@@ -1,25 +1,21 @@
-//! The shared within-substep effect seam.
+//! The post-advance tail of the shared within-substep effect lifecycle.
 //!
-//! Every fixed-step backend runs the same canonical within-substep lifecycle:
+//! Every backend applies the effects due at one instant in the same order
+//! (language spec §13.10):
 //!
 //! ```text
-//! PROPOSE event-deltas (from the START-OF-STEP SNAPSHOT)
-//!     -> ADVANCE (kernel draws, fuse the event deltas)
-//!     -> INTERVENE (on the post-advance state)
+//! INFLOW events (from the START-OF-STEP SNAPSHOT)
+//!     -> ADVANCE (chain-binomial's transition draw; none at a Gillespie or ODE boundary)
+//!     -> DRAIN-AND-`set` events (on the resulting state)
+//!     -> INTERVENE (on the post-event state, declaration order)
 //!     -> BALANCE (last, chain-only)
 //! ```
 //!
-//! The two functions here are the genuinely-shared parts of that lifecycle: the
-//! PROPOSE stage (stage 1) and the post-ADVANCE INTERVENE+BALANCE tail (stages
-//! 3–4). The ADVANCE kernel itself (transition draws) stays per-backend, because
-//! the draw algorithms differ (Euler-multinomial vs independent Poisson vs RK4
-//! vs SSA) — that is the seam: unify the effect bookkeeping, keep the kernels
-//! distinct.
-//!
-//! These are deliberately thin, trait-shaped functions: each is documented as
-//! the future `FixedStepLifecycle` trait method it will become once the
-//! `{Int|Real}Delta` apply-seam lands and the snapshot/current state types are
-//! generic over i64/f64.
+//! The first three stages are [`crate::effects::apply_event_phases`]; the last
+//! two are [`apply_post_advance`] here. The ADVANCE kernel itself (transition
+//! draws) stays per-backend, because the draw algorithms differ
+//! (Euler-multinomial vs RK4 vs SSA) — that is the seam: unify the effect
+//! bookkeeping, keep the kernels distinct.
 
 use crate::{
     compiled_model::{CompiledModel, ResolvedBalance},
