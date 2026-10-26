@@ -160,6 +160,24 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("seasonal_drift", "gillespie", 0x3ebeed379edb8107),
     ("seasonal_drift", "chain_binomial", 0xf8db0999aa8fe812),
     ("seasonal_drift", "ode", 0x631a6bb7eba02031),
+    // The effect-plan fixtures (proposal 2026-10-04 §6.2): zero-rate models whose
+    // every row is hand-computed in the fixture header and asserted row by row in
+    // cross_backend_lifecycle_agreement.rs, so all three backends share one hash.
+    // origin_effects / recurring_default_from: effects at t_start apply to the
+    // starting state (D1). offset_origin: t_start = 0.5, the grid key relative to
+    // it. inflow_drain_origin: an inflow and a drain at t_start, post-inflow (D4).
+    ("inflow_drain_origin", "gillespie", 0x382863e775d6c090),
+    ("inflow_drain_origin", "chain_binomial", 0x382863e775d6c090),
+    ("inflow_drain_origin", "ode", 0x382863e775d6c090),
+    ("offset_origin", "gillespie", 0x398aafee96829f2d),
+    ("offset_origin", "chain_binomial", 0x398aafee96829f2d),
+    ("offset_origin", "ode", 0x398aafee96829f2d),
+    ("origin_effects", "gillespie", 0xa6e9762cdabac436),
+    ("origin_effects", "chain_binomial", 0xa6e9762cdabac436),
+    ("origin_effects", "ode", 0xa6e9762cdabac436),
+    ("recurring_default_from", "gillespie", 0x15ccdb8a23d619c8),
+    ("recurring_default_from", "chain_binomial", 0x15ccdb8a23d619c8),
+    ("recurring_default_from", "ode", 0x15ccdb8a23d619c8),
 ];
 
 #[test]

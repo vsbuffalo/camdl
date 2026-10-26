@@ -1,0 +1,44 @@
+# Corner case: A RECURRING SCHEDULE WITH THE DEFAULT `from` (D1).
+#
+# A block schedule's `from` defaults to t_start, and the enumeration includes
+# it, so `every = 2 'days` over [0, 6] fires at 0, 2, 4 and 6 — four fires,
+# the first of them at t_start, where it applies to the starting state.
+#
+# The transition rate is identically zero, so every backend must agree on
+# every row.
+#
+# Hand computation:
+#   t=0  A = 0 + 1 = 1     <- the t = 0 row
+#   t=1  A = 1
+#   t=2  A = 2
+#   t=3  A = 2
+#   t=4  A = 3
+#   t=5  A = 3
+#   t=6  A = 4
+time_unit = 'days
+
+compartments { A, B }
+
+parameters {
+  k : rate in [0.0, 1.0]
+}
+
+transitions {
+  drain : A --> B  @ k * A
+}
+
+events {
+  pulse : add(A, 1) {
+    every = 2 'days
+  }
+}
+
+init {
+  A = 0
+  B = 0
+}
+
+simulate {
+  from = 0 'days
+  to   = 6 'days
+}

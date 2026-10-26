@@ -258,6 +258,10 @@ const BATTERY: &[(&str, bool)] = &[
     ("multi_effect_same_time", true),
     ("off_grid_intervention", false),
     ("fractional_output_end", false),
+    ("origin_effects", true),
+    ("recurring_default_from", true),
+    ("offset_origin", true),
+    ("inflow_drain_origin", true),
 ];
 
 fn load_named(stem: &str) -> CompiledModel {
@@ -1060,4 +1064,93 @@ fn drains_summing_to_the_whole_compartment_are_not_refused() {
         }
     }
     assert!(wrong.is_empty(), "exact drains were refused:\n{}", wrong.join("\n"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D1 / D4 / the run-relative grid key, row by row. Each fixture's header carries
+// the hand computation; with a zero rate the three backends must reproduce it on
+// EVERY output row, the t_start row included — the row an effect at t_start
+// used to be missing from (gh#958: chain-binomial never fired it, the ODE and
+// Gillespie fired it after recording the row).
+
+/// Every `(t, counts of `comps`)` row of `stem` on every backend must equal
+/// `expected`.
+fn assert_rows_on_every_backend(stem: &str, comps: [&str; 2], expected: &[(f64, [i64; 2])]) {
+    let compiled = load_named(stem);
+    let t_start = compiled.model.simulation.t_start;
+    let t_end = compiled.model.simulation.t_end;
+    let params = compiled.default_params.clone();
+    let idx = comps.map(|c| local_idx(&compiled, c));
+    for (name, sim, cfg) in battery_backends(t_start, t_end) {
+        let traj = sim
+            .run(&compiled, &params, SEED, &cfg)
+            .unwrap_or_else(|e| panic!("{stem}/{name}: forward sim: {e:?}"));
+        let rows: Vec<(f64, [i64; 2])> = traj
+            .snapshots
+            .iter()
+            .map(|s| (s.t, idx.map(|i| s.int_state.counts[i])))
+            .collect();
+        assert_eq!(rows, expected, "{stem}/{name}: rows of {comps:?} (hand computation in the fixture header)");
+    }
+}
+
+/// D1: an event and an intervention at t_start apply to the starting state,
+/// events first, before the t_start row; on-grid effects later are unchanged.
+#[test]
+fn effects_at_t_start_are_in_the_t_start_row_on_every_backend() {
+    assert_rows_on_every_backend(
+        "origin_effects",
+        ["A", "B"],
+        &[
+            (0.0, [30, 30]),
+            (1.0, [30, 30]),
+            (2.0, [34, 30]),
+            (3.0, [17, 47]),
+            (4.0, [17, 47]),
+            (5.0, [17, 47]),
+        ],
+    );
+}
+
+/// D1: a recurring schedule with the default `from` fires at t_start too, so
+/// `every = 2 'days` over [0, 6] fires four times on every backend.
+#[test]
+fn a_recurring_schedule_with_default_from_fires_at_t_start_on_every_backend() {
+    assert_rows_on_every_backend(
+        "recurring_default_from",
+        ["A", "B"],
+        &[
+            (0.0, [1, 0]),
+            (1.0, [1, 0]),
+            (2.0, [2, 0]),
+            (3.0, [2, 0]),
+            (4.0, [3, 0]),
+            (5.0, [3, 0]),
+            (6.0, [4, 0]),
+        ],
+    );
+}
+
+/// The grid key is relative to t_start: with `from = 0.5`, `dt = 1`, the event
+/// at 1 fires on the step ending at 1.5 and the intervention at 2.4 on the step
+/// ending at 2.5 — every row agrees with the exact backends, which fire at 1
+/// and 2.4. The absolute key dropped the event at 1 and fired 2.4 at 1.5.
+#[test]
+fn an_offset_origin_fires_on_the_runs_own_grid() {
+    assert_rows_on_every_backend(
+        "offset_origin",
+        ["A", "B"],
+        &[(0.5, [0, 0]), (1.5, [1, 0]), (2.5, [11, 0]), (3.5, [11, 0]), (4.5, [11, 0])],
+    );
+}
+
+/// D4 at the origin: the drain reads the post-inflow state, so I = 5, R = 5 in
+/// the t_start row on every backend, whatever the declaration order.
+#[test]
+fn an_inflow_and_a_drain_at_t_start_give_the_post_inflow_split_on_every_backend() {
+    assert_rows_on_every_backend(
+        "inflow_drain_origin",
+        ["I", "R"],
+        &[(0.0, [5, 5]), (1.0, [5, 5]), (2.0, [5, 5]), (3.0, [5, 5])],
+    );
 }

@@ -1,0 +1,54 @@
+# Corner case: EFFECTS AT t_start (D1, gh#958), with an on-grid effect later.
+#
+# An event and an intervention are declared at t = 0 = t_start. They apply to
+# the starting state, before the t_start row is recorded (language spec
+# §13.10 without the transition stage): inflow events read the `init {}`
+# state, then interventions in declaration order. A second event fires on the
+# grid at t = 2 and the intervention fires again at t = 3.
+#
+# The transition rate is identically zero (drain @ k*A, k = 0), so no
+# stochastic flow occurs and chain_binomial, ode and gillespie must agree on
+# every row, the t_start row included.
+#
+# Hand computation (keep = 0.5):
+#   init:                                 A = 50,  B = 0
+#   t=0  seed  add(A, 10):                A = 60,  B = 0
+#        pull  transfer 0.5*A, A -> B:    floor(60 * 0.5) = 30
+#                                         A = 30,  B = 30     <- the t = 0 row
+#   t=1                                   A = 30,  B = 30
+#   t=2  top   add(A, 4):                 A = 34,  B = 30
+#   t=3  pull  floor(34 * 0.5) = 17:      A = 17,  B = 47
+#   t=4, t=5                              A = 17,  B = 47
+# (On the ODE the transfer is the exact fraction; 60 * 0.5 and 34 * 0.5 are
+# whole, so the ODE rows are the same integers.)
+time_unit = 'days
+
+compartments { A, B }
+
+parameters {
+  k    : rate        in [0.0, 1.0]
+  keep : probability in [0.0, 1.0]
+}
+
+transitions {
+  drain : A --> B  @ k * A
+}
+
+events {
+  seed : add(A, 10) at [0]
+  top  : add(A, 4) at [2]
+}
+
+interventions {
+  pull : transfer(fraction = keep, from = A, to = B) at [0, 3]
+}
+
+init {
+  A = 50
+  B = 0
+}
+
+simulate {
+  from = 0 'days
+  to   = 5 'days
+}
