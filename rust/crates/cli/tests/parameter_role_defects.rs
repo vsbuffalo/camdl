@@ -169,3 +169,30 @@ fn profile_rw_sd_auto_does_not_estimate_fixed_file_names() {
             "{name} is pinned by --fixed-file but was estimated: {est:?}");
     }
 }
+
+/// A model constant (`let omega : rate = 0.01`, a parameter whose value the
+/// model fixes) is not a nuisance parameter: `--rw-sd auto` must not estimate
+/// it. It did, alongside every other non-focal name.
+#[test]
+fn profile_rw_sd_auto_does_not_estimate_a_model_constant() {
+    let tmp = tempdir("constant");
+    let ir = compile(tmp.path(), "m", MODEL);
+    let fixed = tmp.path().join("fixed.toml");
+    std::fs::write(&fixed, "beta = 0.3\nrho = 0.6\nk = 10\nN0 = 1000\nI0 = 10\n").unwrap();
+    let cwd = tmp.path().join("run");
+    let data = tmp.path().join("cases.tsv");
+    let mut args = vec![
+        "profile", ir.to_str().unwrap(),
+        "--data", data.to_str().unwrap(),
+        "--fixed-file", fixed.to_str().unwrap(),
+        "--fixed", "gamma=0.15",
+        "--sweep", "beta=0.2,0.4", "--rw-sd", "auto",
+    ];
+    args.extend_from_slice(PROFILE_KNOBS);
+    // Every declared parameter is focal or pinned, so the model constant is
+    // the only name `auto` could pick up.
+    ok(camdl(&cwd, &args));
+    let est = profile_estimated(&cwd);
+    assert!(!est.contains(&"omega".to_string()),
+        "omega is a model constant but was estimated: {est:?}");
+}

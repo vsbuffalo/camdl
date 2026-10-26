@@ -298,6 +298,15 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // same pattern as `fit/runner.rs:144-180`.
     let (mut model_pre, model_json) = crate::util::load_model(&ir_path)
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    // The model's own constants — parameters whose value the model fixes
+    // (`let omega : rate = 0.01` compiles to `{"mode":"fixed"}`). Taken from
+    // the IR as loaded, before any seeding below turns a valueless parameter
+    // into a `Fixed` one, so a constant is the author's statement and never a
+    // supplied value. `--rw-sd auto` never estimates one.
+    let model_constants: std::collections::HashSet<String> = model_pre.parameters.iter()
+        .filter(|p| matches!(p.value, ir::parameter::ParamValue::Fixed { .. }))
+        .map(|p| p.name.clone())
+        .collect();
 
     // ── Optional --fit toml resolution (gh#73) ──────────────────────
     //
@@ -766,6 +775,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let param_names_to_estimate: Vec<String> = if rw_sd_auto {
         model.parameters.iter()
             .filter(|p| !exclude.contains(&p.name))
+            .filter(|p| !model_constants.contains(&p.name))
             .filter(|p| compiled.param_index.contains_key(p.name.as_str()))
             .map(|p| p.name.clone())
             .collect()
