@@ -266,7 +266,8 @@ pub struct ParameterProvenance {
     /// "fixed_cli"`).
     pub source: String,
     /// `"fixed" | "estimated"` — matches
-    /// [`crate::params_resolver::ParameterRole`].
+    /// [`crate::params_resolver::ParameterRole`] — or, on a profile, `"focal"`
+    /// for a swept parameter (pinned per cell at its grid value).
     pub role:   String,
     /// Present iff the parameter was kicked from `[estimate]` by a
     /// user-explicit `--fixed{,-file}` assertion. The `by` field

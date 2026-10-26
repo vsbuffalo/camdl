@@ -153,6 +153,10 @@ struct ProfileMethodLevel<'a> {
     rw_sd_auto: bool,
     init: &'a crate::fit::starts::ChainStarts,
     pf_max_substeps: Option<u64>,
+    /// The `[[simplex_groups]]` IF2 perturbs jointly, member names in order.
+    /// Omitted when empty, so a profile without groups keeps its key.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    simplex_groups: &'a [Vec<String>],
 }
 
 #[derive(serde::Serialize)]
@@ -321,11 +325,12 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // source used downstream by `resolve_priors_with_precedence`. When
     // `--fit` is absent the map is empty and the resolver falls
     // through to model-IR priors (tier 2) for every parameter.
-    let (fit_estimate, fit_toml_hash, fit_toml_fixed_indexmap, fit_scenario):
+    let (fit_estimate, fit_toml_hash, fit_toml_fixed_indexmap, fit_scenario, fit_simplex_groups):
         (indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
          Option<String>,
          indexmap::IndexMap<String, f64>,
-         (Option<String>, Vec<String>, Vec<String>)) = if let Some(fit_path) = a.fit.as_ref() {
+         (Option<String>, Vec<String>, Vec<String>),
+         Vec<crate::fit::config_v2::SimplexGroup>) = if let Some(fit_path) = a.fit.as_ref() {
         let fit_path_str = fit_path.to_string_lossy().into_owned();
         let fit_cfg = crate::fit::config_v2::Problem::load(&fit_path_str)
             .unwrap_or_else(|e| {
@@ -358,10 +363,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         eprintln!("profile: using --fit '{}' for priors / bounds / [fixed]",
             fit_path_str);
         (fit_cfg.estimate, Some(hash), fixed_resolved,
-         (fit_cfg.scenario, fit_cfg.enable, fit_cfg.disable))
+         (fit_cfg.scenario, fit_cfg.enable, fit_cfg.disable),
+         fit_cfg.simplex_groups)
     } else {
         (indexmap::IndexMap::new(), None, indexmap::IndexMap::new(),
-         (None, Vec::new(), Vec::new()))
+         (None, Vec::new(), Vec::new()), Vec::new())
     };
 
     // The scenario this profile runs under: the fit config's top-level
@@ -868,6 +874,43 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         }
     }
 
+    // The fit config's `[[simplex_groups]]`: members that must sum to one.
+    // IF2 keeps the constraint by perturbing them jointly on the log-ratio
+    // scale, so every member has to be one of this profile's estimated
+    // parameters — a swept or pinned member would leave the others free to
+    // drift off the simplex. The nl-* optimizers do not honour the constraint
+    // (as under `fit run`), which is said rather than dropped silently.
+    let simplex_groups: Vec<sim::inference::if2::SimplexGroup> = if fit_simplex_groups.is_empty() {
+        Vec::new()
+    } else {
+        for (gi, group) in fit_simplex_groups.iter().enumerate() {
+            for name in &group.params {
+                if !if2_params.iter().any(|p| p.name == *name) {
+                    let why = if focal_names.contains(name) { "it is swept (--sweep)" }
+                        else if fixed_names.contains(name) { "it is pinned" }
+                        else { "it is not in --rw-sd" };
+                    eprintln!(
+                        "error: simplex_groups[{gi}] member '{name}' is not estimated by this \
+                         profile: {why}. The members of a simplex group sum to one and are \
+                         estimated jointly, so every member must be estimated: profile a \
+                         parameter outside the group, or drop the group from the fit config.");
+                    std::process::exit(1);
+                }
+            }
+        }
+        if !matches!(profile_algo, ProfileAlgo::If2) {
+            eprintln!("warning: the fit config declares simplex_groups, but `{}` does not \
+                honour the simplex constraint: members are optimised independently.",
+                format!("{:?}", profile_algo).to_lowercase());
+        }
+        crate::fit::runner::resolve_simplex_groups(
+            &fit_simplex_groups, &fit_estimate, &compiled.param_index, &if2_params,
+        ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); })
+    };
+    // Member names per group, in order, for the method identity.
+    let simplex_names: Vec<Vec<String>> =
+        fit_simplex_groups.iter().map(|g| g.params.clone()).collect();
+
     let if2_params = Arc::new(if2_params);
 
     // ── Prior resolution (gh#73) ─────────────────────────────────────
@@ -1081,8 +1124,22 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // unified resolver output (populated upstream). Each entry maps a
     // resolved parameter name to the value + source + role + audit
     // fields. NOT part of the CAS hash (provenance is metadata).
-    let parameters_provenance =
+    //
+    // The resolver knows only `[estimate]` and the pins, so on its own it
+    // records every parameter of a CLI-only profile as `fixed`. The roles
+    // this profile actually gives them are set here: a swept parameter is
+    // `focal` (pinned per cell at its grid value; the value recorded is the
+    // base value the grid writes over), and every parameter IF2 or the
+    // optimizer moves is `estimated`.
+    let mut parameters_provenance =
         crate::run_meta::ParameterProvenance::of_all(&resolved.params);
+    for (name, prov) in parameters_provenance.iter_mut() {
+        if focal_names.contains(name) {
+            prov.role = "focal".to_string();
+        } else if if2_params.iter().any(|p| p.name == *name) {
+            prov.role = "estimated".to_string();
+        }
+    }
     // Per-start init provenance, straight from the drawn starts.
     let init_provenance: Option<crate::run_meta::InitProvenance> =
         Some(crate::run_meta::InitProvenance::from_chain_starts(&drawn_starts));
@@ -1166,6 +1223,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         },
         rw_sd: &rw_sd_blob,
         rw_sd_auto,
+        simplex_groups: &simplex_names,
         init: &init_method,
         pf_max_substeps: a.inference.pf_max_substeps,
     }, &[]).unwrap_or_else(|e| {
@@ -1299,6 +1357,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     overridden_model_prior: prior_overrides.iter()
                         .find(|o| &o.param == n).map(|o| o.model.clone()) })
                 .collect(),
+            parameters_provenance: parameters_provenance.clone(),
             ..Default::default()
         };
         // Archive the producing `fit.toml` (best-effort; `write_fit_sidecar`
@@ -1422,7 +1481,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     n_particles, n_iterations,
                     cooling_fraction: cooling, cooling_target_iters: n_iterations, dt,
                     t_start: process.compiled.model.simulation.t_start,
-                    simplex_groups: vec![],
+                    simplex_groups: simplex_groups.clone(),
                     skip_first_obs_from_loglik: false,
                     max_substeps: a.inference.pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET), // gh#241
                 };
@@ -1889,6 +1948,7 @@ mod tests {
             },
             rw_sd: &rw_sd,
             rw_sd_auto: false,
+            simplex_groups: &[],
             init: &init,
             pf_max_substeps: None,
         }).unwrap();
@@ -1903,6 +1963,24 @@ mod tests {
         });
         assert_eq!(method_struct, method_literal,
             "ProfileMethodLevel must reproduce the literal");
+
+        // Simplex groups enter the method level only when there are some, so a
+        // profile without groups keeps the key above.
+        let groups = vec![vec!["p1".to_string(), "p2".to_string()]];
+        let with_groups = serde_json::to_value(ProfileMethodLevel {
+            algorithm: "if2",
+            if2: ProfileIf2Knobs {
+                particles: 30, iterations: 5, cooling: 0.7, dt: 1.0, starts: 1,
+            },
+            rw_sd: &rw_sd,
+            rw_sd_auto: false,
+            simplex_groups: &groups,
+            init: &init,
+            pf_max_substeps: None,
+        }).unwrap();
+        let mut literal_with_groups = method_literal.clone();
+        literal_with_groups["simplex_groups"] = serde_json::json!(groups);
+        assert_eq!(with_groups, literal_with_groups);
     }
 
     // ── starts_values_from_init_method: the starts rule's point ───────

@@ -641,7 +641,7 @@ pub fn ode_step_dt(config: &FitRunConfig) -> f64 {
 /// log-ratio scale. The user's `EstimateSpecV2.rw_sd` for a simplex
 /// member is taken as-is on that scale (matches pomp's
 /// `parameter_trans(barycentric = ...)` + `rw.sd` semantics).
-fn resolve_simplex_groups(
+pub(crate) fn resolve_simplex_groups(
     cli_groups: &[super::config_v2::SimplexGroup],
     estimate: &indexmap::IndexMap<String, super::config_v2::EstimateSpecV2>,
     param_index: &HashMap<String, usize>,

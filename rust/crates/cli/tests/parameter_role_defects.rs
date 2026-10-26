@@ -251,3 +251,137 @@ gamma = 0.15
     // Control: inside the bounds, the same profile runs.
     ok(run(&tmp.path().join("inside"), "beta=0.2,0.4", Some(&fit)));
 }
+
+/// `(role, source)` per parameter, from a `parameters_provenance` block.
+fn roles(prov: &serde_json::Value) -> std::collections::BTreeMap<String, String> {
+    prov.as_object().unwrap_or_else(|| panic!("no parameters_provenance: {prov}"))
+        .iter().map(|(k, v)| (k.clone(), v["role"].as_str().unwrap().to_string())).collect()
+}
+
+/// A profile records each parameter's role as the profile gave it: the swept
+/// parameter `focal`, the ones IF2 moves `estimated`, the rest `fixed`. It
+/// recorded every parameter of a CLI-only profile as `fixed`, and its base
+/// sidecar carried no provenance at all.
+#[test]
+fn profile_records_focal_and_estimated_roles() {
+    let tmp = tempdir("roles");
+    let ir = compile(tmp.path(), "m", MODEL);
+    let data = tmp.path().join("cases.tsv");
+    let fixed = tmp.path().join("fixed.toml");
+    std::fs::write(&fixed, "beta = 0.3\nrho = 0.6\nk = 10\nN0 = 1000\nI0 = 10\n").unwrap();
+    // `gamma` is the one estimated parameter; the fit config gives its start.
+    let fit = tmp.path().join("fit.toml");
+    std::fs::write(&fit, format!(r#"[model]
+camdl = "{ir}"
+[data.observations]
+cases = "{data}"
+[estimate]
+gamma = {{ bounds = [0.01, 1.0], start = 0.15 }}
+[fixed]
+"#, ir = ir.display(), data = data.display())).unwrap();
+    let cwd = tmp.path().join("run");
+    let mut args = vec![
+        "profile", ir.to_str().unwrap(),
+        "--data", data.to_str().unwrap(),
+        "--fit", fit.to_str().unwrap(),
+        "--fixed-file", fixed.to_str().unwrap(),
+        "--sweep", "beta=0.2,0.4", "--rw-sd", "gamma=0.02",
+    ];
+    args.extend_from_slice(PROFILE_KNOBS);
+    ok(camdl(&cwd, &args));
+
+    let want: std::collections::BTreeMap<String, String> = [
+        ("beta", "focal"), ("gamma", "estimated"), ("rho", "fixed"), ("k", "fixed"),
+        ("N0", "fixed"), ("I0", "fixed"), ("omega", "fixed"),
+    ].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    let cells = find(&cwd.join("results").join("profiles"), "run.json");
+    assert_eq!(cells.len(), 2);
+    for cell in &cells {
+        let v = json(cell);
+        assert_eq!(roles(&v["inputs"]["provenance"]["parameters_provenance"]), want,
+            "{}", cell.display());
+    }
+    let metas = find(&cwd.join("results").join("profiles"), "fit.meta.json");
+    assert_eq!(roles(&json(&metas[0])["parameters_provenance"]), want,
+        "the profile base sidecar records the same roles");
+}
+
+/// A model whose reporting and recovery read three shares that must sum to
+/// one (`p1 + p2 + p3 = 1`), declared as a `[[simplex_groups]]` in the fit
+/// config.
+const SIMPLEX_MODEL: &str = r#"
+time_unit = 'days
+compartments { S, I, R }
+parameters {
+  beta  : rate        in [0.05, 1.0]
+  gamma : rate        in [0.01, 1.0]
+  p1    : probability in [0, 1]
+  p2    : probability in [0, 1]
+  p3    : probability in [0, 1]
+}
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R)
+  recovery  : I --> R @ gamma * (p2 + 2 * p3) * I
+}
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    projected  = I
+    emit_schedule = every 1 'days
+    cases ~ poisson(rate = p1 * projected)
+  }
+}
+init { S = 990  I = 10 }
+simulate { from = 0 'days  to = 6 'days }
+"#;
+
+/// `profile --fit` honours the fit config's `[[simplex_groups]]`: IF2 must
+/// perturb the members jointly so every cell's optimum stays on the simplex.
+/// The profile's IF2 config was built with no groups, so each member moved on
+/// its own and the cells' optima summed to 1.85 and 1.44.
+#[test]
+fn profile_keeps_the_fit_configs_simplex_groups() {
+    let tmp = tempdir("simplex");
+    let ir = compile(tmp.path(), "s", SIMPLEX_MODEL);
+    let data = tmp.path().join("cases.tsv");
+    let fit = tmp.path().join("fit.toml");
+    std::fs::write(&fit, format!(r#"[model]
+camdl = "{ir}"
+[data.observations]
+cases = "{data}"
+[[simplex_groups]]
+params = ["p1", "p2", "p3"]
+[estimate]
+beta = {{ bounds = [0.05, 1.0], start = 0.3 }}
+p1 = {{ bounds = [0, 1], start = 0.5 }}
+p2 = {{ bounds = [0, 1], start = 0.3 }}
+p3 = {{ bounds = [0, 1], start = 0.2 }}
+[fixed]
+gamma = 0.2
+"#, ir = ir.display(), data = data.display())).unwrap();
+    let run = |cwd: &Path, sweep: &str| {
+        camdl(cwd, &[
+            "profile", ir.to_str().unwrap(), "--fit", fit.to_str().unwrap(),
+            "--sweep", sweep, "--rw-sd", "auto", "--iterations", "5",
+            "--particles", "50", "--n-starts", "1", "--seed", "1",
+        ])
+    };
+    let cwd = tmp.path().join("run");
+    ok(run(&cwd, "beta=0.2,0.4"));
+    let mles = find(&cwd.join("results").join("profiles"), "mle.toml");
+    assert_eq!(mles.len(), 2);
+    for m in &mles {
+        let text = std::fs::read_to_string(m).unwrap();
+        let v: toml::Value = toml::from_str(&text).unwrap();
+        let sum: f64 = ["p1", "p2", "p3"].iter()
+            .map(|k| v["mle"][k].as_float().unwrap()).sum();
+        assert!((sum - 1.0).abs() < 1e-9,
+            "simplex members must sum to one at each cell's optimum, got {sum}:\n{text}");
+    }
+
+    // Sweeping a member would leave the rest free to leave the simplex.
+    let out = run(&tmp.path().join("member"), "p1=0.4,0.6");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && err.contains("simplex_groups[0] member 'p1'")
+        && err.contains("swept"), "a swept member is refused by name:\n{err}");
+}
