@@ -3840,13 +3840,16 @@ the post-inflow count.
 
 Within the drain-and-`set` stage every action resolves against the same
 post-inflow state (on the fixed-step backends, the post-transition state of
-stage 3) and their changes add, a `set` contributing the difference
-between its value and that state: from `X = 10`, an `{ X = 5 ... }` event and a
-`transfer(fraction = 0.5, from = X, to = Y)` event at one instant give
-`X = 10 + (5 − 10) − 5 = 0` and `Y = 5`, in either order. Two or more `set`s on
-one compartment at the same instant are an error on every backend, since their
-changes would add to a value neither names, and so is a stage that leaves an
-integer compartment negative.
+stage 3) and their changes add: two draining `transfer`s from `X = 10`, of
+fractions 0.5 and 0.2, move 5 and 2 and leave `X = 3`, in either order. A `set`
+cannot share its compartment with another action of that stage: a second `set`
+on it, or a `transfer` from or into it, at the same instant is an error on
+every backend, since the changes would add to a value neither event names
+(from `X = 10`, `{ X = 5 ... }` beside a half drain of `X` would give `X = 0`).
+Give them different times or merge them into one. An inflow `add` beside a
+`set` is fine — it acts in the earlier inflow stage, and the `set` then
+overwrites the result. A stage that leaves an integer compartment negative is
+also an error.
 
 **At `t_start`.** The effects due at the start of the run (§13.2) apply to the
 `init {}` state in the same order, without a transition stage, on every

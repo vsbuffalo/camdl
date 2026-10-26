@@ -830,38 +830,55 @@ fn coincident_add_and_count_drain_event_reads_post_inflow_state() {
              state (gh#985).");
 }
 
-/// `set X = 5` and `transfer(fraction = 0.5, from = X, to = Y)` at t=3 from
-/// X = 10, Y = 0 give X = 0, Y = 5 on every backend, in either order. Both are
-/// drain-and-`set` actions, so both resolve against the same post-inflow state
-/// and their deltas sum: the `set` contributes 5 − 10 = −5, the drain
-/// −floor(10 · 0.5) = −5 to X and +5 to Y. Applying them one at a time instead
-/// gives X = 5 when the drain comes first and X = 0 when the `set` does (the ODE
-/// before this case was pinned).
+/// A `set` beside a drain on the same compartment at one instant is refused on
+/// every backend, in either order: from X = 10, `set X = 5` and a half drain of
+/// X added to X = 0, a value neither event names. Main gave X = 0, Y = 5.
 #[test]
-fn coincident_set_and_drain_on_one_compartment_sum_their_deltas() {
-    let finals = coincident_finals(
-        "gh985_set_drain_same_compartment",
-        ("X", 10.0),
+fn a_set_beside_a_drain_on_one_compartment_is_refused_on_every_backend() {
+    for (case, other) in [
+        ("fraction", drain_event("cull", 0.5)),
+        ("count", count_drain_event("cull", 8.0)),
+    ] {
+        let results = coincident_results(
+            &format!("set_beside_{case}"),
+            ("X", 10.0),
+            ("Y", 0.0),
+            vec![set_event("reset", "X", 5.0), other],
+        );
+        for (label, res) in &results {
+            match res {
+                Err(e) => {
+                    let msg = e.to_string();
+                    assert!(
+                        msg.contains("a `set` and a `transfer` on compartment 'X'")
+                            && msg.contains("'reset'")
+                            && msg.contains("'cull'")
+                            && msg.contains("t=3"),
+                        "{case}/{label}: wrong error: {msg}"
+                    );
+                }
+                Ok(got) => panic!("{case}/{label}: ran and gave {got:?}"),
+            }
+        }
+    }
+}
+
+/// An inflow `add` beside a `set` is still fine: the `add` acts in the earlier
+/// inflow phase and the `set` overwrites the post-inflow value (X = 5).
+#[test]
+fn an_add_beside_a_set_still_gives_the_set_value() {
+    let results = coincident_results(
+        "add_beside_set",
+        ("X", 0.0),
         ("Y", 0.0),
         vec![
-            event(
-                "reset",
-                vec![3.0],
-                Action::Set(SetAction { compartment: "X".into(), value: Expr::const_(5.0) }),
-            ),
-            event(
-                "cull",
-                vec![3.0],
-                Action::FractionTransfer(FractionTransfer {
-                    src: "X".into(),
-                    dst: "Y".into(),
-                    fraction: Expr::const_(0.5),
-                }),
-            ),
+            event("arrivals", vec![3.0], Action::Add(AddAction { compartment: "X".into(), count: Expr::const_(10.0) })),
+            set_event("reset", "X", 5.0),
         ],
     );
-    assert_every_backend(&finals, (0, 5),
-        "set X = 5 and transfer(fraction = 0.5, from = X, to = Y) at one instant from X = 10 must give X = 0, Y = 5 (§13.10: both resolve against the same state and their deltas sum); X = 5 means the actions were applied one at a time in declaration order.");
+    for (label, res) in &results {
+        assert_eq!(res.as_ref().ok().copied(), Some((5, 0)), "{label}: {res:?}");
+    }
 }
 
 /// Run `forward` and its reverse on every backend and return each run's result
@@ -954,15 +971,14 @@ fn two_sets_on_one_compartment_at_one_instant_are_refused() {
 }
 
 /// A drain-and-`set` phase that leaves a compartment negative is an error on
-/// every backend, never a clamped 0. Cases from X = 10: `set X = 2` with a full
-/// drain (10 + (2 − 10) − 10 = −8), and two drains of 0.6 (10 − 6 − 6 = −2).
+/// every backend, never a clamped 0. From X = 10, two drains of 0.6
+/// (10 − 6 − 6 = −2).
 /// Gillespie and the ODE report `InterventionNegative`; chain-binomial reports
 /// its post-draw scan's `BinomialOvershoot` (a known mislabel, left as is).
 #[test]
 fn drain_and_set_phase_going_negative_is_an_error_on_every_backend() {
     use sim::error::{NegativeCountCause, SimError};
     let cases = [
-        ("set_plus_full_drain", vec![set_event("reset", "X", 2.0), drain_event("cull", 1.0)]),
         ("two_drains_overdraw", vec![drain_event("cull_a", 0.6), drain_event("cull_b", 0.6)]),
     ];
     let mut failures = Vec::new();
