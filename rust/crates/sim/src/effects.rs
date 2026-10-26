@@ -445,7 +445,9 @@ fn refuse_coincident_sets(model: &CompiledModel, event_idx: &[usize], t: f64) ->
             })
         })
     };
-    // Fast path: the common batch carries at most one `set`.
+    // Fast path: the common batch carries at most one `set`. Finding that walks
+    // the due events' actions once, without allocating; it is linear in the
+    // batch, not constant.
     if sets().nth(1).is_none() {
         return Ok(());
     }
@@ -1140,6 +1142,27 @@ mod tests {
             let m = model_with(actions);
             assert_eq!(continuous_phases_from(&m, vec![10.0, 0.0]), vec![0.0, 5.0]);
         }
+    }
+
+    #[test]
+    fn continuous_lone_negative_int_set_is_refused() {
+        // A lone `set` to −1 on an integer compartment used to be integrated
+        // from −1 and printed as 0; it is now refused as Gillespie refuses it.
+        let m = model_with(vec![Action::Set(SetAction {
+            compartment: "S".into(),
+            value: Expr::const_(-1.0),
+        })]);
+        let mut int_vals = vec![100.0, 0.0];
+        let mut real_vals = vec![50.0];
+        let mut arena = ContinuousArena { int: &mut int_vals, real: &mut real_vals };
+        let res = apply_event_phases(&m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None);
+        assert!(
+            matches!(
+                res,
+                Err(SimError::NegativeCount { cause: NegativeCountCause::InterventionNegative, .. })
+            ),
+            "got {res:?}"
+        );
     }
 
     #[test]
