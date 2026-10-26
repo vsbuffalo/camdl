@@ -605,11 +605,12 @@ camdl pfilter model.camdl --data cases_dated.tsv ...
   rounds onto the `dt` grid. `pfilter`, `if2` and `pmmh` default to `exact` and
   reject `snap`; `pgas` uses a uniform grid and therefore `snap`, and rejects
   `exact` naming the algorithms that support it. Nothing falls back silently.
-  Where snapping applies the rule is nearest — `round(t / dt)` — with on-grid
-  meaning within `1e-9`, and interventions and events map to steps through the
-  same `round(t / dt)`, so a snapped observation and an intervention at the same
-  instant land on the same step. The one hard error common to all is two
-  distinct observations mapping to the _same_ step (obs spacing `< dt`) — a real
+  Where snapping applies the rule is nearest, with on-grid meaning within
+  `1e-9`. Interventions and events fire on the run's own grid from `t_start`,
+  `k = ⌊(t − t_start)/dt + ½⌋` on every chain-binomial path (language spec
+  §13.2), so a snapped observation and an intervention at the same instant land
+  on the same step. The one hard error common to all is two distinct
+  observations mapping to the _same_ step (obs spacing `< dt`) — a real
   data/`dt` mismatch.
 
 ## Getting dates back out

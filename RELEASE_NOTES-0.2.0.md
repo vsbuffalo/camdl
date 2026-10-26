@@ -291,6 +291,54 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   on an integer compartment. Migration: give the `set`s different times or merge
   them into one.
 
+- **An effect at `t_start` now applies to the starting state, on every backend
+  and every fit (gh#958).** `at [0]` with `from = 0`, and the first fire of a
+  recurring schedule whose `from` defaults to `t_start`, used to be dropped
+  silently by chain-binomial simulation, the particle filter, PMMH, IF2 and
+  PGAS, and applied by the ODE and Gillespie only after the `t_start` row was
+  recorded. It now applies to the `init {}` state before that row is recorded or
+  an observation there is scored, in the §13.10 order (inflow events, then
+  drains and `set` on the post-inflow state, then interventions, then
+  `balance`). `every = 2 'days` over `[0, 6]` fires four times on every backend
+  (chain-binomial fired three). A forecast or contrast arm resumed from a saved
+  state does not apply it again. Migration: an `at [t_start]` effect that was
+  meant to be inert must be removed; a schedule that relied on chain-binomial
+  skipping its first fire should set `from`.
+
+- **The particle filter, PMMH, IF2 and PGAS fire every effect where
+  chain-binomial simulation does (gh#957).** Each backend fires effects in its
+  own natural time: chain-binomial and every fit that steps it fire at the end
+  of the nearest step of the run's own grid, `k = ⌊(t − t_start)/dt + ½⌋`; the
+  ODE and Gillespie fire at the declared time. An off-grid event used to fire at
+  its exact time in the filter while `simulate` snapped it (−0.355 nats against
+  the exact likelihood on the oracle model), and an off-grid scheduled
+  intervention was refused under the filter; both now snap. The key is now
+  relative to `t_start` (`from = 0.5`, `dt = 1`: an event at 1 fires at 1.5,
+  where it used to be dropped, and one at 2.4 at 2.5, not 1.5), a tie goes to
+  the later step whatever its sign, and only effects inside `[t_start, t_end]`
+  fire (an effect in `(t_end, t_end + dt/2]` used to fire on chain-binomial; one
+  in `(t_start − dt/2, t_start)` on the ODE and Gillespie). When `t_end` is off
+  the grid, an effect in the shortened last step fires at its nearer end, with a
+  warning. The ODE and Gillespie now fire an intervention once per declared time
+  (`at [2.3, 2.4]` fires twice) and no longer fire an effect early at another
+  effect's landing in the same step. Migration: none needed; the likelihood of a
+  model with such effects changes, so refit it.
+
+- **PGAS and IF2 refuse a parameter they cannot fit (gh#986, gh#984).** Under
+  PGAS an estimated parameter that reaches the state only through an effect's
+  amount, an effect's `at [...]` time, or a plain `init {}` assignment
+  (`init { I = I0 }`) used to sample its prior and report it as the posterior;
+  under IF2 an estimated parameter in an effect's schedule stayed at its start
+  value. Both are now refused, naming the parameter and the effect. Migration:
+  fit seed timing and size with PMMH, fix the parameter, or, for an initial size
+  under PGAS, declare a law (`I ~ poisson(rate = I0)`).
+
+- **A `fit predict` contrast forks before the instant its toggled intervention
+  fires, not its declared time.** The arms run chain-binomial, which fires an
+  intervention declared at 2.4 with `dt = 1` at 2; the fork used to land on the
+  post-effect snapshot at 2, so both arms carried the effect the contrast
+  isolates. Migration: none; such contrasts now measure the effect.
+
 ## Run identity
 
 - **Every stored PGAS fit, every stored PMMH fit and every stored
