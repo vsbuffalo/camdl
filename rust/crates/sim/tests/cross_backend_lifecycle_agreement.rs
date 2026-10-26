@@ -810,3 +810,80 @@ fn coincident_set_and_drain_on_one_compartment_sum_their_deltas() {
     assert_every_backend(&finals, (0, 5),
         "set X = 5 and transfer(fraction = 0.5, from = X, to = Y) at one instant from X = 10 must give X = 0, Y = 5 (§13.10: both resolve against the same state and their deltas sum); X = 5 means the actions were applied one at a time in declaration order.");
 }
+
+/// Run `forward` and its reverse on every backend and return each run's result
+/// (the final two counts, or the error), labelled by backend and order.
+fn coincident_results(
+    name: &str,
+    src: (&str, f64),
+    dst: (&str, f64),
+    forward: Vec<Intervention>,
+) -> Vec<(String, Result<(i64, i64), sim::error::SimError>)> {
+    let mut reversed = forward.clone();
+    reversed.reverse();
+    let mut out = Vec::new();
+    for (order, ivs) in [("declared", forward), ("reversed", reversed)] {
+        let compiled = zero_rate_model(name, src, dst, ivs);
+        let a = local_idx(&compiled, src.0);
+        let b = local_idx(&compiled, dst.0);
+        for (backend, sim, cfg) in battery_backends(0.0, 5.0) {
+            let params = compiled.default_params.clone();
+            let res = sim.run(&compiled, &params, SEED, &cfg).map(|traj| {
+                let last = traj.snapshots.last().expect("at least one snapshot");
+                (last.int_state.counts[a], last.int_state.counts[b])
+            });
+            out.push((format!("{backend} ({order} order)"), res));
+        }
+    }
+    out
+}
+
+fn set_event(name: &str, comp: &str, v: f64) -> Intervention {
+    event(
+        name,
+        vec![3.0],
+        Action::Set(SetAction { compartment: comp.into(), value: Expr::const_(v) }),
+    )
+}
+
+/// Two `set` events on one compartment at one instant are refused on every
+/// backend, with an error naming the compartment, both events and the time.
+/// Summing them gives `v1 + v2 − x`, which means nothing: from X = 5 two sets
+/// to 7 would silently give 9, and from X = 10 two sets to 2 give −6, which
+/// the ODE used to clamp to 0 in its output.
+#[test]
+fn two_sets_on_one_compartment_at_one_instant_are_refused() {
+    let mut failures = Vec::new();
+    for (x0, v) in [(5.0, 7.0), (10.0, 2.0)] {
+        let results = coincident_results(
+            "gh985_two_sets",
+            ("X", x0),
+            ("Y", 0.0),
+            vec![set_event("first", "X", v), set_event("second", "X", v)],
+        );
+        let wrong: Vec<String> = results
+            .iter()
+            .filter_map(|(label, res)| match res {
+                Err(e) => {
+                    let msg = e.to_string();
+                    let names_all = msg.contains("'X'")
+                        && msg.contains("'first'")
+                        && msg.contains("'second'")
+                        && msg.contains("t=3")
+                        && msg.contains("more than one `set`");
+                    (!names_all).then(|| format!("  {label}: wrong error: {msg}"))
+                }
+                Ok(got) => Some(format!("  {label}: ran and gave {got:?}")),
+            })
+            .collect();
+        if !wrong.is_empty() {
+            failures.push(format!("X = {x0}, two `X = {v}` events at t=3:\n{}", wrong.join("\n")));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "every backend must refuse two sets on one compartment with an error naming \
+         'X', 'first', 'second' and t=3:\n{}",
+        failures.join("\n")
+    );
+}

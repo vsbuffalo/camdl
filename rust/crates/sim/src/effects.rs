@@ -441,6 +441,44 @@ pub trait EventArena {
     ) -> Result<(), SimError>;
 }
 
+/// Refuse two or more `set` actions on one compartment among the events due at
+/// one instant. In the drain-and-`set` phase every action contributes its
+/// change against the same state, so two sets would give `v1 + v2 − x`, a
+/// value neither of them names. A config error, raised on every backend.
+fn refuse_coincident_sets(model: &CompiledModel, event_idx: &[usize], t: f64) -> Result<(), SimError> {
+    let sets = || {
+        event_idx.iter().flat_map(move |&iv_idx| {
+            let iv = &model.model.interventions[iv_idx];
+            iv.actions.iter().filter_map(move |a| match a {
+                Action::Set(sa) => Some((sa.compartment.as_str(), iv.name.as_str())),
+                _ => None,
+            })
+        })
+    };
+    // Fast path: the common batch carries at most one `set`.
+    if sets().nth(1).is_none() {
+        return Ok(());
+    }
+    let all: Vec<(&str, &str)> = sets().collect();
+    for (i, &(comp, _)) in all.iter().enumerate() {
+        if all[..i].iter().any(|&(c, _)| c == comp) {
+            continue; // reported with its first occurrence
+        }
+        let mut names: Vec<&str> = all.iter().filter(|&&(c, _)| c == comp).map(|&(_, n)| n).collect();
+        if names.len() < 2 {
+            continue;
+        }
+        names.dedup();
+        let names = names.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ");
+        return Err(SimError::Validation(format!(
+            "more than one `set` on compartment '{comp}' at t={t}: events {names} each set it \
+             at the same instant, and their combined effect is not defined — give the \
+             sets different times or merge them into one"
+        )));
+    }
+    Ok(())
+}
+
 /// The integer arena: chain-binomial's and Gillespie's state. Each phase
 /// resolves into `deltas` (caller-owned scratch, cleared per phase, so the hot
 /// path allocates nothing) and applies them with [`apply_effects`].
@@ -500,6 +538,7 @@ pub fn apply_event_phases<A: EventArena>(
     if !t.is_finite() {
         return Err(SimError::Validation(format!("apply_event_phases: non-finite t = {t}")));
     }
+    refuse_coincident_sets(model, event_idx, t)?;
     arena.apply_phase(model, event_idx, params, t, dt, EventPhase::Snapshot)?;
     if let Some(advance) = advance {
         advance(arena)?;
