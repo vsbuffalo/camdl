@@ -776,3 +776,37 @@ fn coincident_add_and_count_drain_event_reads_post_inflow_state() {
              post-inflow state); I = 10, R = 0 means it read the pre-inflow \
              state (gh#985).");
 }
+
+/// `set X = 5` and `transfer(fraction = 0.5, from = X, to = Y)` at t=3 from
+/// X = 10, Y = 0 give X = 0, Y = 5 on every backend, in either order. Both are
+/// drain-and-`set` actions, so both resolve against the same post-inflow state
+/// and their deltas sum: the `set` contributes 5 − 10 = −5, the drain
+/// −floor(10 · 0.5) = −5 to X and +5 to Y. Applying them one at a time instead
+/// gives X = 5 when the drain comes first and X = 0 when the `set` does (the ODE
+/// before this case was pinned).
+#[test]
+fn coincident_set_and_drain_on_one_compartment_sum_their_deltas() {
+    let finals = coincident_finals(
+        "gh985_set_drain_same_compartment",
+        ("X", 10.0),
+        ("Y", 0.0),
+        vec![
+            event(
+                "reset",
+                vec![3.0],
+                Action::Set(SetAction { compartment: "X".into(), value: Expr::const_(5.0) }),
+            ),
+            event(
+                "cull",
+                vec![3.0],
+                Action::FractionTransfer(FractionTransfer {
+                    src: "X".into(),
+                    dst: "Y".into(),
+                    fraction: Expr::const_(0.5),
+                }),
+            ),
+        ],
+    );
+    assert_every_backend(&finals, (0, 5),
+        "set X = 5 and transfer(fraction = 0.5, from = X, to = Y) at one instant from X = 10 must give X = 0, Y = 5 (§13.10: both resolve against the same state and their deltas sum); X = 5 means the actions were applied one at a time in declaration order.");
+}
