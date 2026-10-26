@@ -633,37 +633,6 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
 
 // ─── Resolution ──────────────────────────────────────────────────────────────
 
-/// The scenario a fit-aware survey runs under, from the fit config's top-level
-/// `scenario` key and the `--scenario` flag.
-///
-/// Either source alone selects the scenario. When both name one they must
-/// agree: the fit config describes the problem a fit was run on, so a flag
-/// naming a different scenario is a contradiction about which problem this
-/// survey scores, and neither silently wins. A flag alongside the config's
-/// `enable`/`disable` lists is refused for the same reason the config refuses
-/// `scenario` beside them. The name itself is resolved (declared preset, or
-/// refused listing the declared names) by `resolve_parameters`.
-fn fit_aware_scenario(
-    flag: Option<&str>,
-    config: Option<&str>,
-    config_has_adhoc: bool,
-) -> Result<Option<String>, String> {
-    match (flag, config) {
-        (None, c) => Ok(c.map(str::to_string)),
-        (Some(f), _) if config_has_adhoc => Err(format!(
-            "--scenario `{f}` cannot be combined with the fit config's \
-             `enable`/`disable` lists: a run takes a named scenario or an \
-             ad-hoc toggle set, not both.\n  \
-             Fix: drop --scenario, or move the toggles into a scenario the \
-             model declares.")),
-        (Some(f), Some(c)) if f != c => Err(format!(
-            "--scenario `{f}` contradicts the fit config's `scenario = \"{c}\"`.\n  \
-             Fix: drop --scenario to survey under `{c}`, or edit the fit \
-             config's `scenario` key to `{f}`.")),
-        (Some(f), _) => Ok(Some(f.to_string())),
-    }
-}
-
 fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
     -> Result<ResolvedSurveyInputs, String>
 {
@@ -674,16 +643,10 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
 
     if let Some(fit_path) = a.fit.as_ref() {
         // Fit-aware mode: load fit.toml; pull bounds from [estimate],
-        // data from [data], fixed from [fixed], scenario from top.
+        // data from [data], fixed from [fixed]; the scenario is the
+        // top-level key combined with --scenario.
         let fit_path_str = fit_path.to_string_lossy().into_owned();
         let config = Problem::load(&fit_path_str)?;
-        // Make scenario+enable+disable mutual exclusion explicit
-        // (matches fit::runner::FitRunConfig::build).
-        if config.scenario.is_some() && (!config.enable.is_empty() || !config.disable.is_empty()) {
-            return Err(
-                "fit.toml: `scenario` is mutually exclusive with `enable`/`disable`. \
-                 Use one approach.".into());
-        }
 
         // Load model from fit.toml's `model.camdl` (already path-
         // resolved by Problem::load). `mut` because the gh#92
@@ -755,13 +718,21 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             fixed_cfg.resolve_with_model(&model_pre)?;
 
         // Build the inputs for the unified resolver. The scenario is the one
-        // the fit config and `--scenario` agree on (`fit_aware_scenario`).
-        let scenario_opt: Option<String> = fit_aware_scenario(
-            a.scenario.as_deref(), config.scenario.as_deref(),
-            !config.enable.is_empty() || !config.disable.is_empty(),
+        // the fit config and `--scenario` agree on.
+        let crate::util::ScenarioSelection {
+            scenario: scenario_opt,
+            enable: adhoc_enable,
+            disable: adhoc_disable,
+        } = crate::util::combine_fit_scenario(
+            crate::util::ScenarioChoice {
+                scenario: a.scenario.as_deref(), enable: &[], disable: &[],
+            },
+            crate::util::ScenarioChoice {
+                scenario: config.scenario.as_deref(),
+                enable: &config.enable,
+                disable: &config.disable,
+            },
         )?;
-        let adhoc_enable: Vec<String> = config.enable.clone();
-        let adhoc_disable: Vec<String> = config.disable.clone();
         // No `--fixed` on the survey-fit path; the inline `--fixed`
         // flag is mutually exclusive with `--fit` per SurveyArgs.
         let fixed_cli: Vec<(String, f64)> = Vec::new();

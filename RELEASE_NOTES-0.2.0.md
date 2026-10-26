@@ -381,6 +381,14 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
 User-visible correctness fixes (selected from ~138):
 
+- **`profile --fit` applies the fit config's scenario.** `profile` read
+  `[estimate]`, `[fixed]` and `[data]` from the fit config but never its
+  top-level `scenario`, `enable` or `disable`, so earlier `profile --fit` runs
+  whose config named a scenario profiled the unmodified model, and their
+  log-likelihoods did not include the scenario. The config's selection now
+  applies, combined with `--scenario`/`--enable`/`--disable` by the same rule as
+  `survey --fit`: either alone selects, both must name the same scenario, and
+  anything else is refused, naming both.
 - **`survey --fit` applies `--scenario`.** The fit-aware form of `survey` read
   only the fit config's own `scenario` key, so the `--scenario` flag never
   reached parameter resolution: earlier `survey --fit … --scenario NAME` runs

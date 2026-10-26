@@ -254,7 +254,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let pmmh_steps = a.pmmh_steps;
     let pmmh_particles = a.pmmh_particles;
     let output_tsv_path: Option<String> = a.output.as_ref().map(|p| p.to_string_lossy().into_owned());
-    let scenario_name = a.scenario.scenario.clone();
     let label_arg: Option<String> = match a.label.as_deref() {
         Some(raw) => match crate::fit::validate_label(raw) {
             Ok(l) => Some(l),
@@ -345,10 +344,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // source used downstream by `resolve_priors_with_precedence`. When
     // `--fit` is absent the map is empty and the resolver falls
     // through to model-IR priors (tier 2) for every parameter.
-    let (fit_estimate, fit_toml_hash, fit_toml_fixed_indexmap):
+    let (fit_estimate, fit_toml_hash, fit_toml_fixed_indexmap, fit_scenario):
         (indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
          Option<String>,
-         indexmap::IndexMap<String, f64>) = if let Some(fit_path) = a.fit.as_ref() {
+         indexmap::IndexMap<String, f64>,
+         (Option<String>, Vec<String>, Vec<String>)) = if let Some(fit_path) = a.fit.as_ref() {
         let fit_path_str = fit_path.to_string_lossy().into_owned();
         let fit_cfg = crate::fit::config_v2::Problem::load(&fit_path_str)
             .unwrap_or_else(|e| {
@@ -380,10 +380,32 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let hash = crate::hashing::sha256_hex(&bytes);
         eprintln!("profile: using --fit '{}' for priors / bounds / [fixed]",
             fit_path_str);
-        (fit_cfg.estimate, Some(hash), fixed_resolved)
+        (fit_cfg.estimate, Some(hash), fixed_resolved,
+         (fit_cfg.scenario, fit_cfg.enable, fit_cfg.disable))
     } else {
-        (indexmap::IndexMap::new(), None, indexmap::IndexMap::new())
+        (indexmap::IndexMap::new(), None, indexmap::IndexMap::new(),
+         (None, Vec::new(), Vec::new()))
     };
+
+    // The scenario this profile runs under: the fit config's top-level
+    // `scenario`/`enable`/`disable` combined with the CLI flags by the same
+    // rule `survey --fit` uses.
+    let crate::util::ScenarioSelection {
+        scenario: scenario_name,
+        enable: adhoc_enable,
+        disable: adhoc_disable,
+    } = crate::util::combine_fit_scenario(
+        crate::util::ScenarioChoice {
+            scenario: a.scenario.scenario.as_deref(),
+            enable: &a.scenario.enable,
+            disable: &a.scenario.disable,
+        },
+        crate::util::ScenarioChoice {
+            scenario: fit_scenario.0.as_deref(),
+            enable: &fit_scenario.1,
+            disable: &fit_scenario.2,
+        },
+    ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
 
     // Starts-rule → resolver bridge: `--starts from_params=<toml>` and
     // `--starts from_mle=<path>` both load a single-point
@@ -538,8 +560,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         crate::params_resolver::ParameterInputs {
             model: &model_pre,
             scenario: scenario_name.as_deref(),
-            adhoc_enable: &a.scenario.enable,
-            adhoc_disable: &a.scenario.disable,
+            adhoc_enable: &adhoc_enable,
+            adhoc_disable: &adhoc_disable,
             scenario_inline_name: None,
             scenario_inline_set: &[],
             scenario_inline_scale: &[],

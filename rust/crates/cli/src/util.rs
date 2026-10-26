@@ -3133,6 +3133,81 @@ pub fn check_reactive_baked_emit_end(
     Ok(())
 }
 
+/// One side's scenario selection: a named scenario, or ad-hoc
+/// `enable`/`disable` toggles, or nothing.
+#[derive(Debug, Clone, Copy)]
+pub struct ScenarioChoice<'a> {
+    pub scenario: Option<&'a str>,
+    pub enable: &'a [String],
+    pub disable: &'a [String],
+}
+
+impl ScenarioChoice<'_> {
+    fn is_empty(&self) -> bool {
+        self.scenario.is_none() && self.enable.is_empty() && self.disable.is_empty()
+    }
+
+    fn describe(&self) -> String {
+        match self.scenario {
+            Some(s) => format!("scenario `{s}`"),
+            None => format!("enable {:?} / disable {:?}", self.enable, self.disable),
+        }
+    }
+
+    fn owned(&self) -> ScenarioSelection {
+        ScenarioSelection {
+            scenario: self.scenario.map(str::to_string),
+            enable: self.enable.to_vec(),
+            disable: self.disable.to_vec(),
+        }
+    }
+}
+
+/// The scenario selection a run resolves under, once the fit config's and the
+/// CLI's have been combined by [`combine_fit_scenario`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioSelection {
+    pub scenario: Option<String>,
+    pub enable: Vec<String>,
+    pub disable: Vec<String>,
+}
+
+/// Combine a fit config's top-level `scenario` / `enable` / `disable` with the
+/// CLI's `--scenario` / `--enable` / `--disable`, for a verb that reads both
+/// (`survey --fit`, `profile --fit`).
+///
+/// Either side alone selects the scenario. When both select one they must be
+/// the same named scenario: the fit config describes the problem a fit was run
+/// on, so a flag naming a different scenario (or toggles beside a scenario, or
+/// toggles beside toggles) is a contradiction about which problem the run
+/// scores, and neither side silently wins. A config carrying both `scenario`
+/// and toggles is refused, as `fit run` refuses it. Whether the name is
+/// declared is decided later, by `resolve_parameters`.
+pub fn combine_fit_scenario(
+    flag: ScenarioChoice<'_>,
+    config: ScenarioChoice<'_>,
+) -> Result<ScenarioSelection, String> {
+    if config.scenario.is_some() && (!config.enable.is_empty() || !config.disable.is_empty()) {
+        return Err("fit.toml: `scenario` is mutually exclusive with `enable`/`disable`. \
+                    Use one approach.".into());
+    }
+    if flag.is_empty() {
+        return Ok(config.owned());
+    }
+    if config.is_empty() {
+        return Ok(flag.owned());
+    }
+    match (flag.scenario, config.scenario) {
+        (Some(f), Some(c)) if f == c => Ok(flag.owned()),
+        _ => Err(format!(
+            "the command line selects {} but the fit config selects {}; a run \
+             scores one scenario, so neither silently wins.\n  \
+             Fix: drop the flag to run under the fit config's selection, or \
+             edit the fit config's `scenario`/`enable`/`disable` keys.",
+            flag.describe(), config.describe())),
+    }
+}
+
 /// Refuse a scenario whose declared horizon this command structurally cannot
 /// honour (gh#561).
 ///
