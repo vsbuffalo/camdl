@@ -402,6 +402,106 @@ pub fn resolve_event_batch(
     Ok(())
 }
 
+// ── The two event phases of language spec §13.10 ────────────────────────────
+//
+// At one effect instant the due events apply in two phases: the inflow phase
+// (`add`) resolves against the start-of-step snapshot; the drain-and-`set`
+// phase (`transfer`, `set`) resolves against the state after the inflows and,
+// where the backend has one, after the transition draw between them. Within a
+// phase every action reads the same state. [`apply_event_phases`] holds that
+// order once; [`EventArena`] is the only thing that differs per representation
+// (integer `i64` counts vs the ODE's `f64` vectors).
+
+/// A compartment state the event phases of §13.10 read and write. Implemented
+/// by [`DiscreteArena`] (the integer `IntState`/`RealState` pair, via
+/// [`resolve_event_batch`] and [`apply_effects`]) and [`ContinuousArena`] (the
+/// ODE's `f64` vectors, via `apply_action_f64`). The phase order is not the
+/// arena's business: it lives in [`apply_event_phases`].
+pub trait EventArena {
+    /// Resolve the `phase` actions of every event in `event_idx` (declaration
+    /// order) against this arena's current state, every action reading that
+    /// same state, then apply them to it.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_phase(
+        &mut self,
+        model: &CompiledModel,
+        event_idx: &[usize],
+        params: &[f64],
+        t: f64,
+        dt: f64,
+        phase: EventPhase,
+    ) -> Result<(), SimError>;
+}
+
+/// The integer arena: chain-binomial's and Gillespie's state. Each phase
+/// resolves into `deltas` (caller-owned scratch, cleared per phase, so the hot
+/// path allocates nothing) and applies them with [`apply_effects`].
+pub struct DiscreteArena<'a> {
+    pub int: &'a mut IntState,
+    pub real: &'a mut RealState,
+    pub deltas: &'a mut EffectDeltas,
+}
+
+impl EventArena for DiscreteArena<'_> {
+    fn apply_phase(
+        &mut self,
+        model: &CompiledModel,
+        event_idx: &[usize],
+        params: &[f64],
+        t: f64,
+        dt: f64,
+        phase: EventPhase,
+    ) -> Result<(), SimError> {
+        self.deltas.clear();
+        resolve_event_batch(model, event_idx, self.int, self.real, params, t, dt, phase, self.deltas)?;
+        apply_effects(self.deltas, StateMut { int: self.int, real: self.real });
+        Ok(())
+    }
+}
+
+/// Apply the due events `event_idx` at instant `t` in the §13.10 order, on
+/// every backend:
+///
+///   1. the inflow phase (`add`), resolved against the state on entry — the
+///      start-of-step snapshot;
+///   2. `advance`, when given — chain-binomial's transition deltas, drawn from
+///      that same snapshot before this call; Gillespie and the ODE pass `None`,
+///      having no transition stage at a boundary;
+///   3. the drain-and-`set` phase (`transfer`, `set`), resolved against the
+///      state the first two stages leave.
+///
+/// Scheduled interventions are not applied here; they follow in declaration
+/// order on the result ([`crate::lifecycle::apply_post_advance`] for the
+/// integer backends, `apply_boundary_batch_continuous`'s intervention pass for the ODE). With
+/// `add(X, 10)` and `set X = 5` at one instant this gives X = 5 on every
+/// backend whatever the declaration order, and a drain declared beside an
+/// inflow moves a share of the post-inflow count (gh#985, gh#217).
+///
+/// `dt` is the backend's step for amount evaluation (`EvalCtx.dt`). The drain
+/// phase is skipped, along with its resolve, when no event is due.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_event_phases<A: EventArena>(
+    model: &CompiledModel,
+    event_idx: &[usize],
+    arena: &mut A,
+    params: &[f64],
+    t: f64,
+    dt: f64,
+    advance: Option<&mut dyn FnMut(&mut A) -> Result<(), SimError>>,
+) -> Result<(), SimError> {
+    if !t.is_finite() {
+        return Err(SimError::Validation(format!("apply_event_phases: non-finite t = {t}")));
+    }
+    arena.apply_phase(model, event_idx, params, t, dt, EventPhase::Snapshot)?;
+    if let Some(advance) = advance {
+        advance(arena)?;
+    }
+    if !event_idx.is_empty() {
+        arena.apply_phase(model, event_idx, params, t, dt, EventPhase::Residual)?;
+    }
+    Ok(())
+}
+
 // ── Continuous (ODE) effect application ─────────────────────────────────────
 //
 // ODE holds its INTEGER compartments as f64 (`int_vals`) and integrates them
@@ -515,6 +615,46 @@ fn apply_action_f64(
         }
     }
     Ok(())
+}
+
+/// The ODE's arena: integer compartments held as `f64` (`int_vals`) and the
+/// real compartments, both updated exactly, with no rounding. Each phase
+/// copies the state once and reads every amount and every transfer source from
+/// that copy, so the actions of one phase see the same state.
+pub struct ContinuousArena<'a> {
+    pub int: &'a mut [f64],
+    pub real: &'a mut [f64],
+}
+
+impl EventArena for ContinuousArena<'_> {
+    fn apply_phase(
+        &mut self,
+        model: &CompiledModel,
+        event_idx: &[usize],
+        params: &[f64],
+        t: f64,
+        dt: f64,
+        phase: EventPhase,
+    ) -> Result<(), SimError> {
+        if event_idx.is_empty() {
+            return Ok(());
+        }
+        let snap_int = self.int.to_vec();
+        let snap_real = self.real.to_vec();
+        for &iv_idx in event_idx {
+            let iv = &model.model.interventions[iv_idx];
+            for (action_idx, action) in iv.actions.iter().enumerate() {
+                if action_phase(action) != phase {
+                    continue;
+                }
+                let v = eval_amount_f64(model, iv_idx, action_idx, &snap_int, &snap_real, params, t, dt);
+                let v = crate::intervention::finite_action_value(v, &iv.name, action, t)?;
+                trace_action(EffectKind::Event, &iv.name, action, v, t);
+                apply_action_f64(model, action, v, &snap_int, &snap_real, self.int, self.real)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Apply a known due batch to ODE's continuous compartment vectors, exactly (no
@@ -782,6 +922,104 @@ mod tests {
         resolve_intervention(model, 0, &model.model.interventions[0], snap(&int_s, &real_s),
                              &model.default_params, 1.0, 1.0, EffectKind::Intervention, None, &mut out).unwrap();
         out
+    }
+
+    // ── apply_event_phases: the §13.10 order over both arenas (gh#985) ───────
+    // One effect whose actions are declared drain/`set` first and inflow last,
+    // so a pass in declaration order would get each case wrong. S=100, I=0.
+
+    fn set_then_add() -> CompiledModel {
+        model_with(vec![
+            Action::Set(SetAction { compartment: "I".into(), value: Expr::const_(5.0) }),
+            Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(10.0) }),
+        ])
+    }
+
+    fn drain_then_add() -> CompiledModel {
+        model_with(vec![
+            Action::FractionTransfer(FractionTransfer {
+                src: "I".into(),
+                dst: "S".into(),
+                fraction: Expr::const_(0.5),
+            }),
+            Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(10.0) }),
+        ])
+    }
+
+    fn discrete_phases(m: &CompiledModel) -> Vec<i64> {
+        let (mut int_s, mut real_s) = states();
+        let mut deltas = EffectDeltas::default();
+        {
+            let mut arena = DiscreteArena { int: &mut int_s, real: &mut real_s, deltas: &mut deltas };
+            apply_event_phases(m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None).unwrap();
+        }
+        int_s.counts
+    }
+
+    fn continuous_phases(m: &CompiledModel) -> Vec<f64> {
+        let mut int_vals = vec![100.0, 0.0];
+        let mut real_vals = vec![50.0];
+        {
+            let mut arena = ContinuousArena { int: &mut int_vals, real: &mut real_vals };
+            apply_event_phases(m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None).unwrap();
+        }
+        int_vals
+    }
+
+    #[test]
+    fn event_phases_set_reads_post_inflow_state_on_both_arenas() {
+        let m = set_then_add();
+        // Inflow first (I = 10), then `set` overwrites: I = 5. Summing both
+        // deltas against I = 0 would give 15.
+        assert_eq!(discrete_phases(&m), vec![100, 5]);
+        assert_eq!(continuous_phases(&m), vec![100.0, 5.0]);
+    }
+
+    #[test]
+    fn event_phases_drain_reads_post_inflow_state_on_both_arenas() {
+        let m = drain_then_add();
+        // Inflow first (I = 10), then the drain moves floor(10 · 0.5) = 5 to S.
+        assert_eq!(discrete_phases(&m), vec![105, 5]);
+        assert_eq!(continuous_phases(&m), vec![105.0, 5.0]);
+    }
+
+    #[test]
+    fn event_phases_advance_runs_between_inflow_and_drain() {
+        let m = drain_then_add();
+        // Snapshot I = 0 → inflow I = 10 → advance adds 6 (a transition's
+        // deltas) → I = 16 → the drain moves floor(16 · 0.5) = 8 to S.
+        let (mut int_s, mut real_s) = states();
+        let mut deltas = EffectDeltas::default();
+        let mut seen_i = None;
+        {
+            let mut arena = DiscreteArena { int: &mut int_s, real: &mut real_s, deltas: &mut deltas };
+            let mut advance = |a: &mut DiscreteArena<'_>| {
+                seen_i = Some(a.int.counts[1]);
+                a.int.counts[1] += 6;
+                Ok(())
+            };
+            apply_event_phases(&m, &[0], &mut arena, &m.default_params, 1.0, 1.0, Some(&mut advance))
+                .unwrap();
+        }
+        assert_eq!(int_s.counts, vec![108, 8]);
+        assert_eq!(seen_i, Some(10), "the advance must see the post-inflow state");
+    }
+
+    #[test]
+    fn event_phases_with_no_due_event_still_advance() {
+        let m = drain_then_add();
+        let (mut int_s, mut real_s) = states();
+        let mut deltas = EffectDeltas::default();
+        {
+            let mut arena = DiscreteArena { int: &mut int_s, real: &mut real_s, deltas: &mut deltas };
+            let mut advance = |a: &mut DiscreteArena<'_>| {
+                a.int.counts[0] -= 1;
+                Ok(())
+            };
+            apply_event_phases(&m, &[], &mut arena, &m.default_params, 1.0, 1.0, Some(&mut advance))
+                .unwrap();
+        }
+        assert_eq!(int_s.counts, vec![99, 0]);
     }
 
     #[test]
