@@ -2859,4 +2859,305 @@ n_particles = 10
         assert!(names.contains(&"interv_b"),
             "adhoc-enabled toggleable survives; got {:?}", names);
     }
+
+    // ── The precedence matrix (spec §1.3) ───────────────────────────────
+    //
+    // Every pair of tiers that can both set one parameter, each checked for
+    // the four things the rule promises: the higher tier's value is the one
+    // the run uses, one notice names both values and both sources, the
+    // notice's severity is a warning exactly when the replaced value is a
+    // fit's estimate, and `run.json`'s `parameters_provenance` records the
+    // replacement. The expected notice text and record are written out here
+    // rather than built with the resolver's own phrase functions, so a change
+    // to either side shows up as a disagreement.
+
+    /// A tier that can set `beta`. `FitEstimate` is a params file carrying a
+    /// fit's `[provenance]` block (a fit's `mle_params.toml` passed back as
+    /// `--params`); `ScenarioSet` and `ScenarioScale` are the two halves of
+    /// tier 4.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Tier { FitToml, File, FitEstimate, Point, ScenarioSet, ScenarioScale, Cli }
+
+    impl Tier {
+        const ALL: [Tier; 7] = [
+            Tier::FitToml, Tier::File, Tier::FitEstimate, Tier::Point,
+            Tier::ScenarioSet, Tier::ScenarioScale, Tier::Cli,
+        ];
+
+        /// Twice the spec §1.3 tier number (3.5 → 7), so the order is integral.
+        fn rank(self) -> u8 {
+            match self {
+                Tier::FitToml => 4,
+                Tier::File | Tier::FitEstimate => 6,
+                Tier::Point => 7,
+                Tier::ScenarioSet | Tier::ScenarioScale => 8,
+                Tier::Cli => 10,
+            }
+        }
+
+        fn is_file(self) -> bool { matches!(self, Tier::File | Tier::FitEstimate) }
+    }
+
+    /// Whether `later` replaces `earlier` when both set one parameter:
+    /// a higher tier, or a params file listed after another. A scenario's
+    /// `set` and `scale` are one tier-4 value, not a pair.
+    fn replaces(later: Tier, earlier: Tier) -> bool {
+        later.rank() > earlier.rank() || (later.is_file() && earlier.is_file())
+    }
+
+    /// The tiers stacked onto one parameter, `beta`, in the order pushed.
+    struct Stack {
+        default: f64,
+        ftf: IndexMap<String, f64>,
+        files: Vec<PathBuf>,
+        point: Vec<(String, f64)>,
+        set: Vec<(String, f64)>,
+        scale: Vec<(String, f64)>,
+        cli: Vec<(String, f64)>,
+    }
+
+    impl Stack {
+        fn new(default: f64) -> Self {
+            Stack {
+                default,
+                ftf: IndexMap::new(),
+                files: vec![],
+                point: vec![],
+                set: vec![],
+                scale: vec![],
+                cli: vec![],
+            }
+        }
+
+        /// Add `tier` setting `beta` to `v` (for `ScenarioScale`, `v` is the
+        /// factor). Returns the source the resolver must attribute it to.
+        fn push(&mut self, tier: Tier, v: f64) -> ValueSource {
+            let beta = || "beta".to_string();
+            match tier {
+                Tier::FitToml => { self.ftf.insert(beta(), v); ValueSource::FitTomlFixed }
+                Tier::File => {
+                    let path = params_file(&format!("f{}.toml", self.files.len()),
+                        &format!("beta = {v}\n"));
+                    self.files.push(path.clone());
+                    ValueSource::FixedFile { path }
+                }
+                Tier::FitEstimate => {
+                    let path = fit_params_file(&format!("mle{}.toml", self.files.len()),
+                        &format!("beta = {v}"));
+                    self.files.push(path.clone());
+                    ValueSource::FixedFile { path }
+                }
+                Tier::Point => { self.point.push((beta(), v)); ValueSource::SweepPoint }
+                Tier::ScenarioSet => { self.set.push((beta(), v)); ValueSource::Scenario("s".into()) }
+                Tier::ScenarioScale => { self.scale.push((beta(), v)); ValueSource::Scenario("s".into()) }
+                Tier::Cli => { self.cli.push((beta(), v)); ValueSource::FixedCli }
+            }
+        }
+
+        fn resolve(&self) -> ResolvedParameters {
+            let mut model = mk_model(vec![mk_param("beta", Some(self.default))]);
+            let set: Vec<(&str, f64)> = self.set.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+            let scale: Vec<(&str, f64)> = self.scale.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+            let has_scenario = !set.is_empty() || !scale.is_empty();
+            if has_scenario {
+                model.presets.push(preset("s", &set, &scale));
+            }
+            let fte = IndexSet::new();
+            let mut inputs = empty_inputs(&model, &self.cli, &self.files, &self.ftf, &fte);
+            inputs.point_overrides = &self.point;
+            if has_scenario {
+                inputs.scenario = Some("s");
+            }
+            resolve_parameters(inputs).expect("resolves")
+        }
+    }
+
+    /// How a notice names `src` as the value's origin — written out by hand.
+    fn expected_origin(tier: Tier, src: &ValueSource) -> String {
+        let path = match src { ValueSource::FixedFile { path } => path.display().to_string(), _ => String::new() };
+        match tier {
+            Tier::FitToml => "fit.toml [fixed]".into(),
+            Tier::File => path,
+            Tier::FitEstimate => format!("{path}, a fit's estimate"),
+            Tier::Point => "the draw or sweep point".into(),
+            Tier::ScenarioSet | Tier::ScenarioScale => "scenario `s`".into(),
+            Tier::Cli => "--param/--fixed".into(),
+        }
+    }
+
+    /// How a notice names `src` as the replacing tier — written out by hand.
+    fn expected_subject(tier: Tier, src: &ValueSource) -> String {
+        match (tier, src) {
+            (Tier::File | Tier::FitEstimate, ValueSource::FixedFile { path }) =>
+                format!("params file {}", path.display()),
+            _ => expected_origin(tier, src),
+        }
+    }
+
+    /// The `run.json` record of one side of a replacement — written out by hand.
+    fn expected_record(tier: Tier, src: &ValueSource, value: f64) -> serde_json::Value {
+        let tag = match tier {
+            Tier::FitToml => "fit_toml_fixed",
+            Tier::File | Tier::FitEstimate => "fixed_file",
+            Tier::Point => "sweep_point",
+            Tier::ScenarioSet | Tier::ScenarioScale => "scenario",
+            Tier::Cli => "fixed_cli",
+        };
+        let mut rec = serde_json::json!({ "source": tag, "value": value });
+        match src {
+            ValueSource::FixedFile { path } => { rec["path"] = path.display().to_string().into(); }
+            ValueSource::Scenario(n) => { rec["scenario"] = n.clone().into(); }
+            _ => {}
+        }
+        rec
+    }
+
+    /// The value `tier` contributes in a matrix cell, and what `beta` is
+    /// after it: a set tier sets `v`; a scale tier multiplies the current
+    /// value by `factor`.
+    fn contribute(tier: Tier, v: f64, factor: f64, current: f64) -> (f64, f64) {
+        if tier == Tier::ScenarioScale { (factor, current * factor) } else { (v, v) }
+    }
+
+    #[test]
+    fn every_tier_pair_higher_wins_is_reported_and_is_recorded() {
+        // Model default 0.1; the lower tier sets 0.2 (a scale doubles 0.1),
+        // the higher sets 0.3 (a scale doubles the lower tier's 0.2 to 0.4).
+        // Doubling is exact in binary floating point, so every value compares
+        // exactly.
+        let mut pairs = 0;
+        for &lo in &Tier::ALL {
+            for &hi in &Tier::ALL {
+                if !replaces(hi, lo) {
+                    continue;
+                }
+                pairs += 1;
+                let cell = format!("{lo:?} then {hi:?}");
+                let mut st = Stack::new(0.1);
+                let (lo_in, lo_val) = contribute(lo, 0.2, 2.0, 0.1);
+                let lo_src = st.push(lo, lo_in);
+                let (hi_in, hi_val) = contribute(hi, 0.3, 2.0, lo_val);
+                let hi_src = st.push(hi, hi_in);
+                let r = st.resolve();
+                let beta = &r.params[0];
+
+                // The higher tier wins.
+                assert_eq!(beta.value, hi_val, "{cell}: value");
+                assert_eq!(beta.source, hi_src, "{cell}: source");
+
+                // One replacement, naming both values and both sources.
+                assert_eq!(beta.overrides, vec![Override {
+                    name: "beta".into(),
+                    replaced: (lo_src.clone(), lo_val),
+                    by: (hi_src.clone(), hi_val),
+                }], "{cell}: overrides");
+
+                // One notice, warning exactly when the replaced value is a
+                // fit's estimate.
+                let severity = if lo == Tier::FitEstimate { Severity::Warning } else { Severity::Info };
+                let ns = notices(&[&r]);
+                let ns: Vec<&Notice> = ns.iter().collect();
+                assert_eq!(ns.len(), 1, "{cell}: notices {ns:?}");
+                assert_eq!(ns[0].code, "param-override", "{cell}");
+                assert_eq!(ns[0].severity, severity, "{cell}: severity");
+                let prefix = if severity == Severity::Warning { "warning" } else { "info" };
+                assert_eq!(ns[0].render(), format!(
+                    "{prefix}: {} replaced beta = {lo_val} (from {}) with {hi_val}",
+                    expected_subject(hi, &hi_src), expected_origin(lo, &lo_src)),
+                    "{cell}: notice text");
+
+                // `run.json` records it.
+                let rec = serde_json::to_value(
+                    crate::run_meta::ParameterProvenance::from_resolved(beta)).unwrap();
+                assert_eq!(rec["value"], serde_json::json!(hi_val), "{cell}");
+                assert_eq!(rec["overrides"], serde_json::json!([{
+                    "replaced": expected_record(lo, &lo_src, lo_val),
+                    "by": expected_record(hi, &hi_src, hi_val),
+                }]), "{cell}: provenance");
+
+                // The emit path's own cross-check of notices against records.
+                emit_notices(&[&r]);
+            }
+        }
+        // 5 tier groups of sizes 1, 2, 1, 2, 1 → 19 cross-tier pairs, plus
+        // the four orders of two params files (plain or a fit's estimate).
+        assert_eq!(pairs, 23);
+    }
+
+    #[test]
+    fn an_equal_value_from_any_higher_tier_is_not_an_override() {
+        // Default 0.15; every tier lands on 0.3 (a lower scale doubles 0.15, a
+        // higher scale multiplies by 1).
+        for &lo in &Tier::ALL {
+            for &hi in &Tier::ALL {
+                if !replaces(hi, lo) {
+                    continue;
+                }
+                let cell = format!("{lo:?} then {hi:?}");
+                let mut st = Stack::new(0.15);
+                let (lo_in, lo_val) = contribute(lo, 0.3, 2.0, 0.15);
+                st.push(lo, lo_in);
+                let (hi_in, hi_val) = contribute(hi, 0.3, 1.0, lo_val);
+                let hi_src = st.push(hi, hi_in);
+                assert_eq!((lo_val, hi_val), (0.3, 0.3), "{cell}: fixture");
+                let r = st.resolve();
+                assert_eq!(r.params[0].value, 0.3, "{cell}");
+                assert_eq!(r.params[0].source, hi_src, "{cell}: the later tier is still the source");
+                assert!(r.params[0].overrides.is_empty(), "{cell}: {:?}", r.params[0].overrides);
+                assert!(rendered(&[&r]).is_empty(), "{cell}: {:?}", rendered(&[&r]));
+                let rec = serde_json::to_value(
+                    crate::run_meta::ParameterProvenance::from_resolved(&r.params[0])).unwrap();
+                assert!(rec.get("overrides").is_none(), "{cell}: {rec}");
+            }
+        }
+    }
+
+    #[test]
+    fn replacing_the_model_default_from_any_tier_is_not_an_override() {
+        for &tier in &Tier::ALL {
+            let mut st = Stack::new(0.1);
+            let (v, want) = contribute(tier, 0.3, 2.0, 0.1);
+            let src = st.push(tier, v);
+            let r = st.resolve();
+            assert_eq!(r.params[0].value, want, "{tier:?}");
+            assert_eq!(r.params[0].source, src, "{tier:?}");
+            assert!(r.params[0].overrides.is_empty(), "{tier:?}: {:?}", r.params[0].overrides);
+            assert!(rendered(&[&r]).is_empty(), "{tier:?}");
+        }
+    }
+
+    #[test]
+    fn all_six_tiers_on_one_parameter_replace_in_spec_order() {
+        // fit.toml [fixed] → params file → a fit's estimate file → draw/sweep
+        // point → scenario (set, then scale: one value) → --param.
+        let mut st = Stack::new(0.1);
+        let ftf = st.push(Tier::FitToml, 0.2);
+        let file = st.push(Tier::File, 0.25);
+        let mle = st.push(Tier::FitEstimate, 0.3);
+        let point = st.push(Tier::Point, 0.35);
+        let scen = st.push(Tier::ScenarioSet, 0.4);
+        st.push(Tier::ScenarioScale, 2.0);
+        let cli = st.push(Tier::Cli, 0.9);
+        let r = st.resolve();
+        let beta = &r.params[0];
+        assert_eq!((beta.value, &beta.source), (0.9, &cli));
+        let chain: Vec<(ValueSource, f64, ValueSource, f64)> = beta.overrides.iter()
+            .map(|o| (o.replaced.0.clone(), o.replaced.1, o.by.0.clone(), o.by.1))
+            .collect();
+        assert_eq!(chain, vec![
+            (ftf, 0.2, file.clone(), 0.25),
+            (file, 0.25, mle.clone(), 0.3),
+            (mle, 0.3, point.clone(), 0.35),
+            (point, 0.35, scen.clone(), 0.8),
+            (scen, 0.8, cli, 0.9),
+        ]);
+        let severities: Vec<Severity> = notices(&[&r]).iter().map(|n| n.severity).collect();
+        assert_eq!(severities, vec![
+            Severity::Info, Severity::Info, Severity::Warning, Severity::Info, Severity::Info,
+        ], "only the replacement of the fit's estimate is a warning");
+        let rec = serde_json::to_value(
+            crate::run_meta::ParameterProvenance::from_resolved(beta)).unwrap();
+        assert_eq!(rec["overrides"].as_array().map(Vec::len), Some(5));
+        emit_notices(&[&r]);
+    }
 }
