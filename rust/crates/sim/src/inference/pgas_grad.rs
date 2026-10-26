@@ -500,6 +500,20 @@ pub fn complete_data_loglik_grad(
     // reconstruct the SAME (t0, dt_substep) — both now read rec, never s·dt.
     let mut prev_end = t_start;
 
+    // An observation at t_start: its density and gradient on the post-origin
+    // state over an empty interval, before any substep — the value path's term
+    // (`complete_data_loglik`), mirrored.
+    if let Some(obs_idx) = obs_at_substep.at_origin() {
+        let counts = super::pgas::post_origin_counts(model, trajectory, params, dt)?;
+        obs_model.fold_into_acc(&cum_flows, &mut acc);
+        log_p += obs_model.log_likelihood_from_flows_and_counts(&acc, &counts, obs_idx, params);
+        let obs_grad = obs_model.log_likelihood_grad_from_flows_and_counts(
+            &acc, &counts, obs_idx, params, estimated_to_model,
+        );
+        for i in 0..d { grad[i] += obs_grad[i]; }
+        obs_model.reset_due_acc(obs_idx, &mut acc);
+    }
+
     for s in 0..n_substeps {
         let rec = &trajectory.substeps[s];
         if cfg!(debug_assertions) {

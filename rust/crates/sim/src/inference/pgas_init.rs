@@ -259,6 +259,43 @@ pub fn unconditional_smc_pass(
         }
     }
 
+    // An observation at t_start weights each live particle on its post-origin
+    // state over an empty interval, before substep 0 (D1), as the CSMC sweep
+    // and the complete-data density score it.
+    if let Some(obs_idx) = obs_at_substep.at_origin() {
+        for (((lw, a), (cflows, cnt)), &dead) in log_weights
+            .iter_mut()
+            .zip(acc.iter_mut())
+            .zip(cum_flows.iter().zip(counts.iter()))
+            .zip(deaths.as_slice())
+        {
+            obs_model.fold_into_acc(cflows, a);
+            *lw = if dead {
+                f64::NEG_INFINITY
+            } else {
+                obs_model.log_likelihood_from_flows_and_counts(a, cnt, obs_idx, params)
+            };
+        }
+        if !log_weights.iter().any(|w| w.is_finite()) {
+            let live: Vec<(&[u64], &[i64])> = acc
+                .iter()
+                .zip(counts.iter())
+                .zip(deaths.as_slice())
+                .filter(|(_, &dead)| !dead)
+                .map(|((a, cnt), _)| (a.as_slice(), cnt.as_slice()))
+                .collect();
+            let attempts = obs_model.stream_attempts(obs_idx, &live, deaths.count(), params);
+            return Ok(UnconditionalPass::NoSupport(InitFallback::SwarmCollapsed {
+                obs_index: obs_idx,
+                substep: 0,
+                attempts,
+            }));
+        }
+        for a in acc.iter_mut() {
+            obs_model.reset_due_acc(obs_idx, a);
+        }
+    }
+
     for (s, &(t, step_dt)) in grid.iter().enumerate() {
         // ── 1. Resample (unconditional, systematic) ──
         // Between observations every live weight is equal, so a resample would

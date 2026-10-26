@@ -1161,12 +1161,59 @@ pub struct ChainResumeState {
     pub param_names: Vec<String>,
 }
 
-/// Map from substep index to observation index.
+/// Where each observation is scored on the PGAS substep grid: the substep whose
+/// end coincides with its time, or — for an observation at `t_start` — the
+/// origin, after the origin batch and before substep 0 (D1), as the bootstrap
+/// filter scores it.
 ///
 /// Built once from observation times and dt, then passed to
 /// `complete_data_loglik`, `csmc_as`, and `complete_data_loglik_grad`
 /// to avoid rebuilding each call.
-pub type ObsAtSubstep = std::collections::HashMap<usize, usize>;
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ObsAtSubstep {
+    by_substep: std::collections::HashMap<usize, usize>,
+    at_origin: Option<usize>,
+}
+
+impl ObsAtSubstep {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// The observation scored at the end of substep `s`, if any.
+    pub fn get(&self, s: &usize) -> Option<&usize> {
+        self.by_substep.get(s)
+    }
+    /// Score observation `obs_idx` at the end of substep `s`.
+    pub fn insert(&mut self, s: usize, obs_idx: usize) -> Option<usize> {
+        self.by_substep.insert(s, obs_idx)
+    }
+    pub fn contains_key(&self, s: &usize) -> bool {
+        self.by_substep.contains_key(s)
+    }
+    /// The substeps an observation is scored at (the origin excluded).
+    pub fn keys(&self) -> impl Iterator<Item = &usize> {
+        self.by_substep.keys()
+    }
+    /// `(substep, observation)` pairs (the origin excluded).
+    pub fn iter(&self) -> impl Iterator<Item = (&usize, &usize)> {
+        self.by_substep.iter()
+    }
+    /// The observation scored at the origin (`t_start`), if any.
+    pub fn at_origin(&self) -> Option<usize> {
+        self.at_origin
+    }
+    /// Score observation `obs_idx` at the origin.
+    pub fn set_at_origin(&mut self, obs_idx: usize) {
+        self.at_origin = Some(obs_idx);
+    }
+    /// Number of scored observations, the origin's included.
+    pub fn len(&self) -> usize {
+        self.by_substep.len() + usize::from(self.at_origin.is_some())
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 /// Build the substep→observation index mapping (Snap policy).
 ///
@@ -1190,7 +1237,19 @@ pub fn build_obs_at_substep(
         std::collections::HashMap::new();
     for (obs_idx, obs) in observations.iter().enumerate() {
         let s = crate::time::interval_steps(t_start, obs.time, dt);
-        if s > 0 {
+        if s == 0 {
+            // Scored at the origin, after the effects at t_start (D1).
+            if let Some(prev) = map.at_origin() {
+                return Err(crate::error::SimError::Validation(format!(
+                    "observation times {} and {} are closer than dt = {} to t_start = {}; \
+                     under snap obs-alignment both are scored at t_start and one would be \
+                     silently dropped from the likelihood. Use a dt finer than the \
+                     smallest observation gap, or remove the closer observation.",
+                    observations[prev].time, obs.time, dt, t_start
+                )));
+            }
+            map.set_at_origin(obs_idx);
+        } else {
             if let Some(prev_time) = claimant.insert(s - 1, obs.time) {
                 return Err(crate::error::SimError::Validation(format!(
                     "observation times {} and {} are closer than dt = {} and round \
@@ -1294,9 +1353,22 @@ pub fn build_substep_grid(
                             "exact grid: substep {li} claimed twice (obs collision)"
                         );
                     }
-                    // A leading window coincident with t_start (obs(0) == t_start)
-                    // yields no substep; the old whole-run walk broke here too.
-                    None => break,
+                    // A window that yields no substep is an observation at the
+                    // window's start. Strictly increasing observation times
+                    // (validated upstream) leave only obs(0) == t_start: scored
+                    // at the origin, after the effects at t_start (D1), and the
+                    // walk goes on to the next observation.
+                    None if idx == 0 && obs_at_substep.at_origin().is_none() => {
+                        obs_at_substep.set_at_origin(cur.obs_idx);
+                    }
+                    None => {
+                        return Err(SimError::Validation(format!(
+                            "pgas: observation {} at t = {obs_t} yields no substep after \
+                             t = {window_start}; observation times must be strictly \
+                             increasing",
+                            cur.obs_idx
+                        )));
+                    }
                 }
                 window_start = obs_t; // re-anchor at the EXACT obs time
                 cur.pass_obs();
@@ -1761,6 +1833,32 @@ pub fn complete_data_loglik(
     // bound). Contiguity catches a producer that mispopulates a record.
     let mut prev_end = t_start;
 
+    // An observation at t_start is scored on the post-origin state — the
+    // substep-0 pre-state — over an empty interval, before any transition,
+    // exactly as the bootstrap filter scores it (D1).
+    if let Some(obs_idx) = obs_at_substep.at_origin() {
+        let counts = post_origin_counts(model, trajectory, params, dt)?;
+        obs_model.fold_into_acc(&cum_flows, &mut acc);
+        let per_stream = obs_model.log_likelihood_per_stream_from_flows_and_counts(
+            &acc, &counts, obs_idx, params);
+        let obs_ll: f64 = per_stream.iter().sum();
+        observation_ll += obs_ll;
+        for (dst, src) in observation_per_stream.iter_mut().zip(per_stream.iter()) {
+            *dst += *src;
+        }
+        if !(initial_state_ll + observation_ll).is_finite() {
+            log::debug!("complete_data_loglik: -inf at the t_start observation");
+            return Ok(LogLikComponents {
+                total: f64::NEG_INFINITY,
+                transition: 0.0,
+                observation: observation_ll,
+                observation_per_stream,
+                initial_state: initial_state_ll,
+            });
+        }
+        obs_model.reset_due_acc(obs_idx, &mut acc);
+    }
+
     for s in 0..n_substeps {
         let rec = &trajectory.substeps[s];
         if cfg!(debug_assertions) {
@@ -1973,6 +2071,24 @@ pub fn pgas_effect_plan(
         ));
     }
     Ok(plan)
+}
+
+/// The post-origin state of a trajectory — where an observation at `t_start`
+/// is scored: its substep-0 pre-state, or, for a trajectory with no substep (a
+/// run whose only observation is at `t_start`), the origin image of its x₀.
+pub(crate) fn post_origin_counts(
+    model: &CompiledModel,
+    trajectory: &PGASTrajectory,
+    params: &[f64],
+    dt: f64,
+) -> Result<Vec<i64>, SimError> {
+    if let Some(first) = trajectory.substeps.first() {
+        return Ok(first.counts_before.clone());
+    }
+    let plan = pgas_effect_plan(model, params, dt, &[])?;
+    let mut counts = trajectory.initial_counts.clone();
+    apply_origin_to_counts(model, &plan, &mut counts, params, dt)?;
+    Ok(counts)
 }
 
 /// Apply the plan's origin batch (D1) to one particle's starting counts `x0`,
@@ -2788,9 +2904,7 @@ pub fn csmc_as(
             apply_origin_to_counts(model, plan, c, params, dt)?;
         }
     }
-    if let Some(first) = reference.substeps.first() {
-        counts[j_ref].copy_from_slice(&first.counts_before);
-    }
+    counts[j_ref] = post_origin_counts(model, reference, params, dt)?;
 
     // History for traceback
     let mut history_counts_before: Vec<Vec<Vec<i64>>> = Vec::with_capacity(n_substeps);
@@ -2867,6 +2981,25 @@ pub fn csmc_as(
 
     // Pre-allocated buffer for ancestor sampling weights (reused each substep)
     let mut ancestor_log_w = vec![f64::NEG_INFINITY; n_particles];
+
+    // An observation at t_start weights every particle on its post-origin
+    // state, over an empty interval, before substep 0 — as the bootstrap filter
+    // and the complete-data density score it. The first substep's resample then
+    // draws from those weights (and ancestor sampling there is legal).
+    if let Some(obs_idx) = obs_at_substep.at_origin() {
+        for ((lw, a), (cflows, cnt)) in log_weights
+            .iter_mut()
+            .zip(acc.iter_mut())
+            .zip(cum_flows.iter().zip(counts.iter()))
+        {
+            obs_model.fold_into_acc(cflows, a);
+            *lw = obs_model.log_likelihood_from_flows_and_counts(a, cnt, obs_idx, params);
+            obs_model.reset_due_acc(obs_idx, a);
+        }
+        if n_substeps > 0 {
+            weight_collapse.record(0, obs_idx, &log_weights);
+        }
+    }
 
     for s in 0..n_substeps {
         // Tile against the grid carried by the reference trajectory (built once
