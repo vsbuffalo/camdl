@@ -340,6 +340,15 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   instant, so the check now applies to the chain-binomial clock only (and a
   fit's pre-flight checks only the particle-filter methods). Migration: none.
 
+- **A fit whose data run past the model's simulation end is refused.** The
+  particle filter, PMMH, IF2 and PGAS (and `profile`, `survey`, `compare` and
+  `fit predict` through them) used to step on to the last observation past
+  `simulate { to }`, scoring states `simulate` never produces, with the effects
+  due there unplanned. They now refuse, naming both times: "the data run to
+  t=7672 days but the model's simulation ends at t=7670.0925 days …". Migration:
+  extend `to` to cover the data, e.g. `to = last_obs` or
+  `to = last_obs + 8 'weeks`.
+
 - **A `fit predict` contrast forks before the instant its toggled intervention
   fires, not its declared time.** The arms run chain-binomial, which fires an
   intervention declared at 2.4 with `dt = 1` at 2; the fork used to land on the

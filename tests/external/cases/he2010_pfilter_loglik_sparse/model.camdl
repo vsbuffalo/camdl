@@ -146,5 +146,8 @@ observations {
 
 simulate {
   from = 0 'days
-  to   = 21 'years
+  # The weekly series ends at day 7672, past 21 years (7670.09 days); a fit
+  # cannot score data past the simulation's end. (`to = last_obs` is refused:
+  # the recurring cohort schedule needs a literal horizon.)
+  to   = 7672 'days
 }
