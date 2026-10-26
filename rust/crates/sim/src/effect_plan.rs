@@ -333,6 +333,27 @@ impl EffectPlan {
     }
 }
 
+/// Refuse a fit whose data run past the model's simulation end. A fit scores
+/// the model the backend simulates over `[t_start, simulation.t_end]` (D2);
+/// an observation after `t_end` would be scored against a state `simulate`
+/// never produces, with the effects due there unplanned. One check for every
+/// inference path: the particle filter, PMMH and IF2 through
+/// [`crate::intervention::ExactInferenceTimeline::build`], PGAS at `run_pgas`.
+/// `t_end` is the resolved end (`to = last_obs` resolves to the data's end).
+pub fn refuse_data_past_end(model: &CompiledModel, last_obs: f64) -> Result<(), SimError> {
+    let t_end = model.model.simulation.t_end;
+    if last_obs <= t_end + crate::schedule::output_tol(t_end) {
+        return Ok(());
+    }
+    let unit = &model.model.time_unit;
+    Err(SimError::Validation(format!(
+        "the data run to t={last_obs} {unit} but the model's simulation ends at t={t_end} \
+         {unit} (`simulate {{ to }}`); a fit cannot score data past the end of the \
+         simulation. Extend `to` to cover the data, e.g. `to = last_obs` or \
+         `to = last_obs + 8 'weeks`."
+    )))
+}
+
 /// Log `note` once per process: a particle filter builds its plan once per
 /// likelihood evaluation, and PMMH evaluates thousands of times.
 fn warn_once(note: &SnapNote) {

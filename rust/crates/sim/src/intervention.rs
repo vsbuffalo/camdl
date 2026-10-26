@@ -251,6 +251,9 @@ impl ExactInferenceTimeline {
         // directly rather than unwrap-and-revalidate.
         let t_end = obs.last().unwrap_or(t_start);
         let plan = if let Some(model) = model {
+            if let Some(last) = obs.last() {
+                crate::effect_plan::refuse_data_past_end(model, last)?;
+            }
             guard_attimesexpr_exact(model, StepPolicy::Exact)?;
             refuse_per_particle_schedule(model, per_particle)?;
             let horizon = model.model.simulation.t_end;

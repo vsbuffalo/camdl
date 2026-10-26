@@ -115,3 +115,100 @@ fn the_pgas_producer_fires_an_effect_simulate_fires_at_the_last_observation() {
     assert_eq!(i[8], 10, "nothing before the step ending at 10");
     assert_eq!(i[9], 510, "the event acts on the step ending at 10");
 }
+
+fn filter(m: &Arc<CompiledModel>, times: &[f64]) -> Result<f64, String> {
+    let obs = PoissonI { y: times.iter().map(|_| 11.0).collect(), times: times.to_vec() };
+    let config = SMCConfig {
+        n_particles: 8, dt: 1.0, t_start: 0.0,
+        skip_first_obs_from_loglik: false, record_ancestry: false,
+        record_prequential: false, record_predictions: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+    };
+    bootstrap_filter(&ChainBinomialProcess::new(m.clone()), &obs, &m.default_params, &config, 3)
+        .map(|r| r.log_likelihood)
+        .map_err(|e| e.to_string())
+}
+
+fn pgas(m: &Arc<CompiledModel>, times: &[f64]) -> Result<(), String> {
+    use sim::inference::if2::{EstimatedParam, Transform};
+    use sim::inference::particle_filter::Observation;
+    use sim::inference::pgas::{run_pgas, PGASConfig};
+    use sim::inference::pmmh::Prior;
+    let beta = m.param_index["beta"];
+    let est = vec![EstimatedParam {
+        name: "beta".into(), index: beta, initial: 0.0, rw_sd: 0.1,
+        transform: Transform::None, lower: 0.0, upper: 1.0, rw_sd_auto: false, perturb_only_at_t0: false,
+    }];
+    let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::Btpe, ancestor_sampling: true,
+        n_particles: 4, n_sweeps: 1, burn_in: 0, thin: 1, dt: 1.0,
+        use_nuts: false, dense_mass: false, max_tree_depth: 4,
+        trajectory_warmup: 0, csmc_sweeps_per_nuts: 1,
+        step_policy: sim::schedule::StepPolicy::Snap,
+    };
+    let obs: Vec<Observation> = times.iter().map(|&time| Observation { time, value: 11.0 }).collect();
+    run_pgas(
+        m, &est, &[Prior::Fixed(sim::inference::prior::Density::Flat)], &m.default_params, &config,
+        &obs, &i_obs(m, times), 1, None, None, "past_end".into(),
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// A fit whose data run past the model's simulation end is refused, on the
+/// particle filter and on PGAS, naming both times: an effect at 25 with
+/// `to = 20` and data to 30 would be scored on a state `simulate` never makes.
+#[test]
+fn data_past_the_simulation_end_are_refused() {
+    let m = model(&[25.0], 500.0, 20.0);
+    let times: Vec<f64> = (1..=30).map(f64::from).collect();
+    let want = "the data run to t=30 days but the model's simulation ends at t=20 days";
+    let e = filter(&m, &times).expect_err("pfilter must refuse");
+    assert!(e.contains(want) && e.contains("to = last_obs"), "{e}");
+    let e = pgas(&m, &times).expect_err("pgas must refuse");
+    assert!(e.contains(want), "{e}");
+}
+
+/// Data that end exactly at `to` still run.
+#[test]
+fn data_ending_at_the_simulation_end_run() {
+    let m = model(&[25.0], 500.0, 20.0);
+    let times: Vec<f64> = (1..=20).map(f64::from).collect();
+    filter(&m, &times).expect("pfilter runs");
+    pgas(&m, &times).expect("pgas runs");
+}
+
+/// A Poisson reading of `I` (`rate = I + 0.1`) of 11 at each of `times`.
+fn i_obs(m: &Arc<CompiledModel>, times: &[f64]) -> sim::inference::multi_stream_obs::MultiStreamObsModel {
+    use sim::inference::multi_stream_obs::{dense_cells, BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec, StreamTimes};
+    let spec = StreamSpec {
+        projection: StreamProjection::IntCompSum(vec![1]),
+        ir_model: ir::observation::ObservationModel {
+            name: "i_obs".into(),
+            source: "i_obs".into(),
+            columns: vec![
+                ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+                ir::observation::ObsColumn { name: "i_obs".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+            ],
+            scored: "i_obs".into(),
+            emit_schedule: Some(ir::observation::ObservationSchedule::AtTimes(vec![])),
+            projection: ir::observation::Projection::CurrentPop("I".into()),
+            projection_state_grad: Default::default(),
+            likelihood: ir::observation::Likelihood::Poisson(ir::observation::PoissonLikelihood {
+                rate: ir::Diffable::new(ir::expr::Expr::BinOp(ir::expr::BinOpWrap {
+                    bin_op: ir::expr::BinOpExpr {
+                        op: ir::expr::BinOp::Add,
+                        left: Box::new(ir::expr::Expr::Projected(ir::expr::ProjectedExpr { projected: () })),
+                        right: Box::new(ir::expr::Expr::Const(ir::expr::ConstExpr { value: 0.1 })),
+                    },
+                })),
+            }),
+            stratum: vec![],
+            covers: None,
+        },
+        observations: dense_cells(times.iter().map(|_| 11.0).collect()),
+        times: StreamTimes::Instants(times.to_vec()),
+        aux: vec![],
+    };
+    MultiStreamObsModel::new(BoundObs::bind(0.0, vec![spec]).unwrap().0, m.clone()).unwrap()
+}

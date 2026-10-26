@@ -3786,6 +3786,9 @@ pub fn run_pgas(
     // D3 (gh#986): a parameter the θ-move cannot score is refused, not sampled
     // at its prior. See `refuse_unscored_parameters`.
     refuse_unscored_parameters(model, if2_params)?;
+    if let Some(last) = observations.last() {
+        crate::effect_plan::refuse_data_past_end(model, last.time)?;
+    }
 
     // gh#747: the reference trajectory and the initial-state draw run on THIS
     // rng, sequentially on the chain thread, while the particle swarm runs on
