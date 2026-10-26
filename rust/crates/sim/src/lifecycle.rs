@@ -30,18 +30,20 @@ use crate::{
 /// CURRENT post-advance state, in fixed order. One function so no backend can reorder them.
 /// NOTE: for tau/ode/gillespie this is a one-call passthrough today (balance is chain-only).
 ///
-/// INTERVENE applies the `intervention_idx` batch [`due_effects`](crate::effects::due_effects)
-/// derived for this substep (reading the current post-advance state); BALANCE
+/// INTERVENE applies the `intervention_idx` batch the caller's
+/// [`EffectPlan`](crate::effect_plan::EffectPlan) reports due (reading the current
+/// post-advance state); BALANCE
 /// then overwrites the target compartment so the population budget holds,
 /// reading the post-intervention state. The balance target is exempt from the
 /// negative-count check by construction (its negativity is a separate signal,
 /// warned about here, not erred). RNG-free.
 ///
 /// `intervention_idx` is the scheduled (`!always_active`) interventions due at
-/// `t + dt`, in declaration order — the seam no longer re-derives due-ness here
-/// (the duplication removed by the scheduling-spine §B). `dt` is `dt_actual` —
-/// the realized substep length, driving the balance / effect-amount evaluation.
-/// See docs/dev/proposals/2026-06-07-scheduling-spine-v2.md §A/§B.
+/// the effect instant `t_end` (the end of a substep, a Gillespie boundary, or
+/// `t_start` for the origin batch), in declaration order — the seam does not
+/// re-derive due-ness here. `dt` is the backend's step, driving the balance /
+/// effect-amount evaluation. See
+/// docs/dev/proposals/2026-06-07-scheduling-spine-v2.md §A/§B.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_post_advance(
     model: &CompiledModel,
@@ -49,11 +51,10 @@ pub fn apply_post_advance(
     current: &mut IntState,
     real: &mut RealState,
     params: &[f64],
-    t: f64,
+    t_end: f64,
     dt: f64,
     balance: Option<&ResolvedBalance>,
 ) -> Result<(), SimError> {
-    let t_end = t + dt;
 
     // Stage 3: INTERVENE on the current post-advance state.
     if !intervention_idx.is_empty() {

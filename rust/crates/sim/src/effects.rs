@@ -541,6 +541,61 @@ pub fn apply_event_phases<A: EventArena>(
     Ok(())
 }
 
+/// Apply the plan's origin batch to the starting state (D1): the effects at
+/// `t_start`, before the first step and before the `t_start` row is recorded or
+/// scored. It is §13.10 without the transition stage — [`apply_event_phases`]
+/// with no advance hook (inflow events from the starting state, then drains and
+/// `set` on the post-inflow state), then `interventions` with the scheduled
+/// interventions of the batch, the backend's stage-4 tail
+/// ([`apply_origin_batch_discrete`] for the integer backends,
+/// [`apply_interventions_continuous`] for the ODE).
+///
+/// A no-op when the batch is empty: the tail is never reached, so a
+/// `balance {}` model's `t_start` row is not rewritten by a balance pass it
+/// never had (`lifecycle::apply_post_advance` applies balance whether or not
+/// its batch is empty). `dt` is the backend's step, for amount evaluation;
+/// amounts see `t = t_start`.
+pub fn apply_origin_batch<A: EventArena>(
+    model: &CompiledModel,
+    plan: &crate::effect_plan::EffectPlan,
+    arena: &mut A,
+    params: &[f64],
+    t_start: f64,
+    dt: f64,
+    interventions: impl FnOnce(&mut A, &[usize]) -> Result<(), SimError>,
+) -> Result<(), SimError> {
+    if plan.at_origin().is_empty() {
+        return Ok(());
+    }
+    let mut batch = crate::schedule::EffectBatch::default();
+    split_due_batch(model, plan.at_origin(), &mut batch);
+    apply_event_phases(model, &batch.event_idx, arena, params, t_start, dt, None)?;
+    interventions(arena, &batch.intervention_idx)
+}
+
+/// [`apply_origin_batch`] on the integer state of chain-binomial, Gillespie and
+/// every inference particle: the stage-4 tail is
+/// [`crate::lifecycle::apply_post_advance`] (interventions, `balance`, the
+/// non-negativity check). `balance` is the model's on the chain-binomial
+/// paths, `None` on Gillespie (which refuses `balance {}` models).
+#[allow(clippy::too_many_arguments)]
+pub fn apply_origin_batch_discrete(
+    model: &CompiledModel,
+    plan: &crate::effect_plan::EffectPlan,
+    int_s: &mut IntState,
+    real_s: &mut RealState,
+    params: &[f64],
+    t_start: f64,
+    dt: f64,
+    balance: Option<&crate::compiled_model::ResolvedBalance>,
+) -> Result<(), SimError> {
+    let mut deltas = EffectDeltas::default();
+    let mut arena = DiscreteArena { int: int_s, real: real_s, deltas: &mut deltas };
+    apply_origin_batch(model, plan, &mut arena, params, t_start, dt, |a, ivs| {
+        crate::lifecycle::apply_post_advance(model, ivs, a.int, a.real, params, t_start, dt, balance)
+    })
+}
+
 // ── Continuous (ODE) effect application ─────────────────────────────────────
 //
 // ODE holds its INTEGER compartments as f64 (`int_vals`) and integrates them

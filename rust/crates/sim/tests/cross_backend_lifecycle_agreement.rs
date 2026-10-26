@@ -375,41 +375,27 @@ fn battery_integer_exact_cross_backend_final_agreement() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// gh#198: WITHIN-dt fire-time COLLISION. Under `StepPolicy::Exact` (ode +
-// gillespie), the schedule walks every raw intervention fire time as its own
-// boundary, and at each landing `effects::due_effects` re-derives due-ness via
-// `round(t / dt)`. When two DISTINCT fire times fall within one `dt` and round to
-// the SAME step (e.g. `at: [2.3, 2.4]` at `dt = 1`, both → step 2), the effect was
-// applied once per raw boundary = TWICE — while `chain_binomial` (Snap) fires it
-// once. `Add` (cohort entry) and `Transfer` (vaccination) are non-idempotent, so a
-// double-fire doubles the people moved and ode/gillespie silently disagree with
-// chain_binomial on the same model + seed.
-//
-// The fix keys the Exact cursor advance on the STEP: after `due_effects` fires the
-// whole step's batch at a landing, `Schedule::arrive` skips every remaining effect
-// boundary that maps to the same `round(t/grid)` step (not just those within
-// `EFFECT_EPS` of the landing). Each distinct intervention then fires exactly once
-// per rounded dt-step, matching chain_binomial.
-//
-// Two collision shapes, both at step round(2.3)=round(2.4)=2 (dt=1):
-//   (i)  ONE intervention with `at: [2.3, 2.4]` (Add and Transfer variants);
-//   (ii) the cousin — TWO interventions at `[2.3]` and `[2.4]` (`due_effects`
-//        scans EVERY intervention against the rounded step at BOTH boundaries).
-// The on-grid case (a fire time at an exact dt multiple) must stay a single fire —
-// the existing `event_intervention_agree` fixture (effect at t=5) covers it and
-// must remain green.
+// gh#198, under the per-backend rule (D2): two DISTINCT fire times within one
+// `dt` (`at: [2.3, 2.4]` at `dt = 1`). Chain-binomial is discrete-time: both
+// times key to the step ending at 2 (k = ⌊t + ½⌋ = 2), and one intervention
+// fires once per step, so it fires ONCE. The ODE and Gillespie are
+// continuous-time: each declared time is its own instant, so the intervention
+// fires TWICE, at 2.3 and at 2.4. Two interventions at 2.3 and 2.4 each fire
+// once on every backend. (Before the plan, the exact backends merged the two
+// times onto one rounded step to agree with chain-binomial, which fired an
+// effect at 2.4 early, at 2.3 — and at an earlier landing at 2.0.)
 
 /// S=100, V=0 integer model with a single zero-rate transition `S --> V @ 0`
 /// (rate ≡ 0 ⇒ no stochastic flow ⇒ integer-exact, identical on every backend),
-/// carrying `interventions`. Output at t=0 and t_end=5, dt=1, so the final
-/// snapshot is the post-intervention state.
+/// carrying `interventions`. Output at every integer t in [0, 5], dt=1, so the
+/// final snapshot is the post-intervention state.
 fn collision_model(interventions: Vec<Intervention>) -> CompiledModel {
     zero_rate_model("gh198_within_dt_collision", ("S", 100.0), ("V", 0.0), interventions)
 }
 
 /// Two integer compartments `src`, `dst` with their initial counts and a single
 /// zero-rate transition `src --> dst @ 0`, so the only state changes are the
-/// effects in `interventions`. Output at t=0 and t_end=5, dt=1.
+/// effects in `interventions`. Output at every integer t in [0, 5], dt=1.
 fn zero_rate_model(
     name: &str,
     src: (&str, f64),
@@ -461,7 +447,7 @@ fn zero_rate_model(
             h
         }),
         output: OutputConfig {
-            times: OutputSchedule::AtTimes(vec![0.0, 5.0]),
+            times: OutputSchedule::AtTimes(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]),
             format: "tsv".into(),
             trajectory: true,
             observations: false,
@@ -512,12 +498,17 @@ fn collision_final_s_v(
     (last.int_state.counts[is], last.int_state.counts[iv])
 }
 
-/// gh#198 (i), Add: ONE intervention firing `add(V, 10)` at both 2.3 and 2.4 (dt=1,
-/// both round to step 2) must add 10 ONCE (V=10) on all three backends. On the
-/// buggy Exact path ode/gillespie fire twice (V=20), disagreeing with
-/// chain_binomial's single Snap fire.
+/// Whether `backend` runs on a Grid clock (fires on the step) or an Exact one
+/// (fires at the declared instant).
+fn is_grid(backend: &str) -> bool {
+    backend == "chain_binomial"
+}
+
+/// gh#198 (i), Add: ONE intervention firing `add(V, 10)` at both 2.3 and 2.4
+/// (dt=1). Chain-binomial fires it once, on the step ending at 2 (V=10); the ODE
+/// and Gillespie fire it once per declared time (V=20).
 #[test]
-fn within_dt_collision_single_intervention_add_fires_once() {
+fn within_dt_pair_fires_once_per_step_on_grid_and_once_per_time_on_exact() {
     let compiled = collision_model(vec![scheduled(
         "campaign",
         vec![2.3, 2.4],
@@ -525,21 +516,21 @@ fn within_dt_collision_single_intervention_add_fires_once() {
     )]);
     for (name, sim, cfg) in battery_backends(0.0, 5.0) {
         let (s, v) = collision_final_s_v(&compiled, &*sim, &cfg);
+        let expected = if is_grid(name) { (100, 10) } else { (100, 20) };
         assert_eq!(
             (s, v),
-            (100, 10),
-            "{name}: add(V,10) at [2.3,2.4] (dt=1, both round to step 2) must fire \
-             ONCE (S=100, V=10); (S=100, V=20) is the gh#198 double-fire (applied \
-             once per raw boundary instead of once per rounded step)."
+            expected,
+            "{name}: add(V,10) at [2.3,2.4] (dt=1) fires once per step on the Grid \
+             clock (V=10) and once per declared instant on the Exact clock (V=20)."
         );
     }
 }
 
-/// gh#198 (i), Transfer: ONE intervention moving `transfer(S -> V, 30)` at both 2.3
-/// and 2.4 must move 30 ONCE (S=70, V=30). A double-fire moves 60 (S=40, V=60) —
-/// the non-idempotent over-vaccination the bug produces.
+/// gh#198 (i), Transfer: ONE intervention moving `transfer(S -> V, 30)` at both
+/// 2.3 and 2.4. Chain-binomial moves 30 once (S=70, V=30); the ODE and Gillespie
+/// move 30 at each instant (S=40, V=60).
 #[test]
-fn within_dt_collision_single_intervention_transfer_fires_once() {
+fn within_dt_pair_transfer_fires_once_per_step_on_grid_and_once_per_time_on_exact() {
     let compiled = collision_model(vec![scheduled(
         "vaccinate",
         vec![2.3, 2.4],
@@ -551,19 +542,18 @@ fn within_dt_collision_single_intervention_transfer_fires_once() {
     )]);
     for (name, sim, cfg) in battery_backends(0.0, 5.0) {
         let (s, v) = collision_final_s_v(&compiled, &*sim, &cfg);
+        let expected = if is_grid(name) { (70, 30) } else { (40, 60) };
         assert_eq!(
             (s, v),
-            (70, 30),
-            "{name}: transfer S->V of 30 at [2.3,2.4] (dt=1) must fire ONCE \
-             (S=70, V=30); (S=40, V=60) is the gh#198 double-fire (60 moved)."
+            expected,
+            "{name}: transfer S->V of 30 at [2.3,2.4] (dt=1): once per step on the Grid \
+             clock (S=70, V=30), once per instant on the Exact clock (S=40, V=60)."
         );
     }
 }
 
 /// gh#198 (ii), the cousin: TWO separate interventions, at `[2.3]` (add 10) and
-/// `[2.4]` (add 100), both rounding to step 2 at dt=1. `due_effects` scans EVERY
-/// intervention against the rounded step at each landing, so on the buggy path both
-/// fire at 2.3 AND again at 2.4 (V=220). Each must fire exactly once: V=110.
+/// `[2.4]` (add 100). Each fires exactly once on every backend: V=110.
 #[test]
 fn within_dt_collision_two_interventions_each_fire_once() {
     let compiled = collision_model(vec![
@@ -582,10 +572,69 @@ fn within_dt_collision_two_interventions_each_fire_once() {
         let (_s, v) = collision_final_s_v(&compiled, &*sim, &cfg);
         assert_eq!(
             v, 110,
-            "{name}: interventions at 2.3 (add 10) and 2.4 (add 100), dt=1 (both \
-             round to step 2) → each must fire ONCE (V=110); V=220 is the gh#198 \
-             double-fire (both interventions fire at both boundaries)."
+            "{name}: interventions at 2.3 (add 10) and 2.4 (add 100), dt=1 → each must \
+             fire ONCE (V=110)."
         );
+    }
+}
+
+/// `V` at every output row (t = 0, 1, ..., 5) on `sim`.
+fn v_rows(compiled: &CompiledModel, sim: &dyn Simulate, cfg: &SimConfig) -> Vec<(f64, i64)> {
+    let params = compiled.default_params.clone();
+    let traj = sim.run(compiled, &params, SEED, cfg).expect("forward sim (zero-rate)");
+    let iv = local_idx(compiled, "V");
+    traj.snapshots.iter().map(|s| (s.t, s.int_state.counts[iv])).collect()
+}
+
+/// An effect at 2.4 does not fire at an earlier landing at 2.0 on the exact
+/// backends: with `a` at 2.0 (add 10) and `b` at 2.4 (add 100), the t = 2 row
+/// carries `a` only and `b` first appears at t = 3. On chain-binomial both key
+/// to the step ending at 2 (2.4 + ½ floors to 2), so the t = 2 row carries both.
+#[test]
+fn an_effect_does_not_fire_at_an_earlier_landing_in_its_step() {
+    let compiled = collision_model(vec![
+        scheduled(
+            "a",
+            vec![2.0],
+            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0) }),
+        ),
+        scheduled(
+            "b",
+            vec![2.4],
+            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(100.0) }),
+        ),
+    ]);
+    for (name, sim, cfg) in battery_backends(0.0, 5.0) {
+        let rows = v_rows(&compiled, &*sim, &cfg);
+        let expected: Vec<(f64, i64)> = if is_grid(name) {
+            vec![(0.0, 0), (1.0, 0), (2.0, 110), (3.0, 110), (4.0, 110), (5.0, 110)]
+        } else {
+            vec![(0.0, 0), (1.0, 0), (2.0, 10), (3.0, 110), (4.0, 110), (5.0, 110)]
+        };
+        assert_eq!(rows, expected, "{name}: V rows");
+    }
+}
+
+/// An off-grid effect fires at `t_start + fire_step(t)·dt` under chain-binomial
+/// and at `t` under the ODE and Gillespie: `add(V, 10)` at 2.4 is in the t = 2
+/// row on chain-binomial (k = ⌊2.4 + ½⌋ = 2) and first in the t = 3 row on the
+/// exact backends. At 2.6 it keys to the step ending at 3 on every backend.
+#[test]
+fn an_off_grid_effect_fires_per_backend_clock() {
+    for (at, grid_row) in [(2.4, 2.0), (2.6, 3.0)] {
+        let compiled = collision_model(vec![scheduled(
+            "pulse",
+            vec![at],
+            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0) }),
+        )]);
+        for (name, sim, cfg) in battery_backends(0.0, 5.0) {
+            let first = if is_grid(name) { grid_row } else { at.ceil() };
+            let rows = v_rows(&compiled, &*sim, &cfg);
+            for (t, v) in rows {
+                let want = if t >= first - 1e-9 { 10 } else { 0 };
+                assert_eq!(v, want, "{name}: effect at {at}: V at t={t}");
+            }
+        }
     }
 }
 

@@ -3,7 +3,7 @@ use crate::{
     config::{ChainBinomialConfig, SimConfig},
     rng::StatefulRng,
     error::SimError,
-    boundary_times::{EffectTimes, OutputTimes},
+    boundary_times::OutputTimes,
     lineage::{DemeId, TransitionId, TransitionObserver},
     ode_integrator::rk4_step,
     propensity::{eval_propensities, EvalCtx},
@@ -262,11 +262,20 @@ pub fn run_chain_binomial_with_observer(
     let n_transitions = model.model.transitions.len();
     let n_real = real_s.values.len();
 
-    // gh#53: fire-step indices depend on the runtime integrator's dt
-    // (not the compile-time `model.simulation.dt`). Resolve once per
-    // sim run from the dt-invariant `fire_times` on CompiledModel.
-    // gh#69: also threads `params` for parametric `at [...]` schedules.
-    let fire_steps = model.resolve_fire_steps(cfg.dt, params);
+    // The effect plan: chain-binomial is discrete-time, so every effect fires at
+    // the end of a step of the run's own grid `t_start + k·dt` (`fire_step`),
+    // built once per run at `params` (parametric `at [...]` schedules resolve
+    // here, gh#69). A resumed run (gh#322) starts from a saved, already
+    // post-effect state, so its origin batch is empty.
+    let origin = if resume.start.is_some() {
+        crate::effect_plan::Origin::Resumed
+    } else {
+        crate::effect_plan::Origin::Init
+    };
+    let plan = crate::effect_plan::EffectPlan::build(
+        model, params, cfg.t_start, cfg.t_end,
+        crate::effect_plan::FireClock::Grid { dt: cfg.dt }, origin,
+    )?;
 
     let mut scratch = StepScratch::new(model);
     let mut flows = vec![0u64; n_transitions];
@@ -283,14 +292,13 @@ pub fn run_chain_binomial_with_observer(
 
     // Merged timeline spine. chain_binomial is the SNAP policy: it steps a full
     // dt every substep (never clipped to a boundary) and emits outputs at grid
-    // times; interventions fire inside step_one (keyed on fire_steps), so the
-    // schedule reports only output boundaries and the effect cursor advances with
-    // chain_binomial's own cfg.dt*0.5 snap tolerance, not the schedule's.
+    // times; effects fire inside step_one from the plan's batch for the substep,
+    // so nothing here reads the schedule's effect cursor.
     let schedule = Schedule::snap_forward(
         cfg.dt,
         cfg.t_end,
         OutputTimes::from_model(model)?,
-        EffectTimes::from_model(model, params)?,
+        plan.effect_times(),
     );
     let mut cursor = Cursor::default();
 
@@ -330,6 +338,15 @@ pub fn run_chain_binomial_with_observer(
             )));
         }
     }
+
+    // D1: effects at t_start apply to the starting state before the t_start row
+    // is recorded (§13.10 without the transition stage: inflow events, drains
+    // and `set`, interventions, balance, the non-negativity check). A no-op
+    // when the plan has no origin batch, so a `balance {}` model's t_start row
+    // is untouched.
+    crate::effects::apply_origin_batch_discrete(
+        model, &plan, &mut int_s, &mut real_s, params, cfg.t_start, cfg.dt, model.balance.as_ref(),
+    )?;
 
     let mut traj = Trajectory::new();
     let mut current_flows = FlowVec::new(n_transitions);
@@ -414,10 +431,9 @@ pub fn run_chain_binomial_with_observer(
         // (once at t_end inside step_one, once at the new t here).
         // See docs/dev/incidents/2026-04-17-chain-binomial-double-fire.md.
         flows.fill(0);
-        // Snap policy: decide the due batch on the `round(t/dt)` key at the
-        // boundary t_grid + dt (the firing key step_one used internally before
-        // gh#216 lifted the decision to the caller). Byte-identical.
-        crate::effects::due_effects(model, &fire_steps, t_grid + dt, cfg.dt, &mut scratch.effect_batch);
+        // The plan's batch for this substep: the effects whose grid key is
+        // k = s + 1, the step ending at t_grid + dt.
+        crate::effects::split_due_batch(model, plan.batch_ending_substep(s), &mut scratch.effect_batch);
         // gh#204 hook A: merge reactive effects due at this boundary into the
         // SAME due-batch as scheduled interventions, so they fire through the
         // identical apply_intervention_effects + post-advance + balance +
@@ -455,12 +471,9 @@ pub fn run_chain_binomial_with_observer(
         t += dt;
         s += 1;
 
-        // No effect-cursor advance here (gh#233 task 4). chain is Snap: it fires
-        // effects INSIDE step_one, keyed on round(t/dt) via the `due_effects`
-        // batch above — and nothing on the Snap path reads the schedule's effect
-        // cursor. The old `iv <= t + cfg.dt*0.5` half-step advance was dead
-        // bookkeeping (it wrote `cursor.effect_idx`, which is never read here) on a
-        // tolerance that did not even match the firing key; removed. Byte-identical.
+        // No effect-cursor advance here (gh#233 task 4): chain is Snap and fires
+        // effects INSIDE step_one from the plan's per-substep batch above;
+        // nothing on the Snap path reads the schedule's effect cursor.
 
         // Output
         schedule.drain_outputs(&mut cursor, t, |ot| {
@@ -835,7 +848,7 @@ pub fn step_one(
     scratch.int_s.counts.copy_from_slice(counts);
     crate::lifecycle::apply_post_advance(
         model, &scratch.effect_batch.intervention_idx, &mut scratch.int_s,
-        &mut scratch.real_s, params, t, dt, model.balance.as_ref(),
+        &mut scratch.real_s, params, t + dt, dt, model.balance.as_ref(),
     )?;
     counts.copy_from_slice(&scratch.int_s.counts);
 

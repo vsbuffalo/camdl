@@ -1,5 +1,5 @@
 use crate::{
-    boundary_times::{EffectTimes, OutputTimes},
+    boundary_times::OutputTimes,
     compiled_model::CompiledModel,
     config::{OdeConfig, SimConfig},
     error::SimError,
@@ -821,7 +821,7 @@ pub fn run_ode(
     // time at the entry point — a RELEASE-build check (the per-conversion
     // guards in `time.rs` are debug_assert only). A non-positive dt would
     // otherwise spin the RK4 substep loop forever (time never advances).
-    model.validate_schedule(cfg.dt, params, cfg.t_start, crate::effect_plan::FireClock::Grid { dt: cfg.dt })?;
+    model.validate_schedule(cfg.dt, params, cfg.t_start, crate::effect_plan::FireClock::Exact)?;
 
     // gh#272: stage the per-eval prologue ONCE for this θ-stable span. `params`
     // is fixed for this whole `run_ode` call, so the param/table-only
@@ -845,6 +845,24 @@ pub fn run_ode(
         real: real_s0.values.clone(),
         flow: vec![0.0; n_transitions],
     };
+
+    // The effect plan: the ODE is continuous-time, so every effect fires at its
+    // declared instant (D2), and the effects at t_start apply to the starting
+    // state before the t_start row is recorded (D1): inflow events, drains and
+    // `set` on the post-inflow state, then the interventions sequentially — the
+    // same two passes as every ODE boundary below.
+    let plan = crate::effect_plan::EffectPlan::build(
+        model, params, cfg.t_start, cfg.t_end,
+        crate::effect_plan::FireClock::Exact, crate::effect_plan::Origin::Init,
+    )?;
+    crate::effects::apply_origin_batch(
+        model, &plan,
+        &mut crate::effects::ContinuousArena { int: &mut state.int, real: &mut state.real },
+        params, cfg.t_start, cfg.dt,
+        |a, ivs| crate::effects::apply_interventions_continuous(
+            model, ivs, a.int, a.real, params, cfg.t_start, cfg.dt,
+        ),
+    )?;
 
     // Coarse burn-in (gh#396 follow-on): active only when the caller passed a
     // genuinely larger `burnin_dt` AND there is an unscored warm-up window. When
@@ -890,19 +908,8 @@ pub fn run_ode(
     // Merged timeline spine. ODE is dt-independent, so EXACT and snap coincide;
     // it uses the EXACT policy (land on each output/effect boundary). Firing stays
     // inline; the schedule owns the sorted times and `cursor` walks them.
-    let schedule = Schedule::exact_forward(
-        cfg.dt,
-        cfg.t_end,
-        output_times,
-        EffectTimes::from_model(model, params)?,
-    );
+    let schedule = Schedule::exact_forward(cfg.dt, cfg.t_end, output_times, plan.effect_times());
     let mut cursor = Cursor::default();
-
-    // gh#53: fire_steps depend on the runtime cfg.dt, not the
-    // compile-time model.simulation.dt. See chain_binomial.rs for the
-    // architectural rationale. gh#69: also threads `params` for
-    // parametric `at [...]` schedules.
-    let fire_steps = model.resolve_fire_steps(cfg.dt, params);
 
     // gh#166: B2 — models that reference the step size in a rate (`Expr::Dt` /
     // RUNTIME_DT) keep the first-order Euler flow on fixed RK4; all others use
@@ -1000,9 +1007,9 @@ pub fn run_ode(
             &stop,
             t,
             &mut state,
-            |st, bt| {
+            |st, bt, effect_idx| {
                 let mut batch = crate::schedule::EffectBatch::default();
-                crate::effects::due_effects(model, &fire_steps, bt, cfg.dt, &mut batch);
+                crate::effects::split_due_batch(model, plan.batch(effect_idx), &mut batch);
                 // §13.10: inflow events, then drains and `set` on the
                 // post-inflow state (no transition stage at a boundary), then
                 // interventions in declaration order (gh#985).
@@ -1120,7 +1127,7 @@ pub(crate) fn integrate_obs_sensitivity(
     let d = param_model_idx.len();
     let n_tr = model.model.transitions.len();
 
-    model.validate_schedule(cfg.dt, params, cfg.t_start, crate::effect_plan::FireClock::Grid { dt: cfg.dt })?;
+    model.validate_schedule(cfg.dt, params, cfg.t_start, crate::effect_plan::FireClock::Exact)?;
 
     // §1c: fixed-step RK4 only. An adaptive integrator sizes steps from the state
     // error alone (S under-resolved) and its step sequence is discontinuous in θ
@@ -1190,14 +1197,25 @@ pub(crate) fn integrate_obs_sensitivity(
     } else {
         output_times
     };
-    let schedule = Schedule::exact_forward(
-        cfg.dt,
-        cfg.t_end,
-        output_times,
-        EffectTimes::from_model(model, params)?,
-    );
+    // §1g: fixed-time θ-magnitude event sensitivity is a follow-up, and the
+    // gradient path applies no effect — neither the origin batch nor a later
+    // one — so v1 refuses any effect the run would fire rather than emit a
+    // gradient of the model without it (silent-wrong). Both halves of the plan
+    // count: a model whose only effect is at t_start has no later instant.
+    let plan = crate::effect_plan::EffectPlan::build(
+        model, params, cfg.t_start, cfg.t_end,
+        crate::effect_plan::FireClock::Exact, crate::effect_plan::Origin::Init,
+    )?;
+    if !plan.is_empty() {
+        return Err(SimError::Validation(
+            "ODE gradient (nuts) does not yet support scheduled interventions \
+             or events: their event-jump sensitivity is a follow-up (gh#275 \
+             §1g). Use gradient-free `mh` on `ode` for models with effects."
+                .to_string(),
+        ));
+    }
+    let schedule = Schedule::exact_forward(cfg.dt, cfg.t_end, output_times, plan.effect_times());
     let mut cursor = Cursor::default();
-    let fire_steps = model.resolve_fire_steps(cfg.dt, params);
 
     // Running incidence (and its sensitivity) accumulated across output snapshots
     // since the previous obs time — reset per obs, exactly as `compute_ode_loglik`
@@ -1296,22 +1314,11 @@ pub(crate) fn integrate_obs_sensitivity(
             &stop,
             t,
             &mut st,
-            |_st, bt| {
-                let mut batch = crate::schedule::EffectBatch::default();
-                crate::effects::due_effects(model, &fire_steps, bt, cfg.dt, &mut batch);
-                if !batch.is_empty() {
-                    // §1g: fixed-time θ-magnitude event sensitivity is a follow-up;
-                    // v1 refuses any scheduled effect under the gradient path rather
-                    // than emit a jump-term-only (silent-wrong) gradient.
-                    return Err(SimError::Validation(
-                        "ODE gradient (nuts) does not yet support scheduled interventions \
-                         or events: their event-jump sensitivity is a follow-up (gh#275 \
-                         §1g). Use gradient-free `mh` on `ode` for models with effects."
-                            .to_string(),
-                    ));
-                }
-                Ok(())
-            },
+            // The plan is empty (refused above), so no effect boundary exists.
+            |_st, bt, _effect_idx| Err(SimError::Validation(format!(
+                "internal: ODE gradient path reached an effect boundary at t={bt} \
+                 although its effect plan is empty"
+            ))),
             |st, _ot| {
                 for i in 0..n_tr {
                     cum_flow[i] += st.ode.flow[i];

@@ -443,26 +443,6 @@ impl Schedule {
         self.next_effect(cursor) <= t + EFFECT_EPS
     }
 
-    /// Whether the cursor's current effect boundary maps to the dt-step `step`
-    /// under the snap [`grid`](Schedule::grid) — `time_to_step(effect, grid) ==
-    /// step`. The STEP-keyed advance predicate [`arrive`](Schedule::arrive) uses
-    /// AFTER firing (gh#198), distinct from the within-`EFFECT_EPS`-of-`t`
-    /// [`effect_due_at`](Schedule::effect_due_at).
-    ///
-    /// Under `Exact`, forward effect application is STEP-keyed: `due_effects` fires
-    /// EVERY intervention whose `fire_step == round(t/grid)` in one batch at the
-    /// landing. So all effect boundaries sharing a dt-step are a single firing
-    /// occasion — already applied. Two distinct fire times in one step
-    /// (`at:[2.3, 2.4]` at dt=1, or two interventions at 2.3 and 2.4) would
-    /// otherwise re-stop the integrator at the second time, where `due_effects`
-    /// re-fires the already-applied step: the ode/gillespie double-fire that
-    /// diverged from chain_binomial's single Snap fire. Skipping every same-step
-    /// boundary makes each distinct intervention fire exactly once per step.
-    fn effect_maps_to_step(&self, cursor: &Cursor, step: i64) -> bool {
-        self.effect_time(cursor)
-            .is_some_and(|e| crate::time::time_to_step(e, self.grid) == step)
-    }
-
     /// The current (next un-emitted) output time for `cursor`, or `None` past the
     /// end. Internal to `drain_outputs` (gh#233 Layer 4).
     fn output_time(&self, cursor: &Cursor) -> Option<f64> {
@@ -574,13 +554,13 @@ impl Schedule {
     ///
     /// 1. **Effects before output** — a snapshot recorded at this boundary must
     ///    reflect the post-effect state (the cross-backend lifecycle invariant).
-    /// 2. **All coincident effects, and every same-step boundary** —
-    ///    `while effect_due_at` drains the batch coincident with `t` (two
-    ///    interventions at one `t`), then a step-keyed loop
-    ///    ([`effect_maps_to_step`](Schedule::effect_maps_to_step)) skips any
-    ///    further effect boundary rounding to the just-fired dt-step. `due_effects`
-    ///    fires the WHOLE step in one batch, so a second fire time within the same
-    ///    `dt` (`at:[2.3, 2.4]`) must not re-stop and re-fire it (gh#198).
+    /// 2. **Every effect boundary due at `t`, each once** — `while
+    ///    effect_due_at` applies the batch of each effect boundary within
+    ///    `EFFECT_EPS` of `t` in turn (`apply_effects(state, t, effect_idx)`) and
+    ///    advances past it. The boundaries are an
+    ///    [`EffectPlan`](crate::effect_plan::EffectPlan)'s firing instants, which
+    ///    are already distinct, so this is normally one batch; a ULP landing that
+    ///    reaches the next instant too still applies each batch once.
     /// 3. **All coincident outputs** — `drain_outputs` records every output due
     ///    at `t`, including one coincident with `t_end`. The caller checks
     ///    [`TimelineStop::is_end`] AFTER `arrive` returns, so the terminal output
@@ -591,8 +571,10 @@ impl Schedule {
     /// is passed THROUGH (not captured), because both closures mutate it and two
     /// closures cannot each capture `&mut state` — `arrive` owns the single `&mut`
     /// and hands it to each in turn:
-    /// - `apply_effects(state, t)` — fire the due effect batch (discrete counts vs
-    ///   the ODE's continuous f64 state); may fail (e.g. a negative count).
+    /// - `apply_effects(state, t, effect_idx)` — fire the batch of effect
+    ///   boundary `effect_idx` (an index into the plan the schedule was built
+    ///   from; discrete counts vs the ODE's continuous f64 state); may fail (e.g.
+    ///   a negative count).
     /// - `record(state, ot)` — build and push the snapshot at output time `ot`
     ///   (i64 `Flows::Int` vs the ODE's `Flows::Real`).
     ///
@@ -606,25 +588,16 @@ impl Schedule {
         stop: &TimelineStop,
         t: f64,
         state: &mut S,
-        mut apply_effects: impl FnMut(&mut S, f64) -> Result<(), SimError>,
+        mut apply_effects: impl FnMut(&mut S, f64, usize) -> Result<(), SimError>,
         mut record: impl FnMut(&mut S, f64),
     ) -> Result<(), SimError> {
         if stop.has(StopReason::ScheduledEffect) {
-            apply_effects(state, t)?;
-            // Clear the boundary landed on (robust to a ULP landing: within
-            // EFFECT_EPS of `t`). This always advances past the effect that made
-            // this a ScheduledEffect stop, so the loop below cannot stall.
+            // Apply and clear every boundary landed on (robust to a ULP landing:
+            // within EFFECT_EPS of `t`). This always advances past the effect
+            // that made this a ScheduledEffect stop, so the caller's loop cannot
+            // stall.
             while self.effect_due_at(cursor, t) {
-                cursor.pass_effect();
-            }
-            // gh#198: `apply_effects` (`due_effects`) fired the WHOLE dt-step's
-            // batch at this landing, keyed on `round(t/grid)`. Skip every remaining
-            // effect boundary that maps to the SAME step — not just those within
-            // EFFECT_EPS of `t` — so a second fire time in the step does not
-            // re-stop the integrator and re-fire the already-applied step (the
-            // ode/gillespie double-fire vs chain_binomial's single Snap fire).
-            let fired_step = crate::time::time_to_step(t, self.grid);
-            while self.effect_maps_to_step(cursor, fired_step) {
+                apply_effects(state, t, cursor.effect_idx)?;
                 cursor.pass_effect();
             }
         }
@@ -1144,7 +1117,7 @@ mod tests {
             &stop,
             5.0,
             &mut log,
-            |log, _t| { log.push("effect".into()); Ok(()) },
+            |log, _t, _| { log.push("effect".into()); Ok(()) },
             |log, ot| log.push(format!("output@{ot}")),
         )
         .unwrap();
@@ -1154,57 +1127,51 @@ mod tests {
     }
 
     #[test]
-    fn arrive_advances_past_the_whole_coincident_effect_batch() {
-        // Two interventions at the SAME t=5: `apply_effects` fires the batch in ONE
-        // call (the backend's `due_effects` collects it), and `arrive` advances the
-        // cursor past BOTH coincident effect boundaries — not just the first.
+    fn arrive_applies_each_due_effect_boundary_once() {
+        // Two effect boundaries due at the SAME t=5 (a plan's instants are
+        // distinct, so this is the ULP-landing case): `arrive` applies each
+        // boundary's batch once, in index order, and advances past both.
         let s = exact(1.0, 12.0, vec![], vec![5.0, 5.0]);
         let mut cur = Cursor::default();
         let stop = s.next_stop(&cur, 4.0).unwrap();
         assert!(stop.has(StopReason::ScheduledEffect));
-        let mut calls = 0u32;
-        s.arrive(&mut cur, &stop, 5.0, &mut calls, |c, _| { *c += 1; Ok(()) }, |_, _| {})
+        let mut applied: Vec<usize> = Vec::new();
+        s.arrive(&mut cur, &stop, 5.0, &mut applied, |a, _, idx| { a.push(idx); Ok(()) }, |_, _| {})
             .unwrap();
-        assert_eq!(calls, 1, "the batch is applied in a single call");
+        assert_eq!(applied, vec![0, 1], "each due boundary's batch once, in order");
         assert_eq!(cur.effect_idx, 2, "cursor advances past BOTH coincident effects");
     }
 
     #[test]
-    fn arrive_advances_past_same_step_effects_within_one_dt() {
-        // gh#198: two DISTINCT effect boundaries within one dt that round to the
-        // SAME step (2.3, 2.4 → step 2 at grid=1). The integrator lands on the
-        // first (2.3), where `apply_effects` (the backend's `due_effects`) fires
-        // the WHOLE step in ONE batch. `arrive` must then advance the cursor past
-        // BOTH — else the integrator re-stops at 2.4 and `due_effects` re-fires the
-        // already-applied step (the ode/gillespie double-fire vs chain_binomial's
-        // single Snap fire). `effect_due_at` alone (within EFFECT_EPS of 2.3) skips
-        // only 2.3; the step-keyed loop skips 2.4 too.
+    fn arrive_leaves_a_same_step_effect_for_its_own_instant() {
+        // Two DISTINCT effect instants within one dt (2.3, 2.4 at dt=1). The
+        // exact backends fire each at its own instant (D2): landing on 2.3
+        // applies 2.3's batch only and leaves 2.4 for its own landing. (The
+        // gh#198 step-keyed skip that passed 2.4 here is gone: it fired an effect
+        // at 2.4 early, at 2.3.)
         let s = exact(1.0, 12.0, vec![], vec![2.3, 2.4]);
         let mut cur = Cursor::default();
         let stop = s.next_stop(&cur, 2.0).unwrap();
-        assert_eq!(stop.t, 2.3, "lands on the first same-step boundary");
+        assert_eq!(stop.t, 2.3, "lands on the first boundary");
         assert!(stop.has(StopReason::ScheduledEffect));
-        let mut calls = 0u32;
-        s.arrive(&mut cur, &stop, 2.3, &mut calls, |c, _| { *c += 1; Ok(()) }, |_, _| {})
+        let mut applied: Vec<usize> = Vec::new();
+        s.arrive(&mut cur, &stop, 2.3, &mut applied, |a, _, idx| { a.push(idx); Ok(()) }, |_, _| {})
             .unwrap();
-        assert_eq!(calls, 1, "the step's batch is applied in a single call at 2.3");
-        assert_eq!(
-            cur.effect_idx, 2,
-            "cursor advances past BOTH 2.3 and 2.4 (same dt-step 2), so the \
-             integrator does not re-stop at 2.4 and re-fire the step (gh#198)"
-        );
+        assert_eq!(applied, vec![0], "only 2.3's batch applies at 2.3");
+        assert_eq!(cur.effect_idx, 1, "2.4 stays for its own landing");
+        let stop = s.next_stop(&cur, 2.3).unwrap();
+        assert_eq!(stop.t, 2.4, "the integrator stops again at 2.4");
     }
 
     #[test]
     fn arrive_does_not_over_advance_past_a_later_step() {
-        // The step-keyed advance must skip only the JUST-FIRED step, not a later
-        // one: 2.3 (step 2) and 3.4 (step 3). Landing on 2.3 fires step 2 and
-        // passes 2.3 only; 3.4 stays for its own boundary and its own fire.
+        // Landing on 2.3 passes 2.3 only; 3.4 stays for its own boundary and its
+        // own fire.
         let s = exact(1.0, 12.0, vec![], vec![2.3, 3.4]);
         let mut cur = Cursor::default();
         let stop = s.next_stop(&cur, 2.0).unwrap();
         assert_eq!(stop.t, 2.3);
-        s.arrive(&mut cur, &stop, 2.3, &mut (), |_, _| Ok(()), |_, _| {}).unwrap();
+        s.arrive(&mut cur, &stop, 2.3, &mut (), |_, _, _| Ok(()), |_, _| {}).unwrap();
         assert_eq!(
             cur.effect_idx, 1,
             "only the step-2 boundary (2.3) is passed; 3.4 (step 3) remains for its own fire"
@@ -1219,7 +1186,7 @@ mod tests {
         let stop = s.next_stop(&cur, 4.0).unwrap();
         assert!(!stop.has(StopReason::ScheduledEffect));
         let mut log: Vec<&str> = Vec::new();
-        s.arrive(&mut cur, &stop, 5.0, &mut log, |log, _| { log.push("E"); Ok(()) }, |log, _| log.push("O"))
+        s.arrive(&mut cur, &stop, 5.0, &mut log, |log, _, _| { log.push("E"); Ok(()) }, |log, _| log.push("O"))
             .unwrap();
         assert_eq!(log, vec!["O"], "no ScheduledEffect reason → apply_effects skipped, output drained");
     }
@@ -1232,7 +1199,7 @@ mod tests {
         let mut cur = Cursor::default();
         let stop = s.next_stop(&cur, 4.0).unwrap();
         let mut recorded: Vec<f64> = Vec::new();
-        s.arrive(&mut cur, &stop, 5.0, &mut recorded, |_, _| Ok(()), |r, ot| r.push(ot)).unwrap();
+        s.arrive(&mut cur, &stop, 5.0, &mut recorded, |_, _, _| Ok(()), |r, ot| r.push(ot)).unwrap();
         assert_eq!(recorded, vec![5.0], "terminal output recorded before End break");
     }
 
@@ -1250,7 +1217,7 @@ mod tests {
             &stop,
             5.0,
             &mut recorded,
-            |_, t| Err(SimError::NumericalCollapse { kind: crate::error::CollapseKind::DivByZero, t }),
+            |_, t, _| Err(SimError::NumericalCollapse { kind: crate::error::CollapseKind::DivByZero, t }),
             |rec, _| *rec = true,
         );
         assert!(r.is_err(), "effect-application error propagates");
