@@ -41,6 +41,8 @@
 //! [`a_start_no_swarm_can_explain_is_still_refused_and_says_why`] pins that the
 //! refusal says so in those words.
 
+// The fixture model carries no effects, so its effect plan is empty.
+use sim::effect_plan::EffectPlan;
 use std::sync::Arc;
 
 use sim::compiled_model::CompiledModel;
@@ -53,7 +55,7 @@ use sim::inference::multi_stream_obs::{
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{
     build_obs_at_substep, complete_data_loglik, run_pgas, simulate_reference,
-    simulate_reference_on_grid, EffectFiring, ObsAtSubstep, PGASConfig, PGASTrajectory,
+    simulate_reference_on_grid, ObsAtSubstep, PGASConfig, PGASTrajectory,
 };
 use sim::inference::pgas_init::{initial_reference_trajectory, unconditional_smc_pass, UnconditionalPass};
 use sim::inference::pmmh::Prior;
@@ -205,7 +207,7 @@ impl Fixture {
             &self.params,
             DT,
             &self.grid,
-            EffectFiring::default(),
+            &EffectPlan::default(),
             &mut rng,
         )
         .expect("forward draw")
@@ -223,7 +225,7 @@ impl Fixture {
             &self.obs_model,
             seed,
             &self.obs_at_substep,
-            EffectFiring::default(),
+            &EffectPlan::default(),
             &mut rng,
         )
         .expect("initial_reference_trajectory")
@@ -450,7 +452,7 @@ fn a_start_no_swarm_can_explain_falls_back_to_the_forward_draw_bit_for_bit() {
     // The premise: the swarm genuinely has no support here.
     let pass = unconditional_smc_pass(
         &f.compiled, &f.params, &f.grid, N_PARTICLES, DT, &f.obs_model,
-        CHAIN_SEED, &f.obs_at_substep, EffectFiring::default(),
+        CHAIN_SEED, &f.obs_at_substep, &EffectPlan::default(),
         sim::rng::BinomialAlgorithm::Btpe,
     )
     .expect("unconditional pass");

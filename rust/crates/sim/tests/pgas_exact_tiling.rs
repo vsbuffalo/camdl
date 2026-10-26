@@ -44,9 +44,25 @@ const SEED: u64 = 42;
 /// the chain-binomial `step_one` producer path never applies it — the dynamics
 /// here are the pure seasonal SEIR, deterministic given the seed.
 fn seir_seasonal() -> (Arc<CompiledModel>, Vec<f64>) {
+    seir_seasonal_with(true)
+}
+
+/// The same model without its vaccination campaign. The PGAS producers fire
+/// effects on the dt grid, so a model with effects is refused on a substep
+/// grid that exact alignment has re-tiled at off-grid observations
+/// (`pgas_effect_plan`); the shortened-substep tests here are about the
+/// density reading the realized `(t0, dt_substep)`, not about effects.
+fn seir_seasonal_without_effects() -> (Arc<CompiledModel>, Vec<f64>) {
+    seir_seasonal_with(false)
+}
+
+fn seir_seasonal_with(effects: bool) -> (Arc<CompiledModel>, Vec<f64>) {
     let json = std::fs::read_to_string("../../../ocaml/golden/seir_vaccine_seasonal.ir.json")
         .expect("read seir_vaccine_seasonal IR");
     let mut model = ir::from_str(&json).expect("parse seir_vaccine_seasonal IR");
+    if !effects {
+        model.interventions.clear();
+    }
     assert!(
         model.transitions.iter().any(|t| !t.rate_grad.is_empty()),
         "seasonal model must carry rate_grad (run make update-golden)"
@@ -106,7 +122,8 @@ fn exact_equals_snap_on_grid() {
 
     let grid = build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
     let mut rng_exact = StatefulRng::new(SEED);
-    let exact = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, None, &mut rng_exact).unwrap();
+    let plan = sim::inference::pgas::pgas_effect_plan(&compiled, &params, dt, &grid.steps).unwrap();
+    let exact = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, &plan, &mut rng_exact).unwrap();
 
     assert!(
         trajectories_bit_identical(&snap, &exact),
@@ -126,7 +143,7 @@ fn exact_equals_snap_on_grid() {
 /// substep mapping correctness is pinned separately in the keystone unit tests.
 #[test]
 fn exact_shortened_substep_density_recompute() {
-    let (compiled, params) = seir_seasonal();
+    let (compiled, params) = seir_seasonal_without_effects();
     let t_start = compiled.model.simulation.t_start;
     let dt = 1.0;
     // Off-grid obs with VARIED fractional gaps, so each window is off-grid
@@ -136,7 +153,9 @@ fn exact_shortened_substep_density_recompute() {
 
     let grid = build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
     let mut rng = StatefulRng::new(SEED);
-    let traj = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, None, &mut rng).unwrap();
+    let traj = simulate_reference_on_grid(
+        &compiled, &params, dt, &grid.steps, &sim::effect_plan::EffectPlan::default(), &mut rng,
+    ).unwrap();
 
     // Non-vacuity: genuinely shortened substeps exist, each in (0, dt).
     let n_short = traj.substeps.iter().filter(|r| r.dt_substep != dt).count();
@@ -194,7 +213,7 @@ fn exact_shortened_substep_density_recompute() {
 /// (transition + gamma density only) — called with no observations.
 #[test]
 fn exact_shortened_substep_gradient_matches_fd() {
-    let (compiled, params) = seir_seasonal();
+    let (compiled, params) = seir_seasonal_without_effects();
     let t_start = compiled.model.simulation.t_start;
     let dt = 1.0;
     let observations = obs_at(&[40.5, 90.2, 140.8, 190.3]);
@@ -202,7 +221,9 @@ fn exact_shortened_substep_gradient_matches_fd() {
 
     let grid = build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
     let mut rng = StatefulRng::new(SEED);
-    let traj = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, None, &mut rng).unwrap();
+    let traj = simulate_reference_on_grid(
+        &compiled, &params, dt, &grid.steps, &sim::effect_plan::EffectPlan::default(), &mut rng,
+    ).unwrap();
     assert!(traj.substeps.iter().any(|r| r.dt_substep != dt),
         "gate is vacuous without a shortened substep");
 

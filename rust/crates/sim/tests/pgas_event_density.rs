@@ -460,11 +460,12 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
         result.resume_state.nuts_step_size);
 }
 
-/// Stage 3 (2c): exact obs-alignment is REFUSED on models with always-active
-/// events. Their firing keys on `round(t/dt)` (intervention.rs), which a
-/// shortened exact substep would shift off the intended step — a silent
-/// mis-fire. `run_pgas` returns a clean error before doing any work. (The guard
-/// fires ahead of the grid build, so empty observations suffice to reach it.)
+/// Exact obs-alignment with an off-grid observation is REFUSED on a model with
+/// an effect (here an always-active event). The PGAS producers fire effects on
+/// the dt grid (the effect plan), and exact alignment re-tiles the substeps at
+/// the off-grid observation, so firing by substep index would shift the event
+/// off its step — a silent mis-fire. (The CLI never runs PGAS under exact
+/// alignment.) `run_pgas` refuses before sampling.
 #[test]
 fn exact_alignment_rejected_on_always_active_event_model() {
     let model = seir_with_seed_event(5, 10.0); // founders_arrive: always_active
@@ -492,15 +493,17 @@ fn exact_alignment_rejected_on_always_active_event_model() {
         step_policy: sim::schedule::StepPolicy::Exact,
     };
 
+    let obs: Vec<Observation> =
+        [3.25, 12.0].iter().map(|&t| Observation { time: t, value: 0.0 }).collect();
     match run_pgas(
         &compiled, &if2_params, &priors, &params, &config,
-        &[], &obs_model, 1, None, None, "exact_event_guard".into(),
+        &obs, &obs_model, 1, None, None, "exact_event_guard".into(),
     ) {
-        Ok(_) => panic!("exact + always-active event must be refused"),
+        Ok(_) => panic!("exact + an off-grid observation + an event must be refused"),
         Err(e) => {
-            let msg = format!("{e:?}");
-            assert!(msg.contains("always-active"),
-                "guard error should name always-active events, got: {msg}");
+            let msg = format!("{e}");
+            assert!(msg.contains("exact obs-alignment re-tiles"),
+                "the refusal should name the re-tiled grid, got: {msg}");
         }
     }
 }

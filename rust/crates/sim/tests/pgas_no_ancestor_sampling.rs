@@ -9,6 +9,8 @@
 //! flag is dropped anywhere between the config and the AS gate, the off-run
 //! proposes ancestors like the on-run and these assertions go red.
 
+// The fixture model carries no effects, so its effect plan is empty.
+use sim::effect_plan::EffectPlan;
 use std::sync::Arc;
 
 use sim::compiled_model::CompiledModel;
@@ -16,7 +18,7 @@ use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{
-    build_obs_at_substep, csmc_as, simulate_reference, EffectFiring, ObsAtSubstep, PGASTrajectory,
+    build_obs_at_substep, csmc_as, simulate_reference, ObsAtSubstep, PGASTrajectory,
 };
 use sim::rng::StatefulRng;
 
@@ -129,7 +131,7 @@ fn sweep(f: &Fixture, ancestor_sampling: bool, seed: u64) -> sim::inference::pga
         &f.obs_model,
         seed,
         &f.obs_at_substep,
-        EffectFiring::default(),
+        &EffectPlan::default(),
         sim::rng::BinomialAlgorithm::Btpe,
         ancestor_sampling,
     )

@@ -25,6 +25,8 @@
 //! per-bin vector is not, and (2) that the vector `csmc_as` actually returns is
 //! a per-bin count of real per-substep decisions, not the scalar rebroadcast.
 
+// The fixture model carries no effects, so its effect plan is empty.
+use sim::effect_plan::EffectPlan;
 use std::sync::Arc;
 
 use sim::compiled_model::CompiledModel;
@@ -32,7 +34,7 @@ use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{
-    build_obs_at_substep, csmc_as, simulate_reference, EffectFiring, ObsAtSubstep, PositionBins,
+    build_obs_at_substep, csmc_as, simulate_reference, ObsAtSubstep, PositionBins,
     RENEWAL_BINS,
 };
 use sim::rng::StatefulRng;
@@ -289,7 +291,7 @@ fn sweeps(n_sweeps: u64, n_particles: usize) -> Vec<SweepProfile> {
         .map(|seed| {
             let (_traj, diag) = csmc_as(
                 &compiled, &params, &obs, &reference, n_particles, DT, &obs_model,
-                SEED + seed, &obs_at_substep, EffectFiring::default(),
+                SEED + seed, &obs_at_substep, &EffectPlan::default(),
                 sim::rng::BinomialAlgorithm::Btpe,
                 true,
             )

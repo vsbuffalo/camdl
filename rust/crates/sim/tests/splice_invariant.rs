@@ -467,3 +467,63 @@ fn off_grid_resume_above_8192_is_rejected_naming_the_neighbours() {
     assert!(msg.contains("8197"), "names T*; got: {msg}");
     assert!(msg.contains("8196") && msg.contains("8203"), "names the neighbouring emits; got: {msg}");
 }
+
+/// 6. **A fork at an effect instant does not fire it twice** (proposal
+///    2026-10-04, D1 and `Origin::Resumed`). With an intervention AT T*, the head
+///    run [0, T*] fires it at the end of its last step, so the saved state@T* is
+///    already post-effect. The resumed run starts at T* with that effect in its
+///    origin batch's position — and must not apply it again. The splice is then
+///    byte-identical to the continuous run, which fires it once.
+#[test]
+fn a_fork_at_an_effect_instant_does_not_fire_it_twice() {
+    let model_at = |outs: Vec<f64>, t_end: f64| sir_model_at(0.0, [T_STAR, 15.0], outs, t_end);
+    let (head_model, head_params) = model_at(ints(T_STAR as u64), T_STAR);
+    let mut captured = StatefulRng::new(0);
+    let traj_head = run_chain_binomial_with_observer(
+        &head_model,
+        &head_params,
+        SEED,
+        &ChainBinomialConfig { t_start: 0.0, t_end: T_STAR, dt: 1.0 },
+        None,
+        None,
+        Resume { start: None, capture_final_rng: Some(&mut captured) },
+    )
+    .unwrap();
+    let at_tstar = traj_head.snapshots.last().unwrap();
+    let (tail_model, tail_params) = model_at(ints(T_END as u64), T_END);
+    let start = StartState {
+        int_s: at_tstar.int_state.clone(),
+        real_s: at_tstar.real_state.clone(),
+        rng: Some(captured),
+    };
+    let traj_tail = run_chain_binomial_with_observer(
+        &tail_model,
+        &tail_params,
+        SEED,
+        &ChainBinomialConfig { t_start: T_STAR, t_end: T_END, dt: 1.0 },
+        None,
+        None,
+        Resume { start: Some(&start), capture_final_rng: None },
+    )
+    .unwrap();
+    let (full_model, full_params) = model_at(ints(T_END as u64), T_END);
+    let traj_full = run_chain_binomial(
+        &full_model,
+        &full_params,
+        SEED,
+        &ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0 },
+    )
+    .unwrap();
+    for fs in traj_full.snapshots.iter().filter(|s| s.t >= T_STAR - 1e-9) {
+        let ts = traj_tail.snapshots.iter().find(|s| (s.t - fs.t).abs() < 1e-9).unwrap();
+        assert_eq!(
+            fs.int_state.counts, ts.int_state.counts,
+            "state diverges at t={}: the resumed run re-applied the effect at T*",
+            fs.t
+        );
+    }
+    // Non-vacuity: the effect at T* moved mass into V in the head run.
+    let v = full_model.model.compartments.iter().position(|c| c.name == "V").unwrap();
+    let before = traj_head.snapshots.iter().find(|s| (s.t - (T_STAR - 1.0)).abs() < 1e-9).unwrap();
+    assert!(at_tstar.int_state.counts[v] > before.int_state.counts[v], "the T* effect must fire in the head");
+}

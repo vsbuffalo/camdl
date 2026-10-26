@@ -27,6 +27,8 @@
 // than an f64 carries. Shortening them by hand is undone on the next capture.
 #![allow(clippy::excessive_precision)]
 
+// The fixture model carries no effects, so its effect plan is empty.
+use sim::effect_plan::EffectPlan;
 use std::sync::Arc;
 
 use sim::compiled_model::CompiledModel;
@@ -34,8 +36,7 @@ use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{
-    build_obs_at_substep, complete_data_loglik, simulate_reference_on_grid, EffectFiring,
-    ObsAtSubstep, PGASTrajectory,
+    build_obs_at_substep, complete_data_loglik, simulate_reference_on_grid, ObsAtSubstep, PGASTrajectory,
 };
 use sim::inference::pgas_init::{unconditional_smc_pass, UnconditionalPass};
 use sim::rng::StatefulRng;
@@ -150,7 +151,7 @@ fn fixture() -> Fixture {
     // an impossible fixture.
     let mut rng = StatefulRng::new(DATA_SEED);
     let truth = simulate_reference_on_grid(
-        &compiled, &params, DT, &grid, EffectFiring::default(), &mut rng,
+        &compiled, &params, DT, &grid, &EffectPlan::default(), &mut rng,
     )
     .expect("data-generating draw");
 
@@ -231,7 +232,7 @@ impl Fixture {
             &self.obs_model,
             seed,
             &self.obs_at_substep,
-            EffectFiring::default(),
+            &EffectPlan::default(),
             sim::rng::BinomialAlgorithm::Btpe,
         )
         .expect("unconditional pass")
