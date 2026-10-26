@@ -233,3 +233,38 @@ fn chain_binomial_refuses_multi_unit_before_any_step() {
     let run = ChainBinomialSim.run(&single, &single.default_params, 1, &fine);
     assert!(run.is_ok(), "a single-unit model runs on chain_binomial: {:?}", run.err());
 }
+
+/// An overdispersed exit whose gamma rate multiplier is drawn as exactly 0
+/// (likely when σ² ≫ dt: the Gamma shape dt/σ² is tiny) has zero hazard for
+/// that step, so no member leaves. Every exit of the source group drew 0, the
+/// group's total rate is 0 — and the group must draw nothing. It must not fall
+/// through to the source-less draw, which is unbounded by the source and took
+/// `S` from 5 to −3305.
+#[test]
+fn chain_binomial_zero_gamma_multiplier_draws_no_exits() {
+    use sim::{config::ChainBinomialConfig, ChainBinomialSim};
+    let mut leave = transition("leave", &[("S", -1), ("I", 1)], mul(param("beta"), pop("S")));
+    leave.draw_method = DrawMethod::Overdispersed {
+        sigma_sq: param("sig"),
+        sigma_sq_grad: HashMap::new(),
+    };
+    let mut model = build(
+        &["S", "I"],
+        vec![leave],
+        vec![fixed("beta", 50.0), fixed("sig", 500.0)],
+        &[("S", 5.0), ("I", 0.0)],
+        10.0,
+    );
+    model.output.times = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
+    let compiled = CompiledModel::new(model).unwrap();
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 10.0, dt: 1.0 });
+    for seed in 1..=50u64 {
+        let traj = ChainBinomialSim
+            .run(&compiled, &compiled.default_params, seed, &cfg)
+            .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        for snap in &traj.snapshots {
+            let c = &snap.int_state.counts;
+            assert!(c[0] >= 0 && c[1] >= 0 && c[0] + c[1] == 5, "seed {seed}: {c:?} at t={}", snap.t);
+        }
+    }
+}

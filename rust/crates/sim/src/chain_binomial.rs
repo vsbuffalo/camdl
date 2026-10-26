@@ -732,7 +732,15 @@ pub fn step_one(
             scratch.probs.push((tr_idx, effective));
         }
 
-        if total_rate <= 0.0 || scratch.probs.is_empty() { continue; }
+        if total_rate <= 0.0 || scratch.probs.is_empty() {
+            // Every competing exit has zero effective hazard this step (each
+            // overdispersed exit drew a gamma multiplier of exactly 0), so no
+            // member leaves. Mark them handled: left unhandled they would fall
+            // through to the source-less draw below, which is not bounded by
+            // the source's count.
+            for &(tr_idx, _) in &scratch.probs { scratch.handled[tr_idx] = true; }
+            continue;
+        }
 
         // Step 2: draw total exits (pomp's first rbinom)
         // gh#audit-H3: stable (p, q) primitive (q discarded here).
