@@ -117,7 +117,7 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
         fit_toml_estimate: &fte,
         table_files: &table_files,
     }).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-    emit_notices(&resolved);
+    emit_notices(&[&resolved]);
     if log::log_enabled!(log::Level::Debug) {
         for p in &resolved.params {
             log::debug!("eval: param `{}` = {} ({})",

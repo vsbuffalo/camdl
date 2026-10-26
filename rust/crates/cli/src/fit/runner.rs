@@ -303,7 +303,7 @@ impl FitRunConfig {
                 table_files: &table_files_resolver,
             },
         ).map_err(|e| e.to_string())?;
-        crate::params_resolver::emit_notices(&resolved);
+        crate::params_resolver::emit_notices(&[&resolved]);
         let model = resolved.model.clone();
 
         let compiled = CompiledModel::new(model.clone())

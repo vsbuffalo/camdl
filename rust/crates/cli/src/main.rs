@@ -2190,8 +2190,9 @@ fn run_simulate(a: &args::SimulateArgs) {
                        --replicates / --draws / multiple --scenario)");
             std::process::exit(1);
         }
-        sink.on_start(&grid);
         let spec = specs.into_iter().next().expect("len checked == 1");
+        util::emit_run_notices(&[&spec.sim_run]);
+        sink.on_start(&grid);
         let (traj, model, event_log, exact) =
             util::run_simulation_event_log(&spec.sim_run).unwrap_or_else(|e| {
                 eprintln!("error: {}", e);
@@ -3873,6 +3874,8 @@ fn simulate_on_bound_design(
     // resolving the model needs a complete parameter vector, so it is read off
     // the first point's run and reused for the rest.
     let first = run_for(0, &points[0]);
+    let runs: Vec<util::SimRun> = points.iter().enumerate().map(|(i, p)| run_for(i, p)).collect();
+    util::emit_run_notices(&runs.iter().collect::<Vec<_>>());
     let (compiled, model) = util::resolve_run_model(&first)?;
     let model_obs_names: Vec<String> =
         model.observations.iter().map(|o| o.name.clone()).collect();

@@ -855,26 +855,32 @@ parameter from the `[estimate]` set if it was there — so
 slice-while-holding-gamma pattern. The kick-out is announced on stderr (one line
 per parameter) so the override is never silent.
 
-**Scenario-override visibility.** When a `--fixed-file` or `--fixed NAME=VALUE`
-value overrides a value that the active scenario _also_ set, the resolver emits
-a `ScenarioOverridden` warning to stderr at resolve time and records both values
-into `run.json`'s `parameters_provenance` block:
+**Override visibility.** Whenever one tier replaces, with a different value, a
+value a lower tier supplied — `--fixed` over the active scenario, a later
+`--fixed-file` over an earlier one — the resolver prints one line to stderr
+naming the parameter, both values and both sources, and records every
+replacement in `run.json`'s `parameters_provenance` block:
 
 ```json
 "beta": {
   "value": 0.5,
   "source": "fixed_cli",
   "role": "fixed",
-  "overrode_scenario": {
-    "scenario": "worst_case",
-    "scenario_value": 0.3
-  }
+  "overrides": [
+    {
+      "replaced": { "source": "scenario", "value": 0.3, "scenario": "worst_case" },
+      "by": { "source": "fixed_cli", "value": 0.5 }
+    }
+  ]
 }
 ```
 
-CLI override of a scenario value is a legitimate quick-test workflow; the
-warning + provenance pair ensure six-months-later auditing of which value
-actually ran isn't blocked by archaeology.
+The line is `info:` for a replacement the command's own flags asked for, and
+`warning:` when the replaced value is a fit's estimate (a params file carrying a
+fit `[provenance]` block). CLI override of a scenario value is a legitimate
+quick-test workflow; the line and the provenance record ensure six-months-later
+auditing of which value actually ran isn't blocked by archaeology. The full rule
+is `docs/camdl-run-spec.md` §1.3.
 
 **Profile focal parameters.** The focal swept parameter(s) are always removed
 from the estimated set, even when they appear in the fit toml's `[estimate]`.

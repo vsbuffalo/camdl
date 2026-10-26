@@ -91,12 +91,15 @@ pub fn generate_synthetic_datasets(
             format!("-emit{}", &h[..8])
         })
         .unwrap_or_default();
+    let runs: Vec<crate::util::SimRun> = seeds.iter()
+        .map(|&sim_seed| synthetic_sim_run(spec, model_path, sim_seed, dt))
+        .collect::<Result<_, _>>()?;
+    crate::util::emit_run_notices(&runs.iter().collect::<Vec<_>>());
     let mut out = Vec::with_capacity(seeds.len());
-    for (i, &sim_seed) in seeds.iter().enumerate() {
+    for (i, run) in runs.iter().enumerate() {
         let idx = i + 1;
         let dir = data_dir.join(format!("{}{tag}", format_dataset_dir(idx)));
-        let run = synthetic_sim_run(spec, model_path, sim_seed, dt)?;
-        let written = simulate_dataset(&run, ObservationDesign::Declared { emit }, &dir)?;
+        let written = simulate_dataset(run, ObservationDesign::Declared { emit }, &dir)?;
         let files: IndexMap<String, PathBuf> =
             written.into_iter().map(|f| (f.source, f.path)).collect();
         out.push(SyntheticDataset { idx, files });

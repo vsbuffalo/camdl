@@ -254,8 +254,8 @@ pub struct ResolvedPriorEntry {
 
 /// One parameter's full provenance: where the resolved value came
 /// from, whether the parameter is fixed or estimated, plus optional
-/// audit fields for the kick-from-estimate and scenario-override
-/// cases. The exact field shape the proposal specifies.
+/// audit fields for the kick-from-estimate case and for every
+/// replacement of one tier's value by another's.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParameterProvenance {
     /// Resolved value as written into `model.parameters[i].value`.
@@ -273,15 +273,11 @@ pub struct ParameterProvenance {
     /// `"fixed_cli"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kicked_from_estimate: Option<KickedFromEstimate>,
-    /// Present iff the active scenario set this parameter to a
-    /// different value than the final winner. The proposal calls
-    /// this `overrode_scenario`; the renamed `ScenarioOverrideRecord`
-    /// struct lives here in `run_meta` so it can be `Serialize`d
-    /// without colliding with the unsealed resolver-side
-    /// `ScenarioOverride` (which would force re-exporting all the
-    /// resolver-side `serde` derives).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub overrode_scenario: Option<ScenarioOverrideRecord>,
+    /// Every replacement of this parameter's value by a later tier, in
+    /// tier order ([`crate::params_resolver::Override`]). Absent when no
+    /// tier displaced another's value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<OverrideRecord>,
 }
 
 /// Audit record for [`crate::params_resolver::FixReason::KickedFromEstimate`].
@@ -292,12 +288,44 @@ pub struct KickedFromEstimate {
     pub by: String,
 }
 
-/// Audit record for a silent scenario override. Pairs with
-/// [`crate::params_resolver::ResolverWarning::ScenarioOverridden`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScenarioOverrideRecord {
-    pub scenario:       String,
-    pub scenario_value: f64,
+/// Audit record for one [`crate::params_resolver::Override`]: the value a
+/// lower tier supplied and the value that replaced it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OverrideRecord {
+    pub replaced: SourcedValue,
+    pub by:       SourcedValue,
+}
+
+/// A value and the tier that supplied it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourcedValue {
+    /// [`crate::params_resolver::ValueSource::tag`].
+    pub source: String,
+    pub value:  f64,
+    /// The scenario's name, for a `scenario` source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<String>,
+    /// The file, for a `fixed_file` source (`--params` / `--fixed-file`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+impl SourcedValue {
+    fn from_resolved(src: &crate::params_resolver::ValueSource, value: f64) -> Self {
+        use crate::params_resolver::ValueSource;
+        SourcedValue {
+            source: src.tag().to_string(),
+            value,
+            scenario: match src {
+                ValueSource::Scenario(n) => Some(n.clone()),
+                _ => None,
+            },
+            path: match src {
+                ValueSource::FixedFile { path } => Some(path.display().to_string()),
+                _ => None,
+            },
+        }
+    }
 }
 
 /// Per-chain init provenance. The `method` field echoes the
@@ -340,18 +368,16 @@ impl ParameterProvenance {
                 ("fixed".to_string(), kicked)
             }
         };
-        let overrode_scenario = rp.overrode_scenario.as_ref().map(|s| {
-            ScenarioOverrideRecord {
-                scenario:       s.scenario.clone(),
-                scenario_value: s.scenario_value,
-            }
-        });
+        let overrides = rp.overrides.iter().map(|o| OverrideRecord {
+            replaced: SourcedValue::from_resolved(&o.replaced.0, o.replaced.1),
+            by:       SourcedValue::from_resolved(&o.by.0, o.by.1),
+        }).collect();
         ParameterProvenance {
             value:  rp.value,
             source: rp.source.tag().to_string(),
             role,
             kicked_from_estimate,
-            overrode_scenario,
+            overrides,
         }
     }
 }
@@ -1018,8 +1044,8 @@ mod tests {
     #[test]
     fn parameter_provenance_round_trips() {
         use crate::params_resolver::{
-            FixReason, ParameterRole, ResolvedParameter,
-            ScenarioOverride, ValueSource,
+            FixReason, Override, ParameterRole, ResolvedParameter,
+            ValueSource,
         };
         // Build one entry per `ValueSource` variant tag — exercises
         // every branch of `ValueSource::tag()` through the round-trip.
@@ -1029,7 +1055,7 @@ mod tests {
                 value: 0.42,
                 source: ValueSource::ModelDefault,
                 role: ParameterRole::Estimated,
-                overrode_scenario: None,
+                overrides: Vec::new(),
             },
             ResolvedParameter {
                 name:  "gamma".into(),
@@ -1038,7 +1064,7 @@ mod tests {
                 role: ParameterRole::Fixed {
                     reason: FixReason::NotInEstimate,
                 },
-                overrode_scenario: None,
+                overrides: Vec::new(),
             },
             ResolvedParameter {
                 name:  "rho".into(),
@@ -1049,10 +1075,11 @@ mod tests {
                         by: ValueSource::FixedCli,
                     },
                 },
-                overrode_scenario: Some(ScenarioOverride {
-                    scenario:       "worst_case".into(),
-                    scenario_value: 0.30,
-                }),
+                overrides: vec![Override {
+                    name:     "rho".into(),
+                    replaced: (ValueSource::Scenario("worst_case".into()), 0.30),
+                    by:       (ValueSource::FixedCli, 0.50),
+                }],
             },
             ResolvedParameter {
                 name:  "mu".into(),
@@ -1061,7 +1088,7 @@ mod tests {
                 role: ParameterRole::Fixed {
                     reason: FixReason::NotInEstimate,
                 },
-                overrode_scenario: None,
+                overrides: Vec::new(),
             },
             ResolvedParameter {
                 name:  "iota".into(),
@@ -1076,7 +1103,7 @@ mod tests {
                         },
                     },
                 },
-                overrode_scenario: None,
+                overrides: Vec::new(),
             },
         ];
         let parameters_provenance: HashMap<String, ParameterProvenance> =
@@ -1104,13 +1131,20 @@ mod tests {
                 "role must be fixed|estimated, got {}", prov.role);
         }
         // Specific assertions: kick_from_estimate present on rho/iota;
-        // overrode_scenario present on rho only.
+        // overrides present on rho only.
         let rho = &meta["rho"];
         assert!(rho.kicked_from_estimate.is_some());
         assert_eq!(rho.kicked_from_estimate.as_ref().unwrap().by, "fixed_cli");
-        assert!(rho.overrode_scenario.is_some());
-        assert_eq!(rho.overrode_scenario.as_ref().unwrap().scenario, "worst_case");
-        assert!((rho.overrode_scenario.as_ref().unwrap().scenario_value - 0.30).abs() < 1e-12);
+        assert_eq!(rho.overrides, vec![OverrideRecord {
+            replaced: SourcedValue {
+                source: "scenario".into(), value: 0.30,
+                scenario: Some("worst_case".into()), path: None,
+            },
+            by: SourcedValue {
+                source: "fixed_cli".into(), value: 0.50, scenario: None, path: None,
+            },
+        }]);
+        assert!(meta["iota"].overrides.is_empty());
         let beta = &meta["beta"];
         assert_eq!(beta.role, "estimated");
         assert!(beta.kicked_from_estimate.is_none());

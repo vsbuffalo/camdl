@@ -257,9 +257,9 @@ impl CasSink {
             .find(|s| s.name == name || s.route.as_deref() == Some(name))
             .ok_or_else(|| format!("cell scenario '{}' not among the resolved scenarios", name))?;
 
-        let params: HashMap<String, f64> = crate::util::resolved_parameter_values(
-            &crate::util::resolve_run_parameters(&self.base_model, &spec.sim_run)?.model,
-        ).into_iter().collect();
+        let resolved_params = crate::util::resolve_run_parameters(&self.base_model, &spec.sim_run)?;
+        let params: HashMap<String, f64> =
+            crate::util::resolved_parameter_values(&resolved_params.model).into_iter().collect();
 
         let scenario_label = if resolved.name.is_empty() { "baseline" } else { resolved.name.as_str() };
         // The label names the point's parameters at the values the cell RAN
@@ -327,7 +327,22 @@ impl CasSink {
                 }
             }),
         };
-        let rt = crate::resolve::resolve_trajectory(&ctx).map_err(|e| format!("resolve error: {e}"))?;
+        let mut rt = crate::resolve::resolve_trajectory(&ctx).map_err(|e| format!("resolve error: {e}"))?;
+        // Display-only, never hashed (the run_id is fixed above, from the
+        // levels): each parameter's provenance, with every override of one
+        // tier's value by another's, and the notices this cell's resolution
+        // reported.
+        if let Some(obj) = rt.display_inputs.as_object_mut() {
+            let provenance: std::collections::BTreeMap<String, crate::run_meta::ParameterProvenance> =
+                resolved_params.params.iter()
+                    .map(|rp| (rp.name.clone(), crate::run_meta::ParameterProvenance::from_resolved(rp)))
+                    .collect();
+            obj.insert("parameters_provenance".into(),
+                serde_json::to_value(&provenance).map_err(|e| e.to_string())?);
+            let notices = crate::params_resolver::notices(&[&resolved_params]);
+            obj.insert("notices".into(),
+                serde_json::to_value(&notices).map_err(|e| e.to_string())?);
+        }
         let root = self.root();
         let dir = runid::store_path(&root, runid::ArtifactKind::Sim, &rt.levels);
         let rel = dir.strip_prefix(&root).unwrap_or(&dir).to_string_lossy().into_owned();

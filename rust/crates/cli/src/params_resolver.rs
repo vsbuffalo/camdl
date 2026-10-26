@@ -92,7 +92,7 @@ use std::path::PathBuf;
 use indexmap::{IndexMap, IndexSet};
 use ir::table::TableSource;
 
-use crate::notice::{Notice, Notices};
+use crate::notice::{Notice, Notices, Severity};
 
 // ─── The range a parameter is valid on ───────────────────────────────────────
 
@@ -181,7 +181,7 @@ pub struct ParameterInputs<'a> {
 /// Where a parameter's final value came from. Serialised verbatim
 /// into `run.json`'s `parameters_provenance` block via
 /// [`ValueSource::tag`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ValueSource {
     /// `p.value` from the DSL — the model's authored default.
     ModelDefault,
@@ -237,13 +237,53 @@ pub enum FixReason {
     KickedFromEstimate { by: ValueSource },
 }
 
+/// One replacement in the tier walk: a later tier set `name` to a different
+/// value than the one a lower tier had supplied.
+///
+/// Recorded for every such replacement, in tier order, so no tier can
+/// displace a value the user supplied without the user being told. Two
+/// replacements are deliberately not overrides:
+///
+/// - **an equal value** — nothing changed, so there is nothing to report;
+/// - **replacing the model default** — the default is what every other tier
+///   exists to replace, so reporting it would print a line for every value a
+///   params file or `--param` sets.
+///
+/// Each tier contributes one net value per parameter: a scenario's `set` and
+/// its `scale` on the same parameter are one tier-4 value, and a name given
+/// twice to `--param`/`--param-vec` is one tier-5 value.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ScenarioOverride {
-    /// The active scenario's name (preset name).
-    pub scenario:       String,
-    /// The value the scenario tried to set, before a higher-precedence
-    /// source overrode it.
-    pub scenario_value: f64,
+pub struct Override {
+    pub name:     String,
+    /// The lower tier's value and where it came from.
+    pub replaced: (ValueSource, f64),
+    /// The value that replaced it, and where that came from.
+    pub by:       (ValueSource, f64),
+}
+
+/// What the resolver learned about its inputs that bears on how a
+/// replacement is reported, but not on any value ([`severity`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResolveContext {
+    /// The params files (`--params` / `--fixed-file`) that carry a fit's
+    /// `[provenance]` block, i.e. files whose values are a fit's estimate.
+    pub fit_estimate_files: HashSet<PathBuf>,
+}
+
+/// How loudly to report `o`.
+///
+/// A warning when the replaced value is a fit's estimate (it came from a
+/// params file carrying a fit `[provenance]` block): the run then simulates
+/// something other than the fit's estimate for that parameter, which is the
+/// replacement most likely to be unintended. Every other replacement is one
+/// the user asked for with a flag in this command (`--param`, `--scenario`, a
+/// later params file, a sweep or draws), so it is info.
+pub fn severity(o: &Override, ctx: &ResolveContext) -> Severity {
+    match &o.replaced.0 {
+        ValueSource::FixedFile { path } if ctx.fit_estimate_files.contains(path) =>
+            Severity::Warning,
+        _ => Severity::Info,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -252,14 +292,12 @@ pub struct ResolvedParameter {
     pub value:  f64,
     pub source: ValueSource,
     pub role:   ParameterRole,
-    /// Present iff the active scenario set this parameter to a value
-    /// different from the final winner — i.e. a higher-precedence
-    /// source (currently only `--fixed-cli` given the spec §1.3
-    /// ordering) silently displaced the scenario value. Pairs with
-    /// the [`ResolverWarning::ScenarioOverridden`] warning so the
-    /// override is auditable from `run.json` even after stderr is
+    /// Every replacement of this parameter's value across the tiers, in tier
+    /// order ([`Override`]). Empty when no tier displaced another's value.
+    /// Recorded in `run.json`'s `parameters_provenance` and reported on
+    /// stderr by [`notices`], so an override is auditable after stderr is
     /// gone.
-    pub overrode_scenario: Option<ScenarioOverride>,
+    pub overrides: Vec<Override>,
 }
 
 #[derive(Debug, Clone)]
@@ -268,26 +306,12 @@ pub struct ResolvedParameters {
     pub estimate_set: IndexSet<String>,
     pub model:        ir::Model,
     pub warnings:     Vec<ResolverWarning>,
+    pub context:      ResolveContext,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolverWarning {
     KickedFromEstimate { name: String, by: ValueSource },
-    /// The active scenario set `name = scenario_value`, but a
-    /// higher-precedence source (`by` — `--fixed-cli` or `--fixed-file`,
-    /// per spec §1.3 ordering only `--fixed-cli` can actually beat
-    /// scenario today) overrode it to `new_value`. Surfaced on stderr
-    /// at resolve time and threaded into run.json's
-    /// `parameters_provenance.overrode_scenario` field. Not an error
-    /// — CLI override of a scenario value is a legitimate quick-test
-    /// workflow; the warning ensures the override is never silent.
-    ScenarioOverridden {
-        name: String,
-        scenario: String,
-        scenario_value: f64,
-        by: ValueSource,
-        new_value: f64,
-    },
     /// `fit.toml` lists `name` in both `[fixed]` and `[estimate]`.
     /// The resolver treats `[fixed]` as winning (a parameter that is
     /// both fixed and estimated is a config bug; the conservative
@@ -312,23 +336,6 @@ impl ResolverWarning {
                     "{} removes `{}` from [estimate]; it will be \
                      pinned to its resolved value rather than inferred.",
                     source_clause, name))
-            }
-            ResolverWarning::ScenarioOverridden {
-                name, scenario, scenario_value, by, new_value,
-            } => {
-                let source_clause = match by {
-                    ValueSource::FixedCli => format!("--fixed {}={}", name, new_value),
-                    ValueSource::FixedFile { path } => {
-                        format!("--fixed-file {} ({}={})",
-                            path.display(), name, new_value)
-                    }
-                    other => format!("source {:?} ({}={})",
-                        other, name, new_value),
-                };
-                Notice::warning("scenario-overridden", format!(
-                    "{} overrides scenario `{}` which would have \
-                     set `{}` = {}.",
-                    source_clause, scenario, name, scenario_value))
             }
             ResolverWarning::FixedEstimateOverlap { name } => {
                 Notice::warning("fixed-estimate-overlap", format!(
@@ -960,14 +967,18 @@ pub fn resolve_parameters<'a>(
     // No mutation needed — the IR carries `p.value` straight from the
     // DSL. The resolver layers tiers 2..5 on top.
     //
-    // Track each parameter's *current* source as we walk tiers. The
-    // map starts with whatever the IR supplied (ModelDefault for
+    // Track each parameter's *current* source as we walk tiers, and every
+    // replacement of one tier's value by another's ([`Layers::set`]). The
+    // source map starts with whatever the IR supplied (ModelDefault for
     // params with a value, sentinel "unset" for those without).
-    let mut current_source: HashMap<String, Option<ValueSource>> =
-        model.parameters.iter()
+    let mut layers = Layers {
+        source: model.parameters.iter()
             .map(|p| (p.name.clone(),
                 if p.value.resolved_value().is_some() { Some(ValueSource::ModelDefault) } else { None }))
-            .collect();
+            .collect(),
+        overrides: HashMap::new(),
+    };
+    let mut context = ResolveContext::default();
 
     let model_param_set: HashSet<String> = model.parameters.iter()
         .map(|p| p.name.clone()).collect();
@@ -1061,8 +1072,7 @@ pub fn resolve_parameters<'a>(
         }
         for p in &mut model.parameters {
             if p.name == *name {
-                p.value = p.value.with_value(v);
-                current_source.insert(name.clone(), Some(ValueSource::FitTomlFixed));
+                layers.set(p, ValueSource::FitTomlFixed, v);
             }
         }
     }
@@ -1084,11 +1094,12 @@ pub fn resolve_parameters<'a>(
                 });
             }
         }
+        if carries_fit_provenance(path) {
+            context.fit_estimate_files.insert(path.clone());
+        }
         for p in &mut model.parameters {
             if let Some(&v) = overrides.get(&p.name) {
-                p.value = p.value.with_value(v);
-                current_source.insert(p.name.clone(),
-                    Some(ValueSource::FixedFile { path: path.clone() }));
+                layers.set(p, ValueSource::FixedFile { path: path.clone() }, v);
             }
         }
     }
@@ -1112,8 +1123,7 @@ pub fn resolve_parameters<'a>(
         }
         for p in &mut model.parameters {
             if p.name == *name {
-                p.value = p.value.with_value(*v);
-                current_source.insert(name.clone(), Some(ValueSource::SweepPoint));
+                layers.set(p, ValueSource::SweepPoint, *v);
             }
         }
     }
@@ -1126,42 +1136,42 @@ pub fn resolve_parameters<'a>(
     // `params` / `scale` happen here, layered on top of the file +
     // draw/sweep overrides.
     //
-    // Tracking for [`ResolverWarning::ScenarioOverridden`]: record
-    // what value the scenario *would have* set each named param to,
-    // so the post-tier-5 sweep can detect silent overrides by
-    // comparing final winner vs scenario intent. Stored as
-    // (scenario_name, value) so we know which preset's intent was
-    // overridden.
-    let mut scenario_assigned: HashMap<String, (String, f64)> = HashMap::new();
+    // The scenario is one tier: its `set` and its `scale` on a parameter are
+    // folded into one net value first (`set` replaces the current value,
+    // each `scale` factor then multiplies), and that value is layered once —
+    // so a replacement is reported against the lower tier's value, never
+    // against the scenario's own intermediate `set`.
     if let Some(name) = scenario_label.as_deref() {
+        let mut tier4: IndexMap<String, f64> = IndexMap::new();
         for (k, v) in &scenario_params {
-            for p in &mut model.parameters {
-                if p.name == *k {
-                    p.value = p.value.with_value(*v);
-                    current_source.insert(k.clone(),
-                        Some(ValueSource::Scenario(name.to_string())));
-                    scenario_assigned.insert(k.clone(),
-                        (name.to_string(), *v));
-                }
+            if model_param_set.contains(k) {
+                tier4.insert(k.clone(), *v);
             }
         }
         for (k, factor) in &scenario_scale {
+            let base = tier4.get(k).copied().or_else(|| {
+                model.parameters.iter()
+                    .find(|p| p.name == *k)
+                    .and_then(|p| p.value.resolved_value())
+            });
+            if let Some(v) = base {
+                tier4.insert(k.clone(), v * factor);
+            }
+        }
+        for (k, v) in &tier4 {
             for p in &mut model.parameters {
                 if p.name == *k {
-                    if let Some(v) = p.value.resolved_value() {
-                        let scaled = v * factor;
-                        p.value = p.value.with_value(scaled);
-                        current_source.insert(k.clone(),
-                            Some(ValueSource::Scenario(name.to_string())));
-                        scenario_assigned.insert(k.clone(),
-                            (name.to_string(), scaled));
-                    }
+                    layers.set(p, ValueSource::Scenario(name.to_string()), *v);
                 }
             }
         }
     }
 
     // ── Tier 5: --fixed NAME=VALUE (highest) ────────────────────────────
+    //
+    // One net value per name (a name given twice — `--param-vec` then
+    // `--param` — is one tier-5 value, the last).
+    let mut tier5: IndexMap<String, f64> = IndexMap::new();
     for (name, v) in inputs.fixed_cli {
         if !model_param_set.contains(name) {
             return Err(ResolveError::UnknownParameter {
@@ -1170,10 +1180,12 @@ pub fn resolve_parameters<'a>(
                 candidates: model_param_names.clone(),
             });
         }
+        tier5.insert(name.clone(), *v);
+    }
+    for (name, v) in &tier5 {
         for p in &mut model.parameters {
             if p.name == *name {
-                p.value = p.value.with_value(*v);
-                current_source.insert(name.clone(), Some(ValueSource::FixedCli));
+                layers.set(p, ValueSource::FixedCli, *v);
             }
         }
     }
@@ -1266,7 +1278,7 @@ pub fn resolve_parameters<'a>(
             return Err(ResolveError::UnsetRequired { name: p.name.clone() });
         };
         if !value.is_finite() {
-            let source = current_source.get(&p.name)
+            let source = layers.source.get(&p.name)
                 .and_then(|s| s.clone())
                 .unwrap_or(ValueSource::ModelDefault);
             violations.push(ResolveError::NonFiniteValue {
@@ -1290,7 +1302,7 @@ pub fn resolve_parameters<'a>(
                 continue;
             }
         }
-        let source = current_source.get(&p.name)
+        let source = layers.source.get(&p.name)
             .and_then(|s| s.clone())
             .unwrap_or(ValueSource::ModelDefault);
         let role = if estimate_set.contains(&p.name) {
@@ -1303,41 +1315,12 @@ pub fn resolve_parameters<'a>(
             ParameterRole::Fixed { reason: FixReason::NotInEstimate }
         };
 
-        // Scenario-override visibility: if the scenario intended to
-        // set this parameter to value S but a higher-precedence
-        // source (currently only `--fixed-cli` given spec §1.3) won
-        // with a different value V, record the override on the
-        // provenance and emit a warning. Float-equality is the right
-        // comparator here because the scenario writes an explicit
-        // value (or scales the pre-tier-4 value by an exact factor)
-        // — any deviation means a higher tier overwrote it.
-        let overrode_scenario = scenario_assigned.get(&p.name)
-            .and_then(|(scen_name, scen_value)| {
-                let final_is_scenario = matches!(
-                    &source, ValueSource::Scenario(_));
-                if !final_is_scenario && (*scen_value != value) {
-                    warnings.push(ResolverWarning::ScenarioOverridden {
-                        name: p.name.clone(),
-                        scenario: scen_name.clone(),
-                        scenario_value: *scen_value,
-                        by: source.clone(),
-                        new_value: value,
-                    });
-                    Some(ScenarioOverride {
-                        scenario: scen_name.clone(),
-                        scenario_value: *scen_value,
-                    })
-                } else {
-                    None
-                }
-            });
-
         params.push(ResolvedParameter {
             name: p.name.clone(),
             value,
             source,
             role,
-            overrode_scenario,
+            overrides: layers.overrides.remove(&p.name).unwrap_or_default(),
         });
     }
 
@@ -1378,46 +1361,197 @@ pub fn resolve_parameters<'a>(
         estimate_set,
         model,
         warnings,
+        context,
     })
 }
 
-/// The notices one resolution reports, in the order the resolver found them.
-pub fn notices(resolved: &ResolvedParameters) -> Notices {
-    resolved.warnings.iter().map(ResolverWarning::notice).collect()
+/// The tier walk's running state: each parameter's current source, and every
+/// [`Override`] recorded so far.
+struct Layers {
+    source:    HashMap<String, Option<ValueSource>>,
+    overrides: HashMap<String, Vec<Override>>,
+}
+
+impl Layers {
+    /// Set `p` to `v` from `source`, recording an [`Override`] when this
+    /// replaces a different value that a tier other than the model default
+    /// supplied. The single writer of a tier's value, so no tier can replace
+    /// another's without the replacement being recorded.
+    fn set(&mut self, p: &mut ir::parameter::Parameter, source: ValueSource, v: f64) {
+        let prev = self.source.get(&p.name).cloned().flatten();
+        if let (Some(prev), Some(prev_v)) = (prev, p.value.resolved_value()) {
+            if prev != ValueSource::ModelDefault && prev_v != v {
+                self.overrides.entry(p.name.clone()).or_default().push(Override {
+                    name:     p.name.clone(),
+                    replaced: (prev, prev_v),
+                    by:       (source.clone(), v),
+                });
+            }
+        }
+        p.value = p.value.with_value(v);
+        self.source.insert(p.name.clone(), Some(source));
+    }
+}
+
+/// Whether a params file carries a fit's `[provenance]` block — its values
+/// are then a fit's estimate ([`severity`]). A `.tsv` params file has no
+/// block, and an unreadable block counts as none: this only chooses how a
+/// replacement is reported, and `simulate` refuses a malformed block before
+/// it resolves anything.
+fn carries_fit_provenance(path: &std::path::Path) -> bool {
+    let is_tsv = path.extension()
+        .map(|e| e.eq_ignore_ascii_case("tsv"))
+        .unwrap_or(false);
+    !is_tsv && matches!(
+        crate::fit::provenance::read_mle_provenance(&path.to_string_lossy()),
+        Ok(Some(_)))
+}
+
+// ─── Notices ──────────────────────────────────────────────────────────────────
+
+/// How a notice names `src` as the origin of a replaced value.
+fn origin_phrase(src: &ValueSource, ctx: &ResolveContext) -> String {
+    match src {
+        ValueSource::ModelDefault => "the model default".to_string(),
+        ValueSource::Scenario(n) => format!("scenario `{n}`"),
+        ValueSource::FitTomlFixed => "fit.toml [fixed]".to_string(),
+        ValueSource::FixedFile { path } if ctx.fit_estimate_files.contains(path) =>
+            format!("{}, a fit's estimate", path.display()),
+        ValueSource::FixedFile { path } => path.display().to_string(),
+        ValueSource::SweepPoint => "the draw or sweep point".to_string(),
+        ValueSource::FixedCli => "--param/--fixed".to_string(),
+    }
+}
+
+/// How a notice names `src` as the subject that replaced a value.
+fn subject_phrase(src: &ValueSource) -> String {
+    match src {
+        ValueSource::FixedFile { path } => format!("params file {}", path.display()),
+        other => origin_phrase(other, &ResolveContext::default()),
+    }
+}
+
+/// `v`, or `lo to hi` when the values differ (a multi-cell run).
+fn value_span(values: &[f64]) -> String {
+    let lo = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if lo == hi { format!("{lo}") } else { format!("{lo} to {hi}") }
+}
+
+/// The parameter, the replaced value's source and the winner's source: one
+/// override line per distinct key, however many cells it occurs in.
+type OverrideKey = (String, ValueSource, ValueSource);
+
+/// One `param-override` notice per [`OverrideKey`] across `resolved`, in
+/// first-seen order (cell order, then parameter declaration order, then tier
+/// order). When the values differ by cell, each side reports its range and
+/// the line says how many cells it covers. The severity is the loudest any
+/// cell assigns ([`severity`]).
+fn override_notices(resolved: &[&ResolvedParameters]) -> Vec<(OverrideKey, Notice)> {
+    struct Agg {
+        replaced: Vec<f64>,
+        by:       Vec<f64>,
+        cells:    usize,
+        severity: Severity,
+        origin:   String,
+    }
+    let mut agg: IndexMap<OverrideKey, Agg> = IndexMap::new();
+    for r in resolved {
+        // A key counts once per cell even if (it cannot today) it recurred.
+        let mut seen_in_cell: HashSet<OverrideKey> = HashSet::new();
+        for p in &r.params {
+            for o in &p.overrides {
+                let key = (o.name.clone(), o.replaced.0.clone(), o.by.0.clone());
+                let sev = severity(o, &r.context);
+                let e = agg.entry(key.clone()).or_insert_with(|| Agg {
+                    replaced: Vec::new(),
+                    by:       Vec::new(),
+                    cells:    0,
+                    severity: sev,
+                    origin:   origin_phrase(&o.replaced.0, &r.context),
+                });
+                e.replaced.push(o.replaced.1);
+                e.by.push(o.by.1);
+                e.severity = e.severity.max(sev);
+                if seen_in_cell.insert(key) {
+                    e.cells += 1;
+                }
+            }
+        }
+    }
+    agg.into_iter().map(|(key, a)| {
+        let (name, _, by_src) = &key;
+        let replaced = value_span(&a.replaced);
+        let by = value_span(&a.by);
+        let across = if replaced.contains(" to ") || by.contains(" to ") {
+            format!(", across {} cells", a.cells)
+        } else {
+            String::new()
+        };
+        let message = format!(
+            "{} replaced {name} = {replaced} (from {}) with {by}{across}",
+            subject_phrase(by_src), a.origin);
+        let notice = Notice { severity: a.severity, code: "param-override", message };
+        (key, notice)
+    }).collect()
+}
+
+/// The notices a run's resolutions report: the resolver warnings (each
+/// distinct line once), then one line per distinct override
+/// ([`override_notices`]). One resolution for a single run; one per cell for
+/// a multi-cell run, so a condition every cell shares is reported once.
+pub fn notices(resolved: &[&ResolvedParameters]) -> Notices {
+    let mut warnings: IndexSet<Notice> = IndexSet::new();
+    for r in resolved {
+        warnings.extend(r.warnings.iter().map(ResolverWarning::notice));
+    }
+    warnings.into_iter()
+        .chain(override_notices(resolved).into_iter().map(|(_, n)| n))
+        .collect()
 }
 
 /// Emit [`notices`] for `resolved` to stderr. Subcommand wrappers call this
-/// once after `resolve_parameters`.
+/// once after resolving — over every cell's resolution for a multi-cell run.
 ///
-/// Also runs a structural cross-check between the
-/// `ResolverWarning::ScenarioOverridden` warnings and the
-/// `ResolvedParameter.overrode_scenario` field: every parameter
-/// carrying `overrode_scenario = Some(_)` must have a matching
-/// warning, and vice versa. A mismatch is a resolver-internal bug
-/// (the warning was emitted without populating provenance, or
-/// provenance was written without a stderr warning) — surfaced as
-/// `debug_assert!` so it trips in tests but degrades gracefully in
-/// release.
-pub fn emit_notices(resolved: &ResolvedParameters) {
+/// Also runs a structural cross-check, debug-only so it trips in tests but
+/// costs nothing in release, between each parameter's recorded
+/// [`Override`]s (what `run.json` records) and the lines reported:
+///
+/// - the overrides chain — each replacement replaces the value the previous
+///   one set, and the last one's winner is the parameter's final source and
+///   value — so a tier that wrote a value without going through
+///   [`Layers::set`] is caught;
+/// - the parameters the override lines name are exactly the parameters with
+///   recorded overrides, so a line without provenance, or provenance without
+///   a line, is caught.
+pub fn emit_notices(resolved: &[&ResolvedParameters]) {
     notices(resolved).emit_stderr();
 
-    // Structural agreement check (debug-only, zero cost in release):
-    // warnings-of-override and `overrode_scenario` provenance must
-    // name the same parameters. This catches a class of resolver
-    // bugs where one side was added without the other.
-    let warning_names: std::collections::HashSet<&str> =
-        resolved.warnings.iter().filter_map(|w| match w {
-            ResolverWarning::ScenarioOverridden { name, .. } => Some(name.as_str()),
-            _ => None,
-        }).collect();
-    let provenance_names: std::collections::HashSet<&str> =
-        resolved.params.iter()
-            .filter(|p| p.overrode_scenario.is_some())
-            .map(|p| p.name.as_str())
+    if cfg!(debug_assertions) {
+        for r in resolved {
+            for p in &r.params {
+                for w in p.overrides.windows(2) {
+                    debug_assert_eq!(w[0].by.1.to_bits(), w[1].replaced.1.to_bits(),
+                        "override chain broken for `{}`: {:?}", p.name, p.overrides);
+                }
+                if let Some(last) = p.overrides.last() {
+                    debug_assert!(last.by.0 == p.source
+                        && last.by.1.to_bits() == p.value.to_bits(),
+                        "last override of `{}` is not its final value: {:?} vs ({:?}, {})",
+                        p.name, last.by, p.source, p.value);
+                }
+            }
+        }
+        let reported: HashSet<String> = override_notices(resolved).into_iter()
+            .map(|((name, _, _), _)| name).collect();
+        let recorded: HashSet<String> = resolved.iter()
+            .flat_map(|r| r.params.iter())
+            .filter(|p| !p.overrides.is_empty())
+            .map(|p| p.name.clone())
             .collect();
-    debug_assert_eq!(warning_names, provenance_names,
-        "ScenarioOverridden warnings and overrode_scenario provenance \
-         must name the same parameters");
+        debug_assert_eq!(reported, recorded,
+            "override notices and recorded overrides must name the same parameters");
+    }
 }
 
 
@@ -2301,7 +2435,7 @@ mod tests {
 
         // `emit_notices` is a thin wrapper; smoke-call it to confirm
         // no panic and to keep the symbol live.
-        emit_notices(&resolved);
+        emit_notices(&[&resolved]);
     }
 
     #[test]
@@ -2352,162 +2486,224 @@ mod tests {
         assert_eq!(by_name["d"].source, ValueSource::FixedCli);
     }
 
-    // ── Scenario-override visibility ────────────────────────────────────
+    // ── Override reporting ──────────────────────────────────────────────
 
-    #[test]
-    fn fixed_cli_override_of_scenario_emits_warning_and_provenance() {
-        // Scenario sets beta=0.3; --fixed beta=0.5 wins. The resolver
-        // must emit a ScenarioOverridden warning AND record the
-        // scenario's intended value on the parameter's
-        // `overrode_scenario` field so a future reader sees what the
-        // scenario *would* have set, even though the CLI overrode it.
-        let mut model = mk_model(vec![mk_param("beta", Some(0.5))]);
-        let mut scen_params = HashMap::new();
-        scen_params.insert("beta".to_string(), 0.3);
-        model.presets.push(Preset {
-            name: "worst_case".into(),
-            label: "worst_case".into(),
-            params: scen_params,
-            scale: HashMap::new(),
+    /// A preset that `set`s `params` and `scale`s `scale`.
+    fn preset(name: &str, params: &[(&str, f64)], scale: &[(&str, f64)]) -> Preset {
+        Preset {
+            name: name.into(),
+            label: name.into(),
+            params: params.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            scale: scale.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             enable: vec![],
             disable: vec![],
             compose: vec![],
             t_end: None,
             t_end_anchor: None,
-        });
-        let fcli = vec![("beta".to_string(), 0.5)];
-        let ffiles = vec![];
-        let ftf = IndexMap::new();
-        let fte = IndexSet::new();
-        let mut inputs = empty_inputs(&model, &fcli, &ffiles, &ftf, &fte);
-        inputs.scenario = Some("worst_case");
-        let resolved = resolve_parameters(inputs).expect("ok");
-
-        // CLI value wins.
-        assert_eq!(resolved.params[0].value, 0.5);
-        assert_eq!(resolved.params[0].source, ValueSource::FixedCli);
-
-        // Provenance carries the overridden scenario value.
-        let beta = &resolved.params[0];
-        assert_eq!(beta.overrode_scenario,
-            Some(ScenarioOverride {
-                scenario: "worst_case".into(),
-                scenario_value: 0.3,
-            }),
-            "overrode_scenario must record scenario name + intended value");
-
-        // Warning emitted.
-        let scen_warns: Vec<_> = resolved.warnings.iter().filter(|w|
-            matches!(w, ResolverWarning::ScenarioOverridden { .. })).collect();
-        assert_eq!(scen_warns.len(), 1);
-        match scen_warns[0] {
-            ResolverWarning::ScenarioOverridden {
-                name, scenario, scenario_value, by, new_value,
-            } => {
-                assert_eq!(name, "beta");
-                assert_eq!(scenario, "worst_case");
-                assert_eq!(*scenario_value, 0.3);
-                assert_eq!(*by, ValueSource::FixedCli);
-                assert_eq!(*new_value, 0.5);
-            }
-            _ => unreachable!(),
         }
     }
 
-    #[test]
-    fn scenario_applied_cleanly_does_not_emit_override_warning() {
-        // If --fixed-cli doesn't conflict with scenario, the warning
-        // must NOT fire. Regression guard against a spurious warning
-        // on the legitimate single-source case.
-        let mut model = mk_model(vec![mk_param("beta", Some(0.5))]);
-        let mut scen_params = HashMap::new();
-        scen_params.insert("beta".to_string(), 0.3);
-        model.presets.push(Preset {
-            name: "worst_case".into(),
-            label: "worst_case".into(),
-            params: scen_params,
-            scale: HashMap::new(),
-            enable: vec![],
-            disable: vec![],
-            compose: vec![],
-            t_end: None,
-            t_end_anchor: None,
-        });
-        let fcli = vec![];
-        let ffiles = vec![];
-        let ftf = IndexMap::new();
-        let fte = IndexSet::new();
-        let mut inputs = empty_inputs(&model, &fcli, &ffiles, &ftf, &fte);
-        inputs.scenario = Some("worst_case");
-        let resolved = resolve_parameters(inputs).expect("ok");
+    /// A params file in a fresh temp dir.
+    fn params_file(name: &str, contents: &str) -> PathBuf {
+        let dir = crate::test_support::unique_temp_dir("override-notices");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
 
-        assert_eq!(resolved.params[0].value, 0.3);
-        assert!(matches!(&resolved.params[0].source,
-            ValueSource::Scenario(name) if name == "worst_case"));
-        assert_eq!(resolved.params[0].overrode_scenario, None);
-        let has_scen_warn = resolved.warnings.iter().any(|w|
-            matches!(w, ResolverWarning::ScenarioOverridden { .. }));
-        assert!(!has_scen_warn,
-            "no override warning when scenario wins cleanly; saw {:?}",
-            resolved.warnings);
+    /// A params file carrying a fit's `[provenance]` block.
+    fn fit_params_file(name: &str, params: &str) -> PathBuf {
+        params_file(name, &format!("{params}
+[provenance]
+camdl_version = \"test\"
+timestamp = \"2026-10-25T00:00:00Z\"
+content_hash = \"00000000\"
+backend = \"chain_binomial\"
+dt = 1.0
+model = \"m.camdl\"
+model_identity = \"f00d\"
+seed = 1
+method = \"if2\"
+chain = 1
+log_likelihood = -1.0
+loglik_sd = 0.0
+n_particles = 10
+"))
+    }
+
+    fn rendered(resolved: &[&ResolvedParameters]) -> Vec<String> {
+        notices(resolved).iter().map(Notice::render).collect()
     }
 
     #[test]
-    fn fixed_cli_matching_scenario_value_does_not_warn() {
-        // Edge case: scenario sets beta=0.3 and --fixed beta=0.3 also.
-        // Final value is 0.3 either way; the resolver records source
-        // = FixedCli (last wins) but the warning should not fire
-        // because the user got the value they asked for.
+    fn scenario_over_params_file_is_reported_with_both_values_and_the_file() {
+        // The maintainer's case: a params file gives I0 = 5, the scenario
+        // sets I0 = 3. The run uses 3, and says so.
+        let mut model = mk_model(vec![mk_param("I0", Some(1.0))]);
+        model.presets.push(preset("lockdown", &[("I0", 3.0)], &[]));
+        let file = params_file("p.toml", "I0 = 5\n");
+        let ffiles = vec![file.clone()];
+        let (fcli, ftf, fte) = (vec![], IndexMap::new(), IndexSet::new());
+        let mut inputs = empty_inputs(&model, &fcli, &ffiles, &ftf, &fte);
+        inputs.scenario = Some("lockdown");
+        let resolved = resolve_parameters(inputs).expect("ok");
+
+        assert_eq!(resolved.params[0].value, 3.0);
+        assert_eq!(resolved.params[0].overrides, vec![Override {
+            name: "I0".into(),
+            replaced: (ValueSource::FixedFile { path: file.clone() }, 5.0),
+            by: (ValueSource::Scenario("lockdown".into()), 3.0),
+        }]);
+        assert_eq!(rendered(&[&resolved]), vec![format!(
+            "info: scenario `lockdown` replaced I0 = 5 (from {}) with 3",
+            file.display())]);
+    }
+
+    #[test]
+    fn later_params_file_over_earlier_is_reported() {
+        let model = mk_model(vec![mk_param("beta", Some(0.1))]);
+        let a = params_file("a.toml", "beta = 0.2\n");
+        let b = params_file("b.toml", "beta = 0.4\n");
+        let ffiles = vec![a.clone(), b.clone()];
+        let (fcli, ftf, fte) = (vec![], IndexMap::new(), IndexSet::new());
+        let resolved = resolve_parameters(empty_inputs(&model, &fcli, &ffiles, &ftf, &fte))
+            .expect("ok");
+        assert_eq!(resolved.params[0].value, 0.4);
+        assert_eq!(rendered(&[&resolved]), vec![format!(
+            "info: params file {} replaced beta = 0.2 (from {}) with 0.4",
+            b.display(), a.display())]);
+    }
+
+    #[test]
+    fn fixed_cli_over_scenario_is_reported() {
+        // Scenario sets beta=0.3; --fixed beta=0.5 wins, and the scenario's
+        // value is recorded as the one replaced.
         let mut model = mk_model(vec![mk_param("beta", Some(0.5))]);
-        let mut scen_params = HashMap::new();
-        scen_params.insert("beta".to_string(), 0.3);
-        model.presets.push(Preset {
-            name: "worst_case".into(),
-            label: "worst_case".into(),
-            params: scen_params,
-            scale: HashMap::new(),
-            enable: vec![],
-            disable: vec![],
-            compose: vec![],
-            t_end: None,
-            t_end_anchor: None,
-        });
-        let fcli = vec![("beta".to_string(), 0.3)];
-        let ffiles = vec![];
-        let ftf = IndexMap::new();
-        let fte = IndexSet::new();
+        model.presets.push(preset("worst_case", &[("beta", 0.3)], &[]));
+        let fcli = vec![("beta".to_string(), 0.5)];
+        let (ffiles, ftf, fte) = (vec![], IndexMap::new(), IndexSet::new());
         let mut inputs = empty_inputs(&model, &fcli, &ffiles, &ftf, &fte);
         inputs.scenario = Some("worst_case");
         let resolved = resolve_parameters(inputs).expect("ok");
 
+        assert_eq!(resolved.params[0].value, 0.5);
+        assert_eq!(resolved.params[0].source, ValueSource::FixedCli);
+        assert_eq!(resolved.params[0].overrides, vec![Override {
+            name: "beta".into(),
+            replaced: (ValueSource::Scenario("worst_case".into()), 0.3),
+            by: (ValueSource::FixedCli, 0.5),
+        }]);
+        assert_eq!(rendered(&[&resolved]), vec![
+            "info: --param/--fixed replaced beta = 0.3 (from scenario `worst_case`) with 0.5"
+                .to_string()]);
+        emit_notices(&[&resolved]);
+    }
+
+    #[test]
+    fn a_fits_estimate_replaced_by_a_scenario_is_a_warning() {
+        let mut model = mk_model(vec![mk_param("I0", Some(1.0))]);
+        model.presets.push(preset("baseline", &[("I0", 3.0)], &[]));
+        let file = fit_params_file("mle_params.toml", "I0 = 5");
+        let ffiles = vec![file.clone()];
+        let (fcli, ftf, fte) = (vec![], IndexMap::new(), IndexSet::new());
+        let mut inputs = empty_inputs(&model, &fcli, &ffiles, &ftf, &fte);
+        inputs.scenario = Some("baseline");
+        let resolved = resolve_parameters(inputs).expect("ok");
+        assert!(resolved.context.fit_estimate_files.contains(&file));
+        assert_eq!(rendered(&[&resolved]), vec![format!(
+            "warning: scenario `baseline` replaced I0 = 5 (from {}, a fit's estimate) with 3",
+            file.display())]);
+    }
+
+    #[test]
+    fn an_equal_value_is_not_an_override() {
+        let mut model = mk_model(vec![mk_param("beta", Some(0.5))]);
+        model.presets.push(preset("worst_case", &[("beta", 0.3)], &[]));
+        let file = params_file("p.toml", "beta = 0.3\n");
+        let ffiles = vec![file];
+        let fcli = vec![("beta".to_string(), 0.3)];
+        let (ftf, fte) = (IndexMap::new(), IndexSet::new());
+        let mut inputs = empty_inputs(&model, &fcli, &ffiles, &ftf, &fte);
+        inputs.scenario = Some("worst_case");
+        let resolved = resolve_parameters(inputs).expect("ok");
         assert_eq!(resolved.params[0].value, 0.3);
         assert_eq!(resolved.params[0].source, ValueSource::FixedCli);
-        assert_eq!(resolved.params[0].overrode_scenario, None,
-            "no override visibility when values agree");
-        let has_scen_warn = resolved.warnings.iter().any(|w|
-            matches!(w, ResolverWarning::ScenarioOverridden { .. }));
-        assert!(!has_scen_warn);
+        assert!(resolved.params[0].overrides.is_empty());
+        assert!(rendered(&[&resolved]).is_empty());
     }
 
     #[test]
-    fn scenario_override_warning_formats_actionably() {
-        // The stderr-printable form must name the parameter, the
-        // scenario, the would-have value, and the actual value so a
-        // user re-reading stderr can localise the override.
-        let w = ResolverWarning::ScenarioOverridden {
+    fn replacing_the_model_default_is_not_an_override() {
+        let mut model = mk_model(vec![mk_param("beta", Some(0.5))]);
+        model.presets.push(preset("worst_case", &[("beta", 0.3)], &[]));
+        let (fcli, ffiles, ftf, fte) = (vec![], vec![], IndexMap::new(), IndexSet::new());
+        let mut inputs = empty_inputs(&model, &fcli, &ffiles, &ftf, &fte);
+        inputs.scenario = Some("worst_case");
+        let resolved = resolve_parameters(inputs).expect("ok");
+        assert_eq!(resolved.params[0].value, 0.3);
+        assert!(resolved.params[0].overrides.is_empty());
+        assert!(rendered(&[&resolved]).is_empty());
+    }
+
+    #[test]
+    fn a_scenarios_set_and_scale_are_one_replacement() {
+        // set 0.4 then scale ×0.5 is one tier-4 value, 0.2, reported against
+        // the file's value — not as the file → 0.4 → 0.2 chain.
+        let mut model = mk_model(vec![mk_param("beta", Some(0.1))]);
+        model.presets.push(preset("half", &[("beta", 0.4)], &[("beta", 0.5)]));
+        let file = params_file("p.toml", "beta = 0.8\n");
+        let ffiles = vec![file.clone()];
+        let (fcli, ftf, fte) = (vec![], IndexMap::new(), IndexSet::new());
+        let mut inputs = empty_inputs(&model, &fcli, &ffiles, &ftf, &fte);
+        inputs.scenario = Some("half");
+        let resolved = resolve_parameters(inputs).expect("ok");
+        assert_eq!(resolved.params[0].value, 0.2);
+        assert_eq!(resolved.params[0].overrides, vec![Override {
             name: "beta".into(),
-            scenario: "worst_case".into(),
-            scenario_value: 0.3,
-            by: ValueSource::FixedCli,
-            new_value: 0.5,
-        };
-        let msg = w.notice().render();
-        assert!(msg.contains("--fixed beta=0.5"),
-            "must show CLI flag and value: {}", msg);
-        assert!(msg.contains("worst_case"),
-            "must name scenario: {}", msg);
-        assert!(msg.contains("0.3"),
-            "must show scenario's intended value: {}", msg);
+            replaced: (ValueSource::FixedFile { path: file }, 0.8),
+            by: (ValueSource::Scenario("half".into()), 0.2),
+        }]);
+    }
+
+    #[test]
+    fn every_replacement_is_recorded_in_tier_order() {
+        // file a → file b → scenario → --param: three replacements.
+        let mut model = mk_model(vec![mk_param("I0", Some(1.0))]);
+        model.presets.push(preset("s", &[("I0", 3.0)], &[]));
+        let a = params_file("a.toml", "I0 = 5\n");
+        let b = params_file("b.toml", "I0 = 4\n");
+        let ffiles = vec![a.clone(), b.clone()];
+        let fcli = vec![("I0".to_string(), 7.0)];
+        let (ftf, fte) = (IndexMap::new(), IndexSet::new());
+        let mut inputs = empty_inputs(&model, &fcli, &ffiles, &ftf, &fte);
+        inputs.scenario = Some("s");
+        let resolved = resolve_parameters(inputs).expect("ok");
+        let chain: Vec<(f64, f64)> = resolved.params[0].overrides.iter()
+            .map(|o| (o.replaced.1, o.by.1)).collect();
+        assert_eq!(chain, vec![(5.0, 4.0), (4.0, 3.0), (3.0, 7.0)]);
+        assert_eq!(rendered(&[&resolved]).len(), 3);
+        emit_notices(&[&resolved]);
+    }
+
+    #[test]
+    fn a_multi_cell_run_reports_each_override_once_with_its_range() {
+        // A draw per cell over a params file: one line, the draws' range.
+        let model = mk_model(vec![mk_param("beta", Some(0.1)), mk_param("gamma", Some(0.2))]);
+        let file = params_file("p.toml", "beta = 0.5\ngamma = 0.3\n");
+        let ffiles = vec![file.clone()];
+        let (fcli, ftf, fte) = (vec![], IndexMap::new(), IndexSet::new());
+        let cells: Vec<ResolvedParameters> = [0.2, 0.6, 0.4].iter().map(|&b| {
+            let point = vec![("beta".to_string(), b)];
+            let mut inputs = empty_inputs(&model, &fcli, &ffiles, &ftf, &fte);
+            inputs.point_overrides = &point;
+            resolve_parameters(inputs).expect("ok")
+        }).collect();
+        let refs: Vec<&ResolvedParameters> = cells.iter().collect();
+        assert_eq!(rendered(&refs), vec![format!(
+            "info: the draw or sweep point replaced beta = 0.5 (from {}) with 0.2 to 0.6, \
+             across 3 cells", file.display())]);
+        emit_notices(&refs);
     }
 
     // ── fit.toml [fixed] ∩ [estimate] overlap (resolved decision B) ─────

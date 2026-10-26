@@ -110,6 +110,27 @@ named preset and an equivalent inline ad-hoc scenario resolve at the same tier,
 so they are indistinguishable in the resolved value — only the recorded
 provenance label differs.
 
+**No replacement is silent.** Whenever a tier replaces, with a different value,
+a value that a tier other than the model default supplied, the run says so on
+stderr — one line per replacement, naming the parameter, both values and both
+sources — and records it in each leaf's `run.json`
+(`inputs.parameters_provenance.<name>.overrides`, beside the lines themselves in
+`inputs.notices`; recorded, never hashed):
+
+```
+info: scenario `lockdown` replaced I0 = 5 (from p.toml) with 3
+warning: scenario `lockdown` replaced I0 = 5 (from mle_params.toml, a fit's estimate) with 3
+```
+
+A replacement is a warning when the replaced value is a fit's estimate (it came
+from a params file carrying a fit `[provenance]` block): the run then simulates
+something other than what the fit estimated. Every other replacement is info —
+it is one the command's own flags asked for (a later `--params` file, a
+scenario, a sweep or draw, `--param`). Replacing the model default, and
+replacing a value with an equal one, are not reported. A multi-cell run reports
+each (parameter, replaced source, winning source) once, with the range of values
+when they differ by cell.
+
 `[estimate]` membership is narrowed by the same walk: a parameter named by a
 user-explicit `--fixed`/`--fixed-file` is removed from the estimated set (with a
 warning), while a scenario patch or a draw/sweep value never kicks a parameter

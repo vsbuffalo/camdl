@@ -13,12 +13,15 @@ use serde::Serialize;
 
 /// How much a notice asks of the user.
 ///
+/// - `Info`: the command did what the user's flags asked, and this says so —
+///   a later flag replacing an earlier value, for example.
 /// - `Warning`: the command did something the user is likely not to have
 ///   meant, or that changes what the run means — a parameter dropped from
 ///   `[estimate]`, for example.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
+    Info,
     Warning,
 }
 
@@ -26,13 +29,14 @@ impl Severity {
     /// The stderr prefix.
     pub fn label(self) -> &'static str {
         match self {
+            Severity::Info => "info",
             Severity::Warning => "warning",
         }
     }
 }
 
 /// One notice.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Notice {
     pub severity: Severity,
     /// A stable kebab-case identifier for the condition (`param-override`),
@@ -61,9 +65,13 @@ impl Notice {
 pub struct Notices(Vec<Notice>);
 
 impl Notices {
+    pub fn iter(&self) -> std::slice::Iter<'_, Notice> {
+        self.0.iter()
+    }
+
     /// Print every notice to stderr, one rendered line each.
     pub fn emit_stderr(&self) {
-        for n in &self.0 {
+        for n in self.iter() {
             eprintln!("{}", n.render());
         }
     }
@@ -81,6 +89,8 @@ mod tests {
 
     #[test]
     fn render_prefixes_the_severity() {
+        let info = Notice { severity: Severity::Info, code: "param-override", message: "x".into() };
+        assert_eq!(info.render(), "info: x");
         assert_eq!(Notice::warning("param-override", "y").render(), "warning: y");
     }
 

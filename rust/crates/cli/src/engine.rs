@@ -222,6 +222,7 @@ pub fn plan_grid(job: &SimulateJob) -> (Vec<CellSpec>, Grid) {
 pub fn run_job(job: &SimulateJob, sink: &mut dyn RunSink) -> Result<(), String> {
     check_scenario_coordinate_collision(job)?;
     let (specs, grid) = plan_grid(job);
+    util::emit_run_notices(&specs.iter().map(|s| &s.sim_run).collect::<Vec<_>>());
     sink.on_start(&grid);
 
     // Cache classification — in canonical order, before any simulation, so

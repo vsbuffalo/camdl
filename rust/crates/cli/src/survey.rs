@@ -762,7 +762,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
                 table_files: &table_files,
             },
         ).map_err(|e| e.to_string())?;
-        crate::params_resolver::emit_notices(&resolved);
+        crate::params_resolver::emit_notices(&[&resolved]);
         let mut model = resolved.model.clone();
 
         // Apply [estimate].start as a starting-point hint for params
@@ -974,7 +974,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
                 table_files: &table_files,
             },
         ).map_err(|e| e.to_string())?;
-        crate::params_resolver::emit_notices(&resolved);
+        crate::params_resolver::emit_notices(&[&resolved]);
         let model = resolved.model.clone();
         let fixed_map: HashMap<String, f64> = fixed_cli_vec.iter().cloned().collect();
 

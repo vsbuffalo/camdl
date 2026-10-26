@@ -3334,6 +3334,23 @@ pub fn resolve_run_parameters_typed(
     ).map_err(RunParamError::Resolve)
 }
 
+/// Report the parameter notices of a run's cells once, over all of them
+/// ([`crate::params_resolver::notices`]): an override every cell shares is one
+/// line, with its value range when the values differ by cell.
+///
+/// Called by each entry point that runs [`resolve_run_ir`]'s cells, before
+/// they run. A cell whose parameters do not resolve contributes nothing here;
+/// its error surfaces when the cell itself resolves.
+pub fn emit_run_notices(runs: &[&SimRun]) {
+    let Some(first) = runs.first() else { return };
+    let Ok(model) = load_run_model(first) else { return };
+    let resolved: Vec<crate::params_resolver::ResolvedParameters> = runs.iter()
+        .filter_map(|r| resolve_run_parameters_typed(&model, r).ok())
+        .collect();
+    let refs: Vec<&crate::params_resolver::ResolvedParameters> = resolved.iter().collect();
+    crate::params_resolver::emit_notices(&refs);
+}
+
 /// The parameter values a resolved model carries: every parameter that
 /// resolved to a value, by name. What a cell's `params` level hashes and what
 /// its `run.json` records.
@@ -3415,9 +3432,10 @@ pub fn resolve_run_ir(run: &SimRun) -> Result<ir::Model, String> {
         msg
     })?;
 
+    // Notices are not emitted here: this runs once per cell (and again for a
+    // stored cell's read-back), so the caller that owns the whole run emits
+    // them once over every cell ([`emit_run_notices`]).
     let resolved = resolve_run_parameters(&model, run)?;
-
-    crate::params_resolver::emit_notices(&resolved);
 
     let mut model = resolved.model;
     // The baked-end refusal runs HERE — after the resolver's scenario filter

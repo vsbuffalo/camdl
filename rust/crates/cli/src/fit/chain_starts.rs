@@ -538,7 +538,7 @@ pub fn build_resolved_view_for_init(
             value,
             source: ValueSource::ModelDefault,
             role,
-            overrode_scenario: None,
+            overrides: Vec::new(),
         });
     }
     ResolvedParameters {
@@ -546,6 +546,7 @@ pub fn build_resolved_view_for_init(
         estimate_set,
         model: model.clone(),
         warnings: Vec::new(),
+        context: Default::default(),
     }
 }
 
@@ -1297,7 +1298,7 @@ mod tests {
                         reason: crate::params_resolver::FixReason::NotInEstimate,
                     }
                 },
-                overrode_scenario: None,
+                overrides: Vec::new(),
             }
         }).collect();
         let model = ir::Model {
@@ -1338,7 +1339,7 @@ mod tests {
             identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
         };
         ResolvedParameters {
-            params, estimate_set, model, warnings: vec![],
+            params, estimate_set, model, warnings: vec![], context: Default::default(),
         }
     }
 
