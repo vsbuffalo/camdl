@@ -1199,14 +1199,15 @@ transition log-density at that substep is exactly zero (finite). No
 Gaussian-pulse workaround is needed.
 
 **Use PMMH to fit the seed timing or size.** PGAS scores the recorded latent
-path, and a parameter that reaches the state only through an effect — its amount
-(`n_seed`), its time (`tau`), or a plain `init {}` assignment
-(`init { I = I0 }`) — appears in no term of that score, so its posterior would
-equal its prior. PGAS refuses such a parameter by name, and IF2 refuses an
-estimated parameter in an effect's schedule (it resolves the schedule once per
-run). PMMH re-simulates the path at each proposed θ and fits all three. For an
-initial size, declaring a law (`I ~ poisson(rate = I0)`) makes it estimable
-under PGAS. (A replay θ-move that would score these under PGAS is gh#986.)
+path, and the channel through which a parameter enters an effect — its amount
+(`n_seed`), its time (`tau`) — or a plain `init {}` assignment
+(`init { I = I0 }`) appears in no term of that score, so the sampler cannot move
+the parameter through it (a parameter entering only that way keeps its prior).
+PGAS refuses such a parameter by name, and IF2 refuses an estimated parameter in
+an effect's schedule (it resolves the schedule once per run). PMMH re-simulates
+the path at each proposed θ and fits all three. For an initial size, declaring a
+law (`I ~ poisson(rate = I0)`) makes it estimable under PGAS. (A replay θ-move
+that would score these under PGAS is gh#986.)
 
 With a fixed `tau` outside the simulation window, the seed never fires,
 predicted incidence stays zero, and the _observation_ density goes to $-\infty$

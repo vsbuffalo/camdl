@@ -510,6 +510,10 @@ mod tests {
             ],
             "the rule, not the nominal key, placed 2.45 and 2.25 — and only those",
         );
+        // A tie within GRID_TOL·dt still goes to t_end (2.25 − 1e-10 is 2e-10
+        // nearer 2 than 2.5 in exact arithmetic).
+        assert_eq!(grid_instant(2.25 - 1e-10, 0.0, 1.0, 2.5), Some(2.5));
+        assert_eq!(grid_instant(2.25 - 1e-8, 0.0, 1.0, 2.5), Some(2.0), "beyond the tolerance: 2");
         let text = p.notes()[0].to_string();
         assert!(text.contains("late") && text.contains("2.45") && text.contains("2.5"), "{text}");
     }

@@ -325,13 +325,20 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   model with such effects changes, so refit it.
 
 - **PGAS and IF2 refuse a parameter they cannot fit (gh#986, gh#984).** Under
-  PGAS an estimated parameter that reaches the state only through an effect's
-  amount, an effect's `at [...]` time, or a plain `init {}` assignment
-  (`init { I = I0 }`) used to sample its prior and report it as the posterior;
-  under IF2 an estimated parameter in an effect's schedule stayed at its start
-  value. Both are now refused, naming the parameter and the effect. Migration:
-  fit seed timing and size with PMMH, fix the parameter, or, for an initial size
-  under PGAS, declare a law (`I ~ poisson(rate = I0)`).
+  PGAS an estimated parameter that sets an effect's amount, an effect's
+  `at [...]` time, or a plain `init {}` assignment (`init { I = I0 }`) could not
+  be moved by the sampler through that channel — one entering only that way
+  sampled its prior and reported it as the posterior; under IF2 an estimated
+  parameter in an effect's schedule stayed at its start value. Both are now
+  refused, naming the parameter and the effect. Migration: fit seed timing and
+  size with PMMH, fix the parameter, or, for an initial size under PGAS, declare
+  a law (`I ~ poisson(rate = I0)`).
+
+- **ODE and Gillespie runs whose recurring period is shorter than `dt` now
+  run.** They were refused at start ("one fire per period would be silently
+  dropped"); the continuous backends fire every recurring target at its own
+  instant, so the check now applies to the chain-binomial clock only (and a
+  fit's pre-flight checks only the particle-filter methods). Migration: none.
 
 - **A `fit predict` contrast forks before the instant its toggled intervention
   fires, not its declared time.** The arms run chain-binomial, which fires an
@@ -472,6 +479,23 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 ## Fixed
 
 User-visible correctness fixes (selected from ~138):
+
+- **PGAS scores an observation at `t_start`.** It kept an observation only at a
+  substep after the first, so a `t_start` row was silently dropped from every
+  PGAS likelihood — the draws were byte-identical with and without it, and the
+  summary counted one observation fewer than the file held — and under exact
+  alignment every later observation was dropped with it. It is now scored on the
+  state after the effects at `t_start`, as the particle filter scores it, in the
+  initialization filter, the CSMC sweep, the complete-data likelihood and its
+  gradient. Fits whose data start at `t_start` change.
+
+- **The particle filter, IF2 and PGAS fire effects on the model's own horizon.**
+  Their effect timing was built over the window ending at the last observation,
+  so the data could move an effect: with `dt = 1` an effect at 4.3 fired at 4.4
+  when the data ended at 4.4 and at 4 when they ended later, and an effect at
+  10.3 that `simulate` fires at the step ending at 10 (`to = 20`) was never seen
+  by a filter whose data ended at 10. They now use the plan `simulate` builds,
+  over `[t_start, to]`, so the data never move an effect.
 
 - **`profile --fit` applies the fit config's scenario.** `profile` read
   `[estimate]`, `[fixed]` and `[data]` from the fit config but never its

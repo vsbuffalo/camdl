@@ -3694,9 +3694,9 @@ pub fn refuse_unscored_parameters(
         {
             let p = name_of(p);
             return Err(SimError::Validation(format!(
-                "pgas: `{p}` is estimated but reaches the state only through the amount of \
-                 {kind} `{}`, which the PGAS parameter move cannot score; its posterior would \
-                 equal its prior. Fit with PMMH, or fix `{p}`.",
+                "pgas: `{p}` is estimated and sets the amount of {kind} `{}`, which the PGAS \
+                 parameter move cannot score, so the sampler cannot move `{p}` through it. Fit \
+                 with PMMH, or fix `{p}`.",
                 iv.name
             )));
         }
@@ -3707,9 +3707,9 @@ pub fn refuse_unscored_parameters(
         {
             let p = name_of(p);
             return Err(SimError::Validation(format!(
-                "pgas: `{p}` is estimated but sets the fire time of {kind} `{}`, which the \
-                 PGAS parameter move cannot score; its posterior would equal its prior. Fit \
-                 with PMMH, or fix `{p}`.",
+                "pgas: `{p}` is estimated and sets the fire time of {kind} `{}`, which the \
+                 PGAS parameter move cannot score, so the sampler cannot move `{p}` through it. \
+                 Fit with PMMH, or fix `{p}`.",
                 iv.name
             )));
         }
@@ -3719,8 +3719,8 @@ pub fn refuse_unscored_parameters(
         model.deterministic_init_param_read(&|n: &str| estimated_names.contains(&n))
     {
         return Err(SimError::Validation(format!(
-            "pgas: `{p}` is estimated but enters only through `{entry}`, which the PGAS \
-             parameter move cannot score; its posterior would equal its prior. Declare a law, \
+            "pgas: `{p}` is estimated and enters `{entry}`, which the PGAS parameter move \
+             cannot score, so the sampler cannot move `{p}` through it. Declare a law, \
              `{comp} ~ poisson(rate = {p})`, or fit with PMMH."
         )));
     }
