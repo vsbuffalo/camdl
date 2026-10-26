@@ -1742,6 +1742,21 @@ pub(crate) fn modal_value(xs: &[f64]) -> f64 {
 }
 
 #[cfg(test)]
+mod simulation_error_message_tests {
+    use super::simulation_error_message;
+
+    /// A refusal prints as written (no `Validation("…")` wrapper, real
+    /// newlines); a runtime error keeps its structured form.
+    #[test]
+    fn validation_prints_as_written_and_runtime_errors_keep_their_fields() {
+        let refusal = sim::SimError::Validation("transition 'pair' refused\n  help: x".into());
+        assert_eq!(simulation_error_message(refusal), "transition 'pair' refused\n  help: x");
+        let runtime = sim::SimError::AbsorbingState(2.0);
+        assert_eq!(simulation_error_message(runtime), "simulation error: AbsorbingState(2.0)");
+    }
+}
+
+#[cfg(test)]
 mod modal_value_tests {
     use super::modal_value;
 
@@ -3693,7 +3708,7 @@ pub fn simulate_compiled(
             sim::ode::run_ode(compiled, &params, &cfg, tick_opt, None)
         }
     }
-    .map_err(|e| format!("simulation error: {:?}", e))?;
+    .map_err(simulation_error_message)?;
 
     if let Some(pb) = progress {
         pb.set_position(1000);
@@ -3722,6 +3737,18 @@ pub fn simulate_compiled(
 /// That path carries its own refusal; see the note there. Any third consumer
 /// added later needs one too, because `resolve_run_model` moving `t_start` is
 /// only half of honouring `--init-state`.
+/// The message `simulate` prints for a backend error. A `Validation` error is a
+/// refusal written for the user — it names the construct and the fix — so it is
+/// printed as written. Every other error keeps its structured `Debug` form,
+/// which carries the fields (compartment, value, time) a runtime failure is
+/// diagnosed from.
+pub fn simulation_error_message(e: sim::SimError) -> String {
+    match e {
+        sim::SimError::Validation(msg) => msg,
+        other => format!("simulation error: {other:?}"),
+    }
+}
+
 pub fn unseamed_backend_msg(backend: &str) -> String {
     format!(
         "--init-state is not supported on the {backend} backend: it has no \
@@ -3858,7 +3885,7 @@ pub fn run_simulation_event_log(
         }
         ForwardBackend::Ode => unreachable!("ODE rejected above"),
     }
-    .map_err(|e| format!("simulation error: {:?}", e))?;
+    .map_err(simulation_error_message)?;
 
     // The recorder's initial pool was built from a reproduction of the
     // backend's initial draw (see above). Check it against the state the
