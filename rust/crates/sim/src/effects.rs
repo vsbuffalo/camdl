@@ -740,33 +740,45 @@ impl EventArena for ContinuousArena<'_> {
                 action_changes_f64(model, action, v, &snap_int, &snap_real, &mut changes)?;
             }
         }
-        let snap_of = |a: Arena| match a {
-            Arena::Int(i) => snap_int[i],
-            Arena::Real(i) => snap_real[i],
-        };
-        let mut sorted: Vec<f64> = Vec::new();
-        for (k, &(target, change)) in changes.iter().enumerate() {
-            if changes[..k].iter().any(|&(a, _)| a == target) {
-                continue; // applied with its first occurrence
+        // Group the changes by compartment, in first-appearance order, with a
+        // per-arena index map (linear in the number of changes).
+        let mut group_int = vec![usize::MAX; snap_int.len()];
+        let mut group_real = vec![usize::MAX; snap_real.len()];
+        let mut groups: Vec<(Arena, Vec<ChangeF64>)> = Vec::new();
+        for &(target, change) in &changes {
+            let g = match target {
+                Arena::Int(i) => &mut group_int[i],
+                Arena::Real(i) => &mut group_real[i],
+            };
+            if *g == usize::MAX {
+                *g = groups.len();
+                groups.push((target, Vec::with_capacity(1)));
             }
-            let n = changes.iter().filter(|&&(a, _)| a == target).count();
-            let x = slot(self.int, self.real, target);
-            if n == 1 {
-                match change {
+            groups[*g].1.push(change);
+        }
+        let mut sorted: Vec<f64> = Vec::new();
+        for (target, cs) in &groups {
+            let base = match *target {
+                Arena::Int(i) => snap_int[i],
+                Arena::Real(i) => snap_real[i],
+            };
+            let as_delta = |c: &ChangeF64| match *c {
+                ChangeF64::Delta(d) => d,
+                ChangeF64::Write(w) => w - base,
+            };
+            let x = slot(self.int, self.real, *target);
+            if let [change] = cs.as_slice() {
+                match *change {
                     ChangeF64::Delta(d) => *x += d,
                     ChangeF64::Write(w) => *x = w,
                 }
             } else {
-                let base = snap_of(target);
                 sorted.clear();
-                sorted.extend(changes.iter().filter(|&&(a, _)| a == target).map(|&(_, c)| match c {
-                    ChangeF64::Delta(d) => d,
-                    ChangeF64::Write(w) => w - base,
-                }));
+                sorted.extend(cs.iter().map(as_delta));
                 sorted.sort_by(|a, b| a.total_cmp(b));
                 *x = sorted.iter().fold(base, |acc, &d| acc + d);
             }
-            if let Arena::Int(i) = target {
+            if let Arena::Int(i) = *target {
                 let v = self.int[i];
                 if v < -CONTINUOUS_NEG_TOL * snap_int[i].abs().max(1.0) {
                     return Err(SimError::NegativeCount {
