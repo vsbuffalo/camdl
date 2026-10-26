@@ -469,7 +469,7 @@ impl EventArena for DiscreteArena<'_> {
 ///
 /// Scheduled interventions are not applied here; they follow in declaration
 /// order on the result ([`crate::lifecycle::apply_post_advance`] for the
-/// integer backends, `apply_boundary_batch_continuous`'s intervention pass for the ODE). With
+/// integer backends, [`apply_interventions_continuous`] for the ODE). With
 /// `add(X, 10)` and `set X = 5` at one instant this gives X = 5 on every
 /// backend whatever the declaration order, and a drain declared beside an
 /// inflow moves a share of the post-inflow count (gh#985, gh#217).
@@ -654,20 +654,15 @@ impl EventArena for ContinuousArena<'_> {
     }
 }
 
-/// Apply a known due batch to ODE's continuous compartment vectors, exactly (no
-/// rounding). Order matches the discrete lifecycle: always-active EVENTS fire
-/// first (`batch.event_idx`), every action reading the frozen pre-intervention
-/// snapshot; then scheduled INTERVENTIONS (`batch.intervention_idx`) apply
-/// sequentially on the post-event state. ODE carries no balance. `t_boundary` is
-/// the effect time; `dt` drives the amount evaluation.
-///
-/// `batch` (from [`due_effects`]) carries the firing interventions in
-/// declaration order per stage — this function does NOT re-derive due-ness; it
-/// applies the lists it was handed (the duplication the scheduling-spine §B seam
-/// removes from `effects.rs:382`).
-pub fn apply_boundary_batch_continuous(
+/// Apply the due scheduled interventions `intervention_idx` to the ODE's
+/// continuous compartment vectors, exactly (no rounding), in declaration order
+/// and sequentially: each action reads the live state the previous one left.
+/// This is the stage after [`apply_event_phases`] at an ODE boundary; ODE
+/// carries no balance. `t_boundary` is the effect time; `dt` drives the amount
+/// evaluation.
+pub fn apply_interventions_continuous(
     model: &CompiledModel,
-    batch: &crate::schedule::EffectBatch,
+    intervention_idx: &[usize],
     int_vals: &mut [f64],
     real_vals: &mut [f64],
     params: &[f64],
@@ -675,24 +670,7 @@ pub fn apply_boundary_batch_continuous(
     dt: f64,
 ) -> Result<(), SimError> {
     let t = t_boundary;
-
-    // EVENTS — frozen snapshot, every firing event's actions resolve against it.
-    if !batch.event_idx.is_empty() {
-        let snap_int = int_vals.to_vec();
-        let snap_real = real_vals.to_vec();
-        for &iv_idx in &batch.event_idx {
-            let iv = &model.model.interventions[iv_idx];
-            for (action_idx, action) in iv.actions.iter().enumerate() {
-                let v = eval_amount_f64(model, iv_idx, action_idx, &snap_int, &snap_real, params, t, dt);
-                let v = crate::intervention::finite_action_value(v, &iv.name, action, t)?;
-                trace_action(EffectKind::Event, &iv.name, action, v, t);
-                apply_action_f64(model, action, v, &snap_int, &snap_real, int_vals, real_vals)?;
-            }
-        }
-    }
-
-    // INTERVENTIONS — sequential, each action reads the live state.
-    for &iv_idx in &batch.intervention_idx {
+    for &iv_idx in intervention_idx {
         let iv = &model.model.interventions[iv_idx];
         for (action_idx, action) in iv.actions.iter().enumerate() {
             let live_int = int_vals.to_vec();
@@ -1259,9 +1237,8 @@ mod tests {
     }
 
     /// Test shim: compute the due batch at `t_boundary` (the seam `due_effects`
-    /// now owns) and route it through `apply_boundary_batch_continuous` — the
-    /// byte-identical replacement for the old `apply_boundary_effects_continuous`
-    /// that re-derived due-ness internally.
+    /// owns) and apply it as the ODE boundary does — [`apply_event_phases`] on a
+    /// [`ContinuousArena`], then [`apply_interventions_continuous`].
     fn apply_boundary_effects_continuous(
         model: &CompiledModel,
         fire_steps: &[std::collections::BTreeSet<i64>],
@@ -1273,7 +1250,14 @@ mod tests {
     ) -> Result<(), SimError> {
         let mut batch = crate::schedule::EffectBatch::default();
         super::due_effects(model, fire_steps, t_boundary, dt, &mut batch);
-        apply_boundary_batch_continuous(model, &batch, int_vals, real_vals, params, t_boundary, dt)
+        apply_event_phases(
+            model, &batch.event_idx,
+            &mut ContinuousArena { int: int_vals, real: real_vals },
+            params, t_boundary, dt, None,
+        )?;
+        apply_interventions_continuous(
+            model, &batch.intervention_idx, int_vals, real_vals, params, t_boundary, dt,
+        )
     }
 
     // ── Continuous (ODE) path — exact f64, no rounding ──────────────────────

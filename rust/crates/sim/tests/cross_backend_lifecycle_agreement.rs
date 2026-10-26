@@ -43,8 +43,8 @@ use sim::{
 use ir::{
     expr::Expr,
     intervention::{
-        AbsoluteTransfer, Action, AddAction, FireSource, Intervention, InterventionKind,
-        InterventionSchedule,
+        AbsoluteTransfer, Action, AddAction, FireSource, FractionTransfer, Intervention,
+        InterventionKind, InterventionSchedule, SetAction,
     },
     model::{
         Compartment, CompartmentKind, InitialConditions, OutputConfig, OutputSchedule,
@@ -404,24 +404,36 @@ fn battery_integer_exact_cross_backend_final_agreement() {
 /// carrying `interventions`. Output at t=0 and t_end=5, dt=1, so the final
 /// snapshot is the post-intervention state.
 fn collision_model(interventions: Vec<Intervention>) -> CompiledModel {
+    zero_rate_model("gh198_within_dt_collision", ("S", 100.0), ("V", 0.0), interventions)
+}
+
+/// Two integer compartments `src`, `dst` with their initial counts and a single
+/// zero-rate transition `src --> dst @ 0`, so the only state changes are the
+/// effects in `interventions`. Output at t=0 and t_end=5, dt=1.
+fn zero_rate_model(
+    name: &str,
+    src: (&str, f64),
+    dst: (&str, f64),
+    interventions: Vec<Intervention>,
+) -> CompiledModel {
     let m = Model {
         ic_grad: Default::default(),
-        name: "gh198_within_dt_collision".into(),
+        name: name.into(),
         version: "0.1".into(),
         time_unit: "days".into(),
         description: None,
         origin: None,
         origin_rata_die: None,
         compartments: vec![
-            Compartment { name: "S".into(), kind: CompartmentKind::Integer },
-            Compartment { name: "V".into(), kind: CompartmentKind::Integer },
+            Compartment { name: src.0.into(), kind: CompartmentKind::Integer },
+            Compartment { name: dst.0.into(), kind: CompartmentKind::Integer },
         ],
         transitions: vec![Transition {
             rate_state_grad: Default::default(),
             name: "noop".into(),
             stoichiometry: vec![
-                StoichiometryEntry("S".into(), -1),
-                StoichiometryEntry("V".into(), 1),
+                StoichiometryEntry(src.0.into(), -1),
+                StoichiometryEntry(dst.0.into(), 1),
             ],
             rate: Expr::const_(0.0),
             metadata: None,
@@ -444,8 +456,8 @@ fn collision_model(interventions: Vec<Intervention>) -> CompiledModel {
         }],
         initial_conditions: InitialConditions::constants({
             let mut h = HashMap::new();
-            h.insert("S".into(), 100.0);
-            h.insert("V".into(), 0.0);
+            h.insert(src.0.into(), src.1);
+            h.insert(dst.0.into(), dst.1);
             h
         }),
         output: OutputConfig {
@@ -470,7 +482,7 @@ fn collision_model(interventions: Vec<Intervention>) -> CompiledModel {
         quantities: vec![],
         contrasts: vec![],
     };
-    CompiledModel::new(m).expect("compile gh198 collision model")
+    CompiledModel::new(m).unwrap_or_else(|e| panic!("compile {name}: {e:?}"))
 }
 
 /// A scheduled (`!always_active`) intervention firing `action` at `at`.
@@ -595,4 +607,172 @@ fn on_grid_intervention_still_fires_once() {
             "{name}: add(V,10) at on-grid t=3.0 must fire exactly once (S=100, V=10)."
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// gh#985 / D4: coincident EVENTS at one instant. Language spec §13.10: inflow
+// events (`add`) resolve against the start-of-step snapshot; draining
+// `transfer` events and `set` resolve against the state after the inflows (and
+// after the transition draw, where there is one). The same rule holds at every
+// effect boundary on every backend, so declaration order never matters, a drain
+// cannot overdraw, and `set` means set. Each case runs both declaration orders
+// on all three backends; the zero-rate model makes the result hand-checkable.
+
+/// An always-active event (`events {}`) firing `action` at `at`.
+fn event(name: &str, at: Vec<f64>, action: Action) -> Intervention {
+    Intervention {
+        name: name.into(),
+        base_name: None,
+        fire: FireSource::Scheduled(InterventionSchedule::AtTimes(at)),
+        actions: vec![action],
+        kind: InterventionKind::Event,
+    }
+}
+
+/// Final counts of the model's two compartments, `(first, second)`, on every
+/// backend, for the events declared in `forward` order and in reverse order.
+fn coincident_finals(
+    name: &str,
+    src: (&str, f64),
+    dst: (&str, f64),
+    forward: Vec<Intervention>,
+) -> Vec<(String, (i64, i64))> {
+    let mut reversed = forward.clone();
+    reversed.reverse();
+    let mut out = Vec::new();
+    for (order, ivs) in [("declared", forward), ("reversed", reversed)] {
+        let compiled = zero_rate_model(name, src, dst, ivs);
+        let a = local_idx(&compiled, src.0);
+        let b = local_idx(&compiled, dst.0);
+        for (backend, sim, cfg) in battery_backends(0.0, 5.0) {
+            let params = compiled.default_params.clone();
+            let traj = sim
+                .run(&compiled, &params, SEED, &cfg)
+                .unwrap_or_else(|e| panic!("{name}/{backend}/{order}: forward sim: {e:?}"));
+            let last = traj.snapshots.last().expect("at least one snapshot");
+            out.push((
+                format!("{backend} ({order} order)"),
+                (last.int_state.counts[a], last.int_state.counts[b]),
+            ));
+        }
+    }
+    out
+}
+
+/// Assert every `(backend, order)` cell gave `expected`, listing every cell's
+/// result on failure so the whole backend × order table is visible at once.
+fn assert_every_backend(finals: &[(String, (i64, i64))], expected: (i64, i64), rule: &str) {
+    let wrong: Vec<_> = finals.iter().filter(|(_, got)| *got != expected).collect();
+    assert!(
+        wrong.is_empty(),
+        "{rule}\nexpected {expected:?} on every backend and order; got:\n{}",
+        finals
+            .iter()
+            .map(|(label, got)| format!(
+                "  {label}: {got:?}{}",
+                if *got == expected { "" } else { "  <- wrong" }
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// `add(X, 10)` and `set X = 5` at t=3 give X = 5 on every backend, in either
+/// declaration order. Hand computation: X = 0 → inflow X = 10 → `set` reads
+/// the post-inflow state and overwrites it, X = 5. Summing both deltas against
+/// the pre-event state gives 0 + 10 + (5 − 0) = 15 (Gillespie before gh#985);
+/// applying them one at a time gives 15 when `set` is declared first (the ODE
+/// before gh#985).
+#[test]
+fn coincident_add_and_set_event_gives_the_set_value_on_every_backend() {
+    let finals = coincident_finals(
+        "gh985_add_set",
+        ("X", 0.0),
+        ("Y", 0.0),
+        vec![
+            event(
+                "arrivals",
+                vec![3.0],
+                Action::Add(AddAction { compartment: "X".into(), count: Expr::const_(10.0) }),
+            ),
+            event(
+                "reset",
+                vec![3.0],
+                Action::Set(SetAction { compartment: "X".into(), value: Expr::const_(5.0) }),
+            ),
+        ],
+    );
+    assert_every_backend(&finals, (5, 0),
+        "add(X, 10) and set X = 5 at one instant must give X = 5 \
+             (§13.10: set reads the post-inflow state); X = 15 means the set was \
+             resolved against the pre-inflow state (gh#985).");
+}
+
+/// D4's example, mid-run: `seed : add(I, 10)` and
+/// `cull : transfer(fraction = 0.5, from = I, to = R)` at t=3 from I = R = 0
+/// give I = 5, R = 5 on every backend, in either order. Hand computation:
+/// inflow I = 10 → the drain reads the post-inflow I, floor(10 · 0.5) = 5.
+/// Reading the pre-inflow I = 0 moves nothing (I = 10, R = 0).
+#[test]
+fn coincident_add_and_fraction_drain_event_reads_post_inflow_state() {
+    let finals = coincident_finals(
+        "gh985_add_fraction_drain",
+        ("I", 0.0),
+        ("R", 0.0),
+        vec![
+            event(
+                "seed",
+                vec![3.0],
+                Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(10.0) }),
+            ),
+            event(
+                "cull",
+                vec![3.0],
+                Action::FractionTransfer(FractionTransfer {
+                    src: "I".into(),
+                    dst: "R".into(),
+                    fraction: Expr::const_(0.5),
+                }),
+            ),
+        ],
+    );
+    assert_every_backend(&finals, (5, 5),
+        "add(I, 10) and transfer(fraction = 0.5, from = I, to = R) at \
+             one instant must give I = 5, R = 5 (§13.10: the drain reads the \
+             post-inflow state); I = 10, R = 0 means it read the pre-inflow \
+             state (gh#985).");
+}
+
+/// The count form of the drain: `add(I, 10)` and
+/// `transfer(count = 4, from = I, to = R)` at t=3 from I = R = 0 give I = 6,
+/// R = 4 on every backend, in either order. The count is clamped to the
+/// source it reads, so reading the pre-inflow I = 0 moves nothing.
+#[test]
+fn coincident_add_and_count_drain_event_reads_post_inflow_state() {
+    let finals = coincident_finals(
+        "gh985_add_count_drain",
+        ("I", 0.0),
+        ("R", 0.0),
+        vec![
+            event(
+                "seed",
+                vec![3.0],
+                Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(10.0) }),
+            ),
+            event(
+                "cull",
+                vec![3.0],
+                Action::AbsoluteTransfer(AbsoluteTransfer {
+                    src: "I".into(),
+                    dst: "R".into(),
+                    count: Expr::const_(4.0),
+                }),
+            ),
+        ],
+    );
+    assert_every_backend(&finals, (6, 4),
+        "add(I, 10) and transfer(count = 4, from = I, to = R) at one \
+             instant must give I = 6, R = 4 (§13.10: the drain reads the \
+             post-inflow state); I = 10, R = 0 means it read the pre-inflow \
+             state (gh#985).");
 }
