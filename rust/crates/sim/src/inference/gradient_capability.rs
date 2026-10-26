@@ -29,7 +29,7 @@ use crate::compiled_model::CompiledModel;
 use crate::error::SimError;
 
 /// Collect names of every `Param` referenced by an expression tree.
-pub(crate) fn collect_param_refs(e: &Expr, out: &mut HashSet<String>) {
+pub fn collect_param_refs(e: &Expr, out: &mut HashSet<String>) {
     match e {
         Expr::Param(p) => {
             out.insert(p.param.clone());

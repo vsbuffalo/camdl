@@ -2518,6 +2518,57 @@ impl FitConfig {
     /// and leaves the report to `FitRunConfig::build`, whose resolver says
     /// which parameter and which tier — a better message than anything phrased
     /// in terms of gradients.
+    /// Refuse an estimated hyperparameter whose hierarchical leaves are held,
+    /// under the samplers that read a prior (PMMH, MH, PGAS).
+    ///
+    /// Their log prior sums over the estimated parameters only, so a held
+    /// leaf's density p(leaf | hyper) never enters it: the hyperparameter is
+    /// informed by its own prior alone and its posterior is that prior. Until
+    /// the held leaves' terms are included, such a fit is refused rather than
+    /// run. IF2 and the optimizers read no prior and are unaffected.
+    pub fn validate_held_hierarchical_leaves(&self, model: &ir::Model) -> Result<(), String> {
+        use crate::run_meta::FitAlgorithm;
+        let Some(method) = &self.inference.method else {
+            return Ok(());
+        };
+        let kind = method.algorithm.method_kind();
+        if !matches!(kind, FitAlgorithm::Pmmh | FitAlgorithm::Mh | FitAlgorithm::Pgas) {
+            return Ok(());
+        }
+        let estimate = &self.problem.estimate;
+        let mut held: Vec<(String, Vec<String>)> = Vec::new();
+        for p in &model.parameters {
+            if estimate.contains_key(&p.name) {
+                continue;
+            }
+            let Some(h) = p.hierarchical() else { continue };
+            let mut refs = std::collections::HashSet::new();
+            for arg in h.args.values() {
+                sim::inference::gradient_capability::collect_param_refs(arg, &mut refs);
+            }
+            let mut hypers: Vec<String> =
+                refs.into_iter().filter(|r| estimate.contains_key(r)).collect();
+            hypers.sort();
+            if !hypers.is_empty() {
+                held.push((p.name.clone(), hypers));
+            }
+        }
+        if held.is_empty() {
+            return Ok(());
+        }
+        let lines: Vec<String> = held.iter()
+            .map(|(leaf, hypers)| format!("  {leaf} (held), prior on {}", hypers.join(", ")))
+            .collect();
+        Err(format!(
+            "[estimate]: an estimated hyperparameter has hierarchical leaves that are \
+             held, not estimated:\n{}\n\
+             Under `{}` the log prior sums over the estimated parameters only, so the held \
+             leaves' prior terms p(leaf | hyperparameter) are not yet included and the \
+             hyperparameter would not be informed by them: its posterior would be its own \
+             prior. Estimate the leaves too, or hold the hyperparameter.",
+            lines.join("\n"), kind.as_str()))
+    }
+
     pub fn validate_gradient_capability(&self, model: &ir::Model) -> Result<(), String> {
         let Some(method) = &self.inference.method else {
             return Ok(());

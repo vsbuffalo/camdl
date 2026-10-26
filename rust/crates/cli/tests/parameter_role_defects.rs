@@ -505,3 +505,78 @@ cooling = 0.9
     assert_eq!(prov["gamma"]["source"].as_str(), Some("estimate_start_drawn"), "{prov}");
     assert_eq!(prov["rho"]["source"].as_str(), Some("fit_toml_fixed"), "{prov}");
 }
+
+/// A hierarchical model: `gamma`'s prior is `log_normal(mu = mu_g, sigma =
+/// 0.1)`, so `gamma` is a leaf and `mu_g` its hyperparameter.
+const HIER_MODEL: &str = r#"
+time_unit = 'days
+compartments { S, I, R }
+parameters {
+  mu_g  : real ~ normal(mu = 0.0, sigma = 1.0)
+  gamma : rate ~ log_normal(mu = mu_g, sigma = 0.1)
+  beta  : rate in [0.05, 1.0]
+}
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R)
+  recovery  : I --> R @ gamma * I
+}
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    projected  = I
+    emit_schedule = every 1 'days
+    cases ~ poisson(rate = projected)
+  }
+}
+init { S = 990  I = 10 }
+simulate { from = 0 'days  to = 6 'days }
+"#;
+
+/// Under PMMH, PGAS and MH the log prior sums over the estimated parameters
+/// only, so an estimated hyperparameter whose leaf is held contributes its own
+/// prior and nothing else: the held leaf's p(gamma | mu_g) is missing and the
+/// hyperparameter's posterior equals its prior (reproduced: a PMMH run with
+/// gamma held at 0.1 gave mu_g a posterior mean of 0.00 and sd of 1.00, the
+/// N(0, 1) prior, where including the leaf gives a mean near -2.28). Refused at
+/// config validation until the held leaves' terms are included. IF2 reads no
+/// prior and is unaffected.
+#[test]
+fn bayesian_fit_refuses_an_estimated_hyperparameter_over_held_leaves() {
+    let tmp = tempdir("hier");
+    let ir = compile(tmp.path(), "h", HIER_MODEL);
+    let data = tmp.path().join("cases.tsv");
+    let write = |name: &str, estimate: &str, fixed: &str, method: &str| {
+        let fit = tmp.path().join(name);
+        std::fs::write(&fit, format!(r#"[model]
+camdl = "{ir}"
+[data.observations]
+cases = "{data}"
+[estimate]
+{estimate}
+[fixed]
+{fixed}
+[method]
+{method}
+"#, ir = ir.display(), data = data.display())).unwrap();
+        fit
+    };
+    let pmmh = "algorithm = \"pmmh\"\nbackend = \"chain_binomial\"\nchains = 2\n\
+                particles = 20\niterations = 20\nburn_in = 5\n";
+    let pgas = "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 2\n\
+                particles = 20\nsweeps = 20\nburn_in = 5\n";
+    for (tag, method) in [("pmmh", pmmh), ("pgas", pgas)] {
+        let fit = write(&format!("{tag}.toml"),
+            "mu_g = { bounds = [-5, 5], start = 0.0 }", "gamma = 0.1\nbeta = 0.3", method);
+        let out = camdl(&tmp.path().join(tag), &["fit", "run", fit.to_str().unwrap()]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{tag}: an estimated hyperparameter over a held \
+            leaf must be refused:\n{err}");
+        assert!(err.contains("mu_g") && err.contains("gamma")
+            && err.contains("not yet included"), "{tag}: the refusal names both:\n{err}");
+    }
+    // Control: with the leaf estimated too, the same PMMH fit runs.
+    let fit = write("both.toml",
+        "mu_g = { bounds = [-5, 5], start = 0.0 }\ngamma = { bounds = [0.01, 1.0], start = 0.1 }",
+        "beta = 0.3", pmmh);
+    ok(camdl(&tmp.path().join("both"), &["fit", "run", fit.to_str().unwrap()]));
+}
