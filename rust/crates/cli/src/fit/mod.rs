@@ -140,7 +140,10 @@ fn gate_run_method_against_model(
         };
         for (label, step) in [("dt", Some(dt)), ("burnin_dt", burnin_dt)] {
             let Some(step) = step else { continue };
-            if let Err(e) = compiled.validate_recurring_dt_collisions(step) {
+            if let Err(e) = compiled.validate_recurring_dt_collisions(
+                compiled.model.simulation.t_start,
+                sim::effect_plan::FireClock::Grid { dt: step },
+            ) {
                 return Err(format!("method '{}' ({} = {}): {}", stage_name, label, step, e));
             }
         }
@@ -2778,7 +2781,12 @@ mod tests {
         // Sanity: the forward path already rejects this dt. The bug is that the
         // fit path does not.
         assert!(
-            compiled.validate_recurring_dt_collisions(400.0).is_err(),
+            compiled
+                .validate_recurring_dt_collisions(
+                    compiled.model.simulation.t_start,
+                    sim::effect_plan::FireClock::Grid { dt: 400.0 },
+                )
+                .is_err(),
             "precondition: dt=400 must collide on this model"
         );
 

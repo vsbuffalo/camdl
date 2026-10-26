@@ -142,7 +142,9 @@ pub fn run_gillespie_with_observer(
     // gh#126: reject a non-finite/non-positive intervention-resolution dt
     // or a non-finite fire time at entry — a RELEASE-build check (the
     // per-conversion guards in `time.rs` are debug_assert only).
-    model.validate_schedule(iv_resolution_dt, params)?;
+    model.validate_schedule(
+        iv_resolution_dt, params, cfg.t_start, crate::effect_plan::FireClock::Grid { dt: iv_resolution_dt },
+    )?;
     let fire_steps = model.resolve_fire_steps(iv_resolution_dt, params);
 
     // gh#272 LICM: stage the per-eval prologue ONCE for this forward run. `params`

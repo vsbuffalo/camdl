@@ -143,6 +143,14 @@ impl EffectTimes {
         Ok(EffectTimes(timeline.times.clone()))
     }
 
+    /// An [`crate::effect_plan::EffectPlan`]'s firing instants, index-aligned
+    /// with its batches. The plan built them from validated fire times, sorted
+    /// and distinct, so there is nothing left to check.
+    pub(crate) fn from_plan_times(times: Vec<f64>) -> Self {
+        debug_assert!(times.windows(2).all(|w| w[0] < w[1]), "plan times not strictly ascending");
+        EffectTimes(times)
+    }
+
     pub(crate) fn into_vec(self) -> Vec<f64> {
         self.0
     }
