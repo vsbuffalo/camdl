@@ -176,9 +176,9 @@ fn pgas_refuses_an_estimated_effect_amount() {
     let err = run_pgas_estimating(&seeding_model(), &["beta", "n_seed"]).expect_err("must be refused");
     assert_eq!(
         err,
-        "model validation error: pgas: `n_seed` is estimated but reaches the state only through \
-         the amount of event `founders_arrive`, which the PGAS parameter move cannot score; its \
-         posterior would equal its prior. Fit with PMMH, or fix `n_seed`."
+        "model validation error: pgas: `n_seed` is estimated and sets the amount of event \
+         `founders_arrive`, which the PGAS parameter move cannot score, so the sampler cannot \
+         move `n_seed` through it. Fit with PMMH, or fix `n_seed`."
     );
 }
 
@@ -188,9 +188,9 @@ fn pgas_refuses_an_estimated_effect_schedule() {
     let err = run_pgas_estimating(&seeding_model(), &["tau"]).expect_err("must be refused");
     assert_eq!(
         err,
-        "model validation error: pgas: `tau` is estimated but sets the fire time of event \
-         `founders_arrive`, which the PGAS parameter move cannot score; its posterior would equal \
-         its prior. Fit with PMMH, or fix `tau`."
+        "model validation error: pgas: `tau` is estimated and sets the fire time of event \
+         `founders_arrive`, which the PGAS parameter move cannot score, so the sampler cannot \
+         move `tau` through it. Fit with PMMH, or fix `tau`."
     );
 }
 
@@ -202,9 +202,9 @@ fn pgas_refuses_an_estimated_plain_init_assignment() {
     let err = run_pgas_estimating(&seeding_model(), &["I0"]).expect_err("must be refused");
     assert_eq!(
         err,
-        "model validation error: pgas: `I0` is estimated but enters only through \
-         `init { I = I0 }`, which the PGAS parameter move cannot score; its posterior would equal \
-         its prior. Declare a law, `I ~ poisson(rate = I0)`, or fit with PMMH."
+        "model validation error: pgas: `I0` is estimated and enters `init { I = I0 }`, which the \
+         PGAS parameter move cannot score, so the sampler cannot move `I0` through it. Declare a \
+         law, `I ~ poisson(rate = I0)`, or fit with PMMH."
     );
 }
 
