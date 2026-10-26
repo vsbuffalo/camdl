@@ -122,8 +122,32 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   an overdrawing pair of drains) was reported by chain-binomial as
   `BinomialOvershoot`, so `pfilter`, PMMH, IF2 and PGAS gave the particle −∞
   weight and carried on. It is now a configuration error that stops the run, as
-  on the ODE and Gillespie. A transition overshoot (`S + S --> D`) keeps the
-  `BinomialOvershoot` label. Migration: fix the `set` value.
+  on the ODE and Gillespie. Migration: fix the `set` value.
+- **A transition that consumes several units of one compartment (`S + S --> D`)
+  is refused on chain-binomial, and Gillespie fires a transition only when its
+  sources can pay.** Chain-binomial draws how many individuals leave a
+  compartment and applied a two-unit transition to that count twice over: on
+  `pair : S + S --> D @ k*S*S/(S+D+R)` from `S = 5` it took `S` to −3 to −5 on
+  every seed, which `pfilter`, PMMH, IF2 and PGAS turned into a −∞ particle
+  weight. Such a transition is now refused when the model is loaded, on
+  `simulate`, `pfilter` and every `fit` method on chain-binomial, naming the
+  transition, the compartment and the units. Gillespie fired the same transition
+  at `S = 1` (and a constant-rate exit `S --> R @ k` at `S = 0`); it now fires a
+  transition only while every compartment it consumes holds what one firing
+  removes, at the declared rate, unchanged. Single-unit models whose rates are
+  proportional to their source give byte-identical Gillespie trajectories. The
+  ODE is unchanged. Migration: run the model on `--backend gillespie` (or fit it
+  on `ode`), or restructure the transition.
+- **`NegativeCountCause::BinomialOvershoot` is gone.** No transition can leave a
+  compartment negative any more, so a negative left by the transition stage is
+  `SimError::SimulatorInvariant`: it stops the run, under inference too, and its
+  message says it is a camdl bug. A negative count that comes from the starting
+  state (`init { S = N - I0 }` with `I0 > N`) is
+  `NegativeCount { cause: InitialState }`, classified as `BinomialOvershoot` was
+  (under inference the particle gets −∞ weight). Also fixed on the way: an
+  overdispersed exit group whose gamma multipliers were all drawn as 0 fell
+  through to an unbounded draw and could take its source far below zero (`S = 5`
+  to −3305); it now draws no exits.
 - **A scenario that disagrees with a fit.toml's `[fixed]` on a parameter is
   refused.** `fit run` on such a file used to run at the `[fixed]` value while
   its notice said the scenario's value had replaced it ("scenario fastrec

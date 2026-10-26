@@ -2008,6 +2008,55 @@ Both produce the same stoichiometry `{S_h:-1, I_h:+1}` and the same rate
 expression. Prefer the multi-source form when two compartments jointly determine
 the event — the `+` makes the dependency explicit.
 
+**Repeated sources: several units per firing (`S + S --> D`).** A compartment
+may appear more than once on the left. Its entries add, so `S + S --> D`
+consumes two members of `S` each time it fires (stoichiometry `{S: -2, D: +1}`):
+pair formation, or a reaction that needs two molecules of one species.
+
+```camdl
+time_unit = 'days
+compartments { S, D, R }
+parameters { k : rate in [0.0, 10.0]  g : rate in [0.0, 10.0] }
+transitions {
+  pair : S + S --> D  @ k * S * S / (S + D + R)
+  rec  : S --> R      @ g * S
+}
+init { S = 5 }
+simulate { from = 0 'days  to = 3 'days }
+```
+
+**Feasibility.** A transition is _feasible_ in a state when every compartment it
+consumes holds at least the number of members one firing removes: `x_i ≥ ν_i`
+for each compartment `i` whose net stoichiometry is `−ν_i < 0`. `pair` above is
+feasible only while `S ≥ 2`; `rec` while `S ≥ 1`; `A + B --> C` while `A ≥ 1`
+and `B ≥ 1`. The rule is about the net stoichiometry, so a catalyst (on both
+sides, collapsed away as described above) is not consumed. How each backend
+treats it:
+
+- **Gillespie** fires a transition at its declared rate where it is feasible and
+  not at all where it is not: the effective propensity is the rate expression
+  when feasible and `0` otherwise. The rule applies to every transition, so no
+  firing ever takes a compartment below zero. The rate expression is not
+  rewritten — `k * S * S` stays `k * S * S` wherever `pair` can fire; it is not
+  turned into the combinatorial `k * S * (S - 1)`. Write the number of distinct
+  pairs into the rate if that is the intended propensity. For a single-unit
+  transition whose rate is proportional to its source the rule changes nothing
+  (the rate is already `0` when the source is empty); a constant-rate exit
+  (`S --> R @ k`) stops when `S` reaches `0`.
+- **Chain-binomial** refuses a transition that consumes more than one unit of a
+  source, when the model is loaded and before any step, on `simulate` and on
+  every inference method that runs on it (`pfilter`, `fit` with IF2, PMMH or
+  PGAS). Its Euler-multinomial step draws how many _individuals_ leave a
+  compartment, one at a time, and has no meaning for a firing that removes two
+  at once:
+  ```
+  error: transition 'pair' consumes 2 units of S per firing; the chain-binomial backend models individuals leaving a compartment one at a time and supports at most 1 unit per firing from a source
+    help: use --backend gillespie for this model (`fit` and `pfilter` have no Gillespie backend: fit it with backend = "ode", or restructure the transition)
+  ```
+- **ODE** treats every transition as a continuous flow: `pair` removes
+  `S` at `2 × rate` and adds `D` at `rate`. There are no discrete firings, so
+  there is no feasibility rule.
+
 ### 9.1.2 Probabilistic branching (`X --> { A : p, B : 1-p }`)
 
 When a single event has multiple possible destination compartments chosen
