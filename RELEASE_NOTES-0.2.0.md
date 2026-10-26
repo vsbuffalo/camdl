@@ -271,9 +271,20 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   an `{ X = 5 ... }` event at one instant gave `X = 15` (Gillespie, and the ODE
   when the `set` was declared first) and now give `X = 5`; a draining `transfer`
   beside an inflow into its source moved nothing and now moves its share of the
-  post-inflow count. Migration: none needed; Gillespie and ODE runs whose events
-  coincide this way give different, now backend-consistent, results.
-  Chain-binomial and every inference method are unchanged.
+  post-inflow count. Within that stage the changes add on every backend: from
+  `X = 10`, an `{ X = 5 ... }` event and a half drain of `X` at one instant give
+  `X = 0` in either order (the ODE gave 5 when the drain was declared first).
+  Migration: none needed; Gillespie and ODE runs whose events coincide this way
+  give different, now backend-consistent, results. Chain-binomial and every
+  inference method are unchanged.
+
+- **Two `set`s on one compartment at one instant are refused (gh#985).** Their
+  changes would add to a value neither names (from `X = 5`, two `X = 7` events
+  gave 9 on every backend). Every backend now stops with an error naming the
+  compartment, the events and the time. The ODE likewise now refuses events that
+  leave an integer compartment negative, as chain-binomial and Gillespie already
+  did, instead of printing it as 0. Migration: give the `set`s different times
+  or merge them into one.
 
 ## Run identity
 

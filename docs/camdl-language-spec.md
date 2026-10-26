@@ -3808,6 +3808,15 @@ the same instant leave `X = 5` on every backend, whichever is declared first,
 and a draining `transfer` due beside an inflow into its source moves a share of
 the post-inflow count.
 
+Within the drain-and-`set` stage every action resolves against the same
+post-inflow state and their changes add, a `set` contributing the difference
+between its value and that state: from `X = 10`, an `{ X = 5 ... }` event and a
+`transfer(fraction = 0.5, from = X, to = Y)` event at one instant give
+`X = 10 + (5 − 10) − 5 = 0` and `Y = 5`, in either order. Two or more `set`s on
+one compartment at the same instant are an error on every backend, since their
+changes would add to a value neither names, and so is a stage that leaves an
+integer compartment negative.
+
 The consequence a modeller must know: recorded output is **post-effect**. An
 observation emitted at a time when an intervention fires — a vaccination
 `transfer`, say — sees the **post-vaccination** state, not the pre-vaccination
