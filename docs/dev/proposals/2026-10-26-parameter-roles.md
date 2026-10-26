@@ -1,6 +1,6 @@
 ---
 date: 2026-10-26
-status: accepted — D1–D8 decided by the maintainer on 2026-10-26 (§12); D9 (typed-constant entries in existing fit configs) is open; implementation follows §11
+status: accepted except D9 and D10 (D9 blocks Stage 2) — D1–D8 decided by the maintainer on 2026-10-26 (§12); implementation follows §11
 area: CLI parameter resolution / inference setup / run records
 issues: gh#965 (typed constants); §13 lists the follow-ups
 related:
@@ -254,11 +254,13 @@ today:
   estimated. It is not needed: holding a parameter is one line moved from
   `[estimate]` to `[fixed]` in a copy of the config, and that copy then names
   the problem it runs. The error says exactly that.
-- **A `--fixed-file` entry naming a swept or `--estimate` parameter is
-  refused.** A file written for another purpose — a fit's `mle.toml` — names
-  every parameter; using it to hold "the rest" while also sweeping or estimating
-  some of them was a silent precedence. The error names the entry and offers
-  `--starts from_params=FILE` when the file was meant as starting values.
+- **A `--fixed-file` entry naming a swept or `--estimate` parameter is pending
+  D10.** A `--fixed-file` key is a fixed declaration (§4.1), so under the rule
+  above it would be refused. A file written for another purpose — a fit's
+  `mle.toml` — names every parameter, and files carrying a fit's `[provenance]`
+  block are already treated differently (`carries_fit_provenance`,
+  `params_resolver.rs:1860`). Which treatment applies is D10; until it is
+  decided, this proposal does not change how such files resolve.
 
 Examples:
 
@@ -270,7 +272,7 @@ Examples:
 | `--sweep N0`, `N0` in `[fixed]`                                                        | valid: design at job level, fixed per cell (case 2) |
 | `--fixed X` + `--sweep X`; `--estimate X` + `--fixed X`                                | refused                                             |
 | `--fixed rho`, `rho` in `[estimate]`                                                   | refused (reverses `21d4ed47`)                       |
-| `--fixed-file mle.toml --sweep beta`, `mle.toml` naming `beta`                         | refused                                             |
+| `--fixed-file mle.toml --sweep beta`, `mle.toml` naming `beta`                         | pending D10                                         |
 | `--draws uniform --sweep beta`                                                         | valid: design shadow (case 3)                       |
 | `--draws uniform --param beta=0.5`                                                     | valid: imposition by `--param` (case 3)             |
 | `--estimate omega` or `--fixed omega=…`, `omega` a typed constant                      | refused (D2)                                        |
@@ -330,9 +332,10 @@ to `beta_<key>` names before roles are resolved (`util.rs:3360-3362`, verified).
 ### 5.1 A fixed parameter takes tiers 2–5
 
 A fixed parameter's value comes from the tiers of §2, with the same override
-records and notices as today (`b262fde0`). Under D3, an undeclared parameter is
-fixed: if a source gives it a value (a scenario `set`, a `--fixed-file` or
-`--params` key, a sample row's constant column), it is held at that value and
+records and notices as today (`b262fde0`). A `--fixed-file` or `--params` key is
+a fixed declaration (§4.1), not a bare source. Under D3, an undeclared parameter
+— one no declaration names — is fixed: if a value source gives it a value (a
+scenario `set`, or a sample row's constant column), it is held at that value and
 the record names the source; if none does, the run is refused with "parameter
 `k` has no value and no role: give it one with `--fixed k=…`, `--fixed-file`,
 `[fixed]` or a scenario that sets it, or estimate it with `--estimate k`". A
@@ -971,7 +974,7 @@ Recorded here; that proposal is not edited by this one.
 - `--fixed` or `--fixed-file` over a fit config's `[estimate]` is refused in
   `profile` and `survey` (today a notice, `21d4ed47`, or silently ignored in
   `survey --fit`).
-- A `--fixed-file` entry naming a swept or `--estimate` parameter is refused
+- A `--fixed-file` entry naming a swept or `--estimate` parameter: pending D10
   (today it runs with no notice: `profile.rs:750-781` checks only `--fixed` and
   `[fixed]`).
 - A scenario setting or scaling an estimated or design parameter is refused in
@@ -995,13 +998,15 @@ Recorded here; that proposal is not edited by this one.
   `prior_posterior_invariants.rs`, `profile_grid_identity.rs`,
   `profile_greedy_order_invariant.rs`, `profile_priors.rs`,
   `scenario_horizon.rs`) use the scenario as both held values and starting
-  points. Each migrates to the existing `--starts from_params=FILE`: the
-  scenario's values are written to `baseline.toml`; the held parameters go to
-  `--fixed` flags or a `--fixed-file` listing only them; the estimated ones are
-  named by `--estimate`; `--starts from_params=baseline.toml` starts them (its
-  entries for held and focal names are listed as unused); any intervention the
-  scenario enables becomes `--enable`. `profile_pmmh.rs` was removed with
-  per-cell PMMH (`2b76f8f9`).
+  points. `--starts from_params=FILE` does not replace that usage one for one;
+  each invocation is rewritten in four steps: (1) write the scenario's values to
+  `baseline.toml`; (2) split out the held values into `--fixed` flags or a
+  `--fixed-file` listing only them; (3) name the estimated parameters with
+  `--estimate`, and start them with `--starts from_params=baseline.toml` (its
+  entries for held and focal names are listed as unused); (4) turn any
+  intervention the scenario enables into `--enable`. The scenario no longer
+  appears in the command. `profile_pmmh.rs` was removed with per-cell PMMH
+  (`2b76f8f9`).
 - **Every `profile --rw-sd …`.** 25 occurrences of `"--rw-sd"` in 15 test files
   (`rg -c '"--rw-sd"' rust/crates/cli/tests`) and the `camdl profile` help
   examples (`args/mod.rs:1663-1690`): an explicit list keeps working where its
@@ -1060,19 +1065,24 @@ the estimand it claims. Each is a small committed fixture whose exact answer is
 computed independently of camdl's likelihood code.
 
 - **K1 — iid normal, location and scale.** A model whose one compartment `X` has
-  no transitions (`init { X = mu }`), observed
-  `y_t ~ normal(mu = projected,
-  sigma = s)` at n = 20 times, with fixed
-  synthetic data. The likelihood is that of an iid normal sample. Profiling `mu`
-  with `s` estimated must give ℓ_p(μ) = −(n/2)·log(2π·σ̂²(μ)) − n/2, with σ̂²(μ) =
-  (1/n)·Σ(y_t − μ)²; holding `s = s₀` must give ℓ(μ; s₀) = −n·log s₀ − (n/2)·log
-  2π − Σ(y_t − μ)²/(2s₀²). Run under the ODE backend with `nl-bobyqa`, whose
+  no transitions (`init { X = mu }`), observed through the stock, not incidence
+  — `projected = prevalence(X)`; a compartment with no transitions has zero
+  incidence — as `y_t ~ normal(mu = projected, sigma = s)` at n = 20 times, with
+  fixed synthetic data. The likelihood is that of an iid normal sample.
+  Profiling `mu` with `s` estimated must give ℓ_p(μ) = −(n/2)·log(2π·σ̂²(μ)) −
+  n/2, with σ̂²(μ) = (1/n)·Σ(y_t − μ)²; holding `s = s₀` must give ℓ(μ; s₀) =
+  −n·log s₀ − (n/2)·log 2π − Σ(y_t − μ)²/(2s₀²). The search box of `s` must
+  contain σ̂(μ) at every grid point, else the profiled curve follows the box edge
+  instead of the formula: with the data's range fixed, the box is
+  `[0.5·min_μ σ̂(μ), 2·max_μ σ̂(μ)]` over the grid, computed from the fixture and
+  written into its fit config. Run under the ODE backend with `nl-bobyqa`, whose
   likelihood is exact. Tolerance: 1e-6 nats at every grid point (the optimizer's
   tolerance set to 1e-10; inferred sufficient), and the held curve must not
   equal the profiled one except at μ where σ̂(μ) = s₀. The fixture's feasibility
   (a compartment with no transitions observed through `normal`) is inferred and
   is the first thing Stage 1 checks.
-- **K2 — a non-identified product.** The same model observed through
+- **K2 — a non-identified product.** The same model, again observed through the
+  stock (`projected = prevalence(X)`, `init { X = X0 }`), as
   `y_t ~ poisson(rate = rho * projected)` with `X0` and `rho` parameters. The
   likelihood depends on `rho · X0` only. Profiling `rho` with `X0` estimated
   must be flat at the saturated maximum ℓ* = Σ[y_t·log ȳ − ȳ − log y_t!] (ȳ the
@@ -1083,12 +1093,17 @@ computed independently of camdl's likelihood code.
 - **K3 — the exact-marginal particle-filter oracle.** The forward-algorithm
   oracle of `rust/crates/sim/tests/pf_exact_marginal_oracle.rs` (gh#201)
   computes log p(y | θ) exactly for a tiny binomial SIR (N₀ ≈ 6). A
-  held-nuisance slice over `beta` with `gamma` fixed is checked pointwise: the
-  particle-filter estimate averaged over R replicates must lie within 4 Monte
-  Carlo standard errors of the exact value at every grid point, as that oracle
-  already tests at single points. The profiled-out cell maximum (IF2 over
-  `gamma`) must lie within 4 standard errors plus 0.5 nats of the exact maximum
-  over a fine `gamma` grid, and never above it by more than 4 standard errors.
+  held-nuisance slice over `beta` with `gamma` fixed is checked pointwise on the
+  likelihood scale, as that oracle does (`pf_exact_marginal_oracle.rs:38-50`):
+  with `w_r = exp(ll_r − log p(y | θ))` over R replicates,
+  `z = (mean(w) − 1)/(sd(w)/√R)` must satisfy `|z| ≤ 4.5` at every grid point.
+  Averaging `ll_r` instead would be biased low by about half the variance of
+  `ll`. The profiled-out cell (IF2 over `gamma`) is checked one-sided: at the
+  cell's returned γ̂, the same likelihood-scale z-test against the exact
+  `p(y | β, γ̂)` must pass (the reported value is not biased upward), and the
+  exact `log p(y | β, γ̂)` must not exceed the exact profile maximum over
+  `gamma`. The shortfall below that maximum is reported, not asserted: IF2 has
+  no stated optimization tolerance from which an allowance could be derived.
 
 A simplex fixture (three members, one profiled) checks that a split group is
 refused and that a fully held grid point not summing to 1 is refused naming the
@@ -1155,11 +1170,11 @@ overrides one (searched: `ocaml/golden`, `rust/crates/*/tests`, `docs/`,
 `camdl-nigeria-polio`, `ebola-camdl`, `ebola-bdbv-camdl`, `camdl-paper`).
 
 **D3 — Undeclared parameters. Decided (2026-10-26): fixed by default.** An
-undeclared parameter with a value from a scenario, a `--fixed-file`/`--params`
-key or a sample constant is fixed at that value, and the record names the
-source; one with no value is refused, naming the parameter and the ways to
-supply one (§5.1). `--slice` guards the profile case (§4.4). The fit config
-keeps its completeness check.
+undeclared parameter (named by no declaration; a `--fixed-file` or `--params`
+key is a declaration) with a value from a scenario `set` or a sample constant is
+fixed at that value, and the record names the source; one with no value is
+refused, naming the parameter and the ways to supply one (§5.1). `--slice`
+guards the profile case (§4.4). The fit config keeps its completeness check.
 
 **D4 — The stored record. Decided (2026-10-26): `partition` is authoritative.**
 The legacy `estimated` and `fixed` fields are generated from it by
@@ -1171,8 +1186,9 @@ or `[estimate]` in a `--fit` config; steps not given are derived from the
 bounds".
 
 **D6 — A scenario as the starts source. Decided (2026-10-26): deferred.**
-`--starts from_scenario` is not part of this proposal (§13). The existing
-`--starts from_params=FILE` covers the migration (§10.2).
+`--starts from_scenario` is not part of this proposal (§13). The tests that used
+a scenario as starting points are rewritten by hand onto
+`--starts from_params=FILE` (§10.2), a four-step change per invocation.
 
 **D7 — Order and interim records. Decided (2026-10-26): the inference half
 first.** §11 Stages 1-4 now, Stage 5 after design-vs-sample Stage 1, replacing
@@ -1208,10 +1224,27 @@ exception; (b) costs one equality check and spares the nine configs a no-op
 edit. Recommendation: (a), leaning; it is the maintainer's call because it
 breaks configs outside this repository.
 
+**D10 — A `--fixed-file` entry naming a swept or estimated parameter. Open.** A
+`--fixed-file` key declares the parameter fixed (§4.1), so the one-declaration
+rule makes a file that also names a `--sweep` or `--estimate` parameter a
+conflict. A fit's `mle.toml`, which names every parameter, is the common case.
+Options:
+
+- (a) Refuse it. `profile m.camdl --fixed-file mle.toml --sweep beta …` with no
+  fit config then fails; the workaround is to hand-trim the file to the held
+  parameters, then add `--estimate` and `--starts from_params=mle.toml`.
+- (b) When the file carries a fit's `[provenance]` block
+  (`carries_fit_provenance`, `params_resolver.rs:1860`), its entries for swept
+  or estimated names are not used and are listed, as for a starts source: a
+  starts-source rule for fit-provenance files, not a precedence rule.
+- (c) Keep the landed `--fixed` notice behaviour (`21d4ed47`) as well.
+
+Recommendation: left to the maintainer.
+
 ## 13. Out of scope, each with its reason
 
-- **`--starts from_scenario`** (D6), deferred; `--starts from_params` covers the
-  migration.
+- **`--starts from_scenario`** (D6), deferred; until it exists, a scenario's
+  values used as starts are written out by hand for `--starts from_params`.
 - **Sweeping an `[estimate]` parameter in `fit run`.** Under IF2 that is
   `profile`; under PGAS or PMMH it is a grid of conditional posteriors, a
   command the maintainer has deferred. It stays refused.
