@@ -55,6 +55,14 @@ scenarios over the same draws are reported by the `fit predict` run that
 computes them, so nothing is unreported, but the contrast path is silent on its
 own.
 
+**5. A fit.toml's own scenario on `survey` and `profile`.** Known, and being
+fixed separately: `survey --fit fit.toml --scenario X` ignores `--scenario`
+(`survey.rs` reads only the fit.toml's `scenario`). The tests here do not use
+`survey --fit`. The mirror image is on `profile`, inferred from reading the code
+and not executed: `profile --fit fit.toml` reads only the CLI
+`--scenario`/`--enable`/`--disable` (`profile.rs`, `a.scenario`) and never the
+fit.toml's `scenario`, `enable` or `disable`.
+
 **4. Smaller observations.** A one-column `--draws FILE` is refused ("needs at
 least 2 columns", `main.rs`), so a single-parameter draws file cannot be passed.
 `--sweep beta=lin(0.3,0.3,1)` is refused (n ≥ 2); a one-value list
