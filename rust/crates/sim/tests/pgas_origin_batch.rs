@@ -59,6 +59,10 @@ fn model_with_init(effects: &[(&str, f64, Value, bool)], beta: f64, gamma: f64, 
             })
             .collect(),
     );
+    // `k`: a negative-binomial dispersion for the observation-gradient test.
+    m["parameters"].as_array_mut().unwrap().push(json!({
+        "name": "k", "value": {"mode": "fixed", "value": 4.0}, "param_kind": null, "param_dim": null,
+    }));
     let mut model = ir::from_str(&serde_json::to_string(&doc).unwrap()).expect("parse");
     for p in &mut model.parameters {
         let v = match p.name.as_str() {
@@ -66,6 +70,7 @@ fn model_with_init(effects: &[(&str, f64, Value, bool)], beta: f64, gamma: f64, 
             "gamma" => gamma,
             "N0" => N0 as f64,
             "I0" => 2.0,
+            "k" => 4.0,
             other => panic!("unexpected parameter {other}"),
         };
         p.value = ir::parameter::ParamValue::Fixed { value: v };
@@ -396,4 +401,84 @@ fn the_sweep_and_the_init_filter_weight_by_the_t_start_observation() {
     }
     assert!(swept >= 8, "the sweep must weight by the t_start reading: {swept}/10 start at I >= 4");
     assert!(init >= 8, "the init filter must weight by it: {init}/10 start at I >= 4");
+}
+
+/// `neg_binomial(mean = I + 0.1, r = k)` readings of `I` at `times`, with the
+/// compiler's `∂r/∂k = 1` attached (what `camdlc` emits for `r = k`).
+fn i_obs_nb(m: &Arc<CompiledModel>, times: &[f64], y: &[f64]) -> MultiStreamObsModel {
+    use sim::inference::multi_stream_obs::{dense_cells, BoundObs, StreamProjection, StreamSpec, StreamTimes};
+    use ir::expr::{BinOp, BinOpExpr, BinOpWrap, ConstExpr, Expr, ParamExpr, ProjectedExpr};
+    let mean = Expr::BinOp(BinOpWrap {
+        bin_op: BinOpExpr {
+            op: BinOp::Add,
+            left: Box::new(Expr::Projected(ProjectedExpr { projected: () })),
+            right: Box::new(Expr::Const(ConstExpr { value: 0.1 })),
+        },
+    });
+    let spec = StreamSpec {
+        projection: StreamProjection::IntCompSum(vec![1]),
+        ir_model: ir::observation::ObservationModel {
+            name: "i_obs".into(),
+            source: "i_obs".into(),
+            columns: vec![
+                ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
+                ir::observation::ObsColumn { name: "i_obs".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+            ],
+            scored: "i_obs".into(),
+            emit_schedule: Some(ir::observation::ObservationSchedule::AtTimes(vec![])),
+            projection: ir::observation::Projection::CurrentPop("I".into()),
+            projection_state_grad: Default::default(),
+            likelihood: ir::observation::Likelihood::NegBinomial(ir::observation::NegBinomialLikelihood {
+                mean: ir::Diffable::new(mean),
+                dispersion: ir::Diffable {
+                    expr: Expr::Param(ParamExpr { param: "k".into() }),
+                    grad: std::collections::HashMap::from([(
+                        "k".to_string(),
+                        ir::deriv::DerivEntry::Grad(Expr::Const(ConstExpr { value: 1.0 })),
+                    )]),
+                    proj_grad: None,
+                },
+            }),
+            stratum: vec![],
+            covers: None,
+        },
+        observations: dense_cells(y.to_vec()),
+        times: StreamTimes::Instants(times.to_vec()),
+        aux: vec![],
+    };
+    MultiStreamObsModel::new(BoundObs::bind(0.0, vec![spec]).unwrap().0, m.clone()).unwrap()
+}
+
+/// The gradient of the t_start term: on a fixed path with a t_start reading,
+/// `∂/∂k` of the complete-data log-likelihood from `complete_data_loglik_grad`
+/// matches a central finite difference of `complete_data_loglik` in the
+/// negative-binomial dispersion `k`. The t_start row is the largest single
+/// contribution (a reading of 15 against a mean of 3.1), so dropping its
+/// gradient term is far outside the tolerance.
+#[test]
+fn the_t_start_term_gradient_matches_a_finite_difference() {
+    use sim::inference::pgas::build_obs_at_substep;
+    use sim::inference::pgas_grad::{complete_data_loglik_grad, resolve_rate_grad_for_run};
+    let m = origin_model();
+    let (times, y) = ([0.0, 2.0, 4.0], [15.0, 3.0, 2.0]);
+    let obs = observations(&times, &y);
+    let om = i_obs_nb(&m, &times, &y);
+    let map = build_obs_at_substep(&obs, 0.0, DT).unwrap();
+    let traj = reference(&m, 6);
+    let ki = m.param_index["k"];
+    let value = |k: f64| {
+        let mut p = m.default_params.clone();
+        p[ki] = k;
+        complete_data_loglik(&m, &traj, &p, &obs, DT, &om, &map).unwrap().total
+    };
+    let h = 1e-5;
+    let fd = (value(4.0 + h) - value(4.0 - h)) / (2.0 * h);
+    let n = m.default_params.len();
+    let to_est: Vec<Option<usize>> = (0..n).map(Some).collect();
+    let rate_grads = resolve_rate_grad_for_run(&m.resolved.rate_grads_indexed, &to_est);
+    let (_, grad) = complete_data_loglik_grad(
+        &m, &traj, &m.default_params, &obs, DT, &om, n, &rate_grads, &map, &(0..n).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert!((grad[ki] - fd).abs() < 1e-6 * fd.abs().max(1.0), "d/dk analytic {} vs FD {fd}", grad[ki]);
 }
