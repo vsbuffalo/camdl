@@ -298,26 +298,28 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
     // TIME stays accumulated (s*dt deferred, task #14).
     let obs_times: Vec<f64> = (0..n_obs).map(|i| obs_model.obs_time(i)).collect();
 
-    // gh#216: scheduled interventions fire CURSOR-keyed off the timeline's effect
-    // boundaries, so an off-grid observation re-tiling the Exact substep grid no
-    // longer moves the firing instant. `ExactInferenceTimeline::build` runs the
-    // two exact guards FIRST (no inference path can skip a guard — the gh#187
-    // class), then gathers the cursor-keyed effect batches. Built ONCE here and
-    // constant across IF2 iterations: a parametric `at [<param>]` schedule — whose
-    // fire times would be per-particle and per-iteration — is refused by
-    // `guard_attimesexpr_exact`, so every scheduled fire time is
-    // `base_params`-independent. An off-grid scheduled fire time and always-active
-    // events are the other unsupported Exact cases (refused / out of scope). See
-    // particle_filter.rs for the same pattern.
+    // The effect plan (proposal 2026-10-04): the process's own clock decides
+    // when each effect fires — chain-binomial is discrete-time, so every effect
+    // fires at the end of a step of the run's grid `t_start + k·dt` — and the
+    // schedule lands on each firing instant (gh#216). Built ONCE here and
+    // constant across IF2 iterations, from `base_params`: a plan cannot hold
+    // per-particle fire times, so `build` refuses an estimated parameter in any
+    // effect's schedule, events included (D3, gh#984 — before the refusal the
+    // fire time stayed at its starting value while the swarm's value for it
+    // drifted). Amounts stay per particle: `step` and `apply_origin` evaluate
+    // them with the particle's own θ.
+    let per_particle: Vec<usize> = if2_params.iter().map(|p| p.index).collect();
     let timeline = crate::intervention::ExactInferenceTimeline::build(
         process.try_compiled_model(),
         base_params,
         config.t_start,
         config.dt,
+        process.fire_clock(config.dt),
         crate::boundary_times::ObsTimes::new(obs_times)?,
+        &per_particle,
     )?;
     let schedule = timeline.schedule;
-    let scheduled = timeline.effects;
+    let plan = timeline.plan;
 
     // The declared start. Start from `base_params` for non-estimated slots, then overwrite each
     // estimated slot with that `EstimatedParam`'s `.initial`. For
@@ -471,6 +473,9 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         {
             let init_state = process.initial_state_draw(pp, rng)?;
             s.counts.copy_from_slice(&init_state.counts);
+            // D1: the effects at t_start act on this particle's x₀, with its
+            // own θ, before the first step. A no-op when there are none.
+            process.apply_origin(s, &plan, pp, config.t_start, config.dt)?;
             s.reset_flows();
             // Per-ITERATION re-seed (NOT a per-observation reset): zero BOTH the
             // per-transition tally and the per-stream `acc` bins blanket, so no
@@ -576,7 +581,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                     // `fired` lands the cursor-keyed scheduled-intervention batch.
                     for (t_local, step_dt, fired) in schedule.substeps(cur, t_start) {
                         let due_iv: &[usize] = match fired {
-                            Some(idx) => &scheduled.batches[idx],
+                            Some(idx) => plan.batch(idx),
                             None => &[],
                         };
                         process.step(state, pp, t_local, step_dt, per_eval, rng, scratch, due_iv)?;

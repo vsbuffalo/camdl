@@ -18,10 +18,8 @@ use super::types::ParticleState;
 /// (for PGAS). The only process backend that supports PGAS.
 ///
 /// Holds no `dt`: the integrator step arrives per call (`step`/`density` take
-/// `dt`), and effect firing is decided CURSOR-keyed by the driver from the
-/// timeline — there is no per-process `fire_steps`/`round(t/dt)` view to resolve
-/// at a stored `dt` any more (that round-key path was the gh#216 events bug;
-/// see `effects::split_due_batch`).
+/// `dt`), and effect firing is decided by the driver from the run's
+/// [`crate::effect_plan::EffectPlan`] — there is no per-process firing view.
 pub struct ChainBinomialProcess {
     pub compiled: Arc<CompiledModel>,
 }
@@ -75,13 +73,11 @@ impl ProcessModel for ChainBinomialProcess {
         scratch: &mut StepScratch,
         due_effects: &[usize],
     ) -> Result<(), SimError> {
-        // The driver decided due-ness CURSOR-keyed from the timeline (events AND
-        // scheduled interventions are both registered on `effect_times` via
-        // `timeline_effects`, so the integrator landed on each effect time and the
-        // cursor reports the firing batch here — empty off a boundary). Split it
-        // by kind into the lifecycle halves: events at PROPOSE (fused with the
-        // kernel draw), interventions at INTERVENE. step_one applies what we put
-        // here; it no longer decides. No `round(t/dt)` for events (gh#216).
+        // The driver decided due-ness from the effect plan: the schedule lands
+        // on each of the plan's firing instants and the cursor reports that
+        // instant's batch here — empty off a boundary. Split it by kind into the
+        // lifecycle halves: events at PROPOSE (fused with the kernel draw),
+        // interventions at INTERVENE. step_one applies what we put here.
         crate::effects::split_due_batch(&self.compiled, due_effects, &mut scratch.effect_batch);
         // KNOWN LIMITATION (docs/dev/incidents/2026-06-07-chain-binomial-
         // stale-real-state.md, §inference scope): inference particles
@@ -114,6 +110,29 @@ impl ProcessModel for ChainBinomialProcess {
 
     fn try_compiled_model(&self) -> Option<&CompiledModel> {
         Some(&self.compiled)
+    }
+
+    fn apply_origin(
+        &self,
+        state: &mut ParticleState,
+        plan: &crate::effect_plan::EffectPlan,
+        params: &[f64],
+        t_start: f64,
+        dt: f64,
+    ) -> Result<(), SimError> {
+        if plan.at_origin().is_empty() {
+            return Ok(());
+        }
+        // Integer counts only, as in `step`: the particle carries no real
+        // reservoir (the known limitation below), so the real state is zeroed.
+        let mut int_s = crate::state::IntState::from_vec(state.counts.clone());
+        let mut real = crate::state::RealState::new(self.compiled.real_local_to_global.len());
+        crate::effects::apply_origin_batch_discrete(
+            &self.compiled, plan, &mut int_s, &mut real, params, t_start, dt,
+            self.compiled.balance.as_ref(),
+        )?;
+        state.counts.copy_from_slice(&int_s.counts);
+        Ok(())
     }
 }
 

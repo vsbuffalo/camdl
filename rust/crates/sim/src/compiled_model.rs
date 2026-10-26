@@ -1235,6 +1235,67 @@ impl CompiledModel {
         Ok(())
     }
 
+    /// The first parameter index `expr` reads for which `wanted` holds —
+    /// directly (`Param`), through a hoisted binding body (`BindingRef`,
+    /// `PerEvalRef`), or through a forcing's live coefficients (`TimeFunc`) — or
+    /// `None`. The parameter-reference sibling of
+    /// [`crate::resolved_expr::references_state`]: it answers "does this
+    /// expression move with an estimated parameter?", which the PGAS and IF2
+    /// refusals (proposal 2026-10-04 §5, D3) ask of effect actions and
+    /// schedules. The match is exhaustive on purpose: a new variant must be
+    /// classified here.
+    pub fn first_param_read(
+        &self,
+        expr: &ResolvedExpr,
+        wanted: &dyn Fn(usize) -> bool,
+    ) -> Option<usize> {
+        let read = |e: &ResolvedExpr| self.first_param_read(e, wanted);
+        match expr {
+            ResolvedExpr::Param(i) => wanted(*i).then_some(*i),
+            ResolvedExpr::BinOp { left, right, .. } => read(left).or_else(|| read(right)),
+            ResolvedExpr::UnOp { arg, .. } => read(arg),
+            ResolvedExpr::Cond { pred, then_, else_ } =>
+                read(pred).or_else(|| read(then_)).or_else(|| read(else_)),
+            ResolvedExpr::TableLookup { index, .. } => read(index),
+            ResolvedExpr::UncheckedDim { inner } => read(inner),
+            ResolvedExpr::Reduce(terms) => terms.iter().find_map(read),
+            // Bodies are topologically ordered (a body references only earlier
+            // slots), so the recursion terminates.
+            ResolvedExpr::BindingRef(slot) => self.resolved.bindings.get(*slot).and_then(read),
+            ResolvedExpr::PerEvalRef(slot) => {
+                self.resolved.per_eval_bindings.get(*slot).and_then(read)
+            }
+            ResolvedExpr::TimeFunc(i) => {
+                let tf = self.time_func_cache.get(*i)?;
+                let lag = tf.lag.as_ref().and_then(read);
+                lag.or_else(|| match &tf.kind {
+                    CompiledTimeFuncKind::Sinusoidal { amplitude, period, phase, baseline } => {
+                        [amplitude, period, phase, baseline].into_iter().find_map(read)
+                    }
+                    CompiledTimeFuncKind::Periodic { period, values } => {
+                        read(period).or_else(|| values.iter().find_map(read))
+                    }
+                    CompiledTimeFuncKind::Fourier { period, harmonics } => read(period)
+                        .or_else(|| harmonics.iter().find_map(|(a, b)| read(a).or_else(|| read(b)))),
+                    CompiledTimeFuncKind::Piecewise { .. }
+                    | CompiledTimeFuncKind::Interpolated { .. }
+                    | CompiledTimeFuncKind::Constant { .. }
+                    | CompiledTimeFuncKind::CubicSpline(_)
+                    | CompiledTimeFuncKind::PeriodicSpline { .. } => None,
+                })
+            }
+            ResolvedExpr::Const(_)
+            | ResolvedExpr::IntPop(_)
+            | ResolvedExpr::RealPop(_)
+            | ResolvedExpr::IntPopSum(_)
+            | ResolvedExpr::MixedPopSum { .. }
+            | ResolvedExpr::Time
+            | ResolvedExpr::Dt
+            | ResolvedExpr::Projected
+            | ResolvedExpr::ObsColumnRef(_) => None,
+        }
+    }
+
     /// Derive per-intervention sets of step indices for a given
     /// integrator step `dt` and parameter vector. The returned view is
     /// a runtime projection of `self.resolve_fire_times(params)`;

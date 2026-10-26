@@ -5,7 +5,8 @@ use crate::{
     resolved_expr::{eval_resolved, ResolvedExpr},
     state::{IntState, RealState},
 };
-use crate::boundary_times::{EffectTimes, ObsTimes};
+use crate::boundary_times::ObsTimes;
+use crate::effect_plan::{EffectPlan, FireClock, Origin};
 use crate::schedule::{Schedule, StepPolicy, GRID_TOL};
 use ir::intervention::{Action, InterventionSchedule};
 
@@ -315,45 +316,83 @@ pub fn guard_attimesexpr_exact(
     Ok(())
 }
 
-/// A validated EXACT-inference timeline (gh#233 Layer 2.5): the [`Schedule`] the
-/// bootstrap PF / IF2 step, plus the [`TimelineEffects`] batches
-/// the producer fires cursor-keyed. Built ONLY via [`ExactInferenceTimeline::build`],
-/// which runs the exact-inference guards FIRST — so no inference path can
-/// construct a timeline that skipped a guard (the gh#187 class: a forgotten guard
-/// is a latent silent-wrong). PGAS builds its substep grid differently
+/// IF2 refusal (D3, gh#984): an estimated parameter inside any effect's
+/// schedule. IF2 carries a θ per particle, but the effect plan is built once per
+/// run from the base parameters, so a fire time that depends on an estimated
+/// parameter would stay at its starting value for every particle and every
+/// iteration while the swarm's value for it performs a cooled random walk — a
+/// flat likelihood and a plausible-looking estimate, exit 0. Amounts stay
+/// allowed: `step` evaluates them with the particle's own θ.
+///
+/// `per_particle` lists the parameter indices that vary per particle (IF2's
+/// estimated set); empty for a filter whose θ is shared (PF, PMMH), which
+/// rebuilds its plan at each evaluation's θ.
+pub fn refuse_per_particle_schedule(
+    model: &CompiledModel,
+    per_particle: &[usize],
+) -> Result<(), SimError> {
+    if per_particle.is_empty() {
+        return Ok(());
+    }
+    let wanted = |i: usize| per_particle.contains(&i);
+    for (iv_idx, iv) in model.model.interventions.iter().enumerate() {
+        let Some(exprs) = model.resolved.intervention_at_time_exprs[iv_idx].as_deref() else {
+            continue;
+        };
+        if let Some(p) = exprs.iter().find_map(|e| model.first_param_read(e, &wanted)) {
+            let name = &model.model.parameters[p].name;
+            return Err(SimError::Validation(format!(
+                "if2: `{name}` is estimated but sets the fire time of {} `{}`, which IF2 \
+                 resolves once per run, so the fit cannot move it. Fit with PMMH, or fix \
+                 `{name}`.",
+                if iv.kind.is_event() { "event" } else { "intervention" },
+                iv.name,
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A validated inference timeline (gh#233 Layer 2.5): the [`Schedule`] the
+/// bootstrap PF / IF2 step, plus the [`EffectPlan`] whose batches the producer
+/// fires at each landing. Built ONLY via [`ExactInferenceTimeline::build`],
+/// which runs the inference refusals FIRST — so no inference path can construct
+/// a timeline that skipped one (the gh#187 class: a forgotten guard is a latent
+/// silent-wrong). PGAS builds its substep grid differently
 /// (`build_substep_grid`) and is not a consumer.
 pub struct ExactInferenceTimeline {
     pub schedule: Schedule,
-    pub effects: TimelineEffects,
+    pub plan: EffectPlan,
 }
 
 impl ExactInferenceTimeline {
-    /// Run the exact-inference guards, gather the scheduled-effect timeline, and
-    /// build the Exact `Schedule`. `model = None` (a process with no compiled
-    /// model) means no scheduled effects. The guards cannot be skipped — a valid
-    /// `ExactInferenceTimeline` exists only if they passed.
+    /// Run the inference refusals, build the effect plan on the process's
+    /// `clock` over `[t_start, last observation]`, and build the `Schedule`
+    /// that lands on each observation and each firing instant. `model = None`
+    /// (a process with no compiled model) means no effects. `per_particle` is
+    /// the set of parameter indices that vary per particle (IF2's estimated
+    /// set; empty for a shared θ), see [`refuse_per_particle_schedule`].
     pub fn build(
         model: Option<&CompiledModel>,
         params: &[f64],
         t_start: f64,
         dt: f64,
+        clock: FireClock,
         obs: ObsTimes,
+        per_particle: &[usize],
     ) -> Result<Self, SimError> {
-        let effects = if let Some(model) = model {
-            guard_attimesexpr_exact(model, StepPolicy::Exact)?;
-            guard_exact_offgrid_effect_time(model, params, t_start, dt, StepPolicy::Exact)?;
-            timeline_effects(model, params)
-        } else {
-            TimelineEffects::default()
-        };
         // `obs` is already validated (constructed via `ObsTimes::new`); reuse it
-        // directly rather than unwrap-and-revalidate. The effect timeline is
-        // index-aligned with `effects.batches`, so it is validated order-PRESERVING
-        // (`from_timeline`), never sorted.
+        // directly rather than unwrap-and-revalidate.
         let t_end = obs.last().unwrap_or(t_start);
-        let schedule =
-            Schedule::exact_inference(dt, t_end, EffectTimes::from_timeline(&effects)?, obs);
-        Ok(ExactInferenceTimeline { schedule, effects })
+        let plan = if let Some(model) = model {
+            guard_attimesexpr_exact(model, StepPolicy::Exact)?;
+            refuse_per_particle_schedule(model, per_particle)?;
+            EffectPlan::build(model, params, t_start, t_end, clock, Origin::Init)?
+        } else {
+            EffectPlan::default()
+        };
+        let schedule = Schedule::exact_inference(dt, t_end, plan.effect_times(), obs);
+        Ok(ExactInferenceTimeline { schedule, plan })
     }
 }
 
@@ -375,10 +414,12 @@ mod tests {
             &[],
             0.0,
             1.0,
+            FireClock::Grid { dt: 1.0 },
             ObsTimes::new(vec![1.0, 2.0, 3.0]).unwrap(),
+            &[],
         )
         .unwrap();
-        assert!(timeline.effects.times.is_empty(), "no model ⇒ no scheduled effects");
+        assert!(timeline.plan.is_empty(), "no model ⇒ no scheduled effects");
         let cur = crate::schedule::Cursor::default();
         assert_eq!(timeline.schedule.obs_time(&cur), Some(1.0), "obs boundaries carried");
     }

@@ -123,29 +123,22 @@ fn gate_run_method_against_model(
             return Err(format!("method '{}': {}", stage_name, msg));
         }
         // gh#449: the recurring-fire collision guard (gh#447) lived only at the
-        // three forward backends' entry points; the inference path calls
-        // `resolve_fire_steps` directly, whose dedup `BTreeSet` is where a
-        // colliding fire is silently dropped. Check it here, per stage, so a
-        // coarse-`dt` fit fails loudly instead of quietly losing fires.
+        // three forward backends' entry points; check it here too, per stage,
+        // so a coarse-`dt` fit fails loudly instead of quietly losing fires.
         //
-        // Two step sizes reach the integrator on this path, and BOTH can
-        // collide. `burnin_dt` (gh#396) is the more dangerous of the two: it
-        // exists precisely to be COARSER than `dt` on the unscored warm-up, so
-        // a schedule safe at `dt` can still drop fires during warm-up. It
-        // postdates gh#447, which is why the original guard never considered
-        // it.
-        let burnin_dt = match stage {
-            config_v2::Algorithm::Mh { burnin_dt, .. } => *burnin_dt,
-            _ => None,
+        // Only a Grid clock can drop a fire (effect plan, proposal 2026-10-04):
+        // the particle-filter methods step chain-binomial, which fires one
+        // intervention once per step. An ODE-backed method fires every effect at
+        // its own instant — at `dt` and at a coarse warm-up `burnin_dt` alike —
+        // so for it the check does not apply.
+        let clock = match stage.backend() {
+            crate::run_meta::InferenceBackend::Ode => sim::effect_plan::FireClock::Exact,
+            _ => sim::effect_plan::FireClock::Grid { dt },
         };
-        for (label, step) in [("dt", Some(dt)), ("burnin_dt", burnin_dt)] {
-            let Some(step) = step else { continue };
-            if let Err(e) = compiled.validate_recurring_dt_collisions(
-                compiled.model.simulation.t_start,
-                sim::effect_plan::FireClock::Grid { dt: step },
-            ) {
-                return Err(format!("method '{}' ({} = {}): {}", stage_name, label, step, e));
-            }
+        if let Err(e) =
+            compiled.validate_recurring_dt_collisions(compiled.model.simulation.t_start, clock)
+        {
+            return Err(format!("method '{}' (dt = {}): {}", stage_name, dt, e));
         }
     }
     // gh#166 B2: warn if an ODE-backed method will fit a `dt`-in-rate model
@@ -2811,34 +2804,24 @@ mod tests {
         });
     }
 
-    /// An `mh` stage with a coarse `burnin_dt` — the case gh#449 does not
-    /// mention and gh#447 could not have, since `burnin_dt` (gh#396) postdates
-    /// it. `burnin_dt` exists to be COARSER than `dt` on the unscored warm-up,
-    /// so a schedule that is perfectly safe at the run's `dt` can still drop
-    /// recurring fires during warm-up. The gate must check both step sizes.
+    /// An `mh` stage (ODE-backed) with a coarse `burnin_dt` is accepted: the
+    /// ODE fires every effect at its own instant (proposal 2026-10-04, D2), so
+    /// a warm-up step coarser than the recurrence period drops no fire. The
+    /// coarse warm-up still clips onto each effect instant (`run_ode`).
     #[test]
-    fn fit_run_rejects_coarse_burnin_dt_even_when_dt_is_fine() {
+    fn fit_run_accepts_coarse_burnin_dt_on_an_ode_stage() {
         let compiled = compiled_golden("ocaml/golden/seir_seasonal_importation.ir.json");
         let stage = mh_stage_with_burnin_dt(Some(400.0));
-        // dt = 1.0 is fine on its own — proven by the negative control above —
-        // so any rejection here can only come from `burnin_dt`.
-        let err = gate_run_method_against_model(&stage, &compiled, 1.0).expect_err(
-            "a coarse burnin_dt that drops recurring fires must be rejected even when dt is fine",
-        );
-        assert!(err.contains("mh"), "should name the offending method: {err}");
-        assert!(
-            err.contains("burnin_dt"),
-            "should name burnin_dt as the offending step, not dt: {err}"
-        );
-        assert!(
-            err.contains("silently dropped"),
-            "should carry the collision diagnostic: {err}"
-        );
+        gate_run_method_against_model(&stage, &compiled, 1.0).unwrap_or_else(|e| {
+            panic!("an ODE stage fires each effect at its own instant; burnin_dt=400 drops nothing: {e}")
+        });
+        // And at a coarse dt too: the check is a Grid-clock check.
+        gate_run_method_against_model(&stage, &compiled, 400.0).unwrap_or_else(|e| {
+            panic!("an ODE stage fires each effect at its own instant; dt=400 drops nothing: {e}")
+        });
     }
 
-    /// Negative control for the burnin_dt arm: the same stage with no
-    /// `burnin_dt` set must pass at the same `dt`, so the test above is
-    /// attributable to `burnin_dt` and not to the stage kind.
+    /// The same stage with no `burnin_dt` set passes too.
     #[test]
     fn fit_run_accepts_an_mh_stage_without_burnin_dt() {
         let compiled = compiled_golden("ocaml/golden/seir_seasonal_importation.ir.json");
