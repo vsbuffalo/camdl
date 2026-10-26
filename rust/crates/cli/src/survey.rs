@@ -633,6 +633,37 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
 
 // ─── Resolution ──────────────────────────────────────────────────────────────
 
+/// The scenario a fit-aware survey runs under, from the fit config's top-level
+/// `scenario` key and the `--scenario` flag.
+///
+/// Either source alone selects the scenario. When both name one they must
+/// agree: the fit config describes the problem a fit was run on, so a flag
+/// naming a different scenario is a contradiction about which problem this
+/// survey scores, and neither silently wins. A flag alongside the config's
+/// `enable`/`disable` lists is refused for the same reason the config refuses
+/// `scenario` beside them. The name itself is resolved (declared preset, or
+/// refused listing the declared names) by `resolve_parameters`.
+fn fit_aware_scenario(
+    flag: Option<&str>,
+    config: Option<&str>,
+    config_has_adhoc: bool,
+) -> Result<Option<String>, String> {
+    match (flag, config) {
+        (None, c) => Ok(c.map(str::to_string)),
+        (Some(f), _) if config_has_adhoc => Err(format!(
+            "--scenario `{f}` cannot be combined with the fit config's \
+             `enable`/`disable` lists: a run takes a named scenario or an \
+             ad-hoc toggle set, not both.\n  \
+             Fix: drop --scenario, or move the toggles into a scenario the \
+             model declares.")),
+        (Some(f), Some(c)) if f != c => Err(format!(
+            "--scenario `{f}` contradicts the fit config's `scenario = \"{c}\"`.\n  \
+             Fix: drop --scenario to survey under `{c}`, or edit the fit \
+             config's `scenario` key to `{f}`.")),
+        (Some(f), _) => Ok(Some(f.to_string())),
+    }
+}
+
 fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
     -> Result<ResolvedSurveyInputs, String>
 {
@@ -723,9 +754,12 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         let fixed_resolved_indexmap: IndexMap<String, f64> =
             fixed_cfg.resolve_with_model(&model_pre)?;
 
-        // Build the inputs for the unified resolver. Scenario
-        // (or enable/disable) routing matches the previous behaviour.
-        let scenario_opt: Option<String> = config.scenario.clone();
+        // Build the inputs for the unified resolver. The scenario is the one
+        // the fit config and `--scenario` agree on (`fit_aware_scenario`).
+        let scenario_opt: Option<String> = fit_aware_scenario(
+            a.scenario.as_deref(), config.scenario.as_deref(),
+            !config.enable.is_empty() || !config.disable.is_empty(),
+        )?;
         let adhoc_enable: Vec<String> = config.enable.clone();
         let adhoc_disable: Vec<String> = config.disable.clone();
         // No `--fixed` on the survey-fit path; the inline `--fixed`
@@ -810,17 +844,16 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
 
         let compiled = Arc::new(CompiledModel::new(model.clone())
             .map_err(|e| format!("compile error: {:?}", e))?);
+        // `default_params` already carries every resolved tier, `[fixed]`
+        // and the scenario included. Writing `[fixed]` over it again here
+        // would put tier 2 back above tier 4 and undo a scenario that patches
+        // a parameter `[fixed]` also pins.
         let mut base_params = compiled.default_params.clone();
         for (name, spec) in &config.estimate {
             if let Some(start) = spec.start {
                 if let Some(&idx) = compiled.param_index.get(name.as_str()) {
                     base_params[idx] = start;
                 }
-            }
-        }
-        for (name, &v) in &fixed_resolved {
-            if let Some(&idx) = compiled.param_index.get(name.as_str()) {
-                base_params[idx] = v;
             }
         }
 
@@ -894,7 +927,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             per_stream_times,
             data_hashes,
             fixed: fixed_resolved.into_iter().collect(),
-            scenario: config.scenario,
+            scenario: scenario_opt,
             estimate_starts: if estimate_starts.is_empty() {
                 None
             } else {

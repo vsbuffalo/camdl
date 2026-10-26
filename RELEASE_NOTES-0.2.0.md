@@ -381,6 +381,20 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
 User-visible correctness fixes (selected from ~138):
 
+- **`survey --fit` applies `--scenario`.** The fit-aware form of `survey` read
+  only the fit config's own `scenario` key, so the `--scenario` flag never
+  reached parameter resolution: earlier `survey --fit … --scenario NAME` runs
+  used the unmodified model, so their landscapes did not include the scenario
+  (they were byte-identical to, and stored in the same leaf as, the run with no
+  scenario), and a misspelled name ran at exit status 0. The flag is now
+  resolved like every other verb's: a declared scenario is applied and keys its
+  own leaf, an undeclared one is refused with the declared names listed. When
+  the fit config also names a scenario, the two must agree or the run is
+  refused; `--scenario` beside the config's `enable`/`disable` lists is refused
+  too. Separately, a scenario that set a parameter the config also pins in
+  `[fixed]` was overridden by the `[fixed]` value when the landscape was scored;
+  the scenario's value now applies, as the precedence order states. Surveys
+  whose config named such a scenario should be re-run.
 - **`baseline` is an ordinary scenario name on every verb.**
   `--scenario baseline` means the scenario the model declares under that name,
   on `simulate`, `fit predict`, `pfilter`, `profile` and inline-mode `survey`; a
