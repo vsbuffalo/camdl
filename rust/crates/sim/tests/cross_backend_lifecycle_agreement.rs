@@ -846,6 +846,18 @@ fn set_event(name: &str, comp: &str, v: f64) -> Intervention {
     )
 }
 
+fn drain_event(name: &str, frac: f64) -> Intervention {
+    event(
+        name,
+        vec![3.0],
+        Action::FractionTransfer(FractionTransfer {
+            src: "X".into(),
+            dst: "Y".into(),
+            fraction: Expr::const_(frac),
+        }),
+    )
+}
+
 /// Two `set` events on one compartment at one instant are refused on every
 /// backend, with an error naming the compartment, both events and the time.
 /// Summing them gives `v1 + v2 − x`, which means nothing: from X = 5 two sets
@@ -884,6 +896,46 @@ fn two_sets_on_one_compartment_at_one_instant_are_refused() {
         failures.is_empty(),
         "every backend must refuse two sets on one compartment with an error naming \
          'X', 'first', 'second' and t=3:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// A drain-and-`set` phase that leaves a compartment negative is an error on
+/// every backend, never a clamped 0. Cases from X = 10: `set X = 2` with a full
+/// drain (10 + (2 − 10) − 10 = −8), and two drains of 0.6 (10 − 6 − 6 = −2).
+/// Gillespie and the ODE report `InterventionNegative`; chain-binomial reports
+/// its post-draw scan's `BinomialOvershoot` (a known mislabel, left as is).
+#[test]
+fn drain_and_set_phase_going_negative_is_an_error_on_every_backend() {
+    use sim::error::{NegativeCountCause, SimError};
+    let cases = [
+        ("set_plus_full_drain", vec![set_event("reset", "X", 2.0), drain_event("cull", 1.0)]),
+        ("two_drains_overdraw", vec![drain_event("cull_a", 0.6), drain_event("cull_b", 0.6)]),
+    ];
+    let mut failures = Vec::new();
+    for (case, events) in cases {
+        let results = coincident_results(case, ("X", 10.0), ("Y", 0.0), events);
+        let wrong: Vec<String> = results
+            .iter()
+            .filter_map(|(label, res)| {
+                let ok = match res {
+                    Err(SimError::NegativeCount { compartment, cause, .. }) => {
+                        compartment == "X"
+                            && (label.starts_with("chain_binomial")
+                                || *cause == NegativeCountCause::InterventionNegative)
+                    }
+                    _ => false,
+                };
+                (!ok).then(|| format!("  {label}: {res:?}"))
+            })
+            .collect();
+        if !wrong.is_empty() {
+            failures.push(format!("{case}:\n{}", wrong.join("\n")));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "X must be refused as negative on every backend, not clamped:\n{}",
         failures.join("\n")
     );
 }
