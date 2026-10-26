@@ -5034,10 +5034,6 @@ mod theta_proposal_score_tests {
             SimError::NonFiniteParameter { name: "tau".into(), value: f64::NEG_INFINITY, t: -101.0 },
             SimError::NumericalCollapse { kind: CollapseKind::DivByZero, t: 3.0 },
             SimError::NumericalCollapse { kind: CollapseKind::SqrtNegative, t: 3.0 },
-            SimError::NegativeCount {
-                compartment: "S".into(), attempted_value: -2, t: 4.0,
-                cause: NegativeCountCause::BinomialOvershoot,
-            },
             SimError::TableLookup("table 'k': index 5 out of bounds [0, 2)".into()),
             SimError::NegativePropensity { transition: "foi".into(), value: -0.5, t: 2.0 },
             SimError::DivisionByZero(7.0),

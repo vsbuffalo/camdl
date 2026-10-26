@@ -89,7 +89,7 @@ pub const ITER_BUDGET: u64 = 10_000_000_000; // 1e10 particle-substeps
 ///   1. **Classify** ([`DeathMask::classify`]) — a particle that hits a
 ///      *per-particle-recoverable* `SimError`
 ///      ([`SimError::is_per_particle_recoverable`]: `NumericalCollapse`,
-///      `NegativeCount{BinomialOvershoot}`, `NonFiniteParameter`,
+///      `NegativeCount{InitialState}`, `NonFiniteParameter`,
 ///      `TableLookup`) is marked dead and stops propagating. **Every other**
 ///      error propagates and tears the evaluation down.
 ///   2. **Score** — a dead particle's log-weight is `−∞`, so systematic
@@ -318,11 +318,18 @@ mod tests {
         assert!(recoverable.is_per_particle_recoverable());
         assert!(DeathMask::classify(Err(recoverable)).unwrap());
 
-        let overshoot = SimError::NegativeCount {
+        let negative_init = SimError::NegativeCount {
             compartment: "S".into(), attempted_value: -1, t: 1.0,
-            cause: NegativeCountCause::BinomialOvershoot,
+            cause: NegativeCountCause::InitialState,
         };
-        assert!(DeathMask::classify(Err(overshoot)).unwrap());
+        assert!(DeathMask::classify(Err(negative_init)).unwrap());
+
+        // A simulator bug is never absorbed as a dead particle.
+        let invariant = SimError::SimulatorInvariant { what: "x".into(), t: 1.0 };
+        assert!(matches!(
+            DeathMask::classify(Err(invariant)),
+            Err(SimError::SimulatorInvariant { .. }),
+        ));
 
         // Structural: must NOT be absorbed by the mask.
         let structural = SimError::Validation("model cannot run".into());

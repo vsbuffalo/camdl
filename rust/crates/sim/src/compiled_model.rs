@@ -1117,8 +1117,8 @@ impl CompiledModel {
     /// is therefore capped by only the first source, then applied to every
     /// source — so a *secondary* source with fewer members than the drawn flow
     /// is driven negative: silently in a mild regime (the secondary source stays
-    /// abundant) and, in a harsher regime, as a cryptic runtime
-    /// `NegativeCount{cause: BinomialOvershoot}` that never names the real cause.
+    /// abundant) and, in a harsher regime, as a cryptic runtime negative-count
+    /// error that never names the real cause.
     /// The correct treatment (a joint draw bounded by `min` over all sources)
     /// is not implemented; rather than over-draw, reject the model up front with
     /// a located error.

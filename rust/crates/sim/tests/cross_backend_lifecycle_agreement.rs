@@ -973,9 +973,9 @@ fn two_sets_on_one_compartment_at_one_instant_are_refused() {
 /// A drain-and-`set` phase that leaves an integer compartment negative is an
 /// error on every backend, never a clamped 0, and every backend reports it as
 /// `InterventionNegative`: a configuration error, not a per-particle overshoot.
-/// From X = 10, `set X = -1`. Chain-binomial used to label it
-/// `BinomialOvershoot` from its post-draw scan, which inference treats as a
-/// recoverable per-particle failure and turns into a silent −∞ weight.
+/// From X = 10, `set X = -1`. Chain-binomial used to report it from its
+/// post-draw scan as a per-particle-recoverable cause, which inference turned
+/// into a silent −∞ weight.
 #[test]
 fn drain_and_set_phase_going_negative_is_an_error_on_every_backend() {
     use sim::error::{NegativeCountCause, SimError};

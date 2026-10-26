@@ -469,21 +469,37 @@ pub fn run_gillespie_with_observer(
             int_s.counts[local] += delta;
         }
 
-        // gh#audit-C5 / S2. Gillespie's source compartment has at least
-        // one individual when a transition fires — by construction. So
-        // a negative count post-stoichiometry is a real model bug
-        // worth surfacing. Returns SimError::NegativeCount; inference
-        // layers catch and recover per-particle (though for Gillespie
-        // this should be a structural error, not particle-recoverable).
+        // A firing cannot make a compartment negative: the fired transition was
+        // feasible (every compartment it consumes held at least what one firing
+        // removes), and the selection never picks an infeasible one. So a
+        // negative here was negative before this firing — the starting state,
+        // since every effect stage is scanned (`InitialState`: an `init {}`
+        // that evaluates or draws below zero) — or it is a simulator bug
+        // (`SimulatorInvariant`, which stops the run).
         if let Some((local, val)) = int_s.first_negative() {
-            return Err(SimError::NegativeCount {
-                compartment: model.comp_index.iter()
-                    .find(|(_, &g)| model.global_to_int.get(g).copied().flatten() == Some(local))
-                    .map(|(n, _)| n.clone())
-                    .unwrap_or_else(|| format!("(local-int-{local})")),
-                attempted_value: val,
-                t,
-                cause: crate::error::NegativeCountCause::BinomialOvershoot,
+            let fired_delta: i64 = model.transition_stoich[fired_idx]
+                .iter()
+                .filter(|&&(l, _)| l == local)
+                .map(|&(_, d)| d)
+                .sum();
+            let before = val - fired_delta;
+            return Err(if before < 0 {
+                SimError::NegativeCount {
+                    compartment: model.int_compartment_name(local),
+                    attempted_value: val,
+                    t,
+                    cause: crate::error::NegativeCountCause::InitialState,
+                }
+            } else {
+                SimError::SimulatorInvariant {
+                    what: format!(
+                        "firing transition '{}' left compartment '{}' at {val} (it held \
+                         {before}); no transition may remove more than its source holds",
+                        model.model.transitions[fired_idx].name,
+                        model.int_compartment_name(local),
+                    ),
+                    t,
+                }
             });
         }
 

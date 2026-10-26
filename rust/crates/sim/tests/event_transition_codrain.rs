@@ -15,7 +15,7 @@
 //! Before the fix, chain_binomial resolved the draining event against the
 //! START-OF-STEP snapshot and FUSED its delta into the same atomic apply as the
 //! transition draws, so both the transition and `dump` subtracted from the full
-//! snapshot A → A = −(drain flow) → `NegativeCount{BinomialOvershoot}`.
+//! snapshot A → A = −(drain flow) → a negative-count error.
 //!
 //! The fix: draining event actions (the `from` side of a transfer; `Set`) read
 //! and act on the POST-TRANSITION residual; inflow `Add` actions keep
@@ -185,7 +185,7 @@ fn run_backend(backend: &str, seed: u64) -> Result<(Arc<CompiledModel>, Trajecto
 // and A must be 0 at/after t=5.
 // ════════════════════════════════════════════════════════════════════════════
 
-/// gh#217: chain_binomial must NOT abort with NegativeCount/BinomialOvershoot
+/// gh#217: chain_binomial must NOT abort with a negative-count error
 /// when A is drained by both `drain` (transition) and `dump` (event) at t=5.
 /// A must end at 0 (the `dump` moved all survivors to B).
 #[test]

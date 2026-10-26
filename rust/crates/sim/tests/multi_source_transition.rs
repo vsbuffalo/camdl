@@ -2,7 +2,7 @@
 //! (`A + B --> C`, two negative-stoichiometry entries) is bounded by only the
 //! FIRST source on chain_binomial, so the secondary source can be driven
 //! negative — silently in a mild regime, or as a cryptic runtime
-//! `NegativeCount{cause: BinomialOvershoot}` otherwise. gillespie applies each
+//! negative-count error otherwise. gillespie applies each
 //! firing as one atomic CTMC event decrementing every source together; ODE runs
 //! every transition as a continuous flow. So the multi-source model must be
 //! REJECTED up front on the stochastic chain-binomial paths (forward

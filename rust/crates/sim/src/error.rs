@@ -47,14 +47,13 @@ pub enum SimError {
     #[error("numerical collapse ({kind:?}) in rate expression at t={t}")]
     NumericalCollapse { kind: CollapseKind, t: f64 },
 
-    /// gh#audit-C5. Compartment count went below zero. Two distinct
-    /// causes: BinomialOvershoot (rate·dt → 1 in chain-binomial split,
-    /// transient under inference exploration) vs InterventionAddNegative
-    /// (config bug: an Action::Add expression resolved to a negative
-    /// value). Previously silently clamped to 0, making the population
-    /// non-conservative. Inference layers catch BinomialOvershoot and
-    /// convert to −Inf log-likelihood for the offending particle;
-    /// forward-sim CLI propagates as a user-facing error.
+    /// gh#audit-C5. A compartment count is below zero, for a reason in the
+    /// model or its configuration: an initial state that evaluates or draws
+    /// negative (`InitialState`), or an effect that adds a negative amount or
+    /// leaves a compartment negative (`InterventionAddNegative`,
+    /// `InterventionNegative`); see [`NegativeCountCause`]. A *transition*
+    /// never produces one — a negative left by the transition stage is a
+    /// simulator bug and is reported as [`SimError::SimulatorInvariant`].
     #[error("compartment '{compartment}' would go to {attempted_value} (cause: {cause:?}) at t={t}")]
     NegativeCount {
         compartment: String,
@@ -72,7 +71,7 @@ pub enum SimError {
     ///   consecutive observation windows. Sustained collapse — not a
     ///   single-window dip during epidemic peaks.
     /// - `AllParticlesDead`: every particle hit a per-particle-recoverable
-    ///   error (NumericalCollapse / NegativeCount{BinomialOvershoot}) —
+    ///   error (NumericalCollapse / NegativeCount{InitialState}) —
     ///   the limit case of ESS collapse, but cheap to detect and
     ///   diagnostically distinct.
     ///
@@ -206,6 +205,18 @@ pub enum SimError {
         value: f64,
         t: f64,
     },
+
+    /// A guarantee the simulator itself makes was broken. The one raised today:
+    /// the transition stage left a compartment negative. Chain-binomial bounds
+    /// each source's exits by its count (and refuses the transitions it cannot
+    /// bound: several sources, gh#121, or several units of one source), and
+    /// Gillespie fires only feasible transitions, so no transition consumes
+    /// more than its source holds. Reaching this is a camdl bug, never a
+    /// property of the model or of a parameter value, so it is structural (the
+    /// run stops) and never a per-particle −∞ weight.
+    #[error("simulator invariant violated at t={t}: {what}. This is a bug in camdl, \
+             not a problem with the model or its parameters — please report it")]
+    SimulatorInvariant { what: String, t: f64 },
 }
 
 /// gh#audit-C6 / S1. Specific numerical-degeneracy mode that
@@ -227,20 +238,22 @@ pub enum CollapseKind {
 }
 
 /// gh#audit-C5. Cause discriminator for NegativeCount.
-/// BinomialOvershoot is expected during inference exploration and
-/// gets caught by the inference layer; InterventionAddNegative and
-/// InterventionNegative are always config bugs and propagate regardless
-/// of caller.
+/// `InitialState` depends on θ (and on the initial-state draw), and the
+/// inference layer kills the offending particle; `InterventionAddNegative`
+/// and `InterventionNegative` are configuration errors and propagate
+/// regardless of caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NegativeCountCause {
-    /// A transition stage left a compartment negative. Chain-binomial caps
-    /// each source's exits at its count, so this is reached only through a
-    /// transition that removes more than one member of its source per firing
-    /// (`S + S --> D`); Gillespie raises it for the same transition. Raised
-    /// from the transition stage only — a negative left by an effect is
-    /// `InterventionNegative`. The inference layer catches it and kills the
-    /// offending particle.
-    BinomialOvershoot,
+    /// A compartment was already negative when a chain-binomial step began, or
+    /// in the state Gillespie starts from. Every stage's output is scanned, so
+    /// the source is the starting state: an `init {}` entry that evaluates or
+    /// draws below zero at these parameters (`S = N - I0` with `I0 > N`, or
+    /// `S = N - I` after `I ~ poisson(...)` draws above `N`), or an injected
+    /// start state. It depends on θ and, for a drawn init, on the draw, so the
+    /// inference layer kills the offending particle (with a deterministic
+    /// `init {}` every particle starts the same, and the filter reports the θ
+    /// as degenerate).
+    InitialState,
     /// An `add()` action resolved to a negative amount — caught eagerly
     /// at the action site (you cannot add a negative number of
     /// individuals). Config bug; propagates regardless of caller.
@@ -417,7 +430,7 @@ impl SimError {
     ///
     /// Recoverable: NumericalCollapse (DivByZero, PowNanInf, UnOpNan,
     /// SqrtNegative, LogNonPositive, ModByZero), NegativeCount with cause
-    /// BinomialOvershoot, NonFiniteParameter (gh#81 Phase 2 — a
+    /// InitialState, NonFiniteParameter (gh#81 Phase 2 — a
     /// NUTS/PMMH proposal produced a NaN/Inf parameter), and TableLookup
     /// (gh#127 #12 — a state/parameter-dependent table index that went
     /// out of range at runtime) — these all arise from particles or
@@ -441,7 +454,7 @@ impl SimError {
         matches!(
             self,
             SimError::NumericalCollapse { .. }
-            | SimError::NegativeCount { cause: NegativeCountCause::BinomialOvershoot, .. }
+            | SimError::NegativeCount { cause: NegativeCountCause::InitialState, .. }
             | SimError::NonFiniteParameter { .. }
             | SimError::TableLookup(..)
         )
@@ -492,13 +505,16 @@ impl SimError {
             | SimError::UnknownOp(_)
             | SimError::WrongArgCount { .. }
             | SimError::Validation(_)
+            // A simulator bug: no parameter value avoids it, and it must
+            // never be absorbed as a rejected θ or a dead particle.
+            | SimError::SimulatorInvariant { .. }
             // Deterministic compute-budget bail: trips identically for
             // every chain/iteration; meant to be fatal, not retried.
             | SimError::PFIterationBudget { .. } => true,
 
             // A config-bug intervention (adds / leaves a compartment
-            // negative) is structural; a binomial overshoot is a transient
-            // per-θ excursion the inference layer rejects.
+            // negative) is structural; a negative initial state depends on θ
+            // (`S = N - I0`) and the inference layer rejects that θ.
             SimError::NegativeCount { cause, .. } => {
                 matches!(cause, InterventionAddNegative | InterventionNegative)
             }
@@ -573,7 +589,13 @@ mod tests {
             compartment: "S".into(),
             attempted_value: -1,
             t: 1.0,
-            cause: NegativeCountCause::BinomialOvershoot,
+            cause: NegativeCountCause::InitialState,
+        }.is_per_particle_recoverable());
+        // A negative left by the transition stage is a simulator bug: never
+        // a dead particle.
+        assert!(!SimError::SimulatorInvariant {
+            what: "the transition stage left compartment 'S' at -1".into(),
+            t: 1.0,
         }.is_per_particle_recoverable());
         // Not recoverable
         assert!(!SimError::NegativeCount {
@@ -623,7 +645,7 @@ mod tests {
             SimError::NumericalCollapse { kind: CollapseKind::ModByZero, t: 1.0 },
             SimError::NegativeCount {
                 compartment: "S".into(), attempted_value: -1, t: 1.0,
-                cause: NegativeCountCause::BinomialOvershoot,
+                cause: NegativeCountCause::InitialState,
             },
             SimError::NonFiniteParameter { name: "tau".into(), value: f64::NEG_INFINITY, t: -101.0 },
             SimError::TableLookup("table 'k': index 5 out of bounds [0, 2)".into()),
@@ -657,6 +679,8 @@ mod tests {
             compartment: "S".into(), attempted_value: -1, t: 1.0,
             cause: NegativeCountCause::InterventionAddNegative,
         }.is_structural());
+        // A simulator bug stops the run; it is never a rejected θ.
+        assert!(SimError::SimulatorInvariant { what: "x".into(), t: 1.0 }.is_structural());
         // Deterministic compute-budget bail is meant to be fatal (gh#147).
         assert!(SimError::PFIterationBudget {
             obs_window: 3, attempted_substeps: 10, budget_substeps: 5,
@@ -671,7 +695,7 @@ mod tests {
         assert!(!SimError::NonFiniteParameter { name: "beta".into(), value: f64::NAN, t: 1.0 }.is_structural());
         assert!(!SimError::NegativeCount {
             compartment: "S".into(), attempted_value: -1, t: 1.0,
-            cause: NegativeCountCause::BinomialOvershoot,
+            cause: NegativeCountCause::InitialState,
         }.is_structural());
         assert!(!SimError::AbsorbingState(0.0).is_structural());
     }

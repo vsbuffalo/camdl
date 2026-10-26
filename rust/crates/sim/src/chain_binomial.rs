@@ -530,7 +530,16 @@ pub fn run_chain_binomial_with_observer(
 }
 
 /// The first integer compartment of `counts` below zero, other than the
-/// balance target `bal_idx`, as a `NegativeCount` with `cause`; `Ok` when none.
+/// balance target `bal_idx`, with its count.
+fn negative_count(counts: &[i64], bal_idx: Option<usize>) -> Option<(usize, i64)> {
+    counts
+        .iter()
+        .enumerate()
+        .find(|&(i, &c)| c < 0 && Some(i) != bal_idx)
+        .map(|(i, &c)| (i, c))
+}
+
+/// [`negative_count`] as a `NegativeCount` with `cause`; `Ok` when none.
 fn first_negative(
     model: &CompiledModel,
     counts: &[i64],
@@ -538,20 +547,15 @@ fn first_negative(
     t: f64,
     cause: NegativeCountCause,
 ) -> Result<(), SimError> {
-    for (i, &c) in counts.iter().enumerate() {
-        if Some(i) == bal_idx {
-            continue;
-        }
-        if c < 0 {
-            return Err(SimError::NegativeCount {
-                compartment: model.int_compartment_name(i),
-                attempted_value: c,
-                t,
-                cause,
-            });
-        }
+    match negative_count(counts, bal_idx) {
+        None => Ok(()),
+        Some((i, c)) => Err(SimError::NegativeCount {
+            compartment: model.int_compartment_name(i),
+            attempted_value: c,
+            t,
+            cause,
+        }),
     }
-    Ok(())
 }
 
 /// Check if step tracing is enabled via CAMDL_TRACE_STEPS=1.
@@ -811,17 +815,23 @@ pub fn step_one(
     // phase reads it, as when the inflow deltas rode in `pending_deltas`;
     // integer addition makes the two orders of that sum identical.
     //
-    // A compartment the transition draws leave negative is reported here, as
-    // `BinomialOvershoot`, before the drain phase can touch it; a compartment
-    // the effect stages leave negative is reported by the scan below, as
-    // `InterventionNegative`. The two causes differ in kind: the first is a draw
-    // exceeding its source (reachable through a source that appears twice in a
-    // transition, `S + S --> D`, whose firings are capped by S but remove 2·S),
-    // which inference treats as a per-particle failure; the second is a
-    // configuration error, structural on every backend.
+    // A compartment negative after the transition draws is reported here,
+    // before the drain phase can touch it; a compartment the effect stages
+    // leave negative is reported by the scan below, as `InterventionNegative`.
+    //
+    // The transition draws cannot make a compartment negative: each source's
+    // exits are bounded by its count, each exit removes one member of one
+    // source (`validate_single_source_transitions`,
+    // `validate_unit_source_consumption`), and every other delta is an inflow.
+    // So a negative here was already negative when the step began — an
+    // `init {}` that evaluates or draws below zero at these parameters
+    // (`InitialState`, which depends on θ and kills the particle under
+    // inference) — or it is a simulator bug (`SimulatorInvariant`, which stops
+    // the run and is never a −∞ weight).
     let bal_idx = model.balance.as_ref().map(|b| b.local_int_idx);
     {
         let pending = &scratch.pending_deltas;
+        let at_step_start: &[i64] = counts;
         let mut arena = crate::effects::DiscreteArena {
             int: &mut scratch.int_s,
             real: &mut scratch.real_s,
@@ -831,7 +841,25 @@ pub fn step_one(
             for &(local, delta) in pending {
                 a.int.counts[local] += delta;
             }
-            first_negative(model, &a.int.counts, bal_idx, t + dt, NegativeCountCause::BinomialOvershoot)
+            match negative_count(&a.int.counts, bal_idx) {
+                None => Ok(()),
+                Some((i, c)) if at_step_start[i] < 0 => Err(SimError::NegativeCount {
+                    compartment: model.int_compartment_name(i),
+                    attempted_value: c,
+                    t: t + dt,
+                    cause: NegativeCountCause::InitialState,
+                }),
+                Some((i, c)) => Err(SimError::SimulatorInvariant {
+                    what: format!(
+                        "the transition stage left compartment '{}' at {c} (it held {} \
+                         when the step began); no transition may remove more than its \
+                         source holds",
+                        model.int_compartment_name(i),
+                        at_step_start[i],
+                    ),
+                    t: t + dt,
+                }),
+            }
         };
         crate::effects::apply_event_phases(
             model, &scratch.effect_batch.event_idx, &mut arena, params, t + dt, dt,
@@ -870,7 +898,7 @@ pub fn step_one(
     // are refused before they apply (`effects::refuse_overdrawing_drains`), and
     // the transition draws were scanned in the advance hook above, so what
     // reaches here is a configuration error: `InterventionNegative`, as on the
-    // ODE and Gillespie, never the per-particle-recoverable `BinomialOvershoot`.
+    // ODE and Gillespie.
     // The balance target is exempt: its negativity is a separate signal
     // (constraint-expression-yielded-negative) handled by the balance stage.
     first_negative(model, counts, bal_idx, t + dt, NegativeCountCause::InterventionNegative)?;

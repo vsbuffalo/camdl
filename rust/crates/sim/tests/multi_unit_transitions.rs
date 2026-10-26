@@ -268,3 +268,72 @@ fn chain_binomial_zero_gamma_multiplier_draws_no_exits() {
         }
     }
 }
+
+/// The transition-stage negative scan is an internal invariant. Driving the
+/// chain-binomial kernel directly (`step_one`, which every entry point guards
+/// with `validate_unit_source_consumption` and which is bypassed here on
+/// purpose) on the two-unit model takes S below zero in the transition stage;
+/// the kernel reports it as `SimulatorInvariant`, which stops the run and is
+/// never a per-particle −∞ weight.
+#[test]
+fn a_transition_stage_negative_is_a_simulator_invariant_not_a_dead_particle() {
+    use sim::{chain_binomial::{step_one, StepScratch}, error::SimError, rng::StatefulRng, state::RealState};
+    let compiled = pair_model(&[("S", -2), ("D", 1)]);
+    let mut hit = None;
+    for seed in 1..=20u64 {
+        let mut counts = vec![5_i64, 0, 0];
+        let mut flows = vec![0_u64; 2];
+        let mut real = RealState::new(0);
+        let mut rng = StatefulRng::new(seed);
+        let mut scratch = StepScratch::new(&compiled);
+        if let Err(e) = step_one(
+            &compiled, &mut counts, &mut flows, &mut real, &compiled.default_params,
+            0.0, 1.0, None, &mut rng, &mut scratch,
+        ) {
+            hit = Some(e);
+            break;
+        }
+    }
+    let err = hit.expect("the unguarded kernel must overdraw S on some seed");
+    assert!(matches!(err, SimError::SimulatorInvariant { .. }), "got {err:?}");
+    assert!(err.to_string().contains("bug in camdl"), "names it a simulator bug: {err}");
+    assert!(err.is_structural(), "stops the run");
+    assert!(!err.is_per_particle_recoverable(), "never a −∞ particle");
+}
+
+/// A negative count that came from the starting state is reported as
+/// `NegativeCount{InitialState}` on both stochastic backends, not as a
+/// simulator bug: `R = 2 - I0` with `I0 = 5` starts R at −3. R is in no rate,
+/// so nothing else catches it first.
+#[test]
+fn a_negative_initial_state_is_labelled_initial_state() {
+    use sim::{config::ChainBinomialConfig, error::{NegativeCountCause, SimError}, ChainBinomialSim};
+    use ir::model::InitSpec;
+    let mut model = build(
+        &["S", "I", "R"],
+        vec![
+            transition("inf", &[("S", -1), ("I", 1)], mul(param("beta"), pop("S"))),
+            transition("rec", &[("I", -1), ("R", 1)], mul(param("gamma"), pop("I"))),
+        ],
+        vec![fixed("beta", 1.0), fixed("gamma", 1.0)],
+        &[("S", 50.0), ("I", 5.0), ("R", 0.0)],
+        3.0,
+    );
+    model.output.times = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
+    *model.initial_conditions.0.get_mut("R").unwrap() =
+        InitSpec::Deterministic(bin(BinOp::Sub, Expr::const_(2.0), Expr::const_(5.0)));
+    let compiled = CompiledModel::new(model).unwrap();
+    let cb = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 3.0, dt: 1.0 });
+    for (label, res) in [
+        ("chain_binomial", ChainBinomialSim.run(&compiled, &compiled.default_params, 1, &cb)),
+        ("gillespie", GillespieSim.run(&compiled, &compiled.default_params, 1, &gillespie(3.0))),
+    ] {
+        match res {
+            Err(ref e @ SimError::NegativeCount { cause: NegativeCountCause::InitialState, ref compartment, .. }) => {
+                assert_eq!(compartment, "R", "{label}");
+                assert!(e.is_per_particle_recoverable() && !e.is_structural(), "{label}");
+            }
+            other => panic!("{label}: expected InitialState on R, got {:?}", other.map(|t| t.snapshots.len())),
+        }
+    }
+}
