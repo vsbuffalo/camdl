@@ -1,6 +1,6 @@
 ---
 date: 2026-10-26
-status: proposed — the design is complete; D1–D7 (§12) are the maintainer's calls, each with a recommendation
+status: proposed — the design is complete; D1–D8 (§12) are the maintainer's calls, each with a recommendation
 area: CLI parameter resolution / inference setup / run records
 issues: gh#965 (typed constants, open); §13 lists the follow-ups
 related:
@@ -216,42 +216,67 @@ Nothing else declares a role. `--rw-sd`, `[estimate].rw_sd`,
 
 ### 4.2 The rule
 
-Roles are decided once per job by three clauses.
+Roles are decided once per job by five clauses.
 
 1. **An implicit role yields to a named declaration.** A parameter that is
-   sampled only because a measure covers it, fixed only because it is a model
-   constant, or fixed only because nothing names it, takes the role a named
-   declaration gives it. Over a sampled parameter this is design-vs-sample's
-   design shadow (`--sweep`) or imposition by `--param` (`--param`, `--fixed`),
-   recorded as such (§7.2); over a model constant or the default it is silent.
-2. **The fit config's `[estimate]` yields to the command line's `--sweep` and
-   `--fixed`, with an info notice.** A fit config is reused across `fit run`,
-   `survey` and `profile`; holding or profiling one of its estimated parameters
-   is the command narrowing the estimand, not a contradiction. The `[estimate]`
-   entry's `bounds`, `start`, `prior`, `rw_sd` and `perturb_only_at_t0` are then
-   not used, and the notice says so. This applies in `profile` and `survey`;
-   `fit run --sweep` naming an `[estimate]` parameter stays refused, as today
-   (§13).
-3. **Any other two named declarations giving one parameter different roles are
+   sampled only because a measure covers it, or fixed only because nothing names
+   it, takes the role a named declaration gives it. Over a sampled parameter
+   this is design-vs-sample's design shadow (`--sweep`) or imposition by
+   `--param` (`--param`, `--fixed`), recorded as such (§7.2); over the default
+   it is silent.
+2. **A model constant can only be given another fixed value.** `--fixed`,
+   `--param`, `--fixed-file` or `--params` may replace its declared value (tier
+   5 or 3 over tier 1, an ordinary override record). Naming it in `[estimate]`,
+   `--estimate`, `--sweep` or `--sweep-file` is refused with "move `omega` into
+   `parameters {}` to vary it" (D2). No measure covers a model constant: it has
+   no bounds and no prior.
+3. **The fit config's `[estimate]` yields to the command line's `--sweep`,
+   `--fixed` and `--fixed-file`, with an info notice.** A fit config is reused
+   across `fit run`, `survey` and `profile`; holding or profiling one of its
+   estimated parameters is the command narrowing the estimand, not a
+   contradiction. The `[estimate]` entry's `bounds`, `start`, `prior`, `rw_sd`
+   and `perturb_only_at_t0` are then not used, and the notice says so. This
+   applies in `profile` and `survey`; `fit run --sweep` naming an `[estimate]`
+   parameter stays refused, as today (§13). `--fixed-file` is included because
+   it removes a parameter from `[estimate]` today
+   (`params_resolver.rs:1675-1717`, verified).
+4. **A `--fixed-file` or `--params` entry is bulk values, and any other named
+   command-line declaration of the same parameter beats it, with an info
+   notice.** A file written for another purpose — a fit's `mle.toml`, a
+   `truth.toml` — names every parameter; the user's `--sweep beta` or
+   `--estimate gamma` on the same command line says what this run does with
+   those two, and the file's values for them are not used. The notice names the
+   file, the parameter and the declaration that won.
+5. **A design declaration over a `[fixed]` entry is a per-cell value, not a role
+   conflict** (D1, option (c)). `[fixed]` says the parameter is not estimated;
+   `--sweep` says which value each cell holds. The job records the role as
+   design, each cell records it fixed at its design point (§7.2), and the
+   `[fixed]` value, replaced at tier 3.5b, is reported once at info. This is
+   what `fit run --sweep` requires today (`fit/mod.rs:519-535`).
+6. **Any other two named declarations giving one parameter different roles are
    refused**, naming both: `[estimate]` and `[fixed]` in one file;
    `--fixed beta` with `--sweep beta`; `--estimate beta` with `--fixed beta`.
    `--estimate` and `--fit` are mutually exclusive, as in `survey` today
    (`args/mod.rs:2020`): with a fit config, `[estimate]` alone declares the
    estimated set.
 
-A `--sweep` over a `[fixed]` parameter is D1. Scenarios never enter this rule;
-they are a value source, checked by role in §4.3.
+Clause 5 is D1's recommended option; under D1 (a) it becomes a displacement
+fixed → design, under D1 (b) a refusal. Scenarios never enter this rule; they
+are a value source, checked by role in §4.3.
 
 The resulting conflicts:
 
 | Input combination                                                            | Result                                                                         |
 | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | `[estimate]` + `[estimate].start`                                            | valid: the start is the start                                                  |
-| `[estimate]` + `[fixed]`, one file                                           | refused (clause 3; already refused, `6c94825f`)                                |
-| `[estimate]` + `--sweep` (`profile`)                                         | valid; estimated → design, info notice (clause 2)                              |
-| `[estimate]` + `--fixed`                                                     | valid; estimated → fixed, info notice (clause 2; already a notice, `21d4ed47`) |
-| `[fixed]` + `--sweep`                                                        | D1                                                                             |
-| `--fixed X` + `--sweep X`                                                    | refused (clause 3)                                                             |
+| `[estimate]` + `[fixed]`, one file                                           | refused (clause 6; already refused, `6c94825f`)                                |
+| `[estimate]` + `--sweep` (`profile`)                                         | valid; estimated → design, info notice (clause 3)                              |
+| `[estimate]` + `--fixed`                                                     | valid; estimated → fixed, info notice (clause 3; already a notice, `21d4ed47`) |
+| `[fixed]` + `--sweep`                                                        | valid; the design point is the per-cell value, info notice (clause 5, D1)      |
+| `[estimate]` + `--fixed-file`                                                | valid; estimated → fixed, info notice (clause 3)                               |
+| `--fixed-file` entry + `--sweep` or `--estimate` on the same name            | valid; the sweep or estimate wins, info notice (clause 4)                      |
+| `--estimate omega` or `--sweep omega`, `omega` a model constant              | refused (clause 2)                                                             |
+| `--fixed X` + `--sweep X`                                                    | refused (clause 6)                                                             |
 | `--draws uniform` + `--sweep beta`                                           | valid; design shadow (clause 1)                                                |
 | `--draws uniform` + `--param beta=0.5`                                       | valid; imposition by `--param` (clause 1)                                      |
 | `[estimate]` + `--starts`                                                    | valid                                                                          |
@@ -629,16 +654,25 @@ fixes the sum at 1 (`sim/src/inference/if2.rs:58-67`,
   free members sum to 1 − Σ(held). That is a legitimate model, but the runtime
   cannot express it — `SimplexGroup` has no total (`if2.rs:62-67`) and the
   softmax always returns 1 — so it is refused (`SimplexPartlyHeld`) until a
-  scaled simplex is added (§13).
+  scaled simplex is added (§13). Renormalizing the free members to 1 instead
+  would silently fit a different model.
 
 **Hierarchical priors.** A leaf's hierarchical prior refers to its
 hyperparameters as ordinary parameters (`HierarchicalPrior.args` are expressions
 over `Param` names, `ir/src/parameter.rs:98-108`). Every combination is a
 defined model and none is refused: a fixed or design hyperparameter makes its
 estimated leaves' prior conditional on that value (the expression is evaluated
-at it); an estimated hyperparameter over fixed leaves is estimated from those
-leaves' prior terms. The launch block prints each hierarchical family's members
-with their roles, so a fixed hyperparameter is visible.
+at it). The reverse case is not computed correctly today. Statistically, a held
+leaf is a conditioning value, so the posterior of an estimated hyperparameter
+must include each held leaf's density p(leaf | hyper). The Bayesian methods sum
+the log-prior over the estimated parameters only (PMMH:
+`sim/src/inference/pmmh.rs:599-602`, verified; PGAS inferred to do the same), so
+a held leaf contributes nothing and, with every leaf held, the hyperparameter's
+posterior is its own prior. Under PMMH and PGAS, an estimated hyperparameter
+with any held leaf is therefore refused, naming the held leaves, until the prior
+sum includes them (D8, §13). IF2 and NLopt ignore priors, so the case does not
+arise there. The launch block prints each hierarchical family's members with
+their roles.
 
 **IF2 settings.** `perturb_only_at_t0` and `rw_sd` are `If2ParamSettings` fields
 keyed by estimated names. `EstimatedParam` (`sim/src/inference/types.rs:49-74`),
@@ -943,6 +977,11 @@ Recorded here; that proposal is not edited by this one.
 - A `real` or `instant` parameter with no declared bounds is searched over
   `(−∞, ∞)`, not `[0, ∞)`; a method needing a finite box refuses it.
 - A model constant needs no `[fixed]` entry and cannot be estimated (D2).
+- `--fixed-file` keeps removing a parameter from `[estimate]`, now with a notice
+  (clause 3); a `--fixed-file` entry yields to `--sweep` or `--estimate` on the
+  same name, with a notice (clause 4).
+- Under PMMH and PGAS, an estimated hyperparameter with a held leaf is refused
+  (D8).
 
 ### 10.2 Existing workflows
 
@@ -965,7 +1004,14 @@ Recorded here; that proposal is not edited by this one.
   the whole `[estimate]` set, minus focal and `--fixed` names. A user who relied
   on the narrowing writes `--fixed NAME=VALUE` for each parameter to hold.
 - **`profile --starts from_params=FILE` holding parameters.** Those parameters
-  need `--fixed-file FILE` as well.
+  need `--fixed-file FILE` as well. Without `--fit`, the file's entries for
+  `--estimate` and `--sweep` names are overridden by clause 4. With `--fit`, an
+  entry naming an `[estimate]` parameter holds it (clause 3), so the file must
+  list only the parameters to hold.
+- **`--fixed-file` with `--sweep` on the same name.** Today it runs with no
+  notice: the focal-vs-fixed check reads only `--fixed` and `[fixed]`
+  (`profile.rs:750-781`, verified), and the grid overwrites the file's value in
+  each cell (inferred). After, the sweep wins with a notice (clause 4).
 - **Docs.** Run spec §1.3 (`docs/camdl-run-spec.md:82-183`) is rewritten around
   roles then values; `docs/camdl-language-spec.md:5201-5210` ("the list IS the
   partition", the three `--rw-sd` modes) and `:218-220` (model constants) are
@@ -1044,6 +1090,9 @@ fixed, declared by default or by `--param`/`--params` — and keep today's
 `engine::check_scenario_coordinate_collision` and `ParamSource`. Their values,
 refusals and output are unchanged; their records list every parameter fixed,
 with swept and drawn values tagged by tier, which is what they are in each cell.
+Their job-level records read "all fixed" during this interim and must not be
+read as the job's semantics: a swept or drawn parameter is design or sampled at
+job level, which only Stage 5 records.
 
 **Stage 5 — `simulate`, `fit predict`, `pfilter`, `eval` on the full
 partition.** After design-vs-sample Stage 1. The guard reads the partition
@@ -1051,7 +1100,7 @@ partition.** After design-vs-sample Stage 1. The guard reads the partition
 impositions per-arm findings. _Tests:_ design-vs-sample Stage 2's tests,
 unchanged in substance; `simulate --estimate` is refused naming `simulate`.
 
-## 12. Seven calls are the maintainer's
+## 12. Eight calls are the maintainer's
 
 **D1 — `--sweep` over a `[fixed]` parameter.** Today `fit run --sweep`
 _requires_ the swept name to be in `[fixed]` (`fit/mod.rs:519-535`), and every
@@ -1068,14 +1117,15 @@ needs no role change, and keeps every `fit run --sweep` config valid; (a) gives
 the same output with one more kind of displacement to explain. **Recommendation:
 (c). Leaning.**
 
-**D2 — Model constants in the partition.** A typed constant `let` is an IR
-parameter with a value (§2), but not equivalent to a `parameters {}` entry
-(E512, gh#965). Options: (a) a model constant is fixed at its declared value,
-needs no `[fixed]` entry, may be given another value by `--fixed`/`--param`, and
-cannot be estimated, designed or sampled — to vary it, move it into
-`parameters {}`; (b) also allow estimating it; (c) keep requiring a `[fixed]`
-entry. (b) would make a role available that the compiler does not support for
-every use of the constant; (c) is §3.2 item 7. **Recommendation: (a). Solid.**
+**D2 — Model constants in the partition.** (Clause 2 of §4.2 implements (a).) A
+typed constant `let` is an IR parameter with a value (§2), but not equivalent to
+a `parameters {}` entry (E512, gh#965). Options: (a) a model constant is fixed
+at its declared value, needs no `[fixed]` entry, may be given another value by
+`--fixed`/`--param`, and cannot be estimated, designed or sampled — to vary it,
+move it into `parameters {}`; (b) also allow estimating it; (c) keep requiring a
+`[fixed]` entry. (b) would make a role available that the compiler does not
+support for every use of the constant; (c) is §3.2 item 7. **Recommendation:
+(a). Solid.**
 
 **D3 — Undeclared parameters are fixed.** In a command that accepts fixed
 parameters, a parameter no declaration names gets role fixed and must get a
@@ -1120,6 +1170,16 @@ on the command line and in the record. **Recommendation: (a). Leaning.**
 scenario guard twice, once keyed on the axis and once on the role.
 **Recommendation: (a). Solid.**
 
+**D8 — Estimated hyperparameters over held leaves.** Under PMMH and PGAS the
+prior sum omits a held leaf's density p(leaf | hyper) (§6.4), so the posterior
+of an estimated hyperparameter whose leaves are held is wrong. Options: (a)
+refuse such a hyperparameter now, naming the held leaves, and add the held-leaf
+terms to the prior sum as a follow-up; (b) add the held-leaf terms in this
+proposal, as a stage touching `pmmh.rs` and `pgas.rs`. (b) is the complete fix,
+but it changes the log-posterior of every hierarchical fit with a held leaf and
+belongs to the high-risk inference files, which this proposal otherwise does not
+touch. **Recommendation: (a). Leaning.**
+
 ## 13. Out of scope, each with its reason
 
 - **PMMH in `profile`** is being removed separately: a cell's highest-posterior
@@ -1133,6 +1193,9 @@ scenario guard twice, once keyed on the axis and once on the role.
   own issue.
 - **Multi-unit transitions** are separate work and do not touch parameter roles.
 - **PMMH's own proposal tuning** (replacing `rw_sd × 5`) belongs to PMMH.
+- **Held-leaf densities in the prior sum** (D8 (a)): add log p(leaf | hyper) for
+  each held leaf of an estimated hyperparameter in PMMH and PGAS, then lift the
+  refusal.
 - **A scaled simplex** (free members summing to 1 − Σ held), needed before a
   partly held simplex can run; it changes `if2.rs`, a high-risk file.
 - **Warm-starting a cell from its neighbour** would make a cell's identity
