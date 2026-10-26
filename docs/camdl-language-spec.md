@@ -3467,6 +3467,33 @@ recurrence or at an explicit calendar-listed `at [date(...), date(...), ...]`
 schedule for true month-aligned recurrence. In unanchored mode the classifier is
 inactive and `every = 1 'months` is fine.
 
+**When a scheduled time fires.** Every schedule form resolves to a list of
+declared times; each backend fires them on its own clock, so a simulation and a
+fit on the same backend define the same model:
+
+- An effect fires only inside the run's window, `t_start ≤ t ≤ t_end` (to within
+  `1e-9 · dt` on a discrete-time backend and `1e-10` on a continuous one). A
+  declared time outside it does not fire.
+- **Discrete-time backends** (chain-binomial, and every fit that runs
+  chain-binomial steps: `pfilter`, PMMH, IF2, PGAS) fire an effect at the end of
+  a step of the run's own grid `t_start + k·dt`, with
+  `k = ⌊(t − t_start)/dt + ½⌋` — the nearest step, a tie going to the later one.
+  `at [2.4]` at `dt = 1` from `t_start = 0` fires at 2; with `from = 0.5` an
+  effect at 1 fires at 1.5. When `t_end` is off the grid, the last step is
+  shortened to end at `t_end`, and an effect inside that step fires at the
+  nearer of its two ends (a tie going to `t_end`), with a warning naming the
+  effect, its time and the end it fires at. One intervention fires once per
+  step: `at [2.3, 2.4]` at `dt = 1` fires once, at 2.
+- **Continuous-time backends** (ODE, Gillespie) fire an effect at its declared
+  time; `at [2.3, 2.4]` fires twice.
+- An effect at `t_start` (`k = 0` on a discrete-time backend; within `1e-10` of
+  `t_start` on a continuous one) applies to the starting state, before the
+  `t_start` row is recorded or an observation there is scored (§13.10). A
+  recurring schedule's default `from` is `t_start`, so its first fire is such an
+  effect. A run resumed from a saved state (a contrast fork, a forecast from
+  `--init-state`) does not apply it again: the saved state is already
+  post-effect.
+
 ### 13.3 Indexed Interventions
 
 An intervention can be declared with an **index binder**, creating a **family**
@@ -3610,13 +3637,16 @@ NAME : add(COMP, EXPR) every PERIOD at_day DAY
 ```
 
 `at_day` is the absolute phase within the period, measured from `t = 0`. Fire
-times are `at_day + k * period` for the smallest `k` where `target >= t_start`.
-The engine fires on the single timestep where `|t - target| < 0.5 * dt`, so each
-period fires exactly once as long as `dt` is no coarser than the period
-(`dt <= period`). A coarser `dt` would round two consecutive targets onto the
-same integrator step, silently dropping a fire; rather than merge them, the
-engine rejects such a schedule at simulation start with a hard error (use a
-finer `dt`, or widen the period).
+times are `at_day + k * period` for the smallest `k` where `target >= t_start`,
+and each fires as §13.2 states: on the nearest step of the run's grid
+`t_start + k·dt` on a discrete-time backend, at the target itself on a
+continuous one. On a discrete-time backend each period fires exactly once as
+long as `dt` is no coarser than the period (`dt <= period`). A coarser `dt`
+would put two consecutive targets on the same step, silently dropping a fire;
+rather than merge them, the engine rejects such a schedule at simulation start
+(and a fit at its pre-flight) with a hard error (use a finer `dt`, or widen the
+period). The continuous backends fire every target at its own instant and do
+not reject it.
 
 Example: `every 365.25 'days at_day 251` fires on day 251 of each year. If
 simulation starts at `t = 100`, the first fire is at `t = 251` (not `t = 351`).
@@ -3818,10 +3848,22 @@ one compartment at the same instant are an error on every backend, since their
 changes would add to a value neither names, and so is a stage that leaves an
 integer compartment negative.
 
+**At `t_start`.** The effects due at the start of the run (§13.2) apply to the
+`init {}` state in the same order, without a transition stage, on every
+backend: inflow events from the `init {}` state, then draining events and `set`
+on the post-inflow state, then interventions in declaration order, then
+`balance`, then the non-negativity check; the `t_start` row is recorded, and an
+observation at `t_start` scored, after all of them. With `init { I = 0 }`,
+`seed : add(I, 10) at [0]` and
+`cull : transfer(fraction = 0.5, from = I, to = R) at [0]`, the `t_start` row
+is `I = 5`, `R = 5` on every backend. When nothing is due at `t_start` the
+`init {}` state is recorded as is (a `balance {}` target is not rewritten). An
+action's amount evaluates at `t = t_start`.
+
 The consequence a modeller must know: recorded output is **post-effect**. An
 observation emitted at a time when an intervention fires — a vaccination
 `transfer`, say — sees the **post-vaccination** state, not the pre-vaccination
-state.
+state. That includes `t_start`.
 
 ---
 
@@ -4448,8 +4490,10 @@ Differencing two independently-simulated arms by hand mixes the intervention
 effect with the Monte Carlo noise of two unrelated random draws. The reducer
 behind `contrasts {}` instead *forks* both arms from a shared trajectory: it
 diffs the two runs' live intervention sets, finds the toggled intervention, and
-branches at the last saved snapshot strictly before that intervention fires, so
-both arms share one history up to the intervention and one per-draw seed. The
+branches at the last saved snapshot strictly before the instant that
+intervention fires on the arms' chain-binomial grid (§13.2: declared at 2.4 with
+`dt = 1`, it fires at 2, so with snapshots on the integer grid the fork is at
+1), so both arms share one history up to the intervention and one per-draw seed. The
 difference is then attributable to the intervention rather than to sampling.
 Results are banded over the forkable draws into `contrasts/<name>.tsv`. A
 contrast whose two arms differ only in a parameter — no intervention is toggled

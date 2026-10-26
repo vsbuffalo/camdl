@@ -37,7 +37,7 @@ time.
 ```
 Schedule  (immutable, Sync — ONE per run, shared by every particle)
 ┌──────────────────────────────────────────────────────────────────────┐
-│ dt, t_end, grid, policy: StepPolicy { Snap | Exact }                   │
+│ dt, t_end, policy: StepPolicy { Snap | Exact }                         │
 │ output_times: [0 ···· 10 ···· 20 ··· ]   trajectory snapshots          │
 │ effect_times: [    4 ··········· 35 ··· ]  effect boundaries           │
 │ obs_times:    [ 3.5 ·· 7.5 ·· 14 ······ ]  inference scores (may be     │
@@ -75,16 +75,30 @@ and the PGAS density (`shape = dt/σ²`) is sensitive to that ULP.
 `Schedule::clip(cursor, t, t_proposed)` is Gillespie's variant: the SSA proposes
 an exponential time and the schedule clips it back to the next boundary.
 
-### 1.4 Effect firing — one cursor-keyed path (post gh#216)
+### 1.4 Effect firing — one plan per run, on the backend's clock
 
-`effect_times` carries **every** effect — events and interventions alike (built
-by `intervention::timeline_effects` for inference, `all_intervention_times` for
-forward). Under Exact the integrator therefore **lands on each effect time**,
-and the driver reads the boundary's batch from the cursor and splits it by kind
-via the one shared helper:
+When each effect fires is decided once per run by
+`effect_plan::EffectPlan::build(model, params, t_start, t_end, clock, origin)`
+(proposal `2026-10-04-effect-fire-time-authority.md`). The clock is the
+backend's natural time:
+
+- `FireClock::Grid { dt }` — discrete-time dynamics (chain-binomial forward and
+  every inference path that runs chain-binomial steps). An effect fires at the
+  end of step `k = ⌊(t − t_start)/dt + ½ + GRID_TOL⌋` of the run's own grid
+  (`effect_plan::fire_step`); in a shortened last step, at the nearer of its two
+  ends (ties to `t_end`), with a warning. One intervention fires once per step.
+- `FireClock::Exact` — continuous-time dynamics (ODE, Gillespie). An effect
+  fires at its declared instant; fires within `EFFECT_EPS` are one instant.
+
+Both fire only inside `[t_start, t_end]`. Effects at `t_start` form the plan's
+origin batch, applied to the starting state before the `t_start` row
+(`effects::apply_origin_batch`); a resumed run (`Origin::Resumed`) has none. The
+plan's later instants are `plan.effect_times()`, index-aligned with
+`plan.batch(idx)`, and the driver splits a batch by kind via the one shared
+helper:
 
 ```
-effects::split_due_batch(model, &timeline.batches[effect_idx], &mut batch)
+effects::split_due_batch(model, plan.batch(effect_idx), &mut batch)
    → batch.event_idx        (always-active events) — fire at PROPOSE
    → batch.intervention_idx (scheduled interventions) — fire at INTERVENE
 ```
@@ -95,33 +109,25 @@ The **lifecycle stage** is the genuine kind difference the spine keeps:
   the kernel draw_ (chain-binomial atomic interleaving).
 - **INTERVENE** — scheduled interventions apply on the _post-advance_ state.
 
-Firing _time_ is unified (cursor-keyed for all kinds); only the apply _stage_
-forks by kind. There is no `round(t/dt)` firing key on the inference path any
-more — that was the gh#216 events bug (an obs-anchored off-grid substep end
-rounding onto a colliding `fire_step`). The Snap-forward path keeps
-`round(t/dt)` via `due_effects` because Snap stays on the dt grid, where it is
-exact.
-
 ### 1.5 The apply step is shared substrate; per-backend apply differs
 
-Every path routes firing-_time_ through the spine +
-`due_effects`/`split_due_batch`, but the **apply** differs because the state
-representation differs — and that is the correct seam (share the timing, keep
-the distinct dynamics):
+Every path takes firing _time_ from the plan, but the **apply** differs because
+the state representation differs — and that is the correct seam (share the
+timing, keep the distinct dynamics):
 
-| path                       | builds `effect_times`                   | fires via                    | apply                                                                     |
-| -------------------------- | --------------------------------------- | ---------------------------- | ------------------------------------------------------------------------- |
-| chain-binomial (Snap, fwd) | `all_intervention_times` (incl. events) | `due_effects` round, on-grid | `step_one` PROPOSE/INTERVENE                                              |
-| ODE (Exact, fwd)           | `all_intervention_times`                | cursor land                  | `apply_boundary_batch_continuous` (f64, no RNG)                           |
-| Gillespie (Exact, fwd)     | `all_intervention_times`                | cursor land                  | discrete apply **+ full propensity recompute**                            |
-| PF / IF2 (Exact, inf)      | `timeline_effects` (incl. events)       | cursor, `split_due_batch`    | `step_one`                                                                |
-| PGAS (Exact, inf)          | `timeline_effects`                      | cursor, `split_due_batch`    | `step_one`; **rejects events under Exact** (loud floor, gh#219 follow-up) |
-| PMMH                       | wraps the bootstrap PF                  | inherits                     | inherits                                                                  |
+| path                       | clock | fires via                                        | apply                                                         |
+| -------------------------- | ----- | ------------------------------------------------ | ------------------------------------------------------------- |
+| chain-binomial (Snap, fwd) | Grid  | `plan.batch_ending_substep(s)` inside `step_one` | `step_one` PROPOSE/INTERVENE                                  |
+| ODE (Exact, fwd)           | Exact | lands on `plan.effect_times()`, `arrive`         | `apply_event_phases` (f64) + `apply_interventions_continuous` |
+| Gillespie (Exact, fwd)     | Exact | lands on `plan.effect_times()`, `arrive`         | discrete apply **+ full propensity recompute**                |
+| PF / IF2 / PMMH (inf)      | Grid  | lands on `plan.effect_times()`, `Substeps`       | `step_one`                                                    |
+| PGAS (inf)                 | Grid  | `plan.batch_ending_substep(s)` (snap grid)       | `step_one`                                                    |
 
 Three things are deliberately backend-specific and must not be "unified" away:
 ODE's continuous apply (no RNG), Gillespie's post-effect propensity recompute (a
-correctness requirement), and PGAS's events-under-Exact rejection (the loud
-capability floor until its ancestor walk re-anchors at event landings).
+correctness requirement), and PGAS's refusal of an effect-bearing model on a
+substep grid that exact alignment re-tiled (`pgas_effect_plan`; the CLI runs
+PGAS on the snap grid only).
 
 ### 1.6 The CRN invariant
 

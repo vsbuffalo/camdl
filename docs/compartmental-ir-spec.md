@@ -175,20 +175,25 @@ restarting is statistically valid. But the correct procedure is to draw a fresh
 inter-event time from the _post-intervention_ total propensity. Implementors
 must not simply "resume" with the remaining time from the old exponential draw.
 
-**Discrete-time (chain-binomial).** Intervention times fall between discrete
-steps. The runtime must truncate the current step to the intervention time,
-apply the intervention, and restart. If multiple interventions cluster, the step
-may be repeatedly truncated. The runtime should manage step size near
-intervention boundaries.
+**Discrete-time (chain-binomial).** A discrete-time process has no state between
+steps, so an effect belongs to a step: it fires at the end of step
+`k = ⌊(t − t_start)/dt + ½⌋` of the run's grid `t_start + k·dt` (the nearest
+step, ties to the later one; within a shortened last step, at the nearer of its
+two ends, ties to `t_end`), the step is never truncated, and one intervention
+fires once per step however many of its times share it. The same rule holds on
+every path that runs chain-binomial steps — forward simulation, the particle
+filter, PMMH, IF2 and PGAS — so a fit scores the model the simulation generates
+(language spec §13.2). An effect at `t_start` (`k = 0`) applies to the initial
+state before the `t_start` row (§13.10).
 
 **ODE.** Standard ODE solvers handle discontinuities via solver restart. The
 intervention schedule must be communicated as "tstop" hints so adaptive steppers
 don't overshoot. Most mature ODE libraries (SUNDIALS, etc.) support this
 natively via callbacks.
 
-**Discrete-time.** If the intervention falls within a step, apply at the nearest
-step boundary (rounding down). Interventions coinciding with step boundaries are
-applied between steps.
+The continuous backends (ODE and Gillespie) fire every effect at its declared
+time inside `[t_start, t_end]` — each declared time its own instant — and apply
+an effect at `t_start` to the initial state before the `t_start` row.
 
 **Competing interventions.** When multiple interventions fire at the same time,
 execute in document order (order in the `interventions` list).

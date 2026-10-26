@@ -5287,12 +5287,15 @@ contrasts {
 
 The fork point is **derived, not declared**: the reducer diffs the two arms'
 live intervention sets, finds the toggled intervention, and forks both arms at
-the last saved trajectory snapshot strictly before its fire time — so "fork at
-or after the intervention" is unrepresentable. Both arms share the smoothed
-latent state at the fork and the per-draw seed, then desync by design after it.
-Results are banded over the forkable draws into `contrasts/<name>.tsv`. A
-contrast with no toggled intervention (a parameter-only scenario) or one toggled
-by a parametric or reactive fire time is skipped with a note, never silently.
+the last saved trajectory snapshot strictly before the instant it fires — on the
+arms' chain-binomial grid `t_start + k·dt`, not its declared time (declared at
+2.4 with `dt = 1`, it fires at 2) — so "fork at or after the intervention" is
+unrepresentable. The resumed arms do not re-apply an effect at the fork time:
+the saved state is already post-effect. Both arms share the smoothed latent
+state at the fork and the per-draw seed, then desync by design after it. Results
+are banded over the forkable draws into `contrasts/<name>.tsv`. A contrast with
+no toggled intervention (a parameter-only scenario) or one toggled by a
+parametric or reactive fire time is skipped with a note, never silently.
 
 **A chain selection reaches the contrast.** `fit predict --exclude-chains`
 narrows the forkable set to the retained chains before the fork, so a contrast
@@ -5885,22 +5888,23 @@ world where the intervention had already fired; scoring against the
 pre-intervention state would deterministically bias the posterior against any
 scenario that correctly represents it.
 
-The ordering is fixed in one shared dispatch seam (`Schedule::arrive`,
-`rust/crates/sim/src/schedule.rs:536`), not by each backend: **effects before
-output**, all coincident effects drained as one batch, then all coincident
-outputs. On the inference path the equivalent guarantee comes from the substep
-walk: a substep that lands on an effect boundary fires that boundary's batch
-inside `process.step` (`particle_filter.rs:315`), and scoring happens after the
-window walk. Forward chain-binomial fires effects inside `step_one` for the
-substep ending at `t + dt` and records the output afterwards
-(`rust/crates/sim/src/chain_binomial.rs:424`).
+When each effect fires is decided once per run by the effect plan
+(`rust/crates/sim/src/effect_plan.rs`, `EffectPlan::build`), on the backend's
+clock: chain-binomial and every fit that steps it (`pfilter`, PMMH, IF2, PGAS)
+fire on the run's grid `t_start + k·dt`, `k = ⌊(t − t_start)/dt + ½⌋`; the ODE
+and Gillespie fire at the declared time (language spec §13.2). Effects at
+`t_start` apply to the starting state before the `t_start` row is recorded or an
+observation there is scored (§13.10).
 
-There is no live `apply_interventions_at` function; it survives only as a test
-adapter. Effects are decided by the caller and applied through the `effects`
-seam — `round(t/dt)`-keyed on the forward chain-binomial "snap" path,
-cursor-keyed off the timeline's effect boundaries on the exact paths.
-(Historical: an earlier chain-binomial loop fired interventions twice per
-scheduled time; see
+The ordering at an instant is fixed in one shared dispatch seam
+(`Schedule::arrive`), not by each backend: **effects before output**, each due
+effect boundary's batch applied once, then all coincident outputs. On the
+inference path the equivalent guarantee comes from the substep walk: a substep
+that lands on one of the plan's firing instants fires that instant's batch
+inside `process.step`, and scoring happens after the window walk. Forward
+chain-binomial fires the plan's batch for each substep inside `step_one` and
+records the output afterwards. (Historical: an earlier chain-binomial loop fired
+interventions twice per scheduled time; see
 `docs/dev/incidents/2026-04-17-chain-binomial-double-fire.md`.)
 
 ### 14.4 Likelihood families

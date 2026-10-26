@@ -1189,22 +1189,30 @@ additive term, are fine without it.
 
 #### Discrete-event seeding and PGAS
 
-Discrete seeding via `events { ... add(E, n_seed) at [tau] }` is supported by
-PGAS as of 2026-05-25 (gh#80). The chain-binomial simulator and the density
-evaluator are consistent at the event substep: at substep $s_{\text{event}}$,
-`counts_before` is the pre-event state, all stochastic flows are drawn from
-pre-event rates (which are zero for the seeded compartment's downstream
-transitions), and the event delta is applied atomically with transition deltas
-at end-of-substep. The transition log-density at that substep is exactly zero
-(finite). No Gaussian-pulse workaround is needed.
+A model with discrete seeding via `events { ... add(E, n_seed) at [tau] }` runs
+under PGAS (gh#80). The chain-binomial simulator and the density evaluator are
+consistent at the event substep: at substep $s_{\text{event}}$, `counts_before`
+is the pre-event state, all stochastic flows are drawn from pre-event rates
+(which are zero for the seeded compartment's downstream transitions), and the
+event delta is applied atomically with transition deltas at end-of-substep. The
+transition log-density at that substep is exactly zero (finite). No
+Gaussian-pulse workaround is needed.
 
-If a chain initialises with an event-time parameter (e.g., `tau`) outside the
-simulation window, the seed never fires within the simulation, predicted
-incidence stays zero, and the _observation_ density goes to $-\infty$ against
-real data with nonzero cases. camdl prints a split-by-component diagnostic at
-startup so the failure mode is identifiable (transition_ll vs observation_ll vs
-ivp_ll); the chain will still run if NUTS or MH can propose into a feasible
-region.
+**Use PMMH to fit the seed timing or size.** PGAS scores the recorded latent
+path, and a parameter that reaches the state only through an effect — its amount
+(`n_seed`), its time (`tau`), or a plain `init {}` assignment
+(`init { I = I0 }`) — appears in no term of that score, so its posterior would
+equal its prior. PGAS refuses such a parameter by name, and IF2 refuses an
+estimated parameter in an effect's schedule (it resolves the schedule once per
+run). PMMH re-simulates the path at each proposed θ and fits all three. For an
+initial size, declaring a law (`I ~ poisson(rate = I0)`) makes it estimable
+under PGAS. (A replay θ-move that would score these under PGAS is gh#986.)
+
+With a fixed `tau` outside the simulation window, the seed never fires,
+predicted incidence stays zero, and the _observation_ density goes to $-\infty$
+against real data with nonzero cases. camdl prints a split-by-component
+diagnostic at startup so the failure mode is identifiable (transition_ll vs
+observation_ll vs ivp_ll).
 
 During CSMC ancestor sampling on event-using models, the density evaluator
 returns $-\infty$ for a free particle whose pre-step state has zero rate for a
@@ -1738,6 +1746,11 @@ defaulted:
 
 The origin must coincide with an output-emit time — a time between snapshots is
 an error, never snapped to a neighbour.
+
+An effect scheduled at the origin time is not applied again: the saved state is
+post-effect, because the run that saved it applied every effect due at that time
+before recording it. Effects after the origin fire on the forecast's own grid,
+`origin + k·dt` (language spec §13.2).
 
 Parameter uncertainty is **not** propagated by this form: every replicate runs
 at the filter's θ, so the spread is process noise plus filtering uncertainty in
