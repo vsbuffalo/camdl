@@ -3315,10 +3315,23 @@ let splice_date_ranges ctx (es : expr list) : expr list =
    inlined its O(H) sum into all H force-of-infection rates (and their
    gradients): an O(H²) IR in the number of coupled strata.
 
+   A typed `let` with a constant body (`let omega : rate = 0.01`) is NOT a
+   param-free leaf even though its body is a literal: it lowers to
+   [Ir.Param "omega"] (see [let_is_typed_const]), so a let naming it reaches a
+   parameter. Recursing into its literal body instead made `let w = 2 * omega`
+   look param-free; `w` was hoisted and the IR invariant (E512) then fired.
+
    [visited] guards the recursion against a self-referential let. A revisit is
    either in-progress (a cycle — the least fixpoint is "no param found here";
    such a let cannot survive inlining anyway) or already-proven param-free, since
    a param-bearing body short-circuits to true on first visit. *)
+(* A typed `let` with a constant body is a fixed parameter in the IR (spec §1:
+   "indistinguishable, once compiled, from the same value declared in
+   `parameters { }`"). The single predicate for that lowering: [resolve_expr]
+   emits [Ir.Param] for it, and hoist eligibility must agree. *)
+let let_is_typed_const (lb : let_binding) : bool =
+  lb.lkind <> None && is_const_expr lb.lbody
+
 let body_refs_param_or_let ctx (e : expr) : bool =
   let visited = Hashtbl.create 8 in
   let rec go (e : expr) : bool =
@@ -3327,6 +3340,7 @@ let body_refs_param_or_let ctx (e : expr) : bool =
       || Hashtbl.mem ctx.scalar_param_tbl n
       || (match Hashtbl.find_opt ctx.let_tbl n with
           | None    -> false
+          | Some lb when let_is_typed_const lb -> true
           | Some lb ->
             if Hashtbl.mem visited n then false
             else begin Hashtbl.replace visited n (); go lb.lbody end)
@@ -3386,7 +3400,7 @@ let let_is_hoistable ctx (lb : let_binding) : bool =
   | None ->
     let eligible =
       lb.lshape = None
-      && not (lb.lkind <> None && is_const_expr lb.lbody)   (* typed const → Param path *)
+      && not (let_is_typed_const lb)   (* typed const → Param path *)
       && not (body_refs_param_or_let ctx lb.lbody)
       && free_index_var_clean lb
     in
@@ -4518,7 +4532,7 @@ and resolve_ident_name ctx name ~loc =
               ~declared:(List.length axes) ~provided:0 ());
     Ir.Const 0.0  (* placeholder — keep collecting diagnostics this pass *)
   | Some lb ->
-    if lb.lkind <> None && is_const_expr lb.lbody then
+    if let_is_typed_const lb then
       (* Typed const let → treat as parameter (dimcheck will see param_kind) *)
       Ir.Param name
     else if let_is_hoistable ctx lb && not ctx.suppress_hoist then

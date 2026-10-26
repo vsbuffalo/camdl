@@ -629,6 +629,49 @@ let test_binding_invariant_catches_poisoned_binding () =
     Alcotest.(check bool) "ParamInBinding fired for the poisoned binding"
       true fired
 
+(** A `let` that references a typed constant is not param-free. A typed `let`
+    with a constant body (`let omega : rate = 0.01`) lowers to [Param "omega"]
+    (spec §1, "indistinguishable, once compiled, from the same value declared in
+    `parameters { }`"), but the hoist-eligibility walk recursed into its body,
+    saw `0.01`, and called `let w = 2 * omega` param-free — so `w` was hoisted
+    into [model.bindings] and the compile died on the E512 invariant. The same
+    let over a declared parameter (`2 * gamma`) compiled. Both must behave the
+    same: `w` is inlined and its rate reaches the parameter `omega`, directly
+    and through a further let (`w2 = w`). *)
+let test_let_over_typed_const_is_not_hoisted () =
+  let m = compile_expect_ok {|
+time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R
+parameters { beta : rate in [0.001, 2.0]  gamma : rate in [0.001, 1.0] }
+let omega : rate = 0.01
+let w = 2 * omega
+let w2 = w
+transitions {
+  infection : S --> I @ beta * S * (I / N)
+  recovery  : I --> R @ gamma * I
+  waning    : R --> S @ w * R
+  waning2   : R --> S @ w2 * R
+}
+init { S = 990  I = 10 }
+simulate { from = 0 'days to = 10 'days }
+|} in
+  Alcotest.(check bool) "omega is an IR parameter" true
+    (List.exists (fun (p : Ir.parameter) -> p.Ir.name = "omega") m.Ir.parameters);
+  List.iter (fun (b : Ir.binding) ->
+    Alcotest.(check bool)
+      (Printf.sprintf "binding '%s' is param-free" b.Ir.bname)
+      false (Validate.references_param b.Ir.bexpr)) m.Ir.bindings;
+  List.iter (fun tr_name ->
+    match List.find_opt (fun (t : Ir.transition) -> t.Ir.name = tr_name)
+            m.Ir.transitions with
+    | None -> Alcotest.failf "transition %s missing" tr_name
+    | Some t ->
+      Alcotest.(check (option string))
+        (Printf.sprintf "%s rate reaches Param omega" tr_name)
+        (Some "omega") (Validate.first_param t.Ir.rate))
+    ["waning"; "waning2"]
+
 (* ── Cost report (--cost-report) ──────────────────────────────────────────────
    The cost report is read-only over the (unfolded) expanded model plus a local
    Constant_fold pass. On the sparse-ring model the report must show the
@@ -13963,6 +14006,8 @@ let () =
         `Quick test_binding_invariant_clean_on_spatial;
       Alcotest.test_case "poisoned binding (Param spliced in) raises E512"
         `Quick test_binding_invariant_catches_poisoned_binding;
+      Alcotest.test_case "let over a typed constant is inlined, not hoisted (no E512)"
+        `Quick test_let_over_typed_const_is_not_hoisted;
     ];
     "cost_report", [
       Alcotest.test_case "sparse-ring numbers are sane (Reduce 16→8, reuse, dups)"
