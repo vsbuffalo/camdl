@@ -123,6 +123,38 @@ pub trait ProcessModel: Send + Sync {
     fn try_compiled_model(&self) -> Option<&crate::compiled_model::CompiledModel> {
         None
     }
+
+    /// The clock this process's dynamics fire effects on, for a filter stepping
+    /// it at `dt` (proposal 2026-10-04, D2). The step arrives per call, as it does
+    /// for `step`, because a process stores none. Every process the particle
+    /// filters drive is a fixed-step discrete-time process, hence the default.
+    fn fire_clock(&self, dt: f64) -> crate::effect_plan::FireClock {
+        crate::effect_plan::FireClock::Grid { dt }
+    }
+
+    /// Apply `plan`'s origin batch — the effects at `t_start` — to one
+    /// particle's starting state, after `initial_state_draw` and before the
+    /// first step or any observation at `t_start` is scored (D1). `params` is
+    /// this particle's θ (IF2: its own perturbed θ); `dt` the filter's step, for
+    /// amount evaluation. A no-op when the batch is empty. The default refuses a
+    /// non-empty batch: a process that cannot apply effects must not drop one.
+    fn apply_origin(
+        &self,
+        state: &mut Self::State,
+        plan: &crate::effect_plan::EffectPlan,
+        params: &[f64],
+        t_start: f64,
+        dt: f64,
+    ) -> Result<(), SimError> {
+        let _ = (state, params, t_start, dt);
+        if plan.at_origin().is_empty() {
+            Ok(())
+        } else {
+            Err(SimError::Validation(
+                "this process model cannot apply effects at t_start".to_string(),
+            ))
+        }
+    }
 }
 
 /// Observation model: maps latent state to data likelihood.

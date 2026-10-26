@@ -21,9 +21,9 @@
 //!     `round()` did). GREEN throughout — the load-bearing byte-identity gate.
 //!   - Test 5 (PGAS producer): the reference producer fires once, at the
 //!     registered boundary; value/gradient score those records.
-//!   - Test 7 (no over-rejection + the residual guards): on-grid fits, events fit,
-//!     intervention-free fits; off-grid effect TIME and `AtTimesExpr`+Exact are
-//!     refused loudly.
+//!   - Test 7 (no over-rejection + the residual guard): on-grid fits, events fit,
+//!     intervention-free fits; an off-grid effect time is snapped to the grid;
+//!     `AtTimesExpr`+Exact is refused loudly.
 //!
 //! The observable is deterministic by construction: a pure-death model with
 //! `mu = 0` (no transition fires, no RNG consumed, every particle identical), so
@@ -474,23 +474,25 @@ fn pgas_no_intervention_off_grid_fits() {
         .expect("no-intervention model under Exact PGAS with off-grid obs must fit");
 }
 
-/// RESIDUAL GUARD: a scheduled intervention whose fire time is OFF the dt grid is
-/// refused loudly under Exact (deferred generalization, naming the snap migration).
+/// An off-grid scheduled intervention time is SNAPPED on the filter's grid, as
+/// forward chain-binomial simulation does (proposal 2026-10-04, D2): at 4.4 with
+/// dt=1 it fires at the end of the step ending at 4 (⌊4.4 + ½⌋ = 4), at 4.6 at
+/// the step ending at 5, whatever observations re-tile the substeps (3.5 here).
+/// (It used to be refused under Exact.)
 #[test]
-fn pf_rejects_off_grid_effect_time() {
-    let compiled = Arc::new(firing_model(
-        InterventionSchedule::AtTimes(vec![4.5]), // OFF the dt=1 grid
-        InterventionKind::Scenario,
-    ));
-    let params = compiled.default_params.clone();
-    let process = ChainBinomialProcess::new(compiled);
-    let (obs, _) = obs_on_m(&[2.0, 6.0]); // on-grid obs — only the effect time is off-grid
-    let msg = expect_err(
-        bootstrap_filter(&process, &obs, &params, &smc_config(), 42),
-        "an off-grid scheduled intervention time under Exact must be rejected",
-    );
-    assert!(msg.to_lowercase().contains("off the dt grid") && (msg.contains("snap") || msg.contains("obs_alignment")),
-        "guard must name the off-grid effect time and the snap migration, got: {msg}");
+fn pf_snaps_an_off_grid_effect_time() {
+    for (declared, fires) in [(4.4, 4.0), (4.6, 5.0)] {
+        for kind in [InterventionKind::Scenario, InterventionKind::Event] {
+            let compiled = Arc::new(firing_model(InterventionSchedule::AtTimes(vec![declared]), kind));
+            let obs_times = [3.5, 4.0, 4.5, 5.0, 6.0];
+            let m = pf_m_trajectory(&compiled, &obs_times);
+            let expected: Vec<i64> = obs_times
+                .iter()
+                .map(|&t| if t >= fires - 1e-9 { TRANSFER as i64 } else { 0 })
+                .collect();
+            assert_eq!(m, expected, "{kind:?} at {declared} must fire once, at {fires}");
+        }
+    }
 }
 
 /// §3.6 HARD-ERROR: a parametric `at [<param>]` schedule under Exact is refused

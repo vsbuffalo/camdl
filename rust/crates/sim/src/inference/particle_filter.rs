@@ -231,26 +231,25 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // reset-only boundary or a leading hole comes first (gh#833).
     let first_observation_idx = obs_model.first_observation_idx();
 
-    // gh#216: scheduled interventions fire CURSOR-keyed off the timeline's effect
-    // boundaries (NOT the `round(t/dt)` key inside step_one), so an off-grid
-    // observation re-tiling the Exact substep grid no longer moves the firing
-    // instant. `ExactInferenceTimeline::build` runs the two exact guards FIRST —
-    // so no inference path can construct a timeline that skipped a guard (the
-    // gh#187 class) — then gathers the cursor-keyed effect batches and builds the
-    // Exact schedule. The None-model process yields no effects. Two Exact cases
-    // are refused loudly inside the guards: a parametric `at [<param>]` schedule
-    // (one shared timeline can't hold per-particle times), and a scheduled fire
-    // time off the dt grid (the drift-free PGAS walk would need to re-anchor — a
-    // deferred follow-up). Always-active events are out of scope (grid_dt-keyed).
+    // The effect plan (proposal 2026-10-04): the process's own clock decides
+    // when each effect fires — chain-binomial is discrete-time, so every effect
+    // (event or intervention) fires at the end of a step of the run's grid
+    // `t_start + k·dt`, the model `simulate` generates — and the schedule lands
+    // on each firing instant, so an off-grid observation re-tiling the substeps
+    // cannot move it (gh#216). θ is shared across the swarm, so the plan built
+    // at `params` is every particle's. `build` runs the inference refusals first
+    // (the gh#187 class). The None-model process yields no effects.
     let timeline = crate::intervention::ExactInferenceTimeline::build(
         process.try_compiled_model(),
         params,
         config.t_start,
         dt,
+        process.fire_clock(dt),
         crate::boundary_times::ObsTimes::new(obs_times)?,
+        &[],
     )?;
     let schedule = timeline.schedule;
-    let scheduled = timeline.effects;
+    let plan = timeline.plan;
 
     // gh#147 (M3.1). Cumulative particle-substep count for the
     // deterministic compute-budget guard. Bounds a single PF evaluation;
@@ -322,6 +321,17 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // filter applies, rather than a second, subtly-different copy here.
     let mut deaths = DeathMask::new(n_particles);
 
+    // D1: the effects at t_start act on every particle's starting state, before
+    // the first substep and before an observation at t_start is scored. A
+    // particle the origin batch leaves negative dies like one a step would.
+    if !plan.at_origin().is_empty() {
+        let outcomes: Vec<Result<bool, SimError>> = swarm.states.iter_mut()
+            .map(|state| DeathMask::classify(
+                process.apply_origin(state, &plan, params, config.t_start, dt)))
+            .collect();
+        deaths.absorb(outcomes)?;
+    }
+
     for obs_idx in 0..n_obs {
         let obs_time = obs_model.obs_time(obs_idx);
 
@@ -361,7 +371,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
                 // boundary — fire that boundary's batch cursor-keyed.
                 for (t_local, step_dt, fired) in schedule.substeps(cur, t_start_interval) {
                     let due_iv: &[usize] = match fired {
-                        Some(idx) => &scheduled.batches[idx],
+                        Some(idx) => plan.batch(idx),
                         None => &[],
                     };
                     // `classify` is the shared policy (gh#367): `?` propagates a
