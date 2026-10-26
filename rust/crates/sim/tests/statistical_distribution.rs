@@ -15,21 +15,40 @@ use sim::{
     ChainBinomialSim, GillespieSim,
 };
 
-/// Test adapter for the retired `apply_interventions_at`: derive the due batch
-/// at `t` (grid_dt) and apply the scheduled interventions. Byte-identical.
+/// Test adapter: apply the scheduled interventions the run's effect plan fires
+/// at boundary `t` (the retired `apply_interventions_at`).
+#[allow(clippy::too_many_arguments)]
 fn apply_interventions_at(
     t: f64,
     model: &CompiledModel,
-    fire_steps: &[std::collections::BTreeSet<i64>],
+    plan: &sim::effect_plan::EffectPlan,
+    t_start: f64,
     dt: f64,
-    grid_dt: f64,
     int_s: &mut sim::state::IntState,
     real_s: &mut sim::state::RealState,
     params: &[f64],
 ) -> Result<bool, sim::error::SimError> {
     let mut batch = sim::schedule::EffectBatch::default();
-    sim::effects::due_effects(model, fire_steps, t, grid_dt, &mut batch);
+    sim::effects::split_due_batch(model, &plan_batch_at(plan, t_start, t), &mut batch);
     sim::intervention::apply_effect_batch(t, model, &batch.intervention_idx, dt, int_s, real_s, params)
+}
+
+/// The batch an [`EffectPlan`] fires at the boundary `t` of a walk from
+/// `t_start` (the origin batch at `t_start` itself).
+fn plan_batch_at(plan: &sim::effect_plan::EffectPlan, t_start: f64, t: f64) -> Vec<usize> {
+    if (t - t_start).abs() < 1e-9 {
+        return plan.at_origin().to_vec();
+    }
+    plan.times().iter().position(|&x| (x - t).abs() < 1e-9).map_or(Vec::new(), |i| plan.batch(i).to_vec())
+}
+
+/// A Grid plan for `model` over `[t_start, t_end]` at step `dt`.
+fn grid_plan(model: &CompiledModel, t_start: f64, t_end: f64, dt: f64) -> sim::effect_plan::EffectPlan {
+    sim::effect_plan::EffectPlan::build(
+        model, &model.default_params, t_start, t_end,
+        sim::effect_plan::FireClock::Grid { dt }, sim::effect_plan::Origin::Init,
+    )
+    .unwrap()
 }
 
 fn load_golden(name: &str) -> ir::Model {
@@ -350,7 +369,7 @@ fn test_fraction_transfer_edge_cases() {
         let (model, _) = make_model(1.0);
         let mut int_s = sim::state::IntState::from_vec(vec![100, 0]);
         let mut real_s = sim::state::RealState::new(0);
-        apply_interventions_at(1.0, &model, &model.resolve_fire_steps(1.0, &[]), 1.0, 1.0, &mut int_s, &mut real_s, &[]).unwrap();
+        apply_interventions_at(1.0, &model, &grid_plan(&model, 0.0, 10.0, 1.0), 0.0, 1.0, &mut int_s, &mut real_s, &[]).unwrap();
         assert_eq!(int_s.counts[0], 0, "frac=1.0: S should be 0");
         assert_eq!(int_s.counts[1], 100, "frac=1.0: V should be 100");
     }
@@ -360,7 +379,7 @@ fn test_fraction_transfer_edge_cases() {
         let (model, _) = make_model(0.0);
         let mut int_s = sim::state::IntState::from_vec(vec![100, 0]);
         let mut real_s = sim::state::RealState::new(0);
-        apply_interventions_at(1.0, &model, &model.resolve_fire_steps(1.0, &[]), 1.0, 1.0, &mut int_s, &mut real_s, &[]).unwrap();
+        apply_interventions_at(1.0, &model, &grid_plan(&model, 0.0, 10.0, 1.0), 0.0, 1.0, &mut int_s, &mut real_s, &[]).unwrap();
         assert_eq!(int_s.counts[0], 100, "frac=0.0: S should stay 100");
         assert_eq!(int_s.counts[1], 0, "frac=0.0: V should stay 0");
     }
@@ -370,7 +389,7 @@ fn test_fraction_transfer_edge_cases() {
         let (model, _) = make_model(0.8);
         let mut int_s = sim::state::IntState::from_vec(vec![1, 0]);
         let mut real_s = sim::state::RealState::new(0);
-        apply_interventions_at(1.0, &model, &model.resolve_fire_steps(1.0, &[]), 1.0, 1.0, &mut int_s, &mut real_s, &[]).unwrap();
+        apply_interventions_at(1.0, &model, &grid_plan(&model, 0.0, 10.0, 1.0), 0.0, 1.0, &mut int_s, &mut real_s, &[]).unwrap();
         assert_eq!(int_s.counts[0], 1, "frac=0.8, S=1: floor(0.8)=0, no transfer");
         assert_eq!(int_s.counts[1], 0);
     }
@@ -380,7 +399,7 @@ fn test_fraction_transfer_edge_cases() {
         let (model, _) = make_model(0.8);
         let mut int_s = sim::state::IntState::from_vec(vec![0, 0]);
         let mut real_s = sim::state::RealState::new(0);
-        apply_interventions_at(1.0, &model, &model.resolve_fire_steps(1.0, &[]), 1.0, 1.0, &mut int_s, &mut real_s, &[]).unwrap();
+        apply_interventions_at(1.0, &model, &grid_plan(&model, 0.0, 10.0, 1.0), 0.0, 1.0, &mut int_s, &mut real_s, &[]).unwrap();
         assert_eq!(int_s.counts[0], 0, "frac=0.8, S=0: no crash");
         assert_eq!(int_s.counts[1], 0);
     }

@@ -589,6 +589,19 @@ mod tests {
         assert_eq!(e.batch(0), &[2]);
     }
 
+    /// The key scales with the run's own `dt` (the gh#53 fingerprint): day 258
+    /// is step 258 at dt = 1, 516 at dt = 0.5 and 1032 at dt = 0.25, and each of
+    /// a period's fires keeps its own step.
+    #[test]
+    fn the_grid_key_scales_with_dt() {
+        for (dt, k) in [(1.0, 258), (0.5, 516), (0.25, 1032)] {
+            assert_eq!(fire_step(258.0, 0.0, dt, 2000.0), Some(k));
+            let steps: Vec<u64> =
+                [258.0, 623.25, 988.5].iter().map(|&t| fire_step(t, 0.0, dt, 2000.0).unwrap()).collect();
+            assert!(steps.windows(2).all(|w| w[0] < w[1]), "dt={dt}: {steps:?}");
+        }
+    }
+
     #[test]
     fn n_substeps_counts_a_shortened_last_step() {
         assert_eq!(n_substeps(0.0, 10.0, 1.0), 10);

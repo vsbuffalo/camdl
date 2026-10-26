@@ -26,9 +26,6 @@ use ir::{
 };
 use sim::{
     compiled_model::CompiledModel,
-    effects::due_effects,
-    intervention::apply_effect_batch,
-    schedule::EffectBatch,
     state::{IntState, RealState},
 };
 
@@ -36,25 +33,40 @@ fn int_comp(name: &str) -> Compartment {
     Compartment { name: name.into(), kind: CompartmentKind::Integer }
 }
 
-/// Test adapter preserving the old `apply_interventions_at` call shape: derive
-/// the due batch at the boundary `t` (the seam `due_effects` now owns) and apply
-/// the scheduled interventions. Byte-identical to the retired
-/// `apply_interventions_at` — the firing decision still keys on `grid_dt`.
+/// Test adapter: apply the scheduled interventions the run's effect plan fires
+/// at boundary `t` (the retired `apply_interventions_at`).
 #[allow(clippy::too_many_arguments)]
 fn apply_interventions_at(
     t: f64,
     model: &CompiledModel,
-    fire_steps: &[std::collections::BTreeSet<i64>],
+    plan: &sim::effect_plan::EffectPlan,
+    t_start: f64,
     dt: f64,
-    grid_dt: f64,
-    int_s: &mut IntState,
-    real_s: &mut RealState,
+    int_s: &mut sim::state::IntState,
+    real_s: &mut sim::state::RealState,
     params: &[f64],
-    _tolerance: f64,
 ) -> Result<bool, sim::error::SimError> {
-    let mut batch = EffectBatch::default();
-    due_effects(model, fire_steps, t, grid_dt, &mut batch);
-    apply_effect_batch(t, model, &batch.intervention_idx, dt, int_s, real_s, params)
+    let mut batch = sim::schedule::EffectBatch::default();
+    sim::effects::split_due_batch(model, &plan_batch_at(plan, t_start, t), &mut batch);
+    sim::intervention::apply_effect_batch(t, model, &batch.intervention_idx, dt, int_s, real_s, params)
+}
+
+/// The batch an [`EffectPlan`] fires at the boundary `t` of a walk from
+/// `t_start` (the origin batch at `t_start` itself).
+fn plan_batch_at(plan: &sim::effect_plan::EffectPlan, t_start: f64, t: f64) -> Vec<usize> {
+    if (t - t_start).abs() < 1e-9 {
+        return plan.at_origin().to_vec();
+    }
+    plan.times().iter().position(|&x| (x - t).abs() < 1e-9).map_or(Vec::new(), |i| plan.batch(i).to_vec())
+}
+
+/// A Grid plan for `model` over `[t_start, t_end]` at step `dt`.
+fn grid_plan(model: &CompiledModel, t_start: f64, t_end: f64, dt: f64) -> sim::effect_plan::EffectPlan {
+    sim::effect_plan::EffectPlan::build(
+        model, &model.default_params, t_start, t_end,
+        sim::effect_plan::FireClock::Grid { dt }, sim::effect_plan::Origin::Init,
+    )
+    .unwrap()
 }
 
 /// Two compartments S, V, and a single periodic intervention
@@ -131,15 +143,14 @@ fn simulate_and_count_fires(
     t_end: f64,
     initial_s: i64,
 ) -> i64 {
-    let fire_steps = model.resolve_fire_steps(runtime_dt, &[]);
+    let plan = grid_plan(model, t_start, t_end, runtime_dt);
     let mut int_s = IntState::from_vec(vec![initial_s, 0]);
     let mut real_s = RealState::new(0);
 
     let mut t = t_start;
     while t <= t_end + 1e-9 {
         apply_interventions_at(
-            t, model, &fire_steps, runtime_dt, runtime_dt,
-            &mut int_s, &mut real_s, &[], 1e-10,
+            t, model, &plan, t_start, runtime_dt, &mut int_s, &mut real_s, &[],
         ).unwrap();
         t += runtime_dt;
     }
@@ -251,13 +262,12 @@ fn periodic_intervention_fires_at_absolute_wall_time_independent_of_t_start() {
 
     // Walk from t_start=0 to t=300 at dt=0.5. Cohort fires at t=258
     // → V counter should be 1 by t=300.
-    let fire_steps = model_at_zero.resolve_fire_steps(0.5, &[]);
     let mut int_s = IntState::from_vec(vec![100, 0]);
     let mut real_s = RealState::new(0);
+    let plan = grid_plan(&model_at_zero, 0.0, 300.0, 0.5);
     let mut t = 0.0;
     while t <= 300.0 + 1e-9 {
-        apply_interventions_at(t, &model_at_zero, &fire_steps, 0.5, 0.5,
-            &mut int_s, &mut real_s, &[], 1e-10).unwrap();
+        apply_interventions_at(t, &model_at_zero, &plan, 0.0, 0.5, &mut int_s, &mut real_s, &[]).unwrap();
         t += 0.5;
     }
     assert_eq!(int_s.counts[1], 1,
@@ -267,10 +277,10 @@ fn periodic_intervention_fires_at_absolute_wall_time_independent_of_t_start() {
     // fires at absolute wall time 258 → V should still be 1.
     let mut int_s = IntState::from_vec(vec![100, 0]);
     let mut real_s = RealState::new(0);
+    let plan = grid_plan(&model_at_zero, 100.0, 300.0, 0.5);
     let mut t = 100.0;
     while t <= 300.0 + 1e-9 {
-        apply_interventions_at(t, &model_at_zero, &fire_steps, 0.5, 0.5,
-            &mut int_s, &mut real_s, &[], 1e-10).unwrap();
+        apply_interventions_at(t, &model_at_zero, &plan, 100.0, 0.5, &mut int_s, &mut real_s, &[]).unwrap();
         t += 0.5;
     }
     assert_eq!(int_s.counts[1], 1,
@@ -281,10 +291,10 @@ fn periodic_intervention_fires_at_absolute_wall_time_independent_of_t_start() {
     // range, cohort should still fire.
     let mut int_s = IntState::from_vec(vec![100, 0]);
     let mut real_s = RealState::new(0);
+    let plan = grid_plan(&model_at_zero, 200.0, 300.0, 0.5);
     let mut t = 200.0;
     while t <= 300.0 + 1e-9 {
-        apply_interventions_at(t, &model_at_zero, &fire_steps, 0.5, 0.5,
-            &mut int_s, &mut real_s, &[], 1e-10).unwrap();
+        apply_interventions_at(t, &model_at_zero, &plan, 200.0, 0.5, &mut int_s, &mut real_s, &[]).unwrap();
         t += 0.5;
     }
     assert_eq!(int_s.counts[1], 1,
@@ -296,10 +306,10 @@ fn periodic_intervention_fires_at_absolute_wall_time_independent_of_t_start() {
     // single-period model).
     let mut int_s = IntState::from_vec(vec![100, 0]);
     let mut real_s = RealState::new(0);
+    let plan = grid_plan(&model_at_zero, 300.0, 400.0, 0.5);
     let mut t = 300.0;
     while t <= 400.0 + 1e-9 {
-        apply_interventions_at(t, &model_at_zero, &fire_steps, 0.5, 0.5,
-            &mut int_s, &mut real_s, &[], 1e-10).unwrap();
+        apply_interventions_at(t, &model_at_zero, &plan, 300.0, 0.5, &mut int_s, &mut real_s, &[]).unwrap();
         t += 0.5;
     }
     assert_eq!(int_s.counts[1], 0,
@@ -351,13 +361,12 @@ fn periodic_intervention_fires_at_correct_wall_time_under_sub_day_dt() {
     // Drive to t = 130.0 at dt = 0.5 — pre-fix, the intervention
     // would have fired at wall time 129 (step 258 × dt 0.5), so by
     // t = 130 the V count would be 1. Post-fix it must be 0.
-    let fire_steps = model.resolve_fire_steps(0.5, &[]);
     let mut int_s = IntState::from_vec(vec![100, 0]);
     let mut real_s = RealState::new(0);
+    let plan = grid_plan(&model, 0.0, 260.0, 0.5);
     let mut t = 0.0;
     while t <= 130.0 + 1e-9 {
-        apply_interventions_at(t, &model, &fire_steps, 0.5, 0.5,
-            &mut int_s, &mut real_s, &[], 1e-10).unwrap();
+        apply_interventions_at(t, &model, &plan, 0.0, 0.5, &mut int_s, &mut real_s, &[]).unwrap();
         t += 0.5;
     }
     assert_eq!(int_s.counts[1], 0,
@@ -368,8 +377,7 @@ fn periodic_intervention_fires_at_correct_wall_time_under_sub_day_dt() {
 
     // Continue past wall time 258. After t = 258 it must have fired.
     while t <= 260.0 + 1e-9 {
-        apply_interventions_at(t, &model, &fire_steps, 0.5, 0.5,
-            &mut int_s, &mut real_s, &[], 1e-10).unwrap();
+        apply_interventions_at(t, &model, &plan, 0.0, 0.5, &mut int_s, &mut real_s, &[]).unwrap();
         t += 0.5;
     }
     assert_eq!(int_s.counts[1], 1,

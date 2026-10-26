@@ -1222,12 +1222,6 @@ pub struct SubstepGrid {
     /// substep index → observation index: the substep whose end coincides with
     /// that observation time (where the likelihood is scored).
     pub obs_at_substep: ObsAtSubstep,
-    /// substep index → scheduled-effect-boundary index (into a
-    /// [`crate::intervention::TimelineEffects`]): the substep whose end lands on
-    /// that scheduled intervention's fire time, where the producer fires it
-    /// CURSOR-keyed (gh#216). Empty under `Snap` (effects fire on the `round(t/dt)`
-    /// key in the producer's `due_effects`); populated only under `Exact`.
-    pub effect_at_substep: ObsAtSubstep,
 }
 
 /// Build the substep grid over `[t_start, last_obs]` under the alignment policy.
@@ -1243,8 +1237,7 @@ pub struct SubstepGrid {
 ///   behavior, byte-identical.
 /// * `Exact`: loop obs windows over `Schedule::substeps`. Each window yields
 ///   drift-free `t0 = substep_time(window_start, s)` substeps clipped to its obs;
-///   the obs is scored on the window's final clipped substep, effects on the
-///   substep the iterator signals. At dt=1.0 (and any window that is an integer
+///   the obs is scored on the window's final clipped substep. At dt=1.0 (and any window that is an integer
 ///   multiple of `dt`) this is bit-identical to `Snap`; at non-power-of-2 `dt` the
 ///   final step of an on-grid window differs from `Snap` by ≤1 ULP — the
 ///   sanctioned EXACT-stepper drift, bounded to one window (substep-time
@@ -1253,59 +1246,38 @@ pub fn build_substep_grid(
     t_start: f64,
     dt: f64,
     observations: &[Observation],
-    effect_times: &[f64],
     policy: StepPolicy,
 ) -> Result<SubstepGrid, SimError> {
     let last_obs = observations.last().map(|o| o.time).unwrap_or(t_start);
     match policy {
         StepPolicy::Snap => {
-            // Snap: effects fire on the `round(t/dt)` key inside the producer's
-            // `due_effects`, off this uniform grid — so no effect boundaries are
-            // registered and `effect_at_substep` stays empty (byte-identical).
             let n = crate::time::interval_steps(t_start, last_obs, dt);
             let steps = (0..n).map(|s| (t_start + s as f64 * dt, dt)).collect();
             let obs_at_substep = build_obs_at_substep(observations, t_start, dt)?;
-            Ok(SubstepGrid { steps, obs_at_substep, effect_at_substep: ObsAtSubstep::new() })
+            Ok(SubstepGrid { steps, obs_at_substep })
         }
         StepPolicy::Exact => {
             let obs_times: Vec<f64> = observations.iter().map(|o| o.time).collect();
-            // gh#216: register the scheduled-effect boundaries so the Exact walk
-            // LANDS exactly on each (even an on-grid effect that off-grid obs would
-            // otherwise step past), and record which substep fires it so the
-            // producer fires CURSOR-keyed. Off-grid effect times are refused
-            // upstream (`guard_exact_offgrid_effect_time`).
-            let schedule =
-                Schedule::new(dt, last_obs, dt, StepPolicy::Exact, Vec::new(), effect_times.to_vec())
-                    .with_obs(obs_times);
+            // No effect boundaries: the producers fire the effect plan by
+            // substep index on the dt grid, and `pgas_effect_plan` refuses an
+            // effect-bearing model on a grid this walk has re-tiled.
+            let schedule = Schedule::new(dt, last_obs, StepPolicy::Exact, Vec::new(), Vec::new())
+                .with_obs(obs_times);
             // PGAS materializes the SAME inner walk the bootstrap PF / IF2
             // iterate (`Schedule::substeps`), instead of hand-rolling a second
             // copy (gh#233 — one walk, two consumers). We loop obs windows
             // and collect each window's drift-free substeps into the flat grid; the
-            // obs lands on the window's last substep, effects on the substep the
-            // iterator signals via `fired`. The effect cursor carries monotonically
-            // across windows (PGAS's single-cursor convention: an effect fires
-            // exactly once, on the substep landing on its boundary).
+            // obs lands on the window's last substep.
             let mut steps: Vec<(f64, f64)> = Vec::new();
             let mut obs_at_substep = ObsAtSubstep::new();
-            let mut effect_at_substep = ObsAtSubstep::new();
             let mut cur = Cursor::default();
             let mut window_start = t_start;
             let mut idx = 0usize;
             while let Some(obs_t) = schedule.obs_time(&cur) {
-                let wcur =
-                    Cursor { obs_idx: cur.obs_idx, effect_idx: cur.effect_idx, ..Default::default() };
+                let wcur = Cursor { obs_idx: cur.obs_idx, ..Default::default() };
                 let mut last_idx = None;
-                let mut fired_in_window = 0usize;
-                for (t0, step_dt, fired) in schedule.substeps(wcur, window_start) {
+                for (t0, step_dt, _) in schedule.substeps(wcur, window_start) {
                     steps.push((t0, step_dt));
-                    if let Some(eff_idx) = fired {
-                        let prev = effect_at_substep.insert(idx, eff_idx);
-                        debug_assert!(
-                            prev.is_none(),
-                            "exact grid: substep {idx} claimed twice (effect collision)"
-                        );
-                        fired_in_window += 1;
-                    }
                     last_idx = Some(idx);
                     idx += 1;
                 }
@@ -1327,10 +1299,9 @@ pub fn build_substep_grid(
                     None => break,
                 }
                 window_start = obs_t; // re-anchor at the EXACT obs time
-                cur.effect_idx += fired_in_window;
                 cur.pass_obs();
             }
-            Ok(SubstepGrid { steps, obs_at_substep, effect_at_substep })
+            Ok(SubstepGrid { steps, obs_at_substep })
         }
     }
 }
@@ -3691,7 +3662,7 @@ pub fn run_pgas(
     // The realized substep grid (uniform under Snap; window-tiled with shortened
     // remainders under Exact) and its obs→substep map — the single grid every
     // producer and density consumer tiles against.
-    let grid = build_substep_grid(t_start, config.dt, observations, &[], config.step_policy)?;
+    let grid = build_substep_grid(t_start, config.dt, observations, config.step_policy)?;
     let obs_at_substep = grid.obs_at_substep;
     // The effect plan every producer fires by (D2: Grid, the substep grid's own
     // step). Built once: D3 above refuses an estimated parameter in a schedule.
@@ -4737,7 +4708,7 @@ mod grid_tests {
     #[test]
     fn snap_grid_is_the_legacy_uniform_grid() {
         let observations = obs(&[3.0, 7.0, 10.0]);
-        let g = build_substep_grid(0.0, 1.0, &observations, &[], StepPolicy::Snap).unwrap();
+        let g = build_substep_grid(0.0, 1.0, &observations, StepPolicy::Snap).unwrap();
         let expect: Vec<(f64, f64)> = (0..10).map(|s| (s as f64, 1.0)).collect();
         assert_eq!(g.steps, expect);
         assert_eq!(g.obs_at_substep, build_obs_at_substep(&observations, 0.0, 1.0).unwrap());
@@ -4747,7 +4718,7 @@ mod grid_tests {
     #[test]
     fn exact_tiles_off_grid_obs_with_remainder() {
         let observations = obs(&[3.5, 7.0, 10.5]);
-        let g = build_substep_grid(0.0, 1.0, &observations, &[], StepPolicy::Exact).unwrap();
+        let g = build_substep_grid(0.0, 1.0, &observations, StepPolicy::Exact).unwrap();
         assert_eq!(g.steps.len(), 12);
         let dts: Vec<f64> = g.steps.iter().map(|&(_, d)| d).collect();
         assert_eq!(dts, vec![1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0, 0.5]);
@@ -4763,34 +4734,11 @@ mod grid_tests {
     }
 
     #[test]
-    fn exact_grid_with_on_grid_effect_and_off_grid_obs() {
-        // The effect-re-anchor path the off-grid-obs-only tests don't reach
-        // (gh#233: the shared Substeps walk re-anchors at the EXACT effect time).
-        // dt=1, obs at [3.0, 7.5], one on-grid effect at 2.0. The full expected
-        // grid is hand-computed and was verified bit-identical to the deleted
-        // hand-rolled whole-run walk: substeps 0,1,2 reach obs(0)=3.0 (the effect
-        // fires on the substep landing on t=2, idx 1); substeps 3..7 reach
-        // obs(1)=7.5 with a 0.5 remainder. gate_pgas_density_baseline +
-        // gh187_pgas_scheduled_intervention pin the same path end-to-end.
-        let observations = obs(&[3.0, 7.5]);
-        let g = build_substep_grid(0.0, 1.0, &observations, &[2.0], StepPolicy::Exact).unwrap();
-        let dts: Vec<f64> = g.steps.iter().map(|&(_, d)| d).collect();
-        assert_eq!(dts, vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5]);
-        let t0s: Vec<f64> = g.steps.iter().map(|&(t0, _)| t0).collect();
-        assert_eq!(t0s, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
-        assert_eq!(sorted_map(&g), vec![(2, 0), (7, 1)], "obs land on each window's last substep");
-        let mut eff: Vec<(usize, usize)> =
-            g.effect_at_substep.iter().map(|(&k, &v)| (k, v)).collect();
-        eff.sort();
-        assert_eq!(eff, vec![(1, 0)], "effect 0 fires on the substep landing on t=2 (idx 1)");
-    }
-
-    #[test]
     fn exact_on_grid_equals_snap_dt_one() {
         // On-grid obs at dt=1.0: Exact and Snap grids are identical.
         let observations = obs(&[3.0, 7.0, 10.0]);
-        let snap = build_substep_grid(0.0, 1.0, &observations, &[], StepPolicy::Snap).unwrap();
-        let exact = build_substep_grid(0.0, 1.0, &observations, &[], StepPolicy::Exact).unwrap();
+        let snap = build_substep_grid(0.0, 1.0, &observations, StepPolicy::Snap).unwrap();
+        let exact = build_substep_grid(0.0, 1.0, &observations, StepPolicy::Exact).unwrap();
         assert_eq!(exact, snap);
     }
 
@@ -4802,8 +4750,8 @@ mod grid_tests {
         // EXACT-stepper drift (substep-time proposal). The obs MAP is identical,
         // and EXACT lands exactly on each obs (the property SNAP lacks).
         let observations = obs(&[3.0, 5.0]);
-        let snap = build_substep_grid(0.0, 0.1, &observations, &[], StepPolicy::Snap).unwrap();
-        let exact = build_substep_grid(0.0, 0.1, &observations, &[], StepPolicy::Exact).unwrap();
+        let snap = build_substep_grid(0.0, 0.1, &observations, StepPolicy::Snap).unwrap();
+        let exact = build_substep_grid(0.0, 0.1, &observations, StepPolicy::Exact).unwrap();
         assert_eq!(exact.obs_at_substep, snap.obs_at_substep, "obs map must be identical");
         assert_eq!(exact.steps.len(), snap.steps.len());
         for (i, (&(et, ed), &(st, sd))) in exact.steps.iter().zip(&snap.steps).enumerate() {
@@ -4824,7 +4772,7 @@ mod grid_tests {
         // value (window_start + s·dt), never an accumulation. The window's final
         // step is the clipped remainder that lands on the obs.
         let observations = obs(&[5.0]);
-        let g = build_substep_grid(0.0, 0.1, &observations, &[], StepPolicy::Exact).unwrap();
+        let g = build_substep_grid(0.0, 0.1, &observations, StepPolicy::Exact).unwrap();
         let n = g.steps.len();
         for (s, &(t0, d)) in g.steps.iter().enumerate() {
             assert_eq!(t0.to_bits(), (s as f64 * 0.1).to_bits(), "t0 not drift-free at {s}");
@@ -4843,7 +4791,7 @@ mod grid_tests {
         // Σ dt_substep within each obs window equals the window length, and each
         // t0 is monotone — the relaxed invariant the consumers assert under exact.
         let observations = obs(&[2.5, 6.0, 9.3]);
-        let g = build_substep_grid(0.0, 1.0, &observations, &[], StepPolicy::Exact).unwrap();
+        let g = build_substep_grid(0.0, 1.0, &observations, StepPolicy::Exact).unwrap();
         let mut prev_end = 0.0;
         for &(t0, d) in &g.steps {
             assert!(t0 >= prev_end - 1e-12, "t0 must be monotone (got {t0} after {prev_end})");
@@ -4857,7 +4805,7 @@ mod grid_tests {
 
     #[test]
     fn empty_obs_yields_empty_grid() {
-        let g = build_substep_grid(0.0, 1.0, &[], &[], StepPolicy::Exact).unwrap();
+        let g = build_substep_grid(0.0, 1.0, &[], StepPolicy::Exact).unwrap();
         assert!(g.steps.is_empty() && g.obs_at_substep.is_empty());
     }
 
@@ -4884,7 +4832,7 @@ mod grid_tests {
     #[test]
     fn snap_sub_dt_colliding_obs_is_rejected_by_build_substep_grid() {
         let observations = obs(&[3.0, 3.4]);
-        let result = build_substep_grid(0.0, 1.0, &observations, &[], StepPolicy::Snap);
+        let result = build_substep_grid(0.0, 1.0, &observations, StepPolicy::Snap);
         assert!(
             result.is_err(),
             "Snap grid must reject sub-dt-colliding observation times"
@@ -4895,7 +4843,7 @@ mod grid_tests {
     fn snap_non_colliding_obs_builds_grid_with_both_present() {
         // t=3.0 and t=6.0 at dt=1 land on distinct substeps (2 and 5).
         let observations = obs(&[3.0, 6.0]);
-        let g = build_substep_grid(0.0, 1.0, &observations, &[], StepPolicy::Snap)
+        let g = build_substep_grid(0.0, 1.0, &observations, StepPolicy::Snap)
             .expect("non-colliding obs must build fine");
         assert_eq!(sorted_map(&g), vec![(2, 0), (5, 1)]);
         let map = build_obs_at_substep(&observations, 0.0, 1.0)

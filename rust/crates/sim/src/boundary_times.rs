@@ -11,15 +11,15 @@
 //! Validation is **per-axis**, not a single generic policy, because ORDER matters
 //! differently per axis:
 //!
-//! - **Independent producer lists** (output times, the forward effect set) carry
-//!   no parallel index data, so they may be freely SORTED into canonical order —
-//!   [`SortedFiniteTimes`].
-//! - **Index-aligned / ordered lists** (the inference effect timeline, whose
-//!   `times[i]` aligns with `TimelineEffects::batches[i]`; and observation times,
+//! - **Independent producer lists** (output times) carry no parallel index data,
+//!   so they may be freely SORTED into canonical order — [`SortedFiniteTimes`].
+//! - **Index-aligned / ordered lists** (an effect plan's firing instants, whose
+//!   `times[i]` aligns with the plan's `batch(i)`; and observation times,
 //!   indexed by obs position) must NOT be sorted — reordering would desync the
-//!   parallel `batches` (firing the wrong batch) or the obs index. These are
-//!   validated **order-preserving**: a non-monotone input is REJECTED, never
-//!   silently reordered.
+//!   parallel batches (firing the wrong batch) or the obs index. Observation
+//!   times are validated **order-preserving**: a non-monotone input is
+//!   REJECTED, never silently reordered; the plan's instants are built sorted
+//!   and distinct ([`crate::effect_plan::EffectPlan`]).
 //!
 //! The wrappers live only at the construction boundary: the mode constructors on
 //! [`crate::schedule::Schedule`] unwrap them to `Vec<f64>` immediately, so nothing
@@ -27,7 +27,6 @@
 
 use crate::compiled_model::CompiledModel;
 use crate::error::SimError;
-use crate::intervention::TimelineEffects;
 
 fn reject_non_finite(times: &[f64], axis: &str) -> Result<(), SimError> {
     if let Some(bad) = times.iter().copied().find(|t| !t.is_finite()) {
@@ -52,22 +51,9 @@ fn reject_non_increasing(times: &[f64], axis: &str) -> Result<(), SimError> {
     Ok(())
 }
 
-fn reject_non_monotone(times: &[f64], axis: &str) -> Result<(), SimError> {
-    for w in times.windows(2) {
-        // NaN arm explicit, as in `reject_non_increasing`.
-        if w[0].is_nan() || w[1].is_nan() || w[0] > w[1] {
-            return Err(SimError::Validation(format!(
-                "{axis} times must be non-decreasing; found {} followed by {}",
-                w[0], w[1]
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// A finite, ascending list of times produced by SORTING an INDEPENDENT list (one
-/// with no parallel index data). Use ONLY for such lists; never for the inference
-/// effect timeline or observation times (see the module header).
+/// with no parallel index data). Use ONLY for such lists; never for an effect
+/// plan's instants or observation times (see the module header).
 #[derive(Clone, Debug)]
 pub struct SortedFiniteTimes(Vec<f64>);
 
@@ -122,27 +108,6 @@ impl OutputTimes {
 pub struct EffectTimes(Vec<f64>);
 
 impl EffectTimes {
-    /// The FORWARD effect set (interventions + always-active events) — an
-    /// independent list with no parallel index, so it is sorted into canonical
-    /// order. The forward backends fire via `round(t/dt)`, not by an index into
-    /// this list.
-    pub fn from_model(model: &CompiledModel, params: &[f64]) -> Result<Self, SimError> {
-        Ok(EffectTimes(
-            SortedFiniteTimes::new(crate::intervention::all_intervention_times(model, params))?
-                .into_vec(),
-        ))
-    }
-
-    /// The INFERENCE effect timeline: `timeline.times[i]` is the boundary the
-    /// producer fires `timeline.batches[i]` at — so the order is index-aligned
-    /// with the batches and must be PRESERVED. Validate finite + non-decreasing
-    /// (the producer's invariant); never sort (that would desync the batches).
-    pub fn from_timeline(timeline: &TimelineEffects) -> Result<Self, SimError> {
-        reject_non_finite(&timeline.times, "effect")?;
-        reject_non_monotone(&timeline.times, "effect")?;
-        Ok(EffectTimes(timeline.times.clone()))
-    }
-
     /// An [`crate::effect_plan::EffectPlan`]'s firing instants, index-aligned
     /// with its batches. The plan built them from validated fire times, sorted
     /// and distinct, so there is nothing left to check.
@@ -210,7 +175,7 @@ mod tests {
         assert!(ObsTimes::new(vec![4.0]).is_ok());
     }
 
-    /// The monotonicity guards carry their own NaN arm, behind the
+    /// The monotonicity guard carries its own NaN arm, behind the
     /// `reject_non_finite` pass that normally catches NaN first. Pinned
     /// directly because it is a second line of defence: any caller that
     /// validates order without validating finiteness relies on it, and a bare
@@ -219,21 +184,8 @@ mod tests {
     fn monotonicity_guards_reject_nan_on_their_own() {
         assert!(reject_non_increasing(&[1.0, f64::NAN], "t").is_err(), "NaN as the later time");
         assert!(reject_non_increasing(&[f64::NAN, 1.0], "t").is_err(), "NaN as the earlier time");
-        assert!(reject_non_monotone(&[1.0, f64::NAN], "t").is_err(), "NaN as the later time");
-        assert!(reject_non_monotone(&[f64::NAN, 1.0], "t").is_err(), "NaN as the earlier time");
         // Negative control: the guards still accept what they should.
         assert!(reject_non_increasing(&[1.0, 2.0, 3.0], "t").is_ok());
-        assert!(reject_non_monotone(&[1.0, 1.0, 2.0], "t").is_ok());
         assert!(reject_non_increasing(&[1.0, 1.0], "t").is_err(), "strict: coincident rejected");
-    }
-
-    #[test]
-    fn effect_from_timeline_preserves_order_aligned_with_batches() {
-        let tl = TimelineEffects { times: vec![2.0, 5.0, 5.0], batches: vec![vec![0], vec![1], vec![2]] };
-        // Non-decreasing (coincident effect boundaries allowed) + preserved.
-        assert_eq!(EffectTimes::from_timeline(&tl).unwrap().into_vec(), vec![2.0, 5.0, 5.0]);
-        // A non-monotone timeline is rejected (would desync batches if sorted).
-        let bad = TimelineEffects { times: vec![5.0, 2.0], batches: vec![vec![0], vec![1]] };
-        assert!(EffectTimes::from_timeline(&bad).is_err(), "non-monotone timeline rejected, not sorted");
     }
 }

@@ -564,9 +564,8 @@ impl FitRunConfig {
 
     /// Build the inference process. The integrator `dt` is supplied per call to
     /// `step`/`density` (and per rung by the gh#52 Richardson dt-check via the
-    /// SMCConfig), so the process itself is dt-agnostic — there is no stored
-    /// `fire_steps` to resolve at a particular dt any more (effect firing is
-    /// cursor-keyed from the timeline; see `effects::split_due_batch`).
+    /// SMCConfig), so the process itself is dt-agnostic: each filter run builds
+    /// its effect plan at its own dt (`ProcessModel::fire_clock`).
     pub fn build_process(&self) -> sim::inference::ChainBinomialProcess {
         sim::inference::ChainBinomialProcess::new(self.compiled.clone())
     }
@@ -967,9 +966,8 @@ pub fn run_quick_pfilter_with_dt(
     seed: u64,
 ) -> Result<(f64, super::loglik_eval::FilterStats), sim::error::SimError> {
     let dt = dt_override.unwrap_or(config.if2_config.dt);
-    // gh#53: Process must be built with the same dt the SMCConfig
-    // will use, so its internal fire_steps resolves correctly for
-    // dt-override calls (gh#52 Richardson ladder).
+    // The process is dt-agnostic; the filter builds its effect plan at the
+    // SMCConfig's dt, the override included (gh#52 Richardson ladder).
     let process = config.build_process();
     let obs_model = config.build_obs_model();
     let smc_config = sim::inference::traits::SMCConfig {

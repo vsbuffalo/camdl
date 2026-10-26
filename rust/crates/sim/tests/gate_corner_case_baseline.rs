@@ -7,7 +7,7 @@
 //! intervention snap, the coincident-boundary order, the fractional output end,
 //! and the full substep lifecycle (events + intervention + balance).
 //!
-//! At `Simulate::run` ALL model interventions fire (it resolves `fire_steps` for
+//! At `Simulate::run` ALL model interventions fire (the effect plan covers
 //! everything; the CLI's default-off is a CLI-layer filter), so these models
 //! exercise the intervention/event/balance boundary handling without `--enable`.
 //!

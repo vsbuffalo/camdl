@@ -155,10 +155,10 @@ fn generate_data(compiled: &CompiledModel, params: &[f64]) -> (Vec<f64>, Vec<f64
     let mut obs_times = Vec::new();
     let mut obs_values = Vec::new();
     let mut t = 0.0;
+    let plan = sim::effect_plan::EffectPlan::build(compiled, params, 0.0, 77.0, sim::effect_plan::FireClock::Grid { dt: 1.0 }, sim::effect_plan::Origin::Init).unwrap();
     while t < 77.0 {
         for _ in 0..7 {
-            let fire_steps = compiled.resolve_fire_steps(1.0, params);
-            sim::effects::due_effects(compiled, &fire_steps, t + 1.0, 1.0, &mut scratch.effect_batch);
+            sim::effects::split_due_batch(compiled, plan.batch_ending_substep(t as u64), &mut scratch.effect_batch);
             step_one(compiled, &mut state.counts, &mut state.flow_accumulators, &mut real, params, t, 1.0, None, &mut rng, &mut scratch).unwrap();
             t += 1.0;
         }

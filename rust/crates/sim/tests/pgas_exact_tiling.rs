@@ -120,7 +120,7 @@ fn exact_equals_snap_on_grid() {
     let mut rng_snap = StatefulRng::new(SEED);
     let snap = simulate_reference(&compiled, &params, last_obs, dt, &mut rng_snap).unwrap();
 
-    let grid = build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
+    let grid = build_substep_grid(t_start, dt, &observations, StepPolicy::Exact).unwrap();
     let mut rng_exact = StatefulRng::new(SEED);
     let plan = sim::inference::pgas::pgas_effect_plan(&compiled, &params, dt, &grid.steps).unwrap();
     let exact = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, &plan, &mut rng_exact).unwrap();
@@ -151,7 +151,7 @@ fn exact_shortened_substep_density_recompute() {
     // first remainder and produce only one shortened substep).
     let observations = obs_at(&[40.5, 90.2, 140.8, 190.3]);
 
-    let grid = build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
+    let grid = build_substep_grid(t_start, dt, &observations, StepPolicy::Exact).unwrap();
     let mut rng = StatefulRng::new(SEED);
     let traj = simulate_reference_on_grid(
         &compiled, &params, dt, &grid.steps, &sim::effect_plan::EffectPlan::default(), &mut rng,
@@ -219,7 +219,7 @@ fn exact_shortened_substep_gradient_matches_fd() {
     let observations = obs_at(&[40.5, 90.2, 140.8, 190.3]);
     let n_params = compiled.param_index.len();
 
-    let grid = build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
+    let grid = build_substep_grid(t_start, dt, &observations, StepPolicy::Exact).unwrap();
     let mut rng = StatefulRng::new(SEED);
     let traj = simulate_reference_on_grid(
         &compiled, &params, dt, &grid.steps, &sim::effect_plan::EffectPlan::default(), &mut rng,

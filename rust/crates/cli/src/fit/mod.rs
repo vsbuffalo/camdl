@@ -2760,10 +2760,10 @@ mod tests {
 
     /// gh#449 (follow-up to gh#447). The recurring-fire collision guard was
     /// added to `CompiledModel::validate_schedule`, which the three forward
-    /// backends call at entry — but nothing on the inference/fit path calls it.
-    /// The PGAS producer goes straight to `resolve_fire_steps(dt, params)`,
-    /// whose dedup `BTreeSet` is exactly where a colliding fire is silently
-    /// dropped. So a coarse-`dt` `fit` still silently drops recurring fires,
+    /// backends call at entry — but nothing on the inference/fit path calls it,
+    /// and the inference producers fire one intervention once per grid step, so
+    /// two recurring fires on one step are one. So a coarse-`dt` `fit` silently
+    /// dropped recurring fires,
     /// which is the item-23 silent-wrong condition surviving on the inference
     /// cells — against the "every backend x method cell works or fails loudly"
     /// doctrine.

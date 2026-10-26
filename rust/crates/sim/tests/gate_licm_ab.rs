@@ -371,7 +371,7 @@ fn gate_licm_inference_producer_byte_identical() {
         let t = t_start + s as f64;
         // ON threads the staged scratch (exactly what bootstrap_filter / run_if2 /
         // csmc_as do); OFF takes the on-demand arm. The fixture has no events or
-        // interventions, so `due_effects` is empty.
+        // interventions, so the due batch is empty.
         proc_on
             .step(&mut s_on, &params_on, t, dt, pe_on.as_deref(), &mut rng_on, &mut scr_on, &[])
             .expect("on producer step");
@@ -446,7 +446,7 @@ fn gate_licm_pgas_loglik_byte_identical() {
         let observations: Vec<Observation> =
             obs_times.iter().map(|&t| Observation { time: t, value: 0.0 }).collect();
         let grid =
-            build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
+            build_substep_grid(t_start, dt, &observations, StepPolicy::Exact).unwrap();
         let mut rng = StatefulRng::new(SEED);
         let traj =
             simulate_reference_on_grid(compiled, params, dt, &grid.steps, &sim::effect_plan::EffectPlan::default(), &mut rng).unwrap();

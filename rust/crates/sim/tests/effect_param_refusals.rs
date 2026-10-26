@@ -72,7 +72,7 @@ fn build_if2(model: &CompiledModel, estimated: &[&str]) -> Result<ExactInference
 #[test]
 fn if2_refuses_an_estimated_parameter_in_an_event_schedule() {
     let model = seeding_model();
-    let err = build_if2(&model, &["beta", "tau"]).err().expect("tau sets the fire time: must be refused");
+    let Err(err) = build_if2(&model, &["beta", "tau"]) else { panic!("tau sets the fire time: must be refused") };
     assert_eq!(
         err,
         "model validation error: if2: `tau` is estimated but sets the fire time of event \
@@ -125,9 +125,9 @@ fn run_if2_refuses_an_estimated_event_time() {
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
-    let err = run_if2(&process, &obs, &model.default_params, &if2_params, &config, 1)
-        .err()
-        .expect("IF2 with tau estimated must be refused");
+    let Err(err) = run_if2(&process, &obs, &model.default_params, &if2_params, &config, 1) else {
+        panic!("IF2 with tau estimated must be refused")
+    };
     assert!(err.to_string().contains("if2: `tau` is estimated but sets the fire time of event `founders_arrive`"), "{err}");
 }
 
@@ -173,7 +173,7 @@ fn run_pgas_estimating(model: &Arc<CompiledModel>, estimated: &[&str]) -> Result
 /// An estimated effect AMOUNT is refused under PGAS, naming it and the event.
 #[test]
 fn pgas_refuses_an_estimated_effect_amount() {
-    let err = run_pgas_estimating(&seeding_model(), &["beta", "n_seed"]).err().expect("must be refused");
+    let err = run_pgas_estimating(&seeding_model(), &["beta", "n_seed"]).expect_err("must be refused");
     assert_eq!(
         err,
         "model validation error: pgas: `n_seed` is estimated but reaches the state only through \
@@ -185,7 +185,7 @@ fn pgas_refuses_an_estimated_effect_amount() {
 /// An estimated effect SCHEDULE is refused under PGAS.
 #[test]
 fn pgas_refuses_an_estimated_effect_schedule() {
-    let err = run_pgas_estimating(&seeding_model(), &["tau"]).err().expect("must be refused");
+    let err = run_pgas_estimating(&seeding_model(), &["tau"]).expect_err("must be refused");
     assert_eq!(
         err,
         "model validation error: pgas: `tau` is estimated but sets the fire time of event \
@@ -199,7 +199,7 @@ fn pgas_refuses_an_estimated_effect_schedule() {
 /// refusal names the entry that is the parameter itself.
 #[test]
 fn pgas_refuses_an_estimated_plain_init_assignment() {
-    let err = run_pgas_estimating(&seeding_model(), &["I0"]).err().expect("must be refused");
+    let err = run_pgas_estimating(&seeding_model(), &["I0"]).expect_err("must be refused");
     assert_eq!(
         err,
         "model validation error: pgas: `I0` is estimated but enters only through \

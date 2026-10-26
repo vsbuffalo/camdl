@@ -1,41 +1,19 @@
 //! The merged timeline spine — one `Schedule` answering "where does the
-//! integrator stop next, and what is due there" for every stepping idiom.
+//! integrator stop next, and what is due there" for every stepping idiom:
 //!
-//! Today that question is answered three incompatible ways (verified against the
-//! backends, 2026-06-05):
+//!   - **snap** (chain-binomial forward, PGAS) — a full `dt` every substep, never
+//!     clipped to an output or effect time; outputs are emitted at grid times.
+//!   - **exact** (ODE, the inference filters) — the step is clipped so the
+//!     integrator lands exactly on each output / effect / observation boundary.
+//!   - **clip** (Gillespie) — a proposed exponential time is clipped back to the
+//!     next boundary.
 //!
-//!   - **chain_binomial** (`chain_binomial.rs:170-237`) — steps a FULL `cfg.dt`
-//!     every substep (`dt = cfg.dt.min(t_end - t)`, never clipped to an
-//!     output/effect time); outputs are emitted post-step at grid times; effects
-//!     fire *inside* `step_one` keyed on `resolve_fire_steps(cfg.dt)` (a step
-//!     index), NOT on the loop's boundary detection. This is the **snap** policy.
-//!   - **ode** (`ode.rs:205-239`) — computes
-//!     `next_boundary = min(t_end, out_t, iv_t)` and clips
-//!     `dt = cfg.dt.min(next_boundary - t)`, landing EXACTLY on each output/effect
-//!     time, where it fires via `apply_interventions_at(t, …, 1e-10)`. This is
-//!     the **exact** policy.
-//!   - **gillespie** (`gillespie.rs:144-246`) — PROPOSES an exponential time and
-//!     clips it back to `min(t_end, out_t, iv_t)`. The **clip** query.
-//!
-//! This module makes the time→step mapping ONE thing with an explicit policy and
-//! an explicit grid, rather than three call-site conventions. The grid is a FIELD
-//! (`cfg.dt` for chain/ode, `model.simulation.dt.unwrap_or(1.0)` —
-//! gillespie's `iv_resolution_dt`, `gillespie.rs:120` — for gillespie), the
-//! single source of truth, so a model never snaps interventions on one grid and
-//! observations on another.
-//!
-//! ## Scope of the byte-identical extraction (Stage 1)
-//!
-//! Stage 1 unifies the **boundary cursor**: the next-stop time, the substep
-//! cadence, and the output-emission walk (the `while output_times[idx] <= t + 1e-12`
-//! block duplicated in all four backends). It does NOT move where interventions
-//! *fire*: chain_binomial keeps its `fire_steps`-in-`step_one` mechanism, the
-//! exact backends keep `apply_interventions_at` at the clipped boundary
-//! ("interventions as today"). Unifying the firing mechanism is a behaviour change
-//! (it would move chain_binomial's snap-vs-exact divergence — see
-//! `tests/fixtures/corner_cases/off_grid_intervention.camdl`) and belongs to the
-//! `--obs-alignment` knob (Stage 2), not here. Accordingly, under `Snap` the
-//! schedule reports only `Output` boundaries; effects are the backend's business.
+//! WHEN an effect fires is not decided here: it is the run's
+//! [`EffectPlan`](crate::effect_plan::EffectPlan), on the backend's clock. The
+//! exact and clip idioms hand the schedule the plan's firing instants as their
+//! effect boundaries and apply the plan's batch at each landing
+//! ([`Schedule::arrive`], [`Schedule::substeps`]); the snap idiom fires the
+//! plan's batch for each substep inside `step_one` and reads no effect cursor.
 //!
 //! ## The CRN invariant (the one regression that breaks silently)
 //!
@@ -99,8 +77,9 @@ impl TimelineStop {
 /// The interventions/events due to fire at one substep, pre-split by lifecycle
 /// stage so application carries a known list instead of re-deriving due-ness.
 /// Indices are into `model.model.interventions`, in DECLARATION ORDER (the
-/// firing order the discrete backends already used). Filled by
-/// [`crate::effects::due_effects`]; consumed by the PROPOSE / INTERVENE stages.
+/// firing order the discrete backends already used). Filled from a plan batch by
+/// [`crate::effects::split_due_batch`]; consumed by the PROPOSE / INTERVENE
+/// stages.
 ///
 /// - `event_idx` — `always_active` interventions (events): fire at PROPOSE,
 ///   resolved against the start-of-step snapshot and fused with the kernel draw.
@@ -133,8 +112,8 @@ impl EffectBatch {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StepPolicy {
     /// chain_binomial: step a full `dt` every substep, never clipping to land on
-    /// an output/effect time. Outputs are emitted at grid points; effects are
-    /// snapped to a step elsewhere (`resolve_fire_steps`).
+    /// an output/effect time. Outputs are emitted at grid points; effects fire
+    /// on the step the effect plan keys them to.
     Snap,
     /// ode: clip the step so the integrator lands exactly on the next
     /// output/effect boundary. Also the policy the inference filters run
@@ -204,13 +183,6 @@ pub const MIN_STEP_EPS: f64 = 1e-15;
 pub struct Schedule {
     dt: f64,
     t_end: f64,
-    /// The snap grid (`cfg.dt` for chain/tau/ode; `iv_resolution_dt` for
-    /// gillespie) — the SAME grid the forward backends' `due_effects` keys effect
-    /// firing on (`round(t/grid)`). [`Schedule::arrive`] reads it to skip every
-    /// effect boundary sharing a just-fired dt-step, so a within-`dt` fire-time
-    /// collision fires once, not once per raw boundary (gh#198). The `Snap` path
-    /// emits effects off this grid via the backend's `resolve_fire_steps`.
-    grid: f64,
     policy: StepPolicy,
     /// Sorted, ascending. Output snapshot times within `[t_start, t_end]`.
     output_times: Vec<f64>,
@@ -228,7 +200,7 @@ pub struct Schedule {
 
 impl Schedule {
     /// The raw, untyped constructor: the integrator `dt`, the run window
-    /// `[t_start, t_end]`, the snap `grid`, the policy, and the sorted output /
+    /// `[t_start, t_end]`, the policy, and the sorted output /
     /// effect time vectors. Times are assumed already sorted ascending (the
     /// producers guarantee it); debug-asserted. Observation boundaries default to
     /// empty — add them with [`Schedule::with_obs`] for the inference drivers.
@@ -243,14 +215,13 @@ impl Schedule {
     pub(crate) fn new(
         dt: f64,
         t_end: f64,
-        grid: f64,
         policy: StepPolicy,
         output_times: Vec<f64>,
         effect_times: Vec<f64>,
     ) -> Self {
         debug_assert!(output_times.windows(2).all(|w| w[0] <= w[1]), "output_times not sorted");
         debug_assert!(effect_times.windows(2).all(|w| w[0] <= w[1]), "effect_times not sorted");
-        Schedule { dt, t_end, grid, policy, output_times, effect_times, obs_times: Vec::new() }
+        Schedule { dt, t_end, policy, output_times, effect_times, obs_times: Vec::new() }
     }
 
     /// Attach observation boundaries (sorted ascending). The inference drivers step
@@ -269,27 +240,21 @@ impl Schedule {
     /// swapped (gh#233 Layer 2.5). The role wrappers are unwrapped here — the hot
     /// loop sees only `Vec<f64>`.
     pub fn exact_forward(dt: f64, t_end: f64, output: OutputTimes, effects: EffectTimes) -> Self {
-        Self::new(dt, t_end, dt, StepPolicy::Exact, output.into_vec(), effects.into_vec())
+        Self::new(dt, t_end, StepPolicy::Exact, output.into_vec(), effects.into_vec())
     }
 
     /// Forward SNAP schedule (chain_binomial): a full `dt` per substep; effects
-    /// fire in the kernel keyed on `round(t/dt)`, not on boundary landings.
+    /// fire in the kernel from the effect plan's per-substep batch, not on
+    /// boundary landings.
     pub fn snap_forward(dt: f64, t_end: f64, output: OutputTimes, effects: EffectTimes) -> Self {
-        Self::new(dt, t_end, dt, StepPolicy::Snap, output.into_vec(), effects.into_vec())
+        Self::new(dt, t_end, StepPolicy::Snap, output.into_vec(), effects.into_vec())
     }
 
-    /// Forward SSA schedule (gillespie): `iv_resolution_dt` is the intervention
-    /// snap grid (gillespie has no integrator step of its own); boundaries are
-    /// clipped exactly, so the policy is `Exact`.
+    /// Forward SSA schedule (gillespie): `iv_resolution_dt` stands in for the
+    /// step (gillespie has none of its own); boundaries are clipped exactly, so
+    /// the policy is `Exact`.
     pub fn ssa_forward(iv_resolution_dt: f64, t_end: f64, output: OutputTimes, effects: EffectTimes) -> Self {
-        Self::new(
-            iv_resolution_dt,
-            t_end,
-            iv_resolution_dt,
-            StepPolicy::Exact,
-            output.into_vec(),
-            effects.into_vec(),
-        )
+        Self::new(iv_resolution_dt, t_end, StepPolicy::Exact, output.into_vec(), effects.into_vec())
     }
 
     /// EXACT inference schedule (bootstrap PF / IF2): no output
@@ -298,7 +263,7 @@ impl Schedule {
     /// `obs`. Built via [`crate::intervention::ExactInferenceTimeline::build`],
     /// which runs the exact-inference guards first.
     pub fn exact_inference(dt: f64, t_end: f64, effects: EffectTimes, obs: ObsTimes) -> Self {
-        Self::new(dt, t_end, dt, StepPolicy::Exact, Vec::new(), effects.into_vec())
+        Self::new(dt, t_end, StepPolicy::Exact, Vec::new(), effects.into_vec())
             .with_obs(obs.into_vec())
     }
 
@@ -345,7 +310,7 @@ impl Schedule {
     /// The next boundary time the integrator must stop on under this policy,
     /// WITHOUT the per-step `dt` clip — the raw landing target. `Exact`: the min
     /// over `(t_end, next_output, next_effect, next_obs)`. `Snap`: `t_end`
-    /// (effects fire off-grid via the backend's `resolve_fire_steps`). `None`
+    /// (effects fire inside the step, from the effect plan). `None`
     /// once `t >= t_end` (the cursor has walked past the window).
     ///
     /// Internal helper for [`Schedule::substep`] (= `dt.min(next_boundary - t)`);
@@ -464,10 +429,6 @@ impl Schedule {
 
     pub fn t_end(&self) -> f64 {
         self.t_end
-    }
-
-    pub fn grid(&self) -> f64 {
-        self.grid
     }
 
     /// The start time of the `s`-th substep within a window beginning at
@@ -610,9 +571,8 @@ impl Schedule {
 /// Yields `(t0, step_dt, fired_effect)`, terminating at the cursor's current
 /// observation boundary (where the clipped step shrinks to [`MIN_STEP_EPS`]).
 /// `fired_effect` is `Some(effect_idx)` when this substep LANDS on a
-/// scheduled-effect boundary — the caller reads the due batch (e.g.
-/// [`crate::intervention::TimelineEffects`] `.batches[effect_idx]`) and fires it
-/// CURSOR-keyed (gh#216), instead of the `round(t/dt)` key inside `step_one`.
+/// scheduled-effect boundary — the caller fires the effect plan's
+/// `batch(effect_idx)` there (gh#216).
 ///
 /// **Drift-free** (gh#233 finishing the substep-time convention, task #14): `t0 =
 /// substep_time(window_start, s)` (one multiply, O(1) rounding), NOT accumulation
@@ -700,10 +660,10 @@ mod tests {
     use super::*;
 
     fn exact(dt: f64, t_end: f64, out: Vec<f64>, eff: Vec<f64>) -> Schedule {
-        Schedule::new(dt, t_end, dt, StepPolicy::Exact, out, eff)
+        Schedule::new(dt, t_end, StepPolicy::Exact, out, eff)
     }
     fn snap(dt: f64, t_end: f64, out: Vec<f64>, eff: Vec<f64>) -> Schedule {
-        Schedule::new(dt, t_end, dt, StepPolicy::Snap, out, eff)
+        Schedule::new(dt, t_end, StepPolicy::Snap, out, eff)
     }
 
     /// gh#964: at every magnitude the tolerance spans many ulps of `t`, so a
@@ -881,7 +841,7 @@ mod tests {
                 match (s.next_boundary(&cur, t), s.substep(&cur, t)) {
                     (Some(b), Some(step)) => assert_eq!(
                         step.to_bits(),
-                        s.grid().min(b - t).to_bits(),
+                        s.dt.min(b - t).to_bits(),
                         "substep must equal dt.min(next_boundary - t) at t={t}"
                     ),
                     (None, None) => {} // both past t_end
@@ -917,7 +877,7 @@ mod tests {
     fn obs_boundary_clips_like_an_effect_and_leaves_forward_untouched() {
         // Inference: obs at 7.3, dt=1. The Exact substep clips to land on it,
         // exactly as the bootstrap PF does (dt.min(obs - t)).
-        let s = Schedule::new(1.0, 80.0, 1.0, StepPolicy::Exact, vec![], vec![]).with_obs(vec![7.3]);
+        let s = Schedule::new(1.0, 80.0, StepPolicy::Exact, vec![], vec![]).with_obs(vec![7.3]);
         let cur = Cursor::default();
         assert_eq!(s.substep(&cur, 0.0).unwrap(), 1.0, "full dt before the obs");
         assert_eq!(s.substep(&cur, 7.0).unwrap(), 7.3 - 7.0, "clips exactly to the obs at 7.3");
@@ -968,7 +928,7 @@ mod tests {
     fn next_stop_simultaneous_output_and_observation() {
         // A time that is BOTH an output and an observation boundary: the stop
         // carries both reasons (and ScheduledEffect if an effect also lands).
-        let s = Schedule::new(1.0, 12.0, 1.0, StepPolicy::Exact, vec![5.0], vec![5.0])
+        let s = Schedule::new(1.0, 12.0, StepPolicy::Exact, vec![5.0], vec![5.0])
             .with_obs(vec![5.0]);
         let cur = Cursor::default();
         let stop = s.next_stop(&cur, 4.0).unwrap();
@@ -1031,7 +991,7 @@ mod tests {
         // next_stop.t is exactly min(t_end, next_output, next_effect, next_obs)
         // for the cursor — the same min the Exact substep clips to. A schedule
         // with all four kinds pending: the nearest (the effect at 2.5) wins.
-        let s = Schedule::new(1.0, 12.0, 1.0, StepPolicy::Exact, vec![4.0], vec![2.5])
+        let s = Schedule::new(1.0, 12.0, StepPolicy::Exact, vec![4.0], vec![2.5])
             .with_obs(vec![7.3]);
         let cur = Cursor::default();
         let stop = s.next_stop(&cur, 1.0).unwrap();
@@ -1074,7 +1034,7 @@ mod tests {
     fn next_stop_helpers_read_the_reason_batch() {
         // `has`/`is_end` read a coincident reason batch (output + effect + obs all
         // at t=5), and `is_end` is false away from t_end.
-        let s = Schedule::new(1.0, 12.0, 1.0, StepPolicy::Exact, vec![5.0], vec![5.0])
+        let s = Schedule::new(1.0, 12.0, StepPolicy::Exact, vec![5.0], vec![5.0])
             .with_obs(vec![5.0]);
         let cur = Cursor::default();
         let stop = s.next_stop(&cur, 4.0).unwrap();
@@ -1231,7 +1191,7 @@ mod tests {
         // a fire signal at the effect landing AND advance the effect cursor so the
         // walk progresses (no zero-substep stall, proposal §3.3). dt=1, one obs at
         // 4, one on-grid effect at 2: substeps 0→1→2(fire)→3→4.
-        let s = Schedule::new(1.0, 4.0, 1.0, StepPolicy::Exact, vec![], vec![2.0])
+        let s = Schedule::new(1.0, 4.0, StepPolicy::Exact, vec![], vec![2.0])
             .with_obs(vec![4.0]);
         let cur = Cursor { obs_idx: 0, effect_idx: s.effect_idx_at(0.0), ..Default::default() };
         // `take` bounds the walk so the MUTATION check (omitting `pass_effect` in
@@ -1281,7 +1241,7 @@ mod tests {
         // iterator must yield the byte-identical (t0, step_dt) sequence. Window 2
         // ([7.3, 12.0]) is the one that pins drift-free vs accumulation: its s*dt
         // grid (7.3 + s) differs from `t += step_dt` at the ULP these tests guard.
-        let s = Schedule::new(1.0, 12.0, 1.0, StepPolicy::Exact, vec![], vec![])
+        let s = Schedule::new(1.0, 12.0, StepPolicy::Exact, vec![], vec![])
             .with_obs(vec![3.0, 7.3, 12.0]);
         let mut window_start = 0.0;
         for obs_idx in 0..3 {

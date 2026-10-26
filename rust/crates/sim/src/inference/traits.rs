@@ -80,15 +80,14 @@ pub trait ProcessModel: Send + Sync {
     /// Must not allocate. Uses scratch buffers for temporaries.
     ///
     /// `due_effects` lists EVERY effect — always-active events AND scheduled
-    /// interventions — that fires at the END of this substep (`t + dt`), decided
-    /// CURSOR-keyed by the driver from the timeline's effect boundaries
-    /// (`timeline_effects().batches[effect_idx]`). It is empty on every
+    /// interventions — that fires at the END of this substep (`t + dt`): the
+    /// batch of the run's [`crate::effect_plan::EffectPlan`] at the firing
+    /// instant the driver's schedule landed on. It is empty on every
     /// off-boundary substep. The process splits it by kind via
     /// [`crate::effects::split_due_batch`]: events at PROPOSE (fused with the
-    /// kernel draw), interventions at INTERVENE (post-advance). Events are no
-    /// longer keyed on `round(t/dt)` internally — the integrator lands on each
-    /// event time, so off-grid observation anchoring can't shift the firing
-    /// instant (gh#216, the events arm).
+    /// kernel draw), interventions at INTERVENE (post-advance). The instant comes
+    /// from the plan, not from the substep, so off-grid observation anchoring
+    /// cannot shift it (gh#216).
     fn step(
         &self,
         state: &mut Self::State,

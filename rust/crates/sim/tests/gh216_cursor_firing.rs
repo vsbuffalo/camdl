@@ -417,7 +417,7 @@ fn pgas_producer_fires_once_at_registered_boundary() {
     );
     let params = compiled.default_params.clone();
     let observations = pgas_observations(&[4.0, 8.0]);
-    let grid = build_substep_grid(0.0, 1.0, &observations, &[], StepPolicy::Snap)
+    let grid = build_substep_grid(0.0, 1.0, &observations, StepPolicy::Snap)
         .expect("build snap grid");
     let plan = pgas_effect_plan(&compiled, &params, 1.0, &grid.steps).expect("effect plan");
     let mut rng = StatefulRng::new(1);
@@ -436,9 +436,9 @@ fn pgas_producer_fires_once_at_registered_boundary() {
         "the intervention must fire EXACTLY ONCE (M stays 10, never 20)");
 
     // An exact grid re-tiled at 3.5 is refused for an effect-bearing model.
-    let off = build_substep_grid(0.0, 1.0, &pgas_observations(&[3.5, 8.0]), &[], StepPolicy::Exact)
+    let off = build_substep_grid(0.0, 1.0, &pgas_observations(&[3.5, 8.0]), StepPolicy::Exact)
         .expect("build exact grid");
-    let err = pgas_effect_plan(&compiled, &params, 1.0, &off.steps).err().expect("must be refused");
+    let err = pgas_effect_plan(&compiled, &params, 1.0, &off.steps).expect_err("must be refused");
     assert!(err.to_string().contains("exact obs-alignment re-tiles"), "{err}");
 }
 
@@ -469,8 +469,7 @@ fn pgas_offgrid_obs_with_an_intervention_under_exact_is_refused() {
         InterventionKind::Scenario,
     ));
     let err = run_pgas_exact(&compiled, &[3.5, 8.0], "gh216_pgas_offgrid")
-        .err()
-        .expect("an effect-bearing model on a re-tiled exact grid must be refused");
+        .expect_err("an effect-bearing model on a re-tiled exact grid must be refused");
     assert!(err.to_string().contains("exact obs-alignment re-tiles"), "{err}");
 }
 

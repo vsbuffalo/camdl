@@ -7,7 +7,7 @@ use crate::{
 };
 use crate::boundary_times::ObsTimes;
 use crate::effect_plan::{EffectPlan, FireClock, Origin};
-use crate::schedule::{Schedule, StepPolicy, GRID_TOL};
+use crate::schedule::{Schedule, StepPolicy};
 use ir::intervention::{Action, InterventionSchedule};
 
 /// Short human label for an action, for diagnostics (`"set V"`,
@@ -109,13 +109,13 @@ pub fn intervention_fire_times(
 
 /// Apply a known due batch of scheduled interventions at time `t_end` (in
 /// declaration order). The INTERVENE-stage apply half: it consumes the
-/// `intervention_idx` list [`due_effects`](crate::effects::due_effects) already
-/// derived, and does ONE job — apply those interventions — instead of
-/// re-deriving due-ness via `time_to_step + fire_steps.contains`.
+/// `intervention_idx` half of a plan batch
+/// ([`EffectPlan`](crate::effect_plan::EffectPlan), split by
+/// [`split_due_batch`](crate::effects::split_due_batch)) and does ONE job —
+/// apply those interventions — without re-deriving due-ness.
 ///
 /// `intervention_idx` lists exactly the firing scheduled (`!always_active`)
-/// interventions in declaration order; this function does not re-check
-/// `always_active` or `fire_steps`.
+/// interventions in declaration order; this function does not re-check them.
 ///
 /// `dt` is `dt_actual` — the realized integrator substep (not
 /// `model.simulation.dt`, which the compiled model carries only as a default —
@@ -131,9 +131,8 @@ pub fn apply_effect_batch(
     real_s: &mut RealState,
     params: &[f64],
 ) -> Result<bool, SimError> {
-    // Rm4 in 2026-04-19 engine review: guard against NaN t silently
-    // rounding to step 0. The due batch is derived from `time_to_step`, which
-    // debug-asserts finiteness; this keeps the runtime guard on the apply path.
+    // Rm4 in 2026-04-19 engine review: guard against a NaN t reaching the
+    // amount evaluation; the runtime guard on the apply path.
     if !t_end.is_finite() {
         return Err(SimError::Validation(format!(
             "apply_effect_batch: non-finite t = {}", t_end
@@ -146,141 +145,6 @@ pub fn apply_effect_batch(
         )?;
     }
     Ok(!intervention_idx.is_empty())
-}
-
-/// Collect sorted, deduplicated intervention times.
-///
-/// gh#69: takes `params` so any `AtTimesExpr` schedules can be resolved
-/// against the current parameter vector. Parametric schedules' resolved
-/// expressions live on `CompiledModel.resolved.intervention_at_time_exprs`.
-pub fn all_intervention_times(model: &CompiledModel, params: &[f64]) -> Vec<f64> {
-    let mut times: Vec<f64> = model.model.interventions.iter()
-        .enumerate()
-        .flat_map(|(iv_idx, iv)| match iv.fire.schedule() {
-            Some(sched) => {
-                let resolved = model.resolved.intervention_at_time_exprs[iv_idx].as_deref();
-                intervention_fire_times(sched, resolved, model, params)
-            }
-            // Reactive fire sources contribute no static times.
-            None => Vec::new(),
-        })
-        .collect();
-    times.sort_by(|a, b| a.total_cmp(b));
-    times.dedup();
-    times
-}
-
-/// The effect boundaries for one inference filter run — the cursor-keyed firing
-/// timeline, the replacement for the `round(t/dt)` firing key (gh#216).
-///
-/// `times` is the sorted, deduplicated set of fire times of EVERY effect — both
-/// always-active events and scheduled interventions — IDENTICAL to the
-/// `effect_times` registered on the inference [`crate::schedule::Schedule`], so a
-/// [`crate::schedule::Cursor`]'s `effect_idx` indexes both. `batches[i]` lists, in
-/// declaration order, the effects firing at `times[i]`; when the integrator lands
-/// on an effect boundary the caller reads `batches[effect_idx]` and splits it by
-/// kind ([`crate::effects::split_due_batch`]) into the PROPOSE (events) /
-/// INTERVENE (interventions) lifecycle halves. Events are included here precisely
-/// so the integrator LANDS on each event time — the same treatment the forward
-/// Exact backends (ode, gillespie) already give events via `all_intervention_times`
-/// — instead of rounding an obs-anchored off-grid substep end onto a `fire_step`.
-///
-/// Recomputed once per filter run from `params` (§3.1 of the proposal). For the
-/// supported case every fire time is constant (parametric `at [<param>]`
-/// schedules under Exact are rejected by [`guard_attimesexpr_exact`]).
-#[derive(Clone, Debug, Default)]
-pub struct TimelineEffects {
-    pub times: Vec<f64>,
-    pub batches: Vec<Vec<usize>>,
-}
-
-/// Build the [`TimelineEffects`] for `model` at `params`: group EVERY effect's
-/// (events + scheduled interventions) fire times into sorted, distinct
-/// boundaries. The resulting `times` is what the inference `Schedule`'s
-/// `effect_times` must carry, so the integrator lands on each one.
-pub fn timeline_effects(model: &CompiledModel, params: &[f64]) -> TimelineEffects {
-    let fire_times = model.resolve_fire_times(params);
-    // (time, iv_idx) for EVERY effect, collected in declaration order so a stable
-    // sort keeps per-boundary firing order = declaration order. The kind→stage
-    // split happens at apply time (split_due_batch), not here.
-    let mut pairs: Vec<(f64, usize)> = Vec::new();
-    for (iv_idx, _iv) in model.model.interventions.iter().enumerate() {
-        for &t in &fire_times[iv_idx] {
-            pairs.push((t, iv_idx));
-        }
-    }
-    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut out = TimelineEffects::default();
-    for (t, iv_idx) in pairs {
-        match out.times.last() {
-            // Distinct boundaries by exact equality, matching `all_intervention_times`'
-            // dedup; an effect sharing a fire time joins the batch.
-            Some(&last) if last == t => out.batches.last_mut().unwrap().push(iv_idx),
-            _ => {
-                out.times.push(t);
-                out.batches.push(vec![iv_idx]);
-            }
-        }
-    }
-    out
-}
-
-/// gh#216 RESIDUAL GUARD (replaces the off-grid-OBS stopgap): under `Exact`,
-/// reject a model whose SCHEDULED (`!is_event`) intervention fires at a time OFF
-/// the dt grid (relative to `t_start`). The cursor-keyed firing fixes off-grid
-/// OBS re-tiling an ON-grid intervention (the gh#216 reproduction); an off-grid
-/// intervention TIME is a separate generalization deferred to a follow-up (the
-/// PGAS drift-free substep-time walk would need to re-anchor at off-grid effect
-/// boundaries). Until then, refuse it loudly with a migration, rather than fire
-/// it at a snapped grid step (the old `round()` behaviour this proposal retires).
-///
-/// Events are exempt (they key on `grid_dt`, out of scope). `Snap` and forward
-/// simulation are never rejected (they stay on / clip to the grid).
-pub fn guard_exact_offgrid_effect_time(
-    model: &CompiledModel,
-    params: &[f64],
-    t_start: f64,
-    dt: f64,
-    policy: StepPolicy,
-) -> Result<(), SimError> {
-    if policy != StepPolicy::Exact {
-        return Ok(());
-    }
-    let fire_times = model.resolve_fire_times(params);
-    let mut off_grid: Vec<f64> = Vec::new();
-    for (iv_idx, iv) in model.model.interventions.iter().enumerate() {
-        if iv.kind.is_event() {
-            continue;
-        }
-        for &e in &fire_times[iv_idx] {
-            let r = (e - t_start) / dt;
-            if (r - r.round()).abs() > GRID_TOL {
-                off_grid.push(e);
-            }
-        }
-    }
-    if off_grid.is_empty() {
-        return Ok(());
-    }
-    off_grid.sort_by(|a, b| a.total_cmp(b));
-    off_grid.dedup();
-    let shown: Vec<String> = off_grid.iter().take(4).map(|t| format!("{t:.4}")).collect();
-    let more = if off_grid.len() > 4 {
-        format!(", … ({} total)", off_grid.len())
-    } else {
-        String::new()
-    };
-    Err(SimError::Validation(format!(
-        "exact obs-alignment does not yet support a scheduled intervention whose \
-         fire time is OFF the dt grid (dt={dt}, t_start={t_start}): under Exact the \
-         integrator lands exactly on each observation, and firing the intervention \
-         at its off-grid time requires re-anchoring the substep grid there — a \
-         deferred generalization of the gh#216 cursor-keyed firing fix. Off-grid \
-         scheduled intervention time(s): [{}{more}]. Use `obs_alignment = \"snap\"`, \
-         or place the intervention time(s) on the dt grid (t_start + an integer \
-         multiple of dt).",
-        shown.join(", "),
-    )))
 }
 
 /// §3.6 hard-error: a parametric `at [<param>]` (`AtTimesExpr`) scheduled
