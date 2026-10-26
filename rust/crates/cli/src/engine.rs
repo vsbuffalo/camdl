@@ -354,12 +354,17 @@ fn effective_replicates(job: &SimulateJob) -> usize {
     }
 }
 
-/// The scenario list, with the empty case expanded to a single implicit
-/// baseline (`ScenarioRef::Named("baseline")` resolves to the identity
-/// patch via `resolve_scenario_ref`'s baseline exemption).
+/// The scenario list, with the empty case expanded to the single implicit
+/// arm: an empty inline patch labelled [`crate::sim_job::IMPLICIT_ARM_LABEL`],
+/// which resolves through the ad-hoc path with no scenario applied.
 pub(crate) fn effective_scenarios(job: &SimulateJob) -> Vec<ScenarioRef> {
     if job.scenarios.is_empty() {
-        vec![ScenarioRef::Named("baseline".to_string())]
+        vec![ScenarioRef::Inline {
+            name: crate::sim_job::IMPLICIT_ARM_LABEL.to_string(),
+            enable: Vec::new(),
+            disable: Vec::new(),
+            params: IndexMap::new(),
+        }]
     } else {
         job.scenarios.clone()
     }

@@ -2,13 +2,15 @@
 //! `docs/dev/proposals/2026-10-24-batch-to-simulate.md` §3 "Arm labels";
 //! §6 tests 3 and 10).
 //!
-//! Without `--scenario` the run's one arm was labelled `baseline` whatever
-//! `--enable`/`--disable`/`--param` built, so two different ad-hoc arms were
-//! indistinguishable in the leaf path, `run.json` and the listings. The label
-//! is now derived from the resolved arm: `baseline+vaccination`,
-//! `baseline;beta=0.3`. It is provenance: the arm's identity is its resolved
+//! Without `--scenario` the run's one arm is labelled from what
+//! `--enable`/`--disable`/`--param` built: `(none)` for none of them,
+//! `(none)+vaccination`, `(none);beta=0.3`. Two different ad-hoc arms are
+//! told apart in the leaf path, `run.json` and the listings, and the
+//! parenthesised label cannot collide with a declared scenario (whose name is
+//! an identifier). It is provenance: the arm's identity is its resolved
 //! delta, so a preset-named arm with the same delta is the same leaf, and a
-//! leaf written under the old `baseline` label is found by hash and reused.
+//! leaf written under an earlier label (`baseline`) is found by hash and
+//! reused.
 //!
 //! Shells out to the release `camdl` binary.
 
@@ -165,11 +167,11 @@ fn scenario_segment_label(leaf: &Path) -> String {
     seg.rsplit_once('-').map(|(l, _)| l.to_string()).unwrap_or(seg)
 }
 
-/// Test 10 — `--enable vaccination` labels its arm `baseline+vaccination` in
+/// Test 10 — `--enable vaccination` labels its arm `(none)+vaccination` in
 /// `run.json`, in the leaf path (rendered by the store's path sanitizer, which
-/// maps `+` to `_`) and in the store listing; `--param beta=0.3` and
-/// `--param beta=.3` both give `baseline;beta=0.3` and one leaf; plain
-/// `simulate` still gives `baseline`.
+/// maps `(`, `)` and `+` to `_`) and in the store listing; `--param beta=0.3`
+/// and `--param beta=.3` both give `(none);beta=0.3` and one leaf; plain
+/// `simulate` gives `(none)`, in `run.json`, the path and the listing.
 #[test]
 fn ad_hoc_arms_are_labelled_from_their_flags() {
     let fx = Fixture::new();
@@ -177,14 +179,14 @@ fn ad_hoc_arms_are_labelled_from_their_flags() {
     let leaves = fx.leaves();
     assert_eq!(leaves.len(), 2);
     for (dir, _, label) in &leaves {
-        assert_eq!(label, "baseline+vaccination", "run.json level label");
-        assert_eq!(scenario_segment_label(dir), "baseline_vaccination", "path segment: {}", dir.display());
+        assert_eq!(label, "(none)+vaccination", "run.json level label");
+        assert_eq!(scenario_segment_label(dir), "_none__vaccination", "path segment: {}", dir.display());
     }
     let list = fx.camdl(&["list", "out", "--kind", "sim"]);
     assert_ok(&list, "list");
     let listing = format!("{}{}", String::from_utf8_lossy(&list.stdout), stderr(&list));
     assert!(
-        listing.contains("baseline+vaccination"),
+        listing.contains("(none)+vaccination"),
         "the listing shows the derived label:\n{listing}"
     );
 
@@ -193,12 +195,18 @@ fn ad_hoc_arms_are_labelled_from_their_flags() {
     assert_ok(&fx.simulate(&["--param", "beta=.3"]), "--param beta=.3");
     let leaves = fx.leaves();
     assert_eq!(leaves.len(), 1, "`beta=.3` is `beta=0.3`: one label, one leaf: {leaves:?}");
-    assert_eq!(leaves[0].2, "baseline;beta=0.3");
-    assert_eq!(scenario_segment_label(&leaves[0].0), "baseline_beta_0.3");
+    assert_eq!(leaves[0].2, "(none);beta=0.3");
+    assert_eq!(scenario_segment_label(&leaves[0].0), "_none__beta_0.3");
 
     let fx = Fixture::new();
     assert_ok(&fx.simulate(&[]), "plain");
-    assert_eq!(fx.leaves()[0].2, "baseline");
+    let leaves = fx.leaves();
+    assert_eq!(leaves[0].2, "(none)");
+    assert_eq!(scenario_segment_label(&leaves[0].0), "_none_");
+    let list = fx.camdl(&["list", "out", "--kind", "sim"]);
+    assert_ok(&list, "list");
+    let listing = format!("{}{}", String::from_utf8_lossy(&list.stdout), stderr(&list));
+    assert!(listing.contains("(none)"), "the listing shows `(none)`:\n{listing}");
 }
 
 /// Test 10 / test 3 — the label is not identity: the preset `vax` and
@@ -217,7 +225,7 @@ fn a_preset_and_the_flags_that_spell_it_share_leaves_and_ensemble() {
     let run = fx.simulate(&["--enable", "vaccination", "--replicates", "2"]);
     assert_ok(&run, "flags over the preset's store");
     assert_eq!(simulated(&run), Some(0), "stderr:\n{}", stderr(&run));
-    assert_eq!(fx.leaves(), preset_leaves, "no second copy under `baseline+vaccination`");
+    assert_eq!(fx.leaves(), preset_leaves, "no second copy under `(none)+vaccination`");
     assert_eq!(fx.ensemble_id(), preset_ens, "one ensemble identity whatever the arm is called");
 
     // Flags in a fresh store: the same run_ids under the derived label.
@@ -229,13 +237,13 @@ fn a_preset_and_the_flags_that_spell_it_share_leaves_and_ensemble() {
         preset_leaves.iter().map(|l| &l.1).collect::<Vec<_>>(),
         "the leaf identities are the resolved delta's, unchanged by the label"
     );
-    assert!(flag_leaves.iter().all(|(_, _, l)| l == "baseline+vaccination"));
+    assert!(flag_leaves.iter().all(|(_, _, l)| l == "(none)+vaccination"));
     assert_eq!(fy.ensemble_id(), preset_ens);
 }
 
 /// Test 10 — a leaf written under `baseline-<h8>` before this change (the
 /// pre-PR binary labelled every ad-hoc arm `baseline`) is a hit for the
-/// relabelled run: nothing is simulated and no `baseline+vaccination` copy
+/// relabelled run: nothing is simulated and no `(none)+vaccination` copy
 /// appears. The pre-PR shape is reproduced on disk by relabelling the
 /// scenario directory and its records.
 #[test]
@@ -269,5 +277,5 @@ fn a_leaf_written_under_the_old_baseline_label_is_a_hit() {
     assert_ok(&run, "relabelled run");
     assert_eq!(simulated(&run), Some(0), "stderr:\n{}", stderr(&run));
     assert_eq!(fx.leaves(), old_leaves, "found by hash; the old-labelled leaves stay the only copy");
-    assert!(!scenario_dir.exists(), "no `baseline+vaccination` directory appears");
+    assert!(!scenario_dir.exists(), "no `(none)+vaccination` directory appears");
 }

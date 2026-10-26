@@ -177,11 +177,12 @@ fn a_relabelled_scenario_directory_is_still_a_hit() {
     let before = fx.sim_leaves();
     assert_eq!(before.len(), 2);
 
-    // Relabel: the leaves' parent is the scenario directory `baseline-<h8>`.
+    // Relabel: the leaves' parent is the scenario directory `_none_-<h8>`
+    // (the implicit arm `(none)`, as the path sanitizer renders it).
     let scenario_dir = before[0].0.parent().unwrap().to_path_buf();
     let seg = scenario_dir.file_name().unwrap().to_string_lossy().into_owned();
     let (label, h8) = seg.rsplit_once('-').unwrap();
-    assert_eq!(label, "baseline");
+    assert_eq!(label, "_none_");
     let relabelled = scenario_dir.with_file_name(format!("renamed_arm-{h8}"));
     std::fs::rename(&scenario_dir, &relabelled).unwrap();
     for leaf in run_leaves(&relabelled) {
@@ -204,7 +205,7 @@ fn a_relabelled_scenario_directory_is_still_a_hit() {
     assert_eq!(
         after, relabelled_leaves,
         "the run must find the relabelled leaves by hash and store nothing new; \
-         a `baseline-<h8>` directory must not reappear beside `renamed_arm-<h8>`"
+         a `_none_-<h8>` directory must not reappear beside `renamed_arm-<h8>`"
     );
     assert!(!scenario_dir.exists(), "no second copy under the current label");
 }

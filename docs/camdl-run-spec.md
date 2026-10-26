@@ -819,13 +819,17 @@ Segment labels: the model label is the model file's slugged stem; the config
 label is `{backend}-dt{dt}`; the params label is `base` when no per-cell
 overrides apply, otherwise the sorted `name=value` pairs joined by `_`
 (sanitized), falling back to the literal `draws` when that would exceed 96
-characters; the scenario label is the preset name or `baseline`; the seed label
-is `seed_{N}` with the base seed verbatim, unpadded.
+characters; the scenario label is the preset name, or for the implicit arm of a
+run without `--scenario` the label derived from its flags — `(none)` when it has
+none, which the path sanitizer renders `_none_` — and the seed label is
+`seed_{N}` with the base seed verbatim, unpadded. A label is provenance, never
+identity: a leaf written under another label for the same hashes (an earlier
+camdl wrote the implicit arm as `baseline`) is found by hash and reused.
 
 Because a level hash is a structural digest of typed values rather than of a
 string, the empty scenario is a **constant**: a scenario with no overrides, no
 scale factors, no enables and no disables always hashes to the same value, so
-`baseline-037ee3b0` identifies the unmodified baseline in every project.
+`_none_-037ee3b0` identifies the unmodified model in every project.
 `seed_1-06cbd6b3` and `base-...` are constants in the same way.
 
 A **multi-cell** `simulate` (`--replicates`, `--seeds`, several `--scenario`, or
@@ -926,7 +930,7 @@ pub struct SimulateJob {
     pub integrator: Option<crate::args::types::IntegratorArg>,
     /// Where parameter vectors come from (the central dispatch).
     pub source: ParamSource,
-    /// σ layer — which scenarios to run. Empty ⇒ a single implicit baseline.
+    /// σ layer — which scenarios to run. Empty ⇒ the single implicit arm, `(none)`.
     pub scenarios: Vec<ScenarioRef>,
     /// S layer.
     pub seeds: Seeds,
@@ -1233,7 +1237,8 @@ The four cases:
    scenario is the source of truth.
 
 When no `[[scenario]]` entries are defined and no `--scenario` flag is given, a
-single implicit baseline is used. This is not a "default scenario" — it is the
+single implicit arm, labelled `(none)`, is used. This is not a "default
+scenario" — it is the
 absence of any scenario patch, and it hashes to the real digest of the empty
 delta rather than to a literal zero.
 
@@ -1346,7 +1351,7 @@ results/sims/
   sir_basic-cd37d79d/                 # model:    IR digest + ir_version + engine
     chain_binomial-dt1-9fe90ef5/      # config:   backend, dt, schedule, output view
       base-b912ced1/                  # params:   resolved base values (+ table digests)
-        baseline-037ee3b0/            # scenario: the (here empty) delta
+        _none_-037ee3b0/              # scenario: the (here empty) delta
           seed_7-d0aef62a/            # seed:     the resolved process_seed
             traj.tsv
             run.json
@@ -1387,7 +1392,7 @@ camdl simulate seir_vaccine.camdl --params params.toml --seed 42
 ```
 
 ```
-   stored ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/baseline-037ee3b0/seed_42-dd2fb524
+   stored ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/_none_-037ee3b0/seed_42-dd2fb524
           camdl cat 18bd7a09b098c20c22fd478abd331b5475d213c57f5505ead75088f35a523c27
 ```
 
@@ -1421,7 +1426,7 @@ camdl simulate (dry run)
   backend: chain_binomial
   dt: 1
   seed: 42
-  scenario: (baseline)
+  scenario: (none)
 
 Parameters (7):
   I0        =             10  params.toml
@@ -1713,7 +1718,7 @@ camdl list --format json           # machine-readable; see the caveat below
 
 # Full metadata for one run (short-hash prefix resolves git-style)
 camdl show 18bd7a09
-camdl show ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/baseline-037ee3b0/seed_42-dd2fb524
+camdl show ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/_none_-037ee3b0/seed_42-dd2fb524
 
 # Emit the trajectory, or a named stream from the leaf
 camdl cat 18bd7a09
@@ -1729,8 +1734,8 @@ camdl label 18bd7a09 "reference run"
 ```
 sims
  CREATED   RUN_ID    LABEL          MODEL         SCENARIO  SEED  PARAMS  SIZE  PATH
- just now  52f1a1ba  <unlabelled>   seir_vaccine  baseline  42    base    35K   ./results/sims/seir_vaccine-a0c10f3e/…/seed_42-dd2fb524
- 13m ago   18bd7a09  reference run  seir_vaccine  baseline  42    base    32K   ./results/sims/seir_vaccine-a0c10f3e/…/seed_42-dd2fb524
+ just now  52f1a1ba  <unlabelled>   seir_vaccine  (none)    42    base    35K   ./results/sims/seir_vaccine-a0c10f3e/…/seed_42-dd2fb524
+ 13m ago   18bd7a09  reference run  seir_vaccine  (none)    42    base    32K   ./results/sims/seir_vaccine-a0c10f3e/…/seed_42-dd2fb524
 ```
 
 with a separate `ensembles` block carrying `CELLS` instead of `SCENARIO`/`SEED`.
@@ -2044,7 +2049,7 @@ pub struct SimulateJob {
     pub dt: f64,
     pub integrator: Option<IntegratorArg>,   // --integrator rk4|rk45
     pub source: ParamSource,           // where parameter vectors come from
-    pub scenarios: Vec<ScenarioRef>,   // σ layer; empty ⇒ one implicit baseline
+    pub scenarios: Vec<ScenarioRef>,   // σ layer; empty ⇒ the implicit `(none)` arm
     pub seeds: Seeds,                  // S layer
     pub cli_overrides: Vec<(String, f64)>,   // --param (highest M tier)
     pub set_vec_entries: Vec<(String, String)>, // --param-vec
@@ -2108,7 +2113,7 @@ and |seed slots| =
   otherwise:                       `replicates` (default 1), seeds derived from --seed
 
 and |scenarios| =
-  none specified:  1 (implicit baseline)
+  none specified:  1 (the implicit arm, `(none)`)
   otherwise:       the number of --scenario names
 ```
 
@@ -2192,10 +2197,10 @@ every tier and the sweep would not vary it; so is `--sweep` with `--draws` or
 **Labels and records.** Each cell's `params` level is labelled by the swept
 values, `beta=0.2` in `run.json` and `beta_0.2-<h8>` in the path, two swept
 parameters as `beta=0.3_rho=0.5`; the arm label is the preset's name, or derived
-from the flags for an ad-hoc arm (`baseline`, `baseline+vaccination` for
-`--enable vaccination`, `baseline;beta=0.3` for `--param beta=0.3`). The
-ensemble leaf's `run.json` carries the resolved design — its source, the point
-count (`n_points`, in place of a sample's `n_draws`) and each swept parameter's
+from the flags for an ad-hoc arm (`(none)`, `(none)+vaccination` for
+`--enable vaccination`, `(none);beta=0.3` for `--param beta=0.3`). The ensemble
+leaf's `run.json` carries the resolved design — its source, the point count
+(`n_points`, in place of a sample's `n_draws`) and each swept parameter's
 values, name-sorted — so the grid declaration lives with the results.
 
 **Columns.** Under a sweep the combined `ensemble.tsv` (and `-o` mirror) leads
@@ -2229,7 +2234,7 @@ camdl simulate (dry run)
   design: 2 design point(s)
   seed: 1
   replicates: 2
-  scenario: (baseline)
+  scenario: (none)
 
 Parameters (3):
   I0    =             10  ocaml/golden/sir_basic.params.toml
@@ -2239,10 +2244,10 @@ Parameters (3):
   total: 2 design points × 2 replicates = 4 runs
 
 store: results
-  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.2-65985320/baseline-037ee3b0/seed_1-06cbd6b3
-  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.2-65985320/baseline-037ee3b0/seed_5871781006564002452-f483e20c
-  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.5-ee1882a0/baseline-037ee3b0/seed_1-06cbd6b3
-  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.5-ee1882a0/baseline-037ee3b0/seed_5871781006564002452-f483e20c
+  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.2-65985320/_none_-037ee3b0/seed_1-06cbd6b3
+  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.2-65985320/_none_-037ee3b0/seed_5871781006564002452-f483e20c
+  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.5-ee1882a0/_none_-037ee3b0/seed_1-06cbd6b3
+  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.5-ee1882a0/_none_-037ee3b0/seed_5871781006564002452-f483e20c
   0 cache hits → read back, 4 misses → would simulate
 (dry run — no simulation, no files written.)
 ```

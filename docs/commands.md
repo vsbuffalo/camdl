@@ -203,8 +203,9 @@ its own `--seed`). The combined table and the observation tables carry
 pairing key across points. A scenario that sets or scales a swept parameter, or
 a `--param` on one, is refused. A second run of the same grid reads every cell
 the store holds back instead of re-simulating it; `--force` recomputes. The arm
-of an ad-hoc run is labelled from its flags (`baseline+school_closure` for
-`--enable school_closure`, `baseline;beta=0.3` for `--param beta=0.3`).
+of an ad-hoc run is labelled from its flags (`(none)` for no flags,
+`(none)+school_closure` for `--enable school_closure`, `(none);beta=0.3` for
+`--param beta=0.3`).
 
 Use a sweep to explore _forward_ behavior under interventions and parameter
 ranges. To estimate parameters from data, use `fit`.

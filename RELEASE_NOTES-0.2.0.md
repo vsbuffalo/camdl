@@ -105,6 +105,14 @@ breaking changes are still expected before 1.0.
 
 These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
+- **`simulate`'s implicit arm is labelled `(none)`, not `baseline`.** A run
+  without `--scenario` shows `(none)` (path segment `_none_-<h8>`) in its leaf
+  path, `run.json` and `camdl list`, and its derived labels read
+  `(none)+vaccination`, `(none);beta=0.3`, so it can no longer be mistaken for a
+  scenario the model names `baseline`. Stored runs are still found: the store
+  looks a leaf up by hash, so a leaf stored under `baseline-<h8>` is reused.
+  Migration: a script that matches the label text matches `(none)`.
+
 - **`simulate --params` refuses a fit-written `mle_params.toml` whose values no
   longer match its declared `content_hash`, and every file written by an earlier
   fit is refused.** The fit writer hashed the unrounded estimates while the file

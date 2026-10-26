@@ -40,8 +40,8 @@ pub struct SimulateJob {
     pub integrator: Option<crate::args::types::IntegratorArg>,
     /// Where parameter vectors come from (the central dispatch).
     pub source: ParamSource,
-    /// σ layer — which scenarios to run. Empty ⇒ a single implicit
-    /// baseline (run-spec §3.6).
+    /// σ layer — which scenarios to run. Empty ⇒ the single implicit arm,
+    /// [`IMPLICIT_ARM_LABEL`] (run-spec §3.6).
     pub scenarios: Vec<ScenarioRef>,
     /// gh#626: the resolved `--to` horizon override (model time), applied to
     /// every cell after the scenario horizon in `resolve_run_model`, and keyed
@@ -317,17 +317,23 @@ pub enum ScenarioRef {
 /// The derived label of `simulate`'s ad-hoc arm — the one arm a run without
 /// `--scenario` has (proposal 2026-10-24-batch-to-simulate §3 "Arm labels").
 ///
-/// `baseline` when nothing is overridden; otherwise `baseline` followed by
-/// `+name` for each enabled intervention, `-name` for each disabled one, and
-/// `;param=value` for each `--param`, each group sorted by name and each value
-/// in Rust's shortest round-trip form, so the label is a pure function of the
-/// resolved arm and `beta=.3` and `beta=0.3` give one label:
-/// `baseline+vaccination`, `baseline-sia`, `baseline;beta=0.3`. A derived
-/// label cannot collide with a declared scenario, whose name is an identifier.
+/// [`IMPLICIT_ARM_LABEL`] (`(none)`) when nothing is overridden; otherwise
+/// `(none)` followed by `+name` for each enabled intervention, `-name` for each
+/// disabled one, and `;param=value` for each `--param`, each group sorted by
+/// name and each value in Rust's shortest round-trip form, so the label is a
+/// pure function of the resolved arm and `beta=.3` and `beta=0.3` give one
+/// label: `(none)+vaccination`, `(none)-sia`, `(none);beta=0.3`. Scenario names
+/// are identifiers (`[A-Za-z_][A-Za-z0-9_]*`), so a parenthesised label can
+/// never collide with a declared scenario — including one the model calls
+/// `baseline` — and no scenario name is reserved.
 /// The label is provenance — it names the leaf's path segment, its `run.json`
 /// level and the listings — never identity, which the resolved delta hashes.
+/// The label of the implicit arm `simulate` runs when it is given no scenario
+/// flags: the model as written, no scenario applied.
+pub const IMPLICIT_ARM_LABEL: &str = "(none)";
+
 pub fn adhoc_arm_label(enable: &[String], disable: &[String], params: &[(String, f64)]) -> String {
-    let mut label = String::from("baseline");
+    let mut label = String::from(IMPLICIT_ARM_LABEL);
     let mut enable: Vec<&String> = enable.iter().collect();
     enable.sort();
     for e in enable {
@@ -492,13 +498,13 @@ mod tests {
 
     #[test]
     fn adhoc_arm_label_is_a_pure_function_of_the_resolved_arm() {
-        assert_eq!(adhoc_arm_label(&[], &[], &[]), "baseline");
-        assert_eq!(adhoc_arm_label(&names(&["vaccination"]), &[], &[]), "baseline+vaccination");
-        assert_eq!(adhoc_arm_label(&[], &names(&["sia"]), &[]), "baseline-sia");
+        assert_eq!(adhoc_arm_label(&[], &[], &[]), "(none)");
+        assert_eq!(adhoc_arm_label(&names(&["vaccination"]), &[], &[]), "(none)+vaccination");
+        assert_eq!(adhoc_arm_label(&[], &names(&["sia"]), &[]), "(none)-sia");
         let p = |v: f64| vec![("beta".to_string(), v)];
-        assert_eq!(adhoc_arm_label(&[], &[], &p(0.3)), "baseline;beta=0.3");
+        assert_eq!(adhoc_arm_label(&[], &[], &p(0.3)), "(none);beta=0.3");
         // `beta=.3` parses to the same f64 as `beta=0.3`: one label.
-        assert_eq!(adhoc_arm_label(&[], &[], &p(".3".parse().unwrap())), "baseline;beta=0.3");
+        assert_eq!(adhoc_arm_label(&[], &[], &p(".3".parse().unwrap())), "(none);beta=0.3");
         // Groups sorted by name, flag order irrelevant.
         assert_eq!(
             adhoc_arm_label(
@@ -514,7 +520,7 @@ mod tests {
         );
         assert_eq!(
             adhoc_arm_label(&names(&["vaccination", "sia"]), &names(&["closure"]), &[("beta".to_string(), 2.0)]),
-            "baseline+sia+vaccination-closure;beta=2"
+            "(none)+sia+vaccination-closure;beta=2"
         );
     }
 

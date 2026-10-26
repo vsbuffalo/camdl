@@ -261,7 +261,11 @@ impl CasSink {
         let params: HashMap<String, f64> =
             crate::util::resolved_parameter_values(&resolved_params.model).into_iter().collect();
 
-        let scenario_label = if resolved.name.is_empty() { "baseline" } else { resolved.name.as_str() };
+        let scenario_label = if resolved.name.is_empty() {
+            crate::sim_job::IMPLICIT_ARM_LABEL
+        } else {
+            resolved.name.as_str()
+        };
         // The label names the point's parameters at the values the cell RAN
         // (resolved), not the values the point asked for: a `--param` or a
         // scenario that shadows a draw column must not leave the path

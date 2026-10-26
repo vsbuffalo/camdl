@@ -1009,7 +1009,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         std::process::exit(1);
     }
 
-    // If no scenarios specified, use a single None (baseline)
+    // If no scenarios specified, use a single None (the implicit `(none)` arm)
     let scenario_list: Vec<Option<String>> = if scenario_names.is_empty() {
         vec![None]
     } else {
@@ -1518,7 +1518,10 @@ fn run_simulate(a: &args::SimulateArgs) {
                         std::process::exit(1);
                     }),
             };
-            horizons.push((s.clone().unwrap_or_else(|| "baseline".into()), h));
+            horizons.push((
+                s.clone().unwrap_or_else(|| crate::sim_job::IMPLICIT_ARM_LABEL.into()),
+                h,
+            ));
         }
         if horizons.iter().any(|(_, h)| *h != horizons[0].1) {
             let list: Vec<String> =
@@ -5169,13 +5172,14 @@ fn print_dry_run(
         eprintln!("  {} {}", d("replicates:"), replicates);
     }
 
+    let implicit = crate::sim_job::IMPLICIT_ARM_LABEL;
     let scenarios: Vec<&str> = scenario_list.iter()
-        .map(|s| s.as_deref().unwrap_or("(baseline)"))
+        .map(|s| s.as_deref().unwrap_or(implicit))
         .collect();
-    if scenarios.len() > 1 || scenarios[0] != "(baseline)" {
+    if scenarios.len() > 1 || scenarios[0] != implicit {
         eprintln!("  {} {}", d("scenarios:"), scenarios.join(", "));
     } else {
-        eprintln!("  {} (baseline)", d("scenario:"));
+        eprintln!("  {} {implicit}", d("scenario:"));
     }
 
     // Obs output
