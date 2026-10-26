@@ -67,6 +67,11 @@ impl Simulate for GillespieSim {
 /// drift in the running `lambda_total` SUM is a separate concern, still handled
 /// by the `lambda_total.max(0.0)` guards at the call sites and the periodic full
 /// recompute.)
+///
+/// The result is the **effective** propensity: the user's rate where the
+/// transition is feasible, 0 where it is not (see
+/// [`CompiledModel::transition_feasible`]), exactly as
+/// [`eval_feasible_propensities`] computes it for the full path.
 #[inline]
 fn eval_one(tr_idx: usize, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
     let p = eval_resolved(&ctx.model.resolved.rates[tr_idx], ctx);
@@ -75,7 +80,44 @@ fn eval_one(tr_idx: usize, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
     // state-dependent argument that grows as the epidemic progresses) would set
     // `lambda_total = +inf` and force a burst of spurious zero-time firings until
     // the periodic full recompute finally errored.
-    guard_propensity(p, tr_idx, ctx.model, ctx.t)
+    let p = guard_propensity(p, tr_idx, ctx.model, ctx.t)?;
+    Ok(if p != 0.0 && !ctx.model.transition_feasible(tr_idx, &ctx.int_s.counts) { 0.0 } else { p })
+}
+
+/// Every transition's effective propensity: the user's rate where the
+/// transition is feasible, 0 where it is not.
+///
+/// A transition is feasible in state `x` when `x_i ≥ ν⁻_i` for every
+/// compartment `i` it consumes, `ν⁻_i` being the units one firing removes
+/// ([`CompiledModel::transition_feasible`]). This is what keeps a firing from
+/// taking a compartment below zero when the declared rate stays positive there —
+/// `S + S --> D @ k*S*S` at `S = 1`, or a constant-rate exit at `S = 0`. The
+/// user's rate is not rewritten: where the transition is feasible it fires at
+/// exactly the declared rate. For a single-unit transition whose rate is
+/// proportional to its source the rule changes nothing, since the rate is
+/// already 0 when the source is empty.
+///
+/// The rate is evaluated and guarded before the mask, so a negative or
+/// non-finite rate errors whether or not the transition is feasible, on the
+/// full path and the sparse path ([`eval_one`]) alike.
+#[allow(clippy::too_many_arguments)]
+fn eval_feasible_propensities(
+    model: &CompiledModel,
+    int_s: &IntState,
+    real_s: &RealState,
+    params: &[f64],
+    t: f64,
+    dt: f64,
+    per_eval: Option<&[f64]>,
+    out: &mut Vec<f64>,
+) -> Result<(), SimError> {
+    eval_propensities(model, int_s, real_s, params, t, dt, per_eval, out)?;
+    for (tr_idx, p) in out.iter_mut().enumerate() {
+        if *p != 0.0 && !model.transition_feasible(tr_idx, &int_s.counts) {
+            *p = 0.0;
+        }
+    }
+    Ok(())
 }
 
 pub fn run_gillespie(
@@ -196,7 +238,7 @@ pub fn run_gillespie_with_observer(
     }
 
     // Initial full propensity evaluation — maintained incrementally from here on.
-    eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
+    eval_feasible_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
     let mut lambda_total: f64 = propensities.iter().sum();
     let mut event_count: usize = 0;
 
@@ -209,7 +251,7 @@ pub fn run_gillespie_with_observer(
         // If lambda_total looks zero (from incremental drift or genuine absorbing state),
         // do a full recompute to verify before treating as absorbing.
         if lambda_total <= 0.0 {
-            eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
+            eval_feasible_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
             lambda_total = propensities.iter().sum();
         }
 
@@ -276,7 +318,7 @@ pub fn run_gillespie_with_observer(
             // If a scheduled effect fired the state changed — recompute; the model
             // may leave the absorbing state.
             if stop.has(StopReason::ScheduledEffect) {
-                eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
+                eval_feasible_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
                 lambda_total = propensities.iter().sum();
             }
 
@@ -356,7 +398,7 @@ pub fn run_gillespie_with_observer(
 
             if stop.has(StopReason::ScheduledEffect) {
                 // Full recompute after intervention (integer state changed).
-                eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
+                eval_feasible_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
                 lambda_total = propensities.iter().sum();
             } else {
                 // Time advanced but no state change: re-evaluate time-dependent transitions.
@@ -378,14 +420,30 @@ pub fn run_gillespie_with_observer(
         let u2: f64 = stateful_rng.uniform();
         let threshold = u2 * lambda_total;
         let mut cumulative = 0.0;
-        let mut fired_idx = n_transitions - 1;
+        let mut fired_idx = None;
+        let mut last_positive = None;
         for (i, &p) in propensities.iter().enumerate() {
+            if p > 0.0 { last_positive = Some(i); }
             cumulative += p;
             if cumulative >= threshold {
-                fired_idx = i;
+                fired_idx = Some(i);
                 break;
             }
         }
+        // The running `lambda_total` can drift a few ulps above the true sum, so
+        // `threshold` can exceed every partial sum. The fall-through then picks the
+        // last transition that can fire — never one whose effective propensity is
+        // 0, which may be infeasible in this state. If none can fire, the drifted
+        // total was the only thing keeping the system out of the absorbing branch:
+        // recompute it and draw again.
+        let fired_idx = match fired_idx.or(last_positive) {
+            Some(i) => i,
+            None => {
+                eval_feasible_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
+                lambda_total = propensities.iter().sum();
+                continue;
+            }
+        };
 
         // Advance real state to event time
         // TODO(v0.2): replace with PDMP thinning
@@ -436,7 +494,7 @@ pub fn run_gillespie_with_observer(
         event_count += 1;
         if event_count.is_multiple_of(FULL_RECOMPUTE_INTERVAL) {
             // Periodic full recompute prevents floating-point drift in lambda_total
-            eval_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
+            eval_feasible_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
             lambda_total = propensities.iter().sum();
         } else {
             // Incremental update: only recompute transitions whose dependencies changed.
@@ -466,6 +524,23 @@ pub fn run_gillespie_with_observer(
                     let new_p = eval_one(tr_idx, &ctx)?;
                     propensities[tr_idx] = new_p;
                     lambda_total += new_p - old;
+                }
+            }
+
+            // Transitions that consume a compartment the firing changed: their
+            // feasibility can change even when their rate does not read that
+            // compartment (a constant-rate exit). Run after the two passes above
+            // so their summation order is untouched; a transition already
+            // current re-evaluates to the same value and adds exactly 0.
+            for &(local, _) in &model.transition_stoich[fired_idx] {
+                for &tr_idx in &model.comp_to_consumers[local] {
+                    if !updated.contains(&tr_idx) {
+                        let old = propensities[tr_idx];
+                        let new_p = eval_one(tr_idx, &ctx)?;
+                        propensities[tr_idx] = new_p;
+                        lambda_total += new_p - old;
+                        updated.push(tr_idx);
+                    }
                 }
             }
 

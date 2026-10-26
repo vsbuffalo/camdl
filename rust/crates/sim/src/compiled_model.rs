@@ -790,6 +790,24 @@ pub struct CompiledModel {
     /// Real compartments cannot appear in stoichiometry (validator enforces this).
     pub transition_stoich: Vec<Vec<(usize, i64)>>,
 
+    /// For each transition, the units it consumes per firing from each
+    /// integer compartment it draws down: `(int_local_idx, units)` with
+    /// `units ≥ 1`, one entry per compartment whose **net** stoichiometry is
+    /// negative (duplicate IR entries for one compartment are summed first).
+    /// `S + S --> D` consumes `(S, 2)`; `S --> I` consumes `(S, 1)`; a
+    /// source-less inflow consumes nothing. Gillespie reads it for the
+    /// feasibility rule (a transition may fire only when every consumed
+    /// compartment holds at least `units`); chain-binomial refuses any
+    /// `units > 1` up front ([`Self::validate_unit_source_consumption`]).
+    pub transition_consumption: Vec<Vec<(usize, i64)>>,
+
+    /// Inverse of [`Self::transition_consumption`]: for each integer
+    /// compartment (local index), the transitions that consume it. Gillespie's
+    /// sparse update re-evaluates these after the compartment changes, because a
+    /// transition's feasibility can change even when its rate does not read the
+    /// compartment (a constant-rate exit `S --> R @ k`).
+    pub comp_to_consumers: Vec<Vec<usize>>,
+
     /// For each ODE equation, the local real-compartment index.
     pub ode_real_indices: Vec<usize>,
 
@@ -1152,6 +1170,18 @@ impl CompiledModel {
             )));
         }
         Ok(())
+    }
+
+    /// Gillespie's feasibility rule: may transition `tr_idx` fire in state
+    /// `counts`? True when every compartment it consumes holds at least the
+    /// units one firing removes (`x_i ≥ ν⁻_i`). A firing therefore never takes a
+    /// compartment below zero. The user's rate expression is not consulted or
+    /// rewritten: a feasible transition fires at exactly its declared rate.
+    #[inline]
+    pub fn transition_feasible(&self, tr_idx: usize, counts: &[i64]) -> bool {
+        self.transition_consumption[tr_idx]
+            .iter()
+            .all(|&(local, units)| counts[local] >= units)
     }
 
     /// Resolve per-intervention fire **times** for the current
@@ -1548,6 +1578,30 @@ impl CompiledModel {
                 }
             }
             transition_stoich.push(stoich);
+        }
+
+        // Net per-compartment consumption of each transition (see the field
+        // doc): sum the stoichiometry per compartment so a hand-authored IR
+        // that repeats a compartment gets the same verdict as the collapsed
+        // form camdlc emits.
+        let transition_consumption: Vec<Vec<(usize, i64)>> = transition_stoich
+            .iter()
+            .map(|stoich| {
+                let mut net: Vec<(usize, i64)> = Vec::new();
+                for &(local, delta) in stoich {
+                    match net.iter_mut().find(|(l, _)| *l == local) {
+                        Some((_, d)) => *d += delta,
+                        None => net.push((local, delta)),
+                    }
+                }
+                net.into_iter().filter(|&(_, d)| d < 0).map(|(l, d)| (l, -d)).collect()
+            })
+            .collect();
+        let mut comp_to_consumers: Vec<Vec<usize>> = vec![Vec::new(); int_local_to_global.len()];
+        for (tr_idx, consumed) in transition_consumption.iter().enumerate() {
+            for &(local, _) in consumed {
+                comp_to_consumers[local].push(tr_idx);
+            }
         }
 
         // Build dependency graph for sparse propensity updates.
@@ -2123,6 +2177,8 @@ impl CompiledModel {
             global_to_real,
             default_params,
             transition_stoich,
+            transition_consumption,
+            comp_to_consumers,
             ode_real_indices,
             table_values_cache,
             time_func_cache,
