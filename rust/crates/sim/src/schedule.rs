@@ -183,6 +183,15 @@ pub fn output_tol(t: f64) -> f64 {
 }
 /// "An effect / observation time has been reached" / due: `next_effect <= t + EFFECT_EPS`.
 pub const EFFECT_EPS: f64 = 1e-10;
+/// Relative tolerance on the `dt` grid anchored at `t_start`, in units of `dt`:
+/// a time `t` is on the grid when `(t - t_start)/dt` is within `GRID_TOL` of an
+/// integer, and the grid key of an effect time adds it before flooring so a
+/// float-rounded tie still goes to the later step. `1e-9` matches the
+/// schedule-arithmetic epsilon used elsewhere (the `Recurring` loop bound in
+/// `intervention_fire_times` uses `period * 1e-9`); it is tight enough to catch
+/// a genuine off-grid time (a biweekly ES cadence at `t_start + k·dt + dt/2`)
+/// and loose enough not to flag a float-rounded on-grid one.
+pub const GRID_TOL: f64 = 1e-9;
 /// Step FLOOR: a remaining gap this small means the integrator has ARRIVED at the
 /// boundary — dispatch, don't step. Distinct in meaning from the two *due* tests
 /// above even though numerically smaller. (ode `h_max` arrival, chain loop-break,

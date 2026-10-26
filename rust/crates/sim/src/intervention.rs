@@ -6,7 +6,7 @@ use crate::{
     state::{IntState, RealState},
 };
 use crate::boundary_times::{EffectTimes, ObsTimes};
-use crate::schedule::{Schedule, StepPolicy};
+use crate::schedule::{Schedule, StepPolicy, GRID_TOL};
 use ir::intervention::{Action, InterventionSchedule};
 
 /// Short human label for an action, for diagnostics (`"set V"`,
@@ -168,15 +168,6 @@ pub fn all_intervention_times(model: &CompiledModel, params: &[f64]) -> Vec<f64>
     times.dedup();
     times
 }
-
-/// Relative tolerance for the on-grid test: a time `t` is "on the dt grid
-/// anchored at `t_start`" when `(t - t_start)/dt` is within `GRID_TOL` of an
-/// integer. `1e-9` matches the schedule-arithmetic epsilon used elsewhere (e.g.
-/// the `Recurring` loop bound in `intervention_fire_times` uses `period * 1e-9`);
-/// it is tight enough to catch a genuine off-grid observation (a
-/// biweekly ES cadence at `t_start + k·dt + dt/2`) yet loose enough not to flag
-/// a float-rounded on-grid time.
-const GRID_TOL: f64 = 1e-9;
 
 /// The effect boundaries for one inference filter run — the cursor-keyed firing
 /// timeline, the replacement for the `round(t/dt)` firing key (gh#216).
