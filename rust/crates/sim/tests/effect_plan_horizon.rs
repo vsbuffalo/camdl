@@ -164,7 +164,7 @@ fn data_past_the_simulation_end_are_refused() {
     let times: Vec<f64> = (1..=30).map(f64::from).collect();
     let want = "the data run to t=30 days but the model's simulation ends at t=20 days";
     let e = filter(&m, &times).expect_err("pfilter must refuse");
-    assert!(e.contains(want) && e.contains("to = last_obs"), "{e}");
+    assert!(e.contains(want) && e.contains("to = 30 'days") && e.contains("to = last_obs"), "{e}");
     let e = pgas(&m, &times).expect_err("pgas must refuse");
     assert!(e.contains(want), "{e}");
 }

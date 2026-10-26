@@ -349,8 +349,9 @@ pub fn refuse_data_past_end(model: &CompiledModel, last_obs: f64) -> Result<(), 
     Err(SimError::Validation(format!(
         "the data run to t={last_obs} {unit} but the model's simulation ends at t={t_end} \
          {unit} (`simulate {{ to }}`); a fit cannot score data past the end of the \
-         simulation. Extend `to` to cover the data, e.g. `to = last_obs` or \
-         `to = last_obs + 8 'weeks`."
+         simulation. Extend `to` to cover the data: `to = {last_obs} '{unit}` does, and so \
+         does `to = last_obs` (or `to = last_obs + 8 'weeks`) where the model has no \
+         recurring schedule that needs a literal end."
     )))
 }
 
