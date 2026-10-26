@@ -714,12 +714,24 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // *both* a value (handled by the resolver above) and the kick-out
     // assertion (this set). Names from `--fixed-file` are pulled in
     // via the resolver's provenance — they kick out of [estimate]
-    // identically.
+    // identically, and `--rw-sd auto` never estimates them. A file name a
+    // later tier (a scenario, `--fixed`) re-valued is still pinned: the
+    // override record keeps the file as the replaced source. A focal name
+    // the file also carries stays focal (the sweep writes over it per cell).
     let cli_fixed_names: std::collections::HashSet<String> =
         a.model_overrides.fixed_cli.iter().map(|p| p.name.clone()).collect();
     let mut fixed_names: std::collections::HashSet<String> = cli_fixed_names.clone();
     for k in fit_toml_fixed.keys() {
         fixed_names.insert(k.clone());
+    }
+    let from_fixed_file = |s: &crate::params_resolver::ValueSource|
+        matches!(s, crate::params_resolver::ValueSource::FixedFile { .. });
+    for rp in &resolved.params {
+        let named_by_file = from_fixed_file(&rp.source)
+            || rp.overrides.iter().any(|o| from_fixed_file(&o.replaced.0));
+        if named_by_file && !focal_names.contains(&rp.name) {
+            fixed_names.insert(rp.name.clone());
+        }
     }
 
     // Focal-vs-fixed conflict check (gh#73 §2): a parameter cannot
