@@ -697,11 +697,14 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         // Without this, the canonical workflow `camdl survey --fit
         // X.toml && camdl fit run X.toml --survey-path ...` errors at
         // survey even though `fit run` accepts the same toml.
+        let mut seeded: HashMap<String, crate::params_resolver::ValueSource> = HashMap::new();
         for (name, spec) in &config.estimate {
             if let Some(p) = model_pre.parameters.iter_mut().find(|p| p.name == *name) {
                 if p.value.resolved_value().is_none() {
                     if let Some(start) = spec.start {
                         p.value = p.value.with_value(start);
+                        seeded.insert(name.clone(),
+                            crate::params_resolver::ValueSource::EstimateStart { drawn: false });
                     }
                 }
             }
@@ -793,6 +796,8 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
                 table_files: &table_files,
             },
         ).map_err(|e| e.to_string())?;
+        let mut resolved = resolved;
+        resolved.attribute_seeded_starts(&seeded);
         crate::params_resolver::emit_notices(&[&resolved]);
         let parameters_provenance =
             crate::run_meta::ParameterProvenance::of_all(&resolved.params);

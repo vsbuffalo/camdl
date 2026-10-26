@@ -204,6 +204,14 @@ pub enum ValueSource {
     /// A single-point `--starts` rule's values (tier 1.5), naming where they
     /// came from.
     Starts(StartsOrigin),
+    /// The start fall-back for an `[estimate]` parameter the model gives no
+    /// value, seeded before resolution so the parameter has one: its
+    /// `[estimate].start` (`drawn: false`), or a draw within its bounds when
+    /// the entry gives no start (`drawn: true`). A reference point, not any
+    /// chain's start: the starts rule draws those (`init_provenance`).
+    /// Attributed after resolution by
+    /// [`ResolvedParameters::attribute_seeded_starts`].
+    EstimateStart { drawn: bool },
 }
 
 /// Where a single-point `--starts` rule's values came from.
@@ -241,6 +249,8 @@ impl ValueSource {
             ValueSource::FixedCli        => "fixed_cli",
             ValueSource::Starts(StartsOrigin::Params { .. }) => "starts_from_params",
             ValueSource::Starts(StartsOrigin::Mle { .. })    => "starts_from_mle",
+            ValueSource::EstimateStart { drawn: false } => "estimate_start",
+            ValueSource::EstimateStart { drawn: true }  => "estimate_start_drawn",
         }
     }
 }
@@ -341,6 +351,23 @@ pub struct ResolvedParameters {
     /// Names `[estimate]` lists that `--fixed`/`--fixed-file` pinned.
     pub pinned_over_estimate: Vec<PinnedOverEstimate>,
     pub context:      ResolveContext,
+}
+
+impl ResolvedParameters {
+    /// Attribute the values a caller seeded into the model before resolution
+    /// (`seeded`: name → [`ValueSource::EstimateStart`]) to that source. The
+    /// resolver reads a seeded value as the model's own and records it as
+    /// `model_default`; only a parameter still sourced there is relabelled,
+    /// so a tier that replaced the seed keeps its own attribution.
+    pub fn attribute_seeded_starts(&mut self, seeded: &HashMap<String, ValueSource>) {
+        for rp in &mut self.params {
+            if rp.source == ValueSource::ModelDefault {
+                if let Some(src) = seeded.get(&rp.name) {
+                    rp.source = src.clone();
+                }
+            }
+        }
+    }
 }
 
 /// A parameter the fit config lists in `[estimate]` that `--fixed` /
@@ -1883,6 +1910,9 @@ fn origin_phrase(src: &ValueSource, ctx: &ResolveContext) -> String {
             format!("--starts from_params={}", path.display()),
         ValueSource::Starts(StartsOrigin::Mle { fit }) =>
             format!("--starts from_mle={fit}, a fit's estimate"),
+        ValueSource::EstimateStart { drawn: false } => "[estimate].start".to_string(),
+        ValueSource::EstimateStart { drawn: true } =>
+            "a start drawn within the [estimate] bounds".to_string(),
     }
 }
 

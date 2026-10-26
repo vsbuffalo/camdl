@@ -431,3 +431,77 @@ I0 = 10
     assert_eq!((prov["value"].as_f64(), prov["role"].as_str()),
         (Some(0.3), Some("fixed")), "{prov}");
 }
+
+/// The `[estimate].start` attribution holds on `survey --fit` too, which
+/// seeds the same fall-back before resolving.
+#[test]
+fn survey_fit_records_estimate_start_as_its_own_source() {
+    let tmp = tempdir("survey_start_source");
+    let ir = compile(tmp.path(), "m", MODEL);
+    let data = tmp.path().join("cases.tsv");
+    let fit = tmp.path().join("fit.toml");
+    std::fs::write(&fit, format!(r#"[model]
+camdl = "{ir}"
+[data.observations]
+cases = "{data}"
+[estimate]
+gamma = {{ bounds = [0.01, 1.0], start = 0.1 }}
+[fixed]
+beta = 0.3
+rho = 0.6
+k = 10
+N0 = 1000
+I0 = 10
+"#, ir = ir.display(), data = data.display())).unwrap();
+    let cwd = tmp.path().join("run");
+    ok(camdl(&cwd, &[
+        "survey", ir.to_str().unwrap(), "--fit", fit.to_str().unwrap(),
+        "--n-points", "4", "--eval", "simulate", "--output", "out",
+    ]));
+    let runs = find(&cwd.join("out"), "run.json");
+    let prov = &json(&runs[0])["inputs"]["parameters_provenance"]["gamma"];
+    assert_eq!(prov["source"].as_str(), Some("estimate_start"), "{prov}");
+}
+
+/// `fit run` records an estimated parameter's `[estimate].start` as
+/// `estimate_start`, not `model_default`: the model gives the parameter no
+/// value, and under the default `from_prior` starts the number is not any
+/// chain's start either. A parameter with neither a value nor a start gets an
+/// in-bounds draw, recorded `estimate_start_drawn`.
+#[test]
+fn fit_run_records_estimate_start_as_its_own_source() {
+    let tmp = tempdir("fit_start_source");
+    let ir = compile(tmp.path(), "m", MODEL);
+    let data = tmp.path().join("cases.tsv");
+    let fit = tmp.path().join("fit.toml");
+    std::fs::write(&fit, format!(r#"[model]
+camdl = "{ir}"
+[data.observations]
+cases = "{data}"
+[estimate]
+beta  = {{ bounds = [0.05, 1.0], start = 0.3 }}
+gamma = {{ bounds = [0.01, 1.0] }}
+[fixed]
+rho = 0.6
+k = 10
+N0 = 1000
+I0 = 10
+omega = 0.01
+[method]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 2
+particles = 30
+iterations = 2
+cooling = 0.9
+"#, ir = ir.display(), data = data.display())).unwrap();
+    let cwd = tmp.path().join("run");
+    ok(camdl(&cwd, &["fit", "run", fit.to_str().unwrap()]));
+    let metas = find(&cwd.join("results"), "fit.meta.json");
+    assert_eq!(metas.len(), 1);
+    let prov = &json(&metas[0])["parameters_provenance"];
+    assert_eq!((prov["beta"]["source"].as_str(), prov["beta"]["value"].as_f64()),
+        (Some("estimate_start"), Some(0.3)), "{prov}");
+    assert_eq!(prov["gamma"]["source"].as_str(), Some("estimate_start_drawn"), "{prov}");
+    assert_eq!(prov["rho"]["source"].as_str(), Some("fit_toml_fixed"), "{prov}");
+}

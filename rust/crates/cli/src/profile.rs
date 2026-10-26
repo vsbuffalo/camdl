@@ -433,11 +433,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // bounds-uniform fallback for profile yet — the focal sweep
     // overrides the focal param's value per-cell anyway, and the
     // non-focal params are usually pinned via `--fixed`).
+    let mut seeded: HashMap<String, crate::params_resolver::ValueSource> = HashMap::new();
     for (name, spec) in &fit_estimate {
         if let Some(p) = model_pre.parameters.iter_mut().find(|p| p.name == *name) {
             if p.value.resolved_value().is_none() {
                 if let Some(start) = spec.start {
                     p.value = p.value.with_value(start);
+                    seeded.insert(name.clone(),
+                        crate::params_resolver::ValueSource::EstimateStart { drawn: false });
                 }
             }
         }
@@ -588,6 +591,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         starts_values.as_ref().map(|(origin, values)|
             crate::params_resolver::StartsValues { origin, values }),
     ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    let mut resolved = resolved;
+    resolved.attribute_seeded_starts(&seeded);
     crate::params_resolver::emit_notices(&[&resolved]);
     // The grid writes each focal value straight over the parameter, so a
     // scenario's value for a focal parameter is replaced at every point: said

@@ -263,7 +263,7 @@ pub struct ParameterProvenance {
     /// [`crate::params_resolver::ValueSource::tag`] string
     /// (`"model_default" | "starts_from_params" | "starts_from_mle" |
     /// "fit_toml_fixed" | "fixed_file" | "sweep_point" | "scenario" |
-    /// "fixed_cli"`).
+    /// "fixed_cli" | "estimate_start" | "estimate_start_drawn"`).
     pub source: String,
     /// `"fixed" | "estimated"` — matches
     /// [`crate::params_resolver::ParameterRole`] — or, on a profile, `"focal"`

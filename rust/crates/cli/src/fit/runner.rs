@@ -242,6 +242,7 @@ pub(crate) fn resolve_fit_parameters(
     // the model param has no value yet (no scenario default, no
     // model-declared `value`), fall back to a Transform-aware
     // uniform draw within bounds.
+    let mut seeded: HashMap<String, crate::params_resolver::ValueSource> = HashMap::new();
     for (name, spec) in &fit.estimate {
         if let Some(p) = model_pre.parameters.iter_mut().find(|p| p.name == *name) {
             if p.value.resolved_value().is_none() {
@@ -261,6 +262,9 @@ pub(crate) fn resolve_fit_parameters(
                     // intact) so the resolver passes (gh#34) and `default_params`
                     // gets the start.
                     p.value = p.value.with_value(v);
+                    seeded.insert(name.clone(), crate::params_resolver::ValueSource::EstimateStart {
+                        drawn: spec.start.is_none(),
+                    });
                 }
             }
         }
@@ -303,6 +307,8 @@ pub(crate) fn resolve_fit_parameters(
             table_files: &table_files_resolver,
         },
     ).map_err(|e| e.to_string())?;
+    let mut resolved = resolved;
+    resolved.attribute_seeded_starts(&seeded);
     Ok(FitParameters { model_declared, model_ir_json, resolved })
 }
 
