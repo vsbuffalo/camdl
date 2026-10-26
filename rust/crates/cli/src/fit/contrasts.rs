@@ -403,7 +403,7 @@ pub fn emit_contrasts(
         // Derive the fork from the contrast's toggled intervention. The edge cases
         // (no toggled intervention; a parametric/reactive fire time) are loud
         // skip-with-note deferrals, never silent mis-forks.
-        let plan = match derive_fork(model, &arms, &runs_c, &snapshot_times) {
+        let plan = match derive_fork(model, &arms, &runs_c, &snapshot_times, (model.simulation.t_start, dt, run_end)) {
             Ok(p) => p,
             Err(reason) => {
                 eprintln!("fit predict: skipping contrast '{}' — {reason}", c.name);
@@ -412,11 +412,12 @@ pub fn emit_contrasts(
         };
         eprintln!(
             "fit predict: contrast '{}' — fork at t={} (last saved snapshot before '{}' \
-             fires at t={}); arms run [{}, {}].{}",
+             fires at t={}, declared at t={}); arms run [{}, {}].{}",
             c.name,
             plan.fork_t,
             plan.fire_iv,
             plan.fire_t,
+            plan.fire_declared,
             plan.fork_t,
             run_end,
             if plan.toggled.len() > 1 {
@@ -670,14 +671,19 @@ fn resolve_arm(
 
 /// The fork derived for one contrast: where to branch the two arms from, and what
 /// drove it. The fork is the last saved trajectory snapshot strictly before the
-/// toggled intervention's fire time — so "fork at/after the intervention" is
+/// instant the toggled intervention FIRES — so "fork at/after the intervention" is
 /// unrepresentable by construction.
 struct ForkPlan {
     /// The fork time: the latest saved snapshot strictly before `fire_t`.
     fork_t: f64,
-    /// The earliest fire time across the toggled interventions — the first instant
-    /// the arms diverge.
+    /// The earliest firing instant across the toggled interventions — the first
+    /// instant the arms diverge. The arms run chain-binomial, which fires on the
+    /// run's grid `t_start + k·dt` (the effect plan, D2), so this is that grid
+    /// instant, not the declared time: an intervention declared at 2.4 with
+    /// `dt = 1` fires at 2.
     fire_t: f64,
+    /// The declared time behind `fire_t`, for the note.
+    fire_declared: f64,
     /// The name of the intervention firing at `fire_t` (for the transparency note).
     fire_iv: String,
     /// Every toggled intervention (≥1), sorted; >1 means several differ across the
@@ -712,6 +718,7 @@ fn derive_fork(
     arms: &HashMap<String, Arm>,
     runs: &[String],
     snapshot_times: &[f64],
+    (t_start, dt, t_end): (f64, f64, f64),
 ) -> Result<ForkPlan, String> {
     // The live intervention name-set of each arm (what actually fires in it).
     let live: Vec<HashSet<String>> = runs
@@ -736,9 +743,9 @@ fn derive_fork(
         );
     }
 
-    // The earliest constant fire time across the toggled interventions; a
+    // The earliest firing instant across the toggled interventions; a
     // parametric / reactive one is a loud deferral.
-    let mut earliest: Option<(f64, String)> = None;
+    let mut earliest: Option<(f64, f64, String)> = None;
     for name in &toggled {
         let iv = model
             .interventions
@@ -746,9 +753,14 @@ fn derive_fork(
             .find(|iv| &iv.name == name)
             .ok_or_else(|| format!("internal: toggled intervention '{name}' not found in model"))?;
         match intervention_earliest_fire(iv) {
-            FireTime::Const(t) => {
-                if earliest.as_ref().is_none_or(|(e, _)| t < *e) {
-                    earliest = Some((t, name.clone()));
+            FireTime::Const(declared) => {
+                let Some(instant) = first_grid_instant(arms, runs, name, (t_start, dt, t_end)) else {
+                    return Err(format!(
+                        "the toggled intervention '{name}' has no fire times in the run window"
+                    ));
+                };
+                if earliest.as_ref().is_none_or(|(e, _, _)| instant < *e) {
+                    earliest = Some((instant, declared, name.clone()));
                 }
             }
             FireTime::Parametric => {
@@ -771,16 +783,45 @@ fn derive_fork(
             }
         }
     }
-    let (fire_t, fire_iv) = earliest.expect("a non-empty toggled set yields at least one fire time");
+    let (fire_t, fire_declared, fire_iv) =
+        earliest.expect("a non-empty toggled set yields at least one fire time");
 
     // The fork = the largest saved snapshot strictly before the first divergence.
     match fork_before(snapshot_times, fire_t) {
-        Some(fork_t) => Ok(ForkPlan { fork_t, fire_t, fire_iv, toggled }),
+        Some(fork_t) => Ok(ForkPlan { fork_t, fire_t, fire_declared, fire_iv, toggled }),
         None => Err(format!(
             "the toggled intervention fires at t={fire_t}, at or before the first saved \
              snapshot — there is no pre-intervention state to fork from"
         )),
     }
+}
+
+/// The first instant the arm that runs `name` fires it: each of its fire times
+/// mapped onto the chain-binomial grid `t_start + k·dt` by
+/// [`sim::effect_plan::grid_instant`] (outside `[t_start, t_end]` it does not
+/// fire), the earliest kept. Read from the arm's compiled model, so a recurring
+/// schedule is enumerated by the runtime itself.
+fn first_grid_instant(
+    arms: &HashMap<String, Arm>,
+    runs: &[String],
+    name: &str,
+    (t_start, dt, t_end): (f64, f64, f64),
+) -> Option<f64> {
+    let compiled = runs.iter().find_map(|r| {
+        let c = &arms[r].compiled;
+        c.model.interventions.iter().any(|iv| iv.name == name).then_some(c)
+    })?;
+    let iv_idx = compiled.model.interventions.iter().position(|iv| iv.name == name)?;
+    earliest_grid_instant(&compiled.resolve_fire_times(&compiled.default_params)[iv_idx], (t_start, dt, t_end))
+}
+
+/// The earliest instant at which a chain-binomial run over `[t_start, t_end]`
+/// at step `dt` fires an effect declared at `times`, or `None` if none fires.
+fn earliest_grid_instant(times: &[f64], (t_start, dt, t_end): (f64, f64, f64)) -> Option<f64> {
+    times
+        .iter()
+        .filter_map(|&t| sim::effect_plan::grid_instant(t, t_start, dt, t_end))
+        .min_by(|a, b| a.total_cmp(b))
 }
 
 /// The largest saved snapshot time strictly before `fire_t` (with a snapshot-time
@@ -1574,6 +1615,24 @@ mod tests {
             toggled_across_arms(&[set(&["a"]), set(&["a", "b"]), set(&["a"])]),
             vec!["b"]
         );
+    }
+
+    /// The fork is strictly before the instant the resumed chain-binomial arm
+    /// FIRES at, not the declared time (proposal 2026-10-04 §4): an
+    /// intervention at 2.4 with `dt = 1` fires on the step ending at 2, so with
+    /// snapshots on the integer grid the fork is at 1. Forking before the
+    /// declared 2.4 picks the post-effect snapshot at 2, and both arms would
+    /// then carry the effect the contrast isolates.
+    #[test]
+    fn the_fork_is_before_the_firing_instant_not_the_declared_time() {
+        let snapshots = [0.0, 1.0, 2.0, 3.0, 4.0];
+        let instant = earliest_grid_instant(&[2.4], (0.0, 1.0, 10.0)).unwrap();
+        assert_eq!(instant, 2.0);
+        assert_eq!(fork_before(&snapshots, instant), Some(1.0));
+        assert_eq!(fork_before(&snapshots, 2.4), Some(2.0), "the declared time would fork at 2");
+        // Outside the window nothing fires; the earliest fire inside it counts.
+        assert_eq!(earliest_grid_instant(&[-3.0, 2.6], (0.0, 1.0, 10.0)), Some(3.0));
+        assert_eq!(earliest_grid_instant(&[10.6], (0.0, 1.0, 10.0)), None);
     }
 
     #[test]

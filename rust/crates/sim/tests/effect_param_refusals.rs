@@ -9,6 +9,12 @@
 //!   `ExactInferenceTimeline::build`; an estimated amount is allowed, since
 //!   `step` reads it with the particle's own θ.
 //!
+//! - PGAS (gh#986): the complete-data density scores the recorded path; the
+//!   effect map and a deterministic `init {}` entry appear in no term, so an
+//!   estimated parameter there has a posterior equal to its prior. Refused at
+//!   the `run_pgas` boundary for an effect amount, an effect schedule and a
+//!   plain `init` assignment.
+//!
 //! The model is the book's seeding idiom on `sir_basic`:
 //! `events { founders_arrive : add(I, n_seed) at [tau] }`.
 
@@ -123,4 +129,88 @@ fn run_if2_refuses_an_estimated_event_time() {
         .err()
         .expect("IF2 with tau estimated must be refused");
     assert!(err.to_string().contains("if2: `tau` is estimated but sets the fire time of event `founders_arrive`"), "{err}");
+}
+
+// ─── PGAS ───────────────────────────────────────────────────────────────────
+
+fn run_pgas_estimating(model: &Arc<CompiledModel>, estimated: &[&str]) -> Result<(), String> {
+    use sim::inference::if2::{EstimatedParam, Transform};
+    use sim::inference::multi_stream_obs::MultiStreamObsModel;
+    use sim::inference::pgas::{run_pgas, PGASConfig};
+    use sim::inference::pmmh::Prior;
+    let if2_params: Vec<EstimatedParam> = estimated
+        .iter()
+        .map(|n| {
+            let index = model.param_index[*n];
+            EstimatedParam {
+                name: (*n).into(),
+                index,
+                initial: model.default_params[index],
+                rw_sd: 0.1,
+                transform: Transform::None,
+                lower: 0.0,
+                upper: 1e4,
+                rw_sd_auto: false,
+                perturb_only_at_t0: false,
+            }
+        })
+        .collect();
+    let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat); if2_params.len()];
+    let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
+        ancestor_sampling: true,
+        n_particles: 4, n_sweeps: 1, burn_in: 0, thin: 1, dt: 1.0,
+        use_nuts: false, dense_mass: false, max_tree_depth: 4,
+        trajectory_warmup: 0, csmc_sweeps_per_nuts: 1,
+        step_policy: sim::schedule::StepPolicy::Snap,
+    };
+    let obs = MultiStreamObsModel::empty(model.clone());
+    run_pgas(model, &if2_params, &priors, &model.default_params, &config, &[], &obs, 1, None, None, "d3".into())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// An estimated effect AMOUNT is refused under PGAS, naming it and the event.
+#[test]
+fn pgas_refuses_an_estimated_effect_amount() {
+    let err = run_pgas_estimating(&seeding_model(), &["beta", "n_seed"]).err().expect("must be refused");
+    assert_eq!(
+        err,
+        "model validation error: pgas: `n_seed` is estimated but reaches the state only through \
+         the amount of event `founders_arrive`, which the PGAS parameter move cannot score; its \
+         posterior would equal its prior. Fit with PMMH, or fix `n_seed`."
+    );
+}
+
+/// An estimated effect SCHEDULE is refused under PGAS.
+#[test]
+fn pgas_refuses_an_estimated_effect_schedule() {
+    let err = run_pgas_estimating(&seeding_model(), &["tau"]).err().expect("must be refused");
+    assert_eq!(
+        err,
+        "model validation error: pgas: `tau` is estimated but sets the fire time of event \
+         `founders_arrive`, which the PGAS parameter move cannot score; its posterior would equal \
+         its prior. Fit with PMMH, or fix `tau`."
+    );
+}
+
+/// A parameter in a plain `init {}` assignment is refused under PGAS, pointing
+/// at the law spelling. `sir_basic` has `S = N0 - I0` and `I = I0`; the
+/// refusal names the entry that is the parameter itself.
+#[test]
+fn pgas_refuses_an_estimated_plain_init_assignment() {
+    let err = run_pgas_estimating(&seeding_model(), &["I0"]).err().expect("must be refused");
+    assert_eq!(
+        err,
+        "model validation error: pgas: `I0` is estimated but enters only through \
+         `init { I = I0 }`, which the PGAS parameter move cannot score; its posterior would equal \
+         its prior. Declare a law, `I ~ poisson(rate = I0)`, or fit with PMMH."
+    );
+}
+
+/// A rate parameter alone is not refused: PGAS scores it through the
+/// transition densities. (The run then proceeds; one sweep is enough here.)
+#[test]
+fn pgas_accepts_a_rate_parameter() {
+    run_pgas_estimating(&seeding_model(), &["beta"]).expect("a rate parameter is scored by PGAS");
 }

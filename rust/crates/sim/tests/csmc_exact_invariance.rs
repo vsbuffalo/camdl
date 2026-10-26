@@ -43,6 +43,8 @@
 //! - `π` is concentrated on one path (then any kernel passes) — the effective
 //!   support size is asserted.
 
+// The fixture model carries no effects, so its effect plan is empty.
+use sim::effect_plan::EffectPlan;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -51,8 +53,7 @@ use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{
-    build_obs_at_substep, complete_data_loglik, csmc_as, EffectFiring,
-    ObsAtSubstep, PGASTrajectory, SubstepRecord,
+    build_obs_at_substep, complete_data_loglik, csmc_as, ObsAtSubstep, PGASTrajectory, SubstepRecord,
 };
 
 use sim::rng::StatefulRng;
@@ -422,7 +423,7 @@ fn check_invariance(
             &f.obs_model,
             0x5eed_0000_0000_0000u64.wrapping_add(i as u64),
             &f.obs_at_substep,
-            EffectFiring::default(),
+            &EffectPlan::default(),
             sim::rng::BinomialAlgorithm::Btpe,
             true,
         )

@@ -1743,6 +1743,28 @@ pub fn complete_data_loglik(
     let initial_state_ll =
         model.initial_state_logpdf(&trajectory.initial_counts, &[], params)?;
 
+    // D1 invariant: `initial_counts` is x₀ and `substeps[0].counts_before` is
+    // its image under the origin batch — a deterministic map, so it adds no
+    // density term (D3 refuses an estimated parameter inside it). A producer
+    // that conflated the two (scored x₀ but stepped from x₀ itself, or the
+    // reverse) would score transitions from a state it never used.
+    if cfg!(debug_assertions) {
+        if let Some(first) = trajectory.substeps.first() {
+            let grid: Vec<(f64, f64)> =
+                trajectory.substeps.iter().map(|r| (r.t0, r.dt_substep)).collect();
+            if let Ok(plan) = pgas_effect_plan(model, params, dt, &grid) {
+                let mut image = trajectory.initial_counts.clone();
+                if apply_origin_to_counts(model, &plan, &mut image, params, dt).is_ok() {
+                    debug_assert_eq!(
+                        image, first.counts_before,
+                        "complete_data_loglik: substeps[0].counts_before is not the origin \
+                         batch's image of initial_counts"
+                    );
+                }
+            }
+        }
+    }
+
     if !initial_state_ll.is_finite() {
         log::debug!("complete_data_loglik: -inf initial-state density ({initial_state_ll:.1})");
         return Ok(LogLikComponents {
@@ -1922,44 +1944,87 @@ fn theta_proposal_score(outcome: Result<LogLikComponents, SimError>) -> Result<f
 // Forward simulation (initial trajectory)
 // ═══════════════════════════════════════════════════════════════════
 
-/// The scheduled-effect firing plan a PGAS producer fires by (gh#216): `None`
-/// selects the Snap `round(t/dt)` whole-batch path; `Some((effect_at_substep,
-/// batches))` selects cursor-keyed firing — `effect_at_substep[s]` indexes
-/// `batches` (the [`crate::intervention::TimelineEffects`] per-boundary lists).
-pub type EffectFiring<'a> = Option<(&'a ObsAtSubstep, &'a [Vec<usize>])>;
-
-/// Fill `out` with the effects firing at the boundary `t_end` for producer
-/// substep `s`. `None` (Snap): the whole batch on the `round(t/dt)` key
-/// ([`crate::effects::due_effects`]). `Some(..)` (Exact): the effects the
-/// timeline landed at this substep, CURSOR-keyed, split by kind via
-/// [`crate::effects::split_due_batch`]. PGAS still rejects always-active events
-/// under Exact (the residual guard below), so in practice only scheduled
-/// interventions reach the `Some` branch here. step_one then applies `out`.
+/// Fill `out` with the effects due at the end of producer substep `s`: the
+/// plan's batch for step `k = s + 1` of the run's grid, split by kind (events
+/// at PROPOSE, interventions at INTERVENE) via
+/// [`crate::effects::split_due_batch`]. The plan is a Grid plan
+/// ([`pgas_effect_plan`]); `step_one` then applies `out`. One function for the
+/// four producers — the reference walk, the CSMC sweep, `SpliceGuard` and the
+/// initialization filter — so they cannot fire differently.
 pub(crate) fn fill_producer_batch(
     model: &CompiledModel,
-    fire_steps: &[std::collections::BTreeSet<i64>],
-    t_end: f64,
-    grid_dt: f64,
+    plan: &crate::effect_plan::EffectPlan,
     s: usize,
-    firing: EffectFiring<'_>,
     out: &mut crate::schedule::EffectBatch,
 ) {
-    match firing {
-        None => crate::effects::due_effects(model, fire_steps, t_end, grid_dt, out),
-        Some((effect_at_substep, batches)) => {
-            // Exact: every effect is cursor-keyed from the timeline. Split the
-            // boundary's batch by kind (events at PROPOSE / interventions at
-            // INTERVENE); empty off a boundary. Always-active events under Exact
-            // PGAS are still rejected upstream (the residual guard below), so in
-            // practice `batches` carries only scheduled interventions here — but
-            // routing through the shared `split_due_batch` keeps PGAS on the same
-            // firing path as the other cells (no `due_events` round key).
-            out.clear();
-            if let Some(&eff_idx) = effect_at_substep.get(&s) {
-                crate::effects::split_due_batch(model, &batches[eff_idx], out);
-            }
-        }
+    crate::effects::split_due_batch(model, plan.batch_ending_substep(s as u64), out);
+}
+
+/// The effect plan a PGAS run fires by: chain-binomial is discrete-time, so the
+/// plan is on the Grid clock (D2), over the window the substep grid covers,
+/// `[t_start, t_start + Σ dt_substep]`. Built once per run: the D3 refusal at
+/// [`run_pgas`] rules out an estimated parameter in any schedule, so the fire
+/// steps do not move with θ.
+///
+/// The producers fire the plan's step `k = s + 1` at the end of substep `s`
+/// ([`fill_producer_batch`]), which is right only when substep `s` is the grid's
+/// step `s + 1`: `t0 = t_start + s·dt`, full `dt`. Exact obs-alignment re-tiles
+/// the substeps at an off-grid observation and breaks that, so an effect-bearing
+/// model on such a grid is refused here, for every producer at once. (The CLI
+/// never runs PGAS under exact alignment: `fit/methods.rs` refuses it.)
+pub fn pgas_effect_plan(
+    model: &CompiledModel,
+    params: &[f64],
+    dt: f64,
+    grid: &[(f64, f64)],
+) -> Result<crate::effect_plan::EffectPlan, SimError> {
+    let t_start = model.model.simulation.t_start;
+    let t_end = grid.last().map_or(t_start, |&(t0, h)| t0 + h);
+    let plan = crate::effect_plan::EffectPlan::build(
+        model,
+        params,
+        t_start,
+        t_end,
+        crate::effect_plan::FireClock::Grid { dt },
+        crate::effect_plan::Origin::Init,
+    )?;
+    let tol = crate::schedule::GRID_TOL * dt;
+    let on_grid = grid.iter().enumerate().all(|(s, &(t0, h))| {
+        (t0 - (t_start + s as f64 * dt)).abs() <= tol && (h - dt).abs() <= tol
+    });
+    if !plan.is_empty() && !on_grid {
+        return Err(SimError::Validation(
+            "pgas: scheduled effects (interventions or events) need the substeps on the dt \
+             grid, and exact obs-alignment re-tiles them at an off-grid observation. Use \
+             obs_alignment = \"snap\", or place the observations on the dt grid."
+                .into(),
+        ));
     }
+    Ok(plan)
+}
+
+/// Apply the plan's origin batch (D1) to one particle's starting counts `x0`,
+/// returning the substep-0 pre-state. The deterministic map between the state
+/// the `init {}` law scores (`initial_counts`) and `substeps[0].counts_before`;
+/// identity when the batch is empty.
+pub(crate) fn apply_origin_to_counts(
+    model: &CompiledModel,
+    plan: &crate::effect_plan::EffectPlan,
+    counts: &mut [i64],
+    params: &[f64],
+    dt: f64,
+) -> Result<(), SimError> {
+    if plan.at_origin().is_empty() {
+        return Ok(());
+    }
+    let mut int_s = crate::state::IntState::from_vec(counts.to_vec());
+    let mut real = crate::state::RealState::new(model.real_local_to_global.len());
+    crate::effects::apply_origin_batch_discrete(
+        model, plan, &mut int_s, &mut real, params, model.model.simulation.t_start, dt,
+        model.balance.as_ref(),
+    )?;
+    counts.copy_from_slice(&int_s.counts);
+    Ok(())
 }
 
 /// Simulate a forward trajectory recording per-substep detail, on the uniform
@@ -1977,24 +2042,28 @@ pub fn simulate_reference(
     let t_start = model.model.simulation.t_start;
     let n_substeps = crate::time::interval_steps(t_start, t_end, dt);
     let grid: Vec<(f64, f64)> = (0..n_substeps).map(|s| (t_start + s as f64 * dt, dt)).collect();
-    // Snap (uniform grid): effects fire on the round(t/dt) key in the producer.
-    simulate_reference_on_grid(model, params, dt, &grid, None, rng)
+    let plan = pgas_effect_plan(model, params, dt, &grid)?;
+    simulate_reference_on_grid(model, params, dt, &grid, &plan, rng)
 }
 
 /// Simulate a forward reference trajectory over an explicit substep grid
 /// (`(t0, dt_substep)` per substep, from [`build_substep_grid`]). Each substep
 /// freezes propensities at `t0` and advances by `dt_substep`; the realized times
 /// are recorded so the density consumers (and CSMC free particles, via the
-/// reference) tile against the same grid. `dt` is the nominal step, used only to
-/// resolve `fire_steps` (event step indices). The substep loop and RNG draw
-/// order are identical to the legacy uniform loop, so a uniform grid produces a
-/// byte-identical trajectory.
+/// reference) tile against the same grid. `dt` is the nominal step (amount
+/// evaluation at the origin); `plan` is the run's [`pgas_effect_plan`]. The
+/// substep loop and RNG draw order are identical to the legacy uniform loop, so
+/// a uniform grid produces a byte-identical trajectory.
+///
+/// `initial_counts` is x₀, the state the `init {}` law scores; the plan's
+/// origin batch maps it to `substeps[0].counts_before` (D1). The two are
+/// distinct whenever an effect fires at t_start.
 pub fn simulate_reference_on_grid(
     model: &CompiledModel,
     params: &[f64],
     dt: f64,
     grid: &[(f64, f64)],
-    firing: EffectFiring<'_>,
+    plan: &crate::effect_plan::EffectPlan,
     rng: &mut StatefulRng,
 ) -> Result<PGASTrajectory, SimError> {
     // A reference trajectory is one realization of the process, so its x₀ is a
@@ -2010,13 +2079,9 @@ pub fn simulate_reference_on_grid(
         crate::resolved_expr::stage_per_eval(model, params, model.model.simulation.t_start, dt);
     let per_eval = per_eval_scratch.as_deref();
 
-    // gh#53: resolve fire_steps once at the runtime dt. Used to fill the per-
-    // substep effect batch step_one applies (gh#216): the `round(t/dt)` whole
-    // batch under Snap, or the `grid_dt`-keyed EVENT half under Exact (scheduled
-    // interventions come cursor-keyed from `firing`).
-    let fire_steps = model.resolve_fire_steps(dt, params);
-
+    // D1: the effects at t_start act on x₀ before the first substep.
     let mut counts = init_int.counts.clone();
+    apply_origin_to_counts(model, plan, &mut counts, params, dt)?;
     let mut scratch = StepScratch::new(model);
     let mut substeps = Vec::with_capacity(grid.len());
     // KNOWN LIMITATION (docs/dev/incidents/2026-06-07-chain-binomial-stale-
@@ -2032,9 +2097,8 @@ pub fn simulate_reference_on_grid(
         scratch.gamma_used.clear();
 
         let counts_before = counts.clone();
-        // Populate the due batch step_one applies (gh#216). `dt` is the nominal
-        // grid the firing keys on; `dt_s` is the realized (possibly clipped) step.
-        fill_producer_batch(model, &fire_steps, t0 + dt_s, dt, s, firing, &mut scratch.effect_batch);
+        // Populate the due batch step_one applies: the plan's batch for step s + 1.
+        fill_producer_batch(model, plan, s, &mut scratch.effect_batch);
         step_one(model, &mut counts, &mut flows, &mut real, params, t0, dt_s, per_eval, rng, &mut scratch)?;
 
         // Verify: density evaluation of this record won't produce k > n.
@@ -2123,26 +2187,24 @@ pub struct SpliceGuard {
 }
 
 impl SpliceGuard {
-    /// One backward pass over the reference trajectory. `firing`/`fire_steps`/
-    /// `dt` are the same firing plan the producers use, so "does an effect fire
-    /// at substep `t`" is answered by the one authority that fires them.
+    /// One backward pass over the reference trajectory. `plan` is the same
+    /// effect plan the producers fire by, so "does an effect fire at substep
+    /// `t`" is answered by the one authority that fires them. The origin batch
+    /// fires before substep 0, so every recorded state — and every offset a
+    /// splice tests — is a post-origin state; `initial_counts` is never shifted.
     pub fn from_reference(
         model: &CompiledModel,
         reference: &PGASTrajectory,
-        fire_steps: &[std::collections::BTreeSet<i64>],
-        dt: f64,
-        firing: EffectFiring<'_>,
+        plan: &crate::effect_plan::EffectPlan,
     ) -> Self {
         let n_comp = model.int_local_to_global.len();
         let n_substeps = reference.substeps.len();
 
         let mut effect_at_or_after = vec![false; n_substeps];
         let mut batch = crate::schedule::EffectBatch::default();
-        for (s, rec) in reference.substeps.iter().enumerate() {
-            fill_producer_batch(
-                model, fire_steps, rec.t0 + rec.dt_substep, dt, s, firing, &mut batch,
-            );
-            effect_at_or_after[s] = !batch.is_empty();
+        for (s, slot) in effect_at_or_after.iter_mut().enumerate() {
+            fill_producer_batch(model, plan, s, &mut batch);
+            *slot = !batch.is_empty();
         }
         for s in (0..n_substeps.saturating_sub(1)).rev() {
             effect_at_or_after[s] = effect_at_or_after[s] || effect_at_or_after[s + 1];
@@ -2646,7 +2708,9 @@ pub fn csmc_as(
     obs_model: &super::multi_stream_obs::MultiStreamObsModel,
     seed: u64,
     obs_at_substep: &ObsAtSubstep,
-    firing: EffectFiring<'_>,
+    // The run's effect plan ([`pgas_effect_plan`]), the same one the reference
+    // producer fired by.
+    plan: &crate::effect_plan::EffectPlan,
     // gh#747: stamped onto every particle RNG below, so the choice rides on the
     // particle rather than on whichever rayon worker happens to steal it.
     binomial: crate::rng::BinomialAlgorithm,
@@ -2673,15 +2737,11 @@ pub fn csmc_as(
     let n_tr = model.model.transitions.len();
     let j_ref = n_particles - 1; // reference particle is the last slot
 
-    // gh#53: resolve fire_steps once at the runtime dt for the
-    // free-particle propagation step_one calls below.
-    let fire_steps = model.resolve_fire_steps(dt, params);
-
     // gh#607: one backward pass over the reference, so each ancestor-sampling
     // draw below can refuse — in O(n_compartments) — a splice whose constant
     // state offset would make one of the reference's own recorded flows
     // impossible further down the trajectory.
-    let splice_guard = SpliceGuard::from_reference(model, reference, &fire_steps, dt, firing);
+    let splice_guard = SpliceGuard::from_reference(model, reference, plan);
 
     // gh#607: the reference's own per-substep densities, so the ancestor
     // accept/reject ratio below is accumulated as a difference against a common
@@ -2740,8 +2800,25 @@ pub fn csmc_as(
 
     // Store initial counts per particle BEFORE propagation (for traceback).
     // Needed because free particles have stochastic initial states (Binom draw)
-    // that differ from the deterministic initial_state_mean(params).
+    // that differ from the deterministic initial_state_mean(params). These are
+    // x₀ — the state the `init {}` law scores — so they are taken BEFORE the
+    // origin batch below.
     let initial_counts_per_particle: Vec<Vec<i64>> = counts.to_vec();
+
+    // D1: the effects at t_start map each x₀ to its substep-0 pre-state. Free
+    // particles apply the origin batch to their own draw. The reference slot's
+    // pre-state is READ from the record it is conditioned on, not recomputed:
+    // the reference walk applied the same map to the same x₀, and reading it
+    // keeps the `prev_counts` bookkeeping below on the post-origin state the
+    // reference had. Both are no-ops when the batch is empty.
+    for (j, c) in counts.iter_mut().enumerate() {
+        if j != j_ref {
+            apply_origin_to_counts(model, plan, c, params, dt)?;
+        }
+    }
+    if let Some(first) = reference.substeps.first() {
+        counts[j_ref].copy_from_slice(&first.counts_before);
+    }
 
     // History for traceback
     let mut history_counts_before: Vec<Vec<Vec<i64>>> = Vec::with_capacity(n_substeps);
@@ -2922,14 +2999,10 @@ pub fn csmc_as(
                 for f in flows.iter_mut() { *f = 0; }
                 scratch.gamma_used.clear();
 
-                // Populate the due batch step_one applies (gh#216): the same firing
-                // plan the reference producer used at substep `s`, so free particles
-                // and the (clamped) reference fire identically. `t + step_dt` is the
-                // boundary; `dt` is the nominal firing-key grid.
-                fill_producer_batch(
-                    model, &fire_steps, t + step_dt, dt, s, firing,
-                    &mut scratch.effect_batch,
-                );
+                // Populate the due batch step_one applies: the same plan the
+                // reference producer fired by at substep `s`, so free particles and
+                // the (clamped) reference fire identically.
+                fill_producer_batch(model, plan, s, &mut scratch.effect_batch);
                 step_one(
                     model, cnt, flows, real,
                     // `step_dt` is the realized substep (clipped under Exact).
@@ -3484,6 +3557,71 @@ pub fn nuts_active(use_nuts: bool, model: &CompiledModel) -> bool {
     use_nuts && model.model.transitions.iter().any(|t| !t.rate_grad.is_empty())
 }
 
+/// D3 (proposal 2026-10-04 §5, gh#986): refuse an estimated parameter that
+/// reaches the state only through a deterministic map the PGAS θ-move cannot
+/// score. `complete_data_loglik` scores `log p(x₀ | θ)` and each substep's flows
+/// given the RECORDED pre-state; the effect map between substeps (and, after
+/// D1, between x₀ and `substeps[0].counts_before`) and a deterministic `init {}`
+/// entry appear in no term. A proposed value there changes no term, the move
+/// accepts on the prior ratio alone, and the reported posterior is the prior,
+/// with no warning. Refused, with the parameter and the effect named:
+///
+/// - an effect action's amount (`add`, `transfer` by `fraction` or `count`,
+///   `set`);
+/// - an effect schedule (`at [<param>]`), events included;
+/// - a plain `init {}` assignment (`init { I = I0 }`), pointing at the law
+///   spelling `I ~ poisson(rate = I0)`, whose density does score it.
+///
+/// The replay θ-move of gh#986 is the real fix. PMMH is correct for all three
+/// today: its likelihood re-simulates the path at the proposed θ.
+pub fn refuse_unscored_parameters(
+    model: &CompiledModel,
+    if2_params: &[EstimatedParam],
+) -> Result<(), SimError> {
+    let estimated: Vec<usize> = if2_params.iter().map(|p| p.index).collect();
+    let wanted = |i: usize| estimated.contains(&i);
+    let name_of = |i: usize| model.model.parameters[i].name.clone();
+    for (iv_idx, iv) in model.model.interventions.iter().enumerate() {
+        let kind = if iv.kind.is_event() { "event" } else { "intervention" };
+        if let Some(p) = model.resolved.intervention_exprs[iv_idx]
+            .iter()
+            .find_map(|e| model.first_param_read(e, &wanted))
+        {
+            let p = name_of(p);
+            return Err(SimError::Validation(format!(
+                "pgas: `{p}` is estimated but reaches the state only through the amount of \
+                 {kind} `{}`, which the PGAS parameter move cannot score; its posterior would \
+                 equal its prior. Fit with PMMH, or fix `{p}`.",
+                iv.name
+            )));
+        }
+        if let Some(p) = model.resolved.intervention_at_time_exprs[iv_idx]
+            .iter()
+            .flatten()
+            .find_map(|e| model.first_param_read(e, &wanted))
+        {
+            let p = name_of(p);
+            return Err(SimError::Validation(format!(
+                "pgas: `{p}` is estimated but sets the fire time of {kind} `{}`, which the \
+                 PGAS parameter move cannot score; its posterior would equal its prior. Fit \
+                 with PMMH, or fix `{p}`.",
+                iv.name
+            )));
+        }
+    }
+    let estimated_names: Vec<&str> = if2_params.iter().map(|p| p.name.as_str()).collect();
+    if let Some((comp, p, entry)) =
+        model.deterministic_init_param_read(&|n: &str| estimated_names.contains(&n))
+    {
+        return Err(SimError::Validation(format!(
+            "pgas: `{p}` is estimated but enters only through `{entry}`, which the PGAS \
+             parameter move cannot score; its posterior would equal its prior. Declare a law, \
+             `{comp} ~ poisson(rate = {p})`, or fit with PMMH."
+        )));
+    }
+    Ok(())
+}
+
 /// Run the PGAS Gibbs sampler.
 ///
 /// Alternates between:
@@ -3539,6 +3677,10 @@ pub fn run_pgas(
         )));
     }
 
+    // D3 (gh#986): a parameter the θ-move cannot score is refused, not sampled
+    // at its prior. See `refuse_unscored_parameters`.
+    refuse_unscored_parameters(model, if2_params)?;
+
     // gh#747: the reference trajectory and the initial-state draw run on THIS
     // rng, sequentially on the chain thread, while the particle swarm runs on
     // rayon workers. Both must use the selected sampler or one sweep mixes two.
@@ -3546,56 +3688,15 @@ pub fn run_pgas(
     let mut current_params = base_params.to_vec();
     let t_start = model.model.simulation.t_start;
 
-    // exact-PGAS does not yet support always-active events: their firing keys on
-    // round(t/dt) (the fire_steps lookup in effects::due_effects), which a
-    // shortened exact substep shifts off the intended step. Refuse loudly rather
-    // than silently misfire. (Scheduled non-active interventions ARE applied in
-    // the PGAS producer path under both policies — step_one routes them through
-    // due_effects -> apply_post_advance; pinned by the
-    // gh187_pgas_scheduled_intervention regression test. gh#187's "skipped" claim
-    // described pre-refactor code where inject_event_deltas handled only events.)
-    if config.step_policy == StepPolicy::Exact
-        && model.model.interventions.iter().any(|iv| iv.kind.is_event())
-    {
-        return Err(SimError::Validation(
-            "exact obs-alignment is not yet supported for models with always-active \
-             events (their firing keys on round(t/dt), which a shortened substep \
-             shifts). Use obs_alignment = \"snap\", or place observations on the dt grid."
-                .into(),
-        ));
-    }
-
-    // gh#216: scheduled interventions fire CURSOR-keyed off the timeline's effect
-    // boundaries (registered as `effect_times` in build_substep_grid below), so an
-    // off-grid observation re-tiling the Exact grid no longer moves the firing
-    // instant. The producer fires the boundary recorded at each substep; the
-    // density (which scores records, never fires) is unaffected. Two Exact cases
-    // stay unsupported and are refused loudly: a parametric `at [<param>]` schedule
-    // (per-particle fire times) and a scheduled fire time off the dt grid (the
-    // drift-free walk would need to re-anchor at a within-grid fractional point).
-    // Snap is unaffected (no-op guards). Constant across sweeps because
-    // AtTimesExpr+Exact is rejected.
-    crate::intervention::guard_attimesexpr_exact(model, config.step_policy)?;
-    crate::intervention::guard_exact_offgrid_effect_time(
-        model, &current_params, t_start, config.dt, config.step_policy,
-    )?;
-    let scheduled = crate::intervention::timeline_effects(model, &current_params);
-
     // The realized substep grid (uniform under Snap; window-tiled with shortened
-    // remainders under Exact) and its obs→substep + effect→substep maps — the
-    // single grid every producer and density consumer tiles against. Under Snap
-    // this is byte-identical to the legacy uniform grid + build_obs_at_substep
-    // (effect_times only register under Exact, where they re-anchor the walk).
-    let grid = build_substep_grid(t_start, config.dt, observations, &scheduled.times, config.step_policy)?;
+    // remainders under Exact) and its obs→substep map — the single grid every
+    // producer and density consumer tiles against.
+    let grid = build_substep_grid(t_start, config.dt, observations, &[], config.step_policy)?;
     let obs_at_substep = grid.obs_at_substep;
-    let effect_at_substep = grid.effect_at_substep;
-    // The firing plan the producers use: Snap fires on the round(t/dt) key
-    // (`None`); Exact fires the cursor-keyed scheduled interventions recorded per
-    // substep. EVENTS under Exact are already rejected by the guard above.
-    let firing: EffectFiring = match config.step_policy {
-        StepPolicy::Snap => None,
-        StepPolicy::Exact => Some((&effect_at_substep, scheduled.batches.as_slice())),
-    };
+    // The effect plan every producer fires by (D2: Grid, the substep grid's own
+    // step). Built once: D3 above refuses an estimated parameter in a schedule.
+    // Refuses an effect-bearing model on a re-tiled (exact, off-grid) grid.
+    let plan = pgas_effect_plan(model, &current_params, config.dt, &grid.steps)?;
 
     // Resume or fresh start
     let start_sweep;
@@ -3658,7 +3759,7 @@ pub fn run_pgas(
         let init_t0 = std::time::Instant::now();
         let (init_traj, source) = super::pgas_init::initial_reference_trajectory(
             model, &current_params, &grid.steps, config.n_particles, config.dt,
-            observations, obs_model, seed, &obs_at_substep, firing, &mut rng,
+            observations, obs_model, seed, &obs_at_substep, &plan, &mut rng,
         )?;
         trajectory = init_traj;
         let init_secs = init_t0.elapsed().as_secs_f64();
@@ -4002,7 +4103,7 @@ pub fn run_pgas(
             let (new_traj, _diag) = csmc_as(
                 model, &chain.params, observations, &chain.trajectory,
                 config.n_particles, config.dt, obs_model,
-                csmc_seed, &obs_at_substep, firing, config.binomial,
+                csmc_seed, &obs_at_substep, &plan, config.binomial,
                 config.ancestor_sampling,
             )?;
             chain.trajectory = new_traj;
@@ -4299,7 +4400,7 @@ pub fn run_pgas(
             let (new_trajectory, diag) = csmc_as(
                 model, &chain.params, observations, &chain.trajectory,
                 config.n_particles, config.dt, obs_model,
-                csmc_seed, &obs_at_substep, firing, config.binomial,
+                csmc_seed, &obs_at_substep, &plan, config.binomial,
                 config.ancestor_sampling,
             )?;
             chain.trajectory = new_trajectory;

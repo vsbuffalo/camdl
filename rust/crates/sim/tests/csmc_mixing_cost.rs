@@ -26,6 +26,8 @@
 //! all, so it cannot fail spuriously on a slow machine. Run it with
 //! `--nocapture` and read the table.
 
+// The fixture model carries no effects, so its effect plan is empty.
+use sim::effect_plan::EffectPlan;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -34,7 +36,7 @@ use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{
-    build_obs_at_substep, csmc_as, simulate_reference, EffectFiring, ObsAtSubstep, PGASTrajectory,
+    build_obs_at_substep, csmc_as, simulate_reference, ObsAtSubstep, PGASTrajectory,
 };
 use sim::rng::StatefulRng;
 
@@ -193,7 +195,7 @@ fn report_the_mixing_cost_of_the_ancestor_sampling_gate() {
             &obs_model,
             SEED.wrapping_add(i as u64).wrapping_mul(0x9e3779b97f4a7c15),
             &obs_at_substep,
-            EffectFiring::default(),
+            &EffectPlan::default(),
             sim::rng::BinomialAlgorithm::Btpe,
             true,
         )

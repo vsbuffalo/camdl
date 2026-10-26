@@ -18,6 +18,8 @@
 //! schemes, not a distributional claim — distributional equivalence is pinned
 //! in `sim::rng`'s own suite.
 
+// The fixture model carries no effects, so its effect plan is empty.
+use sim::effect_plan::EffectPlan;
 use std::sync::Arc;
 
 use sim::compiled_model::CompiledModel;
@@ -25,7 +27,7 @@ use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{
-    build_obs_at_substep, csmc_as, simulate_reference, EffectFiring, ObsAtSubstep, PGASTrajectory,
+    build_obs_at_substep, csmc_as, simulate_reference, ObsAtSubstep, PGASTrajectory,
 };
 use sim::rng::{BinomialAlgorithm, StatefulRng};
 
@@ -162,7 +164,7 @@ fn selected_sampler_reaches_csmc_free_particles() {
             &obs_model,
             SEED,
             &obs_at_substep,
-            EffectFiring::default(),
+            &EffectPlan::default(),
             algo,
             true,
         )

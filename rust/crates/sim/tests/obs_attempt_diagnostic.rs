@@ -17,6 +17,8 @@
 //! test is a property of that reduction and a simulation would only add noise
 //! between the fixture and the assertion.
 
+// The fixture model carries no effects, so its effect plan is empty.
+use sim::effect_plan::EffectPlan;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -42,7 +44,7 @@ use sim::inference::multi_stream_obs::{
 };
 use sim::inference::obs_attempt::{NegInfCause, ObsCellState, StreamAttempt};
 use sim::inference::particle_filter::Observation;
-use sim::inference::pgas::{build_obs_at_substep, EffectFiring};
+use sim::inference::pgas::build_obs_at_substep;
 use sim::inference::pgas_init::{unconditional_smc_pass, UnconditionalPass};
 
 const DT: f64 = 1.0;
@@ -355,7 +357,7 @@ fn collapse(
         obs_model,
         SEED,
         &obs_at_substep,
-        EffectFiring::default(),
+        &EffectPlan::default(),
         sim::rng::BinomialAlgorithm::Btpe,
     )
     .expect("unconditional pass");

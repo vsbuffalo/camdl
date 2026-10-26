@@ -55,12 +55,11 @@ use sim::{
         multi_stream_obs::{dense_cells, BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec, StreamTimes},
         obs_loglik::poisson_logpmf,
         particle_filter::{bootstrap_filter, Observation},
-        pgas::{build_substep_grid, run_pgas, simulate_reference_on_grid, PGASConfig},
+        pgas::{build_substep_grid, pgas_effect_plan, run_pgas, simulate_reference_on_grid, PGASConfig},
         pmmh::Prior,
         traits::{ObservationModel, SMCConfig},
         ChainBinomialProcess, ParticleState,
     },
-    intervention::timeline_effects,
     rng::StatefulRng,
     schedule::StepPolicy,
 };
@@ -404,10 +403,12 @@ fn pf_no_intervention_off_grid_bit_identical() {
 // Test 5 — PGAS producer fires once, at the registered boundary
 // ════════════════════════════════════════════════════════════════════════════
 
-/// The PGAS reference producer, walking the Exact grid built with the
-/// scheduled-effect boundary registered, fires the intervention EXACTLY ONCE, at
-/// the substep landing on day 4 — even with an off-grid observation (3.5) that
-/// re-anchors the drift-free walk. `M` jumps 0 → 10 at that substep and stays 10.
+/// The PGAS reference producer fires the intervention EXACTLY ONCE, on the
+/// substep ending at day 4, by the run's effect plan (`pgas_effect_plan`) on the
+/// snap grid the CLI runs PGAS on. `M` jumps 0 → 10 there and stays 10. On a grid
+/// that exact alignment re-tiled at an off-grid observation the plan is refused:
+/// the producers fire step `k` at the end of substep `k − 1`, which only holds
+/// on the dt grid.
 #[test]
 fn pgas_producer_fires_once_at_registered_boundary() {
     let compiled = firing_model(
@@ -415,15 +416,12 @@ fn pgas_producer_fires_once_at_registered_boundary() {
         InterventionKind::Scenario,
     );
     let params = compiled.default_params.clone();
-    let observations = pgas_observations(&[3.5, 8.0]); // off-grid 3.5 re-tiles
-    let scheduled = timeline_effects(&compiled, &params);
-    assert_eq!(scheduled.times, vec![FIRE_TIME], "the scheduled boundary is the intervention time");
-
-    let grid = build_substep_grid(0.0, 1.0, &observations, &scheduled.times, StepPolicy::Exact)
-        .expect("build exact grid with the registered effect boundary");
-    let firing = Some((&grid.effect_at_substep, scheduled.batches.as_slice()));
+    let observations = pgas_observations(&[4.0, 8.0]);
+    let grid = build_substep_grid(0.0, 1.0, &observations, &[], StepPolicy::Snap)
+        .expect("build snap grid");
+    let plan = pgas_effect_plan(&compiled, &params, 1.0, &grid.steps).expect("effect plan");
     let mut rng = StatefulRng::new(1);
-    let traj = simulate_reference_on_grid(&compiled, &params, 1.0, &grid.steps, firing, &mut rng)
+    let traj = simulate_reference_on_grid(&compiled, &params, 1.0, &grid.steps, &plan, &mut rng)
         .expect("reference producer must simulate");
 
     // M (local int index 1) jumps to TRANSFER at the firing substep, and stays.
@@ -436,6 +434,12 @@ fn pgas_producer_fires_once_at_registered_boundary() {
         "the producer must fire at day 4, got landing {landing}");
     assert_eq!(traj.substeps.last().unwrap().counts_after[1], TRANSFER as i64,
         "the intervention must fire EXACTLY ONCE (M stays 10, never 20)");
+
+    // An exact grid re-tiled at 3.5 is refused for an effect-bearing model.
+    let off = build_substep_grid(0.0, 1.0, &pgas_observations(&[3.5, 8.0]), &[], StepPolicy::Exact)
+        .expect("build exact grid");
+    let err = pgas_effect_plan(&compiled, &params, 1.0, &off.steps).err().expect("must be refused");
+    assert!(err.to_string().contains("exact obs-alignment re-tiles"), "{err}");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -454,16 +458,20 @@ fn pgas_on_grid_intervention_still_fits() {
         .expect("on-grid obs + on-grid intervention under Exact PGAS must fit");
 }
 
-/// PGAS: off-grid obs + on-grid intervention now FITS (the case the stopgap
-/// rejected — proposal Test 7).
+/// PGAS: off-grid obs + an intervention under exact alignment is refused. The
+/// PGAS producers fire effects on the dt grid (the effect plan, proposal
+/// 2026-10-04), which exact alignment re-tiles at 3.5. The CLI never runs PGAS
+/// under exact alignment, and on the snap grid it runs on, this model fits.
 #[test]
-fn pgas_offgrid_obs_on_grid_intervention_now_fits() {
+fn pgas_offgrid_obs_with_an_intervention_under_exact_is_refused() {
     let compiled = Arc::new(firing_model(
         InterventionSchedule::AtTimes(vec![FIRE_TIME]),
         InterventionKind::Scenario,
     ));
-    run_pgas_exact(&compiled, &[3.5, 8.0], "gh216_pgas_offgrid")
-        .expect("off-grid obs + on-grid intervention under Exact PGAS must now FIT (gh#216 fix)");
+    let err = run_pgas_exact(&compiled, &[3.5, 8.0], "gh216_pgas_offgrid")
+        .err()
+        .expect("an effect-bearing model on a re-tiled exact grid must be refused");
+    assert!(err.to_string().contains("exact obs-alignment re-tiles"), "{err}");
 }
 
 /// Intervention-free model + off-grid obs fits under Exact PGAS (proposal B).

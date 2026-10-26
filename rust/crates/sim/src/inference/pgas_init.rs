@@ -66,7 +66,7 @@ use super::multi_stream_obs::MultiStreamObsModel;
 use super::particle_filter::Observation;
 use super::pgas::{
     complete_data_loglik, draw_free_particle_initial_state, fill_producer_batch,
-    sample_categorical_log, simulate_reference_on_grid, EffectFiring, ObsAtSubstep,
+    apply_origin_to_counts, sample_categorical_log, simulate_reference_on_grid, ObsAtSubstep,
     PGASTrajectory, SubstepRecord,
 };
 use super::resampling::systematic_resample;
@@ -114,11 +114,11 @@ pub fn initial_reference_trajectory(
     obs_model: &MultiStreamObsModel,
     seed: u64,
     obs_at_substep: &ObsAtSubstep,
-    firing: EffectFiring<'_>,
+    plan: &crate::effect_plan::EffectPlan,
     forward_rng: &mut StatefulRng,
 ) -> Result<(PGASTrajectory, InitSource), SimError> {
     let fallback = match unconditional_smc_pass(
-        model, params, grid, n_particles, dt, obs_model, seed, obs_at_substep, firing,
+        model, params, grid, n_particles, dt, obs_model, seed, obs_at_substep, plan,
         forward_rng.binomial_algorithm(),
     )? {
         UnconditionalPass::Path(traj) => {
@@ -143,7 +143,7 @@ pub fn initial_reference_trajectory(
         UnconditionalPass::NoSupport(reason) => reason,
     };
 
-    let traj = simulate_reference_on_grid(model, params, dt, grid, firing, forward_rng)?;
+    let traj = simulate_reference_on_grid(model, params, dt, grid, plan, forward_rng)?;
     Ok((traj, InitSource::ForwardDraw(fallback)))
 }
 
@@ -184,7 +184,8 @@ pub fn unconditional_smc_pass(
     obs_model: &MultiStreamObsModel,
     seed: u64,
     obs_at_substep: &ObsAtSubstep,
-    firing: EffectFiring<'_>,
+    // The run's effect plan (`pgas::pgas_effect_plan`).
+    plan: &crate::effect_plan::EffectPlan,
     // gh#747: the init pass draws too, so it must use the same sampler the
     // sweeps will -- otherwise a `btrs`-addressed run seeds itself with BTPE.
     binomial: crate::rng::BinomialAlgorithm,
@@ -199,9 +200,6 @@ pub fn unconditional_smc_pass(
     let per_eval_scratch = crate::resolved_expr::stage_per_eval(model, params, t_start, dt);
     let per_eval = per_eval_scratch.as_deref();
 
-    // gh#53: resolve the event step indices once at the runtime dt.
-    let fire_steps = model.resolve_fire_steps(dt, params);
-
     let seed = seed ^ INIT_SEED_SALT;
     let mut rngs = init_particle_rngs(seed, n_particles, 0, binomial);
     let mut resample_rng = StatefulRng::new_stream(seed, RESAMPLE_RNG_STREAM);
@@ -211,6 +209,7 @@ pub fn unconditional_smc_pass(
     let mut counts: Vec<Vec<i64>> = (0..n_particles)
         .map(|j| draw_free_particle_initial_state(model, params, &mut rngs[j], per_eval))
         .collect::<Result<Vec<_>, _>>()?;
+    // x₀, the state the `init {}` law scores — taken BEFORE the origin batch.
     let initial_counts_per_particle: Vec<Vec<i64>> = counts.clone();
 
     let mut substep_flows: Vec<Vec<u64>> = vec![vec![0u64; n_tr]; n_particles];
@@ -243,6 +242,22 @@ pub fn unconditional_smc_pass(
     // `−∞` weight until the next resample removes it, so it can never be an
     // ancestor of a surviving lineage.
     let mut deaths = DeathMask::new(n_particles);
+
+    // D1: the effects at t_start map each x₀ to its substep-0 pre-state, as in
+    // the reference walk and the CSMC sweep. A particle the map leaves negative
+    // dies like one a step would. No-op when the origin batch is empty.
+    if !plan.at_origin().is_empty() {
+        let outcomes: Vec<Result<bool, SimError>> = counts
+            .iter_mut()
+            .map(|c| DeathMask::classify(apply_origin_to_counts(model, plan, c, params, dt)))
+            .collect();
+        deaths.absorb(outcomes)?;
+        for (lw, &dead) in log_weights.iter_mut().zip(deaths.as_slice()) {
+            if dead {
+                *lw = f64::NEG_INFINITY;
+            }
+        }
+    }
 
     for (s, &(t, step_dt)) in grid.iter().enumerate() {
         // ── 1. Resample (unconditional, systematic) ──
@@ -297,15 +312,7 @@ pub fn unconditional_smc_pass(
                         *f = 0;
                     }
                     scratch.gamma_used.clear();
-                    fill_producer_batch(
-                        model,
-                        &fire_steps,
-                        t + step_dt,
-                        dt,
-                        s,
-                        firing,
-                        &mut scratch.effect_batch,
-                    );
+                    fill_producer_batch(model, plan, s, &mut scratch.effect_batch);
                     // `classify` is the shared policy: `?` tears the pass down on
                     // a non-recoverable error, `true` kills this particle only.
                     let died = DeathMask::classify(step_one(

@@ -39,6 +39,8 @@
 //! existed before this change. `weight_collapse` is the only thing that tells
 //! them apart, which is the defect stated as a test.
 
+// The fixture model carries no effects, so its effect plan is empty.
+use sim::effect_plan::EffectPlan;
 use std::sync::Arc;
 
 use sim::compiled_model::CompiledModel;
@@ -46,7 +48,7 @@ use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{
-    build_obs_at_substep, csmc_as, simulate_reference, CSMCDiagnostics, EffectFiring, ObsAtSubstep,
+    build_obs_at_substep, csmc_as, simulate_reference, CSMCDiagnostics, ObsAtSubstep,
     PGASTrajectory, WeightCollapseTally,
 };
 use sim::rng::StatefulRng;
@@ -184,7 +186,7 @@ fn sweep(f: &Fixture) -> (PGASTrajectory, CSMCDiagnostics) {
         &f.obs_model,
         SEED,
         &f.obs_at_substep,
-        EffectFiring::default(),
+        &EffectPlan::default(),
         sim::rng::BinomialAlgorithm::Btpe,
         true,
     )

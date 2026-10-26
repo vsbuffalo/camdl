@@ -650,6 +650,71 @@ fn collect_param_names(expr: &Expr, out: &mut Vec<String>) {
     }
 }
 
+/// Collect the parameter names `expr` reads, following a `BindingRef` into its
+/// body in `bindings` (by name; bindings are acyclic). Encounter order, deduped.
+fn collect_param_names_through_bindings(expr: &Expr, bindings: &[ir::model::Binding], out: &mut Vec<String>) {
+    let mut direct = Vec::new();
+    collect_param_names(expr, &mut direct);
+    for n in direct {
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    let mut refs = Vec::new();
+    collect_binding_refs(expr, &mut refs);
+    for r in refs {
+        if let Some(b) = bindings.iter().find(|b| b.name == r) {
+            collect_param_names_through_bindings(&b.expr, bindings, out);
+        }
+    }
+}
+
+fn collect_binding_refs(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::BindingRef(w) => out.push(w.binding_ref.clone()),
+        Expr::BinOp(w) => {
+            collect_binding_refs(&w.bin_op.left, out);
+            collect_binding_refs(&w.bin_op.right, out);
+        }
+        Expr::UnOp(w) => collect_binding_refs(&w.un_op.arg, out),
+        Expr::Cond(w) => {
+            collect_binding_refs(&w.cond.pred, out);
+            collect_binding_refs(&w.cond.then, out);
+            collect_binding_refs(&w.cond.else_, out);
+        }
+        Expr::TableLookup(w) => w.table_lookup.indices.iter().for_each(|e| collect_binding_refs(e, out)),
+        Expr::Reduce(w) => w.reduce.iter().for_each(|e| collect_binding_refs(e, out)),
+        Expr::UncheckedDim(w) => collect_binding_refs(&w.unchecked_dim.inner, out),
+        Expr::Const(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_) | Expr::Dt(_)
+        | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_) | Expr::ObsAnchor(_)
+        | Expr::PerEvalRef(_) => {}
+    }
+}
+
+/// A short source-like rendering of `expr` for a diagnostic (`N0 - I`); a node
+/// it does not spell out prints as `…`.
+fn render_expr(expr: &Expr) -> String {
+    match expr {
+        Expr::Const(c) => format!("{}", c.value),
+        Expr::Param(p) => p.param.clone(),
+        Expr::Pop(p) => p.pop.clone(),
+        Expr::BindingRef(w) => w.binding_ref.clone(),
+        Expr::UncheckedDim(w) => render_expr(&w.unchecked_dim.inner),
+        Expr::UnOp(w) if w.un_op.op == UnOp::Neg => format!("-{}", render_expr(&w.un_op.arg)),
+        Expr::BinOp(w) => {
+            let op = match w.bin_op.op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                _ => return "…".to_string(),
+            };
+            format!("{} {op} {}", render_expr(&w.bin_op.left), render_expr(&w.bin_op.right))
+        }
+        _ => "…".to_string(),
+    }
+}
+
 /// Evaluate a *structural* forcing array element (interpolation knot, spline
 /// coefficient, periodic-spline coef, piecewise breakpoint/value) to `f64`.
 ///
@@ -1294,6 +1359,39 @@ impl CompiledModel {
             | ResolvedExpr::Projected
             | ResolvedExpr::ObsColumnRef(_) => None,
         }
+    }
+
+    /// The first deterministic `init {}` entry (declaration order) whose
+    /// expression reads a parameter for which `wanted` holds, directly or
+    /// through a binding: `(compartment, parameter, the entry as source)`, e.g.
+    /// `("I", "I0", "init { I = I0 }")`. A law entry (`I ~ poisson(..)`) is not
+    /// reported — its parameters reach the initial-state density. Used by the
+    /// PGAS refusal of D3 (proposal 2026-10-04 §5).
+    pub fn deterministic_init_param_read(
+        &self,
+        wanted: &dyn Fn(&str) -> bool,
+    ) -> Option<(String, String, String)> {
+        // The first parameter found, reported at the entry that IS that
+        // parameter (`I = I0`) when there is one — the entry a law replaces —
+        // else at the first entry that reads it (`S = N0 - I0`).
+        let entry = |name: &str, expr: &Expr| format!("init {{ {name} = {} }}", render_expr(expr));
+        let mut first: Option<(String, String, String)> = None;
+        for (name, spec) in &self.model.initial_conditions {
+            let ir::model::InitSpec::Deterministic(expr) = spec else { continue };
+            if first.is_none() {
+                let mut names = Vec::new();
+                collect_param_names_through_bindings(expr, &self.model.bindings, &mut names);
+                if let Some(p) = names.into_iter().find(|n| wanted(n)) {
+                    first = Some((name.clone(), p, entry(name, expr)));
+                }
+            }
+            if let Some((_, p, _)) = &first {
+                if matches!(expr, Expr::Param(e) if e.param == *p) {
+                    return Some((name.clone(), p.clone(), entry(name, expr)));
+                }
+            }
+        }
+        first
     }
 
     /// Derive per-intervention sets of step indices for a given

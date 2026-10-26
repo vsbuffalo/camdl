@@ -19,6 +19,8 @@
 //! 2. the digest — a full `csmc_as` sweep over this model reproduces the exact
 //!    trajectory measured before the re-sync landed.
 
+// The fixture model carries no effects, so its effect plan is empty.
+use sim::effect_plan::EffectPlan;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -28,7 +30,7 @@ use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{
-    build_obs_at_substep, csmc_as, simulate_reference, EffectFiring, ObsAtSubstep, PGASTrajectory,
+    build_obs_at_substep, csmc_as, simulate_reference, ObsAtSubstep, PGASTrajectory,
 };
 use sim::rng::StatefulRng;
 
@@ -219,7 +221,7 @@ fn the_interval_accumulator_resync_does_not_move_a_prevalence_only_trajectory() 
                 &f.obs_model,
                 SEED + seed,
                 &f.obs_at_substep,
-                EffectFiring::default(),
+                &EffectPlan::default(),
                 sim::rng::BinomialAlgorithm::Btpe,
                 true,
             )
