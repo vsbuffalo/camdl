@@ -1089,6 +1089,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let mut seg_sidecar = fit_sidecar.clone();
                 seg_sidecar.fixed = sweep_config.fixed
                     .resolve().unwrap_or_default().into_iter().collect();
+                // The segment's parameter resolution: every parameter's
+                // source and value and every override of one tier's value by
+                // another's, recorded here and reported once, before any stage
+                // runs (each stage's `FitRunConfig::build` resolves the same
+                // problem and reports nothing). A resolution that fails is
+                // left to that build, which reports it as the error it is.
+                // The resolver is the one writer of the values the fit runs
+                // at, so what is recorded is what the chains start from.
+                if let Ok(fp) = runner::resolve_fit_parameters(&sweep_config, seed) {
+                    crate::params_resolver::emit_notices(&[&fp.resolved]);
+                    seg_sidecar.parameters_provenance =
+                        crate::run_meta::ParameterProvenance::of_all(&fp.resolved.params);
+                }
                 if let Err(e) = crate::run_meta::write_fit_sidecar(
                     seg,
                     std::path::Path::new(&fit_path),
@@ -2206,8 +2219,8 @@ fn build_fit_sidecar(
         estimated,
         fixed: fixed.into_iter().collect(),
         resolved_priors,
-        // gh#83/gh#85 step 9: top-level parameter provenance is populated by
-        // the fit-finalization layer that owns the resolved-params view.
+        // Per segment: the sweep point changes `[fixed]`, so the segment's
+        // own resolution fills this where the segment's sidecar is written.
         parameters_provenance: Default::default(),
         // The observation/dimension schema — a pure fold over the model's
         // expanded observation leaves; emitted for every fit (not gated on

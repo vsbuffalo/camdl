@@ -151,6 +151,161 @@ pub struct ChainResults {
     pub loglik_eval: super::loglik_eval::LoglikEvalOutcome,
 }
 
+/// A fit's model and the parameter values it runs on, before anything
+/// compiles: what [`FitRunConfig::build`] resolves, and what `fit run`
+/// records into `fit.meta.json`'s `parameters_provenance` and reports as
+/// notices, once per fit segment.
+pub(crate) struct FitParameters {
+    /// The loaded model before the scenario's intervention filter, for the
+    /// startup diagnostic (declared vs active).
+    pub model_declared: ir::Model,
+    pub model_ir_json: String,
+    pub resolved: crate::params_resolver::ResolvedParameters,
+}
+
+/// Load `fit`'s model and resolve its parameter values ([`FitParameters`]).
+/// Pure of reporting: the caller emits the resolution's notices.
+///
+/// `seed` draws the start of an estimated parameter that has neither a value
+/// nor an `[estimate].start` (gh#34).
+pub(crate) fn resolve_fit_parameters(
+    fit: &super::config_v2::Problem,
+    seed: u64,
+) -> Result<FitParameters, String> {
+    // Load model. Prefer the pre-compiled IR threaded in by
+    // `cmd_fit_run_v2` (compiled once up front) so a multi-stage / swept
+    // fit doesn't re-invoke camdlc per (cell × sweep point × stage); fall
+    // back to `model.camdl` (recompiles) when no compiled IR was provided
+    // — the identity path is always `model.camdl`, not this.
+    let model_path = fit.compiled_ir.as_deref().unwrap_or(&fit.model.camdl);
+    let (mut model_pre, model_ir_json) = crate::util::load_model(model_path)?;
+    // gh#616: resolve the model's observation anchors from THIS fit's bound
+    // data, before anything compiles. Not optional: `ode_grad.rs` takes the
+    // integration window from `simulation.t_end`, so an unresolved horizon
+    // would integrate nothing.
+    //
+    // `run_fit` normally resolves once up front and repoints `compiled_ir`
+    // at the substituted IR, so this is a no-op there. It stays because a
+    // `FitRunConfig` can also be built by entry points that do not go
+    // through `run_fit` — same window, same function, so resolving again is
+    // idempotent rather than a second opinion.
+    if crate::obs_anchor::model_is_anchored(&model_pre) {
+        let dt0 = model_pre.simulation.dt.unwrap_or(1.0);
+        let (first, last) = crate::obs_anchors_from_config(&model_pre, fit, dt0)
+            .map_err(|e| {
+                format!("resolving this model's observation anchors from [data]: {e}")
+            })?;
+        let moved = crate::obs_anchor::substitute(
+            &mut model_pre,
+            ir::anchor::ObsAnchorTimes { first, last },
+        )?;
+        crate::obs_anchor::report(&moved, &model_pre);
+    }
+    // Keep a copy of the unfiltered model so the startup diagnostic
+    // can show what was declared vs what's active. Cheap clone — the
+    // intervention list is small.
+    let model_declared = model_pre.clone();
+
+    // Per spec §14.4, toggleable interventions default OFF; events
+    // (always_active) stay on unless explicitly disabled. If neither
+    // scenario nor enable/disable are set in fit.toml, interventions
+    // are cleared (spec default). The unified resolver handles this
+    // contract — see 2026-05-25 CLI UX rev 2 proposal.
+    if fit.scenario.is_some()
+        && (!fit.enable.is_empty() || !fit.disable.is_empty())
+    {
+        return Err("fit.toml: `scenario` is mutually exclusive \
+            with `enable`/`disable`. Use one approach.".into());
+    }
+
+    // Resolve fixed up-front (file load + inline overlay, or
+    // scenario lookup via gh#33's `from_scenario`). The
+    // pre-processor produces the IndexMap fed into the unified
+    // resolver as `fit_toml_fixed`.
+    let mut fixed_cfg = fit.fixed.clone();
+    fixed_cfg.expand_from_scenario(&model_pre, &fit.estimate)?;
+    let fixed_resolved: indexmap::IndexMap<String, f64> =
+        fixed_cfg.resolve_with_model(&model_pre)?;
+
+    // Apply the [estimate].start fall-back BEFORE the resolver so
+    // that params with no model default but an [estimate] block
+    // can carry an inferred starting value past the resolver's
+    // `UnsetRequired` check (gh#34). This mirrors the legacy code
+    // path's ordering — start fall-back, then validate — under the
+    // new resolver scaffolding. We seed values into a temporary
+    // copy of the IR; the resolver still owns the final
+    // tier-merge.
+    //
+    // Priority: fit_state start_values > estimate.start > model default
+    //
+    // gh#34: when [estimate] entry has no explicit `start =` AND
+    // the model param has no value yet (no scenario default, no
+    // model-declared `value`), fall back to a Transform-aware
+    // uniform draw within bounds.
+    for (name, spec) in &fit.estimate {
+        if let Some(p) = model_pre.parameters.iter_mut().find(|p| p.name == *name) {
+            if p.value.resolved_value().is_none() {
+                let bounds = spec.bounds.or_else(|| resolved_bounds(p));
+                let value = spec.start.or_else(|| bounds.map(|(lo, hi)| {
+                    let transform = derive_transform_with_bounds(
+                        p,
+                        spec.transform.as_ref().map(|t| t.as_str()),
+                        (lo, hi),
+                    );
+                    let log_scale = matches!(transform, Transform::Log { .. });
+                    super::init::draw_start_in_bounds(lo, hi, log_scale, seed, name)
+                }));
+                if let Some(v) = value {
+                    // Fill the optimiser start without collapsing to a Fixed
+                    // constant — keeps the parameter estimated (bounds/prior
+                    // intact) so the resolver passes (gh#34) and `default_params`
+                    // gets the start.
+                    p.value = p.value.with_value(v);
+                }
+            }
+        }
+    }
+
+    // Route value resolution through the unified resolver. fit.toml
+    // has no CLI-level --fixed; the [fixed] block becomes
+    // `fit_toml_fixed` and the [estimate] keys become
+    // `fit_toml_estimate`. The resolver handles tier ordering,
+    // intervention filter, bounds, and finite-value checks.
+    let fit_toml_estimate: indexmap::IndexSet<String> =
+        fit.estimate.keys().cloned().collect();
+    let table_files_resolver: std::collections::HashMap<String, std::path::PathBuf> =
+        std::collections::HashMap::new();
+    // gh#561: a fit's window is the observation times, so a scenario's own
+    // `simulate { to }` cannot be honoured here — refuse rather than drop
+    // it silently. "Honour it instead" would be actively wrong on this
+    // path: the ODE gradient config reads `simulation.t_end`
+    // (`sim/src/inference/ode_grad.rs`), so a shortened scenario horizon
+    // would truncate integration before the last scored observation.
+    crate::util::refuse_scenario_horizon(
+        &model_pre, fit.scenario.as_deref(), "fit run",
+        "a fit scores at the observation times, so its window comes from \
+         the data, not the model horizon",
+    )?;
+    let resolved = crate::params_resolver::resolve_parameters(
+        crate::params_resolver::ParameterInputs {
+            model: &model_pre,
+            scenario: fit.scenario.as_deref(),
+            adhoc_enable: &fit.enable,
+            adhoc_disable: &fit.disable,
+            scenario_inline_name: None,
+            scenario_inline_set: &[],
+            scenario_inline_scale: &[],
+            point_overrides: &[],
+            fixed_cli: &[],
+            fixed_files: &[],
+            fit_toml_fixed: &fixed_resolved,
+            fit_toml_estimate: &fit_toml_estimate,
+            table_files: &table_files_resolver,
+        },
+    ).map_err(|e| e.to_string())?;
+    Ok(FitParameters { model_declared, model_ir_json, resolved })
+}
+
 impl FitRunConfig {
     /// Build from a problem. `algorithm` is the method that will run on it,
     /// for the observation-alignment check (gh#189) — `None` skips that
@@ -172,138 +327,12 @@ impl FitRunConfig {
         seed: u64,
         random_starts: bool,
     ) -> Result<Self, String> {
-        // Load model. Prefer the pre-compiled IR threaded in by
-        // `cmd_fit_run_v2` (compiled once up front) so a multi-stage / swept
-        // fit doesn't re-invoke camdlc per (cell × sweep point × stage); fall
-        // back to `model.camdl` (recompiles) when no compiled IR was provided
-        // — the identity path is always `model.camdl`, not this.
-        let model_path = fit.compiled_ir.as_deref().unwrap_or(&fit.model.camdl);
-        let (mut model_pre, model_ir_json) = crate::util::load_model(model_path)?;
-        // gh#616: resolve the model's observation anchors from THIS fit's bound
-        // data, before anything compiles. Not optional: `ode_grad.rs` takes the
-        // integration window from `simulation.t_end`, so an unresolved horizon
-        // would integrate nothing.
-        //
-        // `run_fit` normally resolves once up front and repoints `compiled_ir`
-        // at the substituted IR, so this is a no-op there. It stays because a
-        // `FitRunConfig` can also be built by entry points that do not go
-        // through `run_fit` — same window, same function, so resolving again is
-        // idempotent rather than a second opinion.
-        if crate::obs_anchor::model_is_anchored(&model_pre) {
-            let dt0 = model_pre.simulation.dt.unwrap_or(1.0);
-            let (first, last) = crate::obs_anchors_from_config(&model_pre, fit, dt0)
-                .map_err(|e| {
-                    format!("resolving this model's observation anchors from [data]: {e}")
-                })?;
-            let moved = crate::obs_anchor::substitute(
-                &mut model_pre,
-                ir::anchor::ObsAnchorTimes { first, last },
-            )?;
-            crate::obs_anchor::report(&moved, &model_pre);
-        }
-        // Keep a copy of the unfiltered model so the startup diagnostic
-        // can show what was declared vs what's active. Cheap clone — the
-        // intervention list is small.
-        let model_declared = model_pre.clone();
-
-        // Per spec §14.4, toggleable interventions default OFF; events
-        // (always_active) stay on unless explicitly disabled. If neither
-        // scenario nor enable/disable are set in fit.toml, interventions
-        // are cleared (spec default). The unified resolver handles this
-        // contract — see 2026-05-25 CLI UX rev 2 proposal.
-        if fit.scenario.is_some()
-            && (!fit.enable.is_empty() || !fit.disable.is_empty())
-        {
-            return Err("fit.toml: `scenario` is mutually exclusive \
-                with `enable`/`disable`. Use one approach.".into());
-        }
-
-        // Resolve fixed up-front (file load + inline overlay, or
-        // scenario lookup via gh#33's `from_scenario`). The
-        // pre-processor produces the IndexMap fed into the unified
-        // resolver as `fit_toml_fixed`.
-        let mut fixed_cfg = fit.fixed.clone();
-        fixed_cfg.expand_from_scenario(&model_pre, &fit.estimate)?;
-        let fixed_resolved: indexmap::IndexMap<String, f64> =
-            fixed_cfg.resolve_with_model(&model_pre)?;
-
-        // Apply the [estimate].start fall-back BEFORE the resolver so
-        // that params with no model default but an [estimate] block
-        // can carry an inferred starting value past the resolver's
-        // `UnsetRequired` check (gh#34). This mirrors the legacy code
-        // path's ordering — start fall-back, then validate — under the
-        // new resolver scaffolding. We seed values into a temporary
-        // copy of the IR; the resolver still owns the final
-        // tier-merge.
-        //
-        // Priority: fit_state start_values > estimate.start > model default
-        //
-        // gh#34: when [estimate] entry has no explicit `start =` AND
-        // the model param has no value yet (no scenario default, no
-        // model-declared `value`), fall back to a Transform-aware
-        // uniform draw within bounds.
-        for (name, spec) in &fit.estimate {
-            if let Some(p) = model_pre.parameters.iter_mut().find(|p| p.name == *name) {
-                if p.value.resolved_value().is_none() {
-                    let bounds = spec.bounds.or_else(|| resolved_bounds(p));
-                    let value = spec.start.or_else(|| bounds.map(|(lo, hi)| {
-                        let transform = derive_transform_with_bounds(
-                            p,
-                            spec.transform.as_ref().map(|t| t.as_str()),
-                            (lo, hi),
-                        );
-                        let log_scale = matches!(transform, Transform::Log { .. });
-                        super::init::draw_start_in_bounds(lo, hi, log_scale, seed, name)
-                    }));
-                    if let Some(v) = value {
-                        // Fill the optimiser start without collapsing to a Fixed
-                        // constant — keeps the parameter estimated (bounds/prior
-                        // intact) so the resolver passes (gh#34) and `default_params`
-                        // gets the start.
-                        p.value = p.value.with_value(v);
-                    }
-                }
-            }
-        }
-
-        // Route value resolution through the unified resolver. fit.toml
-        // has no CLI-level --fixed; the [fixed] block becomes
-        // `fit_toml_fixed` and the [estimate] keys become
-        // `fit_toml_estimate`. The resolver handles tier ordering,
-        // intervention filter, bounds, and finite-value checks.
-        let fit_toml_estimate: indexmap::IndexSet<String> =
-            fit.estimate.keys().cloned().collect();
-        let table_files_resolver: std::collections::HashMap<String, std::path::PathBuf> =
-            std::collections::HashMap::new();
-        // gh#561: a fit's window is the observation times, so a scenario's own
-        // `simulate { to }` cannot be honoured here — refuse rather than drop
-        // it silently. "Honour it instead" would be actively wrong on this
-        // path: the ODE gradient config reads `simulation.t_end`
-        // (`sim/src/inference/ode_grad.rs`), so a shortened scenario horizon
-        // would truncate integration before the last scored observation.
-        crate::util::refuse_scenario_horizon(
-            &model_pre, fit.scenario.as_deref(), "fit run",
-            "a fit scores at the observation times, so its window comes from \
-             the data, not the model horizon",
-        )?;
-        let resolved = crate::params_resolver::resolve_parameters(
-            crate::params_resolver::ParameterInputs {
-                model: &model_pre,
-                scenario: fit.scenario.as_deref(),
-                adhoc_enable: &fit.enable,
-                adhoc_disable: &fit.disable,
-                scenario_inline_name: None,
-                scenario_inline_set: &[],
-                scenario_inline_scale: &[],
-                point_overrides: &[],
-                fixed_cli: &[],
-                fixed_files: &[],
-                fit_toml_fixed: &fixed_resolved,
-                fit_toml_estimate: &fit_toml_estimate,
-                table_files: &table_files_resolver,
-            },
-        ).map_err(|e| e.to_string())?;
-        crate::params_resolver::emit_notices(&[&resolved]);
+        // The model and its parameter values, through the one seam
+        // `fit run`'s sidecar also reads ([`resolve_fit_parameters`]). The
+        // notices are reported there, once per fit segment, not here — `build`
+        // runs once per cell, and a cell's resolution is the segment's.
+        let FitParameters { model_declared, model_ir_json, resolved } =
+            resolve_fit_parameters(fit, seed)?;
         let model = resolved.model.clone();
 
         let compiled = CompiledModel::new(model.clone())

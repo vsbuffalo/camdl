@@ -14,8 +14,9 @@
 //!   difference is stated and pinned rather than ignored.
 //! - **Each verb reports through the resolver.** A replacement of one tier's
 //!   value by another's prints the resolver's notice, once, and is recorded
-//!   in the verb's `run.json` `parameters_provenance`; a verb that resolved
-//!   parameters some other way would print nothing.
+//!   in the verb's `run.json` (or, for `fit run`, `fit.meta.json`)
+//!   `parameters_provenance`; a verb that resolved parameters some other way
+//!   would print nothing.
 //!
 //! The tier matrix itself (every pair, severity, the record) is unit-tested in
 //! `params_resolver.rs`; these tests prove the verbs reach it.
@@ -745,6 +746,55 @@ fn fit_predict_sweep_reports_the_replaced_draws_once_as_a_range() {
     let (lo, hi): (f64, f64) = (lo.parse().unwrap(), hi.parse().unwrap());
     assert!(lo < hi && (0.05..=1.0).contains(&lo) && (0.05..=1.0).contains(&hi), "{line}");
     assert!(tail.ends_with(" draws"), "{line}");
+}
+
+// ─── fit run: the resolver's decision in fit.meta.json, reported once ───────
+
+#[test]
+fn fit_run_records_the_resolver_decision_once_per_segment() {
+    // A fit.toml scenario agreeing with `[fixed]` on k = 12 (a disagreeing one
+    // is refused, `fit_run_scenario_over_fixed.rs`). fit.meta.json records the
+    // resolver's value and source for every parameter, and an equal value is
+    // not an override, so nothing is reported, for either of the two fit
+    // seeds (two cells, one fit segment).
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(dir.join("model.camdl"), POSTERIOR_MODEL).unwrap();
+    std::fs::write(dir.join("weekly_cases.tsv"),
+        "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n")
+        .unwrap();
+    std::fs::write(dir.join("fit.toml"), r#"output_dir = "results"
+scenario = "k_alt"
+fit_seeds = [1, 2]
+[model]
+camdl = "model.camdl"
+[data.observations]
+weekly_cases = "weekly_cases.tsv"
+[estimate]
+beta  = { bounds = [0.05, 1.0], start = 0.4 }
+gamma = { bounds = [0.01, 0.5], start = 0.15 }
+[fixed]
+N0  = 10000
+I0  = 10
+rho = 0.6
+k   = 12.0
+[method]
+algorithm = "pfilter"
+backend = "chain_binomial"
+particles = 50
+"#).unwrap();
+    let stderr = ok(&camdl(dir, &["fit", "run", "fit.toml"]), "fit run");
+    assert_eq!(override_lines(&stderr), Vec::<String>::new());
+    let fit = std::fs::read_dir(dir.join("results/fits")).unwrap().flatten().next()
+        .expect("fit segment").path();
+    let meta: serde_json::Value = serde_json::from_str(&read(&fit.join("fit.meta.json"))).unwrap();
+    let k = &meta["parameters_provenance"]["k"];
+    assert_eq!(k["value"], 12.0);
+    assert_eq!(k["source"], "scenario");
+    assert!(k.get("overrides").is_none(), "an equal value is not an override: {k}");
+    assert_eq!(meta["parameters_provenance"]["rho"]["value"], 0.6);
+    assert_eq!(meta["parameters_provenance"]["rho"]["source"], "fit_toml_fixed");
+    assert_eq!(meta["parameters_provenance"]["beta"]["role"], "estimated");
 }
 
 // ─── contrasts: an arm's scenario over the draws is reported once ───────────
