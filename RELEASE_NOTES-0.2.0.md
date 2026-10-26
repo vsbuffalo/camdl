@@ -105,6 +105,27 @@ breaking changes are still expected before 1.0.
 
 These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
+- **`perturb_only_at_t0` is refused under every method but `if2`.** It is IF2's
+  perturbation schedule; `pgas`, `pmmh`, `mh` and the `nl-*` optimizers perturb
+  nothing, and used to load the flag and read it nowhere. Migration: keep the
+  flag in the `if2` config only and delete it from the others. `rw_sd` is still
+  accepted everywhere: `pmmh` and `mh` read it as their initial proposal scale.
+- **A Bayesian fit that estimates a hyperparameter over held hierarchical leaves
+  is refused.** Under `pmmh`, `mh` and `pgas`, a leaf in `[fixed]` (e.g.
+  `gamma ~ log_normal(mu = mu_g, sigma = 0.1)` with `gamma` held and `mu_g`
+  estimated) contributed no prior term, so `mu_g`'s posterior was its prior.
+  Migration: estimate the leaves too, or hold the hyperparameter.
+- **`profile --sweep` values outside the parameter's bounds are refused**,
+  naming the parameter, the values and the bounds (the model's, narrowed by
+  `--fit` `[estimate]`). Migration: sweep inside the bounds.
+- **`profile --rw-sd auto` estimates fewer parameters**: never a name from
+  `--fixed-file`, and never a model constant (`let omega : rate = 0.01`). Such
+  profiles, and profiles whose fit config declares `[[simplex_groups]]`, re-key
+  and recompute. Migration: none; list a name in `--rw-sd` to estimate it.
+- **`survey --fit` honours `--fixed`.** A pinned `[estimate]` name is held and
+  no longer sampled, so the landscape loses that column and re-keys. Migration:
+  drop `--fixed` to sample it again.
+
 - **Coincident event drains that could overdraw a compartment are refused.**
   Among the `events {}` due at one instant, two or more `transfer`s from one
   compartment are an error when at least one moves a `count`, and fraction-only
@@ -595,6 +616,28 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 ## Fixed
 
 User-visible correctness fixes (selected from ~138):
+
+- **`profile` estimated parameters the invocation pinned.** `--rw-sd auto` built
+  its estimated set from `--fixed` and `[fixed]` only, so a `--fixed-file`
+  holding `gamma = 0.15` profiled gamma as a nuisance parameter and moved it (to
+  0.177); it also estimated model constants. Both are now excluded.
+- **`profile --fit` ignored `[[simplex_groups]]`.** Each IF2 cell perturbed the
+  members independently, so two cells' optima summed to 1.85 and 1.44. The
+  groups now reach every IF2 cell; a member the profile does not estimate is
+  refused by name.
+- **`profile` recorded every parameter as `fixed`.** A cell's
+  `parameters_provenance` now records the swept parameter as `focal` and the
+  parameters the cell moves as `estimated`, and the profile base `fit.meta.json`
+  carries the same map instead of an empty one.
+- **`survey --fit … --fixed beta=0.3` ignored `--fixed`.** No notice was printed
+  and the landscape sampled beta across its bounds. It now pins beta, with the
+  info notice `profile` prints for `--fixed` over `[estimate]`.
+- **`fit run` recorded an `[estimate].start` as `model_default`.** The
+  provenance now says `estimate_start` (or `estimate_start_drawn` for an
+  in-bounds draw); the same holds for `survey --fit` and `profile --fit`.
+- **`pmmh`/`mh`/`pgas` reported a hyperparameter's prior as its posterior** when
+  its hierarchical leaves were held; such a fit is now refused (see Breaking
+  changes).
 
 - **`[fixed] from_scenario` applies the scenario's `scale`.** The import copied
   the scenario's `set` values and ignored its `scale` factors, so a fit under a

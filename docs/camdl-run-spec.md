@@ -198,7 +198,11 @@ in both, in neither, or in neither-and-not-in-the-model is a hard error before
 the fit starts. On the simulate side the rule is weaker: the resolver walks the
 six tiers above and errors only if _no_ tier supplied a value. A `.camdl`
 parameter declared with a default therefore runs without a params file, and the
-recorded provenance says `model_default`.
+recorded provenance says `model_default`. An `[estimate]` parameter the model
+gives no value is seeded with its `[estimate].start`, or a draw within its
+bounds when the entry has none, and recorded as `estimate_start` or
+`estimate_start_drawn`: a reference point, not any chain's start, which
+`init_provenance` records.
 
 **Sweeps are orthogonal to everything.** A sweep is "run this thing at multiple
 parameter values," and it works on both sides. `simulate --sweep NAME=GRID`
@@ -6280,7 +6284,9 @@ mirror).
 
 ```
 --sweep NAME=SPEC           required, repeatable (2D+ grids). SPEC = V1,V2,... |
-                            lin(min,max,n) | log10(min,max,n)
+                            lin(min,max,n) | log10(min,max,n). Every value must lie
+                            in the parameter's bounds (the model's, narrowed by
+                            --fit [estimate]); the swept name is recorded `focal`
 --particles N               required
 --fixed NAME=VALUE          pin a parameter AND remove it from [estimate] (repeatable)
 --fixed-file TOML           bulk form of the above (repeatable, later files win)
@@ -6289,11 +6295,15 @@ mirror).
 --init MODE                 the same rules `fit run --starts` spells, as a bare
                             mode; note the default here is `uniform`
 --posterior / --mle / --params / (companions for the sourced init modes)
---cooling F                 (default 0.95)          --rw-sd SPEC
+--cooling F                 (default 0.95)
+--rw-sd SPEC                NAME=SD,... or `auto`: every parameter that is not
+                            swept, pinned (--fixed, --fixed-file, [fixed]) or a
+                            model constant (`let`)
 --algorithm NAME            per-cell algorithm (default if2); pair with --backend
 --backend NAME              chain_binomial (default) or ode
---fit PATH                  fit.toml supplying the estimated set, bounds and the
-                            fixed list
+--fit PATH                  fit.toml supplying the estimated set, bounds, the
+                            fixed list and [[simplex_groups]] (honoured by IF2;
+                            every member must be estimated)
 --seeds SPEC                run the whole grid at each seed (multi-seed sensitivity)
 --data / --obs / --time-format / --dt / --seed / --parallel / --scenario /
 --enable / --disable / --table / --allow-degenerate-rates / --pf-max-substeps
@@ -6308,7 +6318,8 @@ mirror).
                             Mutually exclusive with --estimate/--data
 --estimate NAME=LO:HI       inline LHS bounds (repeatable)
 --data PATH                 inline observation TSV
---fixed NAME=VALUE          pin a parameter not in --estimate
+--fixed NAME=VALUE          pin a parameter (repeatable); with --fit, an
+                            [estimate] name is held at VALUE and not sampled
 --scenario NAME
 --n-points N                default 0 = auto: max(1000, 50·d²)
 --eval auto|pfilter|simulate    auto picks pfilter when the model needs
