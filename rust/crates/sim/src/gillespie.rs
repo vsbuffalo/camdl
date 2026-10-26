@@ -219,6 +219,23 @@ pub fn run_gillespie_with_observer(
         model, &plan, &mut int_s, &mut real_s, params, cfg.t_start, iv_resolution_dt, None,
     )?;
 
+    // A negative count in the starting state, refused before the first firing:
+    // a check after each firing alone misses one that no firing follows (no
+    // transition is feasible) or that the first firing lifts back to zero.
+    // The effect stages scan their own output, so only the start needs this.
+    let bal_idx = model.balance.as_ref().map(|b| b.local_int_idx);
+    if let Some((local, val)) = int_s.counts.iter().enumerate()
+        .find(|&(i, &c)| c < 0 && Some(i) != bal_idx)
+        .map(|(i, &c)| (i, c))
+    {
+        return Err(SimError::NegativeCount {
+            compartment: model.int_compartment_name(local),
+            attempted_value: val,
+            t: cfg.t_start,
+            cause: model.negative_initial_state_cause(local),
+        });
+    }
+
     let mut t = cfg.t_start;
     let mut traj = Trajectory::new();
     let mut current_flows = FlowVec::new(n_transitions);
@@ -471,11 +488,12 @@ pub fn run_gillespie_with_observer(
 
         // A firing cannot make a compartment negative: the fired transition was
         // feasible (every compartment it consumes held at least what one firing
-        // removes), and the selection never picks an infeasible one. So a
-        // negative here was negative before this firing — the starting state,
-        // since every effect stage is scanned (`InitialState`: an `init {}`
-        // that evaluates below zero at these parameters; `InitialStateDrawn`:
-        // one a random initial law drew below zero) — or it is a simulator bug
+        // removes), and the selection never picks an infeasible one. The
+        // starting state was scanned before the first firing and every effect
+        // stage scans its output, so a negative here that was negative before
+        // this firing is the balance target, exempt from the start scan, and
+        // is labelled as a starting negative (`InitialState` /
+        // `InitialStateDrawn`); any other is a simulator bug
         // (`SimulatorInvariant`, which stops the run).
         if let Some((local, val)) = int_s.first_negative() {
             let fired_delta: i64 = model.transition_stoich[fired_idx]

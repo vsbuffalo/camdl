@@ -160,6 +160,57 @@ impl Case {
     }
 }
 
+/// Every `trace.tsv` under `root`.
+fn traces(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == "trace.tsv") {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Case (a): `I0` is estimated over `[1, 30]`, but `I = I0` is rounded to a
+/// count, so only `I0 < 10.5` keeps `R = 1000 - 990 - I` non-negative. The fit
+/// completes, and the chain never sits at an infeasible `I0`: those proposals
+/// scored −∞ and were rejected. `I0` just above 10.5 gives `R = -1`, which the
+/// first step's recoveries can lift back to zero — the case a check of the
+/// post-transition state alone let through.
+#[test]
+fn a_parameter_only_negative_start_is_a_rejected_theta() {
+    let case = Case::new();
+    let out = case.fit(
+        "det",
+        "I0 = { bounds = [1, 30], start = 5, prior = { flat = {} } }",
+        "beta = 0.4\ngamma = 0.15\nN0 = 1000\nS0 = 990\nrho = 0.6\nk = 10.0",
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "the fit must continue past infeasible θ:\n{stderr}");
+
+    let found = traces(&case.dir.path().join("results-det"));
+    assert!(!found.is_empty(), "no trace.tsv written");
+    let mut n = 0;
+    for t in found {
+        let text = std::fs::read_to_string(&t).unwrap();
+        let mut lines = text.lines();
+        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        let col = header.iter().position(|h| *h == "I0").expect("I0 column");
+        for line in lines {
+            let i0: f64 = line.split('\t').nth(col).unwrap().parse().unwrap();
+            assert!(i0 < 10.5, "chain sits at an infeasible I0 = {i0} ({})", t.display());
+            n += 1;
+        }
+    }
+    assert!(n > 0, "trace rows were read");
+}
+
 /// Case (b): a random initial law that can make `R` negative stops `fit` and
 /// `pfilter` with the structural message.
 #[test]

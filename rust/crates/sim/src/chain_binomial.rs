@@ -603,6 +603,22 @@ pub fn step_one(
     rng: &mut StatefulRng,
     scratch: &mut StepScratch,
 ) -> Result<(), SimError> {
+    // A compartment negative when the step begins can only come from the
+    // starting state: every stage's output is scanned below, so no earlier step
+    // left it there. Checked here, before the transitions, because the first
+    // step's inflows can lift it back to zero (`R = -1` plus one recovery), and
+    // a scan of the post-transition state alone would then let the run proceed
+    // from a negative start. The balance target is exempt, as below.
+    let bal_idx = model.balance.as_ref().map(|b| b.local_int_idx);
+    if let Some((i, c)) = negative_count(counts, bal_idx) {
+        return Err(SimError::NegativeCount {
+            compartment: model.int_compartment_name(i),
+            attempted_value: c,
+            t,
+            cause: model.negative_initial_state_cause(i),
+        });
+    }
+
     // Copy current counts into scratch IntState for propensity evaluation.
     // This is a memcpy into pre-allocated memory, not a heap allocation.
     scratch.int_s.counts.copy_from_slice(counts);
@@ -823,13 +839,10 @@ pub fn step_one(
     // exits are bounded by its count, each exit removes one member of one
     // source (`validate_single_source_transitions`,
     // `validate_unit_source_consumption`), and every other delta is an inflow.
-    // So a negative here was already negative when the step began — an
-    // `init {}` that evaluates below zero at these parameters (`InitialState`,
-    // which depends on θ alone and kills the particle under inference) or that
-    // a random initial law drew below zero (`InitialStateDrawn`, which stops
-    // the run) — or it is a simulator bug (`SimulatorInvariant`, which stops
-    // the run and is never a −∞ weight).
-    let bal_idx = model.balance.as_ref().map(|b| b.local_int_idx);
+    // A compartment negative when the step began was refused at the top of
+    // this function (`InitialState` / `InitialStateDrawn`), so a negative here
+    // is a simulator bug (`SimulatorInvariant`, which stops the run and is
+    // never a −∞ weight).
     {
         let pending = &scratch.pending_deltas;
         let at_step_start: &[i64] = counts;
@@ -844,12 +857,6 @@ pub fn step_one(
             }
             match negative_count(&a.int.counts, bal_idx) {
                 None => Ok(()),
-                Some((i, _)) if at_step_start[i] < 0 => Err(SimError::NegativeCount {
-                    compartment: model.int_compartment_name(i),
-                    attempted_value: at_step_start[i],
-                    t: t + dt,
-                    cause: model.negative_initial_state_cause(i),
-                }),
                 Some((i, c)) => Err(SimError::SimulatorInvariant {
                     what: format!(
                         "the transition stage left compartment '{}' at {c} (it held {} \

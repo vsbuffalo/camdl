@@ -654,6 +654,14 @@ User-visible correctness fixes (selected from ~138):
   its hierarchical leaves were held; such a fit is now refused (see Breaking
   changes).
 
+- **A negative starting count is caught even when the first step would hide
+  it.** Chain-binomial checked for a negative start only after the first step's
+  transitions, and Gillespie only after its first firing, so `R = -1` plus one
+  recovery into `R` ran on from a negative start, and a Gillespie run with no
+  feasible transition never checked at all. Under PMMH a parameter value that
+  put `R` at −1 scored a finite likelihood and could be retained in the
+  posterior. Both backends now check the starting state before the first step,
+  on `simulate`, `pfilter` and every fit method.
 - **`[fixed] from_scenario` applies the scenario's `scale`.** The import copied
   the scenario's `set` values and ignored its `scale` factors, so a fit under a
   scenario that scales a parameter it sets held that parameter at the unscaled

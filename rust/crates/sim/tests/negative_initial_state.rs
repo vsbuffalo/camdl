@@ -76,6 +76,16 @@ fn model(init_i: InitSpec, init_d: f64) -> Arc<CompiledModel> {
 
 /// [`model`] with the `rec` rate supplied, so a test can make a rate read `R`.
 fn model_with_rec_rate(init_i: InitSpec, init_d: f64, rec_rate: Expr) -> Arc<CompiledModel> {
+    model_full(init_i, init_d, rec_rate, &[("I", -1)])
+}
+
+/// [`model`] with the `rec` rate and stoichiometry supplied.
+fn model_full(
+    init_i: InitSpec,
+    init_d: f64,
+    rec_rate: Expr,
+    rec_stoich: &[(&str, i64)],
+) -> Arc<CompiledModel> {
     let mut ic = InitialConditions::constants(
         [("S", 50.0), ("I", 0.0), ("R", 0.0), ("D", init_d)]
             .iter()
@@ -103,7 +113,7 @@ fn model_with_rec_rate(init_i: InitSpec, init_d: f64, rec_rate: Expr) -> Arc<Com
                 &[("S", -1), ("I", 1)],
                 bin(BinOp::Mul, bin(BinOp::Mul, param("beta"), pop("S")), pop("I")),
             ),
-            transition("rec", &[("I", -1)], rec_rate),
+            transition("rec", rec_stoich, rec_rate),
         ],
         ode_equations: vec![],
         time_functions: vec![],
@@ -278,11 +288,8 @@ fn a_drawn_negative_start_is_a_structural_error() {
 /// compartment whose entry does not read it (`D = -2`) is still θ-only, and
 /// still rejects θ rather than stopping the fit. The law here is
 /// `I ~ binomial(n = 5, p = 0.5)`, so `R = 5 - I` never goes negative and `D`
-/// is the only negative start.
-///
-/// Gillespie detects a negative start only after its first firing, so a draw
-/// of `I = 0` (no transition can fire) runs to the end without reporting it;
-/// those seeds are counted, not asserted on.
+/// is the only negative start. A draw of `I = 0` leaves no transition able to
+/// fire, so Gillespie must check the start itself, not only after a firing.
 #[test]
 fn a_parameter_only_negative_in_a_law_bearing_model_still_rejects_the_parameters() {
     let m = model(
@@ -304,13 +311,12 @@ fn a_parameter_only_negative_in_a_law_bearing_model_still_rejects_the_parameters
                     assert!(!e.is_structural(), "{label}");
                     *caught.entry(label).or_insert(0) += 1;
                 }
-                Ok(()) if label == "gillespie" => {}
                 other => panic!("{label} seed {seed}: expected InitialState on D, got {other:?}"),
             }
         }
     }
     assert_eq!(caught.get("chain_binomial"), Some(&20), "{caught:?}");
-    assert!(caught.get("gillespie").copied().unwrap_or(0) > 0, "{caught:?}");
+    assert_eq!(caught.get("gillespie"), Some(&20), "{caught:?}");
     match filter(&m) {
         Err(ref e @ SimError::PFDegenerate { kind: PFDegenerateKind::AllParticlesDead, .. }) => {
             assert!(!e.is_structural());
@@ -350,5 +356,37 @@ fn a_drawn_negative_start_read_by_a_rate_is_reported_as_drawn() {
     assert!(matches!(
         filter(&m),
         Err(SimError::NegativeCount { cause: NegativeCountCause::InitialStateDrawn, .. })
+    ));
+}
+
+/// A negative start is reported even when the first step's inflows would lift
+/// it back to zero or above. `I = 6` gives `R = 5 - 6 = -1`, and `rec : I --> R`
+/// at `gamma = 5` moves most of `I` into `R` in the first step (chain-binomial)
+/// or as the first firing (Gillespie, probability ≈ 0.9). A check that looked
+/// only at the state after the transitions would let the run proceed from
+/// `R = -1`, and under inference score those parameters as feasible.
+#[test]
+fn a_negative_start_is_reported_even_when_the_first_step_lifts_it() {
+    let m = model_full(
+        InitSpec::Deterministic(Expr::const_(6.0)),
+        0.0,
+        bin(BinOp::Mul, Expr::const_(5.0), pop("I")),
+        &[("I", -1), ("R", 1)],
+    );
+    for seed in 0..20 {
+        for (label, res) in forward(&m, seed) {
+            match res {
+                Err(SimError::NegativeCount {
+                    cause: NegativeCountCause::InitialState, ref compartment, attempted_value, ..
+                }) => {
+                    assert_eq!((compartment.as_str(), attempted_value), ("R", -1), "{label} seed {seed}");
+                }
+                other => panic!("{label} seed {seed}: expected InitialState on R, got {other:?}"),
+            }
+        }
+    }
+    assert!(matches!(
+        filter(&m),
+        Err(SimError::PFDegenerate { kind: PFDegenerateKind::AllParticlesDead, .. })
     ));
 }
