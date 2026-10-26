@@ -64,9 +64,8 @@ pub struct StepScratch {
     /// callers may read it after the call to retrieve the draws from the
     /// most recent step. Pre-clearing by the caller is redundant but harmless.
     pub gamma_used: Vec<f64>,
-    /// Reusable buffer for resolved always-active event deltas (PROPOSE stage).
-    /// `int` deltas are fused into the draw via `pending_deltas`; `real` deltas
-    /// apply to the real reservoir. Cleared per `step_one`.
+    /// Reusable buffer for the resolved deltas of one event phase
+    /// ([`crate::effects::apply_event_phases`]). Cleared per phase.
     event_deltas: crate::effects::EffectDeltas,
     /// Reusable due-batch for this substep — the interventions/events firing at
     /// `t + dt`. The CALLER populates it before each `step_one` (gh#216): the
@@ -749,57 +748,38 @@ pub fn step_one(
     // `grid_dt`-keyed events. Consumed by PROPOSE (event_idx) here and INTERVENE
     // (intervention_idx) below — `step_one` never re-derives due-ness.
 
-    // PROPOSE (stage 1): INFLOW event deltas (`Add`) from the start-of-step
-    // snapshot (`scratch.int_s`/`scratch.real_s`, captured at the top of this
-    // function before any draws). The integer deltas are fused into ADVANCE —
-    // applied atomically with the transition deltas below; the real deltas apply
-    // to the snapshot reservoir, which is written back to `real` at the end.
+    // §13.10 stages 1-3 through the shared seam (gh#985): the INFLOW phase
+    // (`add`) resolves against the start-of-step snapshot; the advance hook adds
+    // the transition deltas drawn above from that same snapshot; the DRAIN-AND-
+    // `set` phase resolves against the resulting post-transition state (gh#217:
+    // a draining event on a transition's source moves a share of what survived
+    // the interval, and cannot overdraw).
     //
-    // gh#217: only the SNAPSHOT phase (inflow `Add`) fires here. Draining
-    // transfers and `Set` (the RESIDUAL phase) are resolved AFTER the atomic
-    // apply, against the post-transition residual — see below. This keeps the
-    // inflow path byte-identical (cohort births fuse with the draw) while a
-    // draining event on a transition's source reads what SURVIVED the interval
-    // (matching ODE/Gillespie), instead of subtracting the full snapshot a second
-    // time and overshooting to a negative count.
-    scratch.event_deltas.clear();
-    crate::effects::resolve_event_batch(
-        model, &scratch.effect_batch.event_idx, &scratch.int_s, &scratch.real_s,
-        params, t + dt, dt, crate::effects::EventPhase::Snapshot, &mut scratch.event_deltas,
-    )?;
-    for d in &scratch.event_deltas.int {
-        scratch.pending_deltas.push((d.idx, d.delta));
-    }
-    for d in &scratch.event_deltas.real {
-        scratch.real_s.values[d.idx] += d.delta;
-    }
-
-    // ADVANCE: apply all snapshot-phase deltas atomically (transitions + inflow
-    // events). `counts` now holds the POST-TRANSITION residual state.
-    for &(local, delta) in &scratch.pending_deltas {
-        counts[local] += delta;
-    }
-
-    // RESIDUAL phase (gh#217): draining transfers (`from` side) and `Set` resolve
-    // against the post-transition residual `counts` / `scratch.real_s`, then apply
-    // to them. `fraction` × residual `from`; `count`.min(residual `from`); `Set`
-    // overwrites the post-dynamics value. `scratch.int_s` is repurposed here as
-    // the residual int read-state (it held the start-of-step snapshot, now stale);
-    // `apply_post_advance` below re-syncs it to `counts` before INTERVENE.
-    if !scratch.effect_batch.event_idx.is_empty() {
-        scratch.int_s.counts.copy_from_slice(counts);
-        scratch.event_deltas.clear();
-        crate::effects::resolve_event_batch(
-            model, &scratch.effect_batch.event_idx, &scratch.int_s, &scratch.real_s,
-            params, t + dt, dt, crate::effects::EventPhase::Residual, &mut scratch.event_deltas,
+    // The arena is `scratch.int_s` / `scratch.real_s`, which hold the
+    // start-of-step snapshot on entry (copied at the top of this function;
+    // `counts` is untouched since). The inflow and transition deltas are both
+    // computed from the snapshot and summed into the state before the drain
+    // phase reads it, as when the inflow deltas rode in `pending_deltas`;
+    // integer addition makes the two orders of that sum identical.
+    {
+        let pending = &scratch.pending_deltas;
+        let mut arena = crate::effects::DiscreteArena {
+            int: &mut scratch.int_s,
+            real: &mut scratch.real_s,
+            deltas: &mut scratch.event_deltas,
+        };
+        let mut advance = |a: &mut crate::effects::DiscreteArena<'_>| {
+            for &(local, delta) in pending {
+                a.int.counts[local] += delta;
+            }
+            Ok(())
+        };
+        crate::effects::apply_event_phases(
+            model, &scratch.effect_batch.event_idx, &mut arena, params, t + dt, dt,
+            Some(&mut advance),
         )?;
-        for d in &scratch.event_deltas.int {
-            counts[d.idx] += d.delta;
-        }
-        for d in &scratch.event_deltas.real {
-            scratch.real_s.values[d.idx] += d.delta;
-        }
     }
+    counts.copy_from_slice(&scratch.int_s.counts);
 
     // Per-substep trace (CAMDL_TRACE_STEPS=1)
     if trace_enabled() {

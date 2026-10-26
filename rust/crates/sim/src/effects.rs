@@ -104,8 +104,8 @@ pub enum EffectKind {
 /// whole batch twice:
 ///
 ///   - [`EventPhase::Snapshot`] selects INFLOW-only actions (`Add`): resolved
-///     against the start-of-step snapshot and fused into the atomic transition
-///     apply. Byte-identical to the pre-gh#217 behaviour.
+///     against the start-of-step snapshot, like the transition draw, and summed
+///     into the state with the transition deltas.
 ///   - [`EventPhase::Residual`] selects DRAINING / assignment actions
 ///     (`FractionTransfer`, `AbsoluteTransfer`, `Set`): resolved against the
 ///     POST-TRANSITION residual state, so a draining transfer moves a fraction
@@ -366,15 +366,12 @@ pub fn split_due_batch(
 /// Resolve a known batch of always-active events into typed deltas, for the
 /// actions matching `phase`. The EVENT path's apply half: each event in
 /// `event_idx` resolves its `phase` actions against `read` at the boundary
-/// `t_end`. PURE — the caller fuses `out.int` into the draw and applies
-/// `out.real` to the real reservoir. Replaces the historical int-only
-/// `inject_event_deltas` (which silently dropped real-targeted events).
+/// `t_end`. PURE — [`DiscreteArena`] applies `out` with [`apply_effects`].
 ///
-/// gh#217: events are resolved in two phases by [`EventPhase`]. `step_one`
-/// passes `read = start-of-step snapshot, phase = Snapshot` for inflow `Add`
-/// (fused with the kernel draw) and `read = post-transition residual, phase =
-/// Residual` for draining transfers / `Set` (applied after the draw). Passing
-/// the read-state and the matching phase together is the caller's contract.
+/// gh#217: events are resolved in two phases by [`EventPhase`], in the order
+/// [`apply_event_phases`] fixes: `Snapshot` (inflow `Add`) against the
+/// start-of-step snapshot, then `Residual` (draining transfers / `Set`) against
+/// the post-inflow, post-transition state.
 ///
 /// `event_idx` (from [`due_effects`]) lists exactly the firing always-active
 /// interventions in declaration order — this function does NOT re-check
