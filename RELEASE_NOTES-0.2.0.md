@@ -381,6 +381,18 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
 User-visible correctness fixes (selected from ~138):
 
+- **`baseline` is an ordinary scenario name on every verb.**
+  `--scenario baseline` means the scenario the model declares under that name,
+  on `simulate`, `fit predict`, `pfilter`, `profile` and inline-mode `survey`; a
+  model that declares no `baseline` gets the same refusal, listing its declared
+  scenarios, as any other undeclared name. `fit predict` used to accept an
+  undeclared `baseline` in its up-front check, run, and then fail with exit
+  status 1 after writing partial output, and its message for a misspelled
+  scenario advised `use 'baseline' for the unmodified model`, which is that
+  failing form. It now refuses before running anything, and the message says to
+  drop `--scenario` to run the model with no scenario applied. A declared
+  `baseline` scenario was applied correctly before this change, so earlier
+  predictions made with `--scenario baseline` are unaffected.
 - **Inference math:** missing terms in the PGAS+NUTS energy for gamma
   multipliers (gh#197) and deterministic source-less inflow (gh#200); corrected
   `log_normal` NUTS gradient bias (gh#155); coherent counts across CSMC-AS joins

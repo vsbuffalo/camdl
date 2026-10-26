@@ -1238,10 +1238,11 @@ pub struct FitPredictArgs {
 
 /// The reserved scenario name for the no-overlay row — the fitted model as
 /// written. Reserved so the `scenario` column's no-overlay value can never be
-/// shadowed by a user preset (which would make rows ambiguous). Mirrors
-/// `simulate`'s `baseline` sentinel, but named `fitted` because in
-/// `fit predict` the parameters come from the fit, not a default-parameter
-/// preset, so reusing `baseline` would mislead.
+/// shadowed by a user preset (which would make rows ambiguous); the compiler
+/// rejects a scenario declared under this name (E291). The counterpart of
+/// `simulate`'s `(none)` arm, named `fitted` because the parameters come from
+/// the fit. Unlike `(none)`, `fitted` is an identifier, which is why it has to
+/// be reserved; `baseline` is not reserved and is an ordinary scenario name.
 pub const FITTED: &str = "fitted";
 
 /// Split `--scenario` values on commas, trim, drop empties, and reject repeats.
@@ -1295,7 +1296,7 @@ impl FitPredictArgs {
     /// `from_cli`): `--scenario a,b` comma-splits into `[Named("a"), Named("b")]`
     /// (the preset path); no `--scenario` yields a single [`FITTED`] inline
     /// overlay carrying any `--enable`/`--disable` (so the no-overlay path keeps
-    /// `scenario_name = None`, exactly like `simulate`'s baseline). `fitted` is
+    /// `scenario_name = None`, exactly like `simulate`'s `(none)` arm). `fitted` is
     /// reserved: an explicit `--scenario fitted` is rejected with the same
     /// migration-style diagnostic the OCaml `scenarios {}` reservation uses.
     pub fn scenario_refs(&self) -> Result<Vec<crate::sim_job::ScenarioRef>, String> {

@@ -365,25 +365,16 @@ impl ScenarioRef {
             ScenarioRef::Inline { name, .. } => name,
         }
     }
-
-    /// True when this ref carries inline patch fields.
-    fn has_inline_fields(&self) -> bool {
-        match self {
-            ScenarioRef::Named(_) => false,
-            ScenarioRef::Inline { enable, disable, params, .. } => {
-                !enable.is_empty() || !disable.is_empty() || !params.is_empty()
-            }
-        }
-    }
 }
 
 /// The result of resolving a [`ScenarioRef`] against a model.
 ///
 /// Exactly one of the two routes is taken (the locked design decision in
 /// the 2026-05-28 proposal):
-///   - `Preset` — the name matched a model `scenarios{}` preset; the
+///   - `Preset` — a `Named` ref to a declared `scenarios{}` preset; the
 ///     `params_resolver` preset path supplies the enable/disable/set/scale.
-///   - `Adhoc` — the name matched nothing but inline patches were given.
+///   - `Adhoc` — an `Inline` arm built from flags; its patch (possibly
+///     empty) is applied, no preset.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedScenario {
     /// Route through the named-preset branch of `params_resolver`
@@ -400,75 +391,32 @@ pub enum ResolvedScenario {
     },
 }
 
-/// Resolve a `ScenarioRef` against the model's presets, per the locked
-/// design decision (proposal §"ScenarioRef semantics"):
+/// Resolve a `ScenarioRef` against the model's presets, the way the engine
+/// will run it (`engine::build_cell_sim_run` routes `Named` through the preset
+/// path and `Inline` through the ad-hoc path, never the reverse):
 ///
-/// 1. name matches a model preset → resolve via the preset path.
-/// 2. name matches nothing but inline enable/disable/params present →
-///    ad-hoc patch.
-/// 3. name matches nothing and no inline fields → hard error listing
-///    available presets.
-/// 4. name matches a preset AND has inline fields → hard error (the
-///    model scenario is the source of truth).
+/// 1. `Named` that the model declares → resolve via the preset path.
+/// 2. `Named` that the model does not declare → hard error listing the
+///    declared scenarios. No name is special: a model may declare a scenario
+///    called `baseline`, and `--scenario baseline` then means that scenario.
+/// 3. `Inline` (an arm built from flags — the implicit `(none)` arm of
+///    `simulate`, or `fit predict`'s `fitted` arm) → the ad-hoc patch it
+///    carries, empty for the model as written.
+/// 4. `Inline` whose name is a declared scenario → hard error: the engine
+///    would run the inline patch, not the scenario of that name, so the row
+///    label would claim a scenario that was never applied.
 pub fn resolve_scenario_ref(
     scenario: &ScenarioRef,
     model_preset_names: &[String],
 ) -> Result<ResolvedScenario, String> {
-    let name = scenario.name();
-    let is_preset = model_preset_names.iter().any(|p| p == name);
-    let has_inline = scenario.has_inline_fields();
-
-    match (is_preset, has_inline) {
-        // Case 4: collides with a preset *and* carries inline patches.
-        (true, true) => Err(format!(
-            "scenario '{name}' names a model preset but also carries inline \
-             enable/disable/params. A scenario reference is either a model \
-             preset OR an ad-hoc patch, never both — the model scenario is \
-             the source of truth.\n  \
-             Fix: drop the inline fields to use the model preset, or rename \
-             the inline scenario so it does not shadow a preset."
-        )),
-        // Case 1: pure preset reference.
-        (true, false) => Ok(ResolvedScenario::Preset { name: name.to_string() }),
-        // Case 2: ad-hoc patch (name matched nothing, inline fields present).
-        (false, true) => {
-            let (enable, disable, params) = match scenario {
-                ScenarioRef::Inline { enable, disable, params, .. } => (
-                    enable.clone(),
-                    disable.clone(),
-                    params.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-                ),
-                // Unreachable: has_inline is false for Named.
-                ScenarioRef::Named(_) => (Vec::new(), Vec::new(), Vec::new()),
-            };
-            Ok(ResolvedScenario::Adhoc {
-                name: name.to_string(),
-                enable,
-                disable,
-                params,
-            })
+    let declared = |name: &str| model_preset_names.iter().any(|p| p == name);
+    match scenario {
+        ScenarioRef::Named(name) if declared(name) => {
+            Ok(ResolvedScenario::Preset { name: name.clone() })
         }
-        // Case 3a: an implicit-identity sentinel name — `baseline` (run-spec
-        // §3.6: "a single implicit baseline — the absence of any scenario
-        // patch") for `simulate`, or `fitted` for `camdl fit predict` (the
-        // no-overlay row: the fitted model, no scenario applied). Both are
-        // always valid even when the model declares no preset by that name:
-        // they mean "the model as written, no modifications." Resolves to an
-        // empty ad-hoc patch; the empty scenario delta hashes to its real
-        // scenario-level digest (the name is the display label only).
-        (false, false) if name == "baseline" || name == "fitted" => {
-            Ok(ResolvedScenario::Adhoc {
-                name: name.to_string(),
-                enable: Vec::new(),
-                disable: Vec::new(),
-                params: Vec::new(),
-            })
-        }
-        // Case 3b: typo / unknown — neither a preset, an ad-hoc patch, nor
-        // the implicit baseline.
-        (false, false) => {
+        ScenarioRef::Named(name) => {
             let available = if model_preset_names.is_empty() {
-                "(none)".to_string()
+                "none — the model has no scenarios {} block".to_string()
             } else {
                 model_preset_names
                     .iter()
@@ -477,14 +425,26 @@ pub fn resolve_scenario_ref(
                     .join(", ")
             };
             Err(format!(
-                "scenario '{name}' is not a model preset and defines no inline \
-                 enable/disable/params.\n  \
-                 Available model presets: {available}.\n  \
-                 Fix: use one of the listed presets, add enable/disable/params \
-                 to define an ad-hoc scenario, or use 'baseline' for the \
-                 unmodified model."
+                "scenario '{name}' is not declared in the model.\n  \
+                 Declared scenarios: {available}.\n  \
+                 Fix: use one of the declared scenarios, or drop `--scenario` \
+                 to run the model with no scenario applied."
             ))
         }
+        ScenarioRef::Inline { name, .. } if declared(name) => Err(format!(
+            "scenario '{name}' names a model scenario but is an inline \
+             enable/disable/params arm. A scenario reference is either a model \
+             scenario OR an ad-hoc patch, never both — the model scenario is \
+             the source of truth.\n  \
+             Fix: drop the inline fields to use the model scenario, or rename \
+             the inline arm so it does not shadow one."
+        )),
+        ScenarioRef::Inline { name, enable, disable, params } => Ok(ResolvedScenario::Adhoc {
+            name: name.clone(),
+            enable: enable.clone(),
+            disable: disable.clone(),
+            params: params.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        }),
     }
 }
 
@@ -535,11 +495,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_inline_matching_preset_name_resolves_as_preset() {
-        // An Inline entry with NO patch fields whose name matches a preset
-        // is treated as a pure preset reference (case 1) — the shape of a
-        // bare arm name that matches a preset.
-        let r = resolve_scenario_ref(
+    fn resolve_inline_arm_shadowing_a_declared_scenario_errors() {
+        // The engine runs an `Inline` arm through the ad-hoc path, never the
+        // preset path, so an inline arm carrying a declared scenario's name
+        // would label rows with a scenario that was never applied. Refused.
+        let err = resolve_scenario_ref(
             &ScenarioRef::Inline {
                 name: "baseline".into(),
                 enable: vec![],
@@ -548,8 +508,8 @@ mod tests {
             },
             &names(&["baseline"]),
         )
-        .unwrap();
-        assert_eq!(r, ResolvedScenario::Preset { name: "baseline".into() });
+        .unwrap_err();
+        assert!(err.contains("source of truth"), "{err}");
     }
 
     #[test]
@@ -589,64 +549,52 @@ mod tests {
     }
 
     #[test]
-    fn resolve_baseline_with_no_presets_is_implicit_identity() {
-        // `baseline` on a model with no scenarios{} block is the implicit
-        // identity patch, not a typo (run-spec §3.6).
-        let r = resolve_scenario_ref(&ScenarioRef::Named("baseline".into()), &[]).unwrap();
-        assert_eq!(
-            r,
-            ResolvedScenario::Adhoc {
-                name: "baseline".into(),
-                enable: vec![],
-                disable: vec![],
-                params: vec![],
-            }
-        );
+    fn resolve_undeclared_baseline_is_refused_like_any_other_name() {
+        // `baseline` is an ordinary scenario name: a model that does not
+        // declare it gets the same refusal, listing the declared scenarios,
+        // as any other undeclared name. It used to resolve to the unmodified
+        // model, so `fit predict --scenario baseline` passed its up-front
+        // check and then failed late, after writing partial output.
+        let err = resolve_scenario_ref(&ScenarioRef::Named("baseline".into()), &names(&["other"]))
+            .unwrap_err();
+        assert!(err.contains("'baseline' is not declared"), "{err}");
+        assert!(err.contains("'other'"), "lists the declared scenarios: {err}");
+        assert!(!err.contains("use 'baseline'"), "must not advise the refused form: {err}");
+
+        let err = resolve_scenario_ref(&ScenarioRef::Named("baseline".into()), &[]).unwrap_err();
+        assert!(err.contains("no scenarios {} block"), "{err}");
     }
 
     #[test]
-    fn resolve_fitted_with_no_presets_is_implicit_identity() {
-        // `fitted` is `camdl fit predict`'s no-overlay sentinel: valid on a
-        // model with no scenarios{} block, resolving to the identity patch (the
-        // sibling of `baseline`).
-        let r = resolve_scenario_ref(&ScenarioRef::Named("fitted".into()), &[]).unwrap();
-        assert_eq!(
-            r,
-            ResolvedScenario::Adhoc {
-                name: "fitted".into(),
-                enable: vec![],
-                disable: vec![],
-                params: vec![],
-            }
-        );
-        // Also via the inline-no-patch form (what `fit predict` builds for the
-        // no-`--scenario` case).
-        let r2 = resolve_scenario_ref(
-            &ScenarioRef::Inline {
-                name: "fitted".into(),
-                enable: vec![],
-                disable: vec![],
-                params: IndexMap::new(),
-            },
-            &[],
-        )
-        .unwrap();
-        assert!(matches!(r2, ResolvedScenario::Adhoc { .. }));
-    }
-
-    #[test]
-    fn resolve_baseline_inline_no_patch_with_no_presets_is_identity() {
-        let r = resolve_scenario_ref(
-            &ScenarioRef::Inline {
-                name: "baseline".into(),
-                enable: vec![],
-                disable: vec![],
-                params: IndexMap::new(),
-            },
-            &[],
-        )
-        .unwrap();
-        assert!(matches!(r, ResolvedScenario::Adhoc { .. }));
+    fn resolve_implicit_arm_is_the_empty_adhoc_patch() {
+        // The implicit arms are `Inline` refs built by the CLI — `(none)` for
+        // `simulate`, `fitted` for `fit predict` — and resolve to the patch
+        // they carry, on a model with or without a `scenarios {}` block.
+        for (label, presets) in [
+            (IMPLICIT_ARM_LABEL, names(&[])),
+            (crate::args::FITTED, names(&[])),
+            (crate::args::FITTED, names(&["baseline"])),
+        ] {
+            let r = resolve_scenario_ref(
+                &ScenarioRef::Inline {
+                    name: label.into(),
+                    enable: vec![],
+                    disable: vec![],
+                    params: IndexMap::new(),
+                },
+                &presets,
+            )
+            .unwrap();
+            assert_eq!(
+                r,
+                ResolvedScenario::Adhoc {
+                    name: label.into(),
+                    enable: vec![],
+                    disable: vec![],
+                    params: vec![],
+                }
+            );
+        }
     }
 
     #[test]

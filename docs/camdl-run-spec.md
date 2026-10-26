@@ -1212,10 +1212,10 @@ downstream:
 
 ```rust
 pub enum ResolvedScenario {
-    /// The name matched a model preset; the preset is the source of truth
+    /// A `Named` ref to a declared preset; the preset is the source of truth
     /// for enable/disable/set/scale/compose.
     Preset { name: String },
-    /// The name matched nothing but inline patches were given.
+    /// An `Inline` arm built from flags; its patch (possibly empty) applies.
     Adhoc { name: String, enable: Vec<String>, disable: Vec<String>,
             params: Vec<(String, f64)> },
 }
@@ -1224,15 +1224,18 @@ pub fn resolve_scenario_ref(scenario: &ScenarioRef, model_preset_names: &[String
     -> Result<ResolvedScenario, String>;
 ```
 
-The four cases:
+Resolution follows the variant, the way the engine runs it — a `Named` ref
+through the preset path, an `Inline` arm through the ad-hoc path:
 
-1. Name matches a preset, no inline fields → `Preset`.
-2. Name matches nothing, inline fields present → `Adhoc`.
-3. Name matches nothing, no inline fields → **error**, listing the available
-   presets. Exception: the sentinel names `baseline` (`simulate`) and `fitted`
-   (`camdl fit predict`) always resolve to the identity patch, even on a model
-   that declares no `scenarios{}` block at all.
-4. Name matches a preset **and** carries inline fields → **error**. A scenario
+1. `Named`, declared by the model → `Preset`.
+2. `Named`, not declared → **error**, listing the declared scenarios. No name
+   is special: a model may declare a scenario called `baseline`, and
+   `--scenario baseline` then means that scenario; on a model that declares
+   none, it is refused like any other undeclared name.
+3. `Inline` → `Adhoc`, carrying its patch. The CLI builds these for the arm a
+   run has without `--scenario`: `simulate`'s `(none)` and `fit predict`'s
+   `fitted`, each the empty patch unless `--enable`/`--disable` were given.
+4. `Inline` whose name is a declared scenario → **error**. A scenario
    reference is either a model preset or an ad-hoc patch, never both; the model
    scenario is the source of truth.
 
