@@ -49,6 +49,18 @@ const T_END: f64 = 30.0;
 /// parameters so each run's output schedule matches its own window (the final
 /// flush drains all remaining output times regardless of `t_end`).
 fn sir_model(output_times: Vec<f64>, t_end: f64) -> (CompiledModel, Vec<f64>) {
+    sir_model_at(0.0, [5.0, 15.0], output_times, t_end)
+}
+
+/// [`sir_model`] on a window starting at `t_start`, with the two interventions
+/// at `iv_at` (pre-T*, post-T*). gh#964 needs the same model placed at a large
+/// time coordinate.
+fn sir_model_at(
+    t_start: f64,
+    iv_at: [f64; 2],
+    output_times: Vec<f64>,
+    t_end: f64,
+) -> (CompiledModel, Vec<f64>) {
     let n_expr = Expr::pop_sum(vec!["S".into(), "I".into(), "R".into(), "V".into()]);
     let beta_s_i = Expr::bin_op(
         BinOp::Mul,
@@ -102,7 +114,7 @@ fn sir_model(output_times: Vec<f64>, t_end: f64) -> (CompiledModel, Vec<f64>) {
         ode_equations: vec![],
         time_functions: vec![],
         tables: vec![],
-        interventions: vec![iv("sia_pre", 5.0, 0.3), iv("sia_post", 15.0, 0.5)],
+        interventions: vec![iv("sia_pre", iv_at[0], 0.3), iv("sia_post", iv_at[1], 0.5)],
         observations: vec![],
         bindings: vec![],
         per_eval_bindings: vec![],
@@ -125,7 +137,7 @@ fn sir_model(output_times: Vec<f64>, t_end: f64) -> (CompiledModel, Vec<f64>) {
             observations: false,
         },
         simulation: SimulationConfig {
-            t_start: 0.0,
+            t_start,
             t_end,
             time_semantics: "continuous".into(),
             dt: Some(1.0),
@@ -353,4 +365,105 @@ fn reactive_model_resume_is_rejected() {
         msg.contains("reactive"),
         "reactive rejection must name the limitation; got: {msg}"
     );
+}
+
+/// 5. **Splice at a large time coordinate (gh#964)** — the headline invariant
+///    with the window placed above 2^13 = 8192, on a weekly emit grid at a
+///    fractional `dt`. The resume time T* = 8196 is on the grid (8000 + 28·7).
+///    An absolute output tolerance of 1e-12 is below one ulp of t there
+///    (2^-39 ≈ 1.8e-12), so the re-seat drain consumed the T* output and the
+///    run was refused as off-grid; the tolerance must scale with |t|.
+#[test]
+fn splice_above_8192_is_byte_identical_to_the_continuous_tail() {
+    const T0: f64 = 8000.0;
+    const T_STAR_BIG: f64 = 8196.0; // 8000 + 28·7
+    const T_END_BIG: f64 = 8231.0; // 8000 + 33·7
+    const DT: f64 = 0.25;
+    let weekly = |end: f64| -> Vec<f64> {
+        (0..).map(|k| T0 + 7.0 * k as f64).take_while(|&t| t <= end).collect()
+    };
+    let ivs = [8100.0, 8210.0];
+
+    let (head_model, head_params) = sir_model_at(T0, ivs, weekly(T_STAR_BIG), T_STAR_BIG);
+    let mut captured = StatefulRng::new(0);
+    let head_cfg = ChainBinomialConfig { t_start: T0, t_end: T_STAR_BIG, dt: DT };
+    let traj_head = run_chain_binomial_with_observer(
+        &head_model,
+        &head_params,
+        SEED,
+        &head_cfg,
+        None,
+        None,
+        Resume { start: None, capture_final_rng: Some(&mut captured) },
+    )
+    .unwrap();
+    let at_tstar = traj_head.snapshots.last().expect("head trajectory is non-empty");
+    assert_eq!(at_tstar.t, T_STAR_BIG, "head's last snapshot is at T*");
+
+    let (tail_model, tail_params) = sir_model_at(T0, ivs, weekly(T_END_BIG), T_END_BIG);
+    let start = StartState {
+        int_s: at_tstar.int_state.clone(),
+        real_s: at_tstar.real_state.clone(),
+        rng: Some(captured),
+    };
+    let tail_cfg = ChainBinomialConfig { t_start: T_STAR_BIG, t_end: T_END_BIG, dt: DT };
+    let traj_tail = run_chain_binomial_with_observer(
+        &tail_model,
+        &tail_params,
+        SEED,
+        &tail_cfg,
+        None,
+        None,
+        Resume { start: Some(&start), capture_final_rng: None },
+    )
+    .expect("an on-grid T* above 8192 must resume");
+    assert_eq!(traj_tail.snapshots[0].t, T_STAR_BIG, "the resumed run's first row is T*");
+
+    let full_cfg = ChainBinomialConfig { t_start: T0, t_end: T_END_BIG, dt: DT };
+    let traj_full = run_chain_binomial(&tail_model, &tail_params, SEED, &full_cfg).unwrap();
+    let full_tail: Vec<_> = traj_full.snapshots.iter().filter(|s| s.t >= T_STAR_BIG).collect();
+    assert_eq!(full_tail.len(), traj_tail.snapshots.len(), "same tail rows");
+    for (i, (f, t)) in full_tail.iter().zip(&traj_tail.snapshots).enumerate() {
+        assert_eq!(f.t, t.t, "row times align");
+        assert_eq!(f.int_state.counts, t.int_state.counts, "state at t={}", f.t);
+        // The T* row carries zeroed flows on the resumed side (initial-row
+        // convention); every later row must match in flows too.
+        if i > 0 {
+            assert_eq!(f.flows.as_int(), t.flows.as_int(), "flows at t={}", f.t);
+        }
+    }
+    assert_eq!(full_tail.len(), 6, "T* plus the five weekly rows to 8231");
+
+    // Not vacuous: the post-T* intervention at 8210 moved mass into V.
+    let v = tail_model.model.compartments.iter().position(|c| c.name == "V").unwrap();
+    assert!(
+        traj_tail.snapshots.last().unwrap().int_state.counts[v]
+            > traj_tail.snapshots[0].int_state.counts[v],
+        "the post-T* SIA must move mass into V"
+    );
+}
+
+/// 6. **Off-grid T\* above 8192 is still refused (gh#964)** — the scaled
+///    tolerance must not swallow a genuine misalignment. T* = 8197 is one day
+///    off the weekly grid; the message names T* and the neighbouring emits.
+#[test]
+fn off_grid_resume_above_8192_is_rejected_naming_the_neighbours() {
+    let out: Vec<f64> = (0..=33).map(|k| 8000.0 + 7.0 * k as f64).collect();
+    let (model, params) = sir_model_at(8000.0, [8100.0, 8210.0], out, 8231.0);
+    let (int_s, real_s) = model.initial_state_mean(&params).unwrap();
+    let start = StartState { int_s, real_s, rng: None };
+    let cfg = ChainBinomialConfig { t_start: 8197.0, t_end: 8231.0, dt: 0.25 };
+    let err = run_chain_binomial_with_observer(
+        &model,
+        &params,
+        SEED,
+        &cfg,
+        None,
+        None,
+        Resume { start: Some(&start), capture_final_rng: None },
+    )
+    .expect_err("an off-grid resume time must be rejected");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("8197"), "names T*; got: {msg}");
+    assert!(msg.contains("8196") && msg.contains("8203"), "names the neighbouring emits; got: {msg}");
 }

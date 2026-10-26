@@ -8,7 +8,8 @@ use ir::model::{OutputSchedule, RegularOutputSchedule};
 /// enumerates `start, start+step, …` up to and including `t_end` (already
 /// ascending and unique by construction); an `AtTimes` list is filtered to
 /// entries `≤ t_end`, so an explicitly-listed time beyond the dynamics horizon
-/// is dropped, not emitted against a frozen state.
+/// is dropped, not emitted against a frozen state. Both bounds allow
+/// [`crate::schedule::output_tol`]`(t_end)` of rounding past `t_end`.
 ///
 /// gh#257: an author-supplied `at = [...]` list may arrive out of order or with
 /// repeats. The `AtTimes` branch is sorted and deduplicated here so the result
@@ -18,18 +19,21 @@ use ir::model::{OutputSchedule, RegularOutputSchedule};
 /// backends build their schedule through (`NaN`/`+∞` never satisfy `≤ t_end`
 /// and drop out here; a surviving `-∞` is rejected there).
 pub fn output_times(sched: &OutputSchedule, t_end: f64) -> Vec<f64> {
+    // The horizon test the observation axis (`obs_schedule_times`) also uses,
+    // so the two axes agree on whether the terminal point is in (gh#606).
+    let in_horizon = |t: f64| t <= t_end + crate::schedule::output_tol(t_end);
     match sched {
         OutputSchedule::Regular(RegularOutputSchedule { start, step }) => {
             let mut times = Vec::new();
             let mut t = *start;
-            while t <= t_end + step * 1e-9 {
+            while in_horizon(t) {
                 times.push(t);
                 t += step;
             }
             times
         }
         OutputSchedule::AtTimes(ts) => {
-            let mut times: Vec<f64> = ts.iter().copied().filter(|&t| t <= t_end).collect();
+            let mut times: Vec<f64> = ts.iter().copied().filter(|&t| in_horizon(t)).collect();
             times.sort_by(f64::total_cmp);
             times.dedup();
             times

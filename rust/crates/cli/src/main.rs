@@ -2538,16 +2538,12 @@ struct GroupQuant {
     sweep: Vec<(String, f64)>,
 }
 
-/// Whether two output-time grids agree, on the RELATIVE tolerance the rest of
-/// the codebase uses for output times (`chain_binomial.rs` compares
-/// `OUTPUT_EPS * t.abs().max(1.0)`). A bare absolute `OUTPUT_EPS` would
-/// degenerate to exact equality on a calendar-anchored model, where one ulp at
-/// t ~ 1e5 days already exceeds 1e-12.
+/// Whether two output-time grids agree, on the output-axis coincidence
+/// tolerance [`sim::schedule::output_tol`] (relative to |t|, so a
+/// calendar-anchored model at t ~ 1e5 days is not held to exact equality).
 fn time_grids_match(a: &[f64], b: &[f64]) -> bool {
     a.len() == b.len()
-        && a.iter().zip(b).all(|(x, y)| {
-            (x - y).abs() <= sim::schedule::OUTPUT_EPS * x.abs().max(1.0)
-        })
+        && a.iter().zip(b).all(|(x, y)| (x - y).abs() <= sim::schedule::output_tol(*x))
 }
 
 /// Materialize the per-draw `y_sim` for the streams an `observations.<stream>`
@@ -4048,11 +4044,14 @@ pub(crate) fn obs_schedule_times(
 ) -> Vec<f64> {
     let after_origin =
         |t: f64| restart_origin.is_none_or(|origin| t >= origin - OBS_SNAP_EPS);
+    // The horizon test `sim::output::output_times` applies to the recording
+    // axis, so both axes agree on whether the terminal point is in (gh#606).
+    let in_horizon = |t: f64| t <= t_end + sim::schedule::output_tol(t_end);
     match schedule {
         ir::observation::ObservationSchedule::Regular(reg) => {
             let mut times = Vec::new();
             let mut t = reg.start;
-            while t <= t_end + 1e-9 {
+            while in_horizon(t) {
                 if after_origin(t) {
                     times.push(t);
                 }
@@ -4061,7 +4060,7 @@ pub(crate) fn obs_schedule_times(
             times
         }
         ir::observation::ObservationSchedule::AtTimes(times) => {
-            times.iter().copied().filter(|&t| t <= t_end && after_origin(t)).collect()
+            times.iter().copied().filter(|&t| in_horizon(t) && after_origin(t)).collect()
         }
     }
 }
@@ -5436,6 +5435,53 @@ mod obs_grid_guard_tests {
         let err = check_obs_times_on_snapshot_grid(&tr, "s", "days", &[0.0])
             .expect_err("no snapshots must be an error");
         assert!(err.contains("recorded no trajectory snapshots"), "got: {err}");
+    }
+
+    /// gh#606: the observation axis and the recording axis confine to the
+    /// horizon with one test, so they agree on the terminal point. A step of 0.1
+    /// accumulated 7418 times lands 1.0e-10 past `t_end = 741.8`; the old bounds
+    /// (`t_end + 1e-9` here, `t_end + step·1e-9` on the recording axis) split on
+    /// it, so the observation at t_end had no recorded row and the run was
+    /// refused by the snapshot-grid check.
+    #[test]
+    fn obs_axis_and_output_axis_agree_at_the_terminal_point() {
+        let t_end = 741.8;
+        let obs = obs_schedule_times(
+            &ir::observation::ObservationSchedule::Regular(ir::observation::RegularSchedule {
+                start: 0.0,
+                step: 0.1,
+                end: t_end,
+            }),
+            None,
+            t_end,
+        );
+        let out = sim::output::output_times(
+            &ir::model::OutputSchedule::Regular(ir::model::RegularOutputSchedule {
+                start: 0.0,
+                step: 0.1,
+            }),
+            t_end,
+        );
+        assert_eq!(obs.len(), 7419, "0, 0.1, ..., 741.8 on the observation axis");
+        assert_eq!(
+            (obs.len(), obs.last()),
+            (out.len(), out.last()),
+            "the two axes agree on the terminal point"
+        );
+        assert!(obs == out, "the two axes enumerate the same times");
+        check_obs_times_on_snapshot_grid(&traj(&out), "s", "days", &obs)
+            .expect("every observation time has a recorded row");
+
+        // An at-list time one rounding past t_end is the terminal point on both axes.
+        let at = vec![10.0, t_end + 1e-13];
+        let obs_at = obs_schedule_times(
+            &ir::observation::ObservationSchedule::AtTimes(at.clone()),
+            None,
+            t_end,
+        );
+        let out_at = sim::output::output_times(&ir::model::OutputSchedule::AtTimes(at), t_end);
+        assert_eq!(obs_at.len(), 2);
+        assert_eq!(obs_at, out_at);
     }
 }
 

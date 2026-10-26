@@ -227,7 +227,7 @@ pub fn run_chain_binomial_with_observer(
             // horizon (output-every == dt: the drift crosses 1e-12 near t≈93 at
             // dt=0.1). The drift is O(t·ε); a genuine sub-dt misalignment is O(dt) ≫
             // that, so the scaled tolerance stays strict against real misalignment.
-            if (grid - ot).abs() > crate::schedule::OUTPUT_EPS * ot.abs().max(1.0) {
+            if (grid - ot).abs() > crate::schedule::output_tol(ot) {
                 return Err(SimError::Validation(format!(
                     "chain_binomial: output time {ot} is not on the dt grid \
                      (t_start={} + k·dt, dt={}); the nearest grid time is {grid}. \
@@ -300,7 +300,7 @@ pub fn run_chain_binomial_with_observer(
     if resume.start.is_some() {
         // Advance the output cursor past every output time STRICTLY before T*
         // via the gh#233 boundary authority — no hand-rolled loop, no parallel
-        // accessor. `until = T* - 2·OUTPUT_EPS` drains outputs `<= T* - OUTPUT_EPS`,
+        // accessor. `until = T* - 2·output_tol(T*)` drains outputs `<= T* - output_tol(T*)`,
         // leaving the cursor pointing AT the T* output boundary, so the initial-row
         // emit below fires for T* with zeroed flows (post-fork incidence starts at
         // 0 — no extra flow-zeroing needed). The effect/obs cursors are NOT
@@ -308,7 +308,7 @@ pub fn run_chain_binomial_with_observer(
         // already correct at T* = cfg.t_start; obs is inference-only).
         schedule.drain_outputs(
             &mut cursor,
-            cfg.t_start - 2.0 * crate::schedule::OUTPUT_EPS,
+            cfg.t_start - 2.0 * crate::schedule::output_tol(cfg.t_start),
             |_| {},
         );
         // T* MUST coincide with an output-emit time: flow accumulators reset only
@@ -316,10 +316,18 @@ pub fn run_chain_binomial_with_observer(
         // when T* is itself an emit. Reject an off-grid T* with a located error —
         // never a silent snap to a neighbour.
         if !schedule.output_due_at(&cursor, cfg.t_start) {
+            let t_star = cfg.t_start;
+            let outs = crate::output::output_times(
+                &model.model.output.times, model.model.simulation.t_end);
+            let i = outs.partition_point(|&o| o < t_star);
+            let near = |o: Option<&f64>| o.map_or_else(|| "none".to_string(), |v| v.to_string());
             return Err(SimError::Validation(format!(
-                "start-from-state resume: the resume time T* must coincide with an \
-                 output-emit time (the saved cadence must contain T*); got {}",
-                cfg.t_start
+                "start-from-state resume: the resume time T* = {t_star} is not one of \
+                 this run's output times (the nearest are {} before and {} after). \
+                 Flow accumulators reset only at an output, so a resumed run must \
+                 start on one: restart from a state saved at an output time.",
+                near(i.checked_sub(1).and_then(|j| outs.get(j))),
+                near(outs.get(i)),
             )));
         }
     }

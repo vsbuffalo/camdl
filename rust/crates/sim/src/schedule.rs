@@ -159,8 +159,28 @@ pub struct Cursor {
 /// *probability* guard, and `pgas::GRID_STEP_EPS` (a 1e-12 negligible-step floor
 /// whose discrepancy with `MIN_STEP_EPS` is a separate, deliberate decision).
 ///
-/// "An output time has been reached" / due: `next_output <= t + OUTPUT_EPS`.
-pub const OUTPUT_EPS: f64 = 1e-12;
+/// The relative coincidence tolerance on the output-time axis; see
+/// [`output_tol`], the only place it is read.
+const OUTPUT_EPS: f64 = 1e-12;
+
+/// How far apart two computations of one output time at magnitude `t` may be
+/// and still name the same instant: `OUTPUT_EPS · max(1, |t|)`. Every "has
+/// this output time been reached", "is this the output at `T*`" and "is this
+/// output or emitted-observation time inside the horizon" comparison adds
+/// this, so the code that enumerates the recording axis, the code that
+/// enumerates the observation-emit axis (`obs_schedule_times` in the CLI) and
+/// the code that emits along them cannot disagree at the boundary (gh#606).
+///
+/// It is relative because the rounding error of a time is: one ulp of `t` lies
+/// between `|t|·2^-53` and `|t|·2^-52`, so an absolute `1e-12` falls below one
+/// ulp above `2^13 = 8192`, and there a `T* − 2·eps` re-seat rounds back to
+/// `T*` (gh#964). `1e-12·|t|` is 4500 to 9000 ulps at every magnitude — far
+/// above the error of a time computed by a few roundings, far below any real
+/// spacing between outputs. The floor of 1 keeps the tolerance at `1e-12` for
+/// `|t| ≤ 1`.
+pub fn output_tol(t: f64) -> f64 {
+    OUTPUT_EPS * t.abs().max(1.0)
+}
 /// "An effect / observation time has been reached" / due: `next_effect <= t + EFFECT_EPS`.
 pub const EFFECT_EPS: f64 = 1e-10;
 /// Step FLOOR: a remaining gap this small means the integrator has ARRIVED at the
@@ -347,7 +367,7 @@ impl Schedule {
     /// PURE in `(self, cursor, t)` — does not mutate the cursor; the driver
     /// advances each per-kind cursor (`pass_output` / `pass_effect` / `pass_obs`)
     /// after consuming the corresponding reason. The reason set is built against
-    /// the SAME `OUTPUT_EPS` / `EFFECT_EPS` tolerances the `*_due_at` predicates
+    /// the SAME `output_tol` / `EFFECT_EPS` tolerances the `*_due_at` predicates
     /// use, so "is this kind a reason for the stop" agrees with "is this kind due
     /// at the landing."
     ///
@@ -355,7 +375,7 @@ impl Schedule {
     /// it in Step 3; here it is a correct, unit-tested primitive that the drivers
     /// can drop in where clean.
     pub fn next_stop(&self, cursor: &Cursor, t: f64) -> Option<TimelineStop> {
-        if t > self.t_end + OUTPUT_EPS {
+        if t > self.t_end + output_tol(self.t_end) {
             return None;
         }
         let next_out = self.next_output(cursor);
@@ -365,7 +385,7 @@ impl Schedule {
 
         let mut reasons: SmallVec<[StopReason; 4]> = SmallVec::new();
         // Canonical reason order: Output, ScheduledEffect, Observation, End.
-        if next_out <= stop_t + OUTPUT_EPS {
+        if next_out <= stop_t + output_tol(stop_t) {
             reasons.push(StopReason::Output);
         }
         if next_eff <= stop_t + EFFECT_EPS {
@@ -374,7 +394,7 @@ impl Schedule {
         if next_obs <= stop_t + EFFECT_EPS {
             reasons.push(StopReason::Observation);
         }
-        if stop_t >= self.t_end - OUTPUT_EPS {
+        if stop_t >= self.t_end - output_tol(self.t_end) {
             reasons.push(StopReason::End);
         }
         Some(TimelineStop { t: stop_t, reasons })
@@ -402,9 +422,9 @@ impl Schedule {
         }
     }
 
-    /// Whether an output is due at `t` for `cursor` (the `<= t + OUTPUT_EPS` test).
+    /// Whether an output is due at `t` for `cursor` (the `<= t + output_tol(t)` test).
     pub fn output_due_at(&self, cursor: &Cursor, t: f64) -> bool {
-        self.next_output(cursor) <= t + OUTPUT_EPS
+        self.next_output(cursor) <= t + output_tol(t)
     }
 
     /// Whether an effect is due at `t` for `cursor` (the `<= t + EFFECT_EPS` test).
@@ -525,7 +545,7 @@ impl Schedule {
     /// flush (≡ the old `while let Some(ot) = output_time(cursor)`).
     pub fn drain_outputs(&self, cursor: &mut Cursor, until: f64, mut record: impl FnMut(f64)) {
         while let Some(ot) = self.output_time(cursor) {
-            if ot > until + OUTPUT_EPS {
+            if ot > until + output_tol(until) {
                 break;
             }
             record(ot);
@@ -702,6 +722,68 @@ mod tests {
     }
     fn snap(dt: f64, t_end: f64, out: Vec<f64>, eff: Vec<f64>) -> Schedule {
         Schedule::new(dt, t_end, dt, StepPolicy::Snap, out, eff)
+    }
+
+    /// gh#964: at every magnitude the tolerance spans many ulps of `t`, so a
+    /// time that is one or two roundings away from an output time still matches
+    /// it. An absolute 1e-12 is below one ulp above 2^13.
+    #[test]
+    fn output_tol_exceeds_an_ulp_at_every_magnitude() {
+        for t in [0.0, 1.0, 8191.0, 8192.0, 8196.0, 2f64.powi(20), 2f64.powi(30), -8196.0] {
+            let ulp = f64::from_bits(t.abs().max(1.0).to_bits() + 1) - t.abs().max(1.0);
+            assert!(output_tol(t) >= 1000.0 * ulp, "t={t}: tol {} vs ulp {ulp}", output_tol(t));
+        }
+        assert_eq!(output_tol(0.5), 1e-12, "floored at 1e-12 for |t| <= 1");
+        let t_star = std::hint::black_box(8196.0_f64);
+        assert_eq!(t_star - 2.0 * 1e-12 + 1e-12, t_star,
+            "precondition: the absolute re-seat rounds back to T* above 2^13");
+    }
+
+    /// gh#964: the start-from-state re-seat (drain to `T* − 2·output_tol(T*)`,
+    /// then require the output at T* to be due) accepts an on-grid T* at 2^13,
+    /// 2^20 and 2^30, and rejects a T* a quarter-step off the grid at each.
+    /// This is the composition `chain_binomial` performs on resume.
+    #[test]
+    fn resume_reseat_accepts_on_grid_and_rejects_off_grid_at_large_t() {
+        for base in [2f64.powi(13), 2f64.powi(20), 2f64.powi(30)] {
+            // A weekly grid from below `base`, enumerated by accumulation as
+            // `output::output_times` does.
+            let mut out = Vec::new();
+            let mut t = base - 28.0;
+            while t <= base + 28.0 {
+                out.push(t);
+                t += 7.0;
+            }
+            let s = snap(0.25, base + 28.0, out, vec![]);
+            let reseat = |t_star: f64| {
+                let mut cur = Cursor::default();
+                s.drain_outputs(&mut cur, t_star - 2.0 * output_tol(t_star), |_| {});
+                s.output_due_at(&cur, t_star)
+            };
+            assert!(reseat(base), "T* = {base} is on the grid and must be accepted");
+            assert!(reseat(base + 7.0), "T* = {} is on the grid", base + 7.0);
+            assert!(!reseat(base + 0.25), "T* = {} is off the grid", base + 0.25);
+            assert!(!reseat(base - 0.25), "T* = {} is off the grid", base - 0.25);
+        }
+    }
+
+    /// gh#606: the recording axis (`output::output_times`) and the observation
+    /// axis (`obs_schedule_times` in the CLI) confine to the horizon with the
+    /// same `t <= t_end + output_tol(t_end)` test. A step of 0.1 accumulated
+    /// 7418 times lands at 741.8 + 1.0e-10: the old recording-axis bound
+    /// (`t_end + step·1e-9`) dropped that terminal point while the old
+    /// observation-axis bound (`t_end + 1e-9`) kept it, so an observation at
+    /// t_end had no recorded row.
+    #[test]
+    fn output_axis_keeps_an_accumulated_terminal_point() {
+        let sched = ir::model::OutputSchedule::Regular(ir::model::RegularOutputSchedule {
+            start: 0.0,
+            step: 0.1,
+        });
+        let times = crate::output::output_times(&sched, 741.8);
+        assert_eq!(times.len(), 7419, "0, 0.1, ..., 741.8");
+        let last = *times.last().unwrap();
+        assert!(last - 741.8 > 1e-10, "precondition: drift past 1e-10, got {last}");
     }
 
     /// Walk the whole schedule into a sequence of substep sizes (bit-exact),
