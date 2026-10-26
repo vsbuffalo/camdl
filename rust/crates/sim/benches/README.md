@@ -24,7 +24,7 @@ P=44,A=21,coupling=on,grad=full anchor (≈ the Kano model), and samples
 `simulate` → `docs/dev/notes/assets/scaling/flamegraph_real.svg`. For
 interactive: `samply record -- rust/target/profiling/camdl simulate <ir> …`.
 
-## PMMH profiling (planned — `make profile-pmmh` to add)
+## PMMH profiling (planned)
 
 Goal: find where a PMMH step spends time on large models. PMMH is the cost Fix B
 did **not** touch — it shrank the IR (parse/load/one-shot simulate), but the
@@ -40,19 +40,17 @@ Key facts that shape the harness:
   state` —
   tiny even at Kano scale. So profiling PMMH at large P is **safe**, unlike
   full-grad simulate benchmarking.
-- **Invocation** (template: `crates/cli/tests/profile_pmmh.rs`):
-  `camdl profile --algorithm pmmh --pmmh-steps N --pmmh-particles M --pmmh-rho ρ
-  <model.ir.json> --data <synth.tsv>`
-  (set `CAMDL_SKIP_VERSION_CHECK=1`).
-- **Synthetic data**: simulate the generated model once, extract weekly cases as
-  `--data` (the `synth_weekly_cases_tsv` pattern in that test).
+- **Invocation**: `camdl fit run <fit.toml>` with `[method] algorithm = "pmmh"`,
+  bounded `particles` and `iterations` (set `CAMDL_SKIP_VERSION_CHECK=1`).
+- **Synthetic data**: simulate the generated model once and bind its weekly
+  cases as the fit's observation data.
 
 Pipeline for the target:
 
 1. `scripts/gen_scaling_models.py -P{8,16,32,44} -A{1,7} --coupling on --grad minimal`
 2. compile once (Fix-B compiler, minimal grad → small IR)
 3. simulate once → synthetic `--data`
-4. `camdl profile --algorithm pmmh` under `samply`, bounded steps/particles
+4. `camdl fit run` (PMMH) under `samply`, bounded iterations/particles
 5. flamegraph + per-stage wall breakdown across the P/A sweep
 
 What to attribute: a step ≈
@@ -65,7 +63,7 @@ the memory-guardrail RFC.
 
 ### Results
 
-_(none yet — fill in once `make profile-pmmh` runs.)_
+_(none yet.)_
 
 ## See also
 

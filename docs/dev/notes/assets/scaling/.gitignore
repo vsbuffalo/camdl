@@ -1,4 +1,4 @@
-# Large, regenerable profiling artifacts — flamegraphs from `make flamegraph-real`
-# / `make profile-pmmh`. Too big (~4–8 MB) and they go stale, so regenerate on
+# Large, regenerable profiling artifacts — flamegraphs from `make flamegraph-real`.
+# Too big (~4–8 MB) and they go stale, so regenerate on
 # demand rather than tracking. The committed figures are the PNGs.
 flamegraph_*.svg

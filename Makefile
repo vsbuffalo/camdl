@@ -459,7 +459,7 @@ sim: build-rust
 # See docs/dev/notes/2026-05-29-foi-scaling-bench.md. The toy model generator
 # is scripts/gen_scaling_models.py; macro sweep scripts/bench_scaling.py.
 
-.PHONY: bench-scaling bench-compile bench-micro bench-micro-fixtures flamegraph-real flamegraph-bench profile-pmmh
+.PHONY: bench-scaling bench-compile bench-micro bench-micro-fixtures flamegraph-real flamegraph-bench
 
 CAMDLC_ABS := $(abspath $(CAMDLC))
 GEN        := scripts/gen_scaling_models.py
@@ -530,38 +530,6 @@ flamegraph-real: build-ocaml
 flamegraph-bench: bench-micro-fixtures
 	cd rust && cargo build --profile profiling -p sim --bench scaling
 	@echo "run: samply record -- rust/target/profiling/deps/scaling-* --bench --profile-time 10 eval_propensities"
-
-# Flamegraph PMMH inference steps. `--observe` makes the generated spatial model
-# fittable (a weekly_cases stream over prevalence(I)); we synthesize data, then
-# sample a PMMH run → static inferno SVG. PMMH is particle-filter-based (uses
-# `rate` only, no rate_grad path); `--grad full` only supplies free FOI params
-# for PMMH to estimate. Memory-safe at moderate P — small IR, PF state is just
-# N_particles × compartments — so unlike `flamegraph-real` (P=44,A=21 full grad,
-# the ~15 GB OOM anchor) this stays small. Tune: PMMH_P/PMMH_A/PMMH_STEPS/PMMH_PARTICLES.
-PMMH_P ?= 16
-PMMH_A ?= 7
-PMMH_STEPS ?= 100
-PMMH_PARTICLES ?= 200
-FG_PMMH_SVG := docs/dev/notes/assets/scaling/flamegraph_pmmh.svg
-profile-pmmh: build-ocaml
-	cd rust && cargo build --profile profiling -p cli --bin camdl
-	python3 $(GEN) -P $(PMMH_P) -A $(PMMH_A) --coupling on --grad full --observe -o /tmp/pmmh_anchor.camdl
-	CAMDL_SKIP_VERSION_CHECK=1 CAMDLC="$(CAMDLC_ABS)" $(PROFILE_CAMDL) \
-	  compile /tmp/pmmh_anchor.camdl --no-dim-check -o /tmp/pmmh_anchor.ir.json
-	CAMDL_SKIP_VERSION_CHECK=1 $(PROFILE_CAMDL) simulate /tmp/pmmh_anchor.ir.json \
-	  --backend chain_binomial --dt 1 --seed 42 --scenario baseline --obs-dir /tmp/pmmh_obs >/dev/null
-	@echo "sampling PMMH (~15s); P=$(PMMH_P) A=$(PMMH_A) particles=$(PMMH_PARTICLES) steps=$(PMMH_STEPS)..."
-	@TMPDIR=/tmp CAMDL_OUTPUT_DIR=/tmp/pmmh_prof_out CAMDL_SKIP_VERSION_CHECK=1 $(PROFILE_CAMDL) \
-	   profile /tmp/pmmh_anchor.ir.json --scenario baseline \
-	   --data /tmp/pmmh_obs/weekly_cases.tsv --obs weekly_cases --flow infection \
-	   --sweep 'R0=lin(14,16,2)' --particles $(PMMH_PARTICLES) \
-	   --algorithm pmmh --pmmh-steps $(PMMH_STEPS) --pmmh-particles $(PMMH_PARTICLES) --pmmh-rho 0.99 \
-	   --starts 1 --rw-sd auto --fixed sigma=0.125 --fixed kappa=0.05 --fixed amplitude=0.25 --fixed iota=1e-7 \
-	   --output /tmp/pmmh_prof.tsv --seed 1 >/tmp/pmmh_prof.log 2>&1 & \
-	 PID=$$!; sample $$PID 15 -file /tmp/pmmh_sample.txt >/dev/null 2>&1; wait $$PID
-	inferno-collapse-sample /tmp/pmmh_sample.txt | \
-	  inferno-flamegraph --title "camdl PMMH step (P=$(PMMH_P),A=$(PMMH_A),coupling on)" > $(FG_PMMH_SVG)
-	@echo "wrote $(FG_PMMH_SVG)"
 
 # ── Tree-sitter / Neovim ──────────────────────────────────────────────────────
 
