@@ -1,0 +1,45 @@
+# Corner case: A RUN WHOSE t_start IS NOT A MULTIPLE OF dt (§2, §5).
+#
+# The run steps on its own grid t_start + k*dt = 0.5, 1.5, 2.5, ... (dt = 1).
+# An event at 1 and an intervention at 2.4 lie off that grid. Chain-binomial
+# fires each on the step nearest it, k = floor((t - 0.5)/1 + 1/2): the event at
+# 1.5 (k = 1) and the intervention at 2.5 (k = 2). The ODE and Gillespie fire
+# them at 1 and 2.4. Every output row (0.5, 1.5, ..., 4.5) is at or after both
+# backends' instants, so with a zero rate all three agree on every row.
+# Times on the offset grid itself (1.5, 2.5) would not test the key: there the
+# old absolute key round(t/dt) and the relative key agree.
+#
+# Hand computation:
+#   t=0.5                      A = 0
+#   t=1.5  arrive add(A, 1):   A = 1
+#   t=2.5  boost  add(A, 10):  A = 11
+#   t=3.5, 4.5                 A = 11
+time_unit = 'days
+
+compartments { A, B }
+
+parameters {
+  k : rate in [0.0, 1.0]
+}
+
+transitions {
+  drain : A --> B  @ k * A
+}
+
+events {
+  arrive : add(A, 1) at [1]
+}
+
+interventions {
+  boost : add(A, 10) at [2.4]
+}
+
+init {
+  A = 0
+  B = 0
+}
+
+simulate {
+  from = 0.5 'days
+  to   = 4.5 'days
+}

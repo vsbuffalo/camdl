@@ -1,0 +1,43 @@
+# Corner case: AN INFLOW AND A DRAINING EVENT AT t_start (D4).
+#
+# At the origin the events apply in two phases, as at every effect instant on
+# every backend: inflow events (`add`) read the starting state; draining events
+# (`transfer`) and `set` read the state the inflows leave. So the cull moves
+# half of the seeded I, and declaration order does not matter.
+#
+# The transition rate is identically zero, so every backend must agree on
+# every row.
+#
+# Hand computation:
+#   init:                                       I = 0,   R = 0
+#   t=0  seed add(I, 10):                       I = 10,  R = 0
+#        cull transfer 0.5*I, I -> R:           floor(10 * 0.5) = 5
+#                                               I = 5,   R = 5   <- the t = 0 row
+#   t=1 .. t=3                                  I = 5,   R = 5
+# The pre-inflow reading would leave I = 10, R = 0.
+time_unit = 'days
+
+compartments { I, R }
+
+parameters {
+  k : rate in [0.0, 1.0]
+}
+
+transitions {
+  recover : I --> R  @ k * I
+}
+
+events {
+  cull : transfer(fraction = 0.5, from = I, to = R) at [0]
+  seed : add(I, 10) at [0]
+}
+
+init {
+  I = 0
+  R = 0
+}
+
+simulate {
+  from = 0 'days
+  to   = 3 'days
+}

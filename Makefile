@@ -297,6 +297,10 @@ update-corner-golden: build-ocaml
 	@$(CAMDLC) $(CORNER_DIR)/multi_effect_same_time.camdl      --set k=0.0 -o $(CORNER_DIR)/ir/multi_effect_same_time.ir.json
 	@$(CAMDLC) $(CORNER_DIR)/event_drain_fusion.camdl          --set k=0.3 --set f=0.2 -o $(CORNER_DIR)/ir/event_drain_fusion.ir.json
 	@$(CAMDLC) $(CORNER_DIR)/dt_rate.camdl                     --set beta=1.0 --set gamma=0.2 --set tau=1.0 -o $(CORNER_DIR)/ir/dt_rate.ir.json
+	@$(CAMDLC) $(CORNER_DIR)/origin_effects.camdl              --set k=0.0 --set keep=0.5 -o $(CORNER_DIR)/ir/origin_effects.ir.json
+	@$(CAMDLC) $(CORNER_DIR)/recurring_default_from.camdl      --set k=0.0 -o $(CORNER_DIR)/ir/recurring_default_from.ir.json
+	@$(CAMDLC) $(CORNER_DIR)/offset_origin.camdl               --set k=0.0 -o $(CORNER_DIR)/ir/offset_origin.ir.json
+	@$(CAMDLC) $(CORNER_DIR)/inflow_drain_origin.camdl         --set k=0.0 -o $(CORNER_DIR)/ir/inflow_drain_origin.ir.json
 
 # Recompile the gradient regression fixtures → tests/fixtures/gradient/ir/*.ir.json.
 # These exercise the compiler-emitted rate_grad on hard cases (a lagged forcing
