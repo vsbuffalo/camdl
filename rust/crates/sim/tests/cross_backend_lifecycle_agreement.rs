@@ -970,43 +970,56 @@ fn two_sets_on_one_compartment_at_one_instant_are_refused() {
     );
 }
 
-/// A drain-and-`set` phase that leaves a compartment negative is an error on
-/// every backend, never a clamped 0. From X = 10, two drains of 0.6
-/// (10 − 6 − 6 = −2).
-/// Gillespie and the ODE report `InterventionNegative`; chain-binomial reports
-/// its post-draw scan's `BinomialOvershoot` (a known mislabel, left as is).
+/// A drain-and-`set` phase that leaves an integer compartment negative is an
+/// error on every backend, never a clamped 0, and every backend reports it as
+/// `InterventionNegative`: a configuration error, not a per-particle overshoot.
+/// From X = 10, `set X = -1`. Chain-binomial used to label it
+/// `BinomialOvershoot` from its post-draw scan, which inference treats as a
+/// recoverable per-particle failure and turns into a silent −∞ weight.
 #[test]
 fn drain_and_set_phase_going_negative_is_an_error_on_every_backend() {
     use sim::error::{NegativeCountCause, SimError};
-    let cases = [
-        ("two_drains_overdraw", vec![drain_event("cull_a", 0.6), drain_event("cull_b", 0.6)]),
-    ];
-    let mut failures = Vec::new();
-    for (case, events) in cases {
-        let results = coincident_results(case, ("X", 10.0), ("Y", 0.0), events);
-        let wrong: Vec<String> = results
-            .iter()
-            .filter_map(|(label, res)| {
-                let ok = match res {
-                    Err(SimError::NegativeCount { compartment, cause, .. }) => {
-                        compartment == "X"
-                            && (label.starts_with("chain_binomial")
-                                || *cause == NegativeCountCause::InterventionNegative)
-                    }
-                    _ => false,
-                };
-                (!ok).then(|| format!("  {label}: {res:?}"))
-            })
-            .collect();
-        if !wrong.is_empty() {
-            failures.push(format!("{case}:\n{}", wrong.join("\n")));
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "X must be refused as negative on every backend, not clamped:\n{}",
-        failures.join("\n")
+    let results = coincident_results(
+        "negative_set",
+        ("X", 10.0),
+        ("Y", 0.0),
+        vec![set_event("reset", "X", -1.0)],
     );
+    let wrong: Vec<String> = results
+        .iter()
+        .filter_map(|(label, res)| {
+            let ok = matches!(
+                res,
+                Err(SimError::NegativeCount { compartment, cause: NegativeCountCause::InterventionNegative, .. })
+                    if compartment == "X"
+            );
+            (!ok).then(|| format!("  {label}: {res:?}"))
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "X must be refused as InterventionNegative on every backend, not clamped:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Every `(backend, order)` result must be an error whose message contains all
+/// of `needles`; returns the cells that are not, for one failure listing.
+fn refused_with(
+    results: &[(String, Result<(i64, i64), sim::error::SimError>)],
+    needles: &[&str],
+) -> Vec<String> {
+    results
+        .iter()
+        .filter_map(|(label, res)| match res {
+            Err(e) => {
+                let msg = e.to_string();
+                let missing: Vec<&&str> = needles.iter().filter(|n| !msg.contains(**n)).collect();
+                (!missing.is_empty()).then(|| format!("  {label}: missing {missing:?} in: {msg}"))
+            }
+            Ok(got) => Some(format!("  {label}: ran and gave {got:?}")),
+        })
+        .collect()
 }
 
 fn count_drain_event(name: &str, count: f64) -> Intervention {
@@ -1021,35 +1034,82 @@ fn count_drain_event(name: &str, count: f64) -> Intervention {
     )
 }
 
-/// An overdraw by half a person at X = 1e9 is still an overdraw. Two count
-/// transfers of 6e8 and 4e8 + 0.5 from X = 1e9 take 1000000000.5 (the integer
-/// path rounds the second to 400000001 and goes to −1). Every backend must
-/// refuse; a slack proportional to |X| alone would let the ODE print X = 0,
-/// Y = 1000000001 and grow the population by one.
+/// Two count drains from one compartment at one instant are refused on every
+/// backend, in either declaration order, whatever the compartment holds: from
+/// X = 10 two transfers of 6 would leave −2, and from X = 1e9 a pair taking
+/// 1000000000.5 would overdraw by half a person; from X = 100 two transfers of
+/// 6 fit, and are refused all the same, because the refusal depends only on
+/// which events are due, never on the state (so every particle of a filter
+/// meets it identically).
 #[test]
-fn overdraw_by_half_a_person_at_1e9_is_refused_on_every_backend() {
-    use sim::error::{NegativeCountCause, SimError};
+fn two_count_drains_from_one_compartment_are_refused_on_every_backend() {
+    let mut failures = Vec::new();
+    for (x0, a, b) in [(10.0, 6.0, 6.0), (1e9, 6e8, 4e8 + 0.5), (100.0, 6.0, 6.0)] {
+        let results = coincident_results(
+            "two_count_drains",
+            ("X", x0),
+            ("Y", 0.0),
+            vec![count_drain_event("cull_a", a), count_drain_event("cull_b", b)],
+        );
+        let wrong = refused_with(
+            &results,
+            &["more than one `transfer` from compartment 'X'", "'cull_a'", "'cull_b'", "t=3"],
+        );
+        if !wrong.is_empty() {
+            failures.push(format!("X = {x0}, counts {a} and {b}:\n{}", wrong.join("\n")));
+        }
+    }
+    assert!(failures.is_empty(), "two count drains must be refused:\n{}", failures.join("\n"));
+}
+
+/// A count drain beside a fraction drain from one compartment is refused on
+/// every backend, in either order: the fraction's share and the count are both
+/// taken from the same state, so together they can ask for more than is there.
+#[test]
+fn a_count_drain_beside_a_fraction_drain_is_refused_on_every_backend() {
     let results = coincident_results(
-        "gh985_overdraw_1e9",
-        ("X", 1e9),
+        "count_beside_fraction",
+        ("X", 100.0),
         ("Y", 0.0),
-        vec![count_drain_event("cull_a", 6e8), count_drain_event("cull_b", 4e8 + 0.5)],
+        vec![drain_event("cull_share", 0.5), count_drain_event("cull_count", 8.0)],
     );
-    let wrong: Vec<String> = results
-        .iter()
-        .filter_map(|(label, res)| {
-            let ok = match res {
-                Err(SimError::NegativeCount { compartment, cause, .. }) => {
-                    compartment == "X"
-                        && (label.starts_with("chain_binomial")
-                            || *cause == NegativeCountCause::InterventionNegative)
-                }
-                _ => false,
-            };
-            (!ok).then(|| format!("  {label}: {res:?}"))
-        })
-        .collect();
-    assert!(wrong.is_empty(), "X must be refused as negative on every backend:\n{}", wrong.join("\n"));
+    let wrong = refused_with(
+        &results,
+        &["more than one `transfer` from compartment 'X'", "'cull_share'", "'cull_count'", "t=3"],
+    );
+    assert!(wrong.is_empty(), "count beside fraction must be refused:\n{}", wrong.join("\n"));
+}
+
+/// Fraction drains from one compartment whose fractions sum above 1 are
+/// refused on every backend, in either order: from X = 10, 0.6 + 0.6 would
+/// move 6 + 6 and leave −2.
+#[test]
+fn fraction_drains_summing_above_one_are_refused_on_every_backend() {
+    let results = coincident_results(
+        "fractions_above_one",
+        ("X", 10.0),
+        ("Y", 0.0),
+        vec![drain_event("cull_a", 0.6), drain_event("cull_b", 0.6)],
+    );
+    let wrong = refused_with(
+        &results,
+        &["`transfer` fractions from compartment 'X' sum to 1.2", "'cull_a'", "'cull_b'", "t=3"],
+    );
+    assert!(wrong.is_empty(), "fractions summing to 1.2 must be refused:\n{}", wrong.join("\n"));
+}
+
+/// Fraction drains summing to at most 1 cannot overdraw and still run: from
+/// X = 10, 0.3 + 0.2 move floor(3) + floor(2) = 5, giving X = 5, Y = 5 on every
+/// backend and in either order.
+#[test]
+fn fraction_drains_summing_to_at_most_one_still_run() {
+    let finals = coincident_finals(
+        "fractions_below_one",
+        ("X", 10.0),
+        ("Y", 0.0),
+        vec![drain_event("cull_a", 0.3), drain_event("cull_b", 0.2)],
+    );
+    assert_every_backend(&finals, (5, 5), "0.3 + 0.2 from X = 10 moves 3 + 2");
 }
 
 /// Drains that remove exactly the snapshot are not overdraws, though the f64
@@ -1168,5 +1228,31 @@ fn an_inflow_and_a_drain_at_t_start_give_the_post_inflow_split_on_every_backend(
         "inflow_drain_origin",
         ["I", "R"],
         &[(0.0, [5, 5]), (1.0, [5, 5]), (2.0, [5, 5]), (3.0, [5, 5])],
+    );
+}
+
+/// A negative left by the transition draws keeps its `BinomialOvershoot` label
+/// on chain-binomial; only effect-stage negatives became
+/// `InterventionNegative`. `pair : X + X --> Y @ 5·X` from X = 3 fires up to 3
+/// times (the draw is capped by X) but removes 2 per firing, so X goes
+/// negative in the transition stage, with no effect due.
+#[test]
+fn a_transition_overshoot_keeps_its_binomial_overshoot_label_on_chain_binomial() {
+    use sim::error::{NegativeCountCause, SimError};
+    let mut m = zero_rate_model("self_pair", ("X", 3.0), ("Y", 0.0), vec![]).model.as_ref().clone();
+    m.transitions[0].stoichiometry =
+        vec![StoichiometryEntry("X".into(), -2), StoichiometryEntry("Y".into(), 1)];
+    m.transitions[0].rate = Expr::bin_op(ir::expr::BinOp::Mul, Expr::const_(5.0), Expr::pop("X"));
+    let compiled = CompiledModel::new(m).expect("compile");
+    let (_, sim, cfg) = battery_backends(0.0, 5.0).into_iter().next().unwrap();
+    let res = sim.run(&compiled, &compiled.default_params.clone(), SEED, &cfg);
+    assert!(
+        matches!(
+            res,
+            Err(SimError::NegativeCount { cause: NegativeCountCause::BinomialOvershoot, ref compartment, .. })
+                if compartment == "X"
+        ),
+        "got {:?}",
+        res.map(|t| t.snapshots.len())
     );
 }

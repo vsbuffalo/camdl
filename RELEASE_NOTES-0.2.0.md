@@ -105,6 +105,25 @@ breaking changes are still expected before 1.0.
 
 These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
+- **Coincident event drains that could overdraw a compartment are refused.**
+  Among the `events {}` due at one instant, two or more `transfer`s from one
+  compartment are an error when at least one moves a `count`, and fraction-only
+  `transfer`s are an error when their fractions sum to more than
+  1. Two `transfer(count = 6, ...)` from `X = 10` used to leave `X = -2`; the
+     ODE reported that as an intervention error, but chain-binomial reported it
+     as a transition overshoot, which inference turns into a silent −∞ particle
+     weight, biasing the posterior toward trajectories where the drains never
+     collide. The count case is refused whatever the compartment holds, so it
+     fires the first time the events are due together, on every backend and
+     every particle. Migration: give the drains different times, or merge them
+     into one transfer. Fractions summing to at most 1 still run, unchanged.
+- **An event that leaves a compartment negative is `InterventionNegative` on
+  chain-binomial.** A `set` to a negative value (and before the refusal above,
+  an overdrawing pair of drains) was reported by chain-binomial as
+  `BinomialOvershoot`, so `pfilter`, PMMH, IF2 and PGAS gave the particle −∞
+  weight and carried on. It is now a configuration error that stops the run, as
+  on the ODE and Gillespie. A transition overshoot (`S + S --> D`) keeps the
+  `BinomialOvershoot` label. Migration: fix the `set` value.
 - **A scenario that disagrees with a fit.toml's `[fixed]` on a parameter is
   refused.** `fit run` on such a file used to run at the `[fixed]` value while
   its notice said the scenario's value had replaced it ("scenario fastrec

@@ -233,9 +233,13 @@ pub enum CollapseKind {
 /// of caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NegativeCountCause {
-    /// A chain-binomial split drew more exits than the source held
-    /// (rate·dt → 1). Transient during inference parameter exploration;
-    /// the inference layer catches it and kills the offending particle.
+    /// A transition stage left a compartment negative. Chain-binomial caps
+    /// each source's exits at its count, so this is reached only through a
+    /// transition that removes more than one member of its source per firing
+    /// (`S + S --> D`); Gillespie raises it for the same transition. Raised
+    /// from the transition stage only — a negative left by an effect is
+    /// `InterventionNegative`. The inference layer catches it and kills the
+    /// offending particle.
     BinomialOvershoot,
     /// An `add()` action resolved to a negative amount — caught eagerly
     /// at the action site (you cannot add a negative number of

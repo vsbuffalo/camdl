@@ -3848,8 +3848,24 @@ every backend, since the changes would add to a value neither event names
 (from `X = 10`, `{ X = 5 ... }` beside a half drain of `X` would give `X = 0`).
 Give them different times or merge them into one. An inflow `add` beside a
 `set` is fine — it acts in the earlier inflow stage, and the `set` then
-overwrites the result. A stage that leaves an integer compartment negative is
-also an error.
+overwrites the result.
+
+Draining `transfer`s from one compartment at the same instant are refused when
+they could take more than it holds, since each is capped only by that shared
+state and the model does not say who goes when there are not enough people for
+all of them: two `transfer(count = 6, from = X, ...)` from `X = 10` would
+leave `X = -2`. So among the events due at one instant it is an error, on
+every backend, to drain one compartment with two or more `transfer`s when at
+least one moves a `count` — whatever the compartment holds, so the error
+fires the first time the events are due together, identically on every run
+and every particle — or with `fraction`s that sum to more than 1. Fractions
+summing to at most 1 (`0.3` and `0.2`, say) never overdraw and are allowed. A
+fraction is evaluated at the instant, as the transfer evaluates it, so a sum
+above 1 that comes from the parameters is refused for every particle. Give the
+drains different times or merge them into one transfer. A single
+`transfer(count = n, ...)` moves at most what its source holds: from `X = 10`,
+`count = 50` moves 10. A stage that leaves an integer compartment negative
+(a `set` to a negative value, say) is also an error, on every backend.
 
 **At `t_start`.** The effects due at the start of the run (§13.2) apply to the
 `init {}` state in the same order, without a transition stage, on every

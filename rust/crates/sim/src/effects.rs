@@ -381,6 +381,21 @@ pub trait EventArena {
         dt: f64,
         phase: EventPhase,
     ) -> Result<(), SimError>;
+
+    /// Evaluate the amount expression of action `action_idx` of event `iv_idx`
+    /// against this arena's current state, exactly as [`Self::apply_phase`]
+    /// evaluates it. Read-only. Used by [`refuse_overdrawing_drains`] to read
+    /// the fractions of coincident drains before they are applied.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_amount(
+        &self,
+        model: &CompiledModel,
+        iv_idx: usize,
+        action_idx: usize,
+        params: &[f64],
+        t: f64,
+        dt: f64,
+    ) -> f64;
 }
 
 /// Refuse a `set` beside any other drain-and-`set` action on the same
@@ -444,6 +459,128 @@ fn refuse_coincident_sets(model: &CompiledModel, event_idx: &[usize], t: f64) ->
     Ok(())
 }
 
+/// One draining `transfer` among the events due at an instant: its source
+/// compartment, its event, where its amount expression lives, and whether it
+/// moves a count (`AbsoluteTransfer`) or a share (`FractionTransfer`).
+struct Drain<'m> {
+    src: &'m str,
+    event: &'m str,
+    iv_idx: usize,
+    action_idx: usize,
+    is_count: bool,
+}
+
+/// `'a', 'b'` — the distinct event names of `drains`, in declaration order.
+fn event_list(drains: &[&Drain<'_>]) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for d in drains {
+        if !names.contains(&d.event) {
+            names.push(d.event);
+        }
+    }
+    names.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ")
+}
+
+/// Refuse coincident drains that can take more than their source holds.
+///
+/// Within the drain-and-`set` phase every `transfer` reads the same state and
+/// the changes add, and each is capped only by that state on its own. Two
+/// transfers of 6 from X = 10 therefore leave X = −2: the model does not say
+/// which of them gets the people when there are not enough for both. Among the
+/// events due at one instant this refuses, on every backend:
+///
+///   - two or more drains from one compartment when at least one moves a count
+///     (`transfer(count = …)`) — refused whatever the compartment holds, so the
+///     refusal depends only on which events are due and fires identically on
+///     every run and every particle, the first time the pair is due;
+///   - fraction-only drains from one compartment whose fractions (each clamped
+///     to [0, 1], as the transfer clamps it) sum to more than 1. Fractions
+///     summing to at most 1 can never overdraw (each moves the floor of its
+///     share) and are not refused. A fraction is evaluated at fire time against
+///     the state the drain phase reads, exactly as the transfer evaluates it, so
+///     a sum above 1 that comes from the parameters alone is refused identically
+///     for every particle; a fraction that reads the state is checked against
+///     the value it takes on that particle.
+///
+/// The fraction sum is formed in ascending order (so the verdict does not
+/// depend on declaration order) and compared with 1 plus the rounding of that
+/// sum (`n · ε` for `n` fractions), so ten drains of 0.1 are not refused.
+///
+/// Drains into a compartment, and a single drain capped by its source, are not
+/// this function's concern; a `set` beside a `transfer` is refused by
+/// [`refuse_coincident_sets`].
+fn refuse_overdrawing_drains<A: EventArena>(
+    model: &CompiledModel,
+    event_idx: &[usize],
+    arena: &A,
+    params: &[f64],
+    t: f64,
+    dt: f64,
+) -> Result<(), SimError> {
+    let drain_actions = || {
+        event_idx.iter().flat_map(move |&iv_idx| {
+            let iv = &model.model.interventions[iv_idx];
+            iv.actions.iter().enumerate().filter_map(move |(action_idx, a)| {
+                let (src, is_count) = match a {
+                    Action::FractionTransfer(ft) => (ft.src.as_str(), false),
+                    Action::AbsoluteTransfer(at) => (at.src.as_str(), true),
+                    Action::Add(_) | Action::Set(_) => return None,
+                };
+                Some(Drain { src, event: iv.name.as_str(), iv_idx, action_idx, is_count })
+            })
+        })
+    };
+    // Fast path: fewer than two drains in the batch cannot collide, and finding
+    // that allocates nothing.
+    if drain_actions().nth(1).is_none() {
+        return Ok(());
+    }
+    let drains: Vec<Drain<'_>> = drain_actions().collect();
+    for (i, d) in drains.iter().enumerate() {
+        if drains[..i].iter().any(|e| e.src == d.src) {
+            continue; // reported with the compartment's first drain
+        }
+        let same: Vec<&Drain<'_>> = drains.iter().filter(|e| e.src == d.src).collect();
+        if same.len() < 2 {
+            continue;
+        }
+        let comp = d.src;
+        let both = if same.len() == 2 { "both" } else { "all of them" };
+        if same.iter().any(|e| e.is_count) {
+            return Err(SimError::Validation(format!(
+                "more than one `transfer` from compartment '{comp}' at t={t}: events {names} \
+                 each move people out of it at the same instant, and at least one moves a \
+                 fixed count, so the model does not say what happens when there are not \
+                 enough people for {both} — give them different times or merge them into \
+                 one transfer",
+                names = event_list(&same),
+            )));
+        }
+        let mut fracs: Vec<f64> = Vec::with_capacity(same.len());
+        for e in &same {
+            let iv = &model.model.interventions[e.iv_idx];
+            let v = arena.eval_amount(model, e.iv_idx, e.action_idx, params, t, dt);
+            let v = crate::intervention::finite_action_value(v, &iv.name, &iv.actions[e.action_idx], t)?;
+            fracs.push(v.clamp(0.0, 1.0));
+        }
+        let shown = fracs.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(" + ");
+        let mut sorted = fracs.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let sum: f64 = sorted.iter().sum();
+        if sum > 1.0 + (sorted.len() as f64) * f64::EPSILON {
+            return Err(SimError::Validation(format!(
+                "`transfer` fractions from compartment '{comp}' sum to {sum} ({shown}) at \
+                 t={t}: events {names} each move a share of it at the same instant, and \
+                 together they ask for more than it holds, so the model does not say what \
+                 happens when there are not enough people for {both} — give them different \
+                 times or merge them into one transfer",
+                names = event_list(&same),
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The integer arena: chain-binomial's and Gillespie's state. Each phase
 /// resolves into `deltas` (caller-owned scratch, cleared per phase, so the hot
 /// path allocates nothing) and applies them with [`apply_effects`].
@@ -467,6 +604,23 @@ impl EventArena for DiscreteArena<'_> {
         resolve_event_batch(model, event_idx, self.int, self.real, params, t, dt, phase, self.deltas)?;
         apply_effects(self.deltas, StateMut { int: self.int, real: self.real });
         Ok(())
+    }
+
+    fn eval_amount(
+        &self,
+        model: &CompiledModel,
+        iv_idx: usize,
+        action_idx: usize,
+        params: &[f64],
+        t: f64,
+        dt: f64,
+    ) -> f64 {
+        // The context `resolve_one` builds for the same action and state.
+        let ctx = EvalCtx {
+            model, int_s: self.int, real_s: self.real, params, t, dt,
+            projected: None, aux: None, int_float_override: None, per_eval: None,
+        };
+        eval_resolved(&model.resolved.intervention_exprs[iv_idx][action_idx], &ctx)
     }
 }
 
@@ -509,6 +663,7 @@ pub fn apply_event_phases<A: EventArena>(
         advance(arena)?;
     }
     if !event_idx.is_empty() {
+        refuse_overdrawing_drains(model, event_idx, arena, params, t, dt)?;
         arena.apply_phase(model, event_idx, params, t, dt, EventPhase::Residual)?;
     }
     Ok(())
@@ -840,6 +995,18 @@ impl EventArena for ContinuousArena<'_> {
             }
         }
         Ok(())
+    }
+
+    fn eval_amount(
+        &self,
+        model: &CompiledModel,
+        iv_idx: usize,
+        action_idx: usize,
+        params: &[f64],
+        t: f64,
+        dt: f64,
+    ) -> f64 {
+        eval_amount_f64(model, iv_idx, action_idx, self.int, self.real, params, t, dt)
     }
 }
 
@@ -1180,6 +1347,26 @@ mod tests {
             let e = apply_event_phases(&m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None).unwrap_err();
             assert!(e.to_string().contains("a `set` and a `transfer` on compartment 'S'"), "{e}");
         }
+    }
+
+    #[test]
+    fn a_parameter_fraction_summing_above_one_is_refused_on_both_arenas() {
+        // `fraction = p` with p = 1 beside a 0.5 drain of S: the sum (1.5) is
+        // known only once p is evaluated at fire time, and is refused on the
+        // integer and the continuous arena alike.
+        let frac = |f: Expr| Action::FractionTransfer(FractionTransfer { src: "S".into(), dst: "I".into(), fraction: f });
+        let m = model_with(vec![frac(Expr::param("p")), frac(Expr::const_(0.5))]);
+        let want = "`transfer` fractions from compartment 'S' sum to 1.5 (1 + 0.5) at t=1";
+        let (mut int_s, mut real_s) = states();
+        let mut deltas = EffectDeltas::default();
+        let mut arena = DiscreteArena { int: &mut int_s, real: &mut real_s, deltas: &mut deltas };
+        let e = apply_event_phases(&m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None).unwrap_err();
+        assert!(e.to_string().contains(want), "{e}");
+        let mut iv = vec![100.0, 0.0];
+        let mut rv = vec![50.0];
+        let mut arena = ContinuousArena { int: &mut iv, real: &mut rv };
+        let e = apply_event_phases(&m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None).unwrap_err();
+        assert!(e.to_string().contains(want), "{e}");
     }
 
     #[test]
@@ -1666,17 +1853,19 @@ mod tests {
             dst: "W2".into(),
             fraction: Expr::const_(0.11),
         });
-        let count = Action::AbsoluteTransfer(AbsoluteTransfer {
+        // A third fraction, not a count: a count beside another drain of W1 is
+        // refused (`refuse_overdrawing_drains`).
+        let frac3 = Action::FractionTransfer(FractionTransfer {
             src: "W1".into(),
             dst: "W2".into(),
-            count: Expr::const_(0.13),
+            fraction: Expr::const_(0.13),
         });
-        let fwd = real_phase(vec![frac2.clone(), frac.clone(), count.clone()]).unwrap();
-        let rev = real_phase(vec![count, frac, frac2]).unwrap();
+        let fwd = real_phase(vec![frac2.clone(), frac.clone(), frac3.clone()]).unwrap();
+        let rev = real_phase(vec![frac3, frac, frac2]).unwrap();
         let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         assert_eq!(bits(&fwd), bits(&rev), "forward {fwd:?} vs reversed {rev:?}");
         let base = 10.0_f64 / 3.0;
-        let mut d = [-(base * 0.21), -(base * 0.11), -0.13];
+        let mut d = [-(base * 0.21), -(base * 0.11), -(base * 0.13)];
         d.sort_by(|a, b| a.total_cmp(b));
         assert_eq!(fwd[0].to_bits(), d.iter().fold(base, |acc, &x| acc + x).to_bits());
     }
