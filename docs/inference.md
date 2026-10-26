@@ -671,6 +671,8 @@ model-declared parameters: list them under `[estimate]` in the `fit.toml` like
 any other parameter, and the fit estimates them. The filter jitters their
 initial values once when particles initialize, then holds them fixed as it runs
 forward — whereas a parameter like R₀ is perturbed at every observation time.
+The flag is IF2's schedule, so only an `if2` config accepts it; any other method
+refuses the config at load rather than run without it.
 
 Under IF2 that single t=0 jitter is the _only_ channel through which the data
 can inform an initial-condition parameter, so each particle then builds its own
@@ -1109,7 +1111,7 @@ attached a Binomial density to whatever compartment the parameter moved, so two
 chains of one fit could disagree about whether the term existed at all. Both the
 detector and that density were removed (gh#719). The `perturb_only_at_t0` flag
 is a separate thing — an IF2 perturbation schedule, refused at config load under
-PGAS.
+every other method.
 
 #### Why a deterministic initial condition identifies its parameter poorly
 

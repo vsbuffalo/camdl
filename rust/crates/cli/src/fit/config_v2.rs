@@ -608,11 +608,13 @@ pub struct EstimateSpecV2 {
     /// IF2 perturbation schedule for an initial-state parameter (`S0`, `I0`,
     /// …), whose effect on the trajectory is spent before the first step.
     /// IF2 is the only algorithm with a perturbation schedule, so declaring
-    /// this under any other algorithm is a config-load error.
+    /// this under any other algorithm is refused by [`FitConfig::validate`].
     #[serde(default)]
     pub perturb_only_at_t0: bool,
 
-    /// Per-parameter random walk SD for IF2. If omitted, auto-scaled from bounds.
+    /// Per-parameter random walk SD for IF2. If omitted, auto-scaled from
+    /// bounds. PMMH and MH also read it: five times it, on the transformed
+    /// scale, is their initial proposal SD (`fit/pmmh.rs::build_proposal_sd`).
     #[serde(default)]
     pub rw_sd: Option<f64>,
 
@@ -2400,11 +2402,25 @@ impl FitConfig {
             }
         }
 
-        // `perturb_only_at_t0` and `rw_sd` are IF2 schedule knobs living in
-        // the problem half. Under one method per file they are inert for a
-        // non-IF2 method and the loader says nothing, so that a problem's IF2
-        // comparator file and its PGAS file differ only in `[method]` and share
-        // a fit-level hash (proposal §5; relocating them is a follow-up).
+        // `perturb_only_at_t0` is IF2's perturbation schedule, and IF2 is the
+        // only method that perturbs at all: under any other method the flag is
+        // read nowhere, so a fit declaring it would run without it and say
+        // nothing. Refused rather than ignored. (`rw_sd` is not refused: PMMH
+        // and MH read it as their initial proposal scale.)
+        if !matches!(algorithm, Algorithm::IF2 { .. }) {
+            let flagged: Vec<&str> = self.problem.estimate.iter()
+                .filter(|(_, spec)| spec.perturb_only_at_t0)
+                .map(|(name, _)| name.as_str())
+                .collect();
+            if !flagged.is_empty() {
+                return Err(format!(
+                    "[estimate]: `perturb_only_at_t0 = true` on {} — the flag is IF2's \
+                     perturbation schedule (perturb at t=0 only), and the `{}` method \
+                     does not perturb parameters, so it would be ignored. Remove the flag \
+                     for this method, or fit with `algorithm = \"if2\"`.",
+                    flagged.join(", "), algorithm.method_name()));
+            }
+        }
 
         // IF2 requires at least one iteration — zero iterations would leave
         // `iterations` empty and cause `last().unwrap()` to panic in
@@ -6486,12 +6502,11 @@ particles = 500
         }
     }
 
-    // ── perturb_only_at_t0 (proposal §8, item 12) ──────────────────────────
+    // ── perturb_only_at_t0 ─────────────────────────────────────────────────
     //
-    // The flag is an IF2 perturbation schedule declared in `[estimate]`, which
-    // is the problem half a family of method files shares. It stays there and
-    // is inert for every non-IF2 method: refusing a `pgas` file for a flag its
-    // sibling `if2` file reads would force an edit to the shared problem.
+    // The flag is IF2's perturbation schedule. Every other method perturbs
+    // nothing, so it would read the flag nowhere: such a config is refused at
+    // load rather than run without it.
 
     fn t0_fit(algorithm: &str, stage_body: &str, declare_flag: bool) -> String {
         let flag = if declare_flag { ", perturb_only_at_t0 = true" } else { "" };
@@ -6527,18 +6542,22 @@ algorithm = "{algorithm}"
             .expect("IF2 honours perturb_only_at_t0 — it is IF2's own schedule");
     }
 
-    /// Every other method accepts the flag and ignores it.
+    /// Every other method refuses the flag, naming the parameter and the
+    /// method, rather than running without it.
     #[test]
-    fn perturb_only_at_t0_is_inert_for_non_if2_methods() {
+    fn perturb_only_at_t0_is_refused_for_non_if2_methods() {
         for (algo, body) in [
             ("pgas", PGAS_BODY),
+            ("pmmh", "backend = \"chain_binomial\"\nchains = 2\nparticles = 100\n\
+                      iterations = 2000\nburn_in = 500\n"),
             ("mh", "backend = \"ode\"\nchains = 2\niterations = 2000\nburn_in = 500\n"),
             ("nl-sbplx", "backend = \"ode\"\nchains = 1\n"),
         ] {
-            parse(&t0_fit(algo, body, true)).unwrap()
+            let err = parse(&t0_fit(algo, body, true)).unwrap()
                 .validate(&ic_free_model_params(), InitLaw::Absent)
-                .unwrap_or_else(|e| panic!(
-                    "{algo} must accept a perturb_only_at_t0 declaration it does not read: {e}"));
+                .expect_err(&format!("{algo} must refuse a perturb_only_at_t0 it does not read"));
+            assert!(err.contains("perturb_only_at_t0") && err.contains("I0")
+                && err.contains(algo), "{algo}: {err}");
         }
     }
 
@@ -6549,6 +6568,8 @@ algorithm = "{algorithm}"
     fn a_config_without_the_flag_is_unaffected() {
         for (algo, body) in [
             ("pgas", PGAS_BODY),
+            ("pmmh", "backend = \"chain_binomial\"\nchains = 2\nparticles = 100\n\
+                      iterations = 2000\nburn_in = 500\n"),
             ("mh", "backend = \"ode\"\nchains = 2\niterations = 2000\nburn_in = 500\n"),
             ("nl-sbplx", "backend = \"ode\"\nchains = 1\n"),
         ] {

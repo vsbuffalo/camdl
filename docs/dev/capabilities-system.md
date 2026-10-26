@@ -219,27 +219,15 @@ same backend by another**. Representative confirmed cases:
   ir/VERSION 0.35 an initial condition may be drawn (`I ~ poisson(rate = I0)`),
   which makes x₀ a random variable the filter has to integrate over; every
   filter draws it per particle.
-- **`perturb_only_at_t0` requires the fit to have an `if2` stage**
-  (`methods.rs::validate_perturb_only_at_t0`, called once from
+- **`perturb_only_at_t0` is accepted only under `if2`** (checked in
   `FitConfigV2::validate`). The flag is an IF2 schedule — "perturb at t=0 only"
   — and IF2 is the only algorithm that perturbs at all, so under `pgas`, `pmmh`,
-  `mh` or the nlopt family it is parsed, hashed, and read nowhere. **This one is
-  checked against the whole fit, not per stage**, and it is the exception worth
-  remembering on this axis: `[estimate]` is global to the fit while the
-  algorithm is per stage, so the flag is a property of the fit. An if2-scout →
-  pgas-posterior pipeline is accepted (one stage reads it, the other ignores
-  it); a fit with no `if2` stage anywhere is refused, because there the
-  declaration genuinely does nothing. A `pfilter`-only fit is tolerated —
-  `pfilter` estimates nothing, so the flag is no more inert than the `rw_sd`
-  beside it.
-
-  Checking it per stage instead was a real regression, caught in review before
-  it shipped: it refused the ordinary scout-then-refine shape and left the user
-  only worse escapes — drop the flag, and the IF2 scout perturbs an
-  initial-value parameter at every observation, which is the thing the flag
-  exists to prevent. The general lesson for this axis: when a config key is
-  fit-scoped and the algorithm is stage-scoped, the check belongs at the fit
-  level.
+  `mh`, `pfilter` or the nlopt family it would be parsed, hashed, and read
+  nowhere. A config is one method, so the check is per file: a non-IF2 method
+  with a flagged `[estimate]` entry is refused at load, naming the parameters.
+  `rw_sd` is not refused: `pmmh` and `mh` read it as their initial proposal
+  scale. A scout-then-refine pair is two files, and only the `if2` one carries
+  the flag.
 
 Because there is no registry for this axis, the only way to know whether an
 algorithm accepts a model feature is to read the algorithm. That is the cost of
