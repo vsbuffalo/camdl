@@ -147,60 +147,6 @@ pub fn apply_effect_batch(
     Ok(!intervention_idx.is_empty())
 }
 
-/// Apply always_active event actions directly to `int_s` / `real_s`.
-///
-/// gh#67: ode/gillespie do not have a `pending_deltas` pipeline
-/// (only chain_binomial does, for atomic interleaving with multinomial
-/// draws). They call this helper at each intervention boundary instead of
-/// `inject_event_deltas`. `t_event` is the time the boundary was scheduled
-/// for; `dt` is the same dt used to build `fire_steps` so the step lookup
-/// matches.
-pub fn apply_events_at(
-    t_event: f64,
-    model: &CompiledModel,
-    fire_steps: &[std::collections::BTreeSet<i64>],
-    dt: f64,
-    int_s: &mut IntState,
-    real_s: &mut RealState,
-    params: &[f64],
-) -> Result<bool, SimError> {
-    if !t_event.is_finite() {
-        return Err(SimError::Validation(format!(
-            "apply_events_at: non-finite t = {}", t_event
-        )));
-    }
-    // Events resolve at the boundary `t_event`. `dt` here is the nominal grid the
-    // `fire_steps` were built on (gillespie's `iv_resolution_dt`); the realized
-    // substep coincides with it on this at-boundary event path, so it is both
-    // `dt_actual` and `grid_dt`. `due_effects` keys the firing on `dt` (grid),
-    // then `resolve_event_batch` resolves the events against the current state.
-    //
-    // gh#217: gillespie has no transition step AT a boundary, so the start-of-step
-    // snapshot, the post-transition residual, and the live state are one and the
-    // same `int_s`/`real_s`. Resolving both event phases against that single state
-    // keeps gillespie byte-identical to its pre-gh#217 behaviour (the co-drain fix
-    // is purely a chain_binomial concern — ODE/Gillespie already read live state).
-    let mut batch = crate::schedule::EffectBatch::default();
-    crate::effects::due_effects(model, fire_steps, t_event, dt, &mut batch);
-    let mut ev = crate::effects::EffectDeltas::default();
-    crate::effects::resolve_event_batch(
-        model, &batch.event_idx, int_s, real_s, params, t_event, dt,
-        crate::effects::EventPhase::Snapshot, &mut ev,
-    )?;
-    crate::effects::resolve_event_batch(
-        model, &batch.event_idx, int_s, real_s, params, t_event, dt,
-        crate::effects::EventPhase::Residual, &mut ev,
-    )?;
-    let fired = !ev.is_empty();
-    for d in &ev.int {
-        int_s.counts[d.idx] += d.delta;
-    }
-    for d in &ev.real {
-        real_s.values[d.idx] += d.delta;
-    }
-    Ok(fired)
-}
-
 /// Collect sorted, deduplicated intervention times.
 ///
 /// gh#69: takes `params` so any `AtTimesExpr` schedules can be resolved

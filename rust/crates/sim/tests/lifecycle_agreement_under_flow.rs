@@ -14,7 +14,7 @@
 //!
 //! Asserting V's exact integer value on each backend pins, in one test:
 //!   (1) always-active event wiring on ALL four backends (incl. gillespie's
-//!       distinct `apply_events_at` snapshot path),
+//!       boundary path through `effects::apply_event_phases`),
 //!   (2) scheduled-intervention wiring on all four (the shared `apply_post_advance`),
 //!   (3) the integer-`Set` happy path (snapshot-relative delta), and
 //!   (4) agreement-under-flow — V is identical across backends *while* S/I flow.

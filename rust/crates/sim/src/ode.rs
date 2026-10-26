@@ -1003,8 +1003,16 @@ pub fn run_ode(
             |st, bt| {
                 let mut batch = crate::schedule::EffectBatch::default();
                 crate::effects::due_effects(model, &fire_steps, bt, cfg.dt, &mut batch);
-                crate::effects::apply_boundary_batch_continuous(
-                    model, &batch, &mut st.int, &mut st.real, params, bt, cfg.dt,
+                // §13.10: inflow events, then drains and `set` on the
+                // post-inflow state (no transition stage at a boundary), then
+                // interventions in declaration order (gh#985).
+                crate::effects::apply_event_phases(
+                    model, &batch.event_idx,
+                    &mut crate::effects::ContinuousArena { int: &mut st.int, real: &mut st.real },
+                    params, bt, cfg.dt, None,
+                )?;
+                crate::effects::apply_interventions_continuous(
+                    model, &batch.intervention_idx, &mut st.int, &mut st.real, params, bt, cfg.dt,
                 )
             },
             |st, ot| {

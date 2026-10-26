@@ -4,7 +4,6 @@ use crate::{
     rng::StatefulRng,
     error::SimError,
     boundary_times::{EffectTimes, OutputTimes},
-    intervention::apply_events_at,
     lineage::{DemeId, TransitionId, TransitionObserver},
     ode_integrator::rk4_step,
     propensity::{eval_propensities, guard_propensity, EvalCtx},
@@ -222,9 +221,10 @@ pub fn run_gillespie_with_observer(
             let Some(stop) = schedule.next_stop(&cursor, t) else { break };
             t = stop.t;
             {
-                // Canonical lifecycle: always-active events fire FIRST (reading the
-                // start-of-step snapshot — gillespie has no transition step at a
-                // boundary), then interventions on the post-event state.
+                // Canonical lifecycle (§13.10): events FIRST — inflows from the
+                // pre-boundary state, then drains and `set` on the post-inflow
+                // state (gillespie has no transition step at a boundary) — then
+                // interventions on the post-event state.
                 let mut bs = GillespieBoundary {
                     int_s: &mut int_s,
                     real_s: &mut real_s,
@@ -236,9 +236,19 @@ pub fn run_gillespie_with_observer(
                     t,
                     &mut bs,
                     |bs, bt| {
-                        apply_events_at(bt, model, &fire_steps, iv_resolution_dt, bs.int_s, bs.real_s, params)?;
                         let mut batch = crate::schedule::EffectBatch::default();
                         crate::effects::due_effects(model, &fire_steps, bt, iv_resolution_dt, &mut batch);
+                        // §13.10 at a boundary: inflow events, then drains and
+                        // `set` on the post-inflow state (no transition stage
+                        // here), then interventions (gh#985).
+                        let mut deltas = crate::effects::EffectDeltas::default();
+                        crate::effects::apply_event_phases(
+                            model, &batch.event_idx,
+                            &mut crate::effects::DiscreteArena {
+                                int: bs.int_s, real: bs.real_s, deltas: &mut deltas,
+                            },
+                            params, bt, iv_resolution_dt, None,
+                        )?;
                         crate::lifecycle::apply_post_advance(
                             model, &batch.intervention_idx, bs.int_s, bs.real_s, params,
                             bt - iv_resolution_dt, iv_resolution_dt, None,
@@ -289,9 +299,10 @@ pub fn run_gillespie_with_observer(
 
             // `clip` and `next_stop` share the boundary min, and the cursor still
             // points at this boundary's unconsumed reasons, so `next_stop` reports
-            // them. Dispatch via the shared seam: events FIRST (start-of-step
-            // snapshot — gillespie has no transition step here), then interventions
-            // on the post-event state, then output.
+            // them. Dispatch via the shared seam: events FIRST (§13.10: inflows,
+            // then drains and `set` on the post-inflow state — gillespie has no
+            // transition step here), then interventions on the post-event state,
+            // then output.
             let stop = schedule.next_stop(&cursor, t).expect("clip hit a boundary <= t_end");
             {
                 let mut bs = GillespieBoundary {
@@ -305,9 +316,19 @@ pub fn run_gillespie_with_observer(
                     t,
                     &mut bs,
                     |bs, bt| {
-                        apply_events_at(bt, model, &fire_steps, iv_resolution_dt, bs.int_s, bs.real_s, params)?;
                         let mut batch = crate::schedule::EffectBatch::default();
                         crate::effects::due_effects(model, &fire_steps, bt, iv_resolution_dt, &mut batch);
+                        // §13.10 at a boundary: inflow events, then drains and
+                        // `set` on the post-inflow state (no transition stage
+                        // here), then interventions (gh#985).
+                        let mut deltas = crate::effects::EffectDeltas::default();
+                        crate::effects::apply_event_phases(
+                            model, &batch.event_idx,
+                            &mut crate::effects::DiscreteArena {
+                                int: bs.int_s, real: bs.real_s, deltas: &mut deltas,
+                            },
+                            params, bt, iv_resolution_dt, None,
+                        )?;
                         crate::lifecycle::apply_post_advance(
                             model, &batch.intervention_idx, bs.int_s, bs.real_s, params,
                             bt - iv_resolution_dt, iv_resolution_dt, None,
