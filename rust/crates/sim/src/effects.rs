@@ -205,6 +205,17 @@ pub fn apply_intervention_effects(
     Ok(())
 }
 
+/// The compartments one action reads or writes: its target, or a transfer's
+/// source and destination.
+fn action_compartments(action: &Action) -> Vec<&str> {
+    match action {
+        Action::Add(a) => vec![a.compartment.as_str()],
+        Action::Set(a) => vec![a.compartment.as_str()],
+        Action::FractionTransfer(ft) => vec![ft.src.as_str(), ft.dst.as_str()],
+        Action::AbsoluteTransfer(at) => vec![at.src.as_str(), at.dst.as_str()],
+    }
+}
+
 /// Which arena a compartment lives in, plus its local index.
 enum Arena {
     Int(usize),
@@ -618,6 +629,16 @@ fn apply_action_f64(
 /// real compartments, both updated exactly, with no rounding. Each phase
 /// copies the state once and reads every amount and every transfer source from
 /// that copy, so the actions of one phase see the same state.
+///
+/// Within a phase the actions combine as on the integer arena: each one
+/// contributes its delta against the phase's snapshot and the deltas sum, a
+/// `set` contributing `v − snapshot`. So `set X = 5` with
+/// `transfer(fraction = 0.5, from = X, to = Y)` from X = 10 gives
+/// X = 10 + (5 − 10) − 5 = 0 whatever the declaration order. A `set` that is
+/// the only action touching its compartment in the phase writes `v` exactly
+/// instead, because `x + (v − x)` need not round to `v` in `f64`; the two
+/// forms agree in exact arithmetic, and the exact write keeps a lone `set`
+/// meaning set.
 pub struct ContinuousArena<'a> {
     pub int: &'a mut [f64],
     pub real: &'a mut [f64],
@@ -638,6 +659,24 @@ impl EventArena for ContinuousArena<'_> {
         }
         let snap_int = self.int.to_vec();
         let snap_real = self.real.to_vec();
+        // How many of this phase's actions touch each compartment, so a `set`
+        // knows whether it is alone on its target (exact write) or coincides
+        // with another action there (snapshot-relative delta, summed).
+        let mut touches_int = vec![0u32; snap_int.len()];
+        let mut touches_real = vec![0u32; snap_real.len()];
+        for &iv_idx in event_idx {
+            for action in &model.model.interventions[iv_idx].actions {
+                if action_phase(action) != phase {
+                    continue;
+                }
+                for name in action_compartments(action) {
+                    match resolve_target(model, name)? {
+                        Arena::Int(i) => touches_int[i] += 1,
+                        Arena::Real(i) => touches_real[i] += 1,
+                    }
+                }
+            }
+        }
         for &iv_idx in event_idx {
             let iv = &model.model.interventions[iv_idx];
             for (action_idx, action) in iv.actions.iter().enumerate() {
@@ -647,6 +686,22 @@ impl EventArena for ContinuousArena<'_> {
                 let v = eval_amount_f64(model, iv_idx, action_idx, &snap_int, &snap_real, params, t, dt);
                 let v = crate::intervention::finite_action_value(v, &iv.name, action, t)?;
                 trace_action(EffectKind::Event, &iv.name, action, v, t);
+                if let Action::Set(sa) = action {
+                    match resolve_target(model, &sa.compartment)? {
+                        Arena::Int(i) if touches_int[i] > 1 => {
+                            self.int[i] += v - snap_int[i];
+                            continue;
+                        }
+                        Arena::Real(i) if touches_real[i] > 1 => {
+                            if v < 0.0 {
+                                return Err(set_real_negative_err(&sa.compartment, v, 0.0));
+                            }
+                            self.real[i] += v - snap_real[i];
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
                 apply_action_f64(model, action, v, &snap_int, &snap_real, self.int, self.real)?;
             }
         }
@@ -956,6 +1011,48 @@ mod tests {
         // Inflow first (I = 10), then the drain moves floor(10 · 0.5) = 5 to S.
         assert_eq!(discrete_phases(&m), vec![105, 5]);
         assert_eq!(continuous_phases(&m), vec![105.0, 5.0]);
+    }
+
+    fn continuous_phases_from(m: &CompiledModel, mut int_vals: Vec<f64>) -> Vec<f64> {
+        let mut real_vals = vec![50.0];
+        {
+            let mut arena = ContinuousArena { int: &mut int_vals, real: &mut real_vals };
+            apply_event_phases(m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None).unwrap();
+        }
+        int_vals
+    }
+
+    #[test]
+    fn continuous_set_and_drain_on_one_compartment_sum_their_deltas() {
+        // From S = 10: `set S = 5` contributes 5 − 10, the drain −10 · 0.5, so
+        // S = 0 and I = 5 in both declaration orders — the integer arena's rule.
+        let set = Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(5.0) });
+        let drain = Action::FractionTransfer(FractionTransfer {
+            src: "S".into(),
+            dst: "I".into(),
+            fraction: Expr::const_(0.5),
+        });
+        for actions in [vec![set.clone(), drain.clone()], vec![drain, set]] {
+            let m = model_with(actions);
+            assert_eq!(continuous_phases_from(&m, vec![10.0, 0.0]), vec![0.0, 5.0]);
+        }
+    }
+
+    #[test]
+    fn continuous_lone_set_writes_its_value_exactly() {
+        // 1e16 + (1 − 1e16) rounds to 0 in f64, so the summed-delta form would
+        // give S = 0 here; a `set` alone on its compartment must give exactly 1,
+        // even with another action on a different compartment in the phase.
+        let m = model_with(vec![
+            Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(1.0) }),
+            Action::AbsoluteTransfer(AbsoluteTransfer {
+                src: "I".into(),
+                dst: "I".into(),
+                count: Expr::const_(0.0),
+            }),
+        ]);
+        let out = continuous_phases_from(&m, vec![1e16, 4.0]);
+        assert_eq!(out[0].to_bits(), 1.0f64.to_bits(), "got S = {}", out[0]);
     }
 
     #[test]
