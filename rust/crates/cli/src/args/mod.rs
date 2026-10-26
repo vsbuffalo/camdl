@@ -1993,9 +1993,10 @@ pub struct SurveyArgs {
     #[arg(long)]
     pub data: Option<PathBuf>,
 
-    /// Inline fixed parameters (NAME=VALUE), repeat. Useful in
-    /// inline mode to pin parameters not in --estimate at a known
-    /// value rather than the model default.
+    /// Fixed parameters (NAME=VALUE), repeat. Pins the parameter at the
+    /// value rather than the model default. With `--fit`, a name the fit
+    /// config lists in `[estimate]` is held at the value and not sampled
+    /// (reported at info).
     #[arg(long, value_name = "NAME=VALUE")]
     pub fixed: Vec<types::ParamOverride>,
 

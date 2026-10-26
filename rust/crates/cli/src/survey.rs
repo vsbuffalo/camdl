@@ -756,9 +756,12 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
                 return Err(refusals.join("\n\nerror: "));
             }
         }
-        // No `--fixed` on the survey-fit path; the inline `--fixed`
-        // flag is mutually exclusive with `--fit` per SurveyArgs.
-        let fixed_cli: Vec<(String, f64)> = Vec::new();
+        // `--fixed NAME=VALUE` pins a parameter over the fit config: an
+        // `[estimate]` name it names is held at the value and not sampled
+        // (the resolver records it in `pinned_over_estimate` and reports it at
+        // info, as `profile` does).
+        let fixed_cli: Vec<(String, f64)> = a.fixed.iter()
+            .map(|p| (p.name.clone(), p.value)).collect();
         let fixed_files: Vec<std::path::PathBuf> = Vec::new();
         let fit_toml_estimate: IndexSet<String> = config.estimate.keys().cloned().collect();
         let table_files: HashMap<String, std::path::PathBuf> = HashMap::new();
@@ -795,6 +798,12 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             crate::run_meta::ParameterProvenance::of_all(&resolved.params);
         let notices = crate::params_resolver::notices(&[&resolved]);
         let mut model = resolved.model.clone();
+        // The `[estimate]` entries this survey samples: the fit config's, less
+        // the ones `--fixed` pinned.
+        let pinned: std::collections::HashSet<&str> = resolved.pinned_over_estimate.iter()
+            .map(|p| p.name.as_str()).collect();
+        let sampled: Vec<(&String, &crate::fit::config_v2::EstimateSpecV2)> = config.estimate
+            .iter().filter(|(name, _)| !pinned.contains(name.as_str())).collect();
 
         // Apply [estimate].start as a starting-point hint for params
         // that survived the resolver without an inferred value (this is
@@ -805,7 +814,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         // resolver returned them in the estimate set without a model
         // default), fall through to fit.toml [estimate].start, then to
         // a bounds-based draw.
-        for (name, spec) in &config.estimate {
+        for &(name, spec) in &sampled {
             if let Some(p) = model.parameters.iter_mut().find(|p| p.name == *name) {
                 if p.value.resolved_value().is_none() {
                     let bounds = spec.bounds
@@ -835,9 +844,12 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         // shape.
         crate::util::validate_parameter_values(&model)?;
 
-        // Re-export the same IndexMap-shape map that the old code path
-        // produced, for ResolvedSurveyInputs.fixed.
-        let fixed_resolved: IndexMap<String, f64> = fixed_resolved_indexmap.clone();
+        // The fixed values this survey holds: the fit config's `[fixed]`, with
+        // `--fixed` over it, for ResolvedSurveyInputs.fixed.
+        let mut fixed_resolved: IndexMap<String, f64> = fixed_resolved_indexmap.clone();
+        for (name, v) in &fixed_cli {
+            fixed_resolved.insert(name.clone(), *v);
+        }
 
         let compiled = Arc::new(CompiledModel::new(model.clone())
             .map_err(|e| format!("compile error: {:?}", e))?);
@@ -846,7 +858,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         // would put tier 2 back above tier 4 and undo a scenario that patches
         // a parameter `[fixed]` also pins.
         let mut base_params = compiled.default_params.clone();
-        for (name, spec) in &config.estimate {
+        for &(name, spec) in &sampled {
             if let Some(start) = spec.start {
                 if let Some(&idx) = compiled.param_index.get(name.as_str()) {
                     base_params[idx] = start;
@@ -857,8 +869,8 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         // Build EstimatedParam vector from [estimate]'s bounds, in
         // declaration order — the fit-toml-bounds-within-model-bounds
         // check is in `build_if2_params_from_specs`.
-        let specs: Vec<ParamSpec> = config.estimate.iter()
-            .map(|(name, spec)| ParamSpec {
+        let specs: Vec<ParamSpec> = sampled.iter()
+            .map(|&(name, spec)| ParamSpec {
                 name: name.clone(),
                 rw_sd: spec.rw_sd,
                 transform: spec.transform.as_ref().map(|t| t.as_str().to_string()),
@@ -911,8 +923,8 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         }
 
         // Capture [estimate].start for the start-rank diagnostic.
-        let estimate_starts: HashMap<String, f64> = config.estimate.iter()
-            .filter_map(|(name, spec)| spec.start.map(|v| (name.clone(), v)))
+        let estimate_starts: HashMap<String, f64> = sampled.iter()
+            .filter_map(|&(name, spec)| spec.start.map(|v| (name.clone(), v)))
             .collect();
         Ok(ResolvedSurveyInputs {
             compiled,
