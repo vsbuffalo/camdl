@@ -361,7 +361,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let mut fixed_cfg = fit_cfg.fixed.clone();
         fixed_cfg.expand_from_scenario(&model_pre, &fit_cfg.estimate)
             .unwrap_or_else(|e| {
-                eprintln!("error: --fit toml [fixed].expand_from_scenario: {}", e);
+                eprintln!("error: {}", e);
                 std::process::exit(1);
             });
         let fixed_resolved = fixed_cfg.resolve_with_model(&model_pre)

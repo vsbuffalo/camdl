@@ -10,8 +10,9 @@
 //!   refused it already; `profile --fit` and `survey --fit` used to warn and let
 //!   `[fixed]` win.
 //!
-//! `[fixed] from_scenario` is not the fit's scenario: it imports a scenario's
-//! values minus the estimated ones (gh#37), and stays accepted.
+//! - **`[fixed] from_scenario` naming a scenario that sets or scales a
+//!   parameter `[estimate]` lists** — on every command that reads the fit
+//!   config. The import used to skip the estimated parameters (gh#37).
 //!
 //! Two layered overrides are not refused, and are reported as `info:` lines:
 //! `--fixed` over a name in `[estimate]`, and a profile's scenario setting the
@@ -188,18 +189,61 @@ fn fit_run_accepts_a_scenario_disjoint_from_the_estimate() {
     assert!(out.status.success(), "fit run fastg: {}", stderr(&out));
 }
 
-/// `[fixed] from_scenario` imports `base`'s values minus the estimated `beta`
-/// (gh#37). That import is the `[fixed]` source, not the fit's scenario, so it
-/// is not refused. Pinned as-is while the carve-out awaits its own decision.
+/// `[fixed] from_scenario = "base"` with `beta` in `[estimate]`: `base` sets
+/// beta = 0.3, so beta would be both fixed (imported) and estimated.
 #[test]
-fn fit_run_from_scenario_carve_out_is_unchanged() {
+fn fit_run_refuses_from_scenario_that_sets_an_estimated_parameter() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     setup(dir);
     fit_toml(dir, "carve", "", BETA, "from_scenario = \"base\"");
     let out = camdl(dir, &["fit", "run", "carve.toml", "--seed", "1"]);
-    assert!(out.status.success(), "fit run carve: {}", stderr(&out));
-    assert!(!stderr(&out).contains("both estimated and set by scenario"), "{}", stderr(&out));
+    assert_refused("fit run from_scenario base", &out, &[
+        "error: parameter `beta` is both estimated and set by scenario `base`, which \
+         [fixed] from_scenario imports",
+        "  [estimate]:  beta",
+        "  scenario:    beta = 0.3    (set beta = 0.3)",
+        "A parameter cannot be both fixed (imported from the scenario) and estimated.",
+        "Fix: define a scenario that does not set `beta` and name it in from_scenario, or \
+         drop `beta` from [estimate] to hold it at the scenario's value.",
+    ], &dir.join("res_carve"));
+}
+
+/// Composed presets and `scale` are caught as on the fit's own scenario. A
+/// scale-only collision has no "drop it from [estimate]" fix: the import
+/// carries `set` values only, so the dropped parameter would have no value.
+#[test]
+fn fit_run_refuses_from_scenario_composed_and_scaling() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    setup(dir);
+    fit_toml(dir, "fs_comp", "", BETA, "from_scenario = \"comp\"");
+    let out = camdl(dir, &["fit", "run", "fs_comp.toml", "--seed", "1"]);
+    assert_refused("fit run from_scenario comp", &out, &[
+        "error: parameter `beta` is both estimated and set by scenario `comp`, which \
+         [fixed] from_scenario imports",
+        "  scenario:    beta = 0.8    (set beta = 0.8 from composed preset `hi`)",
+    ], &dir.join("res_fs_comp"));
+
+    fit_toml(dir, "fs_half", "", BETA, "from_scenario = \"half\"");
+    let out = camdl(dir, &["fit", "run", "fs_half.toml", "--seed", "1"]);
+    assert_refused("fit run from_scenario half", &out, &[
+        "error: parameter `beta` is both estimated and scaled by scenario `half`, which \
+         [fixed] from_scenario imports",
+        "  scenario:    scale beta \u{d7} 0.5",
+        "Fix: define a scenario that does not scale `beta` and name it in from_scenario.",
+    ], &dir.join("res_fs_half"));
+}
+
+/// A `from_scenario` disjoint from `[estimate]` still imports and runs.
+#[test]
+fn fit_run_accepts_from_scenario_disjoint_from_the_estimate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    setup(dir);
+    fit_toml(dir, "fs_ok", "", BETA_GAMMA, "from_scenario = \"bigN\"");
+    let out = camdl(dir, &["fit", "run", "fs_ok.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run fs_ok: {}", stderr(&out));
 }
 
 #[test]
@@ -290,15 +334,20 @@ fn survey_refuses_a_name_in_both_fixed_and_estimate() {
     ], &dir.join("both"));
 }
 
-/// The carve-out on the `survey --fit` path, as on `fit run`.
+/// The `from_scenario` refusal on the `survey --fit` and `profile --fit` paths.
 #[test]
-fn survey_from_scenario_carve_out_is_unchanged() {
+fn survey_and_profile_refuse_from_scenario_that_sets_an_estimated_parameter() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     setup(dir);
     fit_toml(dir, "sv_carve", "", BETA, "from_scenario = \"base\"");
+    let line = "error: parameter `beta` is both estimated and set by scenario `base`, which \
+                [fixed] from_scenario imports";
     let out = survey(dir, "carve", &["--fit", "sv_carve.toml"]);
-    assert!(out.status.success(), "survey carve: {}", stderr(&out));
+    assert_refused("survey from_scenario", &out, &[line], &dir.join("carve"));
+    let out = profile(dir, "pf_carve", "sv_carve.toml", &["--rw-sd", "beta=0.02"]);
+    assert_refused("profile from_scenario", &out, &[line],
+        &dir.join("pf_carve").join("results"));
 }
 
 // ─── layered overrides reported at info ───────────────────────────────────────

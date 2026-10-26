@@ -153,9 +153,16 @@ before anything is written, rather than resolved:
   both: the estimate would discard the scenario's value. The error names the
   parameter, what the scenario does to it and the fit.toml, and the fix: move
   the parameter from `[estimate]` to `[fixed]` with the scenario's value to fit
-  under it, or name a scenario that does not touch it. Only the scenario the fit
-  runs under is checked; `[fixed] from_scenario` imports a scenario's values
-  minus the estimated ones and is not this collision.
+  under it, or name a scenario that does not touch it;
+- `[fixed] from_scenario` naming a scenario that `set`s or `scale`s a parameter
+  `[estimate]` lists, directly or through a preset it composes: on every command
+  that reads the fit.toml (`fit run`, `profile --fit`, `survey --fit`). The
+  import would make the parameter both fixed and estimated. The error names the
+  parameter, the scenario and the scenario's value, and the fix: define a
+  scenario that does not set the estimated parameters and name it in
+  `from_scenario`, or drop them from `[estimate]` to hold them at the scenario's
+  value (a scale-only parameter has the first fix only: the import carries `set`
+  values, not `scale`).
 
 A fit.toml naming one parameter in both `[estimate]` and `[fixed]` is refused by
 every command that reads it (`fit run`, `profile --fit`, `survey --fit`);
@@ -2523,9 +2530,9 @@ and `[fixed]` must be exactly the model's parameter set:
 
 `from_scenario` is mutually exclusive with both `from_file` and inline values:
 allowing an override would make the fit a hybrid that corresponds to nothing in
-the `.camdl`. The one carve-out is structural — a scenario parameter that also
-appears in `[estimate]` is skipped on import, so a single `baseline` scenario
-can serve both forward simulation and a fit's `[fixed]`.
+the `.camdl`. It imports every value the scenario sets, so a scenario that sets
+or scales a parameter in `[estimate]` is refused (§1.3): to estimate a parameter
+a scenario sets, name a scenario that does not set it.
 
 ### 6.5 `[method]` — the inference method
 

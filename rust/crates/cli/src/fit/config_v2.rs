@@ -806,15 +806,10 @@ impl FixedParams {
     /// See `resolve_with_model` for the design rationale on
     /// mutual-exclusion of `from_scenario` with `from_file` and
     /// inline `values`.
-    /// `estimate` is the fit's `[estimate]` map. gh#37: parameters that
-    /// appear in `[estimate]` are carved OUT of the scenario import — a
-    /// single `baseline` scenario can serve both forward-sim and the
-    /// fit's `[fixed]` source, importing everything EXCEPT the estimated
-    /// params. The carve-out is structural (a param can't be both
-    /// estimated and fixed; `validate` enforces `estimate ∩ fixed = ∅`),
-    /// so removing same-named keys does NOT muddy scenario semantics the
-    /// way an inline override with a *different number* would. Inline
-    /// overrides still error (preserved).
+    /// `estimate` is the fit's `[estimate]` map. A scenario that sets or
+    /// scales a parameter `[estimate]` lists is refused
+    /// ([`crate::params_resolver::from_scenario_estimate_collision`]): the
+    /// import would make that parameter both fixed and estimated.
     pub fn expand_from_scenario(
         &mut self,
         model: &ir::Model,
@@ -848,6 +843,13 @@ impl FixedParams {
                 else { available.join(", ") }));
         }
 
+        let estimated: Vec<&str> = estimate.keys().map(|k| k.as_str()).collect();
+        if let Some(msg) = crate::params_resolver::from_scenario_estimate_collision(
+            model, &scen_name, &estimated,
+        )? {
+            return Err(msg);
+        }
+
         // gh#36: walk `compose = [...]` so the import inherits params from
         // composed sub-scenarios, not just the parent's own `set`. Shared
         // with the simulate path via `resolve_preset_params` — before this
@@ -856,18 +858,7 @@ impl FixedParams {
         // nor fixed".
         let preset_params = crate::params_resolver::resolve_preset_params(model, &scen_name)
             .map_err(|e| e.to_string())?;
-
-        // gh#37 carve-out: import every scenario param EXCEPT the ones
-        // being estimated. An estimated param is, by definition, not a
-        // fixed param — `validate`'s `estimate ∩ fixed = ∅` check would
-        // otherwise reject the import. Applied AFTER the compose-walk so it
-        // carves out inherited params too.
-        for (k, v) in &preset_params {
-            if estimate.contains_key(k) {
-                continue;
-            }
-            self.values.insert(k.clone(), *v);
-        }
+        self.values.extend(preset_params);
         self.from_scenario = None;
         Ok(())
     }
@@ -2822,12 +2813,9 @@ impl Problem {
         }
     }
 
-    /// gh#37: expand `[fixed] from_scenario = "name"` in-place, carving
-    /// out the parameters that appear in `[estimate]`. Thin wrapper over
-    /// `FixedParams::expand_from_scenario` that forwards `&self.estimate`
-    /// — the carve-out needs to see which params are being estimated so
-    /// a single scenario can serve both forward-sim and the fit's
-    /// `[fixed]` source ("import everything EXCEPT the estimated params").
+    /// Expand `[fixed] from_scenario = "name"` in-place
+    /// (`FixedParams::expand_from_scenario`), refusing a scenario that sets
+    /// or scales a parameter in `[estimate]`.
     ///
     /// Call this once per fit-pipeline entry point AFTER the model is
     /// loaded but BEFORE `validate(&model_params)` (the every-param-
@@ -5121,10 +5109,10 @@ cooling = 0.9
     }
 
     #[test]
-    fn from_scenario_compose_carves_out_estimated_params() {
-        // gh#37 carve-out must apply to inherited (composed) params too:
-        // an estimated param living in the composed child is carved out of
-        // the fixed import, just as it would be for a parent-level param.
+    fn from_scenario_refuses_an_estimated_param_set_by_a_composed_preset() {
+        // An estimated param living in the composed child is refused, just as
+        // a parent-level one is: the import would make it both fixed and
+        // estimated.
         let model = model_with_compose_scenario(
             "baseline_compose", &[("beta", 0.3)],
             "fit_pinned", &[("gamma", 0.1), ("N0", 1000.0)]);
@@ -5133,14 +5121,12 @@ cooling = 0.9
             from_scenario: Some("baseline_compose".into()),
             values: IndexMap::new(),
         };
-        // `gamma` is inherited from the child AND estimated → must be carved.
-        fixed.expand_from_scenario(&model, &estimate_set(&["gamma"])).unwrap();
-        let resolved = fixed.resolve().unwrap();
-        assert!(!resolved.contains_key("gamma"),
-            "estimated composed param `gamma` must be carved out: {:?}", resolved);
-        assert_eq!(resolved.get("N0"), Some(&1000.0));
-        assert_eq!(resolved.get("beta"), Some(&0.3));
-        assert_eq!(resolved.len(), 2);
+        let err = fixed.expand_from_scenario(&model, &estimate_set(&["gamma"])).unwrap_err();
+        assert!(err.starts_with(
+            "parameter `gamma` is both estimated and set by scenario `baseline_compose`, \
+             which [fixed] from_scenario imports"), "{err}");
+        assert!(err.contains("(set gamma = 0.1 from composed preset `fit_pinned`)"), "{err}");
+        assert!(fixed.values.is_empty(), "a refused import imports nothing: {:?}", fixed.values);
     }
 
     #[test]
@@ -5257,13 +5243,10 @@ cooling = 0.9
     }
 
     #[test]
-    fn from_scenario_carves_out_estimated_params() {
-        // gh#37: a single `baseline` scenario serves both forward-sim and
-        // the fit's [fixed] source. `from_scenario = "baseline"` imports
-        // everything from baseline EXCEPT the parameters being estimated.
-        // Here `beta` is estimated, so the resolved fixed map is the
-        // scenario's set MINUS {beta} — no "in both [estimate] and [fixed]"
-        // error.
+    fn from_scenario_refuses_an_estimated_param_the_scenario_sets() {
+        // `from_scenario = "baseline"` imports every value baseline sets; with
+        // `beta` and `gamma` in [estimate] both would be fixed and estimated.
+        // One refusal names both, with the scenario's values.
         let model = model_with_scenario("baseline", &[
             ("beta", 0.3), ("gamma", 0.1), ("N0", 1000.0), ("I0", 10.0),
         ]);
@@ -5272,24 +5255,25 @@ cooling = 0.9
             from_scenario: Some("baseline".into()),
             values: IndexMap::new(),
         };
-        fixed.expand_from_scenario(&model, &estimate_set(&["beta"])).unwrap();
-        assert!(fixed.from_scenario.is_none(), "expansion clears from_scenario");
-        let resolved = fixed.resolve().unwrap();
-        assert!(!resolved.contains_key("beta"),
-            "estimated param `beta` must be carved out of the fixed import: {:?}",
-            resolved);
-        assert_eq!(resolved.get("gamma"), Some(&0.1));
-        assert_eq!(resolved.get("N0"), Some(&1000.0));
-        assert_eq!(resolved.get("I0"), Some(&10.0));
-        assert_eq!(resolved.len(), 3, "exactly the non-estimated scenario params");
+        let err = fixed.expand_from_scenario(&model, &estimate_set(&["beta", "gamma"]))
+            .unwrap_err();
+        assert_eq!(err,
+            "parameters `beta`, `gamma` are both estimated and set by scenario `baseline`, \
+             which [fixed] from_scenario imports\n  \
+             [estimate]:  beta\n  \
+             scenario:    beta = 0.3    (set beta = 0.3)\n  \
+             [estimate]:  gamma\n  \
+             scenario:    gamma = 0.1    (set gamma = 0.1)\n\
+             A parameter cannot be both fixed (imported from the scenario) and estimated.\n\
+             Fix: define a scenario that does not set `beta`, `gamma` and name it in \
+             from_scenario, or drop `beta`, `gamma` from [estimate] to hold them at the \
+             scenario's value.");
     }
 
     #[test]
-    fn config_expand_fixed_from_scenario_carves_out_estimated_params() {
-        // gh#37: the FitConfig-level wrapper forwards `&self.estimate`
-        // so the carve-out can see which params are estimated. End-to-end
-        // at the config level: from_scenario="baseline" + [estimate] beta
-        // resolves with no estimate∩fixed overlap.
+    fn config_expand_fixed_from_scenario_refuses_an_estimated_param() {
+        // The FitConfig-level wrapper forwards `&self.estimate`, so the
+        // refusal sees which params are estimated.
         let model = model_with_scenario("baseline", &[
             ("beta", 0.3), ("gamma", 0.1), ("N0", 1000.0), ("I0", 10.0),
         ]);
@@ -5314,21 +5298,16 @@ particles = 1000
 iterations = 80
 cooling = 0.70
         "#).unwrap();
-        config.problem.expand_fixed_from_scenario(&model).unwrap();
-        assert!(config.problem.fixed.from_scenario.is_none());
-        assert!(!config.problem.fixed.values.contains_key("beta"),
-            "estimated param carved out: {:?}", config.problem.fixed.values);
-        assert_eq!(config.problem.fixed.values.get("gamma"), Some(&0.1));
-        assert_eq!(config.problem.fixed.values.len(), 3);
+        let err = config.problem.expand_fixed_from_scenario(&model).unwrap_err();
+        assert!(err.starts_with("parameter `beta` is both estimated and set by scenario \
+            `baseline`"), "{err}");
     }
 
     #[test]
     fn from_scenario_still_rejects_inline_override_with_different_value() {
-        // gh#37: the carve-out enables "import minus estimated" but the
-        // override case — inline value with a DIFFERENT number for a
-        // scenario key — is still a hard error (silent semantic mutation
-        // of a named scenario). Here baseline.set.gamma = 0.1 but the
-        // fit.toml inlines gamma = 0.5.
+        // An inline value with a DIFFERENT number for a scenario key is a
+        // hard error (silent semantic mutation of a named scenario). Here
+        // baseline.set.gamma = 0.1 but the fit.toml inlines gamma = 0.5.
         let model = model_with_scenario("baseline", &[
             ("beta", 0.3), ("gamma", 0.1),
         ]);

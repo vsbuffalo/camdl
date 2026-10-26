@@ -1076,25 +1076,9 @@ pub fn scenario_fixed_collision(
     let scen = crate::sim_job::ScenarioRef::Named(scenario.to_string());
     for &(param, fixed_v, scen_v) in &clash {
         msg.push_str(&format!("\n  [fixed]:   {param} = {fixed_v}"));
-        let how: Vec<String> = scenario_param_actions(model, &scen, param)?
-            .iter()
-            .map(|a| {
-                let (text, preset) = match a {
-                    ScenarioParamAction::Set { value, preset } => {
-                        (format!("set {param} = {value}"), preset)
-                    }
-                    ScenarioParamAction::Scale { factor, preset } => {
-                        (format!("scale {param} \u{d7} {factor}"), preset)
-                    }
-                };
-                if preset.as_str() == scenario {
-                    text
-                } else {
-                    format!("{text} from composed preset `{preset}`")
-                }
-            })
-            .collect();
-        msg.push_str(&format!("\n  scenario:  {param} = {scen_v}    ({})", how.join(", ")));
+        let how =
+            describe_scenario_actions(param, scenario, &scenario_param_actions(model, &scen, param)?);
+        msg.push_str(&format!("\n  scenario:  {param} = {scen_v}    ({how})"));
     }
     let them = if clash.len() == 1 { "it" } else { "them" };
     let agree: Vec<String> =
@@ -1113,39 +1097,71 @@ pub fn scenario_fixed_collision(
 
 // ─── Scenario × fit.toml [estimate] collisions ────────────────────────────────
 
-/// Refuse a fit whose scenario sets or scales a parameter its `[estimate]`
-/// block estimates. `Ok(None)` when the scenario touches none of `estimated`;
-/// `Ok(Some(message))` names every colliding parameter, what the scenario does
-/// to it, the fit.toml and the fix.
-///
-/// A parameter is either estimated or given a value, never both. Left to
-/// precedence, the estimate would overwrite whatever the scenario set, which
-/// would survive at most as a starting value, and nothing would tell the user
-/// that the scenario's value was not used. Which parameters the scenario
-/// touches is [`scenario_param_footprint`], the same footprint the sweep and
-/// draws-file guards read, so a composed preset's `set` or `scale` is caught as
-/// surely as the parent's own.
-///
-/// Only the scenario a fit *runs under* is checked: `[fixed] from_scenario`
-/// imports a scenario's values into `[fixed]` minus the estimated ones (gh#37),
-/// and that import is not this collision.
-pub fn scenario_estimate_collision(
-    model: &ir::Model,
+/// How a scenario's actions on `param` read in a diagnostic:
+/// `set beta = 0.8`, `scale beta × 0.5 from composed preset `half``.
+fn describe_scenario_actions(
+    param: &str,
     scenario: &str,
-    estimated: &[&str],
-    fit_toml: &str,
-) -> Result<Option<String>, String> {
-    let scen = crate::sim_job::ScenarioRef::Named(scenario.to_string());
-    let footprint = scenario_param_footprint(model, &scen)?;
-    let clash: Vec<&str> = estimated.iter().copied().filter(|p| footprint.contains(*p)).collect();
-    if clash.is_empty() {
-        return Ok(None);
+    actions: &[ScenarioParamAction],
+) -> String {
+    let how: Vec<String> = actions
+        .iter()
+        .map(|a| {
+            let (text, preset) = match a {
+                ScenarioParamAction::Set { value, preset } => {
+                    (format!("set {param} = {value}"), preset)
+                }
+                ScenarioParamAction::Scale { factor, preset } => {
+                    (format!("scale {param} \u{d7} {factor}"), preset)
+                }
+            };
+            if preset.as_str() == scenario {
+                text
+            } else {
+                format!("{text} from composed preset `{preset}`")
+            }
+        })
+        .collect();
+    how.join(", ")
+}
+
+/// One estimated parameter a scenario touches: what the scenario does to it,
+/// and its net value where one exists (a `set`, or a `scale` of the model's
+/// default).
+struct EstimateClash<'a> {
+    param:   &'a str,
+    actions: Vec<ScenarioParamAction>,
+    net:     Option<f64>,
+}
+
+impl EstimateClash<'_> {
+    fn sets(&self) -> bool {
+        self.actions.iter().any(|a| matches!(a, ScenarioParamAction::Set { .. }))
     }
 
-    // What the scenario does to each clashing parameter, and its net value
-    // where one exists (a `set`, or a `scale` of the model's default).
-    let mut rows: Vec<(&str, Vec<ScenarioParamAction>, Option<f64>)> = Vec::new();
-    for &param in &clash {
+    /// `scenario:    beta = 0.8    (set beta = 0.8)`, or the actions alone
+    /// when there is no net value.
+    fn scenario_line(&self, scenario: &str) -> String {
+        let how = describe_scenario_actions(self.param, scenario, &self.actions);
+        match self.net {
+            Some(v) => format!("\n  scenario:    {} = {v}    ({how})", self.param),
+            None => format!("\n  scenario:    {how}"),
+        }
+    }
+}
+
+/// The parameters of `estimated` that `scenario` sets or scales, through any
+/// preset it composes ([`scenario_param_footprint`], the same footprint the
+/// sweep and draws-file guards read), in `estimated` order.
+fn estimate_clashes<'a>(
+    model: &ir::Model,
+    scenario: &str,
+    estimated: &[&'a str],
+) -> Result<Vec<EstimateClash<'a>>, String> {
+    let scen = crate::sim_job::ScenarioRef::Named(scenario.to_string());
+    let footprint = scenario_param_footprint(model, &scen)?;
+    let mut rows = Vec::new();
+    for &param in estimated.iter().filter(|p| footprint.contains(**p)) {
         let actions = scenario_param_actions(model, &scen, param)?;
         let mut set: Vec<(String, f64)> = Vec::new();
         let mut scale: Vec<(String, f64)> = Vec::new();
@@ -1162,13 +1178,23 @@ pub fn scenario_estimate_collision(
         })
         .get(param)
         .copied();
-        rows.push((param, actions, net));
+        rows.push(EstimateClash { param, actions, net });
     }
+    Ok(rows)
+}
 
-    let sets = |acts: &[ScenarioParamAction]| {
-        acts.iter().any(|a| matches!(a, ScenarioParamAction::Set { .. }))
-    };
-    let n_set = rows.iter().filter(|(_, a, _)| sets(a)).count();
+/// The header pieces both estimate refusals share: the backticked names,
+/// "set" / "scaled" / "set or scaled", and the singular or plural words.
+struct ClashWords {
+    names: String,
+    verb:  &'static str,
+    noun:  &'static str,
+    is:    &'static str,
+    them:  &'static str,
+}
+
+fn clash_words(rows: &[EstimateClash<'_>]) -> ClashWords {
+    let n_set = rows.iter().filter(|r| r.sets()).count();
     let verb = if n_set == rows.len() {
         "set"
     } else if n_set == 0 {
@@ -1176,36 +1202,40 @@ pub fn scenario_estimate_collision(
     } else {
         "set or scaled"
     };
-    let names: Vec<String> = clash.iter().map(|p| format!("`{p}`")).collect();
-    let names = names.join(", ");
+    let names: Vec<String> = rows.iter().map(|r| format!("`{}`", r.param)).collect();
     let (noun, is, them) =
-        if clash.len() == 1 { ("parameter", "is", "it") } else { ("parameters", "are", "them") };
+        if rows.len() == 1 { ("parameter", "is", "it") } else { ("parameters", "are", "them") };
+    ClashWords { names: names.join(", "), verb, noun, is, them }
+}
+
+/// Refuse a fit whose scenario sets or scales a parameter its `[estimate]`
+/// block estimates. `Ok(None)` when the scenario touches none of `estimated`;
+/// `Ok(Some(message))` names every colliding parameter, what the scenario does
+/// to it, the fit.toml and the fix.
+///
+/// A parameter is either estimated or given a value, never both. Left to
+/// precedence, the estimate would overwrite whatever the scenario set, which
+/// would survive at most as a starting value, and nothing would tell the user
+/// that the scenario's value was not used. A composed preset's `set` or
+/// `scale` is caught as surely as the parent's own ([`estimate_clashes`]).
+///
+/// This is the scenario a fit *runs under*. The scenario `[fixed]
+/// from_scenario` imports is checked by [`from_scenario_estimate_collision`].
+pub fn scenario_estimate_collision(
+    model: &ir::Model,
+    scenario: &str,
+    estimated: &[&str],
+    fit_toml: &str,
+) -> Result<Option<String>, String> {
+    let rows = estimate_clashes(model, scenario, estimated)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let ClashWords { names, verb, noun, is, them } = clash_words(&rows);
     let mut msg = format!("{noun} {names} {is} both estimated and {verb} by scenario `{scenario}`");
-    for (param, actions, net) in &rows {
-        msg.push_str(&format!("\n  [estimate]:  {param}    (in `{fit_toml}`)"));
-        let how: Vec<String> = actions
-            .iter()
-            .map(|a| {
-                let (text, preset) = match a {
-                    ScenarioParamAction::Set { value, preset } => {
-                        (format!("set {param} = {value}"), preset)
-                    }
-                    ScenarioParamAction::Scale { factor, preset } => {
-                        (format!("scale {param} \u{d7} {factor}"), preset)
-                    }
-                };
-                if preset.as_str() == scenario {
-                    text
-                } else {
-                    format!("{text} from composed preset `{preset}`")
-                }
-            })
-            .collect();
-        let value = match net {
-            Some(v) => format!("{param} = {v}    ({})", how.join(", ")),
-            None => how.join(", "),
-        };
-        msg.push_str(&format!("\n  scenario:    {value}"));
+    for r in &rows {
+        msg.push_str(&format!("\n  [estimate]:  {}    (in `{fit_toml}`)", r.param));
+        msg.push_str(&r.scenario_line(scenario));
     }
     msg.push_str(
         "\nAn estimated parameter takes its values from the estimation, which would discard \
@@ -1217,8 +1247,8 @@ pub fn scenario_estimate_collision(
     // collision refuses.
     let pinned: Vec<String> = rows
         .iter()
-        .filter(|(_, a, _)| sets(a))
-        .filter_map(|(p, _, net)| net.map(|v| format!("`{p} = {v}`")))
+        .filter(|r| r.sets())
+        .filter_map(|r| r.net.map(|v| format!("`{} = {v}`", r.param)))
         .collect();
     let other = format!("name a scenario that does not touch {them}");
     msg.push_str(&if pinned.is_empty() {
@@ -1232,6 +1262,53 @@ pub fn scenario_estimate_collision(
              value (give [fixed] the scenario's value: {}), or {other}.",
             pinned.join(", ")
         )
+    });
+    Ok(Some(msg))
+}
+
+/// Refuse `[fixed] from_scenario = "<scenario>"` when that scenario sets or
+/// scales a parameter `[estimate]` lists. `Ok(None)` when it touches none of
+/// `estimated`.
+///
+/// `from_scenario` makes every parameter the scenario sets a `[fixed]` value,
+/// so a parameter it sets and `[estimate]` lists would be both fixed and
+/// estimated — the same contradiction as a name in both blocks, and refused
+/// the same way rather than resolved by dropping one side. A parameter the
+/// scenario only scales is refused too: the import carries `set` values only,
+/// so the scale would be discarded without a word.
+pub fn from_scenario_estimate_collision(
+    model: &ir::Model,
+    scenario: &str,
+    estimated: &[&str],
+) -> Result<Option<String>, String> {
+    let rows = estimate_clashes(model, scenario, estimated)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let ClashWords { names, verb, noun, is, them } = clash_words(&rows);
+    let mut msg = format!(
+        "{noun} {names} {is} both estimated and {verb} by scenario `{scenario}`, which \
+         [fixed] from_scenario imports"
+    );
+    for r in &rows {
+        msg.push_str(&format!("\n  [estimate]:  {}", r.param));
+        msg.push_str(&r.scenario_line(scenario));
+    }
+    msg.push_str(
+        "\nA parameter cannot be both fixed (imported from the scenario) and estimated.",
+    );
+    // Dropping a parameter from [estimate] holds it at the scenario's value
+    // only if the scenario `set`s it: a scale-only parameter would be left
+    // with no value at all.
+    let infinitive = if verb == "scaled" { "scale" } else if verb == "set" { "set" } else { "set or scale" };
+    let define = format!(
+        "define a scenario that does not {infinitive} {names} and name it in from_scenario"
+    );
+    msg.push_str(&if rows.iter().all(|r| r.sets()) {
+        format!("\nFix: {define}, or drop {names} from [estimate] to hold {them} at the \
+                 scenario's value.")
+    } else {
+        format!("\nFix: {define}.")
     });
     Ok(Some(msg))
 }

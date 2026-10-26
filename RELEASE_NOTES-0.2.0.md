@@ -131,13 +131,24 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   parameter and the scenario's value. A name in both `[fixed]` and `[estimate]`
   of one fit.toml, which `profile --fit` and `survey --fit` used to accept with
   a warning (`[fixed]` won), is refused by every command; `fit run` already
-  refused it. Unchanged: `[fixed] from_scenario`, which imports a scenario's
-  values minus the estimated ones; `--fixed` over `[estimate]` (see CLI); a
-  scenario that sets a `profile` nuisance parameter; and
-  `fit predict --scenario`. Migration: to fit under the scenario's value, move
-  the parameter from `[estimate]` to `[fixed]` with that value; otherwise name a
-  scenario that does not touch it. For an overlap, remove the name from
-  whichever block is wrong.
+  refused it. Unchanged: `--fixed` over `[estimate]` (see CLI); a scenario that
+  sets a `profile` nuisance parameter; and `fit predict --scenario`. Migration:
+  to fit under the scenario's value, move the parameter from `[estimate]` to
+  `[fixed]` with that value; otherwise name a scenario that does not touch it.
+  For an overlap, remove the name from whichever block is wrong.
+
+- **`[fixed] from_scenario` naming a scenario that sets or scales an estimated
+  parameter is refused.** The import used to skip every parameter `[estimate]`
+  lists (gh#37), so `from_scenario = "baseline"` with `beta` estimated fitted
+  beta and dropped baseline's value without a word. A parameter cannot be both
+  fixed (imported from the scenario) and estimated, so `fit run`,
+  `profile --fit` and `survey --fit` now refuse it, composed presets included;
+  the error names the parameter, the scenario and the scenario's value.
+  Migration: define a scenario that does not set the estimated parameters (for
+  example one `baseline` composes from, minus them) and name it in
+  `from_scenario`, or drop them from `[estimate]` to hold them at the scenario's
+  value. A scenario that only scales an estimated parameter has the first fix
+  only: the import carries `set` values, not `scale`.
 
 - **`simulate`'s implicit arm is labelled `(none)`, not `baseline`.** A run
   without `--scenario` shows `(none)` (path segment `_none_-<h8>`) in its leaf
