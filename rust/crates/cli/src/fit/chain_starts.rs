@@ -545,7 +545,7 @@ pub fn build_resolved_view_for_init(
         params,
         estimate_set,
         model: model.clone(),
-        warnings: Vec::new(),
+        pinned_over_estimate: Vec::new(),
         context: Default::default(),
     }
 }
@@ -1339,7 +1339,7 @@ mod tests {
             identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
         };
         ResolvedParameters {
-            params, estimate_set, model, warnings: vec![], context: Default::default(),
+            params, estimate_set, model, pinned_over_estimate: vec![], context: Default::default(),
         }
     }
 

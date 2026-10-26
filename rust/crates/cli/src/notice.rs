@@ -16,8 +16,8 @@ use serde::Serialize;
 /// - `Info`: the command did what the user's flags asked, and this says so —
 ///   a later flag replacing an earlier value, for example.
 /// - `Warning`: the command did something the user is likely not to have
-///   meant, or that changes what the run means — a parameter dropped from
-///   `[estimate]`, for example.
+///   meant, or that changes what the run means — replacing a fit's estimate,
+///   for example.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -49,8 +49,8 @@ pub struct Notice {
 }
 
 impl Notice {
-    pub fn warning(code: &'static str, message: impl Into<String>) -> Self {
-        Notice { severity: Severity::Warning, code, message: message.into() }
+    pub fn info(code: &'static str, message: impl Into<String>) -> Self {
+        Notice { severity: Severity::Info, code, message: message.into() }
     }
 
     /// The line as printed: `<severity>: <message>`.
@@ -91,17 +91,19 @@ mod tests {
     fn render_prefixes_the_severity() {
         let info = Notice { severity: Severity::Info, code: "param-override", message: "x".into() };
         assert_eq!(info.render(), "info: x");
-        assert_eq!(Notice::warning("param-override", "y").render(), "warning: y");
+        let warn = Notice { severity: Severity::Warning, code: "param-override", message: "y".into() };
+        assert_eq!(warn.render(), "warning: y");
     }
 
     #[test]
     fn notices_serialise_as_a_list_of_records() {
-        let ns: Notices = [Notice::warning("kicked-from-estimate", "m")].into_iter().collect();
+        let warn = Notice { severity: Severity::Warning, code: "param-override", message: "m".into() };
+        let ns: Notices = [warn].into_iter().collect();
         let v = serde_json::to_value(&ns).unwrap();
         assert_eq!(
             v,
             serde_json::json!([
-                { "severity": "warning", "code": "kicked-from-estimate", "message": "m" }
+                { "severity": "warning", "code": "param-override", "message": "m" }
             ])
         );
     }

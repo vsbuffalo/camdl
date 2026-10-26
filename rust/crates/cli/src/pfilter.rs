@@ -195,7 +195,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // surface (`--params FILE` (repeatable) + `--param NAME=VALUE` +
     // scenario/enable/disable) onto the resolver inputs. pfilter is
     // non-inference for the value-resolution perspective; the
-    // [estimate] set is empty and no kick-out warnings can fire.
+    // [estimate] set is empty and no `--fixed`-over-[estimate] notice can fire.
     use crate::params_resolver::{ParameterInputs, resolve_parameters, emit_notices};
     use indexmap::{IndexMap, IndexSet};
 

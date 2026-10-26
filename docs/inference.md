@@ -852,8 +852,9 @@ if2, fit run, survey) were removed in the same revision. Their replacements are:
 `--fixed`/`--fixed-file` on inference subcommands also removes the listed
 parameter from the `[estimate]` set if it was there — so
 `--fixed gamma=0.1 --sweep tau=lin(-35,-1,30)` is the canonical
-slice-while-holding-gamma pattern. The kick-out is announced on stderr (one line
-per parameter) so the override is never silent.
+slice-while-holding-gamma pattern. Each such parameter gets one `info:` line on
+stderr, so the override is never silent:
+``info: gamma: `--fixed gamma=0.1` pins it, so it is not estimated (the fit config lists it in [estimate])``.
 
 **Override visibility.** Whenever one tier replaces, with a different value, a
 value a lower tier supplied — `--fixed` over the active scenario, a later

@@ -162,9 +162,10 @@ every command that reads it (`fit run`, `profile --fit`, `survey --fit`);
 neither block wins.
 
 `[estimate]` membership is narrowed by the same walk: a parameter named by a
-user-explicit `--fixed`/`--fixed-file` is removed from the estimated set (with a
-warning), while a draw/sweep value never kicks a parameter out of `[estimate]`
-and a scenario touching an estimated parameter is refused (above).
+user-explicit `--fixed`/`--fixed-file` is removed from the estimated set — a
+layered override, reported as one `info:` line naming the parameter, the flag
+and its value — while a draw/sweep value never kicks a parameter out of
+`[estimate]` and a scenario touching an estimated parameter is refused (above).
 
 **Priors** resolve on their own three-tier chain (`fit.toml [estimate.p.prior]`
 → the model IR's `~` declaration → flat). For `camdl profile` the flat tier is a

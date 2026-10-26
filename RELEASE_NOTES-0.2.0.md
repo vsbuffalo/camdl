@@ -132,11 +132,11 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   of one fit.toml, which `profile --fit` and `survey --fit` used to accept with
   a warning (`[fixed]` won), is refused by every command; `fit run` already
   refused it. Unchanged: `[fixed] from_scenario`, which imports a scenario's
-  values minus the estimated ones; `--fixed`, which removes a parameter from
-  `[estimate]` with a warning; `profile`; and `fit predict --scenario`.
-  Migration: to fit under the scenario's value, move the parameter from
-  `[estimate]` to `[fixed]` with that value; otherwise name a scenario that does
-  not touch it. For an overlap, remove the name from whichever block is wrong.
+  values minus the estimated ones; `--fixed` over `[estimate]` (see CLI);
+  `profile`; and `fit predict --scenario`. Migration: to fit under the
+  scenario's value, move the parameter from `[estimate]` to `[fixed]` with that
+  value; otherwise name a scenario that does not touch it. For an overlap,
+  remove the name from whichever block is wrong.
 
 - **`simulate`'s implicit arm is labelled `(none)`, not `baseline`.** A run
   without `--scenario` shows `(none)` (path segment `_none_-<h8>`) in its leaf
@@ -459,6 +459,13 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   (gh#156); `--parallel N` caps the thread pool on the inference commands.
 - **Unified chain-start surface:** `--init <mode>` and `--fixed NAME=VALUE`
   across `fit` / `pfilter` / `profile` (see Breaking changes).
+- **`--fixed` / `--fixed-file` over a name in the fit config's `[estimate]` is
+  reported at `info:`, not `warning:`.** It stays a layered override — the
+  parameter is pinned and not estimated — and the line now names the value:
+  ``info: beta: `--fixed beta=0.4` pins it, so it is not estimated (the fit
+  config lists it in [estimate])``.
+  Its `run.json` notice code is `fixed-over-estimate` (was
+  `kicked-from-estimate`).
 - Better diagnostics throughout: structured `--json-errors`, a method-caveat
   banner driven by the registry, and warnings for single-init multi-chain fits
   (gh#71) and origin-less instant parameters (gh#103).

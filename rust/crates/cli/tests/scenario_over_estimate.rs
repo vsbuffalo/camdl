@@ -12,6 +12,9 @@
 //!
 //! `[fixed] from_scenario` is not the fit's scenario: it imports a scenario's
 //! values minus the estimated ones (gh#37), and stays accepted.
+//!
+//! `--fixed` over a name in `[estimate]` is a layered override: not refused,
+//! reported as an `info:` line.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -295,4 +298,24 @@ fn survey_from_scenario_carve_out_is_unchanged() {
     fit_toml(dir, "sv_carve", "", BETA, "from_scenario = \"base\"");
     let out = survey(dir, "carve", &["--fit", "sv_carve.toml"]);
     assert!(out.status.success(), "survey carve: {}", stderr(&out));
+}
+
+// ─── layered overrides reported at info ───────────────────────────────────────
+
+/// `--fixed N0=1000` over a fit config listing N0 in `[estimate]` pins it:
+/// one `info:` line, not a warning, and the profile runs.
+#[test]
+fn profile_fixed_over_estimate_is_an_info_notice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    setup(dir);
+    let est = format!("{BETA_GAMMA}\nN0 = {{ bounds = [100, 10000], start = 1000 }}");
+    fit_toml(dir, "pf_kick", "", &est, "");
+    let out = profile(dir, "kick", "pf_kick.toml", &["--fixed", "N0=1000", "--rw-sd", "beta=0.02"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "profile --fixed: {err}");
+    let line = "info: N0: `--fixed N0=1000` pins it, so it is not estimated (the fit \
+                config lists it in [estimate])";
+    assert_eq!(err.matches(line).count(), 1, "want {line:?} once; stderr:\n{err}");
+    assert!(!err.contains("warning: --fixed"), "no warning for a layered --fixed: {err}");
 }

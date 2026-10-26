@@ -38,8 +38,8 @@ ON INFERENCE SUBCOMMANDS (if2, profile, fit run)
   Any name appearing in `--fixed`/`--fixed-file` is pinned at the supplied
   value AND removed from the inference [estimate] set if present (so that
   `--fixed gamma=0.1 --sweep tau=lin(...)` is the canonical pattern for
-  profile-likelihood slicing — hold gamma, sweep tau). A warning is emitted
-  naming each parameter kicked from [estimate] and the source that did it.
+  profile-likelihood slicing — hold gamma, sweep tau). One info line names
+  each such parameter, the flag that pinned it and its value.
 
 PRECEDENCE (last wins, per docs/camdl-run-spec.md §1.3)
 

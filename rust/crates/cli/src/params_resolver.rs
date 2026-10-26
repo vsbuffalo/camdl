@@ -338,33 +338,40 @@ pub struct ResolvedParameters {
     pub params:       Vec<ResolvedParameter>,
     pub estimate_set: IndexSet<String>,
     pub model:        ir::Model,
-    pub warnings:     Vec<ResolverWarning>,
+    /// Names `[estimate]` lists that `--fixed`/`--fixed-file` pinned.
+    pub pinned_over_estimate: Vec<PinnedOverEstimate>,
     pub context:      ResolveContext,
 }
 
+/// A parameter the fit config lists in `[estimate]` that `--fixed` /
+/// `--fixed-file` pins, so it is held at `value` and not estimated.
+///
+/// A layered override, not a contradiction: the command line is the user's
+/// later, more specific say over the fit config, the same way `--fixed` over a
+/// scenario value is. Reported at info ([`PinnedOverEstimate::notice`]).
 #[derive(Debug, Clone, PartialEq)]
-pub enum ResolverWarning {
-    KickedFromEstimate { name: String, by: ValueSource },
+pub struct PinnedOverEstimate {
+    pub name:  String,
+    /// `FixedCli` or `FixedFile` — the only sources that pin a name out of
+    /// `[estimate]`.
+    pub by:    ValueSource,
+    /// The value that source gives the parameter.
+    pub value: f64,
 }
 
-impl ResolverWarning {
-    /// The warning as a [`Notice`] — its stderr line and its record.
+impl PinnedOverEstimate {
+    /// The notice as a [`Notice`] — its stderr line and its record.
     pub fn notice(&self) -> Notice {
-        match self {
-            ResolverWarning::KickedFromEstimate { name, by } => {
-                let source_clause = match by {
-                    ValueSource::FixedCli => format!("--fixed {}", name),
-                    ValueSource::FixedFile { path } => {
-                        format!("--fixed-file {}", path.display())
-                    }
-                    other => format!("source {:?}", other),
-                };
-                Notice::warning("kicked-from-estimate", format!(
-                    "{} removes `{}` from [estimate]; it will be \
-                     pinned to its resolved value rather than inferred.",
-                    source_clause, name))
+        let PinnedOverEstimate { name, by, value } = self;
+        let flag = match by {
+            ValueSource::FixedCli => format!("`--fixed {name}={value}` pins it"),
+            ValueSource::FixedFile { path } => {
+                format!("`--fixed-file {}` pins it at {value}", path.display())
             }
-        }
+            other => format!("{} pins it at {value}", other.tag()),
+        };
+        Notice::info("fixed-over-estimate", format!(
+            "{name}: {flag}, so it is not estimated (the fit config lists it in [estimate])"))
     }
 }
 
@@ -1252,7 +1259,7 @@ pub fn resolve_parameters_with_starts<'a>(
     starts: Option<StartsValues<'a>>,
 ) -> Result<ResolvedParameters, ResolveError> {
     let mut model = inputs.model.clone();
-    let mut warnings: Vec<ResolverWarning> = Vec::new();
+    let mut pinned_over_estimate: Vec<PinnedOverEstimate> = Vec::new();
 
     // ── Tier 1: model defaults (already in model.parameters) ────────────
     //
@@ -1508,32 +1515,33 @@ pub fn resolve_parameters_with_starts<'a>(
     // this" assertions. Tier 3 (fit.toml [fixed]) is a no-op here
     // because the toml's `[fixed]` block already excludes those
     // names from `[estimate]` at config-load time.
-    let kicker_names: HashMap<String, ValueSource> = {
-        let mut m: HashMap<String, ValueSource> = HashMap::new();
+    let kicker_names: HashMap<String, (ValueSource, f64)> = {
+        let mut m: HashMap<String, (ValueSource, f64)> = HashMap::new();
         for path in inputs.fixed_files {
             let path_str = path.to_string_lossy().into_owned();
             // We already validated the file; load it again for the
             // name list. The cost is negligible vs simulation, and
             // it keeps tier 4 / tier 5 source attribution explicit.
             if let Ok(overrides) = crate::util::load_params_toml(&path_str) {
-                for name in overrides.keys() {
+                for (name, &value) in &overrides {
                     m.insert(name.clone(),
-                        ValueSource::FixedFile { path: path.clone() });
+                        (ValueSource::FixedFile { path: path.clone() }, value));
                 }
             }
         }
-        for (name, _) in inputs.fixed_cli {
-            m.insert(name.clone(), ValueSource::FixedCli);
+        for (name, value) in inputs.fixed_cli {
+            m.insert(name.clone(), (ValueSource::FixedCli, *value));
         }
         m
     };
 
     let mut kicked: HashMap<String, ValueSource> = HashMap::new();
     estimate_set.retain(|name| {
-        if let Some(by) = kicker_names.get(name) {
-            warnings.push(ResolverWarning::KickedFromEstimate {
+        if let Some((by, value)) = kicker_names.get(name) {
+            pinned_over_estimate.push(PinnedOverEstimate {
                 name: name.clone(),
                 by: by.clone(),
+                value: *value,
             });
             kicked.insert(name.clone(), by.clone());
             false
@@ -1646,7 +1654,7 @@ pub fn resolve_parameters_with_starts<'a>(
         params,
         estimate_set,
         model,
-        warnings,
+        pinned_over_estimate,
         context,
     })
 }
@@ -1733,21 +1741,25 @@ fn value_span(values: &[f64]) -> String {
 type OverrideKey = (String, ValueSource, ValueSource);
 
 /// What [`notices`] reads from one resolution: its parameters (with their
-/// recorded overrides), its warnings and its context — everything but the
+/// recorded overrides), its `[estimate]` pins and its context — everything but the
 /// valued model. A caller that resolves many times and reports once
 /// (contrast arms, one resolution per posterior draw) keeps these
 /// ([`ResolvedParameters::into_notice_parts`]) instead of every model copy.
 #[derive(Debug, Clone)]
 pub struct NoticeParts {
     pub params:   Vec<ResolvedParameter>,
-    pub warnings: Vec<ResolverWarning>,
+    pub pinned_over_estimate: Vec<PinnedOverEstimate>,
     pub context:  ResolveContext,
 }
 
 impl ResolvedParameters {
     /// The parts of this resolution [`notices`] reads, without the model.
     pub fn into_notice_parts(self) -> NoticeParts {
-        NoticeParts { params: self.params, warnings: self.warnings, context: self.context }
+        NoticeParts {
+            params: self.params,
+            pinned_over_estimate: self.pinned_over_estimate,
+            context: self.context,
+        }
     }
 }
 
@@ -1756,19 +1768,27 @@ impl ResolvedParameters {
 #[derive(Clone, Copy)]
 struct PartsRef<'a> {
     params:   &'a [ResolvedParameter],
-    warnings: &'a [ResolverWarning],
+    pinned_over_estimate: &'a [PinnedOverEstimate],
     context:  &'a ResolveContext,
 }
 
 impl<'a> From<&'a ResolvedParameters> for PartsRef<'a> {
     fn from(r: &'a ResolvedParameters) -> Self {
-        PartsRef { params: &r.params, warnings: &r.warnings, context: &r.context }
+        PartsRef {
+            params: &r.params,
+            pinned_over_estimate: &r.pinned_over_estimate,
+            context: &r.context,
+        }
     }
 }
 
 impl<'a> From<&'a NoticeParts> for PartsRef<'a> {
     fn from(r: &'a NoticeParts) -> Self {
-        PartsRef { params: &r.params, warnings: &r.warnings, context: &r.context }
+        PartsRef {
+            params: &r.params,
+            pinned_over_estimate: &r.pinned_over_estimate,
+            context: &r.context,
+        }
     }
 }
 
@@ -1827,16 +1847,16 @@ fn override_notices(resolved: &[PartsRef<'_>]) -> Vec<(OverrideKey, Notice)> {
 }
 
 fn notices_of(resolved: &[PartsRef<'_>]) -> Notices {
-    let mut warnings: IndexSet<Notice> = IndexSet::new();
+    let mut pins: IndexSet<Notice> = IndexSet::new();
     for r in resolved {
-        warnings.extend(r.warnings.iter().map(ResolverWarning::notice));
+        pins.extend(r.pinned_over_estimate.iter().map(PinnedOverEstimate::notice));
     }
-    warnings.into_iter()
+    pins.into_iter()
         .chain(override_notices(resolved).into_iter().map(|(_, n)| n))
         .collect()
 }
 
-/// The notices a run's resolutions report: the resolver warnings (each
+/// The notices a run's resolutions report: the `[estimate]` pins (each
 /// distinct line once), then one line per distinct override
 /// ([`override_notices`]). One resolution for a single run; one per cell for
 /// a multi-cell run, so a condition every cell shares is reported once.
@@ -2482,8 +2502,8 @@ mod tests {
         assert!(matches!(&gamma.role,
             ParameterRole::Fixed { reason: FixReason::KickedFromEstimate { by } }
             if *by == ValueSource::FixedCli));
-        assert_eq!(resolved.warnings.len(), 1);
-        let ResolverWarning::KickedFromEstimate { name, by } = &resolved.warnings[0];
+        assert_eq!(resolved.pinned_over_estimate.len(), 1);
+        let PinnedOverEstimate { name, by, .. } = &resolved.pinned_over_estimate[0];
         assert_eq!(name, "gamma");
         assert_eq!(*by, ValueSource::FixedCli);
     }
@@ -2760,9 +2780,7 @@ mod tests {
         let resolved = resolve_parameters(inputs).expect("ok");
         assert!(resolved.estimate_set.contains("beta"),
             "draw/sweep tier must not kick a parameter from [estimate]");
-        let has_kicked = resolved.warnings.iter().any(|w|
-            matches!(w, ResolverWarning::KickedFromEstimate { .. }));
-        assert!(!has_kicked);
+        assert!(resolved.pinned_over_estimate.is_empty());
     }
 
     #[test]
@@ -2783,9 +2801,9 @@ mod tests {
     }
 
     #[test]
-    fn warning_format_is_actionable() {
-        // The warning format must name the parameter and the source so
-        // a user re-reading stderr can localise the kick-out.
+    fn fixed_over_estimate_is_an_info_notice_naming_the_flag_and_value() {
+        // `--fixed` over a name `[estimate]` lists is a layered override the
+        // user asked for: info, naming the parameter, the flag and its value.
         let model = mk_model(vec![mk_param("gamma", Some(0.1))]);
         let fcli = vec![("gamma".to_string(), 0.2)];
         let ffiles = vec![];
@@ -2794,15 +2812,37 @@ mod tests {
         fte.insert("gamma".into());
         let resolved = resolve_parameters(empty_inputs(&model, &fcli, &ffiles, &ftf, &fte))
             .expect("ok");
-        assert_eq!(resolved.warnings.len(), 1);
-        let msg = resolved.warnings[0].notice().render();
-        assert!(msg.contains("gamma"), "warning must name `gamma`: {}", msg);
-        assert!(msg.contains("--fixed"), "warning must mention --fixed: {}", msg);
-        assert!(msg.contains("[estimate]"), "warning must mention [estimate]: {}", msg);
+        let ns: Vec<Notice> = notices(&[&resolved]).iter()
+            .filter(|n| n.code == "fixed-over-estimate").cloned().collect();
+        assert_eq!(ns.len(), 1, "{ns:?}");
+        assert_eq!(ns[0].severity, Severity::Info);
+        assert_eq!(ns[0].render(),
+            "info: gamma: `--fixed gamma=0.2` pins it, so it is not estimated \
+             (the fit config lists it in [estimate])");
 
         // `emit_notices` is a thin wrapper; smoke-call it to confirm
         // no panic and to keep the symbol live.
         emit_notices(&[&resolved]);
+    }
+
+    #[test]
+    fn fixed_file_over_estimate_is_an_info_notice_naming_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pins.toml");
+        std::fs::write(&file, "gamma = 0.25\n").unwrap();
+        let model = mk_model(vec![mk_param("gamma", Some(0.1))]);
+        let fcli = vec![];
+        let ffiles = vec![file.clone()];
+        let ftf = IndexMap::new();
+        let mut fte: IndexSet<String> = IndexSet::new();
+        fte.insert("gamma".into());
+        let resolved = resolve_parameters(empty_inputs(&model, &fcli, &ffiles, &ftf, &fte))
+            .expect("ok");
+        let n = PinnedOverEstimate::notice(&resolved.pinned_over_estimate[0]);
+        assert_eq!(n.severity, Severity::Info);
+        assert_eq!(n.message, format!(
+            "gamma: `--fixed-file {}` pins it at 0.25, so it is not estimated \
+             (the fit config lists it in [estimate])", file.display()));
     }
 
     #[test]
