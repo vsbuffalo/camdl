@@ -205,18 +205,8 @@ pub fn apply_intervention_effects(
     Ok(())
 }
 
-/// The compartments one action reads or writes: its target, or a transfer's
-/// source and destination.
-fn action_compartments(action: &Action) -> Vec<&str> {
-    match action {
-        Action::Add(a) => vec![a.compartment.as_str()],
-        Action::Set(a) => vec![a.compartment.as_str()],
-        Action::FractionTransfer(ft) => vec![ft.src.as_str(), ft.dst.as_str()],
-        Action::AbsoluteTransfer(at) => vec![at.src.as_str(), at.dst.as_str()],
-    }
-}
-
 /// Which arena a compartment lives in, plus its local index.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Arena {
     Int(usize),
     Real(usize),
@@ -584,19 +574,25 @@ fn eval_amount_f64(
     eval_resolved(&model.resolved.intervention_exprs[iv_idx][action_idx], &ctx)
 }
 
-/// Apply one action exactly in f64. `read_int`/`read_real` supply the values the
-/// snapshot-relative arithmetic reads (the frozen snapshot for events; the live
-/// state for sequential interventions); the result is written to
-/// `int_vals`/`real_vals`.
-#[allow(clippy::too_many_arguments)]
-fn apply_action_f64(
+/// One change an action makes to one compartment of the ODE's `f64` state:
+/// add a delta, or write a value (a `set`).
+#[derive(Clone, Copy)]
+enum ChangeF64 {
+    Delta(f64),
+    Write(f64),
+}
+
+/// The changes one action makes, exactly in f64, given its resolved value `v`.
+/// `read_int`/`read_real` supply the values the snapshot-relative arithmetic
+/// reads (the phase snapshot for events; the live state for sequential
+/// interventions). Appends `(compartment, change)` pairs to `out`.
+fn action_changes_f64(
     model: &CompiledModel,
     action: &Action,
     v: f64,
     read_int: &[f64],
     read_real: &[f64],
-    int_vals: &mut [f64],
-    real_vals: &mut [f64],
+    out: &mut Vec<(Arena, ChangeF64)>,
 ) -> Result<(), SimError> {
     match action {
         Action::Add(aa) => {
@@ -612,57 +608,80 @@ fn apply_action_f64(
                     cause: NegativeCountCause::InterventionAddNegative,
                 });
             }
-            match resolve_target(model, &aa.compartment)? {
-                Arena::Int(i) => int_vals[i] += v,
-                Arena::Real(i) => real_vals[i] += v,
-            }
+            out.push((resolve_target(model, &aa.compartment)?, ChangeF64::Delta(v)));
         }
-        Action::Set(sa) => match resolve_target(model, &sa.compartment)? {
-            Arena::Int(i) => int_vals[i] = v,
-            Arena::Real(i) => {
-                // gh#196: reject a negative real `set` on the ODE path too,
-                // matching the discrete resolver. Check the explicit value,
-                // not the integrated state (RK4 undershoot is cleaned to 0).
-                if v < 0.0 {
-                    return Err(set_real_negative_err(&sa.compartment, v, 0.0));
-                }
-                real_vals[i] = v;
+        Action::Set(sa) => {
+            let target = resolve_target(model, &sa.compartment)?;
+            // gh#196: reject a negative real `set` on the ODE path too,
+            // matching the discrete resolver. Check the explicit value,
+            // not the integrated state (RK4 undershoot is cleaned to 0).
+            if matches!(target, Arena::Real(_)) && v < 0.0 {
+                return Err(set_real_negative_err(&sa.compartment, v, 0.0));
             }
-        },
+            out.push((target, ChangeF64::Write(v)));
+        }
         Action::FractionTransfer(ft) => {
             let frac = v.clamp(0.0, 1.0);
-            match (resolve_target(model, &ft.src)?, resolve_target(model, &ft.dst)?) {
-                (Arena::Int(s), Arena::Int(d)) => {
-                    let x = read_int[s] * frac;
-                    int_vals[s] -= x;
-                    int_vals[d] += x;
-                }
-                (Arena::Real(s), Arena::Real(d)) => {
-                    let x = read_real[s] * frac;
-                    real_vals[s] -= x;
-                    real_vals[d] += x;
-                }
+            let (s, d) = (resolve_target(model, &ft.src)?, resolve_target(model, &ft.dst)?);
+            let x = match s {
+                Arena::Int(i) if matches!(d, Arena::Int(_)) => read_int[i] * frac,
+                Arena::Real(i) if matches!(d, Arena::Real(_)) => read_real[i] * frac,
                 _ => return Err(mixed_arena_err(&ft.src, &ft.dst)),
-            }
+            };
+            out.push((s, ChangeF64::Delta(-x)));
+            out.push((d, ChangeF64::Delta(x)));
         }
         Action::AbsoluteTransfer(at) => {
-            match (resolve_target(model, &at.src)?, resolve_target(model, &at.dst)?) {
-                (Arena::Int(s), Arena::Int(d)) => {
-                    let x = v.min(read_int[s]);
-                    int_vals[s] -= x;
-                    int_vals[d] += x;
-                }
-                (Arena::Real(s), Arena::Real(d)) => {
-                    let x = v.min(read_real[s]);
-                    real_vals[s] -= x;
-                    real_vals[d] += x;
-                }
+            let (s, d) = (resolve_target(model, &at.src)?, resolve_target(model, &at.dst)?);
+            let x = match s {
+                Arena::Int(i) if matches!(d, Arena::Int(_)) => v.min(read_int[i]),
+                Arena::Real(i) if matches!(d, Arena::Real(_)) => v.min(read_real[i]),
                 _ => return Err(mixed_arena_err(&at.src, &at.dst)),
-            }
+            };
+            out.push((s, ChangeF64::Delta(-x)));
+            out.push((d, ChangeF64::Delta(x)));
         }
     }
     Ok(())
 }
+
+/// The `f64` slot a compartment occupies.
+fn slot<'s>(int_vals: &'s mut [f64], real_vals: &'s mut [f64], a: Arena) -> &'s mut f64 {
+    match a {
+        Arena::Int(i) => &mut int_vals[i],
+        Arena::Real(i) => &mut real_vals[i],
+    }
+}
+
+/// Apply one action exactly in f64, its changes in the order the action
+/// lists them (the sequential intervention pass).
+#[allow(clippy::too_many_arguments)]
+fn apply_action_f64(
+    model: &CompiledModel,
+    action: &Action,
+    v: f64,
+    read_int: &[f64],
+    read_real: &[f64],
+    int_vals: &mut [f64],
+    real_vals: &mut [f64],
+) -> Result<(), SimError> {
+    let mut changes = Vec::with_capacity(2);
+    action_changes_f64(model, action, v, read_int, read_real, &mut changes)?;
+    for (a, c) in changes {
+        let x = slot(int_vals, real_vals, a);
+        match c {
+            ChangeF64::Delta(d) => *x += d,
+            ChangeF64::Write(w) => *x = w,
+        }
+    }
+    Ok(())
+}
+
+/// Relative slack before a negative integer-kind compartment left by an ODE
+/// event phase is refused: a value below `-CONTINUOUS_NEG_TOL · max(1, |x|)`
+/// (x the phase snapshot) is an overdraw, while drains whose fractions sum to
+/// one can leave a few ulps below zero from rounding alone, which is not.
+const CONTINUOUS_NEG_TOL: f64 = 1e-9;
 
 /// The ODE's arena: integer compartments held as `f64` (`int_vals`) and the
 /// real compartments, both updated exactly, with no rounding. Each phase
@@ -670,14 +689,24 @@ fn apply_action_f64(
 /// that copy, so the actions of one phase see the same state.
 ///
 /// Within a phase the actions combine as on the integer arena: each one
-/// contributes its delta against the phase's snapshot and the deltas sum, a
+/// contributes its change against the phase's snapshot and the changes add, a
 /// `set` contributing `v − snapshot`. So `set X = 5` with
 /// `transfer(fraction = 0.5, from = X, to = Y)` from X = 10 gives
-/// X = 10 + (5 − 10) − 5 = 0 whatever the declaration order. A `set` that is
-/// the only action touching its compartment in the phase writes `v` exactly
-/// instead, because `x + (v − x)` need not round to `v` in `f64`; the two
-/// forms agree in exact arithmetic, and the exact write keeps a lone `set`
-/// meaning set.
+/// X = 10 + (5 − 10) − 5 = 0 whatever the declaration order. Two rules keep
+/// that exact in `f64`:
+///
+///   - a compartment touched by one action only takes that action's change
+///     directly, and a `set` alone on its compartment writes `v` exactly,
+///     because `x + (v − x)` need not round to `v`;
+///   - a compartment touched by several actions gets the snapshot plus their
+///     changes added in ascending order of value, so the result is the same
+///     to the last bit in any declaration order.
+///
+/// Two `set`s on one compartment never reach here ([`apply_event_phases`]
+/// refuses them). An integer-kind compartment the phase leaves below zero
+/// (beyond [`CONTINUOUS_NEG_TOL`]) is refused with
+/// `NegativeCountCause::InterventionNegative`, as Gillespie's post-effect scan
+/// refuses it, instead of being integrated from a negative count.
 pub struct ContinuousArena<'a> {
     pub int: &'a mut [f64],
     pub real: &'a mut [f64],
@@ -698,24 +727,7 @@ impl EventArena for ContinuousArena<'_> {
         }
         let snap_int = self.int.to_vec();
         let snap_real = self.real.to_vec();
-        // How many of this phase's actions touch each compartment, so a `set`
-        // knows whether it is alone on its target (exact write) or coincides
-        // with another action there (snapshot-relative delta, summed).
-        let mut touches_int = vec![0u32; snap_int.len()];
-        let mut touches_real = vec![0u32; snap_real.len()];
-        for &iv_idx in event_idx {
-            for action in &model.model.interventions[iv_idx].actions {
-                if action_phase(action) != phase {
-                    continue;
-                }
-                for name in action_compartments(action) {
-                    match resolve_target(model, name)? {
-                        Arena::Int(i) => touches_int[i] += 1,
-                        Arena::Real(i) => touches_real[i] += 1,
-                    }
-                }
-            }
-        }
+        let mut changes: Vec<(Arena, ChangeF64)> = Vec::new();
         for &iv_idx in event_idx {
             let iv = &model.model.interventions[iv_idx];
             for (action_idx, action) in iv.actions.iter().enumerate() {
@@ -725,23 +737,45 @@ impl EventArena for ContinuousArena<'_> {
                 let v = eval_amount_f64(model, iv_idx, action_idx, &snap_int, &snap_real, params, t, dt);
                 let v = crate::intervention::finite_action_value(v, &iv.name, action, t)?;
                 trace_action(EffectKind::Event, &iv.name, action, v, t);
-                if let Action::Set(sa) = action {
-                    match resolve_target(model, &sa.compartment)? {
-                        Arena::Int(i) if touches_int[i] > 1 => {
-                            self.int[i] += v - snap_int[i];
-                            continue;
-                        }
-                        Arena::Real(i) if touches_real[i] > 1 => {
-                            if v < 0.0 {
-                                return Err(set_real_negative_err(&sa.compartment, v, 0.0));
-                            }
-                            self.real[i] += v - snap_real[i];
-                            continue;
-                        }
-                        _ => {}
-                    }
+                action_changes_f64(model, action, v, &snap_int, &snap_real, &mut changes)?;
+            }
+        }
+        let snap_of = |a: Arena| match a {
+            Arena::Int(i) => snap_int[i],
+            Arena::Real(i) => snap_real[i],
+        };
+        let mut sorted: Vec<f64> = Vec::new();
+        for (k, &(target, change)) in changes.iter().enumerate() {
+            if changes[..k].iter().any(|&(a, _)| a == target) {
+                continue; // applied with its first occurrence
+            }
+            let n = changes.iter().filter(|&&(a, _)| a == target).count();
+            let x = slot(self.int, self.real, target);
+            if n == 1 {
+                match change {
+                    ChangeF64::Delta(d) => *x += d,
+                    ChangeF64::Write(w) => *x = w,
                 }
-                apply_action_f64(model, action, v, &snap_int, &snap_real, self.int, self.real)?;
+            } else {
+                let base = snap_of(target);
+                sorted.clear();
+                sorted.extend(changes.iter().filter(|&&(a, _)| a == target).map(|&(_, c)| match c {
+                    ChangeF64::Delta(d) => d,
+                    ChangeF64::Write(w) => w - base,
+                }));
+                sorted.sort_by(|a, b| a.total_cmp(b));
+                *x = sorted.iter().fold(base, |acc, &d| acc + d);
+            }
+            if let Arena::Int(i) = target {
+                let v = self.int[i];
+                if v < -CONTINUOUS_NEG_TOL * snap_int[i].abs().max(1.0) {
+                    return Err(SimError::NegativeCount {
+                        compartment: model.int_compartment_name(i),
+                        attempted_value: v.floor() as i64,
+                        t,
+                        cause: NegativeCountCause::InterventionNegative,
+                    });
+                }
             }
         }
         Ok(())
@@ -1512,6 +1546,65 @@ mod tests {
     /// has one), so we run two separate models:
     ///   - transfer 3.5: x = min(3.5, 10.0) = 3.5 → W1=6.5, W2=3.5 (exact, no round)
     ///   - transfer 20.0: x = min(20.0, 10.0) = 10.0 (clamp) → W1=0.0, W2=10.0
+    fn real_phase(actions: Vec<Action>) -> Result<Vec<f64>, SimError> {
+        let m = model_two_real(actions);
+        let mut int_vals = vec![100.0, 0.0];
+        let mut real_vals = vec![10.0 / 3.0, 0.0];
+        {
+            let mut arena = ContinuousArena { int: &mut int_vals, real: &mut real_vals };
+            apply_event_phases(&m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None)?;
+        }
+        Ok(real_vals)
+    }
+
+    /// The real-compartment delta path: a `set` and two drains on W1 at one
+    /// instant. With W1 = 10/3 the changes (0.7 − 10/3, −0.11·10/3, −0.13)
+    /// added in declaration order and in reverse order differ in the last bits
+    /// (0.20333333333333303 vs 0.20333333333333314), so the result is only
+    /// order-independent because the changes are added in ascending order.
+    #[test]
+    fn continuous_real_set_and_drains_are_bit_identical_in_either_order() {
+        let set = Action::Set(SetAction { compartment: "W1".into(), value: Expr::const_(0.7) });
+        let frac = Action::FractionTransfer(FractionTransfer {
+            src: "W1".into(),
+            dst: "W2".into(),
+            fraction: Expr::const_(0.11),
+        });
+        let count = Action::AbsoluteTransfer(AbsoluteTransfer {
+            src: "W1".into(),
+            dst: "W2".into(),
+            count: Expr::const_(0.13),
+        });
+        let fwd = real_phase(vec![set.clone(), frac.clone(), count.clone()]).unwrap();
+        let rev = real_phase(vec![count, frac, set]).unwrap();
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&fwd), bits(&rev), "forward {fwd:?} vs reversed {rev:?}");
+        let base = 10.0_f64 / 3.0;
+        let mut d = [0.7 - base, -(base * 0.11), -0.13];
+        d.sort_by(|a, b| a.total_cmp(b));
+        assert_eq!(fwd[0].to_bits(), d.iter().fold(base, |acc, &x| acc + x).to_bits());
+    }
+
+    /// The negative check on a coincident real `set` still fires.
+    #[test]
+    fn continuous_coincident_real_set_negative_is_hard_error() {
+        let res = real_phase(vec![
+            Action::Set(SetAction { compartment: "W1".into(), value: Expr::const_(-1.0) }),
+            Action::FractionTransfer(FractionTransfer {
+                src: "W1".into(),
+                dst: "W2".into(),
+                fraction: Expr::const_(0.5),
+            }),
+        ]);
+        assert!(
+            matches!(
+                res,
+                Err(SimError::NegativeCount { cause: NegativeCountCause::InterventionNegative, .. })
+            ),
+            "got {res:?}"
+        );
+    }
+
     #[test]
     fn continuous_absolute_transfer_real_is_exact_and_clamps() {
         // Sub-source amount: moves exactly 3.5, no rounding of the .5.
