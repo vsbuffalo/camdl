@@ -383,42 +383,63 @@ pub trait EventArena {
     ) -> Result<(), SimError>;
 }
 
-/// Refuse two or more `set` actions on one compartment among the events due at
-/// one instant. In the drain-and-`set` phase every action contributes its
-/// change against the same state, so two sets would give `v1 + v2 − x`, a
-/// value neither of them names. A config error, raised on every backend.
+/// Refuse a `set` beside any other drain-and-`set` action on the same
+/// compartment among the events due at one instant: a second `set`, or a
+/// `transfer` from or into it. In that phase every action contributes its change
+/// against the same state, so the `set` and the other change add — from
+/// `X = 10`, `{ X = 5 }` and a half drain of `X` gave `X = 0`, a value neither
+/// event names. A config error, raised on every backend. An inflow `add` beside
+/// a `set` is not refused: it acts in the earlier inflow phase, and the `set`
+/// then overwrites the post-inflow value (language spec §13.10).
 fn refuse_coincident_sets(model: &CompiledModel, event_idx: &[usize], t: f64) -> Result<(), SimError> {
-    let sets = || {
+    // (compartment, event name, is_set) for every drain-and-`set` action.
+    let touches = || {
         event_idx.iter().flat_map(move |&iv_idx| {
             let iv = &model.model.interventions[iv_idx];
-            iv.actions.iter().filter_map(move |a| match a {
-                Action::Set(sa) => Some((sa.compartment.as_str(), iv.name.as_str())),
-                _ => None,
+            iv.actions.iter().flat_map(move |a| {
+                let name = iv.name.as_str();
+                let v: Vec<(&str, &str, bool)> = match a {
+                    Action::Set(sa) => vec![(sa.compartment.as_str(), name, true)],
+                    Action::FractionTransfer(ft) => {
+                        vec![(ft.src.as_str(), name, false), (ft.dst.as_str(), name, false)]
+                    }
+                    Action::AbsoluteTransfer(at) => {
+                        vec![(at.src.as_str(), name, false), (at.dst.as_str(), name, false)]
+                    }
+                    Action::Add(_) => vec![],
+                };
+                v.into_iter()
             })
         })
     };
-    // Fast path: the common batch carries at most one `set`. Finding that walks
-    // the due events' actions once, without allocating; it is linear in the
-    // batch, not constant.
-    if sets().nth(1).is_none() {
+    // Fast path: the common batch carries no `set`. Finding that walks the due
+    // events' actions once, without allocating beyond the per-action list.
+    if !touches().any(|(_, _, is_set)| is_set) {
         return Ok(());
     }
-    let all: Vec<(&str, &str)> = sets().collect();
-    for (i, &(comp, _)) in all.iter().enumerate() {
-        if all[..i].iter().any(|&(c, _)| c == comp) {
-            continue; // reported with its first occurrence
+    let all: Vec<(&str, &str, bool)> = touches().collect();
+    for (i, &(comp, set_name, is_set)) in all.iter().enumerate() {
+        if !is_set || all[..i].iter().any(|&(c, _, s)| c == comp && s) {
+            continue; // reported with the compartment's first `set`
         }
-        let mut names: Vec<&str> = all.iter().filter(|&&(c, _)| c == comp).map(|&(_, n)| n).collect();
-        if names.len() < 2 {
-            continue;
+        let mut sets: Vec<&str> = all.iter().filter(|&&(c, _, s)| c == comp && s).map(|&(_, n, _)| n).collect();
+        sets.dedup();
+        if sets.len() >= 2 {
+            let names = sets.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ");
+            return Err(SimError::Validation(format!(
+                "more than one `set` on compartment '{comp}' at t={t}: events {names} each set it \
+                 at the same instant, and their combined effect is not defined — give the \
+                 sets different times or merge them into one"
+            )));
         }
-        names.dedup();
-        let names = names.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ");
-        return Err(SimError::Validation(format!(
-            "more than one `set` on compartment '{comp}' at t={t}: events {names} each set it \
-             at the same instant, and their combined effect is not defined — give the \
-             sets different times or merge them into one"
-        )));
+        if let Some(&(_, other, _)) = all.iter().find(|&&(c, _, s)| c == comp && !s) {
+            return Err(SimError::Validation(format!(
+                "a `set` and a `transfer` on compartment '{comp}' at t={t}: event '{set_name}' \
+                 sets it and event '{other}' moves people from or into it at the same instant, \
+                 and their combined value is one neither event names — give them different \
+                 times or merge them into one"
+            )));
+        }
     }
     Ok(())
 }
@@ -1136,9 +1157,10 @@ mod tests {
     }
 
     #[test]
-    fn continuous_set_and_drain_on_one_compartment_sum_their_deltas() {
-        // From S = 10: `set S = 5` contributes 5 − 10, the drain −10 · 0.5, so
-        // S = 0 and I = 5 in both declaration orders — the integer arena's rule.
+    fn a_set_beside_a_drain_on_one_compartment_is_refused_on_both_arenas() {
+        // From S = 10, `set S = 5` and a half drain of S used to add to S = 0, a
+        // value neither event names; it is refused, in either order, on the
+        // integer and the continuous arena.
         let set = Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(5.0) });
         let drain = Action::FractionTransfer(FractionTransfer {
             src: "S".into(),
@@ -1147,7 +1169,16 @@ mod tests {
         });
         for actions in [vec![set.clone(), drain.clone()], vec![drain, set]] {
             let m = model_with(actions);
-            assert_eq!(continuous_phases_from(&m, vec![10.0, 0.0]), vec![0.0, 5.0]);
+            let (mut int_s, mut real_s) = states();
+            let mut deltas = EffectDeltas::default();
+            let mut arena = DiscreteArena { int: &mut int_s, real: &mut real_s, deltas: &mut deltas };
+            let e = apply_event_phases(&m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None).unwrap_err();
+            assert!(e.to_string().contains("a `set` and a `transfer` on compartment 'S'"), "{e}");
+            let mut iv = vec![10.0, 0.0];
+            let mut rv = vec![50.0];
+            let mut arena = ContinuousArena { int: &mut iv, real: &mut rv };
+            let e = apply_event_phases(&m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None).unwrap_err();
+            assert!(e.to_string().contains("a `set` and a `transfer` on compartment 'S'"), "{e}");
         }
     }
 
@@ -1620,14 +1651,16 @@ mod tests {
         Ok(real_vals)
     }
 
-    /// The real-compartment delta path: a `set` and two drains on W1 at one
-    /// instant. With W1 = 10/3 the changes (0.7 − 10/3, −0.11·10/3, −0.13)
-    /// added in declaration order and in reverse order differ in the last bits
-    /// (0.20333333333333303 vs 0.20333333333333314), so the result is only
-    /// order-independent because the changes are added in ascending order.
+    /// The real-compartment delta path: three drains on W1 at one instant.
+    /// The result is order-independent because the changes are added in
+    /// ascending order.
     #[test]
-    fn continuous_real_set_and_drains_are_bit_identical_in_either_order() {
-        let set = Action::Set(SetAction { compartment: "W1".into(), value: Expr::const_(0.7) });
+    fn continuous_real_drains_are_bit_identical_in_either_order() {
+        let frac2 = Action::FractionTransfer(FractionTransfer {
+            src: "W1".into(),
+            dst: "W2".into(),
+            fraction: Expr::const_(0.21),
+        });
         let frac = Action::FractionTransfer(FractionTransfer {
             src: "W1".into(),
             dst: "W2".into(),
@@ -1638,21 +1671,21 @@ mod tests {
             dst: "W2".into(),
             count: Expr::const_(0.13),
         });
-        let fwd = real_phase(vec![set.clone(), frac.clone(), count.clone()]).unwrap();
-        let rev = real_phase(vec![count, frac, set]).unwrap();
+        let fwd = real_phase(vec![frac2.clone(), frac.clone(), count.clone()]).unwrap();
+        let rev = real_phase(vec![count, frac, frac2]).unwrap();
         let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         assert_eq!(bits(&fwd), bits(&rev), "forward {fwd:?} vs reversed {rev:?}");
         let base = 10.0_f64 / 3.0;
-        let mut d = [0.7 - base, -(base * 0.11), -0.13];
+        let mut d = [-(base * 0.21), -(base * 0.11), -0.13];
         d.sort_by(|a, b| a.total_cmp(b));
         assert_eq!(fwd[0].to_bits(), d.iter().fold(base, |acc, &x| acc + x).to_bits());
     }
 
-    /// The negative check on a coincident real `set` still fires.
+    /// A `set` beside a `transfer` into the same real compartment is refused.
     #[test]
-    fn continuous_coincident_real_set_negative_is_hard_error() {
+    fn continuous_real_set_beside_a_transfer_into_it_is_refused() {
         let res = real_phase(vec![
-            Action::Set(SetAction { compartment: "W1".into(), value: Expr::const_(-1.0) }),
+            Action::Set(SetAction { compartment: "W2".into(), value: Expr::const_(1.0) }),
             Action::FractionTransfer(FractionTransfer {
                 src: "W1".into(),
                 dst: "W2".into(),
@@ -1660,10 +1693,7 @@ mod tests {
             }),
         ]);
         assert!(
-            matches!(
-                res,
-                Err(SimError::NegativeCount { cause: NegativeCountCause::InterventionNegative, .. })
-            ),
+            matches!(&res, Err(SimError::Validation(m)) if m.contains("compartment 'W2'")),
             "got {res:?}"
         );
     }
