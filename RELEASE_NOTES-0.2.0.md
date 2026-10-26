@@ -121,6 +121,23 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   that does not set it. A refit of such a file under the scenario gives
   different estimates from the old run.
 
+- **A parameter cannot be both estimated and given a value: a fit.toml whose
+  scenario sets or scales an estimated parameter is refused, and so is a name in
+  both `[fixed]` and `[estimate]`.** `fit run` on a fit.toml whose `scenario`
+  sets a parameter `[estimate]` lists used to estimate it anyway, discard the
+  scenario's value and print nothing. `fit run` and `survey --fit` now refuse a
+  scenario, from the fit.toml or (on `survey`) `--scenario`, that sets or scales
+  an estimated parameter, composed presets included; the error names the
+  parameter and the scenario's value. A name in both `[fixed]` and `[estimate]`
+  of one fit.toml, which `profile --fit` and `survey --fit` used to accept with
+  a warning (`[fixed]` won), is refused by every command; `fit run` already
+  refused it. Unchanged: `[fixed] from_scenario`, which imports a scenario's
+  values minus the estimated ones; `--fixed`, which removes a parameter from
+  `[estimate]` with a warning; `profile`; and `fit predict --scenario`.
+  Migration: to fit under the scenario's value, move the parameter from
+  `[estimate]` to `[fixed]` with that value; otherwise name a scenario that does
+  not touch it. For an overlap, remove the name from whichever block is wrong.
+
 - **`simulate`'s implicit arm is labelled `(none)`, not `baseline`.** A run
   without `--scenario` shows `(none)` (path segment `_none_-<h8>`) in its leaf
   path, `run.json` and `camdl list`, and its derived labels read

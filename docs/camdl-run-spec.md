@@ -145,12 +145,26 @@ before anything is written, rather than resolved:
   `--scenario` flag). The error names the parameter, both values, the scenario
   and the fit.toml, and the fix: give `[fixed]` the scenario's value to run
   under the scenario, or remove the parameter from the scenario. A scenario
-  landing on the `[fixed]` value is not a collision and runs.
+  landing on the `[fixed]` value is not a collision and runs;
+- a scenario that `set`s or `scale`s a parameter a fit.toml's `[estimate]`
+  lists, directly or through a preset it composes: on `fit run` (the fit.toml's
+  own `scenario`) and on `survey --fit` (the scenario from the fit.toml or the
+  `--scenario` flag). A parameter is either estimated or given a value, never
+  both: the estimate would discard the scenario's value. The error names the
+  parameter, what the scenario does to it and the fit.toml, and the fix: move
+  the parameter from `[estimate]` to `[fixed]` with the scenario's value to fit
+  under it, or name a scenario that does not touch it. Only the scenario the fit
+  runs under is checked; `[fixed] from_scenario` imports a scenario's values
+  minus the estimated ones and is not this collision.
+
+A fit.toml naming one parameter in both `[estimate]` and `[fixed]` is refused by
+every command that reads it (`fit run`, `profile --fit`, `survey --fit`);
+neither block wins.
 
 `[estimate]` membership is narrowed by the same walk: a parameter named by a
 user-explicit `--fixed`/`--fixed-file` is removed from the estimated set (with a
-warning), while a scenario patch or a draw/sweep value never kicks a parameter
-out of `[estimate]`.
+warning), while a draw/sweep value never kicks a parameter out of `[estimate]`
+and a scenario touching an estimated parameter is refused (above).
 
 **Priors** resolve on their own three-tier chain (`fit.toml [estimate.p.prior]`
 → the model IR's `~` declaration → flat). For `camdl profile` the flat tier is a
@@ -2957,7 +2971,7 @@ method executes.
 6. `holdout_after` exclusive with `holdout`.
 7. **Partition.** `[estimate] ∩ [fixed] = ∅`, `[estimate] ∪ [fixed]` equals the
    model's parameter set exactly. Three distinct errors:
-   > `parameters in both [estimate] and [fixed]: beta`
+   > ``parameter `beta` is in both [estimate] and [fixed]; a parameter is either estimated or given a value, not both.``
    > `parameters neither estimated nor fixed: I0`
    > `parameters not in model: nope`
 8. **(algorithm, backend)** against the registry. The error names the structural

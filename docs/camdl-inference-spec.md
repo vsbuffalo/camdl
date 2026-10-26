@@ -194,8 +194,8 @@ if estimated ∪ fixed ≠ model_params:
 if estimated ∩ fixed ≠ ∅:
     overlap = estimated ∩ fixed
     error:
-      "Parameters in both [estimate] and [fixed]: {overlap}
-       Each parameter must appear in exactly one section."
+      "parameter {overlap} is in both [estimate] and [fixed]; a parameter is
+       either estimated or given a value, not both."
 ```
 
 This is a hard error. No warnings, no defaults. The user must explicitly decide

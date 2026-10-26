@@ -1104,6 +1104,131 @@ pub fn scenario_fixed_collision(
     Ok(Some(msg))
 }
 
+// ─── Scenario × fit.toml [estimate] collisions ────────────────────────────────
+
+/// Refuse a fit whose scenario sets or scales a parameter its `[estimate]`
+/// block estimates. `Ok(None)` when the scenario touches none of `estimated`;
+/// `Ok(Some(message))` names every colliding parameter, what the scenario does
+/// to it, the fit.toml and the fix.
+///
+/// A parameter is either estimated or given a value, never both. Left to
+/// precedence, the estimate would overwrite whatever the scenario set, which
+/// would survive at most as a starting value, and nothing would tell the user
+/// that the scenario's value was not used. Which parameters the scenario
+/// touches is [`scenario_param_footprint`], the same footprint the sweep and
+/// draws-file guards read, so a composed preset's `set` or `scale` is caught as
+/// surely as the parent's own.
+///
+/// Only the scenario a fit *runs under* is checked: `[fixed] from_scenario`
+/// imports a scenario's values into `[fixed]` minus the estimated ones (gh#37),
+/// and that import is not this collision.
+pub fn scenario_estimate_collision(
+    model: &ir::Model,
+    scenario: &str,
+    estimated: &[&str],
+    fit_toml: &str,
+) -> Result<Option<String>, String> {
+    let scen = crate::sim_job::ScenarioRef::Named(scenario.to_string());
+    let footprint = scenario_param_footprint(model, &scen)?;
+    let clash: Vec<&str> = estimated.iter().copied().filter(|p| footprint.contains(*p)).collect();
+    if clash.is_empty() {
+        return Ok(None);
+    }
+
+    // What the scenario does to each clashing parameter, and its net value
+    // where one exists (a `set`, or a `scale` of the model's default).
+    let mut rows: Vec<(&str, Vec<ScenarioParamAction>, Option<f64>)> = Vec::new();
+    for &param in &clash {
+        let actions = scenario_param_actions(model, &scen, param)?;
+        let mut set: Vec<(String, f64)> = Vec::new();
+        let mut scale: Vec<(String, f64)> = Vec::new();
+        for a in &actions {
+            match a {
+                ScenarioParamAction::Set { value, .. } => set.push((param.to_string(), *value)),
+                ScenarioParamAction::Scale { factor, .. } => {
+                    scale.push((param.to_string(), *factor))
+                }
+            }
+        }
+        let net = fold_scenario_tier(&set, &scale, |k| {
+            model.parameters.iter().find(|p| p.name == k).and_then(|p| p.value.resolved_value())
+        })
+        .get(param)
+        .copied();
+        rows.push((param, actions, net));
+    }
+
+    let sets = |acts: &[ScenarioParamAction]| {
+        acts.iter().any(|a| matches!(a, ScenarioParamAction::Set { .. }))
+    };
+    let n_set = rows.iter().filter(|(_, a, _)| sets(a)).count();
+    let verb = if n_set == rows.len() {
+        "set"
+    } else if n_set == 0 {
+        "scaled"
+    } else {
+        "set or scaled"
+    };
+    let names: Vec<String> = clash.iter().map(|p| format!("`{p}`")).collect();
+    let names = names.join(", ");
+    let (noun, is, them) =
+        if clash.len() == 1 { ("parameter", "is", "it") } else { ("parameters", "are", "them") };
+    let mut msg = format!("{noun} {names} {is} both estimated and {verb} by scenario `{scenario}`");
+    for (param, actions, net) in &rows {
+        msg.push_str(&format!("\n  [estimate]:  {param}    (in `{fit_toml}`)"));
+        let how: Vec<String> = actions
+            .iter()
+            .map(|a| {
+                let (text, preset) = match a {
+                    ScenarioParamAction::Set { value, preset } => {
+                        (format!("set {param} = {value}"), preset)
+                    }
+                    ScenarioParamAction::Scale { factor, preset } => {
+                        (format!("scale {param} \u{d7} {factor}"), preset)
+                    }
+                };
+                if preset.as_str() == scenario {
+                    text
+                } else {
+                    format!("{text} from composed preset `{preset}`")
+                }
+            })
+            .collect();
+        let value = match net {
+            Some(v) => format!("{param} = {v}    ({})", how.join(", ")),
+            None => how.join(", "),
+        };
+        msg.push_str(&format!("\n  scenario:    {value}"));
+    }
+    msg.push_str(
+        "\nAn estimated parameter takes its values from the estimation, which would discard \
+         the scenario's value, so which one is meant cannot be read from the fit config.",
+    );
+    // The values a scenario `set` lands on, for the "fit under it" fix. A
+    // parameter the scenario only scales has no such value: held in [fixed],
+    // the scenario would rescale it off that value, which the [fixed]
+    // collision refuses.
+    let pinned: Vec<String> = rows
+        .iter()
+        .filter(|(_, a, _)| sets(a))
+        .filter_map(|(p, _, net)| net.map(|v| format!("`{p} = {v}`")))
+        .collect();
+    let other = format!("name a scenario that does not touch {them}");
+    msg.push_str(&if pinned.is_empty() {
+        format!(
+            "\nFix: {other}. A scaled parameter cannot be held at a value of its own: the \
+             scenario would rescale that value too."
+        )
+    } else {
+        format!(
+            "\nFix: drop {names} from [estimate] in `{fit_toml}` to fit under the scenario's \
+             value (give [fixed] the scenario's value: {}), or {other}.",
+            pinned.join(", ")
+        )
+    });
+    Ok(Some(msg))
+}
+
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 /// Resolve a `ParameterInputs` to a `ResolvedParameters`, walking the

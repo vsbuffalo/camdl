@@ -538,16 +538,27 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
     }
 
-    // ── Refuse a scenario that disagrees with [fixed] or the sweep ──────
+    // ── Refuse a scenario that disagrees with [estimate], [fixed] or the sweep
     // The resolver is the one writer of every parameter value a fit runs at,
     // and it puts the scenario above both [fixed] and a sweep point (spec
     // §1.3). On the same parameter that would silently discard what the user
     // wrote, so the combination is refused before anything is generated or
-    // written: [fixed] when the scenario lands on a different value, a sweep
-    // whenever the scenario touches a swept parameter (gh#572, as `simulate`
-    // and `fit predict` refuse it).
+    // written: [estimate] whenever the scenario touches an estimated
+    // parameter (the estimate would discard the scenario's value), [fixed]
+    // when the scenario lands on a different value, a sweep whenever the
+    // scenario touches a swept parameter (gh#572, as `simulate` and
+    // `fit predict` refuse it).
     if let Some(scenario) = config.problem.scenario.as_deref() {
         let mut refusals: Vec<String> = Vec::new();
+        let estimated: Vec<&str> = config.problem.estimate.keys().map(|k| k.as_str()).collect();
+        let estimate_clash = crate::params_resolver::scenario_estimate_collision(
+            &model, scenario, &estimated, &fit_path,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
+        refusals.extend(estimate_clash);
         let fixed_clash = crate::params_resolver::scenario_fixed_collision(
             &model, scenario, &fixed_resolved, &fit_path,
         )

@@ -739,14 +739,22 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
                 disable: &config.disable,
             },
         )?;
-        // The rule `fit run` applies to the same file: a scenario (from the
-        // fit config or `--scenario`) that moves a [fixed] parameter to another
-        // value is refused, not resolved.
+        // The rules `fit run` applies to the same file: a scenario (from the
+        // fit config or `--scenario`) that sets or scales an estimated
+        // parameter, or moves a [fixed] parameter to another value, is
+        // refused, not resolved.
         if let Some(scenario) = scenario_opt.as_deref() {
-            if let Some(msg) = crate::params_resolver::scenario_fixed_collision(
-                &model_pre, scenario, &fixed_resolved_indexmap, &fit_path_str,
-            )? {
-                return Err(msg);
+            let estimated: Vec<&str> = config.estimate.keys().map(|k| k.as_str()).collect();
+            let refusals: Vec<String> = [
+                crate::params_resolver::scenario_estimate_collision(
+                    &model_pre, scenario, &estimated, &fit_path_str,
+                )?,
+                crate::params_resolver::scenario_fixed_collision(
+                    &model_pre, scenario, &fixed_resolved_indexmap, &fit_path_str,
+                )?,
+            ].into_iter().flatten().collect();
+            if !refusals.is_empty() {
+                return Err(refusals.join("\n\nerror: "));
             }
         }
         // No `--fixed` on the survey-fit path; the inline `--fixed`
