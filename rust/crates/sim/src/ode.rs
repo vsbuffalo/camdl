@@ -821,7 +821,7 @@ pub fn run_ode(
     // time at the entry point — a RELEASE-build check (the per-conversion
     // guards in `time.rs` are debug_assert only). A non-positive dt would
     // otherwise spin the RK4 substep loop forever (time never advances).
-    model.validate_schedule(cfg.dt, params)?;
+    model.validate_schedule(cfg.dt, params, cfg.t_start, crate::effect_plan::FireClock::Grid { dt: cfg.dt })?;
 
     // gh#272: stage the per-eval prologue ONCE for this θ-stable span. `params`
     // is fixed for this whole `run_ode` call, so the param/table-only
@@ -1120,7 +1120,7 @@ pub(crate) fn integrate_obs_sensitivity(
     let d = param_model_idx.len();
     let n_tr = model.model.transitions.len();
 
-    model.validate_schedule(cfg.dt, params)?;
+    model.validate_schedule(cfg.dt, params, cfg.t_start, crate::effect_plan::FireClock::Grid { dt: cfg.dt })?;
 
     // §1c: fixed-step RK4 only. An adaptive integrator sizes steps from the state
     // error alone (S under-resolved) and its step sequence is discontinuous in θ

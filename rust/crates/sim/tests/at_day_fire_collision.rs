@@ -1,13 +1,15 @@
 //! item 23 (2026-07-17 spec-review triage): the `at_day` / recurring-schedule
 //! guarantee "exactly one fire per period regardless of `dt`" (§13.7) is FALSE
-//! when `dt` is coarse relative to the fire spacing. Fire times are mapped to
-//! integer steps via `round(t / dt)` and collected into a dedup `BTreeSet`
-//! (`time::fire_times_to_steps`), so when two distinct fire times round to the
-//! same step they silently merge and a fire is dropped.
+//! on a Grid clock when `dt` is coarse relative to the fire spacing. Fire times
+//! map to steps of the run's grid (`effect_plan::fire_step`), and the plan fires
+//! one intervention once per step, so when two distinct fire times fall on the
+//! same step a fire is dropped.
 //!
 //! The dispatch pre-flight (`CompiledModel::validate_schedule`, called once at
 //! every forward backend's entry) must reject this collision with a clear error
-//! rather than silently drop fires.
+//! rather than silently drop fires — under `FireClock::Grid` only. Under
+//! `FireClock::Exact` (ODE, Gillespie) each fire acts at its own instant, so the
+//! same schedule drops nothing and is accepted.
 
 use std::collections::HashMap;
 
@@ -23,6 +25,11 @@ use ir::{
     Model,
 };
 use sim::compiled_model::CompiledModel;
+use sim::effect_plan::FireClock;
+
+fn grid(dt: f64) -> FireClock {
+    FireClock::Grid { dt }
+}
 
 /// A model with a single intervention firing on `schedule` over `[0, end]`.
 fn model_with_schedule(schedule: InterventionSchedule, end: f64) -> CompiledModel {
@@ -108,7 +115,7 @@ fn recurring(period: f64) -> InterventionSchedule {
 }
 
 /// dt (4) is coarser than the fire spacing (period 2): fires at t = 2, 4 both
-/// round to step 1, and t = 6, 8 both round to step 2 — two fires silently
+/// fall on step 1, and t = 6, 8 both on step 2 — two fires silently
 /// dropped. `validate_schedule` must reject this rather than merge.
 #[test]
 fn coarse_dt_drops_recurring_fires_and_is_rejected() {
@@ -118,7 +125,7 @@ fn coarse_dt_drops_recurring_fires_and_is_rejected() {
     assert_eq!(times, &vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0], "one fire per period over [0,10]");
 
     let err = model
-        .validate_schedule(4.0, &model.default_params)
+        .validate_schedule(4.0, &model.default_params, 0.0, grid(4.0))
         .expect_err("dt=4 collapses distinct fires onto shared steps — must hard-error");
     let msg = format!("{err}");
     assert!(
@@ -134,25 +141,25 @@ fn dt_at_or_below_period_keeps_every_fire() {
     let model = model_with_schedule(recurring(2.0), 10.0);
     for dt in [2.0, 1.0, 0.5] {
         model
-            .validate_schedule(dt, &model.default_params)
+            .validate_schedule(dt, &model.default_params, 0.0, grid(dt))
             .unwrap_or_else(|e| panic!("dt={dt} <= period=2 must not drop any fire; got {e}"));
     }
 }
 
 /// The gh#198 boundary: an explicit `at [...]` list is a DIFFERENT contract —
 /// it makes no one-per-period promise, and two listed fires within one dt step
-/// deliberately MERGE to one fire for cross-backend agreement. The item-23 check
-/// must NOT touch it: `at [2.3, 2.4]` at dt=1 (both round to step 2) is allowed.
+/// are one fire on a Grid clock on purpose. The item-23 check must NOT touch it:
+/// `at [2.3, 2.4]` at dt=1 (both on step 2) is allowed.
 #[test]
 fn explicit_at_times_within_one_dt_is_not_rejected() {
     let model = model_with_schedule(InterventionSchedule::AtTimes(vec![2.3, 2.4]), 5.0);
     model
-        .validate_schedule(1.0, &model.default_params)
+        .validate_schedule(1.0, &model.default_params, 0.0, grid(1.0))
         .expect("an explicit at[...] list must not be rejected — gh#198 merges it on purpose");
 }
 
 /// gh#449: the collision half of `validate_schedule` is factored out as
-/// `validate_recurring_dt_collisions(dt)` so the fit pre-flight — which runs
+/// `validate_recurring_dt_collisions(t_start, clock)` so the fit pre-flight — which runs
 /// before estimated parameters are resolved — can call it without inventing a
 /// parameter vector. Pin that the extraction is behaviour-preserving: for a
 /// `Recurring` schedule the two entry points must agree at every dt, since
@@ -161,8 +168,8 @@ fn explicit_at_times_within_one_dt_is_not_rejected() {
 fn param_free_collision_check_agrees_with_validate_schedule() {
     let model = model_with_schedule(recurring(2.0), 10.0);
     for dt in [0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 7.0] {
-        let full = model.validate_schedule(dt, &model.default_params);
-        let param_free = model.validate_recurring_dt_collisions(dt);
+        let full = model.validate_schedule(dt, &model.default_params, 0.0, grid(dt));
+        let param_free = model.validate_recurring_dt_collisions(0.0, grid(dt));
         assert_eq!(
             full.is_err(),
             param_free.is_err(),
@@ -173,9 +180,9 @@ fn param_free_collision_check_agrees_with_validate_schedule() {
     // Negative control: the loop above is only meaningful if it spans BOTH
     // outcomes. dt=4 must reject and dt=1 must accept, or the equality above
     // would hold vacuously (e.g. if both sides always returned Ok).
-    assert!(model.validate_recurring_dt_collisions(4.0).is_err(),
+    assert!(model.validate_recurring_dt_collisions(0.0, grid(4.0)).is_err(),
         "dt=4 > period=2 must be rejected — otherwise the agreement test is vacuous");
-    assert!(model.validate_recurring_dt_collisions(1.0).is_ok(),
+    assert!(model.validate_recurring_dt_collisions(0.0, grid(1.0)).is_ok(),
         "dt=1 < period=2 must be accepted — otherwise the agreement test is vacuous");
 }
 
@@ -186,6 +193,24 @@ fn param_free_collision_check_agrees_with_validate_schedule() {
 fn param_free_collision_check_leaves_explicit_at_times_alone() {
     let model = model_with_schedule(InterventionSchedule::AtTimes(vec![2.3, 2.4]), 5.0);
     model
-        .validate_recurring_dt_collisions(1.0)
+        .validate_recurring_dt_collisions(0.0, grid(1.0))
         .expect("an explicit at[...] list must not be rejected — gh#198 merges it on purpose");
+}
+
+/// Under `FireClock::Exact` (ODE, Gillespie) every fire acts at its own
+/// instant, so a period shorter than `dt` drops nothing: the schedule the Grid
+/// clock rejects is accepted, through both entry points.
+#[test]
+fn exact_clock_accepts_the_schedule_grid_rejects() {
+    let model = model_with_schedule(recurring(2.0), 10.0);
+    assert!(
+        model.validate_schedule(4.0, &model.default_params, 0.0, grid(4.0)).is_err(),
+        "precondition: dt=4 collides on the Grid clock"
+    );
+    model
+        .validate_schedule(4.0, &model.default_params, 0.0, FireClock::Exact)
+        .expect("under Exact two fires closer than dt are distinct instants");
+    model
+        .validate_recurring_dt_collisions(0.0, FireClock::Exact)
+        .expect("the param-free check does not apply under Exact");
 }

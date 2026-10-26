@@ -1133,7 +1133,13 @@ impl CompiledModel {
     /// silently fire an intervention at a garbage step (`NaN as i64`).
     /// Returns a named [`SimError::Validation`] instead. See
     /// `docs/dev/notes/2026-06-08-static-typing-as-bug-prevention.md` §6.
-    pub fn validate_schedule(&self, dt: f64, params: &[f64]) -> Result<(), SimError> {
+    pub fn validate_schedule(
+        &self,
+        dt: f64,
+        params: &[f64],
+        t_start: f64,
+        clock: crate::effect_plan::FireClock,
+    ) -> Result<(), SimError> {
         crate::time::validate_dt(dt)?;
 
         // gh#257: the output-step and recurrence-period positivity guards live
@@ -1148,16 +1154,24 @@ impl CompiledModel {
         for times in self.resolve_fire_times(params).iter() {
             crate::time::validate_fire_times(times)?;
         }
-        self.validate_recurring_dt_collisions(dt)
+        self.validate_recurring_dt_collisions(t_start, clock)
     }
 
     /// item 23: a `Recurring` schedule promises "exactly one fire per period
-    /// regardless of `dt`" (§13.7). That promise breaks when `dt` is coarser
-    /// than the period: consecutive targets (one period apart) round to the
-    /// same integrator step via `round(t/dt)`, and the dedup `BTreeSet` in
-    /// [`Self::resolve_fire_steps`] silently drops a fire. `dt` is a runtime
-    /// value (unlike the period, checked at construction), so the collision is
-    /// detected here and hard-errors instead of merging.
+    /// regardless of `dt`" (§13.7). On a [`FireClock::Grid`] that promise breaks
+    /// when `dt` is coarser than the period: consecutive targets (one period
+    /// apart) fall on the same step of the run's grid
+    /// ([`crate::effect_plan::fire_step`]), and the plan fires one intervention
+    /// once per step, so a fire is silently dropped. `dt` is a runtime value
+    /// (unlike the period, checked at construction), so the collision is
+    /// detected here and hard-errors instead of merging. Under
+    /// [`FireClock::Exact`] two fires closer than `dt` are distinct instants and
+    /// nothing is dropped, so the check does not apply.
+    ///
+    /// The key is the nominal grid key, `⌊(t − t_start)/dt + ½ + GRID_TOL⌋`,
+    /// without the window or the shortened-last-step rule: with a period of at
+    /// least `dt` no two fires share a shortened last step, and with a shorter
+    /// period the nominal keys already collide.
     ///
     /// **Parameter-free by construction, and that is the point** (gh#449). A
     /// `Recurring` schedule's fire times are baked at construction — the
@@ -1172,11 +1186,20 @@ impl CompiledModel {
     /// needs params, and only that half stays in [`Self::validate_schedule`].
     ///
     /// Scoped to `Recurring` deliberately: an explicit `at [...]` list
-    /// (`AtTimes`/`AtTimesExpr`) carries NO one-per-period promise, and a
-    /// within-`dt` coincidence of two listed fires MERGES to one fire on
-    /// purpose, for cross-backend agreement (gh#198). Only the recurring
-    /// guarantee is at stake here.
-    pub fn validate_recurring_dt_collisions(&self, dt: f64) -> Result<(), SimError> {
+    /// (`AtTimes`/`AtTimesExpr`) carries NO one-per-period promise, and on a
+    /// Grid clock two listed fires within one step are one fire on purpose
+    /// (gh#198). Only the recurring guarantee is at stake here.
+    ///
+    /// [`FireClock::Grid`]: crate::effect_plan::FireClock::Grid
+    /// [`FireClock::Exact`]: crate::effect_plan::FireClock::Exact
+    pub fn validate_recurring_dt_collisions(
+        &self,
+        t_start: f64,
+        clock: crate::effect_plan::FireClock,
+    ) -> Result<(), SimError> {
+        let crate::effect_plan::FireClock::Grid { dt } = clock else {
+            return Ok(());
+        };
         for (iv_idx, iv) in self.model.interventions.iter().enumerate() {
             if !matches!(
                 iv.fire.schedule(),
@@ -1187,7 +1210,7 @@ impl CompiledModel {
             let mut step_of: std::collections::BTreeMap<i64, f64> =
                 std::collections::BTreeMap::new();
             for &t in &self.fire_times[iv_idx] {
-                let step = crate::time::time_to_step(t, dt);
+                let step = ((t - t_start) / dt + 0.5 + crate::schedule::GRID_TOL).floor() as i64;
                 match step_of.get(&step) {
                     // Same step already claimed by an EARLIER, DISTINCT fire
                     // time — the two would merge to one fire. (An exact
@@ -1195,10 +1218,11 @@ impl CompiledModel {
                     // dropped fire, so it is allowed.)
                     Some(&prev) if prev != t => {
                         return Err(SimError::Validation(format!(
-                            "intervention '{}': fire times {prev} and {t} both round to \
-                             integrator step {step} at dt={dt}, so one fire per period would be \
-                             silently dropped (§13.7 guarantees exactly one fire per period). \
-                             Use a dt no coarser than the period, or widen the period.",
+                            "intervention '{}': fire times {prev} and {t} both fall on \
+                             step {step} of the dt={dt} grid from t_start={t_start}, so one \
+                             fire per period would be silently dropped (§13.7 guarantees \
+                             exactly one fire per period). Use a dt no coarser than the \
+                             period, or widen the period.",
                             iv.name,
                         )));
                     }

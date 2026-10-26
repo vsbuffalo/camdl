@@ -20,6 +20,7 @@ pub mod ode;
 pub mod intervention;
 pub mod lifecycle;
 pub mod effects;
+pub mod effect_plan;
 pub mod reactive;   // gh#204 PR2 — reactive trigger evaluator + agenda
 pub mod simulate;
 pub mod transition_diagnostics;
