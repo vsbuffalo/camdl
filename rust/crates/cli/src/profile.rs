@@ -606,6 +606,20 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             crate::params_resolver::StartsValues { origin, values }),
     ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
     crate::params_resolver::emit_notices(&[&resolved]);
+    // The grid writes each focal value straight over the parameter, so a
+    // scenario's value for a focal parameter is replaced at every point: said
+    // once here, for the run, not per grid point.
+    let focal_notices: crate::notice::Notices = match scenario_name.as_deref() {
+        Some(scenario) => {
+            let focal: Vec<&str> = focal_names.iter().map(|s| s.as_str()).collect();
+            crate::params_resolver::scenario_focal_notices(&model_pre, scenario, &focal)
+                .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); })
+                .into_iter()
+                .collect()
+        }
+        None => crate::notice::Notices::default(),
+    };
+    focal_notices.emit_stderr();
     let model = resolved.model.clone();
 
     // Maintain the downstream `fit_toml_fixed: HashMap` view that the
@@ -1129,7 +1143,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         "parameters_provenance":
             serde_json::to_value(&parameters_provenance).unwrap_or(serde_json::Value::Null),
         "notices":
-            serde_json::to_value(crate::params_resolver::notices(&[&resolved]))
+            serde_json::to_value(
+                crate::params_resolver::notices(&[&resolved]).iter()
+                    .chain(focal_notices.iter())
+                    .cloned()
+                    .collect::<crate::notice::Notices>())
                 .unwrap_or(serde_json::Value::Null),
         "init_provenance":
             serde_json::to_value(&init_provenance).unwrap_or(serde_json::Value::Null),

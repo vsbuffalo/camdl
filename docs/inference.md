@@ -887,7 +887,9 @@ is `docs/camdl-run-spec.md` §1.3.
 from the estimated set, even when they appear in the fit toml's `[estimate]`.
 Listing a focal parameter in `--fixed`/`--fixed-file` (or in the fit toml's
 `[fixed]`) is a hard error — a parameter cannot be simultaneously swept and
-pinned.
+pinned. A scenario that sets or scales a focal parameter is replaced by the grid
+at every point, and the profile says so once per run:
+``info: scenario `baseline` sets beta = 0.4; beta is profiled, so the grid values replace it``.
 
 **Provenance.** Both subcommands write per-parameter `resolved_priors` into
 `run.json`:

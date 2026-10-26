@@ -132,11 +132,12 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   of one fit.toml, which `profile --fit` and `survey --fit` used to accept with
   a warning (`[fixed]` won), is refused by every command; `fit run` already
   refused it. Unchanged: `[fixed] from_scenario`, which imports a scenario's
-  values minus the estimated ones; `--fixed` over `[estimate]` (see CLI);
-  `profile`; and `fit predict --scenario`. Migration: to fit under the
-  scenario's value, move the parameter from `[estimate]` to `[fixed]` with that
-  value; otherwise name a scenario that does not touch it. For an overlap,
-  remove the name from whichever block is wrong.
+  values minus the estimated ones; `--fixed` over `[estimate]` (see CLI); a
+  scenario that sets a `profile` nuisance parameter; and
+  `fit predict --scenario`. Migration: to fit under the scenario's value, move
+  the parameter from `[estimate]` to `[fixed]` with that value; otherwise name a
+  scenario that does not touch it. For an overlap, remove the name from
+  whichever block is wrong.
 
 - **`simulate`'s implicit arm is labelled `(none)`, not `baseline`.** A run
   without `--scenario` shows `(none)` (path segment `_none_-<h8>`) in its leaf
@@ -466,6 +467,12 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   config lists it in [estimate])``.
   Its `run.json` notice code is `fixed-over-estimate` (was
   `kicked-from-estimate`).
+- **`profile` says when its scenario sets the focal parameter.** The grid
+  replaces the scenario's value at every point, as before; one line per run now
+  says so:
+  ``info: scenario `baseline` sets beta = 0.4; beta is profiled, so
+  the grid values replace it``.
+  Recorded in `run.json`'s notices.
 - Better diagnostics throughout: structured `--json-errors`, a method-caveat
   banner driven by the registry, and warnings for single-init multi-chain fits
   (gh#71) and origin-less instant parameters (gh#103).

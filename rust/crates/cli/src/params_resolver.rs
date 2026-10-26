@@ -1236,6 +1236,48 @@ pub fn scenario_estimate_collision(
     Ok(Some(msg))
 }
 
+/// One info notice per focal parameter `scenario` sets or scales: `camdl
+/// profile` writes each grid value straight over the focal parameter, so the
+/// scenario's value for it is replaced at every grid point.
+///
+/// A layered override — stepping the parameter across a grid is what the user
+/// asked for — so it is reported, not refused. Called once per profile run,
+/// so the line prints once, not once per grid point. Scenario-set nuisance
+/// (estimated) parameters are not covered here.
+pub fn scenario_focal_notices(
+    model: &ir::Model,
+    scenario: &str,
+    focal: &[&str],
+) -> Result<Vec<Notice>, String> {
+    let scen = crate::sim_job::ScenarioRef::Named(scenario.to_string());
+    let footprint = scenario_param_footprint(model, &scen)?;
+    let mut out = Vec::new();
+    for &param in focal.iter().filter(|p| footprint.contains(**p)) {
+        let does: Vec<String> = scenario_param_actions(model, &scen, param)?
+            .iter()
+            .map(|a| {
+                let (text, preset) = match a {
+                    ScenarioParamAction::Set { value, preset } => {
+                        (format!("sets {param} = {value}"), preset)
+                    }
+                    ScenarioParamAction::Scale { factor, preset } => {
+                        (format!("scales {param} \u{d7} {factor}"), preset)
+                    }
+                };
+                if preset.as_str() == scenario {
+                    text
+                } else {
+                    format!("{text} (from composed preset `{preset}`)")
+                }
+            })
+            .collect();
+        out.push(Notice::info("scenario-sets-focal", format!(
+            "scenario `{scenario}` {}; {param} is profiled, so the grid values replace it",
+            does.join(" and "))));
+    }
+    Ok(out)
+}
+
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 /// Resolve a `ParameterInputs` to a `ResolvedParameters`, walking the

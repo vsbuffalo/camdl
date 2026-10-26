@@ -13,8 +13,9 @@
 //! `[fixed] from_scenario` is not the fit's scenario: it imports a scenario's
 //! values minus the estimated ones (gh#37), and stays accepted.
 //!
-//! `--fixed` over a name in `[estimate]` is a layered override: not refused,
-//! reported as an `info:` line.
+//! Two layered overrides are not refused, and are reported as `info:` lines:
+//! `--fixed` over a name in `[estimate]`, and a profile's scenario setting the
+//! focal parameter the profile steps across its grid.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -318,4 +319,30 @@ fn profile_fixed_over_estimate_is_an_info_notice() {
                 config lists it in [estimate])";
     assert_eq!(err.matches(line).count(), 1, "want {line:?} once; stderr:\n{err}");
     assert!(!err.contains("warning: --fixed"), "no warning for a layered --fixed: {err}");
+}
+
+/// A profile's scenario that sets the focal parameter is replaced by the grid,
+/// and says so once per run (not once per grid point).
+#[test]
+fn profile_scenario_setting_the_focal_parameter_is_an_info_notice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    setup(dir);
+    fit_toml(dir, "pf_focal", "", "beta = { bounds = [0.01, 1.0], start = 0.3 }", "N0 = 1000");
+    let cwd = dir.join("focal");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let out = Command::new(camdl_bin())
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .current_dir(&cwd)
+        .args(["profile", &dir.join("m.ir.json").to_string_lossy(),
+               "--fit", &dir.join("pf_focal.toml").to_string_lossy()])
+        .args(["--sweep", "gamma=0.1,0.5", "--scenario", "fastg", "--particles", "50",
+               "--iterations", "3", "--n-starts", "1", "--seed", "1", "--rw-sd", "beta=0.02"])
+        .output()
+        .expect("spawn camdl profile");
+    let err = stderr(&out);
+    assert!(out.status.success(), "profile --scenario fastg: {err}");
+    let line = "info: scenario `fastg` sets gamma = 0.9; gamma is profiled, so the grid values \
+                replace it";
+    assert_eq!(err.matches(line).count(), 1, "want {line:?} once; stderr:\n{err}");
 }
