@@ -25,7 +25,6 @@ use ir::observation::{Likelihood, Projection};
 use ir::transition::DrawMethod;
 use ir::Differentiable;
 
-use crate::boundary_times::EffectTimes;
 use crate::compiled_model::CompiledModel;
 use crate::error::SimError;
 
@@ -330,7 +329,20 @@ pub fn preflight_gradient_ode(
         ));
     }
     // ── Scheduled effects: event-jump sensitivity is a follow-up (§1g) ──────────
-    if !EffectTimes::from_model(model, params)?.into_vec().is_empty() {
+    // The plan's both halves: a model whose only effect is at t_start has an
+    // empty list of later instants and a non-empty origin batch, which the
+    // gradient path would silently fit without. The window is open at the end
+    // (the fit's last observation is not known here), so an effect after the
+    // run is refused too — the conservative side.
+    let plan = crate::effect_plan::EffectPlan::build(
+        model,
+        params,
+        m.simulation.t_start,
+        f64::INFINITY,
+        crate::effect_plan::FireClock::Exact,
+        crate::effect_plan::Origin::Init,
+    )?;
+    if !plan.is_empty() {
         return Err(SimError::Validation(
             "ODE gradient (nuts) does not yet support scheduled interventions or events: \
              their event-jump sensitivity is a follow-up (gh#275 §1g). Use gradient-free \
@@ -708,6 +720,29 @@ mod tests {
             ir::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let msg = gate_err(m, &["beta"]);
         assert!(msg.contains("real-valued compartments"), "{msg}");
+    }
+
+    /// A model whose only effect is at t_start has an empty list of later
+    /// firing instants and a non-empty origin batch. The gradient path applies
+    /// no effect at all, so a refusal keyed on the later instants alone would
+    /// let `det_grad` and `nuts` fit this model without its effect — silently.
+    #[test]
+    fn refuses_a_model_whose_only_effect_is_at_t_start() {
+        let mut m = base_model();
+        m.interventions = vec![ir::intervention::Intervention {
+            name: "seed".into(),
+            base_name: None,
+            fire: ir::intervention::FireSource::Scheduled(
+                ir::intervention::InterventionSchedule::AtTimes(vec![m.simulation.t_start]),
+            ),
+            actions: vec![ir::intervention::Action::Add(ir::intervention::AddAction {
+                compartment: "I".into(),
+                count: Expr::Const(ConstExpr { value: 5.0 }),
+            })],
+            kind: ir::intervention::InterventionKind::Event,
+        }];
+        let msg = gate_err(m, &["beta"]);
+        assert!(msg.contains("scheduled interventions or events"), "{msg}");
     }
 
     #[test]

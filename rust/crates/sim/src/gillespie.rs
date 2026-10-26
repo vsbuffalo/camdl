@@ -3,7 +3,7 @@ use crate::{
     config::{GillespieConfig, SimConfig},
     rng::StatefulRng,
     error::SimError,
-    boundary_times::{EffectTimes, OutputTimes},
+    boundary_times::OutputTimes,
     lineage::{DemeId, TransitionId, TransitionObserver},
     ode_integrator::rk4_step,
     propensity::{eval_propensities, guard_propensity, EvalCtx},
@@ -143,9 +143,14 @@ pub fn run_gillespie_with_observer(
     // or a non-finite fire time at entry — a RELEASE-build check (the
     // per-conversion guards in `time.rs` are debug_assert only).
     model.validate_schedule(
-        iv_resolution_dt, params, cfg.t_start, crate::effect_plan::FireClock::Grid { dt: iv_resolution_dt },
+        iv_resolution_dt, params, cfg.t_start, crate::effect_plan::FireClock::Exact,
     )?;
-    let fire_steps = model.resolve_fire_steps(iv_resolution_dt, params);
+    // The effect plan: Gillespie is continuous-time, so every effect fires at
+    // its declared instant (D2). `iv_resolution_dt` only evaluates amounts.
+    let plan = crate::effect_plan::EffectPlan::build(
+        model, params, cfg.t_start, cfg.t_end,
+        crate::effect_plan::FireClock::Exact, crate::effect_plan::Origin::Init,
+    )?;
 
     // gh#272 LICM: stage the per-eval prologue ONCE for this forward run. `params`
     // is fixed for the whole run, so the param/table-only `per_eval_bindings` are
@@ -167,9 +172,15 @@ pub fn run_gillespie_with_observer(
         iv_resolution_dt,
         cfg.t_end,
         OutputTimes::from_model(model)?,
-        EffectTimes::from_model(model, params)?,
+        plan.effect_times(),
     );
     let mut cursor = Cursor::default();
+
+    // D1: effects at t_start apply to the starting state before the t_start row
+    // is recorded (§13.10 without the transition stage). No-op when empty.
+    crate::effects::apply_origin_batch_discrete(
+        model, &plan, &mut int_s, &mut real_s, params, cfg.t_start, iv_resolution_dt, None,
+    )?;
 
     let mut t = cfg.t_start;
     let mut traj = Trajectory::new();
@@ -237,9 +248,9 @@ pub fn run_gillespie_with_observer(
                     &stop,
                     t,
                     &mut bs,
-                    |bs, bt| {
+                    |bs, bt, effect_idx| {
                         let mut batch = crate::schedule::EffectBatch::default();
-                        crate::effects::due_effects(model, &fire_steps, bt, iv_resolution_dt, &mut batch);
+                        crate::effects::split_due_batch(model, plan.batch(effect_idx), &mut batch);
                         // §13.10 at a boundary: inflow events, then drains and
                         // `set` on the post-inflow state (no transition stage
                         // here), then interventions (gh#985).
@@ -253,7 +264,7 @@ pub fn run_gillespie_with_observer(
                         )?;
                         crate::lifecycle::apply_post_advance(
                             model, &batch.intervention_idx, bs.int_s, bs.real_s, params,
-                            bt - iv_resolution_dt, iv_resolution_dt, None,
+                            bt, iv_resolution_dt, None,
                         )
                     },
                     |bs, ot| {
@@ -317,9 +328,9 @@ pub fn run_gillespie_with_observer(
                     &stop,
                     t,
                     &mut bs,
-                    |bs, bt| {
+                    |bs, bt, effect_idx| {
                         let mut batch = crate::schedule::EffectBatch::default();
-                        crate::effects::due_effects(model, &fire_steps, bt, iv_resolution_dt, &mut batch);
+                        crate::effects::split_due_batch(model, plan.batch(effect_idx), &mut batch);
                         // §13.10 at a boundary: inflow events, then drains and
                         // `set` on the post-inflow state (no transition stage
                         // here), then interventions (gh#985).
@@ -333,7 +344,7 @@ pub fn run_gillespie_with_observer(
                         )?;
                         crate::lifecycle::apply_post_advance(
                             model, &batch.intervention_idx, bs.int_s, bs.real_s, params,
-                            bt - iv_resolution_dt, iv_resolution_dt, None,
+                            bt, iv_resolution_dt, None,
                         )
                     },
                     |bs, ot| {
