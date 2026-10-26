@@ -90,7 +90,7 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
     // `--param NAME=VALUE` → `fixed_cli`. `eval` has no scenario, no
     // [estimate] set, and no external tables (the eval pipeline
     // doesn't compile tables independently).
-    use crate::params_resolver::{ParameterInputs, resolve_parameters, print_warnings};
+    use crate::params_resolver::{ParameterInputs, resolve_parameters, emit_notices};
     use indexmap::{IndexMap, IndexSet};
     use std::collections::HashMap;
 
@@ -117,7 +117,7 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
         fit_toml_estimate: &fte,
         table_files: &table_files,
     }).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-    print_warnings(&resolved);
+    emit_notices(&resolved);
     if log::log_enabled!(log::Level::Debug) {
         for p in &resolved.params {
             log::debug!("eval: param `{}` = {} ({})",

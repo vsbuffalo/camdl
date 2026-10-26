@@ -551,7 +551,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             table_files: &table_files_resolver,
         },
     ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-    crate::params_resolver::print_warnings(&resolved);
+    crate::params_resolver::emit_notices(&resolved);
     let model = resolved.model.clone();
 
     // Maintain the downstream `fit_toml_fixed: HashMap` view that the

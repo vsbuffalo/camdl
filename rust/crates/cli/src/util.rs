@@ -3417,7 +3417,7 @@ pub fn resolve_run_ir(run: &SimRun) -> Result<ir::Model, String> {
 
     let resolved = resolve_run_parameters(&model, run)?;
 
-    crate::params_resolver::print_warnings(&resolved);
+    crate::params_resolver::emit_notices(&resolved);
 
     let mut model = resolved.model;
     // The baked-end refusal runs HERE — after the resolver's scenario filter

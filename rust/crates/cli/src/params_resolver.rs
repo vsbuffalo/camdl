@@ -92,6 +92,8 @@ use std::path::PathBuf;
 use indexmap::{IndexMap, IndexSet};
 use ir::table::TableSource;
 
+use crate::notice::{Notice, Notices};
+
 // ─── The range a parameter is valid on ───────────────────────────────────────
 
 /// The interval a parameter *kind* carries on its own — the range the declared
@@ -295,8 +297,8 @@ pub enum ResolverWarning {
 }
 
 impl ResolverWarning {
-    /// Human-readable rendering for stderr.
-    pub fn format(&self) -> String {
+    /// The warning as a [`Notice`] — its stderr line and its record.
+    pub fn notice(&self) -> Notice {
         match self {
             ResolverWarning::KickedFromEstimate { name, by } => {
                 let source_clause = match by {
@@ -306,10 +308,10 @@ impl ResolverWarning {
                     }
                     other => format!("source {:?}", other),
                 };
-                format!(
-                    "warning: {} removes `{}` from [estimate]; it will be \
+                Notice::warning("kicked-from-estimate", format!(
+                    "{} removes `{}` from [estimate]; it will be \
                      pinned to its resolved value rather than inferred.",
-                    source_clause, name)
+                    source_clause, name))
             }
             ResolverWarning::ScenarioOverridden {
                 name, scenario, scenario_value, by, new_value,
@@ -323,17 +325,17 @@ impl ResolverWarning {
                     other => format!("source {:?} ({}={})",
                         other, name, new_value),
                 };
-                format!(
-                    "warning: {} overrides scenario `{}` which would have \
+                Notice::warning("scenario-overridden", format!(
+                    "{} overrides scenario `{}` which would have \
                      set `{}` = {}.",
-                    source_clause, scenario, name, scenario_value)
+                    source_clause, scenario, name, scenario_value))
             }
             ResolverWarning::FixedEstimateOverlap { name } => {
-                format!(
-                    "warning: `{}` appears in both [fixed] and [estimate] in \
+                Notice::warning("fixed-estimate-overlap", format!(
+                    "`{}` appears in both [fixed] and [estimate] in \
                      fit.toml; [fixed] wins. Remove `{}` from one of the \
                      blocks to silence this warning.",
-                    name, name)
+                    name, name))
             }
         }
     }
@@ -1379,8 +1381,13 @@ pub fn resolve_parameters<'a>(
     })
 }
 
-/// Render and print every warning in `resolved.warnings` to stderr.
-/// Subcommand wrappers call this once after `resolve_parameters`.
+/// The notices one resolution reports, in the order the resolver found them.
+pub fn notices(resolved: &ResolvedParameters) -> Notices {
+    resolved.warnings.iter().map(ResolverWarning::notice).collect()
+}
+
+/// Emit [`notices`] for `resolved` to stderr. Subcommand wrappers call this
+/// once after `resolve_parameters`.
 ///
 /// Also runs a structural cross-check between the
 /// `ResolverWarning::ScenarioOverridden` warnings and the
@@ -1391,10 +1398,8 @@ pub fn resolve_parameters<'a>(
 /// provenance was written without a stderr warning) — surfaced as
 /// `debug_assert!` so it trips in tests but degrades gracefully in
 /// release.
-pub fn print_warnings(resolved: &ResolvedParameters) {
-    for w in &resolved.warnings {
-        eprintln!("{}", w.format());
-    }
+pub fn emit_notices(resolved: &ResolvedParameters) {
+    notices(resolved).emit_stderr();
 
     // Structural agreement check (debug-only, zero cost in release):
     // warnings-of-override and `overrode_scenario` provenance must
@@ -2289,14 +2294,14 @@ mod tests {
         let resolved = resolve_parameters(empty_inputs(&model, &fcli, &ffiles, &ftf, &fte))
             .expect("ok");
         assert_eq!(resolved.warnings.len(), 1);
-        let msg = resolved.warnings[0].format();
+        let msg = resolved.warnings[0].notice().render();
         assert!(msg.contains("gamma"), "warning must name `gamma`: {}", msg);
         assert!(msg.contains("--fixed"), "warning must mention --fixed: {}", msg);
         assert!(msg.contains("[estimate]"), "warning must mention [estimate]: {}", msg);
 
-        // `print_warnings` is a thin wrapper; smoke-call it to confirm
+        // `emit_notices` is a thin wrapper; smoke-call it to confirm
         // no panic and to keep the symbol live.
-        print_warnings(&resolved);
+        emit_notices(&resolved);
     }
 
     #[test]
@@ -2496,7 +2501,7 @@ mod tests {
             by: ValueSource::FixedCli,
             new_value: 0.5,
         };
-        let msg = w.format();
+        let msg = w.notice().render();
         assert!(msg.contains("--fixed beta=0.5"),
             "must show CLI flag and value: {}", msg);
         assert!(msg.contains("worst_case"),
@@ -2553,7 +2558,7 @@ mod tests {
         let w = ResolverWarning::FixedEstimateOverlap {
             name: "gamma".into(),
         };
-        let msg = w.format();
+        let msg = w.notice().render();
         assert!(msg.contains("gamma"), "must name the param: {}", msg);
         assert!(msg.contains("[fixed]"),
             "must mention [fixed] block: {}", msg);

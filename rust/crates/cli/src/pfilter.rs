@@ -196,7 +196,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // scenario/enable/disable) onto the resolver inputs. pfilter is
     // non-inference for the value-resolution perspective; the
     // [estimate] set is empty and no kick-out warnings can fire.
-    use crate::params_resolver::{ParameterInputs, resolve_parameters, print_warnings};
+    use crate::params_resolver::{ParameterInputs, resolve_parameters, emit_notices};
     use indexmap::{IndexMap, IndexSet};
 
     let fixed_cli: Vec<(String, f64)> = a.model_overrides.param.iter()
@@ -222,7 +222,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         fit_toml_estimate: &fte,
         table_files: &table_files,
     }).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-    print_warnings(&resolved);
+    emit_notices(&resolved);
     let model = resolved.model.clone();
 
     let compiled = CompiledModel::new(model.clone())
