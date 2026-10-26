@@ -90,6 +90,9 @@ struct Config {
     gamma_slope: f64,
     dt: f64,
     t_start: f64,
+    /// The model's declared end, `simulate { to }`: the horizon of the effect
+    /// plan (the data never move an effect). `sir_basic` declares 80.
+    t_end: f64,
     /// `Some(p)`: `I ~ binomial(n = N0, p)` and `S = N0 − I` (an initial-state
     /// law, gh#732). `None`: deterministic `S = N0 − I0`, `I = I0`.
     init_binomial_p: Option<f64>,
@@ -364,8 +367,8 @@ fn oracle(cfg: &Config) -> (f64, Vec<f64>) {
     }
     let last_obs = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     for e in &cfg.effects {
-        for t in e.acts_at(cfg, last_obs) {
-            if t > cfg.t_start + 1e-9 {
+        for t in e.acts_at(cfg, cfg.t_end) {
+            if t > cfg.t_start + 1e-9 && t <= last_obs + 1e-9 {
                 times.push(t);
             }
         }
@@ -375,8 +378,8 @@ fn oracle(cfg: &Config) -> (f64, Vec<f64>) {
     let mut instants: Vec<Instant> = times.iter().map(|_| Instant::default()).collect();
     let at = |t: f64| times.iter().position(|&u| same(u, t)).unwrap();
     for (k, e) in cfg.effects.iter().enumerate() {
-        for t in e.acts_at(cfg, last_obs) {
-            if t > cfg.t_start + 1e-9 {
+        for t in e.acts_at(cfg, cfg.t_end) {
+            if t > cfg.t_start + 1e-9 && t <= last_obs + 1e-9 {
                 instants[at(t)].effects.push(k);
             }
         }
@@ -408,7 +411,7 @@ fn oracle(cfg: &Config) -> (f64, Vec<f64>) {
 
     // An effect AT `t_start` acts on the initial state.
     let at_start: Vec<usize> = (0..cfg.effects.len())
-        .filter(|&k| cfg.effects[k].acts_at(cfg, last_obs).iter().any(|&t| same(t, cfg.t_start)))
+        .filter(|&k| cfg.effects[k].acts_at(cfg, cfg.t_end).iter().any(|&t| same(t, cfg.t_start)))
         .collect();
     alpha = apply_effects(cfg, alpha, &at_start);
 
@@ -668,6 +671,7 @@ fn build(cfg: &Config) -> (Arc<CompiledModel>, Vec<f64>, MultiStreamObsModel) {
     let mut model = ir::from_str(&serde_json::to_string(&doc).unwrap()).expect("parse patched sir_basic");
     model.observations = cfg.streams.iter().map(obs_block).collect();
     model.simulation.t_start = cfg.t_start;
+    model.simulation.t_end = cfg.t_end;
     for p in &mut model.parameters {
         let v = match p.name.as_str() {
             "beta" => cfg.beta,
@@ -819,6 +823,7 @@ fn base(label: &'static str, streams: Vec<TStream>) -> Config {
         gamma_slope: 0.0,
         dt: 1.0,
         t_start: 0.0,
+        t_end: 80.0,
         init_binomial_p: None,
         effects: vec![],
         streams,
@@ -1432,6 +1437,21 @@ fn two_times_in_one_step_fire_once() {
         vec![prev("p", POIS, daily(4), some(&[2.0, 3.0, 3.0, 2.0]))],
     );
     cfg.effects = vec![Effect { ts: &[2.3, 2.4], act: Act::SToR(1.0), event: false }];
+    assert_unbiased(&cfg, NP, REPS);
+    assert_if2_unbiased(&cfg);
+}
+
+/// An effect in the model's shortened last step: `to = 4.5`, dt = 1, an
+/// intervention at 4.3 acts at 4.5 (nearer than 4), the step's end, where the
+/// last reading is scored. A reading at 4.4 before it does not see it.
+#[test]
+fn effect_in_the_models_shortened_last_step() {
+    let mut cfg = base(
+        "intervention S->R x2 at 4.3, to = 4.5",
+        vec![prev("p", POIS, vec![1.0, 2.0, 3.0, 4.0, 4.4, 4.5], some(&[2.0, 3.0, 3.0, 2.0, 2.0, 1.0]))],
+    );
+    cfg.t_end = 4.5;
+    cfg.effects = vec![Effect { ts: &[4.3], act: Act::SToR(2.0), event: false }];
     assert_unbiased(&cfg, NP, REPS);
     assert_if2_unbiased(&cfg);
 }

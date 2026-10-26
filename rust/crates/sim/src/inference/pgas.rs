@@ -1932,8 +1932,9 @@ pub(crate) fn fill_producer_batch(
 }
 
 /// The effect plan a PGAS run fires by: chain-binomial is discrete-time, so the
-/// plan is on the Grid clock (D2), over the window the substep grid covers,
-/// `[t_start, t_start + Σ dt_substep]`. Built once per run: the D3 refusal at
+/// plan is on the Grid clock (D2), over the model's declared window
+/// `[t_start, simulation.t_end]` — the plan `simulate` builds, so the data never
+/// move an effect. Built once per run: the D3 refusal at
 /// [`run_pgas`] rules out an estimated parameter in any schedule, so the fire
 /// steps do not move with θ.
 ///
@@ -1950,7 +1951,7 @@ pub fn pgas_effect_plan(
     grid: &[(f64, f64)],
 ) -> Result<crate::effect_plan::EffectPlan, SimError> {
     let t_start = model.model.simulation.t_start;
-    let t_end = grid.last().map_or(t_start, |&(t0, h)| t0 + h);
+    let t_end = model.model.simulation.t_end;
     let plan = crate::effect_plan::EffectPlan::build(
         model,
         params,
