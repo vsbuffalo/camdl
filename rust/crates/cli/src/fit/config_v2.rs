@@ -2912,11 +2912,8 @@ impl Problem {
         // estimate ∩ fixed = ∅
         let overlap: Vec<&&str> = estimated.intersection(&fixed).collect();
         if !overlap.is_empty() {
-            return Err(format!(
-                "parameters in both [estimate] and [fixed]: {}\n  \
-                 Each parameter must be in exactly one section.",
-                overlap.iter().map(|s| **s).collect::<Vec<_>>().join(", ")
-            ));
+            let names: Vec<&str> = overlap.iter().map(|s| **s).collect();
+            return Err(crate::params_resolver::fixed_estimate_overlap_message(&names));
         }
 
         // estimate ∪ fixed = model_params

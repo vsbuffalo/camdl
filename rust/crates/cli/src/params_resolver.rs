@@ -345,12 +345,6 @@ pub struct ResolvedParameters {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolverWarning {
     KickedFromEstimate { name: String, by: ValueSource },
-    /// `fit.toml` lists `name` in both `[fixed]` and `[estimate]`.
-    /// The resolver treats `[fixed]` as winning (a parameter that is
-    /// both fixed and estimated is a config bug; the conservative
-    /// interpretation is "the user meant fixed"). Surfaced so the
-    /// user fixes their toml.
-    FixedEstimateOverlap { name: String },
 }
 
 impl ResolverWarning {
@@ -370,13 +364,6 @@ impl ResolverWarning {
                      pinned to its resolved value rather than inferred.",
                     source_clause, name))
             }
-            ResolverWarning::FixedEstimateOverlap { name } => {
-                Notice::warning("fixed-estimate-overlap", format!(
-                    "`{}` appears in both [fixed] and [estimate] in \
-                     fit.toml; [fixed] wins. Remove `{}` from one of the \
-                     blocks to silence this warning.",
-                    name, name))
-            }
         }
     }
 }
@@ -391,6 +378,9 @@ pub enum ResolveError {
     ExternalTableMissing { table: String },
     BoundsViolation      { name: String, value: f64, lo: f64, hi: f64 },
     NestedCompose        { name: String },
+    /// A fit config lists these names in both `[fixed]` and `[estimate]`
+    /// ([`fixed_estimate_overlap_message`]).
+    FixedEstimateOverlap { names: Vec<String> },
     /// One or more finite/bounds violations collected together. The
     /// post-resolution validation pass surfaces *all* violations at
     /// once rather than failing on the first, so a user fixing
@@ -473,6 +463,10 @@ impl std::fmt::Display for ResolveError {
                     "nested compose is not supported. Scenario '{name}' \
                      referenced in compose = [...] itself uses compose.")
             }
+            ResolveError::FixedEstimateOverlap { names } => {
+                let names: Vec<&str> = names.iter().map(|n| n.as_str()).collect();
+                write!(f, "{}", fixed_estimate_overlap_message(&names))
+            }
             ResolveError::MultipleViolations(errs) => {
                 let parts: Vec<String> = errs.iter().map(|e| e.to_string()).collect();
                 write!(f, "{}", parts.join("\n"))
@@ -482,6 +476,24 @@ impl std::fmt::Display for ResolveError {
 }
 
 impl std::error::Error for ResolveError {}
+
+/// The refusal for a fit config that lists `names` in both `[fixed]` and
+/// `[estimate]`. A parameter is either estimated or given a value, never both,
+/// and the file does not say which it means. One wording for every command:
+/// `fit run`'s config validation and the resolver behind `profile` / `survey`.
+pub fn fixed_estimate_overlap_message(names: &[&str]) -> String {
+    let quoted: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
+    let quoted = quoted.join(", ");
+    let (noun, is, them) =
+        if names.len() == 1 { ("parameter", "is", "it") } else { ("parameters", "are", "them") };
+    format!(
+        "{noun} {quoted} {is} in both [estimate] and [fixed]; a parameter is either estimated \
+         or given a value, not both.\n  \
+         Fix: remove {quoted} from [fixed] to estimate {them}, or from [estimate] to hold \
+         {them} at {} [fixed] value.",
+        if names.len() == 1 { "its" } else { "their" }
+    )
+}
 
 // ─── Shared preset compose-walk ────────────────────────────────────────────────
 
@@ -1351,32 +1363,20 @@ pub fn resolve_parameters_with_starts<'a>(
         }
     }
 
-    // ── fit.toml [fixed] ∩ [estimate] overlap (config-file bug) ─────────
+    // ── fit.toml [fixed] ∩ [estimate] overlap: refused ──────────────────
     //
-    // Per resolved decision B in the 2026-05-25 CLI UX proposal: a name
-    // appearing in both blocks of the same fit.toml is treated as
-    // `[fixed]` wins, with a warning emitted so the user fixes their
-    // config. Caller-side mutual exclusion is *not* enforced because
-    // some toml loaders accept the pathological case silently; this
-    // surface emits a clear diagnostic instead of letting the bug
-    // pass.
-    for name in inputs.fit_toml_fixed.keys() {
-        if inputs.fit_toml_estimate.contains(name) {
-            warnings.push(ResolverWarning::FixedEstimateOverlap {
-                name: name.clone(),
-            });
-        }
+    // A name in both blocks of one fit config is both estimated and given a
+    // value, and the file does not say which it means; neither block wins.
+    let overlap: Vec<String> = inputs.fit_toml_fixed.keys()
+        .filter(|n| inputs.fit_toml_estimate.contains(*n))
+        .cloned()
+        .collect();
+    if !overlap.is_empty() {
+        return Err(ResolveError::FixedEstimateOverlap { names: overlap });
     }
 
     // ── Estimate-set kick-out + provenance assembly ─────────────────────
-    //
-    // Build the estimate set from the fit-toml input, then drop names
-    // that fit-toml's own [fixed] block claimed — this preserves the
-    // [fixed]-wins-over-[estimate] resolution from the overlap check
-    // above, so the run.json provenance shows `role = "fixed"` for
-    // overlapping names rather than `"estimated"`.
     let mut estimate_set: IndexSet<String> = inputs.fit_toml_estimate.clone();
-    estimate_set.retain(|n| !inputs.fit_toml_fixed.contains_key(n));
 
     // A name is "kicked from [estimate]" if it appears in tier 4 or
     // tier 5 (CLI / file `--fixed*`) — those are user-explicit "pin
@@ -2358,39 +2358,9 @@ mod tests {
             ParameterRole::Fixed { reason: FixReason::KickedFromEstimate { by } }
             if *by == ValueSource::FixedCli));
         assert_eq!(resolved.warnings.len(), 1);
-        match &resolved.warnings[0] {
-            ResolverWarning::KickedFromEstimate { name, by } => {
-                assert_eq!(name, "gamma");
-                assert_eq!(*by, ValueSource::FixedCli);
-            }
-            other => panic!("expected KickedFromEstimate, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn fit_toml_fixed_does_not_emit_kickedfromestimate_warning() {
-        // Tier-3 (fit-toml `[fixed]`) does NOT emit a
-        // `KickedFromEstimate` warning even when it overlaps
-        // `[estimate]`. The dedicated `FixedEstimateOverlap`
-        // warning handles that case (see
-        // `fit_toml_fixed_estimate_overlap_warns_and_fixed_wins`);
-        // the kick-out warning is reserved for tier-4 / tier-5
-        // CLI-side overrides.
-        let model = mk_model(vec![mk_param("beta", Some(0.5))]);
-        let fcli = vec![];
-        let ffiles = vec![];
-        let mut ftf = IndexMap::new();
-        ftf.insert("beta".into(), 0.7);
-        let mut fte: IndexSet<String> = IndexSet::new();
-        fte.insert("beta".into());
-        let resolved = resolve_parameters(empty_inputs(&model, &fcli, &ffiles, &ftf, &fte))
-            .expect("ok");
-        // No `KickedFromEstimate` warning in the resolver output.
-        let has_kicked = resolved.warnings.iter().any(|w|
-            matches!(w, ResolverWarning::KickedFromEstimate { .. }));
-        assert!(!has_kicked,
-            "tier-3 must not emit KickedFromEstimate; saw {:?}",
-            resolved.warnings);
+        let ResolverWarning::KickedFromEstimate { name, by } = &resolved.warnings[0];
+        assert_eq!(name, "gamma");
+        assert_eq!(*by, ValueSource::FixedCli);
     }
 
     // ── Bounds + finite checks ──────────────────────────────────────────
@@ -2982,65 +2952,38 @@ n_particles = 10
         emit_notices(&refs);
     }
 
-    // ── fit.toml [fixed] ∩ [estimate] overlap (resolved decision B) ─────
+    // ── fit.toml [fixed] ∩ [estimate] overlap: refused ──────────────────
 
     #[test]
-    fn fit_toml_fixed_estimate_overlap_warns_and_fixed_wins() {
-        // Pathological config: same name in both `[fixed]` and
-        // `[estimate]`. Resolver must:
-        //   1. Treat `[fixed]` as winning (parameter is Fixed, not
-        //      Estimated).
-        //   2. Emit a FixedEstimateOverlap warning so the user sees
-        //      the config bug.
-        let model = mk_model(vec![mk_param("beta", Some(0.5))]);
+    fn fit_toml_fixed_estimate_overlap_is_refused() {
+        // A name in both `[fixed]` and `[estimate]` is both estimated and
+        // given a value; neither block wins, the resolver refuses.
+        let model = mk_model(vec![
+            mk_param("beta", Some(0.5)),
+            mk_param("gamma", Some(0.1)),
+        ]);
         let fcli = vec![];
         let ffiles = vec![];
         let mut ftf = IndexMap::new();
         ftf.insert("beta".into(), 0.7);
         let mut fte: IndexSet<String> = IndexSet::new();
         fte.insert("beta".into());
-        let resolved = resolve_parameters(empty_inputs(&model, &fcli, &ffiles, &ftf, &fte))
-            .expect("ok");
-
-        // [fixed] won: not in estimate_set, role is Fixed.
-        assert!(!resolved.estimate_set.contains("beta"),
-            "beta must be removed from estimate_set when [fixed] wins");
-        let beta = &resolved.params[0];
-        assert_eq!(beta.value, 0.7);
-        assert_eq!(beta.source, ValueSource::FitTomlFixed);
-        assert!(matches!(&beta.role,
-            ParameterRole::Fixed { reason: FixReason::NotInEstimate }),
-            "[fixed]-wins-over-[estimate] yields NotInEstimate (overlap \
-             is reported via the dedicated warning, not via FixReason)");
-
-        // Warning emitted.
-        let overlap_warns: Vec<_> = resolved.warnings.iter().filter(|w|
-            matches!(w, ResolverWarning::FixedEstimateOverlap { .. })).collect();
-        assert_eq!(overlap_warns.len(), 1);
-        match overlap_warns[0] {
-            ResolverWarning::FixedEstimateOverlap { name } => {
-                assert_eq!(name, "beta");
-            }
-            _ => unreachable!(),
+        fte.insert("gamma".into());
+        let err = resolve_parameters(empty_inputs(&model, &fcli, &ffiles, &ftf, &fte))
+            .expect_err("an overlap must be refused");
+        match &err {
+            ResolveError::FixedEstimateOverlap { names } => assert_eq!(names, &["beta"]),
+            other => panic!("expected FixedEstimateOverlap, got {other:?}"),
         }
+        assert_eq!(err.to_string(),
+            "parameter `beta` is in both [estimate] and [fixed]; a parameter is either \
+             estimated or given a value, not both.\n  \
+             Fix: remove `beta` from [fixed] to estimate it, or from [estimate] to hold it \
+             at its [fixed] value.");
     }
 
     #[test]
-    fn fixed_estimate_overlap_warning_formats_actionably() {
-        let w = ResolverWarning::FixedEstimateOverlap {
-            name: "gamma".into(),
-        };
-        let msg = w.notice().render();
-        assert!(msg.contains("gamma"), "must name the param: {}", msg);
-        assert!(msg.contains("[fixed]"),
-            "must mention [fixed] block: {}", msg);
-        assert!(msg.contains("[estimate]"),
-            "must mention [estimate] block: {}", msg);
-    }
-
-    #[test]
-    fn no_overlap_means_no_overlap_warning() {
-        // Disjoint [fixed] and [estimate] → no overlap warning.
+    fn disjoint_fixed_and_estimate_resolve() {
         let model = mk_model(vec![
             mk_param("beta", Some(0.5)),
             mk_param("gamma", Some(0.1)),
@@ -3053,10 +2996,8 @@ n_particles = 10
         fte.insert("gamma".into());
         let resolved = resolve_parameters(empty_inputs(&model, &fcli, &ffiles, &ftf, &fte))
             .expect("ok");
-        let has_overlap = resolved.warnings.iter().any(|w|
-            matches!(w, ResolverWarning::FixedEstimateOverlap { .. }));
-        assert!(!has_overlap);
         assert!(resolved.estimate_set.contains("gamma"));
+        assert!(!resolved.estimate_set.contains("beta"));
     }
 
     // ── Intervention filter must run unconditionally ────────────────────
