@@ -7,8 +7,12 @@
 //! `--fixed`, `--fixed-file` and `--sweep` — before any value is resolved.
 //! Each parameter has at most one declaration; two of different roles are an
 //! error ([`RoleError::TwoDeclarations`]), except for the special cases of
-//! [`SpecialCase`]. A typed constant (`let omega : rate = 0.01`) is part of
-//! the model, not a parameter: no declaration may name it.
+//! [`SpecialCase`].
+//!
+//! A typed constant (`let omega : rate = 0.01`) is still an IR parameter, and
+//! is resolved here as one, exactly as today's commands treat it. It leaves
+//! the IR's parameters, and so this module, in a later IR change; nothing
+//! here special-cases it.
 //!
 //! The partition holds no values. The stored record ([`PartitionRecord`])
 //! pairs it with the values the run resolved, and the legacy `estimated` and
@@ -269,8 +273,6 @@ pub enum SimplexRole {
 #[derive(Debug, Clone)]
 pub struct Partition {
     entries: IndexMap<String, RoleEntry>,
-    /// Typed constants and their declared values; recorded, never configured.
-    constants: IndexMap<String, f64>,
     simplex_groups: Vec<ResolvedSimplex>,
     /// Entries of a fit artifact passed as `--fixed-file` that name a design
     /// or estimated parameter: not used, and listed.
@@ -286,10 +288,9 @@ impl Partition {
             .map(|(n, _)| n.as_str())
     }
 
-    /// Every name the model declares a value for: the entries, then the
-    /// typed constants.
+    /// Every parameter's name, in declaration order.
     pub fn all_names(&self) -> impl Iterator<Item = &str> {
-        self.entries.keys().chain(self.constants.keys()).map(String::as_str)
+        self.entries.keys().map(String::as_str)
     }
 
     /// One info line per special case that applied and per unused file entry.
@@ -390,14 +391,8 @@ impl Partition {
             };
             parameters.insert(name.clone(), rec);
         }
-        // The value the run holds each constant at: its declared value, unless
-        // a value tier replaced it.
-        let constants = self.constants.iter()
-            .map(|(n, &declared)| (n.clone(), value_of(n).map(|rp| rp.value).unwrap_or(declared)))
-            .collect();
         PartitionRecord {
             parameters,
-            constants,
             simplex_groups: self.simplex_groups.iter()
                 .map(|g| SimplexRecord { members: g.members.clone(), role: g.role })
                 .collect(),
@@ -440,8 +435,8 @@ pub enum PartitionField {
 
 /// A run's `partition` field and the legacy `estimated` / `fixed` fields,
 /// generated from the record. For roles that form no partition — a run
-/// today's rules accept and [`resolve_roles`] refuses, such as a typed
-/// constant in `[estimate]` — the field is `unresolved` and the legacy fields
+/// today's rules accept and [`resolve_roles`] refuses, or one whose values
+/// did not resolve — the field is `unresolved` and the legacy fields
 /// are the caller's `unpartitioned` ones, as the command wrote them before the
 /// partition existed. That fall-back goes when the command refuses such runs
 /// (Stages 2 and 3 of the proposal).
@@ -473,8 +468,6 @@ impl RoleRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PartitionRecord {
     pub parameters: IndexMap<String, ParamRecord>,
-    /// Typed constants at the value the run held them.
-    pub constants: IndexMap<String, f64>,
     pub simplex_groups: Vec<SimplexRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
@@ -483,8 +476,8 @@ pub struct PartitionRecord {
 impl PartitionRecord {
     /// The legacy `estimated` and `fixed` sidecar fields, generated here and
     /// nowhere else: the estimated names in declaration order, and every held
-    /// parameter's value — fixed parameters, design parameters at their cell
-    /// value, and typed constants.
+    /// parameter's value — fixed parameters and design parameters at their
+    /// cell value.
     pub fn legacy_fields(&self) -> (Vec<String>, BTreeMap<String, f64>) {
         let mut estimated = Vec::new();
         let mut fixed = BTreeMap::new();
@@ -496,9 +489,6 @@ impl PartitionRecord {
                 }
                 ParamRecord::Fixed { value: None, .. } | ParamRecord::Design { .. } => {}
             }
-        }
-        for (name, v) in &self.constants {
-            fixed.insert(name.clone(), *v);
         }
         (estimated, fixed)
     }
@@ -704,8 +694,7 @@ pub struct ScenarioFootprint {
 
 /// The role declarations. Values are not here.
 pub struct RoleInputs<'a> {
-    /// The model as compiled, before any value is written into it: a typed
-    /// constant is a parameter whose IR value is `fixed`.
+    /// The model as compiled, before any value is written into it.
     pub model: &'a ir::Model,
     /// The fit config's `[estimate]`; empty without one.
     pub fit_estimate: &'a IndexMap<String, EstimateSpecV2>,
@@ -727,7 +716,6 @@ pub struct RoleInputs<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoleError {
     TwoDeclarations { name: String, first: Declaration, second: Declaration },
-    TypedConstant { name: String, by: Declaration },
     UnknownName { name: String, by: Declaration, candidates: Vec<String> },
     NotAccepted { name: String, role: RoleKind, command: &'static str },
     Missing { role: RoleKind, command: &'static str },
@@ -753,10 +741,6 @@ impl std::fmt::Display for RoleError {
                     first.role_kind().word(), first.describe(),
                     second.role_kind().word(), second.describe())
             }
-            RoleError::TypedConstant { name, by } => write!(f,
-                "`{name}` is a constant defined in the model with `let`, not a parameter, so \
-                 it cannot be set from outside ({} names it); to make it configurable, \
-                 declare it in `parameters {{}}`", by.describe()),
             RoleError::UnknownName { name, by, candidates } => {
                 write!(f, "{} names `{name}`, which is not a parameter of this model",
                     by.describe())?;
@@ -805,15 +789,7 @@ pub fn resolve_roles<'a>(inputs: &'a RoleInputs<'a>, command: &CommandRoles)
     -> Result<Partition, RoleError>
 {
     let model = inputs.model;
-    let constants: IndexMap<String, f64> = model.parameters.iter()
-        .filter_map(|p| match p.value {
-            ir::parameter::ParamValue::Fixed { value } => Some((p.name.clone(), value)),
-            _ => None,
-        })
-        .collect();
-    let configurable: Vec<&ir::parameter::Parameter> = model.parameters.iter()
-        .filter(|p| !constants.contains_key(&p.name))
-        .collect();
+    let configurable: Vec<&ir::parameter::Parameter> = model.parameters.iter().collect();
 
     // Every declaration, in input order.
     let decl = |name: &'a str, by: Declaration| Decl { name, by, fit_artifact: false, cli_bounds: None };
@@ -832,11 +808,8 @@ pub fn resolve_roles<'a>(inputs: &'a RoleInputs<'a>, command: &CommandRoles)
     }
     decls.extend(inputs.design.iter().map(|(n, origin)| decl(n, Declaration::Design(*origin))));
 
-    // Every declared name is a configurable parameter.
+    // Every declared name is a parameter.
     for d in &decls {
-        if constants.contains_key(d.name) {
-            return Err(RoleError::TypedConstant { name: d.name.to_string(), by: d.by.clone() });
-        }
         if !configurable.iter().any(|p| p.name == d.name) {
             let prefix = format!("{}_", d.name);
             return Err(RoleError::UnknownName {
@@ -984,7 +957,7 @@ pub fn resolve_roles<'a>(inputs: &'a RoleInputs<'a>, command: &CommandRoles)
         simplex_groups.push(ResolvedSimplex { members: g.params.clone(), role });
     }
 
-    Ok(Partition { entries, constants, simplex_groups, unused_file_entries })
+    Ok(Partition { entries, simplex_groups, unused_file_entries })
 }
 
 fn file_of(by: &Declaration) -> PathBuf {
@@ -1148,7 +1121,7 @@ mod tests {
     }
 
     /// The SIR recovery fit config: `beta`, `gamma` estimated, the rest in
-    /// `[fixed]` (the typed constant left out, as the partition requires).
+    /// `[fixed]`; the typed constant `omega` undeclared, so fixed by default.
     fn sir_fit() -> Run {
         Run {
             fit_estimate: estimate(&[("beta", "bounds = [0.1, 0.9]"), ("gamma", "")]),
@@ -1289,22 +1262,6 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_constant_cannot_be_declared() {
-        for run in [
-            Run { cli_estimate: vec![EstimateDecl { name: "omega".into(), bounds: None }],
-                  ..Run::default() },
-            Run { cli_estimate: vec![EstimateDecl { name: "gamma".into(), bounds: None }],
-                  cli_fixed: vec!["omega".into()], ..Run::default() },
-            Run { fit_estimate: estimate(&[("gamma", "")]), ..Run::default() }.fixed(&["omega"]),
-        ] {
-            match run.resolve(&SURVEY).unwrap_err() {
-                RoleError::TypedConstant { name, .. } => assert_eq!(name, "omega"),
-                other => panic!("expected TypedConstant, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
     fn two_fixed_declarations_are_tiers_not_a_conflict() {
         let mut run = sir_fit();
         run.cli_fixed = vec!["k".into()];
@@ -1396,7 +1353,7 @@ mod tests {
         assert_eq!(kind(&p, "gamma"), RoleKind::Fixed);
         assert_eq!(p.entries["gamma"].declared_by, Declaration::Default);
         assert_eq!(p.names_with(RoleKind::Estimated).collect::<Vec<_>>(), vec!["beta"]);
-        assert_eq!(p.all_names().count(), 10, "every parameter and the constant");
+        assert_eq!(p.all_names().count(), 10, "every parameter");
     }
 
     #[test]
@@ -1457,7 +1414,7 @@ mod tests {
         let (est, fixed) = p.record(&vals).legacy_fields();
         assert_eq!(est, vec!["beta", "gamma"]);
         assert!(!fixed.contains_key("N0"));
-        assert_eq!(fixed.get("omega"), Some(&0.01), "constants are held values");
+        assert_eq!(fixed.get("omega"), Some(&0.01), "an undeclared parameter is held");
         // A cell: N0 is fixed at its grid value.
         let point = vec![("N0".to_string(), 5000.0)];
         let rec = p.cell(&point).unwrap().record(&vals);
