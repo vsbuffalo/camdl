@@ -653,6 +653,8 @@ pub enum Allowed {
     No,
     Optional,
     AtLeastOne,
+    /// At least one, unless the run says it is a slice (`profile --slice`).
+    AtLeastOneUnlessSlice,
 }
 
 pub const FIT_RUN: CommandRoles = CommandRoles {
@@ -666,6 +668,12 @@ pub const SURVEY: CommandRoles = CommandRoles {
     estimated: Allowed::AtLeastOne,
     design: Allowed::No,
     profiles: false,
+};
+pub const PROFILE: CommandRoles = CommandRoles {
+    command: "profile",
+    estimated: Allowed::AtLeastOneUnlessSlice,
+    design: Allowed::AtLeastOne,
+    profiles: true,
 };
 
 // ─── Inputs ──────────────────────────────────────────────────────────────────
@@ -708,6 +716,8 @@ pub struct RoleInputs<'a> {
     pub cli_fixed: &'a [String],
     pub cli_fixed_files: &'a [FixedFileDecl],
     pub design: &'a [(String, DesignOrigin)],
+    /// The run is a likelihood slice: nothing estimated, said explicitly.
+    pub slice: bool,
     /// Each scenario arm's footprint, checked against the roles (§4.3).
     pub scenarios: &'a [ScenarioFootprint],
 }
@@ -930,6 +940,9 @@ pub fn resolve_roles<'a>(inputs: &'a RoleInputs<'a>, command: &CommandRoles)
             (Allowed::AtLeastOne, None) => return Err(RoleError::Missing {
                 role: kind, command: command.command,
             }),
+            (Allowed::AtLeastOneUnlessSlice, None) if !inputs.slice => {
+                return Err(RoleError::Missing { role: kind, command: command.command });
+            }
             _ => {}
         }
     }
@@ -1103,6 +1116,7 @@ mod tests {
         cli_fixed: Vec<String>,
         files: Vec<FixedFileDecl>,
         design: Vec<(String, DesignOrigin)>,
+        slice: bool,
         scenarios: Vec<ScenarioFootprint>,
     }
 
@@ -1126,6 +1140,7 @@ mod tests {
                 cli_fixed: &self.cli_fixed,
                 cli_fixed_files: &self.files,
                 design: &self.design,
+                slice: self.slice,
                 scenarios: &self.scenarios,
             };
             resolve_roles(&inputs, command)
@@ -1166,6 +1181,17 @@ mod tests {
     }
 
     #[test]
+    fn profiling_an_estimated_parameter_makes_it_focal() {
+        let p = sir_fit().sweep(&["beta"]).resolve(&PROFILE).unwrap();
+        let beta = &p.entries["beta"];
+        assert_eq!(beta.role.kind(), RoleKind::Design);
+        assert_eq!(beta.special, Some(SpecialCase::ProfileFocal));
+        assert_eq!(beta.declared_by, Declaration::Design(DesignOrigin::Sweep));
+        assert_eq!(kind(&p, "gamma"), RoleKind::Estimated);
+        assert_eq!(p.notices().len(), 1, "{:?}", p.notices());
+    }
+
+    #[test]
     fn sweeping_an_estimated_parameter_outside_profile_is_refused() {
         let (name, first, second) = two(sir_fit().sweep(&["beta"]).resolve(&FIT_RUN).unwrap_err());
         assert_eq!((name.as_str(), first, second),
@@ -1174,10 +1200,12 @@ mod tests {
 
     #[test]
     fn sweeping_a_fixed_entry_is_design_at_job_level() {
-        let p = sir_fit().sweep(&["N0"]).resolve(&FIT_RUN).unwrap();
-        let n0 = &p.entries["N0"];
-        assert_eq!(n0.role.kind(), RoleKind::Design);
-        assert_eq!(n0.special, Some(SpecialCase::SweepOverFixed));
+        for command in [&FIT_RUN, &PROFILE] {
+            let p = sir_fit().sweep(&["N0"]).resolve(command).unwrap();
+            let n0 = &p.entries["N0"];
+            assert_eq!(n0.role.kind(), RoleKind::Design, "{}", command.command);
+            assert_eq!(n0.special, Some(SpecialCase::SweepOverFixed), "{}", command.command);
+        }
     }
 
     #[test]
@@ -1212,6 +1240,40 @@ mod tests {
         let (name, first, second) = two(err);
         assert_eq!((name.as_str(), first, second),
             ("rho", Declaration::FitEstimate, Declaration::CliFixed));
+    }
+
+    #[test]
+    fn a_fit_artifacts_entry_for_a_swept_name_is_unused_and_listed() {
+        let mut run = sir_fit().sweep(&["beta"]);
+        run.files = vec![FixedFileDecl {
+            path: "mle_params.toml".into(),
+            names: vec!["beta".into(), "gamma".into(), "k".into()],
+            fit_artifact: true,
+        }];
+        let p = run.resolve(&PROFILE).unwrap();
+        assert_eq!(kind(&p, "beta"), RoleKind::Design);
+        assert_eq!(kind(&p, "gamma"), RoleKind::Estimated);
+        // Its entry for a name with no other role holds that name.
+        assert_eq!(p.entries["k"].declared_by, Declaration::CliFixedFile("mle_params.toml".into()));
+        assert_eq!(p.unused_file_entries, vec![
+            (PathBuf::from("mle_params.toml"), "beta".to_string()),
+            (PathBuf::from("mle_params.toml"), "gamma".to_string()),
+        ]);
+        assert_eq!(p.notices().iter().filter(|n| n.contains("mle_params.toml")).count(), 2);
+    }
+
+    #[test]
+    fn a_plain_files_entry_for_a_swept_name_is_refused() {
+        let mut run = Run {
+            cli_estimate: vec![EstimateDecl { name: "gamma".into(), bounds: None }],
+            ..Run::default()
+        }.sweep(&["beta"]);
+        run.files = vec![FixedFileDecl {
+            path: "p.toml".into(), names: vec!["beta".into()], fit_artifact: false,
+        }];
+        let (name, first, second) = two(run.resolve(&PROFILE).unwrap_err());
+        assert_eq!((name.as_str(), first, second),
+            ("beta", Declaration::CliFixedFile("p.toml".into()), Declaration::Design(DesignOrigin::Sweep)));
     }
 
     #[test]
@@ -1297,6 +1359,17 @@ mod tests {
             }
             other => panic!("expected NotAccepted, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_profile_with_nothing_estimated_needs_slice() {
+        let run = Run::default().sweep(&["beta"]);
+        assert_eq!(run.resolve(&PROFILE).unwrap_err(),
+            RoleError::Missing { role: RoleKind::Estimated, command: "profile" });
+        let slice = Run { slice: true, ..run };
+        assert!(slice.resolve(&PROFILE).is_ok());
+        assert_eq!(Run::default().resolve(&SURVEY).unwrap_err(),
+            RoleError::Missing { role: RoleKind::Estimated, command: "survey" });
     }
 
     #[test]
