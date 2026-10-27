@@ -3,6 +3,7 @@ pub mod error;
 pub mod state;
 pub mod time;
 pub mod compiled_model;
+pub mod bspline;           // shared B-spline span evaluator (proposal 2026-10-27 §4.1)
 pub mod periodic_bspline;  // gh#59 v2 — de Boor evaluator
 pub mod propensity;
 pub mod resolved_expr;
