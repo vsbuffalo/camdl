@@ -41,12 +41,48 @@ pub enum CompiledTimeFuncKind {
     /// (`period_inv = 1/period` is computed per evaluation); harmonics is a flat
     /// `[(a_1, b_1), (a_2, b_2), …]` of live coefficient pairs.
     Fourier { period: ResolvedExpr, harmonics: Vec<(ResolvedExpr, ResolvedExpr)> },
-    /// gh#59 v2: periodic B-spline forcing with uniform knots, evaluated by
-    /// [`crate::periodic_bspline::PeriodicBasis::eval`] on the shared span
-    /// evaluator (proposal 2026-10-27-estimable-bsplines §4.2). `basis` is
-    /// the structural part, checked at construction; `coefs` has
-    /// `basis.n_basis()` entries.
-    PeriodicSpline { basis: crate::periodic_bspline::PeriodicBasis, coefs: Vec<f64> },
+    /// gh#59 v2: periodic B-spline forcing with uniform knots. The period is
+    /// structural; the coefficients are live, as Fourier's harmonics are.
+    PeriodicSpline(CompiledPeriodicSpline),
+}
+
+/// A compiled `periodic_spline` forcing (proposal
+/// 2026-10-27-estimable-bsplines §4.2): the structural basis — period,
+/// n_basis, degree — checked once, and one live coefficient expression per
+/// basis function, evaluated per call against the params slice. A call
+/// evaluates only the `degree + 1` coefficients nonzero at `t`.
+#[derive(Debug, Clone)]
+pub struct CompiledPeriodicSpline {
+    basis: crate::periodic_bspline::PeriodicBasis,
+    coefs: Vec<ResolvedExpr>,
+}
+
+impl CompiledPeriodicSpline {
+    /// Refuses a coefficient count other than `basis.n_basis()`.
+    pub fn new(
+        basis: crate::periodic_bspline::PeriodicBasis,
+        coefs: Vec<ResolvedExpr>,
+    ) -> Result<Self, String> {
+        if coefs.len() != basis.n_basis() {
+            return Err(format!(
+                "coefs length ({}) must equal n_basis ({})",
+                coefs.len(),
+                basis.n_basis()
+            ));
+        }
+        Ok(CompiledPeriodicSpline { basis, coefs })
+    }
+
+    /// The live coefficient expressions, in basis order.
+    pub fn coefs(&self) -> &[ResolvedExpr] {
+        &self.coefs
+    }
+
+    /// f(t), evaluating each coefficient it reads through `value`.
+    #[inline]
+    pub fn eval(&self, t: f64, mut value: impl FnMut(&ResolvedExpr) -> f64) -> f64 {
+        self.basis.eval(t, |k| value(&self.coefs[k]))
+    }
 }
 
 /// Natural cubic spline with precomputed coefficients.
@@ -714,12 +750,12 @@ fn render_expr(expr: &Expr) -> String {
     }
 }
 
-/// Evaluate a *structural* forcing array element (interpolation knot, spline
-/// coefficient, periodic-spline coef, piecewise breakpoint/value) to `f64`.
+/// Evaluate a *structural* forcing array element (interpolation knot or value,
+/// piecewise breakpoint/value, a periodic spline's period) to `f64`.
 ///
 /// Unlike scalar coefficients, these feed a structure derived at construction
-/// (a sorted knot table, a Thomas-solved spline basis, the de Boor evaluator),
-/// so they cannot vary live. A param-referencing entry is rejected with a clear
+/// (a sorted knot table, a Thomas-solved spline basis, a periodic spline's
+/// knot spacing), so they cannot vary live. A param-referencing entry is rejected with a clear
 /// error rather than silently baked to its default-param value (the freeze).
 fn eval_structural(
     forcing: &str,
@@ -735,8 +771,9 @@ fn eval_structural(
         return Err(SimError::Validation(format!(
             "forcing '{forcing}': {what} references parameter {plist}, but it is \
              structural data — {what}s are fixed at construction and cannot be \
-             estimated. Use a scalar-coefficient forcing (sinusoidal, periodic, \
-             fourier) for an estimated parameter, or make this value constant."
+             estimated. Use a forcing with live coefficients (sinusoidal, periodic, \
+             fourier, periodic_spline) for an estimated parameter, or make this \
+             value constant."
         )));
     }
     eval_table_expr(expr, param_index, params)
@@ -1438,11 +1475,11 @@ impl CompiledModel {
                     }
                     CompiledTimeFuncKind::Fourier { period, harmonics } => read(period)
                         .or_else(|| harmonics.iter().find_map(|(a, b)| read(a).or_else(|| read(b)))),
+                    CompiledTimeFuncKind::PeriodicSpline(ps) => ps.coefs().iter().find_map(read),
                     CompiledTimeFuncKind::Piecewise { .. }
                     | CompiledTimeFuncKind::Interpolated { .. }
                     | CompiledTimeFuncKind::Constant { .. }
-                    | CompiledTimeFuncKind::CubicSpline(_)
-                    | CompiledTimeFuncKind::PeriodicSpline { .. } => None,
+                    | CompiledTimeFuncKind::CubicSpline(_) => None,
                 })
             }
             ResolvedExpr::Const(_)
@@ -1762,11 +1799,12 @@ impl CompiledModel {
             }
         }
 
-        // Build each time function. Scalar coefficients (Sinusoidal / Periodic /
-        // Fourier) resolve to live `ResolvedExpr`, evaluated per-step against the
-        // params slice; structural arrays (interpolation knots, spline bases,
-        // periodic-spline coefs, piecewise steps) stay precomputed `f64` and
-        // reject param references. Build-time numeric checks that depend on a
+        // Build each time function. Live coefficients (Sinusoidal / Periodic /
+        // Fourier, and PeriodicSpline's basis coefficients) resolve to
+        // `ResolvedExpr`, evaluated per-step against the params slice;
+        // structural data (interpolation knots and values, the cubic-spline
+        // basis, piecewise steps, a periodic spline's period) stays
+        // precomputed `f64` and rejects param references. Build-time numeric checks that depend on a
         // now-live coefficient evaluate it at `default_params` for the early
         // diagnostic (the live path guards the runtime value).
         let mut time_func_cache: Vec<CompiledTimeFunc> = Vec::with_capacity(model.time_functions.len());
@@ -1875,16 +1913,13 @@ impl CompiledModel {
                     )
                     .map_err(|e| SimError::Validation(format!(
                         "periodic_spline forcing '{}': {e}", tf.name)))?;
-                    let coefs: Result<Vec<f64>, SimError> = ps.coefs.iter()
-                        .map(|e| eval_structural(&tf.name, "periodic_spline coefficient", e, &param_index, &default_params))
+                    let coefs: Result<Vec<ResolvedExpr>, SimError> = ps.coefs.iter()
+                        .map(|e| resolve_coeff(e, &param_index))
                         .collect();
-                    let cs = coefs?;
-                    if cs.len() != ps.n_basis as usize {
-                        return Err(SimError::Validation(format!(
-                            "periodic_spline: coefs length ({}) must equal n_basis ({})",
-                            cs.len(), ps.n_basis)));
-                    }
-                    CompiledTimeFuncKind::PeriodicSpline { basis, coefs: cs }
+                    CompiledTimeFuncKind::PeriodicSpline(
+                        CompiledPeriodicSpline::new(basis, coefs?).map_err(|e| SimError::Validation(
+                            format!("periodic_spline forcing '{}': {e}", tf.name)))?,
+                    )
                 }
             };
             // gh#314: resolve the optional lag into a live coefficient. It uses
