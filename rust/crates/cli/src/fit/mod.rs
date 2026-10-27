@@ -2165,12 +2165,10 @@ fn resolved_data_hashes(
 
 /// The fit's partition (proposal `2026-10-26-parameter-roles.md`, Stage 1),
 /// from the fit config's `[estimate]` and `[fixed]`, the sweep's names and
-/// the scenario. `fixed_via` is read before the `from_scenario` expansion. A
-/// typed constant in `[fixed]`, which `fit run` still requires, is left out
-/// of the declarations: the partition records it under `constants`.
+/// the scenario. `fixed_via` is read before the `from_scenario` expansion.
 ///
-/// `Err` says why the fit's roles form no partition — a typed constant in
-/// `[estimate]`, which `fit run` still estimates — for an `unresolved` record.
+/// `Err` says why the fit's roles form no partition, for an `unresolved`
+/// record.
 fn resolve_fit_roles(
     problem: &config_v2::Problem,
     model: &ir::Model,
@@ -2178,11 +2176,7 @@ fn resolve_fit_roles(
     sweep: &[(String, Vec<f64>)],
 ) -> Result<crate::roles::Partition, String> {
     use crate::roles::{DesignOrigin, RoleInputs, ScenarioFootprint};
-    let is_constant = |name: &str| model.parameters.iter().any(|p| {
-        p.name == name && matches!(p.value, ir::parameter::ParamValue::Fixed { .. })
-    });
-    let fit_fixed: Vec<(String, crate::roles::FitFixedVia)> =
-        fixed_via?.into_iter().filter(|(n, _)| !is_constant(n)).collect();
+    let fit_fixed: Vec<(String, crate::roles::FitFixedVia)> = fixed_via?;
     let design: Vec<(String, DesignOrigin)> =
         sweep.iter().map(|(n, _)| (n.clone(), DesignOrigin::Sweep)).collect();
     let scenarios: Vec<ScenarioFootprint> = match problem.scenario.as_deref() {

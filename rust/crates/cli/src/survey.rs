@@ -688,8 +688,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         } else {
             model_ir_json
         };
-        // The model before any value is written into it, for the partition:
-        // a typed constant is a parameter whose IR value is `fixed`.
+        // The model before any value is written into it, for the partition.
         let model_declared = model_pre.clone();
         let fixed_via = config.fixed.declarations(&model_pre);
 
@@ -1157,9 +1156,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
 
 /// A survey's role declarations, as today's rules give them: with a fit
 /// config, its `[estimate]` less the names `--fixed` pins, and its `[fixed]`;
-/// inline, `--estimate` and `--fixed`. A typed constant named by `[fixed]` or
-/// `--fixed` is left out of the declarations: the partition records it under
-/// `constants`.
+/// inline, `--estimate` and `--fixed`.
 struct SurveyRoleDecls<'a> {
     model: &'a ir::Model,
     fit_estimate: IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
@@ -1178,12 +1175,7 @@ struct SurveyRoleDecls<'a> {
 /// `unresolved` record.
 fn survey_roles(d: SurveyRoleDecls<'_>) -> Result<crate::roles::Partition, String> {
     use crate::roles::{RoleInputs, ScenarioFootprint};
-    let is_constant = |name: &str| d.model.parameters.iter().any(|p| {
-        p.name == name && matches!(p.value, ir::parameter::ParamValue::Fixed { .. })
-    });
-    let fit_fixed: Vec<(String, crate::roles::FitFixedVia)> =
-        d.fit_fixed?.into_iter().filter(|(n, _)| !is_constant(n)).collect();
-    let cli_fixed: Vec<String> = d.cli_fixed.iter().filter(|n| !is_constant(n)).cloned().collect();
+    let fit_fixed: Vec<(String, crate::roles::FitFixedVia)> = d.fit_fixed?;
     let scenarios: Vec<ScenarioFootprint> = match d.scenario {
         Some(s) => vec![ScenarioFootprint {
             scenario: s.to_string(),
@@ -1200,7 +1192,7 @@ fn survey_roles(d: SurveyRoleDecls<'_>) -> Result<crate::roles::Partition, Strin
             fit_fixed: &fit_fixed,
             simplex_groups: d.simplex_groups,
             cli_estimate: &d.cli_estimate,
-            cli_fixed: &cli_fixed,
+            cli_fixed: d.cli_fixed,
             cli_fixed_files: &[],
             design: &[],
             slice: false,

@@ -114,7 +114,7 @@ fn json(path: &Path) -> Value {
 }
 
 /// The legacy fields a record's `partition` generates: estimated names in
-/// order, and every held value (fixed parameters and constants).
+/// order, and every held value.
 fn legacy_of(partition: &Value) -> (Value, Value) {
     let mut estimated = Vec::new();
     let mut fixed = serde_json::Map::new();
@@ -126,9 +126,6 @@ fn legacy_of(partition: &Value) -> (Value, Value) {
             }
             _ => {}
         }
-    }
-    for (name, v) in partition["constants"].as_object().unwrap() {
-        fixed.insert(name.clone(), v.clone());
     }
     let mut sorted: Vec<(String, Value)> = fixed.into_iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
@@ -161,9 +158,9 @@ fn fit_run_records_its_partition_and_generates_the_legacy_fields() {
     assert_eq!(rho["via"], "inline");
     assert_eq!(rho["value"], 0.6);
     assert_eq!(rho["value_from"]["source"], "fit_toml_fixed");
-    // The typed constant is part of the model, not of the partition.
-    assert!(part["parameters"].get("omega").is_none(), "{part:#}");
-    assert_eq!(part["constants"]["omega"], 0.01);
+    // A typed constant is still an IR parameter, held by its `[fixed]` entry.
+    assert_eq!(part["parameters"]["omega"]["role"], "fixed");
+    assert_eq!(part["parameters"]["omega"]["value"], 0.01);
     let (estimated, fixed) = legacy_of(part);
     assert_eq!(meta["estimated"], estimated);
     assert_eq!(meta["fixed"], fixed);
@@ -194,16 +191,20 @@ fn a_swept_fit_records_each_points_cell_partition() {
     assert_eq!(seen, vec![0.4, 0.6]);
 }
 
+/// A run today's rules accept and the partition refuses — here a simplex
+/// group that `--fixed` splits — records why, and keeps the legacy fields as
+/// the command wrote them before.
 #[test]
-fn a_fit_estimating_a_typed_constant_records_no_partition_and_still_runs() {
-    let estimate = format!("{ESTIMATE}\nomega = {{ bounds = [0.001, 0.1] }}");
-    let fixed = "N0 = 10000\nI0 = 10\nrho = 0.6";
-    let tmp = fixture(&fit_toml(&estimate, fixed));
-    camdl(tmp.path(), &["fit", "run", "fit.toml", "--seed", "1"]);
-    let meta = json(&find_all(&tmp.path().join("res"), "fit.meta.json")[0]);
-    assert_eq!(meta["partition"]["status"], "unresolved", "{meta:#}");
-    assert!(meta["partition"]["reason"].as_str().unwrap().contains("omega"), "{meta:#}");
-    assert_eq!(meta["estimated"], serde_json::json!(["beta", "gamma", "omega"]));
+fn a_survey_whose_roles_form_no_partition_records_why_and_still_runs() {
+    let fit = fit_toml(ESTIMATE, FIXED) + "\n[[simplex_groups]]\nparams = [\"beta\", \"gamma\"]\n";
+    let tmp = fixture(&fit);
+    camdl(tmp.path(), &["survey", "model.camdl", "--fit", "fit.toml", "--fixed", "gamma=0.15",
+        "--n-points", "4", "--eval-particles", "20", "--output", "srv"]);
+    let inputs = &json(&find_all(&tmp.path().join("srv"), "run.json")[0])["inputs"];
+    assert_eq!(inputs["partition"]["status"], "unresolved", "{inputs:#}");
+    assert!(inputs["partition"]["reason"].as_str().unwrap().contains("simplex"), "{inputs:#}");
+    assert_eq!(inputs["estimated"], serde_json::json!(["beta"]));
+    assert_eq!(inputs["fixed"]["gamma"], 0.15);
 }
 
 #[test]

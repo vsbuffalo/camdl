@@ -839,7 +839,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // declarations by the one adapter that reads it. Recorded, not acted on.
     let profile_roles: Result<crate::roles::Partition, String> =
         legacy_role_inputs(LegacySelection {
-            model: &model_declared,
             estimated: &param_names_to_estimate,
             focal: &focal_names,
             fit_estimate: &fit_estimate,
@@ -1963,8 +1962,6 @@ fn render_mle_toml(
 /// or with `auto` every parameter not swept, held or a constant) and the
 /// declarations that held the rest.
 struct LegacySelection<'a> {
-    /// The model before any value is written into it.
-    model: &'a ir::Model,
     estimated: &'a [String],
     focal: &'a [String],
     fit_estimate: &'a indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
@@ -2025,17 +2022,11 @@ impl LegacyRoleDecls {
 ///   parameter of the profile;
 /// - an `[estimate]` name neither estimated nor focal is held: it is left
 ///   undeclared, fixed by default, or held by the `--fixed` that named it;
-/// - a typed constant is left out of every declaration — today a `--fixed`
-///   or `[fixed]` may name one — and recorded under `constants`; an
-///   estimated typed constant stays declared, and the partition refuses it;
 /// - a plain `--fixed-file`'s entries for a focal name are dropped (the grid
 ///   writes over them today); a fit artifact's are kept, and the partition
 ///   lists them as unused;
 /// - nothing estimated is a slice.
 fn legacy_role_inputs(sel: LegacySelection<'_>) -> Result<LegacyRoleDecls, String> {
-    let is_constant = |name: &str| sel.model.parameters.iter().any(|p| {
-        p.name == name && matches!(p.value, ir::parameter::ParamValue::Fixed { .. })
-    });
     let kept = |name: &String| sel.estimated.contains(name) || sel.focal.contains(name);
     let fit_estimate = sel.fit_estimate.iter()
         .filter(|(n, _)| kept(n))
@@ -2045,14 +2036,14 @@ fn legacy_role_inputs(sel: LegacySelection<'_>) -> Result<LegacyRoleDecls, Strin
         .filter(|n| !sel.fit_estimate.contains_key(*n))
         .map(|n| crate::roles::EstimateDecl { name: n.clone(), bounds: None })
         .collect();
-    let fit_fixed = sel.fit_fixed?.into_iter().filter(|(n, _)| !is_constant(n)).collect();
-    let cli_fixed = sel.cli_fixed.iter().filter(|n| !is_constant(n)).cloned().collect();
+    let fit_fixed = sel.fit_fixed?;
+    let cli_fixed = sel.cli_fixed.to_vec();
     let mut files = Vec::new();
     for path in sel.fixed_files {
         let fit_artifact = crate::params_resolver::carries_fit_provenance(path);
         let mut names: Vec<String> = crate::util::load_params_toml(&path.to_string_lossy())?
             .into_keys()
-            .filter(|n| !is_constant(n) && (fit_artifact || !sel.focal.contains(n)))
+            .filter(|n| fit_artifact || !sel.focal.contains(n))
             .collect();
         names.sort();
         files.push(crate::roles::FixedFileDecl { path: path.clone(), names, fit_artifact });
