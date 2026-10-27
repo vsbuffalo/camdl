@@ -365,7 +365,10 @@ impl ContentAddressed for Deps {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         h.write_type_tag("runid::inputs::Deps");
         h.write_schema_version(1);
-        let mut refs: Vec<&ArtifactRef> = self.0.iter().collect();
+        // Exhaustive destructure: a field added to `Deps` must not silently
+        // escape the hash.
+        let Deps(deps) = self;
+        let mut refs: Vec<&ArtifactRef> = deps.iter().collect();
         refs.sort_by(|a, b| a.run_id.as_bytes().cmp(b.run_id.as_bytes()));
         h.write_len(refs.len() as u64);
         for r in refs {

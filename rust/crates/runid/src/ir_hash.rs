@@ -33,9 +33,15 @@
 
 use ir::deriv::Diffable;
 use ir::Differentiable;
-use ir::expr::{BinOp, Expr, UnOp};
+use ir::anchor::AnchoredTime;
+use ir::expr::{
+    BinOp, BinOpExpr, BinOpWrap, BindingRefWrap, CondExpr, CondWrap, ConstExpr, DtExpr, Expr,
+    ObsAnchorWrap, ObsColumnRefExpr, ParamExpr, PerEvalRefWrap, PopExpr, PopSumExpr,
+    ProjectedExpr, ReduceWrap, TableLookupExpr, TableLookupWrap, TimeExpr, TimeFuncRef,
+    TimeFuncWrap, UnOp, UnOpExpr, UnOpWrap, UncheckedDimExpr, UncheckedDimWrap,
+};
 use ir::intervention::{
-    Action, CmpOp, FireSource, Intervention, InterventionKind,
+    AbsoluteTransfer, Action, AddAction, CmpOp, FractionTransfer, SetAction, FireSource, Intervention, InterventionKind,
     InterventionSchedule, ObsReducer, ReactiveTrigger, RecurringSchedule, TriggerExpr,
     TriggerQuantity, TriggerThreshold,
 };
@@ -46,16 +52,22 @@ use ir::model::{
     SimulationConfig,
 };
 use ir::observation::{
-    ColumnRole, Covers, Likelihood, ObsColumn, ObservationModel, ObservationSchedule,
+    BernoulliLikelihood, BetaBinomialLikelihood, BetaLikelihood, BinomialLikelihood,
+    NegBinomialLikelihood, NormalLikelihood, PoissonLikelihood,
+    ZeroInflatedNegBinomialLikelihood, ColumnRole, Covers, Likelihood, ObsColumn, ObservationModel, ObservationSchedule,
     Projection, RegularSchedule, StratumKey,
 };
 use ir::ode_equation::OdeEquation;
 use ir::parameter::{
-    HierarchicalKind, HierarchicalPrior, ParamKind, ParamValue, Parameter, PriorDist, PriorSpec,
+    BetaPrior, ExponentialPrior, GammaPrior, HalfNormalPrior, LogNormalPrior, LogUniformPrior,
+    NormalPrior, TruncatedNormalPrior, UniformPrior, HierarchicalKind, HierarchicalPrior, ParamKind, ParamValue, Parameter, PriorDist, PriorSpec,
     Transform,
 };
 use ir::table::{OobPolicy, Table, TableSource};
-use ir::time_func::{TimeFuncKind, TimeFunction};
+use ir::time_func::{
+    Fourier, InterpMethod, Interpolated, Periodic, PeriodicSpline, Piecewise, Sinusoidal,
+    TimeFuncKind, TimeFunction,
+};
 use ir::transition::{
     DrawMethod, StoichiometryEntry, Transition, TransitionLineage, TransitionMetadata,
 };
@@ -184,91 +196,104 @@ impl ContentAddressed for Expr {
         // Variant index in declaration order, then the meaningful payload —
         // the single-field wrapper structs (ConstExpr, BinOpWrap, …) are
         // inlined; the variant index already provides domain separation.
+        //
+        // Every payload is destructured exhaustively, down through the wrapper
+        // structs, so a field added to any of them is a compile error here
+        // rather than a silently unhashed field (two models differing only in
+        // it would otherwise share a run_id).
         match self {
-            Expr::Const(c) => {
+            Expr::Const(ConstExpr { value }) => {
                 h.write_u32(0);
                 // Structural float: raw bits, ±0.0/NaN-distinct.
-                h.write_f64_bits(c.value);
+                h.write_f64_bits(*value);
             }
-            Expr::Param(p) => {
+            Expr::Param(ParamExpr { param }) => {
                 h.write_u32(1);
-                h.write_str(&p.param);
+                h.write_str(param);
             }
-            Expr::Pop(p) => {
+            Expr::Pop(PopExpr { pop }) => {
                 h.write_u32(2);
-                h.write_str(&p.pop);
+                h.write_str(pop);
             }
-            Expr::PopSum(p) => {
+            Expr::PopSum(PopSumExpr { pop_sum }) => {
                 h.write_u32(3);
-                p.pop_sum.hash_into(h);
+                pop_sum.hash_into(h);
             }
-            Expr::Time(_) => {
+            // `time: ()` is the serde marker for the nullary node; it carries
+            // no value.
+            Expr::Time(TimeExpr { time: () }) => {
                 h.write_u32(4);
             }
-            Expr::Dt(_) => {
+            // `dt: ()` likewise.
+            Expr::Dt(DtExpr { dt: () }) => {
                 h.write_u32(5);
             }
-            Expr::BinOp(w) => {
+            Expr::BinOp(BinOpWrap { bin_op: BinOpExpr { op, left, right } }) => {
                 h.write_u32(6);
-                w.bin_op.op.hash_into(h);
-                w.bin_op.left.hash_into(h);
-                w.bin_op.right.hash_into(h);
+                op.hash_into(h);
+                left.hash_into(h);
+                right.hash_into(h);
             }
-            Expr::UnOp(w) => {
+            Expr::UnOp(UnOpWrap { un_op: UnOpExpr { op, arg } }) => {
                 h.write_u32(7);
-                w.un_op.op.hash_into(h);
-                w.un_op.arg.hash_into(h);
+                op.hash_into(h);
+                arg.hash_into(h);
             }
-            Expr::Cond(w) => {
+            Expr::Cond(CondWrap { cond: CondExpr { pred, then, else_ } }) => {
                 h.write_u32(8);
-                w.cond.pred.hash_into(h);
-                w.cond.then.hash_into(h);
-                w.cond.else_.hash_into(h);
+                pred.hash_into(h);
+                then.hash_into(h);
+                else_.hash_into(h);
             }
-            Expr::TimeFunc(w) => {
+            Expr::TimeFunc(TimeFuncWrap { time_func: TimeFuncRef { name } }) => {
                 h.write_u32(9);
-                h.write_str(&w.time_func.name);
+                h.write_str(name);
             }
-            Expr::TableLookup(w) => {
+            Expr::TableLookup(TableLookupWrap {
+                table_lookup: TableLookupExpr { table, indices },
+            }) => {
                 h.write_u32(10);
-                h.write_str(&w.table_lookup.table);
-                w.table_lookup.indices.hash_into(h);
+                h.write_str(table);
+                indices.hash_into(h);
             }
-            Expr::Projected(_) => {
+            // `projected: ()` likewise.
+            Expr::Projected(ProjectedExpr { projected: () }) => {
                 h.write_u32(11);
             }
-            Expr::UncheckedDim(w) => {
+            Expr::UncheckedDim(UncheckedDimWrap {
+                unchecked_dim: UncheckedDimExpr { inner, dim, reason },
+            }) => {
                 h.write_u32(12);
-                w.unchecked_dim.inner.hash_into(h);
-                w.unchecked_dim.dim.hash_into(h);
-                h.write_str(&w.unchecked_dim.reason);
+                inner.hash_into(h);
+                dim.hash_into(h);
+                h.write_str(reason);
             }
-            Expr::Reduce(w) => {
+            Expr::Reduce(ReduceWrap { reduce }) => {
                 h.write_u32(13);
-                w.reduce.hash_into(h);
+                reduce.hash_into(h);
             }
-            Expr::BindingRef(w) => {
+            Expr::BindingRef(BindingRefWrap { binding_ref }) => {
                 h.write_u32(14);
-                h.write_str(&w.binding_ref);
+                h.write_str(binding_ref);
             }
-            Expr::ObsColumnRef(w) => {
+            Expr::ObsColumnRef(ObsColumnRefExpr { obs_column_ref }) => {
                 h.write_u32(15);
-                h.write_str(&w.obs_column_ref);
+                h.write_str(obs_column_ref);
             }
             // gh#272 LICM: fresh variant index 16 (not inserted between 14/15) so
             // existing nodes keep their hash — only the new node and the empty
             // `per_eval_bindings` field shift the model hash at 0.19.
-            Expr::PerEvalRef(w) => {
+            Expr::PerEvalRef(PerEvalRefWrap { per_eval_ref }) => {
                 h.write_u32(16);
-                h.write_str(&w.per_eval_ref);
+                h.write_str(per_eval_ref);
             }
             // gh#616: fresh index 17, same reason — existing nodes keep their
             // hash. Anchor and offset both enter, so two forcing forks that
             // differ only in offset are different content.
-            Expr::ObsAnchor(w) => {
+            Expr::ObsAnchor(ObsAnchorWrap { obs_anchor: AnchoredTime { anchor, offset } }) => {
                 h.write_u32(17);
-                h.write_str(w.obs_anchor.anchor.as_str());
-                h.write_f64_bits(w.obs_anchor.offset);
+                h.write_str(anchor.as_str());
+                h.write_f64_bits(*offset);
             }
         }
     }
@@ -355,40 +380,41 @@ impl ContentAddressed for Transition {
 impl ContentAddressed for PriorDist {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::parameter::PriorDist");
-        // The single-field prior structs are inlined (1:1 with variants).
+        // The single-field prior structs are inlined (1:1 with variants), each
+        // destructured exhaustively so a new field is a compile error here.
         match self {
-            PriorDist::Uniform(p) => {
+            PriorDist::Uniform(UniformPrior { lower, upper }) => {
                 h.write_u32(0);
-                h.write_f64_bits(p.lower);
-                h.write_f64_bits(p.upper);
+                h.write_f64_bits(*lower);
+                h.write_f64_bits(*upper);
             }
-            PriorDist::Normal(p) => {
+            PriorDist::Normal(NormalPrior { mean, sd }) => {
                 h.write_u32(1);
-                h.write_f64_bits(p.mean);
-                h.write_f64_bits(p.sd);
+                h.write_f64_bits(*mean);
+                h.write_f64_bits(*sd);
             }
-            PriorDist::LogNormal(p) => {
+            PriorDist::LogNormal(LogNormalPrior { mu, sigma }) => {
                 h.write_u32(2);
-                h.write_f64_bits(p.mu);
-                h.write_f64_bits(p.sigma);
+                h.write_f64_bits(*mu);
+                h.write_f64_bits(*sigma);
             }
-            PriorDist::HalfNormal(p) => {
+            PriorDist::HalfNormal(HalfNormalPrior { sigma }) => {
                 h.write_u32(3);
-                h.write_f64_bits(p.sigma);
+                h.write_f64_bits(*sigma);
             }
-            PriorDist::Beta(p) => {
+            PriorDist::Beta(BetaPrior { alpha, beta }) => {
                 h.write_u32(4);
-                h.write_f64_bits(p.alpha);
-                h.write_f64_bits(p.beta);
+                h.write_f64_bits(*alpha);
+                h.write_f64_bits(*beta);
             }
-            PriorDist::Gamma(p) => {
+            PriorDist::Gamma(GammaPrior { shape, rate }) => {
                 h.write_u32(5);
-                h.write_f64_bits(p.shape);
-                h.write_f64_bits(p.rate);
+                h.write_f64_bits(*shape);
+                h.write_f64_bits(*rate);
             }
-            PriorDist::Exponential(p) => {
+            PriorDist::Exponential(ExponentialPrior { rate }) => {
                 h.write_u32(6);
-                h.write_f64_bits(p.rate);
+                h.write_f64_bits(*rate);
             }
             PriorDist::Fixed(v) => {
                 h.write_u32(7);
@@ -396,17 +422,17 @@ impl ContentAddressed for PriorDist {
             }
             // New variants take fresh discriminants (8, 9) so existing priors'
             // content hashes are unchanged.
-            PriorDist::LogUniform(p) => {
+            PriorDist::LogUniform(LogUniformPrior { lower, upper }) => {
                 h.write_u32(8);
-                h.write_f64_bits(p.lower);
-                h.write_f64_bits(p.upper);
+                h.write_f64_bits(*lower);
+                h.write_f64_bits(*upper);
             }
-            PriorDist::TruncatedNormal(p) => {
+            PriorDist::TruncatedNormal(TruncatedNormalPrior { mean, sd, lower, upper }) => {
                 h.write_u32(9);
-                h.write_f64_bits(p.mean);
-                h.write_f64_bits(p.sd);
-                h.write_f64_bits(p.lower);
-                h.write_f64_bits(p.upper);
+                h.write_f64_bits(*mean);
+                h.write_f64_bits(*sd);
+                h.write_f64_bits(*lower);
+                h.write_f64_bits(*upper);
             }
         }
     }
@@ -601,17 +627,29 @@ impl ContentAddressed for Likelihood {
         // models differing only in that argument would share a run_id. `n` is
         // the standing proof that the hazard is real rather than hypothetical.
         // Adding a variant is a compile error here.
+        //
+        // Each family struct is destructured exhaustively too. A `Diffable`
+        // field is bound `_` because the derived `diffables()` traversal below
+        // hashes it; a new `#[differentiate(skip)]` field (the only kind that
+        // traversal cannot see) is then a compile error here until it is
+        // hashed explicitly like `n`.
         match self {
-            Likelihood::Binomial(l) => l.n.hash_into(h),
-            Likelihood::BetaBinomial(l) => l.n.hash_into(h),
+            Likelihood::Binomial(BinomialLikelihood { n, p: _ }) => n.hash_into(h),
+            Likelihood::BetaBinomial(BetaBinomialLikelihood { n, alpha: _, beta: _ }) => {
+                n.hash_into(h)
+            }
             // Every argument is a `Diffable`; the derived traversal below hashes
             // them all, so there is nothing to add here.
-            Likelihood::Poisson(_)
-            | Likelihood::NegBinomial(_)
-            | Likelihood::Normal(_)
-            | Likelihood::Beta(_)
-            | Likelihood::Bernoulli(_)
-            | Likelihood::ZeroInflatedNegBinomial(_) => {}
+            Likelihood::Poisson(PoissonLikelihood { rate: _ })
+            | Likelihood::NegBinomial(NegBinomialLikelihood { mean: _, dispersion: _ })
+            | Likelihood::Normal(NormalLikelihood { mean: _, sd: _ })
+            | Likelihood::Beta(BetaLikelihood { mean: _, concentration: _ })
+            | Likelihood::Bernoulli(BernoulliLikelihood { p: _ })
+            | Likelihood::ZeroInflatedNegBinomial(ZeroInflatedNegBinomialLikelihood {
+                mean: _,
+                dispersion: _,
+                pi: _,
+            }) => {}
         }
         // Every differentiable position (each `Diffable` = expr + classified grad
         // map), in declaration order, via the derived traversal — so a new
@@ -802,47 +840,49 @@ impl ContentAddressed for TimeFuncKind {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::time_func::TimeFuncKind");
         match self {
-            TimeFuncKind::Sinusoidal(s) => {
+            // Each kind's struct is destructured exhaustively, so a new field is
+            // a compile error here rather than a silently unhashed one.
+            TimeFuncKind::Sinusoidal(Sinusoidal { amplitude, period, phase, baseline }) => {
                 h.write_u32(0);
-                s.amplitude.hash_into(h);
-                s.period.hash_into(h);
-                s.phase.hash_into(h);
-                s.baseline.hash_into(h);
+                amplitude.hash_into(h);
+                period.hash_into(h);
+                phase.hash_into(h);
+                baseline.hash_into(h);
             }
-            TimeFuncKind::Piecewise(p) => {
+            TimeFuncKind::Piecewise(Piecewise { breakpoints, values }) => {
                 h.write_u32(1);
-                p.breakpoints.hash_into(h);
-                p.values.hash_into(h);
+                breakpoints.hash_into(h);
+                values.hash_into(h);
             }
-            TimeFuncKind::Interpolated(i) => {
+            TimeFuncKind::Interpolated(Interpolated { times, values, method }) => {
                 h.write_u32(2);
-                i.times.hash_into(h);
-                i.values.hash_into(h);
+                times.hash_into(h);
+                values.hash_into(h);
                 // InterpMethod inlined.
-                let m: u32 = match i.method {
-                    ir::time_func::InterpMethod::Linear => 0,
-                    ir::time_func::InterpMethod::Constant => 1,
-                    ir::time_func::InterpMethod::Spline => 2,
+                let m: u32 = match method {
+                    InterpMethod::Linear => 0,
+                    InterpMethod::Constant => 1,
+                    InterpMethod::Spline => 2,
                 };
                 h.write_u32(m);
             }
-            TimeFuncKind::Periodic(p) => {
+            TimeFuncKind::Periodic(Periodic { period, values }) => {
                 h.write_u32(3);
-                p.period.hash_into(h);
-                p.values.hash_into(h);
+                period.hash_into(h);
+                values.hash_into(h);
             }
-            TimeFuncKind::Fourier(f) => {
+            TimeFuncKind::Fourier(Fourier { period, harmonics }) => {
                 h.write_u32(4);
-                f.period.hash_into(h);
+                period.hash_into(h);
                 // harmonics: Vec<(Expr, Expr)>.
-                f.harmonics.hash_into(h);
+                harmonics.hash_into(h);
             }
-            TimeFuncKind::PeriodicSpline(s) => {
+            TimeFuncKind::PeriodicSpline(PeriodicSpline { period, n_basis, degree, coefs }) => {
                 h.write_u32(5);
-                s.period.hash_into(h);
-                s.n_basis.hash_into(h);
-                s.degree.hash_into(h);
-                s.coefs.hash_into(h);
+                period.hash_into(h);
+                n_basis.hash_into(h);
+                degree.hash_into(h);
+                coefs.hash_into(h);
             }
         }
     }
@@ -1041,28 +1081,30 @@ impl ContentAddressed for FireSource {
 impl ContentAddressed for Action {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::intervention::Action");
+        // Each action struct is destructured exhaustively, so a new field is a
+        // compile error here rather than a silently unhashed one.
         match self {
-            Action::FractionTransfer(a) => {
+            Action::FractionTransfer(FractionTransfer { src, dst, fraction }) => {
                 h.write_u32(0);
-                h.write_str(&a.src);
-                h.write_str(&a.dst);
-                a.fraction.hash_into(h);
+                h.write_str(src);
+                h.write_str(dst);
+                fraction.hash_into(h);
             }
-            Action::AbsoluteTransfer(a) => {
+            Action::AbsoluteTransfer(AbsoluteTransfer { src, dst, count }) => {
                 h.write_u32(1);
-                h.write_str(&a.src);
-                h.write_str(&a.dst);
-                a.count.hash_into(h);
+                h.write_str(src);
+                h.write_str(dst);
+                count.hash_into(h);
             }
-            Action::Set(a) => {
+            Action::Set(SetAction { compartment, value }) => {
                 h.write_u32(2);
-                h.write_str(&a.compartment);
-                a.value.hash_into(h);
+                h.write_str(compartment);
+                value.hash_into(h);
             }
-            Action::Add(a) => {
+            Action::Add(AddAction { compartment, count }) => {
                 h.write_u32(3);
-                h.write_str(&a.compartment);
-                a.count.hash_into(h);
+                h.write_str(compartment);
+                count.hash_into(h);
             }
         }
     }
@@ -1133,9 +1175,13 @@ impl ContentAddressed for InitCountLaw {
         // would share a run_id. Exhaustive (no `_` arm) so a new law whose
         // argument is a bare `Expr` is a compile error here, not a silent
         // omission (gh#734).
+        // The family structs are destructured exhaustively as in `Likelihood`:
+        // `Diffable` fields are `_` (hashed by the traversal below), so a new
+        // non-`Diffable` field is a compile error here.
         match self {
-            InitCountLaw::Binomial(l) => l.n.hash_into(h),
-            InitCountLaw::Poisson(_) | InitCountLaw::NegBinomial(_) => {}
+            InitCountLaw::Binomial(BinomialLikelihood { n, p: _ }) => n.hash_into(h),
+            InitCountLaw::Poisson(PoissonLikelihood { rate: _ })
+            | InitCountLaw::NegBinomial(NegBinomialLikelihood { mean: _, dispersion: _ }) => {}
         }
         // Every differentiable position, in declaration order, via the derived
         // traversal — a new argument is hashed automatically.
@@ -1154,7 +1200,7 @@ impl ContentAddressed for InitRealLaw {
         // No bare-`Expr` argument in any variant; exhaustive so adding one is a
         // compile error (gh#734).
         match self {
-            InitRealLaw::Normal(_) => {}
+            InitRealLaw::Normal(NormalLikelihood { mean: _, sd: _ }) => {}
         }
         for (_, d) in self.diffables() {
             d.hash_into(h);
@@ -1190,8 +1236,9 @@ impl ContentAddressed for InitialConditions {
     /// reordered init block re-keys its runs, it never reuses another model's.
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::model::InitialConditions");
-        h.write_len(self.0.len() as u64);
-        for (k, v) in self.iter() {
+        let InitialConditions(entries) = self;
+        h.write_len(entries.len() as u64);
+        for (k, v) in entries.iter() {
             h.write_str(k);
             v.hash_into(h);
         }
@@ -1278,13 +1325,13 @@ fn hash_integrator(h: &mut CanonicalHasher, i: &ir::model::Integrator) {
 
 /// Hash an optional observation anchor: a presence byte, then the anchor and
 /// its offset.
-fn hash_anchor_opt(h: &mut CanonicalHasher, a: &Option<ir::anchor::AnchoredTime>) {
+fn hash_anchor_opt(h: &mut CanonicalHasher, a: &Option<AnchoredTime>) {
     match a {
         None => h.write_u8(0),
-        Some(a) => {
+        Some(AnchoredTime { anchor, offset }) => {
             h.write_u8(1);
-            h.write_str(a.anchor.as_str());
-            h.write_f64_bits(a.offset);
+            h.write_str(anchor.as_str());
+            h.write_f64_bits(*offset);
         }
     }
 }
