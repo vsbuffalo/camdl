@@ -1,5 +1,5 @@
-//! `profile --fit` and `survey --fit` score the likelihood the fit config
-//! defines, including `ic_free`.
+//! `profile --fit`, `survey --fit` and `pfilter --fit` score the likelihood
+//! the fit config defines, including `ic_free`.
 //!
 //! `ic_free = true` makes `fit run` maximise the conditional likelihood
 //! `log p(y₂:T | y₁, θ)`: the filter weights and resamples at y₁ but leaves
@@ -294,4 +294,124 @@ fn survey_of_an_ic_free_fit_is_a_different_landscape() {
             "leaving y₁'s term out must raise every point's loglik: conditional {c}, full {f}"
         );
     }
+}
+
+/// `camdl pfilter` at `mle` with extra arguments: (printed loglik, stderr).
+fn pfilter_with(bin: &Path, dir: &Path, mle: &Path, extra: &[&str]) -> (f64, String) {
+    let out = camdl(bin, dir)
+        .args(["pfilter", "sir.camdl", "--params", mle.to_str().unwrap(),
+               "--particles", "20000", "--seed", "11"])
+        .args(extra)
+        .output()
+        .expect("spawn pfilter");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "pfilter failed:\n{stderr}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ll = stdout
+        .lines()
+        .find_map(|l| l.trim().parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("pfilter printed no log-likelihood:\n{stdout}"));
+    (ll, stderr)
+}
+
+/// The stored pfilter leaves' `run.json` records, keyed by nothing — all of
+/// them under `results/pfilters`.
+fn pfilter_records(dir: &Path) -> Vec<serde_json::Value> {
+    find_all(&dir.join("results/pfilters"), "run.json")
+        .iter()
+        .map(|p| serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap())
+        .collect()
+}
+
+#[test]
+fn pfilter_with_fit_scores_the_fit_objective_and_without_it_the_full_likelihood() {
+    let bin = binary();
+    assert!(bin.exists(), "release camdl binary missing: {} — run `make build-rust`", bin.display());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    std::fs::write(d.join("sir.camdl"), MODEL).unwrap();
+    std::fs::write(d.join("weekly_cases.tsv"), DATA).unwrap();
+    let first_row: String = DATA.lines().take(2).map(|l| format!("{}\n", l.trim())).collect();
+    std::fs::write(d.join("first_obs.tsv"), first_row).unwrap();
+    std::fs::write(d.join("fit.toml"), FIT).unwrap();
+    std::fs::write(d.join("full.toml"), FIT.replace("ic_free = true", "ic_free = false")).unwrap();
+
+    run(camdl(&bin, d).args(["fit", "run", "fit.toml", "--seed", "3", "--no-progress"]), "fit run");
+    let mle_paths = find_all(&d.join("results/fits"), "mle_params.toml");
+    assert_eq!(mle_paths.len(), 1, "one fit leaf expected: {mle_paths:?}");
+    let mle_path = &mle_paths[0];
+    let mle: toml::Value = toml::from_str(&std::fs::read_to_string(mle_path).unwrap()).unwrap();
+    let fit_ll = mle["provenance"]["log_likelihood"].as_float().unwrap();
+
+    // Without --fit: the full likelihood, log p(y₁:T | θ̂).
+    let (full, _) = pfilter_with(&bin, d, mle_path, &["--data", "weekly_cases.tsv"]);
+    let (first, _) = pfilter_with(&bin, d, mle_path, &["--data", "first_obs.tsv"]);
+    assert!(
+        first < -2.0,
+        "the first observation's term must be large enough to detect: log p(y₁|θ̂) = {first}"
+    );
+
+    // With the ic_free fit: the fit's conditional objective.
+    let (conditional, stderr) = pfilter_with(&bin, d, mle_path, &["--fit", "fit.toml"]);
+    assert!(
+        stderr.contains("objective: conditional on the first observation (ic_free = true in fit.toml)"),
+        "pfilter --fit must say which objective it scored:\n{stderr}"
+    );
+    assert!(
+        (conditional - fit_ll).abs() < 0.5,
+        "pfilter --fit at the fit's MLE must score the fit's objective: \
+         pfilter --fit {conditional}, fit {fit_ll}, pfilter full {full}, first {first}"
+    );
+    // Same seed and particles as the full run, so the paths are the same and
+    // the two differ by exactly that run's y₁ increment, near `first`.
+    assert!(
+        ((full - conditional) - first).abs() < 0.5,
+        "without --fit, pfilter must score the full likelihood: \
+         full {full} − conditional {conditional} should be ≈ log p(y₁|θ̂) = {first}"
+    );
+
+    // A fit without ic_free scores the full likelihood, bit-identically to the
+    // run without --fit, and shares its stored leaf.
+    let (full_via_fit, stderr) = pfilter_with(&bin, d, mle_path, &["--fit", "full.toml"]);
+    assert!(stderr.contains("objective: full likelihood"), "{stderr}");
+    assert_eq!(full_via_fit, full, "a non-ic_free --fit must score the full likelihood");
+    assert!(
+        stderr.contains("cached"),
+        "a non-ic_free pfilter --fit must hit the leaf of the same evaluation without --fit:\n{stderr}"
+    );
+
+    let objectives: Vec<String> = pfilter_records(d)
+        .iter()
+        .map(|r| r["inputs"]["likelihood_objective"].as_str().unwrap_or("<missing>").to_string())
+        .collect();
+    assert!(objectives.contains(&"conditional_on_first_observation".to_string()), "{objectives:?}");
+    assert!(objectives.contains(&"full".to_string()), "{objectives:?}");
+}
+
+#[test]
+fn pfilter_with_an_ic_free_fit_refuses_a_deterministic_init() {
+    let bin = binary();
+    assert!(bin.exists(), "release camdl binary missing: {} — run `make build-rust`", bin.display());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let deterministic = MODEL.replace("I ~ poisson(rate = I0)", "I = I0");
+    assert_ne!(deterministic, MODEL);
+    std::fs::write(d.join("sir.camdl"), deterministic).unwrap();
+    std::fs::write(d.join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(d.join("fit.toml"), FIT).unwrap();
+    std::fs::write(
+        d.join("theta.toml"),
+        "beta = 0.4\ngamma = 0.15\nN0 = 10000\nI0 = 10\nrho = 0.6\nk = 10.0\n",
+    ).unwrap();
+    let out = camdl(&bin, d)
+        .args(["pfilter", "sir.camdl", "--fit", "fit.toml", "--params", "theta.toml",
+               "--particles", "100"])
+        .output()
+        .expect("spawn pfilter");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a deterministic init under ic_free must be refused:\n{stderr}");
+    assert!(
+        stderr.contains("ic_free = true is not supported for this model with the `pfilter` algorithm"),
+        "the refusal must be validate_ic_free's:\n{stderr}"
+    );
 }

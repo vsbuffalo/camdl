@@ -434,15 +434,19 @@ The stage's algorithm must be `if2`, `pfilter` or `pmmh`; `pgas` and the ODE
 algorithms accumulate every observation unconditionally and are rejected
 outright.
 
-`profile --fit` and `survey --fit` score the objective the fit config sets, so a
-profile curve and a survey landscape are on the scale of the fit's own maximum
-and rank parameter values by the likelihood the fit maximises. Each records the
-objective in its `run.json` as `inputs.likelihood_objective` — `full` or
-`conditional_on_first_observation` — and the conditional objective is part of
-the run identity, so the two never share a stored result. A profile with an
-`nl-*` algorithm and `survey --eval simulate` score the deterministic ODE
-skeleton, which cannot leave `y₁` out, so both are refused under
-`ic_free = true`; `survey --eval auto` resolves to `pfilter`.
+`profile --fit`, `survey --fit` and `pfilter --fit` score the objective the fit
+config sets, so a profile curve, a survey landscape and a fixed-θ filter run are
+on the scale of the fit's own maximum and rank parameter values by the
+likelihood the fit maximises. Each records the objective in its `run.json` as
+`inputs.likelihood_objective` — `full` or `conditional_on_first_observation` —
+and the conditional objective is part of the run identity, so the two never
+share a stored result. A profile with an `nl-*` algorithm and
+`survey --eval simulate` score the deterministic ODE skeleton, which cannot
+leave `y₁` out, so both are refused under `ic_free = true`; `survey --eval auto`
+resolves to `pfilter`. `pfilter --fit` of an `ic_free` fit applies the same
+model check as a `pfilter` fit — a deterministic `init { }` is refused — and
+prints which objective it scored; without `--fit`, `pfilter` scores the full
+likelihood.
 
 See `docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md` for
 the mathematical derivation, references (King Nguyen Ionides 2016 JSS, Ionides

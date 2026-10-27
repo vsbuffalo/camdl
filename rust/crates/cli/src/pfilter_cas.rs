@@ -54,6 +54,9 @@ pub struct PfilterCtx<'a> {
     /// empty. Kept so the content-addressed `run_id` of a `--flow`-free run is
     /// bit-stable across the override's removal.
     pub flow_indices: &'a [u32],
+    /// The likelihood scored: the `--fit` config's `ic_free`, or full without
+    /// `--fit`. It changes the stored loglik, so it is identity.
+    pub objective: crate::fit::config_v2::LikelihoodObjective,
     /// The resolved pfilter seed (the `seed` level hashes this).
     pub seed: u64,
 }
@@ -77,6 +80,9 @@ struct PfilterConfigLevel<'a> {
     obs_block: &'a str,
     flow_indices: &'a [u32],
     data: &'a [(&'a str, &'a str)],
+    /// Omitted when full, so a pfilter that never set `ic_free` keeps its key.
+    #[serde(skip_serializing_if = "crate::fit::config_v2::LikelihoodObjective::is_full")]
+    objective: crate::fit::config_v2::LikelihoodObjective,
 }
 
 /// Resolve a pfilter-eval leaf's identity: the four factored levels and the
@@ -106,6 +112,7 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
         obs_block: ctx.obs_block,
         flow_indices: ctx.flow_indices,
         data: &data_sorted,
+        objective: ctx.objective,
     };
 
     let model_digest = ModelDigest::from_model(
@@ -183,6 +190,7 @@ mod tests {
         let lvl = PfilterConfigLevel {
             particles: 100, replicates: 1, dt: 1.0,
             obs_block: "", flow_indices: &flow, data: &data,
+            objective: crate::fit::config_v2::LikelihoodObjective::Full,
         };
         // The literal, verbatim from before the rewrite.
         let literal = serde_json::json!({
@@ -196,6 +204,27 @@ mod tests {
         assert_eq!(canonical_config_hash(&lvl, &[]).unwrap(), canonical_config_hash(&literal, &[]).unwrap(),
             "the struct must reproduce the literal's digest — otherwise every \
              stored pfilter leaf re-keys silently");
+    }
+
+    /// The likelihood objective is identity: `pfilter --fit` of an `ic_free`
+    /// fit stores a different loglik from the same evaluation without it, so
+    /// the two must not share a leaf. The full objective is omitted, so a
+    /// pfilter that never set `ic_free` keeps the key the literal pins.
+    #[test]
+    fn conditional_objective_rekeys_the_config_level() {
+        use crate::fit::config_v2::LikelihoodObjective;
+        let hh = h(1);
+        let data: Vec<(&str, &str)> = vec![("cases", hh.as_str())];
+        let flow: Vec<u32> = Vec::new();
+        let level = |objective| canonical_config_hash(&PfilterConfigLevel {
+            particles: 100, replicates: 1, dt: 1.0,
+            obs_block: "", flow_indices: &flow, data: &data, objective,
+        }, &[]).unwrap();
+        let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
+        assert_eq!(level(LikelihoodObjective::Full), literal,
+            "the full objective must leave the key unchanged");
+        assert_ne!(level(LikelihoodObjective::ConditionalOnFirstObservation), literal,
+            "the conditional objective must change the config hash");
     }
 
     /// A non-finite scored value must be REFUSED, not hashed. `json!` maps

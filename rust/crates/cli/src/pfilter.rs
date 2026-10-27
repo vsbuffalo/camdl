@@ -92,6 +92,23 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         std::process::exit(1);
     }
 
+    // The likelihood this run scores. With `--fit` it is the fit config's own
+    // (`ic_free`), read through the function `fit run` uses, so a pfilter at
+    // the fit's MLE reports the number the fit maximised. Without `--fit`
+    // there is no `ic_free` key and every observation is scored.
+    let objective = match a.fit.as_ref() {
+        Some(fit_path) => {
+            let path_str = fit_path.to_string_lossy();
+            crate::fit::config_v2::Problem::load(&path_str)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: failed to load --fit toml '{}': {}", path_str, e);
+                    std::process::exit(1);
+                })
+                .likelihood_objective()
+        }
+        None => crate::fit::config_v2::LikelihoodObjective::Full,
+    };
+
     // Load model (supports .camdl via camdlc)
     let (mut model_in, _model_json) = crate::util::load_model(&ir_path)
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
@@ -258,6 +275,34 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
     let params = compiled.default_params.clone();
 
+    // The conditional objective (`ic_free = true`) is admitted by the check
+    // `fit run` applies to its `pfilter` method: it needs particles that
+    // differ in x₀, which a deterministic `init { }` does not give.
+    if let Some(fit_path) = a.fit.as_ref() {
+        let fit_name = fit_path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| fit_path.to_string_lossy().into_owned());
+        if objective.skips_first_observation() {
+            let init_law = if compiled.has_init_law {
+                crate::fit::methods::InitLaw::Declared
+            } else {
+                crate::fit::methods::InitLaw::Absent
+            };
+            if let Err(msg) = crate::fit::methods::validate_ic_free(
+                crate::run_meta::FitAlgorithm::Pfilter, init_law,
+            ) {
+                eprintln!("error: the --fit config sets ic_free = true. {msg}");
+                std::process::exit(1);
+            }
+            eprintln!("pfilter: objective: conditional on the first observation \
+                (ic_free = true in {fit_name}); omit --fit and pass --data for the \
+                full likelihood");
+        } else {
+            eprintln!("pfilter: objective: full likelihood ({fit_name} does not set \
+                ic_free = true)");
+        }
+    }
+
     // The missing-data refusal, reported here rather than where the binding was
     // resolved, so every gate above keeps first say (see the binding block).
     let bound_streams = bound_streams.unwrap_or_else(|| {
@@ -412,7 +457,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         n_particles,
         dt,
         t_start: compiled.model.simulation.t_start,
-        skip_first_obs_from_loglik: false,
+        skip_first_obs_from_loglik: objective.skips_first_observation(),
         record_ancestry: need_ancestry,
         record_prequential: save_prequential.is_some(),
         record_predictions: want_predictions,
@@ -467,6 +512,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             dt,
             obs_block: "",
             flow_indices: &flow_indices,
+            objective,
             seed,
         };
         let resolved_id = match crate::pfilter_cas::resolve_pfilter(&ctx) {
@@ -482,6 +528,10 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             // A bootstrap particle filter estimates the marginal `log p(y | θ)`
             // (gh#280) — the comparison-correct class, never PGAS's joint.
             "loglik_type": crate::fit::loglik::LoglikType::Marginal.tag(),
+            // Which likelihood `loglik` is: `full` scores every observation,
+            // `conditional_on_first_observation` (the `--fit` config's
+            // `ic_free`) leaves y₁'s term out.
+            "likelihood_objective": objective,
             "loglik_sd": sd_field,
             "n_replicates": n_reps,
             "n_particles": n_particles,

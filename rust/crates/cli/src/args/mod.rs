@@ -1577,9 +1577,11 @@ pub struct PfilterArgs {
     #[arg(long, value_name = "[NAME=]PATH")]
     pub data: Vec<DataSpec>,
 
-    /// Optional fit toml supplying the multi-stream binding via its
-    /// `[data.observations]` map (gh#90). Only consulted when no
-    /// `--data` flags were supplied; CLI flags always win.
+    /// Optional fit toml. Supplies the multi-stream binding via its
+    /// `[data.observations]` map (gh#90) when no `--data` flags were
+    /// supplied (CLI flags win), and always supplies the likelihood
+    /// objective: under `ic_free = true` the first observation's term is
+    /// left out, as `fit run` scores it. Omit `--fit` for the full likelihood.
     #[arg(long, value_name = "PATH")]
     pub fit: Option<PathBuf>,
 

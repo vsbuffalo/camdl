@@ -666,6 +666,15 @@ User-visible correctness fixes (selected from ~138):
   `inputs.likelihood_objective`, and key `ic_free` results apart from full-
   likelihood ones. `nl-*` profiles and `survey --eval simulate` of an `ic_free`
   fit are refused, since the ODE likelihood cannot leave `y₁` out.
+- **`pfilter --fit` ignored `ic_free`.** At an `ic_free` fit's MLE,
+  `pfilter
+  --fit` reported −47.35 where `fit run` reported −43.01: it scored
+  every observation, and the 4.34-nat gap is `log p(y₁ | θ̂)`. It now scores the
+  fit's objective, prints which one it scored, records it as
+  `inputs.likelihood_objective`, and keys `ic_free` results apart from
+  full-likelihood ones. An `ic_free` fit whose model has a deterministic
+  `init { }` is refused, as `fit run` refuses it. Without `--fit`, `pfilter`
+  still scores the full likelihood.
 - **`profile` estimated parameters the invocation pinned.** `--rw-sd auto` built
   its estimated set from `--fixed` and `[fixed]` only, so a `--fixed-file`
   holding `gamma = 0.15` profiled gamma as a nuisance parameter and moved it (to
