@@ -454,6 +454,16 @@ version-bump:
 sim: build-rust
 	$(CAMDL) simulate $(MODEL) $(ARGS)
 
+# ── Known-profile fixtures ────────────────────────────────────────────────────
+#
+# K1/K2 of the parameter-roles proposal (§11.1): data, fit configs and exact
+# profile answers under tests/external/known_profiles/, written by a stdlib
+# Python script, deterministic. Committed; the tests read only the files.
+
+.PHONY: known-profiles
+known-profiles:
+	cd tests/external/known_profiles && python3 gen/known_profiles.py
+
 # ── Benchmarks & profiling (FOI scaling study) ────────────────────────────────
 #
 # See docs/dev/notes/2026-05-29-foi-scaling-bench.md. The toy model generator
