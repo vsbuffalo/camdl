@@ -316,6 +316,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         .filter(|p| matches!(p.value, ir::parameter::ParamValue::Fixed { .. }))
         .map(|p| p.name.clone())
         .collect();
+    // The model before any value is written into it, for the partition.
+    let model_declared = model_pre.clone();
 
     // ── Optional --fit toml resolution (gh#73) ──────────────────────
     //
@@ -331,13 +333,15 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // `--fit` is absent the map is empty and the resolver falls
     // through to model-IR priors (tier 2) for every parameter.
     let (fit_estimate, fit_toml_hash, fit_toml_fixed_indexmap, fit_scenario, fit_simplex_groups,
-         objective):
+         objective, fit_fixed_via):
         (indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
          Option<String>,
          indexmap::IndexMap<String, f64>,
          (Option<String>, Vec<String>, Vec<String>),
          Vec<crate::fit::config_v2::SimplexGroup>,
-         crate::fit::config_v2::LikelihoodObjective) = if let Some(fit_path) = a.fit.as_ref() {
+         crate::fit::config_v2::LikelihoodObjective,
+         Result<Vec<(String, crate::roles::FitFixedVia)>, String>)
+        = if let Some(fit_path) = a.fit.as_ref() {
         let fit_path_str = fit_path.to_string_lossy().into_owned();
         let fit_cfg = crate::fit::config_v2::Problem::load(&fit_path_str)
             .unwrap_or_else(|e| {
@@ -345,6 +349,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     fit_path_str, e);
                 std::process::exit(1);
             });
+        // How each [fixed] name reached the config, for the partition.
+        let fixed_via = fit_cfg.fixed.declarations(&model_pre);
         // Resolve [fixed] (file load, scenario, inline overlay) the
         // same way `camdl survey --fit` and `camdl fit run` do.
         let mut fixed_cfg = fit_cfg.fixed.clone();
@@ -375,11 +381,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let objective = fit_cfg.likelihood_objective();
         (fit_cfg.estimate, Some(hash), fixed_resolved,
          (fit_cfg.scenario, fit_cfg.enable, fit_cfg.disable),
-         fit_cfg.simplex_groups, objective)
+         fit_cfg.simplex_groups, objective, fixed_via)
     } else {
         (indexmap::IndexMap::new(), None, indexmap::IndexMap::new(),
          (None, Vec::new(), Vec::new()), Vec::new(),
-         crate::fit::config_v2::LikelihoodObjective::Full)
+         crate::fit::config_v2::LikelihoodObjective::Full, Ok(Vec::new()))
     };
 
     // The scenario this profile runs under: the fit config's top-level
@@ -860,6 +866,23 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             .collect()
     };
 
+    // The profile's partition: today's selection, translated into role
+    // declarations by the one adapter that reads it. Recorded, not acted on.
+    let profile_roles: Result<crate::roles::Partition, String> =
+        legacy_role_inputs(LegacySelection {
+            model: &model_declared,
+            estimated: &param_names_to_estimate,
+            focal: &focal_names,
+            fit_estimate: &fit_estimate,
+            fit_fixed: fit_fixed_via,
+            cli_fixed: &a.model_overrides.fixed_cli.iter()
+                .map(|p| p.name.clone()).collect::<Vec<_>>(),
+            fixed_files: &fixed_files_vec,
+        })
+        .and_then(|decls| crate::roles::resolve_roles(
+            &decls.inputs(&model_declared, &fit_simplex_groups), &crate::roles::PROFILE,
+        ).map_err(|e| e.to_string()));
+
     // Specs honour the fit-toml `[estimate]` block when supplied
     // (gh#73): bounds, transform, and perturb_only_at_t0 flow through to
     // `build_if2_params_from_specs`'s fit-toml-bounds-within-model
@@ -1200,6 +1223,22 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             serde_json::to_value(&init_provenance).unwrap_or(serde_json::Value::Null),
     });
 
+    // Each grid point's partition: the focal parameters fixed at the point's
+    // values. Recorded in that point's leaves.
+    let cell_partitions: Vec<serde_json::Value> = grid_points.iter().map(|gp| {
+        let point: Vec<(String, f64)> = focal_grids.iter().zip(gp.iter())
+            .map(|(fg, &(_, v))| (fg.name.clone(), v))
+            .collect();
+        let field = match &profile_roles {
+            Ok(p) => match p.cell(&point) {
+                Ok(cell) => crate::roles::PartitionField::Resolved(cell.record(&resolved)),
+                Err(reason) => crate::roles::PartitionField::Unresolved { reason },
+            },
+            Err(reason) => crate::roles::PartitionField::Unresolved { reason: reason.clone() },
+        };
+        serde_json::to_value(&field).unwrap_or(serde_json::Value::Null)
+    }).collect();
+
     // gh#89: lowercased algorithm tag — a cache-key input for the
     // method `stage` and the `stage`-segment display label.
     let algorithm = format!("{:?}", profile_algo).to_lowercase();
@@ -1378,6 +1417,10 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     if let Some((_, _, _, resolved0, _)) = resolved_jobs.first() {
         let base_seg = runid::store_path(
             &root, runid::ArtifactKind::ProfilePoint, &resolved0.levels[..1]);
+        let roles = crate::roles::RoleRecord::new(
+            profile_roles.as_ref().map(|p| p.record(&resolved)).map_err(String::clone),
+            || (resolved_priors_kv.iter().map(|(n, _)| n.clone()).collect(), Default::default()),
+        );
         let sidecar = crate::run_meta::FitSidecar {
             label: label_arg.clone(),
             model_path: ir_path.clone(),
@@ -1387,8 +1430,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 .unwrap_or_default(),
             fit_toml_hash: fit_toml_hash.clone().unwrap_or_default(),
             data_hashes: data_hashes.iter().cloned().collect(),
-            estimated: resolved_priors_kv.iter()
-                .map(|(n, _)| n.clone()).collect(),
+            estimated: roles.estimated,
+            fixed: roles.fixed,
+            partition: Some(roles.partition),
             resolved_priors: resolved_priors_kv.iter()
                 .map(|(n, s)| crate::run_meta::ResolvedPriorEntry {
                     param: n.clone(), source: s.clone(),
@@ -1724,6 +1768,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 grid_idx, start_idx, final_loglik,
             );
         }
+        // The run's provenance, with this cell's partition.
+        let mut provenance = run_provenance_json.clone();
+        provenance["partition"] = cell_partitions[grid_idx].clone();
         let inputs_json = serde_json::json!({
             "method": profile_algo.method_kind().as_str(),
             "seed": job_seed,
@@ -1742,7 +1789,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             // objective.
             "likelihood_objective": objective,
             "wall_time_seconds": elapsed,
-            "provenance": run_provenance_json.clone(),
+            "provenance": provenance,
         });
         // Streaming write through the one resolved-writer seam (gh#241 PR D).
         // The running record carries Null inputs (the cell's loglik summary is
@@ -1946,6 +1993,118 @@ fn render_mle_toml(
     body.push_str("\n[diagnostics]\n");
     body.push_str(&diag.to_toml_fragment());
     body
+}
+
+
+/// Today's `profile` selection: the estimated set `--rw-sd` chose (its names,
+/// or with `auto` every parameter not swept, held or a constant) and the
+/// declarations that held the rest.
+struct LegacySelection<'a> {
+    /// The model before any value is written into it.
+    model: &'a ir::Model,
+    estimated: &'a [String],
+    focal: &'a [String],
+    fit_estimate: &'a indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
+    /// `Err` when the fit config's `[fixed]` cannot be read.
+    fit_fixed: Result<Vec<(String, crate::roles::FitFixedVia)>, String>,
+    /// `--fixed` names.
+    cli_fixed: &'a [String],
+    fixed_files: &'a [std::path::PathBuf],
+}
+
+/// [`LegacySelection`] as role declarations: the owned half of a
+/// [`crate::roles::RoleInputs`].
+struct LegacyRoleDecls {
+    fit_estimate: indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
+    fit_fixed: Vec<(String, crate::roles::FitFixedVia)>,
+    cli_estimate: Vec<crate::roles::EstimateDecl>,
+    cli_fixed: Vec<String>,
+    files: Vec<crate::roles::FixedFileDecl>,
+    design: Vec<(String, crate::roles::DesignOrigin)>,
+    slice: bool,
+}
+
+impl LegacyRoleDecls {
+    fn inputs<'a>(
+        &'a self,
+        model: &'a ir::Model,
+        simplex_groups: &'a [crate::fit::config_v2::SimplexGroup],
+    ) -> crate::roles::RoleInputs<'a> {
+        crate::roles::RoleInputs {
+            model,
+            fit_estimate: &self.fit_estimate,
+            fit_fixed: &self.fit_fixed,
+            simplex_groups,
+            cli_estimate: &self.cli_estimate,
+            cli_fixed: &self.cli_fixed,
+            cli_fixed_files: &self.files,
+            design: &self.design,
+            slice: self.slice,
+            // A scenario is a value source in today's `profile`, its values
+            // the starting points of the estimated parameters (proposal
+            // §3.2 item 11); it is checked against the roles from Stage 3.
+            scenarios: &[],
+        }
+    }
+}
+
+/// The one adapter between `profile`'s legacy selection and the partition
+/// (proposal `2026-10-26-parameter-roles.md` §11, Stage 1): `roles` never
+/// sees `--rw-sd`, and no rule in `resolve_roles` depends on it. Stage 3
+/// deletes this and builds the declarations from `--estimate` and
+/// `[estimate]` directly.
+///
+/// The translation states today's outcome as declarations:
+///
+/// - an estimated name is its `[estimate]` entry, else an `--estimate`
+///   declaration with no bounds of its own;
+/// - a focal name keeps its `[estimate]` entry, which makes it the focal
+///   parameter of the profile;
+/// - an `[estimate]` name neither estimated nor focal is held: it is left
+///   undeclared, fixed by default, or held by the `--fixed` that named it;
+/// - a typed constant is left out of every declaration — today a `--fixed`
+///   or `[fixed]` may name one — and recorded under `constants`; an
+///   estimated typed constant stays declared, and the partition refuses it;
+/// - a plain `--fixed-file`'s entries for a focal name are dropped (the grid
+///   writes over them today); a fit artifact's are kept, and the partition
+///   lists them as unused;
+/// - nothing estimated is a slice.
+fn legacy_role_inputs(sel: LegacySelection<'_>) -> Result<LegacyRoleDecls, String> {
+    let is_constant = |name: &str| sel.model.parameters.iter().any(|p| {
+        p.name == name && matches!(p.value, ir::parameter::ParamValue::Fixed { .. })
+    });
+    let kept = |name: &String| sel.estimated.contains(name) || sel.focal.contains(name);
+    let fit_estimate = sel.fit_estimate.iter()
+        .filter(|(n, _)| kept(n))
+        .map(|(n, s)| (n.clone(), s.clone()))
+        .collect();
+    let cli_estimate = sel.estimated.iter()
+        .filter(|n| !sel.fit_estimate.contains_key(*n))
+        .map(|n| crate::roles::EstimateDecl { name: n.clone(), bounds: None })
+        .collect();
+    let fit_fixed = sel.fit_fixed?.into_iter().filter(|(n, _)| !is_constant(n)).collect();
+    let cli_fixed = sel.cli_fixed.iter().filter(|n| !is_constant(n)).cloned().collect();
+    let mut files = Vec::new();
+    for path in sel.fixed_files {
+        let fit_artifact = crate::params_resolver::carries_fit_provenance(path);
+        let mut names: Vec<String> = crate::util::load_params_toml(&path.to_string_lossy())?
+            .into_keys()
+            .filter(|n| !is_constant(n) && (fit_artifact || !sel.focal.contains(n)))
+            .collect();
+        names.sort();
+        files.push(crate::roles::FixedFileDecl { path: path.clone(), names, fit_artifact });
+    }
+    Ok(LegacyRoleDecls {
+        fit_estimate,
+        fit_fixed,
+        cli_estimate,
+        cli_fixed,
+        files,
+        design: sel.focal.iter()
+            .map(|n| (n.clone(), crate::roles::DesignOrigin::Sweep))
+            .collect(),
+        slice: sel.estimated.is_empty(),
+    })
 }
 
 #[cfg(test)]
