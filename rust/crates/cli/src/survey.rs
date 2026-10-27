@@ -1203,6 +1203,7 @@ fn survey_roles(d: SurveyRoleDecls<'_>) -> Result<crate::roles::Partition, Strin
             cli_fixed: &cli_fixed,
             cli_fixed_files: &[],
             design: &[],
+            slice: false,
             scenarios: &scenarios,
         },
         &crate::roles::SURVEY,

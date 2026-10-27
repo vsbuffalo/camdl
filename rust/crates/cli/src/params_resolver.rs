@@ -1884,7 +1884,7 @@ impl Layers {
 /// block, and an unreadable block counts as none: this only chooses how a
 /// replacement is reported, and `simulate` refuses a malformed block before
 /// it resolves anything.
-fn carries_fit_provenance(path: &std::path::Path) -> bool {
+pub(crate) fn carries_fit_provenance(path: &std::path::Path) -> bool {
     let is_tsv = path.extension()
         .map(|e| e.eq_ignore_ascii_case("tsv"))
         .unwrap_or(false);

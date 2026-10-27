@@ -2204,6 +2204,7 @@ fn resolve_fit_roles(
             cli_fixed: &[],
             cli_fixed_files: &[],
             design: &design,
+            slice: false,
             scenarios: &scenarios,
         },
         &crate::roles::FIT_RUN,
