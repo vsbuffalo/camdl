@@ -92,7 +92,12 @@ pub struct SearchBox {
 pub enum BoxFrom {
     FitConfig,
     Cli,
+    /// The support: the model's declared range, or the kind's finite one.
     Support,
+    /// Nothing declared and the kind gives no finite range: the runner's
+    /// `[0, ∞)` fall-back (`fit::runner::resolve_search_box`), which is not
+    /// the support of a `real` or `instant` parameter.
+    Fallback,
 }
 
 /// An estimated parameter: its support, search box and prior are distinct.
@@ -277,6 +282,9 @@ pub struct Partition {
     /// Entries of a fit artifact passed as `--fixed-file` that name a design
     /// or estimated parameter: not used, and listed.
     unused_file_entries: Vec<(PathBuf, String)>,
+    /// The estimated names in the order their declarations gave them — the
+    /// order of every method's parameter columns. `entries` keep model order.
+    estimate_order: Vec<String>,
 }
 
 impl Partition {
@@ -393,6 +401,7 @@ impl Partition {
         }
         PartitionRecord {
             parameters,
+            estimate_order: self.estimate_order.clone(),
             simplex_groups: self.simplex_groups.iter()
                 .map(|g| SimplexRecord { members: g.members.clone(), role: g.role })
                 .collect(),
@@ -468,6 +477,13 @@ impl RoleRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PartitionRecord {
     pub parameters: IndexMap<String, ParamRecord>,
+    /// The estimated names in declaration order, for [`Self::legacy_fields`]:
+    /// the legacy `estimated` list has always followed the columns. Not
+    /// stored — the order is that of `[estimate]` / `--estimate` — so a
+    /// record read back carries none, and its legacy list falls back to
+    /// model order.
+    #[serde(skip)]
+    pub estimate_order: Vec<String>,
     pub simplex_groups: Vec<SimplexRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
@@ -479,11 +495,20 @@ impl PartitionRecord {
     /// parameter's value — fixed parameters and design parameters at their
     /// cell value.
     pub fn legacy_fields(&self) -> (Vec<String>, BTreeMap<String, f64>) {
-        let mut estimated = Vec::new();
+        // Declaration order first; any estimated name it lacks (a record read
+        // back from disk) follows in model order.
+        let mut estimated: Vec<String> = self.estimate_order.iter()
+            .filter(|n| matches!(self.parameters.get(*n), Some(ParamRecord::Estimated { .. })))
+            .cloned()
+            .collect();
         let mut fixed = BTreeMap::new();
         for (name, rec) in &self.parameters {
             match rec {
-                ParamRecord::Estimated { .. } => estimated.push(name.clone()),
+                ParamRecord::Estimated { .. } => {
+                    if !self.estimate_order.contains(name) {
+                        estimated.push(name.clone());
+                    }
+                }
                 ParamRecord::Fixed { value: Some(v), .. } => {
                     fixed.insert(name.clone(), *v);
                 }
@@ -721,6 +746,8 @@ pub enum RoleError {
     Missing { role: RoleKind, command: &'static str },
     ScenarioOnRole { scenario: String, name: String, role: RoleKind },
     SimplexPartlyHeld { group: Vec<String>, held: Vec<String> },
+    /// A given search box leaves the model's declared range.
+    BoxOutsideSupport { message: String },
 }
 
 impl std::fmt::Display for RoleError {
@@ -760,6 +787,7 @@ impl std::fmt::Display for RoleError {
                 "scenario `{scenario}` sets or scales `{name}`, which this run declares {}; \
                  a scenario gives values to fixed parameters only",
                 role.word()),
+            RoleError::BoxOutsideSupport { message } => write!(f, "{message}"),
             RoleError::SimplexPartlyHeld { group, held } => write!(f,
                 "simplex group [{}] is partly held ({} not estimated); the free members \
                  would have to sum to one minus the held ones, which a simplex group cannot \
@@ -884,7 +912,7 @@ pub fn resolve_roles<'a>(inputs: &'a RoleInputs<'a>, command: &CommandRoles)
                     _ => None,
                 };
                 RoleEntry {
-                    role: Role::Estimated(Box::new(estimated(p, spec, e.cli_bounds, inputs))),
+                    role: Role::Estimated(Box::new(estimated(p, spec, e.cli_bounds, inputs)?)),
                     declared_by: e.by.clone(),
                     special: None,
                 }
@@ -957,7 +985,16 @@ pub fn resolve_roles<'a>(inputs: &'a RoleInputs<'a>, command: &CommandRoles)
         simplex_groups.push(ResolvedSimplex { members: g.params.clone(), role });
     }
 
-    Ok(Partition { entries, simplex_groups, unused_file_entries })
+    let mut estimate_order: Vec<String> = Vec::new();
+    for d in &decls {
+        let estimated = entries.get(d.name).is_some_and(|e| e.role.kind() == RoleKind::Estimated);
+        if estimated && d.by.role_kind() == RoleKind::Estimated
+            && !estimate_order.iter().any(|n| n == d.name)
+        {
+            estimate_order.push(d.name.to_string());
+        }
+    }
+    Ok(Partition { entries, simplex_groups, unused_file_entries, estimate_order })
 }
 
 fn file_of(by: &Declaration) -> PathBuf {
@@ -989,13 +1026,20 @@ fn estimated(
     spec: Option<&EstimateSpecV2>,
     cli_bounds: Option<(f64, f64)>,
     inputs: &RoleInputs<'_>,
-) -> Estimated {
+) -> Result<Estimated, RoleError> {
     let support = support(p);
-    let search = match (spec.and_then(|s| s.bounds), cli_bounds) {
-        (Some((lower, upper)), _) => SearchBox { lower, upper, from: BoxFrom::FitConfig },
-        (None, Some((lower, upper))) => SearchBox { lower, upper, from: BoxFrom::Cli },
-        (None, None) => SearchBox { lower: support.lower, upper: support.upper, from: BoxFrom::Support },
+    // The box the run searches is the one `resolve_search_box` gives the
+    // method, so the record describes what ran.
+    let given_box = spec.and_then(|s| s.bounds).or(cli_bounds);
+    let (lower, upper) = crate::fit::runner::resolve_search_box(&p.name, given_box, p)
+        .map_err(|message| RoleError::BoxOutsideSupport { message })?;
+    let from = match (spec.and_then(|s| s.bounds), cli_bounds) {
+        (Some(_), _) => BoxFrom::FitConfig,
+        (None, Some(_)) => BoxFrom::Cli,
+        (None, None) if (lower, upper) == (support.lower, support.upper) => BoxFrom::Support,
+        (None, None) => BoxFrom::Fallback,
     };
+    let search = SearchBox { lower, upper, from };
     let given = spec.and_then(|s| s.transform.as_ref()).map(|t| t.as_str());
     let transform = crate::fit::runner::derive_transform_with_bounds(
         p, given, (search.lower, search.upper));
@@ -1012,7 +1056,7 @@ fn estimated(
             .unwrap_or_else(|| format!("{:?}", prior.prior)),
         PriorSource::FlatFallback => "flat()".to_string(),
     };
-    Estimated {
+    Ok(Estimated {
         support,
         search,
         transform,
@@ -1020,7 +1064,7 @@ fn estimated(
         prior,
         prior_text,
         start: spec.and_then(|s| s.start),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1369,8 +1413,22 @@ mod tests {
         let Role::Estimated(tau) = &p.entries["tau"].role else { panic!("tau estimated") };
         assert_eq!(tau.support, Support {
             lower: f64::NEG_INFINITY, upper: f64::INFINITY, from: SupportFrom::Kind });
-        assert_eq!(tau.search.from, BoxFrom::Support);
+        // The run searches the runner's `[0, ∞)` fall-back, not the support,
+        // and the record says so.
+        assert_eq!(tau.search, SearchBox {
+            lower: 0.0, upper: f64::INFINITY, from: BoxFrom::Fallback });
         assert!(matches!(tau.transform, Transform::None));
+    }
+
+    #[test]
+    fn a_box_leaving_the_declared_range_is_refused_as_the_run_refuses_it() {
+        let run = Run { fit_estimate: estimate(&[("beta", "bounds = [0.01, 2.0]")]), ..sir_fit() };
+        match run.resolve(&FIT_RUN).unwrap_err() {
+            RoleError::BoxOutsideSupport { message } => {
+                assert!(message.contains("tighten bounds but not loosen"), "{message}");
+            }
+            other => panic!("expected BoxOutsideSupport, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1431,6 +1489,18 @@ mod tests {
     }
 
     #[test]
+    fn the_legacy_estimated_list_keeps_the_declaration_order() {
+        let run = Run {
+            fit_estimate: estimate(&[("gamma", ""), ("beta", "")]),
+            ..Run::default()
+        }.fixed(&["N0", "I0", "rho", "k", "tau", "c_north", "c_south"]);
+        let rec = run.resolve(&FIT_RUN).unwrap().record(&values(&[]));
+        assert_eq!(rec.legacy_fields().0, vec!["gamma", "beta"], "the columns' order");
+        let in_record: Vec<&str> = rec.parameters.keys().map(String::as_str).take(2).collect();
+        assert_eq!(in_record, vec!["beta", "gamma"], "the record keeps model order");
+    }
+
+    #[test]
     fn the_record_round_trips_with_infinite_bounds() {
         let mut run = sir_fit();
         run.fit_estimate.insert("tau".into(), toml::from_str("").unwrap());
@@ -1443,6 +1513,9 @@ mod tests {
         assert_eq!(json["parameters"]["beta"]["declared_by"], "fit_estimate");
         assert_eq!(json["parameters"]["N0"]["via"], "inline");
         let back: PartitionField = serde_json::from_value(json).unwrap();
-        assert_eq!(back, field);
+        // The declaration order is not stored; everything else round-trips.
+        let PartitionField::Resolved(mut rec) = field else { unreachable!() };
+        rec.estimate_order.clear();
+        assert_eq!(back, PartitionField::Resolved(rec));
     }
 }

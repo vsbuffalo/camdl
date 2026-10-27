@@ -298,3 +298,20 @@ fn a_cli_only_profile_records_its_rw_sd_selection_as_estimate_declarations() {
     let (estimated, fixed) = legacy_of(part);
     assert_eq!((&meta["estimated"], &meta["fixed"]), (&estimated, &fixed));
 }
+
+/// The legacy `estimated` list keeps the order of the survey's columns, which
+/// follow `[estimate]`, not the model.
+#[test]
+fn survey_keeps_the_estimated_order_of_its_columns() {
+    let estimate = "gamma = { start = 0.15 }\nbeta  = { bounds = [0.1, 0.9], start = 0.4 }";
+    let tmp = fixture(&fit_toml(estimate, FIXED));
+    camdl(tmp.path(), &["survey", "model.camdl", "--fit", "fit.toml", "--n-points", "4",
+        "--eval-particles", "20", "--output", "srv"]);
+    let run = &find_all(&tmp.path().join("srv"), "run.json")[0];
+    let inputs = &json(run)["inputs"];
+    assert_eq!(inputs["estimated"], serde_json::json!(["gamma", "beta"]), "{inputs:#}");
+    let header = std::fs::read_to_string(run.parent().unwrap().join("landscape.tsv")).unwrap();
+    let cols: Vec<&str> = header.lines().find(|l| !l.starts_with('#')).unwrap().split('\t')
+        .filter(|c| *c == "gamma" || *c == "beta").collect();
+    assert_eq!(cols, vec!["gamma", "beta"], "{header}");
+}

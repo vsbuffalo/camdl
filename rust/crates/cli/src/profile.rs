@@ -2065,9 +2065,11 @@ impl LegacyRoleDecls {
 /// - nothing estimated is a slice.
 fn legacy_role_inputs(sel: LegacySelection<'_>) -> Result<LegacyRoleDecls, String> {
     let kept = |name: &String| sel.estimated.contains(name) || sel.focal.contains(name);
-    let fit_estimate = sel.fit_estimate.iter()
-        .filter(|(n, _)| kept(n))
-        .map(|(n, s)| (n.clone(), s.clone()))
+    // In the estimated set's order, which is the order of the method's
+    // parameters, then the focal entries.
+    let fit_estimate = sel.estimated.iter().chain(sel.focal.iter())
+        .filter(|n| kept(n))
+        .filter_map(|n| sel.fit_estimate.get(n).map(|s| (n.clone(), s.clone())))
         .collect();
     let cli_estimate = sel.estimated.iter()
         .filter(|n| !sel.fit_estimate.contains_key(*n))
