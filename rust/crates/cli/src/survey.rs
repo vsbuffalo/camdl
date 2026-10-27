@@ -94,6 +94,9 @@ struct ResolvedSurveyInputs {
     /// notices the resolution reported: recorded in `run.json`, never hashed.
     parameters_provenance: std::collections::BTreeMap<String, crate::run_meta::ParameterProvenance>,
     notices: crate::notice::Notices,
+    /// The survey's partition and the legacy `estimated` / `fixed` fields
+    /// generated from it: recorded in `run.json`, never hashed.
+    roles: crate::roles::RoleRecord,
     /// Per-parameter `[estimate].start =` values from fit.toml when in
     /// fit-aware mode; `None` in inline mode (no fit.toml). Used by
     /// the start-rank diagnostic to flag when the user's seeded
@@ -643,7 +646,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         "eval_particles":  a.eval_particles,
         "eval_replicates": a.eval_replicates,
         "n_points":        n_points,
-        "estimated":       estimated_names,
+        "estimated":       resolved.roles.estimated,
         "best_loglik":     best_loglik,
         // A survey grid evaluates a marginal `log p(y | θ)` at each point
         // (PF or clean-eval), so the whole landscape is marginal-class (gh#280).
@@ -654,7 +657,8 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         "wall_time_seconds": elapsed,
         "model_identity":  model_identity,
         "data_hashes":     resolved.data_hashes,
-        "fixed":           resolved.fixed,
+        "fixed":           resolved.roles.fixed,
+        "partition":       resolved.roles.partition,
         "parameters_provenance": resolved.parameters_provenance,
         "notices":         resolved.notices,
     });
@@ -711,6 +715,10 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         } else {
             model_ir_json
         };
+        // The model before any value is written into it, for the partition:
+        // a typed constant is a parameter whose IR value is `fixed`.
+        let model_declared = model_pre.clone();
+        let fixed_via = config.fixed.declarations(&model_pre);
 
         // gh#92: [estimate].start fall-back for survey, matching the
         // gh#34 pattern applied to `camdl profile` (commit 796bfbe)
@@ -836,6 +844,22 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             .map(|p| p.name.as_str()).collect();
         let sampled: Vec<(&String, &crate::fit::config_v2::EstimateSpecV2)> = config.estimate
             .iter().filter(|(name, _)| !pinned.contains(name.as_str())).collect();
+        let fixed_names: Vec<String> = fixed_cli.iter().map(|(n, _)| n.clone()).collect();
+        let roles = crate::roles::RoleRecord::new(
+            survey_roles(SurveyRoleDecls {
+                model: &model_declared,
+                fit_estimate: sampled.iter().map(|&(n, s)| (n.clone(), s.clone())).collect(),
+                fit_fixed: fixed_via,
+                simplex_groups: &config.simplex_groups,
+                cli_estimate: Vec::new(),
+                cli_fixed: &fixed_names,
+                scenario: scenario_opt.as_deref(),
+            })
+            .map(|p| p.record(&resolved)),
+            || (sampled.iter().map(|(n, _)| (*n).clone()).collect(),
+                fixed_resolved_indexmap.iter().map(|(n, v)| (n.clone(), *v))
+                    .chain(fixed_cli.iter().cloned()).collect()),
+        );
 
         // Apply [estimate].start as a starting-point hint for params
         // that survived the resolver without an inferred value (this is
@@ -972,6 +996,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             objective: config.likelihood_objective(),
             parameters_provenance,
             notices,
+            roles,
             estimate_starts: if estimate_starts.is_empty() {
                 None
             } else {
@@ -1002,6 +1027,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         } else {
             model_ir_json
         };
+        let model_declared = model_pre.clone();
 
         // gh#92 inline-mode counterpart of the fit-aware fall-back
         // above: parameters named in `--estimate NAME=LO:HI` flags
@@ -1057,6 +1083,28 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         let notices = crate::params_resolver::notices(&[&resolved]);
         let model = resolved.model.clone();
         let fixed_map: HashMap<String, f64> = fixed_cli_vec.iter().cloned().collect();
+        // A name given to both `--estimate` and `--fixed` is sampled: the LHS
+        // draw writes over the `--fixed` value.
+        let fixed_names: Vec<String> = fixed_cli_vec.iter()
+            .map(|(n, _)| n.clone())
+            .filter(|n| !a.estimate.iter().any(|e| e.name == *n))
+            .collect();
+        let roles = crate::roles::RoleRecord::new(
+            survey_roles(SurveyRoleDecls {
+                model: &model_declared,
+                fit_estimate: IndexMap::new(),
+                fit_fixed: Ok(Vec::new()),
+                simplex_groups: &[],
+                cli_estimate: a.estimate.iter().map(|e| crate::roles::EstimateDecl {
+                    name: e.name.clone(), bounds: Some((e.lo, e.hi)),
+                }).collect(),
+                cli_fixed: &fixed_names,
+                scenario: None,
+            })
+            .map(|p| p.record(&resolved)),
+            || (a.estimate.iter().map(|e| e.name.clone()).collect(),
+                fixed_map.iter().map(|(n, v)| (n.clone(), *v)).collect()),
+        );
 
         let compiled = Arc::new(CompiledModel::new(model.clone())
             .map_err(|e| format!("compile error: {:?}", e))?);
@@ -1128,12 +1176,68 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             scenario: a.scenario.clone(),
             parameters_provenance,
             notices,
+            roles,
             // Inline mode has no fit.toml [estimate].start values.
             estimate_starts: None,
             // Inline mode has no `ic_free` key: every observation is scored.
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
         })
     }
+}
+
+/// A survey's role declarations, as today's rules give them: with a fit
+/// config, its `[estimate]` less the names `--fixed` pins, and its `[fixed]`;
+/// inline, `--estimate` and `--fixed`. A typed constant named by `[fixed]` or
+/// `--fixed` is left out of the declarations: the partition records it under
+/// `constants`.
+struct SurveyRoleDecls<'a> {
+    model: &'a ir::Model,
+    fit_estimate: IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
+    /// `Err` when the fit config's `[fixed]` cannot be read.
+    fit_fixed: Result<Vec<(String, crate::roles::FitFixedVia)>, String>,
+    simplex_groups: &'a [crate::fit::config_v2::SimplexGroup],
+    cli_estimate: Vec<crate::roles::EstimateDecl>,
+    cli_fixed: &'a [String],
+    /// The fit config's scenario (the inline mode's is a value source over
+    /// the sampled parameters too, as today, and is not checked).
+    scenario: Option<&'a str>,
+}
+
+/// The survey's partition (proposal `2026-10-26-parameter-roles.md`,
+/// Stage 1). `Err` says why the survey's roles form no partition, for an
+/// `unresolved` record.
+fn survey_roles(d: SurveyRoleDecls<'_>) -> Result<crate::roles::Partition, String> {
+    use crate::roles::{RoleInputs, ScenarioFootprint};
+    let is_constant = |name: &str| d.model.parameters.iter().any(|p| {
+        p.name == name && matches!(p.value, ir::parameter::ParamValue::Fixed { .. })
+    });
+    let fit_fixed: Vec<(String, crate::roles::FitFixedVia)> =
+        d.fit_fixed?.into_iter().filter(|(n, _)| !is_constant(n)).collect();
+    let cli_fixed: Vec<String> = d.cli_fixed.iter().filter(|n| !is_constant(n)).cloned().collect();
+    let scenarios: Vec<ScenarioFootprint> = match d.scenario {
+        Some(s) => vec![ScenarioFootprint {
+            scenario: s.to_string(),
+            params: crate::params_resolver::scenario_param_footprint(
+                d.model, &crate::sim_job::ScenarioRef::Named(s.to_string()),
+            )?.into_iter().collect(),
+        }],
+        None => Vec::new(),
+    };
+    crate::roles::resolve_roles(
+        &RoleInputs {
+            model: d.model,
+            fit_estimate: &d.fit_estimate,
+            fit_fixed: &fit_fixed,
+            simplex_groups: d.simplex_groups,
+            cli_estimate: &d.cli_estimate,
+            cli_fixed: &cli_fixed,
+            cli_fixed_files: &[],
+            design: &[],
+            scenarios: &scenarios,
+        },
+        &crate::roles::SURVEY,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Load (time, value) pairs from a TSV by NAME — the declared `time` column is

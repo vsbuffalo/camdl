@@ -680,10 +680,18 @@ pub struct FitSidecar {
     // type says so.
     #[serde(default)]
     pub data_hashes: BTreeMap<String, String>,
+    /// Generated from `partition` by
+    /// [`crate::roles::PartitionRecord::legacy_fields`] and written no other
+    /// way.
     #[serde(default)]
     pub estimated: Vec<String>,
     #[serde(default)]
     pub fixed: BTreeMap<String, f64>,
+    /// The run's roles: which parameters were fixed, estimated or swept, and
+    /// what declared each. The authoritative record; absent from sidecars
+    /// written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition: Option<crate::roles::PartitionField>,
     #[serde(default)]
     pub resolved_priors: Vec<ResolvedPriorEntry>,
     #[serde(default)]
