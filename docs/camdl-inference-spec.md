@@ -102,8 +102,10 @@ I0 = { perturb_only_at_t0 = true }
 # Optional: override starting value (default: from model)
 # sigma = { start = 0.1 }
 
-# Optional: override transform (default: derived from parameter type)
-# R0 = { rw_sd = 5.0, transform = "identity" }
+# Optional: override transform (default: derived from parameter type and
+# bounds, §3.2). `transform = "identity"` is refused on bounds finite at both
+# ends, because it does not keep the parameter inside them.
+# R0 = { rw_sd = 5.0, transform = "log" }
 
 # Optional: narrow the search region (default: full model bounds)
 # R0 = { rw_sd = 5.0, bounds = [30.0, 80.0] }
@@ -147,13 +149,37 @@ knowledge constrains the plausible region.
      Fit search bounds must be within model structural bounds.
    ```
 
-2. **Fit bounds control the transform.** When `bounds` is specified, the
-   logit/scaled-logit transform maps to that interval instead of the model
-   bounds. This concentrates the random walk in the region of interest rather
-   than wasting perturbation on implausible values.
+2. **Every finite search box gets a transform that keeps the parameter inside
+   it.** The box is the fit's `bounds`, else the model's `in [lo, hi]`, else the
+   range the parameter's kind carries (`probability` is `[0, 1]`), else
+   `[0, ∞)`. The transform is chosen from the kind and the box:
 
-3. **Fit bounds control scout random starts.** Scout initializes chains from
-   uniform random within the fit bounds, not the full model bounds.
+   | kind                                            | box                 | transform    |
+   | ----------------------------------------------- | ------------------- | ------------ |
+   | `probability`                                   | any                 | scaled logit |
+   | `rate`, `positive`, `count`, `duration`         | lower bound ≥ 0     | log          |
+   | `rate`, `positive`, `count`, `duration`         | below zero, finite  | scaled logit |
+   | `real`, `instant`, or no kind                   | finite at both ends | scaled logit |
+   | `real`, `instant`, or a box reaching below zero | an infinite end     | none         |
+   | no kind                                         | lower bound ≥ 0     | log          |
+
+   The scaled logit maps `[lo, hi]` to the real line whatever the sign of `lo`,
+   so a signed seasonal phase boxed to `[-120, 120]` is searched over that whole
+   interval. The log transform keeps `[lo, hi]` by saturating at its ends; it
+   cannot represent a value below zero, so it is never chosen for a box that
+   reaches below zero. A `transform` in `fit.toml` overrides the table, except
+   that `transform = "identity"` on a box finite at both ends is refused at
+   config time: the identity transform does not keep a parameter inside finite
+   bounds, and PMMH, MH and IF2 would move it outside them.
+
+   The box is a hard constraint: the target the samplers draw from is the
+   posterior truncated to it. Because the transform maps to the box, fit bounds
+   also concentrate the random walk in the region of interest.
+
+3. **Fit bounds control chain starts.** Spread starts (`lhs`, `uniform`,
+   `uniform_unconstrained`) draw within the box. `from_prior` draws each
+   parameter from its prior restricted to the box its transform keeps, redrawing
+   a value that falls outside.
 
 4. **Boundary proximity warning.** If the MLE is within 1% of a fit bound, warn
    that the true MLE may be outside the search region:
@@ -172,6 +198,22 @@ knowledge constrains the plausible region.
 
    The warning is the safety net. Without it, narrowed bounds can hide the true
    MLE. With it, they're a useful search tool.
+
+5. **A hierarchical parameter's bounds may not cut into its prior's support
+   under PMMH or MH.** The samplers score a bounded parameter against its prior
+   density restricted to the box but not renormalised by the prior's mass inside
+   it. For a fixed prior that mass is a constant and drops out. For a
+   hierarchical parameter `a ~ normal(mu, 1)` it is P(box | mu), which moves
+   with `mu`, so omitting it biases `mu`: four such parameters boxed to `[1, 2]`
+   under a flat likelihood give `mu` a posterior mean of 1.18 where the truth
+   is 0. The fit is therefore refused at config time when the box the transform
+   keeps leaves out part of the family's support (`normal`: the real line;
+   `log_normal`, `gamma`, `exponential`, `half_normal`: `[0, ∞)`; `beta`:
+   `[0, 1]`; `uniform`: its `lower` and `upper`, and any finite box if either is
+   an expression). A `rate` parameter with no declared bounds keeps `[0, ∞)`
+   under the log transform, which is the whole support of a `log_normal` or
+   `gamma` prior, so it runs. Adding −log P(box | hyperparameter) per parameter,
+   from the family's CDF, would lift the refusal; it is not implemented.
 
 ### 3.3 Exhaustive Partition Rule
 

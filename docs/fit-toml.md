@@ -83,7 +83,7 @@ the synthetic block records the truth a recovery check reads.
 | `bounds = [lo, hi]`                          | search range. _Optional_ — defaults to the model's `parameters { p : rate in [lo,hi] }` range; a `fit.toml` `bounds` may only **narrow** it, never loosen.                                                                                                         |
 | `start = X`                                  | the base starting value. Optional — defaults to the model's declared value, else a draw from bounds. See "Where a chain starts" below.                                                                                                                             |
 | `prior = { … }`                              | prior distribution. **Required** for a `pgas`/`pmmh`/`mh` method; `if2` ignores it. See "Priors" below.                                                                                                                                                            |
-| `transform = "log" \| "logit" \| "identity"` | inference-scale transform. Optional — inferred from the parameter's declared type if omitted.                                                                                                                                                                      |
+| `transform = "log" \| "logit" \| "identity"` | inference-scale transform. Optional — inferred from the parameter's declared type and its bounds; every bounds finite at both ends gets a transform that keeps the parameter inside them. `"identity"` is refused on bounds finite at both ends.                   |
 | `perturb_only_at_t0 = true`                  | an initial-state parameter (e.g. `s0`, `i0`) — perturbed at t=0 only, never at an observation. It is IF2's perturbation schedule, so only `if2` accepts it: any other method refuses the config at load rather than run without it.                                |
 | `rw_sd = X`                                  | IF2 per-parameter random-walk SD. Optional — auto-scaled from bounds. `pmmh` and `mh` also read it: five times it, on the transformed scale, is the initial proposal SD (the adaptive proposal takes over from there). `pgas` and the `nl-*` optimizers ignore it. |
 
@@ -169,7 +169,7 @@ whether the chains found the same posterior:
 
 | `starts`                          | where the chains start                                                                                                                            |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `from_prior`                      | one draw from the declared priors per chain; base point unused                                                                                    |
+| `from_prior`                      | one draw from the declared priors per chain, restricted to `bounds`; base point unused                                                            |
 | `uniform_unconstrained`           | Stan-style boundary-avoiding draws on the unconstrained scale; base point unused                                                                  |
 | `lhs`                             | Latin-hypercube stratified over `bounds`; base point unused                                                                                       |
 | `uniform`                         | chain 0 at the base point; the rest uniform within `bounds`                                                                                       |
@@ -423,7 +423,17 @@ The model file is the source of truth for what _can_ be estimated; the
   (`resolved_priors[].overridden_model_prior`). If the override is not
   deliberate, delete the `prior`; if it should hold for every fit, move it into
   the model.
-- **Transforms** default to the parameter's declared type; `fit.toml` overrides.
+- **Transforms** default to the parameter's declared type and its bounds
+  (`docs/camdl-inference-spec.md` §3.2): bounds finite at both ends always get a
+  transform that keeps the parameter inside them, a positive kind whose bounds
+  reach below zero included. `fit.toml` overrides, except that
+  `transform = "identity"` on bounds finite at both ends is refused.
+- **Hierarchical parameters** (`a ~ normal(mu, 1)`) may not have bounds that cut
+  into their prior's support under `pmmh` or `mh`: the prior is not renormalised
+  to the bounds, and for a hierarchical parameter the missing constant depends
+  on the hyperparameter, which would bias it. Leave the bounds off (a `rate`
+  keeps `[0, ∞)`, the whole support of a `log_normal`), or remove the
+  hierarchical prior.
 
 So the minimal `fit.toml` for a model that already declares bounds and priors is
 just `[model]`, `[data]`, an `[estimate]` listing names (no per-param fields),

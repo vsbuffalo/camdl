@@ -115,6 +115,31 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   `gamma ~ log_normal(mu = mu_g, sigma = 0.1)` with `gamma` held and `mu_g`
   estimated) contributed no prior term, so `mu_g`'s posterior was its prior.
   Migration: estimate the leaves too, or hold the hyperparameter.
+- **`transform = "identity"` on bounds finite at both ends is refused.** The
+  identity transform clamps nothing, so with `c ~ normal(0, 1)` boxed to
+  `[0, 1]` and a flat likelihood, `pmmh` and `mh` put 66% of draws outside the
+  box and `if2` ended every chain outside it. Migration: drop `transform`; a
+  bounded parameter gets the scaled logit automatically.
+- **Every search box finite at both ends now gets a transform that keeps the
+  parameter inside it.** A `rate`, `positive`, `count` or `duration` whose
+  bounds reach below zero (a seasonal phase `duration` boxed to `[-120, 120]`)
+  got the log transform, which maps a negative start to log(1e-300) = −690 and
+  cannot reach the negative half of the box (gh#967); it now gets the scaled
+  logit. So does a parameter with no `param_kind` (IR written before the field)
+  whose bounds are finite and reach below zero, which got no transform at all.
+  Fits of such parameters re-key. Migration: none.
+- **`starts = "from_prior"` draws inside the bounds.** A prior draw outside the
+  box the transform keeps is redrawn; before, it was clamped to the edge of the
+  box and the chain started there. Fits whose prior draws fell outside the box
+  start elsewhere and re-key. Migration: none.
+- **A hierarchical parameter whose bounds cut into its prior's support is
+  refused under `pmmh` and `mh`.** The prior is not renormalised to the bounds,
+  and for a hierarchical parameter the missing constant P(bounds |
+  hyperparameter) depends on the hyperparameter: `mu ~ normal(0, 1)` with four
+  leaves `a_k ~ normal(mu, 1)` boxed to `[1, 2]` gave `mu` a posterior mean of
+  1.18 under a flat likelihood, where the truth is 0. Migration: drop the leaf's
+  bounds (a `rate` keeps `[0, ∞)`, the whole support of a `log_normal` or
+  `gamma`), or remove the hierarchical prior.
 - **`profile --sweep` values outside the parameter's bounds are refused**,
   naming the parameter, the values and the bounds (the model's, narrowed by
   `--fit` `[estimate]`). Migration: sweep inside the bounds.
