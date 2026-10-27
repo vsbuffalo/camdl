@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/camdl/camdl/ir/schema.json",
   "title": "Camdl IR",
-  "description": "Stochastic compartmental model IR schema v0.6",
+  "description": "The inner `model` object of a camdl IR file. The on-wire file wraps it in the envelope { ir_version, validated_by, docs, model } defined by rust/crates/ir/src/envelope.rs; the version is ir/VERSION. Every ocaml/golden/*.ir.json and ir/golden/*.ir.json is validated against this schema by rust/crates/ir/tests/schema_validates_goldens.rs, so a serde change that is not mirrored here fails the test suite.",
   "type": "object",
   "required": [
     "name",
@@ -128,8 +128,33 @@
       "comment": "Named presets (the `scenarios {}` block). Omitted when empty.",
       "type": "array",
       "items": { "$ref": "#/definitions/preset" }
+    },
+
+    "ic_grad": {
+      "description": "Compiler-derived forward-sensitivity seed: compartment name -> (parameter name -> deriv_entry) for the parameterized initial conditions. Omitted when empty. Not run identity.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/grad_map" }
+    },
+
+    "model_structure": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/definitions/model_structure" }
+      ]
+    },
+
+    "balance": {
+      "description": "A balance constraint: after all transitions and interventions, compartment `target` is overwritten with the value of `expr` (typically `pop(t) - S - E - I`). Omitted when the model declares none.",
+      "type": "object",
+      "required": ["target", "expr"],
+      "properties": {
+        "target": { "type": "string" },
+        "expr": { "$ref": "#/definitions/expr" }
+      },
+      "additionalProperties": false
     }
   },
+  "additionalProperties": false,
 
   "definitions": {
     "compartment": {
@@ -138,7 +163,8 @@
       "properties": {
         "name": { "type": "string" },
         "kind": { "type": "string", "enum": ["integer", "real"] }
-      }
+      },
+      "additionalProperties": false
     },
 
     "expr": {
@@ -180,16 +206,25 @@
           "additionalProperties": false
         },
         {
+          "comment": "The runtime integrator step (gh#54).",
+          "required": ["dt"],
+          "properties": {
+            "dt": { "type": "null" }
+          },
+          "additionalProperties": false
+        },
+        {
           "required": ["bin_op"],
           "properties": {
             "bin_op": {
               "type": "object",
               "required": ["op", "left", "right"],
               "properties": {
-                "op": { "type": "string", "enum": ["add", "sub", "mul", "div", "pow", "min", "max"] },
+                "op": { "type": "string", "enum": ["add", "sub", "mul", "div", "pow", "mod", "min", "max", "eq", "neq", "lt", "gt", "le", "ge"] },
                 "left": { "$ref": "#/definitions/expr" },
                 "right": { "$ref": "#/definitions/expr" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -201,9 +236,10 @@
               "type": "object",
               "required": ["op", "arg"],
               "properties": {
-                "op": { "type": "string", "enum": ["neg", "exp", "log", "sqrt", "abs", "floor", "ceil"] },
+                "op": { "type": "string", "enum": ["neg", "exp", "log", "sqrt", "abs", "floor", "ceil", "sin", "cos", "tanh"] },
                 "arg": { "$ref": "#/definitions/expr" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -218,7 +254,8 @@
                 "pred": { "$ref": "#/definitions/expr" },
                 "then": { "$ref": "#/definitions/expr" },
                 "else": { "$ref": "#/definitions/expr" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -231,7 +268,8 @@
               "required": ["name"],
               "properties": {
                 "name": { "type": "string" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -245,7 +283,8 @@
               "properties": {
                 "table": { "type": "string" },
                 "indices": { "type": "array", "items": { "$ref": "#/definitions/expr" }, "minItems": 1 }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -254,6 +293,23 @@
           "required": ["projected"],
           "properties": {
             "projected": { "type": "null" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "comment": "The dimensional escape: `inner` is taken to have dimension `dim` = [P exponent, T exponent] without checking, for the stated `reason` (e.g. a unit literal).",
+          "required": ["unchecked_dim"],
+          "properties": {
+            "unchecked_dim": {
+              "type": "object",
+              "required": ["inner", "dim", "reason"],
+              "properties": {
+                "inner": { "$ref": "#/definitions/expr" },
+                "dim": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
+                "reason": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
           },
           "additionalProperties": false
         },
@@ -311,7 +367,8 @@
         "origin_kind": { "type": ["string", "null"] },
         "source_compartment": { "type": ["string", "null"] },
         "dest_compartment": { "type": ["string", "null"] }
-      }
+      },
+      "additionalProperties": false
     },
 
     "transition": {
@@ -324,6 +381,15 @@
           "items": { "$ref": "#/definitions/stoichiometry_entry" }
         },
         "rate": { "$ref": "#/definitions/expr" },
+        "draw_method": { "$ref": "#/definitions/draw_method" },
+        "rate_grad": {
+          "description": "Compiler-derived d(rate)/d(parameter). Omitted when empty. Not run identity.",
+          "$ref": "#/definitions/grad_map"
+        },
+        "rate_state_grad": {
+          "description": "Compiler-derived d(rate)/d(compartment), keyed by compartment (gh#275). Omitted when empty. Not run identity.",
+          "$ref": "#/definitions/grad_map"
+        },
         "metadata": {
           "oneOf": [
             { "type": "null" },
@@ -337,7 +403,89 @@
             { "$ref": "#/definitions/transition_lineage" }
           ]
         }
-      }
+      },
+      "additionalProperties": false
+    },
+
+    "draw_method": {
+      "description": "How a transition's event count is drawn. Omitted for the default `poisson`.",
+      "oneOf": [
+        { "type": "string", "enum": ["poisson", "deterministic"] },
+        {
+          "type": "object",
+          "description": "Multiplicative Gamma-Poisson noise with variance parameter `overdispersed` (sigma^2); `overdispersed_grad` is its compiler-derived d(sigma^2)/d(parameter), omitted when empty.",
+          "required": ["overdispersed"],
+          "properties": {
+            "overdispersed": { "$ref": "#/definitions/expr" },
+            "overdispersed_grad": { "$ref": "#/definitions/grad_map" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "deriv_entry": {
+      "description": "One classified derivative: a gradient expression, or a coded refusal naming the node the autodiff pass could not differentiate.",
+      "type": "object",
+      "oneOf": [
+        {
+          "required": ["grad"],
+          "properties": { "grad": { "$ref": "#/definitions/expr" } },
+          "additionalProperties": false
+        },
+        {
+          "required": ["unsupported"],
+          "properties": {
+            "unsupported": {
+              "type": "object",
+              "required": ["node", "code"],
+              "properties": {
+                "node": { "type": "string" },
+                "code": {
+                  "type": "string",
+                  "enum": ["lag", "periodic_coeff", "structural_forcing", "non_const_table_index", "mod", "parametric_n", "nonsmooth_state"]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "grad_map": {
+      "description": "name -> deriv_entry. An absent key is a genuine zero.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/deriv_entry" }
+    },
+
+    "model_structure": {
+      "description": "Stratification bookkeeping kept from expansion: the dimensions, each expanded compartment's levels, and the base (unstratified) names.",
+      "type": "object",
+      "required": ["dimensions", "compartment_dims", "base_compartments", "transmission_transitions", "infectious_compartments"],
+      "properties": {
+        "dimensions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "values"],
+            "properties": {
+              "name": { "type": "string" },
+              "values": { "type": "array", "items": { "type": "string" } }
+            },
+            "additionalProperties": false
+          }
+        },
+        "compartment_dims": {
+          "type": "object",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } }
+        },
+        "base_compartments": { "type": "array", "items": { "type": "string" } },
+        "transmission_transitions": { "type": "array", "items": { "type": "string" } },
+        "infectious_compartments": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
     },
 
     "transition_lineage": {
@@ -368,7 +516,8 @@
       "properties": {
         "compartment": { "type": "string" },
         "derivative": { "$ref": "#/definitions/expr" }
-      }
+      },
+      "additionalProperties": false
     },
 
     "time_func_kind": {
@@ -385,7 +534,8 @@
                 "period": { "$ref": "#/definitions/expr" },
                 "phase": { "$ref": "#/definitions/expr" },
                 "baseline": { "$ref": "#/definitions/expr" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -399,7 +549,8 @@
               "properties": {
                 "breakpoints": { "type": "array", "items": { "$ref": "#/definitions/expr" } },
                 "values": { "type": "array", "items": { "$ref": "#/definitions/expr" } }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -413,8 +564,9 @@
               "properties": {
                 "times": { "type": "array", "items": { "$ref": "#/definitions/expr" } },
                 "values": { "type": "array", "items": { "$ref": "#/definitions/expr" } },
-                "method": { "type": "string", "enum": ["linear", "spline"] }
-              }
+                "method": { "type": "string", "enum": ["linear", "constant", "spline"] }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -428,7 +580,50 @@
               "properties": {
                 "period": { "$ref": "#/definitions/expr" },
                 "values": { "type": "array", "items": { "$ref": "#/definitions/expr" } }
-              }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "comment": "gh#59: a truncated Fourier series with the given period; each harmonic is a [cosine coefficient, sine coefficient] pair.",
+          "required": ["fourier"],
+          "properties": {
+            "fourier": {
+              "type": "object",
+              "required": ["period", "harmonics"],
+              "properties": {
+                "period": { "$ref": "#/definitions/expr" },
+                "harmonics": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": [{ "$ref": "#/definitions/expr" }, { "$ref": "#/definitions/expr" }],
+                    "minItems": 2,
+                    "maxItems": 2
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "comment": "gh#59: a periodic B-spline of the given degree over n_basis basis functions, with one coefficient per basis function.",
+          "required": ["periodic_spline"],
+          "properties": {
+            "periodic_spline": {
+              "type": "object",
+              "required": ["period", "n_basis", "degree", "coefs"],
+              "properties": {
+                "period": { "$ref": "#/definitions/expr" },
+                "n_basis": { "type": "integer", "minimum": 0 },
+                "degree": { "type": "integer", "minimum": 0 },
+                "coefs": { "type": "array", "items": { "$ref": "#/definitions/expr" } }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -438,10 +633,17 @@
 
     "time_function": {
       "type": "object",
-      "required": ["name", "kind"],
+      "required": ["name", "kind", "dim"],
       "properties": {
         "name": { "type": "string" },
         "kind": { "$ref": "#/definitions/time_func_kind" },
+        "dim": {
+          "description": "Declared dimension from the forcing's unit literal, as [P exponent, T exponent].",
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 2,
+          "maxItems": 2
+        },
         "lag": {
           "$ref": "#/definitions/expr",
           "description": "Optional gh#314 evaluation-time shift: the forcing is evaluated at t − lag instead of t. A duration expression in the model's time_unit (a literal like 10 'days, or a parameter reference). Absent ⇒ no shift (identity)."
@@ -450,7 +652,8 @@
           "$ref": "#/definitions/data_source",
           "description": "Compile-time provenance for a forcing declared `data = \"path\"`. Absent for every other forcing (and for the `table =` / inline `times`/`values` forms of `interpolated`) — it appends only when present, so a model with no file-backed forcing is byte-identical to its pre-0.33 form."
         }
-      }
+      },
+      "additionalProperties": false
     },
 
     "data_source": {
@@ -467,17 +670,26 @@
           "pattern": "^[0-9a-f]{64}$",
           "description": "Lowercase hex SHA-256 of the file's raw bytes — reproducible with `shasum -a 256 <path>` from the model's directory."
         }
-      }
+      },
+      "additionalProperties": false
     },
 
     "table": {
+      "description": "A lookup table: inline `values`, or a reference to an `external` table supplied at runtime (exactly one of the two).",
       "type": "object",
-      "required": ["name", "values", "out_of_bounds"],
+      "required": ["name", "out_of_bounds"],
+      "oneOf": [
+        { "required": ["values"], "not": { "required": ["external"] } },
+        { "required": ["external"], "not": { "required": ["values"] } }
+      ],
       "properties": {
         "name": { "type": "string" },
         "values": { "type": "array", "items": { "$ref": "#/definitions/expr" } },
-        "out_of_bounds": { "type": "string", "enum": ["error"] }
-      }
+        "external": { "type": "string" },
+        "out_of_bounds": { "type": "string", "enum": ["error"] },
+        "cell_kind": { "type": "string" }
+      },
+      "additionalProperties": false
     },
 
     "intervention_schedule": {
@@ -509,8 +721,10 @@
               "properties": {
                 "start": { "type": "number" },
                 "period": { "type": "number" },
-                "end": { "type": "number" }
-              }
+                "end": { "type": ["number", "null"], "description": "null encodes an open (NaN) end." },
+                "at_day": { "type": "number" }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -534,7 +748,8 @@
             "stream": { "type": "string" },
             "window": { "type": "number" },
             "reducer": { "$ref": "#/definitions/obs_reducer" }
-          }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -569,7 +784,8 @@
                 "lhs": { "$ref": "#/definitions/trigger_quantity" },
                 "op":  { "type": "string", "enum": ["lt", "le", "gt", "ge", "eq", "neq"] },
                 "rhs": { "$ref": "#/definitions/trigger_threshold" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -612,7 +828,8 @@
         "after": { "type": "number" },
         "once": { "type": "boolean" },
         "cooldown": { "type": "number" }
-      }
+      },
+      "additionalProperties": false
     },
 
     "fire_source": {
@@ -648,7 +865,8 @@
                 "src": { "type": "string" },
                 "dst": { "type": "string" },
                 "fraction": { "$ref": "#/definitions/expr" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -663,7 +881,8 @@
                 "src": { "type": "string" },
                 "dst": { "type": "string" },
                 "count": { "$ref": "#/definitions/expr" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -677,7 +896,23 @@
               "properties": {
                 "compartment": { "type": "string" },
                 "value": { "$ref": "#/definitions/expr" }
-              }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["add"],
+          "properties": {
+            "add": {
+              "type": "object",
+              "required": ["compartment", "count"],
+              "properties": {
+                "compartment": { "type": "string" },
+                "count": { "$ref": "#/definitions/expr" }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -694,7 +929,8 @@
         "fire": { "$ref": "#/definitions/fire_source" },
         "actions": { "type": "array", "items": { "$ref": "#/definitions/action" } },
         "kind": { "type": "string", "enum": ["scenario", "event"] }
-      }
+      },
+      "additionalProperties": false
     },
 
     "projection": {
@@ -755,6 +991,7 @@
     },
 
     "likelihood": {
+      "description": "The observation family. Every argument except a binomial-type `n` is a `diffable` (expression plus its compiler-derived gradients).",
       "type": "object",
       "oneOf": [
         {
@@ -764,8 +1001,9 @@
               "type": "object",
               "required": ["rate"],
               "properties": {
-                "rate": { "$ref": "#/definitions/expr" }
-              }
+                "rate": { "$ref": "#/definitions/diffable" }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -777,9 +1015,10 @@
               "type": "object",
               "required": ["mean", "dispersion"],
               "properties": {
-                "mean": { "$ref": "#/definitions/expr" },
-                "dispersion": { "$ref": "#/definitions/expr" }
-              }
+                "mean": { "$ref": "#/definitions/diffable" },
+                "dispersion": { "$ref": "#/definitions/diffable" }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -791,9 +1030,10 @@
               "type": "object",
               "required": ["mean", "sd"],
               "properties": {
-                "mean": { "$ref": "#/definitions/expr" },
-                "sd": { "$ref": "#/definitions/expr" }
-              }
+                "mean": { "$ref": "#/definitions/diffable" },
+                "sd": { "$ref": "#/definitions/diffable" }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -803,11 +1043,13 @@
           "properties": {
             "binomial": {
               "type": "object",
+              "comment": "`n` must be theta-independent and carries no gradient, so it is a bare expr.",
               "required": ["n", "p"],
               "properties": {
                 "n": { "$ref": "#/definitions/expr" },
-                "p": { "$ref": "#/definitions/expr" }
-              }
+                "p": { "$ref": "#/definitions/diffable" }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -817,12 +1059,14 @@
           "properties": {
             "beta_binomial": {
               "type": "object",
+              "comment": "`n` is a bare expr, as in `binomial`.",
               "required": ["n", "alpha", "beta"],
               "properties": {
                 "n": { "$ref": "#/definitions/expr" },
-                "alpha": { "$ref": "#/definitions/expr" },
-                "beta": { "$ref": "#/definitions/expr" }
-              }
+                "alpha": { "$ref": "#/definitions/diffable" },
+                "beta": { "$ref": "#/definitions/diffable" }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -835,9 +1079,25 @@
               "comment": "Beta likelihood for a continuous proportion x ∈ (0,1). Mean-linked: shape parameters alpha = mean·concentration, beta = (1−mean)·concentration are formed in the runtime scorer/sampler.",
               "required": ["mean", "concentration"],
               "properties": {
-                "mean": { "$ref": "#/definitions/expr" },
-                "concentration": { "$ref": "#/definitions/expr" }
-              }
+                "mean": { "$ref": "#/definitions/diffable" },
+                "concentration": { "$ref": "#/definitions/diffable" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["bernoulli"],
+          "properties": {
+            "bernoulli": {
+              "type": "object",
+              "comment": "A 0/1 observation with success probability `p`.",
+              "required": ["p"],
+              "properties": {
+                "p": { "$ref": "#/definitions/diffable" }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -847,13 +1107,14 @@
           "properties": {
             "zero_inflated_neg_binomial": {
               "type": "object",
-              "comment": "Zero-inflated NegBinomial: structural-zero mass `pi` mixed with NegBinomial(mean, dispersion). P(Y=0) = pi + (1-pi)*f(0); P(Y=k>0) = (1-pi)*f(k). All three arguments are differentiable and carry the diffable shape, as the sibling likelihood arguments do.",
+              "comment": "Zero-inflated NegBinomial: structural-zero mass `pi` mixed with NegBinomial(mean, dispersion). P(Y=0) = pi + (1-pi)*f(0); P(Y=k>0) = (1-pi)*f(k).",
               "required": ["mean", "dispersion", "pi"],
               "properties": {
-                "mean": { "$ref": "#/definitions/expr" },
-                "dispersion": { "$ref": "#/definitions/expr" },
-                "pi": { "$ref": "#/definitions/expr" }
-              }
+                "mean": { "$ref": "#/definitions/diffable" },
+                "dispersion": { "$ref": "#/definitions/diffable" },
+                "pi": { "$ref": "#/definitions/diffable" }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -881,8 +1142,9 @@
               "properties": {
                 "start": { "type": "number" },
                 "step": { "type": "number" },
-                "end": { "type": "number" }
-              }
+                "end": { "type": ["number", "null"], "description": "null encodes an open (NaN) end." }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -909,8 +1171,10 @@
         },
         "covers": { "$ref": "#/definitions/covers" },
         "projection": { "$ref": "#/definitions/projection" },
-        "comment": "projection_state_grad is the compiler-emitted WrtPop gradient of a DerivedExpr projection (gh#275 §1h). It is serialized whenever non-empty, so `additionalProperties: false` rejected valid IR without it declared here.",
-        "projection_state_grad": { "type": "object" },
+        "projection_state_grad": {
+          "description": "Compiler-derived d(projection)/d(compartment) of a derived_expr projection (gh#275 §1h), keyed by compartment. Omitted when empty. Not run identity.",
+          "$ref": "#/definitions/grad_map"
+        },
         "likelihood": { "$ref": "#/definitions/likelihood" }
       },
       "additionalProperties": false
@@ -988,7 +1252,8 @@
               "properties": {
                 "lower": { "type": "number" },
                 "upper": { "type": "number" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1002,7 +1267,8 @@
               "properties": {
                 "mean": { "type": "number" },
                 "sd": { "type": "number" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1016,7 +1282,8 @@
               "properties": {
                 "mu": { "type": "number" },
                 "sigma": { "type": "number" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1029,7 +1296,8 @@
               "required": ["sigma"],
               "properties": {
                 "sigma": { "type": "number" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1043,7 +1311,8 @@
               "properties": {
                 "alpha": { "type": "number" },
                 "beta": { "type": "number" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1057,7 +1326,8 @@
               "properties": {
                 "shape": { "type": "number" },
                 "rate": { "type": "number" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1070,7 +1340,8 @@
               "required": ["rate"],
               "properties": {
                 "rate": { "type": "number" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1084,7 +1355,8 @@
               "properties": {
                 "lower": { "type": "number" },
                 "upper": { "type": "number" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1100,7 +1372,8 @@
                 "sd": { "type": "number" },
                 "lower": { "type": "number" },
                 "upper": { "type": "number" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1198,7 +1471,8 @@
             { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 }
           ]
         }
-      }
+      },
+      "additionalProperties": false
     },
 
     "initial_conditions": {
@@ -1213,9 +1487,10 @@
       "required": ["expr"],
       "properties": {
         "expr": { "$ref": "#/definitions/expr" },
-        "grad": { "type": "object", "description": "parameter name -> deriv_entry" },
-        "proj_grad": { "type": "object", "description": "d(arg)/d(projected); absent for an initial-state law, which has no projection" }
-      }
+        "grad": { "$ref": "#/definitions/grad_map", "description": "parameter name -> deriv_entry" },
+        "proj_grad": { "$ref": "#/definitions/deriv_entry", "description": "d(arg)/d(projected); absent for an initial-state law, which has no projection" }
+      },
+      "additionalProperties": false
     },
 
     "init_count_law": {
@@ -1230,7 +1505,8 @@
               "required": ["rate"],
               "properties": {
                 "rate": { "$ref": "#/definitions/diffable" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1245,7 +1521,8 @@
               "properties": {
                 "n": { "$ref": "#/definitions/expr" },
                 "p": { "$ref": "#/definitions/diffable" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1260,7 +1537,8 @@
               "properties": {
                 "mean": { "$ref": "#/definitions/diffable" },
                 "dispersion": { "$ref": "#/definitions/diffable" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1281,7 +1559,8 @@
               "properties": {
                 "mean": { "$ref": "#/definitions/diffable" },
                 "sd": { "$ref": "#/definitions/diffable" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1338,7 +1617,8 @@
               "properties": {
                 "start": { "type": "number" },
                 "step": { "type": "number" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1362,7 +1642,8 @@
         "format": { "type": "string", "enum": ["tsv", "csv"] },
         "trajectory": { "type": "boolean" },
         "observations": { "type": "boolean" }
-      }
+      },
+      "additionalProperties": false
     },
 
     "simulation_config": {
@@ -1370,24 +1651,37 @@
       "required": ["t_start", "t_end", "time_semantics"],
       "properties": {
         "t_start": { "type": "number" },
-        "t_end": { "type": "number" },
+        "t_end": { "type": ["number", "null"], "description": "null encodes NaN: an unresolved anchored horizon (see t_end_anchor)." },
         "time_semantics": { "type": "string", "enum": ["continuous", "discrete"] },
         "dt": { "type": ["number", "null"] },
         "rng_seed": { "type": ["integer", "null"] },
         "integrator": {
-          "type": "object",
-          "required": ["method"],
-          "properties": {
-            "method": { "type": "string", "enum": ["rk4", "rk45"] },
-            "atol": { "type": ["number", "null"] },
-            "rtol": { "type": ["number", "null"] }
-          }
+          "description": "ODE integrator; omitted at the rk4 default. Tolerances apply to rk45 only and are omitted at the runtime default.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["method"],
+              "properties": { "method": { "const": "rk4" } },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["method"],
+              "properties": {
+                "method": { "const": "rk45" },
+                "atol": { "type": "number" },
+                "rtol": { "type": "number" }
+              },
+              "additionalProperties": false
+            }
+          ]
         },
         "t_end_anchor": {
           "comment": "gh#616: an observation-anchored horizon (`simulate { to = last_obs + 4 'weeks }`). PRESENT means the horizon is UNRESOLVED: `t_end` then carries NaN so every equality-based horizon guard fails closed, and the runtime resolver substitutes the resolved time into `t_end` and removes this key. A model that still carries it is refused at CompiledModel::new. Omitted for a literal horizon.",
           "$ref": "#/definitions/anchored_time"
         }
-      }
+      },
+      "additionalProperties": false
     },
 
     "preset": {
@@ -1677,7 +1971,8 @@
               "properties": {
                 "op": { "type": "string", "enum": ["neg", "exp", "log", "sqrt", "abs", "floor", "ceil", "sin", "cos", "tanh"] },
                 "arg": { "$ref": "#/definitions/scalar_expr" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1692,7 +1987,8 @@
                 "op": { "type": "string", "enum": ["add", "sub", "mul", "div", "pow", "mod", "min", "max", "eq", "neq", "lt", "gt", "le", "ge"] },
                 "left": { "$ref": "#/definitions/scalar_expr" },
                 "right": { "$ref": "#/definitions/scalar_expr" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1707,7 +2003,8 @@
                 "pred": { "$ref": "#/definitions/scalar_expr" },
                 "then": { "$ref": "#/definitions/scalar_expr" },
                 "else": { "$ref": "#/definitions/scalar_expr" }
-              }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
