@@ -653,11 +653,11 @@ In its textbook form the r-th index differences are independent, Δʳcₖ ~ N(0,
 **With clamped knots the index differences have the wrong null space.** A spline
 equals a straight line exactly when its coefficients are linear in the
 **Greville abscissae** ξₖ = (u_{k+1} + … + u_{k+p})/p, the knot averages, not in
-the index k (de Boor 1978, ch. XI). Interior ξ are evenly spaced by h; at a
-clamped end they crowd together: for K = 8 over [0, 182], ξ = 0, 12.1, 36.4, …,
-145.6, 169.9, 182. Index-linear coefficients therefore give a curve that bends
-near both ends — 0.57 on a log range of 7 (measured by the statistics review) —
-so the RW2 prior penalizes a truly exponential growth or decline at exactly the
+the index k (de Boor 1978). Interior ξ are evenly spaced by h; at a clamped end
+they crowd together: for K = 8 over [0, 182], ξ = 0, 12.1, 36.4, …, 145.6,
+169.9, 182. Index-linear coefficients therefore give a curve that bends near
+both ends — 0.57 on a log range of 7 (measured by the statistics review) — so
+the RW2 prior penalizes a truly exponential growth or decline at exactly the
 ends, and the hold rule (§4.3) takes the forecast value from the end. The fix is
 to take the differences over ξ (D3 gives the alternative, unclamped knots):
 
@@ -667,11 +667,15 @@ to take the differences over ξ (D3 gives the alternative, unclamped knots):
   ξₖ₋₂)/2 the mean spacing around ξₖ₋₁; for RW1, cₖ − cₖ₋₁ ~ N(0, τ² · (ξₖ −
   ξₖ₋₁)/h).
 
-In the interior ω̄ₖ = h and the RW2 rule reduces to Δ²cₖ ~ N(0, τ²) exactly; the
-spacing weights are the Brownian scaling of an integrated Wiener process (RW1: a
-Wiener process), so τ keeps one meaning across the end intervals. The null space
-at τ = 0 is now constant slope in time, i.e. log β linear in t, which the spline
-reproduces exactly at every t in the window.
+In the interior ω̄ₖ = h and the RW2 rule reduces to Δ²cₖ ~ N(0, τ²) exactly. The
+end weights are a heuristic, stated as one: they scale each increment's variance
+by its local spacing, as a Brownian (RW1) or integrated-Brownian (RW2) increment
+would, and they touch only the p − 1 increments at each end, where clamping
+makes the spacing uneven. No irregular-grid RW2 from the literature is adopted
+here, because none was checked against this exact construction; V6 and V7 check
+what the heuristic does. The null space at τ = 0 is now constant slope in time,
+i.e. log β linear in t, which the spline reproduces exactly at every t in the
+window.
 
 As a GMRF (Rue & Held 2005, ch. 3) the density is
 
@@ -685,11 +689,14 @@ along the null space, so it must be completed there; and the normalizing power
 is τ^{−(K−r)}, not τ^{−K}, which matters as soon as τ is estimated (using K
 biases τ downward).
 
-**Completion.** Give the null-space coordinates proper priors: for RW1 the level
-c₁; for RW2 the level c₁ and the first slope s₂. The completed density is p(c₁)
-[p(s₂)] Πₖ N(·; 0, ·) as above: proper, with log-density log p(c₁) [+ log p(s₂)]
-− (K − r) log τ − ‖W_r c‖²/(2τ²) + const and gradients ∂/∂c = (null-space terms)
-− W_rᵀW_r c/τ² and ∂/∂τ = −(K − r)/τ + ‖W_r c‖²/τ³. W_rᵀW_r is banded with
+**Completion.** Give the null-space coordinates proper priors, anchored at the
+middle of the window rather than at an end, so the prior band does not fan out
+from one side: with m the index whose Greville abscissa ξ_m is nearest (a +
+b)/2, the level c_m for RW1, and for RW2 the level c_m and the slope s_{m+1} =
+(c_{m+1} − c_m)/(ξ_{m+1} − ξ_m). The completed density is p(c_m) [p(s_{m+1})] Πₖ
+N(·; 0, ·) as above: proper, with log-density log p(c_m) [+ log p(s_{m+1})] − (K
+− r) log τ − ‖W_r c‖²/(2τ²) + const and gradients ∂/∂c = (null-space terms) −
+W_rᵀW_r c/τ² and ∂/∂τ = −(K − r)/τ + ‖W_r c‖²/τ³. W_rᵀW_r is banded with
 bandwidth r, so both are O(K).
 
 **τ is estimated, under a penalized-complexity prior on a standard deviation.**
@@ -700,11 +707,41 @@ statement P(τ > U) = α, λ = −ln α / U. The scale of τ depends on the knot
 spacing: second differences of an integrated Wiener process at spacing h have
 standard deviation ∝ h^{3/2} (first differences ∝ h^{1/2} for RW1) (inferred
 from the integrated-Wiener-process limit; Sørbye & Rue 2014 make the same point
-for intrinsic GMRFs). The validation therefore states the tail per spacing, U_h
-= 1.0 · (h / 14 days)^{3/2} with α = 0.05: "a second difference in log β of more
-than 1.0 per 14 days is a priori unlikely", 14 days being near the Ebola serial
-interval. Spacing h is chosen at or below the generation interval, so the basis
-can follow changes on the time scale transmission can change.
+for intrinsic GMRFs). The tail is therefore stated per spacing, U_h = U₁₄ · (h /
+14 days)^{3/2} with α = 0.05, 14 days being near the Ebola serial interval.
+Spacing h is chosen at or below the generation interval, so the basis can follow
+changes on the time scale transmission can change.
+
+**U₁₄ is calibrated by prior-predictive simulation, not chosen by intuition.** A
+tail statement on τ bounds a local second difference, not the curve: the random
+walk integrates K − 2 innovations twice, so the prior spread of log β(t) grows
+with distance from the anchor and with K, on top of the slope's own
+contribution. A first choice of U₁₄ = 1.0 with b₁ ~ N(0, 0.05/day) gave a 95%
+prior band of R(t) reaching about 10¹² at t = 168 (found by the statistics
+re-review): the slope alone has a log-scale SD of 8.4 there. The calibration
+therefore fixes a target band and searches U₁₄. Target: at every t in the
+window, the 95% prior band of R(t) contains [0.5, 3] (the prior admits every
+plausible value) and lies inside [0.1, 20] (it excludes absurd ones). With the
+level log β(ξ_m) ~ N(ln(1.2γ), 0.6²) (median R = 1.2 mid-window) and b₁ ~ N(0,
+0.005²) per day — one SD changes β by a factor e^{0.42} ≈ 1.5 over half the
+window, the scale of change control measures produce, whereas 0.05/day would be
+an e-fold every 20 days sustained for months — a scan over U₁₄ ∈ {0.1, 0.2, 0.3,
+0.5} meets the target at U₁₄ = 0.2 and fails it at 0.3 for K = 8 and at 0.5 for
+every K. Measured with a scratch prior-predictive script (scipy `BSpline`,
+cubic, clamped, window [0, 168], γ = 0.125, 4,000 draws, seed 20261027):
+
+| K  | h (days) | U_h   | λ = ln 20 / U_h | R(t) band at t = 0 | t = 42       | t = 84       | t = 126      | t = 168 (and held) | range over t  |
+| -- | -------- | ----- | --------------- | ------------------ | ------------ | ------------ | ------------ | ------------------ | ------------- |
+| 8  | 33.6     | 0.744 | 4.03            | [0.27, 5.37]       | [0.36, 3.97] | [0.36, 3.81] | [0.29, 4.76] | [0.14, 9.29]       | [0.14, 9.29]  |
+| 12 | 18.7     | 0.308 | 9.73            | [0.22, 6.88]       | [0.34, 4.08] | [0.36, 3.99] | [0.28, 4.68] | [0.14, 10.28]      | [0.14, 10.28] |
+| 20 | 9.9      | 0.119 | 25.26           | [0.17, 8.06]       | [0.34, 4.56] | [0.37, 3.86] | [0.30, 4.55] | [0.15, 10.39]      | [0.15, 10.39] |
+
+Stage 5 commits this calibration as a reproducible step:
+`scripts/calibrate_rw_prior.py`, run by
+`make -f tests/recovery/Makefile calibrate-rw-prior`, writes
+`tests/recovery/cases/spline_seir/rw_prior_calibration.tsv` (U₁₄, U_h, λ and the
+band at every t, per K) from a fixed seed, and the fit configs read their τ
+priors from it.
 
 ### 6.2 Three realizations, and why the non-centred one comes first
 
@@ -734,17 +771,19 @@ leaf, `9ccb2899`) then apply to every coefficient. It is centred, with (A)'s
 funnel, and verbose.
 
 **(C) Non-centred by construction, from ordinary priors** (recommended, D1). The
-sampler moves standardized innovations zₖ ~ N(0, 1), the level b₀ (and for RW2
-the slope b₁), and τ, each with an ordinary scalar prior the samplers already
-handle. The coefficients are deterministic functions of them:
+sampler moves standardized innovations zₖ ~ N(0, 1), the mid-window level b₀
+(and for RW2 the mid-window slope b₁), and τ, each with an ordinary scalar prior
+the samplers already handle. The coefficients are deterministic functions of
+them:
 
-RW1: c₁ = b₀, cₖ = cₖ₋₁ + τ √((ξₖ − ξₖ₋₁)/h) zₖ; RW2: c₁ = b₀, s₂ = b₁, sₖ =
-sₖ₋₁ + (τ/h) √(ω̄ₖ/h) zₖ, cₖ = cₖ₋₁ + (ξₖ − ξₖ₋₁) sₖ,
+RW1: c_m = b₀, cₖ = cₖ₋₁ + τ √((ξₖ − ξₖ₋₁)/h) zₖ for k > m and symmetrically for
+k < m; RW2: c_m = b₀, s_{m+1} = b₁, sₖ = sₖ₋₁ + (τ/h) √(ω̄ₖ/h) zₖ, cₖ = cₖ₋₁ +
+(ξₖ − ξₖ₋₁) sₖ for k > m + 1, and the mirror-image recursion toward k = 1,
 
-with the spacings of §6.1, b₁ the initial slope of log β per unit time; in
-closed form for RW2, cₖ = b₀ + b₁ (ξₖ − ξ₁) + (τ/h) Σ_{i=3}^{k} √(ω̄ᵢ/h) (ξₖ −
-ξᵢ₋₁) zᵢ, which with every spacing equal to h is the textbook b₀ + (k − 1) h
-b₁ + τ Σ (k − i + 1) zᵢ.
+with m the mid-window index of §6.1 and b₁ the mid-window slope of log β per
+unit time; in closed form for RW2 and k > m, cₖ = b₀ + b₁ (ξₖ − ξ_m) + (τ/h)
+Σ_{i=m+2}^{k} √(ω̄ᵢ/h) (ξₖ − ξᵢ₋₁) zᵢ, with the mirror image for k < m. There are
+still K − 2 innovations.
 
 The map (b₀, b₁, z) → c, for fixed τ, is linear with Jacobian proportional to
 τ^{K−r} — τ^{K−2} for RW2, confirmed by the statistics review — times spacing
@@ -753,8 +792,8 @@ on (c, τ) the same completed prior as (A). The posterior over the curve is
 identical; only the sampler's coordinates differ. Nothing in the samplers
 changes, because every prior in (C) is a scalar prior; the coefficients are
 coefficient expressions, which §5.2 differentiates by the chain rule (for RW2,
-∂cⱼ/∂zᵢ = (τ/h) √(ω̄ᵢ/h) (ξⱼ − ξᵢ₋₁) for j ≥ i, and ∂cⱼ/∂τ = (cⱼ − b₀ − b₁(ξⱼ −
-ξ₁))/τ).
+∂cⱼ/∂zᵢ = (τ/h) √(ω̄ᵢ/h) (ξⱼ − ξᵢ₋₁) for j ≥ i, on the right of m, and ∂cⱼ/∂τ =
+(cⱼ − b₀ − b₁(ξⱼ − ξ_m))/τ).
 
 **The trade-off is information-dependent, and PGAS sits on both sides of it.**
 Papaspiliopoulos, Roberts & Sköld (2007) show the centred form mixes better when
@@ -780,10 +819,10 @@ threshold (§6.6).
 dimensions { innov = [i3, i4, i5, i6, i7, i8, i9, i10, i11, i12] }   # n_basis − order levels
 
 parameters {
-  b0        : real 'ratio in [-8, 2]  ~ normal(mu = -1.4, sigma = 1.0)   # log β at a
-  b1        : real [1/T] in [-0.5, 0.5] ~ normal(mu = 0.0, sigma = 0.05)  # initial slope of log β, per day
-  # PC prior on an SD: P(tau_b > 1.54) = 0.05 at h = 18.7 days (§6.1)
-  tau_b     : positive 'ratio in [1e-6, 7.7] ~ exponential(rate = 1.95)
+  b0        : real 'ratio in [-8, 2]  ~ normal(mu = -1.9, sigma = 0.6)       # log β mid-window (R ≈ 1.2)
+  b1        : real [1/T] in [-0.05, 0.05] ~ normal(mu = 0.0, sigma = 0.005)  # mid-window slope of log β, per day
+  # PC prior on an SD, calibrated (§6.1): P(tau_b > 0.308) = 0.05 at h = 18.7 days
+  tau_b     : positive 'ratio in [1e-6, 1.54] ~ exponential(rate = 9.73)
   z[innov]  : real 'ratio in [-8, 8]  ~ normal(mu = 0.0, sigma = 1.0)
 }
 
@@ -805,12 +844,14 @@ then emitted as expressions over the window ends, which anchor substitution
 resolves like any knot (§4.3), so the IR contains only existing expression forms
 and **no IR change** is needed for the prior. The priors are declared by the
 user, with today's syntax, where a reader sees them. The constructor checks, at
-compile time (new codes in the E4xx forcing range): `order` is 1 or 2; `start`
-has `order` entries; `innovations` is an indexed family with exactly
-`n_basis − order` cells; and each innovation is `real`, with prior exactly
-`normal(mu = 0, sigma = 1)`. That last check keeps the name honest: a different
-innovation prior is a different model, which the user can still write as
-explicit coefficient expressions. The `quantities {}` block can report the
+compile time (new codes in the E4xx forcing range): `order` is 1 or 2; the
+spline's degree is at least 1 (the Greville abscissae are undefined at degree 0,
+so `random_walk` on a degree-0 spline is refused); `start` has `order` entries,
+the mid-window level and, for order 2, slope; `innovations` is an indexed family
+with exactly `n_basis − order` cells; and each innovation is `real`, with prior
+exactly `normal(mu = 0, sigma = 1)`. That last check keeps the name honest: a
+different innovation prior is a different model, which the user can still write
+as explicit coefficient expressions. The `quantities {}` block can report the
 curve, `beta_t = log_beta` (a series, language spec §16.4).
 
 **Under IF2 and the optimizers the scale must be fixed.** They read no prior
@@ -834,11 +875,11 @@ validation.
 
 ### 6.5 The improper null space never reaches the sampler
 
-In (C) the null-space coordinates are the parameters b₀ and b₁, each with a
-proper prior, so the joint prior over everything the sampler moves is proper by
-construction. A user who omits a prior on b₀ gets the model's ordinary treatment
-of a prior-less parameter — a flat density over its declared box — which is
-proper because the box is finite (§7.2).
+In (C) the null-space coordinates are the mid-window parameters b₀ and b₁, each
+with a proper prior, so the joint prior over everything the sampler moves is
+proper by construction. A user who omits a prior on b₀ gets the model's ordinary
+treatment of a prior-less parameter — a flat density over its declared box —
+which is proper because the box is finite (§7.2).
 
 ### 6.6 The centred realization is a separate, conditional stage that changes `pgas.rs`
 
@@ -954,16 +995,17 @@ coefficients means 5, 9 and 17 uniform intervals (h = 33.6, 18.7, 9.9 days). K =
 assertions; K = 8 is reported as a coarse reference.
 
 **Arms.** Each K is fitted (i) with plain coefficients, flat priors in
-`[-8, 2]`, and (ii) with `random_walk(order = 2)`, b₀ ~ N(ln 0.25, 1), b₁ ~ N(0,
-0.05) per day, and the PC prior τ ~ exponential(λ_h) of §6.1: λ = 0.81, 1.95,
-5.05 for K = 8, 12, 20 (U_h = 3.72, 1.54, 0.59), with τ boxed to [10⁻⁶, 5U_h],
-which leaves 3·10⁻⁷ of the prior mass outside. Both arms fix E₀, I₀ and ρ. A
-third arm, (iii), is (ii) at K = 12 with E₀, I₀ and ρ estimated —
-`E ~ poisson(rate = E0)`, `I ~ poisson(rate = I0)` (the law form PGAS can score;
-a plain `init` assignment is refused, `pgas.rs:3683`), E₀, I₀ ~ log_normal(ln
-10, 1), ρ ~ beta(5, 5) — because in a real Ebola fit ρ·I₀ is a near-ridge and
-the first coefficient trades off against I₀; a spline proven only with them
-fixed is not proven for that use.
+`[-8, 2]`, and (ii) with `random_walk(order = 2)` and the calibrated priors of
+§6.1: mid-window level log β ~ N(ln(1.2γ), 0.6²), mid-window slope b₁ ~ N(0,
+0.005²) per day, and τ ~ exponential(λ_h) with λ = 4.03, 9.73, 25.26 for K = 8,
+12, 20 (U_h = 0.744, 0.308, 0.119), τ boxed to [10⁻⁶, 5U_h], which leaves 3·10⁻⁷
+of the prior mass outside. Both arms fix E₀, I₀ and ρ. A third arm, (iii), is
+(ii) at K = 12 with E₀, I₀ and ρ estimated — `E ~ poisson(rate = E0)`,
+`I ~ poisson(rate = I0)` (the law form PGAS can score; a plain `init` assignment
+is refused, `pgas.rs:3683`), E₀, I₀ ~ log_normal(ln 10, 1), ρ ~ beta(5, 5) —
+because in a real Ebola fit ρ·I₀ is a near-ridge and the first coefficient
+trades off against I₀; a spline proven only with them fixed is not proven for
+that use.
 
 ### 8.2 The checks and their thresholds
 
@@ -973,21 +1015,21 @@ fixed is not proven for that use.
 | V2 gradients          | central finite differences of `complete_data_loglik_grad` in the `gradient_check.rs` harness with step ε = 10⁻⁵·max(\|θ\|, 1) — not the harness's `max(10⁻⁵\|θ\|, 10⁻⁸)` (`gradient_check.rs:653`), which is far too small for log-scale coefficients near 0 — for: identity link, `link = log`, user-written `exp`, periodic spline, a constant `lag`, a spline inside an observation mean, `random_walk` (z, b₀, b₁, τ), at times inside, at a knot, at a and b, and beyond b | relative error < 10⁻⁴ for every parameter                                                                                                                                                                                                                                                         |
 | V3 maximum likelihood | (i) the exact maximum: the same model on the ODE backend with NB observations, maximized by `nl-bobyqa` and independently by `nl-sbplx`, 8 starts each. (ii) IF2 on chain-binomial (IF2 on the ODE backend is refused as an inference method), its estimate scored by 10 independent particle-filter runs of 2,000 particles, against the same scoring at θ_proj, the least-squares projection of the true log β onto the basis, and at the ODE maximum's coefficients          | (i) the two optimizers agree within 0.05 nats for each K; (ii) mean ℓ̂_PF(θ̂_IF2) ≥ max(mean ℓ̂_PF(θ_proj), mean ℓ̂_PF(θ_ODE)) − 2 standard errors                                                                                                                                                    |
 | V4 mixing             | PGAS+NUTS, 4 chains, 1,000 warm-up + 2,000 sweeps, dense mass-matrix adaptation (recorded in the config), on dataset 1, every arm; bulk-ESS per second of wall time for the worst coefficient or innovation, and for τ                                                                                                                                                                                                                                                          | R̂ ≤ 1.01 and bulk-ESS ≥ 400 for every sampled parameter in the K = 12 and K = 20 random-walk arms and arm (iii); worst-coordinate ESS/s at K = 12 random walk ≥ 0.2 × that of the two-rate step model (`if t < 90 then b1 else b2`, the workaround available today) on the same data and settings |
-| V5 coverage and width | 100 datasets; 90% central intervals for log β(t) at the 26 times t = 7, 14, …, 182, including the held times 175 and 182, computed from the draws by a script that evaluates the spline with scipy (not camdl's evaluator)                                                                                                                                                                                                                                                      | K = 12 and K = 20 random-walk arms: pooled coverage over all times and datasets in [0.85, 0.95]; separately, pooled coverage at t = 175, 182 reported (the held region) and ≥ 0.80; mean interval width at interior times (28–154) ≤ 0.5 × the prior-predictive width there                       |
+| V5 coverage and width | 100 datasets; 90% central intervals for log β(t) at the 26 times t = 7, 14, …, 182, computed from the draws by a script that evaluates the spline with scipy (not camdl's evaluator); arms (ii) at K = 12 and K = 20, and arm (iii)                                                                                                                                                                                                                                             | each asserted arm: pooled coverage over the interior times 35–168 and all datasets in [0.85, 0.95]; the early times t ≤ 28 (where I₀ confounds β) and the held times 175, 182 each reported separately and each ≥ 0.80; mean interval width at 35–154 ≤ 0.5 × the prior-predictive width there    |
 | V6 prior lowering     | sample (b₀, b₁, z, τ) from their priors, evaluate the compiled coefficient expressions, recompute the weighted second divided differences                                                                                                                                                                                                                                                                                                                                       | equal z to 10⁻¹²: the lowering is the random walk it names; and coefficients linear in ξ give a curve linear in t to 10⁻¹²                                                                                                                                                                        |
-| V7 prior predictive   | 1,000 draws of the random-walk prior per K, R(t) curves over [0, 182]                                                                                                                                                                                                                                                                                                                                                                                                           | two-sided: the 95% prior band of R(t) contains [0.5, 3] at every t and lies inside [0.02, 50] at every t; reported as a figure                                                                                                                                                                    |
+| V7 prior predictive   | 4,000 draws of the random-walk prior per K from the calibration step (§6.1), R(t) over [0, 182]                                                                                                                                                                                                                                                                                                                                                                                 | two-sided: at every t the 95% band of R(t) contains [0.5, 3] and lies inside [0.1, 20]; the committed `rw_prior_calibration.tsv` reproduces the table of §6.1                                                                                                                                     |
 | V8 calibration        | simulation-based calibration (Talts et al. 2018) on a small model where it is affordable: `X --> D @ f(t) * X` with X₀ = 10⁵, `f` a log-link K = 12 random-walk spline, daily `poisson` observations of the flow; 200 prior draws, PGAS+NUTS, 99 thinned posterior draws each (so the 100 possible ranks fall evenly into 20 bins); test quantities b₀, b₁, τ, each zₖ, and the curve values f(tⱼ) at 10 times                                                                  | rank histograms in 20 bins pass a χ² test at α = 0.01/d, d the number of test quantities (Bonferroni)                                                                                                                                                                                             |
 
 **Power of V5.** Treat the 100 datasets as the independent units and, in the
 worst case, the 26 times within a dataset as perfectly correlated, so the pooled
 coverage has the binomial standard deviation of n = 100 (inferred; a real
-correlation below one only tightens it). The band [0.85, 0.95] then passes a
-true coverage of 0.90 with probability 0.90, of 0.85 with 0.50, of 0.80 with
-0.11 and of 0.75 with 0.01; it fails over-coverage, passing a true 0.97 with
-probability 0.12 and 0.99 with probability below 0.01 (computed from the normal
-approximation). The width row stops a prior-dominated, over-wide posterior from
-passing on coverage alone. Cost: 2 asserted arms × 100 datasets × 4 chains, an
-offline run, not CI.
+correlation below one only tightens it). That worst case is the valid one to
+plan for. The band [0.85, 0.95] then passes, by exact binomial probabilities
+(computed by the statistics re-review), a true coverage of 0.90 with probability
+0.936, of 0.85 with 0.568, of 0.80 with 0.129 and of 0.75 with 0.011; and it
+fails over-coverage, passing a true 0.97 with probability 0.182. The width row
+stops a prior-dominated, over-wide posterior from passing on coverage alone.
+Cost: 3 asserted arms × 100 datasets × 4 chains, an offline run, not CI.
 
 SBC on the SEIR itself is out of scope for cost; V5 is calibration at one truth,
 which `[synthetic]` already supports (`docs/camdl-run-spec.md` §11.5). The
@@ -1148,13 +1190,15 @@ three independent basis references at 10⁻¹²; gradient relative error < 10⁻
 step 10⁻⁵·max(|θ|, 1); two optimizers agreeing within 0.05 nats and IF2 within
 two standard errors of the better of the projected truth and the ODE maximum; R̂
 ≤ 1.01 and bulk-ESS ≥ 400, including the arm with E₀, I₀ and ρ estimated; ESS/s
-≥ 0.2× the two-rate step model; pooled coverage in [0.85, 0.95] over 100
-datasets and 26 times, with the held times ≥ 0.80 and interior width ≤ half the
-prior's; a two-sided prior-predictive band; SBC χ² at α = 0.01/d. Loosening any
-of them later is lowering the bar, so they are fixed now. Recommendation: accept
-as written. Confidence: leaning; the ESS/s ratio is the least grounded, set so
-the spline costs at most five times the effective samples per second of a model
-with a sixth of the parameters.
+≥ 0.2× the two-rate step model; pooled interior coverage in [0.85, 0.95] over
+100 datasets for arms (ii) at K = 12, 20 and (iii), with the early and held
+times each ≥ 0.80 and interior width ≤ half the prior's; a prior-predictive band
+of R(t) containing [0.5, 3] and inside [0.1, 20] at every t, met by the
+calibrated priors (§6.1 table); SBC χ² at α = 0.01/d. Loosening any of them
+later is lowering the bar, so they are fixed now. Recommendation: accept as
+written. Confidence: leaning; the ESS/s ratio is the least grounded, set so the
+spline costs at most five times the effective samples per second of a model with
+a sixth of the parameters.
 
 ## 12. Out of scope, each with its reason
 
