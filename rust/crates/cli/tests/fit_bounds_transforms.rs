@@ -298,8 +298,10 @@ fn hierarchical_leaf_box_that_cuts_the_prior_is_refused() {
     assert!(out.status.success(), "if2 must run; stderr=\n{}", stderr(&out));
 
     // Control: leaves with no box (an unconstrained `real` with no bounds has
-    // none enforced) run under PMMH.
-    let open = "mu = { bounds = [-5, 5], start = 0.0 }\na1 = { start = 0.5 }\na2 = { start = 0.5 }";
+    // none enforced) run under PMMH. A box with an infinite end gives no
+    // auto `rw_sd`, so the step is explicit.
+    let open = "mu = { bounds = [-5, 5], start = 0.0 }\n\
+                a1 = { start = 0.5, rw_sd = 0.1 }\na2 = { start = 0.5, rw_sd = 0.1 }";
     let (out, _) = run_fit(&tmp.0, &ir, open, PMMH, "pmmh_open");
     assert!(out.status.success(), "unboxed leaves must run; stderr=\n{}", stderr(&out));
 
@@ -309,7 +311,8 @@ fn hierarchical_leaf_box_that_cuts_the_prior_is_refused() {
   r1 : rate ~ log_normal(mu = m, sigma = 1.0)
   r2 : rate ~ log_normal(mu = m, sigma = 1.0)";
     let rate_ir = compile(&tmp.0, "hier_rate", &model_src(rate_src));
-    let rate_est = "m = { bounds = [-3, 3], start = 0.0 }\nr1 = { start = 1.0 }\nr2 = { start = 1.0 }";
+    let rate_est = "m = { bounds = [-3, 3], start = 0.0 }\n\
+                    r1 = { start = 1.0, rw_sd = 0.1 }\nr2 = { start = 1.0, rw_sd = 0.1 }";
     let (out, _) = run_fit(&tmp.0, &rate_ir, rate_est, PMMH, "pmmh_rate");
     assert!(out.status.success(), "a rate leaf on [0, inf) must run; stderr=\n{}", stderr(&out));
     // The same leaf with a finite box cuts into (0, ∞) and is refused.

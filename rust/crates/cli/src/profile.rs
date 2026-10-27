@@ -904,6 +904,16 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let if2_params = crate::fit::runner::build_if2_params_from_specs(
         &model, &compiled, &base_params, &specs,
     ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    // Each IF2 cell perturbs by `rw_sd`, which the box must scale when it is
+    // derived.
+    if matches!(profile_algo, ProfileAlgo::If2) {
+        if let Err(e) = crate::fit::runner::refuse_auto_rw_sd_without_finite_box(
+            &if2_params, "`--rw-sd NAME=SD`, or `rw_sd = …` in the fit config's [estimate]",
+        ) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
 
     // `nl-lbfgs` takes each cell's optimum with the ODE forward-sensitivity
     // gradient, so ask the gradient capability gate once, here, rather than

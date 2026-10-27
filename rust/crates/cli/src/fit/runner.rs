@@ -366,6 +366,16 @@ impl FitRunConfig {
         let if2_params = build_if2_params(
             &fit.estimate, &model, &compiled, &base_params, random_starts, seed,
         )?;
+        // IF2 perturbs by `rw_sd`; PMMH and MH start their proposals at five
+        // times it. Neither may run on a step the box could not scale.
+        if matches!(
+            algorithm,
+            Some(super::config_v2::Algorithm::IF2 { .. }
+                | super::config_v2::Algorithm::PMMH { .. }
+                | super::config_v2::Algorithm::Mh { .. })
+        ) {
+            refuse_auto_rw_sd_without_finite_box(&if2_params, "`rw_sd = …` in its [estimate] entry")?;
+        }
 
         // Load data — one or more observation streams (real-data only;
         // synthetic-data fits route through a generator before this path).
@@ -1351,6 +1361,27 @@ pub fn build_if2_params_from_specs(
     }
 
     Ok(params)
+}
+
+/// Refuse an auto-derived `rw_sd` for a parameter whose search box has an
+/// infinite end. The auto step is a fraction of the box, so such a box gives
+/// it no scale: [`auto_rw_sd_from_value`] substitutes ±1e6 for an infinite
+/// end of an identity-transformed box (an unbounded `real` parameter got
+/// 166666.67) and `lo · 1000` with `lo` floored at 1e-300 for a log one (an
+/// unbounded `rate` got ~1e-299). No scale is invented here; the user names
+/// one. `how` is the caller's spelling of an explicit step.
+pub fn refuse_auto_rw_sd_without_finite_box(
+    params: &[EstimatedParam],
+    how: &str,
+) -> Result<(), String> {
+    match params.iter().find(|p| p.rw_sd_auto && !(p.lower.is_finite() && p.upper.is_finite())) {
+        None => Ok(()),
+        Some(p) => Err(format!(
+            "`{}` has search box [{}, {}], which has an infinite end, so no random-walk \
+             step (rw_sd) can be derived from it. Give an explicit rw_sd ({how}), or finite \
+             bounds (`in [lo, hi]` in the model, or `bounds = [lo, hi]` in [estimate]).",
+            p.name, p.lower, p.upper)),
+    }
 }
 
 /// Auto-compute rw_sd from bounds on the transformed scale.

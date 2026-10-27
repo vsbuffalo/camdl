@@ -576,9 +576,10 @@ cases = "{data}"
     }
     // Control: with the leaf estimated too, the same PMMH fit runs. The leaf
     // keeps its kind's box [0, ∞), the log_normal's whole support: a finite
-    // box would cut into it and be refused (`fit_bounds_transforms.rs`).
+    // box would cut into it and be refused (`fit_bounds_transforms.rs`). The
+    // open box gives no auto `rw_sd`, so the step is explicit.
     let fit = write("both.toml",
-        "mu_g = { bounds = [-5, 5], start = 0.0 }\ngamma = { start = 0.1 }",
+        "mu_g = { bounds = [-5, 5], start = 0.0 }\ngamma = { start = 0.1, rw_sd = 0.01 }",
         "beta = 0.3", pmmh);
     ok(camdl(&tmp.path().join("both"), &["fit", "run", fit.to_str().unwrap()]));
 }
