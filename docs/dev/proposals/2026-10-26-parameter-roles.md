@@ -1,6 +1,6 @@
 ---
 date: 2026-10-26
-status: accepted — D1–D10 decided by the maintainer on 2026-10-26 and 2026-10-27 (§12); implementation follows §11
+status: accepted — D1–D10 decided by the maintainer on 2026-10-26 and 2026-10-27 (§12), D2 and D9 amended on 2026-10-27 (typed constants become an IR section); implementation follows §11
 area: CLI parameter resolution / inference setup / run records
 issues: gh#965 (typed constants); §13 lists the follow-ups
 related:
@@ -43,8 +43,9 @@ This proposal adds one typed, exhaustive `Partition` over the model's
 declaration; two are an error, except for three legitimate special cases —
 profiling, sweeping a held parameter, and design-vs-sample's overrides of a
 measure's coverage (§4). Values are then resolved per role through the existing
-value tiers. Typed constants (`let omega : rate = 0.01`) are not configurable.
-Algorithm settings never decide a role; a scenario supplies values and
+value tiers. Typed constants (`let omega : rate = 0.01`) are not parameters:
+they compile to the IR's `constants` section, so no role declaration can name
+one. Algorithm settings never decide a role; a scenario supplies values and
 interventions, never roles; starts come only from `--starts` or
 `[estimate].start`. Model support, search bounds and priors are separate types.
 The run prints and stores the partition whole. The aim is a smaller,
@@ -63,16 +64,20 @@ parameter that _carries inference configuration_; it is not a role:
 `beta : rate in [0.05, 1.0]` is held in `simulate` and estimated in `fit run`.
 
 A **typed constant** is a `let` with a type and a constant body, such as
-`let omega : rate = 0.01`. It compiles to an IR parameter with
-`ParamValue::Fixed { value }` (`expander.ml:5871-5881`; measured: `omega` gets
-`{"mode": "fixed", "value": 0.01}`), so the dimension checker sees its kind
-(language spec §8.4, `docs/camdl-language-spec.md:1807-1830`). It is part of the
-model, not a configurable parameter (D2): no command may fix it at another
-value, estimate, sweep or sample it. The spec's sentence that it is
-"indistinguishable, once compiled, from the same value declared in
-`parameters { }`" (`:218-220`) overstates the equivalence: until `fe412028`
-another `let` over it stopped the compiler with E512, and `fit run` still
-demands a `[fixed]` entry for it (gh#965). Stage 4 rewrites that sentence.
+`let omega : rate = 0.01`. It is part of the model, not a parameter (D2, D9). It
+compiles to an entry of the IR's `constants` section — its name, its value and
+its declared kind — and every expression that names it reads it through a
+`const_ref` node, so the dimension checker still sees its kind (language spec
+§8.4) and its derivative with respect to every parameter is zero by
+construction. Its `#'` prose lives in the envelope's documentation dictionary
+under `constants`. Because it is not in the IR's `parameters`, no command can
+fix it at another value, estimate, sweep or sample it: every external naming is
+the ordinary unknown-parameter refusal, with a hint naming the constant (§4.1).
+Until this change the compiler emitted it as an IR parameter with
+`ParamValue::Fixed { value }`, and the IR parameter list meant two things: a
+`let` over one stopped the compiler with E512 until `fe412028`, `fit run`
+demanded a `[fixed]` entry for one (gh#965), and `profile --rw-sd auto`
+estimated one until `140e8ac2`.
 
 A **role declaration** is an input that names a parameter and says what the run
 does with it. A **value source** gives a parameter a number. A scenario is a
@@ -225,12 +230,15 @@ fix is superseded by the partition.
 | sampled   | the varying set of `--draws prior\|uniform\|posterior`, `--draws FILE` (`--draws-file` after design-vs-sample Stage 5), `fit predict`'s posterior | tier 3.5a, the draw row                                     |
 
 Nothing else declares a role. `--rw-sd`, `[estimate].rw_sd`,
-`perturb_only_at_t0`, `--starts` and a scenario do not. Any external naming of a
-typed constant — `[fixed]`, `--fixed`, `--fixed-file`, `--param`, `--params`, a
-scenario `set` or `scale`, a draws column — is refused, even at its declared
-value (D2, D9): "`omega` is a constant defined in the model with `let`, not a
-parameter, so it cannot be set from outside; to make it configurable, declare it
-in `parameters {}`". A `let` and a `parameters {}` entry of the same name are
+`perturb_only_at_t0`, `--starts` and a scenario do not. A typed constant is not
+a parameter (D2, D9), so any external naming of one — `[fixed]`, `[estimate]`,
+`--fixed`, `--estimate`, `--fixed-file`, `--param`, `--params`, `--sweep`, a
+scenario `set` or `scale`, a draws column — is the unknown-parameter refusal
+every command already gives a misspelt name, even at the declared value. Its
+hint names the constant: "`omega` is a constant of the model
+(`let omega : rate
+= 0.01`), not a parameter; declare it in `parameters {}` to
+set it from outside". A `let` and a `parameters {}` entry of the same name are
 already a compile error, E278.
 
 ### 4.2 The rule
@@ -294,7 +302,7 @@ Examples:
 | `--fixed-file p.toml --sweep beta`, a plain file naming `beta`                         | refused                                              |
 | `--draws uniform --sweep beta`                                                         | valid: design shadow (case 3)                        |
 | `--draws uniform --param beta=0.5`                                                     | valid: imposition by `--param` (case 3)              |
-| `--estimate omega` or `--fixed omega=…`, `omega` a typed constant                      | refused (D2)                                         |
+| `--estimate omega` or `--fixed omega=…`, `omega` a typed constant                      | unknown parameter, hint names the constant (D2, D9)  |
 | `--rw-sd NAME=SD` or `perturb_only_at_t0` on the command line for a non-estimated name | refused                                              |
 
 `--estimate` and `--fit` are mutually exclusive, as in `survey` today
@@ -367,9 +375,10 @@ a row per design point.
 | sweep TSV as `--sweep-file FILE`                   | `simulate`                                          | the design axis: every column is a design parameter                                                                                                                                                     |
 | `[synthetic] true_params`                          | `fit recovery`                                      | the data-generating values; not a role declaration for the fit                                                                                                                                          |
 
-A typed constant may not appear in any of them (D9). The `--fixed-file` and
-`--params` help texts and `docs/camdl-run-spec.md` §1.3 carry this table's rows
-for their flag (Stage 4).
+A typed constant is not a parameter, so naming one in any of them is the
+unknown-parameter refusal of §4.1 (D9). The `--fixed-file` and `--params` help
+texts and `docs/camdl-run-spec.md` §1.3 carry this table's rows for their flag
+(Stage 4).
 
 ## 5. Values are resolved per role, and checked against the constraints
 
@@ -383,8 +392,8 @@ scenario `set`, or a sample row's constant column), it is held at that value and
 the record names the source; if none does, the run is refused with "parameter
 `k` has no value and no role: give it one with `--fixed k=…`, `--fixed-file`,
 `[fixed]` or a scenario that sets it, or estimate it with `--estimate k`". A
-typed constant holds its declared value and is recorded under `constants`, not
-in the partition.
+typed constant holds its declared value; it is part of the model (the IR's
+`constants` section, hashed with the model), not of the partition.
 
 ### 5.2 Design and sampled parameters take their own tier; estimated take none
 
@@ -447,7 +456,7 @@ axes say _where_ the points are. A 2-D profile's grid is a product
 (`sim_job.rs:166-178`), and a measure is over the joint draw, so
 design-vs-sample's `DesignAxis` and `SampleAxis` own the points. Fixed values
 are per scenario arm, so they are not in the partition either. Typed constants
-are not in it, because they are not configurable.
+are not in it, because they are not parameters.
 
 ### 6.2 The partition
 
@@ -537,7 +546,6 @@ pub struct RoleEntry {
 #[derive(Debug, Clone)]
 pub struct Partition {
     entries: IndexMap<String, RoleEntry>,
-    constants: IndexMap<String, f64>,      // typed constants, recorded only
     simplex_groups: Vec<ResolvedSimplex>,  // §6.4
 }
 
@@ -598,8 +606,10 @@ pub fn resolve_roles(inputs: &RoleInputs<'_>, command: &CommandRoles)
 #[derive(Debug, Clone)]
 pub enum RoleError {
     TwoDeclarations { name: String, first: Declaration, second: Declaration },
-    TypedConstant { name: String, by: Declaration },
-    UnknownName { name: String, by: Declaration, candidates: Vec<String> },
+    // `constant` is the declaration of a typed constant of that name, if
+    // the name is one; the message then carries §4.1's hint.
+    UnknownName { name: String, by: Declaration, candidates: Vec<String>,
+                  constant: Option<String> },
     NotAccepted { name: String, role: RoleKind, command: &'static str },
     Missing { role: RoleKind, command: &'static str },
     ScenarioOnRole { scenario: String, name: String, role: RoleKind,
@@ -801,7 +811,7 @@ roles (6 parameters, 1 typed constant):
   fixed      N0 = 10000                            [fixed] in fit.toml
              I0 = 10                               [fixed] in fit.toml
              rho = 0.6                             [fixed] in fit.toml
-  constant   omega = 0.01                          model
+  constant   omega = 0.01                          model (IR constants)
   starts     uniform, 3 per cell; gamma from [estimate].start (chain 1), k drawn
   method     if2: 2000 particles × 50 iterations, cooling 0.95
              rw_sd gamma = 0.0138 (auto), k = 2.1 (auto)
@@ -843,7 +853,6 @@ A profile leaf:
     "N0":    { "role": "fixed", "declared_by": "fit_fixed", "value": 10000,
                "value_from": { "source": "fit_toml_fixed" } }
   },
-  "constants": { "omega": 0.01 },
   "simplex_groups": [],
   "interventions": { "scenario": null, "enable": [], "disable": [] },
   "starts": { "rule": "uniform", "per_cell": 3,
@@ -855,6 +864,9 @@ A profile leaf:
                                            "perturb_only_at_t0": false } } }
 }
 ```
+
+The record holds no `constants` entry: a typed constant is part of the model,
+whose digest is already in every run's identity, so the record would repeat it.
 
 Every profile record — job and leaf — also stores the exact likelihood
 objective: the bound streams and their data digests, the per-cell algorithm and
@@ -931,10 +943,11 @@ Until Stage 5 they write no `partition` (D7); from Stage 5 the record and the
   "bulk files yield", no "`[estimate]` yields to `--fixed`/`--fixed-file`": one
   declaration per parameter, three named special cases, errors otherwise.
 - **The constant-override path** (D2). No `--fixed`, `--param`, `[fixed]` or
-  scenario `set` on a typed constant; `ValueSource::ModelDefault`, the
-  resolver's tier 1 and its exemption from override records
-  (`params_resolver.rs:1438-1443`, `Layers::set`'s `prev != ModelDefault` test)
-  go.
+  scenario `set` on a typed constant — it is not a parameter, so there is
+  nothing to override and no constant-specific refusal or filter anywhere in the
+  CLI; `ValueSource::ModelDefault`, the resolver's tier 1 and its exemption from
+  override records (`params_resolver.rs:1438-1443`, `Layers::set`'s
+  `prev != ModelDefault` test) go.
 - **`--starts from_scenario`** and the scenario-as-starts exception (D6): no
   `Point::FromScenario`, no `StartFrom::Scenario`, no per-scenario exemption in
   the scenario rule.
@@ -1002,7 +1015,7 @@ parameters are exactly the sweep's names.
 - **`SampleProvenance.from_outside` and `Origin`** (its §7.1): the parameters a
   sample does not vary are the partition's fixed parameters, with `ValueSource`
   provenance; `Origin::ModelDefault` has no counterpart, because typed constants
-  are not configurable.
+  are not parameters.
 - **W12** (`--param` on a swept parameter): a `TwoDeclarations` refusal.
 
 ### 9.2 What it leaves untouched
@@ -1052,15 +1065,16 @@ Recorded here; that proposal is not edited by this one.
 - A plain `--fixed-file` entry naming a swept or `--estimate` parameter is
   refused; a fit artifact's such entries are unused and listed (D10). Today both
   run with no notice (`profile.rs:750-781` checks only `--fixed` and `[fixed]`).
-- `fit run` no longer demands typed constants in `[fixed]`, and refuses them
-  there (D9).
+- `fit run` no longer demands typed constants in `[fixed]`; naming one there is
+  the unknown-parameter refusal, whose hint names the constant (D9).
 - Under PMMH and PGAS, a hierarchical leaf with a search box narrower than its
   support is refused (§6.4).
 - A scenario setting or scaling an estimated or design parameter is refused in
   every command (today only `fit run` and `survey --fit` refuse the first, and
   `profile` notices the second).
 - A parameter whose only value was a `--starts` file is refused under D3.
-- Typed constants cannot be named by any role declaration or value flag (D2).
+- Typed constants cannot be named by any role declaration or value flag: they
+  are not parameters (D2).
 - Grid values outside the search box are refused (§5.4).
 - A split simplex is refused; a fully held one is checked to sum to 1.
 - A `real` or `instant` parameter with no declared bounds has support `(−∞, ∞)`,
@@ -1098,7 +1112,8 @@ Recorded here; that proposal is not edited by this one.
   need `--fixed` or a `--fixed-file` that names only them.
 - **Typed constants (D9).** The nine `camdl-garki` fit configs
   (`fits/mosq_dyn_pool_*.toml` and kin) drop their `abund_floor = 0.000001`
-  line. Test 4 of `rust/crates/cli/tests/generated_draws_varying_only_gh949.rs`
+  line; until they do, they fail with the unknown-parameter refusal and its
+  hint. Test 4 of `rust/crates/cli/tests/generated_draws_varying_only_gh949.rs`
   declares `c` in `parameters {}` without bounds, which `--draws uniform` also
   leaves undrawn (`main.rs:4581-4587` draws declared bounds only, verified).
 - **Fit artifacts as `--fixed-file` (D10).** Documented in `docs/inference.md`,
@@ -1106,10 +1121,11 @@ Recorded here; that proposal is not edited by this one.
   entries for swept or estimated parameters are unused and listed.
 - **Docs.** Run spec §1.3 (`docs/camdl-run-spec.md:82-183`) rewritten around
   roles then values; `docs/camdl-language-spec.md:5201-5210` (the `--rw-sd`
-  modes) and `:218-220` (typed constants) rewritten by hand, never through
-  `dprint`; `docs/inference.md` and `camdl profile --help` gain the
-  full-versus-held paragraph; `FIXED_LONG_ABOUT` corrected; the stale doc
-  comment on `perturb_only_at_t0` (`fit/config_v2.rs:606-612`) corrected.
+  modes) rewritten by hand, never through `dprint` (its §1 and §8.4 paragraphs
+  on typed constants are rewritten with the IR change of D9);
+  `docs/inference.md` and `camdl profile --help` gain the full-versus-held
+  paragraph; `FIXED_LONG_ABOUT` corrected; the stale doc comment on
+  `perturb_only_at_t0` (`fit/config_v2.rs:606-612`) corrected.
 
 ### 10.3 Run identity
 
@@ -1137,7 +1153,12 @@ and that no key moves for a reason that does not change results:
 - **`simulate`, `fit predict`.** Values are unchanged, so nothing re-keys beyond
   the engine version.
 
-No IR change: no `ir/VERSION` bump, no golden moves.
+The roles change itself is not an IR change. D9's constants section is: it bumps
+`ir/VERSION`, moves every golden, and re-keys every run through the IR version
+in the model digest. A model with typed constants also changes its model digest
+for a reason of substance — the constant leaves `parameters` for `constants` —
+while its simulation and fit results are unchanged, because the same value
+enters the same arithmetic.
 
 ## 11. Five stages, each green alone, with known likelihood profiles as the oracle
 
@@ -1232,6 +1253,14 @@ estimates `beta` and `gamma`; nothing estimated without `--slice` is refused
 naming `--estimate`; a grid outside the search box is refused; two profiles
 differing only in an `--estimate` bound have different base digests.
 
+**The IR change of D9** lands between Stage 1 and Stage 2: typed constants leave
+the IR's `parameters` for a `constants` section, read through a `const_ref`
+expression node. _Tests:_ a constant is not in `parameters`; `fit run` runs
+without a `[fixed]` entry for it; `--fixed omega=…` is refused with §4.1's hint;
+`profile --rw-sd auto` cannot estimate it; a `let` over it still evaluates to
+the value it did; simulation and fit results of models with constants are
+byte-identical apart from run IDs and version headers.
+
 **Stage 4 — delete and document.** Everything in §8.2 the earlier stages left
 unreferenced, `resolve_parameters` included; §10.2's documents.
 
@@ -1254,17 +1283,20 @@ fixed at the grid value. It is not a role conflict but one of the three cases of
 §4.2 (case 2). Rejected: (a) a role change with its own notice class; (b) a
 refusal, which breaks every `fit run --sweep` config.
 
-**D2 — Typed constants. Decided (2026-10-26): not configurable.** Only
-`parameters {}` entries may be fixed, estimated, swept or sampled from outside.
-A typed constant holds its declared value; naming it in any role declaration,
-`--fixed`, `--param`, `[fixed]` or a scenario `set` is refused with "move it
-into `parameters {}`". Rejected: allowing another fixed value; allowing
-estimation. The search for anything requiring an override found two (D9) and
-nothing in the language semantics: §8.4 of the language spec describes typed
-constants as a dimensional device, and no golden, book model or vignette
-overrides one (searched: `ocaml/golden`, `rust/crates/*/tests`, `docs/`,
-`camdl-book`, `camdl-vignettes`, `camdl-garki`, `camdl-india-polio`,
-`camdl-nigeria-polio`, `ebola-camdl`, `ebola-bdbv-camdl`, `camdl-paper`).
+**D2 — Typed constants. Decided (2026-10-26), amended (2026-10-27): not
+parameters.** Only `parameters {}` entries may be fixed, estimated, swept or
+sampled from outside. A typed constant holds its declared value, and it is not
+in the IR's parameter list at all: it compiles to the IR's `constants` section
+(D9). Naming it in any role declaration, `--fixed`, `--param`, `[fixed]` or a
+scenario `set` is therefore the unknown-parameter refusal, with §4.1's hint:
+"declare it in `parameters {}` to set it from outside". Rejected: allowing
+another fixed value; allowing estimation. The search for anything requiring an
+override found two (D9) and nothing in the language semantics: §8.4 of the
+language spec describes typed constants as a dimensional device, and no golden,
+book model or vignette overrides one (searched: `ocaml/golden`,
+`rust/crates/*/tests`, `docs/`, `camdl-book`, `camdl-vignettes`, `camdl-garki`,
+`camdl-india-polio`, `camdl-nigeria-polio`, `ebola-camdl`, `ebola-bdbv-camdl`,
+`camdl-paper`).
 
 **D3 — Undeclared parameters. Decided (2026-10-26): fixed by default.** An
 undeclared parameter (named by no declaration; a `--fixed-file` or `--params`
@@ -1301,13 +1333,25 @@ targeted refusal lands now as an interim fix, under PMMH and PGAS only, and the
 full Bayesian treatment is deferred (§13).
 
 **D9 — Typed constants in existing configs and tests. Decided (2026-10-27):
-option (a).** Typed constants are immutable. Every external naming is refused,
-including a redundant one at the declared value: `[fixed]`, `--fixed`,
-`--fixed-file`, `--param`, `--params`, a scenario `set` or `scale`, or a draws
-column, with the message of §4.1. `fit run` stops demanding constants in
-`[fixed]`. The nine `camdl-garki` configs and test 4 of
-`generated_draws_varying_only_gh949.rs` migrate (§10.2). Rejected: (b),
-accepting an entry at exactly the declared value.
+option (c).** Typed constants lower to a separate IR `constants` section
+carrying each constant's name, value and declared kind; their `#'` prose goes to
+the envelope's documentation dictionary under `constants`, beside every other
+declaration's, outside the run identity. They are not parameters. Expressions
+read one through a `const_ref` node, so the dimension checker sees the declared
+kind and its derivative with respect to every parameter is zero by construction.
+The configuration-layer refusal of option (a) becomes the ordinary
+unknown-parameter error, which holds by construction rather than by a check in
+each command; its hint names the constant and says "declare it in
+`parameters {}` to set it from outside". `fit run` stops demanding constants in
+`[fixed]`, which closes gh#965. `camdl fit summary --parameters` lists the
+model's constants, with their values and prose, under their own heading after
+the parameter legend. The nine `camdl-garki` configs and test 4 of
+`generated_draws_varying_only_gh949.rs` migrate (§10.2). Rejected: (a), a
+refusal of each external naming in the configuration layer while the constant
+stays an IR parameter, because the IR parameter list then keeps meaning two
+things, and every command that enumerates parameters needs its own constant
+filter (`140e8ac2` was one such filter, added after `profile --rw-sd auto`
+estimated a constant); (b), accepting an entry at exactly the declared value.
 
 **D10 — A fit artifact as `--fixed-file`. Decided (2026-10-27): option (b).** A
 fit artifact may name swept or estimated parameters; those entries are unused

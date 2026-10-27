@@ -216,13 +216,18 @@ let N[p in patch] = S[p] + E[p] + I[p] + C[p]
 ```
 
 Which surfaces a `let`'s prose reaches depends on whether the binding becomes a
-model entity. A **typed** `let` with a **constant** body is a fixed parameter —
-`let omega : rate = 0.01` is indistinguishable, once compiled, from the same
-value declared in `parameters { }` — so its doc joins the parameter legend in
-`camdl fit summary` alongside the rest. Every other `let` is inlined and has no
-entity of its own; its prose lives in `camdlc inspect --let <name>`. `@symbol`
-applies either way, and applies everywhere the name is typeset, not only in the
-definition itself.
+model entity. A **typed** `let` with a **constant** body is a **model
+constant**: `let omega : rate = 0.01` compiles to an entry of the IR's
+`constants` section, with its value and its declared kind, and is not a
+parameter. It holds its declared value in every run — no `--fixed`, `[fixed]`,
+`[estimate]`, `--sweep` or scenario `set` can name it, and one that tries is
+refused as an unknown parameter whose hint says to declare it in
+`parameters { }` to set it from outside. `camdl fit summary --parameters` lists
+the model's constants under their own `constants` heading after the parameter
+legend, each with its value and its prose. Every other `let` is inlined and has
+no entity of its own; its prose lives in `camdlc inspect --let <name>`.
+`@symbol` applies either way, and applies everywhere the name is typeset, not
+only in the definition itself.
 
 ---
 
@@ -1815,10 +1820,14 @@ let obs_floor : count = 0.01
 let mu_annual : rate = 0.0002 'per_year
 ```
 
-When a typed `let` has a constant body (`EConst`, `EUnit`, or their negation),
-the compiler emits it as a fixed-value parameter in the IR with `param_kind` set
-and `value` populated. This means the dimensional analysis checker sees the
-declared dimension rather than treating the constant as dimensionless.
+When a typed `let` has a constant body (a literal, a unit literal, or
+arithmetic and pure math functions over them), the compiler evaluates it once
+and emits it into the IR's `constants` section with its declared kind. Every use
+reads it through a constant reference, so the dimensional analysis checker sees
+the declared dimension rather than treating the constant as dimensionless, and
+every gradient treats it as a constant, with derivative zero. It is not a
+parameter: it cannot be fixed at another value, estimated, swept or sampled (§1,
+doc comments).
 
 Without the type annotation, a bare constant like `1e-6` is dimensionless and
 adding it to a population compartment (`I + 1e-6`) triggers E302. The typed form
