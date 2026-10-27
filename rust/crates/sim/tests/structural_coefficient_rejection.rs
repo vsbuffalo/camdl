@@ -121,6 +121,26 @@ fn periodic_spline_coef_param_is_rejected() {
     );
 }
 
+/// The span evaluator's workspaces hold degree ≤ `bspline::MAX_DEGREE` (5); a
+/// larger degree is refused at build, naming the forcing, rather than
+/// reaching the evaluator. The compiler does not bound the degree today.
+#[test]
+fn periodic_spline_degree_above_max_is_refused() {
+    let degree = sim::bspline::MAX_DEGREE as u32 + 1;
+    let err = CompiledModel::new(model_with_forcing(TimeFuncKind::PeriodicSpline(PeriodicSpline {
+        period: Expr::const_(4.0),
+        n_basis: 9,
+        degree,
+        coefs: vec![Expr::const_(1.0); 9],
+    })))
+    .err()
+    .expect("degree 6 must be refused");
+    assert_eq!(
+        err.to_string(),
+        "model validation error: periodic_spline forcing 'f': degree (6) must be at most 5"
+    );
+}
+
 #[test]
 fn periodic_step_value_param_builds_live() {
     // Sanity counterpart: a Periodic forcing IS a scalar-coefficient kind (value

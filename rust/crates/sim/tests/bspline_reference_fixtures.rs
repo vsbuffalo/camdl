@@ -13,7 +13,7 @@
 use std::path::Path;
 
 use sim::bspline::{basis, Knots};
-use sim::periodic_bspline::eval_periodic_bspline;
+use sim::periodic_bspline::PeriodicBasis;
 
 const TOL: f64 = 1e-12;
 
@@ -81,10 +81,10 @@ fn periodic_spline_matches_scipy_at_degrees_0_to_5() {
     assert_eq!(rows.len(), 6 * 205);
     let mut worst: f64 = 0.0;
     for r in &rows {
-        let p: u32 = r[0].parse().unwrap();
+        let p: usize = r[0].parse().unwrap();
         let t: f64 = r[1].parse().unwrap();
         let want: f64 = r[2].parse().unwrap();
-        let got = eval_periodic_bspline(t, 4.0, 7, p, &coefs);
+        let got = PeriodicBasis::new(4.0, 7, p).unwrap().eval(t, |k| coefs[k]);
         let err = (got - want).abs();
         assert!(err <= TOL, "periodic p={p} t={t}: camdl {got} vs scipy {want}");
         worst = worst.max(err);
