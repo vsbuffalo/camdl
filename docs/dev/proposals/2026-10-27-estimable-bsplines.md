@@ -680,10 +680,11 @@ polynomial of degree p − 2, so B_i''B_j'' has degree 2p − 4, and (p − 1)-p
 Gauss–Legendre quadrature on that interval (exact to degree 2p − 3) integrates
 it exactly. For a cubic that is 2 points per interval. Ω is assembled interval
 by interval from the p + 1 nonzero second derivatives, obtained from the same
-span routine as the values (Piegl & Tiller 1997, Algorithm A2.3). Properties,
-each checked numerically with a scratch scipy script (cubic, clamped, window [0,
-168], K = 12, uniform and the irregular breakpoints 0, 10, 25, 30, 60, 90, 100,
-130, 150, 168):
+span routine as the values (Piegl & Tiller 1997, Algorithm A2.3; the algorithm
+number is cited from memory, and Stage 1 checks it against the book).
+Properties, each checked numerically with a scratch scipy script (cubic,
+clamped, window [0, 168], K = 12, uniform and the irregular breakpoints 0, 10,
+25, 30, 60, 90, 100, 130, 150, 168):
 
 - 2-point and 10-point Gauss–Legendre agree to 2·10⁻¹⁵ of max|Ω|;
 - Ω is banded with bandwidth p = 3;
@@ -701,14 +702,14 @@ spacing. Measured on both knot sets above: Σ ξⱼBⱼ(t) = t to 6·10⁻¹⁴ 
 
 ### 6.2 Against the two alternatives, the curvature penalty is the only one exact for irregular knots
 
-|                   | Curvature penalty Ω (chosen)                                                          | Greville divided differences                             | Unclamped Eilers–Marx, index differences                                        |
-| ----------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| Null space        | exactly the linear functions of t, any knots                                          | linear in t, any knots                                   | linear in t only for equal spacing                                              |
-| End behaviour     | no special case: the penalty is on g itself                                           | end increments need spacing weights that are a heuristic | p coefficients per end supported mostly outside the data; f(a), f(b) are blends |
-| Non-uniform knots | yes                                                                                   | yes, with the heuristic weights                          | no (refused)                                                                    |
-| Meaning of τ      | a property of the curve, independent of K (§6.5)                                      | depends on the spacing h; rescaled per K                 | depends on h                                                                    |
-| Precomputation    | Ω by quadrature, O(K·p²); one (K − 2)-dimensional symmetric eigendecomposition, O(K³) | none                                                     | none                                                                            |
-| Per evaluation    | O(pK) (§6.4)                                                                          | O(pK)                                                    | O(pK)                                                                           |
+|                   | Curvature penalty Ω (chosen)                                                                                                       | Greville divided differences                             | Unclamped Eilers–Marx, index differences                                        |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Null space        | exactly the linear functions of t, any knots                                                                                       | linear in t, any knots                                   | linear in t only for equal spacing                                              |
+| End behaviour     | no special case: the penalty is on g itself                                                                                        | end increments need spacing weights that are a heuristic | p coefficients per end supported mostly outside the data; f(a), f(b) are blends |
+| Non-uniform knots | yes                                                                                                                                | yes, with the heuristic weights                          | no (refused)                                                                    |
+| Meaning of τ      | dimensionless, normalized by a declared reference duration and by √(K − 2): the same at every K, time unit and data release (§6.3) | depends on the spacing h; rescaled per K                 | depends on h                                                                    |
+| Precomputation    | Ω by quadrature, O(K·p²); a Householder QR and one (K − 2)-dimensional Cholesky factorization, O(K³)                               | none                                                     | none                                                                            |
+| Per evaluation    | O(pK) (§6.4)                                                                                                                       | O(pK)                                                    | O(pK)                                                                           |
 
 The precomputation runs once per compiled model, after anchors are resolved; for
 K ≤ 50 it is a few hundred thousand flops (inferred). The divided-difference
@@ -718,63 +719,79 @@ curvature penalty removes the need for them at a one-off O(K³) cost.
 
 ### 6.3 The prior, its completion, and the non-centred whitened parameterization
 
-**The prior.** p(w | τ) ∝ τ^{−(K−2)} exp(−wᵀΩw / (2τ²)), improper along null(Ω),
-completed by proper priors on the level and slope of the linear part.
+**Units and scaling.** ∫ g''² dt has units of time⁻³, and its prior expectation
+grows with the number of modes. Two fixed factors make τ a dimensionless number
+with one meaning: a declared reference duration T_ref (`per = 1 'weeks` in
+`smooth`, dimension-checked as a duration, converted to model time units), and
+the number of non-linear modes K − 2. The prior is
 
-**Whitening.** At model build, with t_m = (a + b)/2 the window midpoint:
+p(w | τ) ∝ τ^{−(K−2)} exp(−κ² · wᵀΩw / (2τ²)), κ = √(K − 2) · T_ref^{3/2},
 
-1. N = [1, ξ − t_m·1] spans null(Ω). A Householder QR of N gives an orthonormal
-   basis Q₊ (K × (K − 2)) of its orthogonal complement, which is range(Ω)
-   because Ω is symmetric.
-2. Eigendecompose the positive-definite (K − 2) × (K − 2) matrix Q₊ᵀΩQ₊ = V Λ
-   Vᵀ.
-3. M = Q₊ V Λ^{−1/2}, a K × (K − 2) matrix with MᵀΩM = I and NᵀM = 0.
+improper along null(Ω), completed by proper priors on the level and slope of the
+linear part. Under it, E[T_ref³ ∫ g''² dt | τ] = τ²: τ² is the expected total
+curvature measured in reference durations, independent of the time unit, of the
+knot count and of the data release. Normalizing by the window length instead
+would make the implied prior move whenever an anchored window moves: the
+statistics re-review measured the equivalent tail at 21.8 for a 168-day window
+against 16.6 for a 140-day one. The √(K − 2) factor is a recommendation (D3
+detail, §11): without it E[T_ref³ ∫ g''²] = τ²(K − 2), so adding knots would
+silently loosen the smoothness prior; with it, knot count and smoothness are
+separate choices.
+
+**Whitening by Cholesky.** At model build, with t_m = (a + b)/2:
+
+1. N = [1, ξ − t_m·1] spans null(Ω). Q₊, an orthonormal basis (K × (K − 2)) of
+   its orthogonal complement — which is range(Ω), Ω being symmetric — is the
+   last K − 2 columns of the full Q of a Householder QR of N, computed with the
+   columns in that fixed order, no pivoting, and the standard reflector sign
+   convention (each reflector chosen to avoid cancellation, v₁ carrying the sign
+   of the leading entry). Every step is a fixed sequence of floating-point
+   operations on fixed inputs, so Q₊ is a deterministic function of the knots.
+2. L = chol(Q₊ᵀΩQ₊), the lower Cholesky factor of a (K − 2) × (K − 2)
+   positive-definite matrix, computed by the existing
+   `inference/linalg.rs::cholesky_lower` (verified, `:7`).
+3. M = Q₊ L⁻ᵀ (triangular solves), with MᵀΩM = I and NᵀM = 0.
 
 The coefficients are
 
-w = a·1 + b·(ξ − t_m·1) + τ M z, z ~ N(0, I_{K−2}),
+w = a·1 + b·(ξ − t_m·1) + (τ/κ) M z, z ~ N(0, I_{K−2}),
 
 so the linear part of the curve is a + b(t − t_m): a is the level of log β at
-mid-window and b its slope per unit time. Building the eigenvectors inside
-range(Ω) rather than eigendecomposing Ω itself makes NᵀM = 0 hold by
-construction; the direct eigendecomposition of Ω left NᵀM at 10⁻⁹ in the scratch
-check, because the two near-zero eigenvalues are only numerically zero and
-Λ^{−1/2} amplifies the error. This is the decomposition w = (null-space part) +
-U₊Λ₊^{−1/2}τz, with U₊ = Q₊V the eigenvectors of Ω on range(Ω) and the null
-space removed exactly.
+mid-window and b its slope per unit time. An eigendecomposition would give the
+same MMᵀ, and so the same prior — the statistics re-review measured them equal
+to 9·10⁻¹³, and the scratch check here to 9·10⁻¹³ at K = 20 — but on uniform
+knots Ω's eigenvalues are nearly degenerate (smallest relative gap 10⁻⁶ at K =
+12, 6·10⁻¹³ at K = 20), so individual eigenvectors, and with them the meaning of
+each zᵢ, would depend on rounding and on the last bits of an anchored window.
+The Cholesky construction is unique, non-iterative and needs no sign rule. The
+zᵢ carry no individual interpretation; only their joint law matters.
 
-**Exact equivalence.** The map (a, b, y) → w = a·1 + b(ξ − t_m) + Q₊V y is a
-linear bijection with constant Jacobian, and with y = τΛ^{−1/2}z, wᵀΩw = yᵀΛy =
-τ² zᵀz. The density z ~ N(0, I) therefore induces on w
+**Exact equivalence.** The map (a, b, y) → w = a·1 + b(ξ − t_m) + Q₊ y is a
+linear bijection with constant Jacobian, and with y = (τ/κ) L⁻ᵀ z, κ² wᵀΩw = κ²
+yᵀ(Q₊ᵀΩQ₊)y = τ² zᵀz. The density z ~ N(0, I) therefore induces on w
 
-p(w | τ) = p_{a,b}(a(w), b(w)) · c · τ^{−(K−2)} exp(−wᵀΩw/(2τ²)),
+p(w | τ) = p_{a,b}(a(w), b(w)) · c · τ^{−(K−2)} exp(−κ² wᵀΩw/(2τ²)),
 
 where (a(w), b(w)) are the coordinates of the orthogonal projection of w onto
-null(Ω) and c is a constant. That is exactly the improper Gaussian with
-precision Ω/τ² over range(Ω), with the proper prior p_{a,b} on the null space,
-including the τ^{−(K−2)} normalizer (the rank of Ω, not K) that an estimated τ
-needs. Checked numerically: MᵀΩM = I to 6·10⁻¹⁴ (uniform) and 1.2·10⁻¹³
-(irregular); NᵀM = 0 by construction; the Monte Carlo covariance of τMz over
-2·10⁵ draws matches τ²Ω⁺ (the pseudo-inverse) to 4·10⁻³, its Monte Carlo error.
+null(Ω) and c is a constant: exactly the improper Gaussian with precision κ²Ω/τ²
+over range(Ω), with the proper prior p_{a,b} on the null space, including the
+τ^{−(K−2)} normalizer (the rank of Ω, not K). Checked numerically with the
+Cholesky construction (scratch script, four knot sets): MᵀΩM = I to 2.7·10⁻¹³ at
+worst; ‖NᵀM‖_max/(‖N‖₂‖M‖₂) ≤ 5.4·10⁻¹⁷; and, with the earlier eigenvector
+construction, the Monte Carlo covariance of Mz over 2·10⁵ draws matched Ω⁺ to
+4·10⁻³, its Monte Carlo error.
 
-**Gradient.** In the sampler's coordinates the map is linear: ∂w/∂z = τ M, ∂w/∂a
-= 1, ∂w/∂b = ξ − t_m, ∂w/∂τ = M z. Through the spline, with t_c = clamp(t − lag,
-a, b):
+**Gradient.** In the sampler's coordinates the map is linear: ∂w/∂z = (τ/κ) M,
+∂w/∂a = 1, ∂w/∂b = ξ − t_m, ∂w/∂τ = M z / κ. Through the spline, with t_c =
+clamp(t − lag, a, b):
 
-∂g/∂a = 1, ∂g/∂b = t_c − t_m, ∂g/∂zᵢ = τ Wᵢ(t_c), ∂g/∂τ = Σᵢ zᵢ Wᵢ(t_c),
+∂g/∂a = 1, ∂g/∂b = t_c − t_m, ∂g/∂zᵢ = (τ/κ) Wᵢ(t_c), ∂g/∂τ = Σᵢ zᵢ Wᵢ(t_c)/κ,
 
 where Wᵢ(t) = Σⱼ M_jᵢ Bⱼ(t) is the i-th **whitened basis function**. The first
 two use partition of unity and linear precision, so they need no basis
-evaluation. Under `link = log` each is multiplied by f(t) (§5.2).
-
-**Determinism.** The meaning of each zᵢ depends on M, and an eigendecomposition
-is unique only up to sign and order. The Rust solver is a cyclic Jacobi method
-(no linear-algebra dependency exists in the workspace beyond
-`inference/linalg.rs::cholesky_lower`), with a fixed sweep order, eigenvalues
-sorted ascending (z₁ is the smoothest non-linear mode), and each eigenvector's
-sign fixed by making its largest-magnitude component positive. Because the
-engine version is part of every run identity (§4.2), a change to this code
-re-keys stored runs rather than reinterpreting their draws.
+evaluation. Under `link = log` each is multiplied by f(t) (§5.2). Because the
+engine version is part of every run identity (§4.2), any change to this
+construction re-keys stored runs rather than reinterpreting their draws.
 
 ### 6.4 `smooth(...)` is a coefficient form, and the priors stay visible
 
@@ -782,10 +799,13 @@ re-keys stored runs rather than reinterpreting their draws.
 dimensions { mode = [m1, m2, m3, m4, m5, m6, m7, m8, m9, m10] }  # n_basis − 2
 
 parameters {
-  a_b       : real 'ratio in [-8, 2]  ~ normal(mu = -1.9, sigma = 0.6)          # log β mid-window (R ≈ 1.2)
-  b_b       : real [1/T] in [-0.05, 0.05] ~ normal(mu = 0.0, sigma = 0.005)   # slope of log β, per day  # PC prior on an SD, calibrated (§6.5): P(tau_b > 0.01) = 0.05
-  tau_b     : positive in [1e-8, 0.05] ~ exponential(rate = 299.6)
-  z[mode]   : real 'ratio in [-8, 8]  ~ normal(mu = 0.0, sigma = 1.0)
+  # log β at mid-window (R ≈ 1.2)
+  a_b     : real 'ratio in [-8, 2] ~ normal(mu = -1.9, sigma = 0.6)
+  # slope of log β, per day
+  b_b     : real [1/T] in [-0.05, 0.05] ~ normal(mu = 0.0, sigma = 0.005)
+  # PC prior on an SD, calibrated (§6.5): P(tau_b > 0.5) = 0.05
+  tau_b   : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
+  z[mode] : real 'ratio in [-8, 8] ~ normal(mu = 0.0, sigma = 1.0)
 }
 
 forcing {
@@ -793,7 +813,7 @@ forcing {
     window  = [date("2025-08-04"), last_obs - 2 'weeks]
     n_basis = 12
     link    = log
-    coefs   = smooth(level = a_b, slope = b_b, scale = tau_b, modes = z)
+    coefs   = smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks)
   }
 }
 ```
@@ -805,11 +825,8 @@ least 2, so curvature exists. Compile-time checks, new codes in the E4xx forcing
 range: `modes` is an indexed family with exactly `n_basis − 2` cells, each
 `real` with prior exactly `normal(mu = 0, sigma = 1)`, so the name stays honest;
 `level` and `slope` are scalars. The dimension check requires a dimensionless
-level and a slope of 1/time. The scale has dimension time^{−3/2} (τ²·∫g''² dt is
-dimensionless), which the dimension grammar has no literal for, so it is
-declared `positive` and not dimension-checked; the language spec states that τ
-is in model time units, so a model whose `time_unit` is weeks needs a τ prior
-rescaled by 7^{3/2}.
+level, a slope of 1/time, a dimensionless scale, and a duration `per`; a
+parameter in `per` is refused as structural (E600).
 
 **IR.** Because M depends on knots that may be observation anchors, it cannot be
 computed by the compiler. The coefficients therefore stay symbolic in the IR,
@@ -819,28 +836,29 @@ and the runtime builds M after anchor substitution:
 // rust/crates/ir/src/time_func.rs
 pub enum SplineCoefs {
     Explicit { coefs: Vec<Expr> },
-    Smooth { level: Expr, slope: Expr, scale: Expr, modes: Vec<Expr> },
+    Smooth { level: Expr, slope: Expr, scale: Expr, modes: Vec<Expr>, per: Expr },
 }
 // BSpline.coefs: SplineCoefs. ForcingBasis gains `space: BasisSpace`:
 #[serde(rename_all = "snake_case")]
-pub enum BasisSpace { Spline, Whitened }   // B_k(t) or W_k(t)
+pub enum BasisSpace { Spline, Whitened, Linear }   // B_k(t), W_k(t), t_c − t_m
 ```
 
-Both join the branch's single pending IR bump. `CompiledModel::new` computes Ω,
-Q₊, V, Λ and M for each `Smooth` forcing; evaluation computes the span, the p +
-1 values Bⱼ(t_c), then g = a + b(t_c − t_m) + τ Σᵢ zᵢ Σⱼ M_jᵢ Bⱼ — O(p·K)
-multiply-adds and K − 2 parameter reads per call, about 40 + 4·10 for K = 12
-(inferred). The derivative nodes are `forcing_basis(f, i, whitened)`, Wᵢ(t),
-O(p) each.
+All join the branch's single pending IR bump. `CompiledModel::new` computes Ω,
+Q₊, L and M for each `Smooth` forcing — O(K·p²) for Ω, O(K³) for the QR, the
+Cholesky factor and the solves, once per compiled model. Evaluation computes the
+span, the p + 1 values Bⱼ(t_c), then g = a + b(t_c − t_m) + (τ/κ) Σᵢ zᵢ Σⱼ M_jᵢ
+Bⱼ — O(p·K) multiply-adds and K − 2 parameter reads per call, about 40 + 4·10
+for K = 12 (inferred). The derivative nodes are `forcing_basis(f, i, whitened)`,
+Wᵢ(t), O(p) each.
 
 **Gradient cost** is O(pK) per referencing rate per substep for the K − 2 mode
-gradients (each Wᵢ is a (p + 1)-term sum once the span is known), plus O(1) for
-a and b and O(pK) for τ — trivial for K ≤ 50. The autodiff rule (§5.2) emits,
-for `Smooth`: ∂g/∂a → 1, ∂g/∂b → `Time − lag` clamped (emitted as a
-`forcing_basis` with a third space, `Linear`, which evaluates t_c − t_m, so the
-clamp and lag cannot be re-derived differently), ∂g/∂zᵢ → τ·Wᵢ, ∂g/∂τ → Σᵢ zᵢWᵢ,
-each multiplied by `time_func(f)` under `link = log`. So `BasisSpace` is
-`Spline | Whitened | Linear`.
+gradients, plus O(1) for a and b and O(pK) for τ — trivial for K ≤ 50. The
+autodiff rule (§5.2) emits, for `Smooth`: ∂g/∂a → 1, ∂g/∂b →
+`forcing_basis(f, 0, linear)` (which evaluates t_c − t_m, so the clamp and lag
+cannot be re-derived differently), ∂g/∂zᵢ → (τ/κ)·Wᵢ, ∂g/∂τ → Σᵢ zᵢWᵢ/κ, each
+multiplied by `time_func(f)` under `link = log`. κ is a constant the runtime
+knows and the compiler does not when the window is anchored, so the Whitened
+space returns Wᵢ/κ and the rule emits τ·`forcing_basis(f, i, whitened)`.
 
 **Under IF2 and the optimizers the scale must be fixed.** They read no prior,
 and the likelihood depends on (τ, z) only through w, so an estimated τ beside
@@ -851,37 +869,45 @@ reparameterization of w), or estimate explicit coefficients. The refusal sits
 beside `validate_hierarchical_leaf_boxes` (`fit/config_v2.rs:2604`) and moves
 into `resolve_roles` with roles Stage 2.
 
-### 6.5 τ has a PC prior whose tail is calibrated once, for every K
+### 6.5 τ has a PC prior whose tail is calibrated once
 
 τ = 0 is the base model, log β linear in t, and the penalized-complexity prior
 of Simpson et al. (2017) for a Gaussian standard deviation measured from that
-base is exponential: τ ~ exponential(λ), λ = −ln α / U for a tail statement P(τ
-
-> U) = α. Because wᵀΩw = ∫ g''² dt is a property of the curve, τ means the same
-> thing at every K and knot layout; one U serves all of them.
+base is exponential: τ ~ exponential(λ), with λ = −ln α/U for the tail statement
+that τ exceeds U with probability α.
 
 A tail statement bounds curvature, not the curve, so U is calibrated by
 prior-predictive simulation against a target band. Target: at every t in the run
 (window [0, 168], held to 182), the 95% prior band of R(t) = β(t)/γ contains
 [0.5, 3] (every plausible value is admitted) and lies inside [0.1, 20] (absurd
-ones are excluded). With a ~ N(ln(1.2γ), 0.6²) (median R = 1.2 mid-window) and b
-~ N(0, 0.005²) per day (one SD changes β by a factor e^{0.42} ≈ 1.5 over half
-the window), a scan of U ∈ {0.01, 0.015, 0.02, 0.03} meets the target at 0.01
-and fails it at 0.015 for every knot set tried. Measured with a scratch script
-(scipy `BSpline`, cubic, clamped, γ = 0.125, 4,000 draws, seed 20261027; α =
-0.05, U = 0.01, λ = 299.6):
+ones are excluded). With a ~ N(ln(1.2γ), 0.6²) (median R = 1.2 mid-window), b ~
+N(0, 0.005²) per day (one SD changes β by a factor e^{0.42} ≈ 1.5 over half the
+window) and T_ref = 7 days, a scan of U ∈ {0.3, 0.4, 0.5, 0.6, 0.8} meets the
+target for U ≤ 0.6 on every knot set and fails it at 0.8; U = 0.5 is chosen for
+margin. Measured with a scratch script (scipy `BSpline`, cubic, clamped, γ =
+0.125, 4,000 draws, seed 20261027; α = 0.05, U = 0.5, λ = 5.99):
 
 | Knots            | R(t) band at t = 0 | t = 42       | t = 84       | t = 126      | t = 168 and held to 182 | range over t  |
 | ---------------- | ------------------ | ------------ | ------------ | ------------ | ----------------------- | ------------- |
-| K = 8 uniform    | [0.18, 9.64]       | [0.25, 5.43] | [0.15, 8.04] | [0.25, 5.41] | [0.18, 8.86]            | [0.14, 9.64]  |
-| K = 12 uniform   | [0.14, 9.19]       | [0.28, 5.64] | [0.20, 8.84] | [0.27, 5.48] | [0.13, 8.64]            | [0.13, 9.19]  |
-| K = 20 uniform   | [0.15, 11.87]      | [0.28, 5.10] | [0.18, 6.85] | [0.28, 4.91] | [0.16, 11.22]           | [0.15, 11.87] |
-| K = 12 irregular | [0.17, 8.23]       | [0.26, 5.99] | [0.18, 9.99] | [0.27, 5.68] | [0.15, 8.30]            | [0.15, 9.99]  |
+| K = 8 uniform    | [0.16, 10.94]      | [0.24, 5.96] | [0.14, 9.34] | [0.25, 5.80] | [0.14, 9.69]            | [0.14, 10.94] |
+| K = 12 uniform   | [0.17, 8.50]       | [0.28, 5.26] | [0.21, 7.72] | [0.28, 5.16] | [0.17, 8.06]            | [0.17, 8.50]  |
+| K = 20 uniform   | [0.20, 7.84]       | [0.31, 4.56] | [0.27, 4.89] | [0.31, 4.56] | [0.20, 7.78]            | [0.20, 7.84]  |
+| K = 12 irregular | [0.19, 7.76]       | [0.26, 5.76] | [0.19, 8.36] | [0.27, 5.38] | [0.18, 7.82]            | [0.18, 8.54]  |
 
-The near-equality of the rows is the K-independence the curvature penalty
-promises. τ is boxed to [10⁻⁸, 5U], which leaves 3·10⁻⁷ of the prior mass
-outside. Stage 4 commits this calibration as part of the default prior's
-definition: `scripts/calibrate_smooth_prior.py`, run by
+With the √(K − 2) normalization the bands now narrow slightly as K grows, the
+opposite of the unnormalized form, where they widened (K = 20 reached 11.9). The
+K = 8 band is widest because a coarse basis concentrates the same total
+curvature in fewer, larger bends; the target holds at every K. τ is boxed to
+[10⁻⁶, 5U], which leaves 3·10⁻⁷ of the prior mass outside.
+
+**Converting the calibration.** A tail U₀ stated for the unnormalized penalty in
+model days (τ₀ multiplying M z directly) corresponds to U = U₀ · T_ref^{3/2} ·
+√(K − 2) here; the earlier day-scale tail U₀ = 0.01 maps to 0.59 at K = 12,
+consistent with the 0.5 chosen. A model whose `time_unit` is weeks uses the same
+U, because T_ref is converted to model time.
+
+Stage 4 commits this calibration as part of the default prior's definition:
+`scripts/calibrate_smooth_prior.py`, run by
 `make -f tests/recovery/Makefile calibrate-smooth-prior`, writes
 `tests/recovery/cases/spline_seir/smooth_prior_calibration.tsv` (U, λ and the
 band at every t, per knot set) from a fixed seed; the shipped example configs
@@ -964,13 +990,18 @@ length, max|g|), never as a bare number.
   exact reproduction of constants (coefficients 1) and of t (coefficients ξ) to
   10⁻¹³·(b − a), uniform and irregular.
 - The penalty: Ω (2-point Gauss–Legendre) against 10-point Gauss–Legendre and
-  against R's `fda::bsplinepen` (an independent implementation of ∫ D²B_i
-  D²B_j), ≤ 10⁻¹²·max|Ω|; bandwidth p; rank K − 2; 1ᵀΩ1 and ξᵀΩξ ≤
-  10⁻¹²·max|Ω|·(b − a)² for uniform and irregular knots.
-- The whitening: MᵀΩM = I and NᵀM = 0 to 10⁻¹²; τ²MMᵀ = τ²Ω⁺ to 10⁻¹⁰ relative;
-  the induced density of §6.3 equals the improper Gaussian density with the
-  null-space prior, compared pointwise at 100 random w (log-densities agree to
-  10⁻¹⁰ after removing the constant).
+  against `bsplinepen` from the R package fda (Ramsay, Graves & Hooker), which
+  computes ∫ D²B_i D²B_j — its independence from this implementation is
+  unverified, because fda is not installed here; Stage 4 confirms it computes
+  the penalty by its own quadrature rather than the same closed rule, or
+  substitutes another reference, ≤ 10⁻¹²·max|Ω|; bandwidth p; rank K − 2; 1ᵀΩ1
+  and ξᵀΩξ ≤ 10⁻¹²·max|Ω|·(b − a)² for uniform and irregular knots.
+- The whitening: MᵀΩM = I to 10⁻¹²; ‖NᵀM‖_max ≤ 10⁻¹²·‖N‖₂‖M‖₂ (N's second
+  column is of order the window half-length, about 84, so an unscaled bound
+  would fail on correct code); τ²MMᵀ = τ²Ω⁺ to 10⁻¹⁰ relative; the induced
+  density of §6.3 equals the improper Gaussian density with the null-space
+  prior, compared pointwise at 100 random w (log-densities agree to 10⁻¹⁰ after
+  removing the constant).
 - Fixtures regenerated by `make fixtures-bspline` (scipy, R `splines`, R `fda`,
   and the existing pomp periodic fixture), committed; CI runs offline.
 
@@ -992,12 +1023,31 @@ mean, in the `gradient_check.rs` harness.
   stated in the config), 2 chains × 200 sweeps. It runs, every recorded
   log-likelihood and gradient is finite, and two runs at the same seeds produce
   bitwise-identical draws.
+- A prior-only run under PGAS+NUTS, the cheap check of what the sampler actually
+  draws: the toy model `X --> D @ f(t) * X` (f a log-link K = 6 `smooth` spline)
+  with X₀ = 0, so every flow is zero and the complete-data likelihood is
+  constant (inferred; Stage 5 confirms PGAS runs it, or uses an observation
+  stream with every value missing). Over 4 chains × 4,000 sweeps, τ's draws must
+  match exponential(λ) (Kolmogorov–Smirnov p > 10⁻³ on thinned draws), a and b
+  their normals, and the sample covariance of w − a·1 − b(ξ − t_m) must match
+  E[τ²]/κ²·Ω⁺ = (2/λ²κ²)·Ω⁺, each moment scored as a z-score on its batch-means
+  Monte Carlo standard error with |z| < 5 (the `nuts_stationarity.rs` rule).
+  This exercises the box transforms, the prior sums and τ together.
 - One synthetic recovery with informative data and known parameters: the SEIR of
   §8.4 with N₀ = 10⁶ and a truth that lies in the spline space (a K = 6 `smooth`
   curve with stated a, b, τ, z), E₀, I₀ and ρ fixed, 4 chains. Pass: every true
   coefficient wⱼ lies in its central 99% posterior interval, and the posterior
   median of log β(t) is within 0.2 of the truth at every t in the window's
   middle 80%.
+
+**R5 — Small simulation-based calibration (proposed addition to D7; pending the
+maintainer's confirmation).** The single-dataset recovery above has little
+power: six coefficients inside their 99% intervals passes most wrong posteriors.
+Proposed: SBC (Talts et al. 2018) on the toy model `X --> D @ f(t) * X`, X₀ =
+10⁵, f a log-link K = 6 `smooth` spline, daily `poisson` observations of the
+flow; 100 prior draws, PGAS+NUTS, 99 thinned posterior draws each (100 possible
+ranks, 20 bins); test quantities a, b, τ and f(tⱼ) at 5 times; rank histograms
+pass a χ² test at α = 0.01/d (Bonferroni). Not decided here.
 
 **R4 — Regression.** `make test` green, so every non-spline path passes.
 Coefficient ordering, IR serialization (round-trip OCaml → JSON → Rust → JSON
@@ -1047,13 +1097,13 @@ Each stage ends on a green `make test`; each named test is mutation-checked.
 Every commit re-keys stored runs through the engine version (§4.2); the last
 column says what changes beyond that.
 
-| Stage | Content                                                                                                                                                                                                               | IR                                               | High-risk files | Run identity beyond the engine version                      |
-| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | --------------- | ----------------------------------------------------------- |
-| 1     | `bspline.rs` core; periodic evaluator on it; live periodic coefficients; `first_param_read` arm; before/after microbenchmark                                                                                          | none                                             | none            | none                                                        |
-| 2     | `bspline` kind with explicit coefficients, `link`, `ir_hash` arms with the no-collision test, the past-window notice (§4.3), `make fixtures-bspline`                                                                  | the pending bump (about 118 IR files move, §5.6) | none            | every model re-keys (version string); `link` hashed         |
-| 3     | `forcing_basis` (space `Spline`); autodiff rule for both spline kinds; E600 lifted for coefficients; stale refusal messages rewritten                                                                                 | same pending bump                                | none            | models with coefficient parameters gain `rate_grad` entries |
-| 4     | `smooth`: Ω, whitening and Jacobi solver in `sim/src/spline_penalty.rs`; `SplineCoefs::Smooth`; spaces `Whitened` and `Linear`; autodiff rule; dimension checks; IF2/NLopt scale refusal; the calibration make target | same pending bump                                | none            | models using `smooth`                                       |
-| 5     | R1–R4 completed (the stochastic-epidemic and recovery tests), the §8.2 note                                                                                                                                           | none                                             | none            | none                                                        |
+| Stage | Content                                                                                                                                                                                                                         | IR                                               | High-risk files | Run identity beyond the engine version                      |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | --------------- | ----------------------------------------------------------- |
+| 1     | `bspline.rs` core; periodic evaluator on it; live periodic coefficients; `first_param_read` arm; before/after microbenchmark                                                                                                    | none                                             | none            | none                                                        |
+| 2     | `bspline` kind with explicit coefficients, `link`, `ir_hash` arms with the no-collision test, the past-window notice (§4.3), `make fixtures-bspline`                                                                            | the pending bump (about 118 IR files move, §5.6) | none            | every model re-keys (version string); `link` hashed         |
+| 3     | `forcing_basis` (space `Spline`); autodiff rule for both spline kinds; E600 lifted for coefficients; stale refusal messages rewritten                                                                                           | same pending bump                                | none            | models with coefficient parameters gain `rate_grad` entries |
+| 4     | `smooth`: Ω, Householder QR and Cholesky whitening in `sim/src/spline_penalty.rs`; `SplineCoefs::Smooth`; spaces `Whitened` and `Linear`; autodiff rule; dimension checks; IF2/NLopt scale refusal; the calibration make target | same pending bump                                | none            | models using `smooth`                                       |
+| 5     | R1–R4 completed (the stochastic-epidemic and recovery tests), the §8.2 note                                                                                                                                                     | none                                             | none            | none                                                        |
 
 No stage touches `pgas.rs`, `pgas_grad.rs`, `obs_loglik.rs`, `obs_model.rs`,
 `if2.rs` or `particle_filter.rs` (§5.3, §6.6).
@@ -1115,7 +1165,12 @@ Ebola-style fits; no setting is built now.
 **D3 — Decided: cubic clamped B-splines, uniform or non-uniform knots, under the
 integrated squared curvature penalty** ∫ g''² dt = wᵀΩw, with Ω computed exactly
 (§6.1), compared with the two alternatives (§6.2), and sampled in the
-null-space-separated whitened form (§6.3). No heuristic end weights.
+null-space-separated whitened form (§6.3), whitened by Cholesky rather than
+eigendecomposition. No heuristic end weights. One detail is recommended within
+it: normalize the penalty by √(K − 2) as well as by the declared reference
+duration, so τ means the same at every knot count and knot count and smoothness
+are separate choices; without it, adding knots silently loosens the prior
+(§6.3). Confidence: leaning.
 
 **D4 — Decided: hold outside the window, and say so.** §4.3 defines what a run
 past the window computes, and a static info notice reports it.
@@ -1137,7 +1192,10 @@ Stage 2. Confidence: leaning.
 
 **D6 — Decided: (a), one IR bump kept on the branch** (§10).
 
-**D7 — Decided: the merge criteria are the three tiers of §8.**
+**D7 — Decided: the merge criteria are the three tiers of §8.** One change is
+proposed for confirmation: add R5, a small SBC on the toy model, to the required
+tier, because R3's single-dataset recovery has little power. Recommendation: add
+it. Confidence: leaning.
 
 ## 12. Out of scope, each with its reason
 
@@ -1176,7 +1234,10 @@ Load-bearing for the design:
   construction already used.
 - Piegl, L. & Tiller, W. (1997). _The NURBS Book_, 2nd ed. Springer. §2.5,
   Algorithms A2.1 (span), A2.2 (nonzero basis functions) and A2.3 (their
-  derivatives) (§4.1, §6.1).
+  derivatives) (§4.1, §6.1). A2.3 is cited from memory.
+- Ramsay, J. O., Graves, S. & Hooker, G. _fda: Functional Data Analysis_. R
+  package, CRAN; the version is pinned in the R1 fixture's provenance. Its
+  `bsplinepen` is a reference for Ω (§8.1); its independence is unverified.
 - O'Sullivan, F. (1986). A statistical perspective on ill-posed inverse
   problems. _Statistical Science_ 1(4):502–518. The curvature penalty (§6.1).
 - Wand, M. P. & Ormerod, J. T. (2008). On semiparametric regression with
