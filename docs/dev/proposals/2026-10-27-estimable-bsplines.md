@@ -1,6 +1,6 @@
 ---
 date: 2026-10-27
-status: proposed — decisions D1–D7 (§11) await the maintainer; implementation follows §9 on `feat/bsplines`, which stays off main until §8's thresholds are met
+status: decided — D1–D4, D6, D7 decided by the maintainer on 2026-10-27; D5 pending confirmation (§11); implementation follows §9 on `feat/bsplines`, which stays off main until §8.1's required criteria are met
 area: forcings / IR / compiler autodiff / PGAS+NUTS / fit config
 related:
   - archive/pre-alpha/2026-05-12-periodic-bspline-algorithm.md (the periodic spline's algorithm and oracles)
@@ -36,18 +36,18 @@ missing, and this proposal designs each:
    B-spline that derivative is the basis function itself, Bₖ(t); the compiler
    must emit it, and the runtime must evaluate it with the same code that
    evaluates the forcing (§5).
-3. **A smoothness prior.** With 8–12 coefficients and an outbreak's worth of
-   data, independent coefficients overfit and mix slowly. The Bayesian P-spline
-   prior — a random walk on the coefficients with scale τ — is the standard
-   remedy (§6).
+3. **A smoothness prior.** With 8–20 coefficients and an outbreak's worth of
+   data, independent coefficients overfit and mix slowly. The standard remedy is
+   a penalized spline: a Gaussian prior that makes a curve unlikely in
+   proportion to how much it bends, with scale τ (§6).
 
-The recommended design adds one forcing kind (`bspline`), one IR expression node
+The design adds one forcing kind (`bspline`, cubic and clamped by default,
+uniform or non-uniform knots, held outside its window), one IR expression node
 (`forcing_basis`, the derivative), a `link = log` option, and a coefficient
-constructor (`random_walk`) that realizes the smoothness prior in its
-non-centred form out of ordinary per-parameter priors. That last choice means no
-high-risk inference file changes in the recommended path (§5.6, §6.4); a centred
-realization that does touch `pgas.rs` is specified as a separate, conditional
-stage (§6.6, D1).
+form, `smooth(...)`, that places the integrated-squared-curvature prior on the
+coefficients and samples it in a non-centred, whitened parameterization built
+from ordinary per-parameter priors. No high-risk inference file changes (§5.3,
+§6.6).
 
 ## 2. Terms
 
@@ -65,13 +65,14 @@ stage (§6.6, D1).
   constant added to every coefficient adds that constant to the spline.
 - **Link**: the map from the linear combination g(t) = Σ cₖBₖ(t) to the forcing
   value — identity (f = g) or log (f = exp g).
-- **Random walk of order r** (RW1, RW2) on c₁…c_K: the r-th differences (Δcₖ =
-  cₖ − cₖ₋₁; Δ²cₖ = cₖ − 2cₖ₋₁ + cₖ₋₂) are independent N(0, τ²). **τ** is its
-  scale. It is a Gaussian Markov random field (GMRF): a Gaussian whose precision
-  matrix is sparse (banded).
-- **Centred** parameterization: the sampler moves c and τ. **Non-centred**: the
-  sampler moves standardized innovations zₖ ~ N(0, 1) and τ, and c is computed
-  from them.
+- **Curvature penalty** Ω: the K × K matrix with Ω_ij = ∫ B_i''B_j'' dt, so that
+  wᵀΩw = ∫ g''(t)² dt for coefficients w. The smoothness prior is Gaussian with
+  precision Ω/τ²; **τ** is its scale.
+- **Greville abscissae** ξₖ: the knot averages (u_{k+1} + … + u_{k+p})/p.
+  Coefficients ξ reproduce the line g(t) = t exactly.
+- **Centred** parameterization: the sampler moves the coefficients w and τ.
+  **Non-centred**: the sampler moves standardized modes zᵢ ~ N(0, 1) and τ, and
+  w is computed from them.
 - **PGAS**: particle Gibbs with ancestor sampling, camdl's default Bayesian
   method (Lindsten, Jordan & Schön 2014). It alternates a θ-update given the
   latent trajectory X with a refresh of X given θ. The θ-update uses NUTS
@@ -349,8 +350,8 @@ type bspline_knots =
   | Explicit of expr list            (* strictly increasing, at least 2 *)
 type bspline = {
   knots  : bspline_knots;
-  degree : int;
-  coefs  : expr list;                (* length = n_intervals + degree *)
+  degree : int;  coefs  : spline_coefs;             (* Explicit of expr list | Smooth …, §6.4;
+                                        length n_intervals + degree *)
   link   : spline_link;
 }
 (* time_func_kind gains:  | BSpline of bspline
@@ -370,8 +371,7 @@ pub enum BSplineKnots {
 
 pub struct BSpline {
     pub knots: BSplineKnots,
-    pub degree: u32,
-    pub coefs: Vec<Expr>,
+    pub degree: u32,    pub coefs: SplineCoefs,            // §6.4
     #[serde(default, skip_serializing_if = "SplineLink::is_identity")]
     pub link: SplineLink,
 }
@@ -397,16 +397,11 @@ coefficient count that disagrees with the knots. `obs_anchor`'s exhaustive
 `piecewise` (`obs_anchor.rs:313-355`), because an anchored window can invert
 under one data vintage and not another.
 
-**Ends: clamped, with the prior's differences taken over the Greville
-abscissae** (D3). The knot vector repeats a and b p + 1 times. Every basis
+**Ends: clamped** (D3). The knot vector repeats a and b p + 1 times. Every basis
 function lies inside the window, f(a) = c₁ and f(b) = c_K exactly, and explicit
-breakpoints need no extension beyond the data. Clamping makes the knot averages
-uneven at the ends, so the random-walk prior of §6 takes its differences over
-those averages rather than over the coefficient index; otherwise it would
-penalize a log-linear curve at both ends (§6.1). The alternative is the
-unclamped construction of Eilers & Marx (1996): equally spaced knots extended p
-intervals past each end, plain index differences, and the forcing held at f(a),
-f(b). D3 sets out both.
+non-uniform breakpoints need no extension beyond the data. The smoothness prior
+penalizes the curvature of the curve itself (§6.1), so the uneven Greville
+spacing that clamping creates at the ends needs no special treatment.
 
 **Outside the window: hold** (D4). For t < a the forcing takes its value at a;
 for t > b, its value at b. The evaluator clamps t to [a, b] before the span
@@ -425,9 +420,32 @@ Bₖ(b) and the value and gradient cannot disagree. Three reasons:
 - The forcing stays continuous at a and b; only its derivative in t jumps, which
   no rate consumes.
 
-A window that does not cover the simulation is allowed; `camdl simulate` prints,
-once per run on stderr, the window and the held values, as it prints resolved
-anchors.
+**What a run past the window computes** (D4). For a `bspline` forcing with
+window [a, b], lag ℓ (0 when absent) and link h, the value at simulation time t
+is f(t) = h(g(clamp(t − ℓ, a, b))). For t − ℓ > b this is the constant h(g(b)):
+the same in every substep, particle and replicate of a forecast, carrying only
+the posterior uncertainty of g(b). A scenario fork multiplies or replaces it as
+it does any forcing. The same holds before a with g(a). A window that does not
+cover the run is allowed.
+
+**The notice.** Every command that runs the model, after resolving anchors
+(where `obs_anchor::report` already prints resolved knots, `obs_anchor.rs:422`),
+compares each `bspline` forcing's resolved window end b with the run's resolved
+horizon t_end. If t_end − ℓ > b it adds one info notice through the CLI notice
+system (`rust/crates/cli/src/notice.rs`; notices are recorded with the run and
+never hashed), code `spline-held-past-window`:
+
+```
+info: forcing `log_beta` is held at its value at t = 168 from t = 168 to the horizon t = 220; its window ends at last_obs - 2 'weeks
+```
+
+(with the calendar date appended under an `origin`, as resolved anchors are). It
+compares two resolved numbers in the IR, so no seam from the simulator to the
+CLI is needed, and `Notices` emits it once per job rather than once per cell.
+With the recommended window it fires on fits as well as forecasts, which is
+correct: the last two weeks of data are fitted under the held value. The
+language spec's `bspline` section, added in Stage 2 by hand, documents the
+definition and the notice.
 
 **End the window before the reporting delay.** The last basis function
 integrates to a quarter of an interior one (cubic, clamped), and infections near
@@ -435,8 +453,8 @@ b are mostly reported after the data end: with incubation near 10 days and h =
 20 days, c_K is largely the prior's extrapolation, yet it is the value held for
 every forecast. The language spec section Stage 2 adds therefore recommends
 `window = [..., last_obs - d]`, d the infection-to-report delay (two weeks for
-Ebola), so the held value is a coefficient the data inform; the validation does
-this (§8.1) and checks coverage in the held region.
+Ebola), so the held value is a coefficient the data inform; the synthetic study
+does this (§8.4).
 
 ### 4.4 `link = log` gives a positive rate with the right dimension and no intercept
 
@@ -485,7 +503,7 @@ spline forcing f, at the forcing's evaluation time":
 
 ```rust
 // rust/crates/ir/src/expr.rs
-pub struct ForcingBasisRef { pub name: String, pub index: u32 }
+pub struct ForcingBasisRef { pub name: String, pub index: u32 }   // gains `space`, §6.4
 pub struct ForcingBasisWrap { pub forcing_basis: ForcingBasisRef }
 // Expr gains ForcingBasis(ForcingBasisWrap):
 //   {"forcing_basis": {"name": "log_beta", "index": 2}}
@@ -541,15 +559,16 @@ let spline_deriv fname coefs link structural =
 ```
 
 The rule differentiates each coefficient expression, so a coefficient that is
-arithmetic over parameters — a corner constraint, a sum-to-zero, or the
-`random_walk` lowering of §6 — gets the chain rule with no special case.
-`simplify_fixpoint` drops the terms whose ∂cⱼ/∂θ folds to zero, so for cⱼ =
-`Param θ` the emitted gradient is the single node `forcing_basis(f, j)`.
+arithmetic over parameters — a corner constraint, a sum-to-zero, or the explicit
+expressions over parameters — gets the chain rule with no special case. The
+`smooth` form has its own rule (§6.4). `simplify_fixpoint` drops the terms whose
+∂cⱼ/∂θ folds to zero, so for cⱼ = `Param θ` the emitted gradient is the single
+node `forcing_basis(f, j)`.
 
 **Through `exp`.** Under `link = log`, ∂f/∂cⱼ = f(t)·Bⱼ(t), emitted as
 `time_func(f) * forcing_basis(f, j)`. When the user writes `exp(logb)` with an
 identity link, the existing `Exp` rule (`autodiff.ml:575-576`, verified)
-produces exp(g)·Bⱼ. Both are finite-difference tested (§8, V2).
+produces exp(g)·Bⱼ. Both are finite-difference tested (§8.1, R2).
 
 `forcing_coeff_exprs` (`autodiff.ml:162-170`) splits into the coefficient
 expressions and the structural ones for the two spline kinds, so that
@@ -611,10 +630,11 @@ obvious optimization and is not built until a profile asks for it.
 
 ### 5.6 The IR bump, its goldens, and the `link` hash
 
-Two schema additions — the `bspline` kind with `link` (Stage 2), and
-`forcing_basis` (Stage 3) — share one pending `ir/VERSION` bump on the branch,
-made in Stage 2 (0.40 → 0.41 at today's main; renumbered at rebase, §10). The
-envelope embeds the version in every serialized IR file (verified:
+Three schema additions — the `bspline` kind with `link` (Stage 2),
+`forcing_basis` (Stage 3), and `SplineCoefs::Smooth` with the basis spaces
+(Stage 4) — share one pending `ir/VERSION` bump on the branch, made in Stage 2
+(0.40 → 0.41 at today's main; renumbered at rebase, §10). The envelope embeds
+the version in every serialized IR file (verified:
 `ocaml/golden/sir_basic.ir.json` begins `{"ir_version":"0.40"`), and a bump
 moves about 118 of them (counted by an independent check): 55 in
 `ocaml/golden/`, 17 in the frozen `ir/golden/` set (not regenerated by
@@ -640,190 +660,132 @@ would be served the other's results. Stage 2 hashes `link` in both arms; the
 future field is a compile error there; and a red→green test asserts that two
 models differing only in `link` hash differently.
 
-## 6. The smoothness prior is a random walk on the coefficients, realized non-centred
+## 6. The smoothness prior penalizes integrated squared curvature, and NUTS samples it whitened
 
-### 6.1 What the prior is, and why its differences are taken over the Greville abscissae
+### 6.1 The penalty is ∫ f''(t)² dt, computed exactly from the knots
 
-The Bayesian **P-spline** prior — a B-spline with a random-walk prior on its
-coefficients (Lang & Brezger 2004), the Bayesian form of the difference penalty
-of Eilers & Marx (1996) — is a random walk of order r on the coefficient vector.
-In its textbook form the r-th index differences are independent, Δʳcₖ ~ N(0,
-τ²), k = r + 1, …, K.
+For a spline g(t) = Σⱼ wⱼ Bⱼ(t) with coefficient vector w, the integrated
+squared curvature over the window is a quadratic form,
 
-**With clamped knots the index differences have the wrong null space.** A spline
-equals a straight line exactly when its coefficients are linear in the
-**Greville abscissae** ξₖ = (u_{k+1} + … + u_{k+p})/p, the knot averages, not in
-the index k (de Boor 1978). Interior ξ are evenly spaced by h; at a clamped end
-they crowd together: for K = 8 over [0, 182], ξ = 0, 12.1, 36.4, …, 145.6,
-169.9, 182. Index-linear coefficients therefore give a curve that bends near
-both ends — 0.57 on a log range of 7 (measured by the statistics review) — so
-the RW2 prior penalizes a truly exponential growth or decline at exactly the
-ends, and the hold rule (§4.3) takes the forecast value from the end. The fix is
-to take the differences over ξ (D3 gives the alternative, unclamped knots):
+∫ₐᵇ g''(t)² dt = wᵀΩw, Ω_ij = ∫ₐᵇ B_i''(t) B_j''(t) dt.
 
-- first divided differences sₖ = (cₖ − cₖ₋₁)/(ξₖ − ξₖ₋₁), the local slope of log
-  β per unit time;
-- for RW2, slope increments sₖ − sₖ₋₁ ~ N(0, (τ/h)² · ω̄ₖ/h), with ω̄ₖ = (ξₖ −
-  ξₖ₋₂)/2 the mean spacing around ξₖ₋₁; for RW1, cₖ − cₖ₋₁ ~ N(0, τ² · (ξₖ −
-  ξₖ₋₁)/h).
+This is the penalty of O'Sullivan penalized splines (O'Sullivan 1986; Wand &
+Ormerod 2008, who give its computation and its relation to the difference
+penalty of Eilers & Marx 1996). Its prior form is the Gaussian with precision
+Ω/τ²: a curve is a priori unlikely in proportion to how much it bends, measured
+in the units of the curve and of time, whatever the knots.
 
-In the interior ω̄ₖ = h and the RW2 rule reduces to Δ²cₖ ~ N(0, τ²) exactly. The
-end weights are a heuristic, stated as one: they scale each increment's variance
-by its local spacing, as a Brownian (RW1) or integrated-Brownian (RW2) increment
-would, and they touch only the p − 1 increments at each end, where clamping
-makes the spacing uneven. No irregular-grid RW2 from the literature is adopted
-here, because none was checked against this exact construction; V6 and V7 check
-what the heuristic does. The null space at τ = 0 is now constant slope in time,
-i.e. log β linear in t, which the spline reproduces exactly at every t in the
-window.
+**Ω is exact with a fixed quadrature rule.** On each knot interval B_i'' is a
+polynomial of degree p − 2, so B_i''B_j'' has degree 2p − 4, and (p − 1)-point
+Gauss–Legendre quadrature on that interval (exact to degree 2p − 3) integrates
+it exactly. For a cubic that is 2 points per interval. Ω is assembled interval
+by interval from the p + 1 nonzero second derivatives, obtained from the same
+span routine as the values (Piegl & Tiller 1997, Algorithm A2.3). Properties,
+each checked numerically with a scratch scipy script (cubic, clamped, window [0,
+168], K = 12, uniform and the irregular breakpoints 0, 10, 25, 30, 60, 90, 100,
+130, 150, 168):
 
-As a GMRF (Rue & Held 2005, ch. 3) the density is
+- 2-point and 10-point Gauss–Legendre agree to 2·10⁻¹⁵ of max|Ω|;
+- Ω is banded with bandwidth p = 3;
+- Ω has rank K − 2 (10), and Ω·1 and Ω·ξ vanish to 2·10⁻¹⁶ of max|Ω| (scaled by
+  the window length for ξ), for both knot sets.
 
-p(c | τ) ∝ τ^{−(K−r)} exp(−‖W_r c‖² / (2τ²)),
+**Its null space is exactly the linear functions of t, for any knot spacing.**
+g'' ≡ 0 on [a, b] if and only if g is linear in t. B-splines are linearly
+independent, the constant function has coefficients 1 (partition of unity), and
+t has coefficients ξ, the **Greville abscissae** ξₖ = (u_{k+1} + … + u_{k+p})/p
+(the knot averages; Σ ξⱼBⱼ(t) = t, the linear-precision property, de Boor 1978).
+So null(Ω) = span{1, ξ} exactly — no end weights, no assumption of equal
+spacing. Measured on both knot sets above: Σ ξⱼBⱼ(t) = t to 6·10⁻¹⁴ and Σ Bⱼ(t)
+= 1 to 3·10⁻¹⁶ over 1,001 points.
 
-where W_r is the (K − r) × K matrix of the weighted divided differences above
-(W_r = D_r, the plain difference matrix, when every spacing is h). The precision
-Q = W_rᵀW_r/τ² has rank K − r; its null space is constants (RW1) or functions
-linear in ξ (RW2). Two consequences are load-bearing. The prior is improper
-along the null space, so it must be completed there; and the normalizing power
-is τ^{−(K−r)}, not τ^{−K}, which matters as soon as τ is estimated (using K
-biases τ downward).
+### 6.2 Against the two alternatives, the curvature penalty is the only one exact for irregular knots
 
-**Completion.** Give the null-space coordinates proper priors, anchored at the
-middle of the window rather than at an end, so the prior band does not fan out
-from one side: with m the index whose Greville abscissa ξ_m is nearest (a +
-b)/2, the level c_m for RW1, and for RW2 the level c_m and the slope s_{m+1} =
-(c_{m+1} − c_m)/(ξ_{m+1} − ξ_m). The completed density is p(c_m) [p(s_{m+1})] Πₖ
-N(·; 0, ·) as above: proper, with log-density log p(c_m) [+ log p(s_{m+1})] − (K
-− r) log τ − ‖W_r c‖²/(2τ²) + const and gradients ∂/∂c = (null-space terms) −
-W_rᵀW_r c/τ² and ∂/∂τ = −(K − r)/τ + ‖W_r c‖²/τ³. W_rᵀW_r is banded with
-bandwidth r, so both are O(K).
+|                   | Curvature penalty Ω (chosen)                                                          | Greville divided differences                             | Unclamped Eilers–Marx, index differences                                        |
+| ----------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Null space        | exactly the linear functions of t, any knots                                          | linear in t, any knots                                   | linear in t only for equal spacing                                              |
+| End behaviour     | no special case: the penalty is on g itself                                           | end increments need spacing weights that are a heuristic | p coefficients per end supported mostly outside the data; f(a), f(b) are blends |
+| Non-uniform knots | yes                                                                                   | yes, with the heuristic weights                          | no (refused)                                                                    |
+| Meaning of τ      | a property of the curve, independent of K (§6.5)                                      | depends on the spacing h; rescaled per K                 | depends on h                                                                    |
+| Precomputation    | Ω by quadrature, O(K·p²); one (K − 2)-dimensional symmetric eigendecomposition, O(K³) | none                                                     | none                                                                            |
+| Per evaluation    | O(pK) (§6.4)                                                                          | O(pK)                                                    | O(pK)                                                                           |
 
-**τ is estimated, under a penalized-complexity prior on a standard deviation.**
-τ = 0 is the base model — a constant log-rate (RW1) or a log-linear one (RW2) —
-and the PC prior of Simpson et al. (2017) for a Gaussian standard deviation
-measured from that base is exponential: τ ~ exponential(λ), with λ set by a tail
-statement P(τ > U) = α, λ = −ln α / U. The scale of τ depends on the knot
-spacing: second differences of an integrated Wiener process at spacing h have
-standard deviation ∝ h^{3/2} (first differences ∝ h^{1/2} for RW1) (inferred
-from the integrated-Wiener-process limit; Sørbye & Rue 2014 make the same point
-for intrinsic GMRFs). The tail is therefore stated per spacing, U_h = U₁₄ · (h /
-14 days)^{3/2} with α = 0.05, 14 days being near the Ebola serial interval.
-Spacing h is chosen at or below the generation interval, so the basis can follow
-changes on the time scale transmission can change.
+The precomputation runs once per compiled model, after anchors are resolved; for
+K ≤ 50 it is a few hundred thousand flops (inferred). The divided-difference
+construction approximates the curvature penalty in the interior; it is not
+adopted because its end weights are a heuristic with no derivation, and the
+curvature penalty removes the need for them at a one-off O(K³) cost.
 
-**U₁₄ is calibrated by prior-predictive simulation, not chosen by intuition.** A
-tail statement on τ bounds a local second difference, not the curve: the random
-walk integrates K − 2 innovations twice, so the prior spread of log β(t) grows
-with distance from the anchor and with K, on top of the slope's own
-contribution. A first choice of U₁₄ = 1.0 with b₁ ~ N(0, 0.05/day) gave a 95%
-prior band of R(t) reaching about 10¹² at t = 168 (found by the statistics
-re-review): the slope alone has a log-scale SD of 8.4 there. The calibration
-therefore fixes a target band and searches U₁₄. Target: at every t in the
-window, the 95% prior band of R(t) contains [0.5, 3] (the prior admits every
-plausible value) and lies inside [0.1, 20] (it excludes absurd ones). With the
-level log β(ξ_m) ~ N(ln(1.2γ), 0.6²) (median R = 1.2 mid-window) and b₁ ~ N(0,
-0.005²) per day — one SD changes β by a factor e^{0.42} ≈ 1.5 over half the
-window, the scale of change control measures produce, whereas 0.05/day would be
-an e-fold every 20 days sustained for months — a scan over U₁₄ ∈ {0.1, 0.2, 0.3,
-0.5} meets the target at U₁₄ = 0.2 and fails it at 0.3 for K = 8 and at 0.5 for
-every K. Measured with a scratch prior-predictive script (scipy `BSpline`,
-cubic, clamped, window [0, 168], γ = 0.125, 4,000 draws, seed 20261027):
+### 6.3 The prior, its completion, and the non-centred whitened parameterization
 
-| K  | h (days) | U_h   | λ = ln 20 / U_h | R(t) band at t = 0 | t = 42       | t = 84       | t = 126      | t = 168 (and held) | range over t  |
-| -- | -------- | ----- | --------------- | ------------------ | ------------ | ------------ | ------------ | ------------------ | ------------- |
-| 8  | 33.6     | 0.744 | 4.03            | [0.27, 5.37]       | [0.36, 3.97] | [0.36, 3.81] | [0.29, 4.76] | [0.14, 9.29]       | [0.14, 9.29]  |
-| 12 | 18.7     | 0.308 | 9.73            | [0.22, 6.88]       | [0.34, 4.08] | [0.36, 3.99] | [0.28, 4.68] | [0.14, 10.28]      | [0.14, 10.28] |
-| 20 | 9.9      | 0.119 | 25.26           | [0.17, 8.06]       | [0.34, 4.56] | [0.37, 3.86] | [0.30, 4.55] | [0.15, 10.39]      | [0.15, 10.39] |
+**The prior.** p(w | τ) ∝ τ^{−(K−2)} exp(−wᵀΩw / (2τ²)), improper along null(Ω),
+completed by proper priors on the level and slope of the linear part.
 
-Stage 5 commits this calibration as a reproducible step:
-`scripts/calibrate_rw_prior.py`, run by
-`make -f tests/recovery/Makefile calibrate-rw-prior`, writes
-`tests/recovery/cases/spline_seir/rw_prior_calibration.tsv` (U₁₄, U_h, λ and the
-band at every t, per K) from a fixed seed, and the fit configs read their τ
-priors from it.
+**Whitening.** At model build, with t_m = (a + b)/2 the window midpoint:
 
-### 6.2 Three realizations, and why the non-centred one comes first
+1. N = [1, ξ − t_m·1] spans null(Ω). A Householder QR of N gives an orthonormal
+   basis Q₊ (K × (K − 2)) of its orthogonal complement, which is range(Ω)
+   because Ω is symmetric.
+2. Eigendecompose the positive-definite (K − 2) × (K − 2) matrix Q₊ᵀΩQ₊ = V Λ
+   Vᵀ.
+3. M = Q₊ V Λ^{−1/2}, a K × (K − 2) matrix with MᵀΩM = I and NᵀM = 0.
 
-**(A) A centred GMRF prior type.** A new joint prior on an indexed family,
-`c ~ random_walk(order = 2, scale = tau)`, whose log-density and gradient are
-those above, added to the prior sum. The sampler moves c and τ. The prior sum in
-camdl is per scalar: `prior_log_density_and_grad_z(prior, param, θ, z)`
-(verified, `pgas.rs:3557`), summed coordinate by coordinate in the NUTS target
-(`:4287-4303`), the MH-within-Gibbs move (`:4444-4446`), the chain-start check
-(`:4064-4069`) and the probation check (`:4544-4548`), and likewise in PMMH
-(inferred from the acceptance ratio the roles proposal verified,
-`pmmh.rs:707-714`). A non-separable term needs a new seam at every one of those
-sites, in a high-risk file. Centring also creates the funnel when τ is estimated
-and the data are weak: as τ → 0 the conditional of c narrows, and a fixed-step
-integrator cannot follow both the neck and the mouth (Betancourt & Girolami
-2015).
+The coefficients are
 
-**(B) Lifting PGAS's hierarchical refusal.** The random walk is already
-expressible as a chain of hierarchical leaves,
-`c3 ~ normal(mu = 2*c2 - c1,
-sigma = tau)`, one declaration per cell, because
-hierarchical prior arguments are expressions (`ir/src/parameter.rs:98-108`).
-PGAS would need the env-aware density and its gradient with respect to the leaf
-and every parameter its arguments read — the same non-separable seam as (A), in
-general form — and the roles proposal's hierarchical refusals (held leaf, boxed
-leaf, `9ccb2899`) then apply to every coefficient. It is centred, with (A)'s
-funnel, and verbose.
+w = a·1 + b·(ξ − t_m·1) + τ M z, z ~ N(0, I_{K−2}),
 
-**(C) Non-centred by construction, from ordinary priors** (recommended, D1). The
-sampler moves standardized innovations zₖ ~ N(0, 1), the mid-window level b₀
-(and for RW2 the mid-window slope b₁), and τ, each with an ordinary scalar prior
-the samplers already handle. The coefficients are deterministic functions of
-them:
+so the linear part of the curve is a + b(t − t_m): a is the level of log β at
+mid-window and b its slope per unit time. Building the eigenvectors inside
+range(Ω) rather than eigendecomposing Ω itself makes NᵀM = 0 hold by
+construction; the direct eigendecomposition of Ω left NᵀM at 10⁻⁹ in the scratch
+check, because the two near-zero eigenvalues are only numerically zero and
+Λ^{−1/2} amplifies the error. This is the decomposition w = (null-space part) +
+U₊Λ₊^{−1/2}τz, with U₊ = Q₊V the eigenvectors of Ω on range(Ω) and the null
+space removed exactly.
 
-RW1: c_m = b₀, cₖ = cₖ₋₁ + τ √((ξₖ − ξₖ₋₁)/h) zₖ for k > m and symmetrically for
-k < m; RW2: c_m = b₀, s_{m+1} = b₁, sₖ = sₖ₋₁ + (τ/h) √(ω̄ₖ/h) zₖ, cₖ = cₖ₋₁ +
-(ξₖ − ξₖ₋₁) sₖ for k > m + 1, and the mirror-image recursion toward k = 1,
+**Exact equivalence.** The map (a, b, y) → w = a·1 + b(ξ − t_m) + Q₊V y is a
+linear bijection with constant Jacobian, and with y = τΛ^{−1/2}z, wᵀΩw = yᵀΛy =
+τ² zᵀz. The density z ~ N(0, I) therefore induces on w
 
-with m the mid-window index of §6.1 and b₁ the mid-window slope of log β per
-unit time; in closed form for RW2 and k > m, cₖ = b₀ + b₁ (ξₖ − ξ_m) + (τ/h)
-Σ_{i=m+2}^{k} √(ω̄ᵢ/h) (ξₖ − ξᵢ₋₁) zᵢ, with the mirror image for k < m. There are
-still K − 2 innovations.
+p(w | τ) = p_{a,b}(a(w), b(w)) · c · τ^{−(K−2)} exp(−wᵀΩw/(2τ²)),
 
-The map (b₀, b₁, z) → c, for fixed τ, is linear with Jacobian proportional to
-τ^{K−r} — τ^{K−2} for RW2, confirmed by the statistics review — times spacing
-factors that do not involve τ, which is exactly the GMRF normalizer: (C) induces
-on (c, τ) the same completed prior as (A). The posterior over the curve is
-identical; only the sampler's coordinates differ. Nothing in the samplers
-changes, because every prior in (C) is a scalar prior; the coefficients are
-coefficient expressions, which §5.2 differentiates by the chain rule (for RW2,
-∂cⱼ/∂zᵢ = (τ/h) √(ω̄ᵢ/h) (ξⱼ − ξᵢ₋₁) for j ≥ i, on the right of m, and ∂cⱼ/∂τ =
-(cⱼ − b₀ − b₁(ξⱼ − ξ_m))/τ).
+where (a(w), b(w)) are the coordinates of the orthogonal projection of w onto
+null(Ω) and c is a constant. That is exactly the improper Gaussian with
+precision Ω/τ² over range(Ω), with the proper prior p_{a,b} on the null space,
+including the τ^{−(K−2)} normalizer (the rank of Ω, not K) that an estimated τ
+needs. Checked numerically: MᵀΩM = I to 6·10⁻¹⁴ (uniform) and 1.2·10⁻¹³
+(irregular); NᵀM = 0 by construction; the Monte Carlo covariance of τMz over
+2·10⁵ draws matches τ²Ω⁺ (the pseudo-inverse) to 4·10⁻³, its Monte Carlo error.
 
-**The trade-off is information-dependent, and PGAS sits on both sides of it.**
-Papaspiliopoulos, Roberts & Sköld (2007) show the centred form mixes better when
-the data are informative about c and the non-centred form when they are not. The
-PGAS θ-update conditions on the whole latent path, which is very informative
-about β(t) where many infections occur and barely informative in a long tail of
-few cases. In the informative regime (C) has its own pathology: with c pinned, z
-and τ lie on the ridge z ∝ 1/τ. The dense mass matrix PGAS adapts by default
-(`default_dense_mass` = true, verified `fit/config_v2.rs:1725`) captures a
-linear correlation but not that curvature; spline fits require it, and the V4
-configs state it explicitly rather than relying on the default. Interweaving the
-two parameterizations within each sweep (the ancillarity–sufficiency
-interweaving strategy, ASIS, of Yu & Meng 2011) is robust across both regimes,
-but it needs the centred seam as well; it is an extension of Stage 6, not an
-alternative to it. Which regime dominates on an Ebola-scale outbreak is a
-measurement, made in Stage 5 (§8, V4). (C) comes first because it is correct
-with no high-risk change; (A) is built only if (C) fails the efficiency
-threshold (§6.6).
+**Gradient.** In the sampler's coordinates the map is linear: ∂w/∂z = τ M, ∂w/∂a
+= 1, ∂w/∂b = ξ − t_m, ∂w/∂τ = M z. Through the spline, with t_c = clamp(t − lag,
+a, b):
 
-### 6.3 `random_walk(...)` is a coefficient constructor, and the priors stay visible
+∂g/∂a = 1, ∂g/∂b = t_c − t_m, ∂g/∂zᵢ = τ Wᵢ(t_c), ∂g/∂τ = Σᵢ zᵢ Wᵢ(t_c),
+
+where Wᵢ(t) = Σⱼ M_jᵢ Bⱼ(t) is the i-th **whitened basis function**. The first
+two use partition of unity and linear precision, so they need no basis
+evaluation. Under `link = log` each is multiplied by f(t) (§5.2).
+
+**Determinism.** The meaning of each zᵢ depends on M, and an eigendecomposition
+is unique only up to sign and order. The Rust solver is a cyclic Jacobi method
+(no linear-algebra dependency exists in the workspace beyond
+`inference/linalg.rs::cholesky_lower`), with a fixed sweep order, eigenvalues
+sorted ascending (z₁ is the smoothest non-linear mode), and each eigenvector's
+sign fixed by making its largest-magnitude component positive. Because the
+engine version is part of every run identity (§4.2), a change to this code
+re-keys stored runs rather than reinterpreting their draws.
+
+### 6.4 `smooth(...)` is a coefficient form, and the priors stay visible
 
 ```camdl
-dimensions { innov = [i3, i4, i5, i6, i7, i8, i9, i10, i11, i12] }   # n_basis − order levels
+dimensions { mode = [m1, m2, m3, m4, m5, m6, m7, m8, m9, m10] }  # n_basis − 2
 
 parameters {
-  b0        : real 'ratio in [-8, 2]  ~ normal(mu = -1.9, sigma = 0.6)       # log β mid-window (R ≈ 1.2)
-  b1        : real [1/T] in [-0.05, 0.05] ~ normal(mu = 0.0, sigma = 0.005)  # mid-window slope of log β, per day
-  # PC prior on an SD, calibrated (§6.1): P(tau_b > 0.308) = 0.05 at h = 18.7 days
-  tau_b     : positive 'ratio in [1e-6, 1.54] ~ exponential(rate = 9.73)
-  z[innov]  : real 'ratio in [-8, 8]  ~ normal(mu = 0.0, sigma = 1.0)
+  a_b       : real 'ratio in [-8, 2]  ~ normal(mu = -1.9, sigma = 0.6)          # log β mid-window (R ≈ 1.2)
+  b_b       : real [1/T] in [-0.05, 0.05] ~ normal(mu = 0.0, sigma = 0.005)   # slope of log β, per day  # PC prior on an SD, calibrated (§6.5): P(tau_b > 0.01) = 0.05
+  tau_b     : positive in [1e-8, 0.05] ~ exponential(rate = 299.6)
+  z[mode]   : real 'ratio in [-8, 8]  ~ normal(mu = 0.0, sigma = 1.0)
 }
 
 forcing {
@@ -831,395 +793,373 @@ forcing {
     window  = [date("2025-08-04"), last_obs - 2 'weeks]
     n_basis = 12
     link    = log
-    coefs   = random_walk(order = 2, start = [b0, b1], scale = tau_b, innovations = z)
+    coefs   = smooth(level = a_b, slope = b_b, scale = tau_b, modes = z)
   }
 }
 ```
 
-The expander computes the Greville abscissae from the knots and lowers
-`random_walk(...)` to the K closed-form coefficient expressions above (`Reduce`
-sums over `Param` nodes with constant weights). When a window end is an
-observation anchor the abscissae are not known at compile time; the weights are
-then emitted as expressions over the window ends, which anchor substitution
-resolves like any knot (§4.3), so the IR contains only existing expression forms
-and **no IR change** is needed for the prior. The priors are declared by the
-user, with today's syntax, where a reader sees them. The constructor checks, at
-compile time (new codes in the E4xx forcing range): `order` is 1 or 2; the
-spline's degree is at least 1 (the Greville abscissae are undefined at degree 0,
-so `random_walk` on a degree-0 spline is refused); `start` has `order` entries,
-the mid-window level and, for order 2, slope; `innovations` is an indexed family
-with exactly `n_basis − order` cells; and each innovation is `real`, with prior
-exactly `normal(mu = 0, sigma = 1)`. That last check keeps the name honest: a
-different innovation prior is a different model, which the user can still write
-as explicit coefficient expressions. The `quantities {}` block can report the
-curve, `beta_t = log_beta` (a series, language spec §16.4).
+`smooth` names a penalized curve; there is no walk, so the form is not called a
+random walk. It is accepted only as the `coefs` of a `bspline` (not
+`periodic_spline`, whose wrap-around penalty is a different matrix) of degree at
+least 2, so curvature exists. Compile-time checks, new codes in the E4xx forcing
+range: `modes` is an indexed family with exactly `n_basis − 2` cells, each
+`real` with prior exactly `normal(mu = 0, sigma = 1)`, so the name stays honest;
+`level` and `slope` are scalars. The dimension check requires a dimensionless
+level and a slope of 1/time. The scale has dimension time^{−3/2} (τ²·∫g''² dt is
+dimensionless), which the dimension grammar has no literal for, so it is
+declared `positive` and not dimension-checked; the language spec states that τ
+is in model time units, so a model whose `time_unit` is weeks needs a τ prior
+rescaled by 7^{3/2}.
 
-**Under IF2 and the optimizers the scale must be fixed.** They read no prior
-(`docs/camdl-inference-spec.md`; roles §6.4), and the likelihood depends on (τ,
-z) only through c, so an estimated τ beside estimated z is a ridge with no
-maximum. `fit run` refuses an estimated `random_walk` scale under `if2` and the
-NLopt methods, naming the scale and the remedy: fix τ (the fit is then an
-unpenalized maximum likelihood over an affine reparameterization of c), or
-estimate the plain coefficients. The refusal lives in the fit-config validation
-next to `validate_hierarchical_leaf_boxes` (`fit/config_v2.rs:2604`), and moves
-into `resolve_roles` with roles Stage 2 as a new
-`RoleError::RandomWalkScaleUnderLikelihood` (§7).
-
-### 6.4 The recommended prior touches no high-risk file
-
-Every prior in §6.3 is a `Prior::Fixed` scalar density, summed by the existing
-per-coordinate code. The PGAS hierarchical refusal (`pgas.rs:3775-3784`) is not
-reached and stays. Stage 5 therefore changes the expander, the dimension checker
-(innovations and start are dimensionless, scale positive), and the fit config
-validation.
-
-### 6.5 The improper null space never reaches the sampler
-
-In (C) the null-space coordinates are the mid-window parameters b₀ and b₁, each
-with a proper prior, so the joint prior over everything the sampler moves is
-proper by construction. A user who omits a prior on b₀ gets the model's ordinary
-treatment of a prior-less parameter — a flat density over its declared box —
-which is proper because the box is finite (§7.2).
-
-### 6.6 The centred realization is a separate, conditional stage that changes `pgas.rs`
-
-If V4 (§8) shows (C) below threshold in the informative regime, Stage 6 builds
-(A). Its seam is one function the four PGAS sites call, replacing their inline
-loops — the shared substrate, so the sites cannot drift:
+**IR.** Because M depends on knots that may be observation anchors, it cannot be
+computed by the compiler. The coefficients therefore stay symbolic in the IR,
+and the runtime builds M after anchor substitution:
 
 ```rust
-// sim/src/inference/prior.rs
-pub trait JointPrior: Send + Sync {
-    /// Positions in the estimated-parameter vector this term reads.
-    fn members(&self) -> &[usize];
-    fn log_density(&self, theta: &[f64]) -> f64;
-    /// ∂ log p / ∂θ_m for each member, natural scale, accumulated into `out`.
-    fn grad(&self, theta: &[f64], out: &mut [f64]);
+// rust/crates/ir/src/time_func.rs
+pub enum SplineCoefs {
+    Explicit { coefs: Vec<Expr> },
+    Smooth { level: Expr, slope: Expr, scale: Expr, modes: Vec<Expr> },
 }
-pub struct RandomWalkPrior { members: Vec<usize>, order: u8, scale: ScaleRef,
-                             start: Vec<Prior> }
-
-// pgas.rs: the one prior authority
-pub(crate) fn log_prior_and_grad_z(priors: &[Prior], joint: &[Box<dyn JointPrior>],
-    specs: &[EstimatedParam], theta: &[f64], z: &[f64]) -> (f64, Vec<f64>);
+// BSpline.coefs: SplineCoefs. ForcingBasis gains `space: BasisSpace`:
+#[serde(rename_all = "snake_case")]
+pub enum BasisSpace { Spline, Whitened }   // B_k(t) or W_k(t)
 ```
 
-The exact sites in `pgas.rs`: the NUTS target loop (`:4287-4303`) adds the joint
-term and its z-gradient (chain rule through `transform_deriv`); the
-MH-within-Gibbs move (`:4444-4446`) adds the joint term's change when coordinate
-i moves (O(r) banded terms); the chain-start (`:4064-4069`) and probation
-(`:4544-4548`) sums use the new function. PMMH's prior sum gains the same term.
-The IR carries the joint prior as a model-level list; that is a second
-`ir/VERSION` bump. Stage 6 lands with its own note comparing it to Stage 5 on
-the same fixtures.
+Both join the branch's single pending IR bump. `CompiledModel::new` computes Ω,
+Q₊, V, Λ and M for each `Smooth` forcing; evaluation computes the span, the p +
+1 values Bⱼ(t_c), then g = a + b(t_c − t_m) + τ Σᵢ zᵢ Σⱼ M_jᵢ Bⱼ — O(p·K)
+multiply-adds and K − 2 parameter reads per call, about 40 + 4·10 for K = 12
+(inferred). The derivative nodes are `forcing_basis(f, i, whitened)`, Wᵢ(t),
+O(p) each.
+
+**Gradient cost** is O(pK) per referencing rate per substep for the K − 2 mode
+gradients (each Wᵢ is a (p + 1)-term sum once the span is known), plus O(1) for
+a and b and O(pK) for τ — trivial for K ≤ 50. The autodiff rule (§5.2) emits,
+for `Smooth`: ∂g/∂a → 1, ∂g/∂b → `Time − lag` clamped (emitted as a
+`forcing_basis` with a third space, `Linear`, which evaluates t_c − t_m, so the
+clamp and lag cannot be re-derived differently), ∂g/∂zᵢ → τ·Wᵢ, ∂g/∂τ → Σᵢ zᵢWᵢ,
+each multiplied by `time_func(f)` under `link = log`. So `BasisSpace` is
+`Spline | Whitened | Linear`.
+
+**Under IF2 and the optimizers the scale must be fixed.** They read no prior,
+and the likelihood depends on (τ, z) only through w, so an estimated τ beside
+estimated z is a ridge with no maximum. `fit run` refuses an estimated `smooth`
+scale under `if2` and the NLopt methods, naming the scale and the remedy: fix τ
+(the fit is then unpenalized maximum likelihood over an affine
+reparameterization of w), or estimate explicit coefficients. The refusal sits
+beside `validate_hierarchical_leaf_boxes` (`fit/config_v2.rs:2604`) and moves
+into `resolve_roles` with roles Stage 2.
+
+### 6.5 τ has a PC prior whose tail is calibrated once, for every K
+
+τ = 0 is the base model, log β linear in t, and the penalized-complexity prior
+of Simpson et al. (2017) for a Gaussian standard deviation measured from that
+base is exponential: τ ~ exponential(λ), λ = −ln α / U for a tail statement P(τ
+
+> U) = α. Because wᵀΩw = ∫ g''² dt is a property of the curve, τ means the same
+> thing at every K and knot layout; one U serves all of them.
+
+A tail statement bounds curvature, not the curve, so U is calibrated by
+prior-predictive simulation against a target band. Target: at every t in the run
+(window [0, 168], held to 182), the 95% prior band of R(t) = β(t)/γ contains
+[0.5, 3] (every plausible value is admitted) and lies inside [0.1, 20] (absurd
+ones are excluded). With a ~ N(ln(1.2γ), 0.6²) (median R = 1.2 mid-window) and b
+~ N(0, 0.005²) per day (one SD changes β by a factor e^{0.42} ≈ 1.5 over half
+the window), a scan of U ∈ {0.01, 0.015, 0.02, 0.03} meets the target at 0.01
+and fails it at 0.015 for every knot set tried. Measured with a scratch script
+(scipy `BSpline`, cubic, clamped, γ = 0.125, 4,000 draws, seed 20261027; α =
+0.05, U = 0.01, λ = 299.6):
+
+| Knots            | R(t) band at t = 0 | t = 42       | t = 84       | t = 126      | t = 168 and held to 182 | range over t  |
+| ---------------- | ------------------ | ------------ | ------------ | ------------ | ----------------------- | ------------- |
+| K = 8 uniform    | [0.18, 9.64]       | [0.25, 5.43] | [0.15, 8.04] | [0.25, 5.41] | [0.18, 8.86]            | [0.14, 9.64]  |
+| K = 12 uniform   | [0.14, 9.19]       | [0.28, 5.64] | [0.20, 8.84] | [0.27, 5.48] | [0.13, 8.64]            | [0.13, 9.19]  |
+| K = 20 uniform   | [0.15, 11.87]      | [0.28, 5.10] | [0.18, 6.85] | [0.28, 4.91] | [0.16, 11.22]           | [0.15, 11.87] |
+| K = 12 irregular | [0.17, 8.23]       | [0.26, 5.99] | [0.18, 9.99] | [0.27, 5.68] | [0.15, 8.30]            | [0.15, 9.99]  |
+
+The near-equality of the rows is the K-independence the curvature penalty
+promises. τ is boxed to [10⁻⁸, 5U], which leaves 3·10⁻⁷ of the prior mass
+outside. Stage 4 commits this calibration as part of the default prior's
+definition: `scripts/calibrate_smooth_prior.py`, run by
+`make -f tests/recovery/Makefile calibrate-smooth-prior`, writes
+`tests/recovery/cases/spline_seir/smooth_prior_calibration.tsv` (U, λ and the
+band at every t, per knot set) from a fixed seed; the shipped example configs
+read their τ prior from it, and a test asserts the committed table reproduces.
+
+### 6.6 The non-centred form now; the realization may become a setting later
+
+D1 is decided: the sampler moves (a, b, τ, z), the non-centred whitened form.
+Every prior is a scalar `Prior::Fixed` density, summed by the existing
+per-coordinate code, so no high-risk file changes and the PGAS hierarchical
+refusal (`pgas.rs:3775-3784`) is not reached. The centred form (sampling w under
+the Gaussian prior with precision Ω/τ²) mixes better where the latent path is
+very informative about β(t) (Papaspiliopoulos, Roberts & Sköld 2007), and
+interweaving the two in each sweep (ASIS; Yu & Meng 2011) is robust across both
+regimes. Either may later become a user setting — the goal is whatever mixes
+best for Ebola-style fits — but no setting is built now. Both would need a
+non-separable prior term at the four prior-summing sites of `pgas.rs`
+(`:4064-4069`, `:4287-4303`, `:4444-4446`, `:4544-4548`) and in PMMH; that
+design is recorded here so it is not re-derived: one function
+`log_prior_and_grad_z(priors, joint, specs, θ, z)` that all four sites call.
 
 ## 7. Under parameter roles the coefficients are an estimated indexed family
 
 ### 7.1 Declaring the family
 
-An indexed parameter compiles to one scalar per cell (`c_k1 … c_k8`, measured
-§3), and the roles partition is keyed by scalar names; a declaration naming the
-family `c` is refused as an unknown name (roles §4.5). Listing K entries in
-`[estimate]` works today and under roles, unchanged. D5 asks whether to amend
-roles §4.5 so that `[estimate] c = { … }` declares every cell of an indexed
-family that has no scalar of that name, with shared settings, expanded in the
-partition and recorded per cell.
+An indexed parameter compiles to one scalar per cell (`z_m1 … z_m10`, measured
+§3), and the roles partition is keyed by scalar names (roles §4.5). D5 proposes
+a family declaration. With it, a `smooth` forcing needs four `[estimate]` lines
+and no per-member lines:
+
+```toml
+[estimate]
+a_b = {}
+b_b = {}
+tau_b = {}
+z = {} # expands to z_m1 … z_m10 with shared settings
+```
+
+The bounds and priors come from the model, as for any parameter. A constructor
+that generated its own parameters with default priors was considered and not
+proposed: the priors would be invisible in the model file, and the generated
+names would join the parameter namespace without a declaration.
 
 ### 7.2 Bounds, boxes and transforms
 
-A coefficient family declares finite model bounds, so the design does not depend
-on the `real` fallback being fixed on main (§3):
-`c[knot] : real 'ratio in [-8, 2]` for a log-rate per day (β between 3·10⁻⁴ and
-7.4). A finite box gets the scaled-logit transform (`runner.rs:1167-1198`,
-verified), which is near-linear in the interior and keeps the sampler in the
-box. For the innovations, `in [-8, 8]` cuts 2·Φ(−8) ≈ 10⁻¹⁵ of the N(0, 1) mass
-— negligible, and not a hierarchical leaf, so `validate_hierarchical_leaf_boxes`
-does not apply. Once the `real` support is (−∞, ∞) on main, the innovations
-should drop their box and take the identity transform; V4 is repeated then
-(§10).
+Every family declares finite model bounds, so the design does not depend on the
+`real` fallback being fixed on main (§3). A finite box gets the scaled-logit
+transform (`runner.rs:1167-1198`, verified). For the modes, `in [-8, 8]` cuts
+2·Φ(−8) ≈ 10⁻¹⁵ of the N(0, 1) mass; they are not hierarchical leaves, so
+`validate_hierarchical_leaf_boxes` does not apply. Once the `real` support is
+(−∞, ∞) on main, the modes should drop their box and take the identity
+transform.
 
 ### 7.3 Starts
 
-Starts come from `--starts` or `[estimate].start` (roles §5.3). A shared scalar
-start for a coefficient family is a constant curve, a sensible start. The
-`from_prior` rule draws inside the box (`e6867779`): good for innovations, poor
-for flat-prior coefficients, whose box-wide draws are wild curves. The
-validation uses `--starts from_mle=` an IF2 fit for the plain-coefficient arm
-and `from_prior` for the random-walk arm.
+Starts come from `--starts` or `[estimate].start` (roles §5.3). `from_prior`
+draws inside the box (`e6867779`), which suits a, b, τ and z; for explicit
+coefficients with flat priors, box-wide draws are wild curves, and a shared
+scalar start (a constant curve) or `--starts from_mle=` is better.
 
-### 7.4 Hierarchical boxes
+## 8. Merge criteria come in three tiers
 
-The boxed-hierarchical-leaf refusal (`9ccb2899`) does not arise in the
-recommended design, which has no hierarchical prior. Realization (B) would make
-every coefficient a hierarchical leaf, refused under PMMH whenever its box cuts
-the normal's support — every finite box — which is one more reason against it.
+Each required item is a committed test or make target; every artifact it writes
+is produced by a rule. Tolerances are scale-aware: an absolute tolerance is
+stated relative to the magnitude of the quantity compared (max|Ω|, the window
+length, max|g|), never as a bare number.
 
-## 8. Validation decides "proven"; the branch lands only when every row passes
+### 8.1 Required for merge
 
-Each harness is a committed, named target; every artifact it writes is produced
-by a rule. The synthetic study lives in `tests/recovery/cases/spline_seir/` with
-its Makefile targets; figures and tables go into a dated note under
-`docs/dev/notes/`, which the merge commit cites (agent verification conventions,
-"A new inference method merges with the note that measures it").
+**R1 — Numerical correctness.**
 
-Two terms used below. **Bulk-ESS** is the effective sample size of the
-rank-normalized draws (Vehtari et al. 2021): how many independent draws the
-chains are worth for estimating the centre of the posterior. **Coverage** is the
-fraction of datasets whose 90% central posterior interval contains the truth.
+- Basis values against three independent references: scipy's `BSpline`, R's
+  `splines::splineDesign`, and analytic anchors (at K = p + 1, a clamped spline
+  on one interval is the Bernstein basis C(p, k) uᵏ(1 − u)^{p−k}). Uniform,
+  explicit non-uniform, anchored-resolved and periodic knots; degrees 0–5;
+  points at boundaries, interior knots, in between, and outside the window. Max
+  abs error ≤ 10⁻¹² (values are O(1)).
+- Properties over 10⁴ points per layout: partition of unity ≤ 10⁻¹⁴;
+  non-negativity of every Bⱼ; end interpolation f(a) = w₁, f(b) = w_K to 10⁻¹⁴;
+  exact reproduction of constants (coefficients 1) and of t (coefficients ξ) to
+  10⁻¹³·(b − a), uniform and irregular.
+- The penalty: Ω (2-point Gauss–Legendre) against 10-point Gauss–Legendre and
+  against R's `fda::bsplinepen` (an independent implementation of ∫ D²B_i
+  D²B_j), ≤ 10⁻¹²·max|Ω|; bandwidth p; rank K − 2; 1ᵀΩ1 and ξᵀΩξ ≤
+  10⁻¹²·max|Ω|·(b − a)² for uniform and irregular knots.
+- The whitening: MᵀΩM = I and NᵀM = 0 to 10⁻¹²; τ²MMᵀ = τ²Ω⁺ to 10⁻¹⁰ relative;
+  the induced density of §6.3 equals the improper Gaussian density with the
+  null-space prior, compared pointwise at 100 random w (log-densities agree to
+  10⁻¹⁰ after removing the constant).
+- Fixtures regenerated by `make fixtures-bspline` (scipy, R `splines`, R `fda`,
+  and the existing pomp periodic fixture), committed; CI runs offline.
 
-### 8.1 The synthetic outbreak
+**R2 — Gradient correctness.** Central finite differences with step ε =
+10⁻⁵·max(|θ|, 1) — not the harness's `max(10⁻⁵|θ|, 10⁻⁸)`
+(`gradient_check.rs:653`), which is far too small near 0. Pass: relative error <
+10⁻⁴ for every component with |g_fd| ≥ 10⁻³·max_k|g_fd,k|; absolute error ≤
+10⁻⁷·max_k|g_fd,k| for the rest. Covered: the forcing value against each
+coefficient (explicit and `smooth`, both links, user-written `exp`, constant
+lag, inside, at a knot, at a and b, past b); the penalty ½wᵀΩw (gradient Ωw) and
+the `smooth` map against a, b, τ, z; and the complete-data log-likelihood
+through `complete_data_loglik_grad` for a spline in a rate and in an observation
+mean, in the `gradient_check.rs` harness.
 
-A chain-binomial SEIR with daily steps (dt = 1 day), N₀ = 10⁶, σ = 0.1 and γ =
-0.125 per day (fixed), daily onsets observed as
-`neg_binomial(mean = rho * projected, r = 10)` over 182 days, generated with E₀
-= I₀ = 10 and ρ = 0.5. The true reproduction number is a smooth decline,
+**R3 — Inference integration.**
 
-R(t) = 0.7 + 1.5 / (1 + exp((t − 90)/10)), β(t) = γ R(t),
+- A small stochastic epidemic: chain-binomial SEIR, N₀ = 10⁴, daily steps, 60
+  days, a K = 6 log-link `smooth` spline on β, PGAS+NUTS (dense mass matrix,
+  stated in the config), 2 chains × 200 sweeps. It runs, every recorded
+  log-likelihood and gradient is finite, and two runs at the same seeds produce
+  bitwise-identical draws.
+- One synthetic recovery with informative data and known parameters: the SEIR of
+  §8.4 with N₀ = 10⁶ and a truth that lies in the spline space (a K = 6 `smooth`
+  curve with stated a, b, τ, z), E₀, I₀ and ρ fixed, 4 chains. Pass: every true
+  coefficient wⱼ lies in its central 99% posterior interval, and the posterior
+  median of log β(t) is within 0.2 of the truth at every t in the window's
+  middle 80%.
 
-from 2.2 to 0.7. Deterministically it gives a peak of about 107 onsets/day near
-day 101 and about 8,750 onsets in total, about 28/day at day 182 (measured: a
-15-line Euler integration in a scratch script; Stage 4 replaces it with the
-committed generator). The truth is a logistic curve outside every spline space,
-so recovery includes approximation error.
+**R4 — Regression.** `make test` green, so every non-spline path passes.
+Coefficient ordering, IR serialization (round-trip OCaml → JSON → Rust → JSON
+byte-identical), knot definitions and M (bitwise, for a fixed model across two
+builds) are reproducible; the `link` no-collision hash test (§5.6) passes.
 
-The generating model is the fitted model with the spline replaced by an
-`interpolated 'per_day` forcing read from `beta_true.tsv`, written by a make
-target; a test asserts the two models' IR differ only in that forcing. Datasets
-are 100 seeds of `camdl simulate --obs-dir`.
+### 8.2 Documented, not blocking
 
-**The window ends two weeks before the data** (§4.3): [0, 168], so the last
-coefficient is informed by infections whose onsets fall inside the data
-(incubation about 10 days). Past 168 the forcing is held. K ∈ {8, 12, 20}
-coefficients means 5, 9 and 17 uniform intervals (h = 33.6, 18.7, 9.9 days). K =
-12 and K = 20 put h at or below the generation interval and carry the
-assertions; K = 8 is reported as a coarse reference.
+In a dated `docs/dev/notes/` note the merge commit cites:
 
-**Arms.** Each K is fitted (i) with plain coefficients, flat priors in
-`[-8, 2]`, and (ii) with `random_walk(order = 2)` and the calibrated priors of
-§6.1: mid-window level log β ~ N(ln(1.2γ), 0.6²), mid-window slope b₁ ~ N(0,
-0.005²) per day, and τ ~ exponential(λ_h) with λ = 4.03, 9.73, 25.26 for K = 8,
-12, 20 (U_h = 0.744, 0.308, 0.119), τ boxed to [10⁻⁶, 5U_h], which leaves 3·10⁻⁷
-of the prior mass outside. Both arms fix E₀, I₀ and ρ. A third arm, (iii), is
-(ii) at K = 12 with E₀, I₀ and ρ estimated — `E ~ poisson(rate = E0)`,
-`I ~ poisson(rate = I0)` (the law form PGAS can score; a plain `init` assignment
-is refused, `pgas.rs:3683`), E₀, I₀ ~ log_normal(ln 10, 1), ρ ~ beta(5, 5) —
-because in a real Ebola fit ρ·I₀ is a near-ridge and the first coefficient
-trades off against I₀; a spline proven only with them fixed is not proven for
-that use.
+- a representative benchmark on the §8.4 SEIR at K = 12: R̂, bulk-ESS, ESS per
+  second and divergences for every sampled parameter (4 chains, 1,000 warm-up +
+  2,000 sweeps, dense mass);
+- one plot of the known against the inferred β(t), with the window end and the
+  held region marked;
+- known limitations: the level trades off against an estimated intercept or
+  against I₀ and ρ (§4.4); the end of the window is the least informed part of
+  the curve and the held value inherits that uncertainty (§4.3); the forecast
+  past the window is a held value, not an extrapolated trend (§4.3);
+- the τ calibration table of §6.5 as reproduced by its make target;
+- IF2 on chain-binomial with τ fixed, scored by the particle filter against the
+  truth's projection onto the basis (not asserted).
 
-### 8.2 The checks and their thresholds
+### 8.3 Deferred research
 
-| Check                 | What it establishes                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Pass                                                                                                                                                                                                                                                                                              |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| V1 basis values       | `bspline::span`/`basis` and both forcings agree with three independent references: scipy's `BSpline`, R's `splines::splineDesign`, and analytic anchors — at K = p + 1 a clamped spline on one interval is the Bernstein basis C(p, k) uᵏ(1 − u)^{p−k}, which shares no knot construction with any library. Uniform, explicit, anchored-resolved and periodic knots, degrees 0–5, 2,000 points each including knots, window ends and points outside                             | max abs error ≤ 10⁻¹²; partition of unity ≤ 10⁻¹⁴; fixtures (scipy, R, and the existing pomp periodic one) regenerated by `make fixtures-bspline`, committed, CI offline                                                                                                                          |
-| V2 gradients          | central finite differences of `complete_data_loglik_grad` in the `gradient_check.rs` harness with step ε = 10⁻⁵·max(\|θ\|, 1) — not the harness's `max(10⁻⁵\|θ\|, 10⁻⁸)` (`gradient_check.rs:653`), which is far too small for log-scale coefficients near 0 — for: identity link, `link = log`, user-written `exp`, periodic spline, a constant `lag`, a spline inside an observation mean, `random_walk` (z, b₀, b₁, τ), at times inside, at a knot, at a and b, and beyond b | relative error < 10⁻⁴ for every parameter                                                                                                                                                                                                                                                         |
-| V3 maximum likelihood | (i) the exact maximum: the same model on the ODE backend with NB observations, maximized by `nl-bobyqa` and independently by `nl-sbplx`, 8 starts each. (ii) IF2 on chain-binomial (IF2 on the ODE backend is refused as an inference method), its estimate scored by 10 independent particle-filter runs of 2,000 particles, against the same scoring at θ_proj, the least-squares projection of the true log β onto the basis, and at the ODE maximum's coefficients          | (i) the two optimizers agree within 0.05 nats for each K; (ii) mean ℓ̂_PF(θ̂_IF2) ≥ max(mean ℓ̂_PF(θ_proj), mean ℓ̂_PF(θ_ODE)) − 2 standard errors                                                                                                                                                    |
-| V4 mixing             | PGAS+NUTS, 4 chains, 1,000 warm-up + 2,000 sweeps, dense mass-matrix adaptation (recorded in the config), on dataset 1, every arm; bulk-ESS per second of wall time for the worst coefficient or innovation, and for τ                                                                                                                                                                                                                                                          | R̂ ≤ 1.01 and bulk-ESS ≥ 400 for every sampled parameter in the K = 12 and K = 20 random-walk arms and arm (iii); worst-coordinate ESS/s at K = 12 random walk ≥ 0.2 × that of the two-rate step model (`if t < 90 then b1 else b2`, the workaround available today) on the same data and settings |
-| V5 coverage and width | 100 datasets; 90% central intervals for log β(t) at the 26 times t = 7, 14, …, 182, computed from the draws by a script that evaluates the spline with scipy (not camdl's evaluator); arms (ii) at K = 12 and K = 20, and arm (iii)                                                                                                                                                                                                                                             | each asserted arm: pooled coverage over the interior times 35–168 and all datasets in [0.85, 0.95]; the early times t ≤ 28 (where I₀ confounds β) and the held times 175, 182 each reported separately and each ≥ 0.80; mean interval width at 35–154 ≤ 0.5 × the prior-predictive width there    |
-| V6 prior lowering     | sample (b₀, b₁, z, τ) from their priors, evaluate the compiled coefficient expressions, recompute the weighted second divided differences                                                                                                                                                                                                                                                                                                                                       | equal z to 10⁻¹²: the lowering is the random walk it names; and coefficients linear in ξ give a curve linear in t to 10⁻¹²                                                                                                                                                                        |
-| V7 prior predictive   | 4,000 draws of the random-walk prior per K from the calibration step (§6.1), R(t) over [0, 182]                                                                                                                                                                                                                                                                                                                                                                                 | two-sided: at every t the 95% band of R(t) contains [0.5, 3] and lies inside [0.1, 20]; the committed `rw_prior_calibration.tsv` reproduces the table of §6.1                                                                                                                                     |
-| V8 calibration        | simulation-based calibration (Talts et al. 2018) on a small model where it is affordable: `X --> D @ f(t) * X` with X₀ = 10⁵, `f` a log-link K = 12 random-walk spline, daily `poisson` observations of the flow; 200 prior draws, PGAS+NUTS, 99 thinned posterior draws each (so the 100 possible ranks fall evenly into 20 bins); test quantities b₀, b₁, τ, each zₖ, and the curve values f(tⱼ) at 10 times                                                                  | rank histograms in 20 bins pass a χ² test at α = 0.01/d, d the number of test quantities (Bonferroni)                                                                                                                                                                                             |
+Not part of this branch: simulation-based calibration at scale (Talts et al.
+2018); coverage studies over many datasets; efficiency against step-function
+models; latent random walks and other parameterizations (centred, ASIS); joint
+inference of transmission, initial conditions and ascertainment under weak
+identification.
 
-**Power of V5.** Treat the 100 datasets as the independent units and, in the
-worst case, the 26 times within a dataset as perfectly correlated, so the pooled
-coverage has the binomial standard deviation of n = 100 (inferred; a real
-correlation below one only tightens it). That worst case is the valid one to
-plan for. The band [0.85, 0.95] then passes, by exact binomial probabilities
-(computed by the statistics re-review), a true coverage of 0.90 with probability
-0.936, of 0.85 with 0.568, of 0.80 with 0.129 and of 0.75 with 0.011; and it
-fails over-coverage, passing a true 0.97 with probability 0.182. The width row
-stops a prior-dominated, over-wide posterior from passing on coverage alone.
-Cost: 3 asserted arms × 100 datasets × 4 chains, an offline run, not CI.
+### 8.4 The synthetic outbreak used by R3 and §8.2
 
-SBC on the SEIR itself is out of scope for cost; V5 is calibration at one truth,
-which `[synthetic]` already supports (`docs/camdl-run-spec.md` §11.5). The
-thresholds are fixed before any fit runs; D7 asks the maintainer to confirm
-them.
+A chain-binomial SEIR, dt = 1 day, N₀ = 10⁶, E₀ = I₀ = 10, σ = 0.1 and γ = 0.125
+per day, daily onsets observed as `neg_binomial(mean = 0.5 * projected, r = 10)`
+over 182 days, window [0, 168] (two weeks before the last observation, §4.3).
+For §8.2 the truth is R(t) = 0.7 + 1.5/(1 + exp((t − 90)/10)): deterministically
+about 107 onsets/day at the peak near day 101 and about 8,750 in total (measured
+with a scratch Euler integration; Stage 5 commits the generator). It is
+generated by the same model with the spline replaced by an
+`interpolated 'per_day` forcing from `beta_true.tsv`, written by a make target;
+a test asserts the two IRs differ only in that forcing.
 
-**Proven** means V1, V2, V6 green in `make test`, and V3–V5, V7, V8 meeting
-their rows in the note, at the branch head that merges. If V4's efficiency row
-fails while every correctness row passes, Stage 6 is built and V4 rerun on it.
+## 9. Five stages, each green alone, none touching a high-risk file
 
-## 9. Six stages, each green alone
-
-Each stage ends on a green `make test`; each named test is mutation-checked
-(revert the source change, keep the test, confirm it fails). Every commit
-re-keys stored runs through the engine version (§4.2), so the run-identity
+Each stage ends on a green `make test`; each named test is mutation-checked.
+Every commit re-keys stored runs through the engine version (§4.2); the last
 column says what changes beyond that.
 
-| Stage | Content                                                                                                                                                                                | IR bump                                               | High-risk files             | Run identity beyond the engine version                                     |
-| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | --------------------------- | -------------------------------------------------------------------------- |
-| 1     | `bspline.rs` core; periodic evaluator on it; live periodic coefficients; `first_param_read` arm                                                                                        | no                                                    | none                        | none: IR and hash unchanged                                                |
-| 2     | `bspline` kind and `link` (OCaml types, serde, expander, dimcheck, inspect, lint; Rust IR, compiled form, `obs_anchor`, `ir_hash` arms); `make fixtures-bspline` for scipy, R and pomp | yes (one pending bump; about 118 IR files move, §5.6) | none                        | every model re-keys (version string); `link` hashed                        |
-| 3     | `forcing_basis`; autodiff rule for both spline kinds; E600 lifted for coefficients; stale refusal messages updated; every exhaustive arm                                               | same pending bump                                     | none (§5.3)                 | models with spline-coefficient parameters gain `rate_grad` entries, hashed |
-| 4     | the validation harness: recovery case, generators, scripts, V3–V5 on the plain-coefficient arms, the note                                                                              | no                                                    | none                        | none                                                                       |
-| 5     | `random_walk` constructor, its checks, the IF2/NLopt scale refusal; V4–V8 on the random-walk arms                                                                                      | no                                                    | none                        | none: lowers to existing expressions                                       |
-| 6     | conditional on V4 (D1): centred `JointPrior` seam                                                                                                                                      | second bump                                           | `pgas.rs` (§6.6), `pmmh.rs` | every model re-keys again                                                  |
+| Stage | Content                                                                                                                                                                                                               | IR                                               | High-risk files | Run identity beyond the engine version                      |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | --------------- | ----------------------------------------------------------- |
+| 1     | `bspline.rs` core; periodic evaluator on it; live periodic coefficients; `first_param_read` arm; before/after microbenchmark                                                                                          | none                                             | none            | none                                                        |
+| 2     | `bspline` kind with explicit coefficients, `link`, `ir_hash` arms with the no-collision test, the past-window notice (§4.3), `make fixtures-bspline`                                                                  | the pending bump (about 118 IR files move, §5.6) | none            | every model re-keys (version string); `link` hashed         |
+| 3     | `forcing_basis` (space `Spline`); autodiff rule for both spline kinds; E600 lifted for coefficients; stale refusal messages rewritten                                                                                 | same pending bump                                | none            | models with coefficient parameters gain `rate_grad` entries |
+| 4     | `smooth`: Ω, whitening and Jacobi solver in `sim/src/spline_penalty.rs`; `SplineCoefs::Smooth`; spaces `Whitened` and `Linear`; autodiff rule; dimension checks; IF2/NLopt scale refusal; the calibration make target | same pending bump                                | none            | models using `smooth`                                       |
+| 5     | R1–R4 completed (the stochastic-epidemic and recovery tests), the §8.2 note                                                                                                                                           | none                                             | none            | none                                                        |
 
-**Stage 1.** Compiler unchanged, so a parameter in a periodic coefficient is
-still E600 at `camdlc`; the runtime half is tested with hand-built IR. Tests:
-the scipy and pomp oracles unchanged at 10⁻¹²; `partition_of_unity` and
+No stage touches `pgas.rs`, `pgas_grad.rs`, `obs_loglik.rs`, `obs_model.rs`,
+`if2.rs` or `particle_filter.rs` (§5.3, §6.6).
+
+**Stage 1.** Compiler unchanged; the runtime half is tested with hand-built IR.
+The scipy and pomp oracles unchanged at 10⁻¹²; `partition_of_unity`;
 `basis_matches_cox_de_boor_recursion` (the old recursion kept as a test oracle
-only);
-`structural_coefficient_rejection.rs::periodic_spline_coef_param_is_rejected`
-becomes `…_builds_live`, asserting the value moves with the parameter; the
-`first_param_read` arm by a refusal test of an intervention amount reading a
-spline-coefficient forcing under PGAS. `eval_ab` compares two evaluators inside
-one build and cannot measure this change, so a dedicated microbenchmark,
-`benches/spline_eval.rs`, times the old and new periodic evaluators side by
-side; its before/after is pasted in the commit.
+only); `periodic_spline_coef_param_is_rejected` becomes `…_builds_live`; a PGAS
+refusal test of an intervention amount that reads a spline-coefficient forcing.
+`eval_ab` compares two evaluators inside one build and cannot measure this
+change, so `benches/spline_eval.rs` times the old and new evaluators side by
+side; its result is pasted in the commit.
 
-**Stage 2.** Tests: V1; compile and simulate each new golden; the anchored
-window resolves and its inversion is refused; a window not covering the run is
-held, with the stderr line; `link = log` with `'per_week` equals `'per_day`
-scaled by 1/7 to 10⁻¹²; parameter coefficients still E600; and the red→green
-no-collision test of §5.6 — two models differing only in `link` must have
-different IR hashes, red with the `link` hash removed.
+**Stage 2.** The R1 basis items; each new golden compiles and simulates; an
+anchored window resolves and its inversion is refused; `link = log` with
+`'per_week` equals `'per_day` scaled by 1/7 to 10⁻¹²; parameter coefficients
+still E600; the red→green `link` no-collision test; the notice fires for a
+horizon past the window and not otherwise, and its code and message are pinned.
 
-**Stage 3.** Tests: V2; a `forcing_basis` outside a gradient map, or with a bad
-index, is refused by `ir::validate`; a PGAS+NUTS smoke fit with spline
-coefficients runs past the preflight; a parameter in a window end is still E600,
-and its message no longer lists the spline basis among things a parameter cannot
-drive. The `URStructuralForcing` text (`autodiff.ml:360-370`), the
+**Stage 3.** R2 for explicit coefficients; `forcing_basis` outside a gradient
+map, with a bad index, or with a space its forcing lacks, is refused by
+`ir::validate`; a parameter in a window end is still E600, and the
+`URStructuralForcing` text (`autodiff.ml:360-370`), the
 `UnsupportedReason::StructuralForcing` message (`deriv.rs:73-75`) and the
-runtime `eval_structural` message (`compiled_model.rs:736-741`) all name
-`periodic_spline` coefficients as frozen; each is rewritten to name only knots,
-windows and periods.
+`eval_structural` message (`compiled_model.rs:736-741`) no longer name spline
+coefficients.
 
-**Stages 4 and 5** are measurement stages; their code is the harness and the
-constructor. **Stage 6** lands only if D1's condition fires.
+**Stage 4.** The R1 penalty and whitening items; R2 for `smooth`; the
+calibration target reproduces the committed table; `smooth` on a degree-0 or
+degree-1 spline, on a `periodic_spline`, or with a wrong mode count or mode
+prior is refused with its code.
+
+**Stage 5.** R3, R4, and the §8.2 note.
 
 ## 10. Sequencing with the typed-constants change and the roles stages
 
 The planned IR change that moves typed `let` constants into a `constants`
-section precedes roles Stage 2 and lands on main first. This branch does not
-wait for it and does not join it: its schema changes stay on the branch until §8
-passes. At each rebase onto a main that has bumped `ir/VERSION`, the branch's
-single pending bump is renumbered to main's version plus one step and its golden
-commit regenerated (the `golden-update` skill); the branch never carries two
-pending bumps for Stages 2–3. The two changes are orthogonal in content: a
-coefficient is an expression, and whether a constant it names lives in the
-parameter list or the `constants` section does not change the spline code. Stage
-6, if built, is a second bump after the first has landed.
+section lands on main first; this branch neither waits for it nor joins it (D6).
+At a rebase onto a main that has bumped `ir/VERSION`, the branch's single
+pending bump is renumbered and its IR files regenerated — about 101 generated
+files plus the 17 hand-edited ones in `ir/golden/` (§5.6) — so the branch
+rebases at stage boundaries and once before merge, not continuously. The two
+changes are orthogonal in content: a coefficient is an expression, wherever a
+constant it names lives.
 
-Roles Stage 1 (types, no behaviour change) does not interact. Roles Stage 2
-brings `resolve_roles`, into which the random-walk scale refusal moves. The
-`real` support fix is landing separately on main; once it is there, V4 is rerun
-with unboxed innovations and the note records both.
-
-**The cost of renumbering.** A rebase across a main bump regenerates about 101
-generated IR files and hand-edits the 17 in `ir/golden/` (§5.6). The branch
-therefore rebases at stage boundaries and once before merge, not continuously
-(D6).
+Roles Stage 1 does not interact. Roles Stage 2 brings `resolve_roles`, into
+which the `smooth` scale refusal moves, and is the natural place for D5's family
+declaration.
 
 ## 11. Decisions
 
-**D1 — How the smoothness prior is realized.** The question is which coordinates
-the sampler moves. (a) Non-centred constructor now (§6.2 C): no high-risk
-change, no IR change, the same posterior over the curve, standard normal
-innovations that suit weakly informative stretches; the risk is a curved z–τ
-ridge where the latent path is informative, which shows as low ESS/s in V4. (b)
-Centred GMRF prior type now (§6.2 A): the sampled coordinates are the
-coefficients themselves, efficient where data are informative, but it needs a
-new non-separable prior seam at four sites in `pgas.rs` and one in PMMH, a
-second IR bump, and it has the funnel where data are weak. (c) Interweave both
-in each sweep (ASIS, Yu & Meng 2011): robust across the two regimes, but it
-needs (b)'s seam plus a second θ-move per sweep in `pgas.rs`. (d) Lift the
-hierarchical refusal (§6.2 B): the general mechanism, but centred, verbose (one
-declaration per coefficient), and every coefficient becomes a hierarchical leaf
-subject to the box refusals. User-facing difference: under (a) the fit summary
-lists innovations, level, slope and scale, and the curve is read through
-`quantities {}`; under (b) it lists coefficients. Recommendation: (a), with
-Stage 6 building (b) — and (c) on top of it if (b) alone does not meet V4 — only
-if V4's efficiency row fails. Confidence: leaning; the efficiency comparison is
-exactly what V4 measures.
+**D1 — Decided: the non-centred prior now.** The sampler moves the level, slope,
+scale and whitened modes (§6.3). The realization may later become a user
+setting, centred or interweaving (§6.6), chosen by what mixes best for
+Ebola-style fits; no setting is built now.
 
-**D2 — A `link = log` option on spline forcings.** Without it, a positive rate
-is `unit * exp(spline)` with a typed constant carrying the unit (measured: bare
-`exp` of a forcing is E300, plus E301 for a dimensioned forcing), and unit
-scaling such as `'per_week` must be applied by hand. With it, the forcing
-carries its unit and the rate reads `log_beta * S * I / N`; the cost is one enum
-field on two kinds, hashed, and the additive-scaling rule of §4.4.
-Recommendation: offer it. Confidence: solid.
+**D2 — Decided: offer `link = log`** (§4.4).
 
-**D3 — Knots at the window ends, and the difference the prior penalizes.** The
-RW2 prior must have log-linear curves as its null space, or it penalizes a real
-exponential growth or decline at the ends, where the forecast value is read. (a)
-Clamped knots with divided differences over the Greville abscissae (§6.1): f(a)
-= c₁ and f(b) = c_K exactly; one rule serves uniform and explicit breakpoints;
-interior penalty identical to the textbook RW2; the end weights are a modelling
-choice (Brownian scaling) that V6 checks. (b) Unclamped, equally spaced knots
-extended p intervals past each end (Eilers & Marx 1996), plain index
-differences, and the forcing held at f(a), f(b): the textbook P-spline, a
-homogeneous penalty with the correct null space and no weights, but p
-coefficients at each end supported mostly outside the data; f(b) is a blend of
-the last p + 1 coefficients; knot positions outside the data; and `random_walk`
-must be refused on explicit breakpoints, whose spacing is uneven. Either choice
-fixes every coefficient's meaning, so changing it later re-keys and
-re-interprets every fit. Recommendation: (a). Confidence: leaning.
+**D3 — Decided: cubic clamped B-splines, uniform or non-uniform knots, under the
+integrated squared curvature penalty** ∫ g''² dt = wᵀΩw, with Ω computed exactly
+(§6.1), compared with the two alternatives (§6.2), and sampled in the
+null-space-separated whitened form (§6.3). No heuristic end weights.
 
-**D4 — The forcing outside its window.** Hold (recommended): continuous,
-conservative for forecasts, matches `piecewise` and linear `interpolated`, and
-composes with `last_obs` forks; the window should end at `last_obs` minus the
-infection-to-report delay, so the held value is a coefficient the data inform
-(§4.3). Refuse: forces every window to cover the simulation, which breaks
-forecasting runs past `last_obs`. Polynomial or linear extrapolation: an
-unsupported trend in log β, exponential in β. A user-visible consequence of
-hold: a forecast past the window uses the last estimated level unless a scenario
-says otherwise. Confidence: solid.
+**D4 — Decided: hold outside the window, and say so.** §4.3 defines what a run
+past the window computes, and a static info notice reports it.
 
-**D5 — Declaring an indexed family in `[estimate]`.** Today and under roles as
-accepted, a K = 20 family is 20 `[estimate]` lines (18 innovations under
-`random_walk`). Amending roles §4.5 to accept the family name, when no scalar of
-that name exists, expands to the cells with shared bounds, transform and start,
-recorded per cell in the partition, and still refuses a family name that
-collides with a scalar. It touches `resolve_roles`, not the samplers.
-Recommendation: amend, in roles Stage 2. Confidence: leaning; it is a roles
-decision this proposal motivates rather than needs.
+**D5 — Pending the maintainer's confirmation: a bare family name in
+`[estimate]`.** `z = { bounds = [lo, hi], start = s }` expands to every member
+of the indexed family `z` with those shared settings, and the partition records
+each member separately (roles §4.5 keeps scalar keys). It is refused if a scalar
+named `z` exists, and refused if per-member entries (`z_m1 = …`) for the same
+family also appear, because each parameter has one declaration (roles §4.2). Two
+options were considered. A quoted key `"z[*]"` is explicit about expansion but
+introduces a pattern syntax, and invites partial patterns that would need their
+own rules. A family header with per-member overrides (`[estimate.z]` plus
+`z_m3 = { start = … }`) is more flexible but reintroduces two declarations for
+one parameter, which roles §4.2 removed. The bare name needs no new syntax, and
+its two refusals make it unambiguous. A `smooth` forcing is then four lines,
+`a_b`, `b_b`, `tau_b` and `z` (§7.1). Recommendation: the bare name, in roles
+Stage 2. Confidence: leaning.
 
-**D6 — The IR bump's timing.** (a) One pending bump on this branch, landing when
-proven (recommended). Each rebase onto a main that has bumped `ir/VERSION`
-renumbers it, which regenerates about 101 generated IR files and hand-edits the
-17 frozen ones in `ir/golden/` (§5.6); so the branch rebases at stage boundaries
-and once before merge, not continuously. (b) Bundle the schema additions with
-the typed-constants bump to save a churn — which would put unproven surface on
-main and contradict the branch's purpose. Confidence: solid.
+**D6 — Decided: (a), one IR bump kept on the branch** (§10).
 
-**D7 — The acceptance thresholds of §8.2.** The numbers that decide "proven":
-three independent basis references at 10⁻¹²; gradient relative error < 10⁻⁴ at
-step 10⁻⁵·max(|θ|, 1); two optimizers agreeing within 0.05 nats and IF2 within
-two standard errors of the better of the projected truth and the ODE maximum; R̂
-≤ 1.01 and bulk-ESS ≥ 400, including the arm with E₀, I₀ and ρ estimated; ESS/s
-≥ 0.2× the two-rate step model; pooled interior coverage in [0.85, 0.95] over
-100 datasets for arms (ii) at K = 12, 20 and (iii), with the early and held
-times each ≥ 0.80 and interior width ≤ half the prior's; a prior-predictive band
-of R(t) containing [0.5, 3] and inside [0.1, 20] at every t, met by the
-calibrated priors (§6.1 table); SBC χ² at α = 0.01/d. Loosening any of them
-later is lowering the bar, so they are fixed now. Recommendation: accept as
-written. Confidence: leaning; the ESS/s ratio is the least grounded, set so the
-spline costs at most five times the effective samples per second of a model with
-a sixth of the parameters.
+**D7 — Decided: the merge criteria are the three tiers of §8.**
 
 ## 12. Out of scope, each with its reason
 
-- **Penalized maximum likelihood (a MAP estimate under IF2).** IF2 reads no
-  prior; adding a penalty to its likelihood is an IF2 change (high-risk) for a
-  use V3 does not need.
-- **Estimated knot positions or period.** Their derivatives move the basis
-  itself; they stay structural (E600).
-- **Degree above 5, coincident interior knots.** Neither is needed for smooth
-  rates, and both complicate the stability argument of §4.1.
+- **A latent random walk on log β** (stochastic transmission, β(t) as a state of
+  the process rather than a smooth function of θ). It is a different model
+  class, planned separately.
+- **A centred or interweaving realization, or a setting to choose one** (D1,
+  §6.6).
+- **Penalized maximum likelihood under IF2.** IF2 reads no prior; adding a
+  penalty to its likelihood is an IF2 change, in a high-risk file.
+- **A smoothness prior on `periodic_spline`.** Its wrap-around penalty is a
+  different matrix; add it when a periodic fit needs it.
+- **Estimated knot positions or period.** Their derivatives move the basis; they
+  stay structural (E600).
+- **Degree above 5, coincident interior knots.** Not needed for smooth rates,
+  and both complicate §4.1's stability argument.
 - **A span cache per (forcing, t).** An optimization after a profile (§5.5).
-- **SBC on the SEIR study.** Cost (§8.2); V8 covers the prior and gradient
-  machinery on a small model.
-- **A lint for an estimated intercept beside a free-level log spline** (§4.4).
-  The non-identifiability is documented in the language spec section Stage 2
-  adds; a syntactic lint belongs with the model-lints work.
-- **The `[0, ∞)` box for an unbounded `real` and the stale, untested
+- **The `[0, ∞)` box for an unbounded `real`, and the stale, untested
   `ir/schema.json`** (§3). Both are being fixed separately on main; nothing here
   depends on either staying as it is.
 - **Splines over a stratification dimension** (one curve per province sharing a
-  τ). Expressible as one forcing per stratum today; a stratified forcing kind is
+  τ). Expressible as one forcing per stratum today; a stratified kind is
   separate design.
 
 ## References
@@ -1235,24 +1175,25 @@ Load-bearing for the design:
   linear-reproduction property behind the Greville abscissae; the periodic
   construction already used.
 - Piegl, L. & Tiller, W. (1997). _The NURBS Book_, 2nd ed. Springer. §2.5,
-  Algorithms A2.1 (span) and A2.2 (nonzero basis functions) (§4.1).
+  Algorithms A2.1 (span), A2.2 (nonzero basis functions) and A2.3 (their
+  derivatives) (§4.1, §6.1).
+- O'Sullivan, F. (1986). A statistical perspective on ill-posed inverse
+  problems. _Statistical Science_ 1(4):502–518. The curvature penalty (§6.1).
+- Wand, M. P. & Ormerod, J. T. (2008). On semiparametric regression with
+  O'Sullivan penalized splines. _Australian & New Zealand Journal of Statistics_
+  50(2):179–198. Computing Ω, and its relation to the difference penalty (§6.1);
+  already cited by `periodic_bspline.rs`.
 - Eilers, P. H. C. & Marx, B. D. (1996). Flexible smoothing with B-splines and
   penalties. _Statistical Science_ 11(2):89–121. The difference penalty (§6.1).
-- Lang, S. & Brezger, A. (2004). Bayesian P-splines. _Journal of Computational
-  and Graphical Statistics_ 13(1):183–212. The random-walk prior on coefficients
-  (§6.1).
-- Rue, H. & Held, L. (2005). _Gaussian Markov Random Fields: Theory and
-  Applications_. Chapman & Hall/CRC. Ch. 3, intrinsic GMRFs: rank, null space,
-  normalizer (§6.1).
 - Papaspiliopoulos, O., Roberts, G. O. & Sköld, M. (2007). A general framework
   for the parametrization of hierarchical models. _Statistical Science_
   22(1):59–73. Centred versus non-centred (§6.2).
 - Talts, S., Betancourt, M., Simpson, D., Vehtari, A. & Gelman, A. (2018).
   Validating Bayesian inference algorithms with simulation-based calibration.
-  arXiv:1804.06788 (V8).
+  arXiv:1804.06788 (§8.3).
 - Vehtari, A., Gelman, A., Simpson, D., Carpenter, B. & Bürkner, P.-C. (2021).
   Rank-normalization, folding, and localization: an improved R̂ for assessing
-  convergence of MCMC. _Bayesian Analysis_ 16(2):667–718 (V4).
+  convergence of MCMC. _Bayesian Analysis_ 16(2):667–718 (§8.2).
 
 - Yu, Y. & Meng, X.-L. (2011). To center or not to center: that is not the
   question — an ancillarity–sufficiency interweaving strategy (ASIS) for
@@ -1261,14 +1202,9 @@ Load-bearing for the design:
 
 Context:
 
-- Betancourt, M. & Girolami, M. (2015). Hamiltonian Monte Carlo for hierarchical
-  models. In _Current Trends in Bayesian Methodology with Applications_, CRC
-  Press; arXiv:1312.0906. The funnel (§6.2).
 - Simpson, D., Rue, H., Riebler, A., Martins, T. G. & Sørbye, S. H. (2017).
   Penalising model component complexity: a principled, practical approach to
   constructing priors. _Statistical Science_ 32(1):1–28. The prior on τ (§6.1).
-- Sørbye, S. H. & Rue, H. (2014). Scaling intrinsic Gaussian Markov random field
-  priors in spatial modelling. _Spatial Statistics_ 8:39–51. Scale of τ (§6.1).
 - Lindsten, F., Jordan, M. I. & Schön, T. B. (2014). Particle Gibbs with
   ancestor sampling. _Journal of Machine Learning Research_ 15:2145–2184.
 - Hoffman, M. D. & Gelman, A. (2014). The No-U-Turn Sampler. _Journal of Machine
