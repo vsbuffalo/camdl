@@ -24,6 +24,7 @@ mod cas;
 mod browse;
 mod check_update;   // `camdl check-update` — GitHub release-availability check
 mod sim_job;       // SimulateJob / ParamSource / Seeds / ScenarioRef / ObsOutput (run-spec §3)
+mod roles;         // parameter roles: the partition, resolved from role declarations before any value
 mod sweep;         // the design axis: --sweep / --sweep-file expansion, checks, the resolved design
 mod engine;        // run_job: the engine behind simulate's cell grid (run-spec §3.1)
 mod cas_sink;      // CasSink: the content-addressed store sink for simulate's cells
