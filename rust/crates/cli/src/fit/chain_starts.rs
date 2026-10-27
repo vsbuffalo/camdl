@@ -301,6 +301,11 @@ pub enum InitError {
     /// sampleable prior and no bounds for the uniform fall-back. Lists
     /// the offending parameter names.
     NoPriorAndNoBounds { params: Vec<String> },
+    /// `uniform`, `lhs` or `uniform_unconstrained` was asked to spread chains
+    /// over a parameter whose search box has an infinite end and whose
+    /// transform keeps no box (an unbounded `real` or `instant`): there is no
+    /// interval to draw within. Lists `name [lo, hi]` per parameter.
+    NoFiniteBox { params: Vec<String> },
     /// A sourced rule reached the draw without its source resolved — a
     /// wiring bug ([`resolve_starts`] must run first), never user input.
     Unresolved { rule: String },
@@ -320,6 +325,14 @@ impl std::fmt::Display for InitError {
                 f,
                 "starts = \"from_prior\" requires either a prior or finite bounds on \
                  every estimated parameter; the following have neither: {}",
+                params.join(", ")),
+            InitError::NoFiniteBox { params } => write!(
+                f,
+                "this rule draws each chain's start within the parameter's search box, \
+                 and these parameters have no finite one: {}. Give them bounds (`in [lo, hi]` \
+                 in the model, or `bounds = [lo, hi]` in [estimate]), or choose a different \
+                 --starts rule: `from_prior` draws from each parameter's prior, `single` \
+                 starts every chain at the declared starts.",
                 params.join(", ")),
             InitError::Unresolved { rule } => write!(
                 f, "internal: starts rule `{rule}` reached the draw with its source \
@@ -573,6 +586,14 @@ pub fn draw_chain_starts(
             .map(|s| s.file.as_path())
             .ok_or_else(|| InitError::Unresolved { rule: rule.spelled() })
     };
+    if n_chains >= 2
+        && matches!(
+            rule,
+            ChainStarts::Spread(Spread::Uniform | Spread::Lhs | Spread::UniformUnconstrained)
+        )
+    {
+        refuse_spread_without_finite_box(ctx.base_specs)?;
+    }
     let drawn = match &rule {
         ChainStarts::Point(Point::Declared) => draw_single(ctx.resolved, n_chains),
         ChainStarts::Spread(Spread::Uniform) => {
@@ -623,6 +644,30 @@ pub fn draw_chain_starts(
         }
     };
     Ok(DrawnStarts::fresh(drawn, rule))
+}
+
+/// Refuse a box-spreading rule over a parameter with no box to spread in: a
+/// search box with an infinite end that its transform does not keep
+/// (`Transform::None` — an unbounded `real` or `instant`). The builders would
+/// otherwise scale the declared start by `0.5 + u`, which never changes its
+/// sign and leaves a start of 0 at 0 on every chain. A `Log` parameter's
+/// `[0, ∞)` box is kept by its transform and is not refused here.
+fn refuse_spread_without_finite_box(
+    base_specs: &[EstimatedParam],
+) -> Result<(), InitError> {
+    let params: Vec<String> = base_specs
+        .iter()
+        .filter(|s| {
+            matches!(s.transform, Transform::None)
+                && !(s.lower.is_finite() && s.upper.is_finite())
+        })
+        .map(|s| format!("`{}` [{}, {}]", s.name, s.lower, s.upper))
+        .collect();
+    if params.is_empty() {
+        Ok(())
+    } else {
+        Err(InitError::NoFiniteBox { params })
+    }
 }
 
 /// Lift the builders' `Vec<Vec<EstimatedParam>>` into `ChainStart`s.
@@ -1838,6 +1883,57 @@ mod tests {
             assert!((0.4 - 1e-9..=0.5 + 1e-9).contains(&v),
                 "draw {} outside the resolved prior [0.4, 0.5]", v);
         }
+    }
+
+    /// An estimated `real` parameter `shift` declaring no range, with
+    /// `prior ~ normal(-1, 1)`, and the spec the runner builds for it: the
+    /// runner's own search box and transform, not a test-local choice.
+    fn unbounded_real() -> (ResolvedParameters, Vec<EstimatedParam>) {
+        let mut p = mk_param("shift", 0.5,
+            Some(ir::parameter::PriorDist::Normal(
+                ir::parameter::NormalPrior { mean: -1.0, sd: 1.0 })),
+            None);
+        p.param_kind = Some(ir::parameter::ParamKind::Real);
+        let (lower, upper) = crate::fit::runner::resolve_search_box("shift", None, &p).unwrap();
+        let transform = crate::fit::runner::derive_transform_with_bounds(&p, None, (lower, upper));
+        let resolved = mk_resolved(vec![p], &["shift"]);
+        let spec = EstimatedParam {
+            name: "shift".into(), index: 0, initial: 0.5, rw_sd: 0.1, transform,
+            lower, upper, rw_sd_auto: false, perturb_only_at_t0: false,
+        };
+        (resolved, vec![spec])
+    }
+
+    #[test]
+    fn a_box_spreading_rule_refuses_an_unbounded_real_parameter() {
+        let (resolved, base_specs) = unbounded_real();
+        let priors = priors_for(&resolved);
+        let ctx = StartContext { resolved: &resolved, base_specs: &base_specs, priors: &priors };
+        for rule in [Spread::Uniform, Spread::Lhs, Spread::UniformUnconstrained] {
+            let rule = ChainStarts::Spread(rule);
+            let err = draw_chain_starts(&ctx, &ResolvedStarts::bare(rule.clone()), 4, 1)
+                .expect_err("no box to draw within")
+                .to_string();
+            assert!(err.contains("these parameters have no finite one: `shift` [-inf, inf]."),
+                "{}: {err}", rule.spelled());
+            assert!(err.contains("`from_prior`") && err.contains("bounds = [lo, hi]"),
+                "{}: {err}", rule.spelled());
+            // One chain draws nothing, so there is nothing to refuse.
+            assert!(draw_chain_starts(&ctx, &ResolvedStarts::bare(rule), 1, 1).is_ok());
+        }
+    }
+
+    #[test]
+    fn from_prior_starts_an_unbounded_real_parameter_below_zero() {
+        let (resolved, base_specs) = unbounded_real();
+        let priors = priors_for(&resolved);
+        let ctx = StartContext { resolved: &resolved, base_specs: &base_specs, priors: &priors };
+        let starts = draw_chain_starts(
+            &ctx, &ResolvedStarts::bare(ChainStarts::from_prior()), 32, 7,
+        ).unwrap();
+        let negative = starts.starts.iter().filter(|cs| cs.values["shift"] < 0.0).count();
+        // normal(-1, 1) puts 84% of its mass below zero.
+        assert!(negative >= 16, "{negative} of 32 starts below zero");
     }
 
     #[test]

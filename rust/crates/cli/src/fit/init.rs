@@ -212,10 +212,12 @@ pub fn draw_start_in_bounds(
 /// value, respecting the parameter's transform.
 fn lhs_map_to_natural(spec: &EstimatedParam, u: f64) -> f64 {
     if !spec.lower.is_finite() || !spec.upper.is_finite() {
-        // Unbounded: ±50% jitter around the seeded start. LHS is meaningless
-        // here but we don't want to fail — the upstream validator should
-        // refuse fits with unbounded estimated params; until that lands,
-        // fall back gracefully.
+        // Unbounded: ±50% jitter around the seeded start. From the fit's
+        // chain-start rules this is reached only by a `Transform::Log`
+        // parameter on `[lo, ∞)`, whose jitter keeps its sign:
+        // `draw_chain_starts` refuses an unbounded `Transform::None`
+        // parameter before any builder runs. `survey` calls the LHS builder
+        // directly and still reaches it for such a parameter.
         return spec.initial * (0.5 + u);
     }
     match &spec.transform {

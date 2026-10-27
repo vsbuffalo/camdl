@@ -1,6 +1,6 @@
 //! Auto `rw_sd` is a fraction of the search box. A box with an infinite end
-//! gives it no scale: an unbounded `real` parameter got 166666.67 (its
-//! `[0, ∞)` fall-back box, `Transform::None`, read as ±1e6) and an unbounded
+//! gives it no scale: an unbounded `real` parameter got 166666.67 (an
+//! infinite end of its `Transform::None` box read as ±1e6) and an unbounded
 //! `rate` got ~1e-299 (`Transform::Log` from a lower bound floored at
 //! 1e-300). Either makes the IF2 random walk meaningless, and PMMH's and
 //! MH's first proposals are five times it. Such a fit is refused, naming the

@@ -94,9 +94,10 @@ pub enum BoxFrom {
     Cli,
     /// The support: the model's declared range, or the kind's finite one.
     Support,
-    /// Nothing declared and the kind gives no finite range: the runner's
-    /// `[0, ∞)` fall-back (`fit::runner::resolve_search_box`), which is not
-    /// the support of a `real` or `instant` parameter.
+    /// Nothing declared and the box differs from the support: the runner's
+    /// `[0, ∞)` (`fit::runner::default_search_box`) for a parameter whose IR
+    /// carries no kind, whose support is the whole line. A `real` or
+    /// `instant` parameter searches its support, `(−∞, ∞)`.
     Fallback,
 }
 
@@ -1413,10 +1414,11 @@ mod tests {
         let Role::Estimated(tau) = &p.entries["tau"].role else { panic!("tau estimated") };
         assert_eq!(tau.support, Support {
             lower: f64::NEG_INFINITY, upper: f64::INFINITY, from: SupportFrom::Kind });
-        // The run searches the runner's `[0, ∞)` fall-back, not the support,
-        // and the record says so.
+        // An unbounded `real` searches its whole support: nothing would
+        // enforce a `[0, ∞)` box under the identity transform, so the record
+        // must not claim one.
         assert_eq!(tau.search, SearchBox {
-            lower: 0.0, upper: f64::INFINITY, from: BoxFrom::Fallback });
+            lower: f64::NEG_INFINITY, upper: f64::INFINITY, from: BoxFrom::Support });
         assert!(matches!(tau.transform, Transform::None));
     }
 
@@ -1510,6 +1512,8 @@ mod tests {
         let json = serde_json::to_value(&field).unwrap();
         assert_eq!(json["status"], "resolved");
         assert_eq!(json["parameters"]["tau"]["support"], serde_json::json!(["-inf", "inf"]));
+        assert_eq!(json["parameters"]["tau"]["search"], serde_json::json!(["-inf", "inf"]));
+        assert_eq!(json["parameters"]["tau"]["search_from"], "support");
         assert_eq!(json["parameters"]["beta"]["declared_by"], "fit_estimate");
         assert_eq!(json["parameters"]["N0"]["via"], "inline");
         let back: PartitionField = serde_json::from_value(json).unwrap();

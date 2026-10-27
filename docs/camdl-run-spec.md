@@ -2478,9 +2478,12 @@ the parameter's declared type in the `.camdl`:
 The clamp uses the _resolved_ bounds, so narrowing in `fit.toml` genuinely
 narrows the IF2 search rather than leaving it advisory. Resolution order is
 `fit.toml [estimate].bounds` → the model's `in [lo, hi]` → the range the
-declared type carries → `[0, ∞)`. Only `probability` carries a range (`[0, 1]`),
-which is what makes its `logit` well-formed without an `in [lo, hi]` clause;
-every other type falls through to `[0, ∞)` as before.
+declared type carries: `[0, 1]` for `probability`, which is what makes its
+`logit` well-formed without an `in [lo, hi]` clause; `(−∞, ∞)` for `real` and
+`instant`; `[0, ∞)` for every other type and an undeclared one. An unbounded
+`real` or `instant` takes the whole line because its `identity` transform
+enforces no box; the record (`fit.meta.json` `partition`) shows it as
+`search: ["-inf", "inf"]`.
 
 **Prior wire format.** Externally tagged inline tables, matching what the OCaml
 compiler emits for in-model `~` priors (`PriorDist`,
@@ -2708,8 +2711,11 @@ explored.
 | `{ from_params = "<path>" }`      | point  | Every chain at the point in a hand-written flat params TOML.                                                                                                      |
 
 `uniform`, `lhs`, and `uniform_unconstrained` collapse to the base point at
-`chains = 1`; the source-reading rules do not. A rule applies only to parameters
-in `[estimate]`; anything in `[fixed]` takes its declared value.
+`chains = 1`; the source-reading rules do not. At two or more chains they refuse
+a parameter with no finite box to draw within (an unbounded `real` or `instant`,
+whose box is `(−∞, ∞)`), asking for bounds or a different rule; `from_prior`
+draws such a parameter from its prior. A rule applies only to parameters in
+`[estimate]`; anything in `[fixed]` takes its declared value.
 
 **The default.** With no `starts` in the file and no `--starts` on the command
 line, `fit run` resolves the rule against the problem before the identity is

@@ -428,6 +428,14 @@ The model file is the source of truth for what _can_ be estimated; the
   transform that keeps the parameter inside them, a positive kind whose bounds
   reach below zero included. `fit.toml` overrides, except that
   `transform = "identity"` on bounds finite at both ends is refused.
+- **Unbounded parameters.** With no `bounds` here and no `in [lo, hi]` in the
+  model, a `real` or `instant` parameter is searched over `(−∞, ∞)` with the
+  identity transform; the positive kinds (`rate`, `positive`, `count`,
+  `duration`) over `[0, ∞)` with the log transform; a `probability` over
+  `[0, 1]`. An automatic `rw_sd` is refused for an unbounded parameter (there is
+  no box to scale one from), and at two or more chains the `uniform`, `lhs` and
+  `uniform_unconstrained` starts refuse it; `from_prior` draws it from its
+  prior.
 - **Hierarchical parameters** (`a ~ normal(mu, 1)`) may not have bounds that cut
   into their prior's support under `pmmh` or `mh`: the prior is not renormalised
   to the bounds, and for a hierarchical parameter the missing constant depends

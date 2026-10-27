@@ -128,6 +128,19 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   logit. So does a parameter with no `param_kind` (IR written before the field)
   whose bounds are finite and reach below zero, which got no transform at all.
   Fits of such parameters re-key. Migration: none.
+- **An unbounded `real` or `instant` parameter is searched over `(−∞, ∞)`.**
+  With no `bounds` in `fit.toml` and no `in [lo, hi]` in the model, it was given
+  the box `[0, ∞)` with the identity transform, which enforces no box: the
+  record said `search: [0, "inf"]` while the samplers and IF2 went below zero.
+  The record now says `search: ["-inf", "inf"]` (`search_from: "support"`).
+  `rate`, `positive`, `count` and `duration` keep `[0, ∞)`, which the log
+  transform enforces. At two or more chains, `starts = "uniform"`, `"lhs"` and
+  `"uniform_unconstrained"` now refuse such a parameter, which they had started
+  at its declared start scaled by 0.5–1.5 (never changing its sign); this
+  includes the default `uniform_unconstrained` when a parameter has no
+  sampleable prior. Migration: give the parameter bounds (`in [lo, hi]` or
+  `bounds = [lo, hi]`), or use `starts = "from_prior"` with a prior on it, or
+  `starts = "single"`.
 - **`starts = "from_prior"` draws inside the bounds.** A prior draw outside the
   box the transform keeps is redrawn; before, it was clamped to the edge of the
   box and the chain started there. Fits whose prior draws fell outside the box

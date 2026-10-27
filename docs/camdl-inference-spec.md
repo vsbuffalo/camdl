@@ -151,8 +151,18 @@ knowledge constrains the plausible region.
 
 2. **Every finite search box gets a transform that keeps the parameter inside
    it.** The box is the fit's `bounds`, else the model's `in [lo, hi]`, else the
-   range the parameter's kind carries (`probability` is `[0, 1]`), else
-   `[0, ∞)`. The transform is chosen from the kind and the box:
+   range the parameter's kind carries:
+
+   | kind                                                | box with no bounds declared |
+   | --------------------------------------------------- | --------------------------- |
+   | `probability`                                       | `[0, 1]`                    |
+   | `rate`, `positive`, `count`, `duration`, or no kind | `[0, ∞)`                    |
+   | `real`, `instant`                                   | `(−∞, ∞)`                   |
+
+   An unbounded `real` or `instant` takes the whole line because it has the
+   identity transform, which keeps no box: a narrower one would be recorded but
+   not enforced. The `[0, ∞)` of the positive kinds is kept by the log
+   transform. The transform is chosen from the kind and the box:
 
    | kind                                            | box                 | transform    |
    | ----------------------------------------------- | ------------------- | ------------ |
@@ -177,9 +187,13 @@ knowledge constrains the plausible region.
    also concentrate the random walk in the region of interest.
 
 3. **Fit bounds control chain starts.** Spread starts (`lhs`, `uniform`,
-   `uniform_unconstrained`) draw within the box. `from_prior` draws each
-   parameter from its prior restricted to the box its transform keeps, redrawing
-   a value that falls outside.
+   `uniform_unconstrained`) draw within the box. With two or more chains they
+   refuse a parameter whose box has an infinite end and whose transform keeps
+   none (an unbounded `real` or `instant`), since there is no interval to draw
+   within; the refusal asks for bounds or a different `starts` rule.
+   `from_prior` draws each parameter from its prior restricted to the box its
+   transform keeps, redrawing a value that falls outside; an unbounded `real` or
+   `instant` is drawn from its prior unrestricted, negative values included.
 
 4. **Boundary proximity warning.** If the MLE is within 1% of a fit bound, warn
    that the true MLE may be outside the search region:

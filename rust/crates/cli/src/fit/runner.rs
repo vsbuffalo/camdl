@@ -1143,8 +1143,25 @@ pub fn derive_transform(
     ir_param: &ir::parameter::Parameter,
     transform_override: Option<&str>,
 ) -> Transform {
-    let bounds = resolved_bounds(ir_param).unwrap_or((0.0, f64::INFINITY));
-    derive_transform_with_bounds(ir_param, transform_override, bounds)
+    derive_transform_with_bounds(ir_param, transform_override, default_search_box(ir_param))
+}
+
+/// The box a parameter has when no fit config bounds it: its declared or
+/// kind range ([`resolved_bounds`]), else the support its kind implies —
+/// `(−∞, ∞)` for `real` and `instant`, `[0, ∞)` for `rate`, `positive`,
+/// `count`, `duration` and a parameter whose IR carries no kind.
+///
+/// `real` and `instant` take the whole line because nothing would enforce a
+/// `[0, ∞)` box on them: an infinite end gives them the identity transform,
+/// which clamps nothing, so a `[0, ∞)` box would be recorded but not kept.
+/// The other kinds' `[0, ∞)` is kept by `Transform::Log`.
+pub fn default_search_box(ir_param: &ir::parameter::Parameter) -> (f64, f64) {
+    use ir::parameter::ParamKind::*;
+    resolved_bounds(ir_param).unwrap_or(match ir_param.param_kind {
+        // Exhaustive over ParamKind (no `_`): a new kind must choose its box.
+        Some(Real | Instant) => (f64::NEG_INFINITY, f64::INFINITY),
+        Some(Probability | Rate | Positive | Count | Duration) | None => (0.0, f64::INFINITY),
+    })
 }
 
 /// Like `derive_transform`, but the caller supplies explicit `(lo, hi)`
@@ -1241,7 +1258,8 @@ pub fn check_transform_keeps_box(
 /// The search box a fit uses for one estimated parameter: the fit.toml
 /// `[estimate].bounds` when given (refused if it loosens the model's declared
 /// range), else the model's declared `in [lo, hi]`, else the kind's own
-/// range ([`resolved_bounds`]), else `[0, ∞)`.
+/// range ([`default_search_box`]: `[0, 1]` for `probability`,
+/// `(−∞, ∞)` for `real` and `instant`, else `[0, ∞)`).
 ///
 /// The one resolution [`build_if2_params_from_specs`] and the config-time
 /// checks share, so a check never reasons about a different box than the
@@ -1272,9 +1290,10 @@ pub fn resolve_search_box(
         }
         (Some(b), None) => Ok(b),
         (None, Some(b)) => Ok(b),
-        // Nothing declared anywhere: fall back to the kind's own support
-        // (gh#763 — `probability` is `[0, 1]`), then to `[0, ∞)`.
-        (None, None) => Ok(resolved_bounds(ir_param).unwrap_or((0.0, f64::INFINITY))),
+        // Nothing declared anywhere: the kind's own support (gh#763 —
+        // `probability` is `[0, 1]`, `real`/`instant` the whole line), else
+        // `[0, ∞)`.
+        (None, None) => Ok(default_search_box(ir_param)),
     }
 }
 
