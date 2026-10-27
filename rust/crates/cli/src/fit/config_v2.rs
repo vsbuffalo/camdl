@@ -2587,6 +2587,63 @@ impl FitConfig {
         Ok(())
     }
 
+    /// Refuse, under PMMH and MH, an estimated hierarchical leaf whose search
+    /// box cuts into the support of its prior p(leaf | hyperparameter).
+    ///
+    /// The samplers score the leaf against the prior density restricted to
+    /// the box but not renormalised by P(box | hyperparameter). For a fixed
+    /// prior that constant does not move and the omission is harmless; for a
+    /// hierarchical leaf it depends on the hyperparameter, so leaving it out
+    /// biases the hyperparameter (`mu ~ normal(0, 1)` with four leaves
+    /// `a_k ~ normal(mu, 1)` boxed to `[1, 2]` gives a posterior mean of 1.18
+    /// for `mu` under a flat likelihood, where the truth is 0). PGAS already
+    /// refuses hierarchical priors, and IF2 and the optimizers read no prior.
+    ///
+    /// The box compared is the one the transform enforces: `Transform::None`
+    /// (a box with an infinite end on an unconstrained kind) enforces none.
+    pub fn validate_hierarchical_leaf_boxes(&self, model: &ir::Model) -> Result<(), String> {
+        use crate::run_meta::FitAlgorithm;
+        use sim::inference::types::Transform;
+        let Some(method) = &self.inference.method else {
+            return Ok(());
+        };
+        let kind = method.algorithm.method_kind();
+        if !matches!(kind, FitAlgorithm::Pmmh | FitAlgorithm::Mh) {
+            return Ok(());
+        }
+        let mut cut: Vec<String> = Vec::new();
+        for (name, spec) in &self.problem.estimate {
+            // A fit.toml prior displaces the model's hierarchical one.
+            if spec.prior.is_some() {
+                continue;
+            }
+            let Some(p) = model.parameters.iter().find(|p| p.name == *name) else { continue };
+            let Some(h) = p.hierarchical() else { continue };
+            let override_str = spec.transform.as_ref().map(|t| t.as_str());
+            let Ok(bx) = super::runner::resolve_search_box(name, spec.bounds, p) else { continue };
+            let kept = match super::runner::derive_transform_with_bounds(p, override_str, bx) {
+                Transform::Log { lo, hi } | Transform::Logit { lo, hi } => (lo, hi),
+                Transform::None => continue,
+            };
+            if box_cuts_into_support(kept, hierarchical_support(h)) {
+                cut.push(format!(
+                    "  {name}: bounds [{}, {}], prior {}",
+                    kept.0, kept.1, h.kind));
+            }
+        }
+        if cut.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "[estimate]: a hierarchical parameter's search bounds cut into the support \
+             of its prior:\n{}\n\
+             Under `{}` the prior is not renormalised to the bounds. For a hierarchical \
+             parameter the missing constant, P(bounds | hyperparameter), depends on the \
+             hyperparameter, so leaving it out would bias the hyperparameter. Widen the \
+             bounds to the prior's support, or remove the hierarchical prior.",
+            cut.join("\n"), kind.as_str()))
+    }
+
     pub fn validate_gradient_capability(&self, model: &ir::Model) -> Result<(), String> {
         let Some(method) = &self.inference.method else {
             return Ok(());
@@ -2747,6 +2804,52 @@ impl FitConfig {
              likelihood (scaled-likelihood posterior).\n");
         Err(msg)
     }
+}
+
+/// One end of a prior family's support: a known value, or an end set by an
+/// expression of other parameters (a hierarchical `uniform`'s `lower` or
+/// `upper`), which no fixed box can be shown to contain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum SupportEnd {
+    At(f64),
+    Varies,
+}
+
+/// The support of a hierarchical prior family, `(lower end, upper end)`.
+pub(crate) fn hierarchical_support(
+    h: &ir::parameter::HierarchicalPrior,
+) -> (SupportEnd, SupportEnd) {
+    use ir::parameter::HierarchicalKind as K;
+    use SupportEnd::*;
+    let end = |arg: &str| match h.args.get(arg) {
+        Some(ir::expr::Expr::Const(c)) => At(c.value),
+        _ => Varies,
+    };
+    // Exhaustive over the families (no `_`): a new family must state its
+    // support here.
+    match h.kind {
+        K::Normal => (At(f64::NEG_INFINITY), At(f64::INFINITY)),
+        K::LogNormal | K::HalfNormal | K::Gamma | K::Exponential => (At(0.0), At(f64::INFINITY)),
+        K::Beta => (At(0.0), At(1.0)),
+        K::Uniform => (end("lower"), end("upper")),
+    }
+}
+
+/// Does the box `[lo, hi]` leave out part of the support? An end set by an
+/// expression counts as cut into unless the box is unbounded on that side.
+pub(crate) fn box_cuts_into_support(
+    (lo, hi): (f64, f64),
+    (s_lo, s_hi): (SupportEnd, SupportEnd),
+) -> bool {
+    let lo_cuts = match s_lo {
+        SupportEnd::At(v) => lo > v,
+        SupportEnd::Varies => lo.is_finite(),
+    };
+    let hi_cuts = match s_hi {
+        SupportEnd::At(v) => hi < v,
+        SupportEnd::Varies => hi.is_finite(),
+    };
+    lo_cuts || hi_cuts
 }
 
 impl Inference {
@@ -7591,4 +7694,33 @@ cooling = 0.70
             "[fixed] must keep flattening arbitrary param keys");
     }
 
+    /// The support each hierarchical family is compared against, and the
+    /// rule that a box cuts in when it leaves out any of it — including an
+    /// end set by an expression, which no finite box can be shown to contain.
+    #[test]
+    fn hierarchical_box_cuts_into_support_per_family() {
+        use ir::parameter::{HierarchicalKind as K, HierarchicalPrior};
+        let konst = |v: f64| ir::expr::Expr::Const(ir::expr::ConstExpr { value: v });
+        let param = |n: &str| ir::expr::Expr::Param(ir::expr::ParamExpr { param: n.into() });
+        let h = |kind: K, args: Vec<(&str, ir::expr::Expr)>| HierarchicalPrior {
+            kind, args: args.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            pool_over: String::new(),
+        };
+        let inf = f64::INFINITY;
+        let normal = hierarchical_support(&h(K::Normal, vec![("mu", param("m")), ("sigma", konst(1.0))]));
+        assert!(box_cuts_into_support((1.0, 2.0), normal));
+        assert!(box_cuts_into_support((0.0, inf), normal));
+        assert!(!box_cuts_into_support((-inf, inf), normal));
+        let lognormal = hierarchical_support(&h(K::LogNormal, vec![("mu", param("m")), ("sigma", konst(1.0))]));
+        assert!(!box_cuts_into_support((0.0, inf), lognormal));
+        assert!(box_cuts_into_support((0.0, 5.0), lognormal));
+        let beta = hierarchical_support(&h(K::Beta, vec![("alpha", param("a")), ("beta", konst(2.0))]));
+        assert!(!box_cuts_into_support((0.0, 1.0), beta));
+        assert!(box_cuts_into_support((0.1, 1.0), beta));
+        let uni_const = hierarchical_support(&h(K::Uniform, vec![("lower", konst(0.0)), ("upper", konst(3.0))]));
+        assert!(!box_cuts_into_support((0.0, 3.0), uni_const));
+        let uni_expr = hierarchical_support(&h(K::Uniform, vec![("lower", konst(0.0)), ("upper", param("u"))]));
+        assert!(box_cuts_into_support((0.0, 10.0), uni_expr));
+        assert!(!box_cuts_into_support((0.0, inf), uni_expr));
+    }
 }

@@ -20,6 +20,10 @@
 //!      below zero.
 //!   4. `prior_drawn_starts_lie_inside_the_box` — `starts = "from_prior"`
 //!      drew `normal(0, 1)` starts with no regard to the box `[0, 1]`.
+//!   5. `hierarchical_leaf_box_that_cuts_the_prior_is_refused` — a
+//!      `normal(mu, 1)` leaf boxed to `[1, 2]` biases `mu` under PMMH and MH,
+//!      and is refused before sampling; IF2 reads no prior and runs; a
+//!      `log_normal` leaf on a `rate` with the half-infinite box `[0, ∞)` runs.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -263,4 +267,54 @@ fn prior_drawn_starts_lie_inside_the_box() {
         assert!(out.status.success(), "{tag}: stderr=\n{}", stderr(&out));
         assert_inside(&column_values(&results, "chain_starts.tsv", "c"), 0.0, 1.0, tag);
     }
+}
+
+const HIER: &str = "  mu : real ~ normal(mu = 0.0, sigma = 1.0)
+  a1 : real ~ normal(mu = mu, sigma = 1.0)
+  a2 : real ~ normal(mu = mu, sigma = 1.0)";
+
+#[test]
+fn hierarchical_leaf_box_that_cuts_the_prior_is_refused() {
+    if camdlc_bin().is_none() {
+        return;
+    }
+    let tmp = tempdir("hier");
+    let ir = compile(&tmp.0, "hier", &model_src(HIER));
+    let est = "mu = { bounds = [-5, 5], start = 0.0 }\n\
+               a1 = { bounds = [1, 2], start = 1.5 }\n\
+               a2 = { bounds = [1, 2], start = 1.5 }";
+    for (method, tag) in [(PMMH, "pmmh"), (MH, "mh")] {
+        let (out, results) = run_fit(&tmp.0, &ir, est, method, tag);
+        let err = stderr(&out);
+        assert!(!out.status.success(), "{tag}: must be refused; stderr=\n{err}");
+        assert!(err.contains("a1: bounds [1, 2], prior normal"), "{tag}: {err}");
+        assert!(err.contains("a2: bounds [1, 2], prior normal"), "{tag}: {err}");
+        assert!(err.contains("P(bounds | hyperparameter)"), "{tag}: {err}");
+        assert!(err.contains("Widen the bounds to the prior's support, or remove the hierarchical prior"), "{tag}: {err}");
+        assert!(find_all(&results, "draws.tsv").is_empty(), "{tag}: refused before sampling");
+    }
+    // IF2 reads no prior: the missing constant cannot bias it.
+    let (out, _) = run_fit(&tmp.0, &ir, est, IF2, "if2");
+    assert!(out.status.success(), "if2 must run; stderr=\n{}", stderr(&out));
+
+    // Control: leaves with no box (an unconstrained `real` with no bounds has
+    // none enforced) run under PMMH.
+    let open = "mu = { bounds = [-5, 5], start = 0.0 }\na1 = { start = 0.5 }\na2 = { start = 0.5 }";
+    let (out, _) = run_fit(&tmp.0, &ir, open, PMMH, "pmmh_open");
+    assert!(out.status.success(), "unboxed leaves must run; stderr=\n{}", stderr(&out));
+
+    // Control: a `log_normal` leaf on a `rate` keeps the half-infinite box
+    // [0, ∞), which is the family's whole support.
+    let rate_src = "  m : real ~ normal(mu = 0.0, sigma = 1.0)
+  r1 : rate ~ log_normal(mu = m, sigma = 1.0)
+  r2 : rate ~ log_normal(mu = m, sigma = 1.0)";
+    let rate_ir = compile(&tmp.0, "hier_rate", &model_src(rate_src));
+    let rate_est = "m = { bounds = [-3, 3], start = 0.0 }\nr1 = { start = 1.0 }\nr2 = { start = 1.0 }";
+    let (out, _) = run_fit(&tmp.0, &rate_ir, rate_est, PMMH, "pmmh_rate");
+    assert!(out.status.success(), "a rate leaf on [0, inf) must run; stderr=\n{}", stderr(&out));
+    // The same leaf with a finite box cuts into (0, ∞) and is refused.
+    let rate_boxed = "m = { bounds = [-3, 3], start = 0.0 }\nr1 = { bounds = [0.1, 5], start = 1.0 }\nr2 = { start = 1.0 }";
+    let (out, _) = run_fit(&tmp.0, &rate_ir, rate_boxed, PMMH, "pmmh_rate_boxed");
+    assert!(!out.status.success(), "a rate leaf on [0.1, 5] must be refused");
+    assert!(stderr(&out).contains("r1: bounds [0.1, 5], prior log_normal"), "{}", stderr(&out));
 }

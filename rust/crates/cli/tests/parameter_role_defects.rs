@@ -574,9 +574,11 @@ cases = "{data}"
         assert!(err.contains("mu_g") && err.contains("gamma")
             && err.contains("not yet included"), "{tag}: the refusal names both:\n{err}");
     }
-    // Control: with the leaf estimated too, the same PMMH fit runs.
+    // Control: with the leaf estimated too, the same PMMH fit runs. The leaf
+    // keeps its kind's box [0, ∞), the log_normal's whole support: a finite
+    // box would cut into it and be refused (`fit_bounds_transforms.rs`).
     let fit = write("both.toml",
-        "mu_g = { bounds = [-5, 5], start = 0.0 }\ngamma = { bounds = [0.01, 1.0], start = 0.1 }",
+        "mu_g = { bounds = [-5, 5], start = 0.0 }\ngamma = { start = 0.1 }",
         "beta = 0.3", pmmh);
     ok(camdl(&tmp.path().join("both"), &["fit", "run", fit.to_str().unwrap()]));
 }
