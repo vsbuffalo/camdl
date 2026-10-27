@@ -1,0 +1,41 @@
+# Base: none — root model
+# Adds: a constant observed through a discretized Gaussian (the K1 known profile)
+# Changes: nothing else
+#
+# WHAT THIS MODEL IS
+# One compartment `X` with no transitions that holds 1 for all time. It exists
+# only because an observation needs a projection; the mean of every reading is
+# the parameter `mu` itself. With no dynamics the likelihood is that of an iid
+# sample, so its profile can be computed outside camdl.
+#
+# `mu` multiplies the projection rather than initialising `X`, because a
+# compartment's initial value is rounded to an integer: `init { X = mu }`
+# scores mu = 9.6, 10 and 10.3 identically.
+#
+# WHAT IT IS FITTED TO
+# `y`: one integer reading per day, scored by camdl's `normal(...)`, which is
+# a discretized-count likelihood, P(y) = Phi((y + 0.5 - mu)/s) -
+# Phi((y - 0.5 - mu)/s) for y > 0 (sim/src/inference/obs_loglik.rs). The
+# profile of `mu` (with `s` re-maximized, or held at 2) is in
+# ../ref/k1_profile.tsv.
+
+time_unit = 'days
+
+compartments { X }
+
+parameters {
+  mu : positive in [0.0, 100.0]
+  s  : count    in [0.001, 100.0]
+}
+
+init { X = 1 }
+
+observations {
+  y {
+    columns   { time : time, y : count }
+    projected = prevalence(X)
+    y ~ normal(mean = mu * projected, sd = s)
+  }
+}
+
+simulate { from = 0 'days  to = 20 'days }

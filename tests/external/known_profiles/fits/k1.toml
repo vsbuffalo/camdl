@@ -1,0 +1,20 @@
+# K1: profile `mu` (lin(8.5, 11.5, 13)) with `s` estimated, against
+# ref/k1_profile.tsv. The box of `s` contains its maximizer at every grid
+# point; written by gen/known_profiles.py.
+[model]
+camdl = "../models/k1.camdl"
+
+[data.observations]
+y = "../data/k1_y.tsv"
+
+[estimate]
+mu = { bounds = [8.0, 12.0], start = 10.0 }
+s  = { bounds = [0.8678, 5.0], start = 2.0 }
+
+[fixed]
+
+[method]
+algorithm = "nl-bobyqa"
+backend = "ode"
+chains = 3
+tolerance = 1e-10
