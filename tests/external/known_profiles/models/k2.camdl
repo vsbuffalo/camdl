@@ -1,0 +1,40 @@
+# Base: none — root model
+# Adds: a constant observed through Poisson reporting (the K2 known profile)
+# Changes: nothing else
+#
+# WHAT THIS MODEL IS
+# One compartment `X` with no transitions that holds 1 for all time. It exists
+# only because an observation needs a projection. Each day's count is Poisson
+# with mean `rho * X0`, so the likelihood depends on the product only: `rho`
+# and `X0` are not separately identified, and the profile of `rho` is flat
+# wherever the search box of `X0` can absorb it.
+#
+# `X0` multiplies the projection rather than initialising `X`, because a
+# compartment's initial value is rounded to an integer, which would keep
+# `rho * X0` off the sample mean inside the box.
+#
+# WHAT IT IS FITTED TO
+# `y`: one count per day, Poisson with rate `rho * X0`. The exact profile of
+# `rho` (with `X0` re-maximized over its box, or held at 40) is in
+# ../ref/k2_profile.tsv.
+
+time_unit = 'days
+
+compartments { X }
+
+parameters {
+  X0  : positive    in [1.0, 1000.0]
+  rho : probability in [0.0, 1.0]
+}
+
+init { X = 1 }
+
+observations {
+  y {
+    columns   { time : time, y : count }
+    projected = prevalence(X)
+    y ~ poisson(rate = rho * X0 * projected)
+  }
+}
+
+simulate { from = 0 'days  to = 20 'days }
