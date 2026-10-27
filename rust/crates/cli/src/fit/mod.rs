@@ -785,7 +785,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // computing log L_c (conditional on y₁) rather than log L. Silent
     // when ic_free is false or absent. See
     // docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
-    if config.problem.ic_free.unwrap_or(false) {
+    if config.problem.likelihood_objective().skips_first_observation() {
         let perturb_only_at_t0_params: Vec<&str> = config.problem.estimate.iter()
             .filter(|(_, spec)| spec.perturb_only_at_t0)
             .map(|(n, _)| n.as_str())

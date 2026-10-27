@@ -358,8 +358,8 @@ ic_free = true # top-level key — fit.toml is parsed strictly (deny_unknown_fie
 
 When set:
 
-- The PF / IF2 / PGAS runs still weight and resample at `y₁` (that's what pins
-  `x₀` given `y₁` via Bayesian update on the particle cloud).
+- The PF / IF2 runs still weight and resample at `y₁` (that's what pins `x₀`
+  given `y₁` via Bayesian update on the particle cloud).
 - The log-likelihood accumulation skips `y₁`. The returned loglik is
   `log L_c(θ | y₁) = Σ_{t=2}^T log p(y_t | y_{1:t-1})` rather than the full
   `log L(θ)`. These differ by `log p(y_1)` and are not directly comparable
@@ -391,6 +391,16 @@ case. Two things supply that spread, and either is enough:
 The stage's algorithm must be `if2`, `pfilter` or `pmmh`; `pgas` and the ODE
 algorithms accumulate every observation unconditionally and are rejected
 outright.
+
+`profile --fit` and `survey --fit` score the objective the fit config sets, so a
+profile curve and a survey landscape are on the scale of the fit's own maximum
+and rank parameter values by the likelihood the fit maximises. Each records the
+objective in its `run.json` as `inputs.likelihood_objective` — `full` or
+`conditional_on_first_observation` — and the conditional objective is part of
+the run identity, so the two never share a stored result. A profile with an
+`nl-*` algorithm and `survey --eval simulate` score the deterministic ODE
+skeleton, which cannot leave `y₁` out, so both are refused under
+`ic_free = true`; `survey --eval auto` resolves to `pfilter`.
 
 See `docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md` for
 the mathematical derivation, references (King Nguyen Ionides 2016 JSS, Ionides

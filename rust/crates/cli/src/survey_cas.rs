@@ -44,6 +44,9 @@ pub struct SurveyCtx<'a> {
     pub eval_method: &'a str,
     pub eval_particles: u32,
     pub eval_replicates: u32,
+    /// The likelihood each point is scored under (`ic_free` from the fit
+    /// config). It changes every stored loglik, so it is identity.
+    pub objective: crate::fit::config_v2::LikelihoodObjective,
     /// The LHS box: `(param, lo, hi)`, the estimated-param bounds.
     pub bounds: &'a [(String, f64, f64)],
     /// Fixed `(param, value)` (excluded from the LHS box).
@@ -68,6 +71,9 @@ struct SurveyConfigLevel<'a> {
     data: &'a [(&'a str, &'a str)],
     fixed: &'a [(&'a str, f64)],
     scenario: Option<&'a str>,
+    /// Omitted when full, so a survey that never set `ic_free` keeps its key.
+    #[serde(skip_serializing_if = "crate::fit::config_v2::LikelihoodObjective::is_full")]
+    objective: crate::fit::config_v2::LikelihoodObjective,
 }
 
 /// The `box` level: the LHS sampling spec.
@@ -95,6 +101,7 @@ pub fn resolve_survey(ctx: &SurveyCtx) -> Result<ResolvedSurvey, String> {
         data: &data_sorted,
         fixed: &fixed_sorted,
         scenario: ctx.scenario,
+        objective: ctx.objective,
     };
 
     // box level — the LHS sampling spec.
@@ -168,6 +175,7 @@ mod tests {
         let cfg = SurveyConfigLevel {
             eval_method: "pfilter", eval_particles: 200, eval_replicates: 1,
             data: &data, fixed: &fixed, scenario: None,
+            objective: crate::fit::config_v2::LikelihoodObjective::Full,
         };
         assert_eq!(canonical_config_hash(&cfg, &[]).unwrap(),
                    config_level("pfilter", 200, 1, &[("cases", &h1)], None),
@@ -178,6 +186,27 @@ mod tests {
         assert_eq!(canonical_config_hash(&bx, &[]).unwrap(),
                    box_level(&[("beta", 0.01, 2.0)], 64),
                    "the box struct must reproduce the literal's digest");
+    }
+
+    /// The likelihood objective is identity: a survey of an `ic_free` fit
+    /// stores different logliks from one of the same problem without it, so
+    /// the two must not share a leaf. The full objective is omitted, so a
+    /// survey that never set `ic_free` keeps the key the literal pins.
+    #[test]
+    fn conditional_objective_rekeys_the_config_level() {
+        use crate::fit::config_v2::LikelihoodObjective;
+        let h1 = h(1);
+        let data: Vec<(&str, &str)> = vec![("cases", h1.as_str())];
+        let fixed: Vec<(&str, f64)> = Vec::new();
+        let level = |objective| canonical_config_hash(&SurveyConfigLevel {
+            eval_method: "pfilter", eval_particles: 200, eval_replicates: 1,
+            data: &data, fixed: &fixed, scenario: None, objective,
+        }, &[]).unwrap();
+        let literal = config_level("pfilter", 200, 1, &[("cases", &h1)], None);
+        assert_eq!(level(LikelihoodObjective::Full), literal,
+            "the full objective must leave the key unchanged");
+        assert_ne!(level(LikelihoodObjective::ConditionalOnFirstObservation), literal,
+            "the conditional objective must change the config hash");
     }
 
     /// The eval count knobs are identity-bearing — `eval_method`,

@@ -466,7 +466,7 @@ impl FitRunConfig {
                 streams.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
         }
 
-        let ic_free = fit.ic_free.unwrap_or(false);
+        let ic_free = fit.likelihood_objective().skips_first_observation();
 
         // Resolve top-level fit.simplex_groups into sim::SimplexGroup
         // (param names → indices, rw_sds from EstimateSpecV2.rw_sd).

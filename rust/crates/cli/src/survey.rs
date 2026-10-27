@@ -99,6 +99,10 @@ struct ResolvedSurveyInputs {
     /// the start-rank diagnostic to flag when the user's seeded
     /// best-guess falls in a low-loglik region of the LHS landscape.
     estimate_starts: Option<HashMap<String, f64>>,
+    /// The likelihood each point is scored under: the fit config's own
+    /// (`ic_free`, through `Problem::likelihood_objective`), so the landscape
+    /// ranks starts on the objective the fit maximises. Full in inline mode.
+    objective: crate::fit::config_v2::LikelihoodObjective,
 }
 
 // ─── cmd_survey entry point ──────────────────────────────────────────────────
@@ -180,7 +184,26 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // (`Capabilities::OVERDISPERSION` required), Simulate otherwise.
     // Resolved before any persistent state is written — `SurveyMeta`
     // stores the resolved method, not `Auto`.
+    let objective = resolved.objective;
     let eval_method: SurveyEvalMethod = match a.eval {
+        // `ic_free = true`: only the particle filter can leave y₁'s term out
+        // (the ODE skeleton scores every observation), so `auto` takes it
+        // regardless of the model's process noise.
+        SurveyEvalMethod::Auto if objective.skips_first_observation() => {
+            eprintln!(
+                "survey: --eval auto resolved to 'pfilter' (the fit config sets \
+                 ic_free = true, which only the particle filter scores)");
+            SurveyEvalMethod::Pfilter
+        }
+        SurveyEvalMethod::Simulate if objective.skips_first_observation() => {
+            eprintln!(
+                "error: the --fit config sets ic_free = true, so the fit scores \
+                 log p(y₂:T | y₁, θ) — y₁'s term left out. `--eval simulate` scores \
+                 the deterministic ODE skeleton over every observation and cannot \
+                 leave it out, so its landscape would rank points on a different \
+                 likelihood from the fit's. Use `--eval pfilter` (or `--eval auto`).");
+            std::process::exit(1);
+        }
         SurveyEvalMethod::Auto => {
             let needs_pf = resolved.compiled
                 .required_capabilities()
@@ -318,6 +341,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         eval_method:     eval_method.as_str(),
         eval_particles:  a.eval_particles as u32,
         eval_replicates: a.eval_replicates as u32,
+        objective,
         bounds:          &bounds_vec,
         fixed:           &fixed_vec,
         scenario:        resolved.scenario.as_deref(),
@@ -504,7 +528,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
                     &process, obs_model.as_ref(),
                     &params, &resolved.estimated, draw,
                     a.eval_particles, a.eval_replicates,
-                    smc_dt, t_start, a.seed, point_id,
+                    smc_dt, t_start, objective, a.seed, point_id,
                 ),
                 SurveyEvalMethod::Auto => unreachable!(
                     "Auto resolved before parallel eval loop"),
@@ -624,6 +648,9 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         // A survey grid evaluates a marginal `log p(y | θ)` at each point
         // (PF or clean-eval), so the whole landscape is marginal-class (gh#280).
         "loglik_type":     crate::fit::loglik::LoglikType::Marginal.tag(),
+        // Which likelihood each landscape loglik is: `full`, or
+        // `conditional_on_first_observation` under the fit's `ic_free`.
+        "likelihood_objective": objective,
         "wall_time_seconds": elapsed,
         "model_identity":  model_identity,
         "data_hashes":     resolved.data_hashes,
@@ -942,6 +969,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             data_hashes,
             fixed: fixed_resolved.into_iter().collect(),
             scenario: scenario_opt,
+            objective: config.likelihood_objective(),
             parameters_provenance,
             notices,
             estimate_starts: if estimate_starts.is_empty() {
@@ -1102,6 +1130,8 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             notices,
             // Inline mode has no fit.toml [estimate].start values.
             estimate_starts: None,
+            // Inline mode has no `ic_free` key: every observation is scored.
+            objective: crate::fit::config_v2::LikelihoodObjective::Full,
         })
     }
 }
@@ -1277,6 +1307,7 @@ fn eval_point_pfilter(
     n_replicates: usize,
     dt: f64,
     t_start: f64,
+    objective: crate::fit::config_v2::LikelihoodObjective,
     seed_base: u64,
     point_id: usize,
 ) -> LandscapeRow {
@@ -1291,7 +1322,7 @@ fn eval_point_pfilter(
             n_particles,
             dt,
             t_start,
-            skip_first_obs_from_loglik: false,
+            skip_first_obs_from_loglik: objective.skips_first_observation(),
             record_ancestry: false,
             record_prequential: false,
             record_predictions: false, // gh#520: only `.log_likelihood`/`.ess_trace` are read below

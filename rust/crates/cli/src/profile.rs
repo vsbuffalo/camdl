@@ -139,6 +139,11 @@ struct ProfileBaseLevel<'a> {
     obs_family: &'a str,
     fit_toml: &'a Option<String>,
     priors: &'a [(String, String)],
+    /// The likelihood every cell scores. It changes each stored loglik, so it
+    /// is identity. Omitted when full, so a profile that never set `ic_free`
+    /// keeps its key.
+    #[serde(skip_serializing_if = "crate::fit::config_v2::LikelihoodObjective::is_full")]
+    objective: crate::fit::config_v2::LikelihoodObjective,
 }
 
 /// The `stage` level's identity: the METHOD, i.e. how each cell is fitted.
@@ -325,12 +330,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // source used downstream by `resolve_priors_with_precedence`. When
     // `--fit` is absent the map is empty and the resolver falls
     // through to model-IR priors (tier 2) for every parameter.
-    let (fit_estimate, fit_toml_hash, fit_toml_fixed_indexmap, fit_scenario, fit_simplex_groups):
+    let (fit_estimate, fit_toml_hash, fit_toml_fixed_indexmap, fit_scenario, fit_simplex_groups,
+         objective):
         (indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
          Option<String>,
          indexmap::IndexMap<String, f64>,
          (Option<String>, Vec<String>, Vec<String>),
-         Vec<crate::fit::config_v2::SimplexGroup>) = if let Some(fit_path) = a.fit.as_ref() {
+         Vec<crate::fit::config_v2::SimplexGroup>,
+         crate::fit::config_v2::LikelihoodObjective) = if let Some(fit_path) = a.fit.as_ref() {
         let fit_path_str = fit_path.to_string_lossy().into_owned();
         let fit_cfg = crate::fit::config_v2::Problem::load(&fit_path_str)
             .unwrap_or_else(|e| {
@@ -362,12 +369,17 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let hash = crate::hashing::sha256_hex(&bytes);
         eprintln!("profile: using --fit '{}' for priors / bounds / [fixed]",
             fit_path_str);
+        // The likelihood every cell scores is the fit's own (`ic_free`), read
+        // through the same function `fit run` uses, so a profile curve is on
+        // the scale of the fit it profiles.
+        let objective = fit_cfg.likelihood_objective();
         (fit_cfg.estimate, Some(hash), fixed_resolved,
          (fit_cfg.scenario, fit_cfg.enable, fit_cfg.disable),
-         fit_cfg.simplex_groups)
+         fit_cfg.simplex_groups, objective)
     } else {
         (indexmap::IndexMap::new(), None, indexmap::IndexMap::new(),
-         (None, Vec::new(), Vec::new()), Vec::new())
+         (None, Vec::new(), Vec::new()), Vec::new(),
+         crate::fit::config_v2::LikelihoodObjective::Full)
     };
 
     // The scenario this profile runs under: the fit config's top-level
@@ -627,6 +639,26 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     ) {
         eprintln!("error: {}", msg);
         std::process::exit(1);
+    }
+
+    // A conditional objective (`ic_free = true`) is admitted per method by the
+    // check `fit run` applies: IF2 drops y₁'s term, the deterministic ODE
+    // likelihood cannot, so an `nl-*` profile of such a fit is refused rather
+    // than run on the full likelihood under the fit's name.
+    if objective.skips_first_observation() {
+        let init_law = if compiled.has_init_law {
+            crate::fit::methods::InitLaw::Declared
+        } else {
+            crate::fit::methods::InitLaw::Absent
+        };
+        if let Err(msg) =
+            crate::fit::methods::validate_ic_free(profile_algo.method_kind(), init_law)
+        {
+            eprintln!("error: the --fit config sets ic_free = true. {msg}");
+            std::process::exit(1);
+        }
+        eprintln!("profile: ic_free = true — every cell scores log p(y₂:T | y₁, θ), \
+            the fit's conditional likelihood");
     }
 
     // The missing-data refusal, reported here rather than where the binding was
@@ -1188,6 +1220,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         obs_family: &obs_family_key,
         fit_toml: &fit_toml_hash,
         priors: &priors_blob,
+        objective,
     }, &[]).unwrap_or_else(|e| {
         eprintln!("error: profile base identity: {e}");
         std::process::exit(1);
@@ -1487,7 +1520,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     cooling_fraction: cooling, cooling_target_iters: n_iterations, dt,
                     t_start: process.compiled.model.simulation.t_start,
                     simplex_groups: simplex_groups.clone(),
-                    skip_first_obs_from_loglik: false,
+                    skip_first_obs_from_loglik: objective.skips_first_observation(),
                     max_substeps: a.inference.pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET), // gh#241
                 };
                 let result = run_if2(
@@ -1519,7 +1552,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                             n_particles: n_particles.min(500),
                             dt,
                             t_start: process.compiled.model.simulation.t_start,
-                            skip_first_obs_from_loglik: false,
+                            skip_first_obs_from_loglik: objective.skips_first_observation(),
                             record_ancestry: false,
                             record_prequential: false,
                             record_predictions: false, // gh#520: only `.log_likelihood` is read below
@@ -1703,6 +1736,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             // (gh#280): if2 / marginal / ode_marginal — a marginal in every
             // case, never PGAS's joint.
             "loglik_type": crate::fit::loglik::LoglikType::from(profile_algo.method_kind()).tag(),
+            // Which likelihood `best_loglik` is: `full` scores every
+            // observation, `conditional_on_first_observation` (`ic_free`)
+            // leaves y₁'s term out. Compare a cell only with a fit of the same
+            // objective.
+            "likelihood_objective": objective,
             "wall_time_seconds": elapsed,
             "provenance": run_provenance_json.clone(),
         });
@@ -1933,6 +1971,7 @@ mod tests {
             obs_family: "poisson",
             fit_toml: &fit_toml,
             priors: &priors,
+            objective: crate::fit::config_v2::LikelihoodObjective::Full,
         }).unwrap();
         let base_literal = serde_json::json!({
             "base_params": "bp-hash",
@@ -1943,6 +1982,23 @@ mod tests {
         });
         assert_eq!(base_struct, base_literal,
             "ProfileBaseLevel must reproduce the literal");
+
+        // The full objective is omitted, so a profile without `ic_free` keeps
+        // its key; the conditional one (`ic_free = true`) enters the base and
+        // re-keys it.
+        let conditional = serde_json::to_value(ProfileBaseLevel {
+            base_params: "bp-hash",
+            fixed: &fixed,
+            obs_family: "poisson",
+            fit_toml: &fit_toml,
+            priors: &priors,
+            objective: crate::fit::config_v2::LikelihoodObjective::ConditionalOnFirstObservation,
+        }).unwrap();
+        let mut conditional_literal = base_literal.clone();
+        conditional_literal["objective"] =
+            serde_json::json!("conditional_on_first_observation");
+        assert_eq!(conditional, conditional_literal,
+            "a conditional objective must enter the base level");
 
         let rw_sd: Vec<(&str, Option<f64>)> = vec![("N0", Some(5.0))];
         let init = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Lhs);

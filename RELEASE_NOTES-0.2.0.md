@@ -632,6 +632,15 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
 User-visible correctness fixes (selected from ~138):
 
+- **`profile --fit` and `survey --fit` ignored `ic_free`.** A fit with
+  `ic_free = true` maximises the likelihood without the first observation's
+  term; profile and survey scored every observation, so at the fit's own MLE a
+  profile cell read −47.4 where `fit run` reported −43.0 (the 4.3-nat gap is
+  `log p(y₁ | θ̂)`), and a survey ranked starting points on a likelihood the fit
+  does not maximise. Both now score the fit's objective, record it as
+  `inputs.likelihood_objective`, and key `ic_free` results apart from full-
+  likelihood ones. `nl-*` profiles and `survey --eval simulate` of an `ic_free`
+  fit are refused, since the ODE likelihood cannot leave `y₁` out.
 - **`profile` estimated parameters the invocation pinned.** `--rw-sd auto` built
   its estimated set from `--fixed` and `[fixed]` only, so a `--fixed-file`
   holding `gamma = 0.15` profiled gamma as a nuisance parameter and moved it (to

@@ -550,6 +550,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         eval_method: "pfilter",
         eval_particles: 100,
         eval_replicates: 1,
+        objective: crate::fit::config_v2::LikelihoodObjective::Full,
         bounds: &bounds,
         fixed: &fixed,
         scenario: None,

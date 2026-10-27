@@ -2394,7 +2394,7 @@ impl FitConfig {
         // `init { }` law — hence `init_law` here.
         // Running ic_free without either property would silently compute the
         // UNCONDITIONAL likelihood while the banner claims conditioning.
-        if self.problem.ic_free.unwrap_or(false) {
+        if self.problem.likelihood_objective().skips_first_observation() {
             if let Err(msg) =
                 super::methods::validate_ic_free(algorithm.method_kind(), init_law)
             {
@@ -2781,7 +2781,54 @@ impl ChainStarts {
     }
 }
 
+/// What a likelihood evaluation of this problem scores, as set by the
+/// top-level `ic_free` key.
+///
+/// Every command that scores a [`Problem`] — `fit run`, `profile --fit`,
+/// `survey --fit` — reads it from [`Problem::likelihood_objective`], so a
+/// profile curve or a survey landscape is on the same scale as the fit it
+/// belongs to. The two objectives differ by `log p(y₁ | θ)`, a term that
+/// varies with θ, so neither can be compared with, or ranked against, the
+/// other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LikelihoodObjective {
+    /// `log p(y_{1:T} | θ)`: every observation is scored (`ic_free` absent or
+    /// false).
+    #[default]
+    Full,
+    /// `log p(y_{2:T} | y₁, θ)` (`ic_free = true`): the filter weights and
+    /// resamples at y₁, which conditions the initial state on it, but y₁'s
+    /// own term is not added to the log-likelihood.
+    ConditionalOnFirstObservation,
+}
+
+impl LikelihoodObjective {
+    /// Whether the filter leaves y₁'s term out of the accumulated
+    /// log-likelihood — the value of `SMCConfig::skip_first_obs_from_loglik`
+    /// and `IF2Config::skip_first_obs_from_loglik`.
+    pub fn skips_first_observation(self) -> bool {
+        matches!(self, LikelihoodObjective::ConditionalOnFirstObservation)
+    }
+
+    /// For `skip_serializing_if` on identity levels: the full objective is
+    /// left out, so a run that never set `ic_free` keeps its key.
+    pub fn is_full(&self) -> bool {
+        matches!(self, LikelihoodObjective::Full)
+    }
+}
+
 impl Problem {
+    /// The likelihood this problem defines: [`LikelihoodObjective`] from
+    /// `ic_free`. The one place the key is read.
+    pub fn likelihood_objective(&self) -> LikelihoodObjective {
+        if self.ic_free.unwrap_or(false) {
+            LikelihoodObjective::ConditionalOnFirstObservation
+        } else {
+            LikelihoodObjective::Full
+        }
+    }
+
     /// The entry point for every non-fit reader (`simulate --draws prior
     /// --fit`, `pfilter --fit`, `survey --fit`, `profile --fit`): the file's
     /// problem half, with the inference half discarded. A file with no
