@@ -8,7 +8,7 @@
 //! function of the already-evaluated scalars, tested here without building a
 //! `CompiledModel`.
 
-use sim::periodic_bspline::eval_periodic_bspline;
+use sim::periodic_bspline::PeriodicBasis;
 use sim::propensity::{fourier_value, periodic_value};
 
 #[test]
@@ -131,9 +131,9 @@ fn test_fourier_zero_harmonics_returns_zero() {
 fn test_periodic_spline_partition_of_unity() {
     // gh#59 v2: with all coefs = 1, the B-spline sums to 1 everywhere
     // (partition of unity is preserved by the periodic wrap-fold).
-    let coefs = vec![1.0; 6];
+    let coefs = [1.0; 6];
     for t in [0.0_f64, 0.5, 1.0, 1.7, 2.0, 3.3, 3.99] {
-        let v = eval_periodic_bspline(t, 4.0, 6, 3, &coefs);
+        let v = PeriodicBasis::new(4.0, 6, 3).unwrap().eval(t, |k| coefs[k]);
         assert!(
             (v - 1.0).abs() < 1e-12,
             "partition-of-unity violated at t={}: {}", t, v
@@ -144,11 +144,11 @@ fn test_periodic_spline_partition_of_unity() {
 #[test]
 fn test_periodic_spline_wraps() {
     // gh#59 v2: f(t) == f(t + period).
-    let coefs = vec![0.7, 1.2, 0.9, 0.5, 1.1, 0.8];
+    let coefs = [0.7, 1.2, 0.9, 0.5, 1.1, 0.8];
     for t in [0.123_f64, 1.5, 2.9, 3.6] {
-        let a = eval_periodic_bspline(t, 4.0, 6, 3, &coefs);
-        let b = eval_periodic_bspline(t + 4.0, 4.0, 6, 3, &coefs);
-        let c = eval_periodic_bspline(t - 4.0, 4.0, 6, 3, &coefs);
+        let a = PeriodicBasis::new(4.0, 6, 3).unwrap().eval(t, |k| coefs[k]);
+        let b = PeriodicBasis::new(4.0, 6, 3).unwrap().eval(t + 4.0, |k| coefs[k]);
+        let c = PeriodicBasis::new(4.0, 6, 3).unwrap().eval(t - 4.0, |k| coefs[k]);
         assert!((a - b).abs() < 1e-12, "periodicity at t={}: a={} t+P={}", t, a, b);
         assert!((a - c).abs() < 1e-12, "periodicity at t={}: a={} t-P={}", t, a, c);
     }

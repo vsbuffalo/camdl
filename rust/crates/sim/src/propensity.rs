@@ -494,8 +494,7 @@ pub fn eval_forcing(kind: &CompiledTimeFuncKind, t: f64, ctx: &EvalCtx<'_>) -> f
                 .map(|(k, (a, b))| fourier_term(phase, k, eval_resolved(a, ctx), eval_resolved(b, ctx)))
                 .sum()
         }
-        CompiledTimeFuncKind::PeriodicSpline { period, n_basis, degree, coefs } =>
-            crate::periodic_bspline::eval_periodic_bspline(t, *period, *n_basis, *degree, coefs),
+        CompiledTimeFuncKind::PeriodicSpline { basis, coefs } => basis.eval(t, |k| coefs[k]),
     }
 }
 

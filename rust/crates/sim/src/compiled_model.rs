@@ -41,13 +41,12 @@ pub enum CompiledTimeFuncKind {
     /// (`period_inv = 1/period` is computed per evaluation); harmonics is a flat
     /// `[(a_1, b_1), (a_2, b_2), …]` of live coefficient pairs.
     Fourier { period: ResolvedExpr, harmonics: Vec<(ResolvedExpr, ResolvedExpr)> },
-    /// gh#59 v2 (2026-05-12): periodic B-spline forcing with uniform
-    /// knots and standard de Boor recurrence. Evaluated by
-    /// `periodic_bspline::eval_periodic_bspline` — see proposal at
-    /// `docs/dev/proposals/2026-05-12-periodic-bspline-algorithm.md`
-    /// for algorithm provenance (de Boor 1978 §X, Eilers & Marx
-    /// 1996, Wand & Ormerod 2008).
-    PeriodicSpline { period: f64, n_basis: u32, degree: u32, coefs: Vec<f64> },
+    /// gh#59 v2: periodic B-spline forcing with uniform knots, evaluated by
+    /// [`crate::periodic_bspline::PeriodicBasis::eval`] on the shared span
+    /// evaluator (proposal 2026-10-27-estimable-bsplines §4.2). `basis` is
+    /// the structural part, checked at construction; `coefs` has
+    /// `basis.n_basis()` entries.
+    PeriodicSpline { basis: crate::periodic_bspline::PeriodicBasis, coefs: Vec<f64> },
 }
 
 /// Natural cubic spline with precomputed coefficients.
@@ -1871,15 +1870,11 @@ impl CompiledModel {
                 }
                 TimeFuncKind::PeriodicSpline(ps) => {
                     let period = eval_structural(&tf.name, "periodic_spline period", &ps.period, &param_index, &default_params)?;
-                    if period <= 0.0 {
-                        return Err(SimError::Validation(format!(
-                            "periodic_spline period must be positive, got {}", period)));
-                    }
-                    if ps.n_basis <= ps.degree {
-                        return Err(SimError::Validation(format!(
-                            "periodic_spline: n_basis ({}) must exceed degree ({})",
-                            ps.n_basis, ps.degree)));
-                    }
+                    let basis = crate::periodic_bspline::PeriodicBasis::new(
+                        period, ps.n_basis as usize, ps.degree as usize,
+                    )
+                    .map_err(|e| SimError::Validation(format!(
+                        "periodic_spline forcing '{}': {e}", tf.name)))?;
                     let coefs: Result<Vec<f64>, SimError> = ps.coefs.iter()
                         .map(|e| eval_structural(&tf.name, "periodic_spline coefficient", e, &param_index, &default_params))
                         .collect();
@@ -1889,12 +1884,7 @@ impl CompiledModel {
                             "periodic_spline: coefs length ({}) must equal n_basis ({})",
                             cs.len(), ps.n_basis)));
                     }
-                    CompiledTimeFuncKind::PeriodicSpline {
-                        period,
-                        n_basis: ps.n_basis,
-                        degree: ps.degree,
-                        coefs: cs,
-                    }
+                    CompiledTimeFuncKind::PeriodicSpline { basis, coefs: cs }
                 }
             };
             // gh#314: resolve the optional lag into a live coefficient. It uses
