@@ -1153,16 +1153,17 @@ pub fn derive_transform_with_bounds(
         return match t {
             "log" => Transform::Log { lo: lower, hi: upper },
             "logit" => Transform::Logit { lo: lower, hi: upper },
+            // `identity` on a box finite at both ends is refused before this
+            // is reached ([`check_transform_keeps_box`]).
             _ => Transform::None,
         };
     }
-    // For unconstrained-scale kinds (`instant`, `real`, unknown), a
-    // finite search box still has to be enforced or IF2 walks the
-    // particle out of bounds (gh#66: a bounded `instant` seed-time
-    // escaped to τ = −968 / −inf-likelihood). When both bounds are
-    // finite, use the scaled-logit (it maps `[lo, hi]` regardless of
-    // sign, so a negative lower bound is fine); otherwise there is no
-    // box to clamp to, so leave it unconstrained.
+    // Every search box finite at both ends gets a transform that keeps the
+    // parameter inside it. `Transform::None` clamps nothing, so IF2 and the
+    // samplers walk out of the box (gh#66: a bounded `instant` seed-time
+    // escaped to τ = −968). The scaled logit maps `[lo, hi]` regardless of
+    // sign, so a negative lower bound is fine. With an infinite end there is
+    // no box to clamp to, so the parameter stays unconstrained.
     let bounded_or_none = |lo: f64, hi: f64| {
         if lo.is_finite() && hi.is_finite() {
             Transform::Logit { lo, hi }
@@ -1170,14 +1171,23 @@ pub fn derive_transform_with_bounds(
             Transform::None
         }
     };
+    // `Transform::Log` cannot represent a value ≤ 0: a negative lower bound
+    // would send a negative start through `max(x, 1e-300).ln()` = −690 and
+    // make the delta-method step `rw_sd / 1e-300` (gh#967). A box reaching
+    // below zero therefore takes the same choice as an unconstrained kind.
+    let log_or_bounded = |lo: f64, hi: f64| {
+        if lo >= 0.0 { Transform::Log { lo, hi } } else { bounded_or_none(lo, hi) }
+    };
     if let Some(kind) = ir_param.param_kind {
         // Exhaustive over ParamKind (no `_`): a new kind is a compile error
         // here, forcing an explicit transform decision (the gh#191 payoff).
         use ir::parameter::ParamKind::*;
         match kind {
             Probability => Transform::Logit { lo: lower, hi: upper },
-            // `duration` is a positive span → log scale, like rate/count.
-            Rate | Positive | Count | Duration => Transform::Log { lo: lower, hi: upper },
+            // Positive spans → log scale. A box reaching below zero (a
+            // `duration` used as a signed seasonal phase, gh#967) cannot be
+            // log-transformed and takes the scaled logit instead.
+            Rate | Positive | Count | Duration => log_or_bounded(lower, upper),
             // `instant` is an origin-relative point that may be negative
             // (a seed before the anchor): unconstrained scale unless the
             // fit declares a finite search box, in which case clamp to it.
@@ -1187,7 +1197,74 @@ pub fn derive_transform_with_bounds(
             Real => bounded_or_none(lower, upper),
         }
     } else {
-        if lower >= 0.0 { Transform::Log { lo: lower, hi: upper } } else { Transform::None }
+        // No kind (IR predating `param_kind`): non-negative boxes are log
+        // scale; a box reaching below zero gets the scaled logit when finite.
+        log_or_bounded(lower, upper)
+    }
+}
+
+/// Refuse an explicit `transform = "identity"` on a search box that is finite
+/// at both ends.
+///
+/// The identity transform applies no clamp, so PMMH and MH proposals and IF2
+/// perturbations walk straight out of such a box: under a flat likelihood the
+/// draws outside it are the prior's mass outside it. Every finite box without
+/// an explicit transform already gets the scaled logit
+/// ([`derive_transform_with_bounds`]), so the remedy is to drop the override.
+/// A box with an infinite end has nothing for a transform to keep, and the
+/// identity transform stays available there.
+pub fn check_transform_keeps_box(
+    name: &str,
+    transform_override: Option<&str>,
+    (lo, hi): (f64, f64),
+) -> Result<(), String> {
+    if transform_override == Some("identity") && lo.is_finite() && hi.is_finite() {
+        return Err(format!(
+            "estimate.{name}: `transform = \"identity\"` with bounds [{lo}, {hi}] — the \
+             identity transform does not keep a parameter inside finite bounds, so the \
+             sampler or IF2 would move {name} outside [{lo}, {hi}]. Drop `transform` \
+             and {name} gets a bounded (scaled-logit) transform automatically."));
+    }
+    Ok(())
+}
+
+/// The search box a fit uses for one estimated parameter: the fit.toml
+/// `[estimate].bounds` when given (refused if it loosens the model's declared
+/// range), else the model's declared `in [lo, hi]`, else the kind's own
+/// range ([`resolved_bounds`]), else `[0, ∞)`.
+///
+/// The one resolution [`build_if2_params_from_specs`] and the config-time
+/// checks share, so a check never reasons about a different box than the
+/// engine searches.
+pub fn resolve_search_box(
+    name: &str,
+    fit_bounds: Option<(f64, f64)>,
+    ir_param: &ir::parameter::Parameter,
+) -> Result<(f64, f64), String> {
+    // The match keys on the *declared* `ir_param.bounds()`, not
+    // `resolved_bounds`: the loosen check is about the range a model
+    // author wrote down ("widen the model bounds" is its remedy), so a
+    // kind's implicit range must not silently constrain an explicit
+    // fit.toml box. The kind is consulted only where nothing is declared
+    // anywhere (gh#763).
+    match (fit_bounds, ir_param.bounds()) {
+        (Some((flo, fhi)), Some((mlo, mhi))) => {
+            if flo < mlo || fhi > mhi {
+                return Err(format!(
+                    "estimate.{}: fit.toml bounds [{}, {}] lie outside \
+                     model bounds [{}, {}]. A fit can tighten bounds but \
+                     not loosen them — model bounds may reflect physical \
+                     constraints. Either widen the model bounds or \
+                     tighten the fit bounds.",
+                    name, flo, fhi, mlo, mhi));
+            }
+            Ok((flo, fhi))
+        }
+        (Some(b), None) => Ok(b),
+        (None, Some(b)) => Ok(b),
+        // Nothing declared anywhere: fall back to the kind's own support
+        // (gh#763 — `probability` is `[0, 1]`), then to `[0, ∞)`.
+        (None, None) => Ok(resolved_bounds(ir_param).unwrap_or((0.0, f64::INFINITY))),
     }
 }
 
@@ -1243,41 +1320,13 @@ pub fn build_if2_params_from_specs(
             .ok_or_else(|| format!("parameter '{}' not in compiled model", spec.name))?;
 
         // Resolve bounds: caller-supplied (fit.toml [estimate].bounds)
-        // wins over model-declared ir_param.bounds. Reject configurations
-        // that try to loosen physical bounds — a fit's bounds must lie
-        // within whatever the model declared. This propagates through
+        // wins over model-declared ir_param.bounds, and a fit may not
+        // loosen the model's range. This propagates through
         // `EstimatedParam.{lower, upper}` (used by LHS / uniform-random
         // init samplers) AND through the `Transform::{Log, Logit}` clamp
         // bounds (used by IF2 to keep particles in the search box).
-        // Without this propagation, fit.toml's bounds are advisory only —
-        // IF2 happily walks particles out to model bounds even when the
-        // user tightened.
-        //
-        // The match keys on the *declared* `ir_param.bounds()`, not
-        // `resolved_bounds`: the loosen check is about the range a model
-        // author wrote down ("widen the model bounds" is its remedy), so a
-        // kind's implicit range must not silently constrain an explicit
-        // fit.toml box. The kind is consulted only where nothing is declared
-        // anywhere (gh#763).
-        let (lo, hi) = match (spec.bounds, ir_param.bounds()) {
-            (Some((flo, fhi)), Some((mlo, mhi))) => {
-                if flo < mlo || fhi > mhi {
-                    return Err(format!(
-                        "estimate.{}: fit.toml bounds [{}, {}] lie outside \
-                         model bounds [{}, {}]. A fit can tighten bounds but \
-                         not loosen them — model bounds may reflect physical \
-                         constraints. Either widen the model bounds or \
-                         tighten the fit bounds.",
-                        spec.name, flo, fhi, mlo, mhi));
-                }
-                (flo, fhi)
-            }
-            (Some(b), None)  => b,
-            (None, Some(b))  => b,
-            // Nothing declared anywhere: fall back to the kind's own support
-            // (gh#763 — `probability` is `[0, 1]`), then to `[0, ∞)`.
-            (None, None)     => resolved_bounds(ir_param).unwrap_or((0.0, f64::INFINITY)),
-        };
+        let (lo, hi) = resolve_search_box(&spec.name, spec.bounds, ir_param)?;
+        check_transform_keeps_box(&spec.name, spec.transform.as_deref(), (lo, hi))?;
 
         // Transform: spec override > param_kind > fallback. Built with
         // the resolved (lo, hi) so the clamp bounds match the search box.
@@ -5129,6 +5178,91 @@ dt = 1.0
             "unbounded real must stay None, got {:?}", t_real);
         assert!(matches!(t_instant, Transform::None),
             "unbounded instant must stay None, got {:?}", t_instant);
+    }
+
+    // ── Every finite search box gets a transform that keeps it ───────
+    //
+    // `Transform::None` applies no clamp and `Transform::Log` cannot
+    // represent a negative value, so either one on a box that is finite at
+    // both ends lets a sampler or IF2 put the parameter outside the box (or
+    // never reach its negative part). The scaled logit maps `[lo, hi]`
+    // whatever the sign of `lo`, so it is the transform for every such box.
+
+    fn spec_for(name: &str, lo: f64, hi: f64, transform: Option<&str>) -> ParamSpec {
+        ParamSpec {
+            name: name.into(), rw_sd: None, transform: transform.map(String::from),
+            perturb_only_at_t0: false, bounds: Some((lo, hi)),
+        }
+    }
+
+    /// gh#967: a `duration` (a seasonal phase, say) whose box straddles zero
+    /// got `Log`, mapping a start of −20 to log(1e-300) = −690.
+    #[test]
+    fn duration_with_negative_lower_bound_gets_scaled_logit_not_log() {
+        let (model, compiled) = make_one_param_model(
+            "phi", -120.0, 120.0, Some(ir::parameter::ParamKind::Duration));
+        let base = compiled.default_params.clone();
+        let r = build_if2_params_from_specs(
+            &model, &compiled, &base, &[spec_for("phi", -120.0, 120.0, None)]).expect("ok");
+        assert!(matches!(r[0].transform, Transform::Logit { lo, hi } if lo == -120.0 && hi == 120.0),
+            "a duration boxed to [-120, 120] must get the scaled logit, got {:?}", r[0].transform);
+    }
+
+    /// A non-negative `duration` box keeps the log transform it always had.
+    #[test]
+    fn duration_with_nonnegative_box_keeps_log() {
+        let (model, compiled) = make_one_param_model(
+            "d", 1.0, 30.0, Some(ir::parameter::ParamKind::Duration));
+        let base = compiled.default_params.clone();
+        let r = build_if2_params_from_specs(
+            &model, &compiled, &base, &[spec_for("d", 1.0, 30.0, None)]).expect("ok");
+        assert!(matches!(r[0].transform, Transform::Log { .. }), "got {:?}", r[0].transform);
+    }
+
+    /// A parameter with no kind (IR predating `param_kind`) and a negative
+    /// lower bound fell through to `Transform::None`, which enforces nothing.
+    #[test]
+    fn kindless_param_with_negative_lower_and_finite_box_gets_scaled_logit() {
+        let (model, compiled) = make_one_param_model("c", -1.0, 1.0, None);
+        let base = compiled.default_params.clone();
+        let r = build_if2_params_from_specs(
+            &model, &compiled, &base, &[spec_for("c", -1.0, 1.0, None)]).expect("ok");
+        assert!(matches!(r[0].transform, Transform::Logit { lo, hi } if lo == -1.0 && hi == 1.0),
+            "got {:?}", r[0].transform);
+    }
+
+    /// A kindless parameter whose box has an infinite end has no box to keep.
+    #[test]
+    fn kindless_param_with_negative_lower_and_infinite_end_stays_none() {
+        use ir::parameter::Parameter;
+        let p = Parameter { name: "c".into(), value: ir::parameter::ParamValue::Fixed { value: 0.0 },
+            param_kind: None, param_dim: None };
+        let t = derive_transform_with_bounds(&p, None, (-1.0, f64::INFINITY));
+        assert!(matches!(t, Transform::None), "got {:?}", t);
+    }
+
+    /// An explicit `transform = "identity"` on a box finite at both ends is
+    /// refused: the identity transform cannot keep the parameter inside.
+    #[test]
+    fn explicit_identity_with_finite_box_is_refused() {
+        let (model, compiled) = make_one_param_model(
+            "c", 0.0, 1.0, Some(ir::parameter::ParamKind::Real));
+        let base = compiled.default_params.clone();
+        let err = build_if2_params_from_specs(
+            &model, &compiled, &base, &[spec_for("c", 0.0, 1.0, Some("identity"))])
+            .expect_err("identity on [0, 1] must be refused");
+        assert!(err.contains("identity transform does not keep"), "{err}");
+        assert!(err.contains("Drop `transform`"), "{err}");
+    }
+
+    /// With an infinite end there is no finite box, and the identity
+    /// transform stays available.
+    #[test]
+    fn explicit_identity_with_half_infinite_box_is_allowed() {
+        assert!(check_transform_keeps_box("c", Some("identity"), (0.0, f64::INFINITY)).is_ok());
+        assert!(check_transform_keeps_box("c", Some("identity"), (f64::NEG_INFINITY, 3.0)).is_ok());
+        assert!(check_transform_keeps_box("c", Some("identity"), (0.0, 1.0)).is_err());
+        assert!(check_transform_keeps_box("c", None, (0.0, 1.0)).is_ok());
     }
 
     // ── `probability` carries [0, 1] with no `in [...]` (gh#763) ─────

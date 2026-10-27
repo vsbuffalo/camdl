@@ -2569,6 +2569,24 @@ impl FitConfig {
             lines.join("\n"), kind.as_str()))
     }
 
+    /// Refuse an explicit `transform = "identity"` on a search box finite at
+    /// both ends, under every method, before a leaf is claimed.
+    ///
+    /// The box is the one the engine searches
+    /// ([`super::runner::resolve_search_box`]): fit.toml bounds, else the
+    /// model's declared range, else the kind's. The same check runs again
+    /// where the engine builds its parameters, so no path skips it.
+    pub fn validate_identity_transforms(&self, model: &ir::Model) -> Result<(), String> {
+        for (name, spec) in &self.problem.estimate {
+            let Some(p) = model.parameters.iter().find(|p| p.name == *name) else { continue };
+            // A box the engine would refuse is the engine's error to report.
+            let Ok(bx) = super::runner::resolve_search_box(name, spec.bounds, p) else { continue };
+            super::runner::check_transform_keeps_box(
+                name, spec.transform.as_ref().map(|t| t.as_str()), bx)?;
+        }
+        Ok(())
+    }
+
     pub fn validate_gradient_capability(&self, model: &ir::Model) -> Result<(), String> {
         let Some(method) = &self.inference.method else {
             return Ok(());
@@ -7572,4 +7590,5 @@ cooling = 0.70
         assert!(cfg.problem.fixed.values.contains_key("some_param"),
             "[fixed] must keep flattening arbitrary param keys");
     }
+
 }

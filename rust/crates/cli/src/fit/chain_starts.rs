@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use sim::inference::prior::{Density, Prior};
-use sim::inference::types::EstimatedParam;
+use sim::inference::types::{EstimatedParam, Transform};
 
 use crate::chain_index::ChainIndex;
 use sim::rng::StatefulRng;
@@ -610,7 +610,7 @@ pub fn draw_chain_starts(
             }
         }
         ChainStarts::Spread(Spread::FromPrior) => {
-            draw_from_prior(ctx.resolved, ctx.priors, n_chains, seed)?
+            draw_from_prior(ctx.resolved, ctx.base_specs, ctx.priors, n_chains, seed)?
         }
         ChainStarts::Spread(Spread::FromPosterior { .. }) => {
             draw_from_posterior(ctx.resolved, source_file()?, n_chains, seed)?
@@ -654,18 +654,34 @@ fn draw_single(resolved: &ResolvedParameters, n_chains: usize) -> Vec<ChainStart
 
 // ─── Sourced rules ───────────────────────────────────────────────────────────
 
-/// `from_prior`: per-chain draw from each parameter's resolved prior.
+/// `from_prior`: per-chain draw from each parameter's resolved prior,
+/// restricted to the search box the parameter's transform keeps it in.
 /// Parameters whose prior cannot be drawn from — flat, or hierarchical
 /// (its hyperparameters have no values at chain-init time) — fall back to a
 /// bounds-uniform draw with a startup warning, and are refused when they
 /// have no finite bounds either.
+///
+/// The sampler's target is the prior truncated to that box, so a start drawn
+/// outside it is not a draw from the target: under the scaled logit it is
+/// clamped to the edge of the box, where the chain starts stuck. A draw that
+/// lands outside is redrawn (up to [`MAX_PRIOR_BOX_REDRAWS`] times; a draw
+/// that lands inside first time consumes the stream exactly as before), and a
+/// prior with almost no mass in the box falls back to a uniform draw within
+/// it, with a warning.
 fn draw_from_prior(
     resolved: &ResolvedParameters,
+    base_specs: &[EstimatedParam],
     priors: &[(String, Prior)],
     n_chains: usize,
     seed: u64,
 ) -> Result<Vec<ChainStart>, InitError> {
-    let bounds_map = bounds_map_for_estimate(resolved);
+    let model_bounds = bounds_map_for_estimate(resolved);
+    let kept = kept_boxes(base_specs);
+    // The box a fall-back uniform draw uses: the one the transform keeps,
+    // else the model's declared range.
+    let box_for = |name: &str| -> Option<(f64, f64)> {
+        kept.get(name).or_else(|| model_bounds.get(name)).copied()
+    };
     let mut no_prior_names: Vec<String> = Vec::new();
     let mut no_prior_no_bounds: Vec<String> = Vec::new();
     let mut priors_by_name: HashMap<String, Prior> = HashMap::new();
@@ -681,7 +697,7 @@ fn draw_from_prior(
             }
             None => {
                 no_prior_names.push(name.clone());
-                if bounds_map.get(name)
+                if box_for(name)
                     .map(|(lo, hi)| !lo.is_finite() || !hi.is_finite())
                     .unwrap_or(true)
                 {
@@ -705,14 +721,33 @@ fn draw_from_prior(
         );
     }
     let base = estimate_values_from_resolved(resolved);
-    let starts: Vec<ChainStart> = (0..n_chains).map(|chain_id| {
+    let mut box_fallbacks: Vec<String> = Vec::new();
+    let mut starts: Vec<ChainStart> = Vec::with_capacity(n_chains);
+    for chain_id in 0..n_chains {
         let chain_seed = derive_chain_seed(seed, chain_id);
         let mut rng = StatefulRng::new(chain_seed);
         let mut values = HashMap::with_capacity(resolved.estimate_set.len());
         for name in &resolved.estimate_set {
             let val = if let Some(prior) = priors_by_name.get(name) {
-                sample_prior_natural(prior, &mut rng, base.get(name).copied())
-            } else if let Some(&(lo, hi)) = bounds_map.get(name) {
+                let b = base.get(name).copied();
+                match kept.get(name.as_str()) {
+                    None => sample_prior_natural(prior, &mut rng, b),
+                    Some(&(lo, hi)) => {
+                        let drawn = (0..MAX_PRIOR_BOX_REDRAWS)
+                            .map(|_| sample_prior_natural(prior, &mut rng, b))
+                            .find(|x| (lo..=hi).contains(x));
+                        match drawn {
+                            Some(x) => x,
+                            None => {
+                                if !box_fallbacks.contains(name) {
+                                    box_fallbacks.push(name.clone());
+                                }
+                                lo + rng.uniform() * (hi - lo)
+                            }
+                        }
+                    }
+                }
+            } else if let Some((lo, hi)) = box_for(name) {
                 lo + rng.uniform() * (hi - lo)
             } else {
                 // Unreachable: NoPriorAndNoBounds would have caught
@@ -721,13 +756,42 @@ fn draw_from_prior(
             };
             values.insert(name.clone(), val);
         }
-        ChainStart {
+        starts.push(ChainStart {
             chain_id,
             values,
             source: InitSource::PriorDraw { seed: chain_seed },
-        }
-    }).collect();
+        });
+    }
+    if !box_fallbacks.is_empty() {
+        eprintln!(
+            "\x1b[33mwarning:\x1b[0m starts = \"from_prior\": {} draws from the prior \
+             of {} all fell outside the search bounds; drew uniformly within the bounds \
+             instead. The prior puts almost no mass inside the bounds — check that they \
+             agree.",
+            MAX_PRIOR_BOX_REDRAWS,
+            box_fallbacks.join(", "),
+        );
+    }
     Ok(starts)
+}
+
+/// How many prior draws `from_prior` tries for one parameter before falling
+/// back to a uniform draw within the search box.
+const MAX_PRIOR_BOX_REDRAWS: usize = 10_000;
+
+/// The box each estimated parameter's transform keeps it in: `[lo, hi]` of a
+/// `Log` or `Logit` transform. A `Transform::None` parameter has no box
+/// enforced and is absent.
+fn kept_boxes(base_specs: &[EstimatedParam]) -> HashMap<&str, (f64, f64)> {
+    base_specs
+        .iter()
+        .filter_map(|s| match s.transform {
+            Transform::Log { lo, hi } | Transform::Logit { lo, hi } => {
+                Some((s.name.as_str(), (lo, hi)))
+            }
+            Transform::None => None,
+        })
+        .collect()
 }
 
 /// Natural-scale prior sample. Implements the basics for each

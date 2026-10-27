@@ -499,6 +499,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
+    config.validate_identity_transforms(&model).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
 
     // The chain-starts rule, resolved against the problem before the identity
     // is taken (proposal §3.4): `from_prior` when every estimated parameter
