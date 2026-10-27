@@ -1,6 +1,6 @@
 ---
 date: 2026-10-26
-status: accepted except D9 and D10 (D9 blocks Stage 2) — D1–D8 decided by the maintainer on 2026-10-26 (§12); implementation follows §11
+status: accepted — D1–D10 decided by the maintainer on 2026-10-26 and 2026-10-27 (§12); implementation follows §11
 area: CLI parameter resolution / inference setup / run records
 issues: gh#965 (typed constants); §13 lists the follow-ups
 related:
@@ -199,6 +199,19 @@ fix is superseded by the partition.
     log-prior over the estimated parameters only (PMMH:
     `sim/src/inference/pmmh.rs:599-602`, verified; PGAS inferred), so a held
     leaf's density p(leaf | hyper) is missing (§6.4, D8).
+13. **A search box truncates a hierarchical prior without its normalizing
+    constant** (to fix; §6.4). Under PMMH the box is enforced by the transform,
+    and the prior density is never renormalized to the box, so a leaf's
+    effective prior is p(leaf | hyper)·1[leaf ∈ box] rather than p(leaf |
+    hyper)/Z(hyper), with Z(hyper) the prior mass inside the box. For a plain
+    prior Z is a constant and the posterior is right; for a hierarchical leaf Z
+    depends on the hyperparameter, so the hyperparameter's posterior is wrong
+    whenever the box cuts off appreciable prior mass.
+14. **`profile --fit` ignores `ic_free`** (being fixed now, separately): the
+    per-cell `IF2Config` sets `skip_first_obs_from_loglik: false`
+    (`profile.rs:1492`, verified), so a profile of an `ic_free` fit config
+    scores a different likelihood (one including the first observation) from the
+    fit it profiles. §7.2 makes the objective part of every profile record.
 
 ## 4. One declaration per parameter; three special cases; everything else is an error
 
@@ -212,9 +225,13 @@ fix is superseded by the partition.
 | sampled   | the varying set of `--draws prior\|uniform\|posterior`, `--draws FILE` (`--draws-file` after design-vs-sample Stage 5), `fit predict`'s posterior | tier 3.5a, the draw row                                     |
 
 Nothing else declares a role. `--rw-sd`, `[estimate].rw_sd`,
-`perturb_only_at_t0`, `--starts` and a scenario do not. A role declaration
-naming a typed constant is refused: "`omega` is a typed constant in the model;
-move it into `parameters {}` to configure it" (D2).
+`perturb_only_at_t0`, `--starts` and a scenario do not. Any external naming of a
+typed constant — `[fixed]`, `--fixed`, `--fixed-file`, `--param`, `--params`, a
+scenario `set` or `scale`, a draws column — is refused, even at its declared
+value (D2, D9): "`omega` is a constant defined in the model with `let`, not a
+parameter, so it cannot be set from outside; to make it configurable, declare it
+in `parameters {}`". A `let` and a `parameters {}` entry of the same name are
+already a compile error, E278.
 
 ### 4.2 The rule
 
@@ -254,29 +271,31 @@ today:
   estimated. It is not needed: holding a parameter is one line moved from
   `[estimate]` to `[fixed]` in a copy of the config, and that copy then names
   the problem it runs. The error says exactly that.
-- **A `--fixed-file` entry naming a swept or `--estimate` parameter is pending
-  D10.** A `--fixed-file` key is a fixed declaration (§4.1), so under the rule
-  above it would be refused. A file written for another purpose — a fit's
-  `mle.toml` — names every parameter, and files carrying a fit's `[provenance]`
-  block are already treated differently (`carries_fit_provenance`,
-  `params_resolver.rs:1860`). Which treatment applies is D10; until it is
-  decided, this proposal does not change how such files resolve.
+- **A plain `--fixed-file` entry naming a swept or `--estimate` parameter is
+  refused.** A `--fixed-file` key is a fixed declaration (§4.1). The one
+  exception is a fit artifact (D10): a file carrying a fit's `[provenance]`
+  block, such as `mle_params.toml`, names every parameter as a record of a fit,
+  not as a statement of what this run holds. Its entries for swept or estimated
+  names are not used, and one info notice lists them; its other entries hold
+  their parameters. Today's detector is `carries_fit_provenance`
+  (`params_resolver.rs:1860`). §4.6 gives every file kind's meaning.
 
 Examples:
 
-| Input                                                                                  | Result                                              |
-| -------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `[estimate]` + `[fixed]` naming one parameter, one file                                | refused (already refused, `6c94825f`)               |
-| `profile --fit F --sweep beta`, `beta` in `[estimate]`                                 | valid: `beta` focal (case 1)                        |
-| `fit run --sweep beta`, `beta` in `[estimate]`                                         | refused (§13)                                       |
-| `--sweep N0`, `N0` in `[fixed]`                                                        | valid: design at job level, fixed per cell (case 2) |
-| `--fixed X` + `--sweep X`; `--estimate X` + `--fixed X`                                | refused                                             |
-| `--fixed rho`, `rho` in `[estimate]`                                                   | refused (reverses `21d4ed47`)                       |
-| `--fixed-file mle.toml --sweep beta`, `mle.toml` naming `beta`                         | pending D10                                         |
-| `--draws uniform --sweep beta`                                                         | valid: design shadow (case 3)                       |
-| `--draws uniform --param beta=0.5`                                                     | valid: imposition by `--param` (case 3)             |
-| `--estimate omega` or `--fixed omega=…`, `omega` a typed constant                      | refused (D2)                                        |
-| `--rw-sd NAME=SD` or `perturb_only_at_t0` on the command line for a non-estimated name | refused                                             |
+| Input                                                                                  | Result                                               |
+| -------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `[estimate]` + `[fixed]` naming one parameter, one file                                | refused (already refused, `6c94825f`)                |
+| `profile --fit F --sweep beta`, `beta` in `[estimate]`                                 | valid: `beta` focal (case 1)                         |
+| `fit run --sweep beta`, `beta` in `[estimate]`                                         | refused (§13)                                        |
+| `--sweep N0`, `N0` in `[fixed]`                                                        | valid: design at job level, fixed per cell (case 2)  |
+| `--fixed X` + `--sweep X`; `--estimate X` + `--fixed X`                                | refused                                              |
+| `--fixed rho`, `rho` in `[estimate]`                                                   | refused (reverses `21d4ed47`)                        |
+| `--fixed-file mle_params.toml --sweep beta`, a fit artifact naming `beta`              | valid: the `beta` entry is unused, info notice (D10) |
+| `--fixed-file p.toml --sweep beta`, a plain file naming `beta`                         | refused                                              |
+| `--draws uniform --sweep beta`                                                         | valid: design shadow (case 3)                        |
+| `--draws uniform --param beta=0.5`                                                     | valid: imposition by `--param` (case 3)              |
+| `--estimate omega` or `--fixed omega=…`, `omega` a typed constant                      | refused (D2)                                         |
+| `--rw-sd NAME=SD` or `perturb_only_at_t0` on the command line for a non-estimated name | refused                                              |
 
 `--estimate` and `--fit` are mutually exclusive, as in `survey` today
 (`args/mod.rs:2020`): with a fit config, `[estimate]` alone declares the
@@ -326,6 +345,31 @@ parameter has one role per cell (`beta_north`). A declaration naming the family
 `--sweep` lists only the unknown name (`sweep.rs:65-73`, verified), and the new
 message also lists the family's cells. `simulate --param-vec beta=FILE` expands
 to `beta_<key>` names before roles are resolved (`util.rs:3360-3362`, verified).
+
+### 4.6 How each file is interpreted
+
+A file means one thing per flag; no file is read as two kinds at once. A **plain
+params TOML** is top-level `name = value` lines. A **fit artifact** is a params
+TOML a fit wrote, carrying a `[provenance]` block (`mle_params.toml`,
+`final_params.toml`); today it is recognized by `carries_fit_provenance`
+(`params_resolver.rs:1860`). A **draws TSV** has a row per draw, a **sweep TSV**
+a row per design point.
+
+| File, as passed                                    | Commands                                            | Meaning                                                                                                                                                                                                 |
+| -------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| plain TOML as `--fixed-file` / `--params`          | `profile`, `survey` / `simulate`, `pfilter`, `eval` | declares each named parameter fixed at its value (tier 3); naming a swept or estimated parameter is refused; an entry naming a sampled parameter is below the sample tier and unused, listed (as today) |
+| fit artifact as `--fixed-file` / `--params`        | same                                                | as a plain TOML for parameters with no other role; entries for swept or estimated names are unused and listed (D10); a replaced fit value is a warning, as today (`params_resolver.rs:313-320`)         |
+| plain TOML or fit artifact as `[fixed] from_file`  | `fit run`, `survey --fit`, `profile --fit`          | the fit config's `[fixed]` entries (tier 2); with `[estimate]` it obeys the one-file rule: a name in both is refused                                                                                    |
+| plain TOML as `--starts from_params=FILE`          | `fit run`, `profile`                                | starting values for estimated parameters only; other names unused and listed; declares nothing                                                                                                          |
+| fit directory or handle as `--starts from_mle=FIT` | `fit run`, `profile`                                | the fit's point estimate as starting values for estimated parameters only; declares nothing                                                                                                             |
+| draws TSV as `--starts from_posterior=…`           | `fit run`, `profile`                                | one row per chain, estimated parameters only; declares nothing                                                                                                                                          |
+| draws TSV as `--draws FILE` / `--draws-file FILE`  | `simulate`                                          | the sample axis: its varying columns are sampled (§4.1); constant columns are fixed values of undeclared parameters                                                                                     |
+| sweep TSV as `--sweep-file FILE`                   | `simulate`                                          | the design axis: every column is a design parameter                                                                                                                                                     |
+| `[synthetic] true_params`                          | `fit recovery`                                      | the data-generating values; not a role declaration for the fit                                                                                                                                          |
+
+A typed constant may not appear in any of them (D9). The `--fixed-file` and
+`--params` help texts and `docs/camdl-run-spec.md` §1.3 carry this table's rows
+for their flag (Stage 4).
 
 ## 5. Values are resolved per role, and checked against the constraints
 
@@ -567,6 +611,7 @@ pub enum RoleError {
     SimplexPartlyHeld { group: Vec<String>, held: Vec<String> },
     SimplexSum { group: Vec<String>, cell: Option<u64>, sum: f64 },
     HyperOverHeldLeaf { hyper: String, held_leaves: Vec<String>, method: &'static str },
+    HierarchicalLeafBoxed { leaf: String, search: SearchBox, support: Support },
     SettingForNonEstimated { name: String, setting: &'static str, role: RoleKind },
 }
 
@@ -651,10 +696,29 @@ transform comes from `[estimate].transform`, else the kind, and clamps to the
 search box (`fit/runner.rs:1240-1250`). A method that needs a finite box —
 `survey`'s Latin hypercube, the `uniform` and `lhs` starts rules — refuses an
 infinite box naming the parameter. The prior is resolved by
-`fit::priors_precedence` (fit config, then the model's `~`, then flat). Because
-the transform clamps to the box, a Bayesian fit's effective prior is the stated
-prior restricted to the box (inferred for PMMH and PGAS); the record stores
-both.
+`fit::priors_precedence` (fit config, then the model's `~`, then flat).
+
+**What a search box means under PMMH and PGAS.** Verified for PMMH by reading:
+the acceptance ratio is log-likelihood + log-prior + log-Jacobian on the
+transformed scale (`sim/src/inference/pmmh.rs:707-714`); the prior is the
+untruncated density (`prior.rs:178-240`), with no normalizing constant for the
+box; the box is enforced only by the transform — the `Log` inverse clamps to
+`[lo, hi]` and its log-Jacobian is −∞ outside it (`types.rs:118-143`), the
+`Logit` maps into the box by construction, and `Transform::None` does not
+enforce it at all (`types.rs:130`). So the box restricts where the sampler
+moves, and the target is p(y | θ)·p(θ)·1[θ ∈ box]. For a plain prior that is the
+prior truncated to the box and renormalized, because the missing constant does
+not depend on θ. For a hierarchical leaf it is not: the missing constant
+Z(hyper) = ∫_box p(leaf | hyper) d(leaf) depends on the hyperparameter, so the
+hyperparameter's posterior is wrong when the box cuts off prior mass (§3.2 item
+13). The `truncated_normal` family renormalizes over its own bounds
+(`prior.rs:117`), which is a different mechanism. PGAS is inferred to follow
+PMMH. Two requirements follow: the record stores the box and the prior
+separately, and the launch block says that the box truncates the prior; and
+under PMMH and PGAS a hierarchical leaf whose search box is narrower than its
+support is refused (`HierarchicalLeafBoxed`) until Z(hyper) is computed (§13),
+while an identity-transform parameter's box is enforced by refusing a proposal
+outside it (a −∞ log-prior), so the box means the same under every transform.
 
 **Simplex groups** are sets of estimated parameters constrained to sum to 1,
 which IF2 perturbs jointly through a log-ratio transform whose softmax inverse
@@ -792,9 +856,20 @@ A profile leaf:
 }
 ```
 
+Every profile record — job and leaf — also stores the exact likelihood
+objective: the bound streams and their data digests, the per-cell algorithm and
+backend, and how the initial observation is treated (`ic_free`, i.e. whether y₁
+conditions the initial state without entering the sum,
+`skip_first_obs_from_loglik`). Two profiles whose objectives differ are not
+comparable, and the record is what lets a reader tell (§3.2 item 14).
+
 In `simulate` (from Stage 5) the cell record carries impositions and design
 shadows as design-vs-sample's `summary.impositions` and `summary.design_shadows`
-define them. `parameters_provenance` keeps its per-value records for fixed
+define them. The record's `sampled` set is the **effective** varying set — the
+measure's coverage minus the parameters a `--param` imposition or a design
+shadow took — not the measure's original coverage, because that is what the band
+actually pools over; the original coverage is kept beside it as
+`measure_varying`. `parameters_provenance` keeps its per-value records for fixed
 parameters; estimated parameters leave it, because they have no value (their
 starts are under `starts`), which ends §3.2 item 5.
 
@@ -974,9 +1049,13 @@ Recorded here; that proposal is not edited by this one.
 - `--fixed` or `--fixed-file` over a fit config's `[estimate]` is refused in
   `profile` and `survey` (today a notice, `21d4ed47`, or silently ignored in
   `survey --fit`).
-- A `--fixed-file` entry naming a swept or `--estimate` parameter: pending D10
-  (today it runs with no notice: `profile.rs:750-781` checks only `--fixed` and
-  `[fixed]`).
+- A plain `--fixed-file` entry naming a swept or `--estimate` parameter is
+  refused; a fit artifact's such entries are unused and listed (D10). Today both
+  run with no notice (`profile.rs:750-781` checks only `--fixed` and `[fixed]`).
+- `fit run` no longer demands typed constants in `[fixed]`, and refuses them
+  there (D9).
+- Under PMMH and PGAS, a hierarchical leaf with a search box narrower than its
+  support is refused (§6.4).
 - A scenario setting or scaling an estimated or design parameter is refused in
   every command (today only `fit run` and `survey --fit` refuse the first, and
   `profile` notices the second).
@@ -1017,7 +1096,14 @@ Recorded here; that proposal is not edited by this one.
   `[fixed]`.
 - **`profile --starts from_params=FILE` holding parameters.** Those parameters
   need `--fixed` or a `--fixed-file` that names only them.
-- **Typed constants.** D9.
+- **Typed constants (D9).** The nine `camdl-garki` fit configs
+  (`fits/mosq_dyn_pool_*.toml` and kin) drop their `abund_floor = 0.000001`
+  line. Test 4 of `rust/crates/cli/tests/generated_draws_varying_only_gh949.rs`
+  declares `c` in `parameters {}` without bounds, which `--draws uniform` also
+  leaves undrawn (`main.rs:4581-4587` draws declared bounds only, verified).
+- **Fit artifacts as `--fixed-file` (D10).** Documented in `docs/inference.md`,
+  run spec §1.3 and the `--fixed-file` and `--params` help: such a file's
+  entries for swept or estimated parameters are unused and listed.
 - **Docs.** Run spec §1.3 (`docs/camdl-run-spec.md:82-183`) rewritten around
   roles then values; `docs/camdl-language-spec.md:5201-5210` (the `--rw-sd`
   modes) and `:218-220` (typed constants) rewritten by hand, never through
@@ -1102,10 +1188,16 @@ computed independently of camdl's likelihood code.
   cell's returned γ̂, the same likelihood-scale z-test against the exact
   `p(y | β, γ̂)` must pass (the reported value is not biased upward), and the
   exact `log p(y | β, γ̂)` must not exceed the exact profile maximum over
-  `gamma`. The shortfall below that maximum is reported, not asserted: IF2 has
-  no stated optimization tolerance from which an allowance could be derived.
+  `gamma`. The z-test at γ̂ uses fresh particle-filter evaluations, with seeds
+  disjoint from those of the IF2 run and its clean evaluation, so the values
+  that selected the maximum are not the ones that validate it (selecting on a
+  noisy estimate biases it upward). The shortfall below that maximum is
+  reported, not asserted: IF2 has no stated optimization tolerance from which an
+  allowance could be derived.
 
-A simplex fixture (three members, one profiled) checks that a split group is
+A hierarchical fixture (two leaves under one hyperparameter, PMMH) checks the
+§6.4 refusals: an estimated hyperparameter with a held leaf, and a boxed leaf. A
+simplex fixture (three members, one profiled) checks that a split group is
 refused and that a fully held grid point not summing to 1 is refused naming the
 cell.
 
@@ -1113,9 +1205,14 @@ cell.
 
 **Stage 1 — the types, computed and recorded, no behaviour change.** Add
 `roles.rs`. `fit run`, `survey` and `profile` build the partition from today's
-rules (`profile`'s `--rw-sd` selection expressed as declarations) and write the
-records. _Tests:_ unit tests of `resolve_roles` for every row of §4.2 and §4.3;
-K1 and K2 fixtures compile and their exact answers are committed beside them.
+rules and write the records. The seam: `profile`'s legacy selection (`--rw-sd`
+list or `auto`) is translated into a `RoleInputs` by one adapter,
+`profile::legacy_role_inputs`, inside `profile.rs`; `roles.rs` never sees `RwSd`
+and never imports from `profile.rs`, so no rule in `resolve_roles` depends on
+the legacy semantics. Stage 3 deletes the adapter and builds `RoleInputs` from
+`--estimate` and `[estimate]` directly. _Tests:_ unit tests of `resolve_roles`
+for every row of §4.2 and §4.3; K1 and K2 fixtures compile and their exact
+answers are committed beside them.
 
 **Stage 2 — `fit run` and `survey` resolve roles first.** Starts move out of the
 model (§5.2) and onto the reworked chain-starts seam (§6.5); the launch block;
@@ -1203,43 +1300,24 @@ p(leaf | hyper), under which a held leaf's density belongs in the posterior
 targeted refusal lands now as an interim fix, under PMMH and PGAS only, and the
 full Bayesian treatment is deferred (§13).
 
-**D9 — Typed-constant entries in existing configs and tests. Open.** Two users
-of a typed-constant override exist, and D2 refuses both:
+**D9 — Typed constants in existing configs and tests. Decided (2026-10-27):
+option (a).** Typed constants are immutable. Every external naming is refused,
+including a redundant one at the declared value: `[fixed]`, `--fixed`,
+`--fixed-file`, `--param`, `--params`, a scenario `set` or `scale`, or a draws
+column, with the message of §4.1. `fit run` stops demanding constants in
+`[fixed]`. The nine `camdl-garki` configs and test 4 of
+`generated_draws_varying_only_gh949.rs` migrate (§10.2). Rejected: (b),
+accepting an entry at exactly the declared value.
 
-- nine `camdl-garki` fit configs (`fits/mosq_dyn_pool_*.toml` and kin) list
-  `abund_floor = 0.000001` in `[fixed]`, its declared value, because `fit run`
-  demands it today (gh#965);
-- `rust/crates/cli/tests/generated_draws_varying_only_gh949.rs` test 4 sets the
-  typed constant `c` (`let c : probability = 0.0`) to 0.9 with `--params` and
-  `--param`, to have a parameter `--draws uniform` does not draw.
-
-Options: (a) refuse every naming of a typed constant, with the message naming
-the `let`; the Garki configs drop one line each, and the test declares `c` in
-`parameters {}` without bounds, which `--draws uniform` also leaves alone
-(`main.rs:4581-4587` draws declared bounds only, verified). (b) Accept a
-`[fixed]`/`--fixed` entry naming a typed constant at exactly its declared value,
-with an info line, and refuse any other value; the Garki configs keep working
-unchanged, and the test still migrates. (a) is the rule D2 states without an
-exception; (b) costs one equality check and spares the nine configs a no-op
-edit. Recommendation: (a), leaning; it is the maintainer's call because it
-breaks configs outside this repository.
-
-**D10 — A `--fixed-file` entry naming a swept or estimated parameter. Open.** A
-`--fixed-file` key declares the parameter fixed (§4.1), so the one-declaration
-rule makes a file that also names a `--sweep` or `--estimate` parameter a
-conflict. A fit's `mle.toml`, which names every parameter, is the common case.
-Options:
-
-- (a) Refuse it. `profile m.camdl --fixed-file mle.toml --sweep beta …` with no
-  fit config then fails; the workaround is to hand-trim the file to the held
-  parameters, then add `--estimate` and `--starts from_params=mle.toml`.
-- (b) When the file carries a fit's `[provenance]` block
-  (`carries_fit_provenance`, `params_resolver.rs:1860`), its entries for swept
-  or estimated names are not used and are listed, as for a starts source: a
-  starts-source rule for fit-provenance files, not a precedence rule.
-- (c) Keep the landed `--fixed` notice behaviour (`21d4ed47`) as well.
-
-Recommendation: left to the maintainer.
+**D10 — A fit artifact as `--fixed-file`. Decided (2026-10-27): option (b).** A
+fit artifact may name swept or estimated parameters; those entries are unused
+and one info notice lists them (§4.2, §4.6). This is a rule about what a fit
+artifact means, not a precedence rule; a plain params TOML naming a swept or
+estimated parameter is refused. Today's detector is `carries_fit_provenance`.
+The behaviour is documented in `docs/inference.md`, run spec §1.3 and the
+command help. Rejected: (a), refusing it, which breaks
+`profile m.camdl --fixed-file mle_params.toml --sweep beta …`; (c), keeping the
+landed `--fixed` notice over `[estimate]`.
 
 ## 13. Out of scope, each with its reason
 
@@ -1248,6 +1326,11 @@ Recommendation: left to the maintainer.
 - **Sweeping an `[estimate]` parameter in `fit run`.** Under IF2 that is
   `profile`; under PGAS or PMMH it is a grid of conditional posteriors, a
   command the maintainer has deferred. It stays refused.
+- **The box's normalizing constant for a hierarchical leaf** (§3.2 item 13):
+  compute Z(hyper) and lift the boxed-leaf refusal.
+- **An explicit fitted-value source flag** could replace detecting a fit
+  artifact by its `[provenance]` block (D10), so a file's meaning comes from the
+  flag rather than its contents.
 - **Held-leaf densities in the prior sum** (D8): add log p(leaf | hyper) for
   each held leaf of an estimated hyperparameter in PMMH and PGAS, then lift the
   refusal. It touches `pmmh.rs` and `pgas.rs`, high-risk files.
@@ -1262,5 +1345,3 @@ Recommendation: left to the maintainer.
   depend on grid position and serialize the grid.
 - **A profile interval against a trustworthy global maximum, with Monte Carlo
   error**, is a change to how profile results are summarized.
-- **`profile --fit` ignores `ic_free`** (`skip_first_obs_from_loglik: false`,
-  `profile.rs:1492`, verified), to be filed as an issue.
