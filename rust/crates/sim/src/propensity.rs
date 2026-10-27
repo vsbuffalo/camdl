@@ -453,13 +453,14 @@ pub fn fourier_value(period_inv: f64, harmonics: &[(f64, f64)], t: f64) -> f64 {
 
 /// Evaluate a compiled time function at time `t`, resolving its live scalar
 /// coefficients against `ctx.params`. Structural arrays (interpolation knots,
-/// spline bases, periodic-spline coefs, piecewise steps) are already `f64` and
-/// pass straight through to the pure math above.
+/// the cubic-spline basis, piecewise steps) are already `f64` and pass
+/// straight through to the pure math above.
 ///
 /// Coefficient resolution is per-call today; the per-`(forcing, t)` memo
 /// (proposal §3) collapses the N-referencing-transitions repeat. `Periodic`
-/// evaluates only the selected bin's value and `Fourier` evaluates each
-/// harmonic coefficient inline, so neither allocates.
+/// evaluates only the selected bin's value, `Fourier` each harmonic
+/// coefficient inline, and `PeriodicSpline` only the `degree + 1`
+/// coefficients nonzero at `t`, so none allocates.
 pub fn eval_forcing(kind: &CompiledTimeFuncKind, t: f64, ctx: &EvalCtx<'_>) -> f64 {
     match kind {
         CompiledTimeFuncKind::Sinusoidal { amplitude, period, phase, baseline } =>
@@ -494,7 +495,7 @@ pub fn eval_forcing(kind: &CompiledTimeFuncKind, t: f64, ctx: &EvalCtx<'_>) -> f
                 .map(|(k, (a, b))| fourier_term(phase, k, eval_resolved(a, ctx), eval_resolved(b, ctx)))
                 .sum()
         }
-        CompiledTimeFuncKind::PeriodicSpline { basis, coefs } => basis.eval(t, |k| coefs[k]),
+        CompiledTimeFuncKind::PeriodicSpline(ps) => ps.eval(t, |c| eval_resolved(c, ctx)),
     }
 }
 
