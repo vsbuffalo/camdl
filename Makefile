@@ -411,6 +411,25 @@ check-contrasts-golden: build-ocaml
 	if [ $$fail -ne 0 ]; then exit 1; fi; \
 	echo "  contrasts goldens in sync"
 
+# ── B-spline reference fixtures ───────────────────────────────────────────────
+
+.PHONY: fixtures-bspline
+
+# Regenerate the oracle TSVs the B-spline evaluator is checked against
+# (rust/crates/sim/tests/bspline_reference_fixtures.rs and
+# periodic_bspline_oracle.rs; proposal 2026-10-27-estimable-bsplines §8.1 R1).
+# They are references, never inputs; CI reads the committed files offline.
+# Networked only through uv's first fetch of the pinned scipy/numpy; needs R
+# with `splines` (base) and `pomp`. Byte-identical on re-run: `git status` is
+# clean afterwards.
+BSPLINE_FIXTURES := rust/crates/sim/tests/fixtures
+BSPLINE_PY := uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 python
+fixtures-bspline:
+	$(BSPLINE_PY) scripts/gen_bspline_scipy_fixtures.py --out-dir $(BSPLINE_FIXTURES)
+	$(BSPLINE_PY) scripts/gen_periodic_bspline_scipy_fixture.py --out $(BSPLINE_FIXTURES)/periodic_bspline_scipy.tsv
+	Rscript scripts/gen_bspline_splines_fixture.R $(BSPLINE_FIXTURES)
+	Rscript scripts/gen_periodic_bspline_pomp_fixture.R
+
 # ── Release / changelog ───────────────────────────────────────────────────────
 
 .PHONY: changelog version-bump release-suggest release-prep release-publish

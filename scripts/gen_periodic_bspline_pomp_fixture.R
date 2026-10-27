@@ -11,7 +11,7 @@
 # if pomp's algorithm changes (it has been stable for over a decade) or
 # you intentionally change camdl's convention.
 #
-# Run: Rscript scripts/gen_periodic_bspline_pomp_fixture.R
+# Run: make fixtures-bspline
 
 if (!requireNamespace("pomp", quietly = TRUE)) {
   stop("install pomp first: install.packages('pomp')")
