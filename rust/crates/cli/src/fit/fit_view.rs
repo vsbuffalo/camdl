@@ -357,6 +357,7 @@ mod tests {
             data_hashes: std::collections::BTreeMap::from([("cases".to_string(), "d4ta".repeat(2))]),
             estimated: vec!["beta".into(), "gamma".into()],
             fixed: std::collections::BTreeMap::from([("N0".to_string(), 1000.0)]),
+            partition: None,
             resolved_priors: vec![crate::run_meta::ResolvedPriorEntry {
                 param: "beta".into(),
                 source: "model_ir".into(),

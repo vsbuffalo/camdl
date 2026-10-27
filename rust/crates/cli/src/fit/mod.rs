@@ -447,6 +447,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
+    // How each `[fixed]` name reached the config, for the partition — read
+    // before the expansion below folds a scenario's names into the inline
+    // values. An error is the expansion's to report.
+    let fixed_via = config.problem.fixed.declarations(&model);
     // gh#33: expand `[fixed] from_scenario = "name"` into the inline
     // values map by looking up the named scenario in the model. Must
     // happen after model load but before validate, so the every-param-
@@ -588,6 +592,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             std::process::exit(1);
         }
     }
+
+    // The fit's partition, from its role declarations. Recorded in each
+    // segment's `fit.meta.json`; nothing above or below reads it to decide
+    // what runs.
+    let fit_roles = resolve_fit_roles(&config.problem, &model, fixed_via, &sweep_specs);
 
     // Expand Cartesian product of sweep points
     let sweep_points: Vec<Vec<(String, f64)>> = if sweep_specs.is_empty() {
@@ -1098,8 +1107,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // never held — and `simulate --draws … --fit <segment>`
                 // backfills fixed parameters from exactly this map.
                 let mut seg_sidecar = fit_sidecar.clone();
-                seg_sidecar.fixed = sweep_config.fixed
-                    .resolve().unwrap_or_default().into_iter().collect();
                 // The segment's parameter resolution: every parameter's
                 // source and value and every override of one tier's value by
                 // another's, recorded here and reported once, before any stage
@@ -1108,11 +1115,25 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // left to that build, which reports it as the error it is.
                 // The resolver is the one writer of the values the fit runs
                 // at, so what is recorded is what the chains start from.
-                if let Ok(fp) = runner::resolve_fit_parameters(&sweep_config, seed) {
+                let fp = runner::resolve_fit_parameters(&sweep_config, seed);
+                if let Ok(fp) = &fp {
                     crate::params_resolver::emit_notices(&[&fp.resolved]);
                     seg_sidecar.parameters_provenance =
                         crate::run_meta::ParameterProvenance::of_all(&fp.resolved.params);
                 }
+                // The segment's partition is the cell's: a swept parameter is
+                // fixed at this point's value. `estimated` and `fixed` are
+                // generated from it.
+                let roles = crate::roles::RoleRecord::new(
+                    fit_roles.as_ref().map_err(String::clone)
+                        .and_then(|p| p.cell(sweep_point))
+                        .and_then(|cell| fp.as_ref().map(|fp| cell.record(&fp.resolved))
+                            .map_err(String::clone)),
+                    || unpartitioned_role_fields(&sweep_config),
+                );
+                seg_sidecar.estimated = roles.estimated;
+                seg_sidecar.fixed = roles.fixed;
+                seg_sidecar.partition = Some(roles.partition);
                 if let Err(e) = crate::run_meta::write_fit_sidecar(
                     seg,
                     std::path::Path::new(&fit_path),
@@ -1905,13 +1926,23 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // reads roles instead of reverse-engineering columns. Recorded, not
         // hashed — the run's identity was fixed at claim time.
         {
+            let (estimated_names, held) = match &fit_roles {
+                Ok(p) => (
+                    p.names_with(crate::roles::RoleKind::Estimated)
+                        .map(str::to_string).collect::<Vec<_>>(),
+                    p.all_names().map(str::to_string).collect::<Vec<_>>(),
+                ),
+                Err(_) => {
+                    let (e, f) = unpartitioned_role_fields(&sweep_config);
+                    (e, f.into_keys().collect())
+                }
+            };
             let estimated: std::collections::HashSet<&str> =
-                fit_sidecar.estimated.iter().map(String::as_str).collect();
-            let all_params: std::collections::HashSet<&str> = fit_sidecar
-                .estimated
+                estimated_names.iter().map(String::as_str).collect();
+            let all_params: std::collections::HashSet<&str> = estimated_names
                 .iter()
+                .chain(held.iter())
                 .map(String::as_str)
-                .chain(fit_sidecar.fixed.keys().map(String::as_str))
                 .collect();
             let schema =
                 crate::output_schema::fit_output_schema(write.dir(), &all_params, &estimated);
@@ -2132,6 +2163,67 @@ fn resolved_data_hashes(
         .unwrap_or_default()
 }
 
+/// The fit's partition (proposal `2026-10-26-parameter-roles.md`, Stage 1),
+/// from the fit config's `[estimate]` and `[fixed]`, the sweep's names and
+/// the scenario. `fixed_via` is read before the `from_scenario` expansion. A
+/// typed constant in `[fixed]`, which `fit run` still requires, is left out
+/// of the declarations: the partition records it under `constants`.
+///
+/// `Err` says why the fit's roles form no partition — a typed constant in
+/// `[estimate]`, which `fit run` still estimates — for an `unresolved` record.
+fn resolve_fit_roles(
+    problem: &config_v2::Problem,
+    model: &ir::Model,
+    fixed_via: Result<Vec<(String, crate::roles::FitFixedVia)>, String>,
+    sweep: &[(String, Vec<f64>)],
+) -> Result<crate::roles::Partition, String> {
+    use crate::roles::{DesignOrigin, RoleInputs, ScenarioFootprint};
+    let is_constant = |name: &str| model.parameters.iter().any(|p| {
+        p.name == name && matches!(p.value, ir::parameter::ParamValue::Fixed { .. })
+    });
+    let fit_fixed: Vec<(String, crate::roles::FitFixedVia)> =
+        fixed_via?.into_iter().filter(|(n, _)| !is_constant(n)).collect();
+    let design: Vec<(String, DesignOrigin)> =
+        sweep.iter().map(|(n, _)| (n.clone(), DesignOrigin::Sweep)).collect();
+    let scenarios: Vec<ScenarioFootprint> = match problem.scenario.as_deref() {
+        Some(s) => vec![ScenarioFootprint {
+            scenario: s.to_string(),
+            params: crate::params_resolver::scenario_param_footprint(
+                model, &crate::sim_job::ScenarioRef::Named(s.to_string()),
+            )?.into_iter().collect(),
+        }],
+        None => Vec::new(),
+    };
+    crate::roles::resolve_roles(
+        &RoleInputs {
+            model,
+            fit_estimate: &problem.estimate,
+            fit_fixed: &fit_fixed,
+            simplex_groups: &problem.simplex_groups,
+            cli_estimate: &[],
+            cli_fixed: &[],
+            cli_fixed_files: &[],
+            design: &design,
+            scenarios: &scenarios,
+        },
+        &crate::roles::FIT_RUN,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// The `estimated` and `fixed` fields as `fit run` wrote them before the
+/// partition: the `[estimate]` names and the `[fixed]` values. Used only for a
+/// fit whose roles form no partition ([`resolve_fit_roles`]), which Stage 2 of
+/// the parameter-roles proposal refuses; it goes with that refusal.
+fn unpartitioned_role_fields(
+    problem: &config_v2::Problem,
+) -> (Vec<String>, std::collections::BTreeMap<String, f64>) {
+    (
+        problem.estimate.keys().cloned().collect(),
+        problem.fixed.resolve().unwrap_or_default().into_iter().collect(),
+    )
+}
+
 /// Build the fit-level provenance sidecar for a fit.toml. Fields that require
 /// I/O (model IR, data files, fit.toml bytes) are read here and digested.
 /// Silent fallbacks (empty strings / empty maps) cover the read-error case so a
@@ -2170,9 +2262,6 @@ fn build_fit_sidecar(
     // With no model in scope (`fit where`) the shorthand cannot be expanded,
     // and `effective_observations` errors — the map stays empty, as before.
     let data_hashes = resolved_data_hashes(problem, model);
-    let estimated: Vec<String> = problem.estimate.keys().cloned().collect();
-    let fixed: std::collections::HashMap<String, f64> = problem.fixed
-        .resolve().unwrap_or_default().into_iter().collect();
     // gh#75: resolve per-parameter prior provenance. We only emit
     // entries when the method is Bayesian (an IF2 fit doesn't consume
     // priors, and surfacing `model_ir` for a bunch of params the fit will
@@ -2227,8 +2316,10 @@ fn build_fit_sidecar(
         // Same seam gh#519 used for `FitState` — the ordering requirement
         // belongs to `fit.meta.json`, not to the computation that feeds it.
         data_hashes: data_hashes.into_iter().collect(),
-        estimated,
-        fixed: fixed.into_iter().collect(),
+        // Per segment, generated from the segment's partition record.
+        estimated: Vec::new(),
+        fixed: Default::default(),
+        partition: None,
         resolved_priors,
         // Per segment: the sweep point changes `[fixed]`, so the segment's
         // own resolution fills this where the segment's sidecar is written.

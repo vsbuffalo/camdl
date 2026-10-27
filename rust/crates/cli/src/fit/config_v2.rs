@@ -935,6 +935,39 @@ impl FixedParams {
         }
         Ok(merged)
     }
+
+    /// Each `[fixed]` name and how it reached the config — inline, from
+    /// `from_file`, or from `from_scenario` — for the run's partition
+    /// ([`crate::roles::FitFixedVia`]). Call before
+    /// [`FixedParams::expand_from_scenario`], which folds a scenario's names
+    /// into the inline values. An inline value over a file entry is inline.
+    pub fn declarations(
+        &self,
+        model: &ir::Model,
+    ) -> Result<Vec<(String, crate::roles::FitFixedVia)>, String> {
+        use crate::roles::FitFixedVia;
+        if let Some(scenario) = &self.from_scenario {
+            return Ok(self.resolve_with_model(model)?
+                .into_keys()
+                .map(|n| (n, FitFixedVia::FromScenario(scenario.clone())))
+                .collect());
+        }
+        let mut out: Vec<(String, FitFixedVia)> = match &self.from_file {
+            Some(path) => FixedParams {
+                from_file: Some(path.clone()),
+                from_scenario: None,
+                values: IndexMap::new(),
+            }
+            .resolve()?
+            .into_keys()
+            .filter(|n| !self.values.contains_key(n))
+            .map(|n| (n, FitFixedVia::FromFile(path.into())))
+            .collect(),
+            None => Vec::new(),
+        };
+        out.extend(self.values.keys().map(|n| (n.clone(), FitFixedVia::Inline)));
+        Ok(out)
+    }
 }
 
 // ─── Method ─────────────────────────────────────────────────────────────────
