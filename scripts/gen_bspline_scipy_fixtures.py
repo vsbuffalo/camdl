@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reference basis values for camdl's B-spline evaluator, from scipy.
 
-Writes two TSVs, both independent oracles for `rust/crates/sim/src/bspline.rs`
+Writes three TSVs, each an independent oracle for `rust/crates/sim/src/bspline.rs`
 and the periodic spline built on it (proposal
 `docs/dev/proposals/2026-10-27-estimable-bsplines.md` §8.1, R1):
 
@@ -78,6 +78,32 @@ def clamped_rows() -> list[str]:
     return rows
 
 
+def penalty_rows() -> list[str]:
+    """Omega_ij = integral of B_i''(t) B_j''(t) over the window, each entry by
+    adaptive quadrature (scipy.integrate.quad) on every knot interval of
+    scipy's own second-derivative splines: an implementation independent of
+    camdl's Gauss-Legendre rule and derivative recurrence."""
+    from scipy.integrate import quad
+    rows = []
+    for name in ("uniform", "irregular"):
+        xs = LAYOUTS[name]
+        for p in range(2, MAX_DEGREE + 1):
+            u = clamped_knots(xs, p)
+            n_basis = len(xs) - 1 + p
+            eye = np.eye(n_basis)
+            d2 = [BSpline(u, eye[k], p, extrapolate=False).derivative(2) for k in range(n_basis)]
+            for i in range(n_basis):
+                for j in range(i, min(n_basis, i + p + 1)):
+                    total = 0.0
+                    for lo, hi in zip(xs[:-1], xs[1:]):
+                        mid = 0.5 * (lo + hi)
+                        f = lambda t: float(d2[i](t if t < hi else np.nextafter(hi, lo))) * float(d2[j](t if t < hi else np.nextafter(hi, lo)))
+                        val, _ = quad(f, lo, hi, epsabs=0.0, epsrel=1e-13, limit=200, points=[mid])
+                        total += val
+                    rows.append(f"{name}\t{p}\t{i}\t{j}\t{total!r}")
+    return rows
+
+
 PERIOD = 4.0
 N_BASIS = 7
 COEFS = [0.7, 1.2, 0.9, 0.5, 1.1, 0.8, 1.3]
@@ -120,6 +146,18 @@ def main() -> None:
         ],
         "layout\tdegree\tt\tk\tvalue",
         clamped_rows(),
+    )
+    write(
+        args.out_dir / "bspline_penalty_scipy.tsv",
+        [
+            "Curvature penalty Omega_ij = int B_i'' B_j'' dt (upper band) from scipy",
+            f"BSpline.derivative(2) and scipy.integrate.quad per interval ({versions}).",
+            "Written by scripts/gen_bspline_scipy_fixtures.py; regenerate with",
+            "`make fixtures-bspline`. An oracle, not an input. Layouts as in",
+            "bspline_basis_scipy.tsv.",
+        ],
+        "layout\tdegree\ti\tj\tvalue",
+        penalty_rows(),
     )
     write(
         args.out_dir / "periodic_bspline_degrees_scipy.tsv",

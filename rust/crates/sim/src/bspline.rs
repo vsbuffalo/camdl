@@ -214,6 +214,84 @@ pub fn basis(knots: &Knots, p: usize, t: f64, k: usize) -> f64 {
     triangle(p, t, m + p, |i| knots.knot(i, p))[k - m]
 }
 
+/// The `p + 1` nonzero basis functions at `t` and their first and second
+/// derivatives in t: `ders[k][r]` is the k-th derivative of `B_{first + r}`.
+/// Piegl & Tiller (1997) Algorithm A2.3 (derivatives of the nonzero basis
+/// functions), on the same knots and the same clamped `t` as [`span`];
+/// verified against finite differences of [`span`] and against scipy's
+/// `BSpline.derivative`. For `p < 2` the second derivatives are zero.
+pub fn span_derivatives(knots: &Knots, p: usize, t: f64) -> (usize, [[f64; WIDTH]; 3]) {
+    assert!(p <= MAX_DEGREE, "spline degree {p} exceeds MAX_DEGREE = {MAX_DEGREE}");
+    let (a, b) = knots.window();
+    let t = t.clamp(a, b);
+    let m = knots.interval(t);
+    let mu = m + p;
+    let u = |i: usize| knots.knot(i, p);
+    // ndu: basis values (upper triangle) and knot differences (lower).
+    let mut ndu = [[0.0; WIDTH]; WIDTH];
+    let mut left = [0.0; WIDTH];
+    let mut right = [0.0; WIDTH];
+    ndu[0][0] = 1.0;
+    for j in 1..=p {
+        left[j] = t - u(mu + 1 - j);
+        right[j] = u(mu + j) - t;
+        let mut saved = 0.0;
+        for r in 0..j {
+            ndu[j][r] = right[r + 1] + left[j - r];
+            let temp = ndu[r][j - 1] / ndu[j][r];
+            ndu[r][j] = saved + right[r + 1] * temp;
+            saved = left[j - r] * temp;
+        }
+        ndu[j][j] = saved;
+    }
+    let mut ders = [[0.0; WIDTH]; 3];
+    for (j, row) in ndu.iter().enumerate().take(p + 1) {
+        ders[0][j] = row[p];
+    }
+    let n = p.min(2) as isize;
+    let pi = p as isize;
+    for r in 0..=pi {
+        let (mut s1, mut s2) = (0usize, 1usize);
+        let mut arr = [[0.0; WIDTH]; 2];
+        arr[0][0] = 1.0;
+        for k in 1..=n {
+            let mut d = 0.0;
+            let (rk, pk) = (r - k, pi - k);
+            if r >= k {
+                arr[s2][0] = arr[s1][0] / ndu[(pk + 1) as usize][rk as usize];
+                d = arr[s2][0] * ndu[rk as usize][pk as usize];
+            }
+            let j1 = if rk >= -1 { 1 } else { -rk };
+            let j2 = if r - 1 <= pk { k - 1 } else { pi - r };
+            for j in j1..=j2 {
+                let (ju, rkj) = (j as usize, (rk + j) as usize);
+                arr[s2][ju] = (arr[s1][ju] - arr[s1][ju - 1]) / ndu[(pk + 1) as usize][rkj];
+                d += arr[s2][ju] * ndu[rkj][pk as usize];
+            }
+            if r <= pk {
+                let ku = k as usize;
+                arr[s2][ku] = -arr[s1][ku - 1] / ndu[(pk + 1) as usize][r as usize];
+                d += arr[s2][ku] * ndu[r as usize][pk as usize];
+            }
+            ders[k as usize][r as usize] = d;
+            std::mem::swap(&mut s1, &mut s2);
+        }
+    }
+    let mut f = p as f64;
+    for k in 1..=(n as usize) {
+        for v in ders[k].iter_mut().take(p + 1) {
+            *v *= f;
+        }
+        f *= (p - k) as f64;
+    }
+    (m, ders)
+}
+
+/// Knot `u_i` of the clamped vector for degree `p` (see [`Knots`]).
+pub fn clamped_knot(knots: &Knots, i: usize, p: usize) -> f64 {
+    knots.knot(i, p)
+}
+
 /// The `p + 1` nonzero uniform (cardinal) B-splines of degree `p` on the
 /// unit interval: knots at the integers, `u ∈ [0, 1]` the position within the
 /// interval `[0, 1)`. `values[r]` is the basis function whose support is
@@ -425,6 +503,43 @@ mod tests {
                 let s = span(k, 0, k.breakpoint(i));
                 assert_eq!(s.first, i.min(n - 1), "{k:?}: breakpoint {i} in the wrong interval");
                 assert_eq!(s.values[0], 1.0);
+            }
+        }
+    }
+
+    /// A2.3 against central finite differences of the span values, at
+    /// interior points of every layout and degree (h = 1e-5·(b − a)).
+    #[test]
+    fn span_derivatives_match_finite_differences() {
+        for (name, k) in layouts() {
+            let (a, b) = k.window();
+            let h = 1e-5 * (b - a);
+            for p in 0..=MAX_DEGREE {
+                for i in 1..200 {
+                    let t = a + (b - a) * (i as f64 + 0.37) / 200.0;
+                    let (m, d) = span_derivatives(&k, p, t);
+                    let s = span(&k, p, t);
+                    assert_eq!(m, s.first);
+                    for r in 0..=p {
+                        assert!((d[0][r] - s.values[r]).abs() <= 1e-15, "{name} p={p}: values differ");
+                    }
+                    let (sp, sm) = (span(&k, p, t + h), span(&k, p, t - h));
+                    if sp.first != m || sm.first != m {
+                        continue; // straddles a knot: one-sided pieces
+                    }
+                    let scale1 = 1.0 / (b - a) * k.n_intervals() as f64 * 10.0;
+                    for r in 0..=p {
+                        let fd1 = (sp.values[r] - sm.values[r]) / (2.0 * h);
+                        let fd2 = (sp.values[r] - 2.0 * s.values[r] + sm.values[r]) / (h * h);
+                        assert!((d[1][r] - fd1).abs() <= 1e-6 * scale1, "{name} p={p} t={t} r={r}: B' {} vs {fd1}", d[1][r]);
+                        if p >= 2 {
+                            let scale2 = scale1 * scale1;
+                            assert!((d[2][r] - fd2).abs() <= 1e-3 * scale2, "{name} p={p} t={t} r={r}: B'' {} vs {fd2}", d[2][r]);
+                        } else {
+                            assert_eq!(d[2][r], 0.0);
+                        }
+                    }
+                }
             }
         }
     }

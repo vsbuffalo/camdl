@@ -91,3 +91,30 @@ fn periodic_spline_matches_scipy_at_degrees_0_to_5() {
     }
     eprintln!("periodic spline vs scipy: max |diff| = {worst:.3e} over {} values", rows.len());
 }
+
+/// R1: the curvature penalty Ω (exact (p − 1)-point Gauss–Legendre on
+/// camdl's A2.3 second derivatives) against scipy's second-derivative splines
+/// integrated by adaptive quadrature, ≤ 1e-12·max|Ω| per layout and degree.
+/// The reference is independent of both the rule and the recurrence.
+#[test]
+fn curvature_penalty_matches_scipy() {
+    use sim::spline_penalty::penalty;
+    let rows = rows("bspline_penalty_scipy.tsv");
+    assert!(rows.len() > 300, "penalty fixture has {} rows", rows.len());
+    let mut groups: std::collections::BTreeMap<(String, usize), Vec<(usize, usize, f64)>> = Default::default();
+    for r in &rows {
+        groups.entry((r[0].clone(), r[1].parse().unwrap()))
+            .or_default()
+            .push((r[2].parse().unwrap(), r[3].parse().unwrap(), r[4].parse().unwrap()));
+    }
+    for ((name, p), entries) in groups {
+        let om = penalty(&layout(&name), p);
+        let scale = om.data.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let mut worst: f64 = 0.0;
+        for (i, j, want) in entries {
+            worst = worst.max((om.at(i, j) - want).abs());
+        }
+        assert!(worst <= 1e-12 * scale, "{name} p={p}: max |Ω − scipy| = {worst:e}, max|Ω| = {scale:e}");
+        eprintln!("Ω vs scipy {name} p={p}: {:.2e} of max|Ω|", worst / scale);
+    }
+}
