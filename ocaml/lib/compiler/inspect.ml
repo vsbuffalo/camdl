@@ -1290,6 +1290,8 @@ let run_tables ppf (model : Ir.model) ctx (pattern : string option) =
    `data =`, `read()` tables, `read()` dimensions), use
    `camdlc --emit-deps FILE.json` — that is the depfile, this is the human
    view. *)
+let link_note = function Ir.Link_identity -> "" | Ir.Link_log -> ", log link"
+
 let run_forcings ppf (model : Ir.model) (pattern : string option) =
   let faint s = Term_style.dim_style Fmt.string ppf s in
   let kind_label (tf : Ir.time_function) = match tf.kind with
@@ -1298,8 +1300,15 @@ let run_forcings ppf (model : Ir.model) (pattern : string option) =
     | Ir.Interpolated i -> Printf.sprintf "interpolated (%d knots)" (List.length i.times)
     | Ir.Periodic p   -> Printf.sprintf "periodic (%d bins)" (List.length p.values)
     | Ir.Fourier f    -> Printf.sprintf "fourier (%d harmonics)" (List.length f.harmonics)
-    | Ir.PeriodicSpline s -> Printf.sprintf "periodic_spline (n_basis %d, degree %d)"
-                               s.n_basis s.degree
+    | Ir.PeriodicSpline s -> Printf.sprintf "periodic_spline (n_basis %d, degree %d%s)"
+                               s.n_basis s.degree (link_note s.link)
+    | Ir.BSpline b ->
+      let n_intervals, form = match b.knots with
+        | Ir.Knots_uniform { n_intervals; _ } -> n_intervals, "uniform"
+        | Ir.Knots_explicit bps -> List.length bps - 1, "explicit"
+      in
+      Printf.sprintf "bspline (n_basis %d, degree %d, %s knots%s)"
+        (n_intervals + b.degree) b.degree form (link_note b.link)
   in
   let forcings = match pattern with
     | None     -> model.time_functions

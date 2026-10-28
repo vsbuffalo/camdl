@@ -167,6 +167,13 @@ let forcing_coeff_exprs (k : time_func_kind) : expr list =
   | Periodic p -> p.period :: p.values
   | Fourier f -> f.period :: List.concat_map (fun (a, b) -> [ a; b ]) f.harmonics
   | PeriodicSpline ps -> ps.period :: ps.coefs
+  | BSpline b ->
+    let knots = match b.knots with
+      | Knots_uniform { lower; upper; _ } -> [ lower; upper ]
+      | Knots_explicit bps -> bps
+    in
+    let coefs = match b.coefs with Coefs_explicit cs -> cs in
+    knots @ coefs
 
 let kind_label (k : time_func_kind) : string =
   match k with
@@ -176,6 +183,7 @@ let kind_label (k : time_func_kind) : string =
   | Periodic _ -> "periodic"
   | Fourier _ -> "fourier"
   | PeriodicSpline _ -> "periodic_spline"
+  | BSpline _ -> "bspline"
 
 let two_pi = 2.0 *. Float.pi
 
@@ -317,7 +325,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
          and IF2/PF. When [param] does NOT drive the coefficient, the derivative
          is a genuine zero (tier 2a), exactly as for any constant — this is the
          common case, e.g. a param multiplying a constant-valued periodic term.
-       - Piecewise/Interpolated/PeriodicSpline: a parameter there drives
+       - Piecewise/Interpolated/PeriodicSpline/BSpline: a parameter there drives
          STRUCTURAL data (interpolation knots, a piecewise step grid, the
          de-Boor spline basis) — precomputed at construction, so it cannot be a
          live coefficient at all. Hard compile error (the Rust runtime also
@@ -354,7 +362,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                   live value; a NUTS fit that depends on this gradient is \
                   refused" param fname }
          else Known (Const 0.0)
-       | Some { kind = (Piecewise _ | Interpolated _ | PeriodicSpline _) as kind; _ } ->
+       | Some { kind = (Piecewise _ | Interpolated _ | PeriodicSpline _ | BSpline _) as kind; _ } ->
          if forcing_mentions param fname then
            Unsupported
              { code = URStructuralForcing;

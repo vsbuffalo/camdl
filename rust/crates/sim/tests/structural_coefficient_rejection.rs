@@ -120,6 +120,7 @@ fn periodic_spline_coef_param_builds_live() {
             Expr::const_(1.0), Expr::param("v"), Expr::const_(1.0),
             Expr::const_(1.0), Expr::const_(1.0), Expr::const_(1.0),
         ],
+        link: Default::default(),
     })))
     .unwrap_or_else(|e| panic!("a parameter coefficient is live, not structural: {e}"));
     let (int_s, real_s) = model.initial_state_mean(&model.default_params).unwrap();
@@ -150,6 +151,7 @@ fn periodic_spline_degree_above_max_is_refused() {
         n_basis: 9,
         degree,
         coefs: vec![Expr::const_(1.0); 9],
+        link: Default::default(),
     })))
     .err()
     .expect("degree 6 must be refused");

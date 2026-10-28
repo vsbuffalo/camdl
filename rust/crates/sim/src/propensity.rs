@@ -496,6 +496,7 @@ pub fn eval_forcing(kind: &CompiledTimeFuncKind, t: f64, ctx: &EvalCtx<'_>) -> f
                 .sum()
         }
         CompiledTimeFuncKind::PeriodicSpline(ps) => ps.eval(t, |c| eval_resolved(c, ctx)),
+        CompiledTimeFuncKind::BSpline(b) => b.eval(t, |c| eval_resolved(c, ctx)),
     }
 }
 

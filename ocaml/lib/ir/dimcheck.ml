@@ -988,6 +988,36 @@ let check_model (m : model) : result =
         d (make 0 1)
   ) m.time_functions;
 
+  (* Proposal 2026-10-27-estimable-bsplines §4.4: under `link = log` a spline
+     is s·exp(Σ c_k B_k), so every coefficient is a log-value and must be
+     dimensionless — the same requirement, and the same code, as any `exp`
+     argument. The expander's ln s unit shift is a marked escape; the check
+     reads the coefficient under it. *)
+  List.iter (fun (tf : time_function) ->
+    let log_coefs = match tf.kind with
+      | PeriodicSpline { link = Link_log; coefs; _ } -> coefs
+      | BSpline { link = Link_log; coefs = Coefs_explicit cs; _ } -> cs
+      | _ -> []
+    in
+    List.iteri (fun k c ->
+      let c = match c with
+        | BinOp { op = Add; left; right = UncheckedDim { reason; _ } }
+          when reason = spline_log_shift_reason -> left
+        | c -> c
+      in
+      st.subject <- None;
+      let ctx = Printf.sprintf "forcing '%s' coefficient %d" tf.name (k + 1) in
+      let d = infer st ~ctx c in
+      constrain_known st ~code:"E301"
+        ~message:(Printf.sprintf
+          "forcing '%s': coefficient %d must be dimensionless — under `link = log` \
+           the coefficients are log-values, and the forcing takes its unit from \
+           its declaration. Declare the coefficient's parameter `'ratio`."
+          tf.name (k + 1))
+        d dimensionless
+    ) log_coefs
+  ) m.time_functions;
+
   (* Fix B: precompute each shared binding's dim in declaration (topological)
      order, so a BindingRef in a rate infers the body's dim. Bindings are
      param-free, so their dim is fully determined here and stable across the

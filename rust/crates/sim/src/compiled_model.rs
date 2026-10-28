@@ -44,6 +44,72 @@ pub enum CompiledTimeFuncKind {
     /// gh#59 v2: periodic B-spline forcing with uniform knots. The period is
     /// structural; the coefficients are live, as Fourier's harmonics are.
     PeriodicSpline(CompiledPeriodicSpline),
+    /// A clamped B-spline over a window, held at its end values outside it
+    /// (proposal 2026-10-27-estimable-bsplines §4.3). Knots are structural;
+    /// the coefficients are live.
+    BSpline(CompiledBSpline),
+}
+
+/// `link = log` maps the basis sum g to exp(g); identity leaves it.
+#[inline]
+fn apply_link(link: ir::time_func::SplineLink, g: f64) -> f64 {
+    match link {
+        ir::time_func::SplineLink::Identity => g,
+        ir::time_func::SplineLink::Log => g.exp(),
+    }
+}
+
+/// A compiled `bspline` forcing: checked knots and degree, one live
+/// coefficient per basis function, and the link. A call evaluates only the
+/// `degree + 1` coefficients nonzero at the clamped time.
+#[derive(Debug, Clone)]
+pub struct CompiledBSpline {
+    knots: crate::bspline::Knots,
+    degree: usize,
+    coefs: Vec<ResolvedExpr>,
+    link: ir::time_func::SplineLink,
+}
+
+impl CompiledBSpline {
+    /// Refuses a degree above [`crate::bspline::MAX_DEGREE`] and a
+    /// coefficient count other than `n_intervals + degree`.
+    pub fn new(
+        knots: crate::bspline::Knots,
+        degree: usize,
+        coefs: Vec<ResolvedExpr>,
+        link: ir::time_func::SplineLink,
+    ) -> Result<Self, String> {
+        if degree > crate::bspline::MAX_DEGREE {
+            return Err(format!("degree ({degree}) must be at most {}", crate::bspline::MAX_DEGREE));
+        }
+        let n_basis = knots.n_intervals() + degree;
+        if coefs.len() != n_basis {
+            return Err(format!(
+                "coefs length ({}) must equal the number of basis functions ({n_basis}: \
+                 {} intervals + degree {degree})",
+                coefs.len(),
+                knots.n_intervals()
+            ));
+        }
+        Ok(CompiledBSpline { knots, degree, coefs, link })
+    }
+
+    /// The live coefficient expressions, in basis order.
+    pub fn coefs(&self) -> &[ResolvedExpr] {
+        &self.coefs
+    }
+
+    /// f(t) = h(Σ cₖ Bₖ(clamp(t, a, b))), h the link, evaluating each
+    /// coefficient it reads through `value`.
+    #[inline]
+    pub fn eval(&self, t: f64, mut value: impl FnMut(&ResolvedExpr) -> f64) -> f64 {
+        let s = crate::bspline::span(&self.knots, self.degree, t);
+        let mut g = 0.0;
+        for (r, &v) in s.values.iter().enumerate().take(self.degree + 1) {
+            g += v * value(&self.coefs[s.first + r]);
+        }
+        apply_link(self.link, g)
+    }
 }
 
 /// A compiled `periodic_spline` forcing (proposal
@@ -55,6 +121,7 @@ pub enum CompiledTimeFuncKind {
 pub struct CompiledPeriodicSpline {
     basis: crate::periodic_bspline::PeriodicBasis,
     coefs: Vec<ResolvedExpr>,
+    link: ir::time_func::SplineLink,
 }
 
 impl CompiledPeriodicSpline {
@@ -62,6 +129,7 @@ impl CompiledPeriodicSpline {
     pub fn new(
         basis: crate::periodic_bspline::PeriodicBasis,
         coefs: Vec<ResolvedExpr>,
+        link: ir::time_func::SplineLink,
     ) -> Result<Self, String> {
         if coefs.len() != basis.n_basis() {
             return Err(format!(
@@ -70,7 +138,7 @@ impl CompiledPeriodicSpline {
                 basis.n_basis()
             ));
         }
-        Ok(CompiledPeriodicSpline { basis, coefs })
+        Ok(CompiledPeriodicSpline { basis, coefs, link })
     }
 
     /// The live coefficient expressions, in basis order.
@@ -81,7 +149,7 @@ impl CompiledPeriodicSpline {
     /// f(t), evaluating each coefficient it reads through `value`.
     #[inline]
     pub fn eval(&self, t: f64, mut value: impl FnMut(&ResolvedExpr) -> f64) -> f64 {
-        self.basis.eval(t, |k| value(&self.coefs[k]))
+        apply_link(self.link, self.basis.eval(t, |k| value(&self.coefs[k])))
     }
 }
 
@@ -400,6 +468,14 @@ fn forcing_exprs(k: &ir::time_func::TimeFuncKind) -> Vec<&Expr> {
             .chain(f.harmonics.iter().flat_map(|(a, b)| [a, b]))
             .collect(),
         K::PeriodicSpline(s) => std::iter::once(&s.period).chain(&s.coefs).collect(),
+        K::BSpline(b) => {
+            let ir::time_func::SplineCoefs::Explicit { coefs } = &b.coefs;
+            let knots: Vec<&Expr> = match &b.knots {
+                ir::time_func::BSplineKnots::Uniform { lower, upper, .. } => vec![lower, upper],
+                ir::time_func::BSplineKnots::Explicit { breakpoints } => breakpoints.iter().collect(),
+            };
+            knots.into_iter().chain(coefs).collect()
+        }
     }
 }
 
@@ -1476,6 +1552,7 @@ impl CompiledModel {
                     CompiledTimeFuncKind::Fourier { period, harmonics } => read(period)
                         .or_else(|| harmonics.iter().find_map(|(a, b)| read(a).or_else(|| read(b)))),
                     CompiledTimeFuncKind::PeriodicSpline(ps) => ps.coefs().iter().find_map(read),
+                    CompiledTimeFuncKind::BSpline(b) => b.coefs().iter().find_map(read),
                     CompiledTimeFuncKind::Piecewise { .. }
                     | CompiledTimeFuncKind::Interpolated { .. }
                     | CompiledTimeFuncKind::Constant { .. }
@@ -1917,8 +1994,35 @@ impl CompiledModel {
                         .map(|e| resolve_coeff(e, &param_index))
                         .collect();
                     CompiledTimeFuncKind::PeriodicSpline(
-                        CompiledPeriodicSpline::new(basis, coefs?).map_err(|e| SimError::Validation(
+                        CompiledPeriodicSpline::new(basis, coefs?, ps.link).map_err(|e| SimError::Validation(
                             format!("periodic_spline forcing '{}': {e}", tf.name)))?,
+                    )
+                }
+                TimeFuncKind::BSpline(b) => {
+                    use ir::time_func::{BSplineKnots, SplineCoefs};
+                    let bad = |e: String| SimError::Validation(format!("bspline forcing '{}': {e}", tf.name));
+                    let knot = |what: &str, e: &Expr| {
+                        eval_structural(&tf.name, what, e, &param_index, &default_params)
+                    };
+                    let knots = match &b.knots {
+                        BSplineKnots::Uniform { lower, upper, n_intervals } => {
+                            let a = knot("bspline window start", lower)?;
+                            let z = knot("bspline window end", upper)?;
+                            crate::bspline::Knots::uniform(a, z, *n_intervals as usize).map_err(bad)?
+                        }
+                        BSplineKnots::Explicit { breakpoints } => {
+                            let xs: Result<Vec<f64>, SimError> = breakpoints.iter()
+                                .map(|e| knot("bspline breakpoint", e))
+                                .collect();
+                            crate::bspline::Knots::explicit(xs?).map_err(bad)?
+                        }
+                    };
+                    let SplineCoefs::Explicit { coefs } = &b.coefs;
+                    let coefs: Result<Vec<ResolvedExpr>, SimError> = coefs.iter()
+                        .map(|e| resolve_coeff(e, &param_index))
+                        .collect();
+                    CompiledTimeFuncKind::BSpline(
+                        CompiledBSpline::new(knots, b.degree as usize, coefs?, b.link).map_err(bad)?,
                     )
                 }
             };

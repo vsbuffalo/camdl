@@ -229,11 +229,44 @@ type fourier = { period: expr; harmonics: (expr * expr) list }
    defaults to 3 (cubic). Standard de Boor recurrence + periodic
    wrap-fold; algorithm from de Boor 1978 §X, Eilers & Marx 1996,
    Wand & Ormerod 2008. *)
+(* How a spline's basis sum g(t) = Σ c_k B_k(t) becomes the forcing value:
+   identity (f = g) or log (f = exp g). Proposal
+   2026-10-27-estimable-bsplines §4.4. Serialized only when log. *)
+type spline_link = Link_identity | Link_log
+
+(* The [UncheckedDim.reason] of the ln s shift the expander adds to each
+   coefficient of a log-link spline whose unit has scale s ≠ 1. The dimension
+   checker recognises exactly this node, so the coefficient under it is still
+   required to be dimensionless. *)
+let spline_log_shift_reason = "log-link unit scale"
+
 type periodic_spline = {
   period:  expr;
   n_basis: int;
   degree:  int;
   coefs:   expr list;
+  link:    spline_link;
+}
+
+(* The knots of a clamped `bspline` forcing (proposal §4.3). [Knots_uniform]
+   keeps its window ends as single expressions, because an end may be an
+   observation anchor the runtime substitutes; [n_intervals] equal intervals
+   span it. [Knots_explicit] lists strictly increasing breakpoints, first and
+   last being the window. Both are structural. *)
+type bspline_knots =
+  | Knots_uniform  of { lower : expr; upper : expr; n_intervals : int }
+  | Knots_explicit of expr list
+
+(* One live expression per basis function. *)
+type spline_coefs = Coefs_explicit of expr list
+
+(* A clamped B-spline of [degree] over a window, held at its end values
+   outside it; n_intervals + degree basis functions. *)
+type bspline = {
+  knots:  bspline_knots;
+  degree: int;
+  coefs:  spline_coefs;
+  link:   spline_link;
 }
 
 type time_func_kind =
@@ -243,6 +276,7 @@ type time_func_kind =
   | Periodic      of periodic
   | Fourier       of fourier            (* gh#59 *)
   | PeriodicSpline of periodic_spline   (* gh#59 *)
+  | BSpline       of bspline            (* proposal 2026-10-27-estimable-bsplines *)
 
 (* Compile-time provenance for a forcing declared `data = "path"`. The knots
    are read from the file and INLINED into [Interpolated] at compile time, so

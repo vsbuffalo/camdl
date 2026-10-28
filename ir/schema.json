@@ -621,7 +621,82 @@
                 "period": { "$ref": "#/definitions/expr" },
                 "n_basis": { "type": "integer", "minimum": 0 },
                 "degree": { "type": "integer", "minimum": 0 },
-                "coefs": { "type": "array", "items": { "$ref": "#/definitions/expr" } }
+                "coefs": { "type": "array", "items": { "$ref": "#/definitions/expr" } },
+                "link": { "$ref": "#/definitions/spline_link" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "comment": "A clamped B-spline of the given degree over a window, held at its end values outside it, with n_intervals + degree coefficients (proposal 2026-10-27-estimable-bsplines §4.3).",
+          "required": ["bspline"],
+          "properties": {
+            "bspline": {
+              "type": "object",
+              "required": ["knots", "degree", "coefs"],
+              "properties": {
+                "knots": {
+                  "oneOf": [
+                    {
+                      "comment": "n_intervals equal intervals between the window ends; an end may be an observation anchor.",
+                      "type": "object",
+                      "required": ["uniform"],
+                      "properties": {
+                        "uniform": {
+                          "type": "object",
+                          "required": ["lower", "upper", "n_intervals"],
+                          "properties": {
+                            "lower": { "$ref": "#/definitions/expr" },
+                            "upper": { "$ref": "#/definitions/expr" },
+                            "n_intervals": { "type": "integer", "minimum": 1 }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    {
+                      "comment": "Strictly increasing breakpoints, the first and last being the window.",
+                      "type": "object",
+                      "required": ["explicit"],
+                      "properties": {
+                        "explicit": {
+                          "type": "object",
+                          "required": ["breakpoints"],
+                          "properties": {
+                            "breakpoints": { "type": "array", "items": { "$ref": "#/definitions/expr" }, "minItems": 2 }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "degree": { "type": "integer", "minimum": 0, "maximum": 5 },
+                "coefs": {
+                  "oneOf": [
+                    {
+                      "comment": "One expression per basis function.",
+                      "type": "object",
+                      "required": ["explicit"],
+                      "properties": {
+                        "explicit": {
+                          "type": "object",
+                          "required": ["coefs"],
+                          "properties": {
+                            "coefs": { "type": "array", "items": { "$ref": "#/definitions/expr" } }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "link": { "$ref": "#/definitions/spline_link" }
               },
               "additionalProperties": false
             }
@@ -629,6 +704,12 @@
           "additionalProperties": false
         }
       ]
+    },
+
+    "spline_link": {
+      "description": "How a spline's basis sum g becomes the forcing value: identity (g) or log (exp g). Omitted when identity.",
+      "type": "string",
+      "enum": ["identity", "log"]
     },
 
     "time_function": {

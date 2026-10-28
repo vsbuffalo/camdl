@@ -473,6 +473,21 @@ let ode_equation_of_json j =
 
 (* ── Time functions ──────────────────────────────────────────────────────── *)
 
+(* `link` is omitted when identity, so a spline without `link = log`
+   serializes as it did before the field existed. *)
+let link_field = function
+  | Link_identity -> []
+  | Link_log -> [("link", str "log")]
+
+let link_of_json v =
+  match member_opt "link" v with
+  | None | Some `Null -> Link_identity
+  | Some j ->
+    (match as_string j with
+     | "identity" -> Link_identity
+     | "log" -> Link_log
+     | s -> fail "unknown spline link '%s'" s)
+
 let time_func_kind_to_json (k : time_func_kind) : Yojson.Safe.t =
   match k with
   | Sinusoidal s ->
@@ -503,12 +518,29 @@ let time_func_kind_to_json (k : time_func_kind) : Yojson.Safe.t =
         arr [expr_to_json a; expr_to_json b]) f.harmonics));
     ])]
   | PeriodicSpline ps ->
-    obj [("periodic_spline", obj [
+    obj [("periodic_spline", obj ([
       ("period",  expr_to_json ps.period);
       ("n_basis", int ps.n_basis);
       ("degree",  int ps.degree);
       ("coefs",   arr (List.map expr_to_json ps.coefs));
-    ])]
+    ] @ link_field ps.link))]
+  | BSpline b ->
+    let knots = match b.knots with
+      | Knots_uniform { lower; upper; n_intervals } ->
+        obj [("uniform", obj [
+          ("lower", expr_to_json lower); ("upper", expr_to_json upper);
+          ("n_intervals", int n_intervals) ])]
+      | Knots_explicit bps ->
+        obj [("explicit", obj [("breakpoints", arr (List.map expr_to_json bps))])]
+    in
+    let coefs = match b.coefs with
+      | Coefs_explicit cs -> obj [("explicit", obj [("coefs", arr (List.map expr_to_json cs))])]
+    in
+    obj [("bspline", obj ([
+      ("knots",  knots);
+      ("degree", int b.degree);
+      ("coefs",  coefs);
+    ] @ link_field b.link))]
 
 let time_func_kind_of_json j =
   match j with
@@ -552,7 +584,24 @@ let time_func_kind_of_json j =
         n_basis = as_int (member "n_basis" v);
         degree  = as_int (member "degree" v);
         coefs   = List.map expr_of_json (as_list (member "coefs" v));
+        link    = link_of_json v;
       }
+    | "bspline" ->
+      let knots = match member "knots" v with
+        | `Assoc [("uniform", u)] ->
+          Knots_uniform { lower = expr_of_json (member "lower" u);
+                          upper = expr_of_json (member "upper" u);
+                          n_intervals = as_int (member "n_intervals" u) }
+        | `Assoc [("explicit", e)] ->
+          Knots_explicit (List.map expr_of_json (as_list (member "breakpoints" e)))
+        | _ -> fail "bspline knots must be {\"uniform\": …} or {\"explicit\": …}"
+      in
+      let coefs = match member "coefs" v with
+        | `Assoc [("explicit", e)] ->
+          Coefs_explicit (List.map expr_of_json (as_list (member "coefs" e)))
+        | _ -> fail "bspline coefs must be {\"explicit\": {\"coefs\": […]}}"
+      in
+      BSpline { knots; degree = as_int (member "degree" v); coefs; link = link_of_json v }
     | k -> fail "unknown time_func_kind '%s'" k
   )
   | _ -> fail "time_func_kind must be a single-key object"

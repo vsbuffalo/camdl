@@ -216,14 +216,14 @@ fn pgas_accepts_a_rate_parameter() {
     run_pgas_estimating(&seeding_model(), &["beta"]).expect("a rate parameter is scored by PGAS");
 }
 
-/// A periodic-spline coefficient is live (proposal 2026-10-27-estimable-bsplines
-/// §4.2), so a parameter can reach an effect amount through the forcing. PGAS
+/// A spline coefficient is live (proposal 2026-10-27-estimable-bsplines §4.2,
+/// §4.3), so a parameter can reach an effect amount through the forcing. PGAS
 /// must refuse it as it refuses a direct amount: the event `add(I, season)`
-/// reads forcing `season`, whose second coefficient is `c2`.
-#[test]
-fn pgas_refuses_an_estimated_spline_coefficient_in_an_effect_amount() {
+/// reads forcing `season`, whose second coefficient is `c2`. Checked for both
+/// spline kinds.
+fn refuses_a_spline_coefficient_in_an_effect_amount(kind: ir::time_func::TimeFuncKind) {
     use ir::expr::{Expr, TimeFuncRef, TimeFuncWrap};
-    use ir::time_func::{PeriodicSpline, TimeFuncKind, TimeFunction};
+    use ir::time_func::TimeFunction;
     let base = seeding_model();
     let mut model = (*base.model).clone();
     model.parameters.push(ir::parameter::Parameter {
@@ -234,15 +234,7 @@ fn pgas_refuses_an_estimated_spline_coefficient_in_an_effect_amount() {
     });
     model.time_functions.push(TimeFunction {
         name: "season".into(),
-        kind: TimeFuncKind::PeriodicSpline(PeriodicSpline {
-            period: Expr::const_(4.0),
-            n_basis: 6,
-            degree: 3,
-            coefs: vec![
-                Expr::const_(1.0), Expr::param("c2"), Expr::const_(1.0),
-                Expr::const_(1.0), Expr::const_(1.0), Expr::const_(1.0),
-            ],
-        }),
+        kind,
         dim: (0, 0),
         lag: None,
         data_source: None,
@@ -261,4 +253,39 @@ fn pgas_refuses_an_estimated_spline_coefficient_in_an_effect_amount() {
     );
     // Control: the same model with only `beta` estimated is not refused.
     run_pgas_estimating(&model, &["beta"]).expect("a rate parameter alone is scored by PGAS");
+}
+
+fn spline_coefs() -> Vec<ir::expr::Expr> {
+    use ir::expr::Expr;
+    vec![
+        Expr::const_(1.0), Expr::param("c2"), Expr::const_(1.0),
+        Expr::const_(1.0), Expr::const_(1.0), Expr::const_(1.0),
+    ]
+}
+
+#[test]
+fn pgas_refuses_an_estimated_spline_coefficient_in_an_effect_amount() {
+    use ir::time_func::{PeriodicSpline, SplineLink, TimeFuncKind};
+    refuses_a_spline_coefficient_in_an_effect_amount(TimeFuncKind::PeriodicSpline(PeriodicSpline {
+        period: ir::expr::Expr::const_(4.0),
+        n_basis: 6,
+        degree: 3,
+        coefs: spline_coefs(),
+        link: SplineLink::Identity,
+    }));
+}
+
+#[test]
+fn pgas_refuses_an_estimated_bspline_coefficient_in_an_effect_amount() {
+    use ir::time_func::{BSpline, BSplineKnots, SplineCoefs, SplineLink, TimeFuncKind};
+    refuses_a_spline_coefficient_in_an_effect_amount(TimeFuncKind::BSpline(BSpline {
+        knots: BSplineKnots::Uniform {
+            lower: ir::expr::Expr::const_(0.0),
+            upper: ir::expr::Expr::const_(10.0),
+            n_intervals: 3,
+        },
+        degree: 3,
+        coefs: SplineCoefs::Explicit { coefs: spline_coefs() },
+        link: SplineLink::Identity,
+    }));
 }

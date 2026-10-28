@@ -152,6 +152,19 @@ fn collect_forcing(kind: &TimeFuncKind, out: &mut HashSet<String>) {
             collect(&ps.period, out);
             ps.coefs.iter().for_each(|e| collect(e, out));
         }
+        TimeFuncKind::BSpline(b) => {
+            match &b.knots {
+                ir::time_func::BSplineKnots::Uniform { lower, upper, .. } => {
+                    collect(lower, out);
+                    collect(upper, out);
+                }
+                ir::time_func::BSplineKnots::Explicit { breakpoints } => {
+                    breakpoints.iter().for_each(|e| collect(e, out));
+                }
+            }
+            let ir::time_func::SplineCoefs::Explicit { coefs } = &b.coefs;
+            coefs.iter().for_each(|e| collect(e, out));
+        }
     }
 }
 

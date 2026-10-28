@@ -674,6 +674,46 @@ fn ir_contrasts_excluded_from_hash() {
     );
 }
 
+/// Proposal 2026-10-27-estimable-bsplines §5.6: a spline's `link` is run
+/// identity. Under a `'ratio` unit the expander's unit rewrite is the identity
+/// for both links, so two models differing only in `link` carry identical
+/// coefficients — and would share a `run_id`, the store serving one the other's
+/// trajectory (exp g against g), unless `link` itself is hashed. Checked for
+/// both spline kinds.
+#[test]
+fn ir_spline_link_changes_hash() {
+    use ir::time_func::{BSpline, BSplineKnots, PeriodicSpline, SplineCoefs, SplineLink};
+    let coefs = || vec![Expr::const_(0.2), Expr::const_(-0.1), Expr::const_(0.4), Expr::const_(0.0)];
+    let bspline = |link| {
+        TimeFuncKind::BSpline(BSpline {
+            knots: BSplineKnots::Uniform { lower: Expr::const_(0.0), upper: Expr::const_(30.0), n_intervals: 1 },
+            degree: 3,
+            coefs: SplineCoefs::Explicit { coefs: coefs() },
+            link,
+        })
+    };
+    let periodic = |link| {
+        TimeFuncKind::PeriodicSpline(PeriodicSpline {
+            period: Expr::const_(7.0),
+            n_basis: 4,
+            degree: 3,
+            coefs: coefs(),
+            link,
+        })
+    };
+    for (what, kind) in [("bspline", &bspline as &dyn Fn(SplineLink) -> TimeFuncKind), ("periodic_spline", &periodic)] {
+        let mut ident = representative_model();
+        ident.time_functions[0].kind = kind(SplineLink::Identity);
+        let mut log = representative_model();
+        log.time_functions[0].kind = kind(SplineLink::Log);
+        assert_ne!(
+            ident.content_hash(),
+            log.content_hash(),
+            "{what}: two models differing only in `link` must hash differently"
+        );
+    }
+}
+
 /// gh#314: a forcing `lag` is run identity. Two models that differ only by a
 /// forcing's evaluation-time shift produce different trajectories, so they must
 /// re-key. This pins that `TimeFunction::lag` is actually folded into the hash
