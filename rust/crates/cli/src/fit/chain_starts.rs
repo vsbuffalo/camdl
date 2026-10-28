@@ -843,7 +843,7 @@ fn kept_boxes(base_specs: &[EstimatedParam]) -> HashMap<&str, (f64, f64)> {
 /// when a draw would lie outside the support (e.g. log_normal on
 /// non-positive numbers — should not happen by construction, but
 /// kept defensive).
-fn sample_prior_natural(prior: &Prior, rng: &mut StatefulRng, base: Option<f64>) -> f64 {
+pub(crate) fn sample_prior_natural(prior: &Prior, rng: &mut StatefulRng, base: Option<f64>) -> f64 {
     match prior {
         Prior::Fixed(Density::Flat) => base.unwrap_or(0.0),
         Prior::Fixed(Density::Uniform { lower, upper }) => {

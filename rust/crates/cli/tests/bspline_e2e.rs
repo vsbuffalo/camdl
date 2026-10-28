@@ -386,3 +386,43 @@ fn if2_refuses_an_estimated_smooth_scale() {
     assert!(!stderr.contains("is the scale of the smooth forcing") && stderr.contains("(method=if2)"),
         "a fixed scale passes the rule and the run starts:\n{stderr}");
 }
+
+/// A tiny pgas fit of `sir_smooth_fit` estimating the level `a` and one mode,
+/// `a` either with a fit.toml box or, as the fixture declares it, unbounded
+/// with no start; returns (success, stderr).
+fn pgas_smooth_fit(tmp: &Path, boxed: bool) -> (bool, String) {
+    let model = repo().join("tests/fixtures/gradient/sir_smooth_fit.camdl");
+    let data = tmp.join("cases.tsv");
+    let mut body = String::from("time\tcases\n");
+    for w in 1..=9 {
+        body.push_str(&format!("{}\t{}\n", 7 * w, 20 + 7 * w));
+    }
+    std::fs::write(&data, body).unwrap();
+    let toml = tmp.join(format!("fit_{boxed}.toml"));
+    let a = if boxed { "a = { bounds = [-8.0, 2.0] }\n" } else { "a = {}\n" };
+    std::fs::write(&toml, format!(
+        "output_dir = \"{out}\"\n[model]\ncamdl = \"{model}\"\n[data.observations]\ncases = \"{data}\"\n\
+         [config]\ndt = 1.0\n[estimate]\n{a}z_m1 = {{}}\n\
+         [fixed]\ngamma = 0.15\nb = 0.0\nrho = 0.5\ntau = 0.3\nz_m2 = 0.0\nz_m3 = 0.0\nz_m4 = 0.0\n\
+         [method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 8\nsweeps = 4\nburn_in = 2\n",
+        out = tmp.join(format!("results_{boxed}")).display(),
+        model = model.display(), data = data.display(),
+    )).unwrap();
+    let o = Command::new(bin())
+        .args(["fit", "run", toml.to_str().unwrap()])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_IR_CACHE_DIR", tmp.join("irc"))
+        .env("CAMDL_OUTPUT_DIR", tmp.join("cas"))
+        .output().unwrap();
+    (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
+}
+
+/// An unbounded `real` with a proper prior and no `start` runs under the
+/// default `starts = from_prior`: the placeholder start is a prior draw (it
+/// was refused as "has no value" before).
+#[test]
+fn pgas_runs_unbounded_smooth_coordinates_without_starts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ok, stderr) = pgas_smooth_fit(tmp.path(), false);
+    assert!(ok && !stderr.contains("has no value"), "the unbounded fit must run:\n{stderr}");
+}
