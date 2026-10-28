@@ -305,3 +305,38 @@ fn the_notice_fires_only_past_the_window() {
     assert!(!stderr.contains("is held at its value"), "a window covering the run gets no notice:\n{stderr}");
     assert!(recorded_notice_codes(&cas).is_empty());
 }
+
+/// `pfilter`, `profile` and `survey` resolve the same anchored window and
+/// print the same notice, once each, as `simulate` does.
+#[test]
+fn pfilter_profile_and_survey_notice_the_hold() {
+    let tmp = tempfile::tempdir().unwrap();
+    let model = anchored_model(tmp.path(), "[0 'days, last_obs - 2 'weeks]");
+    let fit = fit_toml(tmp.path(), &model);
+    let params = tmp.path().join("params.toml");
+    std::fs::write(&params, "beta = 0.12\ngamma = 0.1\nrho = 0.6\n").unwrap();
+    let line = "info: forcing `mult` is held at its value at t = 21 from t = 21 to the horizon t = 120; \
+                its window ends at last_obs - 14";
+    let run = |label: &str, args: Vec<String>| {
+        let o = Command::new(bin())
+            .args(&args)
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+            .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+            .output()
+            .expect("spawn");
+        let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
+        assert!(o.status.success(), "{label} must run:\n{stderr}");
+        assert_eq!(stderr.matches(line).count(), 1, "{label}: the notice, once:\n{stderr}");
+    };
+    let s = |x: &Path| x.to_str().unwrap().to_string();
+    let m = s(&model);
+    let f = s(&fit);
+    run("pfilter", ["pfilter", &m, "--params", &s(&params), "--fit", &f, "--particles", "50", "--seed", "1",
+                    "--no-save-samples"].map(String::from).to_vec());
+    run("profile", ["profile", &m, "--fit", &f, "--sweep", "gamma=lin(0.08,0.12,2)", "--algorithm", "if2",
+                    "--particles", "30", "--iterations", "3", "--n-starts", "1", "--rw-sd", "auto", "--seed", "1"]
+        .map(String::from).to_vec());
+    run("survey", ["survey", &m, "--fit", &f, "--eval", "simulate", "--n-points", "4", "--seed", "1",
+                   "--output", &s(&tmp.path().join("survey_out"))].map(String::from).to_vec());
+}

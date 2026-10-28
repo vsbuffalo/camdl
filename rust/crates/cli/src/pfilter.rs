@@ -185,6 +185,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                 eprintln!("error: {msg}");
                 std::process::exit(1);
             }
+            crate::obs_anchor::spline_hold_notices(&model_in, &[], model_in.simulation.t_end)
+                .emit_stderr();
         }
     }
 

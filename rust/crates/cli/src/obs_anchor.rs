@@ -103,11 +103,16 @@ pub fn resolve_from_config(
     resolve_with(model, |m| crate::obs_anchors_from_config(m, config, dt))
 }
 
+/// Also prints the `spline-held-past-window` notice against the model's
+/// resolved horizon, anchored or not, so the three commands that resolve
+/// through here (`pfilter`, `profile`, `survey`) report a hold exactly as
+/// `simulate` and `fit` do.
 fn resolve_with(
     model: &mut ir::Model,
     read_window: impl FnOnce(&ir::Model) -> Result<(f64, f64), String>,
 ) -> Result<bool, String> {
     if !model_is_anchored(model) {
+        spline_hold_notices(model, &[], model.simulation.t_end).emit_stderr();
         return Ok(false);
     }
     let (first, last) = read_window(model).map_err(|e| {
@@ -119,6 +124,7 @@ fn resolve_with(
     })?;
     let moved = substitute(model, ObsAnchorTimes { first, last })?;
     report(&moved, model);
+    spline_hold_notices(model, &moved, model.simulation.t_end).emit_stderr();
     Ok(true)
 }
 
