@@ -79,9 +79,13 @@ impl PeriodicBasis {
 
     /// Basis function `k`, Bₖ(t) = ∂f/∂cₖ: the same span as [`Self::eval`],
     /// so the value and its coefficient derivative cannot disagree. Zero when
-    /// `k` is not among the `p + 1` coefficients nonzero at `t`.
+    /// `k` is not among the `p + 1` coefficients nonzero at `t`; NaN when `k`
+    /// is not a basis function (`k ≥ n_basis`).
     #[inline]
     pub fn basis(&self, t: f64, k: usize) -> f64 {
+        if k >= self.n_basis {
+            return f64::NAN;
+        }
         let (j, n) = self.span(t);
         let nb = self.n_basis;
         (0..=self.degree)

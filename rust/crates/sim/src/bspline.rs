@@ -198,8 +198,13 @@ pub fn span(knots: &Knots, p: usize, t: f64) -> Span {
 }
 
 /// One basis function, `Bₖ(t)`, with `t` clamped as in [`span`]. Zero without
-/// running the triangle when `k` is outside the `p + 1` nonzero at `t`.
+/// running the triangle when `k` is outside the `p + 1` nonzero at `t`; NaN
+/// when `k` is not a basis function at all (`k ≥ n + p`), so a bad index can
+/// never read as a genuine zero.
 pub fn basis(knots: &Knots, p: usize, t: f64, k: usize) -> f64 {
+    if k >= knots.n_intervals() + p {
+        return f64::NAN;
+    }
     let (a, b) = knots.window();
     let t = t.clamp(a, b);
     let m = knots.interval(t);

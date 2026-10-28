@@ -234,3 +234,71 @@ fn an_out_of_range_basis_is_nan() {
     assert!(sim::propensity::eval_forcing_basis(kind, 10.0, 5).is_finite());
     assert!(sim::propensity::eval_forcing_basis(kind, 10.0, 6).is_nan());
 }
+
+// ── forcing_basis: refused at construction, NaN past the basis ──────────────
+// The review of stages 2–3 probed a library caller: a basis node in a rate,
+// index 99 of 6, built and evaluated to 0. `CompiledModel::new` now runs every
+// basis rule itself.
+
+fn basis_json(name: &str, index: u32) -> serde_json::Value {
+    serde_json::json!({"forcing_basis": {"name": name, "index": index}})
+}
+
+/// `seir_observations` (it has an observation stream) plus the 6-function
+/// `contact` spline of `bspline_uniform`, every parameter given a value;
+/// `edit` then places the node under test.
+fn golden_with_spline(edit: impl FnOnce(&mut serde_json::Value)) -> Result<CompiledModel, String> {
+    let read = |n: &str| -> serde_json::Value {
+        let p = format!("{}/../../../ocaml/golden/{n}.ir.json", env!("CARGO_MANIFEST_DIR"));
+        serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+    };
+    let mut doc = read("seir_observations");
+    let spline = read("bspline_uniform")["model"]["time_functions"][0].clone();
+    doc["model"]["time_functions"].as_array_mut().unwrap().push(spline);
+    edit(&mut doc);
+    let mut m = ir::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
+    for p in &mut m.parameters {
+        if p.value.resolved_value().is_none() {
+            p.value = p.value.with_value(if p.name.starts_with('N') { 10_000.0 } else { 0.3 });
+        }
+    }
+    CompiledModel::new(m).map_err(|e| e.to_string())
+}
+
+#[test]
+fn the_golden_host_builds_without_a_basis_node() {
+    golden_with_spline(|_| {}).expect("the host model is valid");
+}
+
+#[test]
+fn a_basis_node_in_a_rate_is_refused_at_construction() {
+    let err = golden_with_spline(|d| d["model"]["transitions"][0]["rate"] = basis_json("contact", 99))
+        .err().expect("a basis node in a rate must be refused");
+    assert!(err.contains("forcing_basis(contact, 99) appears outside a gradient map"), "{err}");
+}
+
+#[test]
+fn an_out_of_range_gradient_basis_is_refused_at_construction() {
+    let err = golden_with_spline(|d| {
+        d["model"]["transitions"][0]["rate_grad"]["beta"] = serde_json::json!({"grad": basis_json("contact", 6)});
+    }).err().expect("index 6 of 6 must be refused");
+    assert!(err.contains("basis 6 of forcing 'contact', which has 6 basis functions"), "{err}");
+}
+
+#[test]
+fn a_bad_target_in_a_projection_state_gradient_is_refused() {
+    let err = golden_with_spline(|d| {
+        d["model"]["observations"][0]["projection_state_grad"] = serde_json::json!({"S": {"grad": basis_json("nope", 0)}});
+    }).err().expect("CompiledModel::new must refuse");
+    assert!(err.contains("forcing_basis(nope, 0) names no forcing"), "{err}");
+}
+
+#[test]
+fn the_basis_primitives_are_nan_past_the_basis() {
+    let k = Knots::uniform(0.0, 60.0, 3).unwrap();
+    assert!(sim::bspline::basis(&k, 3, 10.0, 5).is_finite());
+    assert!(sim::bspline::basis(&k, 3, 10.0, 6).is_nan());
+    let p = sim::periodic_bspline::PeriodicBasis::new(7.0, 6, 3).unwrap();
+    assert!(p.basis(1.0, 5).is_finite());
+    assert!(p.basis(1.0, 6).is_nan());
+}
