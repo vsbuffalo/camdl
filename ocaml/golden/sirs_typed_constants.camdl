@@ -1,0 +1,50 @@
+# SIRS with model constants: typed `let`s with constant bodies.
+#
+# A typed constant compiles to the IR's `constants` section (name, value,
+# kind) and every use reads it through a `const_ref` node; it is not a
+# parameter. This fixture covers, across both languages:
+#
+#   - a rate constant read directly in a rate          (`omega`)
+#   - a `let` over a constant, hoisted as param-free   (`w = 2 * omega`)
+#   - a count constant whose kind the dimension
+#     checker needs (`I + iota` is a population)       (`iota`)
+#   - a constant's `#'` doc in the envelope's docs     (`omega`)
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate   in [0.1, 2.0]
+  gamma : rate   in [0.05, 0.5]
+  N0    : count  in [100, 1000000]
+  I0    : count  in [1, 1000]
+}
+
+#' waning rate of immunity — mean 100-day protection
+#' @symbol ω
+let omega : rate = 0.01
+let w = 2 * omega
+#' importation floor on the infectious pool
+let iota : count = 0.5
+
+transitions {
+  infection : S --> I @ beta * S * (I + iota) / N
+  recovery  : I --> R @ gamma * I
+  waning    : R --> S @ w / 2 * R
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate { from = 0 'days  to = 200 'days }
+
+scenarios {
+  baseline {
+    label = "SIRS with constant waning"
+    set = { beta = 0.4  gamma = 0.1  N0 = 10000  I0 = 10 }
+  }
+}
