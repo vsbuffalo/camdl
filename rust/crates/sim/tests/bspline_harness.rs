@@ -376,25 +376,58 @@ fn ks_p(x: &mut [f64], f: impl Fn(f64) -> f64) -> f64 {
     (1..=100).map(|j| 2.0 * (-1.0_f64).powi(j - 1) * (-2.0 * (j as f64 * l).powi(2)).exp()).sum::<f64>().clamp(0.0, 1.0)
 }
 
-/// R3: PGAS+NUTS on the prior alone. `prior_only_smooth` is `X --> D @ f·X`
-/// with X0 = 0 and one observation stream whose every value is missing, so
-/// every flow is zero, the complete-data likelihood is constant, and the sampler must draw the stated prior: τ ~
-/// exponential(5.99) (KS on draws thinned by 10, p > 1e-3), a ~ N(−1, 0.6²)
-/// and b ~ N(0, 0.01²) (mean and variance), and the curvature part of the
-/// coefficients, w − a·1 − b(ξ − t_m) = (τ/κ)Mz, with covariance
-/// E[τ²]/κ²·Ω⁺ = (2/λ²κ²)MMᵀ, every entry. Each moment is a z-score on its
-/// batch-means MCSE over the pooled chains, |z| < 5. 4 chains × 4,000 kept
-/// sweeps after 1,000 adaptation sweeps.
+/// ∫ g″(t)² dt over the window, g = ln f from the runtime's own value path
+/// at parameters `params`: on each knot interval, two-point Gauss–Legendre
+/// (exact, g″ being linear for a cubic) of the central second difference
+/// with step `h` (exact for a cubic up to rounding).
+fn runtime_curvature(model: &CompiledModel, params: &[f64], knots: &[f64]) -> f64 {
+    let (int_s, real_s) = model.initial_state_mean(params).unwrap();
+    let g = |t: f64| {
+        let ctx = sim::propensity::EvalCtx {
+            model, int_s: &int_s, real_s: &real_s, params, t, dt: 1.0,
+            projected: None, aux: None, int_float_override: None, per_eval: None,
+        };
+        eval_resolved(&ResolvedExpr::TimeFunc(0), &ctx).ln()
+    };
+    let h = 0.25;
+    let node = 1.0 / 3.0_f64.sqrt();
+    knots.windows(2).map(|w| {
+        let (mid, half) = (0.5 * (w[0] + w[1]), 0.5 * (w[1] - w[0]));
+        [mid - half * node, mid + half * node].iter()
+            .map(|&t| ((g(t + h) - 2.0 * g(t) + g(t - h)) / (h * h)).powi(2) * half)
+            .sum::<f64>()
+    }).sum()
+}
+
+/// R3, required for merge (the maintainer's D7): PGAS+NUTS on the prior
+/// alone. `prior_only_smooth` is `X --> D @ f·X` with X0 = 0 and one
+/// observation stream whose every value is missing, so every flow is zero,
+/// the complete-data likelihood is constant, and the sampler must draw the
+/// stated prior. The level, slope and modes are unbounded and sampled on the
+/// identity scale, τ on the log scale, as `fit run` does. 4 chains × 4,000
+/// kept sweeps after 1,000 adaptation sweeps. Checked:
+///
+/// - τ against exponential(λ = 5.99) by KS on draws thinned by 10;
+/// - each standardized innovation zᵢ: mean 0 and variance 1 (z-scores on the
+///   batch-means MCSE, |z| < 5, the `nuts_stationarity.rs` rule) and N(0, 1)
+///   by KS on thinned draws; a and b likewise against their normals;
+/// - the implied covariance of every pair of coefficients,
+///   cov(w) = Var(a)·11ᵀ + Var(b)·(ξ − t_m)(ξ − t_m)ᵀ + (E[τ²]/κ²)·Ω⁺ with
+///   E[τ²] = 2/λ², and the mean E[w] = E[a]·1, as z-scores;
+/// - the integrated curvature of the curve the runtime evaluates: given τ,
+///   S = (K − 2)·T_ref³·∫g″²/τ² ~ χ²_{K−2}, by KS on thinned draws, and per
+///   draw S = ‖z‖² to 1e-6 (the identity that pins κ and M in the value
+///   path the prior acts on).
 #[test]
 #[ignore = "about a minute in release; run by `make validate-bspline`"]
 fn r3_prior_only_run_draws_the_smooth_prior() {
     use sim::inference::if2::{EstimatedParam, Transform};
+    use sim::inference::multi_stream_obs::{StreamProjection, StreamSpec, StreamTimes};
     use sim::inference::particle_filter::Observation;
     use sim::inference::pgas::{run_pgas, PGASConfig};
     use sim::inference::pmmh::Prior;
     use sim::inference::prior::Density;
-    use sim::inference::multi_stream_obs::{StreamProjection, StreamSpec, StreamTimes};
-    use sim::inference::{BoundObs, MultiStreamObsModel};
+    use sim::inference::{normal_cdf, BoundObs, MultiStreamObsModel};
     use std::sync::Arc;
 
     let path = format!("{}/../../../tests/fixtures/bspline_inference/ir/prior_only_smooth.ir.json", env!("CARGO_MANIFEST_DIR"));
@@ -403,32 +436,31 @@ fn r3_prior_only_run_draws_the_smooth_prior() {
         p.value = p.value.with_value(if p.name == "tau" { 0.2 } else if p.name == "a" { -1.0 } else { 0.0 });
     }
     let model = Arc::new(CompiledModel::new(ir_m).unwrap());
-    let lambda = 5.99;
+    let (lambda, t_ref, a_mu, a_sd, b_sd) = (5.99, 7.0, -1.0, 0.6, 0.01);
     let (wh, kap) = match &model.time_func_cache[0].kind {
-        CompiledTimeFuncKind::BSpline(b) => (b.whitening().unwrap().clone(), kappa(b.n_basis(), 7.0)),
+        CompiledTimeFuncKind::BSpline(b) => (b.whitening().unwrap().clone(), kappa(b.n_basis(), t_ref)),
         _ => panic!("the fixture's forcing is a bspline"),
     };
     let (kk, d) = (wh.n_basis(), wh.n_modes());
+    let breakpoints = [0.0, 20.0, 40.0, 60.0]; // window [0, 60], K = 6, cubic
 
-    // The transforms `fit run` derives for these declarations: the scaled
-    // logit for a `real` on a finite box, the log for a `positive`.
-    let est_p = |name: &str, lo: f64, hi: f64, log: bool, init: f64| EstimatedParam {
-        name: name.into(), index: model.param_index[name], initial: init, rw_sd: 0.05,
-        transform: if log { Transform::Log { lo, hi } } else { Transform::Logit { lo, hi } },
+    let est_p = |name: &str, transform: Transform, lo: f64, hi: f64, init: f64| EstimatedParam {
+        name: name.into(), index: model.param_index[name], initial: init, rw_sd: 0.05, transform,
         lower: lo, upper: hi, rw_sd_auto: false, perturb_only_at_t0: false,
     };
+    let inf = f64::INFINITY;
     let mut est = vec![
-        est_p("a", -10.0, 6.0, false, -1.0),
-        est_p("b", -0.2, 0.2, false, 0.0),
-        est_p("tau", 1e-6, 2.5, true, 0.2),
+        est_p("a", Transform::None, -inf, inf, a_mu),
+        est_p("b", Transform::None, -inf, inf, 0.0),
+        est_p("tau", Transform::Log { lo: 1e-6, hi: 2.5 }, 1e-6, 2.5, 0.2),
     ];
     let mut priors = vec![
-        Prior::Fixed(Density::Normal { mean: -1.0, sd: 0.6 }),
-        Prior::Fixed(Density::Normal { mean: 0.0, sd: 0.01 }),
+        Prior::Fixed(Density::Normal { mean: a_mu, sd: a_sd }),
+        Prior::Fixed(Density::Normal { mean: 0.0, sd: b_sd }),
         Prior::Fixed(Density::Exponential { rate: lambda }),
     ];
     for i in 1..=d {
-        est.push(est_p(&format!("z_m{i}"), -8.0, 8.0, false, 0.0));
+        est.push(est_p(&format!("z_m{i}"), Transform::None, -inf, inf, 0.0));
         priors.push(Prior::Fixed(Density::Normal { mean: 0.0, sd: 1.0 }));
     }
     let times: Vec<f64> = (1..=60).map(|t| t as f64).collect();
@@ -451,20 +483,28 @@ fn r3_prior_only_run_draws_the_smooth_prior() {
         use_nuts: true, dense_mass: true, max_tree_depth: 8,
         trajectory_warmup: 0, csmc_sweeps_per_nuts: 1, step_policy: sim::schedule::StepPolicy::Snap,
     };
-    let mut chains: Vec<Vec<Vec<f64>>> = Vec::new();
-    for seed in 1..=4 {
-        let mut base = model.default_params.clone();
-        for p in &est {
-            base[p.index] = p.initial;
-        }
-        let r = run_pgas(&model, &est, &priors, &base, &config, &observations, &obs_model, seed, None, None,
-            "bspline-r3-prior".into()).expect("prior-only PGAS-NUTS run");
-        assert!(r.sweeps.len() >= 4000, "chain {seed}: {} kept sweeps", r.sweeps.len());
-        chains.push(r.sweeps.iter().rev().take(4000).rev()
-            .map(|s| est.iter().map(|p| s.params[p.index]).collect()).collect());
-        eprintln!("chain {seed}: {} divergent", r.n_divergent_total);
-    }
-    let pooled: Vec<&Vec<f64>> = chains.iter().flatten().collect();
+    // Per chain, the full parameter vector of every kept sweep.
+    let runs: Vec<Vec<Vec<f64>>> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (1..=4u64).map(|seed| {
+            let (model, est, priors, observations, obs_model, config) = (&model, &est, &priors, &observations, &obs_model, &config);
+            sc.spawn(move || {
+                let mut base = model.default_params.clone();
+                for p in est {
+                    base[p.index] = p.initial;
+                }
+                let r = run_pgas(model, est, priors, &base, config, observations, obs_model, seed, None, None,
+                    "bspline-r3-prior".into()).expect("prior-only PGAS-NUTS run");
+                eprintln!("chain {seed}: {} divergent ({} after adaptation)", r.n_divergent_total, r.n_divergent_post_burn);
+                r.sweeps.iter().map(|s| s.params.clone()).collect::<Vec<_>>()
+            })
+        }).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(runs.iter().all(|c| c.len() == 4000), "4000 kept sweeps per chain");
+    let ix = |n: &str| model.param_index[n];
+    let zi: Vec<usize> = (1..=d).map(|i| ix(&format!("z_m{i}"))).collect();
+    let pooled: Vec<&Vec<f64>> = runs.iter().flatten().collect();
+    let thinned: Vec<&Vec<f64>> = runs.iter().flat_map(|c| c.iter().step_by(10)).collect();
     let col = |f: &dyn Fn(&[f64]) -> f64| -> Vec<f64> { pooled.iter().map(|v| f(v)).collect() };
     let mut worst: f64 = 0.0;
     let mut score = |label: &str, x: Vec<f64>, exact: f64| {
@@ -473,24 +513,56 @@ fn r3_prior_only_run_draws_the_smooth_prior() {
         worst = worst.max(z.abs());
         assert!(z.abs() < 5.0, "{label}: mean {m:.5} vs {exact:.5}, z = {z:.2}");
     };
-    score("E[a]", col(&|v| v[0]), -1.0);
-    score("Var[a]", col(&|v| (v[0] + 1.0).powi(2)), 0.36);
-    score("E[b]", col(&|v| v[1]), 0.0);
-    score("Var[b]", col(&|v| v[1].powi(2)), 1e-4);
-    score("E[τ]", col(&|v| v[2]), 1.0 / lambda);
-    let curv = |v: &[f64], i: usize| v[2] / kap * (0..d).map(|r| wh.m.at(i, r) * v[3 + r]).sum::<f64>();
+    let mut ks_worst: f64 = 1.0;
+    let mut ks = |label: &str, f: &dyn Fn(&[f64]) -> f64, cdf: &dyn Fn(f64) -> f64| {
+        let mut x: Vec<f64> = thinned.iter().map(|v| f(v)).collect();
+        let p = ks_p(&mut x, cdf);
+        ks_worst = ks_worst.min(p);
+        assert!(p > 1e-3, "{label}: KS p = {p:e}");
+    };
+
+    // τ, a, b and each standardized innovation.
+    ks("τ ~ exponential", &|v| v[ix("tau")], &|x| 1.0 - (-lambda * x).exp());
+    score("E[τ]", col(&|v| v[ix("tau")]), 1.0 / lambda);
+    score("E[a]", col(&|v| v[ix("a")]), a_mu);
+    score("Var[a]", col(&|v| (v[ix("a")] - a_mu).powi(2)), a_sd * a_sd);
+    score("E[b]", col(&|v| v[ix("b")]), 0.0);
+    score("Var[b]", col(&|v| v[ix("b")].powi(2)), b_sd * b_sd);
+    for (i, &k) in zi.iter().enumerate() {
+        score(&format!("E[z{i}]"), col(&|v| v[k]), 0.0);
+        score(&format!("Var[z{i}]"), col(&|v| v[k].powi(2)), 1.0);
+        ks(&format!("z{i} ~ N(0, 1)"), &|v| v[k], &|x| normal_cdf(x));
+    }
+
+    // The implied coefficients and their full covariance.
+    let w_of = |v: &[f64], j: usize| v[ix("a")] + v[ix("b")] * (wh.xi[j] - wh.t_mid)
+        + v[ix("tau")] / kap * (0..d).map(|r| wh.m.at(j, r) * v[zi[r]]).sum::<f64>();
     let m = dense(&wh.m);
     let omega_plus = mul(&m, &tr(&m));
-    for i in 0..kk {
-        for j in i..kk {
-            let exact = 2.0 / (lambda * lambda * kap * kap) * omega_plus[i][j];
-            score(&format!("cov(w{i}, w{j})"), col(&|v| curv(v, i) * curv(v, j)), exact);
+    let e_tau2 = 2.0 / (lambda * lambda);
+    for j in 0..kk {
+        score(&format!("E[w{j}]"), col(&|v| w_of(v, j)), a_mu);
+        for l in j..kk {
+            let (dj, dl) = (wh.xi[j] - wh.t_mid, wh.xi[l] - wh.t_mid);
+            let exact = a_sd * a_sd + b_sd * b_sd * dj * dl + e_tau2 / (kap * kap) * omega_plus[j][l];
+            score(&format!("cov(w{j}, w{l})"), col(&|v| (w_of(v, j) - a_mu) * (w_of(v, l) - a_mu)), exact);
         }
     }
-    let mut thinned: Vec<f64> = chains.iter().flat_map(|c| c.iter().step_by(10).map(|v| v[2])).collect();
-    let p = ks_p(&mut thinned, |x| 1.0 - (-lambda * x).exp());
-    assert!(p > 1e-3, "τ against exponential({lambda}): KS p = {p:e}");
-    eprintln!("prior-only: worst |z| = {worst:.2}, τ KS p = {p:.3}");
+
+    // The integrated curvature of the runtime's curve, against its law.
+    let s_of = |v: &[f64]| (kk - 2) as f64 * t_ref.powi(3) * runtime_curvature(&model, v, &breakpoints) / v[ix("tau")].powi(2);
+    let mut worst_identity: f64 = 0.0;
+    for v in thinned.iter().take(400) {
+        let zz: f64 = zi.iter().map(|&k| v[k] * v[k]).sum();
+        let rel = (s_of(v) - zz).abs() / zz;
+        worst_identity = worst_identity.max(rel);
+    }
+    assert!(worst_identity <= 1e-6, "(K − 2)·T_ref³·∫g″²/τ² differs from ‖z‖² by {worst_identity:e} relative");
+    let dof = (kk - 2) as f64;
+    assert_eq!(dof, 4.0, "the χ² CDF below is for 4 degrees of freedom");
+    ks("(K − 2)T_ref³∫g″²/τ² ~ χ²₄", &s_of, &|x| 1.0 - (-x / 2.0).exp() * (1.0 + x / 2.0));
+    eprintln!("prior-only: worst |z| = {worst:.2}, smallest KS p = {ks_worst:.3}, \
+               worst curvature identity {worst_identity:.1e}");
 }
 
 /// R4: the whitening M is bitwise identical across two builds of one model,

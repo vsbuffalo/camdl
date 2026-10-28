@@ -8,11 +8,11 @@
 ],"tables":[],"interventions":[],"observations":[
 {"name":"removals","source":"removals","columns":[{"name":"time","role":"time"},{"name":"removals","role":{"value":"count"}}],"scored":"removals","emit_schedule":{"regular":{"start":0.0,"step":1.0,"end":60.0}},"covers":{"kind":"until","offset":0.0,"span":1.0},"projection":{"cumulative_flow":"decay"},"likelihood":{"poisson":{"rate":{"expr":{"projected":null},"proj_grad":{"grad":{"const":1.0}}}}}}
 ],"parameters":[
-{"name":"a","value":{"mode":"estimated","bounds":[-10.0,6.0],"prior":{"dist":{"normal":{"mean":-1.0,"sd":0.6}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]},
-{"name":"b","value":{"mode":"estimated","bounds":[-0.2,0.2],"prior":{"dist":{"normal":{"mean":0.0,"sd":0.01}}},"transform":"identity"},"param_kind":"real","param_dim":[0,-1]},
+{"name":"a","value":{"mode":"estimated","prior":{"dist":{"normal":{"mean":-1.0,"sd":0.6}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]},
+{"name":"b","value":{"mode":"estimated","prior":{"dist":{"normal":{"mean":0.0,"sd":0.01}}},"transform":"identity"},"param_kind":"real","param_dim":[0,-1]},
 {"name":"tau","value":{"mode":"estimated","bounds":[1e-06,2.5],"prior":{"dist":{"exponential":{"rate":5.99}}},"transform":"identity"},"param_kind":"positive","param_dim":[0,0]},
-{"name":"z_m1","value":{"mode":"estimated","bounds":[-8.0,8.0],"prior":{"dist":{"normal":{"mean":0.0,"sd":1.0}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]},
-{"name":"z_m2","value":{"mode":"estimated","bounds":[-8.0,8.0],"prior":{"dist":{"normal":{"mean":0.0,"sd":1.0}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]},
-{"name":"z_m3","value":{"mode":"estimated","bounds":[-8.0,8.0],"prior":{"dist":{"normal":{"mean":0.0,"sd":1.0}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]},
-{"name":"z_m4","value":{"mode":"estimated","bounds":[-8.0,8.0],"prior":{"dist":{"normal":{"mean":0.0,"sd":1.0}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]}
+{"name":"z_m1","value":{"mode":"estimated","prior":{"dist":{"normal":{"mean":0.0,"sd":1.0}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]},
+{"name":"z_m2","value":{"mode":"estimated","prior":{"dist":{"normal":{"mean":0.0,"sd":1.0}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]},
+{"name":"z_m3","value":{"mode":"estimated","prior":{"dist":{"normal":{"mean":0.0,"sd":1.0}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]},
+{"name":"z_m4","value":{"mode":"estimated","prior":{"dist":{"normal":{"mean":0.0,"sd":1.0}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]}
 ],"initial_conditions":{"X":{"deterministic":{"const":0.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":60.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"X":[],"D":[]},"base_compartments":["X","D"],"transmission_transitions":[],"infectious_compartments":[]}}}

@@ -10533,7 +10533,7 @@ let test_bspline_log_link_dimensioned_coef_e301 () =
     [ "bspline"; "periodic_spline" ]
 
 (* ── smooth coefficient form (proposal 2026-10-27-estimable-bsplines §6.4) ── *)
-let smooth_model ?(params = "") ?(modes = "z[mode] : real 'ratio in [-8, 8] ~ normal(mu = 0.0, sigma = 1.0)")
+let smooth_model ?(params = "") ?(modes = "z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)")
     ?(kind = "bspline") ?(knots = "window = [0 'days, 168 'days]\n        n_basis = 12")
     ?(extra = "link = log") ?(smooth = "smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks)") () =
   Printf.sprintf {|
@@ -10542,8 +10542,8 @@ let smooth_model ?(params = "") ?(modes = "z[mode] : real 'ratio in [-8, 8] ~ no
     compartments { S, I, R }
     parameters {
       gamma : rate in [0.01, 1.0]
-      a_b   : real 'ratio in [-8, 2] ~ normal(mu = -1.9, sigma = 0.6)
-      b_b   : real [1/T] in [-0.05, 0.05] ~ normal(mu = 0.0, sigma = 0.005)
+      a_b   : real 'ratio ~ normal(mu = -1.9, sigma = 0.6)
+      b_b   : real [1/T] ~ normal(mu = 0.0, sigma = 0.005)
       tau_b : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
       %s
       %s
@@ -10605,7 +10605,7 @@ let test_smooth_refusals () =
   compile_expect_error_code ~code:"E413" ~contains:"has no argument 'tau'"
     (smooth_model ~smooth:"smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks, tau = 1)" ());
   compile_expect_error_code ~code:"E414" ~contains:"prior exactly normal(mu = 0.0, sigma = 1.0)"
-    (smooth_model ~modes:"z[mode] : real 'ratio in [-8, 8] ~ normal(mu = 0.0, sigma = 2.0)" ());
+    (smooth_model ~modes:"z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 2.0)" ());
   compile_expect_error_code ~code:"E414" ~contains:"must be declared `real`"
     (smooth_model ~modes:"z[mode] : positive 'ratio in [0, 8] ~ normal(mu = 0.0, sigma = 1.0)" ())
 

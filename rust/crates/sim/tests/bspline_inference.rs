@@ -87,9 +87,9 @@ struct Fit {
 }
 
 impl Fit {
-    /// The smooth form of `seir_smooth_recovery`: a, b and the modes on their
-    /// declared boxes with no transform (as the explicit fit), τ on the log
-    /// scale; the fixture's priors. Every chain starts at a = −1.5, b = 0,
+    /// The smooth form of `seir_smooth_recovery`: a, b and the modes unbounded
+    /// on the identity scale, τ on the log scale (what `fit run` derives for
+    /// these declarations); the fixture's priors. Every chain starts at a = −1.5, b = 0,
     /// τ = 0.2, z = 0, the explicit fit's common start (−1.5 everywhere).
     fn smooth(model: Arc<CompiledModel>, times: &[f64], counts: &[f64]) -> Self {
         let obs_model = observed(&model, times, counts);
@@ -99,8 +99,8 @@ impl Fit {
             lower: lo, upper: hi, rw_sd_auto: false, perturb_only_at_t0: false,
         };
         let mut est = vec![
-            p("a", -8.0, 2.0, Transform::None, -1.5),
-            p("b", -0.2, 0.2, Transform::None, 0.0),
+            p("a", f64::NEG_INFINITY, f64::INFINITY, Transform::None, -1.5),
+            p("b", f64::NEG_INFINITY, f64::INFINITY, Transform::None, 0.0),
             p("tau", 1e-6, 2.5, Transform::Log { lo: 1e-6, hi: 2.5 }, 0.2),
         ];
         let mut priors = vec![
@@ -109,7 +109,7 @@ impl Fit {
             Prior::Fixed(Density::Exponential { rate: 5.99 }),
         ];
         for i in 1..=3 {
-            est.push(p(&format!("z_m{i}"), -8.0, 8.0, Transform::None, 0.0));
+            est.push(p(&format!("z_m{i}"), f64::NEG_INFINITY, f64::INFINITY, Transform::None, 0.0));
             priors.push(Prior::Fixed(Density::Normal { mean: 0.0, sd: 1.0 }));
         }
         Fit { model, obs_model, observations, est, priors }

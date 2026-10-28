@@ -6790,7 +6790,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
            if p.pkind <> PReal || not standard_normal then
              err "E414" (Printf.sprintf
                  "the modes `%s` must be declared `real` with prior exactly normal(mu = 0.0, sigma = 1.0)" fam)
-               (Printf.sprintf "Declare `%s[...] : real 'ratio in [-8, 8] ~ normal(mu = 0.0, sigma = 1.0)`." fam);
+               (Printf.sprintf "Declare `%s[...] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)`, with no range, so the samplers move it on the identity scale." fam);
            List.map (fun c -> Ir.Param c) cells
          | _ ->
            err "E413" (Printf.sprintf "`modes = %s` must name an indexed parameter family" fam)

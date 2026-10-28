@@ -800,12 +800,12 @@ dimensions { mode = [m1, m2, m3, m4, m5, m6, m7, m8, m9, m10] }  # n_basis − 2
 
 parameters {
   # log β at mid-window (R ≈ 1.2)
-  a_b     : real 'ratio in [-8, 2] ~ normal(mu = -1.9, sigma = 0.6)
+  a_b     : real 'ratio ~ normal(mu = -1.9, sigma = 0.6)
   # slope of log β, per day
-  b_b     : real [1/T] in [-0.05, 0.05] ~ normal(mu = 0.0, sigma = 0.005)
+  b_b     : real [1/T] ~ normal(mu = 0.0, sigma = 0.005)
   # PC prior on an SD, calibrated (§6.5): P(tau_b > 0.5) = 0.05
   tau_b   : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
-  z[mode] : real 'ratio in [-8, 8] ~ normal(mu = 0.0, sigma = 1.0)
+  z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
 }
 
 forcing {
@@ -817,6 +817,16 @@ forcing {
   }
 }
 ```
+
+The level, slope and modes are declared **without a range**: `fit run` gives
+every parameter with a finite search box the scaled-logit transform
+(`fit/runner.rs` `derive_transform_with_bounds`), so a boxed mode would be
+sampled as logit(z) rather than z, losing the whitened geometry and truncating
+its N(0, 1) law. Unbounded, they are searched over (−∞, ∞) on the identity scale
+and their chains start from prior draws. Under the samplers (`pgas`, `pmmh`,
+`mh`) `fit run` refuses a finite box on any of them, from the model's range or
+`[estimate]` bounds; forcing the identity on a boxed parameter would instead
+leave its box unenforced (gh#66). τ keeps its box and log transform.
 
 `smooth` names a penalized curve; there is no walk, so the form is not called a
 random walk. It is accepted only as the `coefs` of a `bspline` (not
