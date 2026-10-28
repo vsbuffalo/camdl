@@ -20,13 +20,13 @@ parameters {
   #' @symbol γ
   gamma   : rate     in [0.001, 1.0]
   #' log transmission rate per day at mid-window (R ≈ 1.2 at the prior mean)
-  a_b     : real 'ratio in [-8, 2] ~ normal(mu = -1.9, sigma = 0.6)
+  a_b     : real 'ratio ~ normal(mu = -1.9, sigma = 0.6)
   #' slope of the log transmission rate, per day
-  b_b     : real [1/T] in [-0.05, 0.05] ~ normal(mu = 0.0, sigma = 0.005)
+  b_b     : real [1/T] ~ normal(mu = 0.0, sigma = 0.005)
   #' curvature scale; PC prior with P(tau_b > 0.5) = 0.05
   tau_b   : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
   #' whitened curvature modes
-  z[mode] : real 'ratio in [-8, 8] ~ normal(mu = 0.0, sigma = 1.0)
+  z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
   #' total population size
   N0      : count    in [100, 100000]
   #' initial number infectious
