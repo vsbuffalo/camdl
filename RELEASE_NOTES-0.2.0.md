@@ -105,6 +105,14 @@ breaking changes are still expected before 1.0.
 
 These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
+- **A typed constant `let` cannot be set from outside.**
+  `let omega : rate =
+  0.01` holds its declared value in every run; `[fixed]`,
+  `[estimate]`, `--fixed`, `--fixed-file`, `--param`, `--params`, `--sweep`, a
+  draws column, `camdlc --set` or a scenario `set` naming it is refused as an
+  unknown parameter, with a hint. `fit run` no longer demands a `[fixed]` entry
+  for it (gh#965). Migration: delete the constant's line from fit configs and
+  params files, or declare it in `parameters {}` to set it from outside.
 - **`perturb_only_at_t0` is refused under every method but `if2`.** It is IF2's
   perturbation schedule; `pgas`, `pmmh`, `mh` and the `nl-*` optimizers perturb
   nothing, and used to load the flag and read it nowhere. Migration: keep the
@@ -532,6 +540,20 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
 ## Run identity
 
+- **Every stored run re-keys at IR 0.41 (typed constants).** A typed `let` with
+  a constant body (`let omega : rate = 0.01`) is now a model constant in the
+  IR's `constants` section, not a parameter. The model hash folds the new
+  section on every model, so every `simulate`, `fit`, `pfilter`, `survey` and
+  `profile` run gets a new `run_id`; nothing stored before is reused. A model
+  with constants also loses them from `parameters`: they no longer appear in a
+  fit's `[fixed]`, draws, traces, `mle_params.toml` or the record's `fixed`
+  list. Results are unchanged: simulations and fits of models with constants are
+  identical to before apart from run IDs, version headers and the constant's own
+  column or line (checked with `cmp` on six models across the ODE,
+  chain-binomial and Gillespie backends, and on MH, nl-sbplx and IF2 fits). A
+  pre-0.41 `mle_params.toml` used as `--fixed-file` or `--params` has its
+  constant entries ignored, with a notice, when its values still match its
+  `content_hash` and equal the model's declared values; otherwise it is refused.
 - **Every stored PGAS fit, every stored PMMH fit and every stored
   `camdl profile` run re-keys.** `tempering` was part of the PGAS method
   identity and `rho` of the PMMH method identity, and `camdl profile` hashed its
