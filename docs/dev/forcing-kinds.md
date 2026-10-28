@@ -45,10 +45,10 @@ there).
 `window = [a, b]` and `n_basis`, or explicit `breakpoints` — held at its end
 values outside it, optionally `link = log` for a positive rate. Use for a
 transmission rate that moves smoothly through an outbreak on no known date.
-Window ends may be observation anchors (`last_obs - 2 'weeks`). The coefficients
-are live at runtime, but the compiler does not yet emit their gradient, so a
-parameter coefficient is refused (E600) until it does (proposal
-`2026-10-27-estimable-bsplines.md`).
+Window ends may be observation anchors (`last_obs - 2 'weeks`). Coefficients may
+be parameters and carry an emitted gradient (a `forcing_basis` node), so NUTS
+can fit them; the knots, window and period are structural (E600). Proposal
+`2026-10-27-estimable-bsplines.md`.
 
 ### Fixed, periodic
 

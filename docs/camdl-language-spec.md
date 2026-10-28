@@ -1570,8 +1570,7 @@ forcing {
 ```
 
 and an anchored window that resolves out of order under some data vintage is
-refused when the run resolves it. Knots are structural: a parameter in a window
-end or breakpoint is **E600**.
+refused when the run resolves it.
 
 **`link = log`** makes the forcing f(t) = s · exp(Σₖ cₖ Bₖ(t)), positive for
 any coefficients. The coefficients are then dimensionless log-values (a
@@ -1583,11 +1582,18 @@ its exponential — a separately estimated intercept multiplying it would
 therefore not be identified, and the coefficients should carry the level
 themselves.
 
+**Coefficients may be parameters**, or arithmetic over them (`coefs = [0.0,
+c2, c3, -(c2 + c3)]`), in a `bspline` and in a `periodic_spline` alike. They
+are evaluated live at every step, and the compiler emits their gradient: ∂f/∂cₖ
+is basis function k at the forcing's evaluation time (times f itself under
+`link = log`), so PGAS with NUTS, IF2 and the particle filter can all estimate
+them. Only the knots — a window end, a breakpoint, a period — must be constant
+(**E600**), because they place the basis functions themselves.
+
 Shape errors are **E408** (both or neither knot form, a `window` that is not
 `[a, b]`, `n_basis ≤ degree`, a degree above 5, a coefficient count that
 disagrees with the knots), an unknown argument is **E409**, and an unknown
-`link` is **E411**. A parameter in a coefficient is **E600** for now: the
-compiler does not yet emit the coefficient gradient a fit needs.
+`link` is **E411**.
 
 ### Lagged forcing (`lag`)
 
