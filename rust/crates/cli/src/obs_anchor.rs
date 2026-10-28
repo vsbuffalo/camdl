@@ -509,7 +509,8 @@ pub fn spline_hold_notices(
                 Some(e) => const_value(e)?,
             };
             let from = end + lag;
-            if !(horizon > from) {
+            // NaN on either side means the comparison is undecidable: no notice.
+            if horizon.is_nan() || from.is_nan() || horizon <= from {
                 return None;
             }
             let site = tf_name(&tf.name);
