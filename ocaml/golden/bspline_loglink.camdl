@@ -1,0 +1,59 @@
+#' SIR whose transmission rate is exp of a cubic B-spline, so it is positive
+#' for any coefficients. The coefficients are log-values with no unit; the
+#' forcing's declared unit, per week, scales the rate: with
+#' `time_unit = 'days` the value is (1/7)·exp(Σ c_k B_k(t)) per day.
+#' @base sir_basic.camdl
+#' @adds a log-link bspline transmission rate in a weekly unit
+#' @changes beta is replaced by the forcing
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  #' recovery rate; the mean infectious period is 1/gamma
+  #' @symbol γ
+  gamma : rate     in [0.001, 1.0]
+  #' total population size
+  N0    : count    in [100, 100000]
+  #' initial number infectious
+  I0    : count    in [1, 1000]
+}
+
+forcing {
+  # exp(0.9) ≈ 2.5 per week ≈ 0.35 per day at the start.
+  beta_t : bspline 'per_week {
+    window  = [0 'days, 15 'weeks]
+    n_basis = 7
+    link    = log
+    coefs   = [0.9, 1.1, 0.6, 0.2, 0.0, 0.3, 0.5]
+  }
+}
+
+transitions {
+  infection : S --> I  @ beta_t * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 120 'days
+}
+
+scenarios {
+  baseline_scenario {
+    label = "baseline"
+    set = {
+      gamma = 0.2
+      N0    = 10000
+      I0    = 10
+    }
+  }
+}

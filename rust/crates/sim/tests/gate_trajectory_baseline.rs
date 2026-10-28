@@ -374,6 +374,16 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("init_laws", "gillespie", 0x73f9b219dd68dd54),
     ("init_laws", "chain_binomial", 0x99b799b03100b590),
     ("init_laws", "ode", 0x4380a0837ed47599),
+    // Proposal 2026-10-27-estimable-bsplines, Stage 2: the bspline goldens.
+    ("bspline_explicit_dated", "gillespie", 0x6d409b1965f13b65),
+    ("bspline_explicit_dated", "chain_binomial", 0xb4a811feedac1b5b),
+    ("bspline_explicit_dated", "ode", 0xcfa98a6ed9cee28e),
+    ("bspline_loglink", "gillespie", 0x465ecee2338159ea),
+    ("bspline_loglink", "chain_binomial", 0x209b243097058672),
+    ("bspline_loglink", "ode", 0xe6b1c6221c8fa9c4),
+    ("bspline_uniform", "gillespie", 0x91b4a603d987b168),
+    ("bspline_uniform", "chain_binomial", 0xf85d1d1c21a643d5),
+    ("bspline_uniform", "ode", 0x8b8ae7af91fe1f95),
 ];
 
 /// State-only ODE baselines (gh#166 Phase A): model -> `ode_state_hash`, captured
@@ -433,6 +443,10 @@ const ODE_STATE_BASELINES: &[(&str, u64)] = &[
     ("sirv_anchored_calendar", 0x59095d189f6f3b42),
     ("surveillance_likelihoods", 0x1797802b02ef6f71),
     ("zinb_vector_catch", 0x90be0bab1ecfa3ba),
+    // Proposal 2026-10-27-estimable-bsplines, Stage 2: the bspline goldens.
+    ("bspline_explicit_dated", 0x4098d1b1f5fb1d05),
+    ("bspline_loglink", 0xd5ed8436e58d18ab),
+    ("bspline_uniform", 0xdc6c447ae2913cbe),
 ];
 
 #[test]
