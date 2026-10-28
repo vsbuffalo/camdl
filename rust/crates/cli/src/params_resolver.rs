@@ -309,6 +309,10 @@ pub struct ResolveContext {
     /// The params files (`--params` / `--fixed-file`) that carry a fit's
     /// `[provenance]` block, i.e. files whose values are a fit's estimate.
     pub fit_estimate_files: HashSet<PathBuf>,
+    /// Per params file, the model constants whose entries were set aside
+    /// because the file is a verified fit artifact written before typed
+    /// constants left the IR's parameters (see [`load_fixed_file`]).
+    pub legacy_constant_entries: std::collections::BTreeMap<PathBuf, Vec<String>>,
 }
 
 /// How loudly to report `o`.
@@ -1594,12 +1598,10 @@ pub fn resolve_parameters_with_starts<'a>(
 
     // ── Tier 3: --fixed-file <toml> (layered, last wins) ────────────────
     for path in inputs.fixed_files {
-        let path_str = path.to_string_lossy().into_owned();
-        let overrides = crate::util::load_params_toml(&path_str)
-            .map_err(|msg| ResolveError::SchemaMismatch {
-                path: path.clone(),
-                msg,
-            })?;
+        let (overrides, set_aside) = load_fixed_file(&model, path)?;
+        if !set_aside.is_empty() {
+            context.legacy_constant_entries.insert(path.clone(), set_aside);
+        }
         for name in overrides.keys() {
             if !model_param_set.contains(name) {
                 return Err(ResolveError::UnknownParameter {
@@ -1891,6 +1893,60 @@ impl Layers {
     }
 }
 
+/// Load a `--fixed-file` / `--params` file for `model`, setting aside the
+/// entries a fit wrote for the model's constants before typed constants left
+/// the IR's parameters (IR 0.41). Returns the values to apply and the names set
+/// aside.
+///
+/// An entry naming a model constant is set aside only when both hold:
+///
+/// - the file is a **verified** fit artifact: it carries a `[provenance]`
+///   block and its parameter values still hash to the block's
+///   `content_hash` ([`crate::fit::provenance::verify_content_hash`]). A
+///   block alone proves nothing — anyone can write one — so a file that
+///   fails the hash, or has no block, is treated as hand-written;
+/// - the entry's value is exactly the model's declared value, so the fit
+///   ran with the constant the model now fixes.
+///
+/// Every other entry naming a constant — a differing value, or any entry
+/// of a hand-written file — stays in the map, where the caller refuses it as
+/// an unknown parameter with the constant's hint.
+pub fn load_fixed_file(
+    model: &ir::Model,
+    path: &std::path::Path,
+) -> Result<(HashMap<String, f64>, Vec<String>), ResolveError> {
+    let path_str = path.to_string_lossy().into_owned();
+    let mut values = crate::util::load_params_toml(&path_str)
+        .map_err(|msg| ResolveError::SchemaMismatch { path: path.to_path_buf(), msg })?;
+    let named: Vec<&ir::parameter::Constant> = model.constants.iter()
+        .filter(|c| values.contains_key(&c.name))
+        .collect();
+    if named.is_empty() || !is_verified_fit_artifact(path) {
+        return Ok((values, Vec::new()));
+    }
+    let mut set_aside = Vec::new();
+    for c in named {
+        if values.get(&c.name).is_some_and(|&v| v == c.value) {
+            values.remove(&c.name);
+            set_aside.push(c.name.clone());
+        }
+    }
+    set_aside.sort();
+    Ok((values, set_aside))
+}
+
+/// Whether `path` is a fit artifact whose values are the fit's own: a
+/// `[provenance]` block whose `content_hash` the file's values still match.
+fn is_verified_fit_artifact(path: &std::path::Path) -> bool {
+    let p = path.to_string_lossy();
+    match crate::fit::provenance::read_mle_provenance(&p) {
+        Ok(Some(prov)) => matches!(
+            crate::fit::provenance::verify_content_hash(&p, &prov.content_hash),
+            Ok(crate::fit::provenance::ContentVerification::Valid)),
+        _ => false,
+    }
+}
+
 /// Whether a params file carries a fit's `[provenance]` block — its values
 /// are then a fit's estimate ([`severity`]). A `.tsv` params file has no
 /// block, and an unreadable block counts as none: this only chooses how a
@@ -2057,6 +2113,15 @@ fn notices_of(resolved: &[PartsRef<'_>]) -> Notices {
     let mut pins: IndexSet<Notice> = IndexSet::new();
     for r in resolved {
         pins.extend(r.pinned_over_estimate.iter().map(PinnedOverEstimate::notice));
+    }
+    for r in resolved {
+        for (path, names) in &r.context.legacy_constant_entries {
+            pins.insert(Notice::info("legacy-constant-entry", format!(
+                "{}: ignored {} — a fit written before typed constants left the \
+                 IR's parameters recorded {}, at the value the model now fixes",
+                path.display(), names.join(", "),
+                if names.len() == 1 { "this model constant" } else { "these model constants" })));
+        }
     }
     pins.into_iter()
         .chain(override_notices(resolved).into_iter().map(|(_, n)| n))

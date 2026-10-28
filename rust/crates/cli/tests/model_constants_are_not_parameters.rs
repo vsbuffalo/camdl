@@ -175,3 +175,117 @@ fn an_expression_over_a_constant_evaluates_to_its_value() {
     assert!(a.lines().count() > 50, "the trajectory is non-trivial:\n{a}");
     assert_eq!(a, b, "w = 2 * omega must evaluate to 0.02");
 }
+
+// ── Fit artifacts written before constants left the parameters ─────────────
+//
+// A fit run before IR 0.41 wrote the model's constants into its
+// `mle_params.toml` beside the parameters. Such a file, when its values still
+// hash to its `[provenance] content_hash`, has the constant's entry set aside
+// if it equals the model's declared value; anything else naming a constant is
+// refused.
+
+/// The tamper hash `write_mle_params` writes into `content_hash`.
+fn tamper_hash(values: &[(&str, f64)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut v: Vec<&(&str, f64)> = values.iter().collect();
+    v.sort_by_key(|(k, _)| *k);
+    let mut h = Sha256::new();
+    for (name, value) in v {
+        h.update(format!("{name}={value:.12}\x00").as_bytes());
+    }
+    hex::encode(&h.finalize()[..4])
+}
+
+/// An `mle_params.toml` as a pre-0.41 fit wrote it, declaring `content_hash`
+/// (the true tamper hash of `values` unless `declared` overrides it).
+fn artifact(values: &[(&str, f64)], declared: Option<&str>) -> String {
+    let hash = declared.map(str::to_string).unwrap_or_else(|| tamper_hash(values));
+    let mut s = String::from("# camdl fit MLE\n");
+    for (k, v) in values {
+        s.push_str(&format!("{k} = {v:?}\n"));
+    }
+    s.push_str(&format!("\n[provenance]\ncamdl_version = \"0.1.0+ed634245\"\n\
+        timestamp = \"2026-10-27T23:58:12Z\"\ncontent_hash = \"{hash}\"\n\
+        fit_hash = \"97690198bb9a0062e570096cbc8f9c6bad93abe90a241633e2ee1b1ff119ddd0\"\n\
+        backend = \"chain_binomial\"\ndt = 1.0\nmodel = \"model.camdl\"\n\
+        model_identity = \"ea325bdbe922e0d43235fb7996d0ec0dd47b3335e9daac4cc4a17603c6f349e1\"\n\
+        seed = 3\nmethod = \"if2\"\nchain = 1\nlog_likelihood = -49.29\nloglik_sd = 0.0\n\
+        n_particles = 100\n"));
+    s
+}
+
+const FIT_VALUES: &[(&str, f64)] =
+    &[("I0", 10.0), ("N0", 10000.0), ("beta", 0.4), ("gamma", 0.15), ("omega", 0.01), ("rho", 0.6)];
+
+/// `profile` with one `--fixed-file`: a path that reads the file without
+/// `simulate --params`'s own tamper refusal in front of it.
+fn profile_with_file(dir: &Path, file: &str) -> Output {
+    camdl(dir, &["profile", "model.camdl", "--data", "weekly_cases.tsv",
+                 "--sweep", "beta=0.4", "--fixed", "N0=10000", "--fixed", "I0=10",
+                 "--fixed", "rho=0.6", "--fixed-file", file, "--rw-sd", "gamma=0.02",
+                 "--starts", "from_params=params.toml", "--particles", "20",
+                 "--iterations", "1"])
+}
+
+#[test]
+fn a_verified_legacy_artifact_at_the_declared_value_runs_with_a_notice() {
+    let tmp = fixture();
+    let dir = tmp.path();
+    std::fs::write(dir.join("mle_params.toml"), artifact(FIT_VALUES, None)).unwrap();
+    let notice = "mle_params.toml: ignored omega";
+    let o = camdl(dir, &["simulate", "model.camdl", "--params", "mle_params.toml"]);
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success(), "simulate --params of a verified legacy artifact: {stderr}");
+    assert!(stderr.contains(notice), "the set-aside entry is reported: {stderr}");
+    // `--fixed-file` reaches the same rule, and `profile`'s partition agrees.
+    std::fs::write(dir.join("held.toml"), artifact(&[("gamma", 0.15), ("omega", 0.01)], None))
+        .unwrap();
+    let o = profile_with_file(dir, "held.toml");
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success(), "profile --fixed-file of a verified legacy artifact: {stderr}");
+    assert!(stderr.contains("held.toml: ignored omega"), "{stderr}");
+}
+
+#[test]
+fn a_verified_artifact_whose_constant_differs_is_refused() {
+    let tmp = fixture();
+    let dir = tmp.path();
+    let mut values = FIT_VALUES.to_vec();
+    values.iter_mut().find(|(k, _)| *k == "omega").unwrap().1 = 0.02;
+    std::fs::write(dir.join("mle_params.toml"), artifact(&values, None)).unwrap();
+    refused_with_hint(&camdl(dir, &["simulate", "model.camdl", "--params", "mle_params.toml"]),
+        "a verified artifact recording omega = 0.02 against the model's 0.01");
+}
+
+#[test]
+fn a_hand_written_file_naming_a_constant_is_refused_even_at_its_value() {
+    let tmp = fixture();
+    let dir = tmp.path();
+    std::fs::write(dir.join("hand.toml"), "gamma = 0.15\nomega = 0.01\n").unwrap();
+    refused_with_hint(&profile_with_file(dir, "hand.toml"), "a hand-written --fixed-file");
+    std::fs::write(dir.join("hand_params.toml"), format!("{PARAMS}omega = 0.01\n")).unwrap();
+    refused_with_hint(&camdl(dir, &["simulate", "model.camdl", "--params", "hand_params.toml"]),
+        "a hand-written --params");
+}
+
+/// A `[provenance]` block proves nothing by being there: one whose
+/// `content_hash` the values do not match — forged outright, or edited — is
+/// a hand-written file, and so is a genuine artifact whose values were edited.
+#[test]
+fn a_forged_or_edited_provenance_block_does_not_unlock_a_constant() {
+    let tmp = fixture();
+    let dir = tmp.path();
+    let held = [("gamma", 0.15), ("omega", 0.01)];
+    std::fs::write(dir.join("forged.toml"), artifact(&held, Some("deadbeef"))).unwrap();
+    refused_with_hint(&profile_with_file(dir, "forged.toml"), "a forged content_hash");
+    // A genuine artifact with its block's hash edited.
+    let genuine = artifact(&held, None);
+    let edited_block = genuine.replace(&tamper_hash(&held), "0badc0de");
+    assert_ne!(genuine, edited_block);
+    std::fs::write(dir.join("edited_block.toml"), edited_block).unwrap();
+    refused_with_hint(&profile_with_file(dir, "edited_block.toml"), "an edited content_hash");
+    // A genuine artifact with a value edited after the fit wrote it.
+    let edited_value = genuine.replace("gamma = 0.15", "gamma = 0.2");
+    std::fs::write(dir.join("edited_value.toml"), edited_value).unwrap();
+    refused_with_hint(&profile_with_file(dir, "edited_value.toml"), "an edited value");
+}

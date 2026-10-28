@@ -30,6 +30,14 @@ params file and scenario. A constant you do want to set from outside becomes a
 parameter: `let omega : rate = 0.01` → `omega : rate` in `parameters { }`, with
 its value supplied by `[fixed]` or a scenario.
 
+A fit's `mle_params.toml` written before this change lists the constant beside
+the parameters. Used as `--fixed-file` or `--params`, its entry is ignored, with
+an info notice, when the file's values still match its
+`[provenance]
+content_hash` and the entry equals the model's declared value. A
+differing value, an edited file, or a hand-written file naming a constant is
+refused.
+
 **Diagnostic.** The command's ordinary unknown-parameter refusal, with this
 hint:
 

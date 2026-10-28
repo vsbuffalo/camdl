@@ -868,6 +868,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             cli_fixed: &a.model_overrides.fixed_cli.iter()
                 .map(|p| p.name.clone()).collect::<Vec<_>>(),
             fixed_files: &fixed_files_vec,
+            model: &model_declared,
         })
         .and_then(|decls| crate::roles::resolve_roles(
             &decls.inputs(&model_declared, &fit_simplex_groups), &crate::roles::PROFILE,
@@ -2008,6 +2009,9 @@ struct LegacySelection<'a> {
     /// `--fixed` names.
     cli_fixed: &'a [String],
     fixed_files: &'a [std::path::PathBuf],
+    /// The model as declared, against which a fit artifact's legacy
+    /// constant entries are set aside ([`crate::params_resolver::load_fixed_file`]).
+    model: &'a ir::Model,
 }
 
 /// [`LegacySelection`] as role declarations: the owned half of a
@@ -2081,7 +2085,8 @@ fn legacy_role_inputs(sel: LegacySelection<'_>) -> Result<LegacyRoleDecls, Strin
     let mut files = Vec::new();
     for path in sel.fixed_files {
         let fit_artifact = crate::params_resolver::carries_fit_provenance(path);
-        let mut names: Vec<String> = crate::util::load_params_toml(&path.to_string_lossy())?
+        let mut names: Vec<String> = crate::params_resolver::load_fixed_file(sel.model, path)
+            .map_err(|e| e.to_string())?.0
             .into_keys()
             .filter(|n| fit_artifact || !sel.focal.contains(n))
             .collect();
