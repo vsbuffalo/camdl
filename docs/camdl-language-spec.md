@@ -1590,6 +1590,77 @@ is basis function k at the forcing's evaluation time (times f itself under
 them. Only the knots — a window end, a breakpoint, a period — must be constant
 (**E600**), because they place the basis functions themselves.
 
+**`coefs = smooth(level, slope, scale, modes, per)`** writes the coefficients
+of a `bspline` as a straight line plus penalized curvature, so the prior on the
+curve says how much it may bend rather than where each coefficient sits:
+
+<!-- camdl-doctest-preamble: forcing-bspline-smooth
+dimensions { mode = [m1, m2, m3, m4, m5, m6, m7, m8, m9, m10] }
+compartments { S, I, R }
+parameters {
+  gamma   : rate
+  a_b     : real 'ratio in [-8, 2] ~ normal(mu = -1.9, sigma = 0.6)
+  b_b     : real [1/T] in [-0.05, 0.05] ~ normal(mu = 0.0, sigma = 0.005)
+  tau_b   : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
+  z[mode] : real 'ratio in [-8, 8] ~ normal(mu = 0.0, sigma = 1.0)
+}
+let N = S + I + R
+transitions {
+  infection : S --> I @ beta_t * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+-->
+
+```camdl preamble=forcing-bspline-smooth
+forcing {
+  # a_b: log beta at mid-window; b_b: its slope per day; tau_b scales the
+  # ten curvature modes z (n_basis - 2 of them).
+  beta_t : bspline 'per_day {
+    window  = [0 'days, 168 'days]
+    n_basis = 12
+    link    = log
+    coefs   = smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks)
+  }
+}
+```
+
+The coefficients are w = a·1 + b(ξ − t_m) + (τ/κ)·M·z, with ξ the Greville
+abscissae (the mean of each basis function's interior knots), t_m the
+mid-window time, and M = Q₊L⁻ᵀ the whitening of the integrated-curvature
+penalty Ω (Ωᵢⱼ = ∫ Bᵢ″ Bⱼ″ dt over the window): Q₊ spans the complement of
+the lines {1, ξ} and L is the Cholesky factor of Q₊ᵀΩQ₊. The runtime builds M
+from the resolved knots, so an anchored window works. Inside the window the
+linear part of the curve is exactly a + b(t − t_m), and the curvature of the rest is
+T_ref³ ∫ g″² dt = τ²‖z‖²/(K − 2), with κ = √(K − 2)·T_ref^{3/2} and T_ref the
+reference duration `per`. With z standard normal, τ² is therefore the expected
+total curvature measured in reference durations, independent of the time unit
+and of the number of knots. An exponential prior on τ is the penalized-complexity
+prior whose base model is a straight line; exponential(rate = 5.99) puts
+P(τ > 0.5) = 0.05. With the level and slope priors above and γ = 0.125, a
+prior-predictive calibration shows it keeps the 95% band of R(t) = β(t)/γ
+inside [0.1, 20] while containing [0.5, 3], at every t, for the cubic knot sets
+it covers (8, 12 and 20 uniform basis functions and 12 irregular; `make -f
+tests/recovery/Makefile calibrate-smooth-prior`). Other priors, rates or
+windows call for their own calibration.
+
+The rules, checked at compile time: `smooth` is accepted only as the `coefs` of
+a `bspline` of degree at least 2 (not of a `periodic_spline`); `modes` is the
+bare name of an indexed parameter family with exactly `n_basis − 2` cells, each
+declared `real` with prior exactly `normal(mu = 0.0, sigma = 1.0)` (**E414**
+otherwise), since the whitening is what gives z that law; `per` is a duration
+and a parameter in it is refused as structural (**E600**). Under `link = log`
+the level and scale are dimensionless and the slope is per unit time (**E301**
+otherwise). Other malformed uses are **E413**.
+
+The gradients are emitted as for explicit coefficients: ∂g/∂a = 1, ∂g/∂b =
+t_c − t_m, ∂g/∂zᵢ = (τ/κ)·Wᵢ(t_c) and ∂g/∂τ = Σᵢ zᵢWᵢ(t_c)/κ, where t_c is the
+evaluation time clamped to the window and Wᵢ = Σⱼ Mⱼᵢ Bⱼ is the i-th whitened
+basis function (each times f itself under `link = log`). Methods that read no
+prior — `if2` and the NLopt optimizers — cannot estimate the scale beside the
+modes, because the likelihood depends on τ and z only through w; `fit run`
+refuses an estimated scale there and names the remedy (fix it, estimate
+explicit coefficients, or fit with `pgas` or `pmmh`).
+
 Shape errors are **E408** (both or neither knot form, a `window` that is not
 `[a, b]`, `n_basis ≤ degree`, a degree above 5, a coefficient count that
 disagrees with the knots), an unknown argument is **E409**, and an unknown
