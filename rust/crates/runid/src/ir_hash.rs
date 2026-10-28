@@ -65,8 +65,8 @@ use ir::parameter::{
 };
 use ir::table::{OobPolicy, Table, TableSource};
 use ir::time_func::{
-    Fourier, InterpMethod, Interpolated, Periodic, PeriodicSpline, Piecewise, Sinusoidal,
-    TimeFuncKind, TimeFunction,
+    BSpline, BSplineKnots, Fourier, InterpMethod, Interpolated, Periodic, PeriodicSpline, Piecewise,
+    Sinusoidal, SplineCoefs, SplineLink, TimeFuncKind, TimeFunction,
 };
 use ir::transition::{
     DrawMethod, StoichiometryEntry, Transition, TransitionLineage, TransitionMetadata,
@@ -877,15 +877,48 @@ impl ContentAddressed for TimeFuncKind {
                 // harmonics: Vec<(Expr, Expr)>.
                 harmonics.hash_into(h);
             }
-            TimeFuncKind::PeriodicSpline(PeriodicSpline { period, n_basis, degree, coefs }) => {
+            TimeFuncKind::PeriodicSpline(PeriodicSpline { period, n_basis, degree, coefs, link }) => {
                 h.write_u32(5);
                 period.hash_into(h);
                 n_basis.hash_into(h);
                 degree.hash_into(h);
                 coefs.hash_into(h);
+                hash_spline_link(*link, h);
+            }
+            TimeFuncKind::BSpline(BSpline { knots, degree, coefs, link }) => {
+                h.write_u32(6);
+                match knots {
+                    BSplineKnots::Uniform { lower, upper, n_intervals } => {
+                        h.write_u32(0);
+                        lower.hash_into(h);
+                        upper.hash_into(h);
+                        n_intervals.hash_into(h);
+                    }
+                    BSplineKnots::Explicit { breakpoints } => {
+                        h.write_u32(1);
+                        breakpoints.hash_into(h);
+                    }
+                }
+                degree.hash_into(h);
+                match coefs {
+                    SplineCoefs::Explicit { coefs } => {
+                        h.write_u32(0);
+                        coefs.hash_into(h);
+                    }
+                }
+                hash_spline_link(*link, h);
             }
         }
     }
+}
+
+/// A spline's `link` (proposal 2026-10-27-estimable-bsplines §5.6). Matched
+/// exhaustively, so a new link is a compile error here.
+fn hash_spline_link(link: SplineLink, h: &mut CanonicalHasher) {
+    h.write_u32(match link {
+        SplineLink::Identity => 0,
+        SplineLink::Log => 1,
+    });
 }
 
 impl ContentAddressed for TimeFunction {

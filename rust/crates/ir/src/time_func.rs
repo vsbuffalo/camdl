@@ -59,6 +59,58 @@ pub struct PeriodicSpline {
     pub n_basis: u32,
     pub degree:  u32,
     pub coefs:   Vec<Expr>,
+    /// How the basis sum becomes the forcing value. Omitted when identity, so
+    /// a model without `link = log` serializes as before.
+    #[serde(default, skip_serializing_if = "SplineLink::is_identity")]
+    pub link:    SplineLink,
+}
+
+/// The map from a spline's basis sum g(t) = Σ cₖ Bₖ(t) to the forcing value:
+/// `Identity` (f = g) or `Log` (f = exp g, positive by construction). Proposal
+/// 2026-10-27-estimable-bsplines §4.4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplineLink {
+    #[default]
+    Identity,
+    Log,
+}
+
+impl SplineLink {
+    pub fn is_identity(&self) -> bool {
+        matches!(self, SplineLink::Identity)
+    }
+}
+
+/// The knots of a clamped `bspline` forcing (proposal §4.3). `Uniform` keeps
+/// its window ends as single expressions, because an end may be an
+/// observation anchor the runtime substitutes; `n_intervals` equal intervals
+/// span it. `Explicit` lists strictly increasing breakpoints, the first and
+/// last being the window. Both are structural: a parameter there is refused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BSplineKnots {
+    Uniform { lower: Expr, upper: Expr, n_intervals: u32 },
+    Explicit { breakpoints: Vec<Expr> },
+}
+
+/// A spline's coefficients: one live expression per basis function.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplineCoefs {
+    Explicit { coefs: Vec<Expr> },
+}
+
+/// A clamped B-spline of `degree` over a window, held at its end values
+/// outside it (proposal §4.3). The basis has `n_intervals + degree`
+/// functions, so that is the coefficient count.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BSpline {
+    pub knots:  BSplineKnots,
+    pub degree: u32,
+    pub coefs:  SplineCoefs,
+    #[serde(default, skip_serializing_if = "SplineLink::is_identity")]
+    pub link:   SplineLink,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +122,9 @@ pub enum TimeFuncKind {
     Periodic(Periodic),
     Fourier(Fourier),                  // gh#59
     PeriodicSpline(PeriodicSpline),    // gh#59
+    // `rename_all` would spell this `b_spline`.
+    #[serde(rename = "bspline")]
+    BSpline(BSpline),                  // proposal 2026-10-27-estimable-bsplines
 }
 
 /// Compile-time provenance for a forcing declared `data = "path"`.

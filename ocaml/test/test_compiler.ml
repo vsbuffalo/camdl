@@ -10269,6 +10269,198 @@ let test_forcing_method_unknown_e411 () =
   compile_expect_error_code ~code:"E411" ~contains:"banana"
     (gh423_inline_forcing "        method = banana\n")
 
+(* ── bspline forcing kind (proposal 2026-10-27-estimable-bsplines §4.3, §4.4) ──
+   A clamped B-spline over a window, held outside it. Two knot forms, exactly
+   one given; `link = identity | log`. The runtime evaluates it
+   (rust/crates/sim); these pin what the compiler emits and refuses. *)
+let bspline_model ?(params = "") ?(kind = "bspline") body = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { gamma : rate %s }
+    forcing {
+      beta_t : %s %s
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ beta_t * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |} params kind body
+
+let bspline_kind (m : Ir.model) =
+  match (List.hd m.time_functions).kind with
+  | Ir.BSpline b -> b
+  | _ -> Alcotest.fail "expected a bspline forcing"
+
+let test_bspline_uniform_compiles () =
+  let b = bspline_kind (compile_expect_ok (bspline_model {|'per_day {
+        window  = [0 'days, 80 'days]
+        n_basis = 6
+        coefs   = [0.3, 0.4, 0.5, 0.3, 0.2, 0.25]
+      }|})) in
+  (match b.knots with
+   | Ir.Knots_uniform { n_intervals; _ } ->
+     Alcotest.(check int) "n_basis - degree intervals" 3 n_intervals
+   | Ir.Knots_explicit _ -> Alcotest.fail "window form must be uniform knots");
+  Alcotest.(check int) "default degree" 3 b.degree;
+  Alcotest.(check bool) "default link identity" true (b.link = Ir.Link_identity);
+  (match b.coefs with Ir.Coefs_explicit cs -> Alcotest.(check int) "coefs" 6 (List.length cs))
+
+let test_bspline_explicit_compiles () =
+  let b = bspline_kind (compile_expect_ok (bspline_model {|'per_day {
+        breakpoints = [0 'days, 10 'days, 30 'days, 80 'days]
+        degree      = 2
+        coefs       = [0.3, 0.4, 0.5, 0.3, 0.2]
+      }|})) in
+  (match b.knots with
+   | Ir.Knots_explicit bps -> Alcotest.(check int) "breakpoints" 4 (List.length bps)
+   | Ir.Knots_uniform _ -> Alcotest.fail "breakpoints form must be explicit knots");
+  Alcotest.(check int) "degree" 2 b.degree
+
+(* A window end read from an observation anchor stays one `obs_anchor` node,
+   which the runtime substitutes per data vintage. *)
+let test_bspline_anchored_window () =
+  let b = bspline_kind (compile_expect_ok (bspline_model {|'per_day {
+        window  = [0 'days, last_obs - 2 'weeks]
+        n_basis = 4
+        coefs   = [0.3, 0.4, 0.5, 0.3]
+      }|})) in
+  match b.knots with
+  | Ir.Knots_uniform { upper = Ir.ObsAnchor _; _ } -> ()
+  | _ -> Alcotest.fail "the window end must compile to an obs_anchor node"
+
+(* §4.4: under `link = log` the unit scale s enters each coefficient as + ln s,
+   so the value is s·exp(g). `'per_week` under `time_unit = 'days` is s = 1/7. *)
+let test_bspline_log_link_shifts_coefficients () =
+  let b = bspline_kind (compile_expect_ok (bspline_model {|'per_week {
+        window  = [0 'days, 12 'weeks]
+        n_basis = 4
+        link    = log
+        coefs   = [0.7, 1.0, 1.2, 0.5]
+      }|})) in
+  Alcotest.(check bool) "link log" true (b.link = Ir.Link_log);
+  match b.coefs with
+  | Ir.Coefs_explicit (Ir.BinOp { op = Ir.Add; left = Ir.Const 0.7;
+                                  right = Ir.UncheckedDim { inner = Ir.Const ls; reason; _ } } :: _) ->
+    Alcotest.(check (float 1e-15)) "ln(1/7)" (Float.log (1.0 /. 7.0)) ls;
+    Alcotest.(check string) "marked shift" Ir.spline_log_shift_reason reason
+  | _ -> Alcotest.fail "a log-link coefficient must be c + ln s"
+
+let test_bspline_both_knot_forms_e408 () =
+  compile_expect_error_code ~code:"E408" ~contains:"not both"
+    (bspline_model {|'per_day {
+        window = [0 'days, 80 'days]
+        breakpoints = [0 'days, 80 'days]
+        n_basis = 4
+        coefs = [0.3, 0.4, 0.5, 0.3]
+      }|})
+
+let test_bspline_no_knots_e408 () =
+  compile_expect_error_code ~code:"E408" ~contains:"missing its knots"
+    (bspline_model {|'per_day { n_basis = 4  coefs = [0.3, 0.4, 0.5, 0.3] }|})
+
+let test_bspline_window_shape_e408 () =
+  compile_expect_error_code ~code:"E408" ~contains:"`window` has 3 entries"
+    (bspline_model {|'per_day {
+        window = [0 'days, 40 'days, 80 'days]
+        n_basis = 4
+        coefs = [0.3, 0.4, 0.5, 0.3]
+      }|})
+
+let test_bspline_n_basis_with_breakpoints_e408 () =
+  compile_expect_error_code ~code:"E408" ~contains:"implied by `breakpoints`"
+    (bspline_model {|'per_day {
+        breakpoints = [0 'days, 40 'days, 80 'days]
+        n_basis = 5
+        coefs = [0.3, 0.4, 0.5, 0.3, 0.2]
+      }|})
+
+let test_bspline_coef_count_e408 () =
+  compile_expect_error_code ~code:"E408" ~contains:"knots give 6 basis functions"
+    (bspline_model {|'per_day {
+        window = [0 'days, 80 'days]
+        n_basis = 6
+        coefs = [0.3, 0.4, 0.5, 0.3]
+      }|})
+
+let test_bspline_n_basis_not_above_degree_e408 () =
+  compile_expect_error_code ~code:"E408" ~contains:"n_basis (3) must be greater than degree (3)"
+    (bspline_model {|'per_day {
+        window = [0 'days, 80 'days]
+        n_basis = 3
+        coefs = [0.3, 0.4, 0.5]
+      }|})
+
+let test_spline_degree_above_five_e408 () =
+  compile_expect_error_code ~code:"E408" ~contains:"degree (6) must be at most 5"
+    (bspline_model {|'per_day {
+        window = [0 'days, 80 'days]
+        n_basis = 9
+        degree = 6
+        coefs = [1, 1, 1, 1, 1, 1, 1, 1, 1]
+      }|});
+  compile_expect_error_code ~code:"E408" ~contains:"degree (6) must be at most 5"
+    (bspline_model ~kind:"periodic_spline" {|'per_day {
+        period = 7 'days
+        n_basis = 9
+        degree = 6
+        coefs = [1, 1, 1, 1, 1, 1, 1, 1, 1]
+      }|})
+
+let test_bspline_unknown_key_e409 () =
+  compile_expect_error_code ~code:"E409" ~contains:"has no argument 'knots'"
+    (bspline_model {|'per_day {
+        window = [0 'days, 80 'days]
+        n_basis = 4
+        knots = 3
+        coefs = [0.3, 0.4, 0.5, 0.3]
+      }|})
+
+let test_spline_unknown_link_e411 () =
+  compile_expect_error_code ~code:"E411" ~contains:"unknown link 'logit'"
+    (bspline_model {|'per_day {
+        window = [0 'days, 80 'days]
+        n_basis = 4
+        link = logit
+        coefs = [0.3, 0.4, 0.5, 0.3]
+      }|})
+
+(* Stage 2 leaves the autodiff rule as it was: a parameter in a spline
+   coefficient is still E600 until `forcing_basis` lands (Stage 3). *)
+let test_bspline_param_coef_still_e600 () =
+  compile_expect_error_code ~code:"E600" ~contains:"bspline forcing coefficient"
+    (bspline_model ~params:"c2 : rate in [0.01, 1.0]" {|'per_day {
+        window = [0 'days, 80 'days]
+        n_basis = 4
+        coefs = [0.3, c2, 0.5, 0.3]
+      }|})
+
+(* `Compiler.compile` stops before the dimension checker that `camdlc` runs,
+   so this calls it on the compiled model. A unit-literal coefficient is
+   dimensioned without being a parameter (a parameter would stop at E600). *)
+let test_bspline_log_link_dimensioned_coef_e301 () =
+  let dimcheck_codes kind link =
+    let m = compile_expect_ok (bspline_model ~kind (Printf.sprintf {|'per_day {
+        %s
+        n_basis = 4
+        link = %s
+        coefs = [-1.0, 0.2 'per_day, -1.0, -1.0]
+      }|} (if kind = "bspline" then "window = [0 'days, 80 'days]" else "period = 7 'days") link)) in
+    List.filter_map (fun (d : Dimcheck.diagnostic) ->
+        if d.severity = Dimcheck.Error then Some (d.code, d.message) else None)
+      (Dimcheck.check_model m).diagnostics
+  in
+  List.iter (fun kind ->
+    (match dimcheck_codes kind "log" with
+     | [ ("E301", msg) ] when contains_substring ~needle:"coefficient 2 must be dimensionless" msg -> ()
+     | ds -> Alcotest.failf "%s, link = log: expected one E301, got [%s]" kind
+               (String.concat "; " (List.map fst ds)));
+    (* Identity link: coefficients carry the forcing's unit, as before. *)
+    Alcotest.(check (list string)) (kind ^ ", link = identity: no dimension error") []
+      (List.map fst (dimcheck_codes kind "identity")))
+    [ "bspline"; "periodic_spline" ]
+
 (* F36 regression: an indexed let-family reference in `projected`
    (`projected = m[v]` with `let m[v in village] = …`) must resolve as a
    derived expression, not fall through to transition-incidence and E507. This
@@ -14709,6 +14901,23 @@ let () =
         `Quick test_forcing_unknown_kwarg_e409;
       Alcotest.test_case "known forcing kwargs still compile"
         `Quick test_forcing_known_kwargs_ok;
+    ];
+    "bspline_forcing", [
+      Alcotest.test_case "uniform window compiles" `Quick test_bspline_uniform_compiles;
+      Alcotest.test_case "explicit breakpoints compile" `Quick test_bspline_explicit_compiles;
+      Alcotest.test_case "last_obs window end is an obs_anchor" `Quick test_bspline_anchored_window;
+      Alcotest.test_case "log link adds ln s to each coefficient" `Quick test_bspline_log_link_shifts_coefficients;
+      Alcotest.test_case "E408 both knot forms" `Quick test_bspline_both_knot_forms_e408;
+      Alcotest.test_case "E408 no knots" `Quick test_bspline_no_knots_e408;
+      Alcotest.test_case "E408 window not [a, b]" `Quick test_bspline_window_shape_e408;
+      Alcotest.test_case "E408 n_basis with breakpoints" `Quick test_bspline_n_basis_with_breakpoints_e408;
+      Alcotest.test_case "E408 coefficient count" `Quick test_bspline_coef_count_e408;
+      Alcotest.test_case "E408 n_basis <= degree" `Quick test_bspline_n_basis_not_above_degree_e408;
+      Alcotest.test_case "E408 degree above 5, both spline kinds" `Quick test_spline_degree_above_five_e408;
+      Alcotest.test_case "E409 unknown bspline key" `Quick test_bspline_unknown_key_e409;
+      Alcotest.test_case "E411 unknown link" `Quick test_spline_unknown_link_e411;
+      Alcotest.test_case "E600 parameter coefficient (until Stage 3)" `Quick test_bspline_param_coef_still_e600;
+      Alcotest.test_case "E301 dimensioned log-link coefficient" `Quick test_bspline_log_link_dimensioned_coef_e301;
     ];
     "forcing_typed_args_gh423", [
       Alcotest.test_case "method = linear (bare, valid) compiles"
