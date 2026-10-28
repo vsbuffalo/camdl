@@ -27,12 +27,13 @@ use std::path::PathBuf;
 use sim::compiled_model::CompiledModel;
 use sim::resolved_expr::{eval_resolved, ResolvedDerivEntry, ResolvedExpr};
 
-const SPLINE_GOLDENS: [&str; 5] = [
+const SPLINE_GOLDENS: [&str; 6] = [
     "bspline_uniform",
     "bspline_explicit_dated",
     "bspline_loglink",
     "bspline_param_coefs",
     "periodic_spline_param_coefs",
+    "bspline_smooth",
 ];
 
 fn golden(name: &str) -> String {

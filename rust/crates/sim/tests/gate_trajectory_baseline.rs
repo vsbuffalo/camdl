@@ -391,6 +391,10 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("periodic_spline_param_coefs", "gillespie", 0x91e0fa361b9b582e),
     ("periodic_spline_param_coefs", "chain_binomial", 0xf3c885ca748c7332),
     ("periodic_spline_param_coefs", "ode", 0x9c8c60c464ffae4b),
+    // Stage 4: the smooth coefficient form.
+    ("bspline_smooth", "gillespie", 0x4605de1eeca43b71),
+    ("bspline_smooth", "chain_binomial", 0x2b507a88e97aa14b),
+    ("bspline_smooth", "ode", 0x28f33e5669543cc4),
 ];
 
 /// State-only ODE baselines (gh#166 Phase A): model -> `ode_state_hash`, captured
@@ -456,6 +460,7 @@ const ODE_STATE_BASELINES: &[(&str, u64)] = &[
     ("bspline_uniform", 0xdc6c447ae2913cbe),
     ("bspline_param_coefs", 0xefd312c52636be4c),
     ("periodic_spline_param_coefs", 0xa4c5147b47421f45),
+    ("bspline_smooth", 0x0e81fd5c4c4ce980),
 ];
 
 #[test]
