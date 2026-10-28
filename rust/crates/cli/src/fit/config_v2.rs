@@ -2634,6 +2634,44 @@ impl FitConfig {
     ///
     /// The box compared is the one the transform enforces: `Transform::None`
     /// (a box with an infinite end on an unconstrained kind) enforces none.
+    /// Proposal 2026-10-27-estimable-bsplines §6.4: IF2 and the NLopt
+    /// optimizers read no prior, and the likelihood depends on a `smooth`
+    /// forcing's scale τ and modes z only through w = … + (τ/κ)Mz, so an
+    /// estimated τ beside them is a ridge with no maximum. Refused, naming the
+    /// scale, its forcing and the remedy.
+    pub fn validate_smooth_scale(&self, model: &ir::Model) -> Result<(), String> {
+        use crate::run_meta::FitAlgorithm;
+        use ir::time_func::{BSpline, SplineCoefs, TimeFuncKind};
+        let Some(method) = &self.inference.method else {
+            return Ok(());
+        };
+        let kind = method.algorithm.method_kind();
+        if !matches!(kind, FitAlgorithm::If2 | FitAlgorithm::NlSbplx | FitAlgorithm::NlBobyqa | FitAlgorithm::NlLbfgs) {
+            return Ok(());
+        }
+        for tf in &model.time_functions {
+            let TimeFuncKind::BSpline(BSpline { coefs: SplineCoefs::Smooth { scale, .. }, .. }) = &tf.kind else {
+                continue;
+            };
+            let mut refs = std::collections::HashSet::new();
+            sim::inference::gradient_capability::collect_param_refs(scale, &mut refs);
+            let mut estimated: Vec<&String> = refs.iter().filter(|p| self.problem.estimate.contains_key(*p)).collect();
+            estimated.sort();
+            if let Some(p) = estimated.first() {
+                return Err(format!(
+                    "[estimate]: `{p}` is the scale of the smooth forcing `{}`, and `{}` reads no \
+                     prior: the likelihood depends on the scale and the modes only through the \
+                     coefficients they make, so an estimated scale beside them has no maximum. \
+                     Fix `{p}` (the fit is then unpenalized maximum likelihood over the modes), \
+                     or estimate explicit coefficients, or fit with pgas or pmmh.",
+                    tf.name,
+                    kind.as_str()
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_hierarchical_leaf_boxes(&self, model: &ir::Model) -> Result<(), String> {
         use crate::run_meta::FitAlgorithm;
         use sim::inference::types::Transform;

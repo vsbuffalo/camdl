@@ -340,3 +340,49 @@ fn pfilter_profile_and_survey_notice_the_hold() {
     run("survey", ["survey", &m, "--fit", &f, "--eval", "simulate", "--n-points", "4", "--seed", "1",
                    "--output", &s(&tmp.path().join("survey_out"))].map(String::from).to_vec());
 }
+
+/// §6.4: under IF2 (no prior), an estimated `smooth` scale is a ridge with no
+/// maximum, and `fit run` refuses it by name before running; with the scale
+/// fixed, the same fit is not refused by this rule.
+#[test]
+fn if2_refuses_an_estimated_smooth_scale() {
+    let tmp = tempfile::tempdir().unwrap();
+    let model = repo().join("tests/fixtures/gradient/sir_smooth_fit.camdl");
+    let data = tmp.path().join("cases.tsv");
+    let mut body = String::from("time\tcases\n");
+    for w in 1..=9 {
+        body.push_str(&format!("{}\t{}\n", 7 * w, 20 + 7 * w));
+    }
+    std::fs::write(&data, body).unwrap();
+    let fit = |estimate_tau: bool| -> (bool, String) {
+        let toml = tmp.path().join(format!("fit_{estimate_tau}.toml"));
+        let (est, fixed) = if estimate_tau {
+            ("tau = { bounds = [1e-6, 2.5], start = 0.5 }\n", "")
+        } else {
+            ("", "tau = 0.5\n")
+        };
+        std::fs::write(&toml, format!(
+            "output_dir = \"{out}\"\n[model]\ncamdl = \"{model}\"\n[data.observations]\ncases = \"{data}\"\n\
+             [config]\ndt = 1.0\n[estimate]\na = {{ bounds = [-8.0, 2.0], start = -1.5 }}\n{est}\
+             [fixed]\ngamma = 0.15\nb = 0.0\nrho = 0.5\nz_m1 = 0.0\nz_m2 = 0.0\nz_m3 = 0.0\nz_m4 = 0.0\n{fixed}\
+             [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 20\niterations = 1\ncooling = 0.7\n",
+            out = tmp.path().join(format!("results_{estimate_tau}")).display(),
+            model = model.display(), data = data.display(),
+        )).unwrap();
+        let o = Command::new(bin())
+            .args(["fit", "run", toml.to_str().unwrap()])
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+            .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+            .output().unwrap();
+        (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
+    };
+    let (ok, stderr) = fit(true);
+    assert!(!ok, "an estimated smooth scale under if2 must be refused:\n{stderr}");
+    assert!(stderr.contains("`tau` is the scale of the smooth forcing `beta_t`, and `if2` reads no prior"), "{stderr}");
+    // Past this rule the run starts (the filter's own outcome on these
+    // synthetic counts is not what is tested here).
+    let (_, stderr) = fit(false);
+    assert!(!stderr.contains("is the scale of the smooth forcing") && stderr.contains("(method=if2)"),
+        "a fixed scale passes the rule and the run starts:\n{stderr}");
+}
