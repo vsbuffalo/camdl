@@ -669,6 +669,29 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
 
 // ─── Resolution ──────────────────────────────────────────────────────────────
 
+/// Refuse a survey over a parameter whose search box has an infinite end.
+///
+/// A survey reports a likelihood landscape over the estimated parameters'
+/// boxes, drawn by Latin-hypercube sampling within them. A box with an
+/// infinite end has no region to sample: the LHS builder would substitute
+/// the declared start scaled by `0.5 + u`, and the landscape would describe
+/// that neighbourhood while the record named the unbounded box.
+fn refuse_survey_without_finite_boxes(estimated: &[EstimatedParam]) -> Result<(), String> {
+    let open: Vec<String> = estimated
+        .iter()
+        .filter(|p| !(p.lower.is_finite() && p.upper.is_finite()))
+        .map(|p| format!("`{}` [{}, {}]", p.name, p.lower, p.upper))
+        .collect();
+    if open.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "survey samples a likelihood landscape within each estimated parameter's search \
+         box, and these parameters have no finite one: {}. Give each `bounds = [lo, hi]` \
+         in its [estimate] entry (or `in [lo, hi]` in the model).",
+        open.join(", ")))
+}
+
 fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
     -> Result<ResolvedSurveyInputs, String>
 {
@@ -936,6 +959,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             })
             .collect();
         let estimated = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)?;
+        refuse_survey_without_finite_boxes(&estimated)?;
 
         // Load observations from [data] and hash bytes per stream.
         let data_spec = config.data_spec()?;
@@ -1123,6 +1147,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             bounds: Some((e.lo, e.hi)),
         }).collect();
         let estimated = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)?;
+        refuse_survey_without_finite_boxes(&estimated)?;
 
         // Inline mode: data is a single file. If the model has one
         // observation, score against it; otherwise treat the file as

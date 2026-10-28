@@ -309,14 +309,15 @@ fn hierarchical_leaf_box_that_cuts_the_prior_is_refused() {
     assert!(out.status.success(), "unboxed leaves must run; stderr=\n{}", stderr(&out));
 
     // Control: a `log_normal` leaf on a `rate` keeps the half-infinite box
-    // [0, ∞), which is the family's whole support.
+    // [0, ∞), which is the family's whole support. That box has no region for
+    // a box-drawing start rule either, so the chains start at `start`.
     let rate_src = "  m : real ~ normal(mu = 0.0, sigma = 1.0)
   r1 : rate ~ log_normal(mu = m, sigma = 1.0)
   r2 : rate ~ log_normal(mu = m, sigma = 1.0)";
     let rate_ir = compile(&tmp.0, "hier_rate", &model_src(rate_src));
     let rate_est = "m = { bounds = [-3, 3], start = 0.0 }\n\
                     r1 = { start = 1.0, rw_sd = 0.1 }\nr2 = { start = 1.0, rw_sd = 0.1 }";
-    let (out, _) = run_fit(&tmp.0, &rate_ir, rate_est, PMMH, "pmmh_rate");
+    let (out, _) = run_fit(&tmp.0, &rate_ir, rate_est, &pmmh_single, "pmmh_rate");
     assert!(out.status.success(), "a rate leaf on [0, inf) must run; stderr=\n{}", stderr(&out));
     // The same leaf with a finite box cuts into (0, ∞) and is refused.
     let rate_boxed = "m = { bounds = [-3, 3], start = 0.0 }\nr1 = { bounds = [0.1, 5], start = 1.0 }\nr2 = { start = 1.0 }";

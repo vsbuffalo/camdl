@@ -134,13 +134,21 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   record said `search: [0, "inf"]` while the samplers and IF2 went below zero.
   The record now says `search: ["-inf", "inf"]` (`search_from: "support"`).
   `rate`, `positive`, `count` and `duration` keep `[0, ∞)`, which the log
-  transform enforces. At two or more chains, `starts = "uniform"`, `"lhs"` and
-  `"uniform_unconstrained"` now refuse such a parameter, which they had started
-  at its declared start scaled by 0.5–1.5 (never changing its sign); this
-  includes the default `uniform_unconstrained` when a parameter has no
-  sampleable prior. Migration: give the parameter bounds (`in [lo, hi]` or
-  `bounds = [lo, hi]`), or use `starts = "from_prior"` with a prior on it, or
-  `starts = "single"`.
+  transform enforces. Migration: none.
+- **Box-drawing starts refuse a parameter with no finite box.** At two or more
+  chains, `starts = "uniform"`, `"lhs"` and `"uniform_unconstrained"` refuse an
+  estimated parameter whose search box has an infinite end: an unbounded `real`
+  or `instant` on `(−∞, ∞)`, or an unbounded `rate`, `positive`, `count` or
+  `duration` on `[0, ∞)`. They had silently started it at its declared start
+  scaled by 0.5–1.5 instead of the rule asked for. This includes the default
+  `uniform_unconstrained`, chosen when some parameter has no prior to draw from
+  (a flat or hierarchical one). Migration: give the parameter bounds
+  (`in [lo, hi]` or `bounds = [lo, hi]`), or use `starts = "from_prior"` with a
+  prior on it, or `starts = "single"`.
+- **`camdl survey` refuses an estimated parameter with no finite box.** Its
+  Latin-hypercube sample had jittered such a parameter around its start, so the
+  reported landscape was not over the box the record named. Migration: give it
+  `bounds = [lo, hi]` in `[estimate]` (or `in [lo, hi]` in the model).
 - **`starts = "from_prior"` draws inside the bounds.** A prior draw outside the
   box the transform keeps is redrawn; before, it was clamped to the edge of the
   box and the chain started there. Fits whose prior draws fell outside the box

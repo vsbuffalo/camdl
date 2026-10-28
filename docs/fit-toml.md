@@ -433,9 +433,10 @@ The model file is the source of truth for what _can_ be estimated; the
   identity transform; the positive kinds (`rate`, `positive`, `count`,
   `duration`) over `[0, ∞)` with the log transform; a `probability` over
   `[0, 1]`. An automatic `rw_sd` is refused for an unbounded parameter (there is
-  no box to scale one from), and at two or more chains the `uniform`, `lhs` and
-  `uniform_unconstrained` starts refuse it; `from_prior` draws it from its
-  prior.
+  no box to scale one from); at two or more chains the `uniform`, `lhs` and
+  `uniform_unconstrained` starts refuse it, the default `uniform_unconstrained`
+  included; and `camdl survey` refuses it. `from_prior` draws it from its prior,
+  and `single` starts every chain at its `start`.
 - **Hierarchical parameters** (`a ~ normal(mu, 1)`) may not have bounds that cut
   into their prior's support under `pmmh` or `mh`: the prior is not renormalised
   to the bounds, and for a hierarchical parameter the missing constant depends

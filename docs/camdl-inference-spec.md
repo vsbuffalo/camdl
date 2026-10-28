@@ -188,12 +188,14 @@ knowledge constrains the plausible region.
 
 3. **Fit bounds control chain starts.** Spread starts (`lhs`, `uniform`,
    `uniform_unconstrained`) draw within the box. With two or more chains they
-   refuse a parameter whose box has an infinite end and whose transform keeps
-   none (an unbounded `real` or `instant`), since there is no interval to draw
-   within; the refusal asks for bounds or a different `starts` rule.
-   `from_prior` draws each parameter from its prior restricted to the box its
-   transform keeps, redrawing a value that falls outside; an unbounded `real` or
-   `instant` is drawn from its prior unrestricted, negative values included.
+   refuse a parameter whose box has an infinite end — an unbounded `real` or
+   `instant` on `(−∞, ∞)`, or an unbounded positive kind on `[0, ∞)` — since
+   there is no interval to draw within; the refusal asks for bounds or a
+   different `starts` rule. `camdl survey` refuses such a parameter the same
+   way: its Latin-hypercube landscape needs a finite region. `from_prior` draws
+   each parameter from its prior restricted to the box its transform keeps,
+   redrawing a value that falls outside; an unbounded `real` or `instant` is
+   drawn from its prior unrestricted, negative values included.
 
 4. **Boundary proximity warning.** If the MLE is within 1% of a fit bound, warn
    that the true MLE may be outside the search region:

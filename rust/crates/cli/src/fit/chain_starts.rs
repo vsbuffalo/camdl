@@ -302,8 +302,7 @@ pub enum InitError {
     /// the offending parameter names.
     NoPriorAndNoBounds { params: Vec<String> },
     /// `uniform`, `lhs` or `uniform_unconstrained` was asked to spread chains
-    /// over a parameter whose search box has an infinite end and whose
-    /// transform keeps no box (an unbounded `real` or `instant`): there is no
+    /// over a parameter whose search box has an infinite end: there is no
     /// interval to draw within. Lists `name [lo, hi]` per parameter.
     NoFiniteBox { params: Vec<String> },
     /// A sourced rule reached the draw without its source resolved — a
@@ -647,20 +646,17 @@ pub fn draw_chain_starts(
 }
 
 /// Refuse a box-spreading rule over a parameter with no box to spread in: a
-/// search box with an infinite end that its transform does not keep
-/// (`Transform::None` — an unbounded `real` or `instant`). The builders would
-/// otherwise scale the declared start by `0.5 + u`, which never changes its
-/// sign and leaves a start of 0 at 0 on every chain. A `Log` parameter's
-/// `[0, ∞)` box is kept by its transform and is not refused here.
+/// search box with an infinite end, whatever its transform (an unbounded
+/// `real` or `instant` on `(−∞, ∞)`, or a positive kind on `[0, ∞)`). The
+/// rule draws within the box, and there is none to draw within; the builders
+/// would otherwise substitute the declared start scaled by `0.5 + u`, a rule
+/// the user did not ask for.
 fn refuse_spread_without_finite_box(
     base_specs: &[EstimatedParam],
 ) -> Result<(), InitError> {
     let params: Vec<String> = base_specs
         .iter()
-        .filter(|s| {
-            matches!(s.transform, Transform::None)
-                && !(s.lower.is_finite() && s.upper.is_finite())
-        })
+        .filter(|s| !(s.lower.is_finite() && s.upper.is_finite()))
         .map(|s| format!("`{}` [{}, {}]", s.name, s.lower, s.upper))
         .collect();
     if params.is_empty() {
@@ -1889,11 +1885,16 @@ mod tests {
     /// `prior ~ normal(-1, 1)`, and the spec the runner builds for it: the
     /// runner's own search box and transform, not a test-local choice.
     fn unbounded_real() -> (ResolvedParameters, Vec<EstimatedParam>) {
+        unbounded(ir::parameter::ParamKind::Real)
+    }
+
+    /// As [`unbounded_real`], for a parameter of `kind`.
+    fn unbounded(kind: ir::parameter::ParamKind) -> (ResolvedParameters, Vec<EstimatedParam>) {
         let mut p = mk_param("shift", 0.5,
             Some(ir::parameter::PriorDist::Normal(
                 ir::parameter::NormalPrior { mean: -1.0, sd: 1.0 })),
             None);
-        p.param_kind = Some(ir::parameter::ParamKind::Real);
+        p.param_kind = Some(kind);
         let (lower, upper) = crate::fit::runner::resolve_search_box("shift", None, &p).unwrap();
         let transform = crate::fit::runner::derive_transform_with_bounds(&p, None, (lower, upper));
         let resolved = mk_resolved(vec![p], &["shift"]);
@@ -1920,6 +1921,22 @@ mod tests {
                 "{}: {err}", rule.spelled());
             // One chain draws nothing, so there is nothing to refuse.
             assert!(draw_chain_starts(&ctx, &ResolvedStarts::bare(rule), 1, 1).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_box_spreading_rule_refuses_an_unbounded_rate_parameter() {
+        let (resolved, base_specs) = unbounded(ir::parameter::ParamKind::Rate);
+        assert!(matches!(base_specs[0].transform, Transform::Log { .. }));
+        let priors = priors_for(&resolved);
+        let ctx = StartContext { resolved: &resolved, base_specs: &base_specs, priors: &priors };
+        for rule in [Spread::Uniform, Spread::Lhs, Spread::UniformUnconstrained] {
+            let rule = ChainStarts::Spread(rule);
+            let err = draw_chain_starts(&ctx, &ResolvedStarts::bare(rule.clone()), 4, 1)
+                .expect_err("[0, inf) has no box to draw within")
+                .to_string();
+            assert!(err.contains("these parameters have no finite one: `shift` [0, inf]."),
+                "{}: {err}", rule.spelled());
         }
     }
 

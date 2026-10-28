@@ -1,10 +1,14 @@
 //! A `real` or `instant` parameter that declares no range and is given no
 //! fit-config bounds searches the whole line, `(−∞, ∞)`. Nothing would keep
 //! it in a narrower box: with an infinite end its transform is the identity,
-//! which clamps nothing. So the record says `search: ["-inf", "inf"]`, the
-//! box-spreading start rules (`uniform`, `lhs`, `uniform_unconstrained`)
-//! refuse it for want of an interval to draw within, and `from_prior` draws
-//! it from its prior, negative values included.
+//! which clamps nothing. So the record says `search: ["-inf", "inf"]`, and
+//! `from_prior` draws it from its prior, negative values included.
+//!
+//! A positive kind with no bounds keeps `[0, ∞)`. Either way the box has an
+//! infinite end, so the rules that draw within it (`uniform`, `lhs`,
+//! `uniform_unconstrained`, at two or more chains) and `survey`'s
+//! Latin-hypercube landscape refuse the parameter rather than substitute a
+//! jitter around its start.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -18,7 +22,8 @@ fn binary() -> PathBuf {
     bin
 }
 
-/// SIR with `delta : real`, declaring no range, which the dynamics ignore.
+/// SIR with `delta : real` and `eta : rate`, declaring no range, which the
+/// dynamics ignore.
 const MODEL: &str = r#"
 time_unit = 'days
 compartments { S, I, R }
@@ -28,10 +33,11 @@ parameters {
   N0    : count
   I0    : count
   delta : real        ~ normal(mu = -1.0, sigma = 1.0)
+  eta   : rate        ~ log_normal(mu = 0.0, sigma = 1.0)
 }
 let N = S + I + R
 transitions {
-  infection : S --> I  @ (beta + 0.0 * delta) * S * I / N
+  infection : S --> I  @ (beta + 0.0 * delta + 0.0 * eta) * S * I / N
   recovery  : I --> R  @ gamma * I
 }
 init { S = N0 - I0  I = I0 }
@@ -53,17 +59,28 @@ const DATA: &str =
 /// Run `camdl fit run` with `delta` estimated under `method`, plus `extra`
 /// arguments. Returns the output and the results directory.
 fn fit(method: &str, extra: &[&str]) -> (Output, tempfile::TempDir) {
+    let mut args = vec!["fit", "run", "fit.toml", "--seed", "1"];
+    args.extend_from_slice(extra);
+    run("delta", method, &args)
+}
+
+/// Run `camdl <args>` in a directory holding the model, the data and a
+/// fit.toml estimating `free` (with no bounds and an explicit `rw_sd`); the
+/// other unbounded parameter is held.
+fn run(free: &str, method: &str, args: &[&str]) -> (Output, tempfile::TempDir) {
+    let held = if free == "delta" { "eta = 0.1" } else { "delta = 0.0" };
     let toml = format!(r#"[model]
 camdl = "model.camdl"
 [data.observations]
 weekly_cases = "weekly_cases.tsv"
 [estimate]
 beta  = {{ bounds = [0.05, 1.0], start = 0.25 }}
-delta = {{ start = 0.5, rw_sd = 0.1 }}
+{free} = {{ start = 0.5, rw_sd = 0.1 }}
 [fixed]
 gamma = 0.15
 N0 = 10000
 I0 = 10
+{held}
 [method]
 {method}
 "#);
@@ -71,10 +88,8 @@ I0 = 10
     std::fs::write(tmp.path().join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.path().join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.path().join("fit.toml"), toml).unwrap();
-    let mut args = vec!["fit", "run", "fit.toml", "--seed", "1"];
-    args.extend_from_slice(extra);
     let out = Command::new(binary())
-        .args(&args)
+        .args(args)
         .env("CAMDL_OUTPUT_DIR", tmp.path().join("res"))
         .current_dir(tmp.path())
         .output()
@@ -152,4 +167,33 @@ fn from_prior_starts_it_below_zero() {
     // `normal(-1, 1)` puts 84% of its mass below zero; four starts all at or
     // above it would have probability 0.16^4 ≈ 7e-4 at this seed's draw.
     assert!(starts.iter().any(|v| *v < 0.0), "no start below zero: {starts:?}");
+}
+
+#[test]
+fn a_box_spreading_start_rule_refuses_an_unbounded_rate_too() {
+    for rule in ["uniform", "lhs", "uniform_unconstrained"] {
+        let (out, _tmp) = run("eta", PMMH_4, &["fit", "run", "fit.toml", "--seed", "1",
+            "--starts", rule]);
+        let err = stderr(&out);
+        assert!(!out.status.success(), "{rule}: expected a refusal:\n{err}");
+        assert!(err.contains("these parameters have no finite one: `eta` [0, inf]."),
+            "{rule}: the refusal names the parameter and its box:\n{err}");
+    }
+    // The rule that does not draw within the box runs.
+    let (out, _tmp) = run("eta", PMMH_4, &["fit", "run", "fit.toml", "--seed", "1",
+        "--starts", "from_prior"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn survey_refuses_a_parameter_with_no_finite_box() {
+    for (free, shown) in [("delta", "`delta` [-inf, inf]"), ("eta", "`eta` [0, inf]")] {
+        let (out, _tmp) = run(free, IF2, &["survey", "model.camdl", "--fit", "fit.toml",
+            "--n-points", "4", "--eval-particles", "20", "--output", "srv"]);
+        let err = stderr(&out);
+        assert!(!out.status.success(), "{free}: expected a refusal:\n{err}");
+        assert!(err.contains(&format!("these parameters have no finite one: {shown}."))
+            && err.contains("`bounds = [lo, hi]`"),
+            "{free}: the refusal names the parameter, its box and the remedy:\n{err}");
+    }
 }

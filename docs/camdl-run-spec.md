@@ -2712,10 +2712,11 @@ explored.
 
 `uniform`, `lhs`, and `uniform_unconstrained` collapse to the base point at
 `chains = 1`; the source-reading rules do not. At two or more chains they refuse
-a parameter with no finite box to draw within (an unbounded `real` or `instant`,
-whose box is `(−∞, ∞)`), asking for bounds or a different rule; `from_prior`
-draws such a parameter from its prior. A rule applies only to parameters in
-`[estimate]`; anything in `[fixed]` takes its declared value.
+a parameter with no finite box to draw within (an unbounded `real` or `instant`
+on `(−∞, ∞)`, or an unbounded `rate`, `positive`, `count` or `duration` on
+`[0, ∞)`), asking for bounds or a different rule; `from_prior` draws such a
+parameter from its prior. A rule applies only to parameters in `[estimate]`;
+anything in `[fixed]` takes its declared value.
 
 **The default.** With no `starts` in the file and no `--starts` on the command
 line, `fit run` resolves the rule against the problem before the identity is
@@ -6335,7 +6336,9 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 ```
 --fit FIT                   fit.toml supplying [estimate] bounds and [data].
                             Mutually exclusive with --estimate/--data
---estimate NAME=LO:HI       inline LHS bounds (repeatable)
+--estimate NAME=LO:HI       inline LHS bounds (repeatable). With --fit, an
+                            estimated parameter whose box has an infinite end
+                            (no `bounds`, no `in [lo, hi]`) is refused
 --data PATH                 inline observation TSV
 --fixed NAME=VALUE          pin a parameter (repeatable); with --fit, an
                             [estimate] name is held at VALUE and not sampled
