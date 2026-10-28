@@ -384,6 +384,13 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("bspline_uniform", "gillespie", 0x91b4a603d987b168),
     ("bspline_uniform", "chain_binomial", 0xf85d1d1c21a643d5),
     ("bspline_uniform", "ode", 0x8b8ae7af91fe1f95),
+    // Stage 3: spline goldens whose coefficients are parameters.
+    ("bspline_param_coefs", "gillespie", 0x711be32341d5833b),
+    ("bspline_param_coefs", "chain_binomial", 0x6d94006874330c0d),
+    ("bspline_param_coefs", "ode", 0x46e789af0ff4f237),
+    ("periodic_spline_param_coefs", "gillespie", 0x91e0fa361b9b582e),
+    ("periodic_spline_param_coefs", "chain_binomial", 0xf3c885ca748c7332),
+    ("periodic_spline_param_coefs", "ode", 0x9c8c60c464ffae4b),
 ];
 
 /// State-only ODE baselines (gh#166 Phase A): model -> `ode_state_hash`, captured
@@ -447,6 +454,8 @@ const ODE_STATE_BASELINES: &[(&str, u64)] = &[
     ("bspline_explicit_dated", 0x4098d1b1f5fb1d05),
     ("bspline_loglink", 0xd5ed8436e58d18ab),
     ("bspline_uniform", 0xdc6c447ae2913cbe),
+    ("bspline_param_coefs", 0xefd312c52636be4c),
+    ("periodic_spline_param_coefs", 0xa4c5147b47421f45),
 ];
 
 #[test]
