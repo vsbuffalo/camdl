@@ -1,0 +1,62 @@
+#' SIR whose transmission is scaled by a smooth multiplier that changes through
+#' time: a clamped cubic B-spline over the first 120 days, equal knot spacing.
+#' Past day 120 the multiplier holds its last value, so the run to day 160
+#' carries the curve's end value rather than an extrapolated trend.
+#' @base sir_basic.camdl
+#' @adds a bspline transmission multiplier over a uniform window
+#' @changes the horizon is 160 days, past the window, to exercise the hold
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  #' per-capita transmission rate before the multiplier
+  #' @symbol β
+  beta  : rate     in [0.001, 2.0]
+  #' recovery rate; the mean infectious period is 1/gamma
+  #' @symbol γ
+  gamma : rate     in [0.001, 1.0]
+  #' total population size
+  N0    : count    in [100, 100000]
+  #' initial number infectious
+  I0    : count    in [1, 1000]
+}
+
+forcing {
+  # Six cubic basis functions over [0, 120] days: three equal intervals.
+  contact : bspline 'ratio {
+    window  = [0 'days, 120 'days]
+    n_basis = 6
+    coefs   = [1.0, 1.1, 0.7, 0.5, 0.6, 0.8]
+  }
+}
+
+transitions {
+  infection : S --> I  @ beta * contact * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 160 'days
+}
+
+scenarios {
+  baseline_scenario {
+    label = "baseline"
+    set = {
+      beta  = 0.4
+      gamma = 0.2
+      N0    = 10000
+      I0    = 10
+    }
+  }
+}
