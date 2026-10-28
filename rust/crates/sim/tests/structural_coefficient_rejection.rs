@@ -26,6 +26,7 @@ use sim::compiled_model::CompiledModel;
 /// process the forcing.
 fn model_with_forcing(kind: TimeFuncKind) -> Model {
     Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "structural".into(),
         version: "0.3".into(),

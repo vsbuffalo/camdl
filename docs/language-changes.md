@@ -13,6 +13,32 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-10-27 — a typed constant `let` is a model constant, not a parameter
+
+**What.** A typed `let` with a constant body (`let omega : rate = 0.01`)
+compiles to the IR's `constants` section and is read through a constant
+reference; it is no longer an IR parameter (IR 0.41). It holds its declared
+value in every run. No `[fixed]`, `[estimate]`, `--fixed`, `--fixed-file`,
+`--param`, `--params`, `--sweep`, draws column, `camdlc --set` or scenario `set`
+can name it, even at its declared value, and `fit run` no longer demands a
+`[fixed]` entry for it (gh#965). The dimension checker still reads its declared
+kind. `camdl fit summary --parameters` lists the model's constants, with their
+values and prose, under their own heading after the parameter legend.
+
+**Migration.** Delete the constant's line from every fit config's `[fixed]`,
+params file and scenario. A constant you do want to set from outside becomes a
+parameter: `let omega : rate = 0.01` → `omega : rate` in `parameters { }`, with
+its value supplied by `[fixed]` or a scenario.
+
+**Diagnostic.** The command's ordinary unknown-parameter refusal, with this
+hint:
+
+```
+hint: `omega` is a constant of the model (`let omega : rate = 0.01`), not a parameter; declare it in `parameters {}` to set it from outside
+```
+
+In a model's own `scenarios { }`, E268 carries the same advice.
+
 ## 2026-10-25 — every chain index a fit shows counts from 0
 
 **What.** A fit's chains are numbered `0 … N-1` on every surface that names one:

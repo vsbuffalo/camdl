@@ -36,6 +36,13 @@ and cond_expr    = { pred: expr; then_: expr; else_: expr }
 and expr =
   | Const  of float
   | Param  of string
+  (* A reference to a model constant — a typed `let` with a constant body
+     (`let omega : rate = 0.01`) — by name, resolved against [model.constants].
+     Not a parameter: no command can set or estimate it, and its derivative with
+     respect to every parameter is zero. It is a node of its own rather than the
+     inlined literal so the dimension checker sees the constant's declared kind
+     (a bare literal is dimensionless) and every display keeps its name. *)
+  | ConstRef of string
   | Pop    of string
   | PopSum of string list
   | Time
@@ -738,6 +745,7 @@ type doc_index = {
      body, this is envelope metadata and can be corrected without re-keying. *)
   di_model:        doc option;
   di_parameters:   (string * doc) list;
+  di_constants:    (string * doc) list;
   di_compartments: (string * doc) list;
   di_transitions:  (string * doc) list;
   di_observations: (string * doc) list;
@@ -747,8 +755,17 @@ type doc_index = {
 
 let empty_doc_index = {
   di_model = None;
-  di_parameters = []; di_compartments = []; di_transitions = [];
+  di_parameters = []; di_constants = []; di_compartments = []; di_transitions = [];
   di_observations = []; di_dimensions = []; di_quantities = [];
+}
+
+(* A model constant: a typed `let` with a constant body, evaluated once at
+   compile time. Expressions read it through [ConstRef]. Its `#'` prose lives in
+   [doc_index.di_constants], like every other declaration's. *)
+type constant = {
+  c_name:  string;
+  c_value: float;
+  c_kind:  param_kind;   (* the declared type keyword — what dimcheck reads *)
 }
 
 type parameter = {
@@ -1086,6 +1103,7 @@ type model = {
   interventions:      intervention list;
   observations:       observation_model list;
   parameters:         parameter list;
+  constants:          constant list;      (* typed constant `let`s; read via [ConstRef] *)
   bindings:           binding list;       (* Fix B: shared per-coordinate bindings, topo-ordered *)
   per_eval_bindings:  binding list;       (* gh#272 LICM: param/table-only loop-invariant bindings,
                                              topo-ordered; produced by the LICM pass, empty by default *)

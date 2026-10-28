@@ -78,6 +78,7 @@ let map2 (da : deriv) (db : deriv) (f : expr -> expr -> expr) : deriv =
 let rec mentions (param : string) (e : expr) : bool =
   match e with
   | Param n -> n = param
+  | ConstRef _ -> false   (* a model constant is not a parameter *)
   | Const _ | Pop _ | Time | Dt | Projected | ObsColumnRef _ | ObsAnchor _ -> false
   | PopSum _ -> false
   | BinOp b -> mentions param b.left || mentions param b.right
@@ -98,7 +99,7 @@ let rec mentions (param : string) (e : expr) : bool =
 let rec mentions_projected (e : expr) : bool =
   match e with
   | Projected -> true
-  | Param _ | Const _ | Pop _ | PopSum _ | Time | Dt | ObsColumnRef _
+  | Param _ | ConstRef _ | Const _ | Pop _ | PopSum _ | Time | Dt | ObsColumnRef _
   | ObsAnchor _ -> false
   | BinOp b -> mentions_projected b.left || mentions_projected b.right
   | UnOp u -> mentions_projected u.arg
@@ -139,7 +140,7 @@ let rec mentions_pop (bindings : binding list) (c : string) (e : expr) : bool =
   match e with
   | Pop n -> n = c
   | PopSum members -> List.mem c members
-  | Param _ | Const _ | Time | Dt | Projected | ObsColumnRef _
+  | Param _ | ConstRef _ | Const _ | Time | Dt | Projected | ObsColumnRef _
   | ObsAnchor _ -> false
   | TimeFunc _ -> false   (* forcings are state-free *)
   | BindingRef name ->
@@ -268,6 +269,10 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
        before any gradient is evaluated; it depends on the DATA, never on a
        parameter or a compartment, so its derivative is a genuine zero. *)
     | Const _ | Time | Dt | ObsColumnRef _ | ObsAnchor _ -> Known (Const 0.0)
+
+    (* A model constant: a literal by another name, not a parameter and not
+       state — zero for every target. *)
+    | ConstRef _ -> Known (Const 0.0)
 
     (* The projection output. The target leaf under [WrtProjected] (∂projected/∂projected
        = 1, the source of the observation factor-2 chain); constant w.r.t. a
@@ -884,7 +889,7 @@ let differentiate_projection (proj : projection) (compartments : string list)
 let rec inline_projected (proj : expr) (e : expr) : expr =
   match e with
   | Projected -> proj
-  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
   | BindingRef _ | ObsColumnRef _ | ObsAnchor _ -> e
   | UnOp u -> UnOp { u with arg = inline_projected proj u.arg }
   | BinOp b ->

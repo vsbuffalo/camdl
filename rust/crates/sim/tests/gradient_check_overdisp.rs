@@ -429,6 +429,7 @@ fn spine_oracle_deterministic_inflow_not_poisson_scored() {
     };
 
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "det_inflow_spine".into(),
         version: "0.3".into(),

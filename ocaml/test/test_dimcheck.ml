@@ -53,6 +53,7 @@ let empty_model
     interventions = [];
     observations;
     parameters;
+    constants = [];
     bindings = [];
     per_eval_bindings = [];
     initial_conditions = [];

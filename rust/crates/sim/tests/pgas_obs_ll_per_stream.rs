@@ -102,6 +102,7 @@ fn ir_incidence_obs(name: &str) -> IrObs {
 /// `--> R @ deterministic(K)`, observed by two incidence blocks (`afp`, `es`).
 fn model() -> Arc<CompiledModel> {
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "pgas_obs_ll_per_stream".into(),
         version: "0.3".into(),

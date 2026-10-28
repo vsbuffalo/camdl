@@ -24,7 +24,7 @@ let prec_binop = function
   | Ir.Eq | Ir.Neq | Ir.Lt | Ir.Gt | Ir.Le | Ir.Ge -> 4
 
 let prec_expr : Ir.expr -> int = function
-  | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
+  | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.TimeFunc _ | Ir.TableLookup _ | Ir.Projected
   | Ir.ObsColumnRef _ -> 10
   | Ir.ObsAnchor _ -> 10      (* a name (± a number), atomic *)
@@ -101,7 +101,7 @@ and pp_inner ~mode ~split ~ascii ppf = function
       Fmt.pf ppf "%.0f" f
     else
       Fmt.pf ppf "%g" f
-  | Ir.Param name ->
+  | Ir.Param name | Ir.ConstRef name ->
     Term_style.param Fmt.string ppf name
   | Ir.Pop name ->
     pp_pop ~mode ~split ppf name

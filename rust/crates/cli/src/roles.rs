@@ -9,10 +9,10 @@
 //! error ([`RoleError::TwoDeclarations`]), except for the special cases of
 //! [`SpecialCase`].
 //!
-//! A typed constant (`let omega : rate = 0.01`) is still an IR parameter, and
-//! is resolved here as one, exactly as today's commands treat it. It leaves
-//! the IR's parameters, and so this module, in a later IR change; nothing
-//! here special-cases it.
+//! A typed constant (`let omega : rate = 0.01`) is not a parameter: it is in
+//! the IR's `constants`, not its `parameters`, so it is in no partition and no
+//! declaration can name it. One that tries is [`RoleError::UnknownName`], whose
+//! message carries the hint that makes it settable.
 //!
 //! The partition holds no values. The stored record ([`PartitionRecord`])
 //! pairs it with the values the run resolved, and the legacy `estimated` and
@@ -742,7 +742,11 @@ pub struct RoleInputs<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoleError {
     TwoDeclarations { name: String, first: Declaration, second: Declaration },
-    UnknownName { name: String, by: Declaration, candidates: Vec<String> },
+    /// `constant_hint` is set when `name` is a model constant
+    /// ([`ir::Model::constant_hint`]); the message then says how to make it
+    /// configurable.
+    UnknownName { name: String, by: Declaration, candidates: Vec<String>,
+                  constant_hint: Option<String> },
     NotAccepted { name: String, role: RoleKind, command: &'static str },
     Missing { role: RoleKind, command: &'static str },
     ScenarioOnRole { scenario: String, name: String, role: RoleKind },
@@ -769,12 +773,15 @@ impl std::fmt::Display for RoleError {
                     first.role_kind().word(), first.describe(),
                     second.role_kind().word(), second.describe())
             }
-            RoleError::UnknownName { name, by, candidates } => {
+            RoleError::UnknownName { name, by, candidates, constant_hint } => {
                 write!(f, "{} names `{name}`, which is not a parameter of this model",
                     by.describe())?;
                 if !candidates.is_empty() {
                     write!(f, "; `{name}` is an indexed family, whose parameters are {}",
                         candidates.join(", "))?;
+                }
+                if let Some(hint) = constant_hint {
+                    write!(f, "\n  hint: {hint}")?;
                 }
                 Ok(())
             }
@@ -848,6 +855,7 @@ pub fn resolve_roles<'a>(inputs: &'a RoleInputs<'a>, command: &CommandRoles)
                     .filter(|p| p.name.starts_with(&prefix))
                     .map(|p| p.name.clone())
                     .collect(),
+                constant_hint: inputs.model.constant_hint(d.name),
             });
         }
     }
@@ -973,6 +981,7 @@ pub fn resolve_roles<'a>(inputs: &'a RoleInputs<'a>, command: &CommandRoles)
                 Some(_) => held.push(m.clone()),
                 None => return Err(RoleError::UnknownName {
                     name: m.clone(), by: Declaration::FitEstimate, candidates: Vec::new(),
+                    constant_hint: inputs.model.constant_hint(m),
                 }),
             }
         }
@@ -1094,8 +1103,9 @@ mod tests {
         }
     }
 
-    /// The SIR recovery model's parameters, a typed constant `omega`, and an
-    /// indexed family `c[region]` compiled to `c_north`, `c_south`.
+    /// The SIR recovery model's parameters, a parameter `delta` with a value
+    /// in the IR, an indexed family `c[region]` compiled to `c_north`,
+    /// `c_south`, and a model constant `omega` (not a parameter).
     fn model() -> ir::Model {
         let mut m = crate::test_support::tiny_model();
         m.parameters = vec![
@@ -1109,12 +1119,15 @@ mod tests {
             param("c_north", ParamKind::Rate, None),
             param("c_south", ParamKind::Rate, None),
             Parameter {
-                name: "omega".into(),
+                name: "delta".into(),
                 value: ParamValue::Fixed { value: 0.01 },
                 param_kind: Some(ParamKind::Rate),
                 param_dim: None,
             },
         ];
+        m.constants = vec![ir::parameter::Constant {
+            name: "omega".into(), value: 0.01, kind: ParamKind::Rate,
+        }];
         m
     }
 
@@ -1166,7 +1179,7 @@ mod tests {
     }
 
     /// The SIR recovery fit config: `beta`, `gamma` estimated, the rest in
-    /// `[fixed]`; the typed constant `omega` undeclared, so fixed by default.
+    /// `[fixed]`; `delta` undeclared, so fixed by default.
     fn sir_fit() -> Run {
         Run {
             fit_estimate: estimate(&[("beta", "bounds = [0.1, 0.9]"), ("gamma", "")]),
@@ -1386,6 +1399,35 @@ mod tests {
         }
     }
 
+    /// D2/D9: a model constant is not a parameter, so naming one in any
+    /// declaration is the unknown-name refusal, and its message says how to
+    /// make it configurable.
+    #[test]
+    fn a_model_constant_is_an_unknown_name_with_a_hint() {
+        let runs = [
+            Run { cli_fixed: vec!["omega".into()], ..sir_fit() },
+            Run { cli_estimate: vec![EstimateDecl { name: "omega".into(), bounds: None }],
+                  ..Run::default() },
+            sir_fit().sweep(&["omega"]),
+        ];
+        for run in runs {
+            let err = run.resolve(&PROFILE).unwrap_err();
+            match &err {
+                RoleError::UnknownName { name, constant_hint: Some(_), .. } =>
+                    assert_eq!(name, "omega"),
+                other => panic!("expected UnknownName with a constant hint, got {other:?}"),
+            }
+            let msg = err.to_string();
+            assert!(msg.contains("`omega` is a constant of the model (`let omega : rate = 0.01`)")
+                && msg.contains("declare it in `parameters {}` to set it from outside"),
+                "the hint must name the constant and the fix: {msg}");
+        }
+        // A misspelt parameter gets no constant hint.
+        let err = Run { cli_fixed: vec!["omegaa".into()], ..sir_fit() }
+            .resolve(&FIT_RUN).unwrap_err();
+        assert!(matches!(err, RoleError::UnknownName { constant_hint: None, .. }), "{err:?}");
+    }
+
     // ── D3, the support and the simplex rule ────────────────────────────────
 
     #[test]
@@ -1469,12 +1511,13 @@ mod tests {
     fn legacy_fields_are_generated_from_the_record() {
         let p = sir_fit().sweep(&["N0"]).resolve(&FIT_RUN).unwrap();
         let vals = values(&[("N0", 1.0), ("I0", 10.0), ("rho", 0.6), ("k", 10.0), ("tau", 0.0),
-                            ("c_north", 1.0), ("c_south", 2.0), ("omega", 0.01)]);
+                            ("c_north", 1.0), ("c_south", 2.0), ("delta", 0.01)]);
         // The job: N0 is a design coordinate, with no single value.
         let (est, fixed) = p.record(&vals).legacy_fields();
         assert_eq!(est, vec!["beta", "gamma"]);
         assert!(!fixed.contains_key("N0"));
-        assert_eq!(fixed.get("omega"), Some(&0.01), "an undeclared parameter is held");
+        assert_eq!(fixed.get("delta"), Some(&0.01), "an undeclared parameter is held");
+        assert!(!fixed.contains_key("omega"), "a model constant is in no partition");
         // A cell: N0 is fixed at its grid value.
         let point = vec![("N0".to_string(), 5000.0)];
         let rec = p.cell(&point).unwrap().record(&vals);

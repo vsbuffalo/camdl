@@ -300,6 +300,21 @@ pub struct DocBlock {
     pub reference: Option<String>,
 }
 
+/// A model constant: a typed `let` with a constant body
+/// (`let omega : rate = 0.01`), evaluated once by the compiler. Expressions
+/// read it through [`crate::expr::Expr::ConstRef`]. It is **not** a parameter:
+/// it is absent from `Model.parameters`, so no command can fix it at another
+/// value, estimate, sweep or sample it, and a name that reaches for one from
+/// outside is an unknown parameter (see [`crate::Model::constant_hint`]). Its
+/// `#'` prose is in the envelope's [`crate::ModelDocs::constants`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Constant {
+    pub name:  String,
+    pub value: f64,
+    /// The declared type keyword — the constant's dimension.
+    pub kind:  ParamKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Parameter {
     pub name:          String,

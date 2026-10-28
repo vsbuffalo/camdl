@@ -3315,22 +3315,28 @@ let splice_date_ranges ctx (es : expr list) : expr list =
    inlined its O(H) sum into all H force-of-infection rates (and their
    gradients): an O(H²) IR in the number of coupled strata.
 
-   A typed `let` with a constant body (`let omega : rate = 0.01`) is NOT a
-   param-free leaf even though its body is a literal: it lowers to
-   [Ir.Param "omega"] (see [let_is_typed_const]), so a let naming it reaches a
-   parameter. Recursing into its literal body instead made `let w = 2 * omega`
-   look param-free; `w` was hoisted and the IR invariant (E512) then fired.
+   A typed `let` with a constant body (`let omega : rate = 0.01`) is a model
+   constant ([let_constant_kind]): it lowers to [Ir.ConstRef "omega"], which is
+   not a parameter, so a let naming it stays param-free — `let w = 2 * omega`
+   has d/dp ≡ 0 and may be hoisted.
 
    [visited] guards the recursion against a self-referential let. A revisit is
    either in-progress (a cycle — the least fixpoint is "no param found here";
    such a let cannot survive inlining anyway) or already-proven param-free, since
    a param-bearing body short-circuits to true on first visit. *)
-(* A typed `let` with a constant body is a fixed parameter in the IR (spec §1:
-   "indistinguishable, once compiled, from the same value declared in
-   `parameters { }`"). The single predicate for that lowering: [resolve_expr]
-   emits [Ir.Param] for it, and hoist eligibility must agree. *)
-let let_is_typed_const (lb : let_binding) : bool =
-  lb.lkind <> None && is_const_expr lb.lbody
+(* A typed `let` with a constant body is a model constant: it compiles to an
+   entry of the IR's `constants` section and every use reads it through
+   [Ir.ConstRef]. It is not a parameter (proposal 2026-10-26-parameter-roles,
+   D9). The single predicate for that lowering — [resolve_expr], hoist
+   eligibility, [expand_constants] and the doc index all ask it, so they cannot
+   drift: when the lift and the doc index disagreed, a documented constant lost
+   its prose (gh#527). Returns the declared kind. *)
+let let_constant_kind (lb : let_binding) : param_type option =
+  match lb.lkind with
+  | Some pk when is_const_expr lb.lbody -> Some pk
+  | _ -> None
+
+let let_is_typed_const (lb : let_binding) : bool = let_constant_kind lb <> None
 
 let body_refs_param_or_let ctx (e : expr) : bool =
   let visited = Hashtbl.create 8 in
@@ -3340,7 +3346,7 @@ let body_refs_param_or_let ctx (e : expr) : bool =
       || Hashtbl.mem ctx.scalar_param_tbl n
       || (match Hashtbl.find_opt ctx.let_tbl n with
           | None    -> false
-          | Some lb when let_is_typed_const lb -> true
+          | Some lb when let_is_typed_const lb -> false  (* a constant, not a parameter *)
           | Some lb ->
             if Hashtbl.mem visited n then false
             else begin Hashtbl.replace visited n (); go lb.lbody end)
@@ -3400,7 +3406,7 @@ let let_is_hoistable ctx (lb : let_binding) : bool =
   | None ->
     let eligible =
       lb.lshape = None
-      && not (let_is_typed_const lb)   (* typed const → Param path *)
+      && not (let_is_typed_const lb)   (* typed const → ConstRef *)
       && not (body_refs_param_or_let ctx lb.lbody)
       && free_index_var_clean lb
     in
@@ -4533,8 +4539,9 @@ and resolve_ident_name ctx name ~loc =
     Ir.Const 0.0  (* placeholder — keep collecting diagnostics this pass *)
   | Some lb ->
     if let_is_typed_const lb then
-      (* Typed const let → treat as parameter (dimcheck will see param_kind) *)
-      Ir.Param name
+      (* A model constant: a reference into `constants`, so dimcheck sees the
+         declared kind and no gradient takes it for a parameter. *)
+      Ir.ConstRef name
     else if let_is_hoistable ctx lb && not ctx.suppress_hoist then
       (* Fix B: a state-only scalar let (e.g. a mixed-compartment total) is
          extracted into a shared binding once instead of inlined per use. *)
@@ -5701,6 +5708,16 @@ let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None)
                    `%s` is not a declared parameter."
           ~hint:"Check spelling, or declare the hyperparameter first."
           ()
+      | Ir.ConstRef n ->
+        Diagnostics.error ctx.diags
+          ~code:"E230" ~loc
+          ~message:(qualify (Printf.sprintf
+            "prior argument references the model constant '%s'" n))
+          ~detail:"Hierarchical priors may reference hyperparameters \
+                   declared in the same `parameters { }` block; a \
+                   typed `let` is a model constant, not a parameter."
+          ~hint:"Write the value inline, or declare it in `parameters { }`."
+          ()
       | Ir.Param _ | Ir.Const _ | Ir.Projected | Ir.ObsColumnRef _ | Ir.Time
       | Ir.Dt | Ir.ObsAnchor _ -> ()
       | Ir.BinOp b -> check_refs b.left; check_refs b.right
@@ -5745,21 +5762,6 @@ let ir_doc_of_ast (d : Ast.doc option) : Ir.doc option =
   Option.map (fun (a : Ast.doc) ->
     { Ir.text = a.Ast.d_text; symbol = a.d_symbol; reference = a.d_ref }) d
 
-(* Which `let` bindings become IR parameters. A typed binding with a constant
-   body is lifted to a `Fixed` parameter by `expand_parameters`; everything else
-   is inlined and has no IR entity of its own.
-
-   Two callers must agree on this exactly — the lift itself, and the doc index
-   below. When they disagree, a documented constant compiles to a parameter with
-   no documentation: `let omega : rate = 0.01` appears in the fit summary's
-   parameter legend as the one undocumented row, and the modeller's stated
-   assumption is silently dropped (gh#527). One predicate, so they cannot
-   drift. *)
-let let_parameter_kind (lb : let_binding) : param_type option =
-  match lb.lkind with
-  | Some pk when is_const_expr lb.lbody -> Some pk
-  | _ -> None
-
 (* Fold the file-header `#'` block and every source declaration's `#'` doc into
    the model's doc dictionary, keyed by base declaration name (matching what an
    author wrote and the logical names ObsSchema groups by). Only documented
@@ -5775,16 +5777,15 @@ let build_doc_index ctx : Ir.doc_index =
     Ir.di_parameters =
       collect (function Ast.PScalar s -> s.pname | Ast.PIndexed i -> i.pname)
               (function Ast.PScalar s -> s.pdoc  | Ast.PIndexed i -> i.pdoc)
-              ctx.param_decls
-      (* A typed const `let` IS a parameter in the IR, so its prose belongs in
-         the parameter legend alongside the ones declared in `parameters {}`.
-         An untyped or non-constant `let` has no IR entity; `camdlc inspect
-         --let` is where its doc surfaces. *)
-      @ collect (fun (lb : Ast.let_binding) -> lb.lname)
-                (fun (lb : Ast.let_binding) -> lb.ldoc)
-                (List.filter
-                   (fun lb -> let_parameter_kind lb <> None)
-                   ctx.let_bindings);
+              ctx.param_decls;
+    (* A model constant is an IR entity of its own, so its prose has its own
+       category, which `fit summary --parameters` lists after the parameter
+       legend. An untyped or non-constant `let` has no IR entity; `camdlc
+       inspect --let` is where its doc surfaces. *)
+    Ir.di_constants =
+      collect (fun (lb : Ast.let_binding) -> lb.lname)
+              (fun (lb : Ast.let_binding) -> lb.ldoc)
+              (List.filter let_is_typed_const ctx.let_bindings);
     Ir.di_compartments =
       collect (fun (c : Ast.compartment_decl) -> c.cname) (fun c -> c.cdoc) ctx.comp_decls;
     Ir.di_transitions =
@@ -5879,21 +5880,20 @@ let expand_parameters ctx =
         ) (expand_indexed_decl_names ctx pname pdims)
       end
   ) ctx.param_decls in
-  (* Typed const let bindings → fixed-value parameters. The same predicate
-     decides which of these carry their `#'` prose into the doc index, so the
-     legend can never miss one — see `let_parameter_kind`. *)
-  let from_lets = List.filter_map (fun (lb : let_binding) ->
-    match let_parameter_kind lb with
+  from_params
+
+(* Typed constant `let`s → the IR's `constants` section, evaluated once here.
+   The same predicate decides which carry their `#'` prose into the doc index
+   — see [let_constant_kind]. *)
+let expand_constants ctx : Ir.constant list =
+  List.filter_map (fun (lb : let_binding) ->
+    match let_constant_kind lb with
     | Some pk ->
-      let v = eval_const_expr ctx lb.lbody in
-      Some { Ir.name       = lb.lname;
-             Ir.value      = Ir.Fixed v;
-             Ir.param_kind = Some (ir_param_kind_of_ast pk);
-             Ir.param_dim  = None;
-           }
+      Some { Ir.c_name  = lb.lname;
+             Ir.c_value = eval_const_expr ctx lb.lbody;
+             Ir.c_kind  = ir_param_kind_of_ast pk; }
     | None -> None
-  ) ctx.let_bindings in
-  from_params @ from_lets
+  ) ctx.let_bindings
 
 (* ── Compartment expansion ───────────────────────────────────────────────── *)
 
@@ -6501,6 +6501,7 @@ let resolve_comp_name ctx env e =
   | other ->
     let kind = match other with
       | Ir.Param p    -> Printf.sprintf "parameter reference ('%s')" p
+      | Ir.ConstRef c -> Printf.sprintf "model constant reference ('%s')" c
       | Ir.PopSum _   -> "a sum of populations (PopSum)"
       | Ir.BinOp _    -> "an arithmetic expression"
       | Ir.UnOp _     -> "a unary expression"
@@ -7839,6 +7840,11 @@ let lower_threshold ctx env ~name ~loc (e : expr) : Ir.trigger_threshold =
   match resolve_expr ctx env e with
   | Ir.Const f -> Ir.TTConst f
   | Ir.Param p -> Ir.TTParam p
+  (* A model constant is a number known now: the threshold is that number. *)
+  | Ir.ConstRef c ->
+    (match Hashtbl.find_opt ctx.let_tbl c with
+     | Some lb -> Ir.TTConst (eval_const_expr ctx lb.lbody)
+     | None -> Ir.TTConst 0.0  (* unreachable: ConstRef is emitted only for a let *))
   | _ ->
     Diagnostics.error ctx.diags ~code:"E272" ~loc
       ~message:(Printf.sprintf
@@ -10948,11 +10954,18 @@ let expand_scenarios ctx : Ir.preset list =
       ~message:(Printf.sprintf
         "scenario '%s': %s names unknown %s '%s'"
         scenario_name field scope name)
-      ~hint:(Printf.sprintf
-        "declare %s '%s' first, or fix the typo. Available %ss: %s"
-        scope name scope
-        (let ns = table_names names_tbl in
-         if ns = [] then "(none declared)" else String.concat ", " ns))
+      ~hint:(match Hashtbl.find_opt ctx.let_tbl name with
+        (* A model constant is not a parameter, so a scenario cannot set it. *)
+        | Some lb when scope = "parameter" && let_is_typed_const lb ->
+          Printf.sprintf
+            "'%s' is a constant of the model (a typed `let`), not a parameter; \
+             declare it in `parameters {}` to set it from outside" name
+        | _ ->
+          Printf.sprintf
+            "declare %s '%s' first, or fix the typo. Available %ss: %s"
+            scope name scope
+            (let ns = table_names names_tbl in
+             if ns = [] then "(none declared)" else String.concat ", " ns))
       ()
   in
 
@@ -11235,7 +11248,7 @@ let build_model_structure ctx expanded_trs =
         c.else_
     | Ir.TableLookup (_, args) ->
       List.fold_left collect_numerator_pops acc args
-    | Ir.Const _ | Ir.Param _ | Ir.Time | Ir.Dt | Ir.Projected
+    | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Time | Ir.Dt | Ir.Projected
     | Ir.ObsColumnRef _ | Ir.ObsAnchor _ | Ir.TimeFunc _ -> acc
     | Ir.UncheckedDim u -> collect_numerator_pops acc u.inner
     (* Every term of a sum is a numerator contribution (like Add). *)
@@ -11281,7 +11294,9 @@ let build_model_structure ctx expanded_trs =
    `--dt` matches that literal. See docs/dev/warning-catalog.md §L401. *)
 
 let rec expr_contains_param_or_pop = function
-  | Ir.Param _ | Ir.Pop _ | Ir.PopSum _ -> true
+  (* A model constant counts: `1 - exp(-omega * 1 'days)` is the same pinned
+     discretization as with a parameter rate. *)
+  | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _ -> true
   | Ir.BinOp { left; right; _ } ->
     expr_contains_param_or_pop left || expr_contains_param_or_pop right
   | Ir.UnOp { arg; _ } -> expr_contains_param_or_pop arg
@@ -11364,7 +11379,7 @@ let rec walk_expr_for_l401 ~on_match e =
   | Ir.Reduce terms -> List.iter (walk_expr_for_l401 ~on_match) terms
   | Ir.BindingRef _ -> ()
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
-  | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
+  | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
   | Ir.TimeFunc _ -> ()
 
@@ -11494,7 +11509,7 @@ let rec l403_rate_forcing_in is_rate_forcing = function
   | Ir.TableLookup (_, args) ->
     List.find_map (l403_rate_forcing_in is_rate_forcing) args
   | Ir.Reduce terms -> List.find_map (l403_rate_forcing_in is_rate_forcing) terms
-  | Ir.TimeFunc _ | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
+  | Ir.TimeFunc _ | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
   | Ir.BindingRef _ -> None
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
@@ -11546,7 +11561,7 @@ let rec walk_expr_for_l403 mags ~on_match e =
     List.iter (walk_expr_for_l403 mags ~on_match) args
   | Ir.Reduce terms ->
     List.iter (walk_expr_for_l403 mags ~on_match) terms
-  | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
+  | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
   | Ir.TimeFunc _ | Ir.BindingRef _ -> ()
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
@@ -11764,6 +11779,7 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
     Ir.interventions      = expand_interventions ctx;
     Ir.observations       = expand_observations ctx ~transitions:expanded_trs;
     Ir.parameters         = expand_parameters ctx;
+    Ir.constants          = expand_constants ctx;
     Ir.bindings           = [];   (* filled below from ctx.hoisted_rev once all resolution is done *)
     Ir.per_eval_bindings  = [];   (* gh#272 LICM: empty until the LICM pass runs (post-autodiff) *)
     Ir.initial_conditions = expand_init ctx ~comps:expanded_comps;

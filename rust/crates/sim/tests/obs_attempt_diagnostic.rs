@@ -173,6 +173,7 @@ fn mixed_death_model() -> Arc<CompiledModel> {
         ),
     );
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "mixed_death".into(),
         version: "0.3".into(),
@@ -269,6 +270,7 @@ fn mixed_death_model() -> Arc<CompiledModel> {
 /// compartments and a transition to project from.
 fn carrier(observations: Vec<IrObs>) -> Arc<CompiledModel> {
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "carrier".into(),
         version: "0.3".into(),

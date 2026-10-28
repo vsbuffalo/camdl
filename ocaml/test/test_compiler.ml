@@ -262,7 +262,7 @@ let rec max_reduce_terms (e : Ir.expr) : int =
   | TableLookup (_, idxs) ->
     List.fold_left (fun acc i -> max acc (max_reduce_terms i)) 0 idxs
   | UncheckedDim { inner; _ } -> max_reduce_terms inner
-  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
   | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> 0
 
 let max_foi_reduce_terms (m : Ir.model) : int =
@@ -629,16 +629,13 @@ let test_binding_invariant_catches_poisoned_binding () =
     Alcotest.(check bool) "ParamInBinding fired for the poisoned binding"
       true fired
 
-(** A `let` that references a typed constant is not param-free. A typed `let`
-    with a constant body (`let omega : rate = 0.01`) lowers to [Param "omega"]
-    (spec §1, "indistinguishable, once compiled, from the same value declared in
-    `parameters { }`"), but the hoist-eligibility walk recursed into its body,
-    saw `0.01`, and called `let w = 2 * omega` param-free — so `w` was hoisted
-    into [model.bindings] and the compile died on the E512 invariant. The same
-    let over a declared parameter (`2 * gamma`) compiled. Both must behave the
-    same: `w` is inlined and its rate reaches the parameter `omega`, directly
-    and through a further let (`w2 = w`). *)
-let test_let_over_typed_const_is_not_hoisted () =
+(** A typed `let` with a constant body is a model constant, not a parameter
+    (proposal 2026-10-26-parameter-roles, D9). It compiles to an entry of
+    [model.constants] carrying its value and kind, it is absent from
+    [model.parameters], and every use reads it through [ConstRef] — so a `let`
+    over it (`w = 2 * omega`, `w2 = w`) is param-free and the E512 invariant
+    holds with it hoisted. No rate reaches a [Param] through it. *)
+let test_typed_const_let_is_a_constant_not_a_parameter () =
   let m = compile_expect_ok {|
 time_unit = 'days
 compartments { S, I, R }
@@ -652,25 +649,41 @@ transitions {
   recovery  : I --> R @ gamma * I
   waning    : R --> S @ w * R
   waning2   : R --> S @ w2 * R
+  waning3   : R --> S @ omega * R
 }
 init { S = 990  I = 10 }
 simulate { from = 0 'days to = 10 'days }
 |} in
-  Alcotest.(check bool) "omega is an IR parameter" true
+  Alcotest.(check bool) "omega is not an IR parameter" false
     (List.exists (fun (p : Ir.parameter) -> p.Ir.name = "omega") m.Ir.parameters);
+  (match m.Ir.constants with
+   | [ c ] ->
+     Alcotest.(check string) "constant name" "omega" c.Ir.c_name;
+     Alcotest.(check (float 0.0)) "constant value" 0.01 c.Ir.c_value;
+     Alcotest.(check string) "constant kind" "rate" (Ir.param_kind_name c.Ir.c_kind)
+   | cs -> Alcotest.failf "expected one constant, got %d" (List.length cs));
   List.iter (fun (b : Ir.binding) ->
     Alcotest.(check bool)
       (Printf.sprintf "binding '%s' is param-free" b.Ir.bname)
       false (Validate.references_param b.Ir.bexpr)) m.Ir.bindings;
-  List.iter (fun tr_name ->
-    match List.find_opt (fun (t : Ir.transition) -> t.Ir.name = tr_name)
-            m.Ir.transitions with
-    | None -> Alcotest.failf "transition %s missing" tr_name
-    | Some t ->
-      Alcotest.(check (option string))
-        (Printf.sprintf "%s rate reaches Param omega" tr_name)
-        (Some "omega") (Validate.first_param t.Ir.rate))
-    ["waning"; "waning2"]
+  let rec mentions_const = function
+    | Ir.ConstRef "omega" -> true
+    | Ir.BinOp b -> mentions_const b.left || mentions_const b.right
+    | Ir.UnOp u -> mentions_const u.arg
+    | _ -> false
+  in
+  let rate n = match List.find_opt (fun (t : Ir.transition) -> t.Ir.name = n)
+                       m.Ir.transitions with
+    | Some t -> t.Ir.rate | None -> Alcotest.failf "transition %s missing" n in
+  Alcotest.(check (option string)) "waning3 reaches no parameter" None
+    (Validate.first_param (rate "waning3"));
+  Alcotest.(check bool) "waning3 reads the constant through ConstRef" true
+    (mentions_const (rate "waning3"));
+  (* `w = 2 * omega` is param-free now, so it is hoisted, and its body is the
+     constant reference. *)
+  (match List.find_opt (fun (b : Ir.binding) -> b.Ir.bname = "w") m.Ir.bindings with
+   | Some b -> Alcotest.(check bool) "w's body reads ConstRef omega" true (mentions_const b.Ir.bexpr)
+   | None -> Alcotest.fail "w was not hoisted")
 
 (* ── Cost report (--cost-report) ──────────────────────────────────────────────
    The cost report is read-only over the (unfolded) expanded model plus a local
@@ -1765,7 +1778,7 @@ let test_table_cell_type_ir_round_trips_through_serde () =
 
 (** Walk an Ir.expr and collect all Pop compartment names. *)
 let rec collect_pops = function
-  | Ir.Const _ | Ir.Param _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _
+  | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _
   | Ir.ObsAnchor _ -> []
   | Ir.Pop name -> [name]
   | Ir.PopSum names -> names
@@ -3384,7 +3397,7 @@ let test_l401_no_fire_when_dt_used () =
       | Ir.Reduce terms -> List.exists contains_dt terms
       | Ir.BindingRef _ -> false
       | Ir.PerEvalRef _ -> false
-      | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _ | Ir.ObsAnchor _
+      | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _ | Ir.ObsAnchor _
       | Ir.Time | Ir.Projected | Ir.ObsColumnRef _ | Ir.TimeFunc _ -> false
     in
     let any_tr_uses_dt = List.exists (fun (t : Ir.transition) ->
@@ -12074,12 +12087,10 @@ let test_doc_on_let_reaches_inspect () =
   Alcotest.(check bool) "typed let doc prose reaches inspect --let" true
     (contains_substring ~needle:"behaviour brake" out2)
 
-(* gh#527. `expand_parameters` lifts a typed `let` with a CONSTANT body into a
-   fixed IR parameter, but `build_doc_index` had no lets category — so a
-   documented constant compiled to a parameter carrying no documentation, and
-   `camdl fit summary`'s legend showed it as the one undocumented row. The same
-   prose written on a `parameters {}` entry landed there fine, which is what
-   made it look like the doc had simply been ignored. *)
+(* gh#527. A typed `let` with a CONSTANT body is a model constant, and its `#'`
+   prose must reach the doc index's `constants` category, which `camdl fit
+   summary --parameters` lists. When the lift and the doc index used different
+   predicates, a documented constant compiled with no documentation. *)
 let doc_const_let_src = {|
 time_unit = 'days
 compartments { S, I, R }
@@ -12098,15 +12109,17 @@ init { S = 1000  I = 10 }
 simulate { from = 0 'days to = 90 'days }
 |}
 
-let test_const_let_doc_reaches_parameter_legend () =
+let test_const_let_doc_reaches_constant_legend () =
   let m = compile_expect_ok doc_const_let_src in
-  (* The premise: `omega` really is lifted into the IR's parameter list. If
-     this ever stops being true the doc assertion below is meaningless, so
-     assert it rather than assume it. *)
-  Alcotest.(check bool) "omega is lifted to an IR parameter" true
-    (List.exists (fun (p : Ir.parameter) -> p.Ir.name = "omega") m.Ir.parameters);
-  (match List.assoc_opt "omega" m.Ir.doc_index.Ir.di_parameters with
-   | None -> Alcotest.fail "const let's doc is missing from di_parameters"
+  (* The premise: `omega` really is lifted into the IR's constants. If this
+     ever stops being true the doc assertion below is meaningless, so assert it
+     rather than assume it. *)
+  Alcotest.(check bool) "omega is lifted to an IR constant" true
+    (List.exists (fun (c : Ir.constant) -> c.Ir.c_name = "omega") m.Ir.constants);
+  Alcotest.(check bool) "a constant's doc is not in the parameter legend" false
+    (List.mem_assoc "omega" m.Ir.doc_index.Ir.di_parameters);
+  (match List.assoc_opt "omega" m.Ir.doc_index.Ir.di_constants with
+   | None -> Alcotest.fail "const let's doc is missing from di_constants"
    | Some (d : Ir.doc) ->
      Alcotest.(check bool) "prose carried into the legend" true
        (match d.Ir.text with
@@ -12117,11 +12130,13 @@ let test_const_let_doc_reaches_parameter_legend () =
         | Some r -> contains_substring ~needle:"Anderson & May" r
         | None -> false));
   (* Negative control. A non-constant `let` has no IR entity of its own, so it
-     must NOT appear in the parameter legend — otherwise the legend documents a
-     name the model has no parameter for. This is what keeps the doc index and
-     `expand_parameters` on the same predicate. *)
+     must NOT appear in either legend — otherwise the legend documents a name
+     the model has no entity for. This is what keeps the doc index and
+     `expand_constants` on the same predicate. *)
   Alcotest.(check bool) "a non-const let stays out of the parameter legend" false
-    (List.mem_assoc "N" m.Ir.doc_index.Ir.di_parameters)
+    (List.mem_assoc "N" m.Ir.doc_index.Ir.di_parameters);
+  Alcotest.(check bool) "a non-const let stays out of the constant legend" false
+    (List.mem_assoc "N" m.Ir.doc_index.Ir.di_constants)
 
 let test_doc_inspect_parameters () =
   let out = doc_inspect_output `Params in
@@ -13787,7 +13802,7 @@ let () =
       Alcotest.test_case "#' on a let compiles (gh#508)"             `Quick test_doc_on_let_compiles;
       Alcotest.test_case "inspect --let shows the let's doc prose"   `Quick test_doc_on_let_reaches_inspect;
       Alcotest.test_case "const let's doc reaches the parameter legend (gh#527)"
-        `Quick test_const_let_doc_reaches_parameter_legend;
+        `Quick test_const_let_doc_reaches_constant_legend;
     ];
     "model_doc_comments_gh750", [
       Alcotest.test_case "file-header #' block reaches docs.model"
@@ -14006,8 +14021,8 @@ let () =
         `Quick test_binding_invariant_clean_on_spatial;
       Alcotest.test_case "poisoned binding (Param spliced in) raises E512"
         `Quick test_binding_invariant_catches_poisoned_binding;
-      Alcotest.test_case "let over a typed constant is inlined, not hoisted (no E512)"
-        `Quick test_let_over_typed_const_is_not_hoisted;
+      Alcotest.test_case "a typed constant let is a constant, not a parameter (no E512)"
+        `Quick test_typed_const_let_is_a_constant_not_a_parameter;
     ];
     "cost_report", [
       Alcotest.test_case "sparse-ring numbers are sane (Reduce 16→8, reuse, dups)"

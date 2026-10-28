@@ -15,6 +15,7 @@ type error =
   | DuplicateParameter    of string
   | UnknownCompartment    of string * site
   | UnknownParameter      of string * site
+  | UnknownConstant       of string * site
   | UnknownTable          of string * site
   | UnknownTimeFunction   of string * site
   | UnknownTransition     of string * site
@@ -36,6 +37,7 @@ let error_to_string = function
   | DuplicateParameter   s -> Printf.sprintf "duplicate parameter: %s" s
   | UnknownCompartment  (s, _) -> Printf.sprintf "unknown compartment: %s" s
   | UnknownParameter    (s, _) -> Printf.sprintf "unknown parameter: %s" s
+  | UnknownConstant     (s, _) -> Printf.sprintf "unknown constant: %s" s
   | UnknownTable        (s, _) -> Printf.sprintf "unknown table: %s" s
   | UnknownTimeFunction (s, _) -> Printf.sprintf "unknown time_function: %s" s
   | UnknownTransition   (s, _) -> Printf.sprintf "unknown transition: %s" s
@@ -75,7 +77,7 @@ module SS = Set.Make(String)
 let first_param (e : expr) : string option =
   let rec go = function
     | Param p -> Some p
-    | Const _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _
+    | Const _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _
     | Projected | ObsColumnRef _ | ObsAnchor _ -> None
     | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
     | BinOp b -> (match go b.left with Some _ as r -> r | None -> go b.right)
@@ -103,10 +105,11 @@ let uniq_check name_of xs constructor errors =
   let set = Hashtbl.fold (fun k () s -> SS.add k s) seen SS.empty in
   set
 
-let check_expr_refs ~site ~comps ~params ~tables ~tfs errors e =
+let check_expr_refs ~site ~comps ~params ~constants ~tables ~tfs errors e =
   let rec go = function
     | Const _ | Time | Dt | Projected | ObsColumnRef _ | ObsAnchor _ -> ()
     | Param p -> if not (SS.mem p params) then errors := UnknownParameter (p, site) :: !errors
+    | ConstRef c -> if not (SS.mem c constants) then errors := UnknownConstant (c, site) :: !errors
     | Pop   c -> if not (SS.mem c comps)  then errors := UnknownCompartment (c, site) :: !errors
     | PopSum cs -> List.iter (fun c -> if not (SS.mem c comps) then errors := UnknownCompartment (c, site) :: !errors) cs
     | BinOp b -> go b.left; go b.right
@@ -141,7 +144,8 @@ let validate (m : model) : (unit, error list) result =
   let tables     = List.map (fun (t: table)         -> t.name) m.tables        |> SS.of_list in
   let tfs        = List.map (fun (f: time_function) -> f.name) m.time_functions |> SS.of_list in
 
-  let check_expr_r ~site e = check_expr_refs ~site ~comps:comp_names ~params ~tables ~tfs errors e in
+  let constants  = List.map (fun (c : constant) -> c.c_name) m.constants |> SS.of_list in
+  let check_expr_r ~site e = check_expr_refs ~site ~comps:comp_names ~params ~constants ~tables ~tfs errors e in
 
   (* stoichiometry *)
   List.iter (fun (tr: transition) ->

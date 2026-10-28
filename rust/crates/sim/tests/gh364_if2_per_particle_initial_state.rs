@@ -241,6 +241,7 @@ fn pure_ic_sir_model() -> (CompiledModel, Vec<f64>) {
     let recovery = Expr::bin_op(BinOp::Mul, Expr::param("gamma"), Expr::pop("I"));
 
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "sir_pure_ic_ivp".into(),
         version: "0.3".into(),

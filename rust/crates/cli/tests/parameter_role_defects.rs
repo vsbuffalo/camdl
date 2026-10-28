@@ -46,8 +46,8 @@ fn tempdir(tag: &str) -> Tmp {
 }
 
 /// An SIR model with a reporting rate, a dispersion, two initial-state
-/// parameters and one model constant (`omega`, a `let`, which compiles to a
-/// parameter whose value the model fixes).
+/// parameters and one model constant (`omega`, a typed `let`, which compiles to
+/// the IR's `constants`, not its `parameters`).
 const MODEL: &str = r#"
 time_unit = 'days
 compartments { S, I, R }
@@ -170,9 +170,10 @@ fn profile_rw_sd_auto_does_not_estimate_fixed_file_names() {
     }
 }
 
-/// A model constant (`let omega : rate = 0.01`, a parameter whose value the
-/// model fixes) is not a nuisance parameter: `--rw-sd auto` must not estimate
-/// it. It did, alongside every other non-focal name.
+/// A model constant (`let omega : rate = 0.01`) is not a nuisance parameter:
+/// `--rw-sd auto` must not estimate it. It did, alongside every other
+/// non-focal name, while a constant compiled to an IR parameter; it cannot now,
+/// because a constant is not in the IR's parameters at all.
 #[test]
 fn profile_rw_sd_auto_does_not_estimate_a_model_constant() {
     let tmp = tempdir("constant");
@@ -292,7 +293,7 @@ gamma = {{ bounds = [0.01, 1.0], start = 0.15 }}
 
     let want: std::collections::BTreeMap<String, String> = [
         ("beta", "focal"), ("gamma", "estimated"), ("rho", "fixed"), ("k", "fixed"),
-        ("N0", "fixed"), ("I0", "fixed"), ("omega", "fixed"),
+        ("N0", "fixed"), ("I0", "fixed"),
     ].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     let cells = find(&cwd.join("results").join("profiles"), "run.json");
     assert_eq!(cells.len(), 2);
@@ -486,7 +487,6 @@ rho = 0.6
 k = 10
 N0 = 1000
 I0 = 10
-omega = 0.01
 [method]
 algorithm = "if2"
 backend = "chain_binomial"

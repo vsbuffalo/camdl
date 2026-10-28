@@ -1344,7 +1344,8 @@ pub fn build_if2_params_from_specs(
     for spec in specs {
         let ir_param = model.parameters.iter()
             .find(|p| p.name == spec.name)
-            .ok_or_else(|| format!("parameter '{}' not in model", spec.name))?;
+            .ok_or_else(|| format!("parameter '{}' not in model{}", spec.name,
+                crate::util::constant_hints(model, [spec.name.as_str()])))?;
         let idx = *compiled.param_index.get(spec.name.as_str())
             .ok_or_else(|| format!("parameter '{}' not in compiled model", spec.name))?;
 
@@ -3810,6 +3811,7 @@ mod tests {
 
         // SIR model: beta (estimated), gamma (fixed), N0 (fixed)
         let model = Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "test".into(),
             version: "0.3".into(),
@@ -4015,6 +4017,7 @@ mod tests {
         // Compartments are required because CompiledModel::new validates
         // them, but the simulation isn't run.
         let model = ir::Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
             description: None, origin: None, origin_rata_die: None,
@@ -4121,6 +4124,7 @@ mod tests {
             transform: Transform::None, perturb_only_at_t0: false,
         }];
         let model = ir::Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
             description: None, origin: None, origin_rata_die: None,
@@ -4297,6 +4301,7 @@ mod tests {
         let beta_with_ir_prior = Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: None, bounds: Some((0.01, 2.0)), prior: ir::parameter::PriorSpec::Dist(PriorDist::LogNormal(LogNormalPrior { mu: -1.0, sigma: 0.5 })), transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None };
         let gamma_no_prior = Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Estimated { init: None, bounds: Some((0.05, 1.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None };
         let model = ir::Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
             description: None, origin: None, origin_rata_die: None,
@@ -4365,6 +4370,7 @@ mod tests {
     #[cfg(test)]
     fn model_with_param(p: ir::parameter::Parameter) -> ir::Model {
         ir::Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
             description: None, origin: None, origin_rata_die: None,
@@ -5001,6 +5007,7 @@ dt = 1.0
             parameter::Parameter,
         };
         let model = ir::Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
             description: None, origin: None, origin_rata_die: None,
@@ -6171,6 +6178,7 @@ dt = 1.0
         // Daily output schedule so a snapshot lands on every obs time
         // (compute_ode_loglik requires a snapshot at each obs time).
         let m = Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "ode_hole_reset".into(),
             version: "0.3".into(),

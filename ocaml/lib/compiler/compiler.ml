@@ -398,6 +398,12 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
       Printf.sprintf "unknown parameter referenced: '%s'" s,
       Some "check the parameters block for a matching declaration",
       site_loc site
+    | UnknownConstant (s, site) ->
+      "E518",
+      Printf.sprintf "unknown constant referenced: '%s'" s,
+      Some "a constant reference names no entry of the model's `constants`; \
+            this is a compiler invariant, so report it",
+      site_loc site
     | UnknownTable (s, site) ->
       "E505",
       Printf.sprintf "unknown table referenced: '%s'" s,

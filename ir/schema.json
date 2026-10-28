@@ -73,6 +73,12 @@
       "items": { "$ref": "#/definitions/parameter" }
     },
 
+    "constants": {
+      "comment": "Model constants: each typed `let` with a constant body (`let omega : rate = 0.01`), evaluated at compile time. Expressions read one through a `const_ref` node. Not parameters: no command can set, estimate, sweep or sample one. Their `#'` prose is in the envelope's docs under `constants`. Omitted when empty.",
+      "type": "array",
+      "items": { "$ref": "#/definitions/constant" }
+    },
+
     "bindings": {
       "type": "array",
       "items": {
@@ -181,6 +187,14 @@
           "required": ["param"],
           "properties": {
             "param": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "comment": "Reference to a model constant (an entry of the model's `constants`) by name.",
+          "required": ["const_ref"],
+          "properties": {
+            "const_ref": { "type": "string" }
           },
           "additionalProperties": false
         },
@@ -1471,6 +1485,17 @@
             { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 }
           ]
         }
+      },
+      "additionalProperties": false
+    },
+
+    "constant": {
+      "type": "object",
+      "required": ["name", "value", "kind"],
+      "properties": {
+        "name": { "type": "string" },
+        "value": { "type": "number" },
+        "kind": { "type": "string", "enum": ["rate", "probability", "count", "positive", "real", "instant", "duration"] }
       },
       "additionalProperties": false
     },

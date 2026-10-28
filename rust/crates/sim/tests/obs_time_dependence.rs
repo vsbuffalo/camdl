@@ -36,6 +36,7 @@ use sim::{
 /// observation block — the dynamics are irrelevant here.
 fn model() -> Arc<CompiledModel> {
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "obs_time_dependence".into(),
         version: "0.3".into(),

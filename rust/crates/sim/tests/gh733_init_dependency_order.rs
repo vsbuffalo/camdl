@@ -47,6 +47,7 @@ use sim::compiled_model::CompiledModel;
 /// initial state is the whole subject.
 fn model(a0: f64, init: Vec<(&str, InitSpec)>, bindings: Vec<Binding>) -> Model {
     Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "gh733".into(),
         version: "0.3".into(),

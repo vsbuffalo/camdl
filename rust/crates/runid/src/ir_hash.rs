@@ -35,7 +35,8 @@ use ir::deriv::Diffable;
 use ir::Differentiable;
 use ir::anchor::AnchoredTime;
 use ir::expr::{
-    BinOp, BinOpExpr, BinOpWrap, BindingRefWrap, CondExpr, CondWrap, ConstExpr, DtExpr, Expr,
+    BinOp, BinOpExpr, BinOpWrap, BindingRefWrap, CondExpr, CondWrap, ConstExpr, ConstRefExpr,
+    DtExpr, Expr,
     ObsAnchorWrap, ObsColumnRefExpr, ParamExpr, PerEvalRefWrap, PopExpr, PopSumExpr,
     ProjectedExpr, ReduceWrap, TableLookupExpr, TableLookupWrap, TimeExpr, TimeFuncRef,
     TimeFuncWrap, UnOp, UnOpExpr, UnOpWrap, UncheckedDimExpr, UncheckedDimWrap,
@@ -60,7 +61,7 @@ use ir::observation::{
 use ir::ode_equation::OdeEquation;
 use ir::parameter::{
     BetaPrior, ExponentialPrior, GammaPrior, HalfNormalPrior, LogNormalPrior, LogUniformPrior,
-    NormalPrior, TruncatedNormalPrior, UniformPrior, HierarchicalKind, HierarchicalPrior, ParamKind, ParamValue, Parameter, PriorDist, PriorSpec,
+    Constant, NormalPrior, TruncatedNormalPrior, UniformPrior, HierarchicalKind, HierarchicalPrior, ParamKind, ParamValue, Parameter, PriorDist, PriorSpec,
     Transform,
 };
 use ir::table::{OobPolicy, Table, TableSource};
@@ -294,6 +295,13 @@ impl ContentAddressed for Expr {
                 h.write_u32(17);
                 h.write_str(anchor.as_str());
                 h.write_f64_bits(*offset);
+            }
+            // IR 0.41: a model-constant reference, fresh index 18 for the same
+            // reason. The name is hashed here and the value with
+            // `Model.constants`, so changing a constant's value re-keys.
+            Expr::ConstRef(ConstRefExpr { const_ref }) => {
+                h.write_u32(18);
+                h.write_str(const_ref);
             }
         }
     }
@@ -541,6 +549,19 @@ impl ContentAddressed for ParamValue {
             }
             ParamValue::Required => h.write_u32(2),
         }
+    }
+}
+
+impl ContentAddressed for Constant {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let Constant { name, value, kind } = self;
+        header(h, "ir::parameter::Constant");
+        h.write_str(name);
+        // Structural float: raw bits, ±0.0/NaN-distinct.
+        h.write_f64_bits(*value);
+        kind.hash_into(h);
     }
 }
 
@@ -1414,7 +1435,7 @@ impl ContentAddressed for Model {
         let Model {
             name, version, time_unit, description, origin, origin_rata_die,
             compartments, transitions, ode_equations, time_functions, tables,
-            interventions, observations, parameters, bindings, per_eval_bindings,
+            interventions, observations, parameters, constants, bindings, per_eval_bindings,
             initial_conditions, ic_grad: _, output, simulation, presets,
             model_structure, balance, identity_tracked_compartments,
             // Reporting-only reductions/contrasts, documented in `ir::model` as
@@ -1437,6 +1458,11 @@ impl ContentAddressed for Model {
         interventions.hash_into(h);
         observations.hash_into(h);
         parameters.hash_into(h);
+        // IR 0.41: typed constants left `parameters` for their own section. The
+        // value is identity (a different constant is a different model); hashed
+        // unconditionally, so the empty Vec's length prefix re-keys every model
+        // once at the bump — deliberate and version-bumped.
+        constants.hash_into(h);
         bindings.hash_into(h);
         // gh#272 LICM: identity field (the emitted IR is hashed). Empty by default
         // — but the empty Vec's length prefix still shifts the model hash at the

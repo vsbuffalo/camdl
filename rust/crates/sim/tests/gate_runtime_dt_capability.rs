@@ -86,6 +86,7 @@ fn dt_hidden_in_binding_requires_runtime_dt() {
     // A rate `beta * S * dtf` where `dtf` is a model-level binding whose body is
     // `Expr::Dt` — the exact shape the Fix-B hoister produces for `let dtf = dt`.
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "hoisted_dt".into(),
         version: "0.1".into(),

@@ -1288,14 +1288,19 @@ pub fn load_model(path: &str) -> Result<(ir::Model, String), String> {
 /// the model documents nothing. Used to build the fit sidecar and the
 /// fit-summary parameter legend.
 pub fn load_model_docs(path: &str) -> Result<ir::ModelDocs, String> {
+    load_model_envelope(path).map(|env| env.docs)
+}
+
+/// Load the whole IR envelope — the model plus its `#'` documentation
+/// dictionary — compiling a `.camdl` via camdlc or reading a `.ir.json`.
+pub fn load_model_envelope(path: &str) -> Result<ir::IrEnvelope, String> {
     let json = if path.ends_with(".camdl") {
         run_camdlc(path)?
     } else {
         std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))?
     };
-    let env = ir::envelope_from_str(&json)
-        .map_err(|e| format!("IR load error from {}: {}", path, e))?;
-    Ok(env.docs)
+    ir::envelope_from_str(&json)
+        .map_err(|e| format!("IR load error from {}: {}", path, e))
 }
 
 /// Delegate a subcommand directly to camdlc, passing through all args.
@@ -2807,6 +2812,26 @@ pub fn param_vec_name(prefix: &str, key: &str) -> String {
     format!("{}_{}", prefix, key)
 }
 
+/// The hint lines for every name in `names` that is a model constant (a typed
+/// `let`, which is not a parameter): one `\n  hint: …` line each, saying how to
+/// make it configurable. Empty when none is. Appended to an unknown-parameter
+/// refusal by the paths whose error type is a plain string.
+pub fn constant_hints<'a>(model: &ir::Model, names: impl IntoIterator<Item = &'a str>) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut out = String::new();
+    for n in names {
+        if seen.contains(&n) {
+            continue;
+        }
+        seen.push(n);
+        if let Some(h) = model.constant_hint(n) {
+            out.push_str("\n  hint: ");
+            out.push_str(&h);
+        }
+    }
+    out
+}
+
 /// Expand `--param-vec PREFIX=FILE` entries into concrete `(PREFIX_key, val)`
 /// pairs, validating each name against the model's parameter set.
 ///
@@ -2825,7 +2850,8 @@ pub fn resolve_param_vec_entries(
             let full_name = param_vec_name(prefix, &key);
             if !model_param_set.contains(full_name.as_str()) {
                 return Err(format!(
-                    "--param-vec {}: unknown parameter '{}'", prefix, full_name));
+                    "--param-vec {}: unknown parameter '{}'{}", prefix, full_name,
+                    constant_hints(model, [full_name.as_str()])));
             }
             out.push((full_name, val));
         }
@@ -4872,6 +4898,7 @@ mod tests {
 
     fn mk_model(ivs: Vec<Intervention>) -> ir::Model {
         ir::Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "t".into(), version: "0.3".into(), time_unit: "days".into(),
             description: None, origin: None, origin_rata_die: None,
@@ -5068,6 +5095,7 @@ mod tests {
     /// field is zero/empty/default.
     fn model_with_one_param(value: Option<f64>, bounds: Option<(f64, f64)>) -> ir::Model {
         ir::Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "fixture".into(),
             version: "0.0".into(),

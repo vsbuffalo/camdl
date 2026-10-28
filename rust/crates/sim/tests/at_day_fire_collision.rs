@@ -34,6 +34,7 @@ fn grid(dt: f64) -> FireClock {
 /// A model with a single intervention firing on `schedule` over `[0, end]`.
 fn model_with_schedule(schedule: InterventionSchedule, end: f64) -> CompiledModel {
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "at_day_collision".into(),
         version: "0.1".into(),

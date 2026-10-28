@@ -382,9 +382,9 @@ fn first_obs_anchor(e: &Expr) -> Option<&ir::anchor::AnchoredTime> {
         Expr::TableLookup(w) => w.table_lookup.indices.iter().find_map(first_obs_anchor),
         Expr::Reduce(w) => w.reduce.iter().find_map(first_obs_anchor),
         Expr::UncheckedDim(w) => first_obs_anchor(&w.unchecked_dim.inner),
-        Expr::Const(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
-        | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
-        | Expr::BindingRef(_) | Expr::PerEvalRef(_) => None,
+        Expr::Const(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
+        | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_)
+        | Expr::ObsColumnRef(_) | Expr::BindingRef(_) | Expr::PerEvalRef(_) => None,
     }
 }
 
@@ -401,11 +401,13 @@ fn expr_refs_param(expr: &Expr) -> bool {
         Expr::TableLookup(w) => w.table_lookup.indices.iter().any(expr_refs_param),
         Expr::Reduce(w) => w.reduce.iter().any(expr_refs_param),
         Expr::UncheckedDim(w) => expr_refs_param(&w.unchecked_dim.inner),
-        // Leaves / non-param nodes. BindingRef: not traversed (see doc above).
+        // Leaves / non-param nodes. A model constant is not a parameter.
+        // BindingRef: not traversed (see doc above).
         // PerEvalRef: likewise not traversed — this net only runs on `model.bindings`
         // (which never contain a PerEvalRef), so the value is moot; grouped with
         // BindingRef for consistency.
         Expr::Const(_)
+        | Expr::ConstRef(_)
         | Expr::Pop(_)
         | Expr::PopSum(_)
         | Expr::Time(_)
@@ -434,10 +436,13 @@ fn expr_refs_param(expr: &Expr) -> bool {
 fn eval_table_expr(
     expr: &Expr,
     param_index: &HashMap<String, usize>,
+    consts: &HashMap<String, f64>,
     params: &[f64],
 ) -> Result<f64, SimError> {
     match expr {
         Expr::Const(c) => Ok(c.value),
+        Expr::ConstRef(c) => consts.get(c.const_ref.as_str()).copied()
+            .ok_or_else(|| SimError::UnknownConstant(c.const_ref.clone())),
         Expr::Param(p) => {
             let idx = param_index.get(p.param.as_str())
                 .copied()
@@ -445,8 +450,8 @@ fn eval_table_expr(
             Ok(params[idx])
         }
         Expr::BinOp(w) => {
-            let a = eval_table_expr(&w.bin_op.left, param_index, params)?;
-            let b = eval_table_expr(&w.bin_op.right, param_index, params)?;
+            let a = eval_table_expr(&w.bin_op.left, param_index, consts, params)?;
+            let b = eval_table_expr(&w.bin_op.right, param_index, consts, params)?;
             Ok(match w.bin_op.op {
                 BinOp::Add => a + b,
                 BinOp::Sub => a - b,
@@ -473,7 +478,7 @@ fn eval_table_expr(
             })
         }
         Expr::UnOp(w) => {
-            let a = eval_table_expr(&w.un_op.arg, param_index, params)?;
+            let a = eval_table_expr(&w.un_op.arg, param_index, consts, params)?;
             let r = match w.un_op.op {
                 UnOp::Neg   => -a,
                 UnOp::Exp   => a.exp(),
@@ -492,7 +497,7 @@ fn eval_table_expr(
             // table cell is never a valid coefficient.
             Ok(if !r.is_finite() { 0.0 } else { r })
         }
-        Expr::UncheckedDim(w) => eval_table_expr(&w.unchecked_dim.inner, param_index, params),
+        Expr::UncheckedDim(w) => eval_table_expr(&w.unchecked_dim.inner, param_index, consts, params),
         _ => Err(SimError::Validation(
             "unsupported expression type in table values (only Const and Param are valid)".to_string()
         )),
@@ -596,9 +601,14 @@ fn check_lineage_weight_names(model: &Model, ctx: &ResolveCtx<'_>) -> Result<(),
 fn resolve_coeff(
     expr: &Expr,
     param_index: &HashMap<String, usize>,
+    consts: &HashMap<String, f64>,
 ) -> Result<ResolvedExpr, SimError> {
     match expr {
         Expr::Const(c) => Ok(ResolvedExpr::Const(c.value)),
+        // A model constant is a literal by another name.
+        Expr::ConstRef(c) => consts.get(c.const_ref.as_str()).copied()
+            .map(ResolvedExpr::Const)
+            .ok_or_else(|| SimError::UnknownConstant(c.const_ref.clone())),
         Expr::Param(p) => {
             let idx = *param_index.get(p.param.as_str())
                 .ok_or_else(|| SimError::UnknownParameter(p.param.clone()))?;
@@ -606,15 +616,15 @@ fn resolve_coeff(
         }
         Expr::BinOp(w) => Ok(ResolvedExpr::BinOp {
             op: w.bin_op.op.clone(),
-            left: Box::new(resolve_coeff(&w.bin_op.left, param_index)?),
-            right: Box::new(resolve_coeff(&w.bin_op.right, param_index)?),
+            left: Box::new(resolve_coeff(&w.bin_op.left, param_index, consts)?),
+            right: Box::new(resolve_coeff(&w.bin_op.right, param_index, consts)?),
         }),
         Expr::UnOp(w) => Ok(ResolvedExpr::UnOp {
             op: w.un_op.op.clone(),
-            arg: Box::new(resolve_coeff(&w.un_op.arg, param_index)?),
+            arg: Box::new(resolve_coeff(&w.un_op.arg, param_index, consts)?),
         }),
         Expr::UncheckedDim(w) => Ok(ResolvedExpr::UncheckedDim {
-            inner: Box::new(resolve_coeff(&w.unchecked_dim.inner, param_index)?),
+            inner: Box::new(resolve_coeff(&w.unchecked_dim.inner, param_index, consts)?),
         }),
         _ => Err(SimError::Validation(
             "unsupported expression in forcing coefficient (only constants, \
@@ -643,8 +653,8 @@ fn collect_param_names(expr: &Expr, out: &mut Vec<String>) {
         Expr::TableLookup(w) => w.table_lookup.indices.iter().for_each(|e| collect_param_names(e, out)),
         Expr::Reduce(w) => w.reduce.iter().for_each(|e| collect_param_names(e, out)),
         Expr::UncheckedDim(w) => collect_param_names(&w.unchecked_dim.inner, out),
-        Expr::Const(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_) | Expr::Dt(_)
-        | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
+        Expr::Const(_) | Expr::ConstRef(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
+        | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
         | Expr::ObsAnchor(_)
         | Expr::BindingRef(_) | Expr::PerEvalRef(_) => {}
     }
@@ -685,9 +695,9 @@ fn collect_binding_refs(expr: &Expr, out: &mut Vec<String>) {
         Expr::TableLookup(w) => w.table_lookup.indices.iter().for_each(|e| collect_binding_refs(e, out)),
         Expr::Reduce(w) => w.reduce.iter().for_each(|e| collect_binding_refs(e, out)),
         Expr::UncheckedDim(w) => collect_binding_refs(&w.unchecked_dim.inner, out),
-        Expr::Const(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_) | Expr::Dt(_)
-        | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_) | Expr::ObsAnchor(_)
-        | Expr::PerEvalRef(_) => {}
+        Expr::Const(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
+        | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_)
+        | Expr::ObsColumnRef(_) | Expr::ObsAnchor(_) | Expr::PerEvalRef(_) => {}
     }
 }
 
@@ -727,6 +737,7 @@ fn eval_structural(
     what: &str,
     expr: &Expr,
     param_index: &HashMap<String, usize>,
+    consts: &HashMap<String, f64>,
     params: &[f64],
 ) -> Result<f64, SimError> {
     let mut names = Vec::new();
@@ -740,7 +751,7 @@ fn eval_structural(
              fourier) for an estimated parameter, or make this value constant."
         )));
     }
-    eval_table_expr(expr, param_index, params)
+    eval_table_expr(expr, param_index, consts, params)
 }
 
 pub struct CompiledModel {
@@ -756,6 +767,9 @@ pub struct CompiledModel {
     /// gh#272 LICM: per-eval binding name → slot (index into
     /// `resolved.per_eval_bindings`). Empty by default.
     pub per_eval_index: HashMap<String, usize>,
+    /// Model constant name → value (`Model.constants`). A `ConstRef` resolves
+    /// to `ResolvedExpr::Const` of this value.
+    pub const_values: HashMap<String, f64>,
 
     /// time_function name → index in model.time_functions
     pub time_func_index: HashMap<String, usize>,
@@ -989,6 +1003,7 @@ fn expr_contains_dt_memo(e: &Expr, bindings: &HashMap<&str, &Expr>, memo: &mut H
     match e {
         Expr::Dt(_) => true,
         Expr::Const(_)
+        | Expr::ConstRef(_)
         | Expr::Param(_)
         | Expr::Pop(_)
         | Expr::PopSum(_)
@@ -1599,6 +1614,10 @@ impl CompiledModel {
             }
         }
 
+        // Model constant name → value; a `ConstRef` resolves to its value.
+        let const_values: HashMap<String, f64> = model.constants.iter()
+            .map(|c| (c.name.clone(), c.value)).collect();
+
         let mut param_index = HashMap::with_capacity(model.parameters.len());
         let mut default_params = Vec::with_capacity(model.parameters.len());
         for (i, p) in model.parameters.iter().enumerate() {
@@ -1742,7 +1761,7 @@ impl CompiledModel {
             match &table.source {
                 ir::table::TableSource::Inline { values } => {
                     let vals: Result<Vec<ResolvedExpr>, SimError> = values.iter()
-                        .map(|expr| resolve_coeff(expr, &param_index))
+                        .map(|expr| resolve_coeff(expr, &param_index, &const_values))
                         .collect();
                     table_values_cache.push(vals?);
                 }
@@ -1775,26 +1794,26 @@ impl CompiledModel {
             use ir::time_func::TimeFuncKind;
             let kind = match &tf.kind {
                 TimeFuncKind::Sinusoidal(s) => CompiledTimeFuncKind::Sinusoidal {
-                    amplitude: resolve_coeff(&s.amplitude, &param_index)?,
-                    period:    resolve_coeff(&s.period,    &param_index)?,
-                    phase:     resolve_coeff(&s.phase,     &param_index)?,
-                    baseline:  resolve_coeff(&s.baseline,  &param_index)?,
+                    amplitude: resolve_coeff(&s.amplitude, &param_index, &const_values)?,
+                    period:    resolve_coeff(&s.period,    &param_index, &const_values)?,
+                    phase:     resolve_coeff(&s.phase,     &param_index, &const_values)?,
+                    baseline:  resolve_coeff(&s.baseline,  &param_index, &const_values)?,
                 },
                 TimeFuncKind::Piecewise(p) => {
                     let bps: Result<Vec<f64>, SimError> = p.breakpoints.iter()
-                        .map(|e| eval_structural(&tf.name, "piecewise breakpoint", e, &param_index, &default_params))
+                        .map(|e| eval_structural(&tf.name, "piecewise breakpoint", e, &param_index, &const_values, &default_params))
                         .collect();
                     let vals: Result<Vec<f64>, SimError> = p.values.iter()
-                        .map(|e| eval_structural(&tf.name, "piecewise value", e, &param_index, &default_params))
+                        .map(|e| eval_structural(&tf.name, "piecewise value", e, &param_index, &const_values, &default_params))
                         .collect();
                     CompiledTimeFuncKind::Piecewise { breakpoints: bps?, values: vals? }
                 }
                 TimeFuncKind::Interpolated(i) => {
                     let times: Result<Vec<f64>, SimError> = i.times.iter()
-                        .map(|e| eval_structural(&tf.name, "interpolation knot time", e, &param_index, &default_params))
+                        .map(|e| eval_structural(&tf.name, "interpolation knot time", e, &param_index, &const_values, &default_params))
                         .collect();
                     let vals: Result<Vec<f64>, SimError> = i.values.iter()
-                        .map(|e| eval_structural(&tf.name, "interpolation knot value", e, &param_index, &default_params))
+                        .map(|e| eval_structural(&tf.name, "interpolation knot value", e, &param_index, &const_values, &default_params))
                         .collect();
                     let ts = times?;
                     let vs = vals?;
@@ -1844,33 +1863,33 @@ impl CompiledModel {
                     }
                 }
                 TimeFuncKind::Periodic(p) => {
-                    let period = resolve_coeff(&p.period, &param_index)?;
+                    let period = resolve_coeff(&p.period, &param_index, &const_values)?;
                     let vals: Result<Vec<ResolvedExpr>, SimError> = p.values.iter()
-                        .map(|e| resolve_coeff(e, &param_index))
+                        .map(|e| resolve_coeff(e, &param_index, &const_values))
                         .collect();
                     CompiledTimeFuncKind::Periodic { period, values: vals? }
                 }
                 TimeFuncKind::Fourier(f) => {
                     // `period <= 0` early check at default params (the live path
                     // guards a non-positive runtime value by returning 0).
-                    let period_at_default = eval_table_expr(&f.period, &param_index, &default_params)?;
+                    let period_at_default = eval_table_expr(&f.period, &param_index, &const_values, &default_params)?;
                     if period_at_default <= 0.0 {
                         return Err(SimError::Validation(format!(
                             "fourier forcing period must be positive, got {}", period_at_default)));
                     }
                     let harmonics: Result<Vec<(ResolvedExpr, ResolvedExpr)>, SimError> = f.harmonics.iter()
                         .map(|(a, b)| Ok((
-                            resolve_coeff(a, &param_index)?,
-                            resolve_coeff(b, &param_index)?,
+                            resolve_coeff(a, &param_index, &const_values)?,
+                            resolve_coeff(b, &param_index, &const_values)?,
                         )))
                         .collect();
                     CompiledTimeFuncKind::Fourier {
-                        period: resolve_coeff(&f.period, &param_index)?,
+                        period: resolve_coeff(&f.period, &param_index, &const_values)?,
                         harmonics: harmonics?,
                     }
                 }
                 TimeFuncKind::PeriodicSpline(ps) => {
-                    let period = eval_structural(&tf.name, "periodic_spline period", &ps.period, &param_index, &default_params)?;
+                    let period = eval_structural(&tf.name, "periodic_spline period", &ps.period, &param_index, &const_values, &default_params)?;
                     if period <= 0.0 {
                         return Err(SimError::Validation(format!(
                             "periodic_spline period must be positive, got {}", period)));
@@ -1881,7 +1900,7 @@ impl CompiledModel {
                             ps.n_basis, ps.degree)));
                     }
                     let coefs: Result<Vec<f64>, SimError> = ps.coefs.iter()
-                        .map(|e| eval_structural(&tf.name, "periodic_spline coefficient", e, &param_index, &default_params))
+                        .map(|e| eval_structural(&tf.name, "periodic_spline coefficient", e, &param_index, &const_values, &default_params))
                         .collect();
                     let cs = coefs?;
                     if cs.len() != ps.n_basis as usize {
@@ -1906,7 +1925,7 @@ impl CompiledModel {
             // only) seam.
             let lag = match &tf.lag {
                 None => None,
-                Some(e) => Some(resolve_coeff(e, &param_index)?),
+                Some(e) => Some(resolve_coeff(e, &param_index, &const_values)?),
             };
             time_func_cache.push(CompiledTimeFunc { kind, lag });
         }
@@ -1982,6 +2001,7 @@ impl CompiledModel {
             table_meta: &table_meta,
             binding_index: &binding_index,
             per_eval_index: &per_eval_index,
+            const_values: &const_values,
         };
 
         // Resolve balance constraint
@@ -2254,6 +2274,7 @@ impl CompiledModel {
             param_index,
             binding_index,
             per_eval_index,
+            const_values,
             time_func_index,
             table_index,
             int_comp_indices,

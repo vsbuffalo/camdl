@@ -56,6 +56,7 @@ fn pop(p: &str) -> Expr { Expr::Pop(PopExpr { pop: p.into() }) }
 /// R = N0 − S − I; a scheduled cull moves 20% of S into R at t=5.
 fn balance_model() -> CompiledModel {
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "balance_conservation".into(),
         version: "0.3".into(),

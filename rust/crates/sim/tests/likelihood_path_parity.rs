@@ -46,6 +46,7 @@ use sim::{
 /// projection (`IntCompSum` over `I`) reads counts too.
 fn model() -> Arc<CompiledModel> {
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "likelihood_path_parity".into(),
         version: "0.3".into(),

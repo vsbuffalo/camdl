@@ -103,6 +103,7 @@ fn death_model(d_rate_d_n0: Expr) -> Arc<CompiledModel> {
     rate_grad.insert("mu".into(), DerivEntry::Grad(Expr::pop("N")));
 
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "gh475_death_with_init_law".into(),
         version: "0.3".into(),

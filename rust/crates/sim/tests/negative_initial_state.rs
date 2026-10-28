@@ -96,6 +96,7 @@ fn model_full(
     *ic.0.get_mut("R").unwrap() =
         InitSpec::Deterministic(bin(BinOp::Sub, Expr::const_(5.0), pop("I")));
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "negative_initial_state".into(),
         version: "0.3".into(),

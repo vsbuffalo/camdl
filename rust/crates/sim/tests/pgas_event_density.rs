@@ -123,6 +123,7 @@ fn sir_with_seed_event() -> Model {
     init.insert("R".into(),   0.0);
 
     Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "sir_seed_event".into(),
         version: "0.3".into(), time_unit: "days".into(),
@@ -209,6 +210,7 @@ fn seir_with_seed_event(n_seed: i64, tau: f64) -> Model {
     init.insert("R".into(),    0.0);
 
     Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "seir_seed_event".into(),
         version: "0.3".into(), time_unit: "days".into(),

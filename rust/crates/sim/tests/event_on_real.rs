@@ -32,6 +32,7 @@ use sim::{
 /// constant by dW/dt = 0 except for the always-active event `topup`.
 fn model_with_real_event() -> CompiledModel {
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "event_on_real".into(),
         version: "0.3".into(),

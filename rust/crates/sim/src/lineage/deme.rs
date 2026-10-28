@@ -426,6 +426,7 @@ mod tests {
 
     fn minimal_model() -> ir::Model {
         ir::Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "t".into(),
             version: "0".into(),

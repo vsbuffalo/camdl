@@ -78,6 +78,7 @@ fn death_model(event_times: Option<Vec<f64>>) -> CompiledModel {
         None => vec![],
     };
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "death_event_guard".into(),
         version: "0.3".into(),

@@ -55,6 +55,7 @@ const T_END: f64 = 10.0;
 /// has a snapshot at every integer boundary, including the declared start.
 fn model() -> Arc<CompiledModel> {
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "covers_leading_reset".into(),
         version: "0.3".into(),

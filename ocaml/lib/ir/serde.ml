@@ -145,6 +145,7 @@ let rec expr_to_json (e : expr) : Yojson.Safe.t =
   match e with
   | Const v      -> obj [("const", flt v)]
   | Param p      -> obj [("param", str p)]
+  | ConstRef c   -> obj [("const_ref", str c)]
   | Pop   p      -> obj [("pop",   str p)]
   | PopSum ps    -> obj [("pop_sum", arr (List.map str ps))]
   | Reduce terms -> obj [("reduce", arr (List.map expr_to_json terms))]
@@ -208,6 +209,7 @@ let rec expr_of_json (j : Yojson.Safe.t) : expr =
     (match keys with
     | ["const"]        -> Const (as_float (List.assoc "const" kvs))
     | ["param"]        -> Param (as_string (List.assoc "param" kvs))
+    | ["const_ref"]    -> ConstRef (as_string (List.assoc "const_ref" kvs))
     | ["pop"]          -> Pop   (as_string (List.assoc "pop" kvs))
     | ["pop_sum"]      -> PopSum (List.map as_string (as_list (List.assoc "pop_sum" kvs)))
     | ["reduce"]       -> Reduce (List.map expr_of_json (as_list (List.assoc "reduce" kvs)))
@@ -1481,6 +1483,7 @@ let doc_index_to_json (di : doc_index) : Yojson.Safe.t =
   obj (
     (match di.di_model with None -> [] | Some d -> [("model", doc_to_json d)]) @
     category "parameters"   di.di_parameters @
+    category "constants"    di.di_constants @
     category "compartments" di.di_compartments @
     category "transitions"  di.di_transitions @
     category "observations" di.di_observations @
@@ -1496,6 +1499,7 @@ let doc_index_of_json j : doc_index =
                        | Some (`Assoc _ as d) -> Some (doc_of_json d)
                        | _ -> None);
     di_parameters   = category "parameters";
+    di_constants    = category "constants";
     di_compartments = category "compartments";
     di_transitions  = category "transitions";
     di_observations = category "observations";
@@ -1504,7 +1508,7 @@ let doc_index_of_json j : doc_index =
 
 let doc_index_is_empty (di : doc_index) : bool =
   di.di_model = None
-  && di.di_parameters = [] && di.di_compartments = [] && di.di_transitions = []
+  && di.di_parameters = [] && di.di_constants = [] && di.di_compartments = [] && di.di_transitions = []
   && di.di_observations = [] && di.di_dimensions = [] && di.di_quantities = []
 
 let parameter_to_json (p : parameter) : Yojson.Safe.t =
@@ -1515,16 +1519,31 @@ let parameter_to_json (p : parameter) : Yojson.Safe.t =
     ("param_dim",  match p.param_dim  with None -> null | Some (p_exp, t_exp) -> arr [int p_exp; int t_exp]);
   ]
 
+let param_kind_of_json_string k =
+  match param_kind_of_name k with
+  | Some pk -> pk
+  | None    -> fail "unknown param_kind '%s' (expected one of \
+                     rate|probability|count|positive|real|instant|duration)" k
+
+(* A model constant: `{"name": _, "value": _, "kind": _}`. *)
+let constant_to_json (c : constant) : Yojson.Safe.t =
+  obj [
+    ("name",  str c.c_name);
+    ("value", flt c.c_value);
+    ("kind",  str (param_kind_name c.c_kind));
+  ]
+
+let constant_of_json j : constant =
+  { c_name  = as_string (member "name" j);
+    c_value = as_float (member "value" j);
+    c_kind  = param_kind_of_json_string (as_string (member "kind" j)); }
+
 let parameter_of_json j =
   { name       = as_string (member "name" j);
     value      = param_value_of_json (member "value" j);
     param_kind = (match member_opt "param_kind" j with
       | Some `Null | None -> None
-      | Some k -> (match param_kind_of_name (as_string k) with
-                   | Some pk -> Some pk
-                   | None    -> fail "unknown param_kind '%s' (expected one of \
-                                      rate|probability|count|positive|real|instant|duration)"
-                                  (as_string k)));
+      | Some k -> Some (param_kind_of_json_string (as_string k)));
     param_dim  = (match member_opt "param_dim" j with
       | Some (`List [p; t]) -> Some (as_int p, as_int t)
       | _ -> None);
@@ -1818,6 +1837,10 @@ let model_to_json (m : model) : Yojson.Safe.t =
     ("interventions",      arr (List.map intervention_to_json m.interventions));
     ("observations",       arr (List.map observation_model_to_json m.observations));
     ("parameters",         arr (List.map parameter_to_json m.parameters));
+  ] @ (match m.constants with
+       | [] -> []
+       | cs -> [("constants", arr (List.map constant_to_json cs))])
+    @ [
     ("initial_conditions", initial_conditions_to_json m.initial_conditions);
   ] @ (match m.ic_grad with
        | [] -> []
@@ -1865,6 +1888,8 @@ let model_of_json (j : Yojson.Safe.t) : model =
     interventions      = List.map intervention_of_json     (as_list (member "interventions"  j));
     observations       = List.map observation_model_of_json (as_list (member "observations"  j));
     parameters         = List.map parameter_of_json        (as_list (member "parameters"     j));
+    constants          = (match member_opt "constants" j with
+                          | Some (`List v) -> List.map constant_of_json v | _ -> []);
     bindings           = (match member_opt "bindings" j with
                           | Some (`List v) -> List.map binding_of_json v | _ -> []);
     per_eval_bindings  = (match member_opt "per_eval_bindings" j with

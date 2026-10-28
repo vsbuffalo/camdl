@@ -52,6 +52,7 @@ fn projected() -> Expr {
 /// degenerate value in as the sampler's `projected` call argument.
 fn model_with_likelihood(likelihood: Likelihood) -> Arc<CompiledModel> {
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "degenerate_obs".into(),
         version: "0.3".into(),

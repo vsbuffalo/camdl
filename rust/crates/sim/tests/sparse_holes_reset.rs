@@ -49,6 +49,7 @@ use sim::{
 /// substep is exactly `nearbyint(K·dt)` — no particle noise in the projection.
 fn model(k_per_unit: f64) -> Arc<CompiledModel> {
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "sparse_holes_reset".into(),
         version: "0.3".into(),

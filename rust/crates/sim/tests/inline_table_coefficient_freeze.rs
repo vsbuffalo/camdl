@@ -40,6 +40,7 @@ fn table_lookup(table: &str, index: f64) -> Expr {
 /// `S --> D` with rate `table_lookup(k_tbl, 0) * S`; `k_tbl = [k]`.
 fn decay_model() -> Model {
     Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "table_decay".into(),
         version: "0.3".into(),

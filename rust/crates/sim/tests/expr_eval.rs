@@ -22,6 +22,7 @@ use sim::{
 
 fn minimal_model(compartments: Vec<Compartment>, params: Vec<Parameter>) -> Model {
     Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "test".into(),
         version: "0.3".into(),

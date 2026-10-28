@@ -19,7 +19,7 @@ fn binary() -> PathBuf {
 }
 
 /// The SIR recovery model with a typed constant `omega` that the dynamics
-/// read, so a run holds it.
+/// read. A constant is not a parameter: no fit config names it.
 const MODEL: &str = r#"
 time_unit = 'days
 compartments { S, I, R }
@@ -75,7 +75,7 @@ cooling = 0.7
 }
 
 const ESTIMATE: &str = "beta  = { bounds = [0.1, 0.9], start = 0.4 }\ngamma = { start = 0.15 }";
-const FIXED: &str = "N0 = 10000\nI0 = 10\nrho = 0.6\nomega = 0.01";
+const FIXED: &str = "N0 = 10000\nI0 = 10\nrho = 0.6";
 
 fn fixture(fit: &str) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
@@ -158,9 +158,10 @@ fn fit_run_records_its_partition_and_generates_the_legacy_fields() {
     assert_eq!(rho["via"], "inline");
     assert_eq!(rho["value"], 0.6);
     assert_eq!(rho["value_from"]["source"], "fit_toml_fixed");
-    // A typed constant is still an IR parameter, held by its `[fixed]` entry.
-    assert_eq!(part["parameters"]["omega"]["role"], "fixed");
-    assert_eq!(part["parameters"]["omega"]["value"], 0.01);
+    // A typed constant is not a parameter: it is in no partition and no
+    // legacy field, and the fit ran without a `[fixed]` entry for it (gh#965).
+    assert!(part["parameters"].get("omega").is_none(), "{part:#}");
+    assert!(meta["fixed"].get("omega").is_none(), "{meta:#}");
     let (estimated, fixed) = legacy_of(part);
     assert_eq!(meta["estimated"], estimated);
     assert_eq!(meta["fixed"], fixed);

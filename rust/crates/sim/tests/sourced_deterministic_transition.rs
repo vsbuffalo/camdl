@@ -86,6 +86,7 @@ fn build(
     t_end: f64,
 ) -> Model {
     Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: name.into(),
         version: "0.3".into(),

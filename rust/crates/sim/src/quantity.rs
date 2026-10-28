@@ -208,6 +208,7 @@ impl QuantityEvaluator {
             table_meta: &table_meta,
             binding_index: &compiled.binding_index,
             per_eval_index: &compiled.per_eval_index,
+            const_values: &compiled.const_values,
         };
         let resolve = |e: &ir::expr::Expr| -> Result<ResolvedExpr, String> {
             resolve_expr(e, &ctx)
@@ -1018,6 +1019,7 @@ mod tests {
             Model,
         };
         let m = Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "q722".into(),
             version: "0.1".into(),

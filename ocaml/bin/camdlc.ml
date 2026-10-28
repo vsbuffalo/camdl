@@ -250,6 +250,23 @@ let () =
          if !emit_deps_path <> "" then
            Compiler.write_depfile ~path:!emit_deps_path ~model:path reads;
          let overrides = List.rev !set_kvs in
+         (* `--set` names a parameter. A name that is not one is refused, not
+            ignored; a model constant (a typed `let`) gets the hint that makes
+            it settable. *)
+         List.iter (fun (k, _) ->
+           if not (List.exists (fun (p : Ir.parameter) -> p.name = k) m.Ir.parameters)
+           then begin
+             (match List.find_opt (fun (c : Ir.constant) -> c.c_name = k) m.Ir.constants with
+              | Some c ->
+                Printf.eprintf
+                  "error: --set %s: '%s' is a constant of the model (`let %s : %s = %g`), \
+                   not a parameter\n  hint: declare it in `parameters {}` to set it \
+                   from outside\n"
+                  k k k (Ir.param_kind_name c.c_kind) c.c_value
+              | None ->
+                Printf.eprintf "error: --set %s: unknown parameter '%s'\n" k k);
+             exit 1
+           end) overrides;
          let m = if overrides = [] then m else
            { m with Ir.parameters =
                List.map (fun (p : Ir.parameter) ->

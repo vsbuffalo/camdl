@@ -48,6 +48,7 @@ impl ObservationModel<ParticleState> for NegBinFlowObs {
 
 fn sir_model() -> (CompiledModel, Vec<f64>) {
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "sir_if2_test".into(),
         version: "0.3".into(),

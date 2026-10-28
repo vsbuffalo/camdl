@@ -1175,6 +1175,7 @@ mod tests {
     // S, I integer; W real. One trivial transition so the model compiles.
     fn model_with(actions: Vec<Action>) -> CompiledModel {
         let m = Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "effects_test".into(),
             version: "0.1".into(),
@@ -1759,6 +1760,7 @@ mod tests {
     /// carries `actions`, fired at t=1 by `apply_boundary_effects_continuous`.
     fn model_two_real(actions: Vec<Action>) -> CompiledModel {
         let m = Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "effects_two_real".into(),
             version: "0.1".into(),
@@ -1950,6 +1952,7 @@ mod tests {
             kind: if always { ir::intervention::InterventionKind::Event } else { ir::intervention::InterventionKind::Scenario },
         };
         let m = Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "split_due_batch_test".into(),
             version: "0.1".into(),

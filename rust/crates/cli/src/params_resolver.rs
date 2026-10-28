@@ -404,7 +404,11 @@ impl PinnedOverEstimate {
 
 #[derive(Debug, Clone)]
 pub enum ResolveError {
-    UnknownParameter     { name: String, source: ValueSource, candidates: Vec<String> },
+    /// `constant_hint`: set when `name` is a model constant
+    /// ([`ir::Model::constant_hint`]) — a typed `let`, which is not a
+    /// parameter; the message then says how to make it configurable.
+    UnknownParameter     { name: String, source: ValueSource, candidates: Vec<String>,
+                           constant_hint: Option<String> },
     NonFiniteValue       { name: String, value: f64, source: ValueSource },
     UnsetRequired        { name: String },
     SchemaMismatch       { path: PathBuf, msg: String },
@@ -438,7 +442,7 @@ impl std::fmt::Display for ResolveError {
             // Resolver diagnostics follow the same convention so a
             // user can grep stderr without worrying about quoting
             // style varying between code paths.
-            ResolveError::UnknownParameter { name, source, candidates } => {
+            ResolveError::UnknownParameter { name, source, candidates, constant_hint } => {
                 let src_label = match source {
                     ValueSource::FixedCli => "--fixed".to_string(),
                     ValueSource::FixedFile { path } =>
@@ -450,7 +454,11 @@ impl std::fmt::Display for ResolveError {
                     "unknown parameter '{name}' from {src_label}.\n  \
                      Available parameters: {}",
                     if candidates.is_empty() { "(none)".to_string() }
-                    else { candidates.join(", ") })
+                    else { candidates.join(", ") })?;
+                if let Some(hint) = constant_hint {
+                    write!(f, "\n  hint: {hint}")?;
+                }
+                Ok(())
             }
             ResolveError::NonFiniteValue { name, value, source } => {
                 // "not finite (NaN or ±∞)" mirrors the legacy
@@ -1574,6 +1582,7 @@ pub fn resolve_parameters_with_starts<'a>(
                 name: name.clone(),
                 source: ValueSource::FitTomlFixed,
                 candidates: model_param_names.clone(),
+                constant_hint: model.constant_hint(name),
             });
         }
         for p in &mut model.parameters {
@@ -1597,6 +1606,7 @@ pub fn resolve_parameters_with_starts<'a>(
                     name: name.clone(),
                     source: ValueSource::FixedFile { path: path.clone() },
                     candidates: model_param_names.clone(),
+                    constant_hint: model.constant_hint(name),
                 });
             }
         }
@@ -1625,6 +1635,7 @@ pub fn resolve_parameters_with_starts<'a>(
                 name: name.clone(),
                 source: ValueSource::SweepPoint,
                 candidates: model_param_names.clone(),
+                constant_hint: model.constant_hint(name),
             });
         }
         for p in &mut model.parameters {
@@ -1675,6 +1686,7 @@ pub fn resolve_parameters_with_starts<'a>(
                 name: name.clone(),
                 source: ValueSource::FixedCli,
                 candidates: model_param_names.clone(),
+                constant_hint: model.constant_hint(name),
             });
         }
         tier5.insert(name.clone(), *v);
@@ -2179,6 +2191,7 @@ mod tests {
     /// the argument; everything else is empty-but-valid.
     fn mk_model(parameters: Vec<Parameter>) -> ir::Model {
         ir::Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "test".into(),
             version: "0.3".into(),

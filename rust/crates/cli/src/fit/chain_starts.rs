@@ -1407,6 +1407,7 @@ mod tests {
             }
         }).collect();
         let model = ir::Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "test".into(),
             version: "0.3".into(),

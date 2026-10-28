@@ -47,6 +47,7 @@ use sim::{
 /// moment the model is most fragile: `I = 0`.
 fn overdispersed_model(sigma_expr: Expr) -> Model {
     Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "gh517".into(),
         version: "0.3".into(),

@@ -45,6 +45,7 @@ fn death_model(
     ic_grad: std::collections::HashMap<String, ir::deriv::ParamGradMap>,
 ) -> Model {
     Model {
+        constants: vec![],
         ic_grad,
         name: "gh938_death".into(),
         version: "0.3".into(),

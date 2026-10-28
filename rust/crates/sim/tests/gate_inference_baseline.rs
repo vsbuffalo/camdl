@@ -94,6 +94,7 @@ fn transition(name: &str, sto: Vec<StoichiometryEntry>, rate: Expr) -> Transitio
 fn build_sir(obs_times: Vec<f64>) -> (MultiStreamObsModel, Arc<CompiledModel>, Vec<f64>) {
     let n = Expr::PopSum(PopSumExpr { pop_sum: vec!["S".into(), "I".into(), "R".into()] });
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "sir_weekly_negbin".into(),
         version: "0.3".into(),

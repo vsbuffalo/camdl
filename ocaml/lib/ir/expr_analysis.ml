@@ -71,6 +71,8 @@ let dep_of_expr ~binding_dep (e : Ir.expr) : dep =
   let rec go : Ir.expr -> dep = function
     | Ir.Const _ -> Const
     | Ir.Param _ -> Param
+    (* A model constant is a compile-time literal by another name. *)
+    | Ir.ConstRef _ -> Const
     | Ir.Pop _ | Ir.PopSum _ -> State
     | Ir.Time | Ir.Dt | Ir.TimeFunc _ -> Time
     (* A table lookup is at least Data (its compile-time cells); its index

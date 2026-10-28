@@ -930,6 +930,7 @@ mod tests {
 
         // Source `I` mixes a deterministic recovery with a Poisson death.
         let model = Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "mixed_source_infer".into(),
             version: "0.3".into(),
@@ -1057,6 +1058,7 @@ mod tests {
         // Build a one-transition S --> I model whose infection rate is `rate`.
         let build = |name: &str, rate: Expr| -> sim::CompiledModel {
             let model = Model {
+                constants: vec![],
                 ic_grad: Default::default(),
                 name: name.into(),
                 version: "0.3".into(),

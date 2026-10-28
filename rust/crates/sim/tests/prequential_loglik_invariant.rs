@@ -50,6 +50,7 @@ use sim::{
 /// flow is exactly `nearbyint(K·dt)`.
 fn model(k_per_unit: f64) -> Arc<CompiledModel> {
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "prequential_invariant".into(),
         version: "0.3".into(),

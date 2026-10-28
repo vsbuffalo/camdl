@@ -53,6 +53,7 @@ const S0: i64 = 1000;
 /// `infect : S --> I @ beta*S` is the only transition; V is untouched by it.
 fn flow_model() -> CompiledModel {
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "lifecycle_agreement_under_flow".into(),
         version: "0.3".into(),

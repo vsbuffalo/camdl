@@ -470,7 +470,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         crate::fit::methods::InitLaw::Absent
     };
     config.validate(&model_params, init_law).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
+        // A model constant named in [estimate] or [fixed] is an unknown
+        // parameter; the hint says how to make it configurable.
+        let fixed = config.problem.fixed.resolve().unwrap_or_default();
+        let named = config.problem.estimate.keys().chain(fixed.keys()).map(|s| s.as_str());
+        eprintln!("error: {}{}", e, crate::util::constant_hints(&model, named));
         std::process::exit(1);
     });
     // gh#75: prior-presence check honoring the IR fallback. Has to run

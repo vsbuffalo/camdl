@@ -239,6 +239,9 @@ pub struct ResolveCtx<'a> {
     /// gh#272 LICM: per-eval binding name → slot. `PerEvalRef(name)` resolves to
     /// `ResolvedExpr::PerEvalRef(slot)`, the sibling of `binding_index`.
     pub per_eval_index: &'a HashMap<String, usize>,
+    /// Model constant name → value. `ConstRef(name)` resolves to
+    /// `ResolvedExpr::Const(value)`: a constant is a literal by another name.
+    pub const_values: &'a HashMap<String, f64>,
 }
 
 /// Resolve an `Expr` tree into a `ResolvedExpr` tree.
@@ -248,6 +251,12 @@ pub struct ResolveCtx<'a> {
 pub fn resolve_expr(expr: &Expr, ctx: &ResolveCtx<'_>) -> Result<ResolvedExpr, SimError> {
     match expr {
         Expr::Const(c) => Ok(ResolvedExpr::Const(c.value)),
+
+        Expr::ConstRef(c) => {
+            let v = *ctx.const_values.get(c.const_ref.as_str())
+                .ok_or_else(|| SimError::UnknownConstant(c.const_ref.clone()))?;
+            Ok(ResolvedExpr::Const(v))
+        }
 
         Expr::Param(p) => {
             let idx = *ctx.param_index.get(p.param.as_str())

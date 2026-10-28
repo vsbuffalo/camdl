@@ -96,6 +96,7 @@ fn pathological_sir_model() -> (CompiledModel, Vec<f64>) {
     }});
 
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "pathological_sir_pf".into(),
         version: "0.3".into(),
@@ -330,6 +331,7 @@ fn healthy_sir_model() -> (CompiledModel, Vec<f64>) {
     }});
 
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "healthy_sir_pf".into(),
         version: "0.3".into(),

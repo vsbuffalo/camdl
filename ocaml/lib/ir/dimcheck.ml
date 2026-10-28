@@ -318,6 +318,15 @@ let init_params st (params : parameter list) =
     Hashtbl.replace st.param_map p.name { stable_dim = d; inferred = None }
   ) params
 
+(* A model constant's dimension comes from its declared kind, exactly as a
+   parameter's does. It shares [param_map] (a `let` and a parameter of the same
+   name are already E278), so every [Param] rule below applies to [ConstRef]. *)
+let init_constants st (constants : constant list) =
+  List.iter (fun (c : constant) ->
+    Hashtbl.replace st.param_map c.c_name
+      { stable_dim = param_dim_of_kind st (Some c.c_kind); inferred = None }
+  ) constants
+
 (* ── Bottom-up inference ────────────────────────────────────────────────── *)
 
 (* A `Reduce [t0; …; tn]` is dimensionally and for display exactly the Add chain
@@ -334,7 +343,7 @@ let rec infer st ~ctx (e : expr) : dim =
   match e with
   | Const 0.0 -> Any
   | Const _   -> Known dimensionless
-  | Param name ->
+  | Param name | ConstRef name ->
     (match Hashtbl.find_opt st.param_map name with
      | Some entry -> resolve st entry.stable_dim
      | None -> fresh_var st)
@@ -485,7 +494,7 @@ and infer_cond st ~ctx (c : cond_expr) : dim =
 let rec propagate st ~ctx (e : expr) (expected : dim_vec) : unit =
   match e with
   | Const _ -> ()
-  | Param name ->
+  | Param name | ConstRef name ->
     (match Hashtbl.find_opt st.param_map name with
      | Some entry ->
        (match resolve st entry.stable_dim with
@@ -650,7 +659,7 @@ let rec read_dim st (e : expr) : dim =
   match e with
   | Const 0.0 -> Any
   | Const _   -> Known dimensionless
-  | Param name ->
+  | Param name | ConstRef name ->
     (match Hashtbl.find_opt st.param_map name with
      | Some entry -> resolve st entry.stable_dim
      | None -> Unknown (-1))  (* sentinel: unknown, but don't allocate *)
@@ -746,7 +755,7 @@ let rec expr_to_short_string (e : expr) : string =
     if Float.is_integer f && Float.abs f < 1e9 then
       string_of_int (Float.to_int f)
     else Printf.sprintf "%g" f
-  | Param s -> s
+  | Param s | ConstRef s -> s
   | Pop s -> s
   | PopSum ss -> String.concat " + " ss
   | Time -> "t"
@@ -959,6 +968,7 @@ let check_model (m : model) : result =
 
   (* Initialize parameter dims *)
   init_params st m.parameters;
+  init_constants st m.constants;
 
   (* Initialize table dims from their values *)
   init_table_dims st m.tables;
@@ -1308,7 +1318,7 @@ let check_model (m : model) : result =
      Returns Some dim_vec if uniquely determined, None otherwise. *)
   let rec implied_param_dim st param_name (e : expr) (target : dim_vec) : dim_vec option =
     match e with
-    | Param name when name = param_name -> Some target
+    | (Param name | ConstRef name) when name = param_name -> Some target
     | BinOp { op = Add; left; right; _ }
     | BinOp { op = Sub; left; right; _ }
     | BinOp { op = Min; left; right; _ }
@@ -1331,7 +1341,7 @@ let check_model (m : model) : result =
       let classify_factor factor is_num =
         let has_param = ref false in
         let rec check = function
-          | Param name when name = param_name -> has_param := true
+          | (Param name | ConstRef name) when name = param_name -> has_param := true
           | BinOp b -> check b.left; check b.right
           | UnOp u -> check u.arg
           | Cond c -> check c.pred; check c.then_; check c.else_
@@ -1358,7 +1368,7 @@ let check_model (m : model) : result =
         let sub_target = if is_num then residual else dim_scale (-1) residual in
         (* If the sub_expr is the param itself, we're done *)
         (match sub_expr with
-         | Param name when name = param_name -> Some sub_target
+         | (Param name | ConstRef name) when name = param_name -> Some sub_target
          | _ -> implied_param_dim st param_name sub_expr sub_target)
       end else
         None
@@ -1380,7 +1390,7 @@ let check_model (m : model) : result =
   (* Collect param names used in each transition *)
   let rec params_in (e : expr) acc =
     match e with
-    | Param name -> if List.mem name acc then acc else name :: acc
+    | Param name | ConstRef name -> if List.mem name acc then acc else name :: acc
     | BinOp b -> params_in b.left (params_in b.right acc)
     | UnOp u -> params_in u.arg acc
     | Cond c -> params_in c.pred (params_in c.then_ (params_in c.else_ acc))

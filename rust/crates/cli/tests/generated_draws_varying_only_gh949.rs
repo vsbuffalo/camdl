@@ -82,17 +82,16 @@ scenarios {
 quantities { final_R = final(R) }
 "#;
 
-/// `c` has a model default (a typed constant `let` is a fixed parameter) and no
-/// bounds, so `--draws uniform` does not draw it; `beta`/`gamma` are bounded
-/// and are drawn.
+/// `c` is declared without bounds, so `--draws uniform` does not draw it;
+/// `beta`/`gamma` are bounded and are drawn.
 const UNIFORM: &str = r#"
 time_unit = 'days
 compartments { S, I, R }
 parameters {
   beta  : rate in [0.05, 1.0]
   gamma : rate in [0.02, 0.5]
+  c     : probability
 }
-let c : probability = 0.0
 init { S = 990  I = 10  R = 0 }
 transitions {
   infect  : S --> I  @ (1 - c) * beta * S * I / (S + I + R)
@@ -249,7 +248,7 @@ fn uniform_draws_leave_an_unbounded_parameter_to_params() {
         "--quantities-out", "q_param",
     ]);
     f.ok(&[
-        "simulate", "uniform.camdl", "--draws", "uniform", "-n", "3",
+        "simulate", "uniform.camdl", "--params", "b0.toml", "--draws", "uniform", "-n", "3",
         "--quantities-out", "q_default",
     ]);
     let via_params = f.final_r_rows("q_params");
@@ -261,7 +260,7 @@ fn uniform_draws_leave_an_unbounded_parameter_to_params() {
     assert_ne!(
         via_params,
         f.final_r_rows("q_default"),
-        "c = 0.9 and the model default c = 0 must give different bands"
+        "c = 0.9 and c = 0 must give different bands"
     );
     assert_eq!(header(&f.read("u.tsv")), vec!["beta", "gamma"]);
 }
@@ -279,7 +278,8 @@ fn sampled_parameters_still_vary_and_are_exported() {
         "--draws-out", "p.tsv",
     ]);
     f.ok(&[
-        "simulate", "uniform.camdl", "--draws", "uniform", "-n", "4", "--draws-out", "u.tsv",
+        "simulate", "uniform.camdl", "--params", "b0.toml", "--draws", "uniform", "-n", "4",
+        "--draws-out", "u.tsv",
     ]);
     for file in ["p.tsv", "u.tsv"] {
         let tsv = f.read(file);

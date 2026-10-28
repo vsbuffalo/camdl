@@ -55,6 +55,7 @@ const T_END: f64 = 6.0;
 /// EVENT that transfers ALL of A → B at t=5.
 fn codrain_model() -> CompiledModel {
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "event_transition_codrain".into(),
         version: "0.3".into(),
@@ -278,6 +279,7 @@ fn codrain_cross_backend_agreement() {
 /// residual phase, which would still be 100 here but the test pins the wiring).
 fn inflow_model() -> CompiledModel {
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "event_transition_inflow".into(),
         version: "0.3".into(),

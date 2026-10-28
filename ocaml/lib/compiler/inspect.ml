@@ -349,7 +349,7 @@ let run_summary ppf (model : Ir.model) ctx (sum : Expander.model_summary) =
 let rec expr_node_count (e : Ir.expr) : int =
   let open Ir in
   match e with
-  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
   | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> 1
   | BinOp b -> 1 + expr_node_count b.left + expr_node_count b.right
   | UnOp u  -> 1 + expr_node_count u.arg
@@ -371,7 +371,7 @@ let rec reduce_term_count (e : Ir.expr) : int =
   | Cond c  -> reduce_term_count c.pred + reduce_term_count c.then_ + reduce_term_count c.else_
   | TableLookup (_, idxs) -> List.fold_left (fun a i -> a + reduce_term_count i) 0 idxs
   | UncheckedDim u -> reduce_term_count u.inner
-  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
   | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> 0
 
 (* Count BindingRefs to [name] within an expr tree. *)
@@ -386,7 +386,7 @@ let rec count_bindingref name (e : Ir.expr) : int =
   | TableLookup (_, idxs) -> List.fold_left (fun a i -> a + count_bindingref name i) 0 idxs
   | Reduce terms -> List.fold_left (fun a t -> a + count_bindingref name t) 0 terms
   | UncheckedDim u -> count_bindingref name u.inner
-  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | Projected
+  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | Projected
   | ObsColumnRef _ | ObsAnchor _ -> 0
 
 (* All rate exprs of a model (the cost surface inspect can see — gradients are
@@ -415,7 +415,7 @@ let rec count_hazard_idioms (e : Ir.expr) : int =
     | TableLookup (_, idxs) -> List.fold_left (fun a i -> a + count_hazard_idioms i) 0 idxs
     | Reduce terms -> List.fold_left (fun a t -> a + count_hazard_idioms t) 0 terms
     | UncheckedDim u -> count_hazard_idioms u.inner
-    | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+    | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
     | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> 0)
 
 (* Structural hash of an expr, for detecting duplicated subexpressions. A
@@ -427,6 +427,7 @@ let rec expr_hash (e : Ir.expr) : int =
   match e with
   | Const f -> mix 1 [ Hashtbl.hash f ]
   | Param p -> mix 2 [ Hashtbl.hash p ]
+  | ConstRef c -> mix 19 [ Hashtbl.hash c ]
   | Pop c -> mix 3 [ Hashtbl.hash c ]
   | PopSum cs -> mix 4 [ Hashtbl.hash cs ]
   | Time -> mix 5 []
@@ -462,7 +463,7 @@ let count_duplicated_subexprs ?(threshold = 3) (roots : Ir.expr list) : int =
     | TableLookup (_, idxs) -> List.iter walk idxs
     | Reduce terms -> List.iter walk terms
     | UncheckedDim u -> walk u.inner
-    | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+    | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
     | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> ()
   in
   List.iter walk roots;

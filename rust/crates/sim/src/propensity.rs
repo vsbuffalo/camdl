@@ -76,6 +76,10 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
     match expr {
         Expr::Const(c) => Ok(c.value),
 
+        Expr::ConstRef(c) => ctx.model.const_values.get(c.const_ref.as_str())
+            .copied()
+            .ok_or_else(|| SimError::UnknownConstant(c.const_ref.clone())),
+
         Expr::Param(p) => {
             let idx = ctx.model.param_index.get(p.param.as_str())
                 .copied()

@@ -348,7 +348,7 @@ fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
 /// One loader for both, because they come from one compile: asking twice would
 /// shell out to `camdlc` twice and let the two halves disagree about which
 /// model they describe.
-fn load_model_docs_for_fit(fit_dir: &Path) -> ir::ModelDocs {
+fn load_model_docs_for_fit(fit_dir: &Path) -> (ir::ModelDocs, Vec<ir::parameter::Constant>) {
     let model_path = FitView::read(fit_dir)
         .map(|v| v.model)
         .filter(|m| !m.is_empty())
@@ -357,11 +357,13 @@ fn load_model_docs_for_fit(fit_dir: &Path) -> ir::ModelDocs {
                 .into_iter()
                 .find_map(|(_, rec)| rec.provenance.source_paths.first().cloned())
         });
-    let Some(model_path) = model_path else { return ir::ModelDocs::default() };
+    let Some(model_path) = model_path else { return Default::default() };
     // The envelope dictionary keys by base parameter name (`R0`, not
     // `R0_urban`), so a stratified family shows once — `BTreeMap` order is
-    // deterministic.
-    crate::util::load_model_docs(&model_path).unwrap_or_default()
+    // deterministic. The model's constants come from the same compile.
+    crate::util::load_model_envelope(&model_path)
+        .map(|env| (env.docs, env.model.constants))
+        .unwrap_or_default()
 }
 
 /// One resolved fit-stage to render: stage name, on-disk directory,
@@ -519,7 +521,7 @@ fn format_text(
 
     print!("{}", fmt.fit_header(dir));
 
-    let docs = load_model_docs_for_fit(Path::new(dir));
+    let (docs, constants) = load_model_docs_for_fit(Path::new(dir));
 
     // What this model IS, from its file-header `#'` block (gh#750) — so the
     // first question a summary raises ("a fit of what?") is answered without
@@ -537,8 +539,9 @@ fn format_text(
         }
     }
 
-    let has_legend = !docs.parameters.is_empty();
+    let has_legend = !docs.parameters.is_empty() || !constants.is_empty();
     print!("{}", parameter_legend(&docs.parameters, args.parameters));
+    print!("{}", constant_legend(&constants, &docs.constants, args.parameters));
 
     // The camdl version is a fact about the FIT, so it opens the first stage's
     // identity line and is not repeated on the others'. A fit with no stage at
@@ -1062,6 +1065,44 @@ fn parameter_legend(
             s.push_str(t);
         }
         if let Some(r) = &d.reference {
+            s.push_str("  [");
+            s.push_str(r);
+            s.push(']');
+        }
+        s.push('\n');
+    }
+    s
+}
+
+/// The model's constants — each typed `let` with a constant body, with its
+/// value, its declared kind and its `#'` prose — or nothing.
+///
+/// A constant is part of the model, not a parameter: no fit estimated or held
+/// it, so it appears in no stage's table. It is listed here, after the
+/// parameter legend and under the same flag, because its value is an
+/// assumption the fit rests on. Every constant is listed, documented or not.
+fn constant_legend(
+    constants: &[ir::parameter::Constant],
+    documented: &BTreeMap<String, ir::parameter::DocBlock>,
+    wanted: bool,
+) -> String {
+    if !wanted || constants.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("\n  constants (typed `let`s: part of the model, not parameters)\n");
+    for c in constants {
+        s.push_str("    ");
+        let d = documented.get(&c.name);
+        if let Some(sym) = d.and_then(|d| d.symbol.as_ref()) {
+            s.push_str(sym);
+            s.push_str("  ");
+        }
+        s.push_str(&format!("{} = {} ({})", c.name, c.value, c.kind.as_str()));
+        if let Some(t) = d.and_then(|d| d.text.as_ref()) {
+            s.push_str("  —  ");
+            s.push_str(t);
+        }
+        if let Some(r) = d.and_then(|d| d.reference.as_ref()) {
             s.push_str("  [");
             s.push_str(r);
             s.push(']');
@@ -5222,6 +5263,34 @@ mod tests {
         ));
         // A model that documents nothing has no legend to gate.
         assert_eq!(parameter_legend(&BTreeMap::new(), true), "");
+    }
+
+    /// A model's constants are listed under their own heading, every one of
+    /// them with its value and kind, its prose when it has any, and only
+    /// under `--parameters`.
+    #[test]
+    fn the_constant_legend_lists_every_constant_under_the_flag() {
+        use std::collections::BTreeMap;
+        let constants = vec![
+            ir::parameter::Constant { name: "omega".into(), value: 0.01,
+                                      kind: ir::parameter::ParamKind::Rate },
+            ir::parameter::Constant { name: "iota".into(), value: 1e-6,
+                                      kind: ir::parameter::ParamKind::Count },
+        ];
+        let docs: BTreeMap<String, ir::parameter::DocBlock> = BTreeMap::from([
+            ("omega".to_string(), ir::parameter::DocBlock {
+                symbol: Some("ω".to_string()),
+                text: Some("Waning of immunity.".to_string()),
+                reference: None,
+            }),
+        ]);
+        assert_eq!(constant_legend(&constants, &docs, false), "");
+        assert_eq!(constant_legend(&constants, &docs, true), concat!(
+"\n  constants (typed `let`s: part of the model, not parameters)\n",
+"    ω  omega = 0.01 (rate)  —  Waning of immunity.\n",
+"    iota = 0.000001 (count)\n",
+        ));
+        assert_eq!(constant_legend(&[], &docs, true), "");
     }
 
     /// `--explain` defines each term exactly ONCE, under the section it is

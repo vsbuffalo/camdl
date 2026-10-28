@@ -426,6 +426,10 @@ pub struct Model {
     pub interventions:      Vec<Intervention>,
     pub observations:       Vec<ObservationModel>,
     pub parameters:         Vec<Parameter>,
+    /// Model constants (typed constant `let`s), read through
+    /// [`crate::expr::Expr::ConstRef`]. Not parameters. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constants:          Vec<crate::parameter::Constant>,
     /// Fix B: shared per-coordinate bindings, topologically ordered. `default`
     /// so pre-Fix-B IR (no field) deserializes to empty; `skip_serializing_if`
     /// so an empty list adds no JSON noise (inc1a emits none).
@@ -484,6 +488,22 @@ pub struct Model {
 }
 
 impl Model {
+    /// The model constant named `name`, if there is one.
+    pub fn constant(&self, name: &str) -> Option<&crate::parameter::Constant> {
+        self.constants.iter().find(|c| c.name == name)
+    }
+
+    /// The hint for an external naming of a model constant — `--fixed`,
+    /// `[fixed]`, `[estimate]`, `--sweep`, a scenario `set`, a draws column —
+    /// which every such path refuses as an unknown parameter. `None` when
+    /// `name` is not a constant of this model.
+    pub fn constant_hint(&self, name: &str) -> Option<String> {
+        self.constant(name).map(|c| format!(
+            "`{n}` is a constant of the model (`let {n} : {k} = {v}`), not a parameter; \
+             declare it in `parameters {{}}` to set it from outside",
+            n = c.name, k = c.kind.as_str(), v = c.value))
+    }
+
     /// gh#616: the post-decode normalisation every IR load applies (see
     /// [`SimulationConfig::restore_unresolved_horizon`]). Idempotent, and a
     /// no-op for a model that declares no anchor.

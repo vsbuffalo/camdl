@@ -120,7 +120,7 @@ fn collect_obs_column_refs(e: &ir::expr::Expr, out: &mut Vec<String>) {
                 collect_obs_column_refs(t, out);
             }
         }
-        Expr::Const(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
+        Expr::Const(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
         | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_)
         // gh#616: a forcing knot, never an aux data column.
         | Expr::ObsAnchor(_)
@@ -296,6 +296,7 @@ impl StreamProjection {
                     table_meta: &table_meta,
                     binding_index: &compiled.binding_index,
                     per_eval_index: &compiled.per_eval_index,
+                    const_values: &compiled.const_values,
                 };
                 let resolved = resolve_expr(expr, &ctx).map_err(|e| format!(
                     "observation '{}': cannot resolve state-snapshot expression: {:?}",
@@ -437,6 +438,7 @@ fn resolve_projection_state_grad(
         table_meta: &table_meta,
         binding_index: &compiled.binding_index,
         per_eval_index: &compiled.per_eval_index,
+        const_values: &compiled.const_values,
     };
     let mut out = Vec::with_capacity(grad.0.len());
     for (comp_name, entry) in grad.0.iter() {
@@ -3449,6 +3451,7 @@ mod hole_scoring_tests {
     /// (flows, counts) lets us isolate the hole-vs-observed-zero behaviour.
     fn model() -> Arc<CompiledModel> {
         let m = Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "hole_scoring".into(),
             version: "0.3".into(),

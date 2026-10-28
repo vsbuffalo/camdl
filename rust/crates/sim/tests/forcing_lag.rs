@@ -53,6 +53,7 @@ fn param(name: &str, value: f64) -> Parameter {
 /// `lag`, plus any parameters the lag references.
 fn model_with_lag(lag: Option<Expr>, params: Vec<Parameter>) -> Model {
     Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "lag_test".into(),
         version: "0.3".into(),

@@ -27,6 +27,7 @@ pub(crate) fn tiny_model() -> ir::Model {
         SimulationConfig,
     };
     Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "sir".into(),
         version: "1".into(),

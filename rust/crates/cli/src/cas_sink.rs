@@ -1034,6 +1034,7 @@ mod tests {
 
     fn tiny_model() -> Model {
         Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "sir".into(),
             version: "1".into(),

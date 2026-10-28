@@ -36,6 +36,7 @@ use sim::{compiled_model::CompiledModel, rng::StatefulRng};
 /// takes `projected` as a call argument.
 fn binom_survey_model() -> Arc<CompiledModel> {
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "binom_survey".into(),
         version: "0.3".into(),

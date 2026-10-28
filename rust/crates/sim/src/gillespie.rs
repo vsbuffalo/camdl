@@ -631,6 +631,7 @@ mod tests {
     // sparse update path (`eval_one`) hits mid-run.
     fn overflow_model() -> CompiledModel {
         let m = Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "overflow".into(),
             version: "0.1".into(),

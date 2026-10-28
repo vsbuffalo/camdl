@@ -53,6 +53,7 @@ impl ObservationModel<ParticleState> for PoissonPrevalenceObs {
 /// Same model used in particle_filter.rs tests.
 fn pure_death_model() -> (CompiledModel, Vec<f64>) {
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "pure_death_pmmh".into(),
         version: "0.3".into(),

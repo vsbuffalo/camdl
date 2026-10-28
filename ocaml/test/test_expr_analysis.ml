@@ -80,7 +80,7 @@ let model_with_bindings bs =
     origin = None; origin_rata_die = None;
     compartments = []; transitions = []; ode_equations = [];
     time_functions = []; tables = []; interventions = []; observations = [];
-    parameters = []; bindings = bs; per_eval_bindings = [];
+    parameters = []; constants = []; bindings = bs; per_eval_bindings = [];
     initial_conditions = [];
     ic_grad = [];
     output = { times = OutAtTimes []; format = "tsv";

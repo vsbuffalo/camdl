@@ -122,6 +122,7 @@ fn pure_death_model() -> (Arc<CompiledModel>, Vec<f64>) {
     let mut rate_grad = ParamGradMap::new();
     rate_grad.insert("mu".into(), DerivEntry::Grad(Expr::Pop(PopExpr { pop: "N".into() })));
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "pure_death_exact".into(),
         version: "0.3".into(),

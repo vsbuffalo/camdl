@@ -108,6 +108,7 @@ fn no_intervention_model() -> CompiledModel {
 
 fn build_model(interventions: Vec<Intervention>) -> CompiledModel {
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "gh216_firing".into(),
         version: "0.3".into(),

@@ -44,6 +44,7 @@ fn pop(p: &str) -> Expr { Expr::Pop(PopExpr { pop: p.into() }) }
 /// test can pick the horizon; the schedule carries only `start` + `step`.
 fn model(t_end: f64, step: f64) -> CompiledModel {
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "output_horizon".into(),
         version: "0.3".into(),

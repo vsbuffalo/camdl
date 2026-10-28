@@ -407,6 +407,7 @@ fn zero_rate_model(
     interventions: Vec<Intervention>,
 ) -> CompiledModel {
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: name.into(),
         version: "0.1".into(),

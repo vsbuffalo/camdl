@@ -48,6 +48,7 @@ fn walk<'a>(
     match expr {
         Expr::Const(_)
         | Expr::Param(_)
+        | Expr::ConstRef(_)
         | Expr::Time(_)
         | Expr::Dt(_)
         | Expr::TimeFunc(_)

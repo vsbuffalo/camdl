@@ -95,6 +95,7 @@ fn ratio_stream(name: &str, scored_kind: ParamKind, likelihood: Likelihood, extr
 /// Two absorbing death compartments fed by two deterministic flows.
 fn model(kc: f64, kf: f64, observations: Vec<IrObs>) -> Arc<CompiledModel> {
     let m = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "flow_ratio".into(),
         version: "0.3".into(),

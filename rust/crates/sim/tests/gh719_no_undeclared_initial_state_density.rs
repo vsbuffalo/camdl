@@ -62,6 +62,7 @@ fn count_ivp_model() -> CompiledModel {
     );
 
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "gh719_count_ivp".into(),
         version: "0.3".into(),

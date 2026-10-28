@@ -25,6 +25,7 @@ use sim::{
 
 fn minimal_model(compartments: Vec<Compartment>, params: Vec<Parameter>) -> Model {
     Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "test".into(),
         version: "0.3".into(),
@@ -88,6 +89,7 @@ fn resolve_ctx_from(model: &CompiledModel) -> ResolveCtx<'_> {
         global_to_real: &model.global_to_real,
         binding_index: &model.binding_index,
         per_eval_index: &model.per_eval_index,
+        const_values: &model.const_values,
         table_meta,
     }
 }

@@ -129,6 +129,7 @@ fn guarded_rate() -> Expr {
 /// build both the guarded fixture and the always-degenerate control.
 fn death_model(rate: Expr) -> Arc<CompiledModel> {
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "gh82_guarded_death".into(),
         version: "0.3".into(),

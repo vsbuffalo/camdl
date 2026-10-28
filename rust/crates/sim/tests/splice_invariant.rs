@@ -99,6 +99,7 @@ fn sir_model_at(
     let int_comp = |name: &str| Compartment { name: name.into(), kind: CompartmentKind::Integer };
 
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "sir_splice".into(),
         version: "0.3".into(),

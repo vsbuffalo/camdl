@@ -95,6 +95,16 @@ pub struct ParamExpr {
     pub param: String,
 }
 
+/// `{"const_ref": "<name>"}` — reference to a model constant (an entry of
+/// `Model.constants`: a typed `let` with a constant body) by name. Not a
+/// parameter: no command can set or estimate it, and its derivative with
+/// respect to every parameter is zero. Resolved to its value at
+/// `CompiledModel::new`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConstRefExpr {
+    pub const_ref: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PopExpr {
     pub pop: String,
@@ -250,6 +260,7 @@ pub struct UncheckedDimWrap {
 pub enum Expr {
     Const(ConstExpr),
     Param(ParamExpr),
+    ConstRef(ConstRefExpr),
     Pop(PopExpr),
     PopSum(PopSumExpr),
     Time(TimeExpr),
@@ -276,6 +287,9 @@ impl Expr {
     }
     pub fn param(name: impl Into<String>) -> Self {
         Expr::Param(ParamExpr { param: name.into() })
+    }
+    pub fn const_ref(name: impl Into<String>) -> Self {
+        Expr::ConstRef(ConstRefExpr { const_ref: name.into() })
     }
     pub fn pop(name: impl Into<String>) -> Self {
         Expr::Pop(PopExpr { pop: name.into() })
@@ -367,6 +381,7 @@ impl<'de> Deserialize<'de> for Expr {
                 let expr = match key.as_str() {
                     "const" => Expr::Const(ConstExpr { value: map.next_value()? }),
                     "param" => Expr::Param(ParamExpr { param: map.next_value()? }),
+                    "const_ref" => Expr::ConstRef(ConstRefExpr { const_ref: map.next_value()? }),
                     "pop" => Expr::Pop(PopExpr { pop: map.next_value()? }),
                     "pop_sum" => Expr::PopSum(PopSumExpr { pop_sum: map.next_value()? }),
                     "time" => {
@@ -405,7 +420,7 @@ impl<'de> Deserialize<'de> for Expr {
                     other => {
                         return Err(de::Error::custom(format!(
                             "unknown expression node kind '{other}' (expected one of: const, \
-                             param, pop, pop_sum, time, dt, bin_op, un_op, cond, time_func, \
+                             param, const_ref, pop, pop_sum, time, dt, bin_op, un_op, cond, time_func, \
                              table_lookup, projected, unchecked_dim, reduce, binding_ref, \
                              per_eval_ref, obs_column_ref, obs_anchor)"
                         )))
@@ -446,6 +461,7 @@ mod deserialize_tests {
             Expr::const_(1.5),
             Expr::const_(-0.0),
             Expr::param("beta"),
+            Expr::const_ref("omega"),
             Expr::pop("S_patch1_age_0_4"),
             Expr::pop_sum(vec!["S".into(), "E".into(), "I".into()]),
             Expr::time(),

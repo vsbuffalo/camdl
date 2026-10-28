@@ -234,6 +234,7 @@ mod tests {
     /// resolver can run without compiling a real model.
     fn mk_model(parameters: Vec<Parameter>) -> ir::Model {
         ir::Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "test".into(),
             version: "0.3".into(),

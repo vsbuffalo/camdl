@@ -201,6 +201,7 @@ fn test_overdispersion_variance_chain_binomial() {
     use ir::expr::{BinOpExpr, BinOpWrap, BinOp, PopExpr};
 
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "od_test".into(),
         version: "0.3".into(),
@@ -326,6 +327,7 @@ fn test_fraction_transfer_edge_cases() {
             })],
         };
         let model = Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "test".into(),
             version: "0.3".into(),

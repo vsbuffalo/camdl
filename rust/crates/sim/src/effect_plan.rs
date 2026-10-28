@@ -394,6 +394,7 @@ mod tests {
     /// `effects` (`(name, schedule, is_event)`), declared in that order.
     fn model(effects: &[(&str, InterventionSchedule, bool)]) -> CompiledModel {
         let m = Model {
+            constants: vec![],
             ic_grad: Default::default(),
             name: "effect_plan_test".into(),
             version: "0.1".into(),

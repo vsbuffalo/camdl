@@ -32,6 +32,7 @@ fn model_with_per_eval(body: Expr) -> Model {
 /// Minimal one-compartment model carrying an arbitrary list of per-eval bindings.
 fn model_with_per_eval_bindings(per_eval_bindings: Vec<Binding>) -> Model {
     Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "per_eval".into(),
         version: "0.3".into(),

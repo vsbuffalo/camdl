@@ -20,6 +20,7 @@ use ir::model::{
 
 fn tiny_model() -> Model {
     Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "sir".into(),
         version: "1".into(),
@@ -739,12 +740,17 @@ fn cas_identity_pins() {
         // `design` field (`null` here). Every stored multi-cell ensemble
         // re-keys once and is rebuilt from cells the store already holds. No
         // other kind hashes an ensemble level, and no `sim` leaf changes.
-        ("sim", "4d378bf80f18768cad7d968ca547d05db64f9cc382deb62054507c6044811bf9"),
-        ("fit", "a2e975020b0d34ec5c4c08126c4b9b0fe54db631badc96ca6bdf59c1a57de01b"),
-        ("pfilter", "e1994c64f4b2eea615d031e5bfe239d8c506f9c0471c94336df5c94ab9fc575a"),
-        ("survey", "3a56923c978abaa4bb73f7b6b8a940bca6c47c9f51d127071fee3191fe1045cb"),
-        ("sim_ensemble", "5f1c403bf8eba26c9b14a88c9f1db057b5f4843ba507cc6364d78637e8f6ece2"),
-        ("profile", "38359dc3df9ab8544384ddc5210eb7ab3a7e6cd50fc1af7c49c8f2141a0b819a"),
+        //
+        // IR 0.41 (typed constants leave `parameters`) then moved EVERY kind:
+        // `Model::hash_into` folds the new `constants` list unconditionally,
+        // so its length prefix enters every kind's `model` level — the same
+        // deliberate, version-bumped re-key as `per_eval_bindings` at 0.19.
+        ("sim", "3dee14e9b5a1f616ea7a212da362411cfc6322c3563930f2fe51c3284251328d"),
+        ("fit", "679914b688c15736c1f0fd498dea7900c4755b643aa82a41f13f5e93d50c3871"),
+        ("pfilter", "5fd865eeec440336717f28371ebf0ab7ba5683edaa2a9aa159b4c9fb9abd60da"),
+        ("survey", "ffd67c4afd54a278839b8db0bc1da82e4ccbdb7f76d48961f97f52c1f6d946ac"),
+        ("sim_ensemble", "13159a37074a633faa11b460b171acd4589bab177df512b8774d5811d818ccf5"),
+        ("profile", "76cb33c616e44597203aa3fa4794e54c9ab09ee53abeeebffada0e8a07d93af1"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.

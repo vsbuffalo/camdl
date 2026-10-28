@@ -35,6 +35,16 @@ pub enum ValidationError {
     #[error("expression references unknown parameter '{0}'")]
     UnknownParameter(String),
 
+    /// E518: a `const_ref` names no entry of `Model.constants`.
+    #[error("expression references unknown constant '{0}'")]
+    UnknownConstant(String),
+
+    /// A model constant shares its name with a parameter (or another constant):
+    /// the two would be one name with two meanings. The compiler refuses the
+    /// source form as E278; this is the IR backstop.
+    #[error("constant '{0}' is declared twice, or shares its name with a parameter")]
+    DuplicateConstant(String),
+
     #[error("expression references unknown compartment '{0}'")]
     UnknownCompartment(String),
 
@@ -227,9 +237,16 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
         }
     }
 
+    let mut const_names: HashSet<&str> = HashSet::new();
+    for c in &model.constants {
+        if param_names.contains(c.name.as_str()) || !const_names.insert(c.name.as_str()) {
+            errors.push(ValidationError::DuplicateConstant(c.name.clone()));
+        }
+    }
+
     // ── Expression reference checks ───────────────────────────────────────────
 
-    let ctx = RefCtx { comp_names: &comp_names, param_names: &param_names, table_names: &table_names, table_lens: &table_lens, tf_names: &tf_names };
+    let ctx = RefCtx { comp_names: &comp_names, param_names: &param_names, const_names: &const_names, table_names: &table_names, table_lens: &table_lens, tf_names: &tf_names };
 
     for tr in &model.transitions {
         check_expr(&tr.rate, &ctx, false, &mut errors);
@@ -592,8 +609,8 @@ fn check_quantity_legal<'a>(
         // quantity can read — and a quantity that wants one writes
         // `value_at(…, last_obs)`, which is a `TimeAnchor`, not this node.
         Expr::ObsAnchor(_) => forbid(errors, quantity, "obs_anchor"),
-        Expr::Const(_) | Expr::Time(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
-        | Expr::TimeFunc(_) => {}
+        Expr::Const(_) | Expr::Time(_) | Expr::Param(_) | Expr::ConstRef(_) | Expr::Pop(_)
+        | Expr::PopSum(_) | Expr::TimeFunc(_) => {}
         Expr::BinOp(w) => {
             check_quantity_legal(&w.bin_op.left, bindings, quantity, errors, seen);
             check_quantity_legal(&w.bin_op.right, bindings, quantity, errors, seen);
@@ -677,6 +694,7 @@ fn const_fold(expr: &Expr) -> Option<f64> {
 struct RefCtx<'a> {
     comp_names:  &'a HashSet<&'a str>,
     param_names: &'a HashSet<&'a str>,
+    const_names: &'a HashSet<&'a str>,
     table_names: &'a HashSet<&'a str>,
     /// gh#127 (#12): Inline-table name → linear length, for constant-index
     /// range checks. External tables are absent (length not static).
@@ -697,6 +715,11 @@ fn check_expr(expr: &Expr, ctx: &RefCtx<'_>, allow_projected: bool, errors: &mut
         Expr::Param(p) => {
             if !ctx.param_names.contains(p.param.as_str()) {
                 errors.push(ValidationError::UnknownParameter(p.param.clone()));
+            }
+        }
+        Expr::ConstRef(c) => {
+            if !ctx.const_names.contains(c.const_ref.as_str()) {
+                errors.push(ValidationError::UnknownConstant(c.const_ref.clone()));
             }
         }
         Expr::Pop(p) => {

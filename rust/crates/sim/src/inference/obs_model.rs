@@ -77,6 +77,7 @@ fn resolve_likelihood_unchecked(
         table_meta: &table_meta,
         binding_index: &compiled.binding_index,
         per_eval_index: &compiled.per_eval_index,
+        const_values: &compiled.const_values,
     };
     resolve_likelihood(likelihood, &ctx)
 }

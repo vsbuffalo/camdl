@@ -67,8 +67,9 @@ pub fn check_swept_names(specs: &[SweepSpec], model: &ir::Model) -> Result<(), S
     if !unknown.is_empty() {
         return Err(format!(
             "--sweep names parameter(s) the model does not declare: {} \
-             (a sweep must vary a real model parameter)",
-            unknown.join(", ")
+             (a sweep must vary a real model parameter){}",
+            unknown.join(", "),
+            crate::util::constant_hints(model, unknown.iter().copied())
         ));
     }
     Ok(())

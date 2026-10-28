@@ -49,6 +49,7 @@ impl ObservationModel<ParticleState> for PoissonPrevalenceObs {
 
 fn pure_death_model() -> (CompiledModel, Vec<f64>) {
     let model = Model {
+        constants: vec![],
         ic_grad: Default::default(),
         name: "pure_death_pf".into(),
         version: "0.3".into(),

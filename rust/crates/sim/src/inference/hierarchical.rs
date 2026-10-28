@@ -76,6 +76,9 @@ impl ParamEnv for () {
 pub fn eval_prior_arg<E: ParamEnv>(expr: &Expr, env: &E) -> f64 {
     match expr {
         Expr::Const(c) => c.value,
+        // The compiler refuses a model constant in a prior argument (E230); a
+        // hand-written IR that carries one gets the same NaN as an unknown name.
+        Expr::ConstRef(_) => f64::NAN,
         Expr::Param(p) => env.get(&p.param).unwrap_or(f64::NAN),
         Expr::BinOp(b) => {
             let l = eval_prior_arg(&b.bin_op.left, env);

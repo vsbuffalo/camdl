@@ -50,6 +50,9 @@ pub struct ModelDocs {
     pub model: Option<DocBlock>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub parameters: BTreeMap<String, DocBlock>,
+    /// Model constants' docs (typed constant `let`s), keyed by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub constants: BTreeMap<String, DocBlock>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub compartments: BTreeMap<String, DocBlock>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -66,6 +69,7 @@ impl ModelDocs {
     pub fn is_empty(&self) -> bool {
         self.model.is_none()
             && self.parameters.is_empty()
+            && self.constants.is_empty()
             && self.compartments.is_empty()
             && self.transitions.is_empty()
             && self.observations.is_empty()

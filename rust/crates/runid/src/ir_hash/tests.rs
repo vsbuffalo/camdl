@@ -153,6 +153,7 @@ fn representative_model() -> Model {
             }),
         }],
         parameters: vec![Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.5), bounds: Some((0.0, 2.0)), prior: ir::parameter::PriorSpec::Dist(PriorDist::Uniform(UniformPrior { lower: 0.0, upper: 2.0 })), transform: Transform::Log }, param_kind: Some(ir::parameter::ParamKind::Rate), param_dim: Some((0, -1)) }],
+        constants: vec![],
         bindings: vec![Binding {
             name: "N".into(),
             expr: Expr::pop_sum(vec!["S".into(), "I".into(), "R".into()]),
@@ -288,9 +289,36 @@ fn model_golden_hash() {
     // model's default `Rk4` and absent anchor now contribute a variant tag and a
     // presence byte where they contributed nothing, and the SV header bumps 2→3.
     // A deliberate, version-bumped re-key of every model-bearing leaf.
-    const GOLDEN: &str = "940a9dd6b594941aad07fdfb73e16c4cd63dd7f90a24c875c2c50e7bfd25c642";
+    // IR 0.41 (typed constants leave `parameters`): `Model::hash_into` folds
+    // `constants` after `parameters`, unconditionally, so the representative
+    // model's empty list adds a length prefix and the hash moves once — a
+    // deliberate, version-bumped re-key.
+    const GOLDEN: &str = "bfb98bb4f7b4f495cfa43925e5cf9165fabce53be5e1d4c5d3fe87fcb6a62518";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
+}
+
+/// IR 0.41: a model constant's value is model identity. Two models that differ
+/// only in a typed constant's value (or its kind, or its name) are different
+/// models, and must not share a run_id. The constant left `parameters`, so
+/// nothing else would carry its value into the hash.
+#[test]
+fn ir_constant_value_changes_hash() {
+    let constant = |name: &str, value: f64, kind: ir::parameter::ParamKind| {
+        let mut m = representative_model();
+        m.constants.push(ir::parameter::Constant { name: name.into(), value, kind });
+        m.content_hash()
+    };
+    let base = constant("omega", 0.01, ir::parameter::ParamKind::Rate);
+    assert_ne!(representative_model().content_hash(), base, "adding a constant re-keys");
+    assert_ne!(base, constant("omega", 0.02, ir::parameter::ParamKind::Rate),
+        "a constant's value is identity");
+    assert_ne!(base, constant("omega", 0.01, ir::parameter::ParamKind::Count),
+        "a constant's kind is identity");
+    assert_ne!(base, constant("omegb", 0.01, ir::parameter::ParamKind::Rate),
+        "a constant's name is identity");
+    assert_ne!(Expr::const_ref("omega").content_hash(), Expr::param("omega").content_hash(),
+        "a constant reference and a parameter reference of one name differ");
 }
 
 /// gh#272: a non-empty `per_eval_bindings` must change the model hash. The

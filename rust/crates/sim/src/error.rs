@@ -9,6 +9,9 @@ pub enum SimError {
     #[error("unknown parameter '{0}'")]
     UnknownParameter(String),
 
+    #[error("unknown model constant '{0}'")]
+    UnknownConstant(String),
+
     #[error("unknown time function '{0}'")]
     UnknownTimeFunction(String),
 
@@ -551,6 +554,7 @@ impl SimError {
             SimError::ConfigMismatch { .. }
             | SimError::UnknownCompartment(_)
             | SimError::UnknownParameter(_)
+            | SimError::UnknownConstant(_)
             | SimError::UnknownTimeFunction(_)
             | SimError::UnknownTable(_)
             | SimError::UnknownOp(_)
