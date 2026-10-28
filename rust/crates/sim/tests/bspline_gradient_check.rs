@@ -63,9 +63,9 @@ fn r2(label: &str, names: &[String], analytic: &[f64], fd: &[f64]) -> f64 {
 const FORCING_VALUES: &[(&str, f64)] =
     &[("c1", -0.8), ("c2", 0.4), ("c3", 1.1), ("c4", -0.2), ("c5", 0.7), ("c6", 0.3), ("a", 0.6)];
 
-#[test]
-fn spline_coefficient_gradients_match_finite_differences_pointwise() {
-    let model = load("bspline_forcing_grad", FORCING_VALUES);
+/// Every transition's emitted `rate_grad` against central differences of its
+/// rate, at each of `times`; returns (points checked, worst rel err).
+fn pointwise(model: &CompiledModel, times: &[f64]) -> (usize, f64) {
     let params = model.default_params.clone();
     let (int_s, real_s) = model.initial_state_mean(&params).unwrap();
     let names: Vec<String> = {
@@ -75,12 +75,9 @@ fn spline_coefficient_gradients_match_finite_differences_pointwise() {
         }
         v
     };
-    // Inside, at every knot of each layout (0, 10, 20, 25, 30, 40, 60), at both
-    // ends, past the end, before the start, and across the lag (t − 3 = 60).
-    let times = [-5.0, 0.0, 0.5, 7.3, 10.0, 17.9, 20.0, 25.0, 30.0, 33.3, 40.0, 51.2, 59.9, 60.0, 63.0, 70.0, 80.0];
     let eval = |rate: &sim::resolved_expr::ResolvedExpr, p: &[f64], t: f64| {
         let ctx = sim::propensity::EvalCtx {
-            model: &model, int_s: &int_s, real_s: &real_s, params: p,
+            model, int_s: &int_s, real_s: &real_s, params: p,
             t, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None,
         };
         eval_resolved(rate, &ctx)
@@ -91,7 +88,7 @@ fn spline_coefficient_gradients_match_finite_differences_pointwise() {
         let rate = &model.resolved.rates[ti];
         let grads = &model.resolved.rate_grads_indexed[ti];
         assert!(!grads.is_empty(), "{} carries no rate_grad", tr.name);
-        for &t in &times {
+        for &t in times {
             let mut cols = Vec::new();
             let (mut analytic, mut fd) = (Vec::new(), Vec::new());
             for (pi, entry) in grads {
@@ -104,15 +101,45 @@ fn spline_coefficient_gradients_match_finite_differences_pointwise() {
                 analytic.push(eval(g, &params, t));
                 fd.push((eval(rate, &up, t) - eval(rate, &dn, t)) / (2.0 * h));
             }
-            if fd.iter().all(|g| *g == 0.0) {
-                continue; // a coefficient set with no support at t (cannot happen here; guarded)
-            }
             worst = worst.max(r2(&format!("{} t={t}", tr.name), &cols, &analytic, &fd));
             checked += 1;
         }
     }
+    (checked, worst)
+}
+
+#[test]
+fn spline_coefficient_gradients_match_finite_differences_pointwise() {
+    let model = load("bspline_forcing_grad", FORCING_VALUES);
+    // Inside, at every knot of each layout (0, 10, 20, 25, 30, 40, 60), at both
+    // ends, past the end, before the start, and across the lag (t − 3 = 60).
+    let times = [-5.0, 0.0, 0.5, 7.3, 10.0, 17.9, 20.0, 25.0, 30.0, 33.3, 40.0, 51.2, 59.9, 60.0, 63.0, 70.0, 80.0];
+    let (checked, worst) = pointwise(&model, &times);
     assert_eq!(checked, 5 * times.len(), "every transition at every time was checked");
     eprintln!("forcing-level spline gradients: {checked} points, worst rel err {worst:.2e}");
+}
+
+/// R2 for `smooth` (§6.3–§6.4): ∂f/∂(level, slope, scale, modes) for a
+/// log-link smooth spline with a lag and an identity-link one on irregular
+/// breakpoints, at the same kinds of point.
+#[test]
+fn smooth_gradients_match_finite_differences_pointwise() {
+    let mut values: Vec<(String, f64)> = vec![
+        ("a".into(), -1.2), ("b".into(), 0.006), ("tau".into(), 0.4),
+        ("c".into(), 0.3), ("d".into(), -0.02), ("s".into(), 0.8),
+    ];
+    for (k, m) in ["m1", "m2", "m3", "m4", "m5", "m6"].iter().enumerate() {
+        values.push((format!("z_{m}"), [0.7, -1.1, 0.2, 1.4, -0.6, 0.9][k]));
+    }
+    for (k, m) in ["i1", "i2", "i3", "i4"].iter().enumerate() {
+        values.push((format!("y_{m}"), [-0.4, 1.0, -1.3, 0.5][k]));
+    }
+    let v: Vec<(&str, f64)> = values.iter().map(|(n, x)| (n.as_str(), *x)).collect();
+    let model = load("bspline_smooth_grad", &v);
+    let times = [-5.0, 0.0, 0.5, 7.5, 10.0, 15.0, 25.0, 30.0, 40.0, 45.0, 52.5, 59.9, 60.0, 63.0, 70.0, 80.0];
+    let (checked, worst) = pointwise(&model, &times);
+    assert_eq!(checked, 2 * times.len());
+    eprintln!("forcing-level smooth gradients: {checked} points, worst rel err {worst:.2e}");
 }
 
 /// Weekly Poisson observations of incidence, bound for the likelihood path.
@@ -130,15 +157,10 @@ fn observed(model: &Arc<CompiledModel>, times: &[f64], counts: &[f64]) -> MultiS
     MultiStreamObsModel::new(BoundObs::bind(0.0, specs).unwrap().0, model.clone()).unwrap()
 }
 
-/// `complete_data_loglik_grad` against the value path, for the rate spline
-/// (b1…b5), the observation-mean spline (r1…r4) and `gamma`.
-#[test]
-fn spline_coefficient_gradients_through_the_complete_data_likelihood() {
-    let values: &[(&str, f64)] = &[
-        ("gamma", 0.15), ("b1", -1.0), ("b2", -0.9), ("b3", -1.4), ("b4", -1.7), ("b5", -1.2),
-        ("r1", 0.6), ("r2", 0.5), ("r3", 0.4), ("r4", 0.45),
-    ];
-    let model = load("sir_bspline_fit", values);
+/// `complete_data_loglik_grad` against the value path's central differences
+/// for every parameter in `values`; `nonzero` must move the likelihood.
+fn likelihood_check(fixture: &str, values: &[(&str, f64)], nonzero: &[&str]) -> f64 {
+    let model = load(fixture, values);
     let params = model.default_params.clone();
     let dt = 1.0;
     let mut rng = StatefulRng::new(7);
@@ -172,15 +194,36 @@ fn spline_coefficient_gradients_through_the_complete_data_likelihood() {
         names.push(name.to_string());
         analytic.push(grad[i]);
         fd.push((total(&up) - total(&dn)) / (2.0 * h));
-        eprintln!("  ∂ll/∂{name:5} = {:14.6e} (analytic) vs {:14.6e} (fd)", grad[i], fd.last().unwrap());
+        eprintln!("  ∂ll/∂{name:6} = {:14.6e} (analytic) vs {:14.6e} (fd)", grad[i], fd.last().unwrap());
     }
-    // Non-vacuity: both splines' coefficients move the likelihood.
-    for name in ["b2", "r2"] {
+    for name in nonzero {
         let k = names.iter().position(|n| n == name).unwrap();
         assert!(fd[k].abs() > 1e-3, "∂ll/∂{name} must be appreciably nonzero, got {:.3e}", fd[k]);
     }
-    let worst = r2("complete-data", &names, &analytic, &fd);
+    r2(&format!("complete-data {fixture}"), &names, &analytic, &fd)
+}
+
+/// For the rate spline (b1…b5), the observation-mean spline (r1…r4) and
+/// `gamma`.
+#[test]
+fn spline_coefficient_gradients_through_the_complete_data_likelihood() {
+    let values: &[(&str, f64)] = &[
+        ("gamma", 0.15), ("b1", -1.0), ("b2", -0.9), ("b3", -1.4), ("b4", -1.7), ("b5", -1.2),
+        ("r1", 0.6), ("r2", 0.5), ("r3", 0.4), ("r4", 0.45),
+    ];
+    let worst = likelihood_check("sir_bspline_fit", values, &["b2", "r2"]);
     eprintln!("complete-data spline gradients: worst rel err {worst:.2e}");
+}
+
+/// R2 for `smooth` through the likelihood: level, slope, scale and modes.
+#[test]
+fn smooth_gradients_through_the_complete_data_likelihood() {
+    let values: &[(&str, f64)] = &[
+        ("gamma", 0.15), ("a", -1.1), ("b", -0.004), ("tau", 0.5), ("rho", 0.5),
+        ("z_m1", 0.6), ("z_m2", -0.9), ("z_m3", 1.2), ("z_m4", -0.3),
+    ];
+    let worst = likelihood_check("sir_smooth_fit", values, &["a", "b", "tau", "z_m2"]);
+    eprintln!("complete-data smooth gradients: worst rel err {worst:.2e}");
 }
 
 /// §5.4: with the coefficients carrying a `Grad` entry, the PGAS-NUTS preflight

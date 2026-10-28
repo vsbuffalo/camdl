@@ -119,7 +119,9 @@ let rec canon (e : expr) : string =
   | PopSum ps -> "S[" ^ String.concat ";" ps ^ "]"
   | Time -> "t" | Dt -> "d"
   | TimeFunc n -> "F" ^ n ^ ";"
-  | ForcingBasis { forcing; index } -> Printf.sprintf "Fb%s#%d;" forcing index
+  | ForcingBasis { forcing; index; space } ->
+    Printf.sprintf "Fb%s#%d%s;" forcing index
+      (match space with Space_spline -> "" | Space_whitened -> "w" | Space_linear -> "l")
   | Projected -> "@" | ObsColumnRef c -> "O" ^ c ^ ";"
   (* Anchor and offset both enter the key: two knots that differ only in offset
      are different subtrees and must never share a per-eval binding. *)

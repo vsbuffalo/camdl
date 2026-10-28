@@ -88,7 +88,7 @@ and expr =
      2026-10-27-estimable-bsplines §5.1). ∂f/∂c_k = B_k(t): the derivative node
      autodiff emits for a spline coefficient. Only ever inside a gradient map;
      the DSL has no syntax for it. *)
-  | ForcingBasis of { forcing : string; index : int }
+  | ForcingBasis of { forcing : string; index : int; space : basis_space }
   (* Per-expression dimensional escape: asserts the wrapped subexpression
      has dimension `(dim_p, dim_t)` without the checker verifying. The
      user-supplied `reason` is retained for audit trails (run.json) and
@@ -96,6 +96,12 @@ and expr =
      evaluates `inner` and returns its value. See
      docs/dev/proposals/notes/unchecked-dim-escape.md. *)
   | UncheckedDim of unchecked_dim_expr
+
+(* Which function a [ForcingBasis] evaluates (proposal §6.4): the k-th
+   B-spline; a smooth forcing's k-th whitened mode divided by kappa (kappa is
+   known only to the runtime when the window is anchored); or its linear
+   direction t_c - t_m (index 0). *)
+and basis_space = Space_spline | Space_whitened | Space_linear
 
 and unchecked_dim_expr = {
   inner:  expr;
@@ -264,8 +270,13 @@ type bspline_knots =
   | Knots_uniform  of { lower : expr; upper : expr; n_intervals : int }
   | Knots_explicit of expr list
 
-(* One live expression per basis function. *)
-type spline_coefs = Coefs_explicit of expr list
+(* One live expression per basis function, or the whitened penalized curve
+   w = level 1 + slope (xi - t_m 1) + (scale/kappa) M modes of proposal §6.3,
+   whose M the runtime builds from the resolved knots; kappa =
+   sqrt(K - 2) per^(3/2), [per] the reference duration (structural). *)
+type spline_coefs =
+  | Coefs_explicit of expr list
+  | Coefs_smooth of { level : expr; slope : expr; scale : expr; modes : expr list; per : expr }
 
 (* A clamped B-spline of [degree] over a window, held at its end values
    outside it; n_intervals + degree basis functions. *)

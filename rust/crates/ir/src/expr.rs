@@ -73,6 +73,31 @@ pub struct TimeFuncRef {
 pub struct ForcingBasisRef {
     pub name: String,
     pub index: u32,
+    /// Which basis (§6.4); omitted when `spline`, the only space an
+    /// explicit-coefficient forcing has.
+    #[serde(default, skip_serializing_if = "BasisSpace::is_spline")]
+    pub space: BasisSpace,
+}
+
+/// The function a `forcing_basis` node evaluates, at the forcing's clamped
+/// evaluation time t_c (proposal §6.4):
+/// - `Spline`: Bₖ(t_c), the k-th B-spline;
+/// - `Whitened`: Wₖ(t_c)/κ = Σⱼ M_jk Bⱼ(t_c)/κ, a `smooth` forcing's k-th
+///   whitened mode (κ known only to the runtime when the window is anchored);
+/// - `Linear`: t_c − t_m (index 0), a `smooth` forcing's slope direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BasisSpace {
+    #[default]
+    Spline,
+    Whitened,
+    Linear,
+}
+
+impl BasisSpace {
+    pub fn is_spline(&self) -> bool {
+        matches!(self, BasisSpace::Spline)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -487,7 +512,10 @@ mod deserialize_tests {
                 offset: -7.0,
             }),
             Expr::ForcingBasis(ForcingBasisWrap {
-                forcing_basis: ForcingBasisRef { name: "log_beta".into(), index: 2 },
+                forcing_basis: ForcingBasisRef { name: "log_beta".into(), index: 2, space: BasisSpace::Spline },
+            }),
+            Expr::ForcingBasis(ForcingBasisWrap {
+                forcing_basis: ForcingBasisRef { name: "log_beta".into(), index: 0, space: BasisSpace::Whitened },
             }),
         ] {
             roundtrip(&e);

@@ -231,8 +231,8 @@ fn an_out_of_range_basis_is_nan() {
     )))
     .unwrap();
     let kind = &model.time_func_cache[0].kind;
-    assert!(sim::propensity::eval_forcing_basis(kind, 10.0, 5).is_finite());
-    assert!(sim::propensity::eval_forcing_basis(kind, 10.0, 6).is_nan());
+    assert!(sim::propensity::eval_forcing_basis(kind, 10.0, 5, ir::expr::BasisSpace::Spline).is_finite());
+    assert!(sim::propensity::eval_forcing_basis(kind, 10.0, 6, ir::expr::BasisSpace::Spline).is_nan());
 }
 
 // ── forcing_basis: refused at construction, NaN past the basis ──────────────
@@ -301,4 +301,45 @@ fn the_basis_primitives_are_nan_past_the_basis() {
     let p = sim::periodic_bspline::PeriodicBasis::new(7.0, 6, 3).unwrap();
     assert!(p.basis(1.0, 5).is_finite());
     assert!(p.basis(1.0, 6).is_nan());
+}
+
+// The whitened and linear spaces exist only on a smooth bspline (proposal
+// 2026-10-27-estimable-bsplines §6.4): K - 2 whitened functions, one linear.
+
+fn spaced(name: &str, index: u32, space: &str) -> serde_json::Value {
+    serde_json::json!({"forcing_basis": {"name": name, "index": index, "space": space}})
+}
+
+/// `bspline_smooth_grad` (f_log: smooth, 8 basis functions, 6 modes), every
+/// parameter at 0.1; `edit` then places the node under test.
+fn smooth_host(edit: impl FnOnce(&mut serde_json::Value)) -> Result<CompiledModel, String> {
+    let p = format!("{}/../../../tests/fixtures/gradient/ir/bspline_smooth_grad.ir.json", env!("CARGO_MANIFEST_DIR"));
+    let mut doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+    edit(&mut doc);
+    let mut m = ir::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
+    for p in &mut m.parameters {
+        p.value = p.value.with_value(0.1);
+    }
+    CompiledModel::new(m).map_err(|e| e.to_string())
+}
+
+#[test]
+fn a_whitened_basis_of_an_explicit_spline_is_refused() {
+    let err = golden_with_spline(|d| {
+        d["model"]["transitions"][0]["rate_grad"]["beta"] = serde_json::json!({"grad": spaced("contact", 0, "whitened")});
+    }).err().expect("an explicit spline has no whitened basis");
+    assert!(err.contains("which has no whitened basis"), "{err}");
+}
+
+#[test]
+fn whitened_and_linear_indices_are_checked_against_their_space() {
+    let at = |index: u32, space: &'static str| {
+        smooth_host(move |d| d["model"]["transitions"][0]["rate_grad"]["a"] = serde_json::json!({"grad": spaced("f_log", index, space)}))
+    };
+    at(5, "whitened").expect("whitened 5 of 6 is in range");
+    at(0, "linear").expect("linear 0 is the one linear function");
+    let err = at(6, "whitened").err().expect("whitened 6 of 6 must be refused");
+    assert!(err.contains("which has 6 basis functions"), "{err}");
+    let err = at(1, "linear").err().expect("linear 1 must be refused");
+    assert!(err.contains("which has 1 basis functions"), "{err}");
 }

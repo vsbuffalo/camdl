@@ -723,9 +723,18 @@ fn ir_spline_link_changes_hash() {
 fn ir_forcing_basis_hashes_its_forcing_and_index() {
     use ir::expr::{ForcingBasisRef, ForcingBasisWrap};
     let fb = |name: &str, index: u32| {
-        Expr::ForcingBasis(ForcingBasisWrap { forcing_basis: ForcingBasisRef { name: name.into(), index } })
+        Expr::ForcingBasis(ForcingBasisWrap {
+            forcing_basis: ForcingBasisRef { name: name.into(), index, space: ir::expr::BasisSpace::Spline },
+        })
+        .content_hash()
+    };
+    let spaced = |space| {
+        Expr::ForcingBasis(ForcingBasisWrap { forcing_basis: ForcingBasisRef { name: "f".into(), index: 0, space } })
             .content_hash()
     };
+    use ir::expr::BasisSpace;
+    assert_ne!(spaced(BasisSpace::Spline), spaced(BasisSpace::Whitened), "the space is hashed");
+    assert_ne!(spaced(BasisSpace::Whitened), spaced(BasisSpace::Linear), "the space is hashed");
     assert_ne!(fb("f", 0), fb("f", 1), "the basis index is hashed");
     assert_ne!(fb("f", 0), fb("g", 0), "the forcing name is hashed");
     assert_eq!(fb("f", 2), fb("f", 2));

@@ -6735,6 +6735,74 @@ let expand_time_function_one ctx fname (env : (string * string) list)
       3
     end else d
   in
+  (* Proposal 2026-10-27-estimable-bsplines §6.4: `coefs = smooth(level = a,
+     slope = b, scale = tau, modes = z, per = 1 'weeks)`, the whitened
+     penalized curve. `modes` names an indexed parameter family with exactly
+     n_basis - 2 cells, each declared `real` with prior exactly
+     normal(mu = 0, sigma = 1), so the name stays honest; `level`, `slope` and
+     `scale` are scalar expressions; `per` is the reference duration. *)
+  let spline_smooth ~knots_ok ~n_basis ~degree kws =
+    let err code msg hint =
+      Diagnostics.error ctx.diags ~code ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf "bspline '%s': %s" fname msg) ~hint ()
+    in
+    let keys = [ "level"; "slope"; "scale"; "modes"; "per" ] in
+    List.iter (fun (k, _) ->
+      if not (List.mem k keys) then
+        err "E413" (Printf.sprintf "`smooth` has no argument '%s'" k)
+          "smooth takes level, slope, scale, modes and per.") kws;
+    let arg k = match List.assoc_opt k kws with
+      | Some e -> Some e
+      | None ->
+        err "E413" (Printf.sprintf "`smooth` is missing '%s'" k)
+          "smooth(level = a, slope = b, scale = tau, modes = z, per = 1 'weeks)";
+        None
+    in
+    let expr k = match arg k with Some e -> resolve_expr ctx env e | None -> Ir.Const 0.0 in
+    if degree < 2 then
+      err "E413" (Printf.sprintf "`smooth` needs degree at least 2, so the curve has curvature; it is %d" degree)
+        "Use degree = 3 (the default).";
+    let level = expr "level" and slope = expr "slope" and scale = expr "scale" and per = expr "per" in
+    let n_modes = n_basis - 2 in
+    let modes = match arg "modes" with
+      | None -> []
+      | Some (EIdent (fam, _)) ->
+        (match List.find_opt (function PIndexed p -> p.pname = fam | PScalar _ -> false) ctx.param_decls with
+         | Some (PIndexed p) ->
+           let cells = expand_indexed_decl_names ctx p.pname p.pdims in
+           if knots_ok && List.length cells <> n_modes then
+             err "E413" (Printf.sprintf
+                 "`modes = %s` has %d cells but %d basis functions need n_basis - 2 = %d"
+                 fam (List.length cells) n_basis n_modes)
+               "Index the family by a dimension with n_basis - 2 levels.";
+           let const_of e = match resolve_expr ctx env e with
+             | Ir.Const v | Ir.UncheckedDim { inner = Ir.Const v; _ } -> Some v
+             | Ir.UnOp { op = Ir.Neg; arg = Ir.Const v } -> Some (-. v)
+             | _ -> None
+           in
+           let standard_normal = match p.pprior with
+             | Some { ps_name = "normal"; ps_args; ps_pool_over = None } ->
+               List.length ps_args = 2
+               && (match List.assoc_opt "mu" ps_args with Some e -> const_of e = Some 0.0 | None -> false)
+               && (match List.assoc_opt "sigma" ps_args with Some e -> const_of e = Some 1.0 | None -> false)
+             | _ -> false
+           in
+           if p.pkind <> PReal || not standard_normal then
+             err "E414" (Printf.sprintf
+                 "the modes `%s` must be declared `real` with prior exactly normal(mu = 0.0, sigma = 1.0)" fam)
+               (Printf.sprintf "Declare `%s[...] : real 'ratio in [-8, 8] ~ normal(mu = 0.0, sigma = 1.0)`." fam);
+           List.map (fun c -> Ir.Param c) cells
+         | _ ->
+           err "E413" (Printf.sprintf "`modes = %s` must name an indexed parameter family" fam)
+             "Declare `z[mode] : real ... ~ normal(mu = 0.0, sigma = 1.0)` and write `modes = z`.";
+           [])
+      | Some _ ->
+        err "E413" "`modes` must be the bare name of an indexed parameter family"
+          "Write `modes = z` for a family `z[mode]`.";
+        []
+    in
+    Ir.Coefs_smooth { level; slope; scale; modes; per }
+  in
   (* `link = identity | log`, a bare closed enum (as `method`). *)
   let spline_link () =
     match List.assoc_opt "link" fargs with
@@ -7245,7 +7313,18 @@ let expand_time_function_one ctx fname (env : (string * string) list)
             | Some e -> spline_int_const fkind e "n_basis" 1 | None -> 1)
       in
       let degree = spline_degree () in
-      let coefs = get_kw_list "coefs" in
+      (match List.assoc_opt "coefs" fargs with
+       | Some (FExpr (EFuncCall ("smooth", _))) ->
+         Diagnostics.error ctx.diags ~code:"E413" ~loc:Diagnostics.no_loc
+           ~message:(Printf.sprintf
+             "periodic_spline '%s': `smooth(...)` is accepted only as the coefs of a bspline" fname)
+           ~hint:"A periodic spline's wrap-around penalty is a different matrix; give explicit coefs."
+           ()
+       | _ -> ());
+      let coefs = match List.assoc_opt "coefs" fargs with
+        | Some (FExpr (EFuncCall ("smooth", _))) -> List.init n_basis (fun _ -> Ir.Const 0.0)
+        | _ -> get_kw_list "coefs"
+      in
       if n_basis <= degree then
         Diagnostics.error ctx.diags ~code:"E408" ~loc:Diagnostics.no_loc
           ~message:(Printf.sprintf
@@ -7319,16 +7398,22 @@ let expand_time_function_one ctx fname (env : (string * string) list)
         | Ir.Knots_uniform { n_intervals; _ } -> n_intervals + degree
         | Ir.Knots_explicit bps -> max 0 (List.length bps - 1) + degree
       in
-      let coefs = get_kw_list "coefs" in
       (* A knot-form error above already reported; a count against no knots
          would only repeat it. *)
       let knots_ok = match knots with Ir.Knots_explicit [] -> false | _ -> true in
-      if knots_ok && List.length coefs <> n_basis then
-        shape_error (Printf.sprintf
-            "coefs has length %d but the knots give %d basis functions (intervals + degree)"
-            (List.length coefs) n_basis)
-          "Provide one coefficient per basis function.";
-      Ir.BSpline { knots; degree; coefs = Ir.Coefs_explicit coefs; link = spline_link () }
+      let coefs = match List.assoc_opt "coefs" fargs with
+        | Some (FExpr (EFuncCall ("smooth", kws))) ->
+          spline_smooth ~knots_ok ~n_basis ~degree kws
+        | _ ->
+          let coefs = get_kw_list "coefs" in
+          if knots_ok && List.length coefs <> n_basis then
+            shape_error (Printf.sprintf
+                "coefs has length %d but the knots give %d basis functions (intervals + degree)"
+                (List.length coefs) n_basis)
+              "Provide one coefficient per basis function.";
+          Ir.Coefs_explicit coefs
+      in
+      Ir.BSpline { knots; degree; coefs; link = spline_link () }
     | k ->
       Diagnostics.error ctx.diags ~code:"E408" ~loc:Diagnostics.no_loc
         ~message:(Printf.sprintf "unknown time function kind '%s' in '%s'" k fname)
@@ -7384,6 +7469,18 @@ let expand_time_function_one ctx fname (env : (string * string) list)
       Ir.PeriodicSpline { ps with Ir.coefs = List.map (spline_scale ps.link) ps.coefs }
     | Ir.BSpline ({ coefs = Ir.Coefs_explicit cs; _ } as b) ->
       Ir.BSpline { b with Ir.coefs = Ir.Coefs_explicit (List.map (spline_scale b.link) cs) }
+    (* smooth: w = level 1 + slope (xi - t_m) + (scale/kappa) M z, and the
+       basis sums to one, so under the log link + ln s goes to the level alone,
+       and under identity s multiplies level, slope and scale (z is a pure
+       number). *)
+    | Ir.BSpline ({ coefs = Ir.Coefs_smooth sm; _ } as b) ->
+      let coefs = match b.link with
+        | Ir.Link_log -> Ir.Coefs_smooth { sm with level = spline_scale Ir.Link_log sm.level }
+        | Ir.Link_identity ->
+          Ir.Coefs_smooth { sm with level = scale_expr sm.level; slope = scale_expr sm.slope;
+                                    scale = scale_expr sm.scale }
+      in
+      Ir.BSpline { b with Ir.coefs }
   in
   let dim = unit_lit_to_dim funit in
   (* gh#314: optional `lag = <duration>` — an evaluation-time shift applied

@@ -459,6 +459,25 @@ mod tests {
 
     const PINNED_M: u64 = 0xb9f928f84765b44c;
 
+    /// R2: the penalty ½wᵀΩw has gradient Ωw (central differences, step
+    /// 1e-5·max(|w|, 1), relative error < 1e-6 on every component).
+    #[test]
+    fn penalty_gradient_is_omega_w() {
+        let k = Knots::explicit(vec![0.0, 10.0, 25.0, 30.0, 60.0, 90.0, 100.0, 130.0, 150.0, 168.0]).unwrap();
+        let om = penalty(&k, 3);
+        let w: Vec<f64> = (0..om.rows).map(|i| ((i * 5 + 2) % 7) as f64 / 3.0 - 1.0).collect();
+        let half = |v: &[f64]| 0.5 * quad(&om, v, v);
+        for i in 0..om.rows {
+            let h = 1e-5 * w[i].abs().max(1.0);
+            let (mut up, mut dn) = (w.clone(), w.clone());
+            up[i] += h;
+            dn[i] -= h;
+            let fd = (half(&up) - half(&dn)) / (2.0 * h);
+            let an: f64 = (0..om.cols).map(|j| om.at(i, j) * w[j]).sum();
+            assert!((an - fd).abs() <= 1e-6 * an.abs().max(1e-3 * max_abs(&om)), "component {i}: {an} vs {fd}");
+        }
+    }
+
     #[test]
     fn whitening_is_refused_without_curvature() {
         assert!(Whitening::new(&Knots::uniform(0.0, 10.0, 4).unwrap(), 1).is_err());

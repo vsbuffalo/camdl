@@ -246,7 +246,7 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
                 Some(lag) => ctx.t - eval_resolved(lag, ctx),
                 None => ctx.t,
             };
-            Ok(eval_forcing_basis(&tf.kind, t_eff, w.forcing_basis.index as usize))
+            Ok(eval_forcing_basis(&tf.kind, t_eff, w.forcing_basis.index as usize, w.forcing_basis.space))
         }
 
         Expr::TableLookup(w) => {
@@ -520,11 +520,11 @@ pub fn eval_forcing(kind: &CompiledTimeFuncKind, t: f64, ctx: &EvalCtx<'_>) -> f
 /// index past the basis count; a path that bypassed both gets NaN (the
 /// strict-mode sentinel the propensity guard and the likelihood catch), never a
 /// plausible-looking 0.
-pub fn eval_forcing_basis(kind: &CompiledTimeFuncKind, t: f64, k: usize) -> f64 {
+pub fn eval_forcing_basis(kind: &CompiledTimeFuncKind, t: f64, k: usize, space: ir::expr::BasisSpace) -> f64 {
     match kind {
-        CompiledTimeFuncKind::BSpline(b) if k < b.n_basis() => b.basis(t, k),
-        CompiledTimeFuncKind::PeriodicSpline(ps) if k < ps.n_basis() => ps.basis(t, k),
-        CompiledTimeFuncKind::BSpline(_) | CompiledTimeFuncKind::PeriodicSpline(_) => f64::NAN,
+        CompiledTimeFuncKind::BSpline(b) => b.basis(t, k, space),
+        CompiledTimeFuncKind::PeriodicSpline(ps) if k < ps.n_basis() && space.is_spline() => ps.basis(t, k),
+        CompiledTimeFuncKind::PeriodicSpline(_) => f64::NAN,
         CompiledTimeFuncKind::Sinusoidal { .. }
         | CompiledTimeFuncKind::Piecewise { .. }
         | CompiledTimeFuncKind::Interpolated { .. }

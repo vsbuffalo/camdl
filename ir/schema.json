@@ -360,7 +360,12 @@
               "required": ["name", "index"],
               "properties": {
                 "name": { "type": "string" },
-                "index": { "type": "integer", "minimum": 0 }
+                "index": { "type": "integer", "minimum": 0 },
+                "space": {
+                  "description": "Which basis: the B-spline (default, omitted), a smooth forcing's whitened mode divided by kappa, or its linear direction t_c - t_m (index 0). Proposal 2026-10-27-estimable-bsplines §6.4.",
+                  "type": "string",
+                  "enum": ["spline", "whitened", "linear"]
+                }
               },
               "additionalProperties": false
             }
@@ -704,6 +709,26 @@
                           "required": ["coefs"],
                           "properties": {
                             "coefs": { "type": "array", "items": { "$ref": "#/definitions/expr" } }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    {
+                      "comment": "The whitened penalized curve w = level 1 + slope (xi - t_m 1) + (scale/kappa) M modes (proposal §6.3); M is built by the runtime from the resolved knots; per is the reference duration (structural), kappa = sqrt(K - 2) per^(3/2).",
+                      "type": "object",
+                      "required": ["smooth"],
+                      "properties": {
+                        "smooth": {
+                          "type": "object",
+                          "required": ["level", "slope", "scale", "modes", "per"],
+                          "properties": {
+                            "level": { "$ref": "#/definitions/expr" },
+                            "slope": { "$ref": "#/definitions/expr" },
+                            "scale": { "$ref": "#/definitions/expr" },
+                            "modes": { "type": "array", "items": { "$ref": "#/definitions/expr" }, "minItems": 1 },
+                            "per": { "$ref": "#/definitions/expr" }
                           },
                           "additionalProperties": false
                         }

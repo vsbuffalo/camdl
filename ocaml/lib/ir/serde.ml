@@ -157,8 +157,13 @@ let rec expr_to_json (e : expr) : Yojson.Safe.t =
   (* gh#616: through the shared anchor codec, so an expr-position anchor and a
      `value_at` anchor are spelled identically on the wire. *)
   | ObsAnchor a  -> obj [("obs_anchor", anchored_time_to_json a)]
-  | ForcingBasis { forcing; index } ->
-    obj [("forcing_basis", obj [("name", str forcing); ("index", int index)])]
+  | ForcingBasis { forcing; index; space } ->
+    let space_field = match space with
+      | Space_spline -> []
+      | Space_whitened -> [("space", str "whitened")]
+      | Space_linear -> [("space", str "linear")]
+    in
+    obj [("forcing_basis", obj ([("name", str forcing); ("index", int index)] @ space_field))]
   | BinOp b      ->
     obj [("bin_op", obj [
       ("op",    str (bin_op_str b.op));
@@ -222,7 +227,15 @@ let rec expr_of_json (j : Yojson.Safe.t) : expr =
     | ["obs_anchor"]   -> ObsAnchor (anchored_time_of_json (List.assoc "obs_anchor" kvs))
     | ["forcing_basis"] ->
       let v = List.assoc "forcing_basis" kvs in
-      ForcingBasis { forcing = as_string (member "name" v); index = as_int (member "index" v) }
+      let space = match member_opt "space" v with
+        | None | Some `Null -> Space_spline
+        | Some j -> (match as_string j with
+            | "spline" -> Space_spline
+            | "whitened" -> Space_whitened
+            | "linear" -> Space_linear
+            | s -> fail "unknown forcing_basis space '%s'" s)
+      in
+      ForcingBasis { forcing = as_string (member "name" v); index = as_int (member "index" v); space }
     | ["bin_op"]       ->
       let b = List.assoc "bin_op" kvs in
       BinOp {
@@ -540,6 +553,11 @@ let time_func_kind_to_json (k : time_func_kind) : Yojson.Safe.t =
     in
     let coefs = match b.coefs with
       | Coefs_explicit cs -> obj [("explicit", obj [("coefs", arr (List.map expr_to_json cs))])]
+      | Coefs_smooth { level; slope; scale; modes; per } ->
+        obj [("smooth", obj [
+          ("level", expr_to_json level); ("slope", expr_to_json slope);
+          ("scale", expr_to_json scale); ("modes", arr (List.map expr_to_json modes));
+          ("per", expr_to_json per) ])]
     in
     obj [("bspline", obj ([
       ("knots",  knots);
@@ -604,7 +622,13 @@ let time_func_kind_of_json j =
       let coefs = match member "coefs" v with
         | `Assoc [("explicit", e)] ->
           Coefs_explicit (List.map expr_of_json (as_list (member "coefs" e)))
-        | _ -> fail "bspline coefs must be {\"explicit\": {\"coefs\": […]}}"
+        | `Assoc [("smooth", e)] ->
+          Coefs_smooth { level = expr_of_json (member "level" e);
+                         slope = expr_of_json (member "slope" e);
+                         scale = expr_of_json (member "scale" e);
+                         modes = List.map expr_of_json (as_list (member "modes" e));
+                         per = expr_of_json (member "per" e) }
+        | _ -> fail "bspline coefs must be {\"explicit\": …} or {\"smooth\": …}"
       in
       BSpline { knots; degree = as_int (member "degree" v); coefs; link = link_of_json v }
     | k -> fail "unknown time_func_kind '%s'" k

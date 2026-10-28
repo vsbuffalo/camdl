@@ -117,8 +117,10 @@ and pp_inner ~mode ~split ~ascii ppf = function
   | Ir.TimeFunc name ->
     Term_style.table Fmt.string ppf name
   (* A derivative-only node: B_k of forcing f, written `basis(f, k)`. *)
-  | Ir.ForcingBasis { forcing; index } ->
-    Fmt.pf ppf "basis(%a, %d)" (Term_style.table Fmt.string) forcing index
+  | Ir.ForcingBasis { forcing; index; space } ->
+    let fn = match space with
+      | Ir.Space_spline -> "basis" | Ir.Space_whitened -> "whitened_basis" | Ir.Space_linear -> "linear_basis" in
+    Fmt.pf ppf "%s(%a, %d)" fn (Term_style.table Fmt.string) forcing index
   | Ir.Projected ->
     Fmt.pf ppf "projected"
   | Ir.ObsColumnRef c ->

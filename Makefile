@@ -314,6 +314,8 @@ update-gradient-golden: build-ocaml
 	@$(CAMDLC) $(GRADIENT_DIR)/sir_pow_zero_base.camdl -o $(GRADIENT_DIR)/ir/sir_pow_zero_base.ir.json
 	@$(CAMDLC) $(GRADIENT_DIR)/bspline_forcing_grad.camdl -o $(GRADIENT_DIR)/ir/bspline_forcing_grad.ir.json
 	@$(CAMDLC) $(GRADIENT_DIR)/sir_bspline_fit.camdl -o $(GRADIENT_DIR)/ir/sir_bspline_fit.ir.json
+	@$(CAMDLC) $(GRADIENT_DIR)/bspline_smooth_grad.camdl -o $(GRADIENT_DIR)/ir/bspline_smooth_grad.ir.json
+	@$(CAMDLC) $(GRADIENT_DIR)/sir_smooth_fit.camdl -o $(GRADIENT_DIR)/ir/sir_smooth_fit.ir.json
 
 # Recompile the B-spline R3 inference fixtures → tests/fixtures/bspline_inference/ir/
 # (rust/crates/sim/tests/bspline_inference.rs; proposal 2026-10-27-estimable-bsplines §8.1).

@@ -94,11 +94,40 @@ pub enum BSplineKnots {
     Explicit { breakpoints: Vec<Expr> },
 }
 
-/// A spline's coefficients: one live expression per basis function.
+/// A spline's coefficients.
+///
+/// - `Explicit`: one live expression per basis function.
+/// - `Smooth` (proposal 2026-10-27-estimable-bsplines §6.3–§6.4): the
+///   whitened penalized curve w = level·1 + slope·(ξ − t_m·1) +
+///   (scale/κ)·M·modes, with M built by the runtime from the resolved knots
+///   (`sim::spline_penalty`) and κ = √(K − 2)·per^{3/2}. `modes` has K − 2
+///   entries; `per` is the reference duration, structural.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SplineCoefs {
     Explicit { coefs: Vec<Expr> },
+    Smooth { level: Expr, slope: Expr, scale: Expr, modes: Vec<Expr>, per: Expr },
+}
+
+impl SplineCoefs {
+    /// Every expression the coefficient form carries, `per` included.
+    pub fn exprs(&self) -> Vec<&Expr> {
+        match self {
+            SplineCoefs::Explicit { coefs } => coefs.iter().collect(),
+            SplineCoefs::Smooth { level, slope, scale, modes, per } => {
+                [level, slope, scale, per].into_iter().chain(modes).collect()
+            }
+        }
+    }
+
+    pub fn exprs_mut(&mut self) -> Vec<&mut Expr> {
+        match self {
+            SplineCoefs::Explicit { coefs } => coefs.iter_mut().collect(),
+            SplineCoefs::Smooth { level, slope, scale, modes, per } => {
+                [level, slope, scale, per].into_iter().chain(modes.iter_mut()).collect()
+            }
+        }
+    }
 }
 
 /// A clamped B-spline of `degree` over a window, held at its end values
@@ -145,6 +174,21 @@ impl TimeFuncKind {
             | TimeFuncKind::Interpolated(_)
             | TimeFuncKind::Periodic(_)
             | TimeFuncKind::Fourier(_) => None,
+        }
+    }
+
+    /// The index range of a `forcing_basis` node in `space` on this forcing,
+    /// or `None` if the forcing has no such basis: `Spline` on either spline
+    /// kind; `Whitened` (K − 2 modes) and `Linear` (one) only on a `bspline`
+    /// whose coefficients are `smooth`.
+    pub fn basis_count(&self, space: crate::expr::BasisSpace) -> Option<usize> {
+        use crate::expr::BasisSpace;
+        let smooth = matches!(self, TimeFuncKind::BSpline(BSpline { coefs: SplineCoefs::Smooth { .. }, .. }));
+        match space {
+            BasisSpace::Spline => self.spline_basis_count(),
+            BasisSpace::Whitened if smooth => self.spline_basis_count().map(|k| k.saturating_sub(2)),
+            BasisSpace::Linear if smooth => Some(1),
+            BasisSpace::Whitened | BasisSpace::Linear => None,
         }
     }
 }

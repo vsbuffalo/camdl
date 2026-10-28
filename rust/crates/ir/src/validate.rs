@@ -735,7 +735,7 @@ fn basis_nodes<'a>(e: &'a Expr, out: &mut Vec<&'a crate::expr::ForcingBasisRef>)
 /// likelihoods are exhaustive, so a new one must declare its expressions here.
 fn check_misplaced_forcing_basis(model: &Model, errors: &mut Vec<ValidationError>) {
     use crate::observation::{Likelihood, Projection};
-    use crate::time_func::{BSplineKnots, SplineCoefs, TimeFuncKind as K};
+    use crate::time_func::{BSplineKnots, TimeFuncKind as K};
     use crate::Differentiable;
     let mut sites: Vec<&Expr> = Vec::new();
     for tr in &model.transitions {
@@ -764,8 +764,7 @@ fn check_misplaced_forcing_basis(model: &Model, errors: &mut Vec<ValidationError
                     BSplineKnots::Uniform { lower, upper, .. } => sites.extend([lower, upper]),
                     BSplineKnots::Explicit { breakpoints } => sites.extend(breakpoints),
                 }
-                let SplineCoefs::Explicit { coefs } = &x.coefs;
-                sites.extend(coefs);
+                sites.extend(x.coefs.exprs());
             }
         }
     }
@@ -820,21 +819,37 @@ fn check_misplaced_forcing_basis(model: &Model, errors: &mut Vec<ValidationError
 fn check_gradient_forcing_basis(model: &Model, errors: &mut Vec<ValidationError>) {
     use crate::deriv::DerivEntry;
     use crate::Differentiable;
-    let counts: std::collections::HashMap<&str, Option<usize>> = model
+    let counts: std::collections::HashMap<&str, &crate::time_func::TimeFuncKind> = model
         .time_functions
         .iter()
-        .map(|tf| (tf.name.as_str(), tf.kind.spline_basis_count()))
+        .map(|tf| (tf.name.as_str(), &tf.kind))
         .collect();
-    fn walk(e: &Expr, counts: &std::collections::HashMap<&str, Option<usize>>, errors: &mut Vec<ValidationError>) {
+    fn walk(
+        e: &Expr,
+        counts: &std::collections::HashMap<&str, &crate::time_func::TimeFuncKind>,
+        errors: &mut Vec<ValidationError>,
+    ) {
+        use crate::expr::BasisSpace;
         match e {
             Expr::ForcingBasis(w) => {
-                let (forcing, index) = (&w.forcing_basis.name, w.forcing_basis.index);
-                let reason = match counts.get(forcing.as_str()) {
+                let (forcing, index, space) = (&w.forcing_basis.name, w.forcing_basis.index, w.forcing_basis.space);
+                let label = match space {
+                    BasisSpace::Spline => "",
+                    BasisSpace::Whitened => " (whitened)",
+                    BasisSpace::Linear => " (linear)",
+                };
+                let reason = match counts.get(forcing.as_str()).map(|k| k.basis_count(space)) {
                     None => Some("no forcing in this model".to_string()),
-                    Some(None) => Some(format!("forcing '{forcing}', which is not a spline and has no basis")),
-                    Some(Some(n)) if index as usize >= *n => {
-                        Some(format!("basis {index} of forcing '{forcing}', which has {n} basis functions"))
+                    Some(None) if space.is_spline() => {
+                        Some(format!("forcing '{forcing}', which is not a spline and has no basis"))
                     }
+                    Some(None) => Some(format!(
+                        "forcing '{forcing}', which has no {} basis (only a bspline with smooth coefficients has one)",
+                        label.trim_matches(|c| c == ' ' || c == '(' || c == ')')
+                    )),
+                    Some(Some(n)) if index as usize >= n => Some(format!(
+                        "basis {index}{label} of forcing '{forcing}', which has {n} basis functions"
+                    )),
                     Some(Some(_)) => None,
                 };
                 if let Some(reason) = reason {

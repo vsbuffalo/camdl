@@ -162,8 +162,7 @@ fn collect_forcing(kind: &TimeFuncKind, out: &mut HashSet<String>) {
                     breakpoints.iter().for_each(|e| collect(e, out));
                 }
             }
-            let ir::time_func::SplineCoefs::Explicit { coefs } = &b.coefs;
-            coefs.iter().for_each(|e| collect(e, out));
+            b.coefs.exprs().into_iter().for_each(|e| collect(e, out));
         }
     }
 }

@@ -36,7 +36,7 @@ use ir::Differentiable;
 use ir::anchor::AnchoredTime;
 use ir::expr::{
     BinOp, BinOpExpr, BinOpWrap, BindingRefWrap, CondExpr, CondWrap, ConstExpr, DtExpr, Expr,
-    ForcingBasisRef, ForcingBasisWrap,
+    BasisSpace, ForcingBasisRef, ForcingBasisWrap,
     ObsAnchorWrap, ObsColumnRefExpr, ParamExpr, PerEvalRefWrap, PopExpr, PopSumExpr,
     ProjectedExpr, ReduceWrap, TableLookupExpr, TableLookupWrap, TimeExpr, TimeFuncRef,
     TimeFuncWrap, UnOp, UnOpExpr, UnOpWrap, UncheckedDimExpr, UncheckedDimWrap,
@@ -298,10 +298,15 @@ impl ContentAddressed for Expr {
             }
             // Appended last (proposal 2026-10-27-estimable-bsplines §5.3), so
             // every earlier variant keeps its tag.
-            Expr::ForcingBasis(ForcingBasisWrap { forcing_basis: ForcingBasisRef { name, index } }) => {
+            Expr::ForcingBasis(ForcingBasisWrap { forcing_basis: ForcingBasisRef { name, index, space } }) => {
                 h.write_u32(18);
                 h.write_str(name);
                 index.hash_into(h);
+                h.write_u32(match space {
+                    BasisSpace::Spline => 0,
+                    BasisSpace::Whitened => 1,
+                    BasisSpace::Linear => 2,
+                });
             }
         }
     }
@@ -912,6 +917,14 @@ impl ContentAddressed for TimeFuncKind {
                     SplineCoefs::Explicit { coefs } => {
                         h.write_u32(0);
                         coefs.hash_into(h);
+                    }
+                    SplineCoefs::Smooth { level, slope, scale, modes, per } => {
+                        h.write_u32(1);
+                        level.hash_into(h);
+                        slope.hash_into(h);
+                        scale.hash_into(h);
+                        modes.hash_into(h);
+                        per.hash_into(h);
                     }
                 }
                 hash_spline_link(*link, h);

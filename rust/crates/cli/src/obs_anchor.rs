@@ -441,10 +441,7 @@ fn forcing_exprs(k: &ir::time_func::TimeFuncKind) -> Vec<&Expr> {
             .chain(f.harmonics.iter().flat_map(|(a, b)| [a, b]))
             .collect(),
         K::PeriodicSpline(s) => std::iter::once(&s.period).chain(&s.coefs).collect(),
-        K::BSpline(b) => {
-            let ir::time_func::SplineCoefs::Explicit { coefs } = &b.coefs;
-            bspline_knot_exprs(&b.knots).into_iter().chain(coefs).collect()
-        }
+        K::BSpline(b) => bspline_knot_exprs(&b.knots).into_iter().chain(b.coefs.exprs()).collect(),
     }
 }
 
@@ -468,12 +465,11 @@ fn forcing_exprs_mut(k: &mut ir::time_func::TimeFuncKind) -> Vec<&mut Expr> {
             .collect(),
         K::PeriodicSpline(s) => std::iter::once(&mut s.period).chain(&mut s.coefs).collect(),
         K::BSpline(b) => {
-            let ir::time_func::SplineCoefs::Explicit { coefs } = &mut b.coefs;
             let knots: Vec<&mut Expr> = match &mut b.knots {
                 ir::time_func::BSplineKnots::Uniform { lower, upper, .. } => vec![lower, upper],
                 ir::time_func::BSplineKnots::Explicit { breakpoints } => breakpoints.iter_mut().collect(),
             };
-            knots.into_iter().chain(coefs).collect()
+            knots.into_iter().chain(b.coefs.exprs_mut()).collect()
         }
     }
 }

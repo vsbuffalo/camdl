@@ -173,7 +173,10 @@ let forcing_coeff_exprs (k : time_func_kind) : expr list =
       | Knots_uniform { lower; upper; _ } -> [ lower; upper ]
       | Knots_explicit bps -> bps
     in
-    let coefs = match b.coefs with Coefs_explicit cs -> cs in
+    let coefs = match b.coefs with
+      | Coefs_explicit cs -> cs
+      | Coefs_smooth { level; slope; scale; modes; per } -> level :: slope :: scale :: per :: modes
+    in
     knots @ coefs
 
 let kind_label (k : time_func_kind) : string =
@@ -284,7 +287,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
     else
       let term j c =
         map1 (d c) (fun dc ->
-          BinOp { op = Mul; left = dc; right = ForcingBasis { forcing = fname; index = j } })
+          BinOp { op = Mul; left = dc; right = ForcingBasis { forcing = fname; index = j; space = Space_spline } })
       in
       let sum =
         List.fold_left (fun acc t -> map2 acc t (fun a b -> BinOp { op = Add; left = a; right = b }))
@@ -293,6 +296,44 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
       match link with
       | Link_identity -> sum
       | Link_log -> map1 sum (fun s -> BinOp { op = Mul; left = TimeFunc fname; right = s })
+  (* Proposal §6.4: g = level + slope (t_c - t_m) + (scale/kappa) sum_i z_i W_i,
+     W_i(t) = sum_j M_ji B_j(t). A `whitened` basis node evaluates W_i/kappa and
+     the `linear` node t_c - t_m, so
+       dg/dtheta = d level + d slope * lin + d scale * sum_i z_i Wh_i
+                   + sum_i (d z_i) * scale * Wh_i,
+     each coefficient expression differentiated by the ordinary rules (the
+     chain rule for free), and under `link = log` times the forcing's value.
+     The knots, window and `per` place the basis or set kappa: Unsupported. *)
+  and smooth_deriv param fname structural ~level ~slope ~scale ~modes ~per link =
+    if List.exists (mentions param) (per :: structural) then
+      Unsupported
+        { code = URStructuralForcing;
+          node = Printf.sprintf "forcing `%s`" fname;
+          reason = Printf.sprintf
+            "parameter '%s' drives the window, breakpoints or reference \
+             duration `per` of smooth spline forcing `%s`, which decide where \
+             its basis functions sit and the scale of its penalty and are fixed \
+             when the model is built, so they cannot be an estimated parameter"
+            param fname }
+    else
+      let wh i = ForcingBasis { forcing = fname; index = i; space = Space_whitened } in
+      let lin = ForcingBasis { forcing = fname; index = 0; space = Space_linear } in
+      let mul a b = BinOp { op = Mul; left = a; right = b } in
+      let add a b = BinOp { op = Add; left = a; right = b } in
+      let z_wh = match List.mapi (fun i z -> mul z (wh i)) modes with
+        | [] -> Const 0.0
+        | t :: ts -> List.fold_left add t ts
+      in
+      let terms =
+        [ d level;
+          map1 (d slope) (fun ds -> mul ds lin);
+          map1 (d scale) (fun dsc -> mul dsc z_wh) ]
+        @ List.mapi (fun i z -> map1 (d z) (fun dz -> mul dz (mul scale (wh i)))) modes
+      in
+      let sum = List.fold_left (fun acc t -> map2 acc t add) (Known (Const 0.0)) terms in
+      match link with
+      | Link_identity -> sum
+      | Link_log -> map1 sum (fun s -> mul (TimeFunc fname) s)
   and d (e : expr) : deriv =
     match e with
     (* Constant leaves — zero for every target. `ObsAnchor` (gh#616) is a
@@ -401,8 +442,11 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
            | Knots_uniform { lower; upper; _ } -> [ lower; upper ]
            | Knots_explicit bps -> bps
          in
-         let coefs = match b.coefs with Coefs_explicit cs -> cs in
-         spline_deriv param fname "window or breakpoints" structural coefs b.link
+         (match b.coefs with
+          | Coefs_explicit coefs ->
+            spline_deriv param fname "window or breakpoints" structural coefs b.link
+          | Coefs_smooth { level; slope; scale; modes; per } ->
+            smooth_deriv param fname structural ~level ~slope ~scale ~modes ~per b.link)
        | Some { kind = (Piecewise _ | Interpolated _) as kind; _ } ->
          if forcing_mentions param fname then
            Unsupported

@@ -443,7 +443,7 @@ let rec expr_hash (e : Ir.expr) : int =
   | UncheckedDim u -> mix 15 [ expr_hash u.inner ]
   | ObsColumnRef c -> mix 16 [ Hashtbl.hash c ]
   | ObsAnchor a -> mix 18 [ Hashtbl.hash a.anchor; Hashtbl.hash a.offset ]
-  | ForcingBasis { forcing; index } -> mix 19 [ Hashtbl.hash forcing; index ]
+  | ForcingBasis { forcing; index; space } -> mix 19 [ Hashtbl.hash forcing; index; Hashtbl.hash space ]
 
 (* Number of distinct non-trivial subexpressions that recur ≥ [threshold]
    times across all given roots. "Non-trivial" excludes single-node leaves

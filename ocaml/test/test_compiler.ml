@@ -10305,7 +10305,9 @@ let test_bspline_uniform_compiles () =
    | Ir.Knots_explicit _ -> Alcotest.fail "window form must be uniform knots");
   Alcotest.(check int) "default degree" 3 b.degree;
   Alcotest.(check bool) "default link identity" true (b.link = Ir.Link_identity);
-  (match b.coefs with Ir.Coefs_explicit cs -> Alcotest.(check int) "coefs" 6 (List.length cs))
+  (match b.coefs with
+   | Ir.Coefs_explicit cs -> Alcotest.(check int) "coefs" 6 (List.length cs)
+   | Ir.Coefs_smooth _ -> Alcotest.fail "explicit coefs expected")
 
 let test_bspline_explicit_compiles () =
   let b = bspline_kind (compile_expect_ok (bspline_model {|'per_day {
@@ -10440,7 +10442,7 @@ let grad_of tf param =
       | Some (Ir.DEGrad e) -> e
       | _ -> Alcotest.failf "∂f/∂%s: expected a DEGrad" param)
 
-let fb k = Ir.ForcingBasis { forcing = "f"; index = k }
+let fb k = Ir.ForcingBasis { forcing = "f"; index = k; space = Ir.Space_spline }
 
 let test_spline_coef_gradient_is_its_basis () =
   let c = [ Ir.Const 0.3; Ir.Param "c2"; Ir.Const 0.5; Ir.Const 0.3 ] in
@@ -10529,6 +10531,110 @@ let test_bspline_log_link_dimensioned_coef_e301 () =
     Alcotest.(check (list string)) (kind ^ ", link = identity: no dimension error") []
       (List.map fst (dimcheck_codes kind "identity")))
     [ "bspline"; "periodic_spline" ]
+
+(* ── smooth coefficient form (proposal 2026-10-27-estimable-bsplines §6.4) ── *)
+let smooth_model ?(params = "") ?(modes = "z[mode] : real 'ratio in [-8, 8] ~ normal(mu = 0.0, sigma = 1.0)")
+    ?(kind = "bspline") ?(knots = "window = [0 'days, 168 'days]\n        n_basis = 12")
+    ?(extra = "link = log") ?(smooth = "smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks)") () =
+  Printf.sprintf {|
+    time_unit = 'days
+    dimensions { mode = [m1, m2, m3, m4, m5, m6, m7, m8, m9, m10] }
+    compartments { S, I, R }
+    parameters {
+      gamma : rate in [0.01, 1.0]
+      a_b   : real 'ratio in [-8, 2] ~ normal(mu = -1.9, sigma = 0.6)
+      b_b   : real [1/T] in [-0.05, 0.05] ~ normal(mu = 0.0, sigma = 0.005)
+      tau_b : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
+      %s
+      %s
+    }
+    forcing {
+      log_beta : %s 'per_day {
+        %s
+        %s
+        coefs = %s
+      }
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I @ log_beta * S * I / N
+      recovery  : I --> R @ gamma * I
+    }
+    init { S = 999  I = 1 }
+  |} modes params kind knots extra smooth
+
+let test_smooth_compiles () =
+  let m = compile_expect_ok (smooth_model ()) in
+  match (List.hd m.time_functions).kind with
+  | Ir.BSpline { coefs = Ir.Coefs_smooth { modes; per; level; _ }; link = Ir.Link_log; _ } ->
+    Alcotest.(check int) "n_basis - 2 modes" 10 (List.length modes);
+    Alcotest.(check bool) "modes are the family's cells in order" true
+      (List.hd modes = Ir.Param "z_m1" && List.nth modes 9 = Ir.Param "z_m10");
+    Alcotest.(check bool) "level is the parameter (unit scale 1)" true (level = Ir.Param "a_b");
+    (match per with
+     | Ir.UncheckedDim { inner = Ir.Const 7.0; _ } -> ()
+     | _ -> Alcotest.fail "per = 1 'weeks is 7 days")
+  | _ -> Alcotest.fail "expected a log-link bspline with smooth coefs"
+
+let test_smooth_gradient_spaces () =
+  let m = compile_expect_ok (smooth_model ()) in
+  let tr = List.find (fun (t : Ir.transition) -> t.name = "infection") m.transitions in
+  let json p = match List.assoc_opt p tr.rate_grad with
+    | Some (Ir.DEGrad g) -> Yojson.Safe.to_string (Serde.expr_to_json g)
+    | _ -> Alcotest.failf "%s carries no gradient" p
+  in
+  Alcotest.(check bool) "slope reads the linear basis" true
+    (contains_substring ~needle:{|"space":"linear"|} (json "b_b"));
+  Alcotest.(check bool) "a mode reads its whitened basis" true
+    (contains_substring ~needle:{|{"forcing_basis":{"name":"log_beta","index":4,"space":"whitened"}}|} (json "z_m5"));
+  Alcotest.(check bool) "the scale reads every whitened basis" true
+    (contains_substring ~needle:{|"index":9,"space":"whitened"|} (json "tau_b"));
+  Alcotest.(check bool) "the level reads no basis" false (contains_substring ~needle:"forcing_basis" (json "a_b"))
+
+let test_smooth_refusals () =
+  compile_expect_error_code ~code:"E413" ~contains:"accepted only as the coefs of a bspline"
+    (smooth_model ~kind:"periodic_spline" ~knots:"period = 365 'days\n        n_basis = 12" ());
+  compile_expect_error_code ~code:"E413" ~contains:"needs degree at least 2"
+    (smooth_model ~extra:"link = log\n        degree = 1" ~knots:"window = [0 'days, 168 'days]\n        n_basis = 12" ());
+  compile_expect_error_code ~code:"E413" ~contains:"has 10 cells but 14 basis functions"
+    (smooth_model ~knots:"window = [0 'days, 168 'days]\n        n_basis = 14" ());
+  compile_expect_error_code ~code:"E413" ~contains:"must name an indexed parameter family"
+    (smooth_model ~smooth:"smooth(level = a_b, slope = b_b, scale = tau_b, modes = a_b, per = 1 'weeks)" ());
+  compile_expect_error_code ~code:"E413" ~contains:"is missing 'per'"
+    (smooth_model ~smooth:"smooth(level = a_b, slope = b_b, scale = tau_b, modes = z)" ());
+  compile_expect_error_code ~code:"E413" ~contains:"has no argument 'tau'"
+    (smooth_model ~smooth:"smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks, tau = 1)" ());
+  compile_expect_error_code ~code:"E414" ~contains:"prior exactly normal(mu = 0.0, sigma = 1.0)"
+    (smooth_model ~modes:"z[mode] : real 'ratio in [-8, 8] ~ normal(mu = 0.0, sigma = 2.0)" ());
+  compile_expect_error_code ~code:"E414" ~contains:"must be declared `real`"
+    (smooth_model ~modes:"z[mode] : positive 'ratio in [0, 8] ~ normal(mu = 0.0, sigma = 1.0)" ())
+
+(* A parameter in `per` sets kappa and is structural. *)
+let test_smooth_param_per_is_e600 () =
+  compile_expect_error_code ~code:"E600" ~contains:"reference duration `per`"
+    (smooth_model ~params:"tref : duration in [1 'days, 30 'days]"
+       ~smooth:"smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = tref)" ())
+
+let test_smooth_dimensions_e301 () =
+  let errs src =
+    let m = compile_expect_ok src in
+    List.filter_map (fun (d : Dimcheck.diagnostic) ->
+        if d.severity = Dimcheck.Error then Some d.message else None)
+      (Dimcheck.check_model m).diagnostics
+  in
+  Alcotest.(check (list string)) "the stated dimensions pass" [] (errs (smooth_model ()));
+  let bad = errs (smooth_model ~smooth:"smooth(level = a_b, slope = a_b, scale = tau_b, modes = z, per = 1 'weeks)" ()) in
+  Alcotest.(check bool) "a dimensionless slope is E301" true
+    (List.exists (contains_substring ~needle:"smooth `slope` must have dimension") bad);
+  let bad = errs (smooth_model ~smooth:"smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = 1.0)" ()) in
+  Alcotest.(check bool) "a dimensionless per is E301" true
+    (List.exists (contains_substring ~needle:"smooth `per` must have dimension") bad);
+  let bad = errs (smooth_model ~smooth:"smooth(level = b_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks)" ()) in
+  Alcotest.(check bool) "a level per unit time is E301" true
+    (List.exists (contains_substring ~needle:"smooth `level` must have dimension") bad);
+  let bad = errs (smooth_model ~smooth:"smooth(level = a_b, slope = b_b, scale = b_b, modes = z, per = 1 'weeks)" ()) in
+  Alcotest.(check bool) "a scale per unit time is E301" true
+    (List.exists (contains_substring ~needle:"smooth `scale` must have dimension") bad)
 
 (* F36 regression: an indexed let-family reference in `projected`
    (`projected = m[v]` with `let m[v in village] = …`) must resolve as a
@@ -14990,6 +15096,11 @@ let () =
       Alcotest.test_case "E600 parameter in a window or period" `Quick test_spline_structural_parameter_still_e600;
       Alcotest.test_case "parameter coefficient compiles with a gradient" `Quick test_bspline_param_coef_compiles_with_gradient;
       Alcotest.test_case "E301 dimensioned log-link coefficient" `Quick test_bspline_log_link_dimensioned_coef_e301;
+      Alcotest.test_case "smooth compiles to its cells and per" `Quick test_smooth_compiles;
+      Alcotest.test_case "smooth gradients read the linear and whitened bases" `Quick test_smooth_gradient_spaces;
+      Alcotest.test_case "smooth refusals (E413, E414)" `Quick test_smooth_refusals;
+      Alcotest.test_case "E600 parameter in smooth per" `Quick test_smooth_param_per_is_e600;
+      Alcotest.test_case "E301 smooth dimensions" `Quick test_smooth_dimensions_e301;
     ];
     "forcing_typed_args_gh423", [
       Alcotest.test_case "method = linear (bare, valid) compiles"

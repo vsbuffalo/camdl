@@ -61,7 +61,7 @@ pub enum ResolvedExpr {
     /// Basis function `index` of the spline forcing `time_func_cache[tf]`, at
     /// that forcing's own evaluation time (proposal
     /// 2026-10-27-estimable-bsplines §5.1). Gradient expressions only.
-    ForcingBasis { tf: usize, index: u32 },
+    ForcingBasis { tf: usize, index: u32, space: ir::expr::BasisSpace },
     /// Table index + resolved sub-expression for the lookup index.
     TableLookup {
         table_idx: usize,
@@ -336,7 +336,7 @@ pub fn resolve_expr(expr: &Expr, ctx: &ResolveCtx<'_>) -> Result<ResolvedExpr, S
         Expr::ForcingBasis(w) => {
             let tf = *ctx.time_func_index.get(w.forcing_basis.name.as_str())
                 .ok_or_else(|| SimError::UnknownTimeFunction(w.forcing_basis.name.clone()))?;
-            Ok(ResolvedExpr::ForcingBasis { tf, index: w.forcing_basis.index })
+            Ok(ResolvedExpr::ForcingBasis { tf, index: w.forcing_basis.index, space: w.forcing_basis.space })
         }
 
         Expr::TableLookup(w) => {
@@ -681,13 +681,13 @@ pub fn eval_resolved(expr: &ResolvedExpr, ctx: &EvalCtx<'_>) -> f64 {
 
         // The same lag as the forcing's value, so ∂f/∂cₖ is taken at the time
         // the value is.
-        ResolvedExpr::ForcingBasis { tf, index } => {
+        ResolvedExpr::ForcingBasis { tf, index, space } => {
             let tf = &ctx.model.time_func_cache[*tf];
             let t_eff = match &tf.lag {
                 Some(lag) => ctx.t - eval_resolved(lag, ctx),
                 None => ctx.t,
             };
-            crate::propensity::eval_forcing_basis(&tf.kind, t_eff, *index as usize)
+            crate::propensity::eval_forcing_basis(&tf.kind, t_eff, *index as usize, *space)
         }
 
         ResolvedExpr::TableLookup { table_idx, oob, table_len, index } => {

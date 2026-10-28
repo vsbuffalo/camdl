@@ -65,59 +65,150 @@ fn apply_link(link: ir::time_func::SplineLink, g: f64) -> f64 {
 pub struct CompiledBSpline {
     knots: crate::bspline::Knots,
     degree: usize,
-    coefs: Vec<ResolvedExpr>,
+    coefs: CompiledSplineCoefs,
     link: ir::time_func::SplineLink,
 }
 
+/// A `bspline`'s coefficients, compiled.
+#[derive(Debug, Clone)]
+pub enum CompiledSplineCoefs {
+    /// One live expression per basis function.
+    Explicit(Vec<ResolvedExpr>),
+    /// The whitened penalized curve of proposal §6.3: the coefficients are
+    /// w = level·1 + slope·(ξ − t_m·1) + (scale/κ)·M·modes, so
+    /// g(t) = level + slope·(t_c − t_m) + (scale/κ) Σᵢ modesᵢ Wᵢ(t_c), with
+    /// Wᵢ = Σⱼ M_ji Bⱼ (partition of unity and linear precision give the first
+    /// two terms without the basis). `whitening` is built from the resolved
+    /// knots; κ = √(K − 2)·per^{3/2}.
+    Smooth {
+        level: ResolvedExpr,
+        slope: ResolvedExpr,
+        scale: ResolvedExpr,
+        modes: Vec<ResolvedExpr>,
+        whitening: std::sync::Arc<crate::spline_penalty::Whitening>,
+        kappa: f64,
+    },
+}
+
 impl CompiledBSpline {
-    /// Refuses a degree above [`crate::bspline::MAX_DEGREE`] and a
-    /// coefficient count other than `n_intervals + degree`.
+    /// Refuses a degree above [`crate::bspline::MAX_DEGREE`], an explicit
+    /// coefficient count other than `n_intervals + degree`, and a smooth form
+    /// whose whitening is not for these knots and degree or whose mode count
+    /// is not K − 2.
     pub fn new(
         knots: crate::bspline::Knots,
         degree: usize,
-        coefs: Vec<ResolvedExpr>,
+        coefs: CompiledSplineCoefs,
         link: ir::time_func::SplineLink,
     ) -> Result<Self, String> {
         if degree > crate::bspline::MAX_DEGREE {
             return Err(format!("degree ({degree}) must be at most {}", crate::bspline::MAX_DEGREE));
         }
         let n_basis = knots.n_intervals() + degree;
-        if coefs.len() != n_basis {
-            return Err(format!(
-                "coefs length ({}) must equal the number of basis functions ({n_basis}: \
-                 {} intervals + degree {degree})",
-                coefs.len(),
-                knots.n_intervals()
-            ));
+        match &coefs {
+            CompiledSplineCoefs::Explicit(cs) if cs.len() != n_basis => {
+                return Err(format!(
+                    "coefs length ({}) must equal the number of basis functions ({n_basis}: \
+                     {} intervals + degree {degree})",
+                    cs.len(),
+                    knots.n_intervals()
+                ));
+            }
+            CompiledSplineCoefs::Smooth { modes, whitening, .. } => {
+                if whitening.n_basis() != n_basis {
+                    return Err(format!("the whitening has {} basis functions, the knots {n_basis}", whitening.n_basis()));
+                }
+                if modes.len() != n_basis - 2 {
+                    return Err(format!("smooth needs {} modes (n_basis − 2), got {}", n_basis - 2, modes.len()));
+                }
+            }
+            CompiledSplineCoefs::Explicit(_) => {}
         }
         Ok(CompiledBSpline { knots, degree, coefs, link })
     }
 
-    /// The live coefficient expressions, in basis order.
-    pub fn coefs(&self) -> &[ResolvedExpr] {
-        &self.coefs
+    /// Every live expression the forcing reads (coefficients, or the smooth
+    /// form's level, slope, scale and modes).
+    pub fn exprs(&self) -> Vec<&ResolvedExpr> {
+        match &self.coefs {
+            CompiledSplineCoefs::Explicit(cs) => cs.iter().collect(),
+            CompiledSplineCoefs::Smooth { level, slope, scale, modes, .. } => {
+                [level, slope, scale].into_iter().chain(modes).collect()
+            }
+        }
     }
 
-    /// f(t) = h(Σ cₖ Bₖ(clamp(t, a, b))), h the link, evaluating each
-    /// coefficient it reads through `value`.
+    /// The window end b, clamped into: t_c = clamp(t, a, b).
+    #[inline]
+    fn clamp(&self, t: f64) -> f64 {
+        let (a, b) = self.knots.window();
+        t.clamp(a, b)
+    }
+
+    /// f(t) = h(g(clamp(t, a, b))), h the link, evaluating each live
+    /// expression it reads through `value`.
     #[inline]
     pub fn eval(&self, t: f64, mut value: impl FnMut(&ResolvedExpr) -> f64) -> f64 {
         let s = crate::bspline::span(&self.knots, self.degree, t);
-        let mut g = 0.0;
-        for (r, &v) in s.values.iter().enumerate().take(self.degree + 1) {
-            g += v * value(&self.coefs[s.first + r]);
-        }
+        let g = match &self.coefs {
+            CompiledSplineCoefs::Explicit(cs) => {
+                let mut g = 0.0;
+                for (r, &v) in s.values.iter().enumerate().take(self.degree + 1) {
+                    g += v * value(&cs[s.first + r]);
+                }
+                g
+            }
+            CompiledSplineCoefs::Smooth { level, slope, scale, modes, whitening, kappa } => {
+                let tc = self.clamp(t);
+                let mut curv = 0.0;
+                for (i, z) in modes.iter().enumerate() {
+                    let zi = value(z);
+                    let mut wi = 0.0;
+                    for (r, &v) in s.values.iter().enumerate().take(self.degree + 1) {
+                        wi += v * whitening.m.at(s.first + r, i);
+                    }
+                    curv += zi * wi;
+                }
+                value(level) + value(slope) * (tc - whitening.t_mid) + value(scale) / kappa * curv
+            }
+        };
         apply_link(self.link, g)
     }
 
-    /// Bₖ(clamp(t, a, b)), basis function `k` of the sum, before the link.
+    /// A `forcing_basis` in `space` at t, before the link: Bₖ(t_c);
+    /// Wₖ(t_c)/κ; or t_c − t_m. NaN for an index outside the space or a space
+    /// this forcing lacks (validation refuses both first).
     #[inline]
-    pub fn basis(&self, t: f64, k: usize) -> f64 {
-        crate::bspline::basis(&self.knots, self.degree, t, k)
+    pub fn basis(&self, t: f64, k: usize, space: ir::expr::BasisSpace) -> f64 {
+        use ir::expr::BasisSpace;
+        match (space, &self.coefs) {
+            (BasisSpace::Spline, _) => crate::bspline::basis(&self.knots, self.degree, t, k),
+            (BasisSpace::Whitened, CompiledSplineCoefs::Smooth { whitening, kappa, .. }) if k < whitening.n_modes() => {
+                let s = crate::bspline::span(&self.knots, self.degree, t);
+                let mut w = 0.0;
+                for (r, &v) in s.values.iter().enumerate().take(self.degree + 1) {
+                    w += v * whitening.m.at(s.first + r, k);
+                }
+                w / kappa
+            }
+            (BasisSpace::Linear, CompiledSplineCoefs::Smooth { whitening, .. }) if k == 0 => {
+                self.clamp(t) - whitening.t_mid
+            }
+            (BasisSpace::Whitened | BasisSpace::Linear, _) => f64::NAN,
+        }
     }
 
+    /// The number of B-spline basis functions, K.
     pub fn n_basis(&self) -> usize {
-        self.coefs.len()
+        self.knots.n_intervals() + self.degree
+    }
+
+    /// The smooth form's whitening, when it has one.
+    pub fn whitening(&self) -> Option<&crate::spline_penalty::Whitening> {
+        match &self.coefs {
+            CompiledSplineCoefs::Smooth { whitening, .. } => Some(whitening),
+            CompiledSplineCoefs::Explicit(_) => None,
+        }
     }
 }
 
@@ -488,12 +579,11 @@ fn forcing_exprs(k: &ir::time_func::TimeFuncKind) -> Vec<&Expr> {
             .collect(),
         K::PeriodicSpline(s) => std::iter::once(&s.period).chain(&s.coefs).collect(),
         K::BSpline(b) => {
-            let ir::time_func::SplineCoefs::Explicit { coefs } = &b.coefs;
             let knots: Vec<&Expr> = match &b.knots {
                 ir::time_func::BSplineKnots::Uniform { lower, upper, .. } => vec![lower, upper],
                 ir::time_func::BSplineKnots::Explicit { breakpoints } => breakpoints.iter().collect(),
             };
-            knots.into_iter().chain(coefs).collect()
+            knots.into_iter().chain(b.coefs.exprs()).collect()
         }
     }
 }
@@ -1575,7 +1665,7 @@ impl CompiledModel {
                     CompiledTimeFuncKind::Fourier { period, harmonics } => read(period)
                         .or_else(|| harmonics.iter().find_map(|(a, b)| read(a).or_else(|| read(b)))),
                     CompiledTimeFuncKind::PeriodicSpline(ps) => ps.coefs().iter().find_map(read),
-                    CompiledTimeFuncKind::BSpline(b) => b.coefs().iter().find_map(read),
+                    CompiledTimeFuncKind::BSpline(b) => b.exprs().into_iter().find_map(read),
                     CompiledTimeFuncKind::Piecewise { .. }
                     | CompiledTimeFuncKind::Interpolated { .. }
                     | CompiledTimeFuncKind::Constant { .. }
@@ -2046,12 +2136,30 @@ impl CompiledModel {
                             crate::bspline::Knots::explicit(xs?).map_err(bad)?
                         }
                     };
-                    let SplineCoefs::Explicit { coefs } = &b.coefs;
-                    let coefs: Result<Vec<ResolvedExpr>, SimError> = coefs.iter()
-                        .map(|e| resolve_coeff(e, &param_index))
-                        .collect();
+                    let coefs = match &b.coefs {
+                        SplineCoefs::Explicit { coefs } => CompiledSplineCoefs::Explicit(
+                            coefs.iter().map(|e| resolve_coeff(e, &param_index)).collect::<Result<_, _>>()?,
+                        ),
+                        SplineCoefs::Smooth { level, slope, scale, modes, per } => {
+                            // The reference duration is structural, like the knots.
+                            let t_ref = eval_structural(&tf.name, "smooth reference duration `per`", per, &param_index, &default_params)?;
+                            if !(t_ref.is_finite() && t_ref > 0.0) {
+                                return Err(bad(format!("smooth `per` must be a positive duration, got {t_ref}")));
+                            }
+                            let whitening = crate::spline_penalty::Whitening::new(&knots, b.degree as usize).map_err(bad)?;
+                            let kappa = crate::spline_penalty::kappa(whitening.n_basis(), t_ref);
+                            CompiledSplineCoefs::Smooth {
+                                level: resolve_coeff(level, &param_index)?,
+                                slope: resolve_coeff(slope, &param_index)?,
+                                scale: resolve_coeff(scale, &param_index)?,
+                                modes: modes.iter().map(|e| resolve_coeff(e, &param_index)).collect::<Result<_, _>>()?,
+                                whitening: std::sync::Arc::new(whitening),
+                                kappa,
+                            }
+                        }
+                    };
                     CompiledTimeFuncKind::BSpline(
-                        CompiledBSpline::new(knots, b.degree as usize, coefs?, b.link).map_err(bad)?,
+                        CompiledBSpline::new(knots, b.degree as usize, coefs, b.link).map_err(bad)?,
                     )
                 }
             };

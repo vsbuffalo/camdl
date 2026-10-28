@@ -756,7 +756,10 @@ let rec expr_to_short_string (e : expr) : string =
   | Time -> "t"
   | Dt   -> "dt"
   | TimeFunc s -> Printf.sprintf "%s(t)" s
-  | ForcingBasis { forcing; index } -> Printf.sprintf "basis_%d(%s)" index forcing
+  | ForcingBasis { forcing; index; space } ->
+    Printf.sprintf "%s_%d(%s)"
+      (match space with Space_spline -> "basis" | Space_whitened -> "whitened" | Space_linear -> "linear")
+      index forcing
   | TableLookup (s, _) -> Printf.sprintf "%s[...]" s
   | Projected -> "projected"
   | ObsColumnRef c -> c
@@ -1004,6 +1007,30 @@ let check_model (m : model) : result =
       | BSpline { link = Link_log; coefs = Coefs_explicit cs; _ } -> cs
       | _ -> []
     in
+    (* §6.4: smooth's reference duration is a duration; under the log link its
+       level and scale are pure numbers and its slope a rate per unit time. *)
+    (match tf.kind with
+     | BSpline { coefs = Coefs_smooth { level; slope; scale; per; _ }; link; _ } ->
+       let need what e want code =
+         st.subject <- None;
+         let ctx = Printf.sprintf "forcing '%s' smooth %s" tf.name what in
+         constrain_known st ~code
+           ~message:(Printf.sprintf "forcing '%s': smooth `%s` must have dimension %s"
+                       tf.name what (dim_display want))
+           (infer st ~ctx e) want
+       in
+       need "per" per (make 0 1) "E301";
+       if link = Link_log then begin
+         let level = match level with
+           | BinOp { op = Add; left; right = UncheckedDim { reason; _ } }
+             when reason = spline_log_shift_reason -> left
+           | e -> e
+         in
+         need "level" level dimensionless "E301";
+         need "slope" slope (make 0 (-1)) "E301";
+         need "scale" scale dimensionless "E301"
+       end
+     | _ -> ());
     List.iteri (fun k c ->
       let c = match c with
         | BinOp { op = Add; left; right = UncheckedDim { reason; _ } }
