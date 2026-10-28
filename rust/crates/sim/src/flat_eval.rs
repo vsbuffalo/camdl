@@ -286,6 +286,13 @@ fn emit(e: &ResolvedExpr, f: &mut FlatProg) {
         // without adding executor machinery for a node the propensity path cannot
         // reach. If it ever did appear, `Op::Delegate` evaluates the exact
         // `eval_resolved` semantics (aux lookup, 0.0 floor when absent).
+        // A basis function appears only in gradient expressions, which the
+        // propensity tape never holds; delegated like `ObsColumnRef`.
+        ResolvedExpr::ForcingBasis { .. } => {
+            let idx = f.subs.len() as u32;
+            f.subs.push(e.clone());
+            f.ops.push(Op::Delegate(idx));
+        }
         ResolvedExpr::ObsColumnRef(_) => {
             let idx = f.subs.len() as u32;
             f.subs.push(e.clone());

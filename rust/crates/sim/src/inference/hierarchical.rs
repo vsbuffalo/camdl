@@ -124,7 +124,7 @@ pub fn eval_prior_arg<E: ParamEnv>(expr: &Expr, env: &E) -> f64 {
         // args. The compiler is supposed to reject these, but returning
         // NaN ensures a bogus prior arg propagates to `-∞` log-density
         // rather than undefined behaviour.
-        Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_)
+        Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_)
         // gh#616: an anchor is not a valid prior argument either; NaN for the
         // same defence-in-depth reason as the rest of this group.
         | Expr::ObsAnchor(_)

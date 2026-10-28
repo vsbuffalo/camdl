@@ -350,6 +350,22 @@
             "obs_anchor": { "$ref": "#/definitions/anchored_time" }
           },
           "additionalProperties": false
+        },
+        {
+          "comment": "Basis function `index` (0-based) of spline forcing `name`, at the forcing's own evaluation time: the derivative of the forcing with respect to coefficient `index` (proposal 2026-10-27-estimable-bsplines §5.1). Emitted only inside a gradient map; ir::validate refuses it elsewhere, and refuses a non-spline target or an index past its basis count.",
+          "required": ["forcing_basis"],
+          "properties": {
+            "forcing_basis": {
+              "type": "object",
+              "required": ["name", "index"],
+              "properties": {
+                "name": { "type": "string" },
+                "index": { "type": "integer", "minimum": 0 }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
         }
       ]
     },

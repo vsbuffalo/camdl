@@ -82,6 +82,13 @@ and expr =
      list (the interception is scoped to that key), which is why it is a
      structural knot rather than a value in the dynamics. *)
   | ObsAnchor of anchored_time
+  (* Basis function [index] (0-based) of spline forcing [forcing], at the
+     forcing's own evaluation time — t − lag, clamped to a bspline's window or
+     wrapped by a periodic_spline's period (proposal
+     2026-10-27-estimable-bsplines §5.1). ∂f/∂c_k = B_k(t): the derivative node
+     autodiff emits for a spline coefficient. Only ever inside a gradient map;
+     the DSL has no syntax for it. *)
+  | ForcingBasis of { forcing : string; index : int }
   (* Per-expression dimensional escape: asserts the wrapped subexpression
      has dimension `(dim_p, dim_t)` without the checker verifying. The
      user-supplied `reason` is retained for audit trails (run.json) and

@@ -38,7 +38,7 @@ let deps ~(bindings : Ir.binding list) (e : Ir.expr) : string list =
   let add c = if not (List.mem c !acc) then acc := c :: !acc in
   let rec go (e : Ir.expr) =
     match e with
-    | Ir.Const _ | Ir.Param _ | Ir.Time | Ir.Dt | Ir.TimeFunc _ | Ir.Projected
+    | Ir.Const _ | Ir.Param _ | Ir.Time | Ir.Dt | Ir.TimeFunc _ | Ir.ForcingBasis _ | Ir.Projected
     | Ir.ObsColumnRef _ | Ir.ObsAnchor _ -> ()
     | Ir.Pop c -> add c
     | Ir.PopSum cs -> List.iter add cs
@@ -157,7 +157,7 @@ let closed (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
     let built = ref SM.empty in
     let rec subst (e : Ir.expr) : Ir.expr =
       match e with
-      | Ir.Const _ | Ir.Param _ | Ir.Time | Ir.Dt | Ir.TimeFunc _ | Ir.Projected
+      | Ir.Const _ | Ir.Param _ | Ir.Time | Ir.Dt | Ir.TimeFunc _ | Ir.ForcingBasis _ | Ir.Projected
       | Ir.ObsColumnRef _ | Ir.ObsAnchor _ -> e
       | Ir.Pop c -> (match SM.find_opt c !built with Some ce -> ce | None -> Ir.Const 0.0)
       | Ir.PopSum cs ->

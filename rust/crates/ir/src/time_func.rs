@@ -127,6 +127,28 @@ pub enum TimeFuncKind {
     BSpline(BSpline),                  // proposal 2026-10-27-estimable-bsplines
 }
 
+impl TimeFuncKind {
+    /// The number of basis functions of a spline kind — the index range of its
+    /// `forcing_basis` nodes — or `None` for a kind that has no basis.
+    pub fn spline_basis_count(&self) -> Option<usize> {
+        match self {
+            TimeFuncKind::PeriodicSpline(ps) => Some(ps.n_basis as usize),
+            TimeFuncKind::BSpline(b) => {
+                let n_intervals = match &b.knots {
+                    BSplineKnots::Uniform { n_intervals, .. } => *n_intervals as usize,
+                    BSplineKnots::Explicit { breakpoints } => breakpoints.len().saturating_sub(1),
+                };
+                Some(n_intervals + b.degree as usize)
+            }
+            TimeFuncKind::Sinusoidal(_)
+            | TimeFuncKind::Piecewise(_)
+            | TimeFuncKind::Interpolated(_)
+            | TimeFuncKind::Periodic(_)
+            | TimeFuncKind::Fourier(_) => None,
+        }
+    }
+}
+
 /// Compile-time provenance for a forcing declared `data = "path"`.
 ///
 /// The knots are read from the file and *inlined* into [`Interpolated`] by

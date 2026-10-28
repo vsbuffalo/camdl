@@ -271,7 +271,7 @@ fn substitute_expr(
         }
         Expr::UncheckedDim(w) => substitute_expr(&mut w.unchecked_dim.inner, anchors, site, out),
         Expr::Const(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
-        | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
+        | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
         | Expr::BindingRef(_) | Expr::PerEvalRef(_) => {}
     }
 }
@@ -417,7 +417,7 @@ fn expr_has_anchor(e: &Expr) -> bool {
         Expr::Reduce(w) => w.reduce.iter().any(expr_has_anchor),
         Expr::UncheckedDim(w) => expr_has_anchor(&w.unchecked_dim.inner),
         Expr::Const(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
-        | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
+        | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
         | Expr::BindingRef(_) | Expr::PerEvalRef(_) => false,
     }
 }

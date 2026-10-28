@@ -68,6 +68,30 @@ impl PeriodicBasis {
     /// `p + 1` indices nonzero at `t` only.
     #[inline]
     pub fn eval(&self, t: f64, mut coef: impl FnMut(usize) -> f64) -> f64 {
+        let (j, n) = self.span(t);
+        let nb = self.n_basis;
+        let mut sum = 0.0;
+        for (r, &v) in n.iter().enumerate().take(self.degree + 1) {
+            sum += v * coef((j + r + nb - self.shift) % nb);
+        }
+        sum
+    }
+
+    /// Basis function `k`, Bₖ(t) = ∂f/∂cₖ: the same span as [`Self::eval`],
+    /// so the value and its coefficient derivative cannot disagree. Zero when
+    /// `k` is not among the `p + 1` coefficients nonzero at `t`.
+    #[inline]
+    pub fn basis(&self, t: f64, k: usize) -> f64 {
+        let (j, n) = self.span(t);
+        let nb = self.n_basis;
+        (0..=self.degree)
+            .find(|r| (j + r + nb - self.shift) % nb == k)
+            .map_or(0.0, |r| n[r])
+    }
+
+    /// The interval j holding t mod period, and the `p + 1` cardinal values on it.
+    #[inline]
+    fn span(&self, t: f64) -> (usize, [f64; MAX_DEGREE + 1]) {
         let nb = self.n_basis;
         let mut x = t.rem_euclid(self.period);
         // rem_euclid can round up to exactly `period` for a tiny negative t.
@@ -83,12 +107,7 @@ impl PeriodicBasis {
         } else if j > 0 && x < j as f64 * self.dx {
             j -= 1;
         }
-        let n = cardinal_span(self.degree, (x - j as f64 * self.dx) / self.dx);
-        let mut sum = 0.0;
-        for (r, &v) in n.iter().enumerate().take(self.degree + 1) {
-            sum += v * coef((j + r + nb - self.shift) % nb);
-        }
-        sum
+        (j, cardinal_span(self.degree, (x - j as f64 * self.dx) / self.dx))
     }
 }
 

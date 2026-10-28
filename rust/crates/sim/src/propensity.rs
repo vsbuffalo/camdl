@@ -237,6 +237,18 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
             Ok(eval_forcing(&tf.kind, t_eff, ctx))
         }
 
+        Expr::ForcingBasis(w) => {
+            let idx = ctx.model.time_func_index.get(w.forcing_basis.name.as_str())
+                .copied()
+                .ok_or_else(|| SimError::UnknownTimeFunction(w.forcing_basis.name.clone()))?;
+            let tf = &ctx.model.time_func_cache[idx];
+            let t_eff = match &tf.lag {
+                Some(lag) => ctx.t - eval_resolved(lag, ctx),
+                None => ctx.t,
+            };
+            Ok(eval_forcing_basis(&tf.kind, t_eff, w.forcing_basis.index as usize))
+        }
+
         Expr::TableLookup(w) => {
             let idx = ctx.model.table_index.get(w.table_lookup.table.as_str())
                 .copied()
@@ -497,6 +509,26 @@ pub fn eval_forcing(kind: &CompiledTimeFuncKind, t: f64, ctx: &EvalCtx<'_>) -> f
         }
         CompiledTimeFuncKind::PeriodicSpline(ps) => ps.eval(t, |c| eval_resolved(c, ctx)),
         CompiledTimeFuncKind::BSpline(b) => b.eval(t, |c| eval_resolved(c, ctx)),
+    }
+}
+
+/// Basis function `k` of a spline forcing at `t` — the value of a
+/// `forcing_basis` node, ∂f/∂cₖ before the link (proposal
+/// 2026-10-27-estimable-bsplines §5.1). `t` is already shifted by the
+/// forcing's lag; each kind clamps or wraps it exactly as its value does.
+/// Resolution refuses a non-spline target, so the NaN arm (the strict-mode
+/// sentinel the propensity guard catches) is unreachable from a resolved model.
+pub fn eval_forcing_basis(kind: &CompiledTimeFuncKind, t: f64, k: usize) -> f64 {
+    match kind {
+        CompiledTimeFuncKind::BSpline(b) => b.basis(t, k),
+        CompiledTimeFuncKind::PeriodicSpline(ps) => ps.basis(t, k),
+        CompiledTimeFuncKind::Sinusoidal { .. }
+        | CompiledTimeFuncKind::Piecewise { .. }
+        | CompiledTimeFuncKind::Interpolated { .. }
+        | CompiledTimeFuncKind::Constant { .. }
+        | CompiledTimeFuncKind::CubicSpline(_)
+        | CompiledTimeFuncKind::Periodic { .. }
+        | CompiledTimeFuncKind::Fourier { .. } => f64::NAN,
     }
 }
 

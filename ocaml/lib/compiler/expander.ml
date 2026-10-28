@@ -5707,7 +5707,7 @@ let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None)
       | Ir.UnOp  u -> check_refs u.arg
       | Ir.Cond  c -> check_refs c.pred; check_refs c.then_; check_refs c.else_
       | Ir.Pop _ | Ir.PopSum _ -> ()  (* caught elsewhere *)
-      | Ir.TimeFunc _ -> ()
+      | Ir.TimeFunc _ | Ir.ForcingBasis _ -> ()
       | Ir.TableLookup (_, args) -> List.iter check_refs args
       | Ir.UncheckedDim u -> check_refs u.inner
       | Ir.Reduce terms -> List.iter check_refs terms
@@ -6507,6 +6507,7 @@ let resolve_comp_name ctx env e =
       | Ir.Const _    -> "a constant"
       | Ir.Cond _     -> "a conditional"
       | Ir.TimeFunc _ -> "a time-function reference"
+      | Ir.ForcingBasis _ -> "a forcing basis function"
       | Ir.TableLookup _ -> "a table lookup"
       | Ir.Time       -> "the time symbol"
       | Ir.Dt         -> "the integrator step `dt`"
@@ -11358,7 +11359,7 @@ let build_model_structure ctx expanded_trs =
     | Ir.TableLookup (_, args) ->
       List.fold_left collect_numerator_pops acc args
     | Ir.Const _ | Ir.Param _ | Ir.Time | Ir.Dt | Ir.Projected
-    | Ir.ObsColumnRef _ | Ir.ObsAnchor _ | Ir.TimeFunc _ -> acc
+    | Ir.ObsColumnRef _ | Ir.ObsAnchor _ | Ir.TimeFunc _ | Ir.ForcingBasis _ -> acc
     | Ir.UncheckedDim u -> collect_numerator_pops acc u.inner
     (* Every term of a sum is a numerator contribution (like Add). *)
     | Ir.Reduce terms -> List.fold_left collect_numerator_pops acc terms
@@ -11417,7 +11418,7 @@ let rec expr_contains_param_or_pop = function
   | Ir.BindingRef _ -> false
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   | Ir.Const _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _
-  | Ir.ObsAnchor _ | Ir.TimeFunc _ -> false
+  | Ir.ObsAnchor _ | Ir.TimeFunc _ | Ir.ForcingBasis _ -> false
 
 (* Treat `UncheckedDim { inner = Const c; ... }` (the IR form of unit
    literals like `1 'days`) as a constant for L401 matching. *)
@@ -11488,7 +11489,7 @@ let rec walk_expr_for_l401 ~on_match e =
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
-  | Ir.TimeFunc _ -> ()
+  | Ir.TimeFunc _ | Ir.ForcingBasis _ -> ()
 
 let lint_l401 ctx (expanded_trs : Ir.transition list) =
   (* Avoid duplicate emits when the same expanded transition rate fires
@@ -11616,7 +11617,7 @@ let rec l403_rate_forcing_in is_rate_forcing = function
   | Ir.TableLookup (_, args) ->
     List.find_map (l403_rate_forcing_in is_rate_forcing) args
   | Ir.Reduce terms -> List.find_map (l403_rate_forcing_in is_rate_forcing) terms
-  | Ir.TimeFunc _ | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
+  | Ir.TimeFunc _ | Ir.ForcingBasis _ | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
   | Ir.BindingRef _ -> None
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
@@ -11670,7 +11671,7 @@ let rec walk_expr_for_l403 mags ~on_match e =
     List.iter (walk_expr_for_l403 mags ~on_match) terms
   | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
-  | Ir.TimeFunc _ | Ir.BindingRef _ -> ()
+  | Ir.TimeFunc _ | Ir.ForcingBasis _ | Ir.BindingRef _ -> ()
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
 let lint_l403 ctx (transitions : Ir.transition list)

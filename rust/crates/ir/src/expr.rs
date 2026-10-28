@@ -64,6 +64,17 @@ pub struct TimeFuncRef {
     pub name: String,
 }
 
+/// Basis function `index` (0-based) of spline forcing `name`, at the
+/// forcing's own evaluation time — t − lag, clamped to a `bspline`'s window or
+/// wrapped by a `periodic_spline`'s period. ∂f/∂cₖ = Bₖ(t): the derivative
+/// node the compiler emits for a spline coefficient (proposal
+/// 2026-10-27-estimable-bsplines §5.1). Only ever inside a gradient map.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForcingBasisRef {
+    pub name: String,
+    pub index: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TableLookupExpr {
     pub table:   String,
@@ -172,6 +183,11 @@ pub struct TimeFuncWrap {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForcingBasisWrap {
+    pub forcing_basis: ForcingBasisRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TableLookupWrap {
     pub table_lookup: TableLookupExpr,
 }
@@ -266,6 +282,7 @@ pub enum Expr {
     PerEvalRef(PerEvalRefWrap),
     ObsColumnRef(ObsColumnRefExpr),
     ObsAnchor(ObsAnchorWrap),
+    ForcingBasis(ForcingBasisWrap),
 }
 
 // ── Convenience constructors ──────────────────────────────────────────────────
@@ -402,12 +419,15 @@ impl<'de> Deserialize<'de> for Expr {
                     "obs_anchor" => {
                         Expr::ObsAnchor(ObsAnchorWrap { obs_anchor: map.next_value()? })
                     }
+                    "forcing_basis" => {
+                        Expr::ForcingBasis(ForcingBasisWrap { forcing_basis: map.next_value()? })
+                    }
                     other => {
                         return Err(de::Error::custom(format!(
                             "unknown expression node kind '{other}' (expected one of: const, \
                              param, pop, pop_sum, time, dt, bin_op, un_op, cond, time_func, \
                              table_lookup, projected, unchecked_dim, reduce, binding_ref, \
-                             per_eval_ref, obs_column_ref, obs_anchor)"
+                             per_eval_ref, obs_column_ref, obs_anchor, forcing_basis)"
                         )))
                     }
                 };
@@ -465,6 +485,9 @@ mod deserialize_tests {
             Expr::obs_anchor(crate::anchor::AnchoredTime {
                 anchor: crate::anchor::ObsAnchor::First,
                 offset: -7.0,
+            }),
+            Expr::ForcingBasis(ForcingBasisWrap {
+                forcing_basis: ForcingBasisRef { name: "log_beta".into(), index: 2 },
             }),
         ] {
             roundtrip(&e);

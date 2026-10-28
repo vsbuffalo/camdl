@@ -262,7 +262,7 @@ let rec max_reduce_terms (e : Ir.expr) : int =
   | TableLookup (_, idxs) ->
     List.fold_left (fun acc i -> max acc (max_reduce_terms i)) 0 idxs
   | UncheckedDim { inner; _ } -> max_reduce_terms inner
-  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _
   | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> 0
 
 let max_foi_reduce_terms (m : Ir.model) : int =
@@ -1772,7 +1772,7 @@ let rec collect_pops = function
   | Ir.BinOp b -> collect_pops b.left @ collect_pops b.right
   | Ir.UnOp u  -> collect_pops u.arg
   | Ir.Cond c  -> collect_pops c.pred @ collect_pops c.then_ @ collect_pops c.else_
-  | Ir.TimeFunc _ -> []
+  | Ir.TimeFunc _ | Ir.ForcingBasis _ -> []
   | Ir.TableLookup (_, idx) -> List.concat_map collect_pops idx
   | Ir.UncheckedDim u -> collect_pops u.inner
   | Ir.Reduce terms -> List.concat_map collect_pops terms
@@ -3385,7 +3385,7 @@ let test_l401_no_fire_when_dt_used () =
       | Ir.BindingRef _ -> false
       | Ir.PerEvalRef _ -> false
       | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _ | Ir.ObsAnchor _
-      | Ir.Time | Ir.Projected | Ir.ObsColumnRef _ | Ir.TimeFunc _ -> false
+      | Ir.Time | Ir.Projected | Ir.ObsColumnRef _ | Ir.TimeFunc _ | Ir.ForcingBasis _ -> false
     in
     let any_tr_uses_dt = List.exists (fun (t : Ir.transition) ->
       contains_dt t.rate
@@ -10426,15 +10426,84 @@ let test_spline_unknown_link_e411 () =
         coefs = [0.3, 0.4, 0.5, 0.3]
       }|})
 
-(* Stage 2 leaves the autodiff rule as it was: a parameter in a spline
-   coefficient is still E600 until `forcing_basis` lands (Stage 3). *)
-let test_bspline_param_coef_still_e600 () =
-  compile_expect_error_code ~code:"E600" ~contains:"bspline forcing coefficient"
-    (bspline_model ~params:"c2 : rate in [0.01, 1.0]" {|'per_day {
+(* Proposal §5.2 (Stage 3): ∂f/∂θ = h′ · Σ_j (∂c_j/∂θ) · B_j, each basis
+   function a `forcing_basis` node. Pinned on the emitted, simplified IR. *)
+let bspline_tf ?(link = Ir.Link_identity) ?(knots = Ir.Knots_uniform
+    { lower = Ir.Const 0.0; upper = Ir.Const 80.0; n_intervals = 1 }) coefs : Ir.time_function =
+  { name = "f"; kind = Ir.BSpline { knots; degree = 3; coefs = Ir.Coefs_explicit coefs; link };
+    dim = (0, 0); lag = None; data_source = None }
+
+let grad_of tf param =
+  match Autodiff.differentiate_rate (Ir.TimeFunc "f") [ param ] [ tf ] [] with
+  | Error msg -> Alcotest.failf "∂f/∂%s must be emitted, got: %s" param msg
+  | Ok grads -> (match List.assoc_opt param grads with
+      | Some (Ir.DEGrad e) -> e
+      | _ -> Alcotest.failf "∂f/∂%s: expected a DEGrad" param)
+
+let fb k = Ir.ForcingBasis { forcing = "f"; index = k }
+
+let test_spline_coef_gradient_is_its_basis () =
+  let c = [ Ir.Const 0.3; Ir.Param "c2"; Ir.Const 0.5; Ir.Const 0.3 ] in
+  Alcotest.(check bool) "identity: ∂f/∂c2 = B_1" true (grad_of (bspline_tf c) "c2" = fb 1);
+  Alcotest.(check bool) "log: ∂f/∂c2 = f · B_1" true
+    (grad_of (bspline_tf ~link:Ir.Link_log c) "c2"
+     = Ir.BinOp { op = Ir.Mul; left = Ir.TimeFunc "f"; right = fb 1 });
+  let ps : Ir.time_function =
+    { name = "f"; kind = Ir.PeriodicSpline { period = Ir.Const 7.0; n_basis = 4; degree = 3; coefs = c;
+                                             link = Ir.Link_identity };
+      dim = (0, 0); lag = None; data_source = None } in
+  Alcotest.(check bool) "periodic_spline: ∂f/∂c2 = B_1" true (grad_of ps "c2" = fb 1)
+
+(* A coefficient that is arithmetic over the parameter gets the chain rule:
+   c = [a, 2a, 0, -a] gives ∂f/∂a = B_0 + 2 B_1 - B_3, with no B_2 term. *)
+let test_spline_coef_gradient_chain_rule () =
+  let a = Ir.Param "a" in
+  let c = [ a; Ir.BinOp { op = Ir.Mul; left = Ir.Const 2.0; right = a }; Ir.Const 0.0;
+            Ir.UnOp { op = Ir.Neg; arg = a } ] in
+  let g = grad_of (bspline_tf c) "a" in
+  let rec indices = function
+    | Ir.ForcingBasis { index; _ } -> [ index ]
+    | Ir.BinOp b -> indices b.left @ indices b.right
+    | Ir.UnOp u -> indices u.arg
+    | Ir.Reduce ts -> List.concat_map indices ts
+    | _ -> []
+  in
+  Alcotest.(check (list int)) "bases of the coefficients that read a" [ 0; 1; 3 ]
+    (List.sort compare (indices g))
+
+(* The knots, window and period place the basis: still E600. *)
+let test_spline_structural_parameter_still_e600 () =
+  let window = bspline_tf ~knots:(Ir.Knots_uniform
+      { lower = Ir.Const 0.0; upper = Ir.Param "t1"; n_intervals = 1 })
+      [ Ir.Const 0.3; Ir.Const 0.4; Ir.Const 0.5; Ir.Const 0.3 ] in
+  (match Autodiff.differentiate_rate (Ir.TimeFunc "f") [ "t1" ] [ window ] [] with
+   | Ok _ -> Alcotest.fail "a parameter in a window end must be refused"
+   | Error msg ->
+     Alcotest.(check bool) "names the window" true
+       (contains_substring ~needle:"window or breakpoints" msg && contains_substring ~needle:"t1" msg));
+  let ps : Ir.time_function =
+    { name = "f"; kind = Ir.PeriodicSpline { period = Ir.Param "p"; n_basis = 4; degree = 3;
+        coefs = [ Ir.Const 1.0; Ir.Const 1.0; Ir.Const 1.0; Ir.Const 1.0 ]; link = Ir.Link_identity };
+      dim = (0, 0); lag = None; data_source = None } in
+  match Autodiff.differentiate_rate (Ir.TimeFunc "f") [ "p" ] [ ps ] [] with
+  | Ok _ -> Alcotest.fail "a parameter in a period must be refused"
+  | Error msg -> Alcotest.(check bool) "names the period" true (contains_substring ~needle:"the period" msg)
+
+(* A whole model: the coefficient parameter compiles, and its rate gradient
+   carries the basis node. *)
+let test_bspline_param_coef_compiles_with_gradient () =
+  let m = compile_expect_ok (bspline_model ~params:"c2 : rate in [0.01, 1.0]" {|'per_day {
         window = [0 'days, 80 'days]
         n_basis = 4
         coefs = [0.3, c2, 0.5, 0.3]
-      }|})
+      }|}) in
+  let tr = List.find (fun (t : Ir.transition) -> t.name = "infection") m.transitions in
+  match List.assoc_opt "c2" tr.rate_grad with
+  | Some (Ir.DEGrad g) ->
+    let s = Yojson.Safe.to_string (Serde.expr_to_json g) in
+    Alcotest.(check bool) "rate_grad reads forcing_basis(beta_t, 1)" true
+      (contains_substring ~needle:{|{"forcing_basis":{"name":"beta_t","index":1}}|} s)
+  | _ -> Alcotest.fail "c2 must carry a rate gradient"
 
 (* `Compiler.compile` stops before the dimension checker that `camdlc` runs,
    so this calls it on the compiled model. A unit-literal coefficient is
@@ -14916,7 +14985,10 @@ let () =
       Alcotest.test_case "E408 degree above 5, both spline kinds" `Quick test_spline_degree_above_five_e408;
       Alcotest.test_case "E409 unknown bspline key" `Quick test_bspline_unknown_key_e409;
       Alcotest.test_case "E411 unknown link" `Quick test_spline_unknown_link_e411;
-      Alcotest.test_case "E600 parameter coefficient (until Stage 3)" `Quick test_bspline_param_coef_still_e600;
+      Alcotest.test_case "∂f/∂c is its basis function (both kinds, both links)" `Quick test_spline_coef_gradient_is_its_basis;
+      Alcotest.test_case "coefficient arithmetic gets the chain rule" `Quick test_spline_coef_gradient_chain_rule;
+      Alcotest.test_case "E600 parameter in a window or period" `Quick test_spline_structural_parameter_still_e600;
+      Alcotest.test_case "parameter coefficient compiles with a gradient" `Quick test_bspline_param_coef_compiles_with_gradient;
       Alcotest.test_case "E301 dimensioned log-link coefficient" `Quick test_bspline_log_link_dimensioned_coef_e301;
     ];
     "forcing_typed_args_gh423", [

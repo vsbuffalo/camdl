@@ -54,6 +54,7 @@ fn walk<'a>(
         | Expr::Projected(_)
         | Expr::ObsColumnRef(_)
         | Expr::ObsAnchor(_)
+        | Expr::ForcingBasis(_)
         | Expr::PerEvalRef(_) => {}
         Expr::Pop(p) => push(&p.pop, out),
         Expr::PopSum(ps) => {

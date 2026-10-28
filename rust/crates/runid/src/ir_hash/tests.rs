@@ -714,6 +714,26 @@ fn ir_spline_link_changes_hash() {
     }
 }
 
+/// Proposal 2026-10-27-estimable-bsplines §5.3: the `forcing_basis` expression
+/// hashes by its forcing and its index (appended as tag 18, so no earlier
+/// variant's hash moves). Gradient maps themselves stay out of model identity
+/// (`SV = 2`), so this pins the node's own hash, which any future hashed use of
+/// it relies on.
+#[test]
+fn ir_forcing_basis_hashes_its_forcing_and_index() {
+    use ir::expr::{ForcingBasisRef, ForcingBasisWrap};
+    let fb = |name: &str, index: u32| {
+        Expr::ForcingBasis(ForcingBasisWrap { forcing_basis: ForcingBasisRef { name: name.into(), index } })
+            .content_hash()
+    };
+    assert_ne!(fb("f", 0), fb("f", 1), "the basis index is hashed");
+    assert_ne!(fb("f", 0), fb("g", 0), "the forcing name is hashed");
+    assert_eq!(fb("f", 2), fb("f", 2));
+    assert_ne!(fb("f", 0), Expr::TimeFunc(ir::expr::TimeFuncWrap {
+        time_func: ir::expr::TimeFuncRef { name: "f".into() } }).content_hash(),
+        "a basis node is not its forcing's value");
+}
+
 /// gh#314: a forcing `lag` is run identity. Two models that differ only by a
 /// forcing's evaluation-time shift produce different trajectories, so they must
 /// re-key. This pins that `TimeFunction::lag` is actually folded into the hash

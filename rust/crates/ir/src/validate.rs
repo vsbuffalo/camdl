@@ -44,6 +44,16 @@ pub enum ValidationError {
     #[error("expression references unknown time function '{0}'")]
     UnknownTimeFunction(String),
 
+    /// Proposal 2026-10-27-estimable-bsplines §5.1: `forcing_basis` is a
+    /// derivative node the compiler writes only inside a gradient map.
+    #[error("forcing_basis({forcing}, {index}) appears outside a gradient map; only the compiler's derivative entries may hold it")]
+    ForcingBasisOutsideGradient { forcing: String, index: u32 },
+
+    /// A `forcing_basis` naming no spline forcing, or a basis index past its
+    /// basis count.
+    #[error("forcing_basis({forcing}, {index}) names {reason}")]
+    ForcingBasisBadTarget { forcing: String, index: u32, reason: String },
+
     #[error("observation '{obs}' cumulative_flow references unknown transition '{transition}'")]
     UnknownTransitionInObservation { obs: String, transition: String },
 
@@ -234,6 +244,7 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
     for tr in &model.transitions {
         check_expr(&tr.rate, &ctx, false, &mut errors);
     }
+    check_gradient_forcing_basis(model, &mut errors);
     for eq in &model.ode_equations {
         check_expr(&eq.derivative, &ctx, false, &mut errors);
     }
@@ -592,6 +603,7 @@ fn check_quantity_legal<'a>(
         // quantity can read — and a quantity that wants one writes
         // `value_at(…, last_obs)`, which is a `TimeAnchor`, not this node.
         Expr::ObsAnchor(_) => forbid(errors, quantity, "obs_anchor"),
+        Expr::ForcingBasis(_) => forbid(errors, quantity, "forcing_basis"),
         Expr::Const(_) | Expr::Time(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
         | Expr::TimeFunc(_) => {}
         Expr::BinOp(w) => {
@@ -674,6 +686,86 @@ fn const_fold(expr: &Expr) -> Option<f64> {
     }
 }
 
+/// Every `forcing_basis` inside a gradient map — a transition's `rate_grad`,
+/// `rate_state_grad` or `sigma_sq_grad`, an observation argument's gradient,
+/// an initial condition's — must name a spline forcing and a basis index below
+/// its basis count (proposal 2026-10-27-estimable-bsplines §5.1). The runtime
+/// refuses the same at resolution; this names the fault at the IR boundary.
+/// [`check_gradient_forcing_basis`] alone, for a loader that does not run the
+/// whole battery (`sim::CompiledModel::new`).
+pub fn validate_forcing_basis(model: &Model) -> Result<(), Vec<ValidationError>> {
+    let mut errors = Vec::new();
+    check_gradient_forcing_basis(model, &mut errors);
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
+}
+
+fn check_gradient_forcing_basis(model: &Model, errors: &mut Vec<ValidationError>) {
+    use crate::deriv::DerivEntry;
+    use crate::Differentiable;
+    let counts: std::collections::HashMap<&str, Option<usize>> = model
+        .time_functions
+        .iter()
+        .map(|tf| (tf.name.as_str(), tf.kind.spline_basis_count()))
+        .collect();
+    fn walk(e: &Expr, counts: &std::collections::HashMap<&str, Option<usize>>, errors: &mut Vec<ValidationError>) {
+        match e {
+            Expr::ForcingBasis(w) => {
+                let (forcing, index) = (&w.forcing_basis.name, w.forcing_basis.index);
+                let reason = match counts.get(forcing.as_str()) {
+                    None => Some("no forcing in this model".to_string()),
+                    Some(None) => Some(format!("forcing '{forcing}', which is not a spline and has no basis")),
+                    Some(Some(n)) if index as usize >= *n => {
+                        Some(format!("basis {index} of forcing '{forcing}', which has {n} basis functions"))
+                    }
+                    Some(Some(_)) => None,
+                };
+                if let Some(reason) = reason {
+                    errors.push(ValidationError::ForcingBasisBadTarget { forcing: forcing.clone(), index, reason });
+                }
+            }
+            Expr::BinOp(w) => {
+                walk(&w.bin_op.left, counts, errors);
+                walk(&w.bin_op.right, counts, errors);
+            }
+            Expr::UnOp(w) => walk(&w.un_op.arg, counts, errors),
+            Expr::Cond(w) => {
+                walk(&w.cond.pred, counts, errors);
+                walk(&w.cond.then, counts, errors);
+                walk(&w.cond.else_, counts, errors);
+            }
+            Expr::TableLookup(w) => w.table_lookup.indices.iter().for_each(|i| walk(i, counts, errors)),
+            Expr::UncheckedDim(w) => walk(&w.unchecked_dim.inner, counts, errors),
+            Expr::Reduce(w) => w.reduce.iter().for_each(|t| walk(t, counts, errors)),
+            Expr::Const(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
+            | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::BindingRef(_)
+            | Expr::PerEvalRef(_) | Expr::ObsColumnRef(_) | Expr::ObsAnchor(_) => {}
+        }
+    }
+    let mut each = |entry: &DerivEntry| {
+        if let DerivEntry::Grad(e) = entry {
+            walk(e, &counts, errors);
+        }
+    };
+    for tr in &model.transitions {
+        tr.rate_grad.values().for_each(&mut each);
+        tr.rate_state_grad.iter().for_each(|(_, d)| each(d));
+        if let crate::transition::DrawMethod::Overdispersed { sigma_sq_grad, .. } = &tr.draw_method {
+            sigma_sq_grad.values().for_each(&mut each);
+        }
+    }
+    for obs in &model.observations {
+        for (_, d) in obs.likelihood.diffables() {
+            d.grad.values().for_each(&mut each);
+            if let Some(p) = &d.proj_grad {
+                each(p);
+            }
+        }
+    }
+    for grads in model.ic_grad.values() {
+        grads.values().for_each(&mut each);
+    }
+}
+
 struct RefCtx<'a> {
     comp_names:  &'a HashSet<&'a str>,
     param_names: &'a HashSet<&'a str>,
@@ -728,6 +820,12 @@ fn check_expr(expr: &Expr, ctx: &RefCtx<'_>, allow_projected: bool, errors: &mut
                 errors.push(ValidationError::UnknownTimeFunction(w.time_func.name.clone()));
             }
         }
+        // `check_expr` walks model expressions, never gradient maps (see
+        // `check_gradient_forcing_basis`), so a basis node here is misplaced.
+        Expr::ForcingBasis(w) => errors.push(ValidationError::ForcingBasisOutsideGradient {
+            forcing: w.forcing_basis.name.clone(),
+            index: w.forcing_basis.index,
+        }),
         Expr::TableLookup(w) => {
             if !ctx.table_names.contains(w.table_lookup.table.as_str()) {
                 errors.push(ValidationError::UnknownTable(w.table_lookup.table.clone()));

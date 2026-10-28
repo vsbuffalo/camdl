@@ -25,7 +25,7 @@ let prec_binop = function
 
 let prec_expr : Ir.expr -> int = function
   | Ir.Const _ | Ir.Param _ | Ir.Pop _ | Ir.PopSum _
-  | Ir.Time | Ir.Dt | Ir.TimeFunc _ | Ir.TableLookup _ | Ir.Projected
+  | Ir.Time | Ir.Dt | Ir.TimeFunc _ | Ir.ForcingBasis _ | Ir.TableLookup _ | Ir.Projected
   | Ir.ObsColumnRef _ -> 10
   | Ir.ObsAnchor _ -> 10      (* a name (± a number), atomic *)
   | Ir.UncheckedDim _ -> 10   (* function-call-like, atomic *)
@@ -116,6 +116,9 @@ and pp_inner ~mode ~split ~ascii ppf = function
     Term_style.param Fmt.string ppf "dt"
   | Ir.TimeFunc name ->
     Term_style.table Fmt.string ppf name
+  (* A derivative-only node: B_k of forcing f, written `basis(f, k)`. *)
+  | Ir.ForcingBasis { forcing; index } ->
+    Fmt.pf ppf "basis(%a, %d)" (Term_style.table Fmt.string) forcing index
   | Ir.Projected ->
     Fmt.pf ppf "projected"
   | Ir.ObsColumnRef c ->

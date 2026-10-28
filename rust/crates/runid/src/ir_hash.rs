@@ -36,6 +36,7 @@ use ir::Differentiable;
 use ir::anchor::AnchoredTime;
 use ir::expr::{
     BinOp, BinOpExpr, BinOpWrap, BindingRefWrap, CondExpr, CondWrap, ConstExpr, DtExpr, Expr,
+    ForcingBasisRef, ForcingBasisWrap,
     ObsAnchorWrap, ObsColumnRefExpr, ParamExpr, PerEvalRefWrap, PopExpr, PopSumExpr,
     ProjectedExpr, ReduceWrap, TableLookupExpr, TableLookupWrap, TimeExpr, TimeFuncRef,
     TimeFuncWrap, UnOp, UnOpExpr, UnOpWrap, UncheckedDimExpr, UncheckedDimWrap,
@@ -294,6 +295,13 @@ impl ContentAddressed for Expr {
                 h.write_u32(17);
                 h.write_str(anchor.as_str());
                 h.write_f64_bits(*offset);
+            }
+            // Appended last (proposal 2026-10-27-estimable-bsplines §5.3), so
+            // every earlier variant keeps its tag.
+            Expr::ForcingBasis(ForcingBasisWrap { forcing_basis: ForcingBasisRef { name, index } }) => {
+                h.write_u32(18);
+                h.write_str(name);
+                index.hash_into(h);
             }
         }
     }

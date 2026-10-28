@@ -343,6 +343,8 @@ let rec infer st ~ctx (e : expr) : dim =
   | Dt   -> Known (make 0 1)  (* gh#54: dt has dimension T, same as t *)
   (* gh#616: an observation anchor resolves to a model TIME. *)
   | ObsAnchor _ -> Known (make 0 1)
+  (* A basis function is a pure number (the basis sums to one). *)
+  | ForcingBasis _ -> Known dimensionless
   | TimeFunc name ->
     (match Hashtbl.find_opt st.tf_dims name with
      | Some d -> resolve st d
@@ -498,6 +500,7 @@ let rec propagate st ~ctx (e : expr) (expected : dim_vec) : unit =
        is explicitly exempted from checker-driven dimensional
        constraints. *)
     ()
+  | ForcingBasis _ -> ()
   | TimeFunc name ->
     (* If the time function's dim is unknown, bind it *)
     (match Hashtbl.find_opt st.tf_dims name with
@@ -658,6 +661,7 @@ let rec read_dim st (e : expr) : dim =
   | Time -> Known (make 0 1)
   | Dt   -> Known (make 0 1)
   | ObsAnchor _ -> Known (make 0 1)   (* gh#616: a model time *)
+  | ForcingBasis _ -> Known dimensionless
   | TimeFunc name ->
     (match Hashtbl.find_opt st.tf_dims name with
      | Some d -> resolve st d
@@ -752,6 +756,7 @@ let rec expr_to_short_string (e : expr) : string =
   | Time -> "t"
   | Dt   -> "dt"
   | TimeFunc s -> Printf.sprintf "%s(t)" s
+  | ForcingBasis { forcing; index } -> Printf.sprintf "basis_%d(%s)" index forcing
   | TableLookup (s, _) -> Printf.sprintf "%s[...]" s
   | Projected -> "projected"
   | ObsColumnRef c -> c

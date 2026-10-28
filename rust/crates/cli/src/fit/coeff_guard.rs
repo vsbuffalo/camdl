@@ -69,7 +69,7 @@ fn collect(e: &Expr, out: &mut HashSet<String>) {
         | Expr::PopSum(_)
         | Expr::Time(_)
         | Expr::Dt(_)
-        | Expr::TimeFunc(_)
+        | Expr::TimeFunc(_) | Expr::ForcingBasis(_)
         | Expr::Projected(_)
         // gh#616: no parameter reference — the value comes from the run's data.
         | Expr::ObsAnchor(_)
@@ -177,6 +177,10 @@ fn collect_forcing_table_refs(e: &Expr, forcings: &mut HashSet<String>, tables: 
     match e {
         Expr::TimeFunc(w) => {
             forcings.insert(w.time_func.name.clone());
+        }
+        // A basis function reads its forcing too (gradient expressions only).
+        Expr::ForcingBasis(w) => {
+            forcings.insert(w.forcing_basis.name.clone());
         }
         Expr::TableLookup(w) => {
             tables.insert(w.table_lookup.table.clone());

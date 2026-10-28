@@ -13,15 +13,14 @@ use crate::state::{IntState, RealState};
 /// references a parameter (`amplitude = alpha`) is therefore not frozen at
 /// construction; there is no `f64` slot for it to freeze into. (Incident
 /// `2026-06-09-forcing-coefficient-param-frozen-at-construction.md`; proposal
-/// `2026-06-09-const-parametric-forcing.md` §3.) Only `Sinusoidal`, `Periodic`,
-/// and `Fourier` carry scalar coefficients.
+/// `2026-06-09-const-parametric-forcing.md` §3.) `Sinusoidal`, `Periodic`,
+/// `Fourier`, `PeriodicSpline` and `BSpline` carry live coefficients.
 ///
 /// **Structural data stays precomputed `f64`.** Interpolation knot arrays, the
-/// cubic-spline basis (a construction-time Thomas solve), the periodic-spline
-/// coefficients (consumed by the de Boor evaluator), and piecewise step
-/// arrays/breakpoints are *data*, not coefficients — a param-referencing entry
-/// in any of these is rejected at construction (see the build loop) rather than
-/// silently frozen.
+/// cubic-spline basis (a construction-time Thomas solve), a spline's period,
+/// window and breakpoints, and piecewise step arrays/breakpoints are *data*,
+/// not coefficients — a param-referencing entry in any of these is rejected at
+/// construction (see the build loop) rather than silently frozen.
 #[derive(Debug, Clone)]
 pub enum CompiledTimeFuncKind {
     Sinusoidal {
@@ -110,6 +109,16 @@ impl CompiledBSpline {
         }
         apply_link(self.link, g)
     }
+
+    /// Bₖ(clamp(t, a, b)), basis function `k` of the sum, before the link.
+    #[inline]
+    pub fn basis(&self, t: f64, k: usize) -> f64 {
+        crate::bspline::basis(&self.knots, self.degree, t, k)
+    }
+
+    pub fn n_basis(&self) -> usize {
+        self.coefs.len()
+    }
 }
 
 /// A compiled `periodic_spline` forcing (proposal
@@ -150,6 +159,16 @@ impl CompiledPeriodicSpline {
     #[inline]
     pub fn eval(&self, t: f64, mut value: impl FnMut(&ResolvedExpr) -> f64) -> f64 {
         apply_link(self.link, self.basis.eval(t, |k| value(&self.coefs[k])))
+    }
+
+    /// Bₖ(t), basis function `k` of the sum, before the link.
+    #[inline]
+    pub fn basis(&self, t: f64, k: usize) -> f64 {
+        self.basis.basis(t, k)
+    }
+
+    pub fn n_basis(&self) -> usize {
+        self.coefs.len()
     }
 }
 
@@ -494,7 +513,7 @@ fn first_obs_anchor(e: &Expr) -> Option<&ir::anchor::AnchoredTime> {
         Expr::Reduce(w) => w.reduce.iter().find_map(first_obs_anchor),
         Expr::UncheckedDim(w) => first_obs_anchor(&w.unchecked_dim.inner),
         Expr::Const(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
-        | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
+        | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
         | Expr::BindingRef(_) | Expr::PerEvalRef(_) => None,
     }
 }
@@ -521,7 +540,7 @@ fn expr_refs_param(expr: &Expr) -> bool {
         | Expr::PopSum(_)
         | Expr::Time(_)
         | Expr::Dt(_)
-        | Expr::TimeFunc(_)
+        | Expr::TimeFunc(_) | Expr::ForcingBasis(_)
         | Expr::Projected(_)
         | Expr::ObsColumnRef(_)
         | Expr::BindingRef(_)
@@ -755,7 +774,7 @@ fn collect_param_names(expr: &Expr, out: &mut Vec<String>) {
         Expr::Reduce(w) => w.reduce.iter().for_each(|e| collect_param_names(e, out)),
         Expr::UncheckedDim(w) => collect_param_names(&w.unchecked_dim.inner, out),
         Expr::Const(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_) | Expr::Dt(_)
-        | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
+        | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
         | Expr::ObsAnchor(_)
         | Expr::BindingRef(_) | Expr::PerEvalRef(_) => {}
     }
@@ -797,7 +816,7 @@ fn collect_binding_refs(expr: &Expr, out: &mut Vec<String>) {
         Expr::Reduce(w) => w.reduce.iter().for_each(|e| collect_binding_refs(e, out)),
         Expr::UncheckedDim(w) => collect_binding_refs(&w.unchecked_dim.inner, out),
         Expr::Const(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_) | Expr::Dt(_)
-        | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_) | Expr::ObsAnchor(_)
+        | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_) | Expr::ObsColumnRef(_) | Expr::ObsAnchor(_)
         | Expr::PerEvalRef(_) => {}
     }
 }
@@ -827,7 +846,8 @@ fn render_expr(expr: &Expr) -> String {
 }
 
 /// Evaluate a *structural* forcing array element (interpolation knot or value,
-/// piecewise breakpoint/value, a periodic spline's period) to `f64`.
+/// piecewise breakpoint/value, a spline's period, window end or breakpoint) to
+/// `f64`.
 ///
 /// Unlike scalar coefficients, these feed a structure derived at construction
 /// (a sorted knot table, a Thomas-solved spline basis, a periodic spline's
@@ -848,8 +868,8 @@ fn eval_structural(
             "forcing '{forcing}': {what} references parameter {plist}, but it is \
              structural data — {what}s are fixed at construction and cannot be \
              estimated. Use a forcing with live coefficients (sinusoidal, periodic, \
-             fourier, periodic_spline) for an estimated parameter, or make this \
-             value constant."
+             fourier, or a periodic_spline or bspline coefficient) for an estimated \
+             parameter, or make this value constant."
         )));
     }
     eval_table_expr(expr, param_index, params)
@@ -1137,7 +1157,7 @@ fn expr_contains_dt_memo(e: &Expr, bindings: &HashMap<&str, &Expr>, memo: &mut H
         }
         // A time_func is a named reference to a model-level forcing; its body
         // is not inline here and cannot itself read the substep `dt`.
-        Expr::TimeFunc(_) => false,
+        Expr::TimeFunc(_) | Expr::ForcingBasis(_) => false,
         Expr::TableLookup(w) => w.table_lookup.indices.iter().any(|e| expr_contains_dt_memo(e, bindings, memo)),
         Expr::UncheckedDim(w) => expr_contains_dt_memo(&w.unchecked_dim.inner, bindings, memo),
         Expr::Reduce(w) => w.reduce.iter().any(|e| expr_contains_dt_memo(e, bindings, memo)),
@@ -1539,6 +1559,9 @@ impl CompiledModel {
             ResolvedExpr::PerEvalRef(slot) => {
                 self.resolved.per_eval_bindings.get(*slot).and_then(read)
             }
+            // A basis function is ∂f/∂cₖ: a function of t alone, the
+            // coefficient's parameter having been differentiated away.
+            ResolvedExpr::ForcingBasis { .. } => None,
             ResolvedExpr::TimeFunc(i) => {
                 let tf = self.time_func_cache.get(*i)?;
                 let lag = tf.lag.as_ref().and_then(read);
@@ -1661,6 +1684,12 @@ impl CompiledModel {
         // path that never resolved, and running it would produce a plausible
         // wrong horizon or a wrong forcing fork.
         refuse_unresolved_anchors(&model)?;
+        // A `forcing_basis` in a gradient must name a spline forcing and one of
+        // its basis functions (proposal 2026-10-27-estimable-bsplines §5.1);
+        // the resolution context cannot see forcing kinds, so it is checked here.
+        ir::validate::validate_forcing_basis(&model).map_err(|errs| {
+            SimError::Validation(errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))
+        })?;
 
         // gh#257: the output schedule's `t += step` and each recurring
         // intervention's `t += period` are infinite-loop hazards with the same

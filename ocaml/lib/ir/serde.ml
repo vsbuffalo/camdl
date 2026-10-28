@@ -157,6 +157,8 @@ let rec expr_to_json (e : expr) : Yojson.Safe.t =
   (* gh#616: through the shared anchor codec, so an expr-position anchor and a
      `value_at` anchor are spelled identically on the wire. *)
   | ObsAnchor a  -> obj [("obs_anchor", anchored_time_to_json a)]
+  | ForcingBasis { forcing; index } ->
+    obj [("forcing_basis", obj [("name", str forcing); ("index", int index)])]
   | BinOp b      ->
     obj [("bin_op", obj [
       ("op",    str (bin_op_str b.op));
@@ -218,6 +220,9 @@ let rec expr_of_json (j : Yojson.Safe.t) : expr =
     | ["projected"]    -> Projected
     | ["obs_column_ref"] -> ObsColumnRef (as_string (List.assoc "obs_column_ref" kvs))
     | ["obs_anchor"]   -> ObsAnchor (anchored_time_of_json (List.assoc "obs_anchor" kvs))
+    | ["forcing_basis"] ->
+      let v = List.assoc "forcing_basis" kvs in
+      ForcingBasis { forcing = as_string (member "name" v); index = as_int (member "index" v) }
     | ["bin_op"]       ->
       let b = List.assoc "bin_op" kvs in
       BinOp {

@@ -58,6 +58,10 @@ pub enum ResolvedExpr {
     },
     /// Index into `time_func_cache[]`.
     TimeFunc(usize),
+    /// Basis function `index` of the spline forcing `time_func_cache[tf]`, at
+    /// that forcing's own evaluation time (proposal
+    /// 2026-10-27-estimable-bsplines §5.1). Gradient expressions only.
+    ForcingBasis { tf: usize, index: u32 },
     /// Table index + resolved sub-expression for the lookup index.
     TableLookup {
         table_idx: usize,
@@ -150,6 +154,7 @@ pub fn first_real_state_read(expr: &ResolvedExpr, bindings: &[ResolvedExpr]) -> 
         | ResolvedExpr::Time
         | ResolvedExpr::Dt
         | ResolvedExpr::TimeFunc(_)
+        | ResolvedExpr::ForcingBasis { .. }
         | ResolvedExpr::Projected
         | ResolvedExpr::ObsColumnRef(_) => None,
     }
@@ -201,6 +206,7 @@ pub fn per_eval_staging_violation(expr: &ResolvedExpr, slot: usize) -> Option<&'
         ResolvedExpr::Time => Some("simulation time (t)"),
         ResolvedExpr::Dt => Some("the integrator step (dt)"),
         ResolvedExpr::TimeFunc(_) => Some("a forcing (time-function)"),
+        ResolvedExpr::ForcingBasis { .. } => Some("a forcing basis function"),
 
         // Observation-context-only — never valid in a dynamics surface anyway.
         ResolvedExpr::Projected => Some("the observation projection"),
@@ -322,6 +328,15 @@ pub fn resolve_expr(expr: &Expr, ctx: &ResolveCtx<'_>) -> Result<ResolvedExpr, S
             let idx = *ctx.time_func_index.get(w.time_func.name.as_str())
                 .ok_or_else(|| SimError::UnknownTimeFunction(w.time_func.name.clone()))?;
             Ok(ResolvedExpr::TimeFunc(idx))
+        }
+
+        // The target's kind and the index range are checked against the IR by
+        // `ir::validate` (the resolution context carries no forcing kinds);
+        // evaluation of an invalid target is NaN, never a panic.
+        Expr::ForcingBasis(w) => {
+            let tf = *ctx.time_func_index.get(w.forcing_basis.name.as_str())
+                .ok_or_else(|| SimError::UnknownTimeFunction(w.forcing_basis.name.clone()))?;
+            Ok(ResolvedExpr::ForcingBasis { tf, index: w.forcing_basis.index })
         }
 
         Expr::TableLookup(w) => {
@@ -662,6 +677,17 @@ pub fn eval_resolved(expr: &ResolvedExpr, ctx: &EvalCtx<'_>) -> f64 {
                 None => ctx.t,
             };
             eval_forcing(&tf.kind, t_eff, ctx)
+        }
+
+        // The same lag as the forcing's value, so ∂f/∂cₖ is taken at the time
+        // the value is.
+        ResolvedExpr::ForcingBasis { tf, index } => {
+            let tf = &ctx.model.time_func_cache[*tf];
+            let t_eff = match &tf.lag {
+                Some(lag) => ctx.t - eval_resolved(lag, ctx),
+                None => ctx.t,
+            };
+            crate::propensity::eval_forcing_basis(&tf.kind, t_eff, *index as usize)
         }
 
         ResolvedExpr::TableLookup { table_idx, oob, table_len, index } => {

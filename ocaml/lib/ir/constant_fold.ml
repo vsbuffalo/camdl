@@ -66,7 +66,7 @@ let rec fold tbls (e : expr) : expr =
   (* gh#616: `ObsAnchor` is a LEAF here and must stay one — its value is not
      known until a run binds its data, so folding it to a number at compile time
      is exactly the data-dependence this design exists to avoid. *)
-  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _
+  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _ | BindingRef _
   | Projected | ObsColumnRef _ | ObsAnchor _ ->
       e
   (* LICM runs after constant_fold, so a PerEvalRef cannot appear here. *)

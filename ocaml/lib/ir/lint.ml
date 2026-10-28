@@ -62,7 +62,7 @@ let rec pops_in_expr (acc : string list) (e : expr) : string list =
   | Pop name -> name :: acc
   | PopSum names -> List.rev_append names acc
   (* Leaves with no compartment reference and no sub-expression. *)
-  | Const _ | Param _ | Time | Dt | TimeFunc _ | BindingRef _ | Projected
+  | Const _ | Param _ | Time | Dt | TimeFunc _ | ForcingBasis _ | BindingRef _ | Projected
   | ObsColumnRef _ | ObsAnchor _ ->
     acc
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"

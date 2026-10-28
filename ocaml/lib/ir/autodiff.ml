@@ -25,7 +25,8 @@
       [reason], so a live-but-omitted coefficient never masquerades as a genuine
       zero on the observation path.)
     - STRUCTURAL data a parameter cannot drive at all — interpolation knots, a
-      piecewise step grid, the spline basis, or a non-constant lookup index.
+      piecewise step grid, a spline's knots, window or period, or a
+      non-constant lookup index.
       These return [Unsupported], which [differentiate_rate] turns into a
       compile-time error (the Rust runtime also rejects them at IR-load).
 
@@ -83,7 +84,7 @@ let rec mentions (param : string) (e : expr) : bool =
   | BinOp b -> mentions param b.left || mentions param b.right
   | UnOp u -> mentions param u.arg
   | Cond c -> mentions param c.pred || mentions param c.then_ || mentions param c.else_
-  | TimeFunc _ -> false
+  | TimeFunc _ | ForcingBasis _ -> false
   | TableLookup (_, args) -> List.exists (mentions param) args
   | UncheckedDim u -> mentions param u.inner
   | Reduce terms -> List.exists (mentions param) terms
@@ -103,7 +104,7 @@ let rec mentions_projected (e : expr) : bool =
   | BinOp b -> mentions_projected b.left || mentions_projected b.right
   | UnOp u -> mentions_projected u.arg
   | Cond c -> mentions_projected c.pred || mentions_projected c.then_ || mentions_projected c.else_
-  | TimeFunc _ -> false
+  | TimeFunc _ | ForcingBasis _ -> false
   | TableLookup (_, args) -> List.exists mentions_projected args
   | UncheckedDim u -> mentions_projected u.inner
   | Reduce terms -> List.exists mentions_projected terms
@@ -141,7 +142,7 @@ let rec mentions_pop (bindings : binding list) (c : string) (e : expr) : bool =
   | PopSum members -> List.mem c members
   | Param _ | Const _ | Time | Dt | Projected | ObsColumnRef _
   | ObsAnchor _ -> false
-  | TimeFunc _ -> false   (* forcings are state-free *)
+  | TimeFunc _ | ForcingBasis _ -> false   (* forcings are state-free *)
   | BindingRef name ->
     (match List.find_opt (fun (b : binding) -> b.bname = name) bindings with
      | Some b -> mentions_pop bindings c b.bexpr
@@ -269,7 +270,30 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
     | WrtParam _ | WrtProjected -> false
     | WrtPop c -> mentions_pop bindings c e
   in
-  let rec d (e : expr) : deriv =
+  let rec spline_deriv param fname what structural coefs link =
+    if List.exists (mentions param) structural then
+      Unsupported
+        { code = URStructuralForcing;
+          node = Printf.sprintf "forcing `%s`" fname;
+          reason = Printf.sprintf
+            "parameter '%s' drives the %s of spline forcing `%s`, which \
+             decides where its basis functions sit and is fixed when the model \
+             is built, so it cannot be an estimated parameter. A spline's \
+             coefficients can be estimated; its %s must be constant" param what
+            fname what }
+    else
+      let term j c =
+        map1 (d c) (fun dc ->
+          BinOp { op = Mul; left = dc; right = ForcingBasis { forcing = fname; index = j } })
+      in
+      let sum =
+        List.fold_left (fun acc t -> map2 acc t (fun a b -> BinOp { op = Add; left = a; right = b }))
+          (Known (Const 0.0)) (List.mapi term coefs)
+      in
+      match link with
+      | Link_identity -> sum
+      | Link_log -> map1 sum (fun s -> BinOp { op = Mul; left = TimeFunc fname; right = s })
+  and d (e : expr) : deriv =
     match e with
     (* Constant leaves — zero for every target. `ObsAnchor` (gh#616) is a
        structural knot in a forcing breakpoint list, resolved to a number
@@ -325,11 +349,19 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
          and IF2/PF. When [param] does NOT drive the coefficient, the derivative
          is a genuine zero (tier 2a), exactly as for any constant — this is the
          common case, e.g. a param multiplying a constant-valued periodic term.
-       - Piecewise/Interpolated/PeriodicSpline/BSpline: a parameter there drives
-         STRUCTURAL data (interpolation knots, a piecewise step grid, the
-         de-Boor spline basis) — precomputed at construction, so it cannot be a
-         live coefficient at all. Hard compile error (the Rust runtime also
-         rejects it at IR-load via `eval_structural`). *)
+       - PeriodicSpline/BSpline (proposal 2026-10-27-estimable-bsplines §5.2):
+         f = h(g), g = Σ_j c_j B_j, so ∂f/∂θ = h′ · Σ_j (∂c_j/∂θ) B_j. Each
+         coefficient expression is differentiated by the ordinary rules (a
+         corner constraint or a sum-to-zero gets the chain rule), each basis
+         function is a [ForcingBasis] node the runtime evaluates with the
+         forcing's own span code, and under `link = log` the sum is multiplied
+         by the forcing's value (h′ = h). A parameter in a knot, window end or
+         period moves the basis itself: Unsupported (E600).
+       - Piecewise/Interpolated: a parameter there drives STRUCTURAL data
+         (interpolation knots and values, a piecewise step grid) — fixed when
+         the model is built, so it cannot be a live coefficient at all. Hard
+         compile error (the Rust runtime also rejects it at IR-load via
+         `eval_structural`). *)
     | TimeFunc fname ->
       (match target with
        (* forcings are state-free (∂forcing/∂x = 0) and projection-free
@@ -362,21 +394,49 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                   live value; a NUTS fit that depends on this gradient is \
                   refused" param fname }
          else Known (Const 0.0)
-       | Some { kind = (Piecewise _ | Interpolated _ | PeriodicSpline _ | BSpline _) as kind; _ } ->
+       | Some { kind = PeriodicSpline ps; _ } ->
+         spline_deriv param fname "period" [ ps.period ] ps.coefs ps.link
+       | Some { kind = BSpline b; _ } ->
+         let structural = match b.knots with
+           | Knots_uniform { lower; upper; _ } -> [ lower; upper ]
+           | Knots_explicit bps -> bps
+         in
+         let coefs = match b.coefs with Coefs_explicit cs -> cs in
+         spline_deriv param fname "window or breakpoints" structural coefs b.link
+       | Some { kind = (Piecewise _ | Interpolated _) as kind; _ } ->
          if forcing_mentions param fname then
            Unsupported
              { code = URStructuralForcing;
                node = Printf.sprintf "forcing `%s`" fname;
                reason = Printf.sprintf
-                 "parameter '%s' drives the %s forcing coefficient, which is \
-                  structural data — interpolation knots, piecewise step grids, \
-                  and the spline basis are precomputed at construction and \
-                  cannot vary per step, so they cannot be an estimated \
-                  parameter. Make the coefficient a constant, or use a \
-                  sinusoidal, fourier, or periodic forcing (whose coefficients \
-                  are live)" param (kind_label kind) }
+                 "parameter '%s' drives the knots or values of %s forcing \
+                  `%s`, which are structural data — interpolation knots and \
+                  values and piecewise step grids are fixed when the model is \
+                  built, so they cannot be an estimated parameter. Make them \
+                  constants, or use a forcing whose coefficients are live \
+                  (sinusoidal, fourier, periodic, periodic_spline, bspline)"
+                 param (kind_label kind) fname }
          else Known (Const 0.0)
        | None -> Known (Const 0.0)))
+
+    (* ∂B_k/∂θ: a basis function depends on t alone, so it is zero for every
+       target — except a parameter in the forcing's `lag`, which moves the
+       evaluation time and whose derivative is not emitted (gh#314). Gradients
+       are not differentiated again, so this arm only keeps the rule total. *)
+    | ForcingBasis { forcing; _ } ->
+      (match target with
+       | WrtPop _ | WrtProjected -> Known (Const 0.0)
+       | WrtParam param ->
+         (match List.find_opt (fun (tf : time_function) -> tf.name = forcing) tfs with
+          | Some tf when lag_mentions param tf ->
+            Omitted
+              { code = URLag;
+                node = Printf.sprintf "forcing `%s`" forcing;
+                reason = Printf.sprintf
+                  "parameter '%s' drives the evaluation-time shift (`lag`) of \
+                   forcing `%s`, whose derivative is not emitted (gh#314)"
+                  param forcing }
+          | _ -> Known (Const 0.0)))
 
     (* Table lookup. A constant index selects one cell, so we differentiate the
        selected value expression — this is how per-stratum parameter tables
@@ -892,7 +952,7 @@ let differentiate_projection (proj : projection) (compartments : string list)
 let rec inline_projected (proj : expr) (e : expr) : expr =
   match e with
   | Projected -> proj
-  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+  | Const _ | Param _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _
   | BindingRef _ | ObsColumnRef _ | ObsAnchor _ -> e
   | UnOp u -> UnOp { u with arg = inline_projected proj u.arg }
   | BinOp b ->
