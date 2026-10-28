@@ -118,3 +118,45 @@ fn curvature_penalty_matches_scipy() {
         eprintln!("Ω vs scipy {name} p={p}: {:.2e} of max|Ω|", worst / scale);
     }
 }
+
+/// R1 for `smooth`: the runtime's forcing values at fixed (a, b, τ, z)
+/// against an independent numpy construction of w = a + b(ξ − t_m) +
+/// (τ/κ)Mz (the proposal's Householder and Cholesky steps, κ = √(K − 2)·per^{3/2})
+/// evaluated by scipy, with the lag and unit scale: `bspline_smooth_grad`'s
+/// log-link `f_log` and identity `f_id`, 15 times each, inside, at knots, at
+/// the ends and past them, ≤ 1e-12 relative. Pins κ and M in the value path,
+/// which the gradient checks see only through consistency with the basis.
+#[test]
+fn smooth_values_match_numpy() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../tests/fixtures/gradient/ir/bspline_smooth_grad.ir.json");
+    let mut m = ir::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let z = [0.8, -0.5, 1.1, 0.2, -0.9, 0.4];
+    let y = [0.6, -1.2, 0.3, 0.9];
+    for p in &mut m.parameters {
+        let v = match p.name.as_str() {
+            "a" => -1.5, "b" => 0.01, "tau" => 0.4, "c" => 0.3, "d" => 0.02, "s" => 0.7,
+            n if n.starts_with("z_m") => z[n[3..].parse::<usize>().unwrap() - 1],
+            n if n.starts_with("y_i") => y[n[3..].parse::<usize>().unwrap() - 1],
+            n => panic!("unexpected parameter {n}"),
+        };
+        p.value = p.value.with_value(v);
+    }
+    let model = sim::compiled_model::CompiledModel::new(m).unwrap();
+    let (int_s, real_s) = model.initial_state_mean(&model.default_params).unwrap();
+    let rows = rows("bspline_smooth_values_numpy.tsv");
+    assert_eq!(rows.len(), 30);
+    let mut worst: f64 = 0.0;
+    for r in &rows {
+        let idx = model.model.time_functions.iter().position(|tf| tf.name == r[0]).unwrap();
+        let (t, want): (f64, f64) = (r[1].parse().unwrap(), r[2].parse().unwrap());
+        let ctx = sim::propensity::EvalCtx {
+            model: &model, int_s: &int_s, real_s: &real_s, params: &model.default_params,
+            t, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None,
+        };
+        let got = sim::resolved_expr::eval_resolved(&sim::resolved_expr::ResolvedExpr::TimeFunc(idx), &ctx);
+        let rel = (got - want).abs() / want.abs();
+        worst = worst.max(rel);
+        assert!(rel <= 1e-12, "{} t = {t}: camdl {got} vs numpy {want}", r[0]);
+    }
+    eprintln!("smooth values vs numpy: worst relative {worst:.2e}");
+}
