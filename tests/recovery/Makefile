@@ -18,6 +18,9 @@
 #   make -f tests/recovery/Makefile survey     # likelihood survey — best-ll bar
 #   make -f tests/recovery/Makefile all        # synth + the three fits
 #   make -f tests/recovery/Makefile clean      # remove generated data + results
+#   make -f tests/recovery/Makefile calibrate-smooth-prior
+#                                              # the smooth scale prior's calibration
+#                                              # table (committed; scipy/numpy pinned)
 #
 # Append `--progress plain` to any target for the CI/plain bar form, or
 # `--no-progress` to silence. Uses `cargo run` (dev build) so it works from a
@@ -80,3 +83,12 @@ all: if2 pgas pmmh ## synth + all three fits
 
 clean: ## remove generated data/ + results/
 	rm -rf $(CASE)/data $(CASE)/results
+
+# Proposal 2026-10-27-estimable-bsplines §6.5: the prior-predictive table the
+# smooth scale prior tau ~ exponential(lambda) is calibrated from. Committed;
+# byte-identical on re-run (fixed seed, pinned scipy/numpy). Cross-checked
+# against camdl's own whitening by rust/crates/sim/tests/bspline_harness.rs.
+.PHONY: calibrate-smooth-prior
+calibrate-smooth-prior:
+	cd $(REPO) && uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 python \
+	  scripts/calibrate_smooth_prior.py --out tests/recovery/cases/spline_seir/smooth_prior_calibration.tsv
