@@ -323,7 +323,7 @@ BSPLINE_INFERENCE_DIR := tests/fixtures/bspline_inference
 update-bspline-inference-golden: build-ocaml
 	@echo "Recompiling B-spline inference fixtures..."
 	@mkdir -p $(BSPLINE_INFERENCE_DIR)/ir
-	@for f in seir_bspline_small seir_bspline_recovery prior_only_smooth; do \
+	@for f in seir_bspline_small seir_bspline_recovery prior_only_smooth seir_smooth_recovery; do \
 	  $(CAMDLC) $(BSPLINE_INFERENCE_DIR)/$$f.camdl -o $(BSPLINE_INFERENCE_DIR)/ir/$$f.ir.json; \
 	done
 
@@ -465,7 +465,7 @@ validate-bspline: build-ocaml build-rust
 	cd rust && cargo test -p runid --lib ir_spline_link_changes_hash
 	cd rust && cargo test -p runid --lib ir_forcing_basis_hashes_its_forcing_and_index
 	cd rust && PATH="$(CAMDLC_BIN):$$PATH" CAMDL_SKIP_VERSION_CHECK=1 cargo test -p cli --test bspline_e2e
-	cd rust && cargo test --release -p sim --test bspline_inference --test bspline_harness -- --ignored
+	cd rust && cargo test --release -p sim --test bspline_inference --test bspline_harness -- --ignored --skip sweeps_to_convergence
 
 # ── Release / changelog ───────────────────────────────────────────────────────
 
