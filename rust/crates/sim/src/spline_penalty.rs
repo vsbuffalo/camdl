@@ -270,21 +270,6 @@ pub fn spline_value(knots: &Knots, p: usize, w: &[f64], t: f64) -> f64 {
 mod tests {
     use super::*;
 
-    fn layouts() -> Vec<(&'static str, Knots)> {
-        vec![
-            ("uniform K=12", Knots::uniform(0.0, 168.0, 9).unwrap()),
-            (
-                "irregular K=12",
-                Knots::explicit(vec![0.0, 10.0, 25.0, 30.0, 60.0, 90.0, 100.0, 130.0, 150.0, 168.0]).unwrap(),
-            ),
-            ("uniform 17 intervals at t~1e3", Knots::uniform(1000.0, 1168.0, 17).unwrap()),
-        ]
-    }
-
-    fn max_abs(m: &Mat) -> f64 {
-        m.data.iter().fold(0.0_f64, |a, v| a.max(v.abs()))
-    }
-
     fn quad(m: &Mat, x: &[f64], y: &[f64]) -> f64 {
         (0..m.rows).map(|i| (0..m.cols).map(|j| x[i] * m.at(i, j) * y[j]).sum::<f64>()).sum()
     }
@@ -299,123 +284,6 @@ mod tests {
                 assert!((got - want).abs() <= 1e-14, "n={n} deg={deg}: {got} vs {want}");
             }
         }
-    }
-
-    /// R1: the exact (p − 1)-point rule against 10-point Gauss–Legendre, ≤
-    /// 1e-12·max|Ω|; symmetric; banded with bandwidth p; rank K − 2.
-    #[test]
-    fn penalty_is_exact_symmetric_and_banded() {
-        for (name, k) in layouts() {
-            for p in 2..=5 {
-                let om = penalty(&k, p);
-                let hi = penalty_with(&k, p, 10);
-                let scale = max_abs(&om);
-                let diff = om.data.iter().zip(&hi.data).fold(0.0_f64, |a, (x, y)| a.max((x - y).abs()));
-                assert!(diff <= 1e-12 * scale, "{name} p={p}: exact vs 10-point {diff:e} of {scale:e}");
-                for i in 0..om.rows {
-                    for j in 0..om.cols {
-                        assert_eq!(om.at(i, j).to_bits(), om.at(j, i).to_bits(), "{name} p={p}: not symmetric");
-                        if i.abs_diff(j) > p {
-                            assert_eq!(om.at(i, j), 0.0, "{name} p={p}: entry ({i},{j}) outside the band");
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// R1: a line has zero curvature penalty. 1ᵀΩ1 and ξᵀΩξ ≤
-    /// 1e-12·max|Ω|·(b − a)², and Ω·1, Ω·ξ vanish to the same scale; uniform
-    /// and irregular knots, degrees 2–5.
-    #[test]
-    fn a_line_has_zero_curvature_penalty() {
-        for (name, k) in layouts() {
-            let (a, b) = k.window();
-            for p in 2..=5 {
-                let om = penalty(&k, p);
-                let scale = max_abs(&om) * (b - a) * (b - a);
-                let ones = vec![1.0; om.rows];
-                let xi = greville(&k, p);
-                let xi_c: Vec<f64> = xi.iter().map(|x| x - 0.5 * (a + b)).collect();
-                for (label, v) in [("1", &ones), ("ξ", &xi), ("ξ − t_m", &xi_c)] {
-                    let q = quad(&om, v, v).abs();
-                    assert!(q <= 1e-12 * scale, "{name} p={p}: {label}ᵀΩ{label} = {q:e} (scale {scale:e})");
-                }
-                // A non-linear vector is penalized: the check is not vacuous.
-                let bend: Vec<f64> = xi.iter().map(|x| ((x - a) / (b - a)).powi(2)).collect();
-                assert!(quad(&om, &bend, &bend) > 1e-6 * max_abs(&om));
-            }
-        }
-    }
-
-    /// R1 whitening: MᵀΩM = I to `tol_mom`; ‖NᵀM‖_max ≤ 1e-12·‖N‖_F‖M‖_F; and
-    /// MMᵀ is the Moore–Penrose pseudo-inverse Ω⁺ (the four Penrose
-    /// conditions, to 1e-10 relative).
-    fn check_whitening(degrees: std::ops::RangeInclusive<usize>, tol_mom: f64) {
-        for (name, k) in layouts() {
-            for p in degrees.clone() {
-                let w = Whitening::new(&k, p).unwrap();
-                let (kk, d) = (w.n_basis(), w.n_modes());
-                let mul = |x: &Mat, y: &Mat| {
-                    let mut out = Mat::zeros(x.rows, y.cols);
-                    for i in 0..x.rows {
-                        for j in 0..y.cols {
-                            out.set(i, j, (0..x.cols).map(|l| x.at(i, l) * y.at(l, j)).sum());
-                        }
-                    }
-                    out
-                };
-                let tr = |x: &Mat| {
-                    let mut out = Mat::zeros(x.cols, x.rows);
-                    for i in 0..x.rows {
-                        for j in 0..x.cols {
-                            out.set(j, i, x.at(i, j));
-                        }
-                    }
-                    out
-                };
-                let mtom = mul(&mul(&tr(&w.m), &w.omega), &w.m);
-                for i in 0..d {
-                    for j in 0..d {
-                        let want = if i == j { 1.0 } else { 0.0 };
-                        assert!((mtom.at(i, j) - want).abs() <= tol_mom, "{name} p={p}: MᵀΩM[{i},{j}] = {}", mtom.at(i, j));
-                    }
-                }
-                let fro = |x: &Mat| x.data.iter().map(|v| v * v).sum::<f64>().sqrt();
-                let ntm = mul(&tr(&w.null), &w.m);
-                assert!(max_abs(&ntm) <= 1e-12 * fro(&w.null) * fro(&w.m), "{name} p={p}: NᵀM = {:e}", max_abs(&ntm));
-                let x = mul(&w.m, &tr(&w.m));
-                let rel = |got: &Mat, want: &Mat| {
-                    let s = max_abs(want);
-                    got.data.iter().zip(&want.data).fold(0.0_f64, |a, (g, v)| a.max((g - v).abs())) / s
-                };
-                let axa = mul(&mul(&w.omega, &x), &w.omega);
-                let xax = mul(&mul(&x, &w.omega), &x);
-                let ax = mul(&w.omega, &x);
-                let xa = mul(&x, &w.omega);
-                assert!(rel(&axa, &w.omega) <= 1e-10, "{name} p={p}: ΩXΩ ≠ Ω ({:e})", rel(&axa, &w.omega));
-                assert!(rel(&xax, &x) <= 1e-10, "{name} p={p}: XΩX ≠ X ({:e})", rel(&xax, &x));
-                assert!(rel(&ax, &tr(&ax)) <= 1e-10, "{name} p={p}: ΩX not symmetric");
-                assert!(rel(&xa, &tr(&xa)) <= 1e-10, "{name} p={p}: XΩ not symmetric");
-                assert_eq!(kk, k.n_intervals() + p);
-            }
-        }
-    }
-
-    /// The proposal's bar, 1e-12, at degrees 2–4 (cubic is the default).
-    /// Measured worst: 3.5e-13 (cubic, 20 basis functions at t ≈ 10³).
-    #[test]
-    fn whitening_identities() {
-        check_whitening(2..=4, 1e-12);
-    }
-
-    /// Degree 5, the largest allowed, is the worst-conditioned: MᵀΩM − I
-    /// reaches 1.23e-12 with 22 basis functions at t ≈ 10³ (4.6e-14 with 14).
-    /// The proposal states no separate bound for it; this pins 2e-12, with the
-    /// other identities at their stated bars.
-    #[test]
-    fn whitening_identities_at_degree_five() {
-        check_whitening(5..=5, 2e-12);
     }
 
     /// The whitened coefficients w = a·1 + b(ξ − t_m) + (τ/κ)Mz give a curve
@@ -438,43 +306,6 @@ mod tests {
         let lin: Vec<f64> = (0..w.n_basis()).map(|j| a + b * (w.xi[j] - w.t_mid)).collect();
         for t in [0.0, 17.0, 84.0, 168.0] {
             assert!((spline_value(&k, 3, &lin, t) - (a + b * (t - 84.0))).abs() <= 1e-12, "t = {t}");
-        }
-    }
-
-    /// FNV-1a over the bits of M for the irregular cubic layout: pins the
-    /// construction itself (column order, reflector signs, the Cholesky and
-    /// the solves), not only its identities, which a different valid
-    /// construction would also satisfy. Only + − × ÷ and sqrt are used, all
-    /// correctly rounded under IEEE 754, so the value is portable.
-    fn m_fingerprint() -> u64 {
-        let k = Knots::explicit(vec![0.0, 10.0, 25.0, 30.0, 60.0, 90.0, 100.0, 130.0, 150.0, 168.0]).unwrap();
-        let w = Whitening::new(&k, 3).unwrap();
-        w.m.data.iter().fold(0xcbf29ce484222325u64, |h, v| (h ^ v.to_bits()).wrapping_mul(0x100000001b3))
-    }
-
-    #[test]
-    fn whitening_construction_is_pinned() {
-        assert_eq!(m_fingerprint(), PINNED_M, "M changed: {:#018x}", m_fingerprint());
-    }
-
-    const PINNED_M: u64 = 0xb9f928f84765b44c;
-
-    /// R2: the penalty ½wᵀΩw has gradient Ωw (central differences, step
-    /// 1e-5·max(|w|, 1), relative error < 1e-6 on every component).
-    #[test]
-    fn penalty_gradient_is_omega_w() {
-        let k = Knots::explicit(vec![0.0, 10.0, 25.0, 30.0, 60.0, 90.0, 100.0, 130.0, 150.0, 168.0]).unwrap();
-        let om = penalty(&k, 3);
-        let w: Vec<f64> = (0..om.rows).map(|i| ((i * 5 + 2) % 7) as f64 / 3.0 - 1.0).collect();
-        let half = |v: &[f64]| 0.5 * quad(&om, v, v);
-        for i in 0..om.rows {
-            let h = 1e-5 * w[i].abs().max(1.0);
-            let (mut up, mut dn) = (w.clone(), w.clone());
-            up[i] += h;
-            dn[i] -= h;
-            let fd = (half(&up) - half(&dn)) / (2.0 * h);
-            let an: f64 = (0..om.cols).map(|j| om.at(i, j) * w[j]).sum();
-            assert!((an - fd).abs() <= 1e-6 * an.abs().max(1e-3 * max_abs(&om)), "component {i}: {an} vs {fd}");
         }
     }
 

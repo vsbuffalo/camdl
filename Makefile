@@ -323,7 +323,7 @@ BSPLINE_INFERENCE_DIR := tests/fixtures/bspline_inference
 update-bspline-inference-golden: build-ocaml
 	@echo "Recompiling B-spline inference fixtures..."
 	@mkdir -p $(BSPLINE_INFERENCE_DIR)/ir
-	@for f in seir_bspline_small seir_bspline_recovery; do \
+	@for f in seir_bspline_small seir_bspline_recovery prior_only_smooth; do \
 	  $(CAMDLC) $(BSPLINE_INFERENCE_DIR)/$$f.camdl -o $(BSPLINE_INFERENCE_DIR)/ir/$$f.ir.json; \
 	done
 
@@ -451,22 +451,21 @@ fixtures-bspline:
 # Every committed check of proposal 2026-10-27-estimable-bsplines §8.1 (R1–R4),
 # the heavy R3 PGAS+NUTS runs included (release build; they are #[ignore]d in
 # `make test` for time). Offline: the reference TSVs are committed (regenerate
-# with `make fixtures-bspline`). Ends by listing the placeholders for items that
-# need the `smooth` form, which are not built and are not run.
+# with `make fixtures-bspline`). R5 (simulation-based calibration) is not here.
 validate-bspline: build-ocaml build-rust
 	@mkdir -p $(CAMDLC_BIN)
 	@ln -sf $(CAMDLC_ABS) $(CAMDLC_BIN)/camdlc
 	cd ocaml && dune exec test/test_compiler.exe -- test bspline_forcing
 	cd rust && cargo test -p sim --lib bspline
+	cd rust && cargo test -p sim --lib spline_penalty
 	cd rust && cargo test -p sim --test bspline_reference_fixtures --test bspline_recursion_oracle \
-	  --test periodic_bspline_oracle --test bspline_forcing --test bspline_gradient_check --test bspline_harness
+	  --test periodic_bspline_oracle --test bspline_forcing --test bspline_gradient_check --test bspline_harness \
+	  --test smooth_prior_calibration
 	cd rust && cargo test -p ir --test forcing_basis_validate --test schema_validates_goldens
 	cd rust && cargo test -p runid --lib ir_spline_link_changes_hash
 	cd rust && cargo test -p runid --lib ir_forcing_basis_hashes_its_forcing_and_index
 	cd rust && PATH="$(CAMDLC_BIN):$$PATH" CAMDL_SKIP_VERSION_CHECK=1 cargo test -p cli --test bspline_e2e
-	cd rust && cargo test --release -p sim --test bspline_inference -- --ignored
-	@echo "── not built (need the smooth form; placeholders in bspline_harness.rs):"
-	@cd rust && cargo test -q -p sim --test bspline_harness -- --ignored --list 2>/dev/null | grep ': test' || true
+	cd rust && cargo test --release -p sim --test bspline_inference --test bspline_harness -- --ignored
 
 # ── Release / changelog ───────────────────────────────────────────────────────
 
