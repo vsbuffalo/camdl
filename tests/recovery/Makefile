@@ -18,6 +18,7 @@
 #   make -f tests/recovery/Makefile survey     # likelihood survey — best-ll bar
 #   make -f tests/recovery/Makefile all        # synth + the three fits
 #   make -f tests/recovery/Makefile clean      # remove generated data + results
+#   make -f tests/recovery/Makefile smooth-diagnosis   # pgas sampling diagnosis (≈1 h)
 #   make -f tests/recovery/Makefile calibrate-smooth-prior
 #                                              # the smooth scale prior's calibration
 #                                              # table (committed; scipy/numpy pinned)
@@ -88,6 +89,20 @@ clean: ## remove generated data/ + results/
 # smooth scale prior tau ~ exponential(lambda) is calibrated from. Committed;
 # byte-identical on re-run (fixed seed, pinned scipy/numpy). Cross-checked
 # against camdl's own whitening by rust/crates/sim/tests/bspline_harness.rs.
+# Sampling diagnosis of the smooth and explicit R3 recovery fits through
+# `camdl fit run` (release build; about an hour): the four recovery datasets
+# from the R3 tests, then scripts/diagnose_smooth_sampling.py. Writes under
+# cases/spline_seir/results/diagnosis/ (not committed: timings vary).
+DIAG := $(HERE)/cases/spline_seir/results/diagnosis
+.PHONY: smooth-diagnosis
+smooth-diagnosis:
+	cd $(REPO)/rust && cargo build --quiet --release -p cli
+	cd $(REPO)/rust && CAMDL_RECOVERY_DATA_DIR=$(DIAG)/data cargo test --quiet --release -p sim \
+	  --test bspline_inference write_recovery_datasets -- --ignored
+	cd $(REPO) && CAMDLC=$(CAMDLC_PATH) uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 \
+	  --with polars==2.1.0 --with arviz==1.3.0 python scripts/diagnose_smooth_sampling.py \
+	  --data-dir $(DIAG)/data --out-dir $(DIAG) --camdl rust/target/release/camdl --repo . $(if $(ONLY),--only $(ONLY))
+
 .PHONY: calibrate-smooth-prior
 calibrate-smooth-prior:
 	cd $(REPO) && uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 python \

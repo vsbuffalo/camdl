@@ -402,3 +402,29 @@ fn sweeps_to_convergence_with_and_without_smooth() {
         }
     }
 }
+
+/// Writes the four recovery datasets (data seeds 23, 31, 47, 59; the same
+/// draws `synthesize` gives every R3 test) as `onsets_<seed>.tsv` under
+/// `$CAMDL_RECOVERY_DATA_DIR`, in the `onsets` stream's columns, so the
+/// `fit run` diagnosis (`make -f tests/recovery/Makefile smooth-diagnosis`)
+/// fits the same data. Not a check; does nothing without the variable.
+#[test]
+#[ignore = "writes data for the smooth-diagnosis target"]
+fn write_recovery_datasets() {
+    let Ok(dir) = std::env::var("CAMDL_RECOVERY_DATA_DIR") else { return };
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut truth: Vec<(&str, f64)> = vec![
+        ("sigma", 0.2), ("gamma", 0.2), ("rho", 0.5), ("k", 10.0),
+        ("N0", 1_000_000.0), ("E0", 100.0), ("I0", 100.0),
+    ];
+    truth.extend(["b1", "b2", "b3", "b4", "b5"].into_iter().zip(RECOVERY_TRUTH));
+    let model = load("seir_bspline_recovery", &truth);
+    for seed in [23, 31, 47, 59] {
+        let (times, counts) = synthesize(&model, 0.5, Some(10.0), seed);
+        let mut body = String::from("time\tonsets\n");
+        for (t, c) in times.iter().zip(&counts) {
+            body.push_str(&format!("{t}\t{c}\n"));
+        }
+        std::fs::write(format!("{dir}/onsets_{seed}.tsv"), body).unwrap();
+    }
+}
