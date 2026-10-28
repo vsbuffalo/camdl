@@ -883,9 +883,11 @@ prior-predictive simulation against a target band. Target: at every t in the run
 ones are excluded). With a ~ N(ln(1.2γ), 0.6²) (median R = 1.2 mid-window), b ~
 N(0, 0.005²) per day (one SD changes β by a factor e^{0.42} ≈ 1.5 over half the
 window) and T_ref = 7 days, a scan of U ∈ {0.3, 0.4, 0.5, 0.6, 0.8} meets the
-target for U ≤ 0.6 on every knot set and fails it at 0.8; U = 0.5 is chosen for
-margin. Measured with a scratch script (scipy `BSpline`, cubic, clamped, γ =
-0.125, 4,000 draws, seed 20261027; α = 0.05, U = 0.5, λ = 5.99):
+target for U ≤ 0.5 on every knot set. At U = 0.6 it fails on K = 8 (lower band
+0.096 < 0.1 in the committed calibration table) and holds on the others; at 0.8
+it fails on three of the four. U = 0.5 is chosen. Measured with a scratch script
+(scipy `BSpline`, cubic, clamped, γ = 0.125, 4,000 draws, seed 20261027; α =
+0.05, U = 0.5, λ = 5.99):
 
 | Knots            | R(t) band at t = 0 | t = 42       | t = 84       | t = 126      | t = 168 and held to 182 | range over t  |
 | ---------------- | ------------------ | ------------ | ------------ | ------------ | ----------------------- | ------------- |
