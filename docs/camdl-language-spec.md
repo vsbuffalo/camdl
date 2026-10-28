@@ -1350,7 +1350,7 @@ same row.
 
 ## 7. Forcing
 
-Named time-dependent forcing functions, usable in rate expressions. Six
+Named time-dependent forcing functions, usable in rate expressions. Seven
 built-in types cover real-world needs:
 
 - `sinusoidal` — smooth seasonal forcing
@@ -1363,8 +1363,11 @@ built-in types cover real-world needs:
   (gh#59)
 - `periodic_spline` — periodic B-spline with uniform knots (`period`,
   `n_basis`, `coefs` — a list of exactly `n_basis` coefficients — plus optional
-  `degree`, default 3, which must be less than `n_basis`), for flexible smooth
-  seasonality (gh#59)
+  `degree`, default 3, at most 5 and less than `n_basis`, and optional
+  `link = identity | log`), for flexible smooth seasonality (gh#59)
+- `bspline` — a clamped B-spline over a window, held at its end values outside
+  it, for a smooth rate that changes through time without repeating; see
+  [B-spline forcing](#b-spline-forcing-bspline) below
 
 <!-- camdl-doctest-preamble: forcing-demo
 compartments { S, I, R }
@@ -1495,6 +1498,97 @@ produce an error.
 `periodic` is primarily useful in v0.2 reporting pipelines for day-of-week
 effects on case reporting.
 
+### B-spline forcing (`bspline`)
+
+A rate that changes smoothly through an outbreak — with behaviour, control
+measures and the depletion of high-contact groups — but not on a known date and
+not periodically, is a **B-spline**: a weighted sum f(t) = Σₖ cₖ Bₖ(t) of K
+fixed, smooth, local bump functions (the basis), whose weights `coefs` are the
+curve's coefficients. Each basis function is a piecewise polynomial of `degree`
+p (default 3, cubic; at most 5) that is nonzero over at most p + 1 adjacent
+knot intervals, so a coefficient moves the curve only near its own knots.
+
+<!-- camdl-doctest-preamble: forcing-bspline
+compartments { S, I, R }
+parameters {
+  gamma : rate
+}
+let N = S + I + R
+transitions {
+  infection : S --> I @ beta_t * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+-->
+
+```camdl preamble=forcing-bspline
+forcing {
+  # Equal knot spacing: n_basis - degree intervals over the window.
+  beta_t : bspline 'per_day {
+    window  = [0 'days, 120 'days]
+    n_basis = 6
+    coefs   = [0.30, 0.40, 0.55, 0.35, 0.20, 0.25]
+  }
+}
+```
+
+The knots take one of two forms, and exactly one must be given:
+
+- **`window = [a, b]` with `n_basis`** — `n_basis − degree` equal intervals
+  between a and b, and `n_basis` coefficients.
+- **`breakpoints = [a, …, b]`** — your own strictly increasing knots, the first
+  and last being the window; `n_basis` is then implied (`len(breakpoints) − 1 +
+  degree`) and is refused if also written.
+
+The basis is **clamped**: the window ends are repeated knots, so the curve
+starts exactly at its first coefficient at a and ends exactly at its last at b.
+**Outside the window the forcing holds**: for t before a it is its value at a,
+after b its value at b, so a run past the window carries the curve's last value
+rather than an extrapolated trend. When a run's horizon passes the window end,
+every command that runs the model says so once, with the info notice
+`spline-held-past-window`:
+
+```
+info: forcing `beta_t` is held at its value at t = 120 from t = 120 to the horizon t = 160
+```
+
+(with calendar dates under an `origin`, and the anchor when the end is one).
+With `lag = ℓ` the forcing is evaluated at t − ℓ, so the hold starts at b + ℓ.
+
+**Window ends and breakpoints are times**, read like `piecewise` breakpoints: a
+duration literal, a `date(...)` under an `origin`, or an observation anchor.
+Ending the window before the reporting delay, so the held value is a coefficient
+the data inform rather than the prior's extrapolation, is written
+
+```camdl
+forcing {
+  beta_t : bspline 'per_day {
+    window  = [0 'days, last_obs - 2 'weeks]
+    n_basis = 8
+    coefs   = [0.3, 0.4, 0.5, 0.45, 0.35, 0.3, 0.25, 0.25]
+  }
+}
+```
+
+and an anchored window that resolves out of order under some data vintage is
+refused when the run resolves it. Knots are structural: a parameter in a window
+end or breakpoint is **E600**.
+
+**`link = log`** makes the forcing f(t) = s · exp(Σₖ cₖ Bₖ(t)), positive for
+any coefficients. The coefficients are then dimensionless log-values (a
+dimensioned one is **E301**), and the declared unit supplies the scale s:
+`bspline 'per_week { link = log … }` under `time_unit = 'days` is exp(g)/7 per
+day. `periodic_spline` accepts the same `link`. Because the basis sums to one at
+every t, adding a constant to every coefficient multiplies a log-link forcing by
+its exponential — a separately estimated intercept multiplying it would
+therefore not be identified, and the coefficients should carry the level
+themselves.
+
+Shape errors are **E408** (both or neither knot form, a `window` that is not
+`[a, b]`, `n_basis ≤ degree`, a degree above 5, a coefficient count that
+disagrees with the knots), an unknown argument is **E409**, and an unknown
+`link` is **E411**. A parameter in a coefficient is **E600** for now: the
+compiler does not yet emit the coefficient gradient a fit needs.
+
 ### Lagged forcing (`lag`)
 
 A forcing often drives the dynamics with a delay: a vectorial-capacity series
@@ -1543,9 +1637,9 @@ relative to a literal date:
 - A command with **no observed data cannot run the model at all** — a plain
   `simulate` refuses, naming the forcing, unless `--fit` supplies the data.
 
-Anchors are accepted only in `breakpoints`, not in `values` or in any
-coefficient list: an anchor is a time, and the knots are the only times a
-forcing declares. Same grammar as everywhere else — the anchor must be the whole
+Anchors are accepted only in `breakpoints` (and a `bspline` `window`), not in
+`values` or in any coefficient list: an anchor is a time, and the knots are the
+only times a forcing declares. Same grammar as everywhere else — the anchor must be the whole
 entry, the offset must carry a duration unit, and a `'months`/`'years` offset
 under an `origin` is refused (see `value_at` above for the full rules and error
 codes).
@@ -1553,7 +1647,8 @@ codes).
 The forcing is then used exactly as any other — `C` or `C(t)` — and resolves to
 `C(t − lag)`. `lag` is a property of the forcing as a whole, uniform across all
 kinds (`interpolated`, `piecewise`, `periodic`, `sinusoidal`, `fourier`,
-`periodic_spline`): every kind is evaluated at the single shifted time.
+`periodic_spline`, `bspline`): every kind is evaluated at the single shifted
+time.
 
 - **`lag` is a duration** in the model's `time_unit`, unit-aware exactly like
   `period = 365 'days`. It must carry the time dimension; a non-duration `lag`

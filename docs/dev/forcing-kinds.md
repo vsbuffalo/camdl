@@ -13,7 +13,7 @@ The kinds shipped fall into a natural 2×2:
 |           | Estimable parametric                       | Fixed / data-driven           |
 | --------- | ------------------------------------------ | ----------------------------- |
 | Periodic  | `sinusoidal`, `fourier`, `periodic_spline` | `periodic` (step over period) |
-| Aperiodic | _(none currently — no clear need)_         | `interpolated`, `piecewise`   |
+| Aperiodic | `bspline`                                  | `interpolated`, `piecewise`   |
 
 - **Estimable parametric**: the forcing's shape parameters (amplitudes, phases,
   basis coefficients) are themselves `Param` references that IF2/PGAS/NUTS
@@ -38,6 +38,17 @@ Pick by parsimony: prefer the smallest basis that captures the expected shape.
 `periodic_spline` when the shape is genuinely non-Fourier (e.g., sharp
 boundaries at school terms — though `periodic` with daily values is also a fit
 there).
+
+### Estimable, aperiodic
+
+`bspline`: a clamped B-spline over a window — uniform knots from
+`window = [a, b]` and `n_basis`, or explicit `breakpoints` — held at its end
+values outside it, optionally `link = log` for a positive rate. Use for a
+transmission rate that moves smoothly through an outbreak on no known date.
+Window ends may be observation anchors (`last_obs - 2 'weeks`). The coefficients
+are live at runtime, but the compiler does not yet emit their gradient, so a
+parameter coefficient is refused (E600) until it does (proposal
+`2026-10-27-estimable-bsplines.md`).
 
 ### Fixed, periodic
 
