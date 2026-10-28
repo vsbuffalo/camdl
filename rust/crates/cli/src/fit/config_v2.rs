@@ -2672,6 +2672,65 @@ impl FitConfig {
         Ok(())
     }
 
+    /// Proposal 2026-10-27-estimable-bsplines §6.3-§6.4: the level, slope and
+    /// modes of a `smooth` forcing are coordinates the prior is built in — the
+    /// modes standard normal by construction, w linear in all three — so the
+    /// samplers must move them on the identity scale. A finite search box (the
+    /// model's `in [lo, hi]` or `[estimate]` bounds) gives such a parameter the
+    /// scaled logit (or log) transform, which bends that geometry, and for a
+    /// mode also truncates the law the whitening assumes. Refused under the
+    /// methods that sample a posterior, naming the parameters and the remedy:
+    /// declare them without a range so they are searched over (−∞, ∞).
+    /// Forcing the identity on a boxed parameter instead would leave the
+    /// declared box unenforced, the silent escape of gh#66.
+    pub fn validate_smooth_coordinates(&self, model: &ir::Model) -> Result<(), String> {
+        use crate::run_meta::FitAlgorithm;
+        use ir::time_func::{BSpline, SplineCoefs, TimeFuncKind};
+        use sim::inference::types::Transform;
+        let Some(method) = &self.inference.method else {
+            return Ok(());
+        };
+        let kind = method.algorithm.method_kind();
+        if !matches!(kind, FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Mh) {
+            return Ok(());
+        }
+        for tf in &model.time_functions {
+            let TimeFuncKind::BSpline(BSpline { coefs: SplineCoefs::Smooth { level, slope, modes, .. }, .. }) = &tf.kind else {
+                continue;
+            };
+            let mut refs = std::collections::HashSet::new();
+            for e in std::iter::once(level).chain(std::iter::once(slope)).chain(modes) {
+                sim::inference::gradient_capability::collect_param_refs(e, &mut refs);
+            }
+            let mut bent: Vec<String> = Vec::new();
+            for name in refs {
+                let Some(spec) = self.problem.estimate.get(&name) else { continue };
+                let Some(p) = model.parameters.iter().find(|p| p.name == name) else { continue };
+                let override_str = spec.transform.as_ref().map(|t| t.as_str());
+                let Ok(bx) = super::runner::resolve_search_box(&name, spec.bounds, p) else { continue };
+                match super::runner::derive_transform_with_bounds(p, override_str, bx) {
+                    Transform::None => {}
+                    Transform::Log { lo, hi } | Transform::Logit { lo, hi } => {
+                        bent.push(format!("  {name}: search box [{lo}, {hi}]"));
+                    }
+                }
+            }
+            if !bent.is_empty() {
+                bent.sort();
+                return Err(format!(
+                    "[estimate]: these parameters feed the level, slope or modes of the smooth \
+                     forcing `{}` and have a finite search box:\n{}\n\
+                     `{}` would sample each through the transform that keeps it in its box, \
+                     which bends the coordinates the smooth prior is built in (the modes are \
+                     standard normal by construction). Declare them without a range, e.g. \
+                     `z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)`, and give no \
+                     `bounds` in [estimate], so they are sampled on the identity scale.",
+                    tf.name, bent.join("\n"), kind.as_str()));
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_hierarchical_leaf_boxes(&self, model: &ir::Model) -> Result<(), String> {
         use crate::run_meta::FitAlgorithm;
         use sim::inference::types::Transform;

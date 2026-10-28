@@ -426,3 +426,18 @@ fn pgas_runs_unbounded_smooth_coordinates_without_starts() {
     let (ok, stderr) = pgas_smooth_fit(tmp.path(), false);
     assert!(ok && !stderr.contains("has no value"), "the unbounded fit must run:\n{stderr}");
 }
+
+/// §6.3-§6.4: the samplers must move a `smooth` forcing's level, slope and
+/// modes on the identity scale. A finite search box on one of them (here a
+/// fit.toml `bounds` on the level `a`) would give it the scaled logit, so
+/// `fit run` refuses it by name under pgas; unbounded, the rule passes.
+#[test]
+fn pgas_refuses_a_boxed_smooth_coordinate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ok, stderr) = pgas_smooth_fit(tmp.path(), true);
+    assert!(!ok, "a boxed smooth level under pgas must be refused:\n{stderr}");
+    assert!(stderr.contains("feed the level, slope or modes of the smooth forcing `beta_t`")
+        && stderr.contains("  a: search box [-8, 2]"), "{stderr}");
+    let (ok, stderr) = pgas_smooth_fit(tmp.path(), false);
+    assert!(ok && !stderr.contains("feed the level, slope or modes"), "{stderr}");
+}
