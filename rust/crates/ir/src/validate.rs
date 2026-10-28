@@ -754,6 +754,7 @@ fn check_gradient_forcing_basis(model: &Model, errors: &mut Vec<ValidationError>
         }
     }
     for obs in &model.observations {
+        obs.projection_state_grad.iter().for_each(|(_, d)| each(d));
         for (_, d) in obs.likelihood.diffables() {
             d.grad.values().for_each(&mut each);
             if let Some(p) = &d.proj_grad {

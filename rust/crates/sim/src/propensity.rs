@@ -516,12 +516,15 @@ pub fn eval_forcing(kind: &CompiledTimeFuncKind, t: f64, ctx: &EvalCtx<'_>) -> f
 /// `forcing_basis` node, ∂f/∂cₖ before the link (proposal
 /// 2026-10-27-estimable-bsplines §5.1). `t` is already shifted by the
 /// forcing's lag; each kind clamps or wraps it exactly as its value does.
-/// Resolution refuses a non-spline target, so the NaN arm (the strict-mode
-/// sentinel the propensity guard catches) is unreachable from a resolved model.
+/// `ir::validate` and `CompiledModel::new` refuse a non-spline target or an
+/// index past the basis count; a path that bypassed both gets NaN (the
+/// strict-mode sentinel the propensity guard and the likelihood catch), never a
+/// plausible-looking 0.
 pub fn eval_forcing_basis(kind: &CompiledTimeFuncKind, t: f64, k: usize) -> f64 {
     match kind {
-        CompiledTimeFuncKind::BSpline(b) => b.basis(t, k),
-        CompiledTimeFuncKind::PeriodicSpline(ps) => ps.basis(t, k),
+        CompiledTimeFuncKind::BSpline(b) if k < b.n_basis() => b.basis(t, k),
+        CompiledTimeFuncKind::PeriodicSpline(ps) if k < ps.n_basis() => ps.basis(t, k),
+        CompiledTimeFuncKind::BSpline(_) | CompiledTimeFuncKind::PeriodicSpline(_) => f64::NAN,
         CompiledTimeFuncKind::Sinusoidal { .. }
         | CompiledTimeFuncKind::Piecewise { .. }
         | CompiledTimeFuncKind::Interpolated { .. }

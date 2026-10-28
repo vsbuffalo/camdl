@@ -218,3 +218,19 @@ fn periodic_spline_log_link_is_exp_of_the_basis_sum() {
         assert!(((lf - lg) / lg).abs() <= 1e-15, "t={t}: {lf} vs exp(g) {lg}");
     }
 }
+
+/// A basis index past the basis count evaluates to NaN, not 0: a gradient that
+/// bypassed validation is loud, never a silent zero.
+#[test]
+fn an_out_of_range_basis_is_nan() {
+    let model = CompiledModel::new(model_with(bspline(
+        BSplineKnots::Uniform { lower: Expr::const_(0.0), upper: Expr::const_(60.0), n_intervals: 3 },
+        3,
+        consts(&C6),
+        SplineLink::Identity,
+    )))
+    .unwrap();
+    let kind = &model.time_func_cache[0].kind;
+    assert!(sim::propensity::eval_forcing_basis(kind, 10.0, 5).is_finite());
+    assert!(sim::propensity::eval_forcing_basis(kind, 10.0, 6).is_nan());
+}
