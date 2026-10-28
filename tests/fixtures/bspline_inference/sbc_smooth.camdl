@@ -1,0 +1,47 @@
+# Experimental SBC fixture (proposal 2026-10-27-estimable-bsplines §8.1, R5;
+# a diagnostic, not a merge gate): X --> D @ f·X with X0 = 10^5, f a log-link
+# K = 6 smooth spline, daily Poisson counts of the removals. The level prior
+# puts the removal rate near 5% per day, so X is not exhausted before day 60.
+
+time_unit = 'days
+
+dimensions { mode = [m1, m2, m3, m4] }
+
+compartments { X, D }
+
+parameters {
+  a       : real 'ratio ~ normal(mu = -3.0, sigma = 0.3)
+  b       : real [1/T] ~ normal(mu = 0.0, sigma = 0.005)
+  tau     : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
+  z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
+}
+
+forcing {
+  f : bspline 'per_day {
+    window  = [0 'days, 60 'days]
+    n_basis = 6
+    link    = log
+    coefs   = smooth(level = a, slope = b, scale = tau, modes = z, per = 1 'weeks)
+  }
+}
+
+transitions {
+  decay : X --> D @ f * X
+}
+
+init { X = 100000 }
+
+observations {
+  removals {
+    columns       { time : time, removals : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(decay)
+    emit_schedule = every 1 'days
+    removals      ~ poisson(rate = projected)
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 60 'days
+}
