@@ -1475,8 +1475,12 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             let w = ir::anchor::ObsAnchorTimes { first, last };
             let moved = crate::obs_anchor::substitute(&mut model, w)?;
             crate::obs_anchor::report(&moved, &model);
+            crate::obs_anchor::spline_hold_notices(&model, &moved, model.simulation.t_end)
+                .emit_stderr();
             Some(w)
         } else {
+            crate::obs_anchor::spline_hold_notices(&model, &[], model.simulation.t_end)
+                .emit_stderr();
             None
         };
     let model = model;

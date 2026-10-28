@@ -3298,6 +3298,15 @@ impl Default for SimRun {
 /// `run_id` that described a different computation from the one stored under
 /// it (`--integrator`, `--param-vec`, the gh#616 anchors — gh#583 item C).
 pub fn load_run_model(run: &SimRun) -> Result<ir::Model, String> {
+    load_run_model_and_anchors(run).map(|(m, _)| m)
+}
+
+/// [`load_run_model`], also returning the observation anchors it substituted
+/// (empty when the run binds none) — what [`crate::obs_anchor::spline_hold_notices`]
+/// needs to name an anchored window end.
+pub fn load_run_model_and_anchors(
+    run: &SimRun,
+) -> Result<(ir::Model, Vec<crate::obs_anchor::ResolvedAnchor>), String> {
     // Load IR source (handles .camdl compilation via camdlc). This is the forward
     // simulation path — it never reads the state-Jacobian, so compile lean
     // (`needs_state_grad = false`, gh#439 A2).
@@ -3311,12 +3320,13 @@ pub fn load_run_model(run: &SimRun) -> Result<ir::Model, String> {
     // gh#616: substitute the run's observation anchors FIRST — before the
     // scenario horizon (which reads a preset's `t_end`, NaN until substituted),
     // before the `--to` override, and before validate/compile.
-    if let Some(w) = run.obs_anchors {
-        crate::obs_anchor::substitute(&mut model, w)?;
-    }
+    let anchors = match run.obs_anchors {
+        Some(w) => crate::obs_anchor::substitute(&mut model, w)?,
+        None => Vec::new(),
+    };
     // gh#166: CLI `--integrator` override (method only), before validate/compile.
     apply_integrator_override(&mut model, run.integrator);
-    Ok(model)
+    Ok((model, anchors))
 }
 
 /// Resolve one cell's parameter values through the resolver's tier chain
@@ -3433,12 +3443,19 @@ pub fn resolve_run_parameters_typed(
 /// its error surfaces when the cell itself resolves.
 pub fn emit_run_notices(runs: &[&SimRun]) {
     let Some(first) = runs.first() else { return };
-    let Ok(model) = load_run_model(first) else { return };
+    let Ok((model, anchors)) = load_run_model_and_anchors(first) else { return };
     let resolved: Vec<crate::params_resolver::ResolvedParameters> = runs.iter()
         .filter_map(|r| resolve_run_parameters_typed(&model, r).ok())
         .collect();
     let refs: Vec<&crate::params_resolver::ResolvedParameters> = resolved.iter().collect();
     crate::params_resolver::emit_notices(&refs);
+    // A bspline held past its window: one line per job, against the run's
+    // resolved horizon (scenario and `--to` applied). Every cell of one job
+    // shares the model's forcings, so the first cell answers for all.
+    if let Ok(run_model) = resolve_run_ir(first) {
+        crate::obs_anchor::spline_hold_notices(&model, &anchors, run_model.simulation.t_end)
+            .emit_stderr();
+    }
 }
 
 /// The parameter values a resolved model carries: every parameter that
