@@ -1700,6 +1700,17 @@ impl Algorithm {
         Ok(())
     }
 
+    /// An IF2 or nl-* method running one chain: its convergence gate (chain
+    /// agreement and the decibans spread) compares chains, so it judges
+    /// nothing, and its settings are inert.
+    fn gates_on_one_chain(&self) -> bool {
+        match self {
+            Algorithm::IF2 { chains, .. } => *chains < 2,
+            Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c) => c.chains < 2,
+            _ => false,
+        }
+    }
+
     /// The second half of the refusal: a flag the method reads, but which the
     /// method's settings — after the overrides above — leave with nothing to
     /// do. Each would otherwise run, re-key and change nothing.
@@ -1723,6 +1734,10 @@ impl Algorithm {
                 return inert("--adapt-start", "it sets when proposal adaptation begins, and \
                     adaptation is off (`--no-adapt`, or `adapt = false` in [method])");
             }
+        }
+        if cli.decibans_thresh.is_some() && self.gates_on_one_chain() {
+            return inert("--decibans-thresh", "the gate judges the spread between chains, \
+                and this method runs one chain");
         }
         let dt_check = match self {
             Algorithm::IF2 { dt_check, .. } | Algorithm::Mh { dt_check, .. } => Some(dt_check),
@@ -2623,6 +2638,10 @@ fn refuse_inert_method_keys(
             }
         }
         _ => {}
+    }
+    if raw_method.contains_key("gate") && algorithm.gates_on_one_chain() {
+        return inert("[method.gate]", "the gate compares chains, and this method runs \
+            one chain");
     }
     // `[method.dt_check] enabled = false`: the check does not run, so every
     // other key in the table tunes nothing.
@@ -4315,6 +4334,17 @@ starts     = "{starts}"
              CliStageOverrides { no_dt_check: true, dt_check_halvings: Some(3), ..Default::default() }),
             ("--dt-check-strict", nl_sbplx_method(),
              CliStageOverrides { no_dt_check: true, dt_check_strict: true, ..Default::default() }),
+            // One chain: there is no between-chain spread for the gate to judge.
+            ("--decibans-thresh", {
+                let mut m = scout_method("single");
+                if let Algorithm::IF2 { chains, .. } = &mut m.algorithm { *chains = 1; }
+                m
+            }, CliStageOverrides { decibans_thresh: Some(5.0), ..Default::default() }),
+            ("--decibans-thresh", {
+                let mut m = nl_sbplx_method();
+                if let Algorithm::NlSbplx(c) = &mut m.algorithm { c.chains = 1; }
+                m
+            }, CliStageOverrides { decibans_thresh: Some(5.0), ..Default::default() }),
         ];
         for (flag, base, cli) in cases {
             let mut m = base.clone();
@@ -4570,7 +4600,18 @@ cooling = 0.7
                 .expect_err(&format!("`{key}` is inert with the dt-check off"));
             assert!(err.contains(key) && err.contains("enabled = false"), "{err}");
         }
+        // [method.gate] on a one-chain run: no between-chain spread to judge.
+        let if2_one = if2.replace("chains = 2", "chains = 1");
+        let nl_one = "[method]\nalgorithm = \"nl-sbplx\"\nbackend = \"ode\"\nchains = 1\n";
+        for method in [if2_one.as_str(), nl_one] {
+            let src = format!("{base}{method}[method.gate]\ndecibans_thresh = 10.0\n");
+            let cfg = parse(&src).unwrap();
+            let err = refuse_inert_method_keys_in(&src, &cfg.inference.method.unwrap())
+                .expect_err("[method.gate] is inert on one chain");
+            assert!(err.contains("gate") && err.contains("one chain"), "{err}");
+        }
         for (method, extra) in [
+            (if2, "[method.gate]\ndecibans_thresh = 10.0\n"),
             (if2, "[method.dt_check]\nenabled = false\n"),
             (if2, "[method.dt_check]\nn_halvings = 3\n"),
             (pgas, "use_nuts = true\nmax_tree_depth = 8\ndense_mass = false\n"),
