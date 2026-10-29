@@ -897,9 +897,11 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
                 if p.value.resolved_value().is_none() {
                     let bounds = spec.bounds
                         .or_else(|| crate::params_resolver::resolved_bounds(p));
-                    let v = spec.start.or_else(|| bounds.map(|(lo, hi)| {
+                    // No kind: no seeded start; resolution refuses it.
+                    let kind = p.param_kind;
+                    let v = spec.start.or_else(|| bounds.zip(kind).map(|((lo, hi), kind)| {
                         let transform =
-                            crate::fit::runner::derive_transform_with_bounds(p, (lo, hi));
+                            crate::fit::runner::derive_transform_with_bounds(kind, (lo, hi));
                         let log_scale = matches!(
                             transform, sim::inference::types::Transform::Log { .. }
                         );

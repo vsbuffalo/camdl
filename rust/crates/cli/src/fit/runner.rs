@@ -247,8 +247,11 @@ pub(crate) fn resolve_fit_parameters(
         if let Some(p) = model_pre.parameters.iter_mut().find(|p| p.name == *name) {
             if p.value.resolved_value().is_none() {
                 let bounds = spec.bounds.or_else(|| resolved_bounds(p));
-                let value = spec.start.or_else(|| bounds.map(|(lo, hi)| {
-                    let transform = derive_transform_with_bounds(p, (lo, hi));
+                // A parameter with no kind gets no seeded start; resolution
+                // refuses it below ([`estimated_kind`]).
+                let kind = p.param_kind;
+                let value = spec.start.or_else(|| bounds.zip(kind).map(|((lo, hi), kind)| {
+                    let transform = derive_transform_with_bounds(kind, (lo, hi));
                     let log_scale = matches!(transform, Transform::Log { .. });
                     super::init::draw_start_in_bounds(lo, hi, log_scale, seed, name)
                 }));
@@ -1120,43 +1123,54 @@ pub fn print_preflight(
     eprintln!();
 }
 
+/// The kind of an estimated parameter, or a refusal naming it.
+///
+/// The compiler always records a kind (`ast.ml` makes it mandatory), so only
+/// hand-built IR, or IR written before the field existed, has none. Its
+/// support is then unknown: the search used to default to `[0, ∞)` while the
+/// partition record called its support `(−∞, ∞)`. A parameter without a kind
+/// is therefore refused rather than given either guess.
+pub fn estimated_kind(ir_param: &ir::parameter::Parameter) -> Result<ir::parameter::ParamKind, String> {
+    ir_param.param_kind.ok_or_else(|| format!(
+        "estimate.{name}: the model IR records no kind for `{name}` (rate, probability, \
+         positive, count, duration, real or instant), so its support is unknown and no \
+         search box or transform can be chosen for it. Recompile the model with the \
+         current camdlc, which always records one.", name = ir_param.name))
+}
+
 /// The box a parameter has when no fit config bounds it: its declared or
 /// kind range ([`resolved_bounds`]), else the support its kind implies —
 /// `(−∞, ∞)` for `real` and `instant`, `[0, ∞)` for `rate`, `positive`,
-/// `count`, `duration` and a parameter whose IR carries no kind.
+/// `count` and `duration`.
 ///
 /// `real` and `instant` take the whole line because nothing would enforce a
 /// `[0, ∞)` box on them: an infinite end gives them the identity transform,
 /// which clamps nothing, so a `[0, ∞)` box would be recorded but not kept.
 /// The other kinds' `[0, ∞)` is kept by `Transform::Log`.
-pub fn default_search_box(ir_param: &ir::parameter::Parameter) -> (f64, f64) {
+pub fn default_search_box(
+    ir_param: &ir::parameter::Parameter,
+    kind: ir::parameter::ParamKind,
+) -> (f64, f64) {
     use ir::parameter::ParamKind::*;
-    resolved_bounds(ir_param).unwrap_or(match ir_param.param_kind {
+    resolved_bounds(ir_param).unwrap_or(match kind {
         // Exhaustive over ParamKind (no `_`): a new kind must choose its box.
-        Some(Real | Instant) => (f64::NEG_INFINITY, f64::INFINITY),
-        Some(Probability | Rate | Positive | Count | Duration) | None => (0.0, f64::INFINITY),
+        Real | Instant => (f64::NEG_INFINITY, f64::INFINITY),
+        Probability | Rate | Positive | Count | Duration => (0.0, f64::INFINITY),
     })
 }
 
-/// Derive the transform for a parameter from its IR metadata and the search
-/// box `(lower, upper)` it clamps to — the fit config's `[estimate].bounds`
-/// when given, else [`default_search_box`] (via [`resolve_search_box`]).
-///
-/// Priority: param_kind > bounds fallback.
-///
-/// The param_kind field (populated by the OCaml compiler from the DSL type)
-/// is the primary signal: probability → Logit, rate/positive/count → Log.
-/// The bounds fallback (lo >= 0 → Log) exists for IR files predating
-/// the param_kind field. The hi <= 1.0 probability-detector heuristic
-/// was deliberately removed — it caused R0 on [1, 100] to get logit
-/// instead of log, which is wrong.
+/// Derive the transform for a parameter from its kind ([`estimated_kind`])
+/// and the search box `(lower, upper)` it clamps to — the fit config's
+/// `[estimate].bounds` when given, else [`default_search_box`] (via
+/// [`resolve_search_box`]): probability → Logit, rate/positive/count/duration
+/// → Log.
 ///
 /// The resulting `Transform::Log` or `Transform::Logit` clamps to *these*
 /// bounds, which is what IF2 uses to keep particles in the search box.
 /// Without this, a fit that tightens bounds would still see IF2 walk
 /// particles out to the model bounds, defeating the tightening.
 pub fn derive_transform_with_bounds(
-    ir_param: &ir::parameter::Parameter,
+    kind: ir::parameter::ParamKind,
     (lower, upper): (f64, f64),
 ) -> Transform {
     // Every search box finite at both ends gets a transform that keeps the
@@ -1179,7 +1193,7 @@ pub fn derive_transform_with_bounds(
     let log_or_bounded = |lo: f64, hi: f64| {
         if lo >= 0.0 { Transform::Log { lo, hi } } else { bounded_or_none(lo, hi) }
     };
-    if let Some(kind) = ir_param.param_kind {
+    {
         // Exhaustive over ParamKind (no `_`): a new kind is a compile error
         // here, forcing an explicit transform decision (the gh#191 payoff).
         use ir::parameter::ParamKind::*;
@@ -1197,20 +1211,15 @@ pub fn derive_transform_with_bounds(
             // be honoured.
             Real => bounded_or_none(lower, upper),
         }
-    } else {
-        // No kind (IR predating `param_kind`): non-negative boxes are log
-        // scale; a box reaching below zero gets the scaled logit when finite.
-        log_or_bounded(lower, upper)
     }
 }
 
 /// The range a parameter's kind admits, with its printed form: `[0, 1]` for
 /// `probability`, `[0, ∞)` for `rate`, `positive`, `count` and `duration`.
-/// `None` for `real` and `instant`, whose kind admits the whole line, and for
-/// a parameter whose IR carries no kind.
-pub fn kind_support(ir_param: &ir::parameter::Parameter) -> Option<((f64, f64), &'static str)> {
+/// `None` for `real` and `instant`, whose kind admits the whole line.
+pub fn kind_support(kind: ir::parameter::ParamKind) -> Option<((f64, f64), &'static str)> {
     use ir::parameter::ParamKind::*;
-    match ir_param.param_kind? {
+    match kind {
         // Exhaustive over ParamKind (no `_`): a new kind must state its support.
         Probability => Some(((0.0, 1.0), "[0, 1]")),
         Rate | Positive | Count | Duration => Some(((0.0, f64::INFINITY), "[0, ∞)")),
@@ -1237,7 +1246,8 @@ pub fn resolve_search_box(
     // author wrote down ("widen the model bounds" is its remedy), so a
     // kind's implicit range must not silently constrain an explicit
     // fit.toml box. The kind is consulted only where nothing is declared
-    // anywhere (gh#763).
+    // anywhere (gh#763). A parameter with no kind is refused first.
+    let kind = estimated_kind(ir_param)?;
     match (fit_bounds, ir_param.bounds()) {
         (Some((flo, fhi)), Some((mlo, mhi))) => {
             if flo < mlo || fhi > mhi {
@@ -1258,9 +1268,9 @@ pub fn resolve_search_box(
         // prior read as ln θ: posterior mean 0.080 where the truncated law has
         // 0.398).
         (Some((flo, fhi)), None) => {
-            if let Some(((slo, shi), shown)) = kind_support(ir_param) {
+            if let Some(((slo, shi), shown)) = kind_support(kind) {
                 if flo < slo || fhi > shi {
-                    let kind = ir_param.param_kind.map(|k| k.as_str()).unwrap_or_default();
+                    let kind = kind.as_str();
                     return Err(format!(
                         "estimate.{name}: fit.toml bounds [{flo}, {fhi}] lie outside the \
                          support of `{kind}`, {shown}. A fit can narrow a parameter's \
@@ -1274,7 +1284,7 @@ pub fn resolve_search_box(
         // Nothing declared anywhere: the kind's own support (gh#763 —
         // `probability` is `[0, 1]`, `real`/`instant` the whole line), else
         // `[0, ∞)`.
-        (None, None) => Ok(default_search_box(ir_param)),
+        (None, None) => Ok(default_search_box(ir_param, kind)),
     }
 }
 
@@ -1336,9 +1346,9 @@ pub fn build_if2_params_from_specs(
         // bounds (used by IF2 to keep particles in the search box).
         let (lo, hi) = resolve_search_box(&spec.name, spec.bounds, ir_param)?;
 
-        // Transform: param_kind > fallback. Built with the resolved (lo, hi)
-        // so the clamp bounds match the search box.
-        let transform = derive_transform_with_bounds(ir_param, (lo, hi));
+        // Transform: from the kind, built with the resolved (lo, hi) so the
+        // clamp bounds match the search box.
+        let transform = derive_transform_with_bounds(estimated_kind(ir_param)?, (lo, hi));
 
         // rw_sd: spec explicit > auto from resolved bounds
         let rw_sd = spec.rw_sd
@@ -3602,7 +3612,7 @@ pub fn validate_prior_transform_compat(
         // where its model box gives Log).
         let fit_bounds = estimate.get(name).and_then(|e| e.bounds);
         let search_box = resolve_search_box(name, fit_bounds, ir_param)?;
-        let transform = derive_transform_with_bounds(ir_param, search_box);
+        let transform = derive_transform_with_bounds(estimated_kind(ir_param)?, search_box);
         let (prior, source) = resolve_prior(name, estimate, model);
 
         let is_log   = matches!(transform, Transform::Log { .. });
@@ -5223,8 +5233,10 @@ dt = 1.0
         };
         // (0.0, INFINITY) is the resolved (lo, hi) when no bounds exist
         // (see build_if2_params_from_specs `(None, None) => (0.0, INF)`).
-        let t_real = derive_transform_with_bounds(&real_param, (0.0, f64::INFINITY));
-        let t_instant = derive_transform_with_bounds(&instant_param, (0.0, f64::INFINITY));
+        let t_real = derive_transform_with_bounds(
+            real_param.param_kind.unwrap(), (0.0, f64::INFINITY));
+        let t_instant = derive_transform_with_bounds(
+            instant_param.param_kind.unwrap(), (0.0, f64::INFINITY));
         assert!(matches!(t_real, Transform::None),
             "unbounded real must stay None, got {:?}", t_real);
         assert!(matches!(t_instant, Transform::None),
@@ -5270,26 +5282,21 @@ dt = 1.0
         assert!(matches!(r[0].transform, Transform::Log { .. }), "got {:?}", r[0].transform);
     }
 
-    /// A parameter with no kind (IR predating `param_kind`) and a negative
-    /// lower bound fell through to `Transform::None`, which enforces nothing.
+    /// D6: a parameter whose IR records no kind has no known support (the
+    /// search used `[0, ∞)` while the record said `(−∞, ∞)`), so estimating
+    /// it is refused, naming the parameter, whatever its box.
     #[test]
-    fn kindless_param_with_negative_lower_and_finite_box_gets_scaled_logit() {
+    fn an_estimated_parameter_without_a_kind_is_refused() {
         let (model, compiled) = make_one_param_model("c", -1.0, 1.0, None);
         let base = compiled.default_params.clone();
-        let r = build_if2_params_from_specs(
-            &model, &compiled, &base, &[spec_for("c", -1.0, 1.0)]).expect("ok");
-        assert!(matches!(r[0].transform, Transform::Logit { lo, hi } if lo == -1.0 && hi == 1.0),
-            "got {:?}", r[0].transform);
-    }
-
-    /// A kindless parameter whose box has an infinite end has no box to keep.
-    #[test]
-    fn kindless_param_with_negative_lower_and_infinite_end_stays_none() {
-        use ir::parameter::Parameter;
-        let p = Parameter { name: "c".into(), value: ir::parameter::ParamValue::Fixed { value: 0.0 },
-            param_kind: None, param_dim: None };
-        let t = derive_transform_with_bounds(&p, (-1.0, f64::INFINITY));
-        assert!(matches!(t, Transform::None), "got {:?}", t);
+        for spec in [spec_for("c", -1.0, 1.0), spec_for("c", 0.0, 1.0)] {
+            let err = build_if2_params_from_specs(&model, &compiled, &base, &[spec])
+                .expect_err("a kindless parameter must be refused");
+            assert!(err.contains("`c`") && err.contains("no kind"), "{err}");
+        }
+        let err = resolve_search_box("c", None, &model.parameters[0])
+            .expect_err("resolve_search_box refuses it too");
+        assert!(err.contains("no kind"), "{err}");
     }
 
     // ── `probability` carries [0, 1] with no `in [...]` (gh#763) ─────
@@ -5333,8 +5340,9 @@ dt = 1.0
     fn undeclared_probability_gets_a_logit_over_the_unit_interval() {
         let (model, _) = make_unbounded_param_model(
             "rho", 0.5, ir::parameter::ParamKind::Probability);
+        let p = &model.parameters[0];
         match derive_transform_with_bounds(
-            &model.parameters[0], default_search_box(&model.parameters[0])) {
+            p.param_kind.unwrap(), default_search_box(p, p.param_kind.unwrap())) {
             Transform::Logit { lo, hi } => {
                 assert_eq!((lo, hi), (0.0, 1.0),
                     "an undeclared `probability` must be a logit over [0, 1]");
@@ -5526,12 +5534,12 @@ dt = 1.0
     }
 
     /// The prior check must read the transform built from the fit box. A
-    /// kindless parameter has no support for D7 to enforce; its model box
-    /// [0, ∞) gives Log, but the fit box [-1, 1] gives the scaled logit, on
-    /// which a log_normal reads the wrong coordinate.
+    /// `real` has no support for D7 to enforce, and the fit box [-1, 1] gives
+    /// it the scaled logit, on which a log_normal reads the wrong coordinate.
     #[test]
     fn prior_check_reads_the_transform_of_the_fit_box() {
-        let model = model_with_prior("phi", None, None, log_normal(-1.0, 0.5));
+        let model = model_with_prior(
+            "phi", Some(ir::parameter::ParamKind::Real), None, log_normal(-1.0, 0.5));
         let err = validate_prior_transform_compat(&est_with("phi", Some((-1.0, 1.0))), &model)
             .expect_err("log_normal on the fit box's scaled logit must be refused");
         assert!(err.contains("log_normal") && err.contains("Logit"), "{err}");

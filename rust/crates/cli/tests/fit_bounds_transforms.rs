@@ -11,10 +11,9 @@
 //!      no `transform` key; a config that carries one, even the map the
 //!      parameter would get anyway, is refused under PMMH, MH and IF2 naming
 //!      the key, and no draw is written.
-//!   2. `kindless_parameter_with_a_negative_box_stays_inside_it` — a parameter
-//!      with no `param_kind` (IR predating the field) and bounds `[-1, 1]`
-//!      fell through to no transform; every PMMH and MH draw and every IF2
-//!      iterate must now lie in the box.
+//!   2. `a_kindless_estimated_parameter_is_refused` — a parameter with no
+//!      `param_kind` (IR predating the field) has no known support, so
+//!      estimating it is refused under PMMH, MH and IF2, naming it.
 //!   3. `duration_box_straddling_zero_reaches_its_negative_half` (gh#967) — a
 //!      `duration` declared `in [-1, 1]` got the log transform, which cannot
 //!      represent a negative value; MH must now put about half its draws
@@ -215,19 +214,20 @@ fn strip_kind(ir: &Path, name: &str) -> PathBuf {
 }
 
 #[test]
-fn kindless_parameter_with_a_negative_box_stays_inside_it() {
+fn a_kindless_estimated_parameter_is_refused() {
     if camdlc_bin().is_none() {
         return;
     }
     let tmp = tempdir("kindless");
     let ir = strip_kind(&compile(&tmp.0, "ident", &model_src(C_REAL)), "c");
-    let est = "c = { bounds = [-1, 1], start = 0.5 }";
-    for (method, tag, file) in
-        [(PMMH, "pmmh", "draws.tsv"), (MH, "mh", "draws.tsv"), (IF2, "if2", "parameter_traces.tsv")]
-    {
+    let est = "c = { bounds = [-1, 1], start = 0.5, rw_sd = 0.1 }";
+    for (method, tag) in [(PMMH, "pmmh"), (MH, "mh"), (IF2, "if2")] {
         let (out, results) = run_fit(&tmp.0, &ir, est, method, tag);
-        assert!(out.status.success(), "{tag}: stderr=\n{}", stderr(&out));
-        assert_inside(&column_values(&results, file, "c"), -1.0, 1.0, tag);
+        let err = stderr(&out);
+        assert!(!out.status.success(), "{tag}: a kindless parameter must be refused; stderr=\n{err}");
+        assert!(err.contains("records no kind for `c`"), "{tag}: {err}");
+        assert!(find_all(&results, "draws.tsv").is_empty(), "{tag}: refused before sampling");
+        assert!(find_all(&results, "parameter_traces.tsv").is_empty(), "{tag}: refused before sampling");
     }
 }
 
