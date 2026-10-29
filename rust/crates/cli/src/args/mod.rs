@@ -209,9 +209,11 @@ pub struct OutputView {
 /// Core inference knobs shared by pfilter / profile
 #[derive(Args, Clone)]
 pub struct InferenceCore {
-    /// Step size
-    #[arg(long, default_value_t = 1.0)]
-    pub dt: f64,
+    /// Step size (default 1.0). An ODE (nl-*) profile cell integrates at the
+    /// model's own `dt` when it declares one, as `fit run` does, and refuses a
+    /// different `--dt` rather than ignore it.
+    #[arg(long)]
+    pub dt: Option<f64>,
 
     /// RNG seed
     #[arg(long, default_value_t = 1)]

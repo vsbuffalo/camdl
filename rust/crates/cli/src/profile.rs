@@ -190,6 +190,28 @@ struct ProfileNloptKnobs {
     starts: usize,
 }
 
+/// `--dt` when not given (`camdl pfilter` and `camdl profile`).
+pub(crate) const DEFAULT_DT: f64 = 1.0;
+
+/// An ODE cell steps at the model's declared `dt` when it has one — the step
+/// `fit run`'s ODE methods use too (`runner::ode_step_dt`). An explicit
+/// `--dt` that differs would be silently ignored, so it is refused; one that
+/// agrees, or a `--dt` on a model that declares none, is used.
+pub(crate) fn refuse_overridden_dt(
+    cli_dt: Option<f64>,
+    model_dt: Option<f64>,
+    algorithm: &str,
+) -> Result<(), String> {
+    match (cli_dt, model_dt) {
+        (Some(cli), Some(model)) if cli != model => Err(format!(
+            "--dt {cli} would be ignored: an `{algorithm}` cell integrates the ODE at the \
+             model's declared dt = {model}, as `fit run` does. Drop --dt, or change the \
+             model's `dt`."
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// `--iterations` when not given: IF2 iterations per cell.
 const PROFILE_DEFAULT_ITERATIONS: usize = 50;
 /// `--cooling` when not given.
@@ -355,7 +377,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let n_starts = a.n_starts;
     let cooling_schedule = profile_cooling_schedule(a);
     let cooling = cooling_schedule.fraction;
-    let dt = a.inference.dt;
+    let dt = a.inference.dt.unwrap_or(DEFAULT_DT);
     let seed_base = a.inference.seed;
     let parallel = a.inference.parallel;
     let output_tsv_path: Option<String> = a.output.as_ref().map(|p| p.to_string_lossy().into_owned());
@@ -758,6 +780,12 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let compiled = Arc::new(CompiledModel::new(model.clone())
         .unwrap_or_else(|e| { eprintln!("{:?}", e); std::process::exit(1); }));
     let base_params = compiled.default_params.clone();
+    if let ProfileAlgo::Nlopt(_) = profile_algo {
+        if let Err(e) = refuse_overridden_dt(a.inference.dt, compiled.model.simulation.dt, algo_name) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
 
     // Reject overdispersed models on the ODE backend (and any other
     // backend / model-capability mismatch). The `validate_combo` call
@@ -2355,6 +2383,17 @@ mod tests {
         assert_eq!(nlopt_cell_budget(Some(&method.algorithm)), (1e-7, 900, true));
         assert_eq!(nlopt_cell_budget(None),
             (PROFILE_NLOPT_TOLERANCE, PROFILE_NLOPT_MAX_EVALS, false));
+    }
+
+    /// An ODE cell steps at the model's declared dt, as `fit run` does; an
+    /// explicit `--dt` that differs used to be ignored without a word.
+    #[test]
+    fn an_overridden_dt_is_refused_on_an_ode_cell() {
+        let err = refuse_overridden_dt(Some(0.5), Some(1.0), "nl-sbplx").unwrap_err();
+        assert!(err.contains("--dt 0.5") && err.contains("dt = 1"), "{err}");
+        refuse_overridden_dt(Some(1.0), Some(1.0), "nl-sbplx").unwrap();
+        refuse_overridden_dt(Some(0.5), None, "nl-sbplx").unwrap();
+        refuse_overridden_dt(None, Some(1.0), "nl-sbplx").unwrap();
     }
 
     // ── starts_values_from_init_method: the starts rule's point ───────
