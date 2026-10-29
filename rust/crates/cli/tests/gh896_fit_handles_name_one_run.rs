@@ -466,3 +466,35 @@ fn predict_writes_under_the_run_it_read() {
         assert!(out.join("report.json").is_file());
     }
 }
+
+/// `compare` scores the run each handle names. Two IF2 runs of one problem
+/// end at different θ̂, so at one seed and particle count their scores
+/// differ; scored from the folder's choice instead, both rows would be one
+/// run and agree exactly.
+#[test]
+fn compare_scores_the_named_runs_estimate() {
+    let p = Project::new();
+    let if2_iters = |n: u32| format!(
+        "algorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 2\n\
+         particles = 30\niterations = {n}\ncooling = 0.7");
+    p.config("scout.toml", &if2_iters(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    p.config("scout.toml", &if2_iters(6));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    let leaves = p.leaves();
+    assert_eq!(leaves.len(), 2, "premise: two runs in one folder");
+    let theta = |leaf: &Path| std::fs::read_to_string(leaf.join("final_params.toml")).unwrap();
+    assert_ne!(theta(&leaves[0]), theta(&leaves[1]), "premise: two different estimates");
+
+    let (a, b) = (leaves[0].to_string_lossy(), leaves[1].to_string_lossy());
+    let out = p.run(&["compare", &a, &b, "--particles", "100", "--seed", "1",
+        "--replicates", "1", "--draws", "1", "--format", "json"]);
+    assert!(out.status.success(), "compare failed:\n{}", text(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("compare JSON");
+    let elpd = |h: &str| -> f64 {
+        v["rows"].as_array().unwrap().iter()
+            .find(|r| r["path"] == h).unwrap_or_else(|| panic!("no row {h}: {v}"))["elpd"]
+            .as_f64().unwrap()
+    };
+    assert_ne!(elpd(&a), elpd(&b), "each row scores its own run's θ̂: {v}");
+}
