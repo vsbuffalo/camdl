@@ -25,7 +25,7 @@ parameters {
   a       : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
   # slope of log beta per day: one SD changes beta by e^1.72 ≈ 5.6 across the window
   b       : real [1/T] ~ normal(mu = 0.0, sigma = 0.02)
-  tau     : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
+  tau     : positive 'ratio ~ exponential(rate = 5.99)
   z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
   N0    : count       in [100, 10000000]
   E0    : count       in [0, 1000]

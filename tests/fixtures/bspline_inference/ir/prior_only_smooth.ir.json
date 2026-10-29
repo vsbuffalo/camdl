@@ -10,7 +10,7 @@
 ],"parameters":[
 {"name":"a","value":{"mode":"estimated","prior":{"dist":{"normal":{"mean":-1.0,"sd":0.6}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]},
 {"name":"b","value":{"mode":"estimated","prior":{"dist":{"normal":{"mean":0.0,"sd":0.01}}},"transform":"identity"},"param_kind":"real","param_dim":[0,-1]},
-{"name":"tau","value":{"mode":"estimated","bounds":[1e-06,2.5],"prior":{"dist":{"exponential":{"rate":5.99}}},"transform":"identity"},"param_kind":"positive","param_dim":[0,0]},
+{"name":"tau","value":{"mode":"estimated","prior":{"dist":{"exponential":{"rate":5.99}}},"transform":"identity"},"param_kind":"positive","param_dim":[0,0]},
 {"name":"z_m1","value":{"mode":"estimated","prior":{"dist":{"normal":{"mean":0.0,"sd":1.0}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]},
 {"name":"z_m2","value":{"mode":"estimated","prior":{"dist":{"normal":{"mean":0.0,"sd":1.0}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]},
 {"name":"z_m3","value":{"mode":"estimated","prior":{"dist":{"normal":{"mean":0.0,"sd":1.0}}},"transform":"identity"},"param_kind":"real","param_dim":[0,0]},

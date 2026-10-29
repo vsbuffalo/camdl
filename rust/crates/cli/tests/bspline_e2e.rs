@@ -391,6 +391,13 @@ fn if2_refuses_an_estimated_smooth_scale() {
 /// `a` either with a fit.toml box or, as the fixture declares it, unbounded
 /// with no start; returns (success, stderr).
 fn pgas_smooth_fit(tmp: &Path, boxed: bool) -> (bool, String) {
+    let a = if boxed { "a = { bounds = [-8.0, 2.0] }\n" } else { "a = {}\n" };
+    pgas_smooth_fit_with(tmp, &format!("boxed_{boxed}"), &format!("{a}z_m1 = {{}}\n"), "tau = 0.3\n")
+}
+
+/// The same fit with the given `[estimate]` lines and the fixed value of
+/// `tau` (empty when it is estimated).
+fn pgas_smooth_fit_with(tmp: &Path, tag: &str, estimate: &str, fixed_tau: &str) -> (bool, String) {
     let model = repo().join("tests/fixtures/gradient/sir_smooth_fit.camdl");
     let data = tmp.join("cases.tsv");
     let mut body = String::from("time\tcases\n");
@@ -398,14 +405,13 @@ fn pgas_smooth_fit(tmp: &Path, boxed: bool) -> (bool, String) {
         body.push_str(&format!("{}\t{}\n", 7 * w, 20 + 7 * w));
     }
     std::fs::write(&data, body).unwrap();
-    let toml = tmp.join(format!("fit_{boxed}.toml"));
-    let a = if boxed { "a = { bounds = [-8.0, 2.0] }\n" } else { "a = {}\n" };
+    let toml = tmp.join(format!("fit_{tag}.toml"));
     std::fs::write(&toml, format!(
         "output_dir = \"{out}\"\n[model]\ncamdl = \"{model}\"\n[data.observations]\ncases = \"{data}\"\n\
-         [config]\ndt = 1.0\n[estimate]\n{a}z_m1 = {{}}\n\
-         [fixed]\ngamma = 0.15\nb = 0.0\nrho = 0.5\ntau = 0.3\nz_m2 = 0.0\nz_m3 = 0.0\nz_m4 = 0.0\n\
+         [config]\ndt = 1.0\n[estimate]\n{estimate}\
+         [fixed]\ngamma = 0.15\nb = 0.0\nrho = 0.5\n{fixed_tau}z_m2 = 0.0\nz_m3 = 0.0\nz_m4 = 0.0\n\
          [method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 8\nsweeps = 4\nburn_in = 2\n",
-        out = tmp.join(format!("results_{boxed}")).display(),
+        out = tmp.join(format!("results_{tag}")).display(),
         model = model.display(), data = data.display(),
     )).unwrap();
     let o = Command::new(bin())
@@ -436,8 +442,19 @@ fn pgas_refuses_a_boxed_smooth_coordinate() {
     let tmp = tempfile::tempdir().unwrap();
     let (ok, stderr) = pgas_smooth_fit(tmp.path(), true);
     assert!(!ok, "a boxed smooth level under pgas must be refused:\n{stderr}");
-    assert!(stderr.contains("feed the level, slope or modes of the smooth forcing `beta_t`")
+    assert!(stderr.contains("feed the level, slope, scale or modes of the")
         && stderr.contains("  a: search box [-8, 2]"), "{stderr}");
     let (ok, stderr) = pgas_smooth_fit(tmp.path(), false);
-    assert!(ok && !stderr.contains("feed the level, slope or modes"), "{stderr}");
+    assert!(ok && !stderr.contains("feed the level, slope, scale or modes"), "{stderr}");
+}
+
+/// The smooth scale is refused with a box too (a boxed log scale is a wall
+/// the sampler's steps cross as divergences); unboxed, it runs.
+#[test]
+fn pgas_refuses_a_boxed_smooth_scale() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ok, stderr) = pgas_smooth_fit_with(tmp.path(), "tau_boxed", "a = {}\nz_m1 = {}\ntau = { bounds = [1e-6, 2.5] }\n", "");
+    assert!(!ok && stderr.contains("  tau: search box [0.000001, 2.5]"), "{stderr}");
+    let (ok, stderr) = pgas_smooth_fit_with(tmp.path(), "tau_free", "a = {}\nz_m1 = {}\ntau = {}\n", "");
+    assert!(ok, "an unboxed scale runs:\n{stderr}");
 }

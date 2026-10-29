@@ -399,6 +399,10 @@ fn runtime_curvature(model: &CompiledModel, params: &[f64], knots: &[f64]) -> f6
     }).sum()
 }
 
+/// Post-adaptation divergences allowed over the 4 × 4,000 prior-only
+/// transitions: one per chain, against 0 measured.
+const MAX_PRIOR_DIVERGENCES: usize = 4;
+
 /// R3, required for merge (the maintainer's D7): PGAS+NUTS on the prior
 /// alone. `prior_only_smooth` is `X --> D @ f·X` with X0 = 0 and one
 /// observation stream whose every value is missing, so every flow is zero,
@@ -417,7 +421,8 @@ fn runtime_curvature(model: &CompiledModel, params: &[f64], knots: &[f64]) -> f6
 /// - the integrated curvature of the curve the runtime evaluates: given τ,
 ///   S = (K − 2)·T_ref³·∫g″²/τ² ~ χ²_{K−2}, by KS on thinned draws, and per
 ///   draw S = ‖z‖² to 1e-6 (the identity that pins κ and M in the value
-///   path the prior acts on).
+///   path the prior acts on);
+/// - at most [`MAX_PRIOR_DIVERGENCES`] divergences after adaptation.
 #[test]
 #[ignore = "about a minute in release; run by `make validate-bspline`"]
 fn r3_prior_only_run_draws_the_smooth_prior() {
@@ -452,7 +457,7 @@ fn r3_prior_only_run_draws_the_smooth_prior() {
     let mut est = vec![
         est_p("a", Transform::None, -inf, inf, a_mu),
         est_p("b", Transform::None, -inf, inf, 0.0),
-        est_p("tau", Transform::Log { lo: 1e-6, hi: 2.5 }, 1e-6, 2.5, 0.2),
+        est_p("tau", Transform::Log { lo: 0.0, hi: f64::INFINITY }, 0.0, f64::INFINITY, 0.2),
     ];
     let mut priors = vec![
         Prior::Fixed(Density::Normal { mean: a_mu, sd: a_sd }),
@@ -484,7 +489,7 @@ fn r3_prior_only_run_draws_the_smooth_prior() {
         trajectory_warmup: 0, csmc_sweeps_per_nuts: 1, step_policy: sim::schedule::StepPolicy::Snap,
     };
     // Per chain, the full parameter vector of every kept sweep.
-    let runs: Vec<Vec<Vec<f64>>> = std::thread::scope(|sc| {
+    let runs: Vec<(Vec<Vec<f64>>, usize)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (1..=4u64).map(|seed| {
             let (model, est, priors, observations, obs_model, config) = (&model, &est, &priors, &observations, &obs_model, &config);
             sc.spawn(move || {
@@ -495,11 +500,17 @@ fn r3_prior_only_run_draws_the_smooth_prior() {
                 let r = run_pgas(model, est, priors, &base, config, observations, obs_model, seed, None, None,
                     "bspline-r3-prior".into()).expect("prior-only PGAS-NUTS run");
                 eprintln!("chain {seed}: {} divergent ({} after adaptation)", r.n_divergent_total, r.n_divergent_post_burn);
-                r.sweeps.iter().map(|s| s.params.clone()).collect::<Vec<_>>()
+                (r.sweeps.iter().map(|s| s.params.clone()).collect::<Vec<_>>(), r.n_divergent_post_burn)
             })
         }).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    // A Gaussian-and-log-exponential target with no box on τ: the kernel
+    // diverges essentially never (0 per chain measured; a box [1e-6, 2.5] on
+    // τ gave 10–31, its walls counted as divergences).
+    let divergent: usize = runs.iter().map(|r| r.1).sum();
+    assert!(divergent <= MAX_PRIOR_DIVERGENCES, "{divergent} divergences after adaptation on the prior alone");
+    let runs: Vec<Vec<Vec<f64>>> = runs.into_iter().map(|r| r.0).collect();
     assert!(runs.iter().all(|c| c.len() == 4000), "4000 kept sweeps per chain");
     let ix = |n: &str| model.param_index[n];
     let zi: Vec<usize> = (1..=d).map(|i| ix(&format!("z_m{i}"))).collect();

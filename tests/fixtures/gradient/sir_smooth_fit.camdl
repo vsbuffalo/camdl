@@ -15,7 +15,7 @@ parameters {
   gamma   : rate in [0.01, 1.0]
   a       : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
   b       : real [1/T] ~ normal(mu = 0.0, sigma = 0.01)
-  tau     : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
+  tau     : positive 'ratio ~ exponential(rate = 5.99)
   z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
   rho     : probability in [0.01, 1.0]
 }

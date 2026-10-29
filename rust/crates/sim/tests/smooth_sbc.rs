@@ -90,7 +90,7 @@ fn one(model: &Arc<CompiledModel>, sim_id: usize) -> Vec<usize> {
     let mut est = vec![
         ep("a", Transform::None, -inf, inf, -3.0),
         ep("b", Transform::None, -inf, inf, 0.0),
-        ep("tau", Transform::Log { lo: 1e-6, hi: 2.5 }, 1e-6, 2.5, 0.2),
+        ep("tau", Transform::Log { lo: 0.0, hi: f64::INFINITY }, 0.0, f64::INFINITY, 0.2),
     ];
     let mut priors = vec![
         Prior::Fixed(Density::Normal { mean: -3.0, sd: 0.3 }),

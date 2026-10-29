@@ -804,7 +804,7 @@ parameters {
   # slope of log β, per day
   b_b     : real [1/T] ~ normal(mu = 0.0, sigma = 0.005)
   # PC prior on an SD, calibrated (§6.5): P(tau_b > 0.5) = 0.05
-  tau_b   : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
+  tau_b   : positive 'ratio ~ exponential(rate = 5.99)
   z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
 }
 
@@ -826,7 +826,11 @@ its N(0, 1) law. Unbounded, they are searched over (−∞, ∞) on the identity
 and their chains start from prior draws. Under the samplers (`pgas`, `pmmh`,
 `mh`) `fit run` refuses a finite box on any of them, from the model's range or
 `[estimate]` bounds; forcing the identity on a boxed parameter would instead
-leave its box unenforced (gh#66). τ keeps its box and log transform.
+leave its box unenforced (gh#66). τ is declared without a range too, so its log
+transform runs over (0, ∞): a finite box on a log-transformed parameter is a
+hard wall where `log_jacobian` is −∞, and the prior-only runs counted 10–31
+divergences per chain with τ boxed to [1e-6, 2.5] and none unboxed. The refusal
+covers τ as well.
 
 `smooth` names a penalized curve; there is no walk, so the form is not called a
 random walk. It is accepted only as the `coefs` of a `bspline` (not
@@ -909,8 +913,8 @@ it fails on three of the four. U = 0.5 is chosen. Measured with a scratch script
 With the √(K − 2) normalization the bands now narrow slightly as K grows, the
 opposite of the unnormalized form, where they widened (K = 20 reached 11.9). The
 K = 8 band is widest because a coarse basis concentrates the same total
-curvature in fewer, larger bends; the target holds at every K. τ is boxed to
-[10⁻⁶, 5U], which leaves 3·10⁻⁷ of the prior mass outside.
+curvature in fewer, larger bends; the target holds at every K. τ is not boxed:
+its log transform runs over (0, ∞) (§6.4).
 
 **Converting the calibration.** A tail U₀ stated for the unnormalized penalty in
 model days (τ₀ multiplying M z directly) corresponds to U = U₀ · T_ref^{3/2} ·

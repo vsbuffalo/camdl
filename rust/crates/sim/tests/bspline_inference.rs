@@ -101,7 +101,7 @@ impl Fit {
         let mut est = vec![
             p("a", f64::NEG_INFINITY, f64::INFINITY, Transform::None, -1.5),
             p("b", f64::NEG_INFINITY, f64::INFINITY, Transform::None, 0.0),
-            p("tau", 1e-6, 2.5, Transform::Log { lo: 1e-6, hi: 2.5 }, 0.2),
+            p("tau", 0.0, f64::INFINITY, Transform::Log { lo: 0.0, hi: f64::INFINITY }, 0.2),
         ];
         let mut priors = vec![
             Prior::Fixed(Density::Normal { mean: -1.5, sd: 1.0 }),

@@ -298,12 +298,12 @@ fn pgas_rung(label: &str, fixture: &str, fixed: &[(&str, f64)], data: Option<(&s
 fn rungs_2_and_4_through_pgas() {
     pgas_rung("rung2 scalars, τ box, X0=0", "tests/fixtures/prior_only/prior_only_all.camdl", &[], None);
     pgas_rung("rung2 scalars, τ unboxed, X0=0", "tests/fixtures/prior_only/prior_only_all_unboxed.camdl", &[], None);
-    pgas_rung("rung4a smooth, τ box, X0=0", "tests/fixtures/bspline_inference/prior_only_smooth.camdl", &[], None);
-    pgas_rung("rung4a smooth, τ unboxed, X0=0", "tests/fixtures/prior_only/smooth_x0_unboxed.camdl", &[], None);
+    pgas_rung("rung4a smooth, τ box, X0=0", "tests/fixtures/prior_only/smooth_x0_boxed.camdl", &[], None);
+    pgas_rung("rung4a smooth, τ unboxed, X0=0", "tests/fixtures/bspline_inference/prior_only_smooth.camdl", &[], None);
     pgas_rung("rung4b smooth, τ unboxed, X0=1e4", "tests/fixtures/prior_only/smooth_x0_10k_unboxed.camdl", &[], None);
     let fixed = [("sigma", 0.2), ("gamma", 0.2), ("rho", 0.5), ("k", 10.0), ("N0", 1e6), ("E0", 100.0), ("I0", 100.0)];
-    pgas_rung("rung4c SEIR data seed 31, τ box", "tests/fixtures/bspline_inference/seir_smooth_recovery.camdl", &fixed,
+    pgas_rung("rung4c SEIR data seed 31, τ box", "tests/fixtures/prior_only/seir_smooth_boxed.camdl", &fixed,
         Some(("tests/fixtures/bspline_inference/seir_bspline_recovery.camdl", 31)));
-    pgas_rung("rung4c SEIR data seed 31, τ unboxed", "tests/fixtures/prior_only/seir_smooth_unboxed.camdl", &fixed,
+    pgas_rung("rung4c SEIR data seed 31, τ unboxed", "tests/fixtures/bspline_inference/seir_smooth_recovery.camdl", &fixed,
         Some(("tests/fixtures/bspline_inference/seir_bspline_recovery.camdl", 31)));
 }

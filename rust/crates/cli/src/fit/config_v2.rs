@@ -2677,8 +2677,11 @@ impl FitConfig {
     /// modes standard normal by construction, w linear in all three — so the
     /// samplers must move them on the identity scale. A finite search box (the
     /// model's `in [lo, hi]` or `[estimate]` bounds) gives such a parameter the
-    /// scaled logit (or log) transform, which bends that geometry, and for a
-    /// mode also truncates the law the whitening assumes. Refused under the
+    /// scaled logit transform, which bends that geometry, and for a mode also
+    /// truncates the law the whitening assumes. The scale is sampled on the
+    /// log scale, and a box there is a hard wall: `log_jacobian` is −∞ outside
+    /// it, so a leapfrog step that crosses it counts as a divergence (the
+    /// prior-only runs: 10-31 divergences per chain boxed, 0 unboxed). Refused under the
     /// methods that sample a posterior, naming the parameters and the remedy:
     /// declare them without a range so they are searched over (−∞, ∞).
     /// Forcing the identity on a boxed parameter instead would leave the
@@ -2695,11 +2698,11 @@ impl FitConfig {
             return Ok(());
         }
         for tf in &model.time_functions {
-            let TimeFuncKind::BSpline(BSpline { coefs: SplineCoefs::Smooth { level, slope, modes, .. }, .. }) = &tf.kind else {
+            let TimeFuncKind::BSpline(BSpline { coefs: SplineCoefs::Smooth { level, slope, scale, modes, .. }, .. }) = &tf.kind else {
                 continue;
             };
             let mut refs = std::collections::HashSet::new();
-            for e in std::iter::once(level).chain(std::iter::once(slope)).chain(modes) {
+            for e in [level, slope, scale].into_iter().chain(modes) {
                 sim::inference::gradient_capability::collect_param_refs(e, &mut refs);
             }
             let mut bent: Vec<String> = Vec::new();
@@ -2708,8 +2711,10 @@ impl FitConfig {
                 let Some(p) = model.parameters.iter().find(|p| p.name == name) else { continue };
                 let override_str = spec.transform.as_ref().map(|t| t.as_str());
                 let Ok(bx) = super::runner::resolve_search_box(&name, spec.bounds, p) else { continue };
+                // A log transform on (0, ∞) has no wall; any finite end does.
                 match super::runner::derive_transform_with_bounds(p, override_str, bx) {
                     Transform::None => {}
+                    Transform::Log { lo, hi } if lo <= 0.0 && hi == f64::INFINITY => {}
                     Transform::Log { lo, hi } | Transform::Logit { lo, hi } => {
                         bent.push(format!("  {name}: search box [{lo}, {hi}]"));
                     }
@@ -2718,13 +2723,16 @@ impl FitConfig {
             if !bent.is_empty() {
                 bent.sort();
                 return Err(format!(
-                    "[estimate]: these parameters feed the level, slope or modes of the smooth \
-                     forcing `{}` and have a finite search box:\n{}\n\
-                     `{}` would sample each through the transform that keeps it in its box, \
-                     which bends the coordinates the smooth prior is built in (the modes are \
-                     standard normal by construction). Declare them without a range, e.g. \
-                     `z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)`, and give no \
-                     `bounds` in [estimate], so they are sampled on the identity scale.",
+                    "[estimate]: these parameters feed the level, slope, scale or modes of the \
+                     smooth forcing `{}` and have a finite search box:\n{}\n\
+                     `{}` would sample each through the transform that keeps it in its box: the \
+                     scaled logit bends the coordinates the smooth prior is built in (the modes \
+                     are standard normal by construction), and a boxed log scale is a wall the \
+                     sampler's steps cross as divergences. Declare them without a range, e.g. \
+                     `z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)` and \
+                     `tau : positive 'ratio ~ exponential(rate = 5.99)`, and give no `bounds` \
+                     in [estimate], so the level, slope and modes are sampled on the identity \
+                     scale and the scale on the log scale over (0, ∞).",
                     tf.name, bent.join("\n"), kind.as_str()));
             }
         }

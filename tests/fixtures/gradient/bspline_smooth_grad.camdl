@@ -15,11 +15,11 @@ compartments { X, D1, D2 }
 parameters {
   a       : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
   b       : real [1/T] ~ normal(mu = 0.0, sigma = 0.01)
-  tau     : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
+  tau     : positive 'ratio ~ exponential(rate = 5.99)
   z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
   c       : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
   d       : real [1/T] ~ normal(mu = 0.0, sigma = 0.1)
-  s       : positive 'ratio in [1e-6, 5] ~ exponential(rate = 1.0)
+  s       : positive 'ratio ~ exponential(rate = 1.0)
   y[imode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
 }
 

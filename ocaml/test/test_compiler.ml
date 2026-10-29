@@ -10544,7 +10544,7 @@ let smooth_model ?(params = "") ?(modes = "z[mode] : real 'ratio ~ normal(mu = 0
       gamma : rate in [0.01, 1.0]
       a_b   : real 'ratio ~ normal(mu = -1.9, sigma = 0.6)
       b_b   : real [1/T] ~ normal(mu = 0.0, sigma = 0.005)
-      tau_b : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
+      tau_b : positive 'ratio ~ exponential(rate = 5.99)
       %s
       %s
     }

@@ -95,7 +95,7 @@ fn problem(model: &CompiledModel, smooth: bool) -> (Vec<EstimatedParam>, Vec<Pri
     let mut est = vec![
         ep("a", Transform::None, -inf, inf, -1.5),
         ep("b", Transform::None, -inf, inf, 0.0),
-        ep("tau", Transform::Log { lo: 1e-6, hi: 2.5 }, 1e-6, 2.5, 0.2),
+        ep("tau", Transform::Log { lo: 0.0, hi: f64::INFINITY }, 0.0, f64::INFINITY, 0.2),
     ];
     let mut priors = vec![normal(-1.5, 1.0), normal(0.0, 0.02), Prior::Fixed(Density::Exponential { rate: 5.99 })];
     for i in 1..=3 {

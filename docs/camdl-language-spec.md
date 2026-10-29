@@ -1601,7 +1601,7 @@ parameters {
   gamma   : rate
   a_b     : real 'ratio ~ normal(mu = -1.9, sigma = 0.6)
   b_b     : real [1/T] ~ normal(mu = 0.0, sigma = 0.005)
-  tau_b   : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
+  tau_b   : positive 'ratio ~ exponential(rate = 5.99)
   z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
 }
 let N = S + I + R
@@ -1652,14 +1652,16 @@ and a parameter in it is refused as structural (**E600**). Under `link = log`
 the level and scale are dimensionless and the slope is per unit time (**E301**
 otherwise). Other malformed uses are **E413**.
 
-Declare the level, slope and modes **without a range**, as above. `fit run`
-gives a parameter with a finite search box (`in [lo, hi]` or `[estimate]`
-`bounds`) the scaled-logit transform that keeps it in the box, which would
-bend the whitened coordinates the prior is built in; under `pgas`, `pmmh`
-and `mh` it refuses such a box on a smooth form's level, slope or modes, so
-they are sampled on the identity scale over (−∞, ∞). Their chains start from
-prior draws (`starts = from_prior`, the default when every estimated
-parameter has a prior).
+Declare the level, slope, scale and modes **without a range**, as above.
+`fit run` gives a parameter with a finite search box (`in [lo, hi]` or
+`[estimate]` `bounds`) a transform that keeps it in the box: for the level,
+slope and modes the scaled logit, which would bend the whitened coordinates
+the prior is built in; for the scale a log transform whose box ends are hard
+walls, which the sampler's steps cross as divergences. Under `pgas`, `pmmh`
+and `mh` it refuses such a box on any of the four, so the level, slope and
+modes are sampled on the identity scale over (−∞, ∞) and the scale on the log
+scale over (0, ∞). Their chains start from prior draws (`starts =
+from_prior`, the default when every estimated parameter has a prior).
 
 The gradients are emitted as for explicit coefficients: ∂g/∂a = 1, ∂g/∂b =
 t_c − t_m, ∂g/∂zᵢ = (τ/κ)·Wᵢ(t_c) and ∂g/∂τ = Σᵢ zᵢWᵢ(t_c)/κ, where t_c is the
