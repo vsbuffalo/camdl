@@ -5584,8 +5584,27 @@ ess_per_iter, ess_per_sec, params, delta_ll_vs_best, age_seconds, created_at,
 stale, stale_reason
 ```
 
+`gate_verdict` is the method's convergence verdict, the one `fit summary` and a
+`from_mle` / `from_posterior` source check read:
+
+| value                  | method    | meaning                                                                                                                            |
+| ---------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `pass`                 | if2, nl-* | every leg passes                                                                                                                   |
+| `fail_a`               | if2       | some estimated parameter's tail chain agreement Â (initial-state ones included) is at or above the threshold                       |
+| `fail_db`              | if2, nl-* | the chains' log-likelihoods spread past the decibans floor                                                                         |
+| `fail_both`            | if2, nl-* | both                                                                                                                               |
+| `incomplete`           | if2       | no Â failed, but some Â is not finite (within-chain variance collapsed): not a pass, and the decibans leg does not stand in for it |
+| `fail_chain_agreement` | nl-*      | the converged chains' estimates disagree                                                                                           |
+| `fail_status`          | nl-*      | a chain ran out of evaluations or failed                                                                                           |
+| `not_assessed`         | nl-*      | the leaf predates the recorded optimizer verdict; re-run it with `--force`                                                         |
+
+For an optimizer method `converged` is true exactly when `gate_verdict` is
+`pass`. A sampler row carries `gate_verdict = "n/a"`, and `converged` is its R̂
+verdict (reported, and below the threshold).
+
 A fit directory with no completed method leaf is reported as a warning line and
-skipped, not silently dropped.
+skipped, not silently dropped; with `--quantity`, a fit whose result cannot be
+read is an error.
 
 To enumerate runs of any kind without the per-fit projection, use the generic
 run browser: `camdl list --kind fit`. For one fit's full interpretation, use
