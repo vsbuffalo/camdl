@@ -128,6 +128,16 @@ smooth-multistart:
 	  --with polars==2.1.0 --with arviz==1.3.0 python scripts/diagnose_multistart.py \
 	  --data-dir $(DIAG)/data --out-dir $(DIAG)/multistart --camdl rust/target/release/camdl --repo .
 
+# H1 vs H2 for the smooth divergences: the smooth multistart chains of seeds
+# 31 and 59 rerun from the same starts and seed with burn_in 3,000 instead of
+# 1,000 (scripts/diagnose_warmup_length.py → results/diagnosis/warmup/).
+# Needs smooth-multistart first. About forty minutes.
+.PHONY: smooth-warmup-length
+smooth-warmup-length:
+	cd $(REPO) && CAMDLC=$(CAMDLC_PATH) uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 \
+	  --with polars==2.1.0 --with arviz==1.3.0 python scripts/diagnose_warmup_length.py \
+	  --multistart-dir $(DIAG)/multistart --out-dir $(DIAG)/warmup --camdl rust/target/release/camdl
+
 .PHONY: calibrate-smooth-prior
 calibrate-smooth-prior:
 	cd $(REPO) && uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 python \
