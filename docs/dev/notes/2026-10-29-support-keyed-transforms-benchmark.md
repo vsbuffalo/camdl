@@ -1,167 +1,164 @@
-# Support-keyed transforms: the §12.6 benchmark, and why commit 6 is held
+# IF2's default step in z, per map family: the §12.6 benchmark
 
-Date: 2026-10-29 Project: camdl Tags: inference, transforms, IF2, PMMH, rw_sd,
+Date: 2026-10-29 Project: camdl Tags: inference, transforms, IF2, rw_sd,
 benchmark
 
 ## Question
 
-`docs/dev/proposals/2026-10-29-support-keyed-transforms.md` §12.6 decides two
-things by measurement before commit 6 (the step fixed in z) lands: D11, whether
-a positive kind boxed with 0 < lo takes `LogInterval` or `Interval`, and D8's
-`Interval` default step, the largest of 2/3, 1/3 and 1/5 that passes three
-criteria on the `[0, hi]` fixture under its real likelihood. The proposal and
-the coordinator both say: if no candidate passes, stop before commit 6 and
-return the numbers to the maintainer. This note records the numbers.
+`docs/dev/proposals/2026-10-29-support-keyed-transforms.md` (D8, §12.6) fixes
+IF2's perturbation step in the transformed coordinate z and gives each map
+family one default: `Interval` (θ = lo + (hi − lo)·σ(z)), `LogInterval` (ln θ =
+ln lo + ln(hi/lo)·σ(z), a positive kind boxed with 0 < lo) and the half-bounded
+maps (θ = lo + eᶻ or hi − eᶻ). Which constant, from 2/3, 1/3, 1/5, 1/10, 1/20
+and 1/50, serves every fixture of its family? A constant serves a fixture when
+IF2's best final log-likelihood (mean over seeds) is within twice the
+particle-filter standard deviation of the best candidate; on the gh912
+short-budget cell it must also leave no more seeds with every chain at −∞ than
+main does. PMMH's and MH's default is separate and adapted, so it is not
+benchmarked.
 
 ## Setup
 
-Three binaries, each with a benchmark-only patch (not committed) that writes
-IF2's final particle swarm to a file per chain:
+Binaries (benchmark only, nothing patched into the branch):
 
-- **main**: `origin/main` at `0abe59f8`, the walled `Log` / `Logit` maps with
-  the natural-scale step converted at each particle;
-- **LogInterval**: the commit-6 tree (branch `wip/support-transforms-c6`), the
-  proposal as written;
-- **Interval everywhere**: the same tree with `LogInterval` disabled, the D11
-  alternative.
+- **br**: branch `feat/support-transforms` at `877c517a` (step fixed in z,
+  `LogInterval` for a positive kind with 0 < lo);
+- **ie**: the same tree with the `LogInterval` arm of `Transform::for_domain`
+  disabled, so every finite box takes `Interval` (the D11 alternative);
+- **main**: `origin/main` at `0abe59f8`, its own automatic `rw_sd` converted at
+  each particle's value (the reference).
 
-The 0.5× and 2× steps and the three `Interval` candidates are given as an
-explicit natural-scale `rw_sd`. Series (i) converts an explicit `rw_sd` once at
-the box's midpoint, so `rw_sd = c·(hi − lo)/4` is a step of exactly `c` in z on
-`Interval`, and `c·√(lo·hi)·ln(hi/lo)/4` on `LogInterval`. On main the scale
-multiplies main's own automatic natural step.
+Every step is written as an explicit natural-scale `rw_sd` chosen so the
+branch's one-time conversion gives exactly the candidate in z: `c·(hi − lo)/4`
+on `Interval` (converted at the midpoint), `c·√(lo·hi)·ln(hi/lo)/4` on
+`LogInterval` (the geometric midpoint), `c·(θ₀ − lo)` on a lower-bounded map
+(converted at the start). Families not under test take 2/3 (`Interval`), 1/5
+(`LogInterval`) and 1/5 (half-bounded).
 
-Fixtures, all on synthetic data from `tests/recovery/cases/*/truth.toml`
-(`simulate --backend chain_binomial --seed 1`):
+Fixtures, all chain-binomial:
 
-| fixture       | what it is                                                                                   |
-| ------------- | -------------------------------------------------------------------------------------------- |
-| `seir_age`    | the recovery case; three rates boxed `[0.001, 0.5]`, `[0.01, 1]`, `[0.01, 1]`                |
-| `sir`         | the recovery case; `beta` on `[0.05, 1]`, `gamma` on `[0.01, 0.5]`                           |
-| `sir_near`    | `sir` with `gamma` boxed `[0.01, 0.16]`                                                      |
-| `sir_0hi`     | `sir` with `gamma : rate in [0.0, 0.5]`, the `[0, hi]` fixture (`Interval` in both variants) |
-| `sir_flat0hi` | `sir_0hi` with `gamma` kept out of the dynamics: the flat-likelihood run, reported only      |
-| `sir_wide`    | `sir` with `lb : real in [-8, 2]` and infection at `exp(lb)`: a wide box on a log quantity   |
-| `ode`         | the `mh_ode_recovery.rs` model under `mh`, `beta` on `[0.05, 5]`                             |
+| fixture    | parameters estimated (map on br)                                           | data                                                 |
+| ---------- | -------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `sir`      | β [0.05, 1], γ [0.01, 0.5] (`LogInterval`)                                 | the recovery case's weekly cases                     |
+| `sir_0hi`  | β (`LogInterval`), γ : rate in [0, 0.5] (`Interval`)                       | the same                                             |
+| `sir_wide` | lb : real in [−8, 2], infection at exp(lb) (`Interval`); γ (`LogInterval`) | the same                                             |
+| `seir_age` | β [0.001, 0.5], σ, γ [0.01, 1] (`LogInterval`)                             | the recovery case's two age streams                  |
+| `ebola`    | β [0.05, 2], σ [0.02, 1] (`LogInterval`), cfr [0, 1] (`Interval`)          | weekly onsets and weekly deaths, 140 days, simulated |
+| `sir_lb`   | β, γ : rate with no range, [0, ∞) (lower-bounded)                          | `sir`'s data                                         |
+| `ebola_lb` | β, σ : rate with no range (lower-bounded), cfr [0, 1]                      | `ebola`'s data                                       |
+| `polio`    | six positive rates (`LogInterval`), ρ [0.1, 0.95] (`Interval`)             | `tests/fixtures/polio_afp_es`, its `fit.toml` boxes  |
+| `gh912`    | the same seven                                                             | the same, 2 chains × 3 iterations × 50 particles     |
 
-`sir_wide` was added at the coordinator's request: on the B-spline branch a
-`real` log-coefficient on `[−8, 2]` with the automatic step `(hi − lo)/6 = 1.67`
-drove every IF2 particle out of the feasible region, where `rw_sd = 0.05` works;
-D8's `Interval` step of 2/3 reproduces that natural step at the midpoint.
+`ebola` is an SEIR with a case-fatality split (death at cfr·γ, recovery at (1 −
+cfr)·γ, γ = 0.125 held), N = 50 000, β = 0.3, σ = 0.1, cfr = 0.6, ρ = 0.7; its
+data are one simulation at seed 1, ending mid-epidemic as a situation-report
+series does. No Ebola or spline recovery case exists in `tests/recovery/cases`;
+this is the closest fixture to one.
 
-Budgets: IF2 8 chains × 2,000 particles × 150 iterations, cooling 0.7, `lhs`
-starts (the recovery fixtures' own budget); PMMH 4 chains × 1,500 iterations,
-500 burn-in, 300 particles, `single` start; MH 4 × 3,000, 1,000 burn-in. Seed 1
-throughout; the deciding cases were repeated at seeds 2 and 3. Another session's
-`make test` and this branch's `make test-fast` ran during parts of the run, so
-wall-clock ESS/s carries load noise of up to ±50% (the same seed-1 PMMH case
-took 6.7 s and 10.1 s); ESS per kept draw is reported beside it, and the cost
-per draw does not depend on the step.
-
-Columns: IF2 _best ll_ and _mean ll (sd)_ are the clean evaluations of each
-chain's final estimate (8 replicates × 4,000 particles); _PF sd_ is the sd of
-one evaluation (`se`·√8); _near lo / hi_ the largest fraction, over chains, of
-the final swarm within 10⁻³ of the width of an end; _min sd(z)_ the smallest
-swarm sd in the variant's own z.
+Budgets: IF2 8 chains × 2000 particles × 150 iterations, cooling 0.7, `lhs`
+starts (`single` on the lower-bounded fixtures, which have no box to spread in);
+seeds 1–3 (`seir_age` 1–2). `polio`: 4 chains × 2000 × 50, cooling 0.5, seed 1.
+`gh912`: seeds 1–8. The final log-likelihood is the clean particle-filter
+evaluation in `chain_evaluations.tsv`. Commands and binaries are in the run
+directory's `README` and `bench2/bench.py`; the per-run table is
+`bench2/results.tsv`.
 
 ## Measurements
 
-### The `[0, hi]` fixture decides D8
+Mean best final log-likelihood over seeds; **bold** where the candidate serves.
+The particle-filter standard deviation is 0.03–0.3 on every fixture except
+`polio` and `gh912` (about 1).
 
-`sir_0hi`, real likelihood (`gamma`'s maximum is interior, 0.25):
+`LogInterval`:
 
-| constant | IF2 best ll, seeds 1 / 2 / 3 | PF sd | near ends | min sd(z) | PMMH ESS/s, quiet seeds 1 / 2 / 3 | ESS per draw, seeds 1 / 2 / 3 |
-| -------- | ---------------------------- | ----- | --------- | --------- | --------------------------------- | ----------------------------- |
-| 2/3      | −58.71 / −58.63 / −58.70     | 0.04  | 0 / 0     | 0.58      | 37.2 / 33.4 / 32.6                | 0.094 / 0.091 / 0.086         |
-| 1/3      | −58.33 / −58.36 / −58.37     | 0.035 | 0 / 0     | 0.41      | 37.2 / 27.8 / 40.3                | 0.091 / 0.073 / 0.101         |
-| 1/5      | −58.30 / −58.30 / −58.29     | 0.03  | 0 / 0     | 0.32      | 29.3 / 27.3 / 27.5                | 0.073 / 0.095 / 0.071         |
-| main     | −58.31 (seed 1)              | 0.04  | 0 / 0     | 0.00      | 3.5 (seed 1)                      | 0.009                         |
+| fixture         | 2/3     | 1/3        | 1/5        | 1/10       | 1/20       | 1/50        | main    |
+| --------------- | ------- | ---------- | ---------- | ---------- | ---------- | ----------- | ------- |
+| `sir`           | −60.21  | **−58.43** | **−58.31** | **−58.27** | **−58.26** | **−58.26**  | −58.27  |
+| `seir_age`      | −274.61 | −171.76    | −155.07    | −146.76    | −145.38    | **−145.19** | −148.48 |
+| `ebola`         | −271.59 | −231.73    | −221.97    | −219.18    | −218.50    | **−218.33** | −224.10 |
+| `polio`         | −716.89 | −656.42    | −610.79    | −555.22    | −552.06    | **−551.74** | −585.5  |
+| `gh912`, mean   | −1896   | −1775      | −1077      | −780       | **−642**   | −871        | −832    |
+| `gh912`, failed | 0/8     | 0/8        | 1/8        | 1/8        | 1/8        | 1/8         | 1/8     |
 
-main's swarm sd of 0 is the defect the interim fix refuses: the automatic step
-on a walled `Log { 0, hi }` is ~10⁻¹⁴⁹, so `gamma` never moves.
+`Interval`, branch maps (the family's parameter only):
 
-Applying the rule (largest constant meeting all three):
+| fixture         | 2/3         | 1/3         | 1/5         | 1/10       | 1/20        | 1/50        |
+| --------------- | ----------- | ----------- | ----------- | ---------- | ----------- | ----------- |
+| `sir_0hi` (γ)   | −58.68      | −58.35      | **−58.30**  | **−58.29** | **−58.29**  | **−58.28**  |
+| `sir_wide` (lb) | −86.24      | −60.47      | −61.97      | −59.25     | **−58.34**  | **−58.34**  |
+| `ebola` (cfr)   | **−221.97** | **−222.10** | **−222.19** | −222.42    | **−222.21** | **−222.18** |
+| `polio` (ρ)     | −610.79     | −606.82     | −625.93     | −619.11    | **−581.09** | −588.40     |
+| `gh912`, mean   | −1077       | −840        | −930        | −1111      | **−805**    | −829        |
+| `gh912`, failed | 1/8         | 1/8         | 0/8         | 1/8        | 0/8         | 0/8         |
 
-- **2/3 fails** the IF2 criterion at every seed: 0.33–0.41 below the best of the
-  three, against 2·PF sd ≈ 0.08.
-- **1/3** is within 2·PF sd at seeds 1 and 2 (0.03, 0.06) and outside it at seed
-  3 (0.08 > 0.064). Its PMMH ESS/s is 0.77 of 2/3's in the loaded seed-1 run and
-  1.0 in the quiet repeat; on the three quiet seeds its mean is the highest
-  (35.1 against 34.4 and 28.0).
-- **1/5** is the best IF2 result; its quiet ESS/s is 0.80 of the best mean (28.0
-  / 35.1), on the line.
+`Interval` on every box (the `ie` variant, D11):
 
-So at the specified seed, with ESS/s from the quiet repeat, **1/3 is the
-constant the rule selects**; it misses the IF2 criterion at one of three seeds
-by 0.016 nats, and with the loaded seed-1 timing it misses the ESS/s criterion.
-The selection is not robust.
+| fixture    | 2/3     | 1/3     | 1/5        | 1/10       | 1/20        | 1/50        |
+| ---------- | ------- | ------- | ---------- | ---------- | ----------- | ----------- |
+| `sir`      | −60.52  | −58.36  | **−58.29** | **−58.27** | **−58.25**  | **−58.26**  |
+| `seir_age` | −inf    | −162.42 | −149.75    | −146.00    | **−145.30** | **−145.19** |
+| `ebola`    | −256.18 | −226.22 | −220.41    | −218.44    | **−218.09** | **−218.03** |
 
-The flat-likelihood run (reported, not a criterion) puts 95% / 81% of the swarm
-within 10⁻³·w of the ends at 2/3, 67% / 67% at 1/3, 46% / 23% at 1/5.
+Half-bounded:
 
-### The wide `real` box fails every candidate
+| fixture    | 2/3     | 1/3     | 1/5     | 1/10       | 1/20       | 1/50        |
+| ---------- | ------- | ------- | ------- | ---------- | ---------- | ----------- |
+| `sir_lb`   | −63.88  | −59.47  | −58.62  | **−58.28** | **−58.26** | **−58.26**  |
+| `ebola_lb` | −383.88 | −238.40 | −223.85 | −219.53    | −218.60    | **−218.33** |
 
-`sir_wide`, IF2 best clean log-likelihood at seeds 1 / 2 / 3, and PMMH
-acceptance:
+Main fails `sir_0hi` outright: it refuses an automatic `rw_sd` on a positive
+kind boxed `[0, hi]`. Main's `sir_wide` mean is −147.68.
 
-| step in z                   | IF2 best ll              | PF sd     | PMMH acceptance    |
-| --------------------------- | ------------------------ | --------- | ------------------ |
-| 2/3 (natural 1.67)          | −70.6 / −96.3 / −91.9    | 2.1–2.5   | 0.71 / 0.69 / 0.72 |
-| 1/3                         | −61.2 / −60.3 / −59.9    | 0.17–0.27 | 0.59 / 0.60 / 0.61 |
-| 1/5                         | −61.8 / −62.3 / −61.9    | 0.20–0.26 | 0.55 / 0.55 / 0.50 |
-| 0.02 (natural 0.05)         | −58.35 / −58.31 / −58.37 | 0.03      | 0.39 / 0.38 / 0.38 |
-| main, natural 1.67 (seed 1) | −174.7                   | 2.5       | 0.72               |
+Iterations until a chain's log-likelihood is within one unit of its final value
+fall as the step shrinks on the fixtures that are hard to fit: `seir_age` 136
+(1/5) to 25 (1/50), `ebola` 140 to 65, `ebola_lb` 137 to 54. Smaller steps do
+not converge more slowly at this budget.
 
-Against main every candidate is better, so §12.6's IF2 criterion, which is
-relative to main, passes. Against the log-likelihood a small step attains, every
-candidate is 1.5–38 nats short, and every candidate's PMMH acceptance is above
-the 0.5 bound. The coordinator's instruction for this case is to stop before
-commit 6 if every candidate fails here.
+## Observations
 
-### Other criteria that do not pass for `LogInterval` as written
+At the fixtures' own budgets, smaller steps give higher final log-likelihoods in
+every family. The present midpoint equivalents (2/3 on `Interval`, 1/5 on
+`LogInterval`) are 3.6–59 nats short on `seir_age`, `ebola` and `polio`.
+`seir_age`, `ebola`, `ebola_lb` and `polio` peak at 1/50, the smallest candidate
+tested, so the optimum may lie below the grid.
 
-| criterion (§12.6)                                      | `LogInterval`          | main            |
-| ------------------------------------------------------ | ---------------------- | --------------- |
-| `seir_age` IF2 best ll, best of three steps            | −146.30 (×0.5)         | −145.77 (×0.5)  |
-| `sir` IF2 best ll, best of three steps                 | −58.27 (×0.5)          | −58.26 (×0.5)   |
-| `sir_near` swarm within 10⁻³·w of `hi`, ×0.5 / ×1 / ×2 | 76% / 99% / 97%        | 11% / 15% / 20% |
-| `sir_near` PMMH ESS per draw, ×1                       | 0.044                  | 0.069           |
-| PMMH acceptance in [0.1, 0.5]                          | 0.545 at `seir_age` ×2 | all inside      |
+`Interval`: 1/20 serves every fixture, both narrow boxes (`sir_0hi`, `cfr`) and
+the wide log-β box (`sir_wide`, where 2/3 is 28 nats short), and the positive
+kinds under the `ie` variant. The `polio` ρ column is one seed, with
+`LogInterval` held at 1/5, so it says little.
 
-- `seir_age`: 0.53 nats below main at the best step, against 2·PF sd of
-  0.15–0.18. The fixture is bimodal and the chains spread (sd 1.2 nats at ×0.5),
-  so this rests on one seed.
-- `sir_near`: with these data `gamma`'s maximum on `[0.01, 0.16]` is on the
-  upper bound (the unconstrained maximum is 0.255), and 6 of 8 `LogInterval`
-  chains found a second basin (`beta` 0.26, `gamma` 0.025, ll −59.05) that main
-  missed. The chains on the bound mode drew the swarm to z ≈ 8, within 10⁻³·w of
-  `hi`: §9.1's "a steep rise draws the swarm far out". The swarm criterion (≤
-  max(5%, main's)) reads this as a pile-up. Its sd in z is 0.49, so it has not
-  collapsed. Whether the criterion should apply to a maximum on the bound is a
-  question about the criterion.
-- `ode` (MH): all variants within noise (acceptance 0.49–0.50, ESS per draw
-  0.21–0.24).
+`LogInterval`: 1/50 serves `sir`, `seir_age`, `ebola` and `polio` and fails no
+more `gh912` seeds than main (1 of 8). On `gh912` its mean is 229 nats below
+1/20, but that cell's per-seed spread is several hundred nats (1/50 runs from
+−562 to −1526), so the mean does not separate 1/20 from 1/50. 1/20 is 0.2–0.3
+nats below 1/50 on `seir_age`, `ebola` and `polio`, which is more than twice the
+particle-filter standard deviation there.
 
-### D11: `Interval` everywhere is worse
+Half-bounded: 1/50 serves both. 1/20 is 0.27 nats short on `ebola_lb`.
 
-`Interval` for every finite box refused `seir_age` IF2 at ×1 and ×2 (every
-chain's final estimate −∞; at ×1 the steps are 2/3 in z on three rates) and was
-worse than `LogInterval` on `sir` and `sir_near` IF2 at every step; its PMMH
-acceptance exceeded 0.5 in all six `sir`, `sir_near` and `seir_age` cells at ×1
-and ×2. `LogInterval` is the better map for positive kinds with 0 < lo.
+D11: at the steps that serve, `Interval` and `LogInterval` on positive kinds
+reach the same likelihood (`seir_age` −145.19 both; `ebola` −218.03 against
+−218.33, with cfr's step differing between the two runs). The geometry choice
+does not move the result here.
 
 ## Interpretation
 
-The rule picks **1/3** for the `Interval` constant at the specified seed, but
-not robustly, and **no candidate passes on a wide box over a log-scale
-quantity**: the default step in z is a fraction of the width, and on `[−8, 2]` a
-step of 1/5 to 2/3 in z is 0.5 to 1.67 in `lb` at the midpoint, a factor of e⁰·⁵
-to e¹·⁷ in `exp(lb)` per perturbation. The fixed step in z removes the
-end-of-box blow-up (§9.1) and makes a positive kind on `[0, hi]` move, but it
-does not supply a scale where the box is much wider than the region the data
-allow.
+Under the rule as written, the constants are `Interval` 1/20, `LogInterval` 1/50
+and half-bounded 1/50. The `LogInterval` constant is not settled: the
+long-budget fixtures prefer 1/50, and `gh912`'s mean prefers 1/20 within noise
+it cannot resolve. Each of these constants is also at or near the bottom of the
+grid. These results invert the premise that a larger step explores faster under
+the same cooling. At 150 iterations with lhs starts, the swarm finds the basin
+from the starts, and a large step mostly adds noise to the final estimate. A fit
+started far from its optimum with few iterations might favour larger steps, and
+none of these fixtures does that except `gh912`.
 
 ## Next
 
-Commit 6 and series (ii) are held on `wip/support-transforms-c6` (local). The
-maintainer's decisions are listed in the hand-off report.
+- The constant is the maintainer's call (the proposal returns it when a fixture
+  disagrees): `Interval` 1/20, half-bounded 1/50, and `LogInterval` 1/20 or
+  1/50.
+- Extend the grid to 1/100 and 1/200 on `seir_age`, `ebola` and `polio`, to find
+  where the curve turns.
+- Run `gh912` at 32 seeds for 1/20 and 1/50; that is the run that would separate
+  the two.
