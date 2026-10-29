@@ -52,6 +52,8 @@ pub struct FitStageView {
     /// The run's label (`run.json` `provenance.label`): the one run `@label`
     /// names (gh#896). `None` when the run was not given one.
     pub label: Option<String>,
+    /// When the run was written (`provenance.created_at`, ISO 8601 UTC).
+    pub created_at: String,
     /// Simulation backend the stage ran on. Defaults to `ChainBinomial` when
     /// absent.
     pub backend: InferenceBackend,
@@ -168,6 +170,7 @@ fn stage_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<Fit
             .unwrap_or_default(),
         run_id: rec.run_id.to_hex(),
         label: rec.provenance.label.clone(),
+        created_at: rec.provenance.created_at.clone().unwrap_or_default(),
         backend,
         seed: inputs.get("seed").and_then(|v| v.as_u64()).unwrap_or(0),
         n_chains: inputs.get("n_chains").and_then(|v| v.as_u64()).unwrap_or(0) as usize,

@@ -371,8 +371,8 @@ cooling = 0.7
         "the default table must not add a quantity column: {header}"
     );
     assert!(
-        header.ends_with("ess_per_sec"),
-        "default header is the pre-existing one (ends at the ESS diagnostic columns): {header}"
+        header.ends_with("ess_per_sec,run_id"),
+        "default header is the pre-existing one (ends at the ESS diagnostic columns and run_id): {header}"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
