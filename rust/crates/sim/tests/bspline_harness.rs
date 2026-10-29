@@ -610,3 +610,115 @@ fn r4_whitening_is_reproducible() {
     assert_eq!(a.len(), 2, "both forcings of the fixture are smooth");
     assert_eq!(a, b, "two builds of one model give different M");
 }
+
+/// R3 for explicit coefficients, required for merge of the explicit form on
+/// its own: PGAS+NUTS on `prior_only_explicit` (X --> D @ f·X, X0 = 0, one
+/// all-missing stream, six log-link coefficients with independent
+/// normal(−1.5, 1) priors, unbounded on the identity scale as `fit run`
+/// samples them). 4 chains × 4,000 kept sweeps after 1,000 adaptation.
+/// Checked: each coefficient's mean, variance and N(−1.5, 1) law (z-scores
+/// on batch-means MCSE |z| < 5; KS on draws thinned by 10, p > 1e-3); every
+/// pairwise covariance against 0; log f(t) from the runtime's value path at
+/// five times against its law, mean −1.5 and variance Σₖ Bₖ(t)²; and at
+/// most [`MAX_PRIOR_DIVERGENCES`] divergences after adaptation.
+#[test]
+#[ignore = "about a minute in release; run by `make validate-bspline`"]
+fn r3_prior_only_run_draws_the_explicit_prior() {
+    use sim::inference::if2::{EstimatedParam, Transform};
+    use sim::inference::multi_stream_obs::{StreamProjection, StreamSpec, StreamTimes};
+    use sim::inference::particle_filter::Observation;
+    use sim::inference::pgas::{run_pgas, PGASConfig};
+    use sim::inference::pmmh::Prior;
+    use sim::inference::prior::Density;
+    use sim::inference::{normal_cdf, BoundObs, MultiStreamObsModel};
+    use std::sync::Arc;
+
+    let path = format!("{}/../../../tests/fixtures/bspline_inference/ir/prior_only_explicit.ir.json", env!("CARGO_MANIFEST_DIR"));
+    let mut ir_m = ir::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for p in &mut ir_m.parameters {
+        p.value = p.value.with_value(-1.5);
+    }
+    let model = Arc::new(CompiledModel::new(ir_m).unwrap());
+    let names: Vec<String> = (1..=6).map(|i| format!("b{i}")).collect();
+    let inf = f64::INFINITY;
+    let est: Vec<EstimatedParam> = names.iter().map(|n| EstimatedParam {
+        name: n.clone(), index: model.param_index[n.as_str()], initial: -1.5, rw_sd: 0.05,
+        transform: Transform::None, lower: -inf, upper: inf, rw_sd_auto: false, perturb_only_at_t0: false,
+    }).collect();
+    let priors = vec![Prior::Fixed(Density::Normal { mean: -1.5, sd: 1.0 }); 6];
+    let times: Vec<f64> = (1..=60).map(|t| t as f64).collect();
+    let observations: Vec<Observation> = times.iter().map(|&t| Observation { time: t, value: 0.0 }).collect();
+    let specs: Vec<StreamSpec> = model.model.observations.iter().map(|om| {
+        let projection = StreamProjection::from_ir(&om.projection, &model, &om.name).unwrap();
+        StreamSpec {
+            times: StreamTimes::contiguous_for(&projection, 0.0, times.clone()).unwrap(),
+            projection, ir_model: om.clone(), observations: vec![None; times.len()], aux: vec![],
+        }
+    }).collect();
+    let obs_model = MultiStreamObsModel::new(BoundObs::bind(0.0, specs).unwrap().0, model.clone()).unwrap();
+    let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::Btpe, ancestor_sampling: true,
+        n_particles: 4, n_sweeps: 5000, burn_in: 1000, thin: 1, dt: 1.0,
+        use_nuts: true, dense_mass: true, max_tree_depth: 8,
+        trajectory_warmup: 0, csmc_sweeps_per_nuts: 1, step_policy: sim::schedule::StepPolicy::Snap,
+    };
+    let runs: Vec<(Vec<Vec<f64>>, usize)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (1..=4u64).map(|seed| {
+            let (model, est, priors, observations, obs_model, config) = (&model, &est, &priors, &observations, &obs_model, &config);
+            sc.spawn(move || {
+                let mut base = model.default_params.clone();
+                for p in est {
+                    base[p.index] = p.initial;
+                }
+                let r = run_pgas(model, est, priors, &base, config, observations, obs_model, seed, None, None,
+                    "bspline-r3-prior-explicit".into()).expect("prior-only PGAS-NUTS run");
+                eprintln!("chain {seed}: {} divergent ({} after adaptation)", r.n_divergent_total, r.n_divergent_post_burn);
+                (r.sweeps.iter().map(|s| s.params.clone()).collect::<Vec<_>>(), r.n_divergent_post_burn)
+            })
+        }).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let divergent: usize = runs.iter().map(|r| r.1).sum();
+    assert!(divergent <= MAX_PRIOR_DIVERGENCES, "{divergent} divergences after adaptation on the prior alone");
+    let runs: Vec<Vec<Vec<f64>>> = runs.into_iter().map(|r| r.0).collect();
+    assert!(runs.iter().all(|c| c.len() == 4000), "4000 kept sweeps per chain");
+    let ix: Vec<usize> = names.iter().map(|n| model.param_index[n.as_str()]).collect();
+    let pooled: Vec<&Vec<f64>> = runs.iter().flatten().collect();
+    let thinned: Vec<&Vec<f64>> = runs.iter().flat_map(|c| c.iter().step_by(10)).collect();
+    let col = |f: &dyn Fn(&[f64]) -> f64| -> Vec<f64> { pooled.iter().map(|v| f(v)).collect() };
+    let mut worst: f64 = 0.0;
+    let mut score = |label: &str, x: Vec<f64>, exact: f64| {
+        let m = x.iter().sum::<f64>() / x.len() as f64;
+        let z = (m - exact) / mcse(&x);
+        worst = worst.max(z.abs());
+        assert!(z.abs() < 5.0, "{label}: mean {m:.5} vs {exact:.5}, z = {z:.2}");
+    };
+    let mut ks_worst: f64 = 1.0;
+    for (j, &k) in ix.iter().enumerate() {
+        score(&format!("E[b{}]", j + 1), col(&|v| v[k]), -1.5);
+        score(&format!("Var[b{}]", j + 1), col(&|v| (v[k] + 1.5).powi(2)), 1.0);
+        for &l in &ix[j + 1..] {
+            score(&format!("cov(b{}, ·)", j + 1), col(&|v| (v[k] + 1.5) * (v[l] + 1.5)), 0.0);
+        }
+        let mut x: Vec<f64> = thinned.iter().map(|v| v[k]).collect();
+        let p = ks_p(&mut x, |y| normal_cdf(y + 1.5));
+        ks_worst = ks_worst.min(p);
+        assert!(p > 1e-3, "b{} ~ N(-1.5, 1): KS p = {p:e}", j + 1);
+    }
+    // log f(t) through the runtime: mean −1.5, variance Σₖ Bₖ(t)².
+    let knots = Knots::uniform(0.0, 60.0, 3).unwrap();
+    for t in [0.0, 17.0, 30.0, 45.0, 60.0] {
+        let lf = |v: &[f64]| -> f64 {
+            let (int_s, real_s) = model.initial_state_mean(v).unwrap();
+            let ctx = sim::propensity::EvalCtx {
+                model: &model, int_s: &int_s, real_s: &real_s, params: v, t, dt: 1.0,
+                projected: None, aux: None, int_float_override: None, per_eval: None,
+            };
+            eval_resolved(&ResolvedExpr::TimeFunc(0), &ctx).ln()
+        };
+        let var: f64 = (0..6).map(|k| sim::bspline::basis(&knots, 3, t, k).powi(2)).sum();
+        score(&format!("E[log f({t})]"), col(&lf), -1.5);
+        score(&format!("Var[log f({t})]"), col(&|v| (lf(v) + 1.5).powi(2)), var);
+    }
+    eprintln!("explicit prior-only: worst |z| = {worst:.2}, smallest KS p = {ks_worst:.3}, {divergent} divergences");
+}
