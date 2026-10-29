@@ -156,6 +156,13 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   nl-* profiles; pass `--cooling-target-iters N` to keep an old schedule.
 - **`fit_state.toml` no longer writes `[rw_sd]`**, which recorded no step any
   method ran with; old leaves still load.
+- **A `pfilter` point source must name every estimated parameter.** A `from_mle`
+  / `from_params` source that leaves one out is refused (it used to fill it from
+  a bounds-uniform draw). Migration: add the parameter to the source, or give it
+  a `start` and use `starts = "single"`.
+- **`camdl profile --algorithm nl-* --dt X`** is refused when the model declares
+  a different `dt`: an ODE cell integrates at the model's dt, as `fit run` does.
+  Migration: drop `--dt`.
 
 - **A typed constant `let` cannot be set from outside.**
   `let omega : rate =
@@ -783,6 +790,13 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   the highest log-posterior draw (natural-scale prior, no Jacobian)"; the
   "`[estimate].start` is unused here" note no longer claims that under PMMH/MH,
   where the start still sets the pre-run check and the initial proposal scale.
+- **Stricter convergence readings.** A soft-band Â no longer lets a starts
+  source skip its decibans leg or an unavailable Â; a sampler parameter whose
+  stored R̂ is `null`, or whose refusal this build cannot read, makes the R̂
+  verdict unavailable (not converged) instead of vanishing from the max; an nl-*
+  run's chain-agreement leg judges the converged chains, as its decibans leg
+  does, so a max-eval chain no longer fails it on its own (the status count
+  still fails the verdict).
 
 User-visible correctness fixes (selected from ~138):
 
