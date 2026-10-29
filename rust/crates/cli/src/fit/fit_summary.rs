@@ -21,7 +21,6 @@
 use crate::args::{FitSummaryArgs, FitSummaryFormat};
 use crate::chain_index::ChainIndex;
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
-use crate::evidence::NATS_TO_DB;
 use crate::fit::config_diff::ConfigDiff;
 use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
 use crate::fit::gating::AgreementBand;
@@ -1523,48 +1522,47 @@ impl Formatter {
 
         let (gate, threshold_source) = Self::resolve_gate(state);
 
-        // Â leg
-        let max_a = state.tail_chain_agreement.values().cloned()
-            .fold(0.0_f64, f64::max);
-        let max_a_param = state.tail_chain_agreement.iter()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(k, _)| k.clone()).unwrap_or_else(|| "—".into());
-        let a_passes = max_a < gate.a_thresh;
+        // Both legs from the one measurement the source check and `fit
+        // table` read, so the three cannot disagree about this fit.
+        let assessed = crate::fit::gating::assess_if2(state, &gate);
+
+        // Â leg — over the structural parameters; a perturb_only_at_t0 Â is
+        // reported on its own line and not gated.
+        let (max_a, max_a_param) = assessed.worst_structural()
+            .map(|(n, a)| (*a, n.clone()))
+            .unwrap_or((0.0, "—".into()));
+        let a_passes = assessed.a_passes();
         let a_glyph = if a_passes { self.ok("✓") } else { self.err("✗") };
         s.push_str(&format!(
             "    Â leg:           max Â = {:.3} ({})  {}  (threshold {:.2})\n",
             max_a, max_a_param, a_glyph, gate.a_thresh));
+        if !assessed.perturb_only_at_t0.is_empty() {
+            let listed: Vec<String> = assessed.perturb_only_at_t0.iter()
+                .map(|(n, a)| format!("{n} {a:.3}")).collect();
+            s.push_str(&format!(
+                "    {}\n",
+                self.dim(&format!("perturb_only_at_t0, reported not gated: Â {}",
+                    listed.join(", ")))));
+        }
 
         // Decibans leg
-        if state.chain_eval_logliks.len() >= 2
-            && state.chain_eval_ses.len() == state.chain_eval_logliks.len()
-        {
-            let hi = state.chain_eval_logliks.iter().cloned()
-                .fold(f64::NEG_INFINITY, f64::max);
-            let lo = state.chain_eval_logliks.iter().cloned()
-                .fold(f64::INFINITY, f64::min);
-            let delta_db = (hi - lo) * NATS_TO_DB;
-            let sigma_max = state.chain_eval_ses.iter().cloned()
-                .fold(0.0_f64, f64::max);
-            let se_floor_db = 8.0 * sigma_max * NATS_TO_DB;
-            let threshold_db = gate.decibans_thresh.max(se_floor_db);
-            let db_passes = delta_db < threshold_db;
+        if let Some(leg) = assessed.spread {
+            let db_passes = leg.passes();
             let db_glyph = if db_passes { self.ok("✓") } else { self.err("✗") };
             s.push_str(&format!(
                 "    decibans leg:    Δ = {:.1} dB / threshold {:.1} dB  {}  (σ_max={:.2})\n",
-                delta_db, threshold_db, db_glyph, sigma_max));
+                leg.delta_db, leg.threshold_db, db_glyph, leg.sigma_max));
 
-            let overall_pass = a_passes && db_passes;
-            let overall = if overall_pass {
-                self.ok("✓ PASS")
-            } else {
-                self.err("✗ FAIL")
-            };
-            s.push_str(&format!("    overall:         {}\n", overall));
         } else {
             s.push_str(&format!("    decibans leg:    {} (loglik-eval data not present)\n",
                 self.dim("—")));
         }
+        let overall = if assessed.passes() {
+            self.ok("✓ PASS")
+        } else {
+            self.err("✗ FAIL")
+        };
+        s.push_str(&format!("    overall:         {}\n", overall));
 
         match threshold_source {
             GateThresholdSource::Resolved => {}
@@ -3029,31 +3027,17 @@ fn if2_stage_report(
         Some(g) => (g.clone(), "resolved".to_string()),
         None    => (GateConfig::default(), "default_fallback".to_string()),
     };
-    let max_a = state.tail_chain_agreement.values().cloned()
-        .fold(0.0_f64, f64::max);
-    let max_a_param = state.tail_chain_agreement.iter()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(k, _)| k.clone());
-    let a_passes = max_a < gate_cfg.a_thresh;
-
-    let (delta_db, threshold_db, sigma_max, db_passes) =
-        if state.chain_eval_logliks.len() >= 2
-            && state.chain_eval_ses.len() == state.chain_eval_logliks.len()
-        {
-            let hi = state.chain_eval_logliks.iter().cloned()
-                .fold(f64::NEG_INFINITY, f64::max);
-            let lo = state.chain_eval_logliks.iter().cloned()
-                .fold(f64::INFINITY, f64::min);
-            let dd = (hi - lo) * NATS_TO_DB;
-            let sm = state.chain_eval_ses.iter().cloned()
-                .fold(0.0_f64, f64::max);
-            let se_floor_db = 8.0 * sm * NATS_TO_DB;
-            let td = gate_cfg.decibans_thresh.max(se_floor_db);
-            (Some(dd), Some(td), Some(sm), Some(dd < td))
-        } else {
-            (None, None, None, None)
-        };
-    let overall_pass = db_passes.map(|p| p && a_passes);
+    // The one IF2 measurement the text block, `fit table` and the source
+    // check also read (`gating::assess_if2`).
+    let assessed = crate::fit::gating::assess_if2(state, &gate_cfg);
+    let max_a = assessed.worst_structural().map(|(_, a)| *a).unwrap_or(0.0);
+    let max_a_param = assessed.worst_structural().map(|(n, _)| n.clone());
+    let a_passes = assessed.a_passes();
+    let delta_db = assessed.spread.map(|leg| leg.delta_db);
+    let threshold_db = assessed.spread.map(|leg| leg.threshold_db);
+    let sigma_max = assessed.spread.map(|leg| leg.sigma_max);
+    let db_passes = assessed.spread.map(|leg| leg.passes());
+    let overall_pass = Some(assessed.passes());
 
     let gate = GateReport {
         max_a_hat: max_a,
@@ -4075,6 +4059,33 @@ mod tests {
         assert_eq!(selected, vec![ChainIndex(5)], "the best loglik (-3804.9) is chain 5, not row 3");
     }
 
+    /// The structured report (`--format json|md|latex`) carries the same IF2
+    /// verdict the text block and `fit table` do: a t0-only Â failure passes
+    /// the Â leg, and a leaf without clean-eval data still gets an overall
+    /// verdict, judged on Â alone, as `fit table`'s `gate_verdict` is.
+    #[test]
+    fn structured_gate_report_is_the_same_verdict_as_the_table() {
+        let mut state = synthetic_fit_state();
+        state.tail_chain_agreement =
+            [("R0".to_string(), 1.001), ("sigma".to_string(), 1.002), ("I0".to_string(), 16.5)]
+                .into_iter().collect();
+        let report = if2_stage_report(
+            "scout", "/nonexistent", &state, None, None, None, &CalendarContext::default());
+        let gate = report.gate.expect("an IF2 report has a gate");
+        assert!(gate.a_passes, "the t0 Â is reported, not gated: {gate:?}");
+        assert_eq!(gate.max_a_param.as_deref(), Some("sigma"));
+        assert_eq!(gate.overall_pass, Some(true));
+
+        state.chain_eval_logliks.clear();
+        state.chain_eval_ses.clear();
+        let report = if2_stage_report(
+            "scout", "/nonexistent", &state, None, None, None, &CalendarContext::default());
+        let gate = report.gate.expect("an IF2 report has a gate");
+        assert_eq!(gate.db_passes, None, "no clean-eval data, no decibans leg");
+        assert_eq!(gate.overall_pass, Some(true),
+            "judged on Â alone, as fit table's gate_verdict is");
+    }
+
     /// gh#981, the other half: without the ids the structured table is
     /// omitted, as the text table is, rather than labelled by position.
     #[test]
@@ -4101,6 +4112,21 @@ mod tests {
             "expected max Â call-out; got: {}", block);
         assert!(block.contains("decibans leg:"));
         assert!(block.contains("overall:"));
+    }
+
+    /// The gate block reads the same assessment the source check does: a fit
+    /// whose only Â failure is a `perturb_only_at_t0` parameter passes the Â
+    /// leg, and the t0 Â is still printed, marked as not gated.
+    #[test]
+    fn gate_block_reports_but_does_not_gate_a_t0_parameter() {
+        let mut state = synthetic_fit_state();
+        state.tail_chain_agreement =
+            [("R0".to_string(), 1.001), ("sigma".to_string(), 1.002), ("I0".to_string(), 16.5)]
+                .into_iter().collect();
+        let block = plain_formatter().gate_verdict_block(&state);
+        assert!(block.contains("max Â = 1.002 (sigma)"), "{block}");
+        assert!(block.contains("I0 16.500") && block.contains("not gated"), "{block}");
+        assert!(block.contains("PASS"), "{block}");
     }
 
     #[test]
