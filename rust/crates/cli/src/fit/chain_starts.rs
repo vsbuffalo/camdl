@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use sim::inference::prior::{Density, Prior};
-use sim::inference::types::{EstimatedParam, Transform};
+use sim::inference::types::EstimatedParam;
 
 use crate::chain_index::ChainIndex;
 use sim::rng::StatefulRng;
@@ -656,8 +656,8 @@ fn refuse_spread_without_finite_box(
 ) -> Result<(), InitError> {
     let params: Vec<String> = base_specs
         .iter()
-        .filter(|s| !(s.lower.is_finite() && s.upper.is_finite()))
-        .map(|s| format!("`{}` [{}, {}]", s.name, s.lower, s.upper))
+        .filter(|s| !(s.bounds().0.is_finite() && s.bounds().1.is_finite()))
+        .map(|s| format!("`{}` [{}, {}]", s.name, s.bounds().0, s.bounds().1))
         .collect();
     if params.is_empty() {
         Ok(())
@@ -820,19 +820,11 @@ fn draw_from_prior(
 /// back to a uniform draw within the search box.
 const MAX_PRIOR_BOX_REDRAWS: usize = 10_000;
 
-/// The box each estimated parameter's transform keeps it in: `[lo, hi]` of a
-/// `Log` or `Logit` transform. A `Transform::None` parameter has no box
-/// enforced and is absent.
+/// The domain each estimated parameter's transform keeps it in. Every
+/// domain is kept, so every parameter is present; an unbounded `real` has
+/// the whole line.
 fn kept_boxes(base_specs: &[EstimatedParam]) -> HashMap<&str, (f64, f64)> {
-    base_specs
-        .iter()
-        .filter_map(|s| match s.transform {
-            Transform::Log { lo, hi } | Transform::Logit { lo, hi } => {
-                Some((s.name.as_str(), (lo, hi)))
-            }
-            Transform::None => None,
-        })
-        .collect()
+    base_specs.iter().map(|s| (s.name.as_str(), s.bounds())).collect()
 }
 
 /// Natural-scale prior sample. Implements the basics for each
@@ -1450,7 +1442,7 @@ mod tests {
     }
 
     /// `EstimatedParam` specs for the resolved view's estimate set, with the
-    /// bounds the model declares and an identity transform.
+    /// bounds the model declares, as the (non-log) map onto them.
     fn specs_for(resolved: &ResolvedParameters) -> Vec<EstimatedParam> {
         resolved.estimate_set.iter().enumerate().map(|(i, name)| {
             let p = resolved.model.parameters.iter().find(|p| &p.name == name).unwrap();
@@ -1461,9 +1453,7 @@ mod tests {
                 index: i,
                 initial: p.value.resolved_value().unwrap(),
                 rw_sd: 0.1,
-                transform: Transform::None,
-                lower,
-                upper,
+                transform: Transform::for_domain(lower, upper, false).expect("domain"),
                 rw_sd_auto: false,
                 perturb_only_at_t0: false,
             }
@@ -1897,11 +1887,10 @@ mod tests {
             None);
         p.param_kind = Some(kind);
         let (lower, upper) = crate::fit::runner::resolve_search_box("shift", None, &p).unwrap();
-        let transform = crate::fit::runner::derive_transform_with_bounds(kind, (lower, upper));
+        let transform = crate::fit::runner::derive_transform_with_bounds(kind, (lower, upper)).unwrap();
         let resolved = mk_resolved(vec![p], &["shift"]);
         let spec = EstimatedParam {
-            name: "shift".into(), index: 0, initial: 0.5, rw_sd: 0.1, transform,
-            lower, upper, rw_sd_auto: false, perturb_only_at_t0: false,
+            name: "shift".into(), index: 0, initial: 0.5, rw_sd: 0.1, transform, rw_sd_auto: false, perturb_only_at_t0: false,
         };
         (resolved, vec![spec])
     }
@@ -1928,7 +1917,7 @@ mod tests {
     #[test]
     fn a_box_spreading_rule_refuses_an_unbounded_rate_parameter() {
         let (resolved, base_specs) = unbounded(ir::parameter::ParamKind::Rate);
-        assert!(matches!(base_specs[0].transform, Transform::Log { .. }));
+        assert!(matches!(base_specs[0].transform, Transform::LowerBounded { .. }));
         let priors = priors_for(&resolved);
         let ctx = StartContext { resolved: &resolved, base_specs: &base_specs, priors: &priors };
         for rule in [Spread::Uniform, Spread::Lhs, Spread::UniformUnconstrained] {
@@ -2253,7 +2242,7 @@ mod tests {
         let base = vec![
             EstimatedParam {
                 name: "beta".into(), index: 0, initial: 0.3, rw_sd: 0.1,
-                transform: Transform::None, lower: 0.0, upper: 1.0,
+                transform: Transform::Identity,
                 rw_sd_auto: false, perturb_only_at_t0: false,
             },
         ];
@@ -2293,7 +2282,7 @@ mod tests {
         let base = vec![
             EstimatedParam {
                 name: "beta".into(), index: 0, initial: 0.3, rw_sd: 0.1,
-                transform: Transform::None, lower: 0.0, upper: 1.0,
+                transform: Transform::Identity,
                 rw_sd_auto: false, perturb_only_at_t0: false,
             },
         ];

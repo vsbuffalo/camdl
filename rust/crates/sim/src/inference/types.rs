@@ -13,36 +13,268 @@ use super::traits::Resettable;
 
 // ── Parameter transform ───────────────────────────────────────────────────────
 
-/// The unconstrained-space transform applied to an estimated parameter.
+/// The effective domain of an estimated parameter, as the map θ = g(z) from
+/// an unconstrained coordinate z onto it.
 ///
-/// Matches Stan's lower/upper bounded parameter conventions. Used by IF2,
-/// PGAS, and PMMH for all scale-management operations (to/from transformed,
-/// Jacobian, gradient chain rule).
-#[derive(Clone, Debug)]
+/// Each variant carries exactly the finite ends it keeps, and g maps the
+/// whole real line onto the domain, so no map clamps and no target has a
+/// wall: a finite end is z = ±∞. The first four are the constraint
+/// transforms of the Stan Reference Manual (v2.40, "Constraint Transforms":
+/// "Lower bounded scalar", "Upper bounded scalar", "Lower and upper bounded
+/// scalar"); `LogInterval` is the interval map applied to ln θ.
+///
+/// Built by [`Transform::for_domain`], which chooses the map from which ends
+/// are finite and, for a box with 0 < lo, from whether the kind is positive
+/// (support-keyed transforms proposal, §4.1 and D11).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Transform {
-    /// Log transform with bounds clamping on the inverse.
-    /// Correct for rates, positive quantities, counts.
-    /// `from_transformed` saturates `z.exp()` at `[lo, hi]` — out-of-bounds
-    /// particles get bad log-likelihood and are resampled away.
-    ///
-    /// The declared bounds are a hard search box (`docs/camdl-inference-spec.md`
-    /// §3.2), so the target they induce is the posterior **truncated** to
-    /// `θ ∈ [lo, hi]`: inside, `θ = exp(z)` with log-Jacobian `z`; outside,
-    /// `dθ/dz = 0` and the density is zero. [`log_saturated`] is the single
-    /// definition of "outside", used by all three derivative accessors.
-    Log { lo: f64, hi: f64 },
-    /// Scaled logit mapping `[lo, hi]` to `(−∞, +∞)`.
-    /// Correct for probabilities. Bounds enforced by the logistic function
-    /// (output always in `(0, 1)`). For narrow bounds like `[0.01, 0.10]`
-    /// the logit-scaled position can be extreme (|z| > 2), compressing the
-    /// effective perturbation range; the preflight diagnostic warns about this.
-    Logit { lo: f64, hi: f64 },
-    /// No transform. For unconstrained real parameters.
-    None,
+    /// (−∞, ∞): θ = z.
+    Identity,
+    /// [lo, ∞): θ = lo + eᶻ.
+    LowerBounded { lo: f64 },
+    /// (−∞, hi]: θ = hi − eᶻ.
+    UpperBounded { hi: f64 },
+    /// [lo, hi]: θ = lo + (hi − lo)·σ(z).
+    Interval { lo: f64, hi: f64 },
+    /// [lo, hi] with 0 < lo, for a positive kind: ln θ = ln lo + ln(hi/lo)·σ(z).
+    LogInterval { lo: f64, hi: f64 },
+}
+
+/// A pair of ends that is not an interval [`Transform::for_domain`] can map.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DomainError {
+    /// NaN, lo ≥ hi, lo = +∞ or hi = −∞.
+    NotAnInterval { lo: f64, hi: f64 },
+}
+
+impl std::fmt::Display for DomainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DomainError::NotAnInterval { lo, hi } => write!(
+                f, "[{lo}, {hi}] is not an interval with lo < hi, so no transform maps onto it"),
+        }
+    }
+}
+
+/// The fraction of an interval's width a start exactly on one of its ends is
+/// moved inward by: such a start has no finite preimage (z = ±∞), so it is
+/// placed at σ(z) = ε, z = ±ln(1/ε − 1) ≈ ±23.03. The same ε is the
+/// lower-bounded map's absolute inward move, θ = lo + ε, z = ln ε.
+pub const EDGE_START_EPS: f64 = PROB_FRACTION_EPS;
+
+/// The logistic function σ(z) = 1/(1 + e⁻ᶻ), on the branch that does not
+/// overflow.
+#[inline]
+pub fn sigmoid(z: f64) -> f64 {
+    if z <= 0.0 { let e = z.exp(); e / (1.0 + e) } else { 1.0 / (1.0 + (-z).exp()) }
+}
+
+/// softplus(x) = ln(1 + eˣ), evaluated as max(x, 0) + ln1p(e^(−|x|)), which
+/// neither overflows nor loses precision.
+#[inline]
+pub fn softplus(x: f64) -> f64 {
+    x.max(0.0) + (-x.abs()).exp().ln_1p()
+}
+
+/// ln(eᵃ + eᵇ) without overflow; `a = −∞` gives `b`.
+#[inline]
+fn logaddexp(a: f64, b: f64) -> f64 {
+    if a == f64::NEG_INFINITY { return b; }
+    if b == f64::NEG_INFINITY { return a; }
+    let m = a.max(b);
+    m + (-(a - b).abs()).exp().ln_1p()
+}
+
+impl Transform {
+    /// The map for the domain with these ends; an infinite end is open.
+    /// `positive_kind` is true for `rate`, `positive`, `count`, `duration`.
+    pub fn for_domain(lo: f64, hi: f64, positive_kind: bool) -> Result<Self, DomainError> {
+        if lo.is_nan() || hi.is_nan() || lo >= hi || lo == f64::INFINITY || hi == f64::NEG_INFINITY {
+            return Err(DomainError::NotAnInterval { lo, hi });
+        }
+        Ok(match (lo.is_finite(), hi.is_finite()) {
+            (false, false) => Transform::Identity,
+            (true, false) => Transform::LowerBounded { lo },
+            (false, true) => Transform::UpperBounded { hi },
+            (true, true) if positive_kind && lo > 0.0 => Transform::LogInterval { lo, hi },
+            (true, true) => Transform::Interval { lo, hi },
+        })
+    }
+
+    /// The domain's ends, (−∞, ∞) for `Identity`.
+    pub fn bounds(&self) -> (f64, f64) {
+        match *self {
+            Transform::Identity => (f64::NEG_INFINITY, f64::INFINITY),
+            Transform::LowerBounded { lo } => (lo, f64::INFINITY),
+            Transform::UpperBounded { hi } => (f64::NEG_INFINITY, hi),
+            Transform::Interval { lo, hi } | Transform::LogInterval { lo, hi } => (lo, hi),
+        }
+    }
+
+    /// Whether start draws and Latin-hypercube points are log-spaced.
+    pub fn log_spaced(&self) -> bool {
+        matches!(self, Transform::LogInterval { .. })
+    }
+
+    /// The map's short name, as the partition record and the launch table
+    /// print it.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Transform::Identity => "identity",
+            Transform::LowerBounded { .. } => "lower_bounded",
+            Transform::UpperBounded { .. } => "upper_bounded",
+            Transform::Interval { .. } => "interval",
+            Transform::LogInterval { .. } => "log_interval",
+        }
+    }
+
+    /// θ = g(z). Total: `±∞` maps to the corresponding end. The interval maps
+    /// are evaluated from the nearer end, so the distance to it keeps full
+    /// relative precision.
+    pub fn inverse(&self, z: f64) -> f64 {
+        match *self {
+            Transform::Identity => z,
+            Transform::LowerBounded { lo } => lo + z.exp(),
+            Transform::UpperBounded { hi } => hi - z.exp(),
+            Transform::Interval { lo, hi } => {
+                let w = hi - lo;
+                if z <= 0.0 { lo + w * sigmoid(z) } else { hi - w * sigmoid(-z) }
+            }
+            Transform::LogInterval { lo, hi } => {
+                let l = (hi / lo).ln();
+                if z <= 0.0 { lo * (l * sigmoid(z)).exp() } else { hi * (-l * sigmoid(-z)).exp() }
+            }
+        }
+    }
+
+    /// z = g⁻¹(θ). A θ exactly on a finite end has no finite preimage and is
+    /// moved inward ([`EDGE_START_EPS`]); a θ outside the domain never reaches
+    /// here (it is refused when values are resolved), which a debug build
+    /// asserts, and is treated as on the nearer end.
+    pub fn forward(&self, theta: f64) -> f64 {
+        let (lo, hi) = self.bounds();
+        debug_assert!(!(theta < lo || theta > hi),
+            "forward map evaluated at {theta}, outside the domain [{lo}, {hi}]");
+        let z_edge = (1.0 / EDGE_START_EPS - 1.0).ln();
+        match *self {
+            Transform::Identity => theta,
+            Transform::LowerBounded { lo } => {
+                let d = theta - lo;
+                if d > 0.0 { d.ln() } else { EDGE_START_EPS.ln() }
+            }
+            Transform::UpperBounded { hi } => {
+                let d = hi - theta;
+                if d > 0.0 { d.ln() } else { EDGE_START_EPS.ln() }
+            }
+            Transform::Interval { lo, hi } => {
+                if theta <= lo { return -z_edge; }
+                if theta >= hi { return z_edge; }
+                (theta - lo).ln() - (hi - theta).ln()
+            }
+            Transform::LogInterval { lo, hi } => {
+                if theta <= lo { return -z_edge; }
+                if theta >= hi { return z_edge; }
+                // ln θ − ln lo and ln hi − ln θ, each from a difference that
+                // keeps its precision near its own end.
+                ((theta - lo) / lo).ln_1p().ln() - ((hi - theta) / theta).ln_1p().ln()
+            }
+        }
+    }
+
+    /// Whether `theta` lies on a finite end of the domain, where
+    /// [`Transform::forward`] moves it inward.
+    pub fn on_an_end(&self, theta: f64) -> bool {
+        let (lo, hi) = self.bounds();
+        (lo.is_finite() && theta <= lo) || (hi.is_finite() && theta >= hi)
+    }
+
+    /// ln |g′(z)|, finite for every finite z.
+    pub fn log_jacobian(&self, z: f64) -> f64 {
+        match *self {
+            Transform::Identity => 0.0,
+            Transform::LowerBounded { .. } | Transform::UpperBounded { .. } => z,
+            Transform::Interval { lo, hi } => (hi - lo).ln() - softplus(-z) - softplus(z),
+            Transform::LogInterval { lo, hi } => {
+                let l = (hi / lo).ln();
+                lo.ln() + l * sigmoid(z) + l.ln() - softplus(-z) - softplus(z)
+            }
+        }
+    }
+
+    /// d/dz ln |g′(z)|.
+    pub fn jacobian_grad(&self, z: f64) -> f64 {
+        match *self {
+            Transform::Identity => 0.0,
+            Transform::LowerBounded { .. } | Transform::UpperBounded { .. } => 1.0,
+            Transform::Interval { .. } => -(z / 2.0).tanh(),
+            Transform::LogInterval { lo, hi } => {
+                let l = (hi / lo).ln();
+                l * sigmoid(z) * sigmoid(-z) - (z / 2.0).tanh()
+            }
+        }
+    }
+
+    /// The signed g′(z) = dθ/dz: −eᶻ for `UpperBounded`. Every caller
+    /// multiplies by it in a chain rule; none takes its logarithm.
+    pub fn deriv(&self, z: f64) -> f64 {
+        match *self {
+            Transform::Identity => 1.0,
+            Transform::LowerBounded { .. } => z.exp(),
+            Transform::UpperBounded { .. } => -z.exp(),
+            Transform::Interval { .. } | Transform::LogInterval { .. } => self.log_jacobian(z).exp(),
+        }
+    }
+
+    /// θ and the logarithms a prior needs, computed from z so that they stay
+    /// exact where θ rounds to an end (proposal §6).
+    pub fn prior_point(&self, z: f64) -> PriorPoint {
+        let theta = self.inverse(z);
+        let (lo, hi) = self.bounds();
+        let log_jac = self.log_jacobian(z);
+        // ln(θ − lo) and ln(hi − θ), exact in z where the map provides them.
+        let ln_above_lo = match *self {
+            Transform::LowerBounded { .. } => z,
+            Transform::Interval { lo, hi } => (hi - lo).ln() - softplus(-z),
+            Transform::LogInterval { lo, hi } => {
+                lo.ln() + ((hi / lo).ln() * sigmoid(z)).exp_m1().ln()
+            }
+            Transform::Identity | Transform::UpperBounded { .. } => f64::NAN,
+        };
+        let ln_below_hi = match *self {
+            Transform::UpperBounded { .. } => z,
+            Transform::Interval { lo, hi } => (hi - lo).ln() - softplus(z),
+            Transform::LogInterval { lo, hi } => {
+                hi.ln() + (-(-(hi / lo).ln() * sigmoid(-z)).exp_m1()).ln()
+            }
+            Transform::Identity | Transform::LowerBounded { .. } => f64::NAN,
+        };
+        let (ln_theta, d_ln_theta_dz) = match *self {
+            Transform::LogInterval { lo, hi } => {
+                let l = (hi / lo).ln();
+                (lo.ln() + l * sigmoid(z), l * sigmoid(z) * sigmoid(-z))
+            }
+            _ if lo >= 0.0 => {
+                let ln_theta = if lo == 0.0 { ln_above_lo } else { logaddexp(lo.ln(), ln_above_lo) };
+                (ln_theta, (log_jac - ln_theta).exp())
+            }
+            _ => (f64::NAN, f64::NAN),
+        };
+        let (ln_one_minus, d_ln_one_minus_dz) = if hi <= 1.0 {
+            let l1m = if hi == 1.0 { ln_below_hi } else { logaddexp((1.0 - hi).ln(), ln_below_hi) };
+            // d ln(1 − θ)/dz = −g′(z)/(1 − θ); g′ > 0 on every map with a
+            // finite upper end except `UpperBounded`, whose g′ is −eᶻ.
+            let sign = if matches!(self, Transform::UpperBounded { .. }) { 1.0 } else { -1.0 };
+            (l1m, sign * (log_jac - l1m).exp())
+        } else {
+            (f64::NAN, f64::NAN)
+        };
+        PriorPoint { theta, ln_theta, ln_one_minus, d_ln_theta_dz, d_ln_one_minus_dz }
+    }
 }
 
 /// One estimated parameter: its name, position in the full model parameter
-/// vector, declared transform and bounds, and per-algorithm adaptation state.
+/// vector, effective domain (as its transform) and per-algorithm adaptation
+/// state.
 ///
 /// Shared by IF2, PGAS, and PMMH. Constructed by the CLI from the fit config
 /// and passed into algorithm entry points.
@@ -54,15 +286,13 @@ pub struct EstimatedParam {
     pub index: usize,
     /// Starting value for IF2 (or the current value on resume).
     pub initial: f64,
-    /// Random walk standard deviation on the *transformed* scale.
+    /// Random walk standard deviation, natural scale, converted to z at each
+    /// particle's current value by [`EstimatedParam::transformed_sd`].
     /// Shrinks by `cooling_fraction` each IF2 iteration.
     pub rw_sd: f64,
-    /// Scale transform applied before perturbation / MH proposals.
+    /// The effective domain, as the map onto it; the bounds are
+    /// [`EstimatedParam::bounds`].
     pub transform: Transform,
-    /// Natural-scale lower bound (used for display and random-start sampling).
-    pub lower: f64,
-    /// Natural-scale upper bound (used for display and random-start sampling).
-    pub upper: f64,
     /// Whether `rw_sd` was auto-computed from the data (for preflight reporting).
     pub rw_sd_auto: bool,
     /// If true, this parameter is perturbed only at t=0, not at every
@@ -74,158 +304,47 @@ pub struct EstimatedParam {
     pub perturb_only_at_t0: bool,
 }
 
-/// Is `z` outside the `Log` transform's declared support `[lo, hi]`?
-///
-/// The single definition of "the inverse map is saturated here", shared by
-/// [`EstimatedParam::log_jacobian`], [`EstimatedParam::jacobian_grad`] and
-/// [`EstimatedParam::transform_deriv`] so a derivative can never describe a
-/// different map than the one `from_transformed` implements (gh#374: all three
-/// returned the derivatives of the *unclamped* `exp`, so a sampler pressed
-/// against a bound got a spuriously non-zero gradient instead of a flat one —
-/// and, in the MH ratio, a log-Jacobian `z` that grew without bound while the
-/// likelihood stayed pinned, rewarding ever-larger `z`).
-///
-/// The test is in **z-space** (`z ∉ [ln lo, ln hi]`) rather than θ-space
-/// (`exp(z) ∉ [lo, hi]`) so that it agrees with `to_transformed`, whose log
-/// branch always returns `ln(x.clamp(lo, hi))`. `exp(ln(hi))` rounds one ulp
-/// *above* `hi` for many ordinary bounds (10, 100, 0.1, 1e-3, 3, …), so a
-/// θ-space test would declare `z = ln(hi)` out-of-support and hand a chain
-/// initialised at its upper bound a `−∞` posterior. The two tests differ only
-/// within one ulp of the bound.
-///
-/// Non-finite and degenerate bounds fall out correctly, matching the sides on
-/// which `clamp` can actually fire: `hi = +∞ → ln hi = +∞` (never saturated
-/// above), `lo = 0 → ln lo = −∞` (never saturated below, and `exp(z) > 0`
-/// always), and `lo < 0 → ln lo = NaN`, whose comparison is `false` — again
-/// never saturated below, which is right because `exp(z) > 0 > lo`.
-fn log_saturated(z: f64, lo: f64, hi: f64) -> bool {
-    z < lo.ln() || z > hi.ln()
-}
-
 impl EstimatedParam {
+    /// The effective domain's ends.
+    pub fn bounds(&self) -> (f64, f64) {
+        self.transform.bounds()
+    }
+
     /// Map a natural-scale value to the unconstrained (z) scale.
     pub fn to_transformed(&self, x: f64) -> f64 {
-        match &self.transform {
-            Transform::Log { lo, hi } => x.clamp(*lo, *hi).max(LOG_PROB_FLOOR).ln(),
-            Transform::Logit { lo, hi } => {
-                let p = ((x - lo) / (hi - lo)).clamp(PROB_FRACTION_EPS, 1.0 - PROB_FRACTION_EPS);
-                (p / (1.0 - p)).ln()
-            }
-            Transform::None => x,
-        }
+        self.transform.forward(x)
     }
 
     /// Map an unconstrained value back to the natural scale.
     pub fn from_transformed(&self, z: f64) -> f64 {
-        match &self.transform {
-            Transform::Log { lo, hi } => {
-                // Clamp to declared bounds — prevents NaN/panic downstream.
-                // Out-of-bounds particles get bad loglik and are resampled away.
-                z.exp().clamp(*lo, *hi)
-            }
-            Transform::Logit { lo, hi } => {
-                let p = 1.0 / (1.0 + (-z).exp());
-                lo + p * (hi - lo)
-                // Bounds enforced by construction — no clamp needed.
-            }
-            Transform::None => z,
-        }
+        self.transform.inverse(z)
     }
 
-    /// log |dθ/dz| for the transform θ = f(z).
-    /// Needed for the MH acceptance ratio when proposing on the transformed scale.
-    ///
-    /// Log-transform:   θ = exp(z)              → log-Jacobian = z
-    /// Logit-transform: θ = lo + (hi−lo)·σ(z)   → log-Jacobian = log((hi−lo)·p·(1−p))
-    /// No transform:    Jacobian = 1             → log-Jacobian = 0
-    ///
-    /// Where the `Log` inverse saturates at a declared bound the map is flat,
-    /// so `|dθ/dz| = 0` and this is `−∞`: the truncated target has no density
-    /// outside its support. Every consumer treats that as a clean rejection —
-    /// `mh_accept` (`pmmh.rs`) rejects a move *to* `−∞` and still accepts the
-    /// `+∞` escape *from* one, and NUTS scores a non-finite energy as divergent
-    /// and refuses to commit a non-finite proposal (`nuts.rs`).
+    /// log |dθ/dz| for the transform θ = g(z): the Jacobian term a sampler
+    /// moving in z adds to its log target. Finite for every finite z.
     pub fn log_jacobian(&self, z: f64) -> f64 {
-        match &self.transform {
-            Transform::Log { lo, hi } if log_saturated(z, *lo, *hi) => f64::NEG_INFINITY,
-            Transform::Log { .. } => z,
-            Transform::Logit { lo, hi } => {
-                let p = 1.0 / (1.0 + (-z).exp());
-                ((hi - lo) * p * (1.0 - p)).ln()
-            }
-            Transform::None => 0.0,
-        }
+        self.transform.log_jacobian(z)
     }
 
     /// d/dz log|dθ/dz| — derivative of the log-Jacobian w.r.t. z.
-    ///
-    /// Zero, not the unclamped `+1`, where the `Log` inverse saturates: the
-    /// log-Jacobian is constant (`−∞`) there, so it contributes no gradient.
-    /// Keeping it finite is what lets the leapfrog integrator carry a usable
-    /// momentum into the divergence check instead of a poisoned one.
     pub fn jacobian_grad(&self, z: f64) -> f64 {
-        match &self.transform {
-            Transform::Log { lo, hi } if log_saturated(z, *lo, *hi) => 0.0,
-            Transform::Log { .. } => 1.0,
-            Transform::Logit { .. } => {
-                let p = 1.0 / (1.0 + (-z).exp());
-                1.0 - 2.0 * p
-            }
-            Transform::None => 0.0,
-        }
+        self.transform.jacobian_grad(z)
     }
 
-    /// dθ/dz — derivative of the natural-scale value with respect to z.
-    /// Used in the chain rule: d(f(θ))/dz = d(f)/dθ × dθ/dz.
-    ///
-    /// Zero where the `Log` inverse saturates: θ is pinned at the bound, so
-    /// moving z there does not move θ and the data/prior term contributes
-    /// nothing to the z-gradient.
+    /// dθ/dz, signed — derivative of the natural-scale value with respect to
+    /// z. Used in the chain rule: d(f(θ))/dz = d(f)/dθ × dθ/dz.
     pub fn transform_deriv(&self, z: f64) -> f64 {
-        match &self.transform {
-            Transform::Log { lo, hi } if log_saturated(z, *lo, *hi) => 0.0,
-            Transform::Log { .. } => z.exp(),
-            Transform::Logit { lo, hi } => {
-                let p = 1.0 / (1.0 + (-z).exp());
-                (hi - lo) * p * (1.0 - p)
-            }
-            Transform::None => 1.0,
-        }
+        self.transform.deriv(z)
     }
 
     /// θ and the logarithms a prior needs ([`PriorPoint`]) at the coordinate z.
-    ///
-    /// Under `Log`, ln θ is z itself and d ln θ/dz is 1, so the `log_normal`
-    /// density read from it is the one computed from z before this point
-    /// existed. Elsewhere the logarithms are taken from θ.
     pub fn prior_point(&self, z: f64) -> PriorPoint {
-        let theta = self.from_transformed(z);
-        let dtheta_dz = self.transform_deriv(z);
-        let (ln_theta, d_ln_theta_dz) = match &self.transform {
-            Transform::Log { .. } => (z, 1.0),
-            Transform::Logit { .. } | Transform::None => (theta.ln(), dtheta_dz / theta),
-        };
-        PriorPoint {
-            theta,
-            ln_theta,
-            ln_one_minus: (1.0 - theta).ln(),
-            d_ln_theta_dz,
-            d_ln_one_minus_dz: -dtheta_dz / (1.0 - theta),
-        }
+        self.transform.prior_point(z)
     }
 
-    /// Delta method: convert a natural-scale `rw_sd` to the transformed scale.
-    /// Matches pomp's convention: the user specifies `rw.sd` on the natural scale.
+    /// Delta method: convert a natural-scale `rw_sd` to z at `current_value`.
     pub fn transformed_sd(&self, natural_sd: f64, current_value: f64) -> f64 {
-        match &self.transform {
-            Transform::Log { .. } => natural_sd / current_value.max(LOG_PROB_FLOOR),
-            Transform::Logit { lo, hi } => {
-                let range = hi - lo;
-                let p = ((current_value - lo) / range).clamp(PROB_FRACTION_EPS, 1.0 - PROB_FRACTION_EPS);
-                natural_sd / (range * p * (1.0 - p))
-            }
-            Transform::None => natural_sd,
-        }
+        natural_sd / self.transform_deriv(self.to_transformed(current_value)).abs()
     }
 }
 
@@ -243,10 +362,11 @@ impl EstimatedParam {
 /// produce −∞ and defeat the purpose.
 pub const LOG_PROB_FLOOR: f64 = 1e-300;
 
-/// Interior clamp keeping an IVP / logit-transform probability strictly inside
-/// (0, 1), so the transform and the Binomial(N, p) draw stay finite. Shared by
-/// the logit transform here and the PGAS IVP density/gradient (`pgas.rs`,
-/// `pgas_grad.rs`) — value and gradient MUST use the same value.
+/// Interior clamp keeping an IVP probability strictly inside (0, 1), so the
+/// Binomial(N, p) draw stays finite; shared by the PGAS IVP density and
+/// gradient (`pgas.rs`, `pgas_grad.rs`), which must use the same value. The
+/// same ε is [`EDGE_START_EPS`], the interval maps' inward move of a start on
+/// an end.
 pub const PROB_FRACTION_EPS: f64 = 1e-10;
 
 /// Reserved stream index for the per-algorithm resampling RNG.
@@ -604,197 +724,219 @@ mod tests {
         assert!(sharp > mild);
     }
 
-    // ── Log-transform saturation (gh#374) ────────────────────────────────
-    //
-    // `from_transformed` saturates θ at the declared bound. The three
-    // derivative accessors must describe THAT map, not the unclamped `exp`.
+    // ── Support-keyed transforms (proposal §5, §12.1) ────────────────────
 
-    fn log_param(lo: f64, hi: f64) -> EstimatedParam {
-        EstimatedParam {
-            name: "beta".into(),
-            index: 0,
-            initial: (lo * hi).sqrt(),
-            rw_sd: 0.1,
-            transform: Transform::Log { lo, hi },
-            lower: lo,
-            upper: hi,
-            rw_sd_auto: false,
-            perturb_only_at_t0: false,
+    /// Every map on every domain of §12.1: [0, ∞), [0, 1], [0, 2],
+    /// [1e-6, 2.5], [1, 100], [−120, 120], [−120, −60], plus the hand-built
+    /// `LowerBounded { 1e-6 }` and `UpperBounded { 30 }`, and `Identity`.
+    /// Each finite box is taken both as a positive kind and not, so it is
+    /// mapped by `LogInterval` where 0 < lo and by `Interval` always.
+    fn maps() -> Vec<(String, Transform)> {
+        let inf = f64::INFINITY;
+        let mut v = vec![
+            ("[0, ∞)".to_string(), Transform::for_domain(0.0, inf, true).unwrap()),
+            ("LowerBounded 1e-6".to_string(), Transform::LowerBounded { lo: 1e-6 }),
+            ("UpperBounded 30".to_string(), Transform::UpperBounded { hi: 30.0 }),
+            ("identity".to_string(), Transform::Identity),
+        ];
+        for (lo, hi) in [(0.0, 1.0), (0.0, 2.0), (1e-6, 2.5), (1.0, 100.0),
+                         (-120.0, 120.0), (-120.0, -60.0)] {
+            for positive in [false, true] {
+                if let Ok(t) = Transform::for_domain(lo, hi, positive) {
+                    v.push((format!("[{lo}, {hi}] {}", t.tag()), t));
+                }
+            }
+        }
+        v
+    }
+
+    fn ulp(x: f64) -> f64 {
+        let x = x.abs();
+        if x == 0.0 { f64::MIN_POSITIVE } else { f64::from_bits(x.to_bits() + 1) - x }
+    }
+
+    #[test]
+    fn for_domain_selects_by_finite_ends_and_kind() {
+        let inf = f64::INFINITY;
+        assert_eq!(Transform::for_domain(-inf, inf, true), Ok(Transform::Identity));
+        assert_eq!(Transform::for_domain(0.0, inf, true), Ok(Transform::LowerBounded { lo: 0.0 }));
+        assert_eq!(Transform::for_domain(-inf, 3.0, false), Ok(Transform::UpperBounded { hi: 3.0 }));
+        assert_eq!(Transform::for_domain(0.1, 2.0, true), Ok(Transform::LogInterval { lo: 0.1, hi: 2.0 }));
+        assert_eq!(Transform::for_domain(0.1, 0.9, false), Ok(Transform::Interval { lo: 0.1, hi: 0.9 }));
+        assert_eq!(Transform::for_domain(0.0, 2.0, true), Ok(Transform::Interval { lo: 0.0, hi: 2.0 }));
+        assert_eq!(Transform::for_domain(-1.0, 1.0, true), Ok(Transform::Interval { lo: -1.0, hi: 1.0 }));
+        for (lo, hi) in [(1.0, 1.0), (2.0, 1.0), (f64::NAN, 1.0), (inf, inf), (-inf, -inf)] {
+            assert!(Transform::for_domain(lo, hi, true).is_err(), "[{lo}, {hi}] is not an interval");
+        }
+        assert!(Transform::LogInterval { lo: 1.0, hi: 2.0 }.log_spaced());
+        assert!(!Transform::Interval { lo: 1.0, hi: 2.0 }.log_spaced());
+    }
+
+    /// g(g⁻¹(θ)) = θ for interior θ, to 4·max(1, |z|) ulp of θ. The proposal
+    /// asks for 4 ulp of the distance to the nearer end; that is not
+    /// attainable through a logarithm and an exponential: z carries a
+    /// relative rounding error ε, which eᶻ turns into an error |z|·ε in θ's
+    /// distance to its end (measured: 12 ulp at θ = 1e-4 on [0, 1], z = −9.2).
+    /// Points run from the interior to within 1e-9 of the width of either end.
+    #[test]
+    fn theta_round_trips() {
+        for (label, t) in maps() {
+            let (lo, hi) = t.bounds();
+            let pts: Vec<f64> = match (lo.is_finite(), hi.is_finite()) {
+                (true, true) => [1e-9, 1e-4, 0.1, 0.5, 0.9, 1.0 - 1e-4, 1.0 - 1e-9]
+                    .iter().map(|f| lo + f * (hi - lo)).collect(),
+                (true, false) => [1e-9, 1e-3, 1.0, 1e3].iter().map(|d| lo + d).collect(),
+                (false, true) => [1e-9, 1e-3, 1.0, 1e3].iter().map(|d| hi - d).collect(),
+                (false, false) => vec![-1e3, -1.0, 0.0, 2.5, 1e3],
+            };
+            for x in pts {
+                let z = t.forward(x);
+                let back = t.inverse(z);
+                assert!((back - x).abs() <= 4.0 * z.abs().max(1.0) * ulp(x),
+                    "{label}: θ {x} → z {z} → θ {back}");
+            }
         }
     }
 
-    /// Central finite difference of the inverse map — the ground truth
-    /// `transform_deriv` is supposed to reproduce.
-    fn fd_dtheta_dz(p: &EstimatedParam, z: f64) -> f64 {
-        let h = 1e-6;
-        (p.from_transformed(z + h) - p.from_transformed(z - h)) / (2.0 * h)
-    }
-
+    /// g⁻¹(g(z)) = z for |z| ≤ 30, to 1e-12 plus the error θ's own rounding
+    /// induces in z (4 ulp of θ times |dz/dθ|). Near an end of a box with
+    /// lo ≠ 0 that second term dominates, because θ − lo is what rounds.
     #[test]
-    fn log_transform_deriv_matches_the_map_above_the_upper_bound() {
-        let p = log_param(0.01, 10.0);
-        let z = 10.0f64.ln() + 1.0;
-        assert_eq!(p.from_transformed(z), 10.0,
-            "precondition: the inverse map saturates at hi here");
-        let fd = fd_dtheta_dz(&p, z);
-        assert_eq!(fd, 0.0, "precondition: a saturated map is flat");
-        assert!((p.transform_deriv(z) - fd).abs() < 1e-9,
-            "dθ/dz must differentiate the map it belongs to: \
-             transform_deriv={} vs finite difference={}",
-            p.transform_deriv(z), fd);
-    }
-
-    #[test]
-    fn log_transform_deriv_matches_the_map_below_the_lower_bound() {
-        let p = log_param(0.01, 10.0);
-        let z = 0.01f64.ln() - 1.0;
-        assert_eq!(p.from_transformed(z), 0.01,
-            "precondition: the inverse map saturates at lo here");
-        let fd = fd_dtheta_dz(&p, z);
-        assert_eq!(fd, 0.0, "precondition: a saturated map is flat");
-        assert!((p.transform_deriv(z) - fd).abs() < 1e-9,
-            "dθ/dz must differentiate the map it belongs to: \
-             transform_deriv={} vs finite difference={}",
-            p.transform_deriv(z), fd);
-    }
-
-    #[test]
-    fn log_jacobian_is_neg_inf_where_the_map_saturates() {
-        // dθ/dz = 0 ⇒ log|dθ/dz| = −∞: the declared bounds truncate the
-        // support, so the change-of-variables density is zero outside it.
-        let p = log_param(0.01, 10.0);
-        for &z in &[10.0f64.ln() + 1e-3, 10.0f64.ln() + 5.0,
-                    0.01f64.ln() - 1e-3, 0.01f64.ln() - 5.0] {
-            assert_eq!(p.log_jacobian(z), f64::NEG_INFINITY,
-                "z={z} is outside [ln lo, ln hi]; log-Jacobian must be −∞");
+    fn z_round_trips() {
+        for (label, t) in maps() {
+            for z in [-30.0, -12.0, -3.0, -0.4, 0.0, 0.7, 3.0, 12.0, 30.0] {
+                let x = t.inverse(z);
+                let back = t.forward(x);
+                let tol = 1e-12 * z.abs().max(1.0) + 4.0 * ulp(x) / t.deriv(z).abs();
+                assert!((back - z).abs() <= tol, "{label}: z {z} → θ {x} → z {back} (tol {tol:e})");
+            }
         }
     }
 
+    fn fd(f: &dyn Fn(f64) -> f64, z: f64) -> f64 {
+        let h = 1e-5;
+        (f(z + h) - f(z - h)) / (2.0 * h)
+    }
+
+    fn rel_close(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() <= tol * a.abs().max(b.abs()).max(1e-300)
+    }
+
+    /// `jacobian_grad` and `prior_point`'s two derivatives against central
+    /// finite differences of the quantities they differentiate, relative
+    /// error below 1e-6 on |z| ≤ 30; those quantities are computed from z,
+    /// so the difference is well conditioned everywhere. `transform_deriv`
+    /// against the difference of θ itself, where θ is not within 1e-6 of its
+    /// magnitude of an end (there θ's rounding swamps a difference of h).
     #[test]
-    fn jacobian_grad_is_zero_where_the_map_saturates() {
-        let p = log_param(0.01, 10.0);
-        for &z in &[10.0f64.ln() + 1e-3, 0.01f64.ln() - 1e-3] {
-            assert_eq!(p.jacobian_grad(z), 0.0,
-                "z={z} is outside the support; the z-gradient must be flat, \
-                 not the unclamped +1");
+    fn derivatives_match_finite_differences() {
+        for (label, t) in maps() {
+            let (lo, hi) = t.bounds();
+            for z in [-30.0, -12.0, -3.0, -0.4, 0.0, 0.7, 3.0, 12.0, 30.0] {
+                let jg = fd(&|z| t.log_jacobian(z), z);
+                assert!((t.jacobian_grad(z) - jg).abs() <= 1e-6 * jg.abs().max(1.0),
+                    "{label} z={z}: jacobian_grad {} vs fd {jg}", t.jacobian_grad(z));
+                let pp = t.prior_point(z);
+                if pp.ln_theta.is_finite() {
+                    let d = fd(&|z| t.prior_point(z).ln_theta, z);
+                    assert!((pp.d_ln_theta_dz - d).abs() <= 1e-6 * d.abs().max(1.0),
+                        "{label} z={z}: d ln θ/dz {} vs fd {d}", pp.d_ln_theta_dz);
+                }
+                if pp.ln_one_minus.is_finite() {
+                    let d = fd(&|z| t.prior_point(z).ln_one_minus, z);
+                    assert!((pp.d_ln_one_minus_dz - d).abs() <= 1e-6 * d.abs().max(1.0),
+                        "{label} z={z}: d ln(1−θ)/dz {} vs fd {d}", pp.d_ln_one_minus_dz);
+                }
+                let x = t.inverse(z);
+                let gap = (x - lo).abs().min((hi - x).abs());
+                if gap > 1e-6 * x.abs().max(1.0) {
+                    let d = fd(&|z| t.inverse(z), z);
+                    assert!(rel_close(t.deriv(z), d, 1e-6),
+                        "{label} z={z}: transform_deriv {} vs fd {d}", t.deriv(z));
+                }
+            }
         }
     }
 
+    /// The log-Jacobian is finite for every |z| ≤ 700, and g(z) is inside the
+    /// closed domain at z ∈ {±40, ±800, ±∞}. The logit log-Jacobian before
+    /// this change was ln((hi − lo)·p·(1 − p)), −∞ from z = 37 on.
     #[test]
-    fn log_transform_derivatives_are_exact_in_the_interior() {
-        // The whole interior is unchanged — every fit whose posterior lives
-        // inside the declared bounds is bit-for-bit unaffected.
-        let p = log_param(0.01, 10.0);
-        for &z in &[-4.0, -1.0, 0.0, 1.0, 2.0] {
-            assert_eq!(p.transform_deriv(z), z.exp());
-            assert_eq!(p.log_jacobian(z), z);
-            assert_eq!(p.jacobian_grad(z), 1.0);
-            let fd = fd_dtheta_dz(&p, z);
-            assert!(((p.transform_deriv(z) - fd) / fd).abs() < 1e-6,
-                "interior dθ/dz must match the finite difference");
-        }
-    }
-
-    #[test]
-    fn unbounded_log_params_are_never_saturated() {
-        // lo = 0 / hi = +∞ is the no-bounds default: `clamp` cannot fire on
-        // either side, so neither may the saturation test.
-        let p = log_param(0.0, f64::INFINITY);
-        for &z in &[-700.0, -1.0, 0.0, 1.0, 700.0] {
-            assert_eq!(p.log_jacobian(z), z);
-            assert_eq!(p.jacobian_grad(z), 1.0);
-            assert_eq!(p.transform_deriv(z), z.exp());
-        }
-    }
-
-    #[test]
-    fn a_value_at_the_declared_bound_stays_in_support() {
-        // `to_transformed` clamps into [lo, hi] and takes ln, so every z the
-        // sampler can be INITIALISED at must carry a finite log-Jacobian —
-        // otherwise a sampler's "posterior is not finite at the initial
-        // parameters" probe would reject a legal start.
-        //
-        // This is why the saturation test is in z-space (z ∉ [ln lo, ln hi])
-        // rather than θ-space (exp(z) ∉ [lo, hi]): `exp(ln(hi))` rounds one
-        // ulp ABOVE hi for hi ∈ {10, 100, 0.1, 1e-3, 3, …}, so a θ-space test
-        // would call z = ln(hi) out-of-support.
-        for &(lo, hi) in &[(0.01, 10.0), (1e-3, 100.0), (1e-6, 0.1),
-                           (0.05, 5.0), (0.1, 3.0), (1.0, 2.0)] {
-            let p = log_param(lo, hi);
-            for &x in &[lo, hi, hi * 10.0, lo / 10.0, (lo * hi).sqrt()] {
-                let z = p.to_transformed(x);
-                assert!(p.log_jacobian(z).is_finite(),
-                    "bounds [{lo}, {hi}], x={x} → z={z}: a round-tripped \
-                     value must stay in support (log-Jacobian was −∞)");
-                assert!(p.transform_deriv(z) > 0.0,
-                    "bounds [{lo}, {hi}], x={x}: dθ/dz must be positive in support");
-                assert_eq!(p.jacobian_grad(z), 1.0);
+    fn no_map_has_a_wall() {
+        for (label, t) in maps() {
+            let (lo, hi) = t.bounds();
+            let mut z = -700.0;
+            while z <= 700.0 {
+                assert!(t.log_jacobian(z).is_finite(), "{label}: log_jacobian({z}) not finite");
+                z += 0.5;
+            }
+            for z in [-40.0, 40.0, -800.0, 800.0, f64::NEG_INFINITY, f64::INFINITY] {
+                let x = t.inverse(z);
+                assert!(x >= lo && x <= hi, "{label}: g({z}) = {x} outside [{lo}, {hi}]");
             }
         }
     }
 
     #[test]
-    fn saturated_z_gives_a_clean_neg_inf_target_not_nan() {
-        // What the samplers actually assemble: ll + prior + log-Jacobian,
-        // with the gradient chained through `transform_deriv`. A log_normal
-        // prior is the sharp case — `Density::TransformedNormal` returns the
-        // natural-scale density (it pre-subtracts z) and relies on the caller
-        // adding `log_jacobian(z)` back, so the two must not cancel into NaN.
+    fn upper_bounded_derivative_is_negative() {
+        let t = Transform::UpperBounded { hi: 30.0 };
+        for z in [-5.0, 0.0, 3.0] {
+            assert!(t.deriv(z) < 0.0);
+            assert_eq!(t.log_jacobian(z), z, "log_jacobian is ln|g′| = z");
+        }
+    }
+
+    /// A start exactly on a finite end has no finite preimage; the forward
+    /// map moves it inward to z = ±ln(1/ε − 1) ≈ ±23.03 on the interval maps
+    /// and to θ = lo + ε, z = ln ε, on the half-bounded ones.
+    #[test]
+    fn a_start_on_an_end_maps_to_a_finite_z() {
+        let edge = (1.0 / EDGE_START_EPS - 1.0).ln();
+        assert!((edge - 23.0258).abs() < 1e-3);
+        for (label, t) in maps() {
+            let (lo, hi) = t.bounds();
+            if lo.is_finite() {
+                assert!(t.on_an_end(lo));
+                let z = t.forward(lo);
+                let want = if hi.is_finite() { -edge } else { EDGE_START_EPS.ln() };
+                assert_eq!(z, want, "{label}: start on lo");
+            }
+            if hi.is_finite() {
+                assert!(t.on_an_end(hi));
+                let z = t.forward(hi);
+                let want = if lo.is_finite() { edge } else { EDGE_START_EPS.ln() };
+                assert_eq!(z, want, "{label}: start on hi");
+            }
+        }
+    }
+
+    /// `log_normal` on `LowerBounded { 0 }` (θ = eᶻ) equals, bit for bit, the
+    /// value and gradient the z-based formulas gave before priors read a
+    /// `PriorPoint`, on z ∈ [−745, 30]. Below −745 θ underflows to 0, which
+    /// the old guard scored −∞; the new value is finite and correct there.
+    #[test]
+    fn log_normal_on_the_half_line_is_bit_identical_to_the_z_formula() {
         use crate::inference::prior::{Density, Prior};
-
-        let p = log_param(0.01, 10.0);
-        let z = 10.0f64.ln() + 2.0;
-        let prior = Prior::Fixed(Density::TransformedNormal { mean: 0.0, sd: 1.0 });
-        let (prior_val, prior_grad_z) =
-            prior.log_density_and_grad_z(&p.prior_point(z), p.transform_deriv(z));
-
-        let ll = -12.5_f64;
-        let log_p = ll + prior_val + p.log_jacobian(z);
-        let grad_z = prior_grad_z + p.jacobian_grad(z);
-
-        assert!(!log_p.is_nan(), "the out-of-support target must not be NaN");
-        assert_eq!(log_p, f64::NEG_INFINITY,
-            "outside the declared bounds the target density is zero");
-        assert!(grad_z.is_finite(),
-            "the gradient must stay finite so the leapfrog momentum is not poisoned");
-    }
-
-    #[test]
-    fn nuts_rejects_a_leapfrog_step_into_the_saturated_region() {
-        // The stability question the −∞ choice raises: does a wall at the
-        // bound give a clean rejection, or a NaN/poisoned trajectory? NUTS
-        // treats a non-finite energy as divergent and refuses to commit a
-        // non-finite proposal, so the answer is: clean rejection, with the
-        // divergence surfaced to the user.
-        use crate::inference::nuts::{nuts_step, MassMatrix, NUTSConfig};
-        use crate::rng::StatefulRng;
-
-        let p = log_param(0.01, 10.0);
-        // Standard normal on z, truncated to the transform's support.
-        let target = |z: &[f64]| -> (f64, Vec<f64>) {
-            if !p.log_jacobian(z[0]).is_finite() {
-                return (f64::NEG_INFINITY, vec![0.0]);
-            }
-            (-0.5 * z[0] * z[0], vec![-z[0]])
-        };
-        let z0 = vec![10.0f64.ln() - 0.01]; // a hair inside the upper bound
-        let (log_p0, grad0) = target(&z0);
-        assert!(log_p0.is_finite(), "precondition: the start is in support");
-
-        let cfg = NUTSConfig {
-            max_tree_depth: 6,
-            step_size: 0.5, // large enough to leap over the wall
-            mass_matrix: MassMatrix::Diagonal(vec![1.0]),
-        };
-        let mut rng = StatefulRng::new(7);
-        for _ in 0..50 {
-            let r = nuts_step(&z0, log_p0, &grad0, &cfg, &target, &mut rng);
-            assert!(r.params[0].is_finite(), "NUTS must never return a NaN position");
-            assert!(r.log_posterior.is_finite(),
-                "NUTS must never commit a −∞ / NaN log-posterior");
-            assert!(p.log_jacobian(r.params[0]).is_finite(),
-                "NUTS accepted a position outside the transform's support: z={}",
-                r.params[0]);
+        const HALF_LN_2PI: f64 = 0.918_938_533_204_672_8;
+        let (mu, sd) = (-1.0_f64, 0.5_f64);
+        let prior = Prior::Fixed(Density::TransformedNormal { mean: mu, sd });
+        let t = Transform::LowerBounded { lo: 0.0 };
+        let mut z = -745.0;
+        while z <= 30.0 {
+            let old_v = {
+                let zs = (z - mu) / sd;
+                -z - HALF_LN_2PI - sd.ln() - 0.5 * zs * zs
+            };
+            let old_g = -(z - mu) / (sd * sd) - 1.0;
+            let (v, g) = prior.log_density_and_grad_z(&t.prior_point(z), t.deriv(z));
+            assert_eq!(v.to_bits(), old_v.to_bits(), "value at z={z}");
+            assert_eq!(g.to_bits(), old_g.to_bits(), "gradient at z={z}");
+            z += 0.37;
         }
+        let z = -800.0;
+        assert_eq!(t.inverse(z), 0.0, "precondition: θ underflows");
+        let v = prior.log_density(&t.prior_point(z));
+        let zs = (z - mu) / sd;
+        assert_eq!(v, -z - HALF_LN_2PI - sd.ln() - 0.5 * zs * zs, "finite closed form at z=-800");
     }
 }

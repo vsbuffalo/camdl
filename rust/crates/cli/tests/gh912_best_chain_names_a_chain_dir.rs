@@ -267,7 +267,7 @@ const IF2_METHOD: &str = "\
 algorithm  = \"if2\"
 backend    = \"chain_binomial\"
 chains     = 2
-particles  = 50
+particles  = 200
 iterations = 3
 cooling    = 0.5
 loglik_eval = { n_particles = 1000, n_replicates = 2 }

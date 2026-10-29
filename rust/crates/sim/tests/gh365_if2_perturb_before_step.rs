@@ -143,9 +143,7 @@ fn if2_weights_the_same_theta_that_drove_the_step() {
         // Big enough that a stale θ is unmistakable, small enough that the
         // Log transform never reaches its clamp (bounds are 3 orders wide).
         rw_sd: 0.2,
-        transform: Transform::Log { lo: 0.01, hi: 10.0 },
-        lower: 0.01,
-        upper: 10.0,
+        transform: Transform::for_domain(0.01, 10.0, true).expect("domain"),
         perturb_only_at_t0: false,
         rw_sd_auto: false,
     }];

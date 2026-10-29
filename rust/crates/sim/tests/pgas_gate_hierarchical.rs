@@ -132,9 +132,7 @@ fn gh175_pgas_refuses_hierarchical_prior_with_clear_error() {
         index: compiled.param_index["beta"],
         initial: 0.3,
         rw_sd: 0.02,
-        transform: Transform::Log { lo: 0.001, hi: 10.0 },
-        lower: 0.001,
-        upper: 10.0,
+        transform: Transform::for_domain(0.001, 10.0, true).expect("domain"),
         rw_sd_auto: false,
         perturb_only_at_t0: false,
     }];

@@ -998,7 +998,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // IC4 in 2026-04-19 inference review batch 3: reject
         // prior × transform combinations that silently produce a
         // different prior than the user wrote (log_normal on
-        // Transform::None → Normal; log_normal on Logit → logit-
+        // Transform::Identity → Normal; log_normal on Logit → logit-
         // normal; etc.). Runs after sweep-value substitution since
         // sweep can change a param's role, but the prior/transform
         // binding itself is fixed across sweep points — this is

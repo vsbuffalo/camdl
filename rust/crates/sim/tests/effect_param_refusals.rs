@@ -108,9 +108,7 @@ fn run_if2_refuses_an_estimated_event_time() {
         index: tau,
         initial: 2.0,
         rw_sd: 0.1,
-        transform: Transform::None,
-        lower: 0.0,
-        upper: 10.0,
+        transform: Transform::Identity,
         rw_sd_auto: false,
         perturb_only_at_t0: false,
     }];
@@ -147,9 +145,7 @@ fn run_pgas_estimating(model: &Arc<CompiledModel>, estimated: &[&str]) -> Result
                 index,
                 initial: model.default_params[index],
                 rw_sd: 0.1,
-                transform: Transform::None,
-                lower: 0.0,
-                upper: 1e4,
+                transform: Transform::Identity,
                 rw_sd_auto: false,
                 perturb_only_at_t0: false,
             }

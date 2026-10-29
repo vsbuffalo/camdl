@@ -26,12 +26,6 @@ use ir::parameter::{HierarchicalKind, HierarchicalPrior};
 use sim::inference::hierarchical::ParamEnv;
 use sim::inference::prior::{Prior, Density};
 
-/// The prior point a `Log`-transformed parameter presents: θ, with ln θ read
-/// from the coordinate `z`.
-fn at(theta: f64, z: f64) -> sim::inference::prior::PriorPoint {
-    sim::inference::prior::PriorPoint { ln_theta: z, ..sim::inference::prior::PriorPoint::natural(theta) }
-}
-
 
 /// The hierarchical-prior density now routes through the unified
 /// `Prior::log_density_env` (the formula lives once in `Density`); this shim
@@ -43,11 +37,11 @@ fn hierarchical_log_density<E: ParamEnv>(
     transformed: f64,
     env: &E,
 ) -> f64 {
-    let at = sim::inference::prior::PriorPoint {
-        ln_theta: transformed,
-        ..sim::inference::prior::PriorPoint::natural(natural)
-    };
-    Prior::from_hierarchical_ir(hp).log_density_env(&at, env)
+    // The densities read ln θ (and ln(1 − θ)) from the point; at a θ with
+    // no coordinate those are taken from θ, so `transformed` is unused.
+    let _ = transformed;
+    Prior::from_hierarchical_ir(hp)
+        .log_density_env(&sim::inference::prior::PriorPoint::natural(natural), env)
 }
 
 fn env_from(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
@@ -694,7 +688,7 @@ fn hierarchical_density_matches_plain_prior_formula() {
             // x <= 0 both sides short-circuit to -inf regardless of z.
             let z = if x > 0.0 { x.ln() } else { 0.0 };
             let h = hierarchical_log_density(&hp, x, z, &env);
-            let p = prior.log_density(&at(x, z));
+            let p = prior.log_density(&sim::inference::prior::PriorPoint::natural(x));
             assert_eq!(
                 h.to_bits(),
                 p.to_bits(),

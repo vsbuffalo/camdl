@@ -112,20 +112,6 @@ impl PriorPoint {
     }
 }
 
-/// The unconstrained transform a prior family requires for correct inference.
-/// Used by the fit-config validator; the rule is per-family, so it is shared
-/// by fixed and hierarchical priors alike.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransformReq {
-    /// Positive-support families (log_normal, half_normal, gamma, exponential,
-    /// log_uniform) require a `Log` transform.
-    Log,
-    /// The Beta family requires a `Logit` transform.
-    Logit,
-    /// Compatible with any transform (flat, uniform, normal, truncated_normal).
-    Any,
-}
-
 /// Distribution families and the **single source of truth** for prior
 /// log-densities. Generic over the parameter source `P` (`f64` for fixed
 /// priors, [`ParamArg`] for hierarchical ones).
@@ -137,8 +123,7 @@ pub enum Density<P> {
     Uniform { lower: P, upper: P },
     /// Normal(mean, sd) on the natural scale.
     Normal { mean: P, sd: P },
-    /// Normal(mean, sd) on the transformed (log) scale — the "log_normal" when
-    /// the parameter uses the Log transform.
+    /// Log-normal: Normal(mean, sd) on ln θ (the IR's `log_normal`).
     TransformedNormal { mean: P, sd: P },
     /// Half-Normal(sigma): folded normal supported on [0, inf).
     HalfNormal { sigma: P },
@@ -172,23 +157,27 @@ impl<P> Density<P> {
             Density::TruncatedNormal { .. } => "truncated_normal",
         }
     }
+}
 
-    /// Which unconstrained transform this family requires (see [`TransformReq`]).
-    /// `truncated_normal` is `Any` — its bounds-vs-support invariant is checked
-    /// separately by the validator, not via the transform.
-    pub fn transform_req(&self) -> TransformReq {
-        match self {
-            Density::TransformedNormal { .. }
-            | Density::HalfNormal { .. }
-            | Density::Gamma { .. }
-            | Density::Exponential { .. }
-            | Density::LogUniform { .. } => TransformReq::Log,
-            Density::Beta { .. } => TransformReq::Logit,
-            Density::Flat
-            | Density::Uniform { .. }
-            | Density::Normal { .. }
-            | Density::TruncatedNormal { .. } => TransformReq::Any,
-        }
+/// The closed interval a density's family puts its mass on, with an end
+/// that is an expression over hyperparameters taken at the family's widest.
+/// The support rule (proposal §6): an estimated parameter's effective domain
+/// must lie within it, or the density is zero inside the domain.
+fn family_support<P: ResolveArg>(d: &Density<P>) -> (f64, f64) {
+    const LINE: (f64, f64) = (f64::NEG_INFINITY, f64::INFINITY);
+    let konst = |p: &P| -> Option<f64> {
+        let v = p.resolve(&());
+        v.is_finite().then_some(v)
+    };
+    match d {
+        Density::Flat | Density::Normal { .. } => LINE,
+        Density::TransformedNormal { .. } | Density::HalfNormal { .. }
+        | Density::Gamma { .. } | Density::Exponential { .. } => (0.0, f64::INFINITY),
+        Density::Beta { .. } => (0.0, 1.0),
+        Density::LogUniform { lower, upper } => (
+            konst(lower).unwrap_or(0.0), konst(upper).unwrap_or(f64::INFINITY)),
+        Density::Uniform { lower, upper } | Density::TruncatedNormal { lower, upper, .. } => (
+            konst(lower).unwrap_or(f64::NEG_INFINITY), konst(upper).unwrap_or(f64::INFINITY)),
     }
 }
 
@@ -234,15 +223,14 @@ impl<P: ResolveArg> Density<P> {
             }
             Density::TransformedNormal { mean, sd } => {
                 // Log-normal on natural scale:
-                //   log p(θ) = log N(log θ; μ, σ) − log θ
-                // read from `at.ln_theta`; under the Log transform that is z,
-                // and the −ln θ compensates for the Jacobian the caller adds
-                // back on the z-scale (log_jacobian(z) = z).
+                //   log p(θ) = log N(log θ; μ, σ) − log θ,
+                // read from `at.ln_theta`, which the transform computes from
+                // z, so it stays exact where θ itself rounds to 0.
                 let (mu, s) = (mean.resolve(env), sd.resolve(env));
                 if !mu.is_finite() || !s.is_finite() || s <= 0.0 {
                     return f64::NEG_INFINITY;
                 }
-                if natural <= 0.0 {
+                if !at.ln_theta.is_finite() {
                     return f64::NEG_INFINITY;
                 }
                 let ln_theta = at.ln_theta;
@@ -266,11 +254,12 @@ impl<P: ResolveArg> Density<P> {
                 if !a.is_finite() || !b.is_finite() || a <= 0.0 || b <= 0.0 {
                     return f64::NEG_INFINITY;
                 }
-                if natural <= 0.0 || natural >= 1.0 {
+                // ln θ and ln(1 − θ) from the point, exact in z near either end.
+                if !at.ln_theta.is_finite() || !at.ln_one_minus.is_finite() {
                     return f64::NEG_INFINITY;
                 }
                 finite(
-                    (a - 1.0) * natural.ln() + (b - 1.0) * (1.0 - natural).ln()
+                    (a - 1.0) * at.ln_theta + (b - 1.0) * at.ln_one_minus
                         - (lgamma(a) + lgamma(b) - lgamma(a + b)),
                 )
             }
@@ -279,11 +268,11 @@ impl<P: ResolveArg> Density<P> {
                 if !k.is_finite() || !r.is_finite() || k <= 0.0 || r <= 0.0 {
                     return f64::NEG_INFINITY;
                 }
-                if natural <= 0.0 {
+                if !at.ln_theta.is_finite() {
                     return f64::NEG_INFINITY;
                 }
                 // log Gamma(x; k, r) = k·ln r + (k−1)·ln x − r·x − lgamma(k)
-                finite(k * r.ln() + (k - 1.0) * natural.ln() - r * natural - lgamma(k))
+                finite(k * r.ln() + (k - 1.0) * at.ln_theta - r * natural - lgamma(k))
             }
             Density::Exponential { rate } => {
                 let r = rate.resolve(env);
@@ -297,17 +286,16 @@ impl<P: ResolveArg> Density<P> {
             }
             Density::LogUniform { lower, upper } => {
                 // Natural-scale density 1/(θ·(ln U − ln L)) on [L, U]:
-                //   log p(θ) = −ln θ − ln(ln U − ln L).
-                // With z = ln θ (Log transform) the caller adds the Jacobian
-                // +z, giving the flat z-scale density −ln(ln U − ln L).
+                //   log p(θ) = −ln θ − ln(ln U − ln L),
+                // with ln θ read from the point.
                 let (lo, hi) = (lower.resolve(env), upper.resolve(env));
                 if !lo.is_finite() || !hi.is_finite() || lo <= 0.0 || hi <= lo {
                     return f64::NEG_INFINITY;
                 }
-                if natural < lo || natural > hi {
+                if natural < lo || natural > hi || !at.ln_theta.is_finite() {
                     return f64::NEG_INFINITY;
                 }
-                finite(-natural.ln() - (hi.ln() - lo.ln()).ln())
+                finite(-at.ln_theta - (hi.ln() - lo.ln()).ln())
             }
             Density::TruncatedNormal { mean, sd, lower, upper } => {
                 // Truncated normal on the natural scale:
@@ -393,6 +381,7 @@ impl Prior {
                 // −(z−μ)/σ². Omitting the −1 left the NUTS gradient for
                 // log_normal priors off by +1 (uncovered: the only FD gradient
                 // test used a flat prior).
+                if !at.ln_theta.is_finite() { return (lp, 0.0); }
                 (-(at.ln_theta - mean) / (sd * sd) - 1.0) * at.d_ln_theta_dz
             }
             Density::HalfNormal { sigma } => {
@@ -401,14 +390,12 @@ impl Prior {
                 dlp_dtheta * dtheta_dz
             }
             Density::Beta { alpha, beta } => {
-                if theta <= 0.0 || theta >= 1.0 { return (lp, 0.0); }
-                let dlp_dtheta = (alpha - 1.0) / theta - (beta - 1.0) / (1.0 - theta);
-                dlp_dtheta * dtheta_dz
+                if !at.ln_theta.is_finite() || !at.ln_one_minus.is_finite() { return (lp, 0.0); }
+                (alpha - 1.0) * at.d_ln_theta_dz + (beta - 1.0) * at.d_ln_one_minus_dz
             }
             Density::Gamma { shape, rate } => {
-                if theta <= 0.0 { return (lp, 0.0); }
-                let dlp_dtheta = (shape - 1.0) / theta - rate;
-                dlp_dtheta * dtheta_dz
+                if !at.ln_theta.is_finite() { return (lp, 0.0); }
+                (shape - 1.0) * at.d_ln_theta_dz - rate * dtheta_dz
             }
             Density::Exponential { rate } => {
                 if theta < 0.0 { return (lp, 0.0); }
@@ -416,12 +403,13 @@ impl Prior {
                 dlp_dtheta * dtheta_dz
             }
             Density::LogUniform { lower, upper } => {
-                if theta < *lower || theta > *upper { return (lp, 0.0); }
-                // d/dθ[−ln θ − const] = −1/θ; chain to z. With the Log transform
-                // this is −1, which the caller's jacobian_grad (+1) cancels → the
-                // z-scale density is flat, as it must be.
-                let dlp_dtheta = -1.0 / theta;
-                dlp_dtheta * dtheta_dz
+                if theta < *lower || theta > *upper || !at.ln_theta.is_finite() {
+                    return (lp, 0.0);
+                }
+                // d/dz[−ln θ − const] = −d ln θ/dz. Under θ = eᶻ this is −1,
+                // which the caller's jacobian_grad (+1) cancels → the z-scale
+                // density is flat, as it must be.
+                -at.d_ln_theta_dz
             }
             Density::TruncatedNormal { mean, sd, lower, upper } => {
                 if theta < *lower || theta > *upper { return (lp, 0.0); }
@@ -442,25 +430,26 @@ impl Prior {
         }
     }
 
+    /// The interval the prior's family puts its mass on (ends that are
+    /// hyperparameter expressions taken at the family's widest). An
+    /// estimated parameter's effective domain must lie within it.
+    pub fn support(&self) -> (f64, f64) {
+        match self {
+            Prior::Fixed(d) => family_support(d),
+            Prior::Hierarchical(d) => family_support(d),
+        }
+    }
+
     /// True if this prior depends on other parameters (a hierarchical leaf).
     pub fn is_hierarchical(&self) -> bool {
         matches!(self, Prior::Hierarchical(_))
     }
 
-    /// Which unconstrained transform this prior's family requires.
-    pub fn transform_req(&self) -> TransformReq {
-        match self {
-            Prior::Fixed(d) => d.transform_req(),
-            Prior::Hierarchical(d) => d.transform_req(),
-        }
-    }
-
     /// Convert from the IR's `PriorDist` (fixed, constant-parameter priors).
     ///
-    /// The IR uses `LogNormal` as a distribution name; it maps to
-    /// `TransformedNormal` (Normal on the log-transformed scale) because
-    /// log_normal parameters use the Log transform for inference. `Fixed`
-    /// (a known value) is not a prior — treated as `Flat` if seen here.
+    /// The IR's `LogNormal` maps to `TransformedNormal` (Normal on ln θ).
+    /// `Fixed` (a known value) is not a prior — treated as `Flat` if seen
+    /// here.
     pub fn from_ir(pd: &ir::parameter::PriorDist) -> Self {
         use ir::parameter::PriorDist;
         Prior::Fixed(match pd {
@@ -514,12 +503,6 @@ mod tests {
         (a - b).abs() < tol
     }
 
-    /// The point a `Log`-transformed parameter presents at θ with z = ln θ
-    /// (or at whatever z a test supplies): ln θ is read from z.
-    fn at(theta: f64, z: f64) -> PriorPoint {
-        PriorPoint { ln_theta: z, ..PriorPoint::natural(theta) }
-    }
-
     // Convenience constructors keep the fixed-prior tests readable.
     fn flat() -> Prior {
         Prior::Fixed(Density::Flat)
@@ -530,18 +513,18 @@ mod tests {
 
     #[test]
     fn flat_is_zero() {
-        assert_eq!(flat().log_density(&at(0.5, 0.5)), 0.0);
-        assert_eq!(flat().log_density(&at(100.0, -100.0)), 0.0);
+        assert_eq!(flat().log_density(&PriorPoint::natural(0.5)), 0.0);
+        assert_eq!(flat().log_density(&PriorPoint::natural(100.0)), 0.0);
     }
 
     #[test]
     fn uniform_within_bounds() {
         let p = Prior::Fixed(Density::Uniform { lower: 0.0, upper: 1.0 });
         // Inside: log(1/1) = 0
-        assert!(approx_eq(p.log_density(&at(0.5, 0.5)), 0.0, 1e-10));
+        assert!(approx_eq(p.log_density(&PriorPoint::natural(0.5)), 0.0, 1e-10));
         // Outside
-        assert_eq!(p.log_density(&at(-0.1, 0.0)), f64::NEG_INFINITY);
-        assert_eq!(p.log_density(&at(1.1, 0.0)), f64::NEG_INFINITY);
+        assert_eq!(p.log_density(&PriorPoint::natural(-0.1)), f64::NEG_INFINITY);
+        assert_eq!(p.log_density(&PriorPoint::natural(1.1)), f64::NEG_INFINITY);
     }
 
     #[test]
@@ -554,8 +537,7 @@ mod tests {
         let total: f64 = (1..50_000)
             .map(|i| {
                 let theta = i as f64 * dx;
-                let z = theta.ln();
-                p.log_density(&at(theta, z)).exp() * dx
+                p.log_density(&PriorPoint::natural(theta)).exp() * dx
             })
             .sum();
         assert!(
@@ -574,7 +556,7 @@ mod tests {
         let p = Prior::Fixed(Density::TransformedNormal { mean: 1.0, sd: 0.5 });
         for &z in &[-1.0_f64, 0.0, 0.5, 1.0, 2.0] {
             let theta = z.exp();
-            let log_natural = p.log_density(&at(theta, z));
+            let log_natural = p.log_density(&PriorPoint::natural(theta));
             let log_z_scale_expected = {
                 let z_score = (z - 1.0) / 0.5;
                 -HALF_LN_2PI - 0.5_f64.ln() - 0.5 * z_score * z_score
@@ -594,8 +576,8 @@ mod tests {
     #[test]
     fn normal_peak_at_mean() {
         let p = normal(1.0, 0.5);
-        let at_mean = p.log_density(&at(1.0, 0.0));
-        let off = p.log_density(&at(1.5, 0.0));
+        let at_mean = p.log_density(&PriorPoint::natural(1.0));
+        let off = p.log_density(&PriorPoint::natural(1.5));
         assert!(at_mean > off);
     }
 
@@ -604,14 +586,14 @@ mod tests {
         // N(0, 1) at x=0: -0.5 ln(2π) ≈ -0.9189385
         // N(0, 1) at x=1: -0.5 ln(2π) - 0.5 ≈ -1.4189385
         let p = normal(0.0, 1.0);
-        assert!(approx_eq(p.log_density(&at(0.0, 0.0)), -HALF_LN_2PI, 1e-10));
-        assert!(approx_eq(p.log_density(&at(1.0, 0.0)), -HALF_LN_2PI - 0.5, 1e-10));
+        assert!(approx_eq(p.log_density(&PriorPoint::natural(0.0)), -HALF_LN_2PI, 1e-10));
+        assert!(approx_eq(p.log_density(&PriorPoint::natural(1.0)), -HALF_LN_2PI - 0.5, 1e-10));
         // Unit integral check via trapezoidal quadrature on the density.
         let dx = 0.001;
         let total: f64 = (-5000..=5000)
             .map(|i| {
                 let x = i as f64 * dx;
-                p.log_density(&at(x, 0.0)).exp() * dx
+                p.log_density(&PriorPoint::natural(x)).exp() * dx
             })
             .sum();
         assert!((total - 1.0).abs() < 1e-4, "density should integrate to ~1, got {}", total);
@@ -620,42 +602,42 @@ mod tests {
     #[test]
     fn half_normal_nonnegative() {
         let p = Prior::Fixed(Density::HalfNormal { sigma: 1.0 });
-        assert_eq!(p.log_density(&at(-0.5, 0.0)), f64::NEG_INFINITY);
-        assert!(p.log_density(&at(0.5, 0.0)).is_finite());
+        assert_eq!(p.log_density(&PriorPoint::natural(-0.5)), f64::NEG_INFINITY);
+        assert!(p.log_density(&PriorPoint::natural(0.5)).is_finite());
     }
 
     #[test]
     fn gamma_positive() {
         let p = Prior::Fixed(Density::Gamma { shape: 2.0, rate: 1.0 });
-        assert_eq!(p.log_density(&at(-0.1, 0.0)), f64::NEG_INFINITY);
-        assert_eq!(p.log_density(&at(0.0, 0.0)), f64::NEG_INFINITY);
-        assert!(p.log_density(&at(1.0, 0.0)).is_finite());
+        assert_eq!(p.log_density(&PriorPoint::natural(-0.1)), f64::NEG_INFINITY);
+        assert_eq!(p.log_density(&PriorPoint::natural(0.0)), f64::NEG_INFINITY);
+        assert!(p.log_density(&PriorPoint::natural(1.0)).is_finite());
         // Gamma(2, 1) mode at (k-1)/r = 1. Density higher at 1 than far from it.
-        assert!(p.log_density(&at(1.0, 0.0)) > p.log_density(&at(5.0, 0.0)));
+        assert!(p.log_density(&PriorPoint::natural(1.0)) > p.log_density(&PriorPoint::natural(5.0)));
     }
 
     #[test]
     fn exponential_decays() {
         let p = Prior::Fixed(Density::Exponential { rate: 1.0 });
-        assert!(p.log_density(&at(0.0, 0.0)) > p.log_density(&at(1.0, 0.0)));
-        assert!(p.log_density(&at(1.0, 0.0)) > p.log_density(&at(10.0, 0.0)));
+        assert!(p.log_density(&PriorPoint::natural(0.0)) > p.log_density(&PriorPoint::natural(1.0)));
+        assert!(p.log_density(&PriorPoint::natural(1.0)) > p.log_density(&PriorPoint::natural(10.0)));
     }
 
     #[test]
     fn beta_on_unit_interval() {
         let p = Prior::Fixed(Density::Beta { alpha: 2.0, beta: 2.0 });
-        assert_eq!(p.log_density(&at(0.0, 0.0)), f64::NEG_INFINITY);
-        assert_eq!(p.log_density(&at(1.0, 0.0)), f64::NEG_INFINITY);
+        assert_eq!(p.log_density(&PriorPoint::natural(0.0)), f64::NEG_INFINITY);
+        assert_eq!(p.log_density(&PriorPoint::natural(1.0)), f64::NEG_INFINITY);
         // Symmetric Beta(2,2) peak at 0.5
-        assert!(p.log_density(&at(0.5, 0.0)) > p.log_density(&at(0.3, 0.0)));
+        assert!(p.log_density(&PriorPoint::natural(0.5)) > p.log_density(&PriorPoint::natural(0.3)));
     }
 
     #[test]
     fn log_uniform_support_and_density() {
         let p = Prior::Fixed(Density::LogUniform { lower: 1e-3, upper: 1e0 });
         // Outside support → -inf.
-        assert_eq!(p.log_density(&at(5e-4, (5e-4_f64).ln())), f64::NEG_INFINITY);
-        assert_eq!(p.log_density(&at(2.0, 2.0_f64.ln())), f64::NEG_INFINITY);
+        assert_eq!(p.log_density(&PriorPoint::natural(5e-4)), f64::NEG_INFINITY);
+        assert_eq!(p.log_density(&PriorPoint::natural(2.0)), f64::NEG_INFINITY);
         // Natural-scale density integrates to ~1 over [lower, upper].
         let (lo, hi) = (1e-3_f64, 1e0_f64);
         let n = 200_000;
@@ -663,7 +645,7 @@ mod tests {
         let total: f64 = (0..n)
             .map(|i| {
                 let theta = lo + (i as f64 + 0.5) * dx;
-                p.log_density(&at(theta, theta.ln())).exp() * dx
+                p.log_density(&PriorPoint::natural(theta)).exp() * dx
             })
             .sum();
         assert!(
@@ -678,7 +660,7 @@ mod tests {
         // On the z = ln θ scale the (Jacobian-adjusted) density is constant.
         let p = Prior::Fixed(Density::LogUniform { lower: 1e-4, upper: 1e2 });
         let pts = [1e-3_f64, 1e-1, 1.0, 50.0];
-        let zdens: Vec<f64> = pts.iter().map(|&t| p.log_density(&at(t, t.ln())) + t.ln()).collect();
+        let zdens: Vec<f64> = pts.iter().map(|&t| p.log_density(&PriorPoint::natural(t)) + t.ln()).collect();
         for w in zdens.windows(2) {
             assert!((w[0] - w[1]).abs() < 1e-12, "log_uniform not flat in z: {:?}", zdens);
         }
@@ -693,8 +675,8 @@ mod tests {
             upper: 1.0,
         });
         // Outside [lower, upper] → -inf.
-        assert_eq!(p.log_density(&at(0.2, 0.0)), f64::NEG_INFINITY);
-        assert_eq!(p.log_density(&at(1.1, 0.0)), f64::NEG_INFINITY);
+        assert_eq!(p.log_density(&PriorPoint::natural(0.2)), f64::NEG_INFINITY);
+        assert_eq!(p.log_density(&PriorPoint::natural(1.1)), f64::NEG_INFINITY);
         // Density integrates to ~1 over [lower, upper].
         let (lo, hi) = (0.3_f64, 1.0_f64);
         let n = 200_000;
@@ -702,7 +684,7 @@ mod tests {
         let total: f64 = (0..n)
             .map(|i| {
                 let x = lo + (i as f64 + 0.5) * dx;
-                p.log_density(&at(x, 0.0)).exp() * dx
+                p.log_density(&PriorPoint::natural(x)).exp() * dx
             })
             .sum();
         assert!(
@@ -723,7 +705,7 @@ mod tests {
             upper: 1.0,
         });
         let n = normal(0.7, 0.2);
-        assert!(tn.log_density(&at(0.7, 0.0)) > n.log_density(&at(0.7, 0.0)));
+        assert!(tn.log_density(&PriorPoint::natural(0.7)) > n.log_density(&PriorPoint::natural(0.7)));
     }
 
     #[test]
@@ -774,5 +756,49 @@ mod tests {
             }
             _ => panic!("expected Fixed(TruncatedNormal)"),
         }
+    }
+
+    /// Proposal §12.1: each log-family density evaluated at a transform's
+    /// `prior_point(z)` equals the density evaluated directly at θ wherever θ
+    /// is representable well inside the domain, on every §12.1 domain in the
+    /// family's support. The point's logarithms come from z, the direct ones
+    /// from θ, so agreement checks the map's logarithms, not only ln θ.
+    #[test]
+    fn densities_at_a_prior_point_match_direct_evaluation() {
+        use crate::inference::types::Transform;
+        let inf = f64::INFINITY;
+        let positive = [(0.0, inf), (0.0, 1.0), (0.0, 2.0), (1e-6, 2.5), (1.0, 100.0)];
+        let unit = [(0.0, 1.0), (0.1, 0.9)];
+        let families: Vec<(Prior, &[(f64, f64)])> = vec![
+            (Prior::Fixed(Density::TransformedNormal { mean: -0.5, sd: 0.8 }), &positive),
+            (Prior::Fixed(Density::Gamma { shape: 2.5, rate: 1.5 }), &positive),
+            (Prior::Fixed(Density::Beta { alpha: 2.0, beta: 5.0 }), &unit),
+            (Prior::Fixed(Density::LogUniform { lower: 1e-6, upper: 2.5 }), &[(1e-6, 2.5)]),
+        ];
+        for (prior, domains) in &families {
+            for &(lo, hi) in domains.iter() {
+                for positive_kind in [false, true] {
+                    let Ok(t) = Transform::for_domain(lo, hi, positive_kind) else { continue };
+                    for z in [-6.0, -2.0, -0.3, 0.0, 0.8, 3.0, 6.0] {
+                        let at = t.prior_point(z);
+                        let direct = prior.log_density(&PriorPoint::natural(at.theta));
+                        let via = prior.log_density(&at);
+                        assert!(via.is_finite(), "{} on {:?} z={z}: {via}", prior.kind_str(), t);
+                        assert!((via - direct).abs() <= 1e-9 * direct.abs().max(1.0),
+                            "{} on {:?} at z={z} (θ={}): point {via} vs direct {direct}",
+                            prior.kind_str(), t, at.theta);
+                    }
+                }
+            }
+        }
+        // Where θ itself rounds to the end, the point's density stays finite
+        // and equals its closed form in z: log_normal on [0, ∞) at z = −800.
+        let t = Transform::LowerBounded { lo: 0.0 };
+        let p = Prior::Fixed(Density::TransformedNormal { mean: -0.5, sd: 0.8 });
+        let z = -800.0_f64;
+        let u = (z + 0.5) / 0.8;
+        assert_eq!(p.log_density(&t.prior_point(z)), -z - HALF_LN_2PI - 0.8_f64.ln() - 0.5 * u * u);
+        assert_eq!(p.log_density(&PriorPoint::natural(t.inverse(z))), f64::NEG_INFINITY,
+            "θ = 0 directly has no finite log");
     }
 }

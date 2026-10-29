@@ -163,9 +163,7 @@ fn attempt_nuts_fit_with(
         index: compiled.param_index[param],
         initial: param_init,
         rw_sd: 0.02,
-        transform: Transform::Log { lo: 0.01, hi: 100.0 },
-        lower: 0.01,
-        upper: 100.0,
+        transform: Transform::for_domain(0.01, 100.0, true).expect("domain"),
         rw_sd_auto: false,
         perturb_only_at_t0: false,
     }];

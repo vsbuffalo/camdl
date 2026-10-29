@@ -1671,7 +1671,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 let est_indices: Vec<usize> =
                     per_start_specs.iter().map(|p| p.index).collect();
                 let bounds: Vec<(f64, f64)> =
-                    per_start_specs.iter().map(|p| (p.lower, p.upper)).collect();
+                    per_start_specs.iter().map(|p| p.bounds()).collect();
                 let ode_dt = compiled.model.simulation.dt.unwrap_or(dt);
                 // Per-cell NLopt knobs: looser than fit.toml stages
                 // because profile is landscape exploration, not a
@@ -2267,8 +2267,7 @@ mod tests {
         sim::inference::if2::EstimatedParam {
             name: name.into(), index,
             initial: 0.5, rw_sd: 0.1,
-            transform: sim::inference::types::Transform::None,
-            lower: 0.0, upper: 1.0,
+            transform: sim::inference::types::Transform::Interval { lo: 0.0, hi: 1.0 },
             perturb_only_at_t0: false, rw_sd_auto: false,
         }
     }

@@ -110,9 +110,7 @@ fn mu_param() -> EstimatedParam {
         index: 0,
         initial: 0.01,
         rw_sd: 0.002,
-        transform: Transform::Log { lo: 1e-6, hi: 1.0 },
-        lower: 1e-6,
-        upper: 1.0,
+        transform: Transform::for_domain(1e-6, 1.0, true).expect("domain"),
         rw_sd_auto: false,
         perturb_only_at_t0: false,
     }

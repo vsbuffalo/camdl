@@ -5,13 +5,13 @@
 //!
 //! - **`uniform`** — chain 1 keeps the declared start; chains 2..N draw
 //!   uniformly within the natural-scale bounds. Legacy; equivalent to LHS for
-//!   `Logit`/`None` parameters but clumps `Log`-typed ones in linear space at
+//!   linearly spaced parameters but clumps log-spaced ones in linear space at
 //!   low chain counts. Kept for reproducibility of pre-LHS results.
-//! - **`lhs`** — Latin-hypercube stratified sampling. For `Log`-typed
-//!   parameters (rates, positive quantities) LHS spans `[ln(lo), ln(hi)]` and
-//!   exponentiates back, so one pass covers orders of magnitude rather than
-//!   concentrating mass near `hi`; `Logit` and untransformed parameters span
-//!   `[lo, hi]` linearly. gh#42: a downstream typhoid fit found 30 LHS chains
+//! - **`lhs`** — Latin-hypercube stratified sampling. For log-spaced
+//!   parameters (`Transform::log_spaced`: a positive kind boxed with 0 < lo)
+//!   LHS spans `[ln(lo), ln(hi)]` and exponentiates back, so one pass covers
+//!   orders of magnitude rather than concentrating mass near `hi`; every
+//!   other parameter spans `[lo, hi]` linearly. gh#42: a downstream typhoid fit found 30 LHS chains
 //!   reach a basin 80,542 nats better than 8 uniform-random chains, holding
 //!   everything else equal.
 //! - **`uniform_unconstrained`** — Stan's initialization: an i.i.d. draw
@@ -25,7 +25,7 @@
 //! [`crate::fit::chain_starts::draw_chain_starts`]. Every runner draws its
 //! starts through that one seam.
 
-use sim::inference::types::{EstimatedParam, Transform};
+use sim::inference::types::EstimatedParam;
 use sim::rng::StatefulRng;
 
 use crate::util::derive_chain_seed;
@@ -56,10 +56,11 @@ pub(crate) fn build_uniform_chain_starts(
     (0..n_chains).map(|chain_id| {
         let mut rng = StatefulRng::new(derive_chain_seed(seed, chain_id));
         base.iter().map(|spec| {
+            let (lo, hi) = spec.bounds();
             let initial = if chain_id == 0 {
                 spec.initial
-            } else if spec.lower.is_finite() && spec.upper.is_finite() {
-                spec.lower + rng.uniform() * (spec.upper - spec.lower)
+            } else if lo.is_finite() && hi.is_finite() {
+                lo + rng.uniform() * (hi - lo)
             } else {
                 spec.initial * (0.5 + rng.uniform())
             };
@@ -75,10 +76,9 @@ pub(crate) fn build_uniform_chain_starts(
 /// 2. For chain k, dim d: `u_{k,d} = (π_d[k] + jitter) / n_chains`, with
 ///    `jitter ~ Uniform(0, 1)` — a uniform draw within stratum k's cell.
 /// 3. Map `u_{k,d}` to natural-scale θ via the parameter's transform:
-///    - `Transform::Log` and both bounds positive → exponential mapping
-///      `θ = lo · (hi/lo)^u`. Equivalent to LHS in `[ln lo, ln hi]`.
-///    - Otherwise (Logit, None, or pathological log bounds) → linear
-///      `θ = lo + u · (hi - lo)`.
+///    - `Transform::log_spaced` → exponential mapping `θ = lo · (hi/lo)^u`.
+///      Equivalent to LHS in `[ln lo, ln hi]`.
+///    - Otherwise → linear `θ = lo + u · (hi - lo)`.
 ///
 /// Unbounded params (lower or upper non-finite) fall back to a
 /// `±50%` jitter around `spec.initial` — same fallback as
@@ -134,9 +134,9 @@ pub(crate) const STAN_INIT_RADIUS: f64 = 2.0;
 /// Boundary-avoiding (`σ(±2) ≈ (0.119, 0.881)` is a fixed interior band, so
 /// starts never sit on a bound — no degenerate `-inf` likelihoods or
 /// zero-gradient starts) and scale-invariant (the same radius works whether
-/// a parameter is `O(1)` or `O(1e6)`). For a `Logit` parameter it is
-/// exactly Stan's `lo + (hi-lo)·σ(z)`; for a `Log` rate it is the
-/// camdl-faithful log-scale analog `lo·(hi/lo)^σ(z)`.
+/// a parameter is `O(1)` or `O(1e6)`). For a linearly spaced parameter it
+/// is exactly Stan's `lo + (hi-lo)·σ(z)`; for a log-spaced rate it is the
+/// log-scale analog `lo·(hi/lo)^σ(z)`.
 ///
 /// Per-chain RNGs derive from `seed` via `derive_chain_seed` (same as
 /// `build_uniform_chain_starts`), so draws are independent across chains
@@ -171,9 +171,9 @@ pub(crate) fn build_uniform_unconstrained_chain_starts(
 /// `validate_parameter_values` succeed. Downstream chain init can then
 /// perturb from this base.
 ///
-/// "Transform-aware" means: for `Log`-typed parameters with both bounds
-/// strictly positive, draw uniformly in *log space* and exponentiate;
-/// otherwise draw linearly in `[lo, hi]`. Replaces the legacy
+/// "Transform-aware" means: for a log-spaced domain (`Transform::log_spaced`)
+/// draw uniformly in *log space* and exponentiate; otherwise draw linearly in
+/// `[lo, hi]`. Replaces the legacy
 /// bounds-midpoint heuristic (`(lo*hi).sqrt()` or `(lo+hi)/2`), which
 /// was geometric-shape-aware via a positive-bounds proxy but ignored
 /// the parameter's declared transform and gave the same point at every
@@ -211,21 +211,19 @@ pub fn draw_start_in_bounds(
 /// Map an LHS coordinate `u ∈ [0, 1]` to the natural-scale parameter
 /// value, respecting the parameter's transform.
 fn lhs_map_to_natural(spec: &EstimatedParam, u: f64) -> f64 {
-    if !spec.lower.is_finite() || !spec.upper.is_finite() {
+    let (lo, hi) = spec.bounds();
+    if !lo.is_finite() || !hi.is_finite() {
         // Unreachable from the callers: `draw_chain_starts` and `survey`
         // refuse a parameter whose box has an infinite end before any
         // builder runs. Kept total: ±50% jitter around the seeded start.
         return spec.initial * (0.5 + u);
     }
-    match &spec.transform {
-        Transform::Log { .. } if spec.lower > 0.0 && spec.upper > 0.0 => {
-            // LHS in log space: θ = lo · (hi/lo)^u
-            spec.lower * (spec.upper / spec.lower).powf(u)
-        }
-        _ => {
-            // Linear LHS in [lo, hi]
-            spec.lower + u * (spec.upper - spec.lower)
-        }
+    if spec.transform.log_spaced() {
+        // LHS in log space: θ = lo · (hi/lo)^u
+        lo * (hi / lo).powf(u)
+    } else {
+        // Linear LHS in [lo, hi]
+        lo + u * (hi - lo)
     }
 }
 
@@ -234,15 +232,23 @@ mod tests {
     use super::*;
     use sim::inference::types::Transform;
 
+    /// The fixtures' `(lower, upper, transform)` triple predates the transform
+    /// carrying its domain: an `Identity` with a box meant "linear in the
+    /// box", which is the interval map.
+    fn domain_of(transform: Transform, lower: f64, upper: f64) -> Transform {
+        match transform {
+            Transform::Identity => Transform::for_domain(lower, upper, false).expect("domain"),
+            t => t,
+        }
+    }
+
     fn ep(name: &str, lower: f64, upper: f64, transform: Transform, initial: f64) -> EstimatedParam {
         EstimatedParam {
             name: name.into(),
             index: 0,
             initial,
             rw_sd: 0.1,
-            transform,
-            lower,
-            upper,
+            transform: domain_of(transform, lower, upper),
             rw_sd_auto: false,
             perturb_only_at_t0: false,
         }
@@ -252,7 +258,7 @@ mod tests {
     fn lhs_strata_cover_range_uniformly() {
         // 100 chains × 1 param ∈ [0, 1] linear: every decile should
         // contain ~10 starts (LHS guarantee at this resolution).
-        let base = vec![ep("a", 0.0, 1.0, Transform::None, 0.5)];
+        let base = vec![ep("a", 0.0, 1.0, Transform::Identity, 0.5)];
         let starts = build_lhs_chain_starts(&base, 100, 42);
         let values: Vec<f64> = starts.iter().map(|c| c[0].initial).collect();
 
@@ -274,7 +280,7 @@ mod tests {
         // Log-typed param with bounds [1e-5, 1e-2] should LHS in log space.
         // The geomean of all draws should be near sqrt(1e-5 * 1e-2) = 1e-3.5
         // and the spread should be the full range — not concentrated near 1e-2.
-        let base = vec![ep("rate", 1e-5, 1e-2, Transform::Log { lo: 1e-5, hi: 1e-2 }, 1e-3)];
+        let base = vec![ep("rate", 1e-5, 1e-2, Transform::for_domain(1e-5, 1e-2, true).expect("domain"), 1e-3)];
         let starts = build_lhs_chain_starts(&base, 50, 42);
         let values: Vec<f64> = starts.iter().map(|c| c[0].initial).collect();
 
@@ -297,8 +303,8 @@ mod tests {
     #[test]
     fn lhs_deterministic_given_seed() {
         let base = vec![
-            ep("a", 0.0, 1.0, Transform::None, 0.5),
-            ep("b", 1e-3, 1.0, Transform::Log { lo: 1e-3, hi: 1.0 }, 0.1),
+            ep("a", 0.0, 1.0, Transform::Identity, 0.5),
+            ep("b", 1e-3, 1.0, Transform::for_domain(1e-3, 1.0, true).expect("domain"), 0.1),
         ];
         let s1 = build_lhs_chain_starts(&base, 16, 42);
         let s2 = build_lhs_chain_starts(&base, 16, 42);
@@ -319,7 +325,7 @@ mod tests {
         let sig = |z: f64| 1.0 / (1.0 + (-z).exp());
         let band_lo = lo + (hi - lo) * sig(-STAN_INIT_RADIUS);
         let band_hi = lo + (hi - lo) * sig(STAN_INIT_RADIUS);
-        let base = vec![ep("p", lo, hi, Transform::None, 0.5)];
+        let base = vec![ep("p", lo, hi, Transform::Identity, 0.5)];
         let starts = build_uniform_unconstrained_chain_starts(&base, 200, 7);
         for c in &starts {
             let v = c[0].initial;
@@ -334,7 +340,7 @@ mod tests {
         // Log param [1e-5, 1e-2]: θ = lo·(hi/lo)^σ(z). log10-interior band
         // is [-5 + 3·σ(-2), -5 + 3·σ(2)] = [-4.64, -2.36] — strictly inside
         // the declared decades.
-        let base = vec![ep("rate", 1e-5, 1e-2, Transform::Log { lo: 1e-5, hi: 1e-2 }, 1e-3)];
+        let base = vec![ep("rate", 1e-5, 1e-2, Transform::for_domain(1e-5, 1e-2, true).expect("domain"), 1e-3)];
         let starts = build_uniform_unconstrained_chain_starts(&base, 200, 7);
         for c in &starts {
             let l = c[0].initial.log10();
@@ -346,8 +352,8 @@ mod tests {
     #[test]
     fn uniform_unconstrained_deterministic_and_iid() {
         let base = vec![
-            ep("a", 0.0, 1.0, Transform::None, 0.5),
-            ep("b", 1e-3, 1.0, Transform::Log { lo: 1e-3, hi: 1.0 }, 0.1),
+            ep("a", 0.0, 1.0, Transform::Identity, 0.5),
+            ep("b", 1e-3, 1.0, Transform::for_domain(1e-3, 1.0, true).expect("domain"), 0.1),
         ];
         let s1 = build_uniform_unconstrained_chain_starts(&base, 16, 42);
         let s2 = build_uniform_unconstrained_chain_starts(&base, 16, 42);
@@ -363,7 +369,7 @@ mod tests {
 
     #[test]
     fn uniform_keeps_chain_one_at_the_declared_start() {
-        let base = vec![ep("a", 0.0, 1.0, Transform::None, 0.5)];
+        let base = vec![ep("a", 0.0, 1.0, Transform::Identity, 0.5)];
         let starts = build_uniform_chain_starts(&base, 4, 42);
         assert_eq!(starts[0][0].initial, 0.5);
         for c in &starts[1..] {
@@ -373,7 +379,7 @@ mod tests {
 
     #[test]
     fn lhs_different_seed_gives_different_draws() {
-        let base = vec![ep("a", 0.0, 1.0, Transform::None, 0.5)];
+        let base = vec![ep("a", 0.0, 1.0, Transform::Identity, 0.5)];
         let s1 = build_lhs_chain_starts(&base, 16, 42);
         let s2 = build_lhs_chain_starts(&base, 16, 43);
         let differs = s1.iter().zip(s2.iter())
@@ -384,16 +390,16 @@ mod tests {
     #[test]
     fn lhs_within_bounds() {
         let base = vec![
-            ep("rate",  1e-5, 1.0, Transform::Log   { lo: 1e-5, hi: 1.0 }, 0.01),
-            ep("prob",  0.05, 0.95, Transform::Logit { lo: 0.05, hi: 0.95 }, 0.5),
-            ep("real", -10.0, 10.0, Transform::None,                          0.0),
+            ep("rate",  1e-5, 1.0, Transform::for_domain(1e-5, 1.0, true).expect("domain"), 0.01),
+            ep("prob",  0.05, 0.95, Transform::Interval { lo: 0.05, hi: 0.95 }, 0.5),
+            ep("real", -10.0, 10.0, Transform::Identity,                          0.0),
         ];
         let starts = build_lhs_chain_starts(&base, 32, 7);
         for chain in &starts {
             for spec in chain {
-                assert!(spec.initial >= spec.lower && spec.initial <= spec.upper,
+                assert!(spec.initial >= spec.bounds().0 && spec.initial <= spec.bounds().1,
                     "{} out of bounds: {} not in [{}, {}]",
-                    spec.name, spec.initial, spec.lower, spec.upper);
+                    spec.name, spec.initial, spec.bounds().0, spec.bounds().1);
             }
         }
     }
@@ -471,8 +477,8 @@ mod tests {
     #[test]
     fn chain_starts_to_param_vecs_overwrites_estimated_indices() {
         let base_specs = [
-            ep_with_idx("beta",  0, 0.0, 1.0, Transform::None, 0.5),
-            ep_with_idx("gamma", 2, 0.0, 1.0, Transform::None, 0.3),
+            ep_with_idx("beta",  0, 0.0, 1.0, Transform::Identity, 0.5),
+            ep_with_idx("gamma", 2, 0.0, 1.0, Transform::Identity, 0.3),
         ];
         // Two chains, two estimated indices (0 and 2 of a 4-slot vector).
         let chains = vec![
@@ -502,9 +508,7 @@ mod tests {
             index,
             initial,
             rw_sd: 0.1,
-            transform,
-            lower,
-            upper,
+            transform: domain_of(transform, lower, upper),
             rw_sd_auto: false,
             perturb_only_at_t0: false,
         }

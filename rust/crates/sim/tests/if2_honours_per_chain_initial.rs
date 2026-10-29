@@ -104,9 +104,7 @@ fn spec(initial: f64) -> Vec<EstimatedParam> {
         index: THETA_IDX,
         initial,
         rw_sd: 0.05,
-        transform: Transform::Log { lo: 0.01, hi: 10.0 },
-        lower: 0.01,
-        upper: 10.0,
+        transform: Transform::for_domain(0.01, 10.0, true).expect("domain"),
         perturb_only_at_t0: false,
         rw_sd_auto: false,
     }]

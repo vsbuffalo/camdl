@@ -13,7 +13,7 @@ use sim::{
         if2::{run_if2_with_progress, IF2Config, EstimatedParam, IF2Result, Transform},
         particle_filter::Observation,
         pmmh::Prior,
-        prior::{Density, TransformReq},
+        prior::Density,
         diagnostic::{DiagnosticCollector, DiagnosticKind, HintContext},
     },
     rng::StatefulRng,
@@ -251,8 +251,8 @@ pub(crate) fn resolve_fit_parameters(
                 // refuses it below ([`estimated_kind`]).
                 let kind = p.param_kind;
                 let value = spec.start.or_else(|| bounds.zip(kind).map(|((lo, hi), kind)| {
-                    let transform = derive_transform_with_bounds(kind, (lo, hi));
-                    let log_scale = matches!(transform, Transform::Log { .. });
+                    let log_scale = derive_transform_with_bounds(kind, (lo, hi))
+                        .is_ok_and(|t| t.log_spaced());
                     super::init::draw_start_in_bounds(lo, hi, log_scale, seed, name)
                 }));
                 if let Some(v) = value {
@@ -732,8 +732,9 @@ fn build_if2_params(
     let mut rng = StatefulRng::new(seed ^ 0xdeadbeef_u64);
     for p in &mut params {
         if random_starts {
-            if p.lower.is_finite() && p.upper.is_finite() {
-                p.initial = p.lower + rng.uniform() * (p.upper - p.lower);
+            let (lower, upper) = p.bounds();
+            if lower.is_finite() && upper.is_finite() {
+                p.initial = lower + rng.uniform() * (upper - lower);
             } else {
                 p.initial *= 1.0 + 0.2 * (rng.uniform() - 0.5);
             }
@@ -771,8 +772,43 @@ pub fn draw_chain_starts_for(
         base_specs: &config.estimated_params,
         priors: &priors,
     };
-    super::chain_starts::draw_chain_starts(&ctx, starts, n_chains, seed)
-        .map_err(|e| format!("starts = {}: {}", starts.rule.spelled(), e))
+    let drawn = super::chain_starts::draw_chain_starts(&ctx, starts, n_chains, seed)
+        .map_err(|e| format!("starts = {}: {}", starts.rule.spelled(), e))?;
+    for notice in starts_on_an_end(&config.estimated_params, &drawn.starts) {
+        eprintln!("{notice}");
+    }
+    Ok(drawn)
+}
+
+/// One notice per estimated parameter that some chain starts exactly on a
+/// finite end of its domain (support-keyed transforms proposal D3). Such a
+/// start has no finite coordinate (z = ±∞), so the transform's forward map
+/// moves it inward ([`sim::inference::types::EDGE_START_EPS`]); the notice
+/// names the parameter, the chains, the bound and the value the chain then
+/// starts from. A start on a bound arrives legitimately, e.g. an
+/// `nl-bobyqa` optimum on its bound passed on through `--starts`.
+pub fn starts_on_an_end(
+    specs: &[EstimatedParam],
+    starts: &[super::chain_starts::ChainStart],
+) -> Vec<String> {
+    let mut notices = Vec::new();
+    for spec in specs {
+        let on_end: Vec<(usize, f64)> = starts.iter()
+            .filter_map(|c| c.values.get(&spec.name).map(|&v| (c.chain_id, v)))
+            .filter(|&(_, v)| spec.transform.on_an_end(v))
+            .collect();
+        let Some(&(_, v)) = on_end.first() else { continue };
+        let (lo, _) = spec.bounds();
+        let which = if lo.is_finite() && v <= lo { "lower" } else { "upper" };
+        let z = spec.to_transformed(v);
+        let moved = spec.from_transformed(z);
+        let chains: Vec<String> = on_end.iter().map(|(c, _)| ChainIndex(*c).to_string()).collect();
+        notices.push(format!(
+            "notice: `{}` starts on its {which} bound {v} (chain {}); a bound has no finite \
+             transformed coordinate, so the start is moved inward to {moved:.4e} (z = {z:.2}).",
+            spec.name, chains.join(", ")));
+    }
+    notices
 }
 
 /// A fresh start for one chain under the resolved rule — attempt `attempt`
@@ -1053,27 +1089,21 @@ pub fn print_preflight(
         eprintln!("\ntransforms:");
     }
     for spec in specs {
-        let (tname, pos) = match &spec.transform {
-            Transform::Log { lo, hi } => {
-                let z = spec.initial.max(1e-300).ln();
-                (format!("log     [{}, {}]", lo, hi), format!("log({:.4}) = {:.2}", spec.initial, z))
-            }
-            Transform::Logit { lo, hi } => {
-                let p = ((spec.initial - lo) / (hi - lo)).clamp(1e-10, 1.0 - 1e-10);
-                let z = (p / (1.0 - p)).ln();
-                let compressed = z.abs() > 2.0;
-                if compressed {
-                    collector.push(DiagnosticKind::CompressedLogitPosition {
-                        param: spec.name.clone(), z,
-                    });
-                }
-                let mark = if compressed { " \x1b[33m⚠ compressed\x1b[0m" } else { "" };
-                (format!("logit   [{}, {}]", lo, hi), format!("logit = {:.2}{}", z, mark))
-            }
-            Transform::None => {
-                ("none".into(), format!("{:.4}", spec.initial))
-            }
-        };
+        // Each map's position is its own z (`to_transformed`). A start far
+        // from an interval map's midpoint (|z| > 2) sits where the map is
+        // compressed: a step in z moves θ little there.
+        let z = spec.to_transformed(spec.initial);
+        let (lo, hi) = spec.bounds();
+        let tname = format!("{:13} [{}, {}]", spec.transform.tag(), lo, hi);
+        let compressed = matches!(spec.transform,
+            Transform::Interval { .. } | Transform::LogInterval { .. }) && z.abs() > 2.0;
+        if compressed {
+            collector.push(DiagnosticKind::CompressedLogitPosition {
+                param: spec.name.clone(), z,
+            });
+        }
+        let mark = if compressed { " \x1b[33m⚠ compressed\x1b[0m" } else { "" };
+        let pos = format!("start={:.4} z={:.2}{}", spec.initial, z, mark);
         let source = if spec.rw_sd_auto { "\x1b[33mauto\x1b[0m" } else { "explicit" };
         let transformed_sd = spec.transformed_sd(spec.rw_sd, spec.initial);
         eprintln!("  {:12} {}  {}  rw_sd={:.4} ({:.3}/step, {})",
@@ -1146,7 +1176,7 @@ pub fn estimated_kind(ir_param: &ir::parameter::Parameter) -> Result<ir::paramet
 /// `real` and `instant` take the whole line because nothing would enforce a
 /// `[0, ∞)` box on them: an infinite end gives them the identity transform,
 /// which clamps nothing, so a `[0, ∞)` box would be recorded but not kept.
-/// The other kinds' `[0, ∞)` is kept by `Transform::Log`.
+/// The other kinds' `[0, ∞)` is kept by `Transform::LowerBounded`.
 pub fn default_search_box(
     ir_param: &ir::parameter::Parameter,
     kind: ir::parameter::ParamKind,
@@ -1159,59 +1189,33 @@ pub fn default_search_box(
     })
 }
 
-/// Derive the transform for a parameter from its kind ([`estimated_kind`])
-/// and the search box `(lower, upper)` it clamps to — the fit config's
-/// `[estimate].bounds` when given, else [`default_search_box`] (via
-/// [`resolve_search_box`]): probability → Logit, rate/positive/count/duration
-/// → Log.
+/// The transform for an estimated parameter: the map onto its effective
+/// domain `(lower, upper)` — the search box [`resolve_search_box`] gives,
+/// which lies within the support — chosen by which ends are finite
+/// ([`Transform::for_domain`], support-keyed transforms proposal §4.1):
 ///
-/// The resulting `Transform::Log` or `Transform::Logit` clamps to *these*
-/// bounds, which is what IF2 uses to keep particles in the search box.
-/// Without this, a fit that tightens bounds would still see IF2 walk
-/// particles out to the model bounds, defeating the tightening.
+/// | ends             | kind                                  | map            |
+/// | ---------------- | ------------------------------------- | -------------- |
+/// | (−∞, ∞)          | any                                   | `Identity`     |
+/// | [lo, ∞)          | any                                   | `LowerBounded` |
+/// | (−∞, hi]         | any                                   | `UpperBounded` |
+/// | [lo > 0, hi]     | rate, positive, count, duration       | `LogInterval`  |
+/// | [lo, hi] (other) | any                                   | `Interval`     |
+///
+/// No map clamps: every finite end is z = ±∞, so the parameter stays inside
+/// its box under IF2 and the samplers, and no target has a wall.
 pub fn derive_transform_with_bounds(
     kind: ir::parameter::ParamKind,
     (lower, upper): (f64, f64),
-) -> Transform {
-    // Every search box finite at both ends gets a transform that keeps the
-    // parameter inside it. `Transform::None` clamps nothing, so IF2 and the
-    // samplers walk out of the box (gh#66: a bounded `instant` seed-time
-    // escaped to τ = −968). The scaled logit maps `[lo, hi]` regardless of
-    // sign, so a negative lower bound is fine. With an infinite end there is
-    // no box to clamp to, so the parameter stays unconstrained.
-    let bounded_or_none = |lo: f64, hi: f64| {
-        if lo.is_finite() && hi.is_finite() {
-            Transform::Logit { lo, hi }
-        } else {
-            Transform::None
-        }
+) -> Result<Transform, String> {
+    use ir::parameter::ParamKind::*;
+    // Exhaustive over ParamKind (no `_`): a new kind must say whether it is
+    // a positive quantity, the one thing the selection reads from the kind.
+    let positive_kind = match kind {
+        Rate | Positive | Count | Duration => true,
+        Probability | Real | Instant => false,
     };
-    // `Transform::Log` cannot represent a value ≤ 0: a negative lower bound
-    // would send a negative start through `max(x, 1e-300).ln()` = −690 and
-    // make the delta-method step `rw_sd / 1e-300` (gh#967). A box reaching
-    // below zero therefore takes the same choice as an unconstrained kind.
-    let log_or_bounded = |lo: f64, hi: f64| {
-        if lo >= 0.0 { Transform::Log { lo, hi } } else { bounded_or_none(lo, hi) }
-    };
-    {
-        // Exhaustive over ParamKind (no `_`): a new kind is a compile error
-        // here, forcing an explicit transform decision (the gh#191 payoff).
-        use ir::parameter::ParamKind::*;
-        match kind {
-            Probability => Transform::Logit { lo: lower, hi: upper },
-            // Positive spans → log scale. A box reaching below zero (a
-            // `duration` used as a signed seasonal phase, gh#967) cannot be
-            // log-transformed and takes the scaled logit instead.
-            Rate | Positive | Count | Duration => log_or_bounded(lower, upper),
-            // `instant` is an origin-relative point that may be negative
-            // (a seed before the anchor): unconstrained scale unless the
-            // fit declares a finite search box, in which case clamp to it.
-            Instant => bounded_or_none(lower, upper),
-            // `real` is unconstrained, but a finite search box must still
-            // be honoured.
-            Real => bounded_or_none(lower, upper),
-        }
-    }
+    Transform::for_domain(lower, upper, positive_kind).map_err(|e| e.to_string())
 }
 
 /// The range a parameter's kind admits, with its printed form: `[0, 1]` for
@@ -1320,6 +1324,33 @@ pub struct ParamSpec {
     pub bounds: Option<(f64, f64)>,
 }
 
+/// Whether IF2's estimate `v` of `spec`, from a chain that started at
+/// `start`, is near an end of its domain, and which: within 1% of the width
+/// of a box finite at both ends, or — on `[lo, ∞)`, the one half-bounded
+/// domain a fit reaches as `[0, ∞)`, which has no width — below
+/// [`NEAR_HALF_BOUND_FRACTION`] of the way from `lo` to the start (proposal
+/// D10).
+pub fn near_a_bound(spec: &EstimatedParam, v: f64, start: f64) -> Option<(f64, &'static str)> {
+    let (lo, hi) = spec.bounds();
+    let span = hi - lo;
+    if lo.is_finite() && hi.is_finite() {
+        if span > 0.0 {
+            if (v - lo) / span < 0.01 { return Some((lo, "lower")); }
+            if (hi - v) / span < 0.01 { return Some((hi, "upper")); }
+        }
+        return None;
+    }
+    if lo.is_finite() && start - lo > 0.0 && v - lo < NEAR_HALF_BOUND_FRACTION * (start - lo) {
+        return Some((lo, "lower"));
+    }
+    None
+}
+
+/// The fraction of the distance from a chain's start to the lower end of a
+/// `[lo, ∞)` domain below which IF2's estimate is reported as near the
+/// bound (proposal D10): θ̂ − lo < 0.01·(θ₀ − lo).
+const NEAR_HALF_BOUND_FRACTION: f64 = 0.01;
+
 /// Build EstimatedParam specs from caller-provided ParamSpecs.
 /// Pure mechanical work: look up indices, derive transforms, compute auto rw_sd.
 pub fn build_if2_params_from_specs(
@@ -1348,7 +1379,8 @@ pub fn build_if2_params_from_specs(
 
         // Transform: from the kind, built with the resolved (lo, hi) so the
         // clamp bounds match the search box.
-        let transform = derive_transform_with_bounds(estimated_kind(ir_param)?, (lo, hi));
+        let transform = derive_transform_with_bounds(estimated_kind(ir_param)?, (lo, hi))
+            .map_err(|e| format!("estimate.{}: {e}", spec.name))?;
 
         // rw_sd: spec explicit > auto from resolved bounds
         let rw_sd = spec.rw_sd
@@ -1360,8 +1392,6 @@ pub fn build_if2_params_from_specs(
             initial: base_params[idx],
             rw_sd,
             transform,
-            lower: lo,
-            upper: hi,
             perturb_only_at_t0: spec.perturb_only_at_t0,
             rw_sd_auto: spec.rw_sd.is_none(),
         });
@@ -1373,14 +1403,14 @@ pub fn build_if2_params_from_specs(
 /// Refuse an auto-derived `rw_sd` that cannot move its parameter.
 ///
 /// The auto step is a fraction of the box ([`auto_rw_sd_from_value`]), and
-/// three boxes give it no scale:
+/// two boxes give it no scale:
 ///
 /// - a box with an infinite end: ±1e6 is substituted for the end of an
 ///   identity-transformed box (an unbounded `real` got 166666.67);
-/// - a `Log` box whose lower bound is ≤ 0: the bound is floored at 1e-300, so
-///   the geometric midpoint is ~1e-150 (`rate in [0, 2]` got ~1e-148, and
-///   IF2 left every chain at its start);
 /// - any other step that is non-finite, ≤ 0, or below 1e-9 of the box width.
+///
+/// A positive kind boxed `[0, hi]` takes the interval map, whose step is a
+/// fraction of the width like any other box's.
 ///
 /// No scale is invented here; the user names one. `how` is the caller's
 /// spelling of an explicit step.
@@ -1389,21 +1419,14 @@ pub fn refuse_degenerate_auto_rw_sd(
     how: &str,
 ) -> Result<(), String> {
     for p in params.iter().filter(|p| p.rw_sd_auto) {
-        let (name, lo, hi) = (&p.name, p.lower, p.upper);
+        let (lo, hi) = p.bounds();
+        let name = &p.name;
         if !(lo.is_finite() && hi.is_finite()) {
             return Err(format!(
                 "`{name}` has search box [{lo}, {hi}], which has an infinite end, so no \
                  random-walk step (rw_sd) can be derived from it. Give an explicit rw_sd \
                  ({how}), or finite bounds (`in [lo, hi]` in the model, or \
                  `bounds = [lo, hi]` in [estimate])."));
-        }
-        if matches!(p.transform, Transform::Log { lo, .. } if lo <= 0.0) {
-            return Err(format!(
-                "`{name}` has search box [{lo}, {hi}] on the log scale, and a log-scale \
-                 random walk has no automatic step (rw_sd) when the lower bound is 0: the \
-                 derived step would be {:e}, which never moves {name}. Give an explicit \
-                 rw_sd ({how}), or a positive lower bound (`in [lo, hi]` in the model, or \
-                 `bounds = [lo, hi]` in [estimate]).", p.rw_sd));
         }
         if !p.rw_sd.is_finite() || p.rw_sd <= 0.0 || p.rw_sd < 1e-9 * (hi - lo) {
             return Err(format!(
@@ -1427,32 +1450,32 @@ pub fn refuse_degenerate_auto_rw_sd(
 /// point (midpoint, lower bound, current value) would produce the same
 /// perturbation on the transformed scale.
 ///
-/// Log: log_range / 20 on transformed scale, converted to natural at geometric midpoint.
+/// LogInterval: log_range / 20 in ln θ, converted to natural at the geometric midpoint.
 ///   For sigma_se in [0.001, 5.0]: log_range = 8.5, log_sd = 0.43, meaning ~±50% per step.
-/// Logit: range / 6 on natural scale. Logit range is ~12 (-6 to 6), /6 gives ~2.0 on logit.
-/// Identity: (hi - lo) / 6.
-///
-/// The /20 vs /6 asymmetry: log is unbounded (perturbations accumulate) while logit
-/// saturates at bounds. Log needs more conservative defaults.
+/// LowerBounded: as LogInterval with hi = 1000·lo.
+/// Interval: range / 6 on natural scale, 2/3 in z at the midpoint.
+/// Identity, UpperBounded: (hi - lo) / 6, with ±1e6 for an infinite end.
 ///
 /// This is a starting heuristic, not a solution. Scout's MAD-based
 /// calibration replaces it for refine. The modeler can override with
 /// explicit rw_sd in fit.toml or --rw-sd on the CLI.
 pub fn auto_rw_sd_from_value(_current_value: f64, lower: f64, upper: f64, transform: &Transform) -> f64 {
-    match transform {
-        Transform::Log { lo, hi } => {
-            let lo = lo.max(1e-300);
-            let hi_val = if hi.is_finite() { *hi } else { lo * 1000.0 };
-            let log_range = (hi_val / lo).ln();
-            let log_sd = log_range / 20.0;
-            // Convert to natural scale at geometric midpoint
-            let midpoint = (lo * hi_val).sqrt();
-            midpoint * log_sd
-        }
-        Transform::Logit { lo, hi } => {
+    let log_auto = |lo: f64, hi: f64| {
+        let lo = lo.max(1e-300);
+        let hi_val = if hi.is_finite() { hi } else { lo * 1000.0 };
+        let log_range = (hi_val / lo).ln();
+        let log_sd = log_range / 20.0;
+        // Convert to natural scale at geometric midpoint
+        let midpoint = (lo * hi_val).sqrt();
+        midpoint * log_sd
+    };
+    match *transform {
+        Transform::LogInterval { lo, hi } => log_auto(lo, hi),
+        Transform::LowerBounded { lo } => log_auto(lo, f64::INFINITY),
+        Transform::Interval { lo, hi } => {
             (hi - lo) / 6.0
         }
-        Transform::None => {
+        Transform::Identity | Transform::UpperBounded { .. } => {
             let lo = if lower.is_finite() { lower } else { -1e6 };
             let hi = if upper.is_finite() { upper } else { 1e6 };
             (hi - lo) / 6.0
@@ -2538,25 +2561,15 @@ pub fn run_chains_with_per_chain_params(
         }
         for spec in config.estimated_params.iter() {
             let v = chain.theta[spec.index];
-            let (lo, hi) = (spec.lower, spec.upper);
-            let span = hi - lo;
-            // Skip when bounds are not informative (zero span or
-            // unbounded sentinels). Both finite + span > 0 is the
-            // meaningful case for "near a bound."
-            if span > 0.0 && lo.is_finite() && hi.is_finite() {
-                let near_lo = (v - lo) / span;
-                let near_hi = (hi - v) / span;
-                if near_lo < 0.01 {
-                    collector.push(DiagnosticKind::ParamNearBound {
-                        param: spec.name.clone(), value: v, bound: lo,
-                        bound_type: "lower".to_string(),
-                    });
-                } else if near_hi < 0.01 {
-                    collector.push(DiagnosticKind::ParamNearBound {
-                        param: spec.name.clone(), value: v, bound: hi,
-                        bound_type: "upper".to_string(),
-                    });
-                }
+            let start = per_chain_params
+                .and_then(|pcp| pcp.get(chain.chain_id.0))
+                .and_then(|c| c.iter().find(|p| p.name == spec.name))
+                .map_or(spec.initial, |c| c.initial);
+            if let Some((bound, bound_type)) = near_a_bound(spec, v, start) {
+                collector.push(DiagnosticKind::ParamNearBound {
+                    param: spec.name.clone(), value: v, bound,
+                    bound_type: bound_type.to_string(),
+                });
             }
         }
     }
@@ -3565,18 +3578,19 @@ pub fn resolve_prior(
     (Prior::Fixed(Density::Flat), "flat (default)")
 }
 
-/// IC4 in the 2026-04-19 inference review batch 3: validate that
-/// each estimated parameter's resolved prior is compatible with its
-/// transform. Wrong combinations silently produce a different prior
-/// than the user wrote (log_normal on Transform::None collapses to
-/// Normal-on-natural; log_normal on Transform::Logit becomes
-/// logit-normal; etc.).
+/// Validate each estimated parameter's resolved prior against its
+/// effective domain (support-keyed transforms proposal §6): the domain must
+/// lie within the prior family's support, or the prior is zero on part of
+/// the domain — a wall by another route.
 ///
-/// Compatibility matrix:
-///   Prior::TransformedNormal (log_normal) — Transform::Log
-///   Prior::Beta                           — Transform::Logit
-///   Prior::HalfNormal, Gamma, Exponential — Transform::Log
-///   Prior::Uniform, Normal, Flat          — any transform
+///   log_normal, gamma, exponential, half_normal — domain ⊆ [0, ∞)
+///   beta                                        — domain ⊆ [0, 1]
+///   log_uniform(L, U), uniform(L, U)            — domain ⊆ [L, U]
+///   normal, flat                                — any domain
+///   truncated_normal                            — its truncation equals the box
+///
+/// Every density reads the logarithms of θ it needs from the transform's
+/// coordinate, so any map is exact inside the support.
 ///
 /// Call from every fit-stage entry point *before* building IF2
 /// params so the user sees a clean error, not a miscalibrated
@@ -3605,53 +3619,29 @@ pub fn validate_prior_transform_compat(
                  model or `bounds = [lo, hi]` to `[estimate.{}]`.", name, name));
         }
 
-        // The engine's transform is built from the fit box
-        // ([`build_if2_params_from_specs`]), so the check reads that one, not
-        // the model's: they differ where a fit box changes the transform's
-        // family (a kindless parameter boxed below zero gets the scaled logit
-        // where its model box gives Log).
+        // The support rule (support-keyed transforms proposal §6): the
+        // effective domain must lie within the prior family's support. A
+        // prior that is zero on part of the domain is a wall by another
+        // route. The domain is the one the engine maps onto, built from the
+        // fit box ([`build_if2_params_from_specs`]).
         let fit_bounds = estimate.get(name).and_then(|e| e.bounds);
         let search_box = resolve_search_box(name, fit_bounds, ir_param)?;
-        let transform = derive_transform_with_bounds(estimated_kind(ir_param)?, search_box);
+        let transform = derive_transform_with_bounds(estimated_kind(ir_param)?, search_box)
+            .map_err(|e| format!("estimate.{name}: {e}"))?;
         let (prior, source) = resolve_prior(name, estimate, model);
-
-        let is_log   = matches!(transform, Transform::Log { .. });
-        let is_logit = matches!(transform, Transform::Logit { .. });
-
-        let prior_name = prior.kind_str();
-        let transform_name = match &transform {
-            Transform::Log { .. }   => "Log",
-            Transform::Logit { .. } => "Logit",
-            Transform::None         => "None",
-        };
-        let support_desc = match prior.kind_str() {
-            "log_normal" => "log_normal",
-            "beta"       => "beta",
-            _            => "positive-support",
-        };
-        let err = |needs: &str| Err(format!(
-            "parameter '{}': prior {} is incompatible with transform {}; \
-             {} priors require a {} transform. Either fix the param_kind \
-             in the model, or pick a different prior.\n  (prior source: {})",
-            name, prior_name, transform_name, support_desc, needs, source,
-        ));
-
-        // Transform compatibility is a per-family rule, identical for fixed and
-        // hierarchical priors — it lives once on `Density::transform_req`.
-        match prior.transform_req() {
-            // log_normal / half_normal / gamma / exponential / log_uniform.
-            TransformReq::Log => {
-                if !is_log { return err("Log"); }
-            }
-            // A narrower box than [0, 1] is admitted, declared or from the fit
-            // config alike: beta is a natural-scale density and the samplers
-            // add the log-Jacobian of the scaled logit they use, so the target
-            // is the beta truncated to the box.
-            TransformReq::Logit => {
-                if !is_logit { return err("Logit"); }
-            }
-            // flat / uniform / normal / truncated_normal — any transform.
-            TransformReq::Any => {}
+        let (lo, hi) = transform.bounds();
+        let (slo, shi) = prior.support();
+        let is_truncated_normal = matches!(&prior, Prior::Fixed(Density::TruncatedNormal { .. }));
+        if !is_truncated_normal && (lo < slo || hi > shi) {
+            let show = |x: f64| if x.is_infinite() {
+                if x > 0.0 { "∞".to_string() } else { "−∞".to_string() }
+            } else { format!("{x}") };
+            return Err(format!(
+                "parameter '{name}': the {} prior puts its mass on [{}, {}], but {name} is \
+                 searched over [{}, {}], which reaches outside it, so the prior density is \
+                 zero on part of the search region. Narrow the bounds to lie within [{}, {}], \
+                 or choose a prior whose support covers them.\n  (prior source: {source})",
+                prior.kind_str(), show(slo), show(shi), show(lo), show(hi), show(slo), show(shi)));
         }
         // truncated_normal is a natural-scale Gaussian truncated to the
         // parameter's bounds. INVARIANT: the truncation support MUST equal the
@@ -3697,8 +3687,7 @@ mod tests {
     fn spec_at(name: &str, initial: f64) -> EstimatedParam {
         EstimatedParam {
             name: name.to_string(), index: 0, initial, rw_sd: 0.1,
-            transform: sim::inference::types::Transform::None,
-            lower: 0.0, upper: 1.0, rw_sd_auto: false, perturb_only_at_t0: false,
+            transform: sim::inference::types::Transform::Identity, rw_sd_auto: false, perturb_only_at_t0: false,
         }
     }
 
@@ -3888,9 +3877,7 @@ mod tests {
             index: compiled.param_index["beta"],
             initial: 0.3,
             rw_sd: 0.05,
-            transform: Transform::Log { lo: 0.01, hi: 2.0 },
-            lower: 0.01,
-            upper: 2.0,
+            transform: Transform::for_domain(0.01, 2.0, true).expect("domain"),
             perturb_only_at_t0: false, rw_sd_auto: false,
         }];
 
@@ -3961,9 +3948,8 @@ mod tests {
         };
 
         let mk_param = |name: &str, idx: usize| EstimatedParam {
-            name: name.into(), index: idx, initial: 0.0,
-            lower: 0.0, upper: 10.0, rw_sd: 0.1, rw_sd_auto: false,
-            transform: Transform::None,
+            name: name.into(), index: idx, initial: 0.0, rw_sd: 0.1, rw_sd_auto: false,
+            transform: Transform::Identity,
             perturb_only_at_t0: false,
         };
         let if2_params = vec![mk_param("beta", 0), mk_param("gamma", 1)];
@@ -4017,9 +4003,8 @@ mod tests {
         };
 
         let if2_params = vec![EstimatedParam {
-            name: "beta".into(), index: 0, initial: 0.0,
-            lower: 0.0, upper: 10.0, rw_sd: 0.1, rw_sd_auto: false,
-            transform: Transform::None, perturb_only_at_t0: false,
+            name: "beta".into(), index: 0, initial: 0.0, rw_sd: 0.1, rw_sd_auto: false,
+            transform: Transform::Identity, perturb_only_at_t0: false,
         }];
 
         // Minimal compiled stand-in. The writer only reads
@@ -4130,9 +4115,8 @@ mod tests {
             overall_winner_idx: 0,
         };
         let if2_params = vec![EstimatedParam {
-            name: "R0".into(), index: 0, initial: 0.0,
-            lower: 1.0, upper: 200.0, rw_sd: 1.0, rw_sd_auto: false,
-            transform: Transform::None, perturb_only_at_t0: false,
+            name: "R0".into(), index: 0, initial: 0.0, rw_sd: 1.0, rw_sd_auto: false,
+            transform: Transform::Identity, perturb_only_at_t0: false,
         }];
         let model = ir::Model {
             constants: vec![],
@@ -4448,11 +4432,12 @@ mod tests {
             "missing-bounds uniform = {{}} must be rejected with a bounds hint: {}", err);
     }
 
-    /// log_uniform is uniform on the log scale → it requires the Log transform,
-    /// like log_normal. A non-Log transform would silently realize a different
-    /// prior, so the compat validator must reject it. (gh#155)
+    /// The support rule for log_uniform(L, U): the effective domain must lie
+    /// within [L, U]. Inside it any map is exact, because the density reads
+    /// ln θ from the transform's coordinate (gh#155 asked for this pairing to
+    /// be checked; it is now a support check, not a transform check).
     #[test]
-    fn log_uniform_requires_log_transform() {
+    fn log_uniform_requires_its_support() {
         use ir::parameter::{Parameter, ParamValue, PriorSpec, PriorDist, LogUniformPrior,
             ParamKind, Transform as IrTransform};
         use crate::fit::config_v2::EstimateSpecV2;
@@ -4474,17 +4459,27 @@ mod tests {
             bounds: Some((1e-5, 1e-2)), prior: None,
             perturb_only_at_t0: false, rw_sd: None, start: None });
 
-        // rate param_kind → Log transform → ok.
+        // A rate (→ LogInterval) and a real (→ Interval) on the prior's own
+        // box are both within its support.
         assert!(validate_prior_transform_compat(&est, &model).is_ok(),
-            "log_uniform on a rate param (→Log) must validate");
-
-        // A `real` on the same box takes the scaled logit → must be rejected,
-        // naming the fix.
+            "log_uniform on a rate boxed to its support must validate");
         let mut real = model.clone();
         real.parameters[0].param_kind = Some(ParamKind::Real);
-        let err = validate_prior_transform_compat(&est, &real).unwrap_err();
-        assert!(err.contains("log_uniform") && err.contains("Log"),
-            "error must name log_uniform + the required Log transform: {}", err);
+        validate_prior_transform_compat(&est, &real)
+            .expect("log_uniform on a real boxed to its support must validate");
+
+        // A box reaching outside [L, U] is refused, naming the support.
+        let mut wide = model.clone();
+        wide.parameters[0].value = ParamValue::Estimated {
+            init: None, bounds: Some((1e-6, 1e-2)),
+            prior: PriorSpec::Dist(PriorDist::LogUniform(
+                LogUniformPrior { lower: 1e-5, upper: 1e-2 })),
+            transform: IrTransform::Identity,
+        };
+        est.get_mut("kappa").unwrap().bounds = Some((1e-6, 1e-2));
+        let err = validate_prior_transform_compat(&est, &wide).unwrap_err();
+        assert!(err.contains("log_uniform") && err.contains("[0.00001, 0.01]"),
+            "error must name log_uniform and its support: {}", err);
     }
 
     /// truncated_normal's truncation support must equal the parameter's
@@ -5060,8 +5055,8 @@ dt = 1.0
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
             .expect("tightened bounds within model bounds is valid");
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].lower, 0.1, "EstimatedParam.lower must reflect fit bounds");
-        assert_eq!(result[0].upper, 0.5, "EstimatedParam.upper must reflect fit bounds");
+        assert_eq!(result[0].bounds().0, 0.1, "EstimatedParam.lower must reflect fit bounds");
+        assert_eq!(result[0].bounds().1, 0.5, "EstimatedParam.upper must reflect fit bounds");
     }
 
     #[test]
@@ -5080,11 +5075,11 @@ dt = 1.0
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
             .expect("ok");
         match &result[0].transform {
-            Transform::Log { lo, hi } => {
-                assert_eq!(*lo, 1e-3, "Transform::Log.lo must reflect fit bounds");
-                assert_eq!(*hi, 0.5,  "Transform::Log.hi must reflect fit bounds");
+            Transform::LogInterval { lo, hi } => {
+                assert_eq!(*lo, 1e-3, "the log-interval's lo must reflect fit bounds");
+                assert_eq!(*hi, 0.5,  "the log-interval's hi must reflect fit bounds");
             }
-            other => panic!("expected Log transform on rate-typed param, got {:?}", other),
+            other => panic!("expected LogInterval on a rate-typed param, got {:?}", other),
         }
     }
 
@@ -5119,8 +5114,8 @@ dt = 1.0
         }];
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
             .expect("ok");
-        assert_eq!(result[0].lower, 0.01);
-        assert_eq!(result[0].upper, 2.0);
+        assert_eq!(result[0].bounds().0, 0.01);
+        assert_eq!(result[0].bounds().1, 2.0);
     }
 
     #[test]
@@ -5158,19 +5153,19 @@ dt = 1.0
     // ── Bounded real/instant params honour fit bounds (gh#66) ────────
     //
     // `derive_transform_with_bounds` mapped `real` (the `_` fallback)
-    // and `instant` to `Transform::None`, which applies NO clamping.
+    // and `instant` to `Transform::Identity`, which applies NO clamping.
     // A bounded real/instant param could then random-walk arbitrarily
     // far outside its declared search bounds during IF2 (the issue
     // observed a seed-time param escaping to τ = −968). When finite
     // bounds are present, the scaled-logit (`Transform::Logit`) must
     // be used so IF2 perturbations stay in `[lo, hi]` — matching the
     // other bounded kinds and inference-spec §3.2 rule #2. With no
-    // finite bounds, `Transform::None` is still correct.
+    // finite bounds, `Transform::Identity` is still correct.
 
     #[test]
     fn real_param_with_bounds_gets_bounded_transform_not_none() {
         // A `real` param WITH finite fit bounds must NOT get
-        // Transform::None (which lets IF2 escape the box). It must get
+        // Transform::Identity (which lets IF2 escape the box). It must get
         // the scaled-logit that clamps to the search bounds.
         let (model, compiled) = make_one_param_model("tau", 0.0, 55.0, Some(ir::parameter::ParamKind::Real));
         let base_params = compiled.default_params.clone();
@@ -5183,13 +5178,13 @@ dt = 1.0
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
             .expect("ok");
         match &result[0].transform {
-            Transform::Logit { lo, hi } => {
+            Transform::Interval { lo, hi } => {
                 assert_eq!(*lo, 0.0, "scaled-logit lo must track fit bounds");
                 assert_eq!(*hi, 55.0, "scaled-logit hi must track fit bounds");
             }
             other => panic!(
                 "bounded `real` must get a bounded (scaled-logit) transform, \
-                 not {:?} — Transform::None lets IF2 escape the search box (gh#66)",
+                 not {:?} — Transform::Identity lets IF2 escape the search box (gh#66)",
                 other),
         }
     }
@@ -5211,7 +5206,7 @@ dt = 1.0
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
             .expect("ok");
         match &result[0].transform {
-            Transform::Logit { lo, hi } => {
+            Transform::Interval { lo, hi } => {
                 assert_eq!(*lo, -30.0, "scaled-logit lo must track fit bounds (negative ok)");
                 assert_eq!(*hi, 30.0, "scaled-logit hi must track fit bounds");
             }
@@ -5224,28 +5219,27 @@ dt = 1.0
     #[test]
     fn unbounded_real_param_stays_none() {
         // No finite bounds → there is no box to clamp to, so an
-        // unconstrained real remains Transform::None (no regression for
+        // unconstrained real remains Transform::Identity (no regression for
         // genuinely-unbounded params).
         use ir::parameter::Parameter;
         let real_param = Parameter { name: "tau".into(), value: ir::parameter::ParamValue::Fixed { value: 0.0 }, param_kind: Some(ir::parameter::ParamKind::Real), param_dim: None };
         let instant_param = Parameter {
             param_kind: Some(ir::parameter::ParamKind::Instant), ..real_param.clone()
         };
-        // (0.0, INFINITY) is the resolved (lo, hi) when no bounds exist
-        // (see build_if2_params_from_specs `(None, None) => (0.0, INF)`).
-        let t_real = derive_transform_with_bounds(
-            real_param.param_kind.unwrap(), (0.0, f64::INFINITY));
-        let t_instant = derive_transform_with_bounds(
-            instant_param.param_kind.unwrap(), (0.0, f64::INFINITY));
-        assert!(matches!(t_real, Transform::None),
+        // (−∞, ∞) is the resolved box of a `real` or `instant` with no
+        // bounds ([`default_search_box`]).
+        let line = (f64::NEG_INFINITY, f64::INFINITY);
+        let t_real = derive_transform_with_bounds(real_param.param_kind.unwrap(), line);
+        let t_instant = derive_transform_with_bounds(instant_param.param_kind.unwrap(), line);
+        assert!(matches!(t_real, Ok(Transform::Identity)),
             "unbounded real must stay None, got {:?}", t_real);
-        assert!(matches!(t_instant, Transform::None),
+        assert!(matches!(t_instant, Ok(Transform::Identity)),
             "unbounded instant must stay None, got {:?}", t_instant);
     }
 
     // ── Every finite search box gets a transform that keeps it ───────
     //
-    // `Transform::None` applies no clamp and `Transform::Log` cannot
+    // `Transform::Identity` applies no clamp and `Transform::Log` cannot
     // represent a negative value, so either one on a box that is finite at
     // both ends lets a sampler or IF2 put the parameter outside the box (or
     // never reach its negative part). The scaled logit maps `[lo, hi]`
@@ -5267,11 +5261,11 @@ dt = 1.0
         let base = compiled.default_params.clone();
         let r = build_if2_params_from_specs(
             &model, &compiled, &base, &[spec_for("phi", -120.0, 120.0)]).expect("ok");
-        assert!(matches!(r[0].transform, Transform::Logit { lo, hi } if lo == -120.0 && hi == 120.0),
+        assert!(matches!(r[0].transform, Transform::Interval { lo, hi } if lo == -120.0 && hi == 120.0),
             "a duration boxed to [-120, 120] must get the scaled logit, got {:?}", r[0].transform);
     }
 
-    /// A non-negative `duration` box keeps the log transform it always had.
+    /// A `duration` box with 0 < lo keeps log geometry: the log-interval map.
     #[test]
     fn duration_with_nonnegative_box_keeps_log() {
         let (model, compiled) = make_one_param_model(
@@ -5279,7 +5273,7 @@ dt = 1.0
         let base = compiled.default_params.clone();
         let r = build_if2_params_from_specs(
             &model, &compiled, &base, &[spec_for("d", 1.0, 30.0)]).expect("ok");
-        assert!(matches!(r[0].transform, Transform::Log { .. }), "got {:?}", r[0].transform);
+        assert_eq!(r[0].transform, Transform::LogInterval { lo: 1.0, hi: 30.0 });
     }
 
     /// D6: a parameter whose IR records no kind has no known support (the
@@ -5342,8 +5336,8 @@ dt = 1.0
             "rho", 0.5, ir::parameter::ParamKind::Probability);
         let p = &model.parameters[0];
         match derive_transform_with_bounds(
-            p.param_kind.unwrap(), default_search_box(p, p.param_kind.unwrap())) {
-            Transform::Logit { lo, hi } => {
+            p.param_kind.unwrap(), default_search_box(p, p.param_kind.unwrap())).unwrap() {
+            Transform::Interval { lo, hi } => {
                 assert_eq!((lo, hi), (0.0, 1.0),
                     "an undeclared `probability` must be a logit over [0, 1]");
             }
@@ -5361,9 +5355,9 @@ dt = 1.0
         let base = compiled.default_params.clone();
         let out = build_if2_params_from_specs(
             &model, &compiled, &base, &[unbounded_spec("rho", None)]).expect("ok");
-        assert_eq!((out[0].lower, out[0].upper), (0.0, 1.0),
+        assert_eq!(out[0].bounds(), (0.0, 1.0),
             "the IF2 search box must be the unit interval");
-        assert!(matches!(out[0].transform, Transform::Logit { lo, hi } if lo == 0.0 && hi == 1.0),
+        assert!(matches!(out[0].transform, Transform::Interval { lo, hi } if lo == 0.0 && hi == 1.0),
             "search box and transform clamp must agree, got {:?}", out[0].transform);
         assert!(out[0].rw_sd.is_finite(),
             "auto rw_sd over an infinite box is inf → NaN on the first \
@@ -5383,15 +5377,15 @@ dt = 1.0
         let base = compiled.default_params.clone();
         let out = build_if2_params_from_specs(
             &model, &compiled, &base, &[unbounded_spec("rho", Some((0.1, 0.4)))]).expect("ok");
-        assert_eq!((out[0].lower, out[0].upper), (0.1, 0.4),
+        assert_eq!(out[0].bounds(), (0.1, 0.4),
             "fit.toml bounds must win over the type's [0, 1]");
-        assert!(matches!(out[0].transform, Transform::Logit { lo, hi } if lo == 0.1 && hi == 0.4),
+        assert!(matches!(out[0].transform, Transform::Interval { lo, hi } if lo == 0.1 && hi == 0.4),
             "the transform must clamp to the fit.toml box, got {:?}", out[0].transform);
     }
 
     /// The other half of the fix: no kind gains a support it did not have.
     /// A `rate` with no `in [...]` keeps `Log` over `[0, ∞)`; `real` and
-    /// `instant` keep `Transform::None`.
+    /// `instant` keep `Transform::Identity`.
     #[test]
     fn other_kinds_keep_their_existing_unbounded_fallback() {
         use ir::parameter::ParamKind::*;
@@ -5400,10 +5394,10 @@ dt = 1.0
             let base = compiled.default_params.clone();
             let out = build_if2_params_from_specs(
                 &model, &compiled, &base, &[unbounded_spec("p", None)]).expect("ok");
-            assert_eq!((out[0].lower, out[0].upper), (0.0, f64::INFINITY),
+            assert_eq!(out[0].bounds(), (0.0, f64::INFINITY),
                 "{kind} must keep the [0, ∞) fallback");
-            assert!(matches!(out[0].transform, Transform::Log { .. }),
-                "{kind} must stay on Log, got {:?}", out[0].transform);
+            assert_eq!(out[0].transform, Transform::LowerBounded { lo: 0.0 },
+                "{kind} on [0, ∞) takes θ = eᶻ");
             assert!(out[0].rw_sd.is_finite(),
                 "{kind} auto rw_sd must stay finite (Log handles hi = ∞), got {}",
                 out[0].rw_sd);
@@ -5413,7 +5407,7 @@ dt = 1.0
             let base = compiled.default_params.clone();
             let out = build_if2_params_from_specs(
                 &model, &compiled, &base, &[unbounded_spec("p", None)]).expect("ok");
-            assert!(matches!(out[0].transform, Transform::None),
+            assert!(matches!(out[0].transform, Transform::Identity),
                 "{kind} with no finite box must stay None, got {:?}", out[0].transform);
         }
     }
@@ -5541,11 +5535,13 @@ dt = 1.0
         let model = model_with_prior(
             "phi", Some(ir::parameter::ParamKind::Real), None, log_normal(-1.0, 0.5));
         let err = validate_prior_transform_compat(&est_with("phi", Some((-1.0, 1.0))), &model)
-            .expect_err("log_normal on the fit box's scaled logit must be refused");
-        assert!(err.contains("log_normal") && err.contains("Logit"), "{err}");
+            .expect_err("log_normal on a box reaching below zero must be refused");
+        assert!(err.contains("log_normal") && err.contains("[-1, 1]") && err.contains("[0, ∞]"),
+            "{err}");
 
-        // The converse: a declared signed range gives the model box a logit,
-        // but a fit box inside [1, 100] is searched on Log, which is right.
+        // The converse: a declared signed range would put the prior's zero
+        // inside the domain, but a fit box inside [1, 100] lies in its
+        // support, which is right.
         let model = model_with_prior("d", Some(ir::parameter::ParamKind::Duration),
             Some((-180.0, 180.0)), log_normal(1.0, 1.0));
         validate_prior_transform_compat(&est_with("d", Some((1.0, 100.0))), &model)
@@ -5579,8 +5575,12 @@ dt = 1.0
             build_if2_params_from_specs(&model, &compiled, &base, &[spec_for("z", lo, hi)])
                 .expect("params")
         };
-        let err = refuse_degenerate_auto_rw_sd(&auto(0.0, 2.0), "rw_sd").unwrap_err();
-        assert!(err.contains("`z`") && err.contains("[0, 2]") && err.contains("lower bound is 0"), "{err}");
+        // A rate on [0, 2] takes the interval map, whose automatic step is a
+        // fraction of the width: it moves the parameter (it did not under the
+        // walled log map, whose floored lower bound made the step ~1e-148).
+        let zero_lo = auto(0.0, 2.0);
+        assert_eq!(zero_lo[0].transform, Transform::Interval { lo: 0.0, hi: 2.0 });
+        refuse_degenerate_auto_rw_sd(&zero_lo, "rw_sd").expect("a rate on [0, 2] has an auto step");
         let err = refuse_degenerate_auto_rw_sd(&auto(1e-30, 1.0), "rw_sd").unwrap_err();
         assert!(err.contains("cannot move"), "{err}");
         refuse_degenerate_auto_rw_sd(&auto(1e-6, 10.0), "rw_sd").expect("an ordinary log box");
@@ -5621,8 +5621,7 @@ dt = 1.0
     fn ep_simple(name: &str, idx: usize) -> EstimatedParam {
         EstimatedParam {
             name: name.into(), index: idx, initial: 1.0,
-            rw_sd: 0.1, transform: Transform::None,
-            lower: 0.0, upper: 10.0,
+            rw_sd: 0.1, transform: Transform::Identity,
             perturb_only_at_t0: false, rw_sd_auto: false,
         }
     }
@@ -6657,5 +6656,53 @@ dt = 1.0
         assert!(parse_time_spec("--to", "last_obs + 8 fortnights", None, "days").is_err());
         assert!(parse_time_spec("--to", "last_obs + 8 weeks extra", None, "days").is_err());
         assert!(parse_time_spec("--to", "last_obs + -8 weeks", None, "days").is_err());
+    }
+
+    // ── Support-keyed transforms: near-bound report (D10) and the notice
+    //    for a start on an end (D3) ──────────────────────────────────────
+
+    fn domain_param(name: &str, transform: Transform, initial: f64) -> EstimatedParam {
+        EstimatedParam {
+            name: name.into(), index: 0, initial, rw_sd: 0.1, transform,
+            rw_sd_auto: false, perturb_only_at_t0: false,
+        }
+    }
+
+    #[test]
+    fn near_a_bound_covers_the_half_line_by_the_ratio_to_the_start() {
+        let half = domain_param("k", Transform::LowerBounded { lo: 0.0 }, 0.5);
+        assert_eq!(near_a_bound(&half, 0.004, 0.5), Some((0.0, "lower")),
+            "θ̂ < 0.01·θ₀ on [0, ∞) is near the bound");
+        assert_eq!(near_a_bound(&half, 0.006, 0.5), None);
+        assert_eq!(near_a_bound(&half, 3.0, 0.5), None);
+        let boxed = domain_param("b", Transform::Interval { lo: 0.0, hi: 2.0 }, 1.0);
+        assert_eq!(near_a_bound(&boxed, 0.01, 1.0), Some((0.0, "lower")));
+        assert_eq!(near_a_bound(&boxed, 1.995, 1.0), Some((2.0, "upper")));
+        assert_eq!(near_a_bound(&boxed, 1.0, 1.0), None);
+        let line = domain_param("r", Transform::Identity, 0.0);
+        assert_eq!(near_a_bound(&line, -1e9, 0.0), None);
+    }
+
+    #[test]
+    fn a_start_on_an_end_gets_one_notice_naming_the_bound_and_the_new_value() {
+        use super::super::chain_starts::{ChainStart, InitSource};
+        let specs = vec![
+            domain_param("rho", Transform::Interval { lo: 0.0, hi: 1.0 }, 0.5),
+            domain_param("kappa", Transform::LowerBounded { lo: 0.0 }, 0.5),
+            domain_param("beta", Transform::LogInterval { lo: 0.1, hi: 2.0 }, 0.5),
+        ];
+        let start = |chain_id: usize, rho: f64, kappa: f64| ChainStart {
+            chain_id,
+            values: [("rho".to_string(), rho), ("kappa".to_string(), kappa),
+                     ("beta".to_string(), 0.5)].into_iter().collect(),
+            source: InitSource::SeededBase,
+        };
+        let notices = starts_on_an_end(&specs, &[start(0, 1.0, 0.0), start(1, 1.0, 0.3)]);
+        assert_eq!(notices.len(), 2, "one notice per parameter, not per chain: {notices:?}");
+        assert!(notices[0].contains("`rho`") && notices[0].contains("upper bound 1")
+            && notices[0].contains("chain 0, 1") && notices[0].contains("z = 23.03"), "{}", notices[0]);
+        assert!(notices[1].contains("`kappa`") && notices[1].contains("lower bound 0")
+            && notices[1].contains("1.0000e-10") && notices[1].contains("z = -23.03"), "{}", notices[1]);
+        assert!(starts_on_an_end(&specs, &[start(0, 0.5, 0.3)]).is_empty());
     }
 }

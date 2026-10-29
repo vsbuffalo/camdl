@@ -103,18 +103,15 @@ use crate::notice::{Notice, Notices, Severity};
 /// type promises when the model wrote no `in [lo, hi]`.
 ///
 /// `probability` is the only kind whose type pins a finite interval
-/// (`docs/camdl-language-spec.md` §4.1: `probability : ∈ [0, 1]`), and it is
-/// also the only kind that selects `Transform::Logit`, the one transform that
-/// needs a finite *upper* bound to have a scale at all: with `hi = ∞`,
-/// `(x − lo)/(hi − lo)` is 0 for every finite `x` and `(hi − lo)/6` — the auto
-/// `rw_sd` — is `∞` (gh#763).
+/// (`docs/camdl-language-spec.md` §4.1: `probability : ∈ [0, 1]`); without it
+/// an undeclared `probability` would be searched over `[0, ∞)` and its auto
+/// `rw_sd`, `(hi − lo)/6`, would be `∞` (gh#763).
 ///
 /// Every other kind's range is either half-open (`rate`, `positive`, `count`,
-/// `duration` → `[0, ∞)`) or unbounded (`real`, `instant`), which is exactly
-/// what each consumer's existing `[0, ∞)`-or-unconstrained fallback already
-/// expresses. They return `None` and keep their behaviour unchanged —
-/// `Transform::Log` documents `hi = +∞` as well-formed, and `instant`/`real`
-/// fall to `Transform::None` when a bound is infinite.
+/// `duration` → `[0, ∞)`, mapped by `Transform::LowerBounded`) or unbounded
+/// (`real`, `instant`, mapped by `Transform::Identity`), which each consumer's
+/// `[0, ∞)`-or-unconstrained fallback already expresses, so they return
+/// `None`.
 pub fn kind_support(kind: ir::parameter::ParamKind) -> Option<(f64, f64)> {
     use ir::parameter::ParamKind::*;
     // Exhaustive over ParamKind (no `_`): a new kind is a compile error here,
@@ -2345,7 +2342,7 @@ mod tests {
     /// `probability` is the only kind whose type pins a finite interval. Every
     /// other kind returns `None` and keeps whatever fallback its consumer
     /// already had — `Transform::Log` is well-formed with `hi = ∞`, and
-    /// `instant`/`real` fall to `Transform::None` when a bound is infinite, so
+    /// `instant`/`real` fall to `Transform::Identity` when a bound is infinite, so
     /// none of them has the gh#763 hole.
     #[test]
     fn only_probability_carries_a_range_of_its_own() {

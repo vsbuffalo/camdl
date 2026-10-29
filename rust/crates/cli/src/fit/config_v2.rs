@@ -2587,11 +2587,11 @@ impl FitConfig {
     /// for `mu` under a flat likelihood, where the truth is 0). PGAS already
     /// refuses hierarchical priors, and IF2 and the optimizers read no prior.
     ///
-    /// The box compared is the one the transform enforces: `Transform::None`
-    /// (a box with an infinite end on an unconstrained kind) enforces none.
+    /// The box compared is the effective domain the transform maps onto
+    /// ([`sim::inference::types::Transform::bounds`]); an unbounded `real` or
+    /// `instant` leaf has the whole line and cannot cut into a support.
     pub fn validate_hierarchical_leaf_boxes(&self, model: &ir::Model) -> Result<(), String> {
         use crate::run_meta::FitAlgorithm;
-        use sim::inference::types::Transform;
         let Some(method) = &self.inference.method else {
             return Ok(());
         };
@@ -2609,10 +2609,8 @@ impl FitConfig {
             let Some(h) = p.hierarchical() else { continue };
             let Ok(bx) = super::runner::resolve_search_box(name, spec.bounds, p) else { continue };
             let Ok(kind) = super::runner::estimated_kind(p) else { continue };
-            let kept = match super::runner::derive_transform_with_bounds(kind, bx) {
-                Transform::Log { lo, hi } | Transform::Logit { lo, hi } => (lo, hi),
-                Transform::None => continue,
-            };
+            let Ok(transform) = super::runner::derive_transform_with_bounds(kind, bx) else { continue };
+            let kept = transform.bounds();
             if box_cuts_into_support(kept, hierarchical_support(h)) {
                 cut.push(format!(
                     "  {name}: bounds [{}, {}], prior {}",

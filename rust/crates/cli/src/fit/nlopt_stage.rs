@@ -104,7 +104,7 @@ pub fn run_stage(
     let bounds: Vec<(f64, f64)> = run_config
         .estimated_params
         .iter()
-        .map(|p| (p.lower, p.upper))
+        .map(|p| p.bounds())
         .collect();
     let est_indices: Vec<usize> = run_config
         .estimated_params

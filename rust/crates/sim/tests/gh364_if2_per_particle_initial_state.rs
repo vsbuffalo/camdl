@@ -145,9 +145,7 @@ fn if2_initial_state_uses_each_particles_own_theta() {
         index: IVP_IDX,
         initial: 0.05,
         rw_sd: 0.3,
-        transform: Transform::Logit { lo: 0.001, hi: 0.5 },
-        lower: 0.001,
-        upper: 0.5,
+        transform: Transform::Interval { lo: 0.001, hi: 0.5 },
         // Pure initial-condition parameter: perturbed at t=0 only, exactly
         // like pomp's `ivp()` entry in `rw.sd`. camdl spells the flag
         // `perturb_only_at_t0` — it is a perturbation schedule, nothing more.
@@ -460,9 +458,7 @@ fn pure_ic_ivp_param_is_identified() {
         // Natural scale (`EstimatedParam::transformed_sd` divides by dθ/dz):
         // jitter i0 by ±0.003, i.e. ±30 initial infectious out of N = 10 000.
         rw_sd: 0.003,
-        transform: Transform::Logit { lo: 0.0005, hi: 0.05 },
-        lower: 0.0005,
-        upper: 0.05,
+        transform: Transform::Interval { lo: 0.0005, hi: 0.05 },
         perturb_only_at_t0: true,
         rw_sd_auto: false,
     }];

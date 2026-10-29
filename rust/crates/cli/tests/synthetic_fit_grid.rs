@@ -309,9 +309,10 @@ cases = "{}"
 /// the runner `process::exit(1)`-ed on the first chain error, killing the
 /// whole fit even when other chains were healthy.
 ///
-/// Base seed 33 is chosen because its IF2 search deterministically collapses
-/// ESS around obs window 9 (verified); with several chains at least one
-/// survives, so a correct runner completes the fit.
+/// Base seed 2 is chosen because one of its IF2 chains deterministically
+/// collapses ESS around obs window 8 (verified under the support-keyed
+/// transforms; seed 33 no longer collapses there); with several chains at
+/// least one survives, so a correct runner completes the fit.
 #[test]
 fn fit_run_skips_degenerate_if2_chain_and_continues() {
     let bin = camdl_sim();
@@ -324,7 +325,7 @@ fn fit_run_skips_degenerate_if2_chain_and_continues() {
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(r#"
 output_dir = "{}"
-fit_seeds = [33]
+fit_seeds = [2]
 
 [model]
 camdl = "{}"

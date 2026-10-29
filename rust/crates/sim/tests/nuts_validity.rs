@@ -7,12 +7,12 @@
 //! and the log-Jacobian log|dθ/dz|. This file checks each layer against an
 //! independent answer, bottom up:
 //!
-//! 1. *Transforms, deterministically.* Every `Transform` variant (unbounded
-//!    `Log`, boxed `Log`, scaled `Logit`, `None`): the round trip z → θ → z and
-//!    θ → z → θ, and `transform_deriv`, `log_jacobian` and `jacobian_grad`
-//!    against central finite differences of `from_transformed`, at interior
-//!    points and next to each bound. And the boundary behaviour as it is
-//!    today: a boxed `Log` has log-Jacobian −∞ outside its box.
+//! 1. *Transforms, deterministically.* The maps a fit reaches
+//!    (`LowerBounded { 0 }`, `LogInterval`, `Interval`, `Identity`): the
+//!    round trip z → θ → z and θ → z → θ, and `transform_deriv`,
+//!    `log_jacobian` and `jacobian_grad` against central finite differences
+//!    of `from_transformed`. And that no map has a wall: the log-Jacobian is
+//!    finite at every finite z.
 //! 2. *The NUTS kernel alone* (`nuts::nuts_step` with dual-averaging
 //!    adaptation, no PGAS, no simulator) on targets built from that
 //!    infrastructure, with known answers: an independent Gaussian, and
@@ -24,8 +24,14 @@
 //!    parameters enter neither the dynamics nor the observation model, so the
 //!    posterior is the prior exactly. τ's draws must match exponential(λ)
 //!    (Kolmogorov–Smirnov) and z's must match N(0, 1) in mean and variance.
-//! 4. *The boxed-Log wall* (`boxed_log_wall_produces_divergences_under_nuts`):
-//!    a record of current behaviour, not a statement of what is correct.
+//! 4. *A boxed parameter has no wall*
+//!    (`boxed_parameter_diverges_no_more_than_the_unboxed_one`): log τ boxed to
+//!    [1e-6, 2.5] under `LogInterval` diverges no more than the unboxed
+//!    control's bound, and its draws are the truncated exponential.
+//! 5. *Prior-only runs recover the truncated prior* under PGAS+NUTS and under
+//!    PMMH (whose kernel ODE-MH shares): τ ~ exponential(5.99) on [1e-6, 2.5],
+//!    ρ ~ beta(2, 5) on [0.1, 0.9] (both `LogInterval`) and κ ~ half_normal(1)
+//!    on [0, ∞) (`LowerBounded { 0 }`), proposal §12.3.
 //!
 //! The per-parameter target *value and gradient* the PGAS closure assembles
 //! from these pieces (`Prior::log_density_and_grad_z`) are
@@ -61,12 +67,6 @@ use sim::inference::prior::Density;
 use sim::inference::{BoundObs, MultiStreamObsModel};
 use sim::rng::StatefulRng;
 
-/// The prior point a `Log`-transformed parameter presents: θ, with ln θ read
-/// from the coordinate `z`.
-fn at(theta: f64, z: f64) -> sim::inference::prior::PriorPoint {
-    sim::inference::prior::PriorPoint { ln_theta: z, ..sim::inference::prior::PriorPoint::natural(theta) }
-}
-
 
 /// The exponential prior rate on τ used throughout (the rate of the B-spline
 /// smoothing-scale prior these diagnostics were first run for).
@@ -84,15 +84,13 @@ const VAR_LOG_EXP: f64 = std::f64::consts::PI * std::f64::consts::PI / 6.0;
 /// seeds), consistent with a calibrated MCSE.
 const Z_FAIL: f64 = 5.0;
 
-fn ep(transform: Transform, lower: f64, upper: f64) -> EstimatedParam {
+fn ep(transform: Transform) -> EstimatedParam {
     EstimatedParam {
         name: "p".into(),
         index: 0,
         initial: 0.0,
         rw_sd: 0.1,
         transform,
-        lower,
-        upper,
         rw_sd_auto: false,
         perturb_only_at_t0: false,
     }
@@ -119,18 +117,17 @@ fn close(a: f64, b: f64, tol: f64) -> bool {
 /// One transform case: the parameter, and the z-points at which to check it
 /// (interior points and points 1e-3 inside each finite bound).
 fn transform_cases() -> Vec<(&'static str, EstimatedParam, Vec<f64>)> {
-    let inf = f64::INFINITY;
     let (lo, hi) = (1e-6_f64, 2.5_f64);
     vec![
-        ("log, unbounded", ep(Transform::Log { lo: 0.0, hi: inf }, 0.0, inf),
+        ("lower-bounded, [0, ∞)", ep(Transform::LowerBounded { lo: 0.0 }),
          vec![-30.0, -5.0, -1.0, 0.0, 1.5, 6.0]),
-        ("log, box [1e-6, 2.5]", ep(Transform::Log { lo, hi }, lo, hi),
-         vec![lo.ln() + 1e-3, -5.0, -1.0, 0.0, 0.5, hi.ln() - 1e-3]),
-        ("logit, [0, 1]", ep(Transform::Logit { lo: 0.0, hi: 1.0 }, 0.0, 1.0),
+        ("log-interval, [1e-6, 2.5]", ep(Transform::for_domain(lo, hi, true).expect("domain")),
+         vec![-8.0, -3.0, -0.5, 0.0, 0.5, 3.0, 8.0]),
+        ("interval, [0, 1]", ep(Transform::Interval { lo: 0.0, hi: 1.0 }),
          vec![-8.0, -3.0, -0.4, 0.0, 0.7, 3.0, 8.0]),
-        ("scaled logit, [-3, 5]", ep(Transform::Logit { lo: -3.0, hi: 5.0 }, -3.0, 5.0),
+        ("interval, [-3, 5]", ep(Transform::Interval { lo: -3.0, hi: 5.0 }),
          vec![-8.0, -2.0, 0.0, 1.3, 8.0]),
-        ("none", ep(Transform::None, -inf, inf), vec![-40.0, -1.0, 0.0, 2.5, 40.0]),
+        ("identity", ep(Transform::Identity), vec![-40.0, -1.0, 0.0, 2.5, 40.0]),
     ]
 }
 
@@ -139,7 +136,8 @@ fn every_transform_round_trips() {
     for (label, p, zs) in transform_cases() {
         for &z in &zs {
             let x = p.from_transformed(z);
-            assert!(x >= p.lower && x <= p.upper, "{label}: θ({z}) = {x} left its bounds");
+            let (lower, upper) = p.bounds();
+            assert!(x >= lower && x <= upper, "{label}: θ({z}) = {x} left its bounds");
             let back = p.to_transformed(x);
             // The logit inverse loses ~ε/(p(1−p)) of z near its bounds: at
             // |z| = 12 that is ~1e-11, under the 1e-9 tolerance.
@@ -172,31 +170,20 @@ fn every_transform_derivative_matches_finite_differences() {
     }
 }
 
-/// The boundary behaviour stated as it is today. A boxed `Log` saturates θ at
-/// the bound, so dθ/dz = 0 and the log-Jacobian is −∞ outside [ln lo, ln hi]:
-/// the box truncates the target. The scaled logit and the unbounded log have
-/// no such wall at any finite z the samplers reach.
+/// No map has a wall: the log-Jacobian and its gradient are finite at every
+/// finite z, and θ stays in the closed domain, out to z = ±700 (θ = lo + eᶻ
+/// overflows past z ≈ 709.8, which no posterior reaches). This replaces the
+/// test that a boxed `Log` was −∞ outside its box.
 #[test]
-fn boxed_log_is_neg_inf_outside_its_box_and_nothing_else_is() {
-    let (lo, hi) = (1e-6_f64, 2.5_f64);
-    let boxed = ep(Transform::Log { lo, hi }, lo, hi);
-    for z in [hi.ln() + 1e-9, hi.ln() + 1e-3, hi.ln() + 3.0, lo.ln() - 1e-3, lo.ln() - 3.0] {
-        assert_eq!(boxed.log_jacobian(z), f64::NEG_INFINITY, "boxed log at z={z}");
-        assert_eq!(boxed.jacobian_grad(z), 0.0, "boxed log at z={z}");
-        assert_eq!(boxed.transform_deriv(z), 0.0, "boxed log at z={z}");
-        let x = boxed.from_transformed(z);
-        assert!(x == lo || x == hi, "boxed log at z={z}: θ = {x} is not clamped to a bound");
-    }
-    // The bounds themselves are in support: a chain may start at one.
-    assert!(boxed.log_jacobian(boxed.to_transformed(hi)).is_finite());
-    assert!(boxed.log_jacobian(boxed.to_transformed(lo)).is_finite());
-
-    let inf = f64::INFINITY;
-    let unboxed = ep(Transform::Log { lo: 0.0, hi: inf }, 0.0, inf);
-    let logit = ep(Transform::Logit { lo, hi }, lo, hi);
-    for z in [-30.0, lo.ln() - 3.0, 0.0, hi.ln() + 3.0, 30.0] {
-        assert!(unboxed.log_jacobian(z).is_finite(), "unboxed log at z={z}");
-        assert!(logit.log_jacobian(z).is_finite(), "scaled logit at z={z}");
+fn every_log_jacobian_is_finite_everywhere() {
+    for (label, p, _) in transform_cases() {
+        let (lower, upper) = p.bounds();
+        for z in [-700.0, -40.0, -23.0, -1.0, 0.0, 1.0, 23.0, 40.0, 700.0] {
+            assert!(p.log_jacobian(z).is_finite(), "{label}: log_jacobian({z}) = {}", p.log_jacobian(z));
+            assert!(p.jacobian_grad(z).is_finite(), "{label}: jacobian_grad({z})");
+            let x = p.from_transformed(z);
+            assert!(x >= lower && x <= upper, "{label}: θ({z}) = {x} outside [{lower}, {upper}]");
+        }
     }
 }
 
@@ -212,8 +199,7 @@ type Target<'a> = dyn Fn(&[f64]) -> (f64, Vec<f64>) + Sync + 'a;
 fn exponential_target(p: EstimatedParam) -> impl Fn(&[f64]) -> (f64, Vec<f64>) + Sync {
     let prior = Prior::Fixed(Density::Exponential { rate: LAMBDA });
     move |z: &[f64]| {
-        let theta = p.from_transformed(z[0]);
-        let value = prior.log_density(&at(theta, z[0])) + p.log_jacobian(z[0]);
+        let value = prior.log_density(&p.prior_point(z[0])) + p.log_jacobian(z[0]);
         let grad = -LAMBDA * p.transform_deriv(z[0]) + p.jacobian_grad(z[0]);
         (value, vec![grad])
     }
@@ -328,8 +314,7 @@ fn nuts_on_an_independent_gaussian_has_no_divergences_and_the_right_moments() {
 /// moments of log τ must be exact.
 #[test]
 fn nuts_on_unboxed_log_tau_rarely_diverges_and_has_the_right_moments() {
-    let inf = f64::INFINITY;
-    let lp = exponential_target(ep(Transform::Log { lo: 0.0, hi: inf }, 0.0, inf));
+    let lp = exponential_target(ep(Transform::LowerBounded { lo: 0.0 }));
     let run = run_kernel(&lp, &[-2.0], &[VAR_LOG_EXP]);
     let total: usize = run.divergent.iter().sum();
     eprintln!("unboxed log τ: divergences per chain {:?}", run.divergent);
@@ -348,52 +333,40 @@ fn nuts_on_unboxed_log_tau_rarely_diverges_and_has_the_right_moments() {
 /// the NUTS kernel on unboxed log τ. Measured at seeds 1–4: 2 (per chain
 /// 0, 2, 0, 0). Over ten disjoint seed sets (1–4, 11–14, …, 91–94) the total
 /// ranged 2–13, so the bound sits 3× above the worst seen, and still 5×
-/// below the fewest the boxed run produced (208), which keeps "rare
-/// overshoot in a stiff tail" apart from "a wall".
+/// below the fewest the walled boxed `Log` map produced before
+/// support-keyed transforms (208), which keeps "rare overshoot in a stiff
+/// tail" apart from "a wall".
 const MAX_UNBOXED_DIVERGENT: usize = 40;
 
-// ── 4. The boxed-Log wall (current behaviour) ───────────────────────────────
+// ── 4. A boxed parameter has no wall ─────────────────────────────────────
 
-/// Records current behaviour; expected to change.
-///
-/// A `Transform::Log { lo, hi }` parameter has log-Jacobian −∞ outside
-/// [ln lo, ln hi] (the box truncates the target). Under NUTS that is a hard
-/// wall: a leapfrog step that crosses it lands on −∞, the energy error is
-/// infinite and the transition is marked divergent. The stiff right tail of
-/// log τ under exponential(λ) is what carries trajectories to ln 2.5, so the
-/// same target that diverges rarely without a box diverges routinely with
-/// one. The draws stay valid (NUTS never commits a point outside the box),
-/// but the divergence count is a false alarm about the posterior geometry.
-///
-/// If the pending change that gives doubly bounded parameters the scaled
-/// logit under NUTS is accepted, this target no longer reaches NUTS through
-/// a boxed `Log`, and this test is to be replaced by one asserting the boxed
-/// parameter diverges no more than the unboxed one.
+/// log τ under exponential(λ) boxed to [1e-6, 2.5]. Under the walled `Log`
+/// map this diverged routinely (271 over 4 × 4,000 at seeds 1–4, 208–288
+/// over ten seed sets): the stiff right tail carried trajectories into the
+/// −∞ log-Jacobian past ln 2.5. Under `LogInterval` the end is z = +∞ and the
+/// tail is the log-Jacobian's, so the boxed run must diverge no more than the
+/// unboxed control's bound, and its draws must be the exponential truncated
+/// to the box.
 #[test]
-fn boxed_log_wall_produces_divergences_under_nuts() {
+fn boxed_parameter_diverges_no_more_than_the_unboxed_one() {
     let (lo, hi) = (1e-6_f64, 2.5_f64);
-    let p = ep(Transform::Log { lo, hi }, lo, hi);
+    let p = ep(Transform::for_domain(lo, hi, true).expect("domain"));
+    assert!(matches!(p.transform, Transform::LogInterval { .. }));
     let lp = exponential_target(p.clone());
-    let run = run_kernel(&lp, &[-2.0], &[VAR_LOG_EXP]);
+    // A unit mass: dual averaging tunes the step, and the target's
+    // z-variance is within an order of magnitude of 1.
+    let run = run_kernel(&lp, &[0.0], &[1.0]);
     let total: usize = run.divergent.iter().sum();
-    eprintln!("boxed log τ: divergences per chain {:?}", run.divergent);
-    for c in &run.chains {
-        assert!(c.iter().all(|v| p.log_jacobian(v[0]).is_finite()),
-            "NUTS committed a draw outside the box");
-    }
-    // Threshold: see MIN_BOXED_DIVERGENT.
-    assert!(total >= MIN_BOXED_DIVERGENT,
-        "boxed log τ: only {total} divergences (per chain {:?}); the wall at ln {hi} \
-         no longer produces them — if the transform changed, replace this test",
-        run.divergent);
+    eprintln!("boxed log τ (LogInterval): divergences per chain {:?}", run.divergent);
+    assert!(total <= MAX_UNBOXED_DIVERGENT,
+        "boxed τ: {total} divergences (per chain {:?}), above the unboxed bound \
+         {MAX_UNBOXED_DIVERGENT}", run.divergent);
+    let theta: Vec<Vec<Vec<f64>>> = run.chains.iter()
+        .map(|c| c.iter().map(|v| vec![p.from_transformed(v[0])]).collect()).collect();
+    let prior = Prior::Fixed(Density::Exponential { rate: LAMBDA });
+    let law = Truncated::new(&prior, lo, hi);
+    law.check("kernel, boxed τ", &theta, 0);
 }
-
-/// Lower bound on the divergent transitions, over 4 chains × 4,000 kept, of
-/// the NUTS kernel on boxed log τ. Measured at seeds 1–4: 271 (per chain
-/// 83, 81, 63, 44). Over ten disjoint seed sets the total ranged 208–288,
-/// so the bound is under half the fewest seen; and it is 2.5× the unboxed
-/// ceiling, so one transform cannot pass both this test and the unboxed one.
-const MIN_BOXED_DIVERGENT: usize = 100;
 
 // ── 3. PGAS + NUTS with no likelihood ───────────────────────────────────────
 
@@ -539,11 +512,11 @@ fn ks_exponential(mut x: Vec<f64>, lambda: f64) -> f64 {
 fn pgas_nuts_without_a_likelihood_draws_the_prior() {
     let model = prior_only_model();
     let inf = f64::INFINITY;
-    let mut tau = ep(Transform::Log { lo: 0.0, hi: inf }, 0.0, inf);
+    let mut tau = ep(Transform::for_domain(0.0, inf, true).expect("domain"));
     tau.name = "tau".into();
     tau.index = TAU_IDX;
     tau.initial = 0.2;
-    let mut z = ep(Transform::None, -inf, inf);
+    let mut z = ep(Transform::Identity);
     z.name = "z".into();
     z.index = Z_IDX;
     let est = vec![tau, z];
@@ -622,3 +595,185 @@ const KS_C: f64 = 2.0;
 /// wall, so the bound only has to separate that from the boxed regime the
 /// branch measured through PGAS (21–51 per chain at 4,000 kept).
 const MAX_PRIOR_ONLY_DIVERGENT: usize = 10;
+
+// ── 5. Prior-only runs recover the truncated prior (proposal §12.3) ─────────
+
+/// |z| of a moment against the truncated law, the §12.3 pass bar (4 MCSE).
+const Z_TRUNC: f64 = 4.0;
+/// Kolmogorov critical value √n·D at p = 0.001 (asymptotic): 1.95.
+const KS_P001: f64 = 1.95;
+
+/// A prior truncated to [lo, hi], by quadrature on 200,000 midpoints of
+/// [lo, min(hi, lo + 40)]: its mean, variance and CDF.
+struct Truncated {
+    grid: Vec<f64>,
+    cdf: Vec<f64>,
+    mean: f64,
+    var: f64,
+}
+
+impl Truncated {
+    fn new(prior: &Prior, lo: f64, hi: f64) -> Self {
+        let top = hi.min(lo + 40.0);
+        let n = 200_000;
+        let h = (top - lo) / n as f64;
+        let grid: Vec<f64> = (0..n).map(|i| lo + (i as f64 + 0.5) * h).collect();
+        let dens: Vec<f64> = grid.iter()
+            .map(|&x| prior.log_density(&sim::inference::prior::PriorPoint::natural(x)).exp())
+            .collect();
+        let z: f64 = dens.iter().sum::<f64>() * h;
+        let mean = grid.iter().zip(&dens).map(|(x, d)| x * d).sum::<f64>() * h / z;
+        let var = grid.iter().zip(&dens).map(|(x, d)| (x - mean).powi(2) * d).sum::<f64>() * h / z;
+        let mut acc = 0.0;
+        let cdf = dens.iter().map(|d| { acc += d * h / z; acc }).collect();
+        Truncated { grid, cdf, mean, var }
+    }
+
+    fn cdf_at(&self, x: f64) -> f64 {
+        match self.grid.partition_point(|g| *g <= x) {
+            0 => 0.0,
+            i => self.cdf[i - 1],
+        }
+    }
+
+    /// The §12.3 pass: mean and variance of coordinate `j` within `Z_TRUNC`
+    /// MCSE of the truncated law's, and a KS test on the pooled draws thinned
+    /// to about the bulk ESS with p > 0.001.
+    fn check(&self, label: &str, chains: &[Vec<Vec<f64>>], j: usize) {
+        let (zm, zv) = moment_z(chains, j, self.mean, self.var);
+        let pooled: Vec<f64> = chains.iter().flat_map(|c| c.iter().map(|v| v[j])).collect();
+        let ess = rank_convergence(&coord(chains, j, &|v| v)).unwrap().ess_bulk;
+        let stride = ((pooled.len() as f64 / ess).ceil() as usize).max(1);
+        let mut thin: Vec<f64> = pooled.iter().step_by(stride).copied().collect();
+        thin.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = thin.len() as f64;
+        let d = thin.iter().enumerate().fold(0.0_f64, |d, (i, &v)| {
+            let f = self.cdf_at(v);
+            d.max((f - i as f64 / n).abs()).max(((i + 1) as f64 / n - f).abs())
+        });
+        eprintln!("{label}: z(mean) {zm:+.2}, z(var) {zv:+.2}, KS √n·D {:.3} (n = {n}, bulk ESS {ess:.0})",
+            n.sqrt() * d);
+        assert!(zm.abs() < Z_TRUNC && zv.abs() < Z_TRUNC,
+            "{label}: mean z {zm:.2}, variance z {zv:.2} against the truncated law (|z| < {Z_TRUNC})");
+        assert!(n.sqrt() * d < KS_P001, "{label}: KS √n·D = {:.3} ≥ {KS_P001}", n.sqrt() * d);
+    }
+}
+
+/// The three §12.3 parameters as `(name, index, transform, prior, lo, hi)`,
+/// on the prior-only model's slots τ, z and κ.
+fn truncated_cases() -> Vec<(&'static str, usize, Transform, Prior, f64, f64)> {
+    use ir::parameter::{BetaPrior, HalfNormalPrior, PriorDist};
+    let inf = f64::INFINITY;
+    vec![
+        ("tau", TAU_IDX, Transform::for_domain(1e-6, 2.5, true).unwrap(),
+         Prior::Fixed(Density::Exponential { rate: LAMBDA }), 1e-6, 2.5),
+        ("z", Z_IDX, Transform::for_domain(0.1, 0.9, true).unwrap(),
+         Prior::from_ir(&PriorDist::Beta(BetaPrior { alpha: 2.0, beta: 5.0 })), 0.1, 0.9),
+        ("kappa", KAPPA_IDX, Transform::for_domain(0.0, inf, true).unwrap(),
+         Prior::from_ir(&PriorDist::HalfNormal(HalfNormalPrior { sigma: 1.0 })), 0.0, inf),
+    ]
+}
+
+fn truncated_params() -> (Vec<EstimatedParam>, Vec<Prior>, Vec<(f64, f64)>) {
+    let cases = truncated_cases();
+    assert!(matches!(cases[0].2, Transform::LogInterval { .. }));
+    assert!(matches!(cases[1].2, Transform::LogInterval { .. }));
+    assert!(matches!(cases[2].2, Transform::LowerBounded { lo } if lo == 0.0));
+    let est = cases.iter().map(|(name, idx, t, _, lo, hi)| {
+        let mut p = ep(*t);
+        p.name = (*name).into();
+        p.index = *idx;
+        p.initial = if hi.is_finite() { (lo * hi).sqrt() } else { 0.5 };
+        p
+    }).collect();
+    let priors = cases.iter().map(|c| c.3.clone()).collect();
+    let boxes = cases.iter().map(|c| (c.4, c.5)).collect();
+    (est, priors, boxes)
+}
+
+/// PGAS+NUTS, 4 chains × 4,000 kept, on the prior-only model: each of τ, ρ
+/// and κ must be its prior truncated to its box, and the boxed parameters
+/// must not diverge more than the unboxed kernel control's bound.
+#[test]
+fn pgas_nuts_without_a_likelihood_draws_the_truncated_priors() {
+    let model = prior_only_model();
+    let (est, priors, boxes) = truncated_params();
+    let times: Vec<f64> = (1..=PRIOR_T_END as usize).map(|t| t as f64).collect();
+    let observations: Vec<Observation> = times.iter().map(|&t| Observation { time: t, value: 0.0 }).collect();
+    let obs = all_missing_obs(&model, &times);
+    let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
+        ancestor_sampling: true,
+        n_particles: 4,
+        n_sweeps: PGAS_BURN + 4_000,
+        burn_in: PGAS_BURN,
+        thin: 1,
+        dt: 1.0,
+        use_nuts: true,
+        dense_mass: true,
+        max_tree_depth: 8,
+        trajectory_warmup: 0,
+        csmc_sweeps_per_nuts: 1,
+        step_policy: sim::schedule::StepPolicy::Snap,
+    };
+    let mut chains: Vec<Vec<Vec<f64>>> = Vec::new();
+    let mut divergent = Vec::new();
+    for seed in 1..=PGAS_CHAINS {
+        let mut base = model.default_params.clone();
+        for p in &est {
+            base[p.index] = p.initial;
+        }
+        let r = run_pgas(&model, &est, &priors, &base, &config, &observations, &obs, seed, None, None,
+            "nuts-validity-truncated".into()).expect("PGAS run");
+        assert!(r.sweeps.iter().any(|s| s.nuts.n_leapfrog > 0), "the θ-step did not run NUTS");
+        chains.push(r.sweeps.iter().map(|s| est.iter().map(|p| s.params[p.index]).collect()).collect());
+        divergent.push(r.n_divergent_post_burn);
+    }
+    let total: usize = divergent.iter().sum();
+    eprintln!("truncated PGAS+NUTS: divergences per chain {divergent:?}");
+    assert!(total <= MAX_UNBOXED_DIVERGENT,
+        "truncated PGAS+NUTS: {total} divergences (per chain {divergent:?}), bound {MAX_UNBOXED_DIVERGENT}");
+    for (j, (p, (lo, hi))) in est.iter().zip(&boxes).enumerate() {
+        Truncated::new(&priors[j], *lo, *hi).check(&format!("PGAS+NUTS {}", p.name), &chains, j);
+    }
+}
+
+/// The same three parameters under PMMH with a zero log-likelihood, 4 chains
+/// × 4,000 kept. ODE-MH runs this kernel (`run_pmmh`) with a deterministic
+/// likelihood, so with none the two are the same test. It exercises the MH
+/// ratio's Jacobian, which the NUTS run does not: acceptance must lie in
+/// [0.1, 0.6] and the draws must be the truncated priors.
+#[test]
+fn pmmh_without_a_likelihood_draws_the_truncated_priors() {
+    use sim::inference::pmmh::{run_pmmh, PMMHConfig};
+    let model = prior_only_model();
+    let (est, priors, boxes) = truncated_params();
+    let config = PMMHConfig {
+        n_steps: 1_000 + 4_000,
+        n_particles: 1,
+        dt: 1.0,
+        proposal_sd: vec![0.5; est.len()],
+        adapt: true,
+        adapt_start: 200,
+        adapt_stop: 1_000,
+        thin: 1,
+        burn_in: 1_000,
+    };
+    let zero = |_: &[f64], _: u64| -> Result<f64, sim::error::SimError> { Ok(0.0) };
+    let mut chains: Vec<Vec<Vec<f64>>> = Vec::new();
+    for seed in 1..=PGAS_CHAINS {
+        let mut base = model.default_params.clone();
+        for p in &est {
+            base[p.index] = p.initial;
+        }
+        let r = run_pmmh(&est, &priors, &base, &[], &config, &zero, seed, None, None,
+            "nuts-validity-pmmh".into()).expect("PMMH run");
+        let acc = r.steps.iter().filter(|s| s.accepted).count() as f64 / r.steps.len() as f64;
+        eprintln!("truncated PMMH chain {seed}: acceptance {acc:.3}");
+        assert!((0.1..=0.6).contains(&acc), "chain {seed}: acceptance {acc:.3} outside [0.1, 0.6]");
+        chains.push(r.steps.iter().map(|s| est.iter().map(|p| s.params[p.index]).collect()).collect());
+    }
+    for (j, (p, (lo, hi))) in est.iter().zip(&boxes).enumerate() {
+        Truncated::new(&priors[j], *lo, *hi).check(&format!("PMMH {}", p.name), &chains, j);
+    }
+}

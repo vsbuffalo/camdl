@@ -257,9 +257,7 @@ fn if2_bails_on_ess_collapse() {
         initial: 5.0,
         rw_sd: 0.1,
         rw_sd_auto: false,
-        transform: Transform::Log { lo: 0.01, hi: 100.0 },
-        lower: 0.01,
-        upper: 100.0,
+        transform: Transform::for_domain(0.01, 100.0, true).expect("domain"),
         perturb_only_at_t0: false,
     }];
 
@@ -428,9 +426,7 @@ fn if2_theta_hat_is_identical_across_thread_counts() {
         initial: 0.5,
         rw_sd: 0.05,
         rw_sd_auto: false,
-        transform: Transform::Log { lo: 0.01, hi: 5.0 },
-        lower: 0.01,
-        upper: 5.0,
+        transform: Transform::for_domain(0.01, 5.0, true).expect("domain"),
         perturb_only_at_t0: false,
     }];
     let config = IF2Config {
@@ -641,9 +637,7 @@ fn if2_iteration_budget_aborts_pre_window() {
         initial: 1.0,
         rw_sd: 0.1,
         rw_sd_auto: false,
-        transform: Transform::Log { lo: 0.01, hi: 100.0 },
-        lower: 0.01,
-        upper: 100.0,
+        transform: Transform::for_domain(0.01, 100.0, true).expect("domain"),
         perturb_only_at_t0: false,
     }];
     let config = IF2Config {

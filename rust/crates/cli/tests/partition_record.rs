@@ -147,7 +147,7 @@ fn fit_run_records_its_partition_and_generates_the_legacy_fields() {
     assert_eq!(beta["search"], serde_json::json!([0.1, 0.9]));
     assert_eq!(beta["search_from"], "fit_config");
     assert_eq!(beta["support"], serde_json::json!([0.05, 1.0]));
-    assert_eq!(beta["transform"], "log");
+    assert_eq!(beta["transform"], "log_interval");
     assert_eq!(beta["prior"]["from"], "model_ir");
     let gamma = &part["parameters"]["gamma"];
     assert_eq!(gamma["search_from"], "support");

@@ -238,9 +238,7 @@ impl Fixture {
             index: beta_idx,
             initial: self.params[beta_idx],
             rw_sd: 0.02,
-            transform: Transform::Log { lo: 1e-4, hi: 10.0 },
-            lower: 1e-4,
-            upper: 10.0,
+            transform: Transform::for_domain(1e-4, 10.0, true).expect("domain"),
             rw_sd_auto: false,
             perturb_only_at_t0: false,
         }];
