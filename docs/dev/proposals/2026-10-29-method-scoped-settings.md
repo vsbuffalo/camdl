@@ -1,13 +1,13 @@
 ---
 date: 2026-10-29
-status: proposed — built on the maintainer decisions of 2026-10-29 listed in §1; D1–D22 (§14) are decided, nothing is pending; the IF2 default constants are provisional until the transforms benchmark is decided (§4.4)
-area: fit config / run identity / resolved problem and execution plan / IF2, PMMH and MH step sizes / profile CLI
-issues: gh#1001
-supersedes: 2026-10-29-support-keyed-transforms.md D9 and its commit series (ii) (its §11 commits 11–12)
-amends:
-  - 2026-10-29-support-keyed-transforms.md §2, §4.1, §9.1, §9.2, §9.5, §10, §11, §13 (§13.1 here)
-  - 2026-10-26-parameter-roles.md §3.2 item 8, §4.1, §4.2, §5.3, §6.3, §6.4, §6.6, §7.1, §7.2, §7.3, §10.1, §10.2, §10.3, §11.2 Stages 2 and 3, D5, §13 (§13.3 here)
-  - 2026-09-08-workflow-first-fit-config.md §5 and decision 12; its §9 follow-up is done (§13.2 here)
+status: proposed — built on the maintainer decisions of 2026-10-29 listed in §1; D1–D22 (§14) are decided, nothing is pending; the IF2 default constants are pending the extended benchmark (maintainer decision T1: extend before choosing; §4.4)
+  area: fit config / run identity / resolved problem and execution plan / IF2, PMMH and MH step sizes / profile CLI
+  issues: gh#1001
+  supersedes: 2026-10-29-support-keyed-transforms.md D9 and its commit series (ii) (its §11 commits 11–12)
+  amends:
+    - 2026-10-29-support-keyed-transforms.md §2, §4.1, §9.1, §9.2, §9.5, §10, §11, §13 (§13.1 here)
+    - 2026-10-26-parameter-roles.md §3.2 item 8, §4.1, §4.2, §5.3, §6.3, §6.4, §6.6, §7.1, §7.2, §7.3, §10.1, §10.2, §10.3, §11.2 Stages 2 and 3, D5, §13 (§13.3 here)
+    - 2026-09-08-workflow-first-fit-config.md §5 and decision 12; its §9 follow-up is done (§13.2 here)
 ---
 
 # A step size belongs to the method that takes it: `[estimate]` states the problem, `[method]` states how each algorithm moves through it
@@ -255,7 +255,7 @@ fn an_if2_file_and_a_pgas_file_of_one_problem_share_the_fit_level() {
 
 It is red today: the two `Problem`s serialize different `[estimate]` entries,
 which the fit level hashes (inferred from `cas.rs:433-435` and
-`config_v2.rs:573-626`; not run). It turns green in commit 4 of §11. Its
+`config_v2.rs:573-626`; not run). It turns green in commit 5 of §11. Its
 mutation check adds the resolved IF2 steps to the fit level (`FitDigest`), which
 must turn it red.
 
@@ -542,14 +542,15 @@ The rules, in order:
    IF2 and `default_mh_step()` under PMMH and MH (_branch_ `types.rs:141-160`).
    The MH constant is 0.25 in z, for PMMH, MH and PGAS's MH-within-Gibbs
    (`types.rs:83`). The IF2 constants in the code are 2/3 on `Interval` and 0.2
-   on `LogInterval` and the half-bounded maps (`types.rs:66-74`); they are
-   provisional. The transforms benchmark
+   on `LogInterval` and the half-bounded maps (`types.rs:66-74`). They are
+   pending the extended benchmark: the maintainer decided (T1) to extend the
+   grid before choosing. The transforms benchmark
    (`docs/dev/notes/2026-10-29-support-keyed-transforms-benchmark.md`,
    "Interpretation") found smaller steps better on every family and, under its
    rule, points to 1/20 on `Interval`, 1/50 on the half-bounded maps, and 1/20
-   or 1/50 on `LogInterval`; the choice is the maintainer's under that proposal.
-   Every default quoted in this document is the current constant and moves with
-   that decision.
+   or 1/50 on `LogInterval`, and its smallest candidates sit at the edge of the
+   grid. Every default quoted in this document is the current constant and moves
+   with the chosen one.
 5. The identity map has no default: `NoDefault`, naming the table and the kind
    (an undeclared `real` or `instant`), and saying that on this map z is θ
    itself, so the value to write is a natural-scale SD.
@@ -731,8 +732,9 @@ fit-level hash; that was already true of every other `[method]` key
 
 `FIT_PROVENANCE_KEYS` subtracts top-level keys only (`serialize_minus`,
 `cas.rs:231-255`), and `start` is a field of each `[estimate]` entry. The
-problem's hashed view therefore drops it explicitly, and the method level adds
-the start values:
+problem's hashed view therefore drops it explicitly. The method level hashes the
+written `[estimate].start` values (`starts_base`) beside the resolved starts
+rule (`starts`, already in the method payload):
 
 ```rust
 // rust/crates/cli/src/fit/cas.rs
@@ -821,7 +823,7 @@ precedent of resolving before identity (`config_v2.rs:1321`,
 ```json
 { "kind": "if2",
   "perturbation": { "beta": { "sd": 0.107, "at": "every_observation" },
-                    "I0":   { "sd": 0.174, "at": "t0_only" } },
+                    "I0":   { "sd": 0.174, "at": "time_zero_only" } },
   "simplex": [ { "p_a": 0.2, "p_b": 0.2, "p_c": 0.2 } ] }
 
 { "kind": "proposal",
@@ -835,9 +837,12 @@ not in `run.json`, `fit.meta.json`, `fit_state.toml` or a profile record. A
 value in an addressed artifact is the value that ran.
 
 `resume_guard` (`cas.rs:603`) hashes the same levels with the extension
-dimension zeroed, so a PMMH or MH resume under a different proposal is refused,
-as today, when the step moves the fit level. `config_identity_hash`
-(`cas.rs:467`), the handle lookup, covers the whole file and is unchanged.
+dimension zeroed. A PMMH or MH resume under a different proposal is therefore
+still refused: the step now moves the method level, which the resume key hashes,
+where today it moves the fit level. `config_identity_hash` (`cas.rs:467`), the
+handle lookup, subtracts `[provenance]` and, from result-records Stage 2,
+`[assessment]` (that proposal's §4.3); this proposal does not change it, and the
+step tables stay inside it.
 
 ### 5.4 Profile
 
@@ -845,10 +850,15 @@ as today, when the step moves the fit level. `config_identity_hash`
 (`profile.rs:209-222`). For IF2 it reads `[method.perturbation]` from a `--fit`
 config whose `[method]` is IF2 (D9). Under `nl-*` there is no step: the step
 flags are refused, a `[method.perturbation]` read through `--fit` is ignored
-with one notice, and the method level hashes `{"kind": "none"}`. Today profile
-hashes the `rw_sd` blob under every algorithm, `nl-*` included
-(`profile.rs:1293-1310`), a setting that does not reach the computation keying
-the result: the same class of defect as §3.3.
+with one notice, and the method level hashes `{"kind": "none"}`. This is
+consistent with invariant I3 ("Every accepted user option has a defined,
+observable effect on the computation, or is refused",
+`docs/dev/inference-architecture.md`): the step flags are options given to this
+command and are refused, while the table is content of a referenced config,
+written for that config's IF2 method, which this command does not run; the
+notice makes its non-use visible. Today profile hashes the `rw_sd` blob under
+every algorithm, `nl-*` included (`profile.rs:1293-1310`), a setting that does
+not reach the computation keying the result: the same class of defect as §3.3.
 
 Profile loads the file with `FitConfig::load` in place of `Problem::load`
 (`profile.rs:337`), uses `.problem` as today, and reads only that one table from
@@ -943,12 +953,14 @@ approved by the maintainer, splits the type along the identity levels:
 /// the compiled model.
 pub struct ResolvedProblem {
     pub model: Arc<CompiledModel>,
-    pub partition: Partition,                  // roles §6.2
+    /// Roles, and for each estimated parameter its support, search box,
+    /// transform (the effective domain: the bounds that truncate the posterior)
+    /// and prior, in `Estimated` (roles §6.2, amended: no `start`). The one
+    /// holder of prior, box and transform.
+    pub partition: Partition,
     pub fixed: ResolvedParameters,             // fixed values, with provenance
     pub interventions: InterventionSet,
     pub streams: ObservationStreams,           // the loaded [data] streams
-    pub priors: IndexMap<String, ResolvedPrior>,          // estimated parameters
-    pub constraints: IndexMap<String, Transform>,         // effective domains: the bounds that truncate the posterior
     pub simplex_groups: Vec<config_v2::SimplexGroup>,
     pub objective: LikelihoodObjective,        // ic_free: which initial states are inferred
     pub window: TrainingWindow,                // the scored window and any holdout
@@ -968,6 +980,12 @@ impl ExecutionPlan {
     pub fn identity(&self, ctx: &IdentityInputs) -> Result<ResolvedFitStage, String>;  // the three levels and run_id
 }
 
+// `ExecutionPlan::new` runs every check that depends on the method, so that
+// `ResolvedProblem` is method-free by construction: the roles D8 refusals
+// (`UnboundedForMethod`, `HyperOverHeldLeaf`, `HierarchicalLeafBoxed`, each
+// raised only for the methods they concern), the `ic_free` precondition
+// (which reads the IF2 steps), and the initial-state checks of §4.6.
+
 /// Per-method settings, typed per method. Not `InferenceMethod`, the
 /// (algorithm, backend) registry entry (`fit/methods.rs:50`).
 pub enum MethodPlan {
@@ -982,8 +1000,16 @@ pub enum MethodPlan {
 pub struct If2Plan {
     pub steps: IndexMap<String, ResolvedPerturbation>,   // §4.4
     pub simplex: Vec<IndexMap<String, ResolvedProposal>>,
-    /* chains, particles, iterations, cooling, cooling_target_iters, loglik_eval,
-       dt-check measurement (enabled, n_halvings, particles, replicates) */
+    pub dt_check: DtCheckMeasurement,
+    /* chains, particles, iterations, cooling, cooling_target_iters, loglik_eval */
+}
+
+/// What a post-fit dt-check measures; its tolerance is assessment policy.
+pub struct DtCheckMeasurement {
+    pub enabled: bool,
+    pub n_halvings: usize,
+    pub n_particles: usize,
+    pub n_replicates: usize,
 }
 
 /// The proposal PMMH and MH share.
@@ -993,7 +1019,19 @@ pub struct MhProposal {
     pub adapt_start: usize,
 }
 pub struct PmmhPlan  { pub proposal: MhProposal, /* chains, particles, iterations, burn_in, thin */ }
-pub struct MhOdePlan { pub proposal: MhProposal, /* chains, iterations, burn_in, thin, burnin_dt, dt-check measurement */ }
+pub struct MhOdePlan {
+    pub proposal: MhProposal,
+    pub dt_check: DtCheckMeasurement,
+    /* chains, iterations, burn_in, thin, burnin_dt */
+}
+/// nl-sbplx, nl-bobyqa, nl-lbfgs. NLopt runs the dt-check too (`nlopt_stage.rs:243`).
+pub struct NloptPlan {
+    pub algorithm: NloptAlgorithm,
+    pub chains: usize,
+    pub tolerance: f64,          // xtol_rel: a stopping control, execution
+    pub max_evals: usize,
+    pub dt_check: DtCheckMeasurement,
+}
 pub struct PgasPlan {
     /// MH-within-Gibbs initial scale per parameter, in z (backend default, §3.8).
     pub mwg_initial_scale: IndexMap<String, f64>,
@@ -1028,8 +1066,10 @@ of §5.3. The chain starts' base points (`[estimate].start`) are part of
 - **Method-specific results**: the existing per-method result types
   (`IF2Result`, `PMMHResult`, the PGAS chains, NLopt outcomes).
 - **Assessment**: an interpretation of a result under a stated policy
-  (convergence verdicts, gates). It is the subject of a separate proposal, in
-  preparation, and is not designed here.
+  (convergence verdicts), the `Assessment` type of the result-records proposal
+  (`2026-10-29-result-records-and-assessment.md` §4.4), computed from a
+  `ResultRecord` (its §4.1, the method-specific result) under a
+  `DiagnosticPolicy` (its §4.3). It is not designed here.
 
 `ExecutionPlan` does not replace `FitRunConfig`: during the migration
 `FitRunConfig` stays the runner-side assembly, built from the plan, until each
@@ -1286,11 +1326,19 @@ decision):
   same as in the result-records proposal
   (`2026-10-29-result-records-and-assessment.md` §6, on
   `docs/inference-invariants-and-assessment`):
-  - a `from_mle` or `from_posterior` starts source in `fit run`
-    (`fit/chain_starts.rs:1031`) and in `profile`'s `--starts from_mle`
+  - a `from_mle` starts source: `draw_from_mle` in `fit run`
+    (`fit/chain_starts.rs:1031`) and `profile`'s `--starts from_mle`
     (`profile.rs:1953`);
-  - the runner reading back the record it has just written (`fit/mod.rs:2101`);
-  - the warm-start source check (`fit/gating.rs:441`).
+  - the warm-start source check, which every `from_mle` and `from_posterior`
+    source passes through (`check_source_converged`, `fit/gating.rs:441`). A
+    `from_posterior` source reads draws, not the state, so this is its one read
+    of `fit_state.toml`;
+  - the runner reading back the record it has just written (`fit/mod.rs:2101`).
+
+  Both reads in the source check must propagate a load error rather than treat
+  it as "no verdict". Today `sampler_source_verdict` swallows them (`.ok()?`,
+  `fit/gating.rs:497`). A fix is in progress on `fix/settings-silent-noops`, and
+  `load_input` keeps it.
 
   The error names the producer version (`FitState.camdl_version`,
   `state.rs:30-32`) and the schema version it was written under, and says the
@@ -1309,17 +1357,28 @@ decision):
   `method_result::point_start` (`fit/method_result.rs:935`); that check decides
   whether to demote the diagnostics of a point-started fit. Its posterior comes
   from the draws, not from `fit_state.toml`. Today that read drops any load
-  error silently (`.ok()?`); under the split it prints the notice. In each of
-  these commands and the notice names the version and the unsupported keys. An
-  old file's initial-state list is read under its old key for this purpose, so
+  error silently (`.ok()?`). Under the split it calls `load_for_inspection`: a
+  legacy record gives the notice, and a corrupt one gives an error. In each of
+  these commands the notice names the version and the unsupported keys. An old
+  file's initial-state list is read under its old key for this purpose, so
   `fit summary` applies the chain-agreement exemption to the parameters the run
   exempted.
 - **Listing commands never abort**: `fit table` reports an unreadable state as
   an error in that fit's row and lists the rest (it already matches on the load
   result, `fit_summary.rs:618`, `:2857`).
 
-`FitState::load` therefore takes the use: `FitState::load_input(dir)` refuses,
-and `FitState::load_for_inspection(dir)` returns the state with its notice. The
+`FitState` gains a schema tag in the same commit (§11 commit 4):
+`schema = "camdl.fit-state/1"`, written on every new state. A file without it
+predates this release. `FitState::load` then takes the use:
+
+- `FitState::load_input(dir)` refuses a missing or unknown tag, naming
+  `camdl_version` and the tag, or "no schema tag, before camdl.fit-state/1";
+- `FitState::load_for_inspection(dir)` returns the state with its notice.
+
+The tag is what makes the refusal general. A refusal keyed on
+`perturb_only_at_t0_params` would catch only old fits that had an initial-state
+parameter, since that field is skipped when empty
+(`#[serde(skip_serializing_if = "Vec::is_empty")]`, `state.rs:67-68`). The
 precedent for a refusal inside `load` is `chain_index::refuse_one_based_layout`
 (`state.rs:190`).
 
@@ -1423,13 +1482,13 @@ are not refused (§7.2).
 > ```
 >
 > A parameter you leave out takes a default chosen from its domain. Under IF2
-> the defaults are provisional: currently 0.2 in z on a log-interval or
-> one-sided map and 2/3 on an interval (logit-type) map. Under PMMH, MH and
-> PGAS's MH-within-Gibbs the default is 0.25. An unbounded `real` or `instant`
-> has no default. A `[method.proposal]` value is exactly the proposal SD: no
-> factor is applied. With `adapt = true` it is the proposal's shape until
-> `adapt_start`, after which adaptation reshapes it; with `adapt = false` it is
-> the proposal for the whole run.
+> the defaults are pending an extended benchmark: currently 0.2 in z on a
+> log-interval or one-sided map and 2/3 on an interval (logit-type) map. Under
+> PMMH, MH and PGAS's MH-within-Gibbs the default is 0.25. An unbounded `real`
+> or `instant` has no default. A `[method.proposal]` value is exactly the
+> proposal SD: no factor is applied. With `adapt = true` it is the proposal's
+> shape until `adapt_start`, after which adaptation reshapes it; with
+> `adapt = false` it is the proposal for the whole run.
 >
 > **What a step of s in z means:**
 >
@@ -1621,19 +1680,35 @@ hash (transforms §13, verified there at `cas.rs:501-521` and
    removal of `rw_sd` and `perturb_only_at_t0` from `EstimateSpecV2`; the
    formula-only refusal (§7.1) and `load_archived` (§7.2); the moved readers.
    Inline test configs move to the new tables.
-4. The identity change (§5.1–§5.3), with the §5.5 tests; the §3.7 test turns
+4. **The D16 commit.** It adds the `FitState` schema tag, the
+   `load_input`/`load_for_inspection` split with its callers (§7.5), and the
+   rename of `perturb_only_at_t0_params` to `initial_state_params`, with the
+   §7.5 tests. Result-records Stage 3 lands after this commit.
+5. The identity change (§5.1–§5.3), with the §5.5 tests; the §3.7 test turns
    green here.
-5. `load_with_model` and the converted values (§7.3, §7.4), with a test per row
+6. `load_with_model` and the converted values (§7.3, §7.4), with a test per row
    of §7.4 and per unavailable case.
-6. `profile` reads `[method.perturbation]` from an IF2 `--fit`, ignores it under
+7. `profile` reads `[method.perturbation]` from an IF2 `--fit`, ignores it under
    `nl-*`, and its base and method levels change (§5.4).
-7. Documents (§9.2–§9.4) and the amended proposals' status lines (§13).
+8. Documents (§9.2–§9.4) and the amended proposals' status lines (§13).
 
 **The plan series (§6)**, before parameter-roles Stage 2: `ExecutionPlan` at the
 CLI boundary first, then one backend per commit, each bit-identical at a fixed
 seed. Parameter-roles Stage 2 then builds `ResolvedProblem` without starts or
 method settings, and its `SettingForNonEstimated` refusal is used by
 `resolve_steps` unchanged.
+
+**Landing order:**
+
+1. the step series, on `feat/support-transforms`;
+2. the plan series;
+3. parameter-roles Stage 2;
+4. parameter-roles Stage 3, which carries the profile flags;
+5. the release.
+
+Result-records Stages 0, 1 and 2 are independent of this proposal and may land
+at any point. Its Stage 3 waits for commit 4 (the D16 commit), and its Stage 4
+follows its own Stage 3.
 
 **The profile flags (§8)** land in parameter-roles Stage 3, which already
 replaces `--rw-sd` as a selector. The release that ships the step series is not
@@ -1708,11 +1783,20 @@ merge of the support-transforms branch.
   refused".
 - §5.3: `[estimate].start` stays a source of starts and is hashed at the method
   level (§5.2 here).
+- §6.2: `Estimated` loses `start`. A written `[estimate].start` goes to the
+  chain-starts input (the base points of `DrawnStarts`, held by
+  `ExecutionPlan.starts`), so no start reaches `ResolvedProblem`. `Estimated`
+  stays the one holder of support, search box, transform and prior.
+- §6.3: `RoleInputs.method` is deleted, so `resolve_roles` and `ResolvedProblem`
+  are method-free by construction. The method-dependent refusals
+  (`UnboundedForMethod`, D8's `HyperOverHeldLeaf`, `HierarchicalLeafBoxed`) move
+  to `ExecutionPlan::new`, with the `ic_free` precondition and the initial-state
+  checks.
 - §6.3: `ResolvedProblem` loses `starts` and `algorithm` and gains `model`,
-  `streams`, `priors`, `constraints`, `simplex_groups`, `objective` and
-  `window`; `resolve_problem` loses its `starts`, `algorithm`, `n_chains` and
-  `seed` arguments; `If2ParamSettings`, `RwSdFrom` and `AlgorithmSettings` are
-  deleted; `ExecutionPlan` and `MethodPlan` are added (§6 here).
+  `streams`, `simplex_groups`, `objective` and `window`; `resolve_problem` loses
+  its `starts`, `algorithm`, `n_chains` and `seed` arguments;
+  `If2ParamSettings`, `RwSdFrom` and `AlgorithmSettings` are deleted;
+  `ExecutionPlan` and `MethodPlan` are added (§6 here).
 - §6.4 "IF2 settings": replaced by §4.2 and §4.4 here;
   `EstimatedParam::from_parts` takes no settings argument.
 - §6.6: each command builds one `ResolvedProblem` per fit segment (per sweep
@@ -1764,21 +1848,21 @@ part of the parameter's `rw.sd` entry. A separate list was considered; it
 matches the `--initial-state` flag's shape but splits one parameter's settings
 across two places. The key is `initial_state` (D18).
 
-**D5 — `[method.proposal]` defaults to `default_mh_step`** (maintainer decision
-3; 0.25 in z, _branch_ `types.rs:83`). Whether a written value is the proposal
-SD itself, with no factor of five (maintainer decision 8): a written value is
-exactly the proposal SD, and the legacy message prints 5 × the converted value
-to reproduce the old initial proposal scale.
+**D5 — `[method.proposal]` is exactly the proposal SD the user writes, and
+defaults to `default_mh_step`** (maintainer decisions 3 and 8; 0.25 in z,
+_branch_ `types.rs:83`). No factor is applied anywhere. The legacy message
+prints 5 × the converted value to reproduce the old initial proposal scale.
 
 **D6 — PGAS gets no per-parameter table.** Maintainer decision 3. Its default
 update, NUTS, has no per-parameter proposal; its MH-within-Gibbs starts at
 `default_mh_step` and adapts by Robbins–Monro (_branch_ `pgas.rs:3872-3886`).
 `[method.proposal]` under `pgas` is refused with the §4.3 message.
 
-**D7 — The method level hashes the resolved steps and the start values; `from`
-is never hashed or stored.** A written default and an omitted name key the same,
-as `starts` does (§5.3). The start moves to the method level by maintainer
-decision 5 (§5.2).
+**D7 — The method level hashes the resolved steps, and the written
+`[estimate].start` values (`starts_base`) beside the starts rule; `from` is
+never hashed or stored.** A written default and an omitted name key the same, as
+`starts` does (§5.3). The start moves to the method level by maintainer decision
+5 (§5.2).
 
 **D8 — Live configs with the old keys are refused; stored copies are set aside
 with one notice.** Refusing a stored copy would make every pre-release fit
@@ -1855,4 +1939,5 @@ walk, so the check is a refusal, not a warning. Non-IF2 methods never warn.
   learns the correlation.
 - **IVP lags (pomp's `ivp(s, lag)`).** No model in this repository or the
   sibling repositories needs one; the entry leaves room for a `lag` key.
-- **The Assessment type** (§6.2): the separate proposal in preparation.
+- **`Assessment`, `ResultRecord` and the `[assessment]` table** (§6.2): designed
+  in `2026-10-29-result-records-and-assessment.md` §4.
