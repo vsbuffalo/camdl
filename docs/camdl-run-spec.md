@@ -6322,7 +6322,9 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 --init MODE                 the same rules `fit run --starts` spells, as a bare
                             mode; note the default here is `uniform`
 --posterior / --mle / --params / (companions for the sourced init modes)
---cooling F                 (default 0.95)
+--cooling F                 IF2 cooling fraction (default 0.95), reached at
+                            --cooling-target-iters as in a fit's `cooling`
+--cooling-target-iters N    iteration the fraction is reached at (default 50)
 --rw-sd SPEC                NAME=SD,... or `auto`: every parameter that is not
                             swept, pinned (--fixed, --fixed-file, [fixed]) or a
                             model constant (`let`)

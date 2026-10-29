@@ -169,8 +169,21 @@ struct ProfileIf2Knobs {
     particles: usize,
     iterations: usize,
     cooling: f64,
+    /// The iteration `cooling` is reached at — part of the schedule, so part
+    /// of the identity.
+    cooling_target_iters: usize,
     dt: f64,
     starts: usize,
+}
+
+/// A profile cell's IF2 cooling schedule: the one `fit run` uses, from the
+/// same two numbers, so `--cooling c` means what `cooling = c` means in a
+/// fit — `c` reached at `--cooling-target-iters` (default 50), whatever
+/// `--iterations` is.
+pub(crate) fn profile_cooling_schedule(
+    a: &crate::args::ProfileArgs,
+) -> sim::inference::if2::CoolingSchedule {
+    sim::inference::if2::CoolingSchedule { fraction: a.cooling, target_iters: a.cooling_target_iters }
 }
 
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
@@ -240,6 +253,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let n_iterations = a.iterations;
     let n_starts = a.n_starts;
     let cooling = a.cooling;
+    let cooling_schedule = profile_cooling_schedule(a);
     let dt = a.inference.dt;
     let seed_base = a.inference.seed;
     let parallel = a.inference.parallel;
@@ -1297,7 +1311,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         algorithm: &algorithm,
         if2: ProfileIf2Knobs {
             particles: n_particles, iterations: n_iterations,
-            cooling, dt, starts: n_starts,
+            cooling, cooling_target_iters: cooling_schedule.target_iters, dt, starts: n_starts,
         },
         rw_sd: &rw_sd_blob,
         rw_sd_auto,
@@ -1562,7 +1576,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             ProfileAlgo::If2 => {
                 let config = IF2Config {
                     n_particles, n_iterations,
-                    cooling_fraction: cooling, cooling_target_iters: n_iterations, dt,
+                    cooling: cooling_schedule, dt,
                     t_start: process.compiled.model.simulation.t_start,
                     simplex_groups: simplex_groups.clone(),
                     skip_first_obs_from_loglik: objective.skips_first_observation(),
@@ -1744,7 +1758,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let algorithm_payload = match profile_algo {
             ProfileAlgo::If2 => serde_json::json!({
                 "particles": n_particles, "iterations": n_iterations,
-                "cooling": cooling, "dt": dt }),
+                "cooling": cooling, "cooling_target_iters": cooling_schedule.target_iters,
+                "dt": dt }),
             ProfileAlgo::Nlopt(_) => serde_json::json!({
                 "tolerance": 1e-4, "max_evals": 1500,
                 "dt": compiled.model.simulation.dt.unwrap_or(dt) }),
@@ -2164,7 +2179,8 @@ mod tests {
         let method_struct = serde_json::to_value(ProfileMethodLevel {
             algorithm: "if2",
             if2: ProfileIf2Knobs {
-                particles: 30, iterations: 5, cooling: 0.7, dt: 1.0, starts: 1,
+                particles: 30, iterations: 5, cooling: 0.7, cooling_target_iters: 50,
+                dt: 1.0, starts: 1,
             },
             rw_sd: &rw_sd,
             rw_sd_auto: false,
@@ -2175,7 +2191,8 @@ mod tests {
         let method_literal = serde_json::json!({
             "algorithm": "if2",
             "if2": { "particles": 30usize, "iterations": 5usize,
-                     "cooling": 0.7, "dt": 1.0, "starts": 1usize },
+                     "cooling": 0.7, "cooling_target_iters": 50usize,
+                     "dt": 1.0, "starts": 1usize },
             "rw_sd": rw_sd,
             "rw_sd_auto": false,
             "init": init,
@@ -2190,7 +2207,8 @@ mod tests {
         let with_groups = serde_json::to_value(ProfileMethodLevel {
             algorithm: "if2",
             if2: ProfileIf2Knobs {
-                particles: 30, iterations: 5, cooling: 0.7, dt: 1.0, starts: 1,
+                particles: 30, iterations: 5, cooling: 0.7, cooling_target_iters: 50,
+                dt: 1.0, starts: 1,
             },
             rw_sd: &rw_sd,
             rw_sd_auto: false,

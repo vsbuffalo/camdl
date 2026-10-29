@@ -1818,9 +1818,18 @@ pub struct ProfileArgs {
     #[arg(long = "pmmh-rho", value_name = "F", hide = true)]
     pub _removed_pmmh_rho: Option<String>,
 
-    /// Cooling schedule
+    /// IF2 cooling fraction: the perturbation SD reaches this fraction of
+    /// its initial value at iteration `--cooling-target-iters`, then keeps
+    /// cooling (pomp's `cooling.fraction.50`, the same schedule `fit run`'s
+    /// `cooling` means).
     #[arg(long, default_value_t = 0.95)]
     pub cooling: f64,
+
+    /// The iteration at which `--cooling` is reached (default 50, pomp's
+    /// `cooling.fraction.50`; `fit run`'s `cooling_target_iters`).
+    #[arg(long, value_name = "N",
+          default_value_t = sim::inference::if2::CoolingSchedule::POMP_TARGET_ITERS)]
+    pub cooling_target_iters: usize,
 
     /// Random-walk SDs
     #[arg(long)]
@@ -2768,6 +2777,22 @@ mod tests {
             Command::Profile(a) => Ok(a),
             _ => unreachable!("expected profile"),
         }
+    }
+
+    /// `profile --cooling c` means what a fit's `cooling = c` means: c is
+    /// reached at iteration 50 (pomp's `cooling.fraction.50`), or at
+    /// `--cooling-target-iters`, whatever `--iterations` is. It used to be
+    /// reached at the last iteration, so a profile cooled on a different
+    /// schedule from the fit it profiled whenever `--iterations` ≠ 50.
+    #[test]
+    fn profile_cooling_is_the_fit_schedule() {
+        let a = try_parse_profile(&["--iterations", "10", "--cooling", "0.5"]).unwrap();
+        let schedule = crate::profile::profile_cooling_schedule(&a);
+        assert_eq!(schedule.target_iters, 50, "reached at 50, not at --iterations");
+        assert!((schedule.multiplier_at_iter(7, 50) - 0.5).abs() < 1e-12);
+        assert!(schedule.multiplier_at_iter(7, 10) > 0.5, "still cooling at the run's end");
+        let a = try_parse_profile(&["--iterations", "10", "--cooling-target-iters", "10"]).unwrap();
+        assert_eq!(crate::profile::profile_cooling_schedule(&a).target_iters, 10);
     }
 
     /// gh#889: `camdl profile --starts` is the same rule grammar

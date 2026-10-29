@@ -204,8 +204,7 @@ fn test_if2_converges_from_dispersed_start() {
     let config = IF2Config {
         n_particles: 200,
         n_iterations: 30,
-        cooling_fraction: 0.90,
-        cooling_target_iters: 50, simplex_groups: vec![],
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 0.90, target_iters: 50 }, simplex_groups: vec![],
         dt: 1.0,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
@@ -276,8 +275,7 @@ fn test_if2_respects_bounds() {
     let config = IF2Config {
         n_particles: 100,
         n_iterations: 20,
-        cooling_fraction: 0.95,
-        cooling_target_iters: 50, simplex_groups: vec![],
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 0.95, target_iters: 50 }, simplex_groups: vec![],
         dt: 1.0,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
@@ -323,8 +321,7 @@ fn test_if2_no_cooling_explores() {
     let config = IF2Config {
         n_particles: 100,
         n_iterations: 15,
-        cooling_fraction: 1.0,
-        cooling_target_iters: 50, simplex_groups: vec![],
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 1.0, target_iters: 50 }, simplex_groups: vec![],
         dt: 1.0,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,

@@ -1342,8 +1342,7 @@ fn if2_lls(cfg: &Config, n_particles: usize, reps: usize, seed: u64) -> Vec<f64>
     let config = IF2Config {
         n_particles,
         n_iterations: reps,
-        cooling_fraction: 0.5,
-        cooling_target_iters: 50,
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 50 },
         dt: cfg.dt,
         t_start: cfg.t_start,
         simplex_groups: vec![],

@@ -310,8 +310,7 @@ fn if2_firing_invariant_to_offgrid_obs_stream() {
         lower: 1e-3, upper: 10.0, rw_sd_auto: false, perturb_only_at_t0: false,
     }];
     let config = IF2Config {
-        n_particles: 64, n_iterations: 1, cooling_fraction: 0.5,
-        cooling_target_iters: 50, dt: 1.0, t_start: 0.0,
+        n_particles: 64, n_iterations: 1, cooling: sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 50 }, dt: 1.0, t_start: 0.0,
         simplex_groups: vec![], skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
@@ -352,8 +351,7 @@ fn if2_event_firing_invariant_to_offgrid_obs_stream() {
         lower: 1e-3, upper: 10.0, rw_sd_auto: false, perturb_only_at_t0: false,
     }];
     let config = IF2Config {
-        n_particles: 64, n_iterations: 1, cooling_fraction: 0.5,
-        cooling_target_iters: 50, dt: 1.0, t_start: 0.0,
+        n_particles: 64, n_iterations: 1, cooling: sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 50 }, dt: 1.0, t_start: 0.0,
         simplex_groups: vec![], skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
@@ -523,8 +521,7 @@ fn if2_rejects_at_times_expr_under_exact() {
         lower: 1.0, upper: 8.0, rw_sd_auto: false, perturb_only_at_t0: false,
     }];
     let config = IF2Config {
-        n_particles: 16, n_iterations: 1, cooling_fraction: 0.5,
-        cooling_target_iters: 50, dt: 1.0, t_start: 0.0,
+        n_particles: 16, n_iterations: 1, cooling: sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 50 }, dt: 1.0, t_start: 0.0,
         simplex_groups: vec![], skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };

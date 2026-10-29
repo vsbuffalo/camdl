@@ -490,8 +490,10 @@ impl FitRunConfig {
         let config = IF2Config {
             n_particles,
             n_iterations,
-            cooling_fraction: cooling,
-            cooling_target_iters,
+            cooling: sim::inference::if2::CoolingSchedule {
+                fraction: cooling,
+                target_iters: cooling_target_iters,
+            },
             simplex_groups: resolved_simplex_groups,
             dt,
             t_start: compiled.model.simulation.t_start,
@@ -1096,13 +1098,12 @@ pub fn print_preflight(
 
     // Cooling schedule preview — uses the SAME per-iteration multiplier the run
     // applies (`cooling_multiplier_at_iter`), so preview and actual can't drift.
-    let frac = config.if2_config.cooling_fraction;
+    let schedule = config.if2_config.cooling;
+    let (frac, target_iters) = (schedule.fraction, schedule.target_iters);
     let iters = config.if2_config.n_iterations;
-    let target_iters = config.if2_config.cooling_target_iters;
     let n_obs = config.observations.len();
 
-    let rw_at =
-        |iter: usize| sim::inference::if2::cooling_multiplier_at_iter(frac, target_iters, n_obs, iter);
+    let rw_at = |iter: usize| schedule.multiplier_at_iter(n_obs, iter);
 
     eprintln!(
         "\ncooling: cf50={:.2}, reached at iter {} (target), over a {}-iteration run × {} observations",
@@ -2288,7 +2289,7 @@ pub fn run_chains_with_per_chain_params(
 ) -> Result<ChainResults, String> {
     eprintln!("running {} chains × {} particles × {} iterations, cooling={}, dt={}",
         config.n_chains, config.if2_config.n_particles, config.if2_config.n_iterations,
-        config.if2_config.cooling_fraction, config.if2_config.dt);
+        config.if2_config.cooling.fraction, config.if2_config.dt);
 
     // GH #14: one `Reporter` hands out a per-chain `Task` rendered as a
     // coordinated stack. The Reporter honors --progress (Pretty=bars,
