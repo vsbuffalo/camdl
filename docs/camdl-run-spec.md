@@ -430,17 +430,17 @@ hash. Its keys serialize in sorted order (the maps are `BTreeMap`s) so two
 identical runs produce byte-identical sidecars and a diff of two runs' metadata
 is meaningful.
 
-Fields: `label` (the sticky user `--label`; a later run into the same segment
-that passes no label preserves the one already on disk), `model_path`,
-`model_identity` (the hex structural model hash), `fit_toml_path` (where the
-producing config lived — the directory its relative `[model]` / `[data]` paths
-resolve against when the config is recovered from the segment), `fit_toml_hash`
-(SHA-256 of the producing config's raw bytes — provenance, i.e. which exact
-bytes produced this fit; a `fit.toml` handle is NOT looked up by it, see below),
-`data_hashes`, `estimated`, `fixed`, `resolved_priors` (one `{param, source}`
-entry per estimated parameter, `source ∈ {fit_toml,
-model_ir, flat_explicit}`,
-emitted only when the method is a posterior sampler), `schema` (the
+Fields: `label` (a profile's label only; a fit's label names one run and lives
+on that run's `run.json`, see §6.8), `model_path`, `model_identity` (the hex
+structural model hash), `fit_toml_path` (where the producing config lived — the
+directory its relative `[model]` / `[data]` paths resolve against when the
+config is recovered from the segment), `fit_toml_hash` (SHA-256 of the producing
+config's raw bytes — provenance, i.e. which exact bytes produced this fit; a
+`fit.toml` handle is NOT looked up by it, see below), `data_hashes`,
+`estimated`, `fixed`, `resolved_priors` (one `{param, source}` entry per
+estimated parameter, `source ∈ {fit_toml,
+model_ir, flat_explicit}`, emitted
+only when the method is a posterior sampler), `schema` (the
 observation/dimension schema below), and `docs` (the model's `#'` documentation
 dictionary, keyed by declaration name, so a consumer can label any output
 column).
@@ -2731,15 +2731,15 @@ that spells the default out hashes the same as one that omits it, because the
 hashed payload always carries the resolved rule.
 
 **Handles.** A sourced rule names its source by a fit handle (`handle.rs`):
-`@<label>` (the `--label` the source was run with), the source's `fit.toml`
-path, its segment directory, a fit-id prefix, its leaf directory, or a prefix of
-the leaf's own `run_id`. A segment handle names a leaf only while the segment
-holds exactly one — two method files of one problem share the segment label —
-and a handle resolving to several leaves is refused with the leaves listed. The
-source is resolved before the model is loaded, and its stored convergence
-verdict is checked where it is consumed: a `from_mle` or `from_posterior` source
-whose verdict is not converged is refused, naming the verdict, unless
-`--allow-nonconverged-source` is passed (§7.3).
+`@<label>` (the one run given that `--label`), the source's `fit.toml` path, its
+segment directory, a fit-id prefix, its leaf directory, or a prefix of the
+leaf's own `run_id`. A segment handle names a leaf only while the segment holds
+exactly one, and a handle resolving to several runs is refused with the runs
+listed and the axes on which they differ (`[method]` settings or `--starts`, fit
+seed, the problem, the camdl build). The source is resolved before the model is
+loaded, and its stored convergence verdict is checked where it is consumed: a
+`from_mle` or `from_posterior` source whose verdict is not converged is refused,
+naming the verdict, unless `--allow-nonconverged-source` is passed (§7.3).
 
 `starts` is identity-bearing: `Method::identity_payload` folds the resolved rule
 into the method hash, and a sourced rule's consumed file (the leaf's
@@ -2869,7 +2869,8 @@ rather than read with every chain shifted by one.
   leaf's identity.
 - **The leaf** is per seed. `run.json` is the CAS record; there is no manifest
   and no fit-wide `run.json` — the fit level is a path segment, and
-  `fit.meta.json` is its sidecar (label, model hash, config archive).
+  `fit.meta.json` is its sidecar (model hash, config archive). A run's label is
+  on its own `run.json` (`provenance.label`).
 
 Per-algorithm leaf contents: IF2 writes `mle_params.toml`, `final_params.toml`,
 `diagnostics.tsv`, `chain_evaluations.tsv`, and
@@ -2899,9 +2900,22 @@ the tag exists to prevent, so it is a version rather than a silent edit.
 A completed leaf is reused on a second identical invocation ("cache hit"); pass
 `--force` to re-run and overwrite.
 
-Fits are addressed downstream by handle (`handle.rs:26`): `@label`, a `fit.toml`
-path, a run directory, or a fit-hash prefix. Ambiguity is listed git-style
+Fits are addressed downstream by handle (`fit/handle.rs`, `FitRef`): `@label`, a
+`fit.toml` path, a leaf or problem-folder directory, or a hash prefix (a run's
+`run_id`, else the fit id). `@label`, a leaf directory and a `run_id` prefix
+name one run; the others name a problem folder. Ambiguity is listed git-style
 rather than guessed.
+
+A label names exactly one run and never moves. It is recorded on that run's
+`run.json` (`provenance.label`) by `fit run --label` or `camdl label <run_id>`.
+`fit run --label L` is refused before any sampling when another run that has not
+failed holds `L`, when the run is already stored under another label, or when
+the invocation writes several runs (several `fit_seeds`, synthetic datasets or
+sweep points). `camdl label` refuses a held label, a run that already has a
+different label, and a fit id, which names a problem folder rather than a run. A
+run started from a labelled source (`from_mle`, `from_posterior`) records the
+source leaf's `run_id` in `deps`, so no later label can change what it was
+started from.
 
 ### 6.9 Load-time validation
 
@@ -4014,11 +4028,11 @@ fit_id     label                  stem           method   methods converged     
 ```
 
 Labels come from `--label` at run time or from the top-level `camdl label`
-afterwards:
+afterwards, addressed by the run's `run_id` (a label names one run, §6.8):
 
 ```
-$ camdl label 2030ba2b mle
-ok: label set to "mle" on ./results/fits/01_mle-2030ba2b
+$ camdl label 4b1e0c9a2f77 mle
+ok: label set to "mle" on ./results/fits/01_mle-2030ba2b/if2-6c1d8e02/seed_1-06cbd6b3
 ```
 
 Filters: `--converged` / `--gate-failed`, `--with-method if2|pgas|pmmh`,
@@ -5688,12 +5702,12 @@ or per run, as `camdl fit run … --starts from_posterior=@<label>`.
 
 There is no `camdl summarize`. Four commands cover the ground:
 
-| Command                      | Answers                                                                                                                                                      |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `camdl list [ROOT]`          | What runs exist? Filter by `--kind sim\|fit\|profile\|pfilter\|survey\|ensemble`, `--model`, `--scenario`, `--since 1h`, `--parent <HASH>`. `--format json`. |
-| `camdl show <TARGET>`        | Full metadata for one run, by short hash prefix or path.                                                                                                     |
-| `camdl cat <TARGET>`         | The run's trajectory TSV; `--stream <NAME>` selects an observation stream or a named artifact (`event_log.tsv`, `reactive_log.tsv`).                         |
-| `camdl label <HASH> <LABEL>` | Name a run so you can find it again. 1–64 chars matching `^[a-zA-Z0-9 ,._-]+$`; refuses a still-running fit and an ambiguous prefix.                         |
+| Command                      | Answers                                                                                                                                                                                                                             |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `camdl list [ROOT]`          | What runs exist? Filter by `--kind sim\|fit\|profile\|pfilter\|survey\|ensemble`, `--model`, `--scenario`, `--since 1h`, `--parent <HASH>`. `--format json`.                                                                        |
+| `camdl show <TARGET>`        | Full metadata for one run, by short hash prefix or path.                                                                                                                                                                            |
+| `camdl cat <TARGET>`         | The run's trajectory TSV; `--stream <NAME>` selects an observation stream or a named artifact (`event_log.tsv`, `reactive_log.tsv`).                                                                                                |
+| `camdl label <HASH> <LABEL>` | Name a run so you can find it again. 1–64 chars matching `^[a-zA-Z0-9 ,._-]+$`; refuses a still-running fit, an ambiguous prefix, a fit id (a problem folder, not a run), a label another fit run holds, and relabelling a fit run. |
 
 Per-scenario summary statistics over a trajectory tree (peak, time-of-peak,
 final value, integral) are **not** a camdl command. Declare them in the model as
@@ -6183,8 +6197,9 @@ sweeps a `[fixed]` parameter of a fit (§7.3).
                               (run_id prefix or leaf path); conflicts with --force
   --sweep NAME=SPEC           Cartesian sweep over a fixed parameter (repeatable).
                               SPEC = V1,V2,... | lin(min,max,n) | log10(min,max,n)
-  --label TEXT                display label; what `@label` in another file's
-                              `starts` resolves to
+  --label TEXT                the run's label; `@label` names this one run.
+                              Refused if another run holds it or this
+                              invocation writes several runs
 
 Chain starts
   --starts SPEC               uniform_unconstrained | lhs | uniform | from_prior | single

@@ -259,14 +259,30 @@ fn fit_level_hash(fit_dir: &Path) -> String {
     panic!("no fit_stage leaf with a `fit` level under {}", fit_dir.display());
 }
 
-/// The fit-level sidecar label (`<fit_segment>/fit.meta.json`), the
-/// authoritative home for a CAS fit's `--label`.
-fn sidecar_label(fit_dir: &Path) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(fit_dir.join("fit.meta.json")).ok()?,
-    )
-    .ok()?;
-    v.get("label").and_then(|l| l.as_str()).map(String::from)
+/// The one fit run under `fit_dir`: its leaf `run.json` as JSON. A fit's
+/// label names one run and lives there (gh#896).
+fn only_run(fit_dir: &Path) -> serde_json::Value {
+    let mut stack = vec![fit_dir.to_path_buf()];
+    let mut runs = Vec::new();
+    while let Some(d) = stack.pop() {
+        let rj = d.join("run.json");
+        if rj.is_file() {
+            runs.push(serde_json::from_str::<serde_json::Value>(
+                &std::fs::read_to_string(&rj).unwrap()).unwrap());
+            continue;
+        }
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            if e.path().is_dir() {
+                stack.push(e.path());
+            }
+        }
+    }
+    assert_eq!(runs.len(), 1, "expected one run under {}", fit_dir.display());
+    runs.pop().unwrap()
+}
+
+fn run_label(fit_dir: &Path) -> Option<String> {
+    only_run(fit_dir)["provenance"]["label"].as_str().map(String::from)
 }
 
 /// gh#147 (M3.2): a method leaf for `stage_substr` exists under `fit_dir` at the
@@ -913,10 +929,11 @@ mod parser_tests {
 // ── Labels (proposal §5) — end-to-end ──────────────────────────────
 
 /// Full label workflow against the real binary:
-///   1. fit run --label "narrow R0, take 1" → label persisted in run.json
+///   1. fit run --label "narrow R0, take 1" → label recorded on the run's run.json
 ///   2. fit table picks up the label, renders it in the row
-///   3. fit label <hash> "<new>" rewrites the label
-///   4. fit table reflects the new label after the rewrite
+///   3. `camdl label` refuses to move it: a fit id names a problem folder, not
+///      a run, and a run keeps the label it was given (gh#896)
+///   4. fit table still shows the label
 #[test]
 fn fit_label_workflow_persists_and_surfaces_in_table() {
     let camdl = camdl_bin();
@@ -944,12 +961,10 @@ fn fit_label_workflow_persists_and_surfaces_in_table() {
     let full_hash = fit_level_hash(&fit_dir);
     let hash_prefix: String = full_hash.chars().take(8).collect();
 
-    // Step 2: --label persisted into the fit-level sidecar (gh#147 M3.2). The
-    // label is a fit-wide attribute with one authoritative home at the fit
-    // segment (`fit.meta.json`) — a CAS fit has no fit-wide run.json, and the
-    // label is not redundantly copied onto each stage leaf.
-    assert_eq!(sidecar_label(&fit_dir).as_deref(), Some(initial_label),
-        "--label must persist into the fit-level sidecar");
+    // Step 2: --label is recorded on the run it names (gh#896): the leaf's
+    // run.json `provenance.label`, not the problem folder's sidecar.
+    assert_eq!(run_label(&fit_dir).as_deref(), Some(initial_label),
+        "--label must be recorded on the run");
 
     // Step 3: fit table surfaces the label.
     let table_out = std::process::Command::new(&camdl)
@@ -963,29 +978,29 @@ fn fit_label_workflow_persists_and_surfaces_in_table() {
     assert_eq!(row_label, Some(initial_label),
         "table_row.label must reflect Run.label; got {:?}", row_label);
 
-    // Step 4: `camdl label <hash> "<new>"` rewrites.
-    let new_label = "narrow R0, take 2";
-    let label_status = std::process::Command::new(&camdl)
-        .arg("label")
-        .arg(&hash_prefix)
-        .arg(new_label)
-        .arg("--root").arg(&output_dir)
-        .status().expect("camdl label must invoke");
-    assert!(label_status.success(), "camdl label failed");
-
-    assert_eq!(sidecar_label(&fit_dir).as_deref(), Some(new_label),
-        "`camdl label` must rewrite the fit-level sidecar");
+    // Step 3: `camdl label` refuses to move the label — by fit id (a problem
+    // folder, not a run) and by the run's own id (a label never moves).
+    let run_id: String = only_run(&fit_dir)["run_id"].as_str().unwrap().chars().take(12).collect();
+    for target in [hash_prefix.as_str(), run_id.as_str()] {
+        let status = std::process::Command::new(&camdl)
+            .arg("label").arg(target).arg("narrow R0, take 2")
+            .arg("--root").arg(&output_dir)
+            .status().expect("camdl label must invoke");
+        assert!(!status.success(), "`camdl label {target}` must not move the label");
+    }
+    assert_eq!(run_label(&fit_dir).as_deref(), Some(initial_label), "the label did not move");
     assert_eq!(fit_level_hash(&fit_dir), full_hash,
-        "relabel must not change the fit-level hash");
+        "relabel attempts must not change the fit-level hash");
 
+    // Step 4: fit table still shows it.
     let table_out2 = std::process::Command::new(&camdl)
         .arg("fit").arg("table").arg(&fits)
         .arg("--hash").arg(&hash_prefix)
         .arg("--format").arg("json")
         .output().unwrap();
     let table2: serde_json::Value = serde_json::from_slice(&table_out2.stdout).unwrap();
-    assert_eq!(table2["rows"][0]["label"].as_str(), Some(new_label),
-        "table_row.label must reflect the relabel");
+    assert_eq!(table2["rows"][0]["label"].as_str(), Some(initial_label),
+        "table_row.label is the run's label");
 }
 
 /// Empty / whitespace-only `--label "<text>"` is rejected at the CLI.

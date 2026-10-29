@@ -1,4 +1,5 @@
-//! Fit handles: resolve a user-typed fit reference to its sealed fit segment.
+//! Fit handles: resolve a user-typed fit reference to the run or problem
+//! folder it names.
 //!
 //! The modeler loop is `fit → {summarize, predict, scenario, compare}`,
 //! referencing the fit each time. A fit is referenced four ways, and resolution
@@ -10,9 +11,9 @@
 //! heuristic pick.
 //!
 //! This subsumes the per-verb `resolve_segment` (which handled only RunDir /
-//! Config) and adds `@label` (a label→run lookup over the fit sidecars) and
-//! hash-prefix (matched on the fit-level hash — the same one `fit table` and
-//! `camdl list` display as `fit_id`, and `camdl label <hash>` resolves).
+//! Config) and adds `@label` (the one run whose `run.json` carries the label,
+//! gh#896) and hash-prefix (a run's `run_id`, else the fit-level hash — the
+//! `fit_id` that `fit table` and `camdl list` display).
 //!
 //! Phase 1b of
 //! `docs/dev/proposals/2026-06-27-sealed-fit-packets-handles-and-override-algebra.md`.
@@ -24,7 +25,8 @@ use std::path::{Path, PathBuf};
 /// total; the I/O (and the ambiguity) lives in resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FitRef {
-    /// `@name` — the leading `@` sigil is the label marker (stripped here).
+    /// `@name` — the leading `@` sigil is the label marker (stripped here);
+    /// names the one run labelled `name`.
     Label(String),
     /// A `fit.toml` config → its unique run (or an ambiguity list).
     Config(PathBuf),
@@ -213,20 +215,28 @@ fn leaf_at(dir: &Path) -> Option<crate::cas_read::Leaf> {
         .then(|| crate::cas_read::Leaf { dir: dir.to_path_buf(), record })
 }
 
-/// Resolve a handle to what it names: a leaf directory or a run-id prefix
-/// names one run; a problem folder or a fit-id prefix names that folder; a
-/// `fit.toml` and `@label` name the folder they match.
+/// Resolve a handle to what it names: a leaf directory, a run-id prefix or
+/// `@label` names one run; a problem folder or a fit-id prefix names that
+/// folder; a `fit.toml` names the folder whose archived config it matches.
 pub fn resolve_target(s: &str) -> Result<FitTarget, ResolveError> {
     match FitRef::classify(s) {
         FitRef::RunDir(dir) => match leaf_at(&dir) {
             Some(leaf) => Ok(FitTarget::Leaf(LeafRef::of(leaf))),
-            None => Ok(FitTarget::Segment(resolve_inner(s)?.0)),
+            None if dir.is_dir() => Ok(FitTarget::Segment(dir)),
+            None => Err(ResolveError::NotFound(format!("no such fit directory: {}", dir.display()))),
         },
         FitRef::HashPrefix(prefix) => {
             let root = crate::run_paths::output_root(None, None);
             let mut leaves = crate::cas_read::resolve_fit_prefix(&root, &prefix);
             match leaves.len() {
-                0 => Ok(FitTarget::Segment(resolve_inner(s)?.0)),
+                0 => {
+                    let seg = resolve_by(&prefix, |seg| {
+                        crate::fit::fit_view::FitView::read(seg)
+                            .map(|v| v.fit_hash.starts_with(&prefix))
+                            .unwrap_or(false)
+                    })?;
+                    Ok(FitTarget::Segment(seg))
+                }
                 1 => Ok(FitTarget::Leaf(LeafRef::of(leaves.remove(0)))),
                 _ => {
                     leaves.sort_by(|a, b| a.dir.cmp(&b.dir));
@@ -234,7 +244,39 @@ pub fn resolve_target(s: &str) -> Result<FitTarget, ResolveError> {
                 }
             }
         }
-        FitRef::Label(_) | FitRef::Config(_) => Ok(FitTarget::Segment(resolve_inner(s)?.0)),
+        FitRef::Label(name) => {
+            let root = crate::run_paths::output_root(None, None);
+            Ok(FitTarget::Leaf(resolve_label(&root, &name)?))
+        }
+        FitRef::Config(path) => Ok(FitTarget::Segment(resolve_config(&path)?.0)),
+    }
+}
+
+/// Every fit run under `root` carrying `label`, whatever its status, in
+/// directory order. At most one non-failed run holds a label: `fit run
+/// --label` and `camdl label` refuse to give a held label to another run.
+pub fn runs_labelled(root: &Path, label: &str) -> Vec<crate::cas_read::Leaf> {
+    let mut runs: Vec<crate::cas_read::Leaf> = crate::cas_read::walk_fit_leaves(root)
+        .into_iter()
+        .filter(|l| l.record.provenance.label.as_deref() == Some(label))
+        .collect();
+    runs.sort_by(|a, b| a.dir.cmp(&b.dir));
+    runs
+}
+
+/// `@name` → the one completed run under `root` labelled `name`.
+pub fn resolve_label(root: &Path, name: &str) -> Result<LeafRef, ResolveError> {
+    let mut runs: Vec<crate::cas_read::Leaf> = runs_labelled(root, name)
+        .into_iter()
+        .filter(|l| l.record.status == runid::RunStatus::Completed)
+        .collect();
+    match runs.len() {
+        0 => Err(ResolveError::NotFound(format!(
+            "no completed fit run labelled @{name} under {}",
+            root.join("fits").display()
+        ))),
+        1 => Ok(LeafRef::of(runs.remove(0))),
+        _ => Err(ResolveError::AmbiguousRuns { handle: format!("@{name}"), runs }),
     }
 }
 
@@ -328,43 +370,6 @@ pub fn resolve_fit(s: &str) -> Result<ResolvedFit, ResolveError> {
         None => load_config_for_segment(&segment).map_err(ResolveError::NotFound)?,
     };
     Ok(ResolvedFit { segment, leaf, config })
-}
-
-/// The 4-way resolution to a segment. The Config branch also returns the
-/// already-loaded live config (so the data paths it resolved against the user's
-/// directory are preserved); the other branches return `None` and let
-/// [`resolve_fit`] recover the config from the segment.
-fn resolve_inner(s: &str) -> Result<(PathBuf, Option<FitConfig>), ResolveError> {
-    match FitRef::classify(s) {
-        FitRef::RunDir(dir) => {
-            if dir.is_dir() {
-                Ok((dir, None))
-            } else {
-                Err(ResolveError::NotFound(format!("no such fit directory: {}", dir.display())))
-            }
-        }
-        FitRef::Config(path) => {
-            let (seg, cfg) = resolve_config(&path)?;
-            Ok((seg, Some(cfg)))
-        }
-        FitRef::Label(name) => {
-            let seg = resolve_by(&format!("@{name}"), |seg| {
-                crate::run_meta::read_fit_sidecar(seg)
-                    .and_then(|side| side.label)
-                    .as_deref()
-                    == Some(name.as_str())
-            })?;
-            Ok((seg, None))
-        }
-        FitRef::HashPrefix(hex) => {
-            let seg = resolve_by(&hex, |seg| {
-                crate::fit::fit_view::FitView::read(seg)
-                    .map(|v| v.fit_hash.starts_with(&hex))
-                    .unwrap_or(false)
-            })?;
-            Ok((seg, None))
-        }
-    }
 }
 
 /// Recover the config for a segment reached by run-dir / `@label` / hash.
@@ -498,7 +503,7 @@ fn resolve_config(path: &Path) -> Result<(PathBuf, FitConfig), ResolveError> {
 }
 
 /// Scan `fits/` segments under the default output root and return the unique
-/// one matching `pred`. Used by the label and hash-prefix branches, which have
+/// one matching `pred`. Used by the fit-id prefix branch, which has
 /// no config to name a custom root — they resolve against the conventional
 /// `results/` root (or `CAMDL_OUTPUT_DIR`); a fit under a custom `output_dir`
 /// is reached by its run dir or `fit.toml`.
@@ -679,7 +684,7 @@ cooling = 0.7
         // Archives `fit.toml.original` from the config on disk, as a fit does.
         crate::run_meta::write_fit_sidecar(&seg, &toml_path, &side).unwrap();
         std::fs::write(&toml_path, live).unwrap();
-        (resolve_inner(&toml_path.to_string_lossy()).map(|r| r.0), seg, tmp)
+        (resolve_config(&toml_path).map(|r| r.0), seg, tmp)
     }
 
     /// The archived config, written portably (`output_dir` points at the
@@ -788,7 +793,7 @@ cooling    = 0.70
         crate::run_meta::write_fit_sidecar(&seg, &toml_path, &side).unwrap();
         std::fs::remove_file(seg.join("fit.toml.original")).unwrap();
 
-        let err = resolve_inner(&toml_path.to_string_lossy()).map(|r| r.0)
+        let err = resolve_config(&toml_path).map(|r| r.0)
             .expect_err("no archive, no match")
             .to_string();
         assert!(

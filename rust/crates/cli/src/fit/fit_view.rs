@@ -49,6 +49,9 @@ pub struct FitStageView {
     /// The leaf's own `run_id` (full 64-char hex) — the address `camdl show`
     /// and `fit predict` accept.
     pub run_id: String,
+    /// The run's label (`run.json` `provenance.label`): the one run `@label`
+    /// names (gh#896). `None` when the run was not given one.
+    pub label: Option<String>,
     /// Simulation backend the stage ran on. Defaults to `ChainBinomial` when
     /// absent.
     pub backend: InferenceBackend,
@@ -82,8 +85,6 @@ pub struct FitView {
     pub created_at: String,
     /// argv that produced the fit (first leaf).
     pub argv: Vec<String>,
-    /// User `--label` (sidecar).
-    pub label: Option<String>,
 
     // ── sidecar provenance (never defaulted on a well-formed segment) ──
     pub model: String,
@@ -166,6 +167,7 @@ fn stage_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<Fit
             .map(|l| l.hash.to_hex())
             .unwrap_or_default(),
         run_id: rec.run_id.to_hex(),
+        label: rec.provenance.label.clone(),
         backend,
         seed: inputs.get("seed").and_then(|v| v.as_u64()).unwrap_or(0),
         n_chains: inputs.get("n_chains").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
@@ -203,6 +205,14 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 }
 
 impl FitView {
+    /// The labels of this problem's runs, in run order, joined for display —
+    /// `None` when no run is labelled. A label names one run, not the problem
+    /// (gh#896), so a folder with several labelled runs shows each.
+    pub fn label(&self) -> Option<String> {
+        let labels: Vec<&str> = self.stages.iter().filter_map(|s| s.label.as_deref()).collect();
+        (!labels.is_empty()).then(|| labels.join(", "))
+    }
+
     /// Project a CAS fit segment (`fits/{stem}-{h8}/`) into a fit-level view.
     /// Collects its `FitStage` leaves, sorts by method label then seed, reads
     /// the fit-level sidecar, and folds them.
@@ -314,7 +324,6 @@ impl FitView {
             engine_version,
             created_at,
             argv,
-            label: side.label,
             model: side.model_path,
             model_identity: side.model_identity,
             fit_toml_path: side.fit_toml_path,
@@ -427,7 +436,7 @@ mod tests {
         assert_eq!(view.created_at, "2026-04-27T00:00:02Z", "latest of the two leaves");
         assert_eq!(view.engine_version, "0.1.0+test", "engine_version (first leaf)");
         assert_eq!(view.argv, vec!["camdl", "fit", "run"], "argv (first leaf)");
-        assert_eq!(view.label.as_deref(), Some("a fit"), "label (sidecar)");
+        assert_eq!(view.label(), None, "no run is labelled; the sidecar's label is not a run's");
 
         // Sidecar provenance.
         assert_eq!(view.model, "sir.camdl", "model");

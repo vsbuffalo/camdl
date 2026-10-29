@@ -789,7 +789,7 @@ fn read_traj_digest(dir: &std::path::Path) -> Option<runid::ContentHash> {
 /// is the same in-place relabel `camdl label` performs, applied at write time
 /// so an explicit `--label` survives a CAS cache hit. Idempotent: a no-op when
 /// the leaf already has the requested label (e.g. a fresh commit).
-fn ensure_provenance_label(leaf_dir: &std::path::Path, label: &str) -> Result<(), String> {
+pub(crate) fn ensure_provenance_label(leaf_dir: &std::path::Path, label: &str) -> Result<(), String> {
     let path = leaf_dir.join("run.json");
     let txt = std::fs::read_to_string(&path)
         .map_err(|e| format!("read {}: {}", path.display(), e))?;

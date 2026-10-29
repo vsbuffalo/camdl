@@ -643,6 +643,8 @@ pub struct TrainingWindow {
 /// default).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FitSidecar {
+    /// A profile's label. A fit segment's sidecar carries none: a fit's label
+    /// names one run and lives on that run's `run.json` (gh#896).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default)]
@@ -732,16 +734,13 @@ pub struct FitSidecar {
 /// is best-effort: a CLI-only fit (no `.toml`) has none and config-diff degrades
 /// to identity. Idempotent; the caller writes it once per fit segment.
 ///
-/// The user `label` is **sticky** (gh#29). A multi-stage pipeline
-/// (`scout → refine → validate`) rewrites this sidecar on every `fit run`
-/// invocation, but the sidecar records the *experiment*, not a single call, so a
-/// `--label` set on an earlier invocation must survive a later stage-only re-run
-/// that passes no `--label`. When `sidecar.label` is `None`, a non-`None` label
-/// already on disk at `fit_segment` is preserved; an explicit `Some(label)`
-/// always overrides; a fresh segment with no prior label stays `None`. (The
-/// same one home is what `fit label` relabels post-hoc.) Every other field is a
-/// derived projection of the current invocation's inputs and is overwritten as
-/// before.
+/// A profile's `label` is **sticky** (gh#29): when `sidecar.label` is `None`,
+/// a non-`None` label already on disk at `fit_segment` is preserved; an
+/// explicit `Some(label)` always overrides; a fresh segment with no prior
+/// label stays `None`. (The same one home is what `camdl label` relabels for a
+/// profile.) A fit writes no label here — its label is its run's (gh#896).
+/// Every other field is a derived projection of the current invocation's
+/// inputs and is overwritten as before.
 pub fn write_fit_sidecar(
     fit_segment: &std::path::Path,
     fit_toml_path: &std::path::Path,
@@ -769,7 +768,7 @@ pub fn write_fit_sidecar(
             }
         }
     }
-    // gh#29: keep the label sticky. gh#585: the applied training window is
+    // gh#29: keep a profile's label sticky. gh#585: the applied training window is
     // sticky the same way — it is recorded after the data load, and a rerun
     // that never loads (all-cache-hit short-circuit) writes the sidecar with
     // `None`, which must not erase the recorded proof. The on-disk sidecar is

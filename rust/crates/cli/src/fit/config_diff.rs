@@ -526,7 +526,6 @@ mod tests {
             engine_version: "0.1.0+test".into(),
             created_at: "2026-04-27T00:00:00Z".into(),
             argv: Vec::new(),
-            label: None,
             model: "sir.camdl".into(),
             model_identity: model_identity.into(),
             fit_toml_path: "fit.toml".into(),

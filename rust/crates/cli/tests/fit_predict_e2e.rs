@@ -931,15 +931,16 @@ thin = 1
     let out = run(&bin, &tmp, &["fit", "predict", "@nope", "--horizon", "free_forward"]);
     assert!(!out.status.success(), "unknown @label must error");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("no fit found for @nope"), "actionable not-found, got: {stderr}");
+    assert!(stderr.contains("no completed fit run labelled @nope"), "actionable not-found, got: {stderr}");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
-fn fit_summary_ambiguous_label_lists_candidates() {
-    // Phase 1b: two distinct fits sharing a label make `@label` ambiguous —
-    // the candidates are listed git-style, never silently resolved to one.
+fn a_second_fit_under_a_held_label_is_refused() {
+    // gh#896: a label names one run and never moves. A second fit asking for
+    // a label another run holds is refused before it runs, naming the holder,
+    // and `@label` keeps naming the first run.
     let bin = skip_if_missing_binary();
     let tmp = std::env::temp_dir().join(format!("camdl_handle_ambig_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -948,8 +949,7 @@ fn fit_summary_ambiguous_label_lists_candidates() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
 
     // Two fits that differ in config (→ distinct fit-level hashes → two
-    // segments) but carry the SAME label. Cheap IF2 fits: resolution ambiguity
-    // fires before any posterior is touched, so `fit summary` is enough.
+    // segments) asking for the SAME label.
     let if2_a = r#"[method]
 algorithm = "if2"
 backend = "chain_binomial"
@@ -969,21 +969,18 @@ cooling = 0.7
     std::fs::write(tmp.join("a.toml"), fit_toml(if2_a, "results")).unwrap();
     std::fs::write(tmp.join("b.toml"), fit_toml(if2_b, "results")).unwrap();
 
-    for cfg in ["a.toml", "b.toml"] {
-        let out = run(&bin, &tmp, &["fit", "run", cfg, "--label", "dup", "--seed", "1"]);
-        assert!(out.status.success(), "fit run {cfg} failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
-    }
-
-    let out = run(&bin, &tmp, &["fit", "summary", "@dup"]);
-    assert!(!out.status.success(), "ambiguous @label must error, not pick one");
+    let out = run(&bin, &tmp, &["fit", "run", "a.toml", "--label", "dup", "--seed", "1"]);
+    assert!(out.status.success(), "fit run a.toml failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
+    let out = run(&bin, &tmp, &["fit", "run", "b.toml", "--label", "dup", "--seed", "1"]);
+    assert!(!out.status.success(), "a held label must be refused, not shared");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("@dup resolves to 2 fits"),
-        "ambiguity is typed and counted, got: {stderr}"
+        stderr.contains("the label \"dup\" already names run") && stderr.contains("results/fits/a-"),
+        "the refusal names the run that holds the label, got: {stderr}"
     );
-    // Both candidate segments are listed.
-    let listed = stderr.matches("results/fits/").count();
-    assert!(listed >= 2, "both candidate segments listed, got: {stderr}");
+
+    let out = run(&bin, &tmp, &["fit", "summary", "@dup"]);
+    assert!(out.status.success(), "@dup names a.toml's run:\n{}", String::from_utf8_lossy(&out.stderr));
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

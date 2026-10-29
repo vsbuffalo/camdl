@@ -329,8 +329,15 @@ fn matches_outer_filters(entry: &FitDirEntry, args: &FitTableArgs, now_unix: i64
         }
     }
     if let Some(pat) = &args.label_pattern {
-        let label = view.label.as_deref().unwrap_or("");
-        if !glob_match(pat, label) {
+        // A label names one run (gh#896): the fit matches when any of its
+        // runs' labels does, and an unlabelled fit is matched as "".
+        let labels: Vec<&str> = view.stages.iter().filter_map(|s| s.label.as_deref()).collect();
+        let matched = if labels.is_empty() {
+            glob_match(pat, "")
+        } else {
+            labels.iter().any(|l| glob_match(pat, l))
+        };
+        if !matched {
             return false;
         }
     }

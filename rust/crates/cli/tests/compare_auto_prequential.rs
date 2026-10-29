@@ -148,20 +148,31 @@ fn setup_two_fits(bin: &Path, slug: &str) -> PathBuf {
     tmp
 }
 
-/// Find the fit segment dir whose sidecar carries `label`.
+/// Find the fit segment dir holding the run labelled `label`.
 fn segment_with_label(results: &Path, label: &str) -> PathBuf {
+    // A label names one run, recorded on its leaf's run.json (gh#896); the
+    // segment is the problem folder two levels above that leaf.
     let fits = results.join("fits");
-    for e in std::fs::read_dir(&fits).unwrap().flatten() {
-        let meta = e.path().join("fit.meta.json");
-        if let Ok(txt) = std::fs::read_to_string(&meta) {
-            if let Ok(j) = serde_json::from_str::<serde_json::Value>(&txt) {
-                if j["label"] == label {
-                    return e.path();
+    let mut stack = vec![fits.clone()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let run = p.join("run.json");
+            match std::fs::read_to_string(&run).ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            {
+                Some(j) if j["provenance"]["label"] == label => {
+                    return p.parent().and_then(Path::parent).unwrap().to_path_buf();
                 }
+                Some(_) => {}
+                None => stack.push(p),
             }
         }
     }
-    panic!("no fit segment labeled {label} under {}", fits.display());
+    panic!("no fit run labeled {label} under {}", fits.display());
 }
 
 /// A cheap PGAS fit (a posterior cloud — writes `fit_state.toml` + `draws.tsv`,

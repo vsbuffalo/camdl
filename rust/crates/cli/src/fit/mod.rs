@@ -783,7 +783,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // segment.
     let fit_dir = announced_fit_dir.clone();
 
-    let fit_sidecar = build_fit_sidecar(&config, &fit_path, validated_label, Some(&model));
+    let fit_sidecar = build_fit_sidecar(&config, &fit_path, Some(&model));
 
     eprintln!("fit: {} (method={})", fit_path, method.algorithm.method_name());
     eprintln!("  model:    {}", config.problem.model.camdl);
@@ -927,6 +927,23 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     };
 
     let total_cells = cells.len();
+    // gh#896: a label names one run. An invocation that writes several leaves
+    // has no one run to give it to, so it is refused before any work.
+    if let Some(label) = &validated_label {
+        let n_leaves = total_cells * sweep_points.len();
+        if n_leaves > 1 {
+            eprintln!(
+                "error: --label \"{label}\" names one run, but this invocation writes {n_leaves} \
+                 method leaves ({} fit seed(s) × {} dataset(s) × {} sweep point(s)).\n  \
+                 Run without --label, then label the run you mean: \
+                 camdl label <run_id> \"{label}\"",
+                fit_seeds.len(),
+                synthetic_datasets.len().max(1),
+                sweep_points.len(),
+            );
+            std::process::exit(1);
+        }
+    }
     if total_cells > 1 {
         eprintln!("grid: {} cell{}", total_cells,
             if total_cells == 1 { "" } else { "s" });
@@ -1099,6 +1116,15 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 eprintln!("error: fit-method resume key: {}", e);
                 std::process::exit(1);
             });
+        // gh#896: the label is checked against this run's identity before any
+        // sampling — a label held by another run, or a run already stored
+        // under another label, is refused here rather than after the work.
+        if let Some(label) = &validated_label {
+            if let Err(e) = check_label_is_free(&cas_root, label, &resolved.run_id) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         let cas_path = runid::store_path(&cas_root, runid::ArtifactKind::FitStage, &resolved.levels);
         // gh#147 (M3.2): write the fit-level sidecar once per fit segment
         // (`cas_path`'s grandparent: `.../fits/{stem}-{h8}/`). Done before the
@@ -1233,7 +1259,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             display_inputs: serde_json::Value::Null,
         };
         let meta = crate::resolve::RecordMeta::new(
-            &ir_version_str, &sweep_config.model.camdl, None)
+            &ir_version_str, &sweep_config.model.camdl, validated_label.clone())
             .with_deps(deps.clone());
         // Reuse decision through the one policy seam. `--resume` deliberately
         // does NOT reuse: it extends a base run into a NEW leaf keyed on the
@@ -1252,6 +1278,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
                     eprintln!("  \x1b[33mcache hit — reusing {}\x1b[0m",
                         dir.strip_prefix(&cas_root).unwrap_or(&dir).display());
+                    // A label given to an unlabelled stored run is recorded on
+                    // it (`check_label_is_free` refused every other case).
+                    if let Some(label) = &validated_label {
+                        if let Err(e) = crate::cas_sink::ensure_provenance_label(&dir, label) {
+                            eprintln!("error: label the stored run {}: {e}", dir.display());
+                            std::process::exit(1);
+                        }
+                    }
                     continue;
                 }
                 Ok(crate::resolve::ReuseVerdict::MustRun) => {}
@@ -2245,7 +2279,6 @@ fn unpartitioned_role_fields(
 fn build_fit_sidecar(
     config: &config_v2::FitConfig,
     fit_path: &str,
-    label: Option<String>,
     model: Option<&ir::Model>,
 ) -> crate::run_meta::FitSidecar {
     let problem = &config.problem;
@@ -2314,7 +2347,9 @@ fn build_fit_sidecar(
         _ => Vec::new(),
     };
     crate::run_meta::FitSidecar {
-        label,
+        // A fit's label is its run's, on the leaf (gh#896); the sidecar
+        // describes the problem.
+        label: None,
         model_path: problem.model.camdl.clone(),
         model_identity,
         fit_toml_path: fit_path.to_string(),
@@ -2551,6 +2586,46 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
 
 // ─── Labels (proposal §5) ─────────────────────────────────────────────
 
+/// Refuse `label` for the run identified by `run_id` unless the label is free
+/// for it (gh#896): no other run under `root` that has not failed holds it,
+/// and the run, if already stored, carries no other label. A label names one
+/// run and never moves, so a second run asking for it gets a refusal naming
+/// the run that holds it.
+fn check_label_is_free(
+    root: &std::path::Path,
+    label: &str,
+    run_id: &runid::ContentHash,
+) -> Result<(), String> {
+    let holder = crate::fit::handle::runs_labelled(root, label)
+        .into_iter()
+        .find(|l| &l.record.run_id != run_id && l.record.status != runid::RunStatus::Failed);
+    if let Some(h) = holder {
+        let id = h.run_id_hex();
+        return Err(format!(
+            "the label \"{label}\" already names run {} ({}, {}, status {:?}).\n  \
+             A label names one run and never moves: give this run another label, \
+             or use @{label} to start from that run.",
+            &id[..12],
+            h.dir.display(),
+            h.record.provenance.created_at.as_deref().unwrap_or("time not recorded"),
+            h.record.status,
+        ));
+    }
+    let stored = crate::cas_read::walk_fit_leaves(root)
+        .into_iter()
+        .find(|l| &l.record.run_id == run_id);
+    if let Some(l) = stored {
+        if let Some(other) = l.record.provenance.label.as_deref().filter(|o| *o != label) {
+            return Err(format!(
+                "this run is already stored as @{other} ({}); a run keeps the label it \
+                 was first given. Refer to it as @{other}.",
+                l.dir.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validate a user-supplied label string against the proposal's
 /// rule: 1–64 characters after trim, restricted to letters, digits,
 /// spaces, commas, dot, underscore, hyphen. Returns the trimmed
@@ -2589,10 +2664,15 @@ pub fn validate_label(raw: &str) -> Result<String, String> {
 /// profile, replicate-set, fit-stage).
 ///
 /// Resolves the hash prefix by walking `<root>/{sims,fits,profiles}/**`
-/// for `run.json` files whose `run_id` (or legacy `hash`) starts with the
-/// prefix. The label is validated, written to the record's `label`, and
-/// the run.json is rewritten atomically. Refuses to relabel a still-running
-/// fit (`status == Running`).
+/// for `run.json` files whose `run_id` starts with the prefix. The label is
+/// validated, written to the record's `label`, and the run.json is rewritten
+/// atomically.
+///
+/// A fit run is addressed by its leaf `run_id` and its label never moves
+/// (gh#896): the label is refused when another fit run holds it, when the run
+/// already carries a different one, or while the run is still running (its
+/// finalize would rewrite the record). A fit-id prefix names a problem folder,
+/// not a run, and is refused with its runs listed.
 ///
 /// Concurrent invocations are last-write-wins; we don't lock the
 /// file. For single-user workflows this is fine; if cross-process
@@ -2614,15 +2694,14 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
     }
 
     // Match by hash prefix. Two homes for the label, by kind:
-    //   - sims / pfilters / surveys → a per-leaf `run.json` whose
+    //   - sims / pfilters / surveys / fit runs → a per-leaf `run.json` whose
     //     `provenance.label` IS the label home; resolved by leaf `run_id`
     //     prefix via the same `cas_read::resolve_*_prefix` machinery `show`
     //     uses, so anything `show` can address, `label` can too.
-    //   - fits (gh#147 M3.2) / profiles (M3.3) have no fit-wide `run.json` —
-    //     their fit-/profile-level hash is derived from the leaves and the
-    //     label lives in the base sidecar (`fit.meta.json`), so they resolve
-    //     by base-hash prefix → segment and relabel that sidecar (NOT
-    //     per-leaf: the label is a fit-wide mutable attribute with one home).
+    //   - profiles (M3.3) have no profile-wide `run.json` — the profile-level
+    //     hash is derived from the leaves and the label lives in the base
+    //     sidecar (`fit.meta.json`), so they resolve by base-hash prefix →
+    //     segment and relabel that sidecar.
     use std::collections::HashSet;
     let mut matches: Vec<std::path::PathBuf> = Vec::new();
     let mut seen_leaves: HashSet<std::path::PathBuf> = HashSet::new();
@@ -2634,21 +2713,12 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
             matches.push(leaf.dir);
         }
     }
-    let mut fit_segments: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(root.join("fits")) {
-        for e in rd.flatten() {
-            let seg = e.path();
-            if !seg.is_dir() { continue; }
-            if let Some(view) = crate::fit::fit_view::FitView::read(&seg) {
-                if view.fit_hash.starts_with(&args.hash) {
-                    fit_segments.push(seg);
-                }
-            }
-        }
-    }
+    let fit_runs: Vec<crate::cas_read::Leaf> =
+        crate::cas_read::resolve_fit_prefix(&root, &args.hash);
+    let mut profile_segments: Vec<std::path::PathBuf> = Vec::new();
     // Profiles (gh#147 M3.3): resolve by the profile-base hash (the `profile`
-    // level of any leaf) → base segment; relabel via the same sidecar-rewrite
-    // path as fits. Dedup so a multi-leaf profile yields one segment.
+    // level of any leaf) → base segment; relabel via the sidecar rewrite.
+    // Dedup so a multi-leaf profile yields one segment.
     {
         let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
         for leaf in crate::cas_read::walk_profile_leaves(&root) {
@@ -2657,14 +2727,38 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
             if !base_hash.starts_with(&args.hash) { continue; }
             if let Some(seg) = leaf.dir.ancestors().nth(4) {
                 if seen.insert(seg.to_path_buf()) {
-                    fit_segments.push(seg.to_path_buf());
+                    profile_segments.push(seg.to_path_buf());
                 }
             }
         }
     }
 
-    let total = matches.len() + fit_segments.len();
+    let total = matches.len() + fit_runs.len() + profile_segments.len();
     if total == 0 {
+        // A fit-id prefix names a problem folder, which holds runs but is not
+        // one; say which runs it holds rather than "not found".
+        let folders: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("fits"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|seg| {
+                crate::fit::fit_view::FitView::read(seg)
+                    .is_some_and(|v| v.fit_hash.starts_with(&args.hash))
+            })
+            .collect();
+        if let Some(seg) = folders.first() {
+            let view = crate::fit::fit_view::FitView::read(seg);
+            eprintln!(
+                "error: `{}` is the fit id of {}, a problem folder, not a run; a label \
+                 names one run. Label one of its runs by its run_id:",
+                args.hash, seg.display());
+            for st in view.iter().flat_map(|v| v.stages.iter()) {
+                eprintln!("    camdl label {} \"{}\"    # {}", &st.run_id[..12], new_label,
+                    st.stage_dir.display());
+            }
+            std::process::exit(1);
+        }
         eprintln!("error: no run found with hash prefix `{}` under {}",
             args.hash, root.display());
         std::process::exit(1);
@@ -2672,23 +2766,49 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
     if total > 1 {
         eprintln!("error: hash prefix `{}` matches {} runs — \
                    use a longer prefix", args.hash, total);
-        for p in matches.iter().chain(fit_segments.iter()).take(8) {
+        for p in matches.iter()
+            .chain(fit_runs.iter().map(|l| &l.dir))
+            .chain(profile_segments.iter())
+            .take(8)
+        {
             eprintln!("  {}", p.display());
         }
         std::process::exit(1);
     }
 
-    // gh#147 (M3.2): the single match is a CAS fit segment — rewrite the
-    // fit-level sidecar's label (its authoritative home), leaving the archived
-    // `fit.toml.original` untouched.
-    if let Some(seg) = fit_segments.into_iter().next() {
+    // A fit run: its label is written once and never moves (gh#896).
+    if let Some(run) = fit_runs.into_iter().next() {
+        if run.record.status == runid::RunStatus::Running {
+            eprintln!("error: {} is still running; label it when it has finished",
+                run.dir.display());
+            std::process::exit(1);
+        }
+        if let Err(e) = check_label_is_free(&root, &new_label, &run.record.run_id) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        let prior = run.record.provenance.label.clone();
+        if let Err(e) = crate::cas_sink::ensure_provenance_label(&run.dir, &new_label) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        match prior {
+            Some(_) => eprintln!("ok: label unchanged (\"{}\") on {}", new_label, run.dir.display()),
+            None => eprintln!("ok: label set to \"{}\" on {}", new_label, run.dir.display()),
+        }
+        return;
+    }
+
+    // A profile: rewrite the base sidecar's label (its authoritative home),
+    // leaving the archived `fit.toml.original` untouched.
+    if let Some(seg) = profile_segments.into_iter().next() {
         let mut side = crate::run_meta::read_fit_sidecar(&seg).unwrap_or_default();
         let prior = side.label.clone();
         side.label = Some(new_label.clone());
         if let Err(e) = crate::run_meta::write_fit_sidecar(
             &seg, std::path::Path::new(&side.fit_toml_path), &side,
         ) {
-            eprintln!("error: cannot write fit-level sidecar {}: {}", seg.display(), e);
+            eprintln!("error: cannot write profile sidecar {}: {}", seg.display(), e);
             std::process::exit(1);
         }
         match prior {
@@ -3076,7 +3196,7 @@ cooling = 0.7
         assert_eq!(stream_names.len(), 2, "fixture must declare two streams");
 
         let sidecar = build_fit_sidecar(
-            &config, fit_path.to_str().unwrap(), None, Some(&model));
+            &config, fit_path.to_str().unwrap(), Some(&model));
 
         let expected = crate::hashing::file_hash(data_path.to_str().unwrap())
             .expect("the fixture data file must hash");
