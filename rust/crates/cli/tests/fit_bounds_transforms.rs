@@ -24,6 +24,11 @@
 //!      `normal(mu, 1)` leaf boxed to `[1, 2]` biases `mu` under PMMH and MH,
 //!      and is refused before sampling; IF2 reads no prior and runs; a
 //!      `log_normal` leaf on a `rate` with the half-infinite box `[0, ∞)` runs.
+//!   6. `kind_support_that_cuts_a_hierarchical_prior_is_refused` — a
+//!      `normal(mu, 1)` leaf on a kind with a finite support end (`rate`,
+//!      `positive`, `count`, `duration`, `probability`) and no box anywhere
+//!      is refused under PMMH and MH, including the leaves of a pooled
+//!      `a[patch] ~ ... | patch` prior; PGAS refuses it as hierarchical.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -327,4 +332,102 @@ fn hierarchical_leaf_box_that_cuts_the_prior_is_refused() {
     let (out, _) = run_fit(&tmp.0, &rate_ir, rate_boxed, PMMH, "pmmh_rate_boxed");
     assert!(!out.status.success(), "a rate leaf on [0.1, 5] must be refused");
     assert!(stderr(&out).contains("r1: bounds [0.1, 5], prior log_normal"), "{}", stderr(&out));
+}
+
+/// The source of a two-patch SIR whose pooled leaf `a[patch]` is one line
+/// of `params`, and which expands to the IR leaves `a_p1`, `a_p2`.
+fn pooled_model_src(params: &str) -> String {
+    format!(
+        r#"time_unit = 'days
+dimensions {{ patch = [p1, p2] }}
+stratify(by = patch)
+compartments {{ S, I, R }}
+parameters {{
+{params}
+  beta  : rate in [0.05, 1.0]
+  gamma : rate in [0.01, 1.0]
+}}
+transitions {{
+  infection[p in patch] : S[p] --> I[p] @ beta * S[p] * I[p] / (S[p] + I[p] + R[p])
+  recovery[p in patch]  : I[p] --> R[p] @ gamma * I[p]
+}}
+observations {{
+  cases {{
+    columns       {{ time : time, cases : count }}
+    projected  = sum(I)
+    emit_schedule = every 1 'days
+    cases ~ poisson(rate = projected)
+  }}
+}}
+init {{ S[p1] = 990  I[p1] = 10  S[p2] = 990  I[p2] = 10 }}
+simulate {{ from = 0 'days  to = 6 'days }}
+"#
+    )
+}
+
+/// A hierarchical leaf with no box anywhere still has one: its kind's
+/// support, which the transform keeps (`[0, ∞)` under `log` for `rate`,
+/// `positive`, `count` and `duration`; `[0, 1]` under the logit for
+/// `probability`). A `normal(mu, 1)` prior puts mass outside that support,
+/// and PMMH and MH would score the leaf against the normal density
+/// truncated to it without dividing by P(support | mu). That missing
+/// constant moves with `mu`, so leaving it out biases `mu`. The refusal must
+/// therefore read the kind's support, not only a declared or fit-config box,
+/// and must reach the IR leaves of a pooled `a[patch] ~ ... | patch` prior.
+/// PGAS refuses every hierarchical prior.
+#[test]
+fn kind_support_that_cuts_a_hierarchical_prior_is_refused() {
+    if camdlc_bin().is_none() {
+        return;
+    }
+    let tmp = tempdir("hier_kind");
+    for (kind, shown) in [
+        ("rate", "[0, inf]"),
+        ("positive", "[0, inf]"),
+        ("count", "[0, inf]"),
+        ("duration", "[0, inf]"),
+        ("probability", "[0, 1]"),
+    ] {
+        let src = format!(
+            "  mu : real ~ normal(mu = 0.0, sigma = 1.0)\n  a1 : {kind} ~ normal(mu = mu, sigma = 1.0)"
+        );
+        let ir = compile(&tmp.0, &format!("hier_{kind}"), &model_src(&src));
+        let est = "mu = { bounds = [-5, 5], start = 0.0 }\na1 = { start = 0.5 }";
+        for (method, m) in [(PMMH, "pmmh"), (MH, "mh")] {
+            let tag = format!("{kind}_{m}");
+            let (out, results) = run_fit(&tmp.0, &ir, est, method, &tag);
+            let err = stderr(&out);
+            assert!(!out.status.success(), "{tag}: must be refused; stderr=\n{err}");
+            assert!(err.contains(&format!("a1: bounds {shown}, prior normal")), "{tag}: {err}");
+            assert!(err.contains("P(bounds | hyperparameter)"), "{tag}: {err}");
+            assert!(find_all(&results, "draws.tsv").is_empty(), "{tag}: refused before sampling");
+        }
+    }
+
+    // A pooled leaf: the check reaches each expanded IR leaf.
+    let pooled = pooled_model_src(
+        "  mu : real ~ normal(mu = 0.0, sigma = 1.0)\n  a[patch] : rate ~ normal(mu = mu, sigma = 1.0) | patch",
+    );
+    let ir = compile(&tmp.0, "hier_pooled", &pooled);
+    let est = "mu = { bounds = [-5, 5], start = 0.0 }\na_p1 = { start = 0.5 }\na_p2 = { start = 0.5 }";
+    for (method, m) in [(PMMH, "pmmh"), (MH, "mh")] {
+        let tag = format!("pooled_{m}");
+        let (out, results) = run_fit(&tmp.0, &ir, est, method, &tag);
+        let err = stderr(&out);
+        assert!(!out.status.success(), "{tag}: must be refused; stderr=\n{err}");
+        assert!(err.contains("a_p1: bounds [0, inf], prior normal"), "{tag}: {err}");
+        assert!(err.contains("a_p2: bounds [0, inf], prior normal"), "{tag}: {err}");
+        assert!(find_all(&results, "draws.tsv").is_empty(), "{tag}: refused before sampling");
+    }
+
+    // PGAS refuses a hierarchical prior outright, box or no box.
+    let pgas = "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 2\nparticles = 10\n\
+                sweeps = 50\nburn_in = 10\nstarts = \"single\"";
+    let src = "  mu : real ~ normal(mu = 0.0, sigma = 1.0)\n  a1 : rate ~ normal(mu = mu, sigma = 1.0)";
+    let ir = compile(&tmp.0, "hier_pgas", &model_src(src));
+    let (out, results) = run_fit(&tmp.0, &ir, "mu = { bounds = [-5, 5], start = 0.0 }\na1 = { start = 0.5 }", pgas, "pgas");
+    let err = stderr(&out);
+    assert!(!out.status.success(), "pgas: must be refused; stderr=\n{err}");
+    assert!(err.contains("PGAS does not support hierarchical priors (parameter 'a1')"), "pgas: {err}");
+    assert!(find_all(&results, "draws.tsv").is_empty(), "pgas: refused before sampling");
 }
