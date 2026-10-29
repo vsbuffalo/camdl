@@ -9,6 +9,13 @@ use sim::inference::MultiStreamObsModel;
 use sim::inference::particle_filter::Observation;
 use sim::rng::StatefulRng;
 
+/// The prior point a `Log`-transformed parameter presents: θ, with ln θ read
+/// from the coordinate `z`.
+fn at(theta: f64, z: f64) -> sim::inference::prior::PriorPoint {
+    sim::inference::prior::PriorPoint { ln_theta: z, ..sim::inference::prior::PriorPoint::natural(theta) }
+}
+
+
 fn load_model(path: &str) -> ir::Model {
     let json = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("cannot read {}: {}", path, e));
@@ -472,7 +479,7 @@ fn test_nuts_target_gradient_on_z_scale() {
             grad_z[i] += ll_grad_theta[i] * dtheta_dz;
 
             // Prior (Flat → 0)
-            log_p += priors[i].log_density(theta, z_val[i]);
+            log_p += priors[i].log_density(&at(theta, z_val[i]));
 
             // Jacobian
             let log_jac = match &if2_params[i].transform {

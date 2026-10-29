@@ -21,6 +21,13 @@ use ir::parameter::{HierarchicalKind, HierarchicalPrior};
 use sim::inference::hierarchical::NamedParams;
 use sim::inference::prior::{Prior, Density};
 
+/// The prior point a `Log`-transformed parameter presents: θ, with ln θ read
+/// from the coordinate `z`.
+fn at(theta: f64, z: f64) -> sim::inference::prior::PriorPoint {
+    sim::inference::prior::PriorPoint { ln_theta: z, ..sim::inference::prior::PriorPoint::natural(theta) }
+}
+
+
 fn make_hier(kind: HierarchicalKind, args: &[(&str, Expr)]) -> HierarchicalPrior {
     HierarchicalPrior {
         kind,
@@ -45,10 +52,10 @@ fn test_prior_hierarchical_env_propagation() {
     let values_b = [1.0,  0.5, 1.0];  // μ = 1 → N(1; 1, 0.5)
 
     let ll_a = prior.log_density_env(
-        values_a[2], values_a[2], &NamedParams { names: &names, values: &values_a }
+        &at(values_a[2], values_a[2]), &NamedParams { names: &names, values: &values_a }
     );
     let ll_b = prior.log_density_env(
-        values_b[2], values_b[2], &NamedParams { names: &names, values: &values_b }
+        &at(values_b[2], values_b[2]), &NamedParams { names: &names, values: &values_b }
     );
 
     // Analytical: Δ log N = -0.5 * ((1 - 1)²/0.25 - (1 - 0)²/0.25) = -0.5 * (0 - 4) = +2.
@@ -68,7 +75,7 @@ fn test_prior_hierarchical_env_less_returns_neg_inf() {
         ("mu", Expr::param("mu_h")),
         ("sigma", Expr::const_(1.0)),
     ]));
-    let got = prior.log_density(0.0, 0.0);
+    let got = prior.log_density(&at(0.0, 0.0));
     assert_eq!(got, f64::NEG_INFINITY);
 }
 
@@ -90,8 +97,8 @@ fn test_plain_priors_ignore_env() {
         Prior::Fixed(Density::Gamma { shape: 2.0, rate: 1.0 }),
         Prior::Fixed(Density::Exponential { rate: 0.5 }),
     ] {
-        let without = prior.log_density(0.5, 0.5);
-        let with    = prior.log_density_env(0.5, 0.5, &env);
+        let without = prior.log_density(&at(0.5, 0.5));
+        let with    = prior.log_density_env(&at(0.5, 0.5), &env);
         assert_eq!(without, with, "env-aware density differed for {:?}", prior);
     }
 }
@@ -108,5 +115,5 @@ fn test_prior_hierarchical_missing_hyperparent_neg_inf() {
     let names: Vec<String> = vec![];
     let values: [f64; 0]   = [];
     let env = NamedParams { names: &names, values: &values };
-    assert_eq!(prior.log_density_env(0.0, 0.0, &env), f64::NEG_INFINITY);
+    assert_eq!(prior.log_density_env(&at(0.0, 0.0), &env), f64::NEG_INFINITY);
 }

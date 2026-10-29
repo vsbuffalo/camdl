@@ -664,9 +664,8 @@ pub fn run_stage(
                     };
                     let log_prior: f64 = config.estimated_params.iter().zip(priors.iter())
                         .map(|(spec, prior)| {
-                            let theta = params[spec.index];
-                            let z = spec.to_transformed(theta);
-                            prior.log_density_env(theta, z, &env)
+                            let z = spec.to_transformed(params[spec.index]);
+                            prior.log_density_env(&spec.prior_point(z), &env)
                         })
                         .sum();
                     let log_posterior = loglik + log_prior;
