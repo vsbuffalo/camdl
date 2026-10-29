@@ -423,11 +423,18 @@ impl PosteriorDiagnostics {
         }
         // A parameter whose failure is a SAMPLER pathology sinks the verdict,
         // whether or not other parameters reported. A fit is not converged
-        // because some of it was.
+        // because some of it was. So does a parameter the estimator scored
+        // whose R̂ is unavailable with no reason recorded — a `null` in the
+        // summary, or a refusal this build cannot read: skipping it would
+        // pass the fit on the parameters that happened to report.
+        let unavailable = |p: &ParamConvergence| matches!(p,
+            ParamConvergence::Scored {
+                rhat: Stat::Undefined, rhat_withheld: None, all_chains_frozen: false, ..
+            });
         let bad: Vec<String> = self
             .per_param
             .iter()
-            .filter(|(_, p)| p.is_pathology())
+            .filter(|(_, p)| p.is_pathology() || unavailable(p))
             .map(|(n, _)| n.clone())
             .collect();
         if !bad.is_empty() {
@@ -702,7 +709,9 @@ pub enum MaxRhat {
     /// Every assessed parameter reported, and this is the worst.
     Reported(f64),
     /// At least one parameter's R̂ could not be computed for a reason that
-    /// indicates a PROBLEM. `params` names them (ascending).
+    /// indicates a PROBLEM, or is unavailable with no reason recorded (a
+    /// `null` in the stored summary, a refusal this build cannot read).
+    /// `params` names them (ascending).
     Unassessable { params: Vec<String> },
     /// R̂ was never computable for a structural reason — too few chains, too
     /// few draws, unequal chain lengths. Report "not assessed".
@@ -1315,13 +1324,19 @@ pub struct ConvergenceMaps {
     ess: BTreeMap<String, f64>,
     ess_tail: BTreeMap<String, f64>,
     ess_per_chain: BTreeMap<String, Vec<f64>>,
+    /// Parameters whose `rhat_not_reported` entry this build cannot read (a
+    /// refusal of a newer camdl). Kept so the parameter cannot vanish; its R̂
+    /// is unavailable.
+    unreadable_refusals: std::collections::BTreeSet<String>,
 }
 
 impl ConvergenceMaps {
     /// Read every convergence key a stage summary may carry.
     pub fn read(summary: &serde_json::Value) -> Self {
         ConvergenceMaps {
-            rhat: read_f64_map(summary, "rhat"),
+            // A `null` R̂ (a NaN, as serde_json writes one) is kept as NaN:
+            // the parameter is present with an unavailable R̂, never absent.
+            rhat: read_f64_map_keeping_nan(summary, "rhat"),
             rhat_bulk: read_f64_map(summary, "rhat_bulk"),
             rhat_folded: read_f64_map(summary, "rhat_folded"),
             rhat_classic: read_f64_map(summary, "rhat_classic"),
@@ -1330,6 +1345,7 @@ impl ConvergenceMaps {
             ess: read_f64_map(summary, "ess"),
             ess_tail: read_f64_map(summary, "ess_tail"),
             ess_per_chain: read_typed_map(summary, "ess_per_chain"),
+            unreadable_refusals: unreadable_keys::<RhatRefusal>(summary, "rhat_not_reported"),
         }
     }
 
@@ -1347,6 +1363,7 @@ impl ConvergenceMaps {
         set.extend(self.ess.keys());
         set.extend(self.ess_tail.keys());
         set.extend(self.ess_per_chain.keys());
+        set.extend(self.unreadable_refusals.iter());
         set.into_iter().cloned().collect()
     }
 
@@ -1430,6 +1447,36 @@ fn read_typed_map<T: serde::de::DeserializeOwned>(
 /// dropped — `v.as_f64()` yields `None`, so an ungated diagnostic reads as
 /// absent rather than poisoning the map. Shared by the PGAS/PMMH loaders'
 /// `rhat` + `ess` extraction.
+/// Like [`read_f64_map`], but a non-number entry (JSON `null`, a NaN) is kept
+/// as NaN rather than dropped: for R̂, an entry that is there but has no value
+/// is an unavailable statistic, and dropping it lets the parameter vanish from
+/// the max-R̂ verdict.
+fn read_f64_map_keeping_nan(summary: &serde_json::Value, key: &str) -> BTreeMap<String, f64> {
+    summary
+        .get(key)
+        .and_then(|v| v.as_object())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_f64().unwrap_or(f64::NAN))).collect())
+        .unwrap_or_default()
+}
+
+/// The keys of a `{ "<param>": <T> }` object whose value does not deserialize
+/// as `T` — what [`read_typed_map`] drops.
+fn unreadable_keys<T: serde::de::DeserializeOwned>(
+    summary: &serde_json::Value,
+    key: &str,
+) -> std::collections::BTreeSet<String> {
+    summary
+        .get(key)
+        .and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .filter(|(_, v)| serde_json::from_value::<T>((*v).clone()).is_err())
+                .map(|(k, _)| k.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn read_f64_map(summary: &serde_json::Value, key: &str) -> BTreeMap<String, f64> {
     summary
         .get(key)
@@ -2212,6 +2259,39 @@ mod tests {
             "a refusal carries no per-chain ESS, which is not the same fact as \
              a parameter whose chains all mixed"
         );
+    }
+
+    /// A parameter must never vanish from the max-R̂ verdict. A stored R̂ of
+    /// `null` (a NaN, as serde_json writes one) and a `rhat_not_reported`
+    /// entry this build cannot read both used to drop the parameter, so the
+    /// max over the rest read as converged. Either is an unavailable R̂, and
+    /// the verdict is then not a pass.
+    #[test]
+    fn a_missing_or_unreadable_rhat_is_never_a_pass() {
+        let verdict = |summary: serde_json::Value| PosteriorDiagnostics {
+            per_param: ConvergenceMaps::read(&summary).per_param(),
+            n_samples: 100, thin: 1, wall_time_secs: None, n_chains: 4,
+        }.max_rhat_status();
+        let null_rhat = serde_json::json!({
+            "rhat": { "beta": 1.001, "gamma": null },
+            "ess": { "beta": 900.0, "gamma": 800.0 },
+        });
+        match verdict(null_rhat) {
+            MaxRhat::Unassessable { params } => assert_eq!(params, vec!["gamma".to_string()]),
+            other => panic!("a null R̂ on gamma must not read as converged: {other:?}"),
+        }
+        let unknown_refusal = serde_json::json!({
+            "rhat": { "beta": 1.001 },
+            "ess": { "beta": 900.0 },
+            "rhat_not_reported": { "gamma": "a_reason_from_a_newer_camdl" },
+        });
+        match verdict(unknown_refusal) {
+            MaxRhat::Unassessable { params } => assert_eq!(params, vec!["gamma".to_string()]),
+            other => panic!("gamma's unreadable refusal must not drop it: {other:?}"),
+        }
+        // A recorded structural refusal is still "not assessed", not a failure.
+        let too_few = serde_json::json!({ "rhat_not_reported": { "beta": "too_few_chains" } });
+        assert!(matches!(verdict(too_few), MaxRhat::NotApplicable { .. }));
     }
 
     /// A parameter whose R̂ is `∞` — every chain frozen at its own value — is a
