@@ -919,7 +919,6 @@ pub fn run_stage(
         // missing chain dirs.
         n_good_chains: if n_good_chains < n_chains { Some(n_good_chains) } else { None },
         start_values,
-        rw_sd: std::collections::BTreeMap::new(),
         loglik_type: Some(LoglikType::Marginal),
         acceptance_rate: Some(map_result.acceptance_rate),
         // Bayesian stages don't produce an IF2-style Â table; the

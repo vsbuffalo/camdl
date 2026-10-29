@@ -41,7 +41,6 @@ pub struct FitState {
     pub n_chains: usize,
     pub n_good_chains: Option<usize>,
     pub start_values: BTreeMap<String, f64>,
-    pub rw_sd: BTreeMap<String, f64>,
     /// What kind of log-likelihood is in `best_loglik` (gh#280). Serializes
     /// to the same `snake_case` tags this field carried as a free string
     /// before, so legacy `fit_state.toml` files deserialize unchanged.
@@ -264,7 +263,6 @@ mod tests {
             n_chains: 2,
             n_good_chains: Some(2),
             start_values: BTreeMap::from([("beta".into(), 0.8)]),
-            rw_sd: BTreeMap::new(),
             loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement,
@@ -359,6 +357,25 @@ beta = 0.8
         assert!(loaded.resolved_loglik_eval.is_none(),
             "legacy file must surface resolved_loglik_eval as None");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `fit_state.toml` records only what the method ran with or produced.
+    /// Its `[rw_sd]` table recorded neither: nl-* copied the run config's
+    /// derived step into it (nl-* never perturbs), IF2 wrote a MAD-based
+    /// "calibration" it never ran with, PGAS/PMMH wrote it empty, and no
+    /// reader consumed it — a leftover of the removed `[stages]` scout →
+    /// refine handoff. The table is gone from what is written; a leaf written
+    /// before still loads, because `FitState` does not deny unknown fields
+    /// and the stale table is simply not read.
+    #[test]
+    fn fit_state_writes_no_rw_sd_and_still_loads_one_that_has_it() {
+        let body = toml::to_string_pretty(&synthetic_state()).expect("serialize");
+        assert!(!body.contains("rw_sd"),
+            "fit_state.toml must not record an rw_sd no method ran with:\n{body}");
+        let legacy = format!("{body}\n[rw_sd]\nbeta = 0.05\n");
+        let back: FitState = toml::from_str(&legacy)
+            .expect("a leaf written with the old [rw_sd] table still loads");
+        assert_eq!(back.start_values.get("beta").copied(), Some(0.8));
     }
 
     /// The kind round-trips as its snake_case name and is absent on a state

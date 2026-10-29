@@ -1625,7 +1625,6 @@ mod tests {
             n_chains: 4,
             n_good_chains: Some(4),
             start_values,
-            rw_sd: Default::default(),
             loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement: agreement,

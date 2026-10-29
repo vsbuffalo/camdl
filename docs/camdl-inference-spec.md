@@ -557,19 +557,6 @@ S0 = 71200
 E0 = 140
 I0 = 118
 
-[rw_sd]
-# rw_sd from the user's fit.toml (or auto from bounds if omitted).
-# No inter-stage auto-calibration — each stage uses the user's
-# specified values. Set explicit rw_sd after inspecting scout traces.
-R0 = 8.5
-sigma = 0.003
-gamma = 0.004
-rho = 0.025
-amplitude = 0.02
-S0 = 3200
-E0 = 95
-I0 = 45
-
 [tail_chain_agreement]
 # Per-parameter Â over the last half of iterations. Refine reads
 # this to gate Stage 1 of its compound scout-convergence check.

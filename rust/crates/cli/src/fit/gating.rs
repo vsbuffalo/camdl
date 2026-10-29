@@ -534,7 +534,6 @@ mod tests {
             n_chains: chain_logliks.len().max(1),
             n_good_chains: None,
             start_values: Default::default(),
-            rw_sd: Default::default(),
             loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement: tail_chain_agreement.iter()
