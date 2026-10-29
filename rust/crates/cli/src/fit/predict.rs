@@ -786,7 +786,8 @@ fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> Convergen
     // Chains that began at one point agree by construction; the leaf's R̂
     // is not a verdict (proposal 2026-09-08, §3.4), so the band carries no
     // number — the same demotion `fit summary` applies.
-    if crate::fit::method_result::point_start(stage_dir).is_some() {
+    // An unreadable fit_state.toml is not assessed either: never "converged".
+    if !matches!(crate::fit::method_result::point_start(stage_dir), Ok(None)) {
         return ConvergenceStatus::NotAssessed;
     }
     let try_read = |name: &str| -> Option<ConvergenceStatus> {
@@ -862,7 +863,8 @@ fn subset_convergence(
     };
     // A subset of chains that began at one point still began at one point.
     if let Some(leaf) = draws_path.parent() {
-        if crate::fit::method_result::point_start(leaf).is_some() {
+        // An unreadable fit_state.toml is not assessed either.
+        if !matches!(crate::fit::method_result::point_start(leaf), Ok(None)) {
             return Ok(ConvergenceStatus::NotAssessed);
         }
     }

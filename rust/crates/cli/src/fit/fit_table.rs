@@ -93,7 +93,16 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
         };
         match table_row::build_row(&entry.fit_dir, diff, 0.0, now_unix) {
             Ok(r) => rows.push(r),
-            Err(e) => errors.push(format!("{}: {}", entry.fit_dir.display(), e)),
+            Err(e) => {
+                // A fit whose result cannot be read is listed as a warning,
+                // but `--quantity` asks for a number from every fit: dropping
+                // one would answer for fewer fits than were asked about.
+                if !args.quantities.is_empty() {
+                    eprintln!("error: {}: {}", entry.fit_dir.display(), e);
+                    std::process::exit(1);
+                }
+                errors.push(format!("{}: {}", entry.fit_dir.display(), e))
+            }
         }
     }
 

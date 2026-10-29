@@ -76,7 +76,7 @@ fn recompute_over_subset(
     )?;
     // A subset of chains that began at one point still began at one point:
     // the recomputed R̂ is no more informative than the stored one.
-    let point = crate::fit::method_result::point_start(stage_dir);
+    let point = crate::fit::method_result::point_start(stage_dir).map_err(|e| e.to_string())?;
 
     // Posterior means over the retained rows — summary-specific, so computed
     // here from the shared recompute's `kept` rows rather than in the shared fn.
@@ -1747,6 +1747,9 @@ impl Formatter {
         // Identity. With an active chain selection `diag.n_chains` is already
         // the RETAINED count (recomputed), so name the subset and what was
         // dropped rather than printing a total that is no longer the total.
+        // Read for the refused-chain count in the identity line only: a
+        // display detail, not a verdict. The method result above already
+        // read this leaf, so an unreadable file has been reported there.
         let state = FitState::load(&stage_dir.to_string_lossy()).ok();
         // gh#663: a chain refused at its start is named here, from its durable
         // record, rather than folded into a chain count that reads as a normal

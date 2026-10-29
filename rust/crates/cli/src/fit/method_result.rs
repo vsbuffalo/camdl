@@ -937,22 +937,32 @@ fn inputs_n_chains(inputs: &serde_json::Value) -> usize {
 }
 
 /// A multi-chain leaf whose `fit_state.toml` says every chain started at one
-/// point, with the rule as written. `None` for a spread start, one chain, a
-/// leaf written before `chain_starts_kind` existed, or no state at all — a
-/// missing record never demotes, because the demotion is a claim about how
-/// the chains were started and an absent field makes no claim.
-pub fn point_start(stage_dir: &Path) -> Option<(usize, String)> {
-    let state = FitState::load(&stage_dir.to_string_lossy()).ok()?;
+/// point, with the rule as written. `Ok(None)` for a spread start, one chain,
+/// a leaf written before `chain_starts_kind` existed, or no `fit_state.toml`
+/// at all — a missing record never demotes, because the demotion is a claim
+/// about how the chains were started and an absent field makes no claim. A
+/// `fit_state.toml` that exists but cannot be read is an error: reading it as
+/// "no claim" would leave a point-started R̂ looking assessed.
+pub fn point_start(stage_dir: &Path) -> Result<Option<(usize, String)>, MethodResultError> {
+    if !stage_dir.join("fit_state.toml").is_file() {
+        return Ok(None);
+    }
+    let state = FitState::load(&stage_dir.to_string_lossy()).map_err(|e| {
+        MethodResultError::Io {
+            stage_dir: stage_dir.to_owned(),
+            message: format!("fit_state.toml: {e}"),
+        }
+    })?;
     if state.chain_starts_kind != Some(crate::fit::starts::ChainStartsKind::Point) {
-        return None;
+        return Ok(None);
     }
     if state.n_chains < 2 {
-        return None;
+        return Ok(None);
     }
-    Some((
+    Ok(Some((
         state.n_chains,
         state.chain_init_source.unwrap_or_else(|| "a point rule".to_string()),
-    ))
+    )))
 }
 
 /// The one place a sampler leaf's diagnostics are read into a
@@ -965,12 +975,12 @@ fn posterior_diagnostics(
     thin: usize,
     wall_time_secs: Option<f64>,
     n_chains: usize,
-) -> PosteriorDiagnostics {
+) -> Result<PosteriorDiagnostics, MethodResultError> {
     let mut diag = PosteriorDiagnostics { per_param, n_samples, thin, wall_time_secs, n_chains };
-    if let Some((n, starts)) = point_start(stage_dir) {
+    if let Some((n, starts)) = point_start(stage_dir)? {
         diag.demote_point_start(n, &starts);
     }
-    diag
+    Ok(diag)
 }
 
 // ── NloptStageResult ────────────────────────────────────────────────
@@ -1222,7 +1232,7 @@ impl PgasStageResult {
         Ok(PgasStageResult {
             diagnostics: posterior_diagnostics(
                 stage_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
-            ),
+            )?,
             posterior_mean,
             posterior_q025,
             posterior_q975,
@@ -1276,7 +1286,7 @@ impl PmmhStageResult {
         Ok(PmmhStageResult {
             diagnostics: posterior_diagnostics(
                 stage_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
-            ),
+            )?,
             posterior_mean,
             acceptance_rate,
             map_loglik,
@@ -1911,15 +1921,18 @@ mod tests {
     fn point_start_needs_the_recorded_kind_and_two_chains() {
         let tmp = tempdir("point_start_guard");
         let dir = tmp.path();
-        assert!(point_start(dir).is_none(), "no state, no claim");
+        assert!(point_start(dir).unwrap().is_none(), "no state, no claim");
         write_state_with_starts(dir, 4, None, "from_mle @mle");
-        assert!(point_start(dir).is_none(), "a pre-split leaf makes no claim");
+        assert!(point_start(dir).unwrap().is_none(), "a pre-split leaf makes no claim");
         write_state_with_starts(dir, 1, Some("point"), "single");
-        assert!(point_start(dir).is_none(), "one chain: R̂ was never applicable");
+        assert!(point_start(dir).unwrap().is_none(), "one chain: R̂ was never applicable");
         write_state_with_starts(dir, 4, Some("point"), "single");
-        assert_eq!(point_start(dir), Some((4, "single".to_string())));
+        assert_eq!(point_start(dir).unwrap(), Some((4, "single".to_string())));
         write_state_with_starts(dir, 4, Some("spread"), "lhs");
-        assert!(point_start(dir).is_none(), "a spread start is assessed");
+        assert!(point_start(dir).unwrap().is_none(), "a spread start is assessed");
+        std::fs::write(dir.join("fit_state.toml"), "n_chains = [oops").unwrap();
+        assert!(point_start(dir).is_err(),
+            "a fit_state.toml that cannot be read is an error, not \"no claim\"");
     }
 
     #[test]
