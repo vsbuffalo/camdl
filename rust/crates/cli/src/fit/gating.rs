@@ -344,16 +344,11 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
                 loglik_spread,
             };
         }
-        AgreementBand::SoftWarn => {
-            let warnable: Vec<(String, f64)> = assessed.all_finite().into_iter()
-                .filter(|(_, r)| gate.a_band(*r) == AgreementBand::SoftWarn)
-                .collect();
-            return ScoutGateVerdict::SoftWarn { param_agreement: warnable };
-        }
-        // The worst Â is a max over finite entries seeded at 0.0, so
-        // `NotAssessed` is unreachable for it; either way there is nothing for
-        // the Â leg to refuse and the decibans leg below carries the verdict.
-        AgreementBand::Pass | AgreementBand::NotAssessed => {}
+        // The soft band refuses nothing on its own, so the decibans leg and an
+        // unavailable Â are checked first; the warning comes last, only for a
+        // source that is otherwise accepted. The worst Â is a max over finite
+        // entries seeded at 0.0, so `NotAssessed` is unreachable for it.
+        AgreementBand::SoftWarn | AgreementBand::Pass | AgreementBand::NotAssessed => {}
     }
 
     // Step 2 — decibans-spread check on clean-eval logliks. Skipped
@@ -378,6 +373,13 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
 
     if assessed.is_incomplete() {
         return ScoutGateVerdict::Incomplete { params: assessed.unavailable };
+    }
+
+    if assessed.a_band == AgreementBand::SoftWarn {
+        let warnable: Vec<(String, f64)> = assessed.all_finite().into_iter()
+            .filter(|(_, r)| gate.a_band(*r) == AgreementBand::SoftWarn)
+            .collect();
+        return ScoutGateVerdict::SoftWarn { param_agreement: warnable };
     }
 
     ScoutGateVerdict::Ok
@@ -887,6 +889,23 @@ decibans_failed = true
         assert!(!assess_if2(&s, &legacy_gate()).a_passes());
         assert!(assess_if2(&s, &legacy_gate()).dynamics_a_passes(&legacy_gate()),
             "the dynamics-only sub-verdict passes");
+    }
+
+    /// A soft-band Â does not excuse the other legs: a failing decibans leg
+    /// or an unavailable Â still refuses, as `fit table` reports `fail_db` /
+    /// `incomplete` for the same leaf. The soft band used to return first.
+    #[test]
+    fn soft_warn_does_not_skip_the_decibans_leg_or_an_unavailable_a() {
+        let mut s = make_state(&[("beta", 1.07), ("gamma", 1.02)], &[], &[-60.2, -160.5], -60.2);
+        s.chain_eval_logliks = vec![-60.0, -160.0];
+        s.chain_eval_ses = vec![0.5, 0.5];
+        let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
+        assert!(matches!(check_scout_convergence(&s, &gate), ScoutGateVerdict::DecibansSpread { .. }),
+            "{:?}", check_scout_convergence(&s, &gate));
+        let mut s = make_state(&[("beta", 1.07), ("gamma", f64::NAN)], &[], &[-60.2, -60.5], -60.2);
+        s.chain_eval_logliks.clear();
+        assert!(matches!(check_scout_convergence(&s, &gate), ScoutGateVerdict::Incomplete { .. }),
+            "{:?}", check_scout_convergence(&s, &gate));
     }
 
     #[test]
