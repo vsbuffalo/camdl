@@ -41,6 +41,8 @@ pub mod ode_grad;
 pub mod gradient_capability;
 #[cfg(feature = "ode")]
 pub mod deterministic;
+#[cfg(test)]
+mod nuts_target_tests;  // the per-parameter NUTS target against analytic densities
 
 // Re-exports
 pub use types::{ParticleState, ParticleSwarm};
