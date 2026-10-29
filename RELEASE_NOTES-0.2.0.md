@@ -150,10 +150,13 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   coordinate. It was a tenth of the transform's spread between 10⁻¹⁰ and 10¹⁰
   (about 10⁹ for an unbounded `real`). Robbins–Monro adaptation tunes it during
   burn-in either way. Migration: none.
-- **The near-bound report covers `[0, ∞)`.** IF2's estimate on a parameter
-  bounded only below is reported near its bound when it is below 1% of the way
-  from the bound to the chain's start; the report now says IF2 cannot place an
-  estimate exactly on a bound, and to profile or refit with `nl-bobyqa`.
+- **The near-bound report names the test for a maximum on the bound.** IF2's
+  estimate within 1% of the width of either end of a box finite at both ends is
+  reported as near the bound, and the report now says IF2 cannot place an
+  estimate exactly on a bound, and to profile the parameter, or refit with
+  `nl-sbplx` (ODE backend only). A domain with an infinite end, such as
+  `[0,
+  ∞)`, gets no report.
 - **IF2's "no finite log-likelihood" refusal says whether the start or the
   perturbed swarm is to blame.** The check runs on each chain's final estimate.
   When a start scores finite, the refusal now says the perturbation is too large

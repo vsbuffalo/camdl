@@ -1385,35 +1385,19 @@ pub struct ParamSpec {
     pub bounds: Option<(f64, f64)>,
 }
 
-/// Whether IF2's estimate `v` of `spec`, from a chain that started at
-/// `start`, is near an end of its domain, and which: within 1% of the width
-/// of a box finite at both ends, or — on `[lo, ∞)`, the one half-bounded
-/// domain a fit reaches as `[0, ∞)`, which has no width — below
-/// [`NEAR_HALF_BOUND_FRACTION`] of the way from `lo` to the start (proposal
-/// D10).
-pub fn near_a_bound(spec: &EstimatedParam, v: f64, start: f64) -> Option<(f64, &'static str)> {
+/// Whether IF2's estimate `v` of `spec` is near an end of its domain, and
+/// which: within [`NEAR_BOUND_FRACTION`] of the width from either end of a
+/// box finite at both ends (proposal D10). A domain with an infinite end has
+/// no width and gets no report: telling a maximum at its bound from a small
+/// interior one needs the likelihood near the bound, a separate design.
+pub fn near_a_bound(spec: &EstimatedParam, v: f64) -> Option<(f64, &'static str)> {
     let (lo, hi) = spec.bounds();
     let span = hi - lo;
-    if lo.is_finite() && hi.is_finite() {
-        if span > 0.0 {
-            if (v - lo) / span < 0.01 { return Some((lo, "lower")); }
-            if (hi - v) / span < 0.01 { return Some((hi, "upper")); }
-        }
+    if !(lo.is_finite() && hi.is_finite()) || span <= 0.0 {
         return None;
     }
-    if lo.is_finite() && start - lo > 0.0 && v - lo < NEAR_HALF_BOUND_FRACTION * (start - lo) {
-        return Some((lo, "lower"));
-    }
-    // A start on the bound itself has no distance to take 1% of. The chain
-    // ran from the start moved inward (`Transform::forward`), so the report
-    // fires when the estimate is still within two orders of magnitude of that
-    // moved start: it has not left the bound it began on.
-    if lo.is_finite() && start <= lo {
-        let moved = spec.from_transformed(spec.to_transformed(start)) - lo;
-        if v - lo < moved / NEAR_HALF_BOUND_FRACTION {
-            return Some((lo, "lower"));
-        }
-    }
+    if (v - lo) / span < NEAR_BOUND_FRACTION { return Some((lo, "lower")); }
+    if (hi - v) / span < NEAR_BOUND_FRACTION { return Some((hi, "upper")); }
     None
 }
 
@@ -1436,10 +1420,9 @@ fn best_start_loglik(config: &FitRunConfig, per_chain: Option<&[Vec<EstimatedPar
     }).fold(f64::NEG_INFINITY, f64::max)
 }
 
-/// The fraction of the distance from a chain's start to the lower end of a
-/// `[lo, ∞)` domain below which IF2's estimate is reported as near the
-/// bound (proposal D10): θ̂ − lo < 0.01·(θ₀ − lo).
-const NEAR_HALF_BOUND_FRACTION: f64 = 0.01;
+/// The fraction of a finite box's width from either end within which IF2's
+/// estimate is reported as near the bound (proposal D10).
+const NEAR_BOUND_FRACTION: f64 = 0.01;
 
 /// Build EstimatedParam specs from caller-provided ParamSpecs.
 /// Pure mechanical work: look up indices, derive transforms, compute auto rw_sd.
@@ -2654,11 +2637,7 @@ pub fn run_chains_with_per_chain_params(
         }
         for spec in config.estimated_params.iter() {
             let v = chain.theta[spec.index];
-            let start = per_chain_params
-                .and_then(|pcp| pcp.get(chain.chain_id.0))
-                .and_then(|c| c.iter().find(|p| p.name == spec.name))
-                .map_or(spec.initial, |c| c.initial);
-            if let Some((bound, bound_type)) = near_a_bound(spec, v, start) {
+            if let Some((bound, bound_type)) = near_a_bound(spec, v) {
                 collector.push(DiagnosticKind::ParamNearBound {
                     param: spec.name.clone(), value: v, bound,
                     bound_type: bound_type.to_string(),
@@ -6822,23 +6801,22 @@ dt = 1.0
         assert_eq!(groups[0].rw_sds, vec![1.0 / 6.0, 0.3]);
     }
 
+    /// Proposal D10: a box finite at both ends reports an estimate within
+    /// 1% of its width of either end; a half-infinite domain reports none.
     #[test]
-    fn near_a_bound_covers_the_half_line_by_the_ratio_to_the_start() {
-        let half = domain_param("k", Transform::LowerBounded { lo: 0.0 }, 0.5);
-        assert_eq!(near_a_bound(&half, 0.004, 0.5), Some((0.0, "lower")),
-            "θ̂ < 0.01·θ₀ on [0, ∞) is near the bound");
-        assert_eq!(near_a_bound(&half, 0.006, 0.5), None);
-        assert_eq!(near_a_bound(&half, 3.0, 0.5), None);
-        // A start on the bound itself: the estimate that never left it is
-        // reported, one that moved off it is not.
-        assert_eq!(near_a_bound(&half, 1e-9, 0.0), Some((0.0, "lower")));
-        assert_eq!(near_a_bound(&half, 0.3, 0.0), None);
+    fn near_a_bound_is_for_boxes_finite_at_both_ends() {
         let boxed = domain_param("b", Transform::Interval { lo: 0.0, hi: 2.0 }, 1.0);
-        assert_eq!(near_a_bound(&boxed, 0.01, 1.0), Some((0.0, "lower")));
-        assert_eq!(near_a_bound(&boxed, 1.995, 1.0), Some((2.0, "upper")));
-        assert_eq!(near_a_bound(&boxed, 1.0, 1.0), None);
+        assert_eq!(near_a_bound(&boxed, 0.01), Some((0.0, "lower")));
+        assert_eq!(near_a_bound(&boxed, 0.03), None);
+        assert_eq!(near_a_bound(&boxed, 1.995), Some((2.0, "upper")));
+        assert_eq!(near_a_bound(&boxed, 1.0), None);
+        let log = domain_param("g", Transform::LogInterval { lo: 0.01, hi: 0.26 }, 0.1);
+        assert_eq!(near_a_bound(&log, 0.0119), Some((0.01, "lower")));
+        assert_eq!(near_a_bound(&log, 0.258), Some((0.26, "upper")));
+        let half = domain_param("k", Transform::LowerBounded { lo: 0.0 }, 0.5);
+        assert_eq!(near_a_bound(&half, 1e-9), None, "[0, ∞) has no width to take 1% of");
         let line = domain_param("r", Transform::Identity, 0.0);
-        assert_eq!(near_a_bound(&line, -1e9, 0.0), None);
+        assert_eq!(near_a_bound(&line, -1e9), None);
     }
 
     /// Proposal D3: a start exactly on a bound is refused, once per
