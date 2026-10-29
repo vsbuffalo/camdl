@@ -82,6 +82,13 @@ pub const IF2_HALF_BOUNDED_STEP: f64 = 0.2;
 /// noise (2·Φ(−s/2) < 0.1% on a plain SIR).
 pub const MH_DEFAULT_STEP: f64 = 0.25;
 
+/// PGAS MH-within-Gibbs's initial proposal SD in z, for every parameter
+/// whatever its map (an unbounded `real` included, where z = θ). PGAS reads no
+/// per-parameter setting for it. It is a separate setting from
+/// [`MH_DEFAULT_STEP`] that happens to share its value: Robbins–Monro
+/// adaptation tunes it during burn-in.
+pub const PGAS_MWG_DEFAULT_STEP: f64 = 0.25;
+
 /// The logistic function σ(z) = 1/(1 + e⁻ᶻ), on the branch that does not
 /// overflow.
 #[inline]

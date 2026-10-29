@@ -261,31 +261,31 @@ fn obs_model(compiled: &Arc<CompiledModel>) -> MultiStreamObsModel {
     .unwrap()
 }
 
-/// `k`: estimated, unconstrained, wide enough that every proposal leaves the
-/// pinhole. The initial proposal SD `run_pgas` derives is
-/// `(|upper − lower| / 10).max(0.01)` on the transformed scale ⇒ ~1.0 here.
+/// `k`: estimated on [0, 10], wide enough that every proposal leaves the
+/// pinhole. `run_pgas`'s initial MH-within-Gibbs proposal is the sampler
+/// default, 0.25 in z, about 0.6 in `k` at the box's midpoint.
 fn k_param() -> EstimatedParam {
     EstimatedParam {
         name: "k".into(),
         index: K_IDX,
         initial: K0,
         rw_sd: 1.0,
-        transform: Transform::Identity,
+        transform: Transform::Interval { lo: 0.0, hi: 10.0 },
         rw_sd_auto: false,
         perturb_only_at_t0: false,
     }
 }
 
-/// `mu`: an ordinary estimated parameter, outside the guard. Bounds are tight
-/// enough that the derived proposal SD (0.0015) keeps proposals well inside
-/// `mu > 0`, so this parameter contributes no errors of its own.
+/// `mu`: an ordinary estimated parameter, outside the guard, on [0.005, 0.02]:
+/// the interval map keeps every proposal inside `mu > 0`, so this parameter
+/// contributes no errors of its own.
 fn mu_param() -> EstimatedParam {
     EstimatedParam {
         name: "mu".into(),
         index: MU_IDX,
         initial: MU0,
         rw_sd: 0.0015,
-        transform: Transform::Identity,
+        transform: Transform::Interval { lo: 0.005, hi: 0.02 },
         rw_sd_auto: false,
         perturb_only_at_t0: false,
     }
