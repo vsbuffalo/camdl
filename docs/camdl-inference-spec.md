@@ -149,42 +149,45 @@ knowledge constrains the plausible region.
    it.** The box is the fit's `bounds`, else the model's `in [lo, hi]`, else the
    range the parameter's kind carries:
 
-   | kind                                                | box with no bounds declared |
-   | --------------------------------------------------- | --------------------------- |
-   | `probability`                                       | `[0, 1]`                    |
-   | `rate`, `positive`, `count`, `duration`, or no kind | `[0, ∞)`                    |
-   | `real`, `instant`                                   | `(−∞, ∞)`                   |
+   | kind                                    | box with no bounds declared |
+   | --------------------------------------- | --------------------------- |
+   | `probability`                           | `[0, 1]`                    |
+   | `rate`, `positive`, `count`, `duration` | `[0, ∞)`                    |
+   | `real`, `instant`                       | `(−∞, ∞)`                   |
 
-   An unbounded `real` or `instant` takes the whole line because it has the
-   identity transform, which keeps no box: a narrower one would be recorded but
-   not enforced. The `[0, ∞)` of the positive kinds is kept by the log
-   transform. The transform is chosen from the kind and the box:
+   A parameter whose IR records no kind is refused. A fit-config box on a
+   parameter with no declared range may narrow its kind's support but not leave
+   it. The box is the parameter's _effective domain_, and its transform θ = g(z)
+   maps the whole real line onto it, chosen by which ends are finite (the
+   constraint transforms of the Stan Reference Manual, v2.40, "Constraint
+   Transforms", plus a log-interval map):
 
-   | kind                                            | box                 | transform    |
-   | ----------------------------------------------- | ------------------- | ------------ |
-   | `probability`                                   | any                 | scaled logit |
-   | `rate`, `positive`, `count`, `duration`         | lower bound ≥ 0     | log          |
-   | `rate`, `positive`, `count`, `duration`         | below zero, finite  | scaled logit |
-   | `real`, `instant`, or no kind                   | finite at both ends | scaled logit |
-   | `real`, `instant`, or a box reaching below zero | an infinite end     | none         |
-   | no kind                                         | lower bound ≥ 0     | log          |
+   | domain                | kind                                    | transform                                   |
+   | --------------------- | --------------------------------------- | ------------------------------------------- |
+   | `(−∞, ∞)`             | any                                     | identity, θ = z                             |
+   | `[lo, ∞)`             | any                                     | lower-bounded, θ = lo + eᶻ                  |
+   | `(−∞, hi]`            | any                                     | upper-bounded, θ = hi − eᶻ                  |
+   | `[lo, hi]`, 0 < lo    | `rate`, `positive`, `count`, `duration` | log-interval, ln θ = ln lo + ln(hi/lo)·σ(z) |
+   | `[lo, hi]`, otherwise | any                                     | interval, θ = lo + (hi − lo)·σ(z)           |
 
-   The scaled logit maps `[lo, hi]` to the real line whatever the sign of `lo`,
-   so a signed seasonal phase declared `in [-120, 120]` is searched over that
-   whole interval. The log transform keeps `[lo, hi]` by saturating at its ends;
-   it cannot represent a value below zero, so it is never chosen for a box that
-   reaches below zero. A `transform` in `fit.toml` overrides the table, except
-   that an override that does not keep the box or the kind's support is refused
-   at config time — `identity` on a box finite at both ends or on a kind whose
-   support has a finite end, `log` on a box below zero, `logit` on a box with an
-   infinite end — because PMMH, MH and IF2 would move the parameter outside it.
-   A fit-config box on a parameter with no declared range may narrow its kind's
-   support (`[0, ∞)` for the positive kinds, `[0, 1]` for `probability`) but not
-   leave it.
+   σ is the logistic function. So a `rate` on `[0, ∞)` is θ = eᶻ, a
+   `probability` is the logit of its box, a signed phase declared
+   `in [-120, 120]` is searched over the whole interval, and a rate on
+   `[lo, hi]` with lo > 0 keeps log geometry in its interior. No transform
+   clamps: a finite end is z = ±∞, so no target has a wall and a sampler near a
+   bound sees the log-Jacobian's tail rather than a cliff. A start exactly on an
+   end has no finite z and is moved inward (to σ(z) = 10⁻¹⁰ of the width, z ≈
+   ±23.03, or θ = lo + 10⁻¹⁰), with one notice per parameter. There is no
+   `transform` override.
 
    The box is a hard constraint: the target the samplers draw from is the
-   posterior truncated to it. Because the transform maps to the box, fit bounds
-   also concentrate the random walk in the region of interest.
+   posterior truncated to it, and IF2 maximises the likelihood over it. Under
+   IF2 a maximum on a bound is approached, not reached; the near-bound report
+   (rule 4) says so. Every prior reads the logarithms of θ it needs from z, so
+   any transform is exact, and a prior whose support is narrower than the box is
+   refused (`log_normal`, `gamma`, `exponential`, `half_normal` need the box
+   within `[0, ∞)`; `beta` within `[0, 1]`; `uniform` and `log_uniform` within
+   their `[lower, upper]`).
 
 3. **Fit bounds control chain starts.** Spread starts (`lhs`, `uniform`,
    `uniform_unconstrained`) draw within the box. With two or more chains they
@@ -193,12 +196,15 @@ knowledge constrains the plausible region.
    there is no interval to draw within; the refusal asks for bounds or a
    different `starts` rule. `camdl survey` refuses such a parameter the same
    way: its Latin-hypercube landscape needs a finite region. `from_prior` draws
-   each parameter from its prior restricted to the box its transform keeps,
-   redrawing a value that falls outside; an unbounded `real` or `instant` is
-   drawn from its prior unrestricted, negative values included.
+   each parameter from its prior restricted to its box, redrawing a value that
+   falls outside; an unbounded `real` or `instant` is drawn from its prior
+   unrestricted, negative values included.
 
-4. **Boundary proximity warning.** If the MLE is within 1% of a fit bound, warn
-   that the true MLE may be outside the search region:
+4. **Boundary proximity warning.** If the MLE is within 1% of a fit bound — or,
+   on `[0, ∞)`, below 1% of the way from the bound to the chain's start — warn
+   that the true MLE may be on the bound or outside the search region. IF2
+   cannot place an estimate exactly on a bound; to test whether the maximum is
+   on it, profile the parameter or refit with `nl-bobyqa`:
 
    ```
    ⚠ R0 = 30.2 is within 1% of fit lower bound (30.0).
@@ -222,14 +228,14 @@ knowledge constrains the plausible region.
    hierarchical parameter `a ~ normal(mu, 1)` it is P(box | mu), which moves
    with `mu`, so omitting it biases `mu`: four such parameters boxed to `[1, 2]`
    under a flat likelihood give `mu` a posterior mean of 1.18 where the truth
-   is 0. The fit is therefore refused at config time when the box the transform
-   keeps leaves out part of the family's support (`normal`: the real line;
-   `log_normal`, `gamma`, `exponential`, `half_normal`: `[0, ∞)`; `beta`:
-   `[0, 1]`; `uniform`: its `lower` and `upper`, and any finite box if either is
-   an expression). A `rate` parameter with no declared bounds keeps `[0, ∞)`
-   under the log transform, which is the whole support of a `log_normal` or
-   `gamma` prior, so it runs. Adding −log P(box | hyperparameter) per parameter,
-   from the family's CDF, would lift the refusal; it is not implemented.
+   is 0. The fit is therefore refused at config time when the box leaves out
+   part of the family's support (`normal`: the real line; `log_normal`, `gamma`,
+   `exponential`, `half_normal`: `[0, ∞)`; `beta`: `[0, 1]`; `uniform`: its
+   `lower` and `upper`, and any finite box if either is an expression). A `rate`
+   parameter with no declared bounds keeps `[0, ∞)`, which is the whole support
+   of a `log_normal` or `gamma` prior, so it runs. Adding −log P(box |
+   hyperparameter) per parameter, from the family's CDF, would lift the refusal;
+   it is not implemented.
 
 ### 3.3 Exhaustive Partition Rule
 
