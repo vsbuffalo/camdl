@@ -3868,21 +3868,22 @@ pub fn run_pgas(
     // to target 44% acceptance (optimal for 1D MH, Roberts & Rosenthal 2001).
     // The adaptation rate c/√sweep decays to zero, so the proposal stabilizes.
     //
-    // Initial scale: five times the parameter's step in z, the rule PMMH and
-    // MH use for their first proposal, else 1.0 in z where the step is not
-    // finite and positive. Robbins-Monro adaptation tunes it during burn-in
-    // whatever it starts at. (This replaced one tenth of the forward map's
-    // spread between `lower.max(1e-10)` and `upper.min(1e10)`, which read a
-    // box the transform did not always keep, gave ~1e9 for an unbounded
-    // `real`, and the floor 0.01 for a box lying below 1e-10.)
+    // Initial scale: the sampler-side default step in z
+    // (`Transform::default_mh_step`, the default PMMH's first proposal takes),
+    // else 1.0 in z for the identity map, which has none. It does not read
+    // `rw_sd`, which is IF2's, PMMH's and MH's knob, not PGAS's. Robbins-Monro
+    // adaptation tunes it during burn-in whatever it starts at. (This
+    // replaced one tenth of the forward map's spread between
+    // `lower.max(1e-10)` and `upper.min(1e10)`, which read a box the
+    // transform did not always keep, gave ~1e9 for an unbounded `real`, and
+    // the floor 0.01 for a box lying below 1e-10.)
     const TARGET_ACCEPTANCE: f64 = 0.44;
     const ADAPT_C: f64 = 2.0; // adaptation speed (higher = faster convergence)
     let adapt_end = config.burn_in; // stop adapting at end of burn-in
 
     let log_proposal_sd: Vec<f64> = if2_params.iter()
         .map(|p| {
-            let step = p.mh_initial_step();
-            if step.is_finite() && step > 0.0 { step.ln() } else { 0.0 }
+            p.transform.default_mh_step().unwrap_or(1.0).ln()
         })
         .collect();
 

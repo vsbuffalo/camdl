@@ -777,3 +777,44 @@ fn pmmh_without_a_likelihood_draws_the_truncated_priors() {
         Truncated::new(&priors[j], *lo, *hi).check(&format!("PMMH {}", p.name), &chains, j);
     }
 }
+
+// ── PGAS's MH-within-Gibbs scale does not read rw_sd ───────────────────────
+
+/// PGAS's MH-within-Gibbs starts each parameter's proposal at the sampler-side
+/// default step in z (`Transform::default_mh_step`), whatever `rw_sd` says:
+/// `rw_sd` is IF2's, PMMH's and MH's knob. Zero sweeps, so the resume state's
+/// scale is the initial one.
+#[test]
+fn pgas_mh_within_gibbs_starts_at_the_sampler_default_not_rw_sd() {
+    let model = prior_only_model();
+    let mut tau = ep(Transform::for_domain(1e-6, 2.5, true).unwrap());
+    tau.name = "tau".into();
+    tau.index = TAU_IDX;
+    tau.initial = 0.5;
+    tau.rw_sd = 0.1;
+    tau.rw_sd_auto = false;
+    let mut base = model.default_params.clone();
+    base[TAU_IDX] = 0.5;
+    let times: Vec<f64> = (1..=PRIOR_T_END as usize).map(|t| t as f64).collect();
+    let observations: Vec<Observation> = times.iter().map(|&t| Observation { time: t, value: 0.0 }).collect();
+    let obs = all_missing_obs(&model, &times);
+    let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
+        ancestor_sampling: true,
+        n_particles: 4,
+        n_sweeps: 0,
+        burn_in: 0,
+        thin: 1,
+        dt: 1.0,
+        use_nuts: false,
+        dense_mass: true,
+        max_tree_depth: 8,
+        trajectory_warmup: 0,
+        csmc_sweeps_per_nuts: 1,
+        step_policy: sim::schedule::StepPolicy::Snap,
+    };
+    let r = run_pgas(&model, &[tau], &[Prior::Fixed(Density::Exponential { rate: LAMBDA })], &base,
+        &config, &observations, &obs, 1, None, None, "mh-scale".into()).expect("PGAS run");
+    assert_eq!(r.resume_state.log_proposal_sd, vec![sim::inference::types::MH_DEFAULT_STEP.ln()],
+        "the initial MH-within-Gibbs scale is the sampler default, not 5 x rw_sd");
+}
