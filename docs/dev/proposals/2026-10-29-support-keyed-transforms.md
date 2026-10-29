@@ -1,6 +1,6 @@
 ---
 date: 2026-10-29
-status: proposed — the direction is approved by the maintainer and by an external statistician; D1–D11 (§14) carry recommendations awaiting the maintainer's decision
+status: accepted — D1–D11 decided by the maintainer on 2026-10-29 (§14); D8's `Interval` constant is measured during implementation by the decided §12.6 rule
 area: inference setup / sim inference transforms / priors / IF2 and MH step sizes
 issues: closes gh#470; carries gh#1001 (commit series ii); gh#1002 is the optimiser follow-up (D5)
 related:
@@ -727,12 +727,12 @@ Posterior means and quantiles of θ are expectations under the target measure,
 which the coordinate does not change; only their Monte Carlo error changes. The
 draws are stored on the natural scale.
 
-Recommendation: B in this proposal, and A under gh#1002 (D5). gh#1002 already
-specifies the benchmark: iterations to convergence and final log-likelihood,
-with `nl-bobyqa` on the natural scale against the log scale. It must also switch
-to `xtol_abs`. gh#1002 also audits existing optimiser-against-sampler
-comparisons. Its question whether the PMMH "MAP" carries the Jacobian is
-answered above: it does not.
+Decided (D5): B in this proposal, and A under gh#1002. gh#1002 already specifies
+the benchmark: iterations to convergence and final log-likelihood, with
+`nl-bobyqa` on the natural scale against the log scale. It must also switch to
+`xtol_abs`. gh#1002 also audits existing optimiser-against-sampler comparisons.
+Its question whether the PMMH "MAP" carries the Jacobian is answered above: it
+does not.
 
 ### 9.4 Starts and Latin-hypercube points follow `log_spaced`
 
@@ -1046,8 +1046,8 @@ D7 is not used: refusing a fit box outside the kind's range lands with the
 interim fix (§3.4).
 
 **D1 — Does the transform carry the domain, with `EstimatedParam`'s bounds
-derived from it? Recommended: yes. Confidence: solid.** Today `lower`, `upper`
-and `transform` are independent, and a box can be recorded that nothing enforces
+derived from it? Decided (2026-10-29): yes.** Today `lower`, `upper` and
+`transform` are independent, and a box can be recorded that nothing enforces
 (§4.1). Option (a), one enum that is the domain, makes that state
 unrepresentable. It touches the 102 non-test lines and 279 test lines of §3.2,
 mechanically. Option (b), a separate `Domain` type from which a `Transform` is
@@ -1055,18 +1055,18 @@ derived, has two isomorphic enums and the same lines to touch. Option (c),
 keeping the fields, keeps the drift. No user-facing behaviour differs among
 them.
 
-**D2 — Delete `[estimate].transform`? Recommended: delete. Confidence: solid.**
-After the interim fix every accepted override is redundant (§7). Option (a),
-deletion, removes `TransformFrom`, `check_transform_keeps_box` and the string
-threading. Every config that sets the key fails at load until the line is
-removed, about 100 files across the sibling repositories (§13). Option (b),
-keeping the field and accepting only the redundant value, keeps a knob with no
-effect. Under the alpha posture (a) is the form.
+**D2 — Delete `[estimate].transform`? Decided (2026-10-29): delete.** After the
+interim fix every accepted override is redundant (§7). Option (a), deletion,
+removes `TransformFrom`, `check_transform_keeps_box` and the string threading.
+Every config that sets the key fails at load until the line is removed, about
+100 files across the sibling repositories (§13). Option (b), keeping the field
+and accepting only the redundant value, keeps a knob with no effect. Under the
+alpha posture (a) is the form.
 
 **D3 — A start exactly on a bound: nudge inward with a notice, or refuse?
-Recommended: nudge. Confidence: leaning.** Starts arrive on bounds legitimately,
-for example an `nl-bobyqa` optimum on a bound passed to PGAS through `--starts`,
-or `start = 0` for an amplitude. Option (a) moves the start to z ≈ ±23.03 and
+Decided (2026-10-29): nudge.** Starts arrive on bounds legitimately, for example
+an `nl-bobyqa` optimum on a bound passed to PGAS through `--starts`, or
+`start = 0` for an amplitude. Option (a) moves the start to z ≈ ±23.03 and
 prints one notice. Since the step is fixed in z (D8), the nudge no longer
 inflates the step, which was the hazard of converting at θ₀ (§9.1). Option (b)
 refuses, which is more explicit but breaks optimiser-to-sampler chaining
@@ -1074,8 +1074,8 @@ whenever the optimum is on a bound. The cost of (a) is a start deep in a tail,
 which burn-in or IF2's early iterations absorb.
 
 **D4 — Do priors read logarithms of θ computed from z, with the compatibility
-table replaced by a support rule? Recommended: yes. Confidence: solid.** This is
-required for correctness. Without it, `log_normal` under any map but θ = eᶻ is a
+table replaced by a support rule? Decided (2026-10-29): yes.** This is required
+for correctness. Without it, `log_normal` under any map but θ = eᶻ is a
 different prior, as the reproduction of §3.3 shows. With it, the prior API
 changes at the eight non-test call sites of §3.2. The guards on θ in the priors
 go. `log_normal` under `LowerBounded { 0 }` stays bit-identical on z ≥ −745 and
@@ -1083,18 +1083,18 @@ becomes correct below. The alternative, keeping `TransformReq` and forcing a log
 map for log-family priors, would reinstate the walled log for every boxed rate
 with a `log_normal` prior.
 
-**D5 — NLopt coordinates. Recommended: keep the natural scale here; measure
-z-coordinates under gh#1002. Confidence: leaning.** §9.3 sets out both options.
-Moving now would change the optimiser's conditioning, its stopping rule and its
-behaviour at bounds, with no measurement in the repository to show it helps;
+**D5 — NLopt coordinates. Decided (2026-10-29): keep the natural scale here;
+measure z-coordinates under gh#1002.** §9.3 sets out both options. Moving now
+would change the optimiser's conditioning, its stopping rule and its behaviour
+at bounds, with no measurement in the repository to show it helps;
 `docs/dev/agent-verification-conventions.md` asks for the measurement first.
 Keeping B means the optimisers and samplers use different coordinates, which
 changes no reported estimand. The trade-off is that, near a bound, an
 `nl-bobyqa` fit sits on the bound and IF2 just inside it; the near-bound message
 (D10) says so.
 
-**D6 — A parameter whose IR carries no kind. Recommended: refuse. Confidence:
-solid.** The compiler always emits a kind (`ast.ml:150-151` makes it mandatory;
+**D6 — A parameter whose IR carries no kind. Decided (2026-10-29): refuse.** The
+compiler always emits a kind (`ast.ml:150-151` makes it mandatory;
 `expander.ml:5806`, `:5866`), so only hand-built IR and IR from before the field
 existed reach this case. Today the runner searches it over [0, ∞)
 (`runner.rs:1163`) while `roles.rs` records its support as (−∞, ∞) (`:1029`), so
@@ -1104,10 +1104,10 @@ builds kind-less parameters gains a kind (commit 3). Option (b), (−∞, ∞), 
 a guess in the other direction. Making `param_kind` non-optional in the IR is
 the complete fix and is an `ir/VERSION` change (§15).
 
-**D8 — The default IF2 and MH step. Recommended: a fixed step in z per map: 1/5
-for `LogInterval`; for `Interval`, the constant chosen from 2/3, 1/3 and 1/5 by
-the decision rule of §12.6; none for a domain with an infinite end. Confidence:
-leaning.** The candidates start from today's default step at the box's midpoint:
+**D8 — The default IF2 and MH step. Decided (2026-10-29): a fixed step in z per
+map: 1/5 for `LogInterval`; for `Interval`, the constant chosen from 2/3, 1/3
+and 1/5 by the decision rule of §12.6; none for a domain with an infinite end.**
+The candidates start from today's default step at the box's midpoint:
 
 - `Interval`: today's logit default is (hi − lo)/6 on the natural scale, which
   is 2/3 in z at the midpoint, where |g′| = w/4;
@@ -1136,33 +1136,33 @@ kind boxed [0, hi] (about 309 declarations), so its constant is a benchmarked
 choice with a stated rule (§12.6), not a fixed 2/3. The benchmark also runs half
 and double each default, and the pass criteria apply at the best of the three.
 
-**D9 — The unit of an explicit `rw_sd` (gh#1001). Recommended: z, in series
-(ii); series (i) converts a natural-scale value once at the domain's midpoint.
-Confidence: leaning.** Option (a) matches pomp's `mif2`. It makes the user's
-number the kernel IF2 runs, and lets `transformed_sd` and its false comment go.
-Every explicit `rw_sd` changes meaning; §13 gives the conversion. Option (b),
-the natural scale converted once at the midpoint for good, keeps hand-tuned
-values meaning roughly what they meant, under a unit the user cannot read off
-the coordinate. Option (c), today's per-particle conversion, is refused by §9.1.
+**D9 — The unit of an explicit `rw_sd` (gh#1001). Decided (2026-10-29): z, in
+series (ii); series (i) converts a natural-scale value once at the domain's
+midpoint.** Option (a) matches pomp's `mif2`. It makes the user's number the
+kernel IF2 runs, and lets `transformed_sd` and its false comment go. Every
+explicit `rw_sd` changes meaning; §13 gives the conversion. Option (b), the
+natural scale converted once at the midpoint for good, keeps hand-tuned values
+meaning roughly what they meant, under a unit the user cannot read off the
+coordinate. Option (c), today's per-particle conversion, is refused by §9.1.
 Default runs are identical under (a) and (b), since they use `default_step`.
 
-**D10 — The near-bound report for [0, ∞). Recommended: fire when θ̂ < 0.01·θ₀.
-Confidence: leaning.** [0, ∞) is the only reachable half-bounded domain (§3.3).
-It has no width, so today's 1%-of-width rule (`runner.rs:2530-2546`) cannot
-apply, and the diagnostic is silent. Option (a), the ratio to the start, is
-scale-free and reads as "the fit moved two orders of magnitude toward zero".
-Option (b), an absolute threshold, needs a unit the parameter does not carry.
-Option (c), silence, leaves a maximum at zero unreported under IF2, which cannot
-reach it (§9.1). The cost of (a) is a false alarm when the start was far above a
+**D10 — The near-bound report for [0, ∞). Decided (2026-10-29): fire when θ̂ <
+0.01·θ₀.** [0, ∞) is the only reachable half-bounded domain (§3.3). It has no
+width, so today's 1%-of-width rule (`runner.rs:2530-2546`) cannot apply, and the
+diagnostic is silent. Option (a), the ratio to the start, is scale-free and
+reads as "the fit moved two orders of magnitude toward zero". Option (b), an
+absolute threshold, needs a unit the parameter does not carry. Option (c),
+silence, leaves a maximum at zero unreported under IF2, which cannot reach it
+(§9.1). The cost of (a) is a false alarm when the start was far above a
 legitimately small estimate. The message says "may be on the bound" and names
 the test (profile, or `nl-bobyqa`).
 
 **D11 — The map for a positive kind (`rate`, `positive`, `count`, `duration`)
-boxed with 0 < lo. Recommended: `LogInterval`, for positive kinds only, subject
-to the §12.6 benchmark. Confidence: leaning.** These boxes are the common case:
-every rate in the recovery fixtures, and the B-spline scale τ on [10⁻⁶, 2.5].
-Option (a), `LogInterval`, keeps today's ln θ geometry in the box's interior, so
-default steps and log-spaced starts carry over.
+boxed with 0 < lo. Decided (2026-10-29): `LogInterval`, for positive kinds only,
+subject to the §12.6 benchmark.** These boxes are the common case: every rate in
+the recovery fixtures, and the B-spline scale τ on [10⁻⁶, 2.5]. Option (a),
+`LogInterval`, keeps today's ln θ geometry in the box's interior, so default
+steps and log-spaced starts carry over.
 
 The trade-off is that the transform is no longer a function of the domain alone:
 the kind splits a box with 0 < lo. Choosing by lo > 0 alone would keep that
