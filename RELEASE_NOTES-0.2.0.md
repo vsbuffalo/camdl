@@ -105,6 +105,58 @@ breaking changes are still expected before 1.0.
 
 These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
+- **`fit run` refuses a flag the method does not read.** Each method-specific
+  flag is accepted only by the methods that read it (`--cooling-target-iters`:
+  if2; `--decibans-thresh`: if2, nl-_; `--no-dt-check`, `--dt-check-halvings`,
+  `--dt-check-strict`: if2, mh, nl-_; `--max-tree-depth`, `--diagonal-mass`,
+  `--trajectory-warmup`, `--csmc-sweeps-per-nuts`, `--n-trajectories`,
+  `--no-nuts`, `--no-ancestor-sampling`, `--binomial`: pgas; `--no-adapt`,
+  `--adapt-start`: pmmh, mh; `--record-ancestry`, `--record-prequential`:
+  pfilter) and refused on any other, naming the methods that accept it. Also
+  refused: `--max-tree-depth` / `--diagonal-mass` with NUTS off, `--adapt-start`
+  with adaptation off, `--dt-check-halvings` / `--dt-check-strict` with the
+  dt-check off, `--dt-check-strict` beside a declared `threshold_nats` (it was
+  ignored there), `--seed` beside `fit_seeds`, and `--allow-nonconverged-source`
+  with a starts rule that is not `from_mle` / `from_posterior`. Migration: drop
+  the flag.
+- **A `[method]` key its own settings leave inert is refused at load:**
+  `max_tree_depth` or `dense_mass` with `use_nuts = false`, `adapt_start` with
+  `adapt = false`. Migration: delete the line.
+- **PGAS says when it cannot run NUTS.** On a model with no rate gradients (no
+  parameter reaches a transition rate) PGAS uses Metropolis-within-Gibbs; an
+  explicit `use_nuts = true` is now refused, and the default prints a notice.
+  Migration: write `use_nuts = false`, or delete `use_nuts = true`.
+- **A `pfilter` method scores a θ the file determines.** It needs a `start` for
+  every estimated parameter (then `starts` defaults to `single`), a sourced
+  rule, or `starts = "from_prior"` by name; it used to score one random prior
+  draw when every parameter had a prior. Priors alone, `single` with a start
+  missing, and `uniform_unconstrained` / `lhs` / `uniform` are refused.
+  Migration: add the `start`s, or say `starts = "from_prior"`.
+- **`from_mle` refuses a posterior sampler** (`pgas`, `pmmh`, `mh`), on
+  `fit run` and `camdl profile`: a sampler writes no maximum-likelihood
+  estimate, and the point it stored is one visited state. Migration:
+  `starts = { from_posterior = "@fit" }`.
+- **Stricter warm-start sources.** A `from_mle` / `from_posterior` source is
+  refused when its convergence verdict cannot be read (corrupt or missing
+  `fit_state.toml` / `run.json`; not liftable by `--allow-nonconverged-source`),
+  when an IF2 source's Â fails on an initial-state (`perturb_only_at_t0`)
+  parameter, when any Â is not finite (the verdict is incomplete), and when an
+  nl-* source's optimizer did not converge to one optimum (it could never be
+  refused before) or predates the recorded verdict (re-run it with `--force`).
+  `--allow-nonconverged-source` starts from a refused-as-unconverged source
+  anyway.
+- __`camdl profile`: one cooling schedule, and nl-_ cells read only their own
+  knobs._* `--cooling c` is reached at iteration 50 (`--cooling-target-iters`),
+  as a fit's `cooling` is, not at the last iteration: results change whenever
+  `--iterations` ≠ 50. On an nl-* profile, `--particles`, `--iterations`,
+  `--cooling`, `--cooling-target-iters`, `--pf-max-substeps` and an `--rw-sd`
+  step size are refused (`--rw-sd auto` / `NAME=auto` still name the estimated
+  set), and a `--fit` whose `[method]` is nl-* sets each cell's `tolerance` and
+  `max_evals` (else 1e-4 / 1500 as before). Migration: drop the IF2 flags from
+  nl-* profiles; pass `--cooling-target-iters N` to keep an old schedule.
+- **`fit_state.toml` no longer writes `[rw_sd]`**, which recorded no step any
+  method ran with; old leaves still load.
+
 - **A typed constant `let` cannot be set from outside.**
   `let omega : rate =
   0.01` holds its declared value in every run; `[fixed]`,
@@ -555,6 +607,12 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
 ## Run identity
 
+- **Every stored `camdl profile` run re-keys** (the method level now carries
+  only the knobs its cell reads, plus IF2's `cooling_target_iters` and nl-*'s
+  `tolerance` / `max_evals`); a `pfilter` fit whose every parameter declares a
+  `start` re-keys (its default rule is now `single`). IF2 fits keep their keys
+  and are bit-identical (the shared cooling schedule computes the same powers).
+
 - **Every stored run re-keys at IR 0.41 (typed constants).** A typed `let` with
   a constant body (`let omega : rate = 0.01`) is now a model constant in the
   IR's `constants` section, not a parameter. The model hash folds the new
@@ -712,6 +770,19 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   round-trippable parameter format in MCMC traces.
 
 ## Fixed
+
+- **One IF2 convergence verdict.** `fit table`, `fit summary` (text and
+  `--format json/md/latex`) and the warm-start source check now read one
+  assessment, which judges every estimated parameter (initial-state ones
+  included; `fit summary` also shows the dynamics-only sub-verdict). A NaN Â is
+  never a pass: `fit table` reports `incomplete`. nl-* rows in `fit table` use
+  the optimizer's recorded verdict (`fail_db` / `fail_both` added; a leaf
+  written before it reads `not_assessed`). `fit table --quantity` refuses a fit
+  whose result cannot be read instead of dropping it.
+- **Labels that said the wrong thing.** PMMH/MH's "MAP loglik" is now "loglik at
+  the highest log-posterior draw (natural-scale prior, no Jacobian)"; the
+  "`[estimate].start` is unused here" note no longer claims that under PMMH/MH,
+  where the start still sets the pre-run check and the initial proposal scale.
 
 User-visible correctness fixes (selected from ~138):
 
