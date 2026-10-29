@@ -807,10 +807,13 @@ pub fn starts_on_an_end(
         let which = if lo.is_finite() && v <= lo { "lower" } else { "upper" };
         let z = spec.to_transformed(v);
         let moved = spec.from_transformed(z);
+        // The move is tiny next to the bound (σ(z) = 1e-10), so the
+        // new value is printed with enough digits to differ from it.
+        let by = (moved - v).abs();
         let chains: Vec<String> = on_end.iter().map(|(c, _)| ChainIndex(*c).to_string()).collect();
         notices.push(format!(
             "notice: `{}` starts on its {which} bound {v} (chain {}); a bound has no finite \
-             transformed coordinate, so the start is moved inward to {moved:.4e} (z = {z:.2}).",
+             transformed coordinate, so the start is moved inward by {by:.2e}, to {moved:.12e} (z = {z:.2}).",
             spec.name, chains.join(", ")));
     }
     notices
@@ -6750,7 +6753,17 @@ dt = 1.0
         assert!(notices[0].contains("`rho`") && notices[0].contains("upper bound 1")
             && notices[0].contains("chain 0, 1") && notices[0].contains("z = 23.03"), "{}", notices[0]);
         assert!(notices[1].contains("`kappa`") && notices[1].contains("lower bound 0")
-            && notices[1].contains("1.0000e-10") && notices[1].contains("z = -23.03"), "{}", notices[1]);
+            && notices[1].contains("by 1.00e-10") && notices[1].contains("z = -23.03"), "{}", notices[1]);
+        // A bound away from zero: the printed value must differ from it.
+        let beta = vec![domain_param("beta", Transform::LogInterval { lo: 0.05, hi: 1.0 }, 0.05)];
+        let one = ChainStart {
+            chain_id: 0, values: [("beta".to_string(), 0.05)].into_iter().collect(),
+            source: InitSource::SeededBase,
+        };
+        let n = starts_on_an_end(&beta, &[one]);
+        assert_eq!(n.len(), 1);
+        assert!(!n[0].contains("to 5.000000000000e-2"), "the moved value must show the move: {}", n[0]);
+        assert!(n[0].contains("to 5.0000000"), "{}", n[0]);
         assert!(starts_on_an_end(&specs, &[start(0, 0.5, 0.3)]).is_empty());
     }
 }
