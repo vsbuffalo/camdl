@@ -728,7 +728,8 @@ mod tests {
 
     /// Every map on every domain of §12.1: [0, ∞), [0, 1], [0, 2],
     /// [1e-6, 2.5], [1, 100], [−120, 120], [−120, −60], plus the hand-built
-    /// `LowerBounded { 1e-6 }` and `UpperBounded { 30 }`, and `Identity`.
+    /// `LowerBounded { 1e-6 }`, `UpperBounded { 30 }` and `{ 0.8 }`, and
+    /// `Identity`.
     /// Each finite box is taken both as a positive kind and not, so it is
     /// mapped by `LogInterval` where 0 < lo and by `Interval` always.
     fn maps() -> Vec<(String, Transform)> {
@@ -737,6 +738,9 @@ mod tests {
             ("[0, ∞)".to_string(), Transform::for_domain(0.0, inf, true).unwrap()),
             ("LowerBounded 1e-6".to_string(), Transform::LowerBounded { lo: 1e-6 }),
             ("UpperBounded 30".to_string(), Transform::UpperBounded { hi: 30.0 }),
+            // hi ≤ 1, so ln(1 − θ) and its z-derivative (positive here, as g′
+            // is −eᶻ) are defined and checked.
+            ("UpperBounded 0.8".to_string(), Transform::UpperBounded { hi: 0.8 }),
             ("identity".to_string(), Transform::Identity),
         ];
         for (lo, hi) in [(0.0, 1.0), (0.0, 2.0), (1e-6, 2.5), (1.0, 100.0),
