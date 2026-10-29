@@ -1,6 +1,6 @@
 ---
 date: 2026-10-29
-status: proposed — built on the maintainer decisions of 2026-10-29 listed in §1; D1–D22 (§14) are decided, nothing is pending; the IF2 default constants are pending the extended benchmark (maintainer decision T1: extend before choosing; §4.4)
+status: proposed — built on the maintainer decisions of 2026-10-29 listed in §1; D1–D24 (§14) are decided, nothing is pending; the default steps are decided heuristics (§4.4)
   area: fit config / run identity / resolved problem and execution plan / IF2, PMMH and MH step sizes / profile CLI
   issues: gh#1001
   supersedes: 2026-10-29-support-keyed-transforms.md D9 and its commit series (ii) (its §11 commits 11–12)
@@ -54,6 +54,12 @@ The maintainer decided, on 2026-10-29:
     identifies initial-state-only parameters (§4.6).
 12. The resolved perturbation and proposal scales are part of the
     `ExecutionPlan` and of saved run provenance (§5.6).
+13. A parameter with no effect on any statistical quantity the method uses is
+    refused. Bayesian methods accept hierarchical hyperparameters, and warn,
+    with a strict option, for an independent prior-only parameter (§4.6).
+14. The default steps are heuristics: IF2 1/20 on interval and log-interval maps
+    and 1/5 one-sided; PMMH and MH 0.25; PGAS's MH-within-Gibbs its own named
+    default, currently 0.25 (§4.4).
 
 ## 2. One key, `rw_sd`, sets two algorithms' steps in a unit about to change, and keeps two fit files of one problem apart
 
@@ -264,22 +270,22 @@ must turn it red.
 After this change, every remaining factor is a documented adaptation or a
 recorded backend default.
 
-| what                                                                                                                                          | `origin/main`                                                              | branch `193525d9`                                                                                                       | after this proposal                                                                                                                                 |
-| --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| PMMH/MH initial proposal = 5 × the IF2 step                                                                                                   | `cli/src/fit/pmmh.rs:1049-1052` (5 × `transformed_sd(rw_sd, θ₀)`)          | `pmmh.rs:1049-1052` → `types.rs:441-447` (5 × the z step, or the default)                                               | **removed**: `[method.proposal]` is the proposal SD (D5)                                                                                            |
-| IF2 step divided by \|g′\| at each particle's current value                                                                                   | `sim/src/inference/if2.rs:428`, `:533`, `:639`                             | removed (fixed step in z, `if2.rs:424`, `:523`)                                                                         | removed; the written z value is the kernel                                                                                                          |
-| IF2 automatic step from the box: ln(hi/lo)/20 at the geometric midpoint, (hi − lo)/6, ±10⁶ for an infinite end                                | `fit/runner.rs:1499-1520` (`auto_rw_sd_from_value`)                        | replaced by `default_if2_step` (`types.rs:141-150`)                                                                     | the D8 default, printed with its natural equivalent at the start                                                                                    |
-| a simplex member's natural-scale automatic value read as a log-ratio SD                                                                       | `runner.rs:681-689` (the member's `EstimatedParam.rw_sd`)                  | `runner.rs:686-689`, `:1516-1535` (`simplex_member_default_step`: the old natural formula, read on the log-ratio scale) | **removed**: one log-ratio constant, `SIMPLEX_LOG_RATIO_STEP` = 1/6, today's value for a member on [0, 1]; a written value is used as written (D20) |
-| PGAS MH-within-Gibbs initial scale                                                                                                            | `sim/src/inference/pgas.rs:3955-3965` (a tenth of the z-range, floor 0.01) | `pgas.rs:3872-3886` (`default_mh_step`, else 1.0 for `Identity`)                                                        | no user scale; **exposed**: the resolved initial scale per parameter is in `PgasPlan` and the run record (§5.6)                                     |
-| PGAS MH-within-Gibbs Robbins–Monro clamp on the log scale, [−20, 5]                                                                           | `pgas.rs:4486`                                                             | `pgas.rs:4405`                                                                                                          | an adaptation bound; documented in `fit-toml.md`                                                                                                    |
-| PGAS NUTS initial step size 0.1 and identity mass, reset to 0.1 after the mass estimate                                                       | `pgas.rs:4097`, `:4415`                                                    | `pgas.rs:4019`, `:4336`                                                                                                 | not per-parameter; dual averaging adapts it; **exposed** as `PgasPlan.nuts_initial_step` and recorded                                               |
-| PMMH/MH Haario shape (2.38²/d)·Cov after `adapt_start`; global scale λ adapted from step one                                                  | `sim/src/inference/pmmh.rs:402-406`, `:654-667`                            | the same lines                                                                                                          | adaptation, not reinterpretation; `fit-toml.md` says the written SD is the shape until `adapt_start` and the whole proposal when `adapt = false`    |
-| IF2 cooling factor on every step                                                                                                              | `if2.rs` (`per_step_cooling`), `IF2Config.cooling_fraction`                | the same                                                                                                                | a declared schedule; unchanged                                                                                                                      |
-| `fit_state.toml` `[rw_sd]` suggestion: MAD calibration, else 0.5 × the step                                                                   | `fit/mod.rs:1434-1439`                                                     | `fit/mod.rs:1432-1437`                                                                                                  | **removed** (§3.5)                                                                                                                                  |
-| `profile`'s `cooling_final`: mean over parameters of each last-iteration SD (natural units on main, z on the branch, mixed across parameters) | `profile.rs:1633-1650`                                                     | `profile.rs` (same computation over `effective_rw_sd`)                                                                  | **replaced** by the last iteration's cooling factor, which is unit-free and the same for every parameter (D21)                                      |
-| `profile` hashes `rw_sd` under `nl-*`, where no step is taken                                                                                 | `profile.rs:1292-1302`                                                     | `profile.rs:1292-1301`                                                                                                  | **removed** (§5.4)                                                                                                                                  |
-| launch-table natural equivalent                                                                                                               | `runner.rs:1080` (at the start)                                            | `runner.rs:1169-1171` (at the box midpoint, `reference_z`)                                                              | at the resolved start everywhere (D19)                                                                                                              |
-| PMMH preflight's one-step spread                                                                                                              | `cli/src/fit/pf_noise.rs:275-283` reads `proposal_sd` as given             | the same                                                                                                                | no factor; reads the resolved proposal                                                                                                              |
+| what                                                                                                                                          | `origin/main`                                                              | branch `193525d9`                                                                                                       | after this proposal                                                                                                                                                   |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PMMH/MH initial proposal = 5 × the IF2 step                                                                                                   | `cli/src/fit/pmmh.rs:1049-1052` (5 × `transformed_sd(rw_sd, θ₀)`)          | `pmmh.rs:1049-1052` → `types.rs:441-447` (5 × the z step, or the default)                                               | **removed**: `[method.proposal]` is the proposal SD (D5)                                                                                                              |
+| IF2 step divided by \|g′\| at each particle's current value                                                                                   | `sim/src/inference/if2.rs:428`, `:533`, `:639`                             | removed (fixed step in z, `if2.rs:424`, `:523`)                                                                         | removed; the written z value is the kernel                                                                                                                            |
+| IF2 automatic step from the box: ln(hi/lo)/20 at the geometric midpoint, (hi − lo)/6, ±10⁶ for an infinite end                                | `fit/runner.rs:1499-1520` (`auto_rw_sd_from_value`)                        | replaced by `default_if2_step` (`types.rs:141-150`)                                                                     | the D8 default, printed with its natural equivalent at the start                                                                                                      |
+| a simplex member's natural-scale automatic value read as a log-ratio SD                                                                       | `runner.rs:681-689` (the member's `EstimatedParam.rw_sd`)                  | `runner.rs:686-689`, `:1516-1535` (`simplex_member_default_step`: the old natural formula, read on the log-ratio scale) | **removed**: one log-ratio constant, `SIMPLEX_LOG_RATIO_STEP` = 1/6, today's value for a member on [0, 1]; a written value is used as written (D20)                   |
+| PGAS MH-within-Gibbs initial scale                                                                                                            | `sim/src/inference/pgas.rs:3955-3965` (a tenth of the z-range, floor 0.01) | `pgas.rs:3872-3886` (`default_mh_step`, else 1.0 for `Identity`)                                                        | no user scale; its own named default `PGAS_MWG_DEFAULT_STEP` (0.25); **exposed**: the resolved initial scale per parameter is in `PgasPlan` and the run record (§5.6) |
+| PGAS MH-within-Gibbs Robbins–Monro clamp on the log scale, [−20, 5]                                                                           | `pgas.rs:4486`                                                             | `pgas.rs:4405`                                                                                                          | an adaptation bound; documented in `fit-toml.md`                                                                                                                      |
+| PGAS NUTS initial step size 0.1 and identity mass, reset to 0.1 after the mass estimate                                                       | `pgas.rs:4097`, `:4415`                                                    | `pgas.rs:4019`, `:4336`                                                                                                 | not per-parameter; dual averaging adapts it; **exposed** as `PgasPlan.nuts_initial_step` and recorded                                                                 |
+| PMMH/MH Haario shape (2.38²/d)·Cov after `adapt_start`; global scale λ adapted from step one                                                  | `sim/src/inference/pmmh.rs:402-406`, `:654-667`                            | the same lines                                                                                                          | adaptation, not reinterpretation; `fit-toml.md` says the written SD is the shape until `adapt_start` and the whole proposal when `adapt = false`                      |
+| IF2 cooling factor on every step                                                                                                              | `if2.rs` (`per_step_cooling`), `IF2Config.cooling_fraction`                | the same                                                                                                                | a declared schedule; unchanged                                                                                                                                        |
+| `fit_state.toml` `[rw_sd]` suggestion: MAD calibration, else 0.5 × the step                                                                   | `fit/mod.rs:1434-1439`                                                     | `fit/mod.rs:1432-1437`                                                                                                  | **removed** (§3.5)                                                                                                                                                    |
+| `profile`'s `cooling_final`: mean over parameters of each last-iteration SD (natural units on main, z on the branch, mixed across parameters) | `profile.rs:1633-1650`                                                     | `profile.rs` (same computation over `effective_rw_sd`)                                                                  | **replaced** by the last iteration's cooling factor, which is unit-free and the same for every parameter (D21)                                                        |
+| `profile` hashes `rw_sd` under `nl-*`, where no step is taken                                                                                 | `profile.rs:1292-1302`                                                     | `profile.rs:1292-1301`                                                                                                  | **removed** (§5.4)                                                                                                                                                    |
+| launch-table natural equivalent                                                                                                               | `runner.rs:1080` (at the start)                                            | `runner.rs:1169-1171` (at the box midpoint, `reference_z`)                                                              | at the resolved start everywhere (D19)                                                                                                                                |
+| PMMH preflight's one-step spread                                                                                                              | `cli/src/fit/pf_noise.rs:275-283` reads `proposal_sd` as given             | the same                                                                                                                | no factor; reads the resolved proposal                                                                                                                                |
 
 The commands that found these:
 
@@ -543,17 +549,22 @@ The rules, in order:
 3. A written `sd` is used as written.
 4. An omitted name, or an entry with no `sd`, takes `default_if2_step()` under
    IF2 and `default_mh_step()` under PMMH and MH (_branch_ `types.rs:141-160`).
-   The MH constant is 0.25 in z, for PMMH, MH and PGAS's MH-within-Gibbs
-   (`types.rs:83`). The IF2 constants in the code are 2/3 on `Interval` and 0.2
-   on `LogInterval` and the half-bounded maps (`types.rs:66-74`). They are
-   pending the extended benchmark: the maintainer decided (T1) to extend the
-   grid before choosing. The transforms benchmark
+   The defaults are decided heuristics (maintainer decision), not tuned optima:
+   - IF2: 1/20 in z on `Interval` and on `LogInterval`, and 1/5 on the one-sided
+     maps (`LowerBounded`, `UpperBounded`);
+   - PMMH and MH: 0.25 in z (`MH_DEFAULT_STEP`);
+   - PGAS's MH-within-Gibbs: its own named default, `PGAS_MWG_DEFAULT_STEP`
+     (`Transform::default_mwg_step`), currently 0.25. It replaces PGAS's reuse
+     of `default_mh_step` (_branch_ `pgas.rs:3886`) with the same value, so
+     output is unchanged and the two can later differ without coupling.
+
+   The branch's constants were 2/3 on `Interval` and 0.2 on `LogInterval` and
+   the half-bounded maps (`types.rs:66-74`). The transforms benchmark
    (`docs/dev/notes/2026-10-29-support-keyed-transforms-benchmark.md`,
-   "Interpretation") found smaller steps better on every family and, under its
-   rule, points to 1/20 on `Interval`, 1/50 on the half-bounded maps, and 1/20
-   or 1/50 on `LogInterval`, and its smallest candidates sit at the edge of the
-   grid. Every default quoted in this document is the current constant and moves
-   with the chosen one.
+   "Interpretation") found smaller steps better on every family, which the
+   decided values follow. Setting the IF2 constants to the decided values is its
+   own commit in series A, and it changes default IF2 output; the fixed-seed
+   pins are re-captured there (§11).
 5. The identity map has no default: `NoDefault`, naming the table and the kind
    (an undeclared `real` or `instant`), and saying that on this map z is θ
    itself, so the value to write is a natural-scale SD.
@@ -721,24 +732,93 @@ pub enum Classification {
 pub fn param_surfaces(model: &ir::Model) -> Classification;
 ```
 
-**Parameters that reach neither the initial state nor the dynamics** are a
-defined class: `unused_by_likelihood`. Its behaviour depends on whether the
-parameter appears anywhere at all.
+**Every estimated parameter is put into one of four use classes.** The rule
+(maintainer decision) is that a parameter with no effect on any statistical
+quantity the selected method uses is refused. `param_surfaces` gives each
+parameter's likelihood connection, meaning whether it reaches the initial state
+or the dynamics. The resolved priors in the partition (`Estimated.prior`, roles
+§6.2) give the **hierarchical-prior graph**: an edge h → p when the prior of an
+estimated parameter p has an argument that references h
+(`HierarchicalPrior.args`, `rust/crates/ir/src/parameter.rs:104-108`). The
+classifier follows that graph transitively, with a visited set, so a
+hyperparameter of a hyperparameter of a likelihood-connected parameter is found
+at any depth.
 
-- **At compile time,** a parameter referenced nowhere, not even in a prior, is
-  the planned unused-parameter lint (`ocaml/lib/ir/lint.ml:14`). That lint is a
-  warning, because such a model is still well-formed to simulate.
-- **At fit time, estimating such a parameter is a request with no defined
-  effect** (invariant I3), so it is refused:
-  - under every method, when the parameter appears nowhere;
-  - under IF2 and `nl-*`, also when it appears only in a hierarchical-prior
-    argument, because those methods ignore priors and nothing selects it.
-- **A hyperparameter under PMMH, MH or PGAS** appears only in prior arguments
-  and is accepted. It enters the posterior through the prior, which is its
-  purpose.
+```rust
+pub enum UseClass {
+    /// Reaches the initial state or the dynamics.
+    Likelihood,
+    /// No direct connection, but a hyperparameter (at any depth) of an
+    /// estimated `Likelihood` parameter.
+    Hierarchical,
+    /// No likelihood connection, direct or through children, and its own
+    /// proper prior: an intentional prior-only parameter.
+    PriorOnly,
+    /// No likelihood connection and no proper prior of its own: truly unused.
+    Unused,
+}
+/// Method-free: computed with `ResolvedProblem` from the IR and the partition.
+pub fn use_classes(surfaces: &ParamSurfaces, partition: &Partition)
+    -> IndexMap<String, UseClass>;
+```
 
-The refusal names the parameter and says it enters neither the initial state nor
-the likelihood.
+A hyperparameter all of whose children are themselves prior-only has no
+likelihood connection, so it is `PriorOnly`, or `Unused` if its own prior is
+improper. A child counts only while it is estimated. A held leaf under an
+estimated hyperparameter is the parameter-roles refusal `HyperOverHeldLeaf`,
+unchanged.
+
+The policy is applied in `ExecutionPlan::new`, because it depends on the method:
+
+| class          | IF2, `nl-*`                                                    | PMMH, MH, PGAS                                                                                                                                         |
+| -------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Likelihood`   | accepted                                                       | accepted                                                                                                                                               |
+| `Hierarchical` | refused: it appears only in priors, which these methods ignore | accepted: a genuine hierarchical hyperparameter, influencing the priors of estimated parameters                                                        |
+| `PriorOnly`    | refused, as `Hierarchical`                                     | accepted with one warning: "`tau`'s marginal posterior equals its prior: it does not connect to the likelihood". Refused under the strict policy below |
+| `Unused`       | refused                                                        | refused: with no likelihood connection and no proper prior, its posterior is undefined                                                                 |
+
+Every refusal names the parameter and its class. At compile time, a parameter
+referenced nowhere, not even in a prior, is also the planned unused-parameter
+lint (`ocaml/lib/ir/lint.ml:14`). That lint is a warning, because such a model
+is still well-formed to simulate. The refusal applies only to estimating such a
+parameter, a request with no defined effect (invariant I3).
+
+**The strict policy for prior-only parameters.** The key is
+`prior_only = "warn" | "refuse"` in `[method]`, on the `pmmh`, `mh` and `pgas`
+variants only, default `"warn"`. The flag `--prior-only refuse` on `fit run`
+overrides it. Where it lives follows from the architecture invariants:
+
+- **Not `[assessment]`.** Assessment interprets a result after a run under a
+  stated policy (result-records D3). This choice decides whether a run starts at
+  all, which is execution validation.
+- **Not the problem.** The problem is method-free by construction (§6.1), and
+  the warning exists only under Bayesian methods.
+- **A field of the three Bayesian variants.** Writing `prior_only` under `if2`
+  or `nl-*` is then an unknown key, refused by `validate_method_keys`, as I3
+  requires of an option with no effect there.
+- **Not in the method identity.** It is subtracted from the method payload. A
+  run that proceeds stores the same bytes under either value, so it changes no
+  stored output (`.claude/rules/run-identity.md`). It is recorded in the run
+  record's unhashed `inputs`, like `from` (§5.6).
+
+**Tests of the use classes**, on inline models compiled through `camdlc`, as
+`rust/crates/cli/tests/parameter_role_defects.rs:509-530` already does for a
+hierarchical prior:
+
+- **`Likelihood` and `Hierarchical`.** `mu_g ~ normal(0, 1)` with
+  `gamma ~ log_normal(mu = mu_g, sigma = 0.1)`, `gamma` in a rate. `mu_g` is
+  `Hierarchical`: accepted by PMMH, refused by IF2.
+- **Transitive `Hierarchical`.** `s_mu ~ half_normal(1)`,
+  `mu_g ~ normal(0, s_mu)`, `gamma ~ log_normal(mu_g, 0.1)`. `s_mu` is
+  `Hierarchical` through two edges.
+- **`PriorOnly`.** `tau ~ half_normal(1)` referenced nowhere else. PMMH warns,
+  PMMH with `prior_only = "refuse"` refuses, and IF2 refuses.
+- **`PriorOnly` through a prior-only child.** `mu_t ~ normal(0, 1)` and
+  `tau ~ log_normal(mu_t, 1)`, neither in the likelihood. Both are `PriorOnly`.
+- **`Unused`.** An estimated parameter with no prior and no reference, under
+  `prior = { flat = {} }`, is refused under PMMH and IF2.
+- **The key is refused off its variants.** `prior_only` under `if2` is refused
+  as an unknown key.
 
 **Tests run on compiled models**, real `.camdl` files through `camdlc`, not only
 hand-built IR:
@@ -1430,16 +1510,16 @@ error: [estimate] sets step sizes, which are settings of the method:
   so away from the start the natural-scale step differs.
 
   Leaving a parameter out uses the default step instead, which is a
-  different step. The default, 0.2 in z for these log-interval maps, gives
-  at the start:  beta 0.037 (was 0.02)   gamma 0.019 (was 0.01)   I0 2.30 (was 2)
+  different step. The default, 1/20 in z for these log-interval maps, gives
+  at the start:  beta 0.0093 (was 0.02)   gamma 0.0047 (was 0.01)   I0 0.58 (was 2)
   For I0 with the default step write `I0 = { initial_state = true }`.
   See `camdl docs fit-toml`, "Step sizes".
 ```
 
 The values come from the `LogInterval` row of §7.3: β on [0.05, 1] at 0.25 has
-|dθ/dz| = 0.18619, so 0.02/0.18619 = 0.1074 and 0.2 × 0.18619 = 0.0372; γ on
-[0.01, 0.5] at 0.10 has 0.09473, giving 0.1056 and 0.0189; `I0` on [1, 100] at
-10 has 11.513, giving 0.1737 and 2.30 (verified by evaluating the formula; not
+|dθ/dz| = 0.18619, so 0.02/0.18619 = 0.1074 and 0.05 × 0.18619 = 0.0093; γ on
+[0.01, 0.5] at 0.10 has 0.09473, giving 0.1056 and 0.0047; `I0` on [1, 100] at
+10 has 11.513, giving 0.1737 and 0.58 (verified by evaluating the formula; not
 produced by camdl).
 
 ### 7.5 An old `fit_state.toml` is refused as an input and readable for inspection
@@ -1616,13 +1696,13 @@ are not refused (§7.2).
 > ```
 >
 > A parameter you leave out takes a default chosen from its domain. Under IF2
-> the defaults are pending an extended benchmark: currently 0.2 in z on a
-> log-interval or one-sided map and 2/3 on an interval (logit-type) map. Under
-> PMMH, MH and PGAS's MH-within-Gibbs the default is 0.25. An unbounded `real`
-> or `instant` has no default. A `[method.proposal]` value is exactly the
-> proposal SD: no factor is applied. With `adapt = true` it is the proposal's
-> shape until `adapt_start`, after which adaptation reshapes it; with
-> `adapt = false` it is the proposal for the whole run.
+> the defaults are heuristics: 1/20 in z on an interval or log-interval map and
+> 1/5 on a one-sided map. Under PMMH and MH the default is 0.25, and PGAS's
+> MH-within-Gibbs has its own default, currently 0.25. An unbounded `real` or
+> `instant` has no default. A `[method.proposal]` value is exactly the proposal
+> SD: no factor is applied. With `adapt = true` it is the proposal's shape until
+> `adapt_start`, after which adaptation reshapes it; with `adapt = false` it is
+> the proposal for the whole run.
 >
 > **What a step of s in z means:**
 >
@@ -1829,8 +1909,11 @@ unchanged:** `fixed_seed_fit_outputs_are_bit_identical`, in a new
   diff is that commit's subject.
 
 Run IDs are not compared, because the engine version moves them. In series A
-with default steps, every commit keeps the pins: the defaults and the default
-PMMH initial proposal are unchanged.
+with default steps, every commit but one keeps the pins. The exception is the
+commit that sets the IF2 constants to the decided values, which intends a
+numerical change and re-captures the IF2 and pin rows. The PMMH and PGAS pins
+hold throughout, because 0.25 and the new `PGAS_MWG_DEFAULT_STEP` equal today's
+values.
 
 **Series A, the step correction, on `feat/support-transforms`**, each commit
 green under `make test`:
@@ -1858,11 +1941,14 @@ green under `make test`:
    of §7.4 and per unavailable case.
 7. `profile` reads `[method.perturbation]` from an IF2 `--fit`, ignores it under
    `nl-*`, and its base and method levels change (§5.4).
-8. Documents (§9.2–§9.4) and the amended proposals' status lines (§13).
+8. The decided IF2 default constants (1/20 on `Interval` and `LogInterval`, 1/5
+   one-sided) and `PGAS_MWG_DEFAULT_STEP`. Its own commit, since it changes
+   default IF2 output; the pin diff is its subject.
+9. Documents (§9.2–§9.4) and the amended proposals' status lines (§13).
 
 **Series C** follows A on any branch: `param_surfaces` with its compiled-model
-tests, then the initial-state refusals and the `unused_by_likelihood` refusal,
-each in its own commit with its red test.
+tests, then the initial-state refusals and the use-class policy, each in its own
+commit with its red test.
 
 **Series B, the plan series (§6)**, before parameter-roles Stage 2:
 `ExecutionPlan` at the CLI boundary first, then one backend per commit, each
@@ -2027,9 +2113,11 @@ _branch_ `types.rs:83`). No factor is applied anywhere. The legacy message
 prints 5 × the converted value to reproduce the old initial proposal scale.
 
 **D6 — PGAS gets no per-parameter table.** Maintainer decision 3. Its default
-update, NUTS, has no per-parameter proposal; its MH-within-Gibbs starts at
-`default_mh_step` and adapts by Robbins–Monro (_branch_ `pgas.rs:3872-3886`).
-`[method.proposal]` under `pgas` is refused with the §4.3 message.
+update, NUTS, has no per-parameter proposal; its MH-within-Gibbs starts at its
+own named default, `PGAS_MWG_DEFAULT_STEP` (currently 0.25, the value
+`default_mh_step` gives it on the branch, `pgas.rs:3872-3886`), and adapts by
+Robbins–Monro. `[method.proposal]` under `pgas` is refused with the §4.3
+message.
 
 **D7 — The method level hashes the resolved steps, and the written
 `[estimate].start` values (`starts_base`) beside the starts rule; `from` is
@@ -2101,6 +2189,17 @@ it is the same for every parameter.
 **D22 — An incorrect initial-state schedule is refused under IF2** (maintainer
 decision 11; §4.6). The IR determines the property reliably by an exhaustive
 walk, so the check is a refusal, not a warning. Non-IF2 methods never warn.
+
+**D23 — The use-class policy** (maintainer decision 13; §4.6). The four classes
+are `Likelihood`, `Hierarchical`, `PriorOnly` and `Unused`, found by following
+the hierarchical-prior graph transitively. IF2 and `nl-*` accept only
+`Likelihood`. PMMH, MH and PGAS accept `Hierarchical`, warn on `PriorOnly`
+(refusing it under `prior_only = "refuse"`), and refuse `Unused`. The strict key
+is a field of the Bayesian method variants and is not hashed.
+
+**D24 — The default steps** (maintainer decision 14; §4.4) are heuristics, not
+tuned optima. IF2 1/20 on `Interval` and `LogInterval`, 1/5 one-sided; PMMH and
+MH 0.25; PGAS MH-within-Gibbs `PGAS_MWG_DEFAULT_STEP`, 0.25.
 
 ## 15. Out of scope, each with its reason
 
