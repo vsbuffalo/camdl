@@ -807,6 +807,43 @@ pub(crate) fn ensure_provenance_label(leaf_dir: &std::path::Path, label: &str) -
         .map_err(|e| format!("write {}: {}", path.display(), e))
 }
 
+/// Ensure a leaf's `run.json` lists `value` in its `inputs[key]` array,
+/// rewriting it atomically (tmp + rename) only when it is missing. `inputs`
+/// is the recorded-not-hashed display projection, so the run_id and the
+/// exact-set are untouched — the same in-place record update
+/// [`ensure_provenance_label`] performs. Used for the config identities a fit
+/// run was reached from (gh#896): a cache hit from a second config with the
+/// same run identity adds that config's.
+pub(crate) fn ensure_input_listed(
+    leaf_dir: &std::path::Path,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let path = leaf_dir.join("run.json");
+    let txt = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let mut rec: runid::RunRecord = serde_json::from_str(&txt)
+        .map_err(|e| format!("parse {}: {}", path.display(), e))?;
+    let obj = rec
+        .inputs
+        .as_object_mut()
+        .ok_or_else(|| format!("{}: `inputs` is not an object", path.display()))?;
+    let list = obj.entry(key.to_string()).or_insert_with(|| serde_json::json!([]));
+    let arr = list
+        .as_array_mut()
+        .ok_or_else(|| format!("{}: `inputs.{key}` is not a list", path.display()))?;
+    if arr.iter().any(|v| v.as_str() == Some(value)) {
+        return Ok(()); // already listed — no rewrite
+    }
+    arr.push(serde_json::Value::String(value.to_string()));
+    let tmp = leaf_dir.join("run.json.tmp");
+    let json = serde_json::to_string_pretty(&rec)
+        .map_err(|e| format!("serialize run.json: {}", e))?;
+    std::fs::write(&tmp, json)
+        .and_then(|_| std::fs::rename(&tmp, &path))
+        .map_err(|e| format!("write {}: {}", path.display(), e))
+}
+
 /// Ensure a leaf's `run.json` declares every id in `ids` under its `obs`
 /// child, rewriting it atomically (tmp + rename) only when one is missing.
 /// `children` is metadata, not identity — the run_id and exact-set of the

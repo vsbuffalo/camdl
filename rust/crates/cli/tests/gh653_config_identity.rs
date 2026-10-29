@@ -199,7 +199,7 @@ fn a_reflowed_config_still_finds_its_completed_fit() {
     let err = resolve_theta(&bin, &tmp)
         .expect_err("a changed particle count must not resolve to the old fit");
     assert!(
-        err.contains("no completed fit found"),
+        err.contains("no completed fit run of"),
         "the miss is reported plainly; got: {err}"
     );
 
@@ -210,7 +210,7 @@ fn a_reflowed_config_still_finds_its_completed_fit() {
     let err = resolve_theta(&bin, &tmp)
         .expect_err("a changed data path must not resolve to the old fit");
     assert!(
-        err.contains("no completed fit found"),
+        err.contains("no completed fit run of"),
         "the miss is reported plainly; got: {err}"
     );
 

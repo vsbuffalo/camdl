@@ -461,13 +461,18 @@ this fit — and nothing resolves a handle by it. Handing a config to a verb
 question: does this config MEAN what the stored fit was run from? That is
 answered by canonicalising the parsed value tree — comments, whitespace, table
 order, and the spelling of a float all discarded, `[estimate]` /
-`[data.observations]` order preserved because camdl reads those in order — and
-comparing it against the same canonicalisation of the segment's
-`fit.toml.original`. The archive is read at lookup time, so a fit stored before
-this rule existed resolves under it unchanged. Reflowing a comment changes
-`fit_toml_hash` and leaves the lookup identity alone; changing a particle count
-or a data path changes the identity and the config no longer resolves to that
-run.
+`[data.observations]` order preserved because camdl reads those in order. Every
+run records that identity for each config it was written or reused from, in its
+`run.json` as `inputs.config_identities`, and a `fit.toml` handle names the run
+whose list holds the file's identity as the file now reads — not the run the
+problem folder's `fit.toml.original` (the latest run's config) describes.
+Several such runs (several fit seeds, a `--starts` override, older camdl builds)
+are narrowed to the runs this camdl build wrote; if that leaves one, it is
+named, and otherwise the runs are listed. A run stored before runs recorded the
+identity cannot be matched by file and is named by its directory or `run_id`.
+Reflowing a comment changes `fit_toml_hash` and leaves the lookup identity
+alone; changing a particle count or a data path changes the identity and the
+config no longer resolves to that run.
 
 The `schema` block lets a consumer facet any stream and label panels with no DSL
 parsing:

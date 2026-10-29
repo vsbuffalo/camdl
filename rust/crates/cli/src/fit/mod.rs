@@ -784,6 +784,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     let fit_dir = announced_fit_dir.clone();
 
     let fit_sidecar = build_fit_sidecar(&config, &fit_path, Some(&model));
+    // gh#896: the identity of the config this run was read from, recorded on
+    // every leaf it writes or reuses (`inputs.config_identities`), so a
+    // `fit.toml` handle names the runs made from the file as it now reads, not
+    // the problem folder's latest archive. Read from the file's text exactly
+    // as `handle::resolve_config` reads it.
+    let run_config_identity: Option<String> = std::fs::read_to_string(&fit_path)
+        .ok()
+        .and_then(|t| crate::fit::handle::config_identity(&t).ok());
 
     eprintln!("fit: {} (method={})", fit_path, method.algorithm.method_name());
     eprintln!("  model:    {}", config.problem.model.camdl);
@@ -1278,6 +1286,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
                     eprintln!("  \x1b[33mcache hit — reusing {}\x1b[0m",
                         dir.strip_prefix(&cas_root).unwrap_or(&dir).display());
+                    // This config now names the stored run too.
+                    if let Some(id) = &run_config_identity {
+                        if let Err(e) =
+                            crate::cas_sink::ensure_input_listed(&dir, "config_identities", id)
+                        {
+                            eprintln!("warning: record this config on {}: {e}", dir.display());
+                        }
+                    }
                     // A label given to an unlabelled stored run is recorded on
                     // it (`check_label_is_free` refused every other case).
                     if let Some(label) = &validated_label {
@@ -1965,6 +1981,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             "starts": starts_rule.spelled(),
             "chain_starts_kind": starts_rule.kind().as_str(),
             "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
+            "config_identities": run_config_identity.iter().collect::<Vec<_>>(),
             "wall_time_seconds": stage_elapsed.as_secs_f64(),
         });
         // Declare the tabular outputs' column schema in run.json (proposal
