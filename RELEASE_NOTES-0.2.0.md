@@ -366,7 +366,9 @@ order. Every handle now names one run, or is refused with the runs listed.
   is now fixed in z, the same for every chain and particle: an explicit `rw_sd`
   is converted once, at the box's midpoint (at the start on a half-bounded
   domain), and with no `rw_sd` IF2 takes a default step in z for the parameter's
-  transform. Every transform with a finite end has a default, so a `rate`,
+  transform: 1/20 on a box finite at both ends, 1/5 on a half-bounded domain.
+  These are starting heuristics chosen for robustness to poor starts, not
+  optimal values. Every transform with a finite end has a default, so a `rate`,
   `positive`, `count` or `duration` on `[0, hi]` or `[0, ∞)` runs without an
   explicit `rw_sd`; an unbounded `real` or `instant` still needs one. PMMH and
   MH start their proposal at 0.25 in z, or at five times an explicit `rw_sd`'s

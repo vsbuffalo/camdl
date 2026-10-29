@@ -239,30 +239,45 @@ the box. That is the base condition, and it favours 1/50–1/100 on `LogInterval
 and 1/20–1/50 on `Interval`. The short-budget `gh912` cell and the far starts
 pull toward 1/20 or larger.
 
-A defensible set of heuristics, each a compromise rather than an optimum:
+The defaults chosen from these measurements are **pragmatic starting heuristics,
+chosen for robustness to poor initialisation, not optimal values**:
 
 - `Interval` 1/20: best or within noise on every spread-start fixture, including
   the wide log-β box, and the peak at 30 iterations from the `sir_0hi` corner.
-- `LogInterval` 1/20 or 1/50. 1/20 is 0.2 nats short of the best on `seir_age`
-  and `ebola` and 1.4 nats short on `polio`. It is better at the short budget
-  (`gh912`, 106 ± 42 nats) and from the `seir_age` corner. 1/50 is the reverse.
-- Half-bounded: there is no box to spread starts in, so these fixtures start
-  from one point, and a far start is the realistic case. 1/5 is the only step
-  that survives every far start tried. 1/10 to 1/50 are 0.3–5 nats better from a
-  start near the optimum, but kill every chain from a far one.
+- `LogInterval` 1/20: 0.2 nats short of the best on `seir_age` and `ebola` and
+  1.4 nats short on `polio` from spread starts, in exchange for the better
+  result at the short budget (`gh912`, 106 ± 42 nats over 1/50) and from the
+  `seir_age` corner. It does not rescue every corner. From the `ebola` corner
+  only 1/3 and 2/3 survived. From the `sir_0hi` corner, with β on its
+  `LogInterval` box started at 0.9, every chain stopped at 4 chains × 1000
+  particles × 30 iterations, both at 1/20 and at 1/50 (a check run for the
+  regression tests below, not part of the tables).
+- Half-bounded 1/5: these parameters have no box to spread starts in, so a fit
+  starts them from one point, and a far start is the realistic case. 1/5 is the
+  only step that survived every far start tried. 1/10 to 1/50 are 0.3–5 nats
+  better from a start near the optimum, but stop every chain from a far one.
 
-A step large enough to escape a far start and small enough to finish precisely
-is what IF2's cooling is for. The default cooling, 0.7 by iteration 50, shrinks
-the step only threefold over these runs. This is a hypothesis, not tested here:
-a larger starting step with faster cooling might serve both rows. That would
-change the cooling default, not the step.
+`cli/tests/if2_default_step_regression.rs` pins three of these cases at a budget
+of seconds, each against the step it guards against:
+
+- the half-bounded default reaches the basin from the `sir_lb` corner, where
+  1/50 stops every chain;
+- the `Interval` default finishes at the maximum when γ starts at 0.45 on [0,
+  0.5], where 1/50 has not arrived and 2/3 overshoots;
+- the boxed defaults reach the basin from `lhs` starts over the wide log-β box,
+  where 2/3 does not.
+
+A unit test pins the constants' values, and `make grid` and `make far` rerun the
+full benchmark.
 
 ## Next
 
-- The constants are the maintainer's decision. The options are set out above,
-  and none is committed.
-- Test the cooling hypothesis on the far rows: 1/5 cooled to 1/50 against a
-  fixed 1/20.
+- Out of scope for this series: a step large enough to escape a far start and
+  small enough to finish precisely is what IF2's cooling is for. The default
+  cooling, 0.7 by iteration 50, shrinks the step only threefold over these runs.
+  Untested hypothesis: a larger starting step with faster cooling, such as 1/5
+  cooled to 1/50, might serve both the far and the spread-start rows. That would
+  change the cooling default, not the step.
 - The far-start failures are the particle-filter watchdog stopping chains at an
   unscoreable start. A refused start under `single` is not redrawn, so a fit
   from such a start fails whatever the step.

@@ -62,16 +62,28 @@ impl std::fmt::Display for DomainError {
 /// lower-bounded map's absolute inward move, θ = lo + ε, z = ln ε.
 pub const EDGE_START_EPS: f64 = PROB_FRACTION_EPS;
 
-/// IF2's default step in z on the interval map (proposal D8, §12.6).
-pub const IF2_INTERVAL_STEP: f64 = 2.0 / 3.0;
+// IF2's default steps in z, one per map family (proposal D8). These are
+// pragmatic starting heuristics, chosen for robustness to poor
+// initialisation, not optimal values: the best step depends on where the
+// chains start, the iteration budget, the cooling and the model. A smaller
+// step finishes more precisely once the swarm is in the optimum's basin; a
+// larger one lets the swarm escape a start the filter cannot score. The
+// measurements are docs/dev/notes/2026-10-29-support-keyed-transforms-benchmark.md
+// (harness: tests/bench/support-transforms).
 
-/// IF2's default step in z on the log-interval map (proposal D8, §12.6).
-pub const IF2_LOG_INTERVAL_STEP: f64 = 0.2;
+/// IF2's default step in z on the interval map: a starting heuristic.
+pub const IF2_INTERVAL_STEP: f64 = 1.0 / 20.0;
+
+/// IF2's default step in z on the log-interval map: a starting heuristic.
+pub const IF2_LOG_INTERVAL_STEP: f64 = 1.0 / 20.0;
 
 /// IF2's default step in z on the lower- and upper-bounded maps, θ = lo + eᶻ
 /// and θ = hi − eᶻ, where a step of s multiplies the distance to the bound by
-/// about e^±s (proposal D8, §12.6).
-pub const IF2_HALF_BOUNDED_STEP: f64 = 0.2;
+/// about e^±s: a starting heuristic. It is larger than the boxed maps' because
+/// these parameters have no box to spread chain starts over, so a start far
+/// from the optimum is the usual case, and smaller steps let every chain
+/// collapse there.
+pub const IF2_HALF_BOUNDED_STEP: f64 = 1.0 / 5.0;
 
 /// PMMH's and MH's default initial proposal SD in z, every map with a finite
 /// end (proposal D8). Robbins–Monro adaptation tunes it from the first
@@ -1023,6 +1035,21 @@ mod tests {
     /// A start exactly on a finite end has no finite preimage; the forward
     /// map moves it inward to z = ±ln(1/ε − 1) ≈ ±23.03 on the interval maps
     /// and to θ = lo + ε, z = ln ε, on the half-bounded ones.
+    /// Proposal D8: the IF2 defaults the benchmark and the maintainer chose
+    /// (docs/dev/notes/2026-10-29-support-keyed-transforms-benchmark.md). A
+    /// change here is a decision, not a refactor; the behaviour they buy is
+    /// pinned by cli/tests/if2_default_step_regression.rs.
+    #[test]
+    fn the_if2_default_steps_are_the_decided_heuristics() {
+        assert_eq!(Transform::Interval { lo: 0.0, hi: 1.0 }.default_if2_step(), Some(1.0 / 20.0));
+        assert_eq!(Transform::LogInterval { lo: 0.1, hi: 1.0 }.default_if2_step(), Some(1.0 / 20.0));
+        assert_eq!(Transform::LowerBounded { lo: 0.0 }.default_if2_step(), Some(1.0 / 5.0));
+        assert_eq!(Transform::UpperBounded { hi: 1.0 }.default_if2_step(), Some(1.0 / 5.0));
+        assert_eq!(Transform::Identity.default_if2_step(), None);
+        assert_eq!(MH_DEFAULT_STEP, 0.25);
+        assert_eq!(PGAS_MWG_DEFAULT_STEP, 0.25);
+    }
+
     /// Proposal D3: within rounding of an end is where the forward map gives
     /// its edge value or beyond.
     #[test]
