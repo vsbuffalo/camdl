@@ -133,15 +133,15 @@ On the branch:
 
 ### 3.2 `perturb_only_at_t0` is IF2's schedule, and seven places read it
 
-| reader                                                                           | where (verified)                                                                                         |
-| -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| IF2's per-observation perturbation skips a flagged parameter                     | `if2.rs:531`                                                                                             |
-| every other algorithm refuses the flag at load                                   | `config_v2.rs:2438-2457`                                                                                 |
-| a simplex member may not carry it                                                | `config_v2.rs:3248-3256`                                                                                 |
-| the `ic_free` precondition accepts an initial-state parameter as t = 0 spread    | `runner.rs:511-556` (the test at `:540-543`)                                                             |
-| the `ic_free` startup line names the initial-state parameters as a spread source | `fit/mod.rs:809-833`                                                                                     |
-| IF2's convergence check exempts initial-state parameters from chain agreement    | `gating.rs:190`                                                                                          |
-| `fit_state.toml` lists them; `fit summary` applies the exemption                 | `state.rs:62-68`; `fit_summary.rs:1597`, `:3071`; written by `fit/mod.rs:1489`, `nlopt_stage.rs:270-299` |
+| reader                                                                                | where (verified)                                                                                         |
+| ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| IF2's per-observation perturbation skips a flagged parameter                          | `if2.rs:531`                                                                                             |
+| every other algorithm refuses the flag at load                                        | `config_v2.rs:2438-2457`                                                                                 |
+| a simplex member may not carry it                                                     | `config_v2.rs:3248-3256`                                                                                 |
+| the `ic_free` precondition accepts an initial-state parameter as t = 0 spread         | `runner.rs:511-556` (the test at `:540-543`)                                                             |
+| the `ic_free` startup line names the initial-state parameters as a spread source      | `fit/mod.rs:809-833`                                                                                     |
+| IF2's convergence check exempts initial-state parameters from chain agreement (today) | `gating.rs:190`                                                                                          |
+| `fit_state.toml` lists them; `fit summary` applies the exemption                      | `state.rs:62-68`; `fit_summary.rs:1597`, `:3071`; written by `fit/mod.rs:1489`, `nlopt_stage.rs:270-299` |
 
 `profile` reads the flag only from a `--fit` config's `[estimate]`
 (`profile.rs:890-891`). A profile with no `--fit` cannot mark an initial-state
@@ -1018,7 +1018,7 @@ outside the hash. Its `provenance` holds `argv`, `host`, `created_at` and
 `thread_count` (`rust/crates/runid/src/record.rs:144-160`), none of which keys
 the run. Two runs that share an identity may have different `from` values, as
 they may have different `argv`. `fit_state.toml` keeps only
-`initial_state_params`, which the convergence check reads (§7.5).
+`initial_state_params`, which the dynamics-only sub-assessment reads (§7.5).
 
 ## 6. The resolved problem is shared by every method; the execution plan is per run (amends parameter-roles §6.3, §6.4, §6.6)
 
@@ -1488,9 +1488,11 @@ decision):
   error silently (`.ok()?`). Under the split it calls `load_for_inspection`: a
   legacy record gives the notice, and a corrupt one gives an error. In each of
   these commands the notice names the version and the unsupported keys. An old
-  file's initial-state list is read under its old key for this purpose, so
-  `fit summary` applies the chain-agreement exemption to the parameters the run
-  exempted.
+  file's initial-state list is read under its old key. Under the result-records
+  proposal (`ee97b86c`), the overall IF2 assessment judges every estimated
+  parameter, initial-state ones included. The list builds only the separately
+  reported dynamics-only sub-assessment, so the old key decides which parameters
+  that sub-assessment leaves out. It never decides the overall verdict.
 - **Listing commands never abort**: `fit table` reports an unreadable state as
   an error in that fit's row and lists the rest (it already matches on the load
   result, `fit_summary.rs:618`, `:2857`).
@@ -1516,14 +1518,18 @@ The split is interim. At result-records Stage 3, `ResultRecord` replaces
 
 - the same input paths refuse;
 - old records are still read for inspection;
-- an old record is still assessed with its old initial-state exemption, read
-  under its old key by that proposal's legacy adapter.
+- an old record's initial-state list is still read under its old key by that
+  proposal's legacy adapter, and still shapes only the dynamics-only
+  sub-assessment.
 
 Tests: a pre-release IF2 state with `perturb_only_at_t0_params` is refused as a
-`from_mle` source, naming the version; `fit summary` on it exempts the listed
-initial-state parameters and prints the notice once; `fit table` over a store
-with one such fit and one unreadable state lists both, the second as a row
-error. Each is red when `load_input` and `load_for_inspection` are swapped.
+`from_mle` source, naming the version. `fit summary` on it prints the notice
+once and leaves the listed initial-state parameters out of the dynamics-only
+sub-assessment, while the overall IF2 assessment still judges them. The test
+asserts both: one fails if the old key is dropped, the other if the list reaches
+the overall verdict. `fit table` over a store with one such fit and one
+unreadable state lists both, the second as a row error. Each is red when
+`load_input` and `load_for_inspection` are swapped.
 
 ## 8. `profile` declares its estimated set with `--estimate` and its steps with `--perturbation`
 
