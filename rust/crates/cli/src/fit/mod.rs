@@ -111,6 +111,40 @@ pub fn cmd_fit_methods() {
 /// gh#191: the model-capability gate must run on the fit-run path, against
 /// the method's declared simulation backend. Returns the offending message
 /// prefixed with the method's name so the user knows where to look.
+/// A `from_mle` / `from_params` point that does not name every estimated
+/// parameter leaves the missing ones to a bounds-uniform draw. Under a
+/// `pfilter`, which scores exactly one θ, that is a random θ: refused, naming
+/// the parameters. (`from_posterior` already refuses a missing column.)
+fn refuse_pfilter_point_source_missing(
+    rule: &starts::ChainStarts,
+    file: &std::path::Path,
+    estimated: &[&str],
+) -> Result<(), String> {
+    use starts::{ChainStarts, Point};
+    let names: std::collections::HashSet<String> = match rule {
+        ChainStarts::Point(Point::FromMle { .. }) => {
+            let dir = file.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+            state::FitState::load(&dir)?.start_values.into_keys().collect()
+        }
+        ChainStarts::Point(Point::FromParams { .. }) => {
+            crate::util::load_params_toml(&file.to_string_lossy())?.into_keys().collect()
+        }
+        _ => return Ok(()),
+    };
+    let missing: Vec<&str> = estimated.iter().copied().filter(|n| !names.contains(*n)).collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "a `pfilter` method scores the log-likelihood at one θ, and `starts = {}` ({}) \
+         gives no value for {}, which would be drawn at random within the bounds. Add {} \
+         to the source, or give {} a `start` and use `starts = \"single\"`.",
+        rule.spelled(), file.display(), missing.join(", "),
+        if missing.len() == 1 { "it" } else { "them" },
+        if missing.len() == 1 { "it" } else { "each" },
+    ))
+}
+
 fn gate_run_method_against_model(
     algorithm: &config_v2::Algorithm,
     compiled: &sim::CompiledModel,
@@ -1003,6 +1037,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 src.file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
             ),
             None => eprintln!("  starts source: {}", src.file.display()),
+        }
+    }
+
+    // A pfilter scores one θ (`Method::resolve_pfilter_point`), so a point
+    // source must name every estimated parameter: the draw would otherwise
+    // fill a missing one from a bounds-uniform draw.
+    if matches!(method.algorithm, Algorithm::PFilter { .. }) {
+        if let Some(src) = &resolved_starts.source {
+            let estimated: Vec<&str> = config.problem.estimate.keys().map(|k| k.as_str()).collect();
+            if let Err(e) = refuse_pfilter_point_source_missing(&resolved_starts.rule, &src.file, &estimated) {
+                eprintln!("error: {fit_path}: {e}");
+                std::process::exit(1);
+            }
         }
     }
 
