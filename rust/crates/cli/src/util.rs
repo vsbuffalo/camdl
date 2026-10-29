@@ -1280,7 +1280,27 @@ pub fn load_model(path: &str) -> Result<(ir::Model, String), String> {
         }
         msg
     })?;
+    refuse_unreleased_smooth(&model)?;
     Ok((model, json))
+}
+
+/// The `smooth(...)` coefficient form of a `bspline` is implemented but not
+/// yet released: its sampling is still under measurement
+/// (docs/dev/notes/2026-10-29-explicit-bspline-measurement.md). Every command
+/// loads its model here, so this is the one place it is refused.
+fn refuse_unreleased_smooth(model: &ir::Model) -> Result<(), String> {
+    use ir::time_func::{BSpline, SplineCoefs, TimeFuncKind};
+    for tf in &model.time_functions {
+        if let TimeFuncKind::BSpline(BSpline { coefs: SplineCoefs::Smooth { .. }, .. }) = &tf.kind {
+            return Err(format!(
+                "forcing `{}`: `coefs = smooth(...)` is not yet available in this release. Write \
+                 explicit coefficients, `coefs = [b1, ..., bK]`, each a parameter with its own \
+                 prior, and keep `n_basis` small (5 or 6): without the smooth prior nothing ties \
+                 neighbouring coefficients together, and many knots overfit.",
+                tf.name));
+        }
+    }
+    Ok(())
 }
 
 /// Load just the model's `#'` documentation dictionary (the envelope-level

@@ -1592,7 +1592,11 @@ them. Only the knots — a window end, a breakpoint, a period — must be consta
 
 **`coefs = smooth(level, slope, scale, modes, per)`** writes the coefficients
 of a `bspline` as a straight line plus penalized curvature, so the prior on the
-curve says how much it may bend rather than where each coefficient sits:
+curve says how much it may bend rather than where each coefficient sits.
+**It is not yet available in this release:** `camdlc` compiles it, but every
+`camdl` command refuses a model that uses it while its sampling is still being
+measured. Until then write explicit coefficients and keep `n_basis` small (5 or
+6), since nothing else ties neighbouring coefficients together.
 
 <!-- camdl-doctest-preamble: forcing-bspline-smooth
 dimensions { mode = [m1, m2, m3, m4, m5, m6, m7, m8, m9, m10] }
