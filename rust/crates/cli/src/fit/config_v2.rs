@@ -2487,6 +2487,37 @@ fn validate_method_keys(contents: &str, method: &Method) -> Result<(), String> {
     refuse_inert_method_keys(raw_method, &method.algorithm)
 }
 
+/// Whether `[method]` in this fit.toml source spells `key` — as opposed to
+/// the method carrying it at its serde default. Used where a default and an
+/// explicit request must be told apart (an explicit `use_nuts = true` the
+/// model cannot honour is refused; the default falls back with a notice).
+pub fn method_declares_key(contents: &str, key: &str) -> bool {
+    toml::from_str::<toml::Value>(contents)
+        .ok()
+        .and_then(|v| v.get("method").and_then(|m| m.as_table()).map(|t| t.contains_key(key)))
+        .unwrap_or(false)
+}
+
+/// The NUTS θ-move was asked for and the model has no rate gradients to run
+/// it on (no estimated parameter reaches a transition rate), so PGAS would run
+/// Metropolis-within-Gibbs instead. Explicitly requested: refused. The
+/// default: a notice, then the fallback.
+pub fn nuts_unavailable(use_nuts_declared: bool) -> Result<String, String> {
+    let why = "the model has no rate gradients to run it on: no parameter reaches a \
+               transition rate, so there is nothing for NUTS to differentiate";
+    if use_nuts_declared {
+        Err(format!(
+            "`use_nuts = true` asks PGAS for the NUTS θ-move, and {why}. Set \
+             `use_nuts = false` (Metropolis-within-Gibbs), or delete the line."
+        ))
+    } else {
+        Ok(format!(
+            "PGAS will update θ by Metropolis-within-Gibbs, not NUTS (the default): {why}. \
+             Set `use_nuts = false` to say so and silence this."
+        ))
+    }
+}
+
 /// Refuse a `[method]` key the method knows but the method's own settings
 /// leave with nothing to do, so the file never states a setting the run
 /// does not use. The CLI flags that write the same fields get the same
@@ -4398,6 +4429,22 @@ cooling = 0.7
                 parse(&mh).unwrap_or_else(|e| panic!("the same file with mh validates: {e}"));
             }
         }
+    }
+
+    /// `use_nuts` is defaulted, not declared, unless `[method]` spells it; the
+    /// two get different answers when the model has no gradients.
+    #[test]
+    fn nuts_without_gradients_is_refused_when_asked_for_and_noted_when_defaulted() {
+        let explicit = "[method]\nalgorithm = \"pgas\"\nuse_nuts = true\n";
+        let defaulted = "[method]\nalgorithm = \"pgas\"\n";
+        assert!(method_declares_key(explicit, "use_nuts"));
+        assert!(!method_declares_key(defaulted, "use_nuts"));
+        assert!(!method_declares_key("use_nuts = true\n[method]\n", "use_nuts"),
+            "only a key under [method] counts");
+        let err = nuts_unavailable(true).unwrap_err();
+        assert!(err.contains("use_nuts = true") && err.contains("rate gradients"), "{err}");
+        let note = nuts_unavailable(false).unwrap();
+        assert!(note.contains("Metropolis-within-Gibbs"), "{note}");
     }
 
     /// A known `[method]` key the method's settings leave inert is refused at
