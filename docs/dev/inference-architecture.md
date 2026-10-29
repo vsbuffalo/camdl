@@ -62,8 +62,8 @@ seed)`,
 `runner.rs:171-174`, draw at `:245-265`). Branch `docs/method-scoped-settings`
 moves both out of the problem: the step keys into `[method]` tables (its §4),
 and `start` out of the fit-level digest through `Problem::identity_view()`, with
-the method level hashing the resolved starts (its §5.2, a coordinated amendment
-to parameter-roles).
+the method level hashing the written `[estimate].start` values (`starts_base`)
+beside the starts rule (its §5.2, a coordinated amendment to parameter-roles).
 
 **I2. An engine receives one validated plan, with nothing for other methods.**
 _Violated today._ `FitRunConfig::build` takes IF2's `n_iterations`, `cooling`
@@ -138,8 +138,10 @@ An **assessment policy** value is read only after the run, to judge stored
 measurements: Â and R̂ thresholds, the decibans threshold and its SE-floor
 multiplier, a minimum ESS, the optimizer agreement range, the dt-check
 tolerance. It is in no identity, and it is recorded beside each verdict where
-recorded-only facts live (the `run.json` provenance, which already varies
-between executions of one `run_id`), never in a leaf's artifact set. That
+recorded-only facts live, never in a leaf's artifact set: the `run.json`
+provenance for a run's own verdicts (it already varies between executions of one
+`run_id`), and the `run.json` inputs for the verdict a run reached on its
+warm-start source (`inputs.starts_source.assessment`). Neither is hashed. That
 placement is what lets this rule and the run-identity rule
 (`.claude/rules/run-identity.md`: a field that changes stored bytes is identity)
 both hold.

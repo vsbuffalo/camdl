@@ -1,12 +1,12 @@
 ---
 date: 2026-10-29
-status: proposed — implements maintainer decisions D3 (assessment thresholds leave run identity) and D4 (refuse unsupported old records as inputs, keep them inspectable) of 2026-10-29; §11 records the calls made under them; §12 records the maintainer's decision on the default thresholds (gh#84); nothing is pending
+status: proposed — implements maintainer decisions D3 (assessment thresholds leave run identity) and D4 (refuse unsupported old records as inputs, keep them inspectable; method-scoped-settings §1 decision 6, recorded there as its D16) of 2026-10-29, and builds on D2 (method-scoped-settings §1 decision 4); §11 records the calls made under them; §12 records the maintainer's decision on the default thresholds (gh#84); nothing is pending
 area: fit result records / convergence verdicts / run identity / fit table, fit summary, fit predict
-issues: none filed; the follow-ups are named in §13
+issues: none filed; §13 lists what is out of scope and why, and no follow-up is open
 related:
   - ../inference-architecture.md (the invariants this implements: I6, I7, I8)
   - 2026-10-26-parameter-roles.md (accepted; untouched by this proposal)
-  - 2026-10-29-method-scoped-settings.md (branch docs/method-scoped-settings at 2df329b0; §10 here states the order: Stage 3 after its commit 3, on its D16 loader split)
+  - 2026-10-29-method-scoped-settings.md (branch docs/method-scoped-settings at 2df329b0; §10 here states the order: Stage 3 after its D16 loader-split commit)
 ---
 
 # A fit stores what it measured; whether it converged is computed when someone asks, under a policy that is named
@@ -288,6 +288,8 @@ pub struct SamplerRecord {
     /// which.
     pub point: PointEstimate,
     pub acceptance_rate: f64,
+    /// PMMH and MH: the pre-run mean log-likelihood; `None` for PGAS.
+    pub initial_loglik: Option<f64>,
     /// PMMH only (gh#764); `None` for MH and PGAS.
     pub pf_noise: Option<PfNoiseCheck>,
     // The mixing measurements stay in `<sampler>_summary.json`
@@ -324,12 +326,13 @@ impl ResultRecord {
 Fields of today's `FitState` that do not appear: `rw_sd` (deleted on branch
 `fix/settings-silent-noops`, `e9358984`), `input_hash` (never set: every writer
 passes `None`, `mod.rs:1477`, `nlopt_stage.rs:281`, `pmmh.rs:910`,
-`pgas.rs:1637`; no reader), `resolved_gate` (policy, §4.3), `initial_loglik`
-(written as −∞ or NaN by IF2, PGAS and NLopt, and as the pre-run mean only by
-PMMH; it stays in PMMH's `SamplerRecord` only if a reader is found during Stage
-3, and is otherwise deleted with the struct), and `n_good_chains` (now
-`chains.completed`, always written). `resolved_loglik_eval` becomes
-`CleanEval`'s three recorded fields.
+`pgas.rs:1637`; no reader), `resolved_gate` (policy, §4.3), and `n_good_chains`
+(now `chains.completed`, always written). `resolved_loglik_eval` becomes
+`CleanEval`'s three recorded fields. `initial_loglik` is kept, on
+`SamplerRecord` only: `fit summary` reads it (`fit_summary.rs:3184-3185`,
+rendered at `:3234`) and shows it only when finite, and only the PMMH runner
+(and MH through it) writes a finite value, the pre-run mean (`pmmh.rs:913`);
+IF2, NLopt and PGAS write −∞ or NaN, which the reader already discards.
 
 ### 4.2 Measurements
 
@@ -374,6 +377,10 @@ pub struct DiagnosticPolicy {
     pub dt_check: DtCheckPolicy,
 }
 
+// Every nested policy struct carries the same attributes as the outer one:
+// #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// #[serde(deny_unknown_fields, default)]
+// so `[assessment.nlopt] a_thresh` is refused, not ignored.
 pub struct If2Policy {
     pub a_thresh: f64,            // 1.01   (config_v2.rs:1863)
     pub decibans_thresh: f64,     // 30.0   (config_v2.rs:1864)
@@ -397,6 +404,9 @@ pub struct DtCheckPolicy {
     /// changes the verdict, as today.
     pub se_inflation_ratio: f64,  // 2.0    (dt_check.rs:146)
 }
+/// TOML: `tolerance = "backend"` (the default), `tolerance = "strict"`, or a
+/// number of nats, `tolerance = 0.5`. A hand-written `Deserialize` takes a
+/// string or a float and refuses any other string, naming the three forms.
 pub enum DtTolerance {
     /// 2.0 nats chain-binomial, 0.5 ODE (dt_check.rs:115-120).
     BackendDefault,
@@ -568,9 +578,12 @@ Three kinds of surface report a verdict, and each carries its `AppliedPolicy`:
    digest are shown (§8). `--as-run` shows the recorded verdicts instead.
 3. **The warm-start source check** (`starts = { from_mle = "@h" }`) assesses the
    source under the consuming run's policy and records the outcome in the
-   consuming run's `run.json` `inputs.starts_source.assessment` (the field
-   gh#896 adds, branch `fix/gh896-handles`). It is not hashed: the check decides
-   whether the run proceeds, never what it computes.
+   consuming run's `run.json` `inputs.starts_source.assessment`. It is not
+   hashed: the check decides whether the run proceeds, never what it computes.
+   `inputs.starts_source` is added by gh#896 (branch `fix/gh896-handles`), which
+   also records the source's handle and `run_id` there. If Stage 2 lands first,
+   it creates `inputs.starts_source` holding only `assessment`, and gh#896 adds
+   the other two keys to the same object.
 
 ### 4.6 Overriding the policy
 
@@ -637,8 +650,9 @@ fit's verdict moves under the default policy except as §8 states.
 
 ## 6. Old records are refused as inputs and read for inspection (D4)
 
-This section follows method-scoped-settings D16 (its §7.5, maintainer decision),
-which splits the loader by use; Stage 3 carries that split onto the new type.
+This section implements maintainer decision D4, which method-scoped-settings
+lists as its §1 decision 6 and records as its D16 (its §7.5), which splits the
+loader by use; Stage 3 carries that split onto the new type.
 
 **The tag.** A `fit_state.toml` written after Stage 3 begins
 `schema = "camdl.fit-result/v1"` and `producer = "<camdl version>"`.
@@ -692,12 +706,41 @@ error: fits/sir-198ada3a/if2-607db55a/seed_1-06cbd6b3/fit_state.toml was
 method-scoped-settings §7.5 is to carry the same one: the `from_mle` start
 (`chain_starts.rs:1031`), `profile`'s `from_mle` start (`profile.rs:1953`), the
 warm-start source check for `from_mle` and `from_posterior`
-(`check_source_converged`, its load at `gating.rs:441`), and the runner reading
-back the record it just wrote (`mod.rs:2101`). Three paths are not on it because
-they do not read `fit_state.toml`: `fit run --resume` copies only
-`resume_state.bin` and `parameter_traces.tsv` from the base's chain directories
-(`copy_resume_carryover`, `mod.rs:2131-2149`), and `profile --fit` and
-`--fixed-file` read the fit config and `mle_params.toml`.
+(`check_source_converged`, its load at `gating.rs:441` and the sampler arm
+below), and the runner reading back the record it just wrote (`mod.rs:2101`).
+Three paths are not on it because they do not read `fit_state.toml`:
+`fit run --resume` copies only `resume_state.bin` and `parameter_traces.tsv`
+from the base's chain directories (`copy_resume_carryover`, `mod.rs:2131-2149`),
+and `profile --fit` and `--fixed-file` read the fit config and
+`mle_params.toml`.
+
+**The source check's sampler arm loads through `load_input` too, and propagates
+every error.** Today a source whose `fit_state.toml` has no chain-agreement
+table falls through to `sampler_source_verdict` (`gating.rs:491-512`), which
+reads `run.json` with `.ok()` and the result with
+`MethodResult::load_from(..).ok()?` (`gating.rs:497`). A load error there
+becomes `None`, which the caller treats as converged, so a `from_posterior`
+source with an unreadable or pre-v1 record is accepted without any check
+(verified by reading; branch `fix/settings-silent-noops` is fixing it on main).
+After: the source check calls `ResultRecord::load_input` once, for every method,
+and passes `RecordError` up as the refusal; `sampler_source_verdict` takes the
+loaded record and its `PosteriorDiagnostics` and reads no file itself.
+
+**The inspection readers are `fit summary`, `fit table` and `fit predict`, and
+nothing else.** Each calls `load_for_inspection`: a legacy record gives the
+notice, and a corrupt or one-based one is an error (a row error in `fit table`,
+which lists the rest). The reads that today swallow a load error are named here
+with what each becomes:
+
+- `fit_summary.rs:1746`, `FitState::load(..).ok()` for the identity block:
+  propagates.
+- `method_result::point_start`, `.ok()?` (`method_result.rs:936`), reached from
+  `fit predict` and `fit summary`: propagates (below).
+- `gating.rs:497`: an input path, above.
+
+`NloptStageResult::load` and `If2StageResult::load` (`method_result.rs:972`,
+`:1017`) already map a load error to `MethodResultError::Io` and propagate it;
+they move to `load_for_inspection` unchanged in that respect.
 
 **`fit predict` is an inspection reader.** Its numbers come from `draws.tsv` and
 `mle_params.toml`; it reads the record only to label convergence (the
@@ -712,7 +755,7 @@ predict call sites propagate the error. A completed leaf always has a record
 (`load_stage_result_or_exit`, `mod.rs:2096-2110`), so a missing file is an error
 too.
 
-**The inspection path.** `fit summary` and `fit table` call
+**The inspection path.** `fit summary`, `fit table` and `fit predict` call
 `load_for_inspection`. A legacy state is adapted into `Measurements` by the
 Stage 1 adapter, which already reads `FitState`, so an old fit is assessed under
 the reader's policy with the initial-state exemption applied to the parameters
@@ -914,17 +957,32 @@ converted spelling; `--max-rhat` refused on an IF2 `fit run` and on
 whose recorded verdict differs from the read-time one is marked. Fixed-seed
 check.
 
+Stage 2 also extends method-scoped-settings' `FitConfig::load_archived` (its
+§7.2), the loader for a stored fit's `fit.toml.original`. `fit table`
+(`load_archived_fit_toml`, `fit_table.rs:297-309`) and the `@handle` lookup
+(`handle.rs:174-199`) reload that copy, so a stored fit whose copy carries
+`[method.gate]` or `[method.dt_check] threshold_nats` would otherwise become
+unlistable and unaddressable once Stage 2 refuses those keys. `load_archived`
+sets them aside with the same one notice, listing them; anything that would run
+from the stored config still refuses them. Test: `fit table` over a store
+holding a fit archived with `[method.gate] decibans_thresh = 60` lists it with
+the notice once, and `@handle` resolves it; red when `load_archived` refuses the
+key.
+
 **Stage 3: per-method result records (D4).** `ResultRecord` replaces `FitState`;
 the four writers construct their `MethodRecord` variant; the input paths of §6
 call `ResultRecord::load_input` and `fit table` and `fit summary` call
 `load_for_inspection`, carrying method-scoped-settings D16's split onto the new
 type; `MethodResult` is rebuilt on `ResultRecord` without verdict fields. Lands
-after method-scoped-settings commit 3 (§10). Tests: each variant round-trips; a
-committed pre-v1 `fit_state.toml` fixture is refused as a `from_mle` source with
-both versions in the message, and is shown by `fit
-summary` and `fit table` with
-exit 0; an `if2` record whose body is `[nlopt]` fails to parse. Fixed-seed
-check.
+after the method-scoped-settings commit that splits `FitState::load` into
+`load_input` and `load_for_inspection` and adds a `schema` tag to `FitState`
+(its §11 names it) (§10). Tests: each variant round-trips; a committed pre-v1
+`fit_state.toml` fixture is refused as a `from_mle` source and as a
+`from_posterior` source, each with both versions in the message (the second red
+on `a9a89178`, where `gating.rs:497` accepts it), and is shown by `fit
+summary`
+and `fit table` with exit 0; an `if2` record whose body is `[nlopt]` fails to
+parse. Fixed-seed check.
 
 **Stage 4: `fit predict` reports the assessment.** `PolicyArgs` on
 `fit
@@ -945,31 +1003,48 @@ TSV it writes is byte-identical at a fixed seed.
   refuses an unsupported old `fit_state.toml` naming the producer and schema
   versions, and `FitState::load_for_inspection`, which `fit summary` and
   `fit table` use and which returns the state with one notice. Stage 3 lands
-  after its commit 3 and keeps that split: `ResultRecord::load_input` and
+  after its D16 commit and keeps that split: `ResultRecord::load_input` and
   `ResultRecord::load_for_inspection` (§6) are the same two functions on the new
   type, and there is no key-specific refusal. Stage 3 also takes its flag name
   `initial_state` and list name `initial_state_params` (its §7.5). The two
   documents carry one list of input paths, §6 here; `fit run --resume` is not on
   it. Its §5.2 moves `[estimate].start` out of the fit-level digest
-  (`Problem::identity_view()`) and hashes the resolved starts at the method
-  level, which settles the problem-identity half of D2 that this proposal does
-  not touch. Its `ExecutionPlan` (its §6.1) carries no policy: `MethodPlan`
-  holds execution controls only. Its `If2Plan` (as of `2df329b0`) holds no
-  `gate` and keeps only the dt-check measurement controls (`enabled`,
-  `n_halvings`, particles, replicates); the tolerance is `DtCheckPolicy` here.
-  `MhOdePlan.dt_check` is read the same way. Either order of Stage 2 and its
-  commit 3 works; both edit `Algorithm::IF2`, so the second rebases.
+  (`Problem::identity_view()`) and hashes, at the method level, the written
+  `[estimate].start` values (`starts_base`, from `Problem::start_values`) beside
+  the starts rule already in the method payload, which settles the
+  problem-identity half of D2 (method-scoped-settings §1 decisions 4 and 5) that
+  this proposal does not touch. Its `ExecutionPlan` (its §6.1) carries no
+  policy: `MethodPlan` holds execution controls only. Its `If2Plan` (as of
+  `2df329b0`) holds no `gate` and keeps only the dt-check measurement controls
+  (`enabled`, `n_halvings`, particles, replicates); the tolerance is
+  `DtCheckPolicy` here. The same holds for the dt-check measurement controls
+  that `MhOdePlan` and `NloptPlan` carry (MH and the NLopt optimizers also run
+  the dt-check). Either order of Stage 2 and the step-series commit that adds
+  the `[method]` tables works; both edit `Algorithm::IF2`, so the second
+  rebases.
 - **`2026-10-26-parameter-roles.md`** (accepted) and its Stage 2: no type here
   depends on `ResolvedProblem`; `NloptAgreement.search_box` is filled from the
   search box the partition resolves once it exists, and from the fit sidecar
   until then.
-- **`feat/support-transforms`**: changes which estimates are reported near a
-  bound (`877c517a`), a run-time finding this proposal leaves alone (§13), and
-  edits `if2.rs` and the NLopt start code; no stage here touches those lines.
+- **`feat/support-transforms`**: carries method-scoped-settings' step series,
+  including the D16 commit Stage 3 depends on. It also changes which estimates
+  are reported near a bound (`877c517a`), a run-time finding this proposal
+  leaves alone (§13). Its step series edits `state.rs`, `config_v2.rs`
+  (`Algorithm::IF2`, `EstimateSpecV2`), `nlopt_stage.rs` and the IF2 arm of
+  `mod.rs`, which Stages 0–3 here also edit, so whichever lands second rebases
+  onto the other.
+
+**Landing order.** The method-scoped-settings and parameter-roles work lands as
+step series (on `feat/support-transforms`) → plan series → parameter-roles Stage
+2 → parameter-roles Stage 3 → release. Stages 0, 1 and 2 here are independent of
+that sequence: Stage 1 needs only `fix/settings-silent-noops`'s `assess_if2`,
+and Stage 2 needs Stage 1. Stage 3 lands after the D16 commit of the step
+series. Stage 4 needs Stage 3.
+
 - **`fix/gh896-handles`**: a handle resolves to one leaf, and a sourced run
-  records `inputs.starts_source`. §4.5 item 3 adds `assessment` to that object;
-  if this lands first, the source check records nothing until gh#896 lands. Rows
-  of `fit table` are per leaf on that branch, which is what a per-leaf verdict
+  records `inputs.starts_source`. §4.5 item 3 adds `assessment` to that object,
+  and creates the object itself if Stage 2 lands before gh#896. Rows of
+  `fit table` are per leaf on that branch, which is what a per-leaf verdict
   needs.
 
 ## 11. Decisions made in this proposal
@@ -1005,8 +1080,8 @@ already splits loading by use (`load_input` refuses, `load_for_inspection` reads
 with a notice), and an old record is inspected through the Stage 1 adapter that
 reads `FitState`, so no second compatibility layer is written.
 
-**`initial_loglik` is deleted unless Stage 3 finds a reader.** Three of four
-writers fill it with a sentinel.
+**`initial_loglik` is kept on `SamplerRecord`.** `fit summary` reads it
+(`fit_summary.rs:3184-3185`, `:3234`); only PMMH and MH write a finite value.
 
 ## 12. Default thresholds: decided by the maintainer (gh#84)
 
