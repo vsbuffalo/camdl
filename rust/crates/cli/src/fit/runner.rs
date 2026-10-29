@@ -1351,6 +1351,16 @@ pub fn near_a_bound(spec: &EstimatedParam, v: f64, start: f64) -> Option<(f64, &
     if lo.is_finite() && start - lo > 0.0 && v - lo < NEAR_HALF_BOUND_FRACTION * (start - lo) {
         return Some((lo, "lower"));
     }
+    // A start on the bound itself has no distance to take 1% of. The chain
+    // ran from the start moved inward (`Transform::forward`), so the report
+    // fires when the estimate is still within two orders of magnitude of that
+    // moved start: it has not left the bound it began on.
+    if lo.is_finite() && start <= lo {
+        let moved = spec.from_transformed(spec.to_transformed(start)) - lo;
+        if v - lo < moved / NEAR_HALF_BOUND_FRACTION {
+            return Some((lo, "lower"));
+        }
+    }
     None
 }
 
@@ -6726,6 +6736,10 @@ dt = 1.0
             "θ̂ < 0.01·θ₀ on [0, ∞) is near the bound");
         assert_eq!(near_a_bound(&half, 0.006, 0.5), None);
         assert_eq!(near_a_bound(&half, 3.0, 0.5), None);
+        // A start on the bound itself: the estimate that never left it is
+        // reported, one that moved off it is not.
+        assert_eq!(near_a_bound(&half, 1e-9, 0.0), Some((0.0, "lower")));
+        assert_eq!(near_a_bound(&half, 0.3, 0.0), None);
         let boxed = domain_param("b", Transform::Interval { lo: 0.0, hi: 2.0 }, 1.0);
         assert_eq!(near_a_bound(&boxed, 0.01, 1.0), Some((0.0, "lower")));
         assert_eq!(near_a_bound(&boxed, 1.995, 1.0), Some((2.0, "upper")));

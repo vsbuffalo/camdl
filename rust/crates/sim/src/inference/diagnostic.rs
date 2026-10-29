@@ -595,10 +595,11 @@ impl DiagnosticKind {
                     target, rate * 100.0, kernel.band_label())
             }
             Self::ParamNearBound { param, value, bound, bound_type } =>
-                format!("'{}' = {:.4} is near {} bound {:.4} and may be on it. IF2 cannot \
+                format!("'{}' = {} is near {} bound {} and may be on it. IF2 cannot \
                          place an estimate exactly on a bound; to test whether the maximum \
                          is on it, profile '{}' or refit with nl-bobyqa, which can.",
-                    param, value, bound_type, bound, param),
+                    param, format_start_value(*value), bound_type, format_start_value(*bound),
+                    param),
             Self::ProfileCIUnbounded { param, direction } =>
                 format!("Profile CI for '{}' is unbounded {}.", param, direction),
             Self::FlatProfile { param, .. } =>
@@ -1190,6 +1191,17 @@ mod tests {
             ResumeParamMissing { .. } => 26,
             PerturbedSwarmInfeasible { .. } => 27,
         }
+    }
+
+    /// A near-bound report shows a small estimate, not `0.0000`: on `[0, ∞)`
+    /// the report fires precisely when θ̂ is small.
+    #[test]
+    fn a_small_near_bound_value_is_shown() {
+        let d = DiagnosticKind::ParamNearBound {
+            param: "c".into(), value: 3.2e-6, bound: 0.0, bound_type: "lower".into(),
+        };
+        let r = d.render();
+        assert!(r.contains("'c' = 3.2000e-6") && r.contains("bound 0.0000"), "{r}");
     }
 
     /// A rank-normalized R̂ is `+∞` when every chain sat at its own single
