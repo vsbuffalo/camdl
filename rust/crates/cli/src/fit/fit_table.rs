@@ -745,6 +745,24 @@ fn format_age(seconds: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stored fit is read back by the same parser `fit run` uses, so a
+    /// check that refuses a config at `fit run` must not live in it: a fit
+    /// stored before the check (here: `max_tree_depth` beside
+    /// `use_nuts = false`, refused at `fit run` since ecde1ad2) would stop
+    /// being listed by `fit table` and resolvable by handle.
+    #[test]
+    fn an_archived_config_with_a_now_refused_key_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fit.toml.original"), "\
+[model]\ncamdl = \"m.camdl\"\n\
+[estimate]\nbeta = { bounds = [0.01, 2.0], prior = { half_normal = { sigma = 1.0 } } }\n\
+[fixed]\nN0 = 1000\n\
+[method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 2\n\
+particles = 100\nsweeps = 10\nuse_nuts = false\nmax_tree_depth = 8\n").unwrap();
+        load_archived_fit_toml(dir.path())
+            .expect("fit table and handle resolution read the archived config");
+    }
     use std::path::{Path, PathBuf};
 
     /// One-off tempdir helper that cleans up on Drop.

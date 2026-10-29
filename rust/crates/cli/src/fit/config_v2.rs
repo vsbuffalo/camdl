@@ -2546,7 +2546,20 @@ fn validate_method_keys(contents: &str, method: &Method) -> Result<(), String> {
             allowed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
         ));
     }
-    refuse_inert_method_keys(raw_method, &method.algorithm)
+    Ok(())
+}
+
+/// Refuse the `[method]` keys this file's method leaves inert. Run by
+/// `fit run` only, on the file it is about to run — never by the shared
+/// parser, which also reads stored fits' archived `fit.toml.original` for
+/// `fit table` and handle resolution: a fit stored before a key became
+/// refused must stay listable.
+pub fn refuse_inert_method_keys_in(contents: &str, method: &Method) -> Result<(), String> {
+    let raw: toml::Value = toml::from_str(contents).map_err(|e| format!("parse error: {e}"))?;
+    match raw.get("method").and_then(toml::Value::as_table) {
+        Some(raw_method) => refuse_inert_method_keys(raw_method, &method.algorithm),
+        None => Ok(()),
+    }
 }
 
 /// Whether `[method]` in this fit.toml source spells `key` — as opposed to
@@ -4528,7 +4541,9 @@ cooling = 0.7
             (pmmh, "adapt = false\nadapt_start = 50\n", "adapt_start"),
             (mh, "adapt = false\nadapt_start = 50\n", "adapt_start"),
         ] {
-            let err = parse(&format!("{base}{method}{extra}"))
+            let src = format!("{base}{method}{extra}");
+            let cfg = parse(&src).expect("the shared parser reads it (stored fits)");
+            let err = refuse_inert_method_keys_in(&src, &cfg.inference.method.unwrap())
                 .expect_err(&format!("`{key}` is inert beside `{extra}`"));
             assert!(err.contains(&format!("`{key}`")) && err.contains("no effect"), "{err}");
         }
@@ -4537,7 +4552,9 @@ cooling = 0.7
             (pgas, "use_nuts = false\n"),
             (pmmh, "adapt = true\nadapt_start = 50\n"),
         ] {
-            parse(&format!("{base}{method}{extra}"))
+            let src = format!("{base}{method}{extra}");
+            let cfg = parse(&src).unwrap();
+            refuse_inert_method_keys_in(&src, &cfg.inference.method.unwrap())
                 .unwrap_or_else(|e| panic!("`{extra}` is a live setting: {e}"));
         }
     }
