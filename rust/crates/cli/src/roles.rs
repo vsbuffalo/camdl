@@ -92,13 +92,8 @@ pub struct SearchBox {
 pub enum BoxFrom {
     FitConfig,
     Cli,
-    /// The support: the model's declared range, or the kind's finite one.
+    /// The support: the model's declared range, or the kind's.
     Support,
-    /// Nothing declared and the box differs from the support: the runner's
-    /// `[0, ∞)` (`fit::runner::default_search_box`) for a parameter whose IR
-    /// carries no kind, whose support is the whole line. A `real` or
-    /// `instant` parameter searches its support, `(−∞, ∞)`.
-    Fallback,
 }
 
 /// An estimated parameter: its support, search box and prior are distinct.
@@ -744,6 +739,8 @@ pub enum RoleError {
     /// A given search box leaves the model's declared range or, where none is
     /// declared, its kind's support.
     BoxOutsideSupport { message: String },
+    /// An estimated parameter whose IR records no kind, so it has no support.
+    NoKind { message: String },
 }
 
 impl std::fmt::Display for RoleError {
@@ -786,7 +783,8 @@ impl std::fmt::Display for RoleError {
                 "scenario `{scenario}` sets or scales `{name}`, which this run declares {}; \
                  a scenario gives values to fixed parameters only",
                 role.word()),
-            RoleError::BoxOutsideSupport { message } => write!(f, "{message}"),
+            RoleError::BoxOutsideSupport { message } | RoleError::NoKind { message } =>
+                write!(f, "{message}"),
             RoleError::SimplexPartlyHeld { group, held } => write!(f,
                 "simplex group [{}] is partly held ({} not estimated); the free members \
                  would have to sum to one minus the held ones, which a simplex group cannot \
@@ -1007,13 +1005,14 @@ fn file_of(by: &Declaration) -> PathBuf {
 
 /// The model's admissible values for `p`: its declared `in [lo, hi]`, else
 /// its kind's range — `probability` `[0, 1]`; `rate`, `positive`, `count`,
-/// `duration` `[0, ∞)`; `real`, `instant` and an unannotated parameter
-/// `(−∞, ∞)`.
-pub fn support(p: &ir::parameter::Parameter) -> Support {
+/// `duration` `[0, ∞)`; `real` and `instant` `(−∞, ∞)`. A parameter
+/// without a kind has no support and is refused
+/// ([`crate::fit::runner::estimated_kind`]).
+pub fn support(p: &ir::parameter::Parameter, kind: ir::parameter::ParamKind) -> Support {
     if let Some((lower, upper)) = p.bounds() {
         return Support { lower, upper, from: SupportFrom::Declared };
     }
-    let (lower, upper) = crate::fit::runner::kind_support(p)
+    let (lower, upper) = crate::fit::runner::kind_support(kind)
         .map_or((f64::NEG_INFINITY, f64::INFINITY), |(range, _)| range);
     Support { lower, upper, from: SupportFrom::Kind }
 }
@@ -1024,7 +1023,9 @@ fn estimated(
     cli_bounds: Option<(f64, f64)>,
     inputs: &RoleInputs<'_>,
 ) -> Result<Estimated, RoleError> {
-    let support = support(p);
+    let kind = crate::fit::runner::estimated_kind(p)
+        .map_err(|message| RoleError::NoKind { message })?;
+    let support = support(p, kind);
     // The box the run searches is the one `resolve_search_box` gives the
     // method, so the record describes what ran.
     let given_box = spec.and_then(|s| s.bounds).or(cli_bounds);
@@ -1033,12 +1034,11 @@ fn estimated(
     let from = match (spec.and_then(|s| s.bounds), cli_bounds) {
         (Some(_), _) => BoxFrom::FitConfig,
         (None, Some(_)) => BoxFrom::Cli,
-        (None, None) if (lower, upper) == (support.lower, support.upper) => BoxFrom::Support,
-        (None, None) => BoxFrom::Fallback,
+        (None, None) => BoxFrom::Support,
     };
     let search = SearchBox { lower, upper, from };
     let transform = crate::fit::runner::derive_transform_with_bounds(
-        p, (search.lower, search.upper));
+        kind, (search.lower, search.upper));
     let prior = crate::fit::priors_precedence::resolve_priors_with_precedence(
         std::slice::from_ref(&p.name), inputs.fit_estimate, inputs.model,
     ).remove(0);

@@ -3089,8 +3089,9 @@ impl FitConfig {
                 let Some(spec) = self.problem.estimate.get(&name) else { continue };
                 let Some(p) = model.parameters.iter().find(|p| p.name == name) else { continue };
                 let Ok(bx) = super::runner::resolve_search_box(&name, spec.bounds, p) else { continue };
+                let Ok(pkind) = super::runner::estimated_kind(p) else { continue };
                 // A log transform on (0, ∞) has no wall; any finite end does.
-                match super::runner::derive_transform_with_bounds(p, bx) {
+                match super::runner::derive_transform_with_bounds(pkind, bx) {
                     Transform::None => {}
                     Transform::Log { lo, hi } if lo <= 0.0 && hi == f64::INFINITY => {}
                     Transform::Log { lo, hi } | Transform::Logit { lo, hi } => {
@@ -3136,7 +3137,8 @@ impl FitConfig {
             let Some(p) = model.parameters.iter().find(|p| p.name == *name) else { continue };
             let Some(h) = p.hierarchical() else { continue };
             let Ok(bx) = super::runner::resolve_search_box(name, spec.bounds, p) else { continue };
-            let kept = match super::runner::derive_transform_with_bounds(p, bx) {
+            let Ok(kind) = super::runner::estimated_kind(p) else { continue };
+            let kept = match super::runner::derive_transform_with_bounds(kind, bx) {
                 Transform::Log { lo, hi } | Transform::Logit { lo, hi } => (lo, hi),
                 Transform::None => continue,
             };
