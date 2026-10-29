@@ -3377,12 +3377,17 @@ error: starts source @scout: it did not converge.
   Pick one:
     - re-run it with more chains or iterations
     - narrow bounds to the basin its best chain found
-    - mark weakly-identified initial-state params as `perturb_only_at_t0 = true`
-      (reported but not gated)
+    - fix a weakly identified initial-state parameter rather than estimate it
 
   To start from it anyway (the starts may launder multi-modality):
     camdl fit run fit.toml --allow-nonconverged-source
 ```
+
+Every estimated parameter's Â is judged, initial-state (`perturb_only_at_t0`)
+parameters included, and an Â that is not finite (within-chain variance
+collapsed) makes the verdict incomplete, which is refused like a failure: the
+decibans leg does not stand in for it, since chains spread along a ridge can
+agree in log-likelihood while disagreeing in θ.
 
 `--allow-nonconverged-source` downgrades the refusal to a warning that repeats
 the verdict and says `starting from it anyway`. A source between the soft and

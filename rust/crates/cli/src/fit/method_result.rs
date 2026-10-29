@@ -1623,10 +1623,9 @@ mod tests {
     }
 
     /// One IF2 fit, one verdict. The fit's only Â failure is on a
-    /// `perturb_only_at_t0` parameter (I0), whose Â the gate reports but does
-    /// not gate on. `check_source_converged` accepts the leaf as a `from_mle`
-    /// source; `fit table` (through `If2StageResult`) and `fit summary` must
-    /// call the same fit converged.
+    /// `perturb_only_at_t0` (initial-state) parameter, I0; every estimate is
+    /// judged, so `fit table` reports a failure and the leaf is refused as a
+    /// `from_mle` source.
     #[test]
     fn if2_verdict_is_the_same_for_the_table_the_summary_and_a_starts_source() {
         let tmp = tempdir("if2_t0_only");
@@ -1644,11 +1643,12 @@ mod tests {
         state.perturb_only_at_t0_params = vec!["I0".into()];
         state.save(&dir.to_string_lossy()).unwrap();
 
-        crate::fit::gating::check_source_converged(dir, "@t0", false)
-            .expect("a from_mle source whose only Â failure is on a t0 parameter is accepted");
+        let err = crate::fit::gating::check_source_converged(dir, "@t0", false)
+            .expect_err("an initial-state Â failure fails the source check");
+        assert!(err.contains("I0"), "{err}");
         let r = If2StageResult::load(dir).unwrap();
-        assert_eq!(r.gate_verdict, GateVerdict::Pass,
-            "`fit table` must agree with the source check: the t0 Â is reported, not gated");
+        assert_eq!(r.gate_verdict, GateVerdict::FailA,
+            "`fit table` agrees with the source check");
     }
 
     /// A NaN Â (within-chain variance collapsed) is unavailable, and an
