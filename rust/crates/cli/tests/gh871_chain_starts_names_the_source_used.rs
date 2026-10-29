@@ -247,7 +247,9 @@ starts    = {{ from_mle = \"@prime\" }}
         .expect("spawn fit summary");
     let summary = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(out.status.success(), "fit summary failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    assert!(summary.contains("seeded from:  from_mle @prime (every chain at one point)"),
+    // gh#896: the handle, then the run it read.
+    let seeded = summary.lines().find(|l| l.contains("seeded from:")).unwrap_or("");
+    assert!(seeded.contains("from_mle @prime, run ") && seeded.ends_with("(every chain at one point)"),
         "the summary must say where the chains began:\n{summary}");
     assert!(summary.contains("R̂ — not assessed: all 2 chains started at one point (starts = from_mle @prime)"),
         "R̂ over chains that began together must be reported as not assessed, with the rule:\n{summary}");

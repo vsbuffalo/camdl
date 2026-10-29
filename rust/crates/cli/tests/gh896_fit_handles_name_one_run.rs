@@ -332,6 +332,12 @@ fn a_label_names_one_run_and_never_moves() {
     let deps: Vec<&str> =
         rec["deps"].as_array().unwrap().iter().map(|d| d["run_id"].as_str().unwrap()).collect();
     assert_eq!(deps, vec![scout_id.as_str()], "the source's run id is in deps");
+    assert_eq!(rec["inputs"]["starts_source"]["handle"], "@scout");
+    assert_eq!(rec["inputs"]["starts_source"]["run_id"], scout_id.as_str(),
+        "the record links the handle to the run it read");
+    let summary = p.ok(&["fit", "summary", &post[0].to_string_lossy()]);
+    assert!(summary.contains(&format!("from_mle @scout, run {}", &scout_id[..12])),
+        "the summary names the source run beside its handle:\n{summary}");
 }
 
 /// One invocation writing several runs has no one run to give a label to.
