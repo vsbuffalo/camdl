@@ -1475,28 +1475,28 @@ pub fn refuse_degenerate_auto_rw_sd(
     Ok(())
 }
 
-/// Auto-compute rw_sd from bounds on the transformed scale.
+/// Auto-compute rw_sd from bounds, as a natural-scale value.
 ///
-/// Returns a natural-scale rw_sd value. At each IF2 perturbation step,
-/// `EstimatedParam::transformed_sd(natural_sd, current_value)` re-converts
-/// this to the transformed scale using the delta method at the CURRENT
-/// parameter value. So the midpoint used here is just a reference point
-/// for expressing the natural-scale number — the actual perturbation
-/// adapts to the current position through transformed_sd. Any reference
-/// point (midpoint, lower bound, current value) would produce the same
-/// perturbation on the transformed scale.
+/// Each perturbation converts the natural-scale `rw_sd` to the transformed
+/// scale at the particle's CURRENT value
+/// (`EstimatedParam::transformed_sd(natural_sd, current_value)`, the delta
+/// method). So the transformed-scale step the heuristic aims at below holds
+/// at its reference point only: for a log transform the step at value `x` is
+/// `rw_sd / x`, which is the intended `log_range / 20` at the geometric
+/// midpoint and larger below it, smaller above.
 ///
-/// Log: log_range / 20 on transformed scale, converted to natural at geometric midpoint.
-///   For sigma_se in [0.001, 5.0]: log_range = 8.5, log_sd = 0.43, meaning ~±50% per step.
-/// Logit: range / 6 on natural scale. Logit range is ~12 (-6 to 6), /6 gives ~2.0 on logit.
-/// Identity: (hi - lo) / 6.
+/// Log: log_range / 20 on the transformed scale, converted to natural at the
+///   geometric midpoint. For sigma_se in [0.001, 5.0]: log_range = 8.5,
+///   log_sd = 0.43, about ±50% per step at the midpoint.
+/// Logit: (hi − lo) / 6 on the natural scale.
+/// Identity: (hi − lo) / 6.
 ///
-/// The /20 vs /6 asymmetry: log is unbounded (perturbations accumulate) while logit
-/// saturates at bounds. Log needs more conservative defaults.
+/// The /20 vs /6 asymmetry: log is unbounded (perturbations accumulate) while
+/// logit saturates at bounds. Log needs more conservative defaults.
 ///
-/// This is a starting heuristic, not a solution. Scout's MAD-based
-/// calibration replaces it for refine. The modeler can override with
-/// explicit rw_sd in fit.toml or --rw-sd on the CLI.
+/// A starting heuristic, not a solution: give an explicit `rw_sd` in the fit's
+/// `[estimate]` (or `--rw-sd` on `camdl profile`) once the traces show the
+/// scale.
 pub fn auto_rw_sd_from_value(_current_value: f64, lower: f64, upper: f64, transform: &Transform) -> f64 {
     match transform {
         Transform::Log { lo, hi } => {

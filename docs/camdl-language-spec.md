@@ -5290,9 +5290,9 @@ revision.
 - Mixed: `--rw-sd "R0=5,sigma=auto"` — explicit where you know, auto where you
   don't.
 
-In a fit, an `algorithm = "if2"` stage derives its perturbation scale from each
-parameter's declared `bounds` — there is no per-parameter `rw_sd` knob on the
-stage. Cooling follows pomp's `cooling.fraction.50`: the SD reaches `cooling` of its
+In a fit, an `algorithm = "if2"` method takes each parameter's perturbation scale
+from that parameter's `[estimate]` `rw_sd`, and derives one from its bounds when
+`rw_sd` is absent. Cooling follows pomp's `cooling.fraction.50`: the SD reaches `cooling` of its
 initial value after `cooling_target_iters` iterations (default 50); see
 `docs/methods/cooling.md`.
 
