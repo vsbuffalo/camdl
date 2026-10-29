@@ -506,7 +506,9 @@ The structure is identical to the particle filter, with two additions:
 ```
 1. PERTURB: jitter each particle's parameters (NEW in IF2)
    For each particle i, for each estimated parameter:
-     θ_i += Normal(0, rw_sd × cooling) on the transformed scale
+     θ_i += Normal(0, sd_i × cooling) on the transformed scale, where
+     sd_i is the natural-scale rw_sd converted to the transformed scale
+     at particle i's current value (the delta method; see below)
    Parameters declared `perturb_only_at_t0` (initial conditions) are
    perturbed at t=0 only.
 

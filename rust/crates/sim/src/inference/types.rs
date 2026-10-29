@@ -53,8 +53,11 @@ pub struct EstimatedParam {
     pub index: usize,
     /// Starting value for IF2 (or the current value on resume).
     pub initial: f64,
-    /// Random walk standard deviation on the *transformed* scale.
-    /// Shrinks by `cooling_fraction` each IF2 iteration.
+    /// Random-walk standard deviation on the *natural* scale; each IF2
+    /// perturbation converts it to the transformed scale at the particle's
+    /// current value ([`EstimatedParam::transformed_sd`]). Cooled by the IF2
+    /// schedule (`if2::CoolingSchedule`): `fraction` of it remains after
+    /// `target_iters` iterations.
     pub rw_sd: f64,
     /// Scale transform applied before perturbation / MH proposals.
     pub transform: Transform,
@@ -192,8 +195,11 @@ impl EstimatedParam {
         }
     }
 
-    /// Delta method: convert a natural-scale `rw_sd` to the transformed scale.
-    /// Matches pomp's convention: the user specifies `rw.sd` on the natural scale.
+    /// Delta method: convert a natural-scale `rw_sd` to the transformed scale
+    /// at `current_value`. This differs from pomp, whose `rw.sd` is a constant
+    /// SD applied on the estimation (transformed) scale when parameter
+    /// transformations are supplied (pomp 6.5 `mif2` manual, "Parameter
+    /// transformations"; King, Nguyen & Ionides 2016, J. Stat. Softw. 69(12)).
     pub fn transformed_sd(&self, natural_sd: f64, current_value: f64) -> f64 {
         match &self.transform {
             Transform::Log { .. } => natural_sd / current_value.max(LOG_PROB_FLOOR),

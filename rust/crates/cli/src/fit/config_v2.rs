@@ -2104,7 +2104,7 @@ fn default_pmmh_adapt_start() -> usize { 300 }
 /// / PIT samples that this flag toggles. Cost is one extra
 /// per-particle obs draw per observation, on the first replicate
 /// only; the trace is auto-written to `prequential.{tsv,json}` in
-/// the stage dir. Set `record_prequential = false` in `[stages.X]`
+/// the stage dir. Set `record_prequential = false` in `[method]`
 /// to opt out (e.g. running PFilter purely for loglik SD without
 /// the diagnostic write).
 fn default_record_prequential() -> bool { true }
