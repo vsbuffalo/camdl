@@ -105,12 +105,17 @@ fn write_posterior_toml(dir: &Path, out: &Path, data: &Path, source: &Path, iter
 }
 
 fn run_fit(bin: &Path, fit_toml: &Path, threads: usize) -> std::process::Output {
+    // The tiny 4-iteration fit does not converge `tau`; the source
+    // convergence check is orthogonal to the CAS properties under test, so a
+    // downstream fit (one that starts `from_mle`) lifts it. A fit with no
+    // source has no verdict to lift, and `fit run` refuses the flag there.
+    let starts_from_a_fit = std::fs::read_to_string(fit_toml)
+        .expect("read fit toml")
+        .contains("from_mle");
+    let lift: &[&str] = if starts_from_a_fit { &["--allow-nonconverged-source"] } else { &[] };
     Command::new(bin)
         .arg("fit").arg("run").arg(fit_toml)
-        // The tiny 4-iteration fit does not converge `tau`; the source
-        // convergence check is orthogonal to the CAS properties under test,
-        // so lift it and let the downstream fit start from it.
-        .arg("--allow-nonconverged-source")
+        .args(lift)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("RAYON_NUM_THREADS", threads.to_string())
         .output()

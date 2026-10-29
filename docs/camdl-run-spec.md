@@ -3258,41 +3258,39 @@ check, `--dt-check-strict` tightens its threshold (0.5 nats for chain_binomial,
 
 **Per-algorithm overrides.** Each writes through to the method identity, so an
 overridden run is a distinct artifact rather than a cache hit on the
-un-overridden one — with the exception noted after the table.
+un-overridden one. A flag is accepted only by the methods in its row; on any
+other method `fit run` refuses it before any work, naming the flag, the method,
+and the methods that read it.
 
-| flag                      | overrides                       | algorithm |
-| ------------------------- | ------------------------------- | --------- |
-| `--decibans-thresh <DB>`  | `[method.gate].decibans_thresh` | gate      |
-| `--cooling-target-iters`  | `cooling_target_iters`          | IF2       |
-| `--max-tree-depth <N>`    | `max_tree_depth`                | PGAS      |
-| `--trajectory-warmup <N>` | `trajectory_warmup`             | PGAS      |
-| `--csmc-sweeps-per-nuts`  | `csmc_sweeps_per_nuts`          | PGAS      |
-| `--n-trajectories <N>`    | `n_trajectories`                | PGAS      |
-| `--diagonal-mass`         | `dense_mass = false`            | PGAS      |
-| `--no-nuts`               | `use_nuts = false`              | PGAS      |
-| `--no-adapt`              | `adapt = false`                 | PMMH/MH   |
-| `--adapt-start <N>`       | `adapt_start`                   | PMMH/MH   |
-| `--record-ancestry`       | `record_ancestry = true`        | PFilter   |
-| `--record-prequential`    | `record_prequential = true`     | PFilter   |
+| flag                      | overrides                           | methods that read it                   |
+| ------------------------- | ----------------------------------- | -------------------------------------- |
+| `--decibans-thresh <DB>`  | `[method.gate].decibans_thresh`     | if2, nl-sbplx, nl-bobyqa, nl-lbfgs     |
+| `--no-dt-check`           | `[method.dt_check].enabled = false` | if2, mh, nl-sbplx, nl-bobyqa, nl-lbfgs |
+| `--dt-check-halvings <N>` | `[method.dt_check].n_halvings`      | if2, mh, nl-sbplx, nl-bobyqa, nl-lbfgs |
+| `--dt-check-strict`       | `[method.dt_check].threshold_nats`  | if2, mh, nl-sbplx, nl-bobyqa, nl-lbfgs |
+| `--cooling-target-iters`  | `cooling_target_iters`              | if2                                    |
+| `--max-tree-depth <N>`    | `max_tree_depth`                    | pgas                                   |
+| `--trajectory-warmup <N>` | `trajectory_warmup`                 | pgas                                   |
+| `--csmc-sweeps-per-nuts`  | `csmc_sweeps_per_nuts`              | pgas                                   |
+| `--n-trajectories <N>`    | `n_trajectories`                    | pgas                                   |
+| `--diagonal-mass`         | `dense_mass = false`                | pgas                                   |
+| `--no-nuts`               | `use_nuts = false`                  | pgas                                   |
+| `--no-ancestor-sampling`  | `ancestor_sampling = false`         | pgas                                   |
+| `--binomial <SAMPLER>`    | `binomial`                          | pgas                                   |
+| `--no-adapt`              | `adapt = false`                     | pmmh, mh                               |
+| `--adapt-start <N>`       | `adapt_start`                       | pmmh, mh                               |
+| `--record-ancestry`       | `record_ancestry = true`            | pfilter                                |
+| `--record-prequential`    | `record_prequential = true`         | pfilter                                |
 
 The boolean overrides are one-way: they can switch a setting off, and switching
 it back means editing the TOML.
 
-> **Four flags do not re-key.** `--decibans-thresh`, `--no-dt-check`,
-> `--dt-check-strict` and `--dt-check-halvings` are applied after the run is
-> looked up in the store, so on an already-completed leaf they are silently
-> ignored and the prior verdict is served:
->
-> ```
-> $ camdl fit run fits/01_mle.toml --decibans-thresh 0.1
-> ── method: if2 ──
->   cache hit — reusing fits/01_mle-2030ba2b/if2-fee126b1/seed_1-06cbd6b3
-> $ camdl fit summary results/fits/01_mle-2030ba2b
->     decibans leg:    Δ = 0.9 dB / threshold 30.0 dB  ✓  (σ_max=0.02)
-> ```
->
-> Delete the method leaf before rerunning with any of them. Every other flag in
-> the table above re-keys correctly.
+A flag the method reads is also refused when the method's other settings leave
+it nothing to do: `--max-tree-depth` or `--diagonal-mass` with NUTS off
+(`--no-nuts` or `use_nuts = false`), `--adapt-start` with adaptation off
+(`--no-adapt` or `adapt = false`), `--dt-check-halvings` or `--dt-check-strict`
+with the dt-check off, and `--dt-check-strict` beside a declared
+`[method.dt_check] threshold_nats`.
 
 **Seeds and fits.** A fit runs at a single base seed — `--seed N`, default 1 —
 and derives each chain's seed from it by a golden-ratio mix,
