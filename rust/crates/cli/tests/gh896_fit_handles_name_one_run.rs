@@ -498,3 +498,40 @@ fn compare_scores_the_named_runs_estimate() {
     };
     assert_ne!(elpd(&a), elpd(&b), "each row scores its own run's θ̂: {v}");
 }
+
+/// A sourced run's identity is the source run, not how its handle was typed.
+/// `@scout`, the scout's leaf directory and a prefix of its run id name one
+/// run, so a run started from each is one run: the second and third are cache
+/// hits. A different source is a different run.
+#[test]
+fn the_starts_handle_spelling_is_not_identity() {
+    let p = Project::new();
+    p.config("scout.toml", &if2(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    let scout = p.leaves();
+    assert_eq!(scout.len(), 1);
+    let (scout_id, _, _) = record(&scout[0]);
+
+    p.config("post.toml", &pgas_from("\"from_prior\""));
+    let mut post_ids: Vec<String> = Vec::new();
+    for (i, handle) in ["@scout".to_string(), scout[0].display().to_string(),
+                        scout_id[..12].to_string()].iter().enumerate() {
+        let out = p.ok(&["fit", "run", "post.toml", "--seed", "1",
+            "--starts", &format!("from_mle={handle}")]);
+        if i > 0 {
+            assert!(out.contains("cache hit"), "{handle} names the same source run:\n{out}");
+        }
+        let post: Vec<PathBuf> = p.leaves().into_iter().filter(|l| !scout.contains(l)).collect();
+        assert_eq!(post.len(), 1, "one sourced run, whatever the spelling ({handle})");
+        post_ids.push(record(&post[0]).0);
+    }
+    assert!(post_ids.windows(2).all(|w| w[0] == w[1]), "{post_ids:?}");
+
+    // Control: a different source run is a different run.
+    p.config("scout.toml", &if2(3));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout3"]);
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--starts", "from_mle=@scout3"]);
+    let ids: std::collections::BTreeSet<String> = p.leaves().iter()
+        .map(|l| record(l).0).collect();
+    assert_eq!(ids.len(), 4, "two scouts and two sourced runs: {ids:?}");
+}

@@ -1390,7 +1390,10 @@ impl Method {
         // names, so those two spellings disagreed across variants. `starts`
         // is always concrete here: `resolve_starts` runs before any identity
         // is taken, and `stage_config_hash` refuses an unresolved method.
-        match self.algorithm {
+        //
+        // `starts` is hashed by [`ChainStarts::identity_value`]: a sourced
+        // rule by its kind, its source through `deps` (gh#896).
+        let mut payload = match self.algorithm {
             Algorithm::PGAS { .. } => self.payload_minus(&["sweeps", "n_trajectories"]),
             Algorithm::PMMH { .. } | Algorithm::Mh { .. } => self.payload_minus(&["iterations"]),
             Algorithm::IF2 { .. }
@@ -1398,7 +1401,11 @@ impl Method {
             | Algorithm::NlSbplx(_)
             | Algorithm::NlBobyqa(_)
             | Algorithm::NlLbfgs(_) => self.payload_minus(&[]),
+        };
+        if let (Some(starts), Some(obj)) = (&self.starts, payload.as_object_mut()) {
+            obj.insert("starts".to_string(), starts.identity_value());
         }
+        payload
     }
 
     /// The method serialized in full, minus `exclude`d top-level keys.
@@ -7124,8 +7131,9 @@ decibans_thresh = 100.0
     /// stored chains/posterior. Two fits differing only in it must not
     /// collide — otherwise the first run's posterior is silently served as the
     /// second's (a wrong scientific result on a multimodal problem). gh#147
-    /// count-in-the-key; the handle as written is part of the key, and a
-    /// regenerated source re-keys through the method level's deps.
+    /// count-in-the-key. A sourced rule is keyed by its kind; which source it
+    /// read keys through the method level's deps, so two spellings of one
+    /// source are one run (gh#896).
     #[test]
     fn starts_is_in_the_method_identity() {
         for (who, base) in [("pgas", make_pgas_stage(1000)), ("pmmh", make_pmmh_stage(1000))] {
@@ -7144,11 +7152,12 @@ decibans_thresh = 100.0
             assert_ne!(lhs.identity_payload(), single.identity_payload(), "{who}: lhs vs single");
             assert_ne!(lhs.identity_payload(), prior.identity_payload(), "{who}: lhs vs from_prior");
             assert_ne!(prior.identity_payload(), mle_a.identity_payload(), "{who}: from_prior vs from_mle");
-            assert_ne!(mle_a.identity_payload(), mle_b.identity_payload(), "{who}: the handle is in the key");
+            assert_eq!(mle_a.identity_payload(), mle_b.identity_payload(),
+                "{who}: the handle as typed is not in the key; the source is, through deps");
             assert_ne!(mle_a.identity_payload(), post_a.identity_payload(), "{who}: from_mle vs from_posterior");
-            // The payload carries the wire form, under its TOML spelling.
+            // A sourced rule hashes as its kind; a bare rule as its TOML spelling.
             let v = mle_a.identity_payload();
-            assert_eq!(v["starts"], serde_json::json!({ "from_mle": "@a" }), "{who}");
+            assert_eq!(v["starts"], serde_json::json!("from_mle"), "{who}");
             assert_eq!(lhs.identity_payload()["starts"], serde_json::json!("lhs"), "{who}");
         }
     }

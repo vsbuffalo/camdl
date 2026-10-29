@@ -2757,8 +2757,13 @@ naming the verdict, unless `--allow-nonconverged-source` is passed (§7.3).
 `starts` is identity-bearing: `Method::identity_payload` folds the resolved rule
 into the method hash, and a sourced rule's consumed file (the leaf's
 `fit_state.toml` or `draws.tsv`, a params TOML) enters the method's `deps` by
-content, so two runs differing only in `starts` are two artifacts and a
-regenerated source re-keys its consumer (§9.2.4).
+content and by the source run's `run_id`, so two runs differing only in `starts`
+are two artifacts and a regenerated source re-keys its consumer (§9.2.4). A
+sourced rule enters the method hash by its kind alone (`from_mle`,
+`from_posterior`, `from_params`), not by its handle as typed: `@scout`, the
+scout's leaf directory and a prefix of its `run_id` name one source and key one
+run. `camdl profile --starts` keys the same way. The handle as typed is kept,
+unhashed, in run.json `inputs.starts_source`.
 
 **A refused spread start is redrawn** (gh#887). A spread rule is a lottery over
 one draw, so a start the filter cannot score is one unlucky draw rather than a

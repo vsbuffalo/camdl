@@ -156,7 +156,10 @@ struct ProfileMethodLevel<'a> {
     /// `--rw-sd auto` derives magnitudes from the model rather than the flag,
     /// so it is its own discriminator rather than a value.
     rw_sd_auto: bool,
-    init: &'a crate::fit::starts::ChainStarts,
+    /// The starts rule as identity hashes it
+    /// ([`crate::fit::starts::ChainStarts::identity_value`]): a sourced rule by
+    /// its kind, its source through the point's `deps` (gh#896).
+    init: serde_json::Value,
     pf_max_substeps: Option<u64>,
     /// The `[[simplex_groups]]` IF2 perturbs jointly, member names in order.
     /// Omitted when empty, so a profile without groups keeps its key.
@@ -1284,8 +1287,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     //    `auto` rides as its own discriminator since it derives the values
     //    from the model rather than the flag.
     //  - init: which starting points seed each start (the gh#514 class, still
-    //    open on this command). Its companion PATHS are part of the resolved
-    //    InitMethod, so they ride along.
+    //    open on this command). A sourced rule is keyed by its kind; the source
+    //    it read rides in `profile_deps` (run id + content digest), not the
+    //    handle as typed (gh#896).
     //  - pf_max_substeps: a degeneracy budget whose trip is swallowed here as
     //    `-inf` (unlike pfilter, which aborts), so a tripped budget could bake
     //    an -inf loglik into a cached cell that a later default-budget run was
@@ -1302,7 +1306,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         rw_sd: &rw_sd_blob,
         rw_sd_auto,
         simplex_groups: &simplex_names,
-        init: &init_method,
+        init: init_method.identity_value(),
         pf_max_substeps: a.inference.pf_max_substeps,
     }, &[]).unwrap_or_else(|e| {
         eprintln!("error: profile method identity: {e}");
@@ -2168,7 +2172,7 @@ mod tests {
             rw_sd: &rw_sd,
             rw_sd_auto: false,
             simplex_groups: &[],
-            init: &init,
+            init: init.identity_value(),
             pf_max_substeps: None,
         }).unwrap();
         let method_literal = serde_json::json!({
@@ -2194,7 +2198,7 @@ mod tests {
             rw_sd: &rw_sd,
             rw_sd_auto: false,
             simplex_groups: &groups,
-            init: &init,
+            init: init.identity_value(),
             pf_max_substeps: None,
         }).unwrap();
         let mut literal_with_groups = method_literal.clone();

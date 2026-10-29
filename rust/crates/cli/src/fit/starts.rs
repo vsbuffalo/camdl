@@ -145,6 +145,19 @@ impl ChainStarts {
         }
     }
 
+    /// The rule as a run's identity hashes it (gh#896). A sourced rule is
+    /// its kind alone (`"from_mle"`): the source it read is identity through
+    /// the run's `deps` — the source run's id and the consumed file's digest —
+    /// so `@scout`, the scout's leaf directory and a prefix of its run id key
+    /// one run. The handle as typed is recorded, unhashed, in run.json
+    /// `inputs.starts_source`. A parameterless rule hashes as it serializes.
+    pub fn identity_value(&self) -> serde_json::Value {
+        match self.source() {
+            Some(_) => serde_json::Value::String(self.tag().to_string()),
+            None => serde_json::to_value(self).unwrap_or(serde_json::Value::Null),
+        }
+    }
+
     /// The handle or path a sourced rule reads, as written; `None` for the
     /// parameterless rules.
     pub fn source(&self) -> Option<String> {
