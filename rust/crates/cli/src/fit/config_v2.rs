@@ -2624,6 +2624,16 @@ fn refuse_inert_method_keys(
         }
         _ => {}
     }
+    // `[method.dt_check] enabled = false`: the check does not run, so every
+    // other key in the table tunes nothing.
+    if let Some(dt) = raw_method.get("dt_check").and_then(toml::Value::as_table) {
+        if dt.get("enabled").and_then(toml::Value::as_bool) == Some(false) {
+            if let Some(key) = dt.keys().find(|k| k.as_str() != "enabled") {
+                return inert(&format!("dt_check.{key}"),
+                    "`[method.dt_check] enabled = false` turns the dt-check off");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -4547,7 +4557,22 @@ cooling = 0.7
                 .expect_err(&format!("`{key}` is inert beside `{extra}`"));
             assert!(err.contains(&format!("`{key}`")) && err.contains("no effect"), "{err}");
         }
+        // [method.dt_check] with the check off: every other key is inert.
+        let if2 = "[method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+                   chains = 2\nparticles = 100\niterations = 10\ncooling = 0.7\n";
+        for (method, extra, key) in [
+            (if2, "[method.dt_check]\nenabled = false\nn_halvings = 3\n", "n_halvings"),
+            (mh, "[method.dt_check]\nenabled = false\nthreshold_nats = 0.5\n", "threshold_nats"),
+        ] {
+            let src = format!("{base}{method}{extra}");
+            let cfg = parse(&src).unwrap();
+            let err = refuse_inert_method_keys_in(&src, &cfg.inference.method.unwrap())
+                .expect_err(&format!("`{key}` is inert with the dt-check off"));
+            assert!(err.contains(key) && err.contains("enabled = false"), "{err}");
+        }
         for (method, extra) in [
+            (if2, "[method.dt_check]\nenabled = false\n"),
+            (if2, "[method.dt_check]\nn_halvings = 3\n"),
             (pgas, "use_nuts = true\nmax_tree_depth = 8\ndense_mass = false\n"),
             (pgas, "use_nuts = false\n"),
             (pmmh, "adapt = true\nadapt_start = 50\n"),
