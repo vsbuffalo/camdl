@@ -287,20 +287,16 @@ impl MethodView {
     }
 
     fn from_nlopt(r: &super::method_result::NloptStageResult) -> Self {
-        // Treat NLopt's two-leg gate as "all chains converged AND
-        // max_rel_range below the proposal's first-pass threshold."
-        // For single-chain runs the rel range is trivially 0.
-        let converged = r.n_converged == r.n_chains
-            && (r.n_chains < 2 || r.max_rel_range < 0.05);
+        // The optimizer's own recorded verdict — the one the warm-start
+        // source check reads. A leaf written before it was recorded is not
+        // assessed rather than judged by a weaker rule.
+        let (converged, verdict) = match &r.optimizer_convergence {
+            Some(v) => (v.passes(), v.gate_verdict()),
+            None => (false, "not_assessed"),
+        };
         Self {
             converged,
-            gate_verdict: if converged {
-                "pass".into()
-            } else if r.n_converged == r.n_chains {
-                "fail_chain_agreement".into()
-            } else {
-                "fail_status".into()
-            },
+            gate_verdict: verdict.into(),
             best_loglik: Some(r.best_loglik),
             max_chain_agreement: if r.n_chains > 1 {
                 Some(r.max_rel_range)

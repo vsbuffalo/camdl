@@ -4695,6 +4695,7 @@ dt = 1.0
             chain_starts_kind: None,
             dt_check: None,
             pf_noise: None,
+            optimizer_convergence: None,
         };
         let gate = super::super::config_v2::GateConfig::default();
         for t0 in [names.clone(), vec![]] {

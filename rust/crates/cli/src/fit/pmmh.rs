@@ -944,6 +944,7 @@ pub fn run_stage(
         // counts it was measured at. Without this the one number that explains
         // a stuck pseudo-marginal chain exists only in the run's stderr.
         pf_noise: pf_noise_check,
+        optimizer_convergence: None,
     };
     state.save(&stage_dir.to_string_lossy())?;
 

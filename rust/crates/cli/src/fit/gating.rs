@@ -539,7 +539,9 @@ pub fn format_hard_verdict(
 /// Refuse a warm-start source whose stored verdict is not converged, unless
 /// `allow` (`--allow-nonconverged-source`), in which case say so and proceed.
 ///
-/// An IF2 (or NLopt) leaf carries `tail_chain_agreement`, so it is judged by
+/// An nl-* leaf is judged by the verdict its optimizer recorded
+/// (`FitState::optimizer_convergence`). An IF2 leaf carries
+/// `tail_chain_agreement`, so it is judged by
 /// the compound gate it was run under (`resolved_gate`, else the default). A
 /// sampler leaf is judged by its stored R̂ through the same classification
 /// `fit summary` renders: `max R̂` at or above the certification threshold,
@@ -548,7 +550,14 @@ pub fn format_hard_verdict(
 /// contradict. `handle` names the source in the message.
 pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<(), String> {
     let dir = leaf.to_string_lossy().into_owned();
+    use crate::run_meta::FitAlgorithm;
     let verdict: Option<String> = match FitState::load(&dir) {
+        // An nl-* leaf's `tail_chain_agreement` holds relative ranges, not
+        // IF2's Â; it is judged by the optimizer's own recorded verdict.
+        Ok(state) if matches!(
+            super::methods::parse_algorithm(&state.method),
+            Some(FitAlgorithm::NlSbplx | FitAlgorithm::NlBobyqa | FitAlgorithm::NlLbfgs)
+        ) => nlopt_source_verdict(&state),
         Ok(state) if !state.tail_chain_agreement.is_empty() => {
             let gate = state.resolved_gate.clone().unwrap_or_default();
             match check_scout_convergence(&state, &gate) {
@@ -601,6 +610,40 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
     }
 }
 
+/// An nl-* leaf's verdict: the optimizer's own, recorded at the end of its
+/// run. A leaf written before the verdict was recorded cannot be judged, and
+/// is refused rather than passed.
+fn nlopt_source_verdict(state: &FitState) -> Option<String> {
+    match &state.optimizer_convergence {
+        Some(v) if v.passes() => None,
+        Some(v) => {
+            let mut legs = Vec::new();
+            if !v.all_chains_converged() {
+                legs.push(format!(
+                    "{} of its chains ran out of evaluations and {} failed",
+                    v.n_maxeval, v.n_failed));
+            }
+            if v.chain_agreement_failed {
+                legs.push(format!(
+                    "its chains ended apart (largest spread {:.1}% of a bound width, {:.3e} \
+                     in natural units)", v.max_rel_range * 100.0, v.max_abs_range));
+            }
+            if v.decibans_failed {
+                legs.push(format!(
+                    "its converged chains' log-likelihoods differ by {:.1} nats",
+                    v.delta_loglik));
+            }
+            Some(format!("its optimizer did not converge to one optimum: {}.",
+                legs.join("; and ")))
+        }
+        None => Some(
+            "it records no optimizer convergence verdict (written before camdl recorded \
+             one), so its convergence cannot be checked. Re-run it with `--force`."
+                .to_string(),
+        ),
+    }
+}
+
 /// A sampler leaf's stored verdict, through the same classification
 /// `fit summary` renders. `None` when converged, or when there is no verdict
 /// to read (not a sampler leaf, R̂ never applicable).
@@ -632,6 +675,56 @@ fn sampler_source_verdict(leaf: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An nl-* leaf whose starts landed far apart. Its stored
+    /// `tail_chain_agreement` holds per-parameter RELATIVE RANGES (range over
+    /// bound width, at most 1 inside the box), not IF2's Â, so judging it
+    /// against IF2's Â threshold (1.01) can never fail it. It must be judged
+    /// by the optimizer's own two-leg verdict, which this leaf records as
+    /// failed.
+    #[test]
+    fn an_nlopt_source_whose_starts_disagree_is_refused() {
+        let dir = std::env::temp_dir().join(format!(
+            "camdl_gating_nl_{}_{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fit_state.toml"), r#"
+method = "nl-sbplx"
+seed = 1
+timestamp = "2026-10-29T00:00:00Z"
+best_loglik = -50.0
+initial_loglik = nan
+best_chain = 0
+n_chains = 3
+n_good_chains = 3
+chain_logliks = [-50.0, -95.0, -140.0]
+
+[start_values]
+beta = 0.4
+
+[tail_chain_agreement]
+beta = 0.6
+
+[resolved_gate]
+a_thresh = 1.01
+decibans_thresh = 30.0
+
+[optimizer_convergence]
+n_converged = 3
+n_maxeval = 0
+n_failed = 0
+max_rel_range = 0.6
+max_abs_range = 2.9
+chain_agreement_failed = true
+delta_loglik = 90.0
+decibans_failed = true
+"#).unwrap();
+        let got = check_source_converged(&dir, "@nl", false);
+        std::fs::remove_dir_all(&dir).ok();
+        let err = got.expect_err("an nl-* source whose chains disagree must be refused");
+        assert!(err.contains("@nl"), "{err}");
+    }
 
     fn make_state(
         tail_chain_agreement: &[(&str, f64)],
@@ -666,6 +759,7 @@ mod tests {
             chain_starts_kind: None,
             dt_check: None,
             pf_noise: None,
+            optimizer_convergence: None,
         }
     }
 

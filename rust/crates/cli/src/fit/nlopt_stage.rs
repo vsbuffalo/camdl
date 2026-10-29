@@ -303,6 +303,16 @@ pub fn run_stage(
         },
         // gh#764: a deterministic optimiser, not a pseudo-marginal sampler.
         pf_noise: None,
+        optimizer_convergence: Some(crate::fit::state::OptimizerConvergence {
+            n_converged: convergence.n_converged,
+            n_maxeval: convergence.n_maxeval,
+            n_failed: convergence.n_failed,
+            max_rel_range: convergence.max_rel_range,
+            max_abs_range: convergence.max_abs_range,
+            chain_agreement_failed: convergence.chain_agreement_failed,
+            delta_loglik: convergence.delta_loglik,
+            decibans_failed: convergence.decibans_failed,
+        }),
     };
     fit_state
         .save(&stage_dir.to_string_lossy())

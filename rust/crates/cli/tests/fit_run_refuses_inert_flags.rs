@@ -139,3 +139,26 @@ fn allow_nonconverged_source_without_a_fit_source_is_refused() {
     assert!(!ok, "--allow-nonconverged-source with `starts = \"single\"` must be refused:\n{err}");
     assert!(err.contains("--allow-nonconverged-source") && err.contains("`single`"), "{err}");
 }
+
+/// An nl-* leaf records its optimizer's own convergence verdict, which the
+/// warm-start source check and `fit table` read (its `tail_chain_agreement`
+/// holds relative ranges, not IF2's Â, and cannot be judged as Â).
+#[test]
+fn an_nlopt_fit_records_its_convergence_verdict() {
+    let tmp = tempdir("nl_verdict");
+    let Some(fit) = write_fit(&tmp, "") else { return };
+    let (ok, err) = run(&fit, &["--no-dt-check"]);
+    assert!(ok, "the fit runs:\n{err}");
+    let mut stack = vec![tmp.0.join("out")];
+    let mut found = None;
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() { stack.push(p) }
+            else if p.file_name().and_then(|n| n.to_str()) == Some("fit_state.toml") { found = Some(p) }
+        }
+    }
+    let state = std::fs::read_to_string(found.expect("a fit_state.toml")).unwrap();
+    assert!(state.contains("[optimizer_convergence]") && state.contains("chain_agreement_failed"),
+        "{state}");
+}
