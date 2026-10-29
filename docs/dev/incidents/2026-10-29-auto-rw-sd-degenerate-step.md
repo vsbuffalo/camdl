@@ -43,6 +43,26 @@ PGAS (particle Gibbs with ancestor sampling, with NUTS or MH-within-Gibbs for
 the parameters) and the `nl-*` optimisers did not read `rw_sd` on main and were
 not affected.
 
+## Scope
+
+Only log-scale parameters were affected: kind `rate`, `positive`, `count` or
+`duration`, with a search box whose lower bound is 0 and no explicit `rw_sd`.
+Parameters on the logit scale (`probability`, or a box handled by the scaled
+logit) get an automatic step of (hi − lo)/6, which is at least 0.67 in z
+everywhere and grows towards either end, so it cannot freeze them. `real`
+parameters carry no transform and get (hi − lo)/6 on the natural scale; an
+infinite end is refused. Neither can produce this defect.
+
+The same log-scale formula has a milder case that 0abe59f8 does not refuse. The
+step is sized at the box's geometric midpoint √(lo·hi) and divided by θ, so a
+parameter sitting far above that midpoint takes a small step. On a box of [10⁻⁶,
+1] the step in ln θ is 0.69 at the midpoint and 0.0014 at θ = 0.5, which is
+about 0.14% per perturbation (computed from the formula; not reproduced as a
+fit). IF2 does not adapt its step, so it can stop short of the maximum. PMMH and
+MH adapt from step 300. The support-keyed transforms series removes this case
+with the rest, by fixing the step in z (D8); until it lands, the risk remains on
+main.
+
 ## What happened
 
 `auto_rw_sd_from_value` (`rust/crates/cli/src/fit/runner.rs`, at `3c480d2c`
