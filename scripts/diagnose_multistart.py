@@ -221,7 +221,7 @@ def main() -> None:
             lb = np.einsum("csk,kt->cst", ws, BASIS)
             rb = max(float(az.rhat(lb[..., i], method="rank")) for i in range(lb.shape[2]))
             eb = min(float(az.ess(lb[..., i], method="bulk")) for i in range(lb.shape[2]))
-            et = min(float(az.ess(lb[..., i], method="tail")) for i in range(lb.shape[2]))
+            et = min(float(az.ess(lb[..., i], method="tail", prob=(0.05, 0.95))) for i in range(lb.shape[2]))
             # R_eff on the sweeps with saved paths common to all chains.
             grid_t = [round(g) for g in d.GRID]
             common = sorted(set.intersection(*[set(pa["draw"].to_list()) for _, pa in chains]))
@@ -242,7 +242,7 @@ def main() -> None:
                 reff.append(np.stack([x[:m] for x in col]))
             rr = max(float(az.rhat(x, method="rank")) for x in reff)
             er = min(float(az.ess(x, method="bulk")) for x in reff)
-            etr = min(float(az.ess(x, method="tail")) for x in reff)
+            etr = min(float(az.ess(x, method="tail", prob=(0.05, 0.95))) for x in reff)
             sol_curves = [log_beta(coefficients(form, th, wh)) for _, th in distinct]
             switches = []
             for c in range(4):
