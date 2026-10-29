@@ -103,6 +103,31 @@ smooth-diagnosis:
 	  --with polars==2.1.0 --with arviz==1.3.0 python scripts/diagnose_smooth_sampling.py \
 	  --data-dir $(DIAG)/data --out-dir $(DIAG) --camdl rust/target/release/camdl --repo . $(if $(ONLY),--only $(ONLY))
 
+# Per-chain divergence report over whatever smooth-diagnosis runs exist
+# (scripts/report_smooth_divergences.py → results/diagnosis/divergence_report.tsv).
+.PHONY: smooth-divergence-report
+smooth-divergence-report:
+	cd $(REPO) && uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 --with polars==2.1.0 \
+	  --with arviz==1.3.0 python scripts/report_smooth_divergences.py --diag-dir $(DIAG)
+
+# Stuck-chain test over the default smooth-diagnosis runs: marginal pfilter
+# log-likelihood at each chain's θ, and a PGAS restart at that θ with a fresh
+# latent path (scripts/diagnose_stuck_chains.py → results/diagnosis/stuck_chains.tsv).
+.PHONY: smooth-stuck-chains
+smooth-stuck-chains:
+	cd $(REPO) && CAMDLC=$(CAMDLC_PATH) uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 \
+	  --with polars==2.1.0 --with arviz==1.3.0 python scripts/diagnose_stuck_chains.py \
+	  --diag-dir $(DIAG) --camdl rust/target/release/camdl --repo .
+
+# Experimental, opt-in: PGAS chains started around distinct IF2 solutions,
+# each with its own latent path (scripts/diagnose_multistart.py →
+# results/diagnosis/multistart/). Changes no default. About two hours.
+.PHONY: smooth-multistart
+smooth-multistart:
+	cd $(REPO) && CAMDLC=$(CAMDLC_PATH) uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 \
+	  --with polars==2.1.0 --with arviz==1.3.0 python scripts/diagnose_multistart.py \
+	  --data-dir $(DIAG)/data --out-dir $(DIAG)/multistart --camdl rust/target/release/camdl --repo .
+
 .PHONY: calibrate-smooth-prior
 calibrate-smooth-prior:
 	cd $(REPO) && uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 python \

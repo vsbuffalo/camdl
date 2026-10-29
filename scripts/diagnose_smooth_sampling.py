@@ -14,7 +14,9 @@ slope, scale and modes unbounded) with `camdl fit run`, under each tuning:
   1,000 adaptation, 4,000 kept, max tree depth 8, and every chain started
   at one point (`starts = "single"`: a = -1.5, b = 0, τ = 0.2, z = 0, or
   every coefficient -1.5), instead of `from_prior`;
-- `single`: `default` with only the starts changed to that one point.
+- `single`: `default` with only the starts changed to that one point;
+- `single_d8`, `single_d12`: `single` with only the maximum tree depth
+  changed, to 8 or 12 (the default is 10).
 
 4 chains, 64 particles, dense mass, thin 1. Per run it reads every chain's
 `trace.tsv` (parameters and per-sweep NUTS and CSMC diagnostics) and
@@ -50,7 +52,8 @@ import polars as pl
 from scipy.interpolate import BSpline
 
 SEEDS = [23, 31, 47, 59]
-TUNINGS = {"default": (1000, 3000), "long": (3000, 3000), "rung4c": (1000, 4000), "single": (1000, 3000)}
+TUNINGS = {"default": (1000, 3000), "long": (3000, 3000), "rung4c": (1000, 4000), "single": (1000, 3000),
+           "single_d8": (1000, 3000), "single_d12": (1000, 3000)}
 WINDOW = (0.0, 86.0)
 GAMMA = 0.2
 DEGREE = 3
@@ -106,14 +109,16 @@ def fit_toml(form: str, seed: int, tuning: str, data_dir: Path, run_dir: Path, r
     burn, kept = TUNINGS[tuning]
     model = repo / "tests/fixtures/bspline_inference" / (
         "seir_bspline_recovery.camdl" if form == "explicit" else "seir_smooth_recovery.camdl")
-    point = tuning in ("rung4c", "single")
+    point = tuning in ("rung4c", "single", "single_d8", "single_d12")
     if form == "explicit":
         start = ", start = -1.5" if point else ""
         est = "".join(f"b{i} = {{ prior = {{ normal = {{ mean = -1.5, sd = 1.0 }} }}{start} }}\n" for i in range(1, 6))
     else:
         starts = {"a": -1.5, "b": 0.0, "tau": 0.2, "z_m1": 0.0, "z_m2": 0.0, "z_m3": 0.0}
         est = "".join(f"{n} = {{ start = {v} }}\n" if point else f"{n} = {{}}\n" for n, v in starts.items())
-    extra = {"rung4c": 'starts = "single"\nmax_tree_depth = 8\n', "single": 'starts = "single"\n'}.get(tuning, "")
+    extra = {"rung4c": 'starts = "single"\nmax_tree_depth = 8\n', "single": 'starts = "single"\n',
+             "single_d8": 'starts = "single"\nmax_tree_depth = 8\n',
+             "single_d12": 'starts = "single"\nmax_tree_depth = 12\n'}.get(tuning, "")
     fixed = "".join(f"{k} = {v}\n" for k, v in FIXED.items())
     rel = lambda p: os.path.relpath(p, run_dir)
     return (f'output_dir = "out"\n[model]\ncamdl = "{rel(model)}"\n'
