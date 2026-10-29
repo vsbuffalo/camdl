@@ -350,6 +350,11 @@ gradient path cannot seed); `nl-sbplx` and `nl-bobyqa` carry no such
 requirement. See `camdl docs inference` (the ODE-backend fitting section) for
 when to pick which.
 
+A `[method]` key the method's own settings leave with nothing to do is refused
+at load, not ignored: `max_tree_depth` or `dense_mass` under `use_nuts = false`
+(the θ-move is then Metropolis-within-Gibbs), and `adapt_start` under
+`adapt = false`.
+
 ```toml
 # A Bayesian fit on the ODE skeleton.
 [method]

@@ -2484,6 +2484,40 @@ fn validate_method_keys(contents: &str, method: &Method) -> Result<(), String> {
             allowed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
         ));
     }
+    refuse_inert_method_keys(raw_method, &method.algorithm)
+}
+
+/// Refuse a `[method]` key the method knows but the method's own settings
+/// leave with nothing to do, so the file never states a setting the run
+/// does not use. The CLI flags that write the same fields get the same
+/// refusal (`Algorithm::apply_cli_overrides`).
+fn refuse_inert_method_keys(
+    raw_method: &toml::map::Map<String, toml::Value>,
+    algorithm: &Algorithm,
+) -> Result<(), String> {
+    let inert = |key: &str, why: &str| -> Result<(), String> {
+        Err(format!(
+            "`{key}` in [method] has no effect here: {why}. Delete the line, or turn the \
+             setting it tunes back on. See `camdl docs fit-toml`."
+        ))
+    };
+    match algorithm {
+        Algorithm::PGAS { use_nuts: false, .. } => {
+            for key in ["max_tree_depth", "dense_mass"] {
+                if raw_method.contains_key(key) {
+                    return inert(key, "it tunes the NUTS θ-move, and `use_nuts = false` makes \
+                        the θ-move Metropolis-within-Gibbs");
+                }
+            }
+        }
+        Algorithm::PMMH { adapt: false, .. } | Algorithm::Mh { adapt: false, .. } => {
+            if raw_method.contains_key("adapt_start") {
+                return inert("adapt_start", "it sets when proposal adaptation begins, and \
+                    `adapt = false` turns adaptation off");
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -4363,6 +4397,39 @@ cooling = 0.7
                 let mh = src.replace("algorithm = \"nuts\"", "algorithm = \"mh\"\niterations = 10");
                 parse(&mh).unwrap_or_else(|e| panic!("the same file with mh validates: {e}"));
             }
+        }
+    }
+
+    /// A known `[method]` key the method's settings leave inert is refused at
+    /// load, and the same key beside the setting it needs loads.
+    #[test]
+    fn method_refuses_a_key_its_own_settings_leave_inert() {
+        let base = "[model]\ncamdl = \"models/sir.camdl\"\n\
+                    [data.observations]\ncases = \"data/cases.tsv\"\n\
+                    [estimate]\nbeta = { bounds = [0.01, 2.0], prior = { half_normal = { sigma = 1.0 } } }\n\
+                    [fixed]\nN0 = 1000000\n";
+        let pgas = "[method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\n\
+                    chains = 2\nparticles = 100\nsweeps = 10\n";
+        let pmmh = "[method]\nalgorithm = \"pmmh\"\nbackend = \"chain_binomial\"\n\
+                    chains = 2\nparticles = 100\niterations = 10\n";
+        let mh = "[method]\nalgorithm = \"mh\"\nbackend = \"ode\"\nchains = 2\niterations = 10\n";
+        for (method, extra, key) in [
+            (pgas, "use_nuts = false\nmax_tree_depth = 8\n", "max_tree_depth"),
+            (pgas, "use_nuts = false\ndense_mass = false\n", "dense_mass"),
+            (pmmh, "adapt = false\nadapt_start = 50\n", "adapt_start"),
+            (mh, "adapt = false\nadapt_start = 50\n", "adapt_start"),
+        ] {
+            let err = parse(&format!("{base}{method}{extra}"))
+                .expect_err(&format!("`{key}` is inert beside `{extra}`"));
+            assert!(err.contains(&format!("`{key}`")) && err.contains("no effect"), "{err}");
+        }
+        for (method, extra) in [
+            (pgas, "use_nuts = true\nmax_tree_depth = 8\ndense_mass = false\n"),
+            (pgas, "use_nuts = false\n"),
+            (pmmh, "adapt = true\nadapt_start = 50\n"),
+        ] {
+            parse(&format!("{base}{method}{extra}"))
+                .unwrap_or_else(|e| panic!("`{extra}` is a live setting: {e}"));
         }
     }
 
