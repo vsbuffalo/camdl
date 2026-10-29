@@ -439,7 +439,9 @@ The model file is the source of truth for what _can_ be estimated; the
   identity transform; the positive kinds (`rate`, `positive`, `count`,
   `duration`) over `[0, ∞)` with the log transform; a `probability` over
   `[0, 1]`. An automatic `rw_sd` is refused for an unbounded parameter (there is
-  no box to scale one from); at two or more chains the `uniform`, `lhs` and
+  no box to scale one from), and for a log-scale box whose lower bound is 0
+  (`rate in [0, 2]`: the step would be ~1e-148); give `rw_sd` or a positive
+  lower bound; at two or more chains the `uniform`, `lhs` and
   `uniform_unconstrained` starts refuse it, the default `uniform_unconstrained`
   included; and `camdl survey` refuses it. `from_prior` draws it from its prior,
   and `single` starts every chain at its `start`.

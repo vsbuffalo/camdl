@@ -5,6 +5,10 @@
 //! 1e-300). Either makes the IF2 random walk meaningless, and PMMH's and
 //! MH's first proposals are five times it. Such a fit is refused, naming the
 //! parameter and the two remedies; an explicit `rw_sd` runs.
+//!
+//! A positive kind boxed `[0, hi]` has the same defect with a finite box: its
+//! `Transform::Log` lower bound is floored at 1e-300, so the auto step is
+//! about 1e-148 (`zeta : rate in [0, 2]` below) and IF2 never moves it.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -16,8 +20,8 @@ fn binary() -> PathBuf {
     bin
 }
 
-/// SIR with two parameters the dynamics ignore: `delta : real` and
-/// `eta : rate`, neither with bounds.
+/// SIR with three parameters the dynamics ignore: `delta : real` and
+/// `eta : rate`, neither with bounds, and `zeta : rate in [0, 2]`.
 const MODEL: &str = r#"
 time_unit = 'days
 compartments { S, I, R }
@@ -28,10 +32,11 @@ parameters {
   I0    : count
   delta : real
   eta   : rate
+  zeta  : rate        in [0.0, 2.0]
 }
 let N = S + I + R
 transitions {
-  infection : S --> I  @ (beta + 0.0 * delta + 0.0 * eta) * S * I / N
+  infection : S --> I  @ (beta + 0.0 * delta + 0.0 * eta + 0.0 * zeta) * S * I / N
   recovery  : I --> R  @ gamma * I
 }
 init { S = N0 - I0  I = I0 }
@@ -51,13 +56,20 @@ const DATA: &str =
     "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
 /// Fit `free` (with `extra` in its `[estimate]` entry) under `method`; the
-/// other unbounded parameter is fixed.
+/// other ignored parameters are fixed.
 fn fit(free: &str, extra: &str, method: &str) -> Output {
     run(free, extra, method, &["fit", "run", "fit.toml", "--seed", "1"])
 }
 
 fn run(free: &str, extra: &str, method: &str, args: &[&str]) -> Output {
-    let held = if free == "delta" { "eta = 0.1" } else { "delta = 0.0" };
+    let tmp = tempfile::tempdir().unwrap();
+    run_in(tmp.path(), free, extra, method, args)
+}
+
+/// As [`run`], in `dir`, which the caller keeps to read the outputs.
+fn run_in(dir: &Path, free: &str, extra: &str, method: &str, args: &[&str]) -> Output {
+    let held = [("delta", "delta = 0.0"), ("eta", "eta = 0.1"), ("zeta", "zeta = 0.5")]
+        .iter().filter(|(n, _)| *n != free).map(|(_, h)| *h).collect::<Vec<_>>().join("\n");
     let toml = format!(r#"[model]
 camdl = "model.camdl"
 [data.observations]
@@ -73,14 +85,13 @@ I0 = 10
 [method]
 {method}
 "#);
-    let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("model.camdl"), MODEL).unwrap();
-    std::fs::write(tmp.path().join("weekly_cases.tsv"), DATA).unwrap();
-    std::fs::write(tmp.path().join("fit.toml"), toml).unwrap();
+    std::fs::write(dir.join("model.camdl"), MODEL).unwrap();
+    std::fs::write(dir.join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(dir.join("fit.toml"), toml).unwrap();
     Command::new(binary())
         .args(args)
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("res"))
-        .current_dir(tmp.path())
+        .env("CAMDL_OUTPUT_DIR", dir.join("res"))
+        .current_dir(dir)
         .output()
         .expect("spawn")
 }
@@ -126,4 +137,51 @@ fn a_profile_cell_needs_the_same_scale() {
         "--sweep", "beta=0.3", "--rw-sd", "auto", "--n-starts", "1", "--particles", "20",
         "--iterations", "2"]);
     refused(&out, "delta");
+}
+
+/// The auto step of a `Log` box with lower bound 0 is ~1e-148: refused under
+/// IF2, PMMH and MH, and in profile's IF2 cells.
+#[test]
+fn a_log_box_with_lower_bound_zero_has_no_auto_rw_sd() {
+    let mh = "algorithm = \"mh\"\nbackend = \"ode\"\nchains = 1\n\
+              iterations = 20\nburn_in = 5\nstarts = \"single\"";
+    let prior = ", prior = { uniform = {} }";
+    for (method, extra, tag) in [(IF2, "", "if2"), (PMMH, prior, "pmmh"), (mh, prior, "mh")] {
+        let out = fit("zeta", extra, method);
+        refused(&out, "zeta");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("[0, 2]") && err.contains("lower bound is 0"),
+            "{tag}: the refusal names the box and why:\n{err}");
+    }
+    let out = run("zeta", "", IF2, &["profile", "model.camdl", "--fit", "fit.toml",
+        "--sweep", "beta=0.3", "--rw-sd", "auto", "--n-starts", "1", "--particles", "20",
+        "--iterations", "2"]);
+    refused(&out, "zeta");
+}
+
+/// With an explicit `rw_sd` the same box runs, and IF2 moves the parameter.
+#[test]
+fn an_explicit_rw_sd_on_a_zero_lower_log_box_moves_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = run_in(tmp.path(), "zeta", ", rw_sd = 0.1", IF2, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let traces = find(&tmp.path().join("res"), "parameter_traces.tsv").expect("parameter_traces.tsv");
+    let text = std::fs::read_to_string(traces).unwrap();
+    let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+    let col = lines.next().unwrap().split('\t').position(|h| h == "zeta").expect("zeta column");
+    let vals: Vec<f64> = lines.map(|l| l.split('\t').nth(col).unwrap().parse().unwrap()).collect();
+    assert!(vals.iter().any(|v| (v - vals[0]).abs() > 1e-6),
+        "zeta never moved from {}: {vals:?}", vals[0]);
+}
+
+fn find(dir: &Path, name: &str) -> Option<PathBuf> {
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if let Some(f) = find(&p, name) { return Some(f); }
+        } else if p.file_name().is_some_and(|n| n == name) {
+            return Some(p);
+        }
+    }
+    None
 }

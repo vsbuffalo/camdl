@@ -38,12 +38,14 @@ es  = "data/es.tsv"
 # scoring — the asserted answer would already be the starting point.) Starts:
 # R0_urban 2.2←truth 3.0, R0_rural 3.0←truth 2.2 (swapped — the filter must
 # distinguish the two patches' rates from the union-axis data), rho 0.40←0.6.
+# kappa's lower bound is 0.001, not 0: on the log scale a box from 0 has no
+# automatic IF2 step (rw_sd), and kappa would never move from its start.
 # Flat priors → the IF2 scout targets the MLE and the PGAS posterior the scaled
 # (unconditioned) likelihood; the likelihood is the object of interest.
 [estimate]
 R0_urban  = { bounds = [1.0, 6.0],   start = 2.2,  prior = { flat = {} } }
 R0_rural  = { bounds = [1.0, 6.0],   start = 3.0,  prior = { flat = {} } }
-kappa     = { bounds = [0.0, 0.3],   start = 0.05, prior = { flat = {} } }
+kappa     = { bounds = [0.001, 0.3], start = 0.05, prior = { flat = {} } }
 gamma     = { bounds = [0.02, 0.5],  start = 0.1,  prior = { flat = {} } }
 delta     = { bounds = [0.01, 0.3],  start = 0.05, prior = { flat = {} } }
 rho       = { bounds = [0.1, 0.95],  start = 0.40, prior = { flat = {} } }

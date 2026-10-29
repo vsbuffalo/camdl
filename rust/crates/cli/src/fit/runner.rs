@@ -367,14 +367,14 @@ impl FitRunConfig {
             &fit.estimate, &model, &compiled, &base_params, random_starts, seed,
         )?;
         // IF2 perturbs by `rw_sd`; PMMH and MH start their proposals at five
-        // times it. Neither may run on a step the box could not scale.
+        // times it. None may run on an automatic step that cannot move.
         if matches!(
             algorithm,
             Some(super::config_v2::Algorithm::IF2 { .. }
                 | super::config_v2::Algorithm::PMMH { .. }
                 | super::config_v2::Algorithm::Mh { .. })
         ) {
-            refuse_auto_rw_sd_without_finite_box(&if2_params, "`rw_sd = …` in its [estimate] entry")?;
+            refuse_degenerate_auto_rw_sd(&if2_params, "`rw_sd = …` in its [estimate] entry")?;
         }
 
         // Load data — one or more observation streams (real-data only;
@@ -1428,25 +1428,50 @@ pub fn build_if2_params_from_specs(
     Ok(params)
 }
 
-/// Refuse an auto-derived `rw_sd` for a parameter whose search box has an
-/// infinite end. The auto step is a fraction of the box, so such a box gives
-/// it no scale: [`auto_rw_sd_from_value`] substitutes ±1e6 for an infinite
-/// end of an identity-transformed box (an unbounded `real` parameter got
-/// 166666.67) and `lo · 1000` with `lo` floored at 1e-300 for a log one (an
-/// unbounded `rate` got ~1e-299). No scale is invented here; the user names
-/// one. `how` is the caller's spelling of an explicit step.
-pub fn refuse_auto_rw_sd_without_finite_box(
+/// Refuse an auto-derived `rw_sd` that cannot move its parameter.
+///
+/// The auto step is a fraction of the box ([`auto_rw_sd_from_value`]), and
+/// three boxes give it no scale:
+///
+/// - a box with an infinite end: ±1e6 is substituted for the end of an
+///   identity-transformed box (an unbounded `real` got 166666.67);
+/// - a `Log` box whose lower bound is ≤ 0: the bound is floored at 1e-300, so
+///   the geometric midpoint is ~1e-150 (`rate in [0, 2]` got ~1e-148, and
+///   IF2 left every chain at its start);
+/// - any other step that is non-finite, ≤ 0, or below 1e-9 of the box width.
+///
+/// No scale is invented here; the user names one. `how` is the caller's
+/// spelling of an explicit step.
+pub fn refuse_degenerate_auto_rw_sd(
     params: &[EstimatedParam],
     how: &str,
 ) -> Result<(), String> {
-    match params.iter().find(|p| p.rw_sd_auto && !(p.lower.is_finite() && p.upper.is_finite())) {
-        None => Ok(()),
-        Some(p) => Err(format!(
-            "`{}` has search box [{}, {}], which has an infinite end, so no random-walk \
-             step (rw_sd) can be derived from it. Give an explicit rw_sd ({how}), or finite \
-             bounds (`in [lo, hi]` in the model, or `bounds = [lo, hi]` in [estimate]).",
-            p.name, p.lower, p.upper)),
+    for p in params.iter().filter(|p| p.rw_sd_auto) {
+        let (name, lo, hi) = (&p.name, p.lower, p.upper);
+        if !(lo.is_finite() && hi.is_finite()) {
+            return Err(format!(
+                "`{name}` has search box [{lo}, {hi}], which has an infinite end, so no \
+                 random-walk step (rw_sd) can be derived from it. Give an explicit rw_sd \
+                 ({how}), or finite bounds (`in [lo, hi]` in the model, or \
+                 `bounds = [lo, hi]` in [estimate])."));
+        }
+        if matches!(p.transform, Transform::Log { lo, .. } if lo <= 0.0) {
+            return Err(format!(
+                "`{name}` has search box [{lo}, {hi}] on the log scale, and a log-scale \
+                 random walk has no automatic step (rw_sd) when the lower bound is 0: the \
+                 derived step would be {:e}, which never moves {name}. Give an explicit \
+                 rw_sd ({how}), or a positive lower bound (`in [lo, hi]` in the model, or \
+                 `bounds = [lo, hi]` in [estimate]).", p.rw_sd));
+        }
+        if !p.rw_sd.is_finite() || p.rw_sd <= 0.0 || p.rw_sd < 1e-9 * (hi - lo) {
+            return Err(format!(
+                "`{name}` has search box [{lo}, {hi}], from which the automatic random-walk \
+                 step (rw_sd) is {:e}, which cannot move {name}. Give an explicit rw_sd \
+                 ({how}), or narrower bounds (`in [lo, hi]` in the model, or \
+                 `bounds = [lo, hi]` in [estimate]).", p.rw_sd));
+        }
     }
+    Ok(())
 }
 
 /// Auto-compute rw_sd from bounds on the transformed scale.
@@ -5670,6 +5695,25 @@ dt = 1.0
             .expect("identity keeps the whole line");
         build_if2_params_from_specs(&real, &real_c, &base, &[over("log", Some((0.0, 1.0)))])
             .expect("log keeps a non-negative box");
+    }
+
+    /// An automatic step that cannot move its parameter is refused: a log box
+    /// with lower bound 0 (~1e-148) and one whose lower bound is so small the
+    /// step is below 1e-9 of the box width. An ordinary log box passes.
+    #[test]
+    fn degenerate_auto_rw_sd_is_refused() {
+        use ir::parameter::ParamKind::Rate;
+        let auto = |lo: f64, hi: f64| {
+            let (model, compiled) = make_one_param_model("z", lo, hi, Some(Rate));
+            let base = compiled.default_params.clone();
+            build_if2_params_from_specs(&model, &compiled, &base, &[spec_for("z", lo, hi, None)])
+                .expect("params")
+        };
+        let err = refuse_degenerate_auto_rw_sd(&auto(0.0, 2.0), "rw_sd").unwrap_err();
+        assert!(err.contains("`z`") && err.contains("[0, 2]") && err.contains("lower bound is 0"), "{err}");
+        let err = refuse_degenerate_auto_rw_sd(&auto(1e-30, 1.0), "rw_sd").unwrap_err();
+        assert!(err.contains("cannot move"), "{err}");
+        refuse_degenerate_auto_rw_sd(&auto(1e-6, 10.0), "rw_sd").expect("an ordinary log box");
     }
 
     // ── Cold-cooling Â suppression (gh#45) ───────────────────────────

@@ -128,6 +128,12 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   `[0, 1]` and a flat likelihood, `pmmh` and `mh` put 66% of draws outside the
   box and `if2` ended every chain outside it. Migration: drop `transform`; a
   bounded parameter gets the scaled logit automatically.
+- **An automatic `rw_sd` is refused on a log-scale box whose lower bound is 0.**
+  Under `if2`, `pmmh` and `mh`, and in `profile`'s IF2 cells, a `rate`,
+  `positive`, `count` or `duration` boxed `[0, hi]` and given no `rw_sd` now
+  refuses, as an unbounded one already did. Migration: give `rw_sd` in its
+  `[estimate]` entry (`--rw-sd NAME=SD` on `profile`), or a positive lower
+  bound.
 - **A fit-config box outside the parameter's kind is refused, and so is a
   `transform` override that does not keep the parameter's support.** Where the
   model declares no `in [lo, hi]`, `[estimate].bounds` may narrow the kind's
@@ -709,6 +715,12 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
 User-visible correctness fixes (selected from ~138):
 
+- **Fits did not estimate a positive-kind parameter boxed `[0, hi]`.** Its log
+  transform floors the lower bound at 1e-300, so the automatic `rw_sd` was about
+  1e-148 (printed `rw_sd=0.0000 (0.000/step, auto)`): IF2 never moved the
+  parameter, every chain stayed at its start, and the reported MLE was the best
+  of the starts. PMMH and MH began from five times that step. Such a fit is now
+  refused (above); PGAS, which reads no `rw_sd`, was unaffected.
 - **A prior could be evaluated on the wrong coordinate, and an override could
   leave the support unenforced.** A `rate ~ log_normal(-1, 0.5)` with no
   declared range and `bounds = [-1, 1]` in the fit config got the scaled logit,
