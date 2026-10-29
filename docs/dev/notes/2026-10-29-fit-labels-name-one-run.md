@@ -124,10 +124,11 @@ to that run, and is what `fit summary` prints. Neither field enters any hash.
 | `camdl label <run_id> L`       | a fit run is addressed by its leaf `run_id`; refused when `L` names another run or the run already has a different label; a fit-id prefix is refused with its runs listed                                                                             |
 | `@L` in any handle             | that one leaf; a `fit.toml` names the runs whose `config_identities` hold its identity, narrowed to this camdl build's runs when that leaves one                                                                                                      |
 | `fit summary <handle>`         | a run handle summarises that run; a problem folder holding several runs of one method is refused with the runs listed; a target with no completed run exits 1                                                                                         |
-| `fit predict`, `compare`       | read the named run when the handle names one (the segment-level choice for a problem-folder handle, and where `fit predict` writes, are unchanged and remain gh#896's open half)                                                                      |
+| `fit predict`, `compare`       | read one run: a problem folder holding several is refused with them listed; `fit predict` writes under `<segment>/predict/<run_id12>/`, and `predictive.json` / `observed.json` record the `run_id`                                                   |
 | `fit summary` of a sourced run | `seeded from:` names the source's run id beside its handle                                                                                                                                                                                            |
 
-What is not changed: the method identity still folds the `starts` handle as
-written, so `@scout` and the scout's directory name the same source but key two
-different runs. With labels fixed this is redundant rather than wrong; removing
-it re-keys every sourced run and is left for a separate, confirmed change.
+The method identity hashes a sourced `starts` rule by its kind
+(`ChainStarts::identity_value`), not the handle as typed, so `@scout`, the
+scout's directory and its run-id prefix key one run; the source enters through
+`deps` (its run id and the consumed file's digest). This re-keys every sourced
+run, `fit run` and `camdl profile` alike.
