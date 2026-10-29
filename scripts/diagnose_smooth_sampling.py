@@ -4,12 +4,17 @@
 Proposal 2026-10-27-estimable-bsplines §8.1, R3. For each recovery dataset
 (data seeds 23, 31, 47, 59; written by the `write_recovery_datasets` test, the
 same draws the in-process R3 tests use), fits the explicit-coefficient model
-(`seir_bspline_recovery`, five coefficients, the model's [-8, 2] boxes, fit.toml
+(`seir_bspline_recovery`, five unbounded coefficients, fit.toml
 normal(-1.5, 1) priors) and the smooth one (`seir_smooth_recovery`, level,
-slope and modes unbounded) with `camdl fit run`, under each tuning:
+slope, scale and modes unbounded) with `camdl fit run`, under each tuning:
 
 - `default`: 1,000 adaptation sweeps, 3,000 kept;
-- `long`: 3,000 adaptation sweeps, 3,000 kept.
+- `long`: 3,000 adaptation sweeps, 3,000 kept;
+- `rung4c`: the settings of `nuts_rungs.rs` rung 4c (direct `run_pgas`):
+  1,000 adaptation, 4,000 kept, max tree depth 8, and every chain started
+  at one point (`starts = "single"`: a = -1.5, b = 0, τ = 0.2, z = 0, or
+  every coefficient -1.5), instead of `from_prior`;
+- `single`: `default` with only the starts changed to that one point.
 
 4 chains, 64 particles, dense mass, thin 1. Per run it reads every chain's
 `trace.tsv` (parameters and per-sweep NUTS and CSMC diagnostics) and
@@ -45,7 +50,7 @@ import polars as pl
 from scipy.interpolate import BSpline
 
 SEEDS = [23, 31, 47, 59]
-TUNINGS = {"default": (1000, 3000), "long": (3000, 3000)}
+TUNINGS = {"default": (1000, 3000), "long": (3000, 3000), "rung4c": (1000, 4000), "single": (1000, 3000)}
 WINDOW = (0.0, 86.0)
 GAMMA = 0.2
 DEGREE = 3
@@ -101,17 +106,21 @@ def fit_toml(form: str, seed: int, tuning: str, data_dir: Path, run_dir: Path, r
     burn, kept = TUNINGS[tuning]
     model = repo / "tests/fixtures/bspline_inference" / (
         "seir_bspline_recovery.camdl" if form == "explicit" else "seir_smooth_recovery.camdl")
+    point = tuning in ("rung4c", "single")
     if form == "explicit":
-        est = "".join(f"b{i} = {{ prior = {{ normal = {{ mean = -1.5, sd = 1.0 }} }} }}\n" for i in range(1, 6))
+        start = ", start = -1.5" if point else ""
+        est = "".join(f"b{i} = {{ prior = {{ normal = {{ mean = -1.5, sd = 1.0 }} }}{start} }}\n" for i in range(1, 6))
     else:
-        est = "a = {}\nb = {}\ntau = {}\nz_m1 = {}\nz_m2 = {}\nz_m3 = {}\n"
+        starts = {"a": -1.5, "b": 0.0, "tau": 0.2, "z_m1": 0.0, "z_m2": 0.0, "z_m3": 0.0}
+        est = "".join(f"{n} = {{ start = {v} }}\n" if point else f"{n} = {{}}\n" for n, v in starts.items())
+    extra = {"rung4c": 'starts = "single"\nmax_tree_depth = 8\n', "single": 'starts = "single"\n'}.get(tuning, "")
     fixed = "".join(f"{k} = {v}\n" for k, v in FIXED.items())
     rel = lambda p: os.path.relpath(p, run_dir)
     return (f'output_dir = "out"\n[model]\ncamdl = "{rel(model)}"\n'
             f'[data.observations]\nonsets = "{rel(data_dir / f"onsets_{seed}.tsv")}"\n'
             f"[config]\ndt = 1.0\n[estimate]\n{est}[fixed]\n{fixed}"
             f'[method]\nalgorithm = "pgas"\nbackend = "chain_binomial"\nchains = 4\nparticles = 64\n'
-            f"sweeps = {burn + kept}\nburn_in = {burn}\nthin = 1\nn_trajectories = 1000\n")
+            f"sweeps = {burn + kept}\nburn_in = {burn}\nthin = 1\nn_trajectories = 1000\n{extra}")
 
 
 def leaf(run_dir: Path) -> Path:
@@ -132,7 +141,7 @@ def analyse(form: str, seed: int, tuning: str, run_dir: Path, wall: float, wh) -
     traces = []
     paths = []
     for c in sorted(p for p in leaf(run_dir).glob("chain_*") if p.is_dir()):
-        t = pl.read_csv(c / "trace.tsv", separator="\t")
+        t = pl.read_csv(c / "trace.tsv", separator="\t", null_values=["NA"], infer_schema_length=None)
         traces.append(t.filter(pl.col("sweep") >= burn).sort("sweep"))
         p = pl.read_csv(c / "trajectories.tsv", separator="\t", comment_prefix="#")
         paths.append(p)

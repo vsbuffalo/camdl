@@ -248,6 +248,15 @@ fn pgas_rung(label: &str, fixture: &str, fixed: &[(&str, f64)], data: Option<(&s
             let prog = tmodel.model.transitions.iter().position(|t| t.name == "progression").unwrap();
             let mut orng = StatefulRng::new(seed ^ 0x5eed);
             let counts: Vec<f64> = traj.substeps.iter().map(|s| orng.neg_binomial_dispersion(0.5 * s.flows[prog] as f64, 10.0) as f64).collect();
+            // `$CAMDL_RUNG_DATA_DUMP`: write the counts as the `fit run` diagnosis's
+            // onsets TSV, to compare the two datasets byte for byte.
+            if let Ok(path) = std::env::var("CAMDL_RUNG_DATA_DUMP") {
+                let mut body = String::from("time\tonsets\n");
+                for (i, c) in counts.iter().enumerate() {
+                    body.push_str(&format!("{}\t{c}\n", i + 1));
+                }
+                std::fs::write(path, body).unwrap();
+            }
             ((1..=counts.len()).map(|t| t as f64).collect(), dense_cells(counts))
         }
     };
@@ -304,6 +313,15 @@ fn rungs_2_and_4_through_pgas() {
     let fixed = [("sigma", 0.2), ("gamma", 0.2), ("rho", 0.5), ("k", 10.0), ("N0", 1e6), ("E0", 100.0), ("I0", 100.0)];
     pgas_rung("rung4c SEIR data seed 31, τ box", "tests/fixtures/prior_only/seir_smooth_boxed.camdl", &fixed,
         Some(("tests/fixtures/bspline_inference/seir_bspline_recovery.camdl", 31)));
+    pgas_rung("rung4c SEIR data seed 31, τ unboxed", "tests/fixtures/bspline_inference/seir_smooth_recovery.camdl", &fixed,
+        Some(("tests/fixtures/bspline_inference/seir_bspline_recovery.camdl", 31)));
+}
+
+/// Rung 4c's dataset only (seed 31), for `$CAMDL_RUNG_DATA_DUMP`.
+#[test]
+#[ignore = "diagnostic; about two minutes in release"]
+fn rung4c_seed_31_alone() {
+    let fixed = [("sigma", 0.2), ("gamma", 0.2), ("rho", 0.5), ("k", 10.0), ("N0", 1e6), ("E0", 100.0), ("I0", 100.0)];
     pgas_rung("rung4c SEIR data seed 31, τ unboxed", "tests/fixtures/bspline_inference/seir_smooth_recovery.camdl", &fixed,
         Some(("tests/fixtures/bspline_inference/seir_bspline_recovery.camdl", 31)));
 }

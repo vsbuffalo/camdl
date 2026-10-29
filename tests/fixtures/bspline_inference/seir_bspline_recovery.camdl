@@ -15,11 +15,11 @@ parameters {
   gamma : rate        in [0.01, 1.0]
   rho   : probability in [0.01, 1.0]
   k     : positive    in [0.1, 1000]
-  b1    : real 'ratio in [-8, 2]
-  b2    : real 'ratio in [-8, 2]
-  b3    : real 'ratio in [-8, 2]
-  b4    : real 'ratio in [-8, 2]
-  b5    : real 'ratio in [-8, 2]
+  b1    : real 'ratio
+  b2    : real 'ratio
+  b3    : real 'ratio
+  b4    : real 'ratio
+  b5    : real 'ratio
   N0    : count       in [100, 10000000]
   E0    : count       in [0, 1000]
   I0    : count       in [0, 1000]
