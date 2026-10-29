@@ -585,18 +585,13 @@ pub fn run_pmmh(
         current_params = base_params.to_vec();
 
         // Current state on transformed scale
+        // A start exactly on a bound has no finite z; the fit refuses one
+        // before it gets here (support-keyed transforms proposal D3).
+        debug_assert!(!if2_params.iter().any(|p| p.transform.on_an_end(current_params[p.index])),
+            "a PMMH chain started exactly on a bound");
         current_transformed = if2_params.iter()
             .map(|p| p.to_transformed(current_params[p.index]))
             .collect();
-        // A start exactly on a bound has no finite z and is moved inward by
-        // `to_transformed`; the chain's θ is that moved point, so the first
-        // likelihood is evaluated where the prior and Jacobian are. Any other
-        // start is left as given.
-        for (p, &z) in if2_params.iter().zip(current_transformed.iter()) {
-            if p.transform.on_an_end(current_params[p.index]) {
-                current_params[p.index] = p.from_transformed(z);
-            }
-        }
 
         // Initial PF evaluation
         current_ll = eval_loglik(&current_params, seed.wrapping_add(0))?;
