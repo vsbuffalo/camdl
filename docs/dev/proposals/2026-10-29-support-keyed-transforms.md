@@ -7,7 +7,7 @@ related:
   - 2026-10-26-parameter-roles.md (accepted; §4.4 states what this amends in its §6.2 and §6.4)
 ---
 
-# A parameter's transform is a function of its domain alone, and every method shares it
+# A parameter's transform is chosen from its effective domain, and every method shares it
 
 Code references are against `origin/main` at `87a426a9`, whose `src` files other
 than `sim/src/inference/{mod.rs,nuts_target_tests.rs}` are identical to
@@ -29,9 +29,10 @@ diverges on it.
 
 This proposal replaces the transform with Stan's constraint transforms
 (identity, lower-bounded, upper-bounded, interval) and adds one composite, a
-log-interval map for boxes with 0 < lo (D11). The map is chosen by the ends of
-the parameter's _effective domain_ alone. No map carries a bound it does not
-keep, so nothing is clamped and no target has a wall.
+log-interval map for positive kinds boxed with 0 < lo (D11). The map is chosen
+by the ends of the parameter's _effective domain_, and, for a box with 0 < lo,
+by whether the kind is a positive one. No map carries a bound it does not keep,
+so nothing is clamped and no target has a wall.
 
 The statistical targets do not change. Under PMMH, MH and PGAS the target is the
 posterior truncated to the domain, as now; under IF2 the estimate maximises the
@@ -270,8 +271,8 @@ pub enum Transform {
     Identity,                          // (−∞, ∞): θ = z
     LowerBounded { lo: f64 },          // [lo, ∞): θ = lo + eᶻ
     UpperBounded { hi: f64 },          // (−∞, hi]: θ = hi − eᶻ
-    Interval { lo: f64, hi: f64 },     // [lo, hi], lo ≤ 0: θ = lo + (hi − lo)·σ(z)
-    LogInterval { lo: f64, hi: f64 },  // [lo, hi], 0 < lo: ln θ = ln lo + ln(hi/lo)·σ(z)
+    Interval { lo: f64, hi: f64 },     // [lo, hi], otherwise: θ = lo + (hi − lo)·σ(z)
+    LogInterval { lo: f64, hi: f64 },  // [lo, hi], 0 < lo, positive kind: ln θ = ln lo + ln(hi/lo)·σ(z)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -281,7 +282,8 @@ pub enum DomainError {
 
 impl Transform {
     /// The map for the domain with these ends; an infinite end is open.
-    pub fn for_domain(lo: f64, hi: f64) -> Result<Self, DomainError>;
+    /// `positive_kind` is true for `rate`, `positive`, `count`, `duration`.
+    pub fn for_domain(lo: f64, hi: f64, positive_kind: bool) -> Result<Self, DomainError>;
     /// The domain's ends, (−∞, ∞) for `Identity`.
     pub fn bounds(&self) -> (f64, f64);
     /// Whether start draws and Latin-hypercube points are log-spaced.
@@ -355,23 +357,25 @@ since a parameter with no kind is refused (D6). The stored record keeps
 `transform_from`. The tag is derivable from `search`, but it is kept so that a
 record states which map ran even if the selection rule later changes.
 
-The selection rule reads only the domain's ends:
+The selection rule reads the domain's ends, and the kind only to split a finite
+box with 0 < lo:
 
-| lo     | hi     | transform                |
-| ------ | ------ | ------------------------ |
-| −∞     | ∞      | `Identity`               |
-| finite | ∞      | `LowerBounded { lo }`    |
-| −∞     | finite | `UpperBounded { hi }`    |
-| ≤ 0    | finite | `Interval { lo, hi }`    |
-| > 0    | finite | `LogInterval { lo, hi }` |
+| lo     | hi     | kind                                    | transform                |
+| ------ | ------ | --------------------------------------- | ------------------------ |
+| −∞     | ∞      | any                                     | `Identity`               |
+| finite | ∞      | any                                     | `LowerBounded { lo }`    |
+| −∞     | finite | any                                     | `UpperBounded { hi }`    |
+| > 0    | finite | `rate`, `positive`, `count`, `duration` | `LogInterval { lo, hi }` |
+| finite | finite | any other case                          | `Interval { lo, hi }`    |
 
-The kind enters only through the support. Four rows are reachable from a model
-and fit config: `Identity` (an undeclared `real` or `instant`),
-`LowerBounded { 0 }` (an undeclared positive kind), `Interval` (`probability`
-[0, 1], a positive kind on [0, hi], a signed box) and `LogInterval` (any box
-with 0 < lo, the common case for rates). `LowerBounded { lo > 0 }` and
-`UpperBounded` are reachable only from hand-built code (§3.3). They are kept so
-that every domain shape has a map and `for_domain` is total.
+Otherwise the kind enters only through the support (D11 states the trade-off).
+Four rows are reachable from a model and fit config: `Identity` (an undeclared
+`real` or `instant`), `LowerBounded { 0 }` (an undeclared positive kind),
+`Interval` (`probability`, a positive kind on [0, hi], a `real` or `instant`
+box, a signed box) and `LogInterval` (a positive kind with 0 < lo, the common
+case for rates). `LowerBounded { lo > 0 }` and `UpperBounded` are reachable only
+from hand-built code (§3.3). They are kept so that every domain shape has a map
+and `for_domain` is total.
 
 Where today's choices were sound they are reproduced. A `rate` on [0, ∞) is θ =
 eᶻ exactly; `probability` on [0, 1] is the logit; a signed box is the scaled
@@ -738,12 +742,11 @@ the seeded start of gh#34 (`runner.rs:248-257`) each decide "log-spaced" today
 by matching `Transform::Log`. They call `Transform::log_spaced` instead. Today a
 positive kind on 0 < lo < hi < ∞ is log-spaced, which `LogInterval` keeps.
 
-Two cases differ from the old `Log` match, one in name only. A positive kind on
-[0, hi] is linear-spaced today, because `init.rs:221` also requires lo > 0, and
-it stays linear-spaced. A `probability` with lo > 0, now `LogInterval`, becomes
-log-spaced; for a box like [0.1, 0.9] the two spacings differ little.
-`kept_boxes` (`chain_starts.rs:822-836`) becomes `bounds()` for every parameter,
-since every domain is kept.
+No case changes. A positive kind on [0, hi] is linear-spaced today, because
+`init.rs:221` also requires lo > 0, and it stays linear-spaced; `probability`,
+`real` and `instant` boxes take `Interval` and stay linear-spaced. `kept_boxes`
+(`chain_starts.rs:822-836`) becomes `bounds()` for every parameter, since every
+domain is kept.
 
 ### 9.5 Profile and survey inherit the change
 
@@ -949,11 +952,18 @@ The fixtures:
   the posterior have mass near an upper bound, which is the case the change is
   for;
 - the ODE fixture of `rust/crates/cli/tests/mh_ode_recovery.rs` under `mh`, the
-  deterministic-skeleton path whose MH proposal shares the step rule.
+  deterministic-skeleton path whose MH proposal shares the step rule;
+- `sir` with `gamma` redeclared `in [0.0, 0.5]`, a benchmark copy of the model
+  committed beside the note, so that a positive kind on [0, hi] takes
+  `Interval`. About 309 declarations have this shape (§3.3).
 
-Each fixture runs at main, after commit 6 with `LogInterval` for 0 < lo, and
-after commit 6 with `Interval` everywhere (D11), each at the default step and at
-the step scaled by 0.5 and 2.
+Each fixture runs at main, after commit 6 with `LogInterval` for positive kinds
+with 0 < lo, and after commit 6 with `Interval` everywhere (D11), each at the
+default step and at the step scaled by 0.5 and 2. On the [0, hi] fixture the
+`Interval` step runs at each of 2/3, 1/3 and 1/5 (D8), under its real likelihood
+and under a flat one. The flat run is reported but is not a pass criterion: with
+no likelihood to confine it, a random walk in z spreads without limit, which
+exaggerates drift to the ends.
 
 Reported:
 
@@ -962,8 +972,9 @@ Reported:
 - IF2 final log-likelihood (the clean particle-filter evaluation, mean and
   standard deviation over chains), iterations until within one log-likelihood
   unit of the final value, and chain agreement;
-- on the near-bound fixture, at IF2's last iteration, the fraction of particles
-  within 10⁻³·w of either end, and the swarm's standard deviation in z.
+- on the near-bound fixture and the [0, hi] fixture, at IF2's last iteration,
+  the fraction of particles within 10⁻³·w of each end, and the swarm's standard
+  deviation in z.
 
 Pass:
 
@@ -973,12 +984,19 @@ Pass:
 - PMMH and MH ESS per second is at least 0.8 of main's on the interior fixtures,
   and higher than main's on the near-bound fixture;
 - acceptance is between 0.1 and 0.5;
-- on the near-bound fixture, the swarm's fraction within 10⁻³·w of an end is at
-  most max(5%, main's), and its z standard deviation at the last iteration is
-  above zero in every chain, so the swarm has neither piled onto the end nor
-  collapsed.
+- on the near-bound fixture and the [0, hi] fixture under the real likelihood,
+  the swarm's fraction within 10⁻³·w of an end is at most max(5%, main's), and
+  its z standard deviation at the last iteration is above zero in every chain,
+  so the swarm has neither piled onto the end nor collapsed.
 
-D11 is decided by these numbers. The measurements go in a `docs/dev/notes/`
+D11 and D8's `Interval` constant are decided by these numbers. The `Interval`
+constant is the largest of 2/3, 1/3 and 1/5 that, on the [0, hi] fixture under
+the real likelihood, meets the swarm criterion above, gives an IF2 final
+log-likelihood within twice the particle-filter standard deviation of the best
+of the three, and gives PMMH ESS per second at least 0.8 of the best of the
+three. The largest passing constant is chosen because a larger step explores
+faster under the same cooling. If none passes, the proposal returns to the
+maintainer before commit 6 lands. The measurements go in a `docs/dev/notes/`
 note, which the series (i) merge cites.
 
 ## 13. What changes for users
@@ -1021,7 +1039,6 @@ note, which the series (i) merge cites.
   - the launch table names the map and the z-step;
   - the partition record's `transform` tag takes the new values and loses
     `transform_from`;
-  - start draws for a `probability` with lo > 0 become log-spaced (§9.4).
 
 ## 14. Decisions
 
@@ -1087,10 +1104,10 @@ builds kind-less parameters gains a kind (commit 3). Option (b), (−∞, ∞), 
 a guess in the other direction. Making `param_kind` non-optional in the IR is
 the complete fix and is an `ir/VERSION` change (§15).
 
-**D8 — The default IF2 and MH step. Recommended: a fixed step in z per map, from
-the domain alone: 2/3 for `Interval`, 1/5 for `LogInterval`, none for a domain
-with an infinite end. Confidence: leaning.** The constants reproduce today's
-default step at the box's midpoint:
+**D8 — The default IF2 and MH step. Recommended: a fixed step in z per map: 1/5
+for `LogInterval`; for `Interval`, the constant chosen from 2/3, 1/3 and 1/5 by
+the decision rule of §12.6; none for a domain with an infinite end. Confidence:
+leaning.** The candidates start from today's default step at the box's midpoint:
 
 - `Interval`: today's logit default is (hi − lo)/6 on the natural scale, which
   is 2/3 in z at the midpoint, where |g′| = w/4;
@@ -1104,8 +1121,20 @@ moving with the parameter. The alternatives each fail §9.1's measurement:
 - (c), conversion once at θ₀, gives each chain a different step, up to 3·10⁸ at
   a nudged start.
 
-The constants are a starting heuristic, like today's. The benchmark (§12.6) also
-runs half and double the step, and pass criteria apply at the best of the three.
+Reproducing the midpoint step is not enough for `Interval`. Reproduced by an
+independent check, `beta` on [0.05, 1] with a flat likelihood and no cooling,
+the share of particles within 10⁻³ of lo / hi:
+
+| map and step       | 50 steps     | 200 steps     |
+| ------------------ | ------------ | ------------- |
+| today              | 2.0% / 0.0%  | 0.5% / 2.6%   |
+| `LogInterval`, 1/5 | 0.2% / 0.0%  | 7.3% / 0.1%   |
+| `Interval`, 2/3    | 17.6% / 2.4% | 31.9% / 16.5% |
+
+A flat likelihood exaggerates this, but `Interval` is the map of every positive
+kind boxed [0, hi] (about 309 declarations), so its constant is a benchmarked
+choice with a stated rule (§12.6), not a fixed 2/3. The benchmark also runs half
+and double each default, and the pass criteria apply at the best of the three.
 
 **D9 — The unit of an explicit `rw_sd` (gh#1001). Recommended: z, in series
 (ii); series (i) converts a natural-scale value once at the domain's midpoint.
@@ -1128,18 +1157,29 @@ reach it (§9.1). The cost of (a) is a false alarm when the start was far above 
 legitimately small estimate. The message says "may be on the bound" and names
 the test (profile, or `nl-bobyqa`).
 
-**D11 — The map for a box with 0 < lo. Recommended: `LogInterval`, subject to
-the §12.6 benchmark. Confidence: leaning.** These boxes are the common case:
+**D11 — The map for a positive kind (`rate`, `positive`, `count`, `duration`)
+boxed with 0 < lo. Recommended: `LogInterval`, for positive kinds only, subject
+to the §12.6 benchmark. Confidence: leaning.** These boxes are the common case:
 every rate in the recovery fixtures, and the B-spline scale τ on [10⁻⁶, 2.5].
 Option (a), `LogInterval`, keeps today's ln θ geometry in the box's interior, so
-default steps and log-spaced starts carry over. ln θ is an exact function of z,
-so log-family priors are exact. Its default step means the same thing at every
-scale of box. It is a composite, not one of Stan's built-in maps. Option (b),
-`Interval` everywhere, is Stan's map and one variant fewer. But it spaces a rate
-on [10⁻⁶, 2.5] linearly, so almost all of z's interior lies above 10⁻² and the
-sampler resolves the low end poorly. It also needs the kind threaded into
-`EstimatedParam` for log-spaced starts (§4.1). The benchmark runs both. If (b)
-matches (a) on every criterion, (b) wins on simplicity.
+default steps and log-spaced starts carry over.
+
+The trade-off is that the transform is no longer a function of the domain alone:
+the kind splits a box with 0 < lo. Choosing by lo > 0 alone would keep that
+principle at two costs. A `probability` on [0.1, 0.9] would move from the logit
+to `LogInterval`, and its default natural-scale step would shrink 4.05× (0.133
+to 0.033), against D8's aim of keeping today's step. An `instant` or `real` on
+[10, 50] would get log geometry while one on [−10, 50] would not, so the
+geometry would depend on where the time origin sits. Log geometry is a property
+of positive quantities, which is what the positive kinds declare. ln θ is an
+exact function of z, so log-family priors are exact. Its default step means the
+same thing at every scale of box. It is a composite, not one of Stan's built-in
+maps. Option (b), `Interval` everywhere, is Stan's map and one variant fewer.
+But it spaces a rate on [10⁻⁶, 2.5] linearly, so almost all of z's interior lies
+above 10⁻² and the sampler resolves the low end poorly. It also needs the kind
+threaded into `EstimatedParam` for log-spaced starts (§4.1); under (a) the kind
+is read once, at construction, and the map carries the answer. The benchmark
+runs both. If (b) matches (a) on every criterion, (b) wins on simplicity.
 
 ## 15. Out of scope, each with its reason
 
