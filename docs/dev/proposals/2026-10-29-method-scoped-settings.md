@@ -982,7 +982,8 @@ pub enum MethodPlan {
 pub struct If2Plan {
     pub steps: IndexMap<String, ResolvedPerturbation>,   // §4.4
     pub simplex: Vec<IndexMap<String, ResolvedProposal>>,
-    /* chains, particles, iterations, cooling, loglik_eval, gate, dt_check */
+    /* chains, particles, iterations, cooling, cooling_target_iters, loglik_eval,
+       dt-check measurement (enabled, n_halvings, particles, replicates) */
 }
 
 /// The proposal PMMH and MH share.
@@ -992,7 +993,7 @@ pub struct MhProposal {
     pub adapt_start: usize,
 }
 pub struct PmmhPlan  { pub proposal: MhProposal, /* chains, particles, iterations, burn_in, thin */ }
-pub struct MhOdePlan { pub proposal: MhProposal, /* chains, iterations, burn_in, thin, burnin_dt, dt_check */ }
+pub struct MhOdePlan { pub proposal: MhProposal, /* chains, iterations, burn_in, thin, burnin_dt, dt-check measurement */ }
 pub struct PgasPlan {
     /// MH-within-Gibbs initial scale per parameter, in z (backend default, §3.8).
     pub mwg_initial_scale: IndexMap<String, f64>,
@@ -1001,6 +1002,17 @@ pub struct PgasPlan {
     /* chains, particles, sweeps, use_nuts, dense_mass, … */
 }
 ```
+
+A plan holds execution settings only. Post-run thresholds are assessment policy
+under the result-records proposal's decided D3 (its §5), and live in its new
+`[assessment]` table, not in any plan:
+
+- IF2's chain-agreement threshold (`gate.a_thresh`);
+- the decibans threshold (`gate.decibans_thresh`, IF2 and NLopt);
+- the dt-check tolerance (`threshold_nats`, `--dt-check-strict`).
+
+What a dt-check or clean evaluation _measures_ (particles, replicates, halvings)
+stays execution and stays in the plan.
 
 `ResolvedSteps` (§4.4) is the step-bearing part of `MethodPlan`: its `If2` arm
 is `If2Plan.steps` and `.simplex`, its `Proposal` arm `MhProposal.sd`, and its
@@ -1270,16 +1282,38 @@ The initial-state list is renamed with the flag, `initial_state_params`. A
 that carries `perturb_only_at_t0_params`, is handled by its use (D16, maintainer
 decision):
 
-- **As an input to a new computation it is refused**: `fit run --resume`, a
-  `from_mle` or `from_posterior` starts source, `profile --fit` or
-  `--fixed-file` from the fit. The error names the producer version
-  (`FitState.camdl_version`, `state.rs:30-32`) and the schema version it was
-  written under, and says the fit must be run again.
+- **As an input to a new computation it is refused.** The input paths are the
+  same as in the result-records proposal
+  (`2026-10-29-result-records-and-assessment.md` §6, on
+  `docs/inference-invariants-and-assessment`):
+  - a `from_mle` or `from_posterior` starts source in `fit run`
+    (`fit/chain_starts.rs:1031`) and in `profile`'s `--starts from_mle`
+    (`profile.rs:1953`);
+  - the runner reading back the record it has just written (`fit/mod.rs:2101`);
+  - the warm-start source check (`fit/gating.rs:441`).
+
+  The error names the producer version (`FitState.camdl_version`,
+  `state.rs:30-32`) and the schema version it was written under, and says the
+  fit must be run again.
+
+  Two paths that look like inputs are not on the list:
+  - `fit run --resume` does not read `fit_state.toml`. `copy_resume_carryover`
+    (`fit/mod.rs:2131-2149`) copies only each chain's `resume_state.bin` and
+    `parameter_traces.tsv`. Its compatibility is the `resume_guard` key (§5.3),
+    not this split.
+  - `profile --fit` and `profile --fixed-file` read the fit config and
+    `mle_params.toml`, not `fit_state.toml`. Stored configs are §7.2, and fit
+    artifacts follow `ef81ade7`.
 - **Read-only commands inspect it with one notice**: `fit summary` and
-  `fit table` read it, and the notice names the version and the unsupported
-  keys. An old file's initial-state list is read under its old key for this
-  purpose, so `fit summary` applies the chain-agreement exemption to the
-  parameters the run exempted.
+  `fit table` read it. So does `fit predict`, whose only read of the state is
+  `method_result::point_start` (`fit/method_result.rs:935`); that check decides
+  whether to demote the diagnostics of a point-started fit. Its posterior comes
+  from the draws, not from `fit_state.toml`. Today that read drops any load
+  error silently (`.ok()?`); under the split it prints the notice. In each of
+  these commands and the notice names the version and the unsupported keys. An
+  old file's initial-state list is read under its old key for this purpose, so
+  `fit summary` applies the chain-agreement exemption to the parameters the run
+  exempted.
 - **Listing commands never abort**: `fit table` reports an unreadable state as
   an error in that fit's row and lists the rest (it already matches on the load
   result, `fit_summary.rs:618`, `:2857`).
@@ -1288,6 +1322,15 @@ decision):
 and `FitState::load_for_inspection(dir)` returns the state with its notice. The
 precedent for a refusal inside `load` is `chain_index::refuse_one_based_layout`
 (`state.rs:190`).
+
+The split is interim. At result-records Stage 3, `ResultRecord` replaces
+`FitState`, and the two functions become `ResultRecord::load_input` and
+`ResultRecord::load_for_inspection` with the same semantics:
+
+- the same input paths refuse;
+- old records are still read for inspection;
+- an old record is still assessed with its old initial-state exemption, read
+  under its old key by that proposal's legacy adapter.
 
 Tests: a pre-release IF2 state with `perturb_only_at_t0_params` is refused as a
 `from_mle` source, naming the version; `fit summary` on it exempts the listed
