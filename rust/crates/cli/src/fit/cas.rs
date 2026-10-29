@@ -729,8 +729,9 @@ mod tests {
         assert!(err.contains("unresolved"), "{err}");
     }
 
-    /// `starts` is in the method identity: two methods differing only in it
-    /// get distinct hashes, and a spelled default equals the resolved one.
+    /// `starts` is in the method identity: two methods differing only in its
+    /// rule get distinct hashes, two spellings of a sourced rule's handle do
+    /// not, and a spelled default equals the resolved one.
     #[test]
     fn starts_is_in_the_method_identity() {
         let base = "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\n\
@@ -744,7 +745,9 @@ mod tests {
         let h = |m: &Method| stage_config_hash(m).unwrap();
         assert_ne!(h(&lhs), h(&prior));
         assert_ne!(h(&prior), h(&mle));
-        assert_ne!(h(&mle), h(&mle_b), "the handle as written is part of the key");
+        // gh#896: the handle as written is not the key; which source run was
+        // read keys through the method level's deps.
+        assert_eq!(h(&mle), h(&mle_b), "the handle as written is not part of the key");
         // A resolved default and the same rule spelled out key identically.
         let mut resolved: Method = toml::from_str(base).unwrap();
         resolved.starts = Some(super::super::starts::ChainStarts::from_prior());
