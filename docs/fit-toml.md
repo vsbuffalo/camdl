@@ -179,11 +179,11 @@ whether the chains found the same posterior:
 that began together agree by construction, and the summary says so instead of
 reporting a pass:
 
-| `starts`                     | where the chains start                                                                                        |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `single`                     | every chain at the base point                                                                                 |
-| `{ from_mle = "<handle>" }`  | every chain at a stored fit's point estimate; a parameter absent from the source falls back to bounds-uniform |
-| `{ from_params = "<toml>" }` | every chain at the values in a flat params TOML                                                               |
+| `starts`                     | where the chains start                                                                                                                                                                                                               |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `single`                     | every chain at the base point                                                                                                                                                                                                        |
+| `{ from_mle = "<handle>" }`  | every chain at a stored optimizer fit's point estimate (`if2`, `nl-*`; a `pgas`/`pmmh`/`mh` source is refused, since a sampler writes no MLE: use `from_posterior`); a parameter absent from the source falls back to bounds-uniform |
+| `{ from_params = "<toml>" }` | every chain at the values in a flat params TOML                                                                                                                                                                                      |
 
 A **handle** is any fit reference: `@label`, a fit-id prefix, a method leaf's
 `run_id` prefix, the leaf directory, or a `fit.toml`. A source whose stored

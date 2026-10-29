@@ -1728,7 +1728,7 @@ impl Formatter {
         forkable: Option<&crate::fit::joint::JointEnsemble>,
     ) -> String {
         // Convergence + efficiency come from the shared diagnostics; the
-        // method-specific extras (acceptance summary, MAP loglik) are pulled
+        // method-specific extras (acceptance summary, the highest-draw loglik) are pulled
         // per variant. Every Bayesian sampler routes through this one block.
         let (diag, posterior_mean, acceptance_summary, map_loglik) = match view {
             BayesianView::Pgas(r) => (&r.diagnostics, &r.posterior_mean, None::<f64>, None::<f64>),
@@ -1769,7 +1769,13 @@ impl Formatter {
             extra.push(format!("{} chains saved paths", facts.n_chains_with_paths));
         }
         if let Some(ll) = map_loglik {
-            extra.push(format!("MAP loglik {:.1}", ll));
+            // `map_loglik` is the log-likelihood of the visited draw that
+            // maximised log-likelihood + log prior, the prior on the natural
+            // scale with no transform Jacobian: not a MAP estimate, and not
+            // an MLE. Said as what it is.
+            extra.push(format!(
+                "loglik {:.1} at the highest log-posterior draw (natural-scale prior, no Jacobian)",
+                ll));
         }
         s.push_str(&self.identity_line(lead, stage, method, &extra));
         s.push_str(&self.refused_chains_lines(&refused));
@@ -5269,7 +5275,8 @@ mod tests {
             "no `latent paths` rule for a sampler that writes none:\n{out}");
         assert!(!out.contains("chains saved paths"),
             "and nothing on the identity line claims any:\n{out}");
-        assert!(out.contains("MAP loglik -1234.5"),
+        assert!(out.contains("loglik -1234.5 at the highest log-posterior draw \
+                              (natural-scale prior, no Jacobian)"),
             "the identity line still carries what this sampler does report:\n{out}");
         // The acceptance rate belongs with the other efficiency numbers.
         assert!(section_of(&out, SECTION_CONVERGENCE)

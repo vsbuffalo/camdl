@@ -421,6 +421,12 @@ pub fn resolve_starts(rule: &ChainStarts, allow_nonconverged: bool) -> Result<Re
     }
     let leaf = resolve_fit_leaf(&handle)
         .map_err(|e| format!("starts = {}: {}", rule.spelled(), e))?;
+    if matches!(rule, ChainStarts::Point(Point::FromMle { .. })) {
+        let method = super::state::FitState::load(&leaf.to_string_lossy())
+            .map(|s| s.method)
+            .map_err(|e| format!("starts = {}: cannot read its fit_state.toml: {e}", rule.spelled()))?;
+        refuse_sampler_as_mle_source(&method, &handle)?;
+    }
     super::gating::check_source_converged(&leaf, &handle, allow_nonconverged)?;
     let (file, artifact) = match rule {
         ChainStarts::Spread(Spread::FromPosterior { .. }) => (leaf.join("draws.tsv"), "draws.tsv"),
@@ -441,6 +447,26 @@ pub fn resolve_starts(rule: &ChainStarts, allow_nonconverged: bool) -> Result<Re
         rule: rule.clone(),
         source: Some(ResolvedSource { file, leaf_dir: Some(leaf), dep }),
     })
+}
+
+/// `from_mle` starts from a fit's point estimate, and a posterior sampler
+/// (pgas, pmmh, mh) writes none: its `fit_state.toml` `start_values` is one
+/// visited state — for PGAS the sweep with the highest complete-data
+/// log-likelihood, for PMMH/MH the draw maximising log-likelihood plus the
+/// natural-scale log prior — not a maximum-likelihood estimate. Refused with
+/// the rule that does read a sampler, `from_posterior`. Shared by `fit run`
+/// and `camdl profile`.
+pub fn refuse_sampler_as_mle_source(method: &str, handle: &str) -> Result<(), String> {
+    use crate::run_meta::FitAlgorithm;
+    match super::methods::parse_algorithm(method) {
+        Some(FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Mh) => Err(format!(
+            "from_mle = \"{handle}\" names a `{method}` fit, a posterior sampler, which \
+             writes no maximum-likelihood estimate: the point it stores is one visited \
+             state. Start from its posterior with `starts = {{ from_posterior = \"{handle}\" }}` \
+             (`--starts from_posterior={handle}`), or from_mle an optimizer fit (if2, nl-*)."
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// A fit handle → the one method leaf it names.
@@ -1528,6 +1554,26 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::write(&p, contents).unwrap();
         p
+    }
+
+    /// `from_mle` of a posterior sampler is refused, naming `from_posterior`:
+    /// a sampler's stored point is one visited state, not an MLE.
+    #[test]
+    fn from_mle_refuses_a_sampler_leaf() {
+        for method in ["pgas", "pmmh", "mh"] {
+            let dir = write_tmp(&format!("mle_of_{method}"), "");
+            std::fs::remove_file(&dir).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("fit_state.toml"), format!(
+                "method = \"{method}\"\nseed = 1\ntimestamp = \"t\"\nbest_loglik = -1.0\n\
+                 initial_loglik = -2.0\nbest_chain = 0\nn_chains = 2\n\
+                 [start_values]\nbeta = 0.4\n")).unwrap();
+            let rule: ChainStarts = format!("from_mle={}", dir.display()).parse().unwrap();
+            let err = resolve_starts(&rule, true)
+                .err().unwrap_or_else(|| panic!("from_mle of a {method} leaf must be refused"));
+            assert!(err.contains("from_posterior") && err.contains(method), "{err}");
+            std::fs::remove_dir_all(&dir).ok();
+        }
     }
 
     // ─── `from_params` ────────────────────────────────────────────────
