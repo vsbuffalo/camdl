@@ -73,10 +73,14 @@ pub const IF2_LOG_INTERVAL_STEP: f64 = 0.2;
 /// about e^±s (proposal D8, §12.6).
 pub const IF2_HALF_BOUNDED_STEP: f64 = 0.2;
 
-/// PMMH's and MH's default initial proposal SD in z, every map with a finite
-/// end (proposal D8). Robbins–Monro adaptation tunes it from the first
-/// warm-up step, so its value matters little.
-pub const MH_DEFAULT_STEP: f64 = 1.0;
+/// PMMH's, MH's and PGAS MH-within-Gibbs's default initial proposal SD in z,
+/// every map with a finite end (proposal D8). Robbins–Monro adaptation tunes
+/// it from the first warm-up step. It is near the scale adaptation reaches on
+/// a well-identified parameter (about 2.4 posterior SDs in z), not far above
+/// it: the PMMH preflight measures the likelihood-ratio spread over one
+/// initial step, and a step of 1.0 made that spread read as hopeless filter
+/// noise (2·Φ(−s/2) < 0.1% on a plain SIR).
+pub const MH_DEFAULT_STEP: f64 = 0.25;
 
 /// The logistic function σ(z) = 1/(1 + e⁻ᶻ), on the branch that does not
 /// overflow.

@@ -146,9 +146,9 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   narrowed `probability` and a `log_normal` on a positive sub-box included.
   Migration: narrow the bounds, or choose a prior that covers them.
 - **PGAS's MH-within-Gibbs (`--no-nuts`) starts its proposal scale at the
-  sampler default, 1.0 in the transformed coordinate,** the default PMMH's first
-  proposal takes; it does not read `rw_sd`. It was a tenth of the transform's
-  spread between 10⁻¹⁰ and 10¹⁰ (about 10⁹ for an unbounded `real`).
+  sampler default, 0.25 in the transformed coordinate,** the default PMMH's
+  first proposal takes; it does not read `rw_sd`. It was a tenth of the
+  transform's spread between 10⁻¹⁰ and 10¹⁰ (about 10⁹ for an unbounded `real`).
   Robbins–Monro adaptation tunes it during burn-in either way. Migration: none.
 - **The near-bound report names the test for a maximum on the bound.** IF2's
   estimate within 1% of the width of either end of a box finite at both ends is
@@ -196,7 +196,7 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   transform. Every transform with a finite end has a default, so a `rate`,
   `positive`, `count` or `duration` on `[0, hi]` or `[0, ∞)` runs without an
   explicit `rw_sd`; an unbounded `real` or `instant` still needs one. PMMH and
-  MH start their proposal at 1.0 in z, or at five times an explicit `rw_sd`'s
+  MH start their proposal at 0.25 in z, or at five times an explicit `rw_sd`'s
   step, and adapt from there. The launch table prints the step in z and the
   natural-scale step it is at the midpoint. Fixed-seed IF2, PMMH and MH runs on
   boxed parameters change. Migration: none; a hand-tuned `rw_sd` keeps its
