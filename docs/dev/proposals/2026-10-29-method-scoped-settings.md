@@ -133,15 +133,15 @@ On the branch:
 
 ### 3.2 `perturb_only_at_t0` is IF2's schedule, and seven places read it
 
-| reader                                                           | where (verified)                                                                                         |
-| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| IF2's per-observation perturbation skips a flagged parameter     | `if2.rs:531`                                                                                             |
-| every other algorithm refuses the flag at load                   | `config_v2.rs:2438-2457`                                                                                 |
-| a simplex member may not carry it                                | `config_v2.rs:3248-3256`                                                                                 |
-| the `ic_free` precondition accepts an IVP as t = 0 spread        | `runner.rs:511-556` (the test at `:540-543`)                                                             |
-| the `ic_free` startup line names the IVPs as a spread source     | `fit/mod.rs:809-833`                                                                                     |
-| IF2's convergence check exempts IVPs from chain agreement        | `gating.rs:190`                                                                                          |
-| `fit_state.toml` lists them; `fit summary` applies the exemption | `state.rs:62-68`; `fit_summary.rs:1597`, `:3071`; written by `fit/mod.rs:1489`, `nlopt_stage.rs:270-299` |
+| reader                                                                           | where (verified)                                                                                         |
+| -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| IF2's per-observation perturbation skips a flagged parameter                     | `if2.rs:531`                                                                                             |
+| every other algorithm refuses the flag at load                                   | `config_v2.rs:2438-2457`                                                                                 |
+| a simplex member may not carry it                                                | `config_v2.rs:3248-3256`                                                                                 |
+| the `ic_free` precondition accepts an initial-state parameter as t = 0 spread    | `runner.rs:511-556` (the test at `:540-543`)                                                             |
+| the `ic_free` startup line names the initial-state parameters as a spread source | `fit/mod.rs:809-833`                                                                                     |
+| IF2's convergence check exempts initial-state parameters from chain agreement    | `gating.rs:190`                                                                                          |
+| `fit_state.toml` lists them; `fit summary` applies the exemption                 | `state.rs:62-68`; `fit_summary.rs:1597`, `:3071`; written by `fit/mod.rs:1489`, `nlopt_stage.rs:270-299` |
 
 `profile` reads the flag only from a `--fit` config's `[estimate]`
 (`profile.rs:890-891`). A profile with no `--fit` cannot mark an initial-state
@@ -395,7 +395,7 @@ Every reader of the removed fields, and what it reads instead:
 | `cli/src/fit/pmmh.rs:1049-1052`, `build_proposal_sd`                                    | `ExecutionPlan`'s resolved proposal (§4.4, §6)                                        |
 | `runner.rs:540-543`, the `ic_free` precondition; `fit/mod.rs:809-833`, its startup line | any resolved IF2 step is `TimeZeroOnly`                                               |
 | `gating.rs:190`; `fit_summary.rs:1597`, `:3071`                                         | `fit_state.toml`'s initial-state list (§7.5)                                          |
-| `fit/mod.rs:1434-1439`, `:1489`; `nlopt_stage.rs:262-299`                               | the IVP list from the resolved steps; `[rw_sd]` is deleted (§3.5)                     |
+| `fit/mod.rs:1434-1439`, `:1489`; `nlopt_stage.rs:262-299`                               | the initial-state list from the resolved steps; `[rw_sd]` is deleted (§3.5)           |
 | `runner.rs:1059-1093` (branch `:1135-1182`), the launch table                           | the resolved steps, with `written`/`default` shown                                    |
 | `runner.rs:369-378`, `:1445-1475` (branch `:1489`), `refuse_degenerate_auto_rw_sd`      | `StepError::NoDefault` (§4.4)                                                         |
 | `runner.rs:647-692` (branch `:659-693`), `resolve_simplex_groups`                       | the resolved simplex SDs                                                              |
@@ -1291,9 +1291,9 @@ precedent for a refusal inside `load` is `chain_index::refuse_one_based_layout`
 
 Tests: a pre-release IF2 state with `perturb_only_at_t0_params` is refused as a
 `from_mle` source, naming the version; `fit summary` on it exempts the listed
-IVPs and prints the notice once; `fit table` over a store with one such fit and
-one unreadable state lists both, the second as a row error. Each is red when
-`load_input` and `load_for_inspection` are swapped.
+initial-state parameters and prints the notice once; `fit table` over a store
+with one such fit and one unreadable state lists both, the second as a row
+error. Each is red when `load_input` and `load_for_inspection` are swapped.
 
 ## 8. `profile` declares its estimated set with `--estimate` and its steps with `--perturbation`
 
@@ -1305,9 +1305,9 @@ The parameter-roles proposal decides that `profile`'s estimated set comes from
   an estimated name. Under IF2 it overrides `[method.perturbation]` from an IF2
   `--fit` config per name.
 - `--initial-state NAME[,NAME…]`, repeatable: perturb at t = 0 only. It adds to
-  the IVPs an IF2 `--fit` config declares. There is no flag to remove one,
-  because perturbing an initial state at every observation is a different
-  estimand, made by editing the config.
+  the initial-state parameters an IF2 `--fit` config declares. There is no flag
+  to remove one, because perturbing an initial state at every observation is a
+  different estimand, made by editing the config.
 - Under `--algorithm nl-*` both flags are refused: the optimizers take no step.
 - `--rw-sd` is a removed-flag trap, like `_removed_pmmh_rho`
   (`args/mod.rs:1815-1819`). After the model loads it prints the `--estimate`
@@ -1715,11 +1715,11 @@ coordinate.** z is the coordinate both kernels act in, pomp's `mif2` unit
 (§3.6), and the unit of the D8 defaults. The type makes a non-positive or
 non-finite value unrepresentable after load.
 
-**D4 — The IVP flag is a key inside the perturbation entry.** One entry per
-parameter keeps its IF2 settings in one place, as pomp's `ivp()` is part of the
-parameter's `rw.sd` entry. A separate list was considered; it matches the
-`--initial-state` flag's shape but splits one parameter's settings across two
-places. The key is `initial_state` (D18).
+**D4 — The initial-state flag is a key inside the perturbation entry.** One
+entry per parameter keeps its IF2 settings in one place, as pomp's `ivp()` is
+part of the parameter's `rw.sd` entry. A separate list was considered; it
+matches the `--initial-state` flag's shape but splits one parameter's settings
+across two places. The key is `initial_state` (D18).
 
 **D5 — `[method.proposal]` defaults to `default_mh_step`** (maintainer decision
 3; 0.25 in z, _branch_ `types.rs:83`). Whether a written value is the proposal
@@ -1745,8 +1745,8 @@ unlistable; accepting a live one would let the file circulate. This follows
 **D9 — `profile` reads `[method.perturbation]` from an IF2 `--fit`, and nothing
 else from `[method]`; under `nl-*` it reads no step.** Profile already reads
 these settings from `[estimate]` (`profile.rs:878-891`), so not reading them
-would perturb an IVP at every observation without saying so. Profile's
-particles, iterations and cooling stay its own flags.
+would perturb an initial-state parameter at every observation without saying so.
+Profile's particles, iterations and cooling stay its own flags.
 
 **D10 — `fit_state.toml` drops `[rw_sd]`.** Written and never read (§3.5).
 
