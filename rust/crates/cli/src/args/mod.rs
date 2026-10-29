@@ -770,12 +770,13 @@ pub struct FitRunArgs {
     #[arg(long = "rho", value_name = "F", hide = true)]
     pub _removed_rho: Option<String>,
 
-    /// User-supplied display label for this fit (1–64 chars after
-    /// trim; allowed: letters, digits, spaces, commas, dot,
-    /// underscore, hyphen). Surfaced in `camdl fit list` and
-    /// `camdl fit table` to disambiguate iterations of a model that
-    /// share the same fit-stem. Examples: --label "narrow R0, take 1",
-    /// --label "iota free", --label "log_normal R0 prior".
+    /// The run's label (1–64 chars after trim; allowed: letters, digits,
+    /// spaces, commas, dot, underscore, hyphen). `@label` names this one run
+    /// from then on, and the label never moves: it is refused when another
+    /// run holds it, when this run is already stored under another label,
+    /// and when the invocation writes several runs (fit seeds, datasets,
+    /// sweep points). Surfaced in `camdl list` and `camdl fit table`.
+    /// Examples: --label "narrow R0, take 1", --label "iota free".
     #[arg(long, value_name = "TEXT")]
     pub label: Option<String>,
 
@@ -957,8 +958,10 @@ Nothing is hidden behind a verbosity flag: every section carries its full
 table. `--parameters` and `--explain` only ADD to it.
 "))]
 pub struct FitSummaryArgs {
-    /// The fit, by handle: `@label`, a fit-level hash prefix, a fit results
-    /// directory (e.g. `results/fits/he2010-…`), or a `fit.toml` config.
+    /// The fit, by handle: `@label`, a run-id or fit-level hash prefix, a run's
+    /// leaf directory or a fit results directory (e.g. `results/fits/he2010-…`),
+    /// or a `fit.toml` config (the run made from it). A directory in which one
+    /// method has several runs errors and lists them.
     pub fit: String,
 
     /// Output format. `text` (default) emits the terminal block;
@@ -1110,10 +1113,10 @@ the file is a superset of the pooled one — and composes with
 --exclude-chains 3,5 writes predictive-excl3,5/ with a `chain` column, and the
 ids there are the fit's own numbering with 3 and 5 simply absent."))]
 pub struct FitPredictArgs {
-    /// The fit, by handle: `@label`, a fit-level hash prefix, a fit results
-    /// directory, or a `fit.toml` config (resolved to its unique run). A handle
-    /// that maps to several fits errors and lists them — pass a run directory or
-    /// a longer hash prefix to disambiguate.
+    /// The fit, by handle: `@label`, a run-id or fit-level hash prefix, a run's
+    /// leaf directory or a fit results directory, or a `fit.toml` config (the
+    /// run made from it). A handle that maps to several runs errors and lists
+    /// them — pass a leaf directory or a longer prefix to disambiguate.
     #[arg(long = "fit", value_name = "FIT")]
     pub fit_flag: Option<String>,
 
@@ -1416,9 +1419,8 @@ pub struct FitTableArgs {
     #[arg(long, value_name = "SECONDS")]
     pub since_seconds: Option<i64>,
 
-    /// Filter to fits whose label matches a glob (step 8 will
-    /// populate labels; pre-step-8 this filter always excludes
-    /// everything).
+    /// Filter to fits with a run whose label matches a glob; an
+    /// unlabelled fit is matched as "".
     #[arg(long, value_name = "GLOB")]
     pub label_pattern: Option<String>,
 
@@ -1494,6 +1496,9 @@ Notes:
   - Errors on ambiguous or unmatched prefix.
   - Errors on a still-running fit (RunStatus::Running); the
     runner would otherwise overwrite the label at completion.
+  - A fit run's label never moves: a label another fit run holds, a
+    second label for a labelled run, and a fit id (a problem folder,
+    not a run) are refused.
   - Concurrent invocations are last-write-wins.
 "))]
 pub struct LabelArgs {
