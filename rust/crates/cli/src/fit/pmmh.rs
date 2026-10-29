@@ -1037,7 +1037,7 @@ pub fn run_stage(
 
     eprintln!("\n{}", completion_line(
         stage_name, is_ode_mh, elapsed.as_secs_f64(), n_chains, n_steps, stage_dir));
-    eprintln!("  MAP loglik: {:.1} (chain {})", map_result.map_loglik, ChainIndex(*map_chain));
+    eprintln!("  loglik at the highest log-posterior draw (natural-scale prior, no Jacobian): {:.1} (chain {})", map_result.map_loglik, ChainIndex(*map_chain));
 
     Ok(())
 }

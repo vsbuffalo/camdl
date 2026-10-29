@@ -1952,6 +1952,7 @@ fn starts_values_from_init_method(
                 .map_err(|e| format!("--starts from_mle={}: {}", source, e))?;
             let state = crate::fit::state::FitState::load(&leaf.to_string_lossy())
                 .map_err(|e| format!("--starts from_mle={}: {}", source, e))?;
+            crate::fit::chain_starts::refuse_sampler_as_mle_source(&state.method, &source.0)?;
             (StartsOrigin::Mle { fit: source.0.clone() },
              state.start_values.into_iter().collect())
         }
