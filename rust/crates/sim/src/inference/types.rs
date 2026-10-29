@@ -250,8 +250,11 @@ impl Transform {
         };
         let (ln_theta, d_ln_theta_dz) = match *self {
             Transform::LogInterval { lo, hi } => {
+                // From the nearer end, so the distance to it in ln θ keeps
+                // its precision: ln lo + L·σ(z) loses it near hi.
                 let l = (hi / lo).ln();
-                (lo.ln() + l * sigmoid(z), l * sigmoid(z) * sigmoid(-z))
+                let ln_theta = if z <= 0.0 { lo.ln() + l * sigmoid(z) } else { hi.ln() - l * sigmoid(-z) };
+                (ln_theta, l * sigmoid(z) * sigmoid(-z))
             }
             _ if lo >= 0.0 => {
                 let ln_theta = if lo == 0.0 { ln_above_lo } else { logaddexp(lo.ln(), ln_above_lo) };
@@ -878,6 +881,29 @@ mod tests {
                 let x = t.inverse(z);
                 assert!(x >= lo && x <= hi, "{label}: g({z}) = {x} outside [{lo}, {hi}]");
             }
+        }
+    }
+
+    /// The log-interval map's ln θ is computed from the nearer end. With
+    /// hi = 1, ln hi = 0 exactly, so near hi ln θ is itself the distance to
+    /// the end and must carry it to 1e-12 relative: −L·σ(−z), out to z = 30.
+    /// Summed from the lower end (ln lo + L·σ(z)) it is the difference of two
+    /// numbers near ±L and is off by ~1e-3 relative at z = 30. Nowhere may ln θ
+    /// exceed ln hi.
+    #[test]
+    fn log_interval_ln_theta_is_exact_near_the_upper_end() {
+        let (lo, hi) = (0.05_f64, 1.0_f64);
+        let t = Transform::LogInterval { lo, hi };
+        let l = (hi / lo).ln();
+        for z in [5.0, 15.0, 30.0] {
+            let got = t.prior_point(z).ln_theta;
+            let want = -l * sigmoid(-z);
+            assert!((got - want).abs() <= 1e-12 * want.abs(), "z={z}: ln θ = {got:e}, want {want:e}");
+        }
+        let mut z = -40.0;
+        while z <= 40.0 {
+            assert!(t.prior_point(z).ln_theta <= 0.0, "z={z}: ln θ above ln hi");
+            z += 0.25;
         }
     }
 
