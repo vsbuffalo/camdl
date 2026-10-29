@@ -756,14 +756,23 @@ fn check_convergence(
         .filter(|(_, c)| matches!(c.status, OptStatus::Failed | OptStatus::MaxTimeReached))
         .count();
 
+    // Both legs judge the converged chains. A chain that ran out of
+    // evaluations or failed stopped where its budget or error did, so its
+    // parameters and log-likelihood say nothing about whether the converged
+    // chains found one optimum; the status counts above report it, and
+    // `OptimizerConvergence::passes` fails a run that has any.
+    let converged: Vec<&ChainOutcome> = chain_outcomes
+        .iter()
+        .filter(|(_, c)| matches!(c.status, OptStatus::Converged(_)))
+        .map(|(_, c)| c)
+        .collect();
     let mut chain_agreement = HashMap::new();
     let mut max_rel = 0.0f64;
     let mut max_abs = 0.0f64;
     let mut chain_agreement_failed = false;
-    if chain_outcomes.len() >= 2 {
+    if converged.len() >= 2 {
         for (slot, name) in est_names.iter().enumerate() {
-            let vals: Vec<f64> =
-                chain_outcomes.iter().map(|(_, c)| c.params[slot]).collect();
+            let vals: Vec<f64> = converged.iter().map(|c| c.params[slot]).collect();
             let max = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let min = vals.iter().cloned().fold(f64::INFINITY, f64::min);
             let abs_range = max - min;
@@ -787,11 +796,7 @@ fn check_convergence(
         }
     }
 
-    let logliks: Vec<f64> = chain_outcomes
-        .iter()
-        .filter(|(_, c)| matches!(c.status, OptStatus::Converged(_)))
-        .map(|(_, c)| c.loglik)
-        .collect();
+    let logliks: Vec<f64> = converged.iter().map(|c| c.loglik).collect();
     let delta_loglik = if logliks.len() >= 2 {
         let lmax = logliks.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let lmin = logliks.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -1189,6 +1194,26 @@ mod tests {
         assert_eq!(v.n_converged, 2);
         assert_eq!(v.n_maxeval, 0);
         assert_eq!(v.n_failed, 0);
+    }
+
+    /// Both legs judge the same chains: the converged ones. A chain that ran
+    /// out of evaluations stopped where its budget did, so its parameters say
+    /// nothing about whether the converged chains found one optimum (the
+    /// status count already reports it). The decibans leg used converged
+    /// chains only and the chain-agreement leg used all of them.
+    #[test]
+    fn both_legs_judge_the_converged_chains_only() {
+        let chains = vec![
+            (0, outcome(-100.0, vec![0.50], OptStatus::Converged(SuccessState::XtolReached))),
+            (1, outcome(-100.1, vec![0.501], OptStatus::Converged(SuccessState::XtolReached))),
+            (2, outcome(-400.0, vec![0.95], OptStatus::MaxEvalReached)),
+        ];
+        let bounds = vec![(0.0, 1.0)];
+        let v = check_convergence(&chains, &names(1), &bounds, &GateConfig::default(), 1e-6);
+        assert!(!v.chain_agreement_failed && v.max_rel_range < 0.01,
+            "the max-eval chain is not part of the agreement: max_rel_range = {}", v.max_rel_range);
+        assert!(!v.decibans_failed);
+        assert_eq!(v.n_maxeval, 1, "the status count still reports it");
     }
 
     #[test]
