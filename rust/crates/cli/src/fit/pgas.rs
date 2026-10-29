@@ -484,6 +484,7 @@ pub fn run_stage(
     // `starts` rule.
     let drawn = super::runner::draw_chain_starts_for(&config, estimate, starts, n_chains, seed)
         .map_err(|e| format!("pgas: {e}"))?;
+    super::runner::report_starts_on_an_end(&config, &drawn);
     let chain_starts: Vec<Vec<f64>> =
         drawn.to_param_vecs(&config.estimated_params, &config.base_params);
 

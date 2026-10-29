@@ -409,3 +409,27 @@ fn log_normal_on_a_positive_sub_box_is_the_truncated_log_normal() {
     assert!((got_mean - mean).abs() < 4.0 * se_mean, "mean {got_mean} vs {mean} (MCSE {se_mean})");
     assert!((got_sd - sd).abs() < 4.0 * se_sd, "sd {got_sd} vs {sd} (MCSE {se_sd})");
 }
+
+/// A start exactly on a bound is moved inward only by the methods that move
+/// in the transformed coordinate, so only they announce it: IF2 prints the
+/// notice, `nl-sbplx` (which optimises on the natural scale from the start as
+/// given) does not.
+#[test]
+fn the_start_on_a_bound_notice_comes_only_from_the_transformed_samplers() {
+    if camdlc_bin().is_none() {
+        return;
+    }
+    let tmp = tempdir("edge_notice");
+    let ir = compile(&tmp.0, "edge", &model_src(C_REAL));
+    let est = "c = { bounds = [0, 1], start = 0.0 }";
+    let nl = "algorithm = \"nl-sbplx\"\nbackend = \"ode\"\nchains = 1\nmax_evals = 20\nstarts = \"single\"\n[method.dt_check]\nenabled = false";
+    let if2 = format!("{IF2}\nstarts = \"single\"");
+    let notice = "starts on its lower bound 0";
+    let (out, _) = run_fit(&tmp.0, &ir, est, &if2, "if2");
+    assert!(out.status.success(), "if2: {}", stderr(&out));
+    assert!(stderr(&out).contains(notice), "IF2 moves the start, so it says so:\n{}", stderr(&out));
+    let (out, _) = run_fit(&tmp.0, &ir, est, nl, "nl");
+    assert!(out.status.success(), "nl-sbplx: {}", stderr(&out));
+    assert!(!stderr(&out).contains(notice),
+        "nl-sbplx uses the start as given and must not claim to move it:\n{}", stderr(&out));
+}

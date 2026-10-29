@@ -772,12 +772,17 @@ pub fn draw_chain_starts_for(
         base_specs: &config.estimated_params,
         priors: &priors,
     };
-    let drawn = super::chain_starts::draw_chain_starts(&ctx, starts, n_chains, seed)
-        .map_err(|e| format!("starts = {}: {}", starts.rule.spelled(), e))?;
+    super::chain_starts::draw_chain_starts(&ctx, starts, n_chains, seed)
+        .map_err(|e| format!("starts = {}: {}", starts.rule.spelled(), e))
+}
+
+/// Print [`starts_on_an_end`]'s notices. Called by the methods that move in
+/// the transformed coordinate (IF2, PMMH, MH, PGAS), where a start on a bound
+/// is moved inward; the optimisers and `pfilter` use the start as given.
+pub fn report_starts_on_an_end(config: &FitRunConfig, drawn: &super::chain_starts::DrawnStarts) {
     for notice in starts_on_an_end(&config.estimated_params, &drawn.starts) {
         eprintln!("{notice}");
     }
-    Ok(drawn)
 }
 
 /// One notice per estimated parameter that some chain starts exactly on a
