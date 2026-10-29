@@ -3196,122 +3196,6 @@ impl StageConvergence {
     }
 }
 
-/// MAD-based auto rw_sd calibration from chain best-loglik parameters.
-///
-/// Returns (rw_sd map, n_good_chains) or error if no consensus.
-pub fn auto_rw_sd(
-    results: &[(usize, IF2Result)],
-    if2_params: &[EstimatedParam],
-) -> Result<(HashMap<String, f64>, usize), String> {
-    let n_chains = results.len();
-    if n_chains < 3 {
-        return Err("auto rw_sd requires at least 3 chains".into());
-    }
-
-    // Collect each chain's best-loglik parameter set
-    let chain_params: Vec<Vec<f64>> = results.iter().map(|(_, r)| {
-        r.mle.clone()
-    }).collect();
-
-    // Per-parameter: compute median and MAD
-    let mut medians: Vec<f64> = Vec::new();
-    let mut mads: Vec<f64> = Vec::new();
-
-    for spec in if2_params {
-        // Filter non-finite values: chains with extreme parameter perturbations
-        // can produce NaN (from -inf loglik propagation) or inf. These are dead
-        // chains — they contributed nothing to inference. Including them in the
-        // MAD would either panic (NaN in sort) or corrupt the scale estimate
-        // (inf inflating the deviation).
-        let mut values: Vec<f64> = chain_params.iter()
-            .map(|p| p[spec.index])
-            .filter(|v| v.is_finite())
-            .collect();
-        if values.len() < 2 {
-            medians.push(0.0);
-            mads.push(0.0);
-            continue;
-        }
-
-        let med = median(&mut values);
-        let m = mad(&values, med);
-
-        medians.push(med);
-        mads.push(m);
-    }
-
-    // Classify chains as "good" (all params within 3×MAD of median)
-    let good_chains: Vec<bool> = (0..n_chains).map(|c| {
-        if2_params.iter().enumerate().all(|(pi, spec)| {
-            let v = chain_params[c][spec.index];
-            let mad = mads[pi];
-            if mad < 1e-15 {
-                // All chains agree perfectly on this parameter
-                true
-            } else {
-                (v - medians[pi]).abs() <= 3.0 * mad
-            }
-        })
-    }).collect();
-
-    let n_good = good_chains.iter().filter(|&&g| g).count();
-
-    if n_good < n_chains / 2 {
-        // Report which chains diverged and their parameters
-        let diverged: Vec<ChainIndex> = good_chains.iter().enumerate()
-            .filter(|(_, &g)| !g).map(|(i, _)| ChainIndex(i)).collect();
-        return Err(format!(
-            "No consensus across chains ({}/{} good). Divergent chains: {:?}\n\
-             The likelihood surface may be multimodal or scout iterations are too few.\n\
-             Re-run with more iterations or check model specification.",
-            n_good, n_chains, diverged
-        ));
-    }
-
-    if n_good < n_chains {
-        let _diverged: Vec<ChainIndex> = good_chains.iter().enumerate()
-            .filter(|(_, &g)| !g).map(|(i, _)| ChainIndex(i)).collect();
-        eprintln!("warning: {}/{} chains diverged ({:?}), excluded from rw_sd calibration",
-            n_chains - n_good, n_chains, _diverged);
-    }
-
-    // rw_sd = 0.5 × MAD of good chains
-    let mut rw_sd_map = HashMap::new();
-    for (pi, spec) in if2_params.iter().enumerate() {
-        let good_values: Vec<f64> = (0..n_chains)
-            .filter(|&c| good_chains[c])
-            .map(|c| chain_params[c][spec.index])
-            .collect();
-
-        let good_mad = mad(&good_values, medians[pi]);
-
-        let rw = 0.5 * good_mad;
-        // Floor: don't let rw_sd go below 1% of the median (prevents convergence stall)
-        let floor = medians[pi].abs() * 0.01;
-        rw_sd_map.insert(spec.name.clone(), rw.max(floor));
-    }
-
-    Ok((rw_sd_map, n_good))
-}
-
-/// Median of a mutable slice (sorts in place).
-fn median(v: &mut [f64]) -> f64 {
-    v.sort_by(|a, b| a.total_cmp(b));
-    let n = v.len();
-    if n == 0 { return 0.0; }
-    if n.is_multiple_of(2) {
-        (v[n / 2 - 1] + v[n / 2]) / 2.0
-    } else {
-        v[n / 2]
-    }
-}
-
-/// Median absolute deviation from a given center.
-fn mad(v: &[f64], center: f64) -> f64 {
-    let mut abs_devs: Vec<f64> = v.iter().map(|&x| (x - center).abs()).collect();
-    median(&mut abs_devs)
-}
-
 /// Write per-chain output files: `parameter_traces.tsv` and
 /// `final_params.toml` under `<dir>/chain_<N>/`.
 ///
@@ -4795,7 +4679,6 @@ dt = 1.0
             n_chains: 2,
             n_good_chains: None,
             start_values: Default::default(),
-            rw_sd: Default::default(),
             loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             // I0's Â is wildly above any threshold; beta's is fine.

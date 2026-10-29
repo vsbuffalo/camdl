@@ -1431,12 +1431,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     winner_theta, &run_config.estimated_params, &run_config.model,
                     &run_config.base_params, &run_config.compiled,
                 );
-                let rw_sd = match runner::auto_rw_sd(&chain_results.results, &run_config.estimated_params) {
-                    Ok((rw, _)) => rw,
-                    Err(_) => run_config.estimated_params.iter()
-                        .map(|s| (s.name.clone(), s.rw_sd * 0.5))
-                        .collect(),
-                };
 
                 // Post-fit Richardson dt-convergence check at θ̂
                 // (gh#52). Auto-runs when `dt_check.enabled = true`
@@ -1482,7 +1476,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     n_chains: *chains,
                     n_good_chains: None,
                     start_values,
-                    rw_sd: rw_sd.iter().map(|(k, v)| (k.clone(), *v)).collect(),
                     loglik_type: Some(loglik::LoglikType::If2),
                     acceptance_rate: None,
                     tail_chain_agreement: chain_results.chain_agreement.iter().map(|(k, v)| (k.clone(), *v)).collect(),

@@ -254,18 +254,8 @@ pub fn run_stage(
     // Persist the winner's full parameter vector via fit_state.toml so
     // downstream stages (`refine`, `pgas`, `posterior`) can resume from it.
     let mut start_values = std::collections::BTreeMap::new();
-    let mut rw_sd = std::collections::HashMap::new();
     for (slot, name) in est_names.iter().enumerate() {
         start_values.insert(name.clone(), winner.params[slot]);
-        // Keep the auto-derived rw_sd from the run config so a downstream
-        // IF2/PMMH refine doesn't have to re-derive it from scratch.
-        if let Some(p) = arc_config
-            .estimated_params
-            .iter()
-            .find(|p| p.name == *name)
-        {
-            rw_sd.insert(name.clone(), p.rw_sd);
-        }
     }
     let perturb_only_at_t0_params: Vec<String> = arc_config
         .estimated_params
@@ -291,7 +281,6 @@ pub fn run_stage(
                 .count(),
         ),
         start_values: start_values.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        rw_sd: rw_sd.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         loglik_type: Some(LoglikType::OdeMarginal),
         acceptance_rate: None,
         tail_chain_agreement: convergence.chain_agreement.iter()

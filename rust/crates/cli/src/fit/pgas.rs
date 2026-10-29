@@ -1644,7 +1644,6 @@ pub fn run_stage(
         // `fit_state.toml` is unchanged. Same convention as PMMH.
         n_good_chains: if n_good_chains < n_chains { Some(n_good_chains) } else { None },
         start_values,
-        rw_sd: std::collections::BTreeMap::new(),
         loglik_type: Some(LoglikType::CompleteData),
         acceptance_rate: Some(best_chain.1.iter()
             .map(|s| s.accepted.iter().filter(|&&a| a).count() as f64 / s.accepted.len().max(1) as f64)
