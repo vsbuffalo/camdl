@@ -221,9 +221,6 @@ pub struct ParamIterDiag {
     pub q_ratio: f64,
     /// Effective rw_sd at this iteration (after cooling).
     pub effective_rw_sd: f64,
-    /// Fraction of particle-steps that hit the bounds clamp this iteration.
-    /// >0.1 means rw_sd is too large — particles are being pushed out of bounds.
-    pub clamp_fraction: f64,
 }
 
 /// Result of the full IF2 run.
@@ -402,7 +399,6 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         let n_if2_params = if2_params.len();
         let mut wvr_accum = vec![0.0_f64; n_if2_params];
         let mut q_k_accum = vec![0.0_f64; n_if2_params];
-        let mut clamp_counts = vec![0_usize; n_if2_params];
         let mut diag_count = vec![0_usize; n_if2_params];
 
         // Build set of simplex member indices (perturbed jointly, skip in per-param loop)
@@ -422,19 +418,13 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             }
 
             for i in 0..n {
-                for (pi, spec) in if2_params.iter().enumerate() {
+                for spec in if2_params {
                     if simplex_member_indices.contains(&spec.index) { continue; }
                     let current = particle_params[i][spec.index];
                     let sd = spec.transformed_sd(spec.rw_sd, current) * cooling_now;
                     let z = spec.to_transformed(current);
                     let new_val = spec.from_transformed(z + rngs[i].normal() * sd);
                     particle_params[i][spec.index] = new_val;
-                    // Detect clamp activation (Log transform)
-                    if let Transform::Log { lo, hi } = &spec.transform {
-                        if (new_val - lo).abs() < 1e-10 || (new_val - hi).abs() < 1e-10 {
-                            clamp_counts[pi] += 1;
-                        }
-                    }
                 }
             }
             global_step += 1;
@@ -527,18 +517,13 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             // observation k is still `per_step_cooling^(k+1)`.
             let cooling_now = per_step_cooling.powf(global_step as f64);
             for i in 0..n {
-                for (pi, spec) in if2_params.iter().enumerate() {
+                for spec in if2_params {
                     if spec.perturb_only_at_t0 || simplex_member_indices.contains(&spec.index) { continue; }
                     let current = particle_params[i][spec.index];
                     let sd = spec.transformed_sd(spec.rw_sd, current) * cooling_now;
                     let z = spec.to_transformed(current);
                     let new_val = spec.from_transformed(z + rngs[i].normal() * sd);
                     particle_params[i][spec.index] = new_val;
-                    if let Transform::Log { lo, hi } = &spec.transform {
-                        if (new_val - lo).abs() < 1e-10 || (new_val - hi).abs() < 1e-10 {
-                            clamp_counts[pi] += 1;
-                        }
-                    }
                 }
             }
             global_step += 1;
@@ -711,8 +696,6 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         // Diagnostic SD at end of `iter`: use (1 + n_obs) steps/iter to match the
         // actual global-step accounting (the perturbation loop), not `n_obs`.
         let cooling_at_iter = per_step_cooling.powf((iter * (1 + n_obs)) as f64);
-        // Total perturbation attempts: n particles × (1 t=0 step + n_obs observation steps)
-        let total_perturb_steps = n * (1 + n_obs);
         let param_diag: Vec<ParamIterDiag> = if2_params.iter().enumerate().map(|(pi, spec)| {
             let cnt = diag_count[pi].max(1) as f64;
             ParamIterDiag {
@@ -720,7 +703,6 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 weighted_var_ratio: wvr_accum[pi] / cnt,
                 q_ratio: q_k_accum[pi] / cnt,
                 effective_rw_sd: spec.rw_sd * cooling_at_iter,
-                clamp_fraction: clamp_counts[pi] as f64 / total_perturb_steps as f64,
             }
         }).collect();
 
