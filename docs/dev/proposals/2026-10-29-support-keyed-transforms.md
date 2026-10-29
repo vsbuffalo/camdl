@@ -1,6 +1,6 @@
 ---
 date: 2026-10-29
-status: accepted — D1–D11 decided by the maintainer on 2026-10-29 (§14); D8's `Interval` constant is measured during implementation by the decided §12.6 rule
+status: accepted — D1–D11 decided by the maintainer on 2026-10-29 (§14); D8's IF2 constants are measured during implementation by the §12.6 benchmark
 area: inference setup / sim inference transforms / priors / IF2 and MH step sizes
 issues: closes gh#470; carries gh#1001 (commit series ii); gh#1002 is the optimiser follow-up (D5)
 related:
@@ -39,7 +39,8 @@ posterior truncated to the domain, as now; under IF2 the estimate maximises the
 likelihood over the domain, as now. What changes is the geometry the samplers
 move through and the IF2 and MH step sizes. IF2 and MH take a fixed step in z,
 derived from the domain (D8); today the step is converted to z at each
-particle's current value, which blows up near the ends of an interval (§9.1).
+particle's current value, which blows up near the ends of an interval (§9.1). A
+start exactly on a bound has no finite z and is refused (D3).
 
 ## 2. Terms
 
@@ -288,8 +289,12 @@ impl Transform {
     pub fn bounds(&self) -> (f64, f64);
     /// Whether start draws and Latin-hypercube points are log-spaced.
     pub fn log_spaced(&self) -> bool { matches!(self, Transform::LogInterval { .. }) }
-    /// The default step in z (D8). `None` for a domain with an infinite end.
-    pub fn default_step(&self) -> Option<f64>;
+    /// IF2's default step in z (D8), one constant per map family. `None`
+    /// for `Identity`, which has no scale.
+    pub fn default_if2_step(&self) -> Option<f64>;
+    /// PMMH's and MH's default initial proposal SD in z (D8). Adaptation
+    /// tunes it; `None` for `Identity`.
+    pub fn default_mh_step(&self) -> Option<f64>;
 }
 
 pub struct EstimatedParam {
@@ -368,14 +373,17 @@ box with 0 < lo:
 | > 0    | finite | `rate`, `positive`, `count`, `duration` | `LogInterval { lo, hi }` |
 | finite | finite | any other case                          | `Interval { lo, hi }`    |
 
-Otherwise the kind enters only through the support (D11 states the trade-off).
-Four rows are reachable from a model and fit config: `Identity` (an undeclared
-`real` or `instant`), `LowerBounded { 0 }` (an undeclared positive kind),
-`Interval` (`probability`, a positive kind on [0, hi], a `real` or `instant`
-box, a signed box) and `LogInterval` (a positive kind with 0 < lo, the common
-case for rates). `LowerBounded { lo > 0 }` and `UpperBounded` are reachable only
-from hand-built code (§3.3). They are kept so that every domain shape has a map
-and `for_domain` is total.
+Otherwise the kind enters only through the support. Splitting a box with 0 < lo
+by kind is a geometry choice, not a consequence of the support: on a positive
+quantity the log-interval map interpolates geometrically between the ends, the
+interval map arithmetically, and both keep the same domain (D11). Four rows are
+reachable from a model and fit config: `Identity` (an undeclared `real` or
+`instant`), `LowerBounded { 0 }` (an undeclared positive kind), `Interval`
+(`probability`, a positive kind on [0, hi], a `real` or `instant` box, a signed
+box) and `LogInterval` (a positive kind with 0 < lo, the common case for rates).
+`LowerBounded { lo > 0 }` and `UpperBounded` are reachable only from hand-built
+code (§3.3). They are kept so that every domain shape has a map and `for_domain`
+is total.
 
 Where today's choices were sound they are reproduced. A `rate` on [0, ∞) is θ =
 eᶻ exactly; `probability` on [0, 1] is the logit; a signed box is the scaled
@@ -490,19 +498,23 @@ unboxed `Log { 0, ∞ }`, at a z no posterior reaches. The interval maps cannot
 overflow. `from_transformed(±∞)` returns the corresponding end, so the map is
 total.
 
-**A start exactly on a bound** has no finite preimage: z = ln 0 = −∞. The
-forward map is made total by moving such a value inward. For the interval maps
-the start moves to the point at z = ±ln(1/ε − 1) ≈ ±23.03, with ε = 10⁻¹⁰, the
-existing `PROB_FRACTION_EPS` (`types.rs:228`); for `Interval` this is today's
-logit behaviour exactly (`types.rs:109-112`). For `LowerBounded { 0 }` the start
-moves to θ = ε, z ≈ −23.03; today's `Log` maps it to ln(10⁻³⁰⁰) ≈ −690.8
-(`LOG_PROB_FLOOR`, `types.rs:222`). The start resolver reports each nudged start
-in one notice that names the parameter, the bound and the new value (D3).
+**A start exactly on a bound** has no finite preimage: z = ln 0 = −∞. Such a
+start is refused before any method runs (D3). A start given by the user — a
+config `start`, a `--starts` file or a sourced rule (`from_mle`, `from_params`)
+— is refused with an error that names the parameter and the bound, gives an
+interior value to start from instead (1% of the width inside the end, or
+0.01·max(1, |bound|) inside a half-bounded domain's end), and says that if the
+optimum on the bound is the scientific point, `nl-sbplx` (ODE backend) or a
+profile can place an estimate on it. A start the fit draws (`uniform`, `lhs`,
+`uniform_unconstrained`, `from_prior`) that lands within rounding of a bound is
+redrawn, as a start the filter cannot score is.
 
-Because the IF2 and MH steps are fixed in z (D8), a nudged start does not change
-the step, and the chain is only far out in a tail, which burn-in or IF2's early
-iterations absorb. A value outside the domain never reaches the forward map,
-because it is refused when values are resolved (parameter-roles §5.4). The
+The forward map is still total: a value on an end maps to z = ±ln(1/ε − 1) ≈
+±23.03 on the interval maps and to z = ln ε on the half-bounded ones, with ε =
+10⁻¹⁰, the existing `PROB_FRACTION_EPS` (`types.rs:228`). No start reaches it
+there; the values that can are a resumed state, which carries its own z, and a
+debug assertion's backstop. A value outside the domain never reaches the forward
+map, because it is refused when values are resolved (parameter-roles §5.4). The
 forward map's clamp of such a value stays only as a `debug_assert!` backstop,
 and no caller evaluates the forward map at a point outside the domain (§9.2
 replaces the one that does).
@@ -569,9 +581,14 @@ family's support.**
   (`runner.rs:3647-3686`).
 
 A prior whose support is narrower than D would put zero density inside the
-domain, which is a wall by another route, so it is refused. Every family is then
-truncated to its box. `Density::transform_req`, `Prior::transform_req` and
-`TransformReq` (`prior.rs:82`, `:142-155`, `:348`) are deleted (D4).
+domain, which is a wall by another route, so it is refused. This is a language
+choice, not a mathematical necessity: the truncated target would still be
+proper, and a sampler could treat the zero-density region as rejected moves.
+camdl refuses it because a box that reaches outside its prior's support is
+almost always a mistake in the box or in the prior, and the refusal says which.
+Every family is then truncated to its box. `Density::transform_req`,
+`Prior::transform_req` and `TransformReq` (`prior.rs:82`, `:142-155`, `:348`)
+are deleted (D4).
 
 ## 7. An explicit transform serves no purpose, so the field is deleted
 
@@ -628,7 +645,7 @@ near the ends is expected under any rule. The per-particle rule doubles it.
 
 Converting once at the start instead makes each chain's step depend on where it
 starts. Reproduced by the same check: 0.21 at θ₀ = 0.25, 3.4 at θ₀ = 0.06, and
-about 3·10⁸ at a start nudged onto an end (D3).
+about 3·10⁸ at a start on an end.
 
 The step is therefore a property of the domain. `EstimatedParam.rw_sd` holds the
 step in z, set once when the parameter is built and the same for every chain and
@@ -636,9 +653,15 @@ particle. It is the kernel Ionides et al. (2015) analyse: a perturbation of
 fixed shape on the estimation scale, shrunk by geometric cooling (Ionides,
 Nguyen, Atchadé, Stoev and King, "Inference for dynamic and latent variable
 models via iterated, perturbed Bayes maps", _PNAS_ 112(3):719–724, Algorithm 1).
-It is also the kernel pomp's `mif2` applies (§3.3). The default step is
-`Transform::default_step` (D8). An explicit `rw_sd` is converted to z once, in
-series (i), and read in z directly from series (ii) on (§11, D9).
+It is also the kernel pomp's `mif2` applies (§3.3). The default is
+`Transform::default_if2_step`, one constant per map family — interval,
+log-interval, and the half-bounded maps — measured by §12.6 (D8). Every map with
+a finite end has one, so a `rate` on [0, ∞) runs without an explicit `rw_sd`;
+`Identity` has no scale and still needs one. An explicit `rw_sd` is converted to
+z once, in series (i), and read in z directly from series (ii) on (§11, D9).
+Where no single constant serves a family's fixtures, the launch table prints
+each parameter's default step together with the natural-scale step it implies at
+the box's midpoint, so the user sees the scale and can override it.
 
 **A maximum on a bound is approached, not reached.** Under the walled log a
 perturbation past an end was clamped onto it, so the swarm could hold mass
@@ -648,23 +671,23 @@ displacement is finite and its distance to a bound levels off rather than going
 to zero. How close it gets depends on the likelihood's slope toward the bound in
 z. A steep rise draws the swarm far out during the early, large-step iterations,
 and the final estimate's likelihood is within Monte Carlo error of the boundary
-value. A shallow rise stops the swarm at a visible distance, with a likelihood
-measurably below the boundary value. So whether IF2 attains the boundary
-likelihood depends on that slope, and IF2 alone cannot say whether the maximum
-is on the bound.
+value. A shallow rise stops the swarm at a visible distance. A maximum on a
+bound is a legitimate result, and IF2 alone cannot say whether the maximum is on
+the bound.
 
-The existing near-bound diagnostic, `ParamNearBound` (`runner.rs:2514-2547`),
-fires when a chain's estimate is within 1% of the box's width from an end, and
-only when both ends are finite. It is extended to the one reachable half-bounded
-domain, [0, ∞), where there is no width. There it fires when θ̂ < 0.01·θ₀ (D10).
-The message gains one sentence: IF2 cannot place an estimate exactly on a bound;
-to test whether the maximum is on it, profile the parameter or refit with
-`nl-bobyqa`, which can (§9.3).
+The near-bound diagnostic, `ParamNearBound` (`runner.rs:2514-2547`), fires when
+a chain's estimate is within 1% of the box's width from either end, and only
+when both ends are finite. A domain with an infinite end gets no report: it has
+no width, and telling a maximum at the bound from a small interior one needs the
+likelihood, which is a separate design (§15) (D10). The message gains one
+sentence: IF2 cannot place an estimate exactly on a bound; to test whether the
+maximum is on it, profile the parameter or refit with `nl-sbplx` (ODE backend
+only), which can (§9.3).
 
 `clamp_fraction` measures an event that no longer exists. It is computed and
 never read (§3.2), so it is deleted in its own commit first (§11).
 
-### 9.2 PMMH, MH and PGAS add the Jacobian, and start MH from five times the step
+### 9.2 PMMH, MH and PGAS add the Jacobian, and start MH from a default step
 
 The acceptance ratio and the NUTS target are unchanged in form: likelihood plus
 log-prior plus `log_jacobian`, with `jacobian_grad` and `transform_deriv` in the
@@ -672,31 +695,36 @@ gradient (`pmmh.rs:707-714`, `pgas.rs:4284-4300`, `pgas.rs:4444-4449`). Only the
 prior's argument changes (§6). Because no map has a wall, a NUTS trajectory near
 a bound sees the log-Jacobian's tail instead of a cliff.
 
-PMMH and MH start their proposal at 5 × the step in z, as today but without the
-conversion at θ₀ (`cli/src/fit/pmmh.rs:1049-1052`). PGAS's MH-within-Gibbs
-initial scale (`pgas.rs:3957-3965`) is replaced by the same rule.
+PMMH and MH start their proposal at `Transform::default_mh_step`, a constant in
+z, or at five times an explicit `rw_sd` converted to z, in place of the
+conversion at θ₀ (`cli/src/fit/pmmh.rs:1049-1052`). Their own default is
+separate from IF2's because the two steps do different jobs: IF2's sets the
+perturbation kernel the whole run uses, while the MH proposal is adapted from
+the first warm-up step, so its starting value matters little. PGAS's
+MH-within-Gibbs initial scale (`pgas.rs:3957-3965`) follows the same rule.
 
 The formula it replaces is not one tenth of the domain's z-width. It evaluates
 the forward map at `lower.max(1e-10)` and `upper.min(1e10)`. For a box lying
 below 10⁻¹⁰, such as an `instant` on [−120, −60], both points are outside the
 domain, the clamped logit maps both to the same z, and the scale is the floor
 0.01. Under the new forward map the same evaluation would trip the
-`debug_assert!` of §5. A parameter with no default step and no explicit `rw_sd`
-(an unbounded `Identity` or `LowerBounded { 0 }`) starts MH-within-Gibbs at 1.0
-in z. Today the formula gives about 10⁹ for an unbounded `real` and 4.6 for an
-unbounded rate. Robbins–Monro adaptation (`pgas.rs:3941-3950`) tunes the scale
-during burn-in in every case. NUTS, the default, uses none of this.
+`debug_assert!` of §5. A parameter with no default (an unbounded `Identity`) and
+no explicit `rw_sd` starts MH-within-Gibbs at 1.0 in z. Robbins–Monro adaptation
+(`pgas.rs:3941-3950`) tunes the scale during burn-in in every case. NUTS, the
+default, uses none of this.
 
-IF2, PMMH and MH keep their refusal of a parameter with no default step and no
-explicit one (`runner.rs:369-378`, `refuse_auto_rw_sd_without_finite_box`).
+IF2, PMMH and MH refuse an `Identity` parameter with no explicit `rw_sd`
+(`runner.rs:369-378`, `refuse_degenerate_auto_rw_sd`); every other map has a
+default.
 
 ### 9.3 NLopt stays on the natural scale; moving it is a measured follow-up
 
 **Option A: optimise in z.** The objective becomes ℓ(g(z)). L-BFGS's gradient is
 ∇θℓ ⊙ g′(z), formed in `fit/nlopt_stage.rs` from `det_grad`'s ∇θ. Every end is
 at z = ±∞, so a maximum on a bound is reachable only if NLopt's z-box is clipped
-at the nudged ends of §5 (z ≈ ±23.03 for the interval maps). That places it
-within 10⁻¹⁰ of the end in the map's own scale.
+at the finite ends the forward map of §5 gives a value on a bound (z ≈ ±23.03
+for the interval maps). That places it within 10⁻¹⁰ of the end in the map's own
+scale.
 
 The gain is conditioning: a rate that spans orders of magnitude is better scaled
 in ln θ, and Sbplx's simplex and Bobyqa's trust region are set in coordinate
@@ -823,31 +851,38 @@ before both.
 
    This commit is unavoidably large, because the enum change breaks every match
    on it.
-6. Fix the step in z (§9.1, §9.2). `build_if2_params_from_specs` sets `rw_sd` to
-   `default_step()`, or converts an explicit natural-scale `rw_sd` once at the
-   domain's reference point. That point is z = 0 for the interval maps (the
+6. Refuse a start on a bound (D3, §5), each in its own commit: a user-given
+   start is refused with the interior value to use; a drawn start within
+   rounding of a bound is redrawn.
+7. Fix the step in z (§9.1, §9.2). `build_if2_params_from_specs` sets `rw_sd` to
+   `default_if2_step()`, or converts an explicit natural-scale `rw_sd` once at
+   the domain's reference point. That point is z = 0 for the interval maps (the
    box's midpoint, geometric for `LogInterval`) and θ₀ for the others. IF2 reads
-   `rw_sd` directly. PMMH, MH and PGAS's MH-within-Gibbs start at 5 × `rw_sd`.
-   The launch table (`runner.rs:1059-1080`) prints the map and the z-step. Its
-   `CompressedLogitPosition` warning, which would now fire on every boxed rate,
-   is computed on the map's own z. This commit changes IF2 and MH dynamics and
-   is the one the benchmark measures.
-7. Documentation:
-   - `docs/camdl-inference-spec.md` §3.2 rule 2 (the transform table at
-     `:152-187`);
-   - `docs/fit-toml.md` and `docs/agents.md` (the override);
-   - the parameter-roles amendments of §4.3.
+   `rw_sd` directly. PMMH, MH and PGAS's MH-within-Gibbs start at
+   `default_mh_step()`, or at 5 × an explicit `rw_sd`. The launch table
+   (`runner.rs:1059-1080`) prints the map, the z-step and the natural-scale step
+   it implies at the midpoint. Its `CompressedLogitPosition` warning is computed
+   on the map's own z. This commit changes IF2 and MH dynamics and is the one
+   the benchmark measures.
+8. The near-bound report for boxes finite at both ends only (D10, §9.1).
+9. The IF2 constants from §12.6.
+10. Documentation:
+
+- `docs/camdl-inference-spec.md` §3.2 rule 2 (the transform table at
+  `:152-187`);
+- `docs/fit-toml.md` and `docs/agents.md` (the override);
+- the parameter-roles amendments of §4.3.
 
 **Series (ii), the `rw_sd` scale (gh#1001).**
 
-8. An explicit `rw_sd` is read in z directly, as pomp's `mif2` reads `rw.sd`.
-   The conversion of commit 6 and `transformed_sd` are deleted, along with its
-   remaining callers: the conversion in `build_if2_params_from_specs`,
-   `runner.rs:1080` and `cli/src/fit/pmmh.rs:1051`. So is the false doc comment.
-   The field doc becomes true. Default runs do not change.
-9. Documentation: inference spec `:86-91` and `docs/fit-toml.md`.
+11. An explicit `rw_sd` is read in z directly, as pomp's `mif2` reads `rw.sd`.
+    The conversion of commit 7 and `transformed_sd` are deleted, along with its
+    remaining callers: the conversion in `build_if2_params_from_specs`,
+    `runner.rs:1080` and `cli/src/fit/pmmh.rs:1051`. So is the false doc
+    comment. The field doc becomes true. Default runs do not change.
+12. Documentation: inference spec `:86-91` and `docs/fit-toml.md`.
 
-Between commits 6 and 8, an explicit natural-scale `rw_sd` on
+Between commits 7 and 11, an explicit natural-scale `rw_sd` on
 `LowerBounded { 0 }` is converted at θ₀, which still makes it start-dependent.
 This intermediate state is never released.
 
@@ -873,9 +908,11 @@ each map and each of the domains [0, ∞), [0, 1], [0, 2], [10⁻⁶, 2.5], [1, 
   density must be finite and equal its closed form in z;
 - `log_normal` on `LowerBounded { 0 }` equals today's value and gradient bit for
   bit on z ∈ [−745, 30];
-- a start on each end maps to the finite z of §5 and produces one notice;
-- `default_step` for each map; auto `rw_sd` for a rate on [0, 2] gives a step in
-  z above 0.1. This is red on main (§3.3).
+- a value on each end maps to the finite z of §5; a user-given start on an end
+  is refused naming an interior value, and a drawn one is redrawn;
+- `default_if2_step` and `default_mh_step` for each map; auto `rw_sd` for a rate
+  on [0, 2] gives a step in z above 0.1 (red on main, §3.3), and a rate on [0,
+  ∞) gets one too.
 
 Each test is mutation-checked: reverting its fix turns it red.
 
@@ -941,63 +978,43 @@ The target is the same truncated posterior in both runs (§4.2), so a
 disagreement means either a defect or a sampling failure of the walled run. If
 one appears, a run four times longer at main decides which.
 
-### 12.6 Benchmark: the two interval maps, and today's, on four boxed fixtures
+### 12.6 Benchmark: IF2's default step per map family
 
-The fixtures:
+IF2's default step decides how far the swarm moves in the early iterations and
+therefore whether a short or a wide-box fit finds the maximum. PMMH and MH adapt
+their proposal, so their default is set once (`default_mh_step`) and is not
+benchmarked. The candidates for IF2's step in z are 2/3, 1/3, 1/5, 1/10, 1/20
+and 1/50, run for each family on the fixtures that exercise it:
 
-- `seir_age`, with its `if2.toml`, `pmmh.toml` and `pgas.toml`;
-- `sir`, with its `if2.toml` and a PMMH config with the same `[estimate]`;
-- `sir` near a bound: `gamma`'s box tightened to [0.01, 0.16] around its truth
-  of 0.15 (`tests/recovery/cases/sir/if2.toml:1-4`), so that the likelihood and
-  the posterior have mass near an upper bound, which is the case the change is
-  for;
-- the ODE fixture of `rust/crates/cli/tests/mh_ode_recovery.rs` under `mh`, the
-  deterministic-skeleton path whose MH proposal shares the step rule;
-- `sir` with `gamma` redeclared `in [0.0, 0.5]`, a benchmark copy of the model
-  committed beside the note, so that a positive kind on [0, hi] takes
-  `Interval`. About 309 declarations have this shape (§3.3).
+| fixture                                                                                          | family exercised                   |
+| ------------------------------------------------------------------------------------------------ | ---------------------------------- |
+| `sir` with `gamma : rate in [0.0, 0.5]`                                                          | `Interval` on a positive kind      |
+| `seir_age`, its `if2.toml`                                                                       | `LogInterval`                      |
+| `polio_afp_es`, its `fit.toml`                                                                   | `LogInterval`, `Interval` (`rho`)  |
+| the gh912 short-budget cell on `polio_afp_es` (2 chains × 3 iterations, 50 particles, seeds 1–8) | the same, at a short budget        |
+| `sir` with `lb : real in [−8, 2]` entering as `exp(lb)`                                          | `Interval` on a wide log-scale box |
+| the Ebola-like recovery fixture closest to `spline_seir`                                         | the families its parameters take   |
+| `sir` with `gamma : rate` undeclared                                                             | `LowerBounded { 0 }`               |
 
-Each fixture runs at main, after commit 6 with `LogInterval` for positive kinds
-with 0 < lo, and after commit 6 with `Interval` everywhere (D11), each at the
-default step and at the step scaled by 0.5 and 2. On the [0, hi] fixture the
-`Interval` step runs at each of 2/3, 1/3 and 1/5 (D8), under its real likelihood
-and under a flat one. The flat run is reported but is not a pass criterion: with
-no likelihood to confine it, a random walk in z spreads without limit, which
-exaggerates drift to the ends.
+Each fixture also runs at main, and the positive-kind fixtures run with
+`Interval` in place of `LogInterval`, so D11's geometry choice is measured
+beside the constant.
 
-Reported:
+Reported for each fixture and candidate: IF2's final log-likelihood (the clean
+particle-filter evaluation, best and mean over chains, with the particle-filter
+standard deviation), the number of chains whose final estimate is −∞, and
+iterations until within one log-likelihood unit of the final value.
 
-- PMMH and MH acceptance, and bulk ESS per wall-second (minimum over
-  parameters);
-- IF2 final log-likelihood (the clean particle-filter evaluation, mean and
-  standard deviation over chains), iterations until within one log-likelihood
-  unit of the final value, and chain agreement;
-- on the near-bound fixture and the [0, hi] fixture, at IF2's last iteration,
-  the fraction of particles within 10⁻³·w of each end, and the swarm's standard
-  deviation in z.
-
-Pass:
-
-- IF2's final log-likelihood is no worse than main's by more than twice the
-  particle-filter standard deviation on any fixture, at the best of the three
-  steps;
-- PMMH and MH ESS per second is at least 0.8 of main's on the interior fixtures,
-  and higher than main's on the near-bound fixture;
-- acceptance is between 0.1 and 0.5;
-- on the near-bound fixture and the [0, hi] fixture under the real likelihood,
-  the swarm's fraction within 10⁻³·w of an end is at most max(5%, main's), and
-  its z standard deviation at the last iteration is above zero in every chain,
-  so the swarm has neither piled onto the end nor collapsed.
-
-D11 and D8's `Interval` constant are decided by these numbers. The `Interval`
-constant is the largest of 2/3, 1/3 and 1/5 that, on the [0, hi] fixture under
-the real likelihood, meets the swarm criterion above, gives an IF2 final
-log-likelihood within twice the particle-filter standard deviation of the best
-of the three, and gives PMMH ESS per second at least 0.8 of the best of the
-three. The largest passing constant is chosen because a larger step explores
-faster under the same cooling. If none passes, the proposal returns to the
-maintainer before commit 6 lands. The measurements go in a `docs/dev/notes/`
-note, which the series (i) merge cites.
+A constant serves a fixture when IF2's best final log-likelihood is within twice
+the particle-filter standard deviation of the best over all candidates (and, on
+the gh912 cell, when no more seeds end with every chain at −∞ than at main). The
+family's constant is the largest that serves every fixture of the family; the
+largest is preferred because a larger step explores faster under the same
+cooling. If no constant serves every fixture of a family, none is chosen by
+rule: the table returns to the maintainer, and the fallback is the launch-table
+notice of §9.1. A maximum on a bound is a legitimate result, and where the swarm
+sits relative to the ends is not a criterion. The measurements go in a
+`docs/dev/notes/` note, which the series (i) merge cites.
 
 ## 13. What changes for users
 
@@ -1019,11 +1036,14 @@ note, which the series (i) merge cites.
 - **Posteriors** are the same truncated posteriors. Sampling near a bound
   changes: fewer NUTS divergences, different PMMH and MH acceptance. The PGAS
   MH-within-Gibbs initial scale changes for every parameter (§9.2).
-- **IF2 and MH steps** are fixed in z (commit 6). With the default step, the
-  step at the box's midpoint is today's (D8). Near an end the step no longer
-  grows, and a positive kind on [0, hi] moves at all for the first time (§3.3).
-  With an explicit `rw_sd`, series (i) keeps the natural-scale unit and converts
-  it once at the midpoint. Series (ii) reads it in z:
+- **A start exactly on a bound** is refused, naming an interior value to start
+  from; a drawn start on a bound is redrawn (D3).
+- **IF2 and MH steps** are fixed in z (commit 7), with IF2's default chosen per
+  map family by §12.6 and PMMH's and MH's set separately (D8). Near an end the
+  step no longer grows, a positive kind on [0, hi] moves at all for the first
+  time (§3.3), and a `rate` on [0, ∞) no longer needs an explicit `rw_sd`. With
+  an explicit `rw_sd`, series (i) keeps the natural-scale unit and converts it
+  once at the midpoint. Series (ii) reads it in z:
   - a value tuned on the natural scale converts as rw_sd_z =
     rw_sd_natural/|g′(0)|;
   - for `LogInterval` that is rw_sd_natural/(θ_mid·L/4), where θ_mid = √(lo·hi);
@@ -1035,7 +1055,8 @@ note, which the series (i) merge cites.
   handling and evaluated exactly here. Each is truncated to the box. A prior
   whose support is narrower than the domain is refused.
 - **Diagnostics and records**:
-  - the near-bound warning covers [0, ∞);
+  - the near-bound warning is for boxes finite at both ends, and names
+    `nl-sbplx` (ODE backend only) or a profile;
   - the launch table names the map and the z-step;
   - the partition record's `transform` tag takes the new values and loses
     `transform_from`;
@@ -1063,15 +1084,18 @@ Every config that sets the key fails at load until the line is removed, about
 and accepting only the redundant value, keeps a knob with no effect. Under the
 alpha posture (a) is the form.
 
-**D3 — A start exactly on a bound: nudge inward with a notice, or refuse?
-Decided (2026-10-29): nudge.** Starts arrive on bounds legitimately, for example
-an `nl-bobyqa` optimum on a bound passed to PGAS through `--starts`, or
-`start = 0` for an amplitude. Option (a) moves the start to z ≈ ±23.03 and
-prints one notice. Since the step is fixed in z (D8), the nudge no longer
-inflates the step, which was the hazard of converting at θ₀ (§9.1). Option (b)
-refuses, which is more explicit but breaks optimiser-to-sampler chaining
-whenever the optimum is on a bound. The cost of (a) is a start deep in a tail,
-which burn-in or IF2's early iterations absorb.
+**D3 — A start exactly on a bound: move it inward, or refuse? Decided
+(2026-10-29): refuse a given start; redraw a drawn one.** A start on a bound has
+no finite z. Moving it inward puts the chain at z ≈ ±23, far out in a tail: a
+natural-scale step converted there is ~10¹⁰ in z, and even a fixed step in z
+leaves the chain walking back through the tail for longer than burn-in (PMMH on
+`sir`, `gamma` started on 0.26 of [0.01, 0.26]: bulk ESS 14–17 against 444 at
+main). A given start on a bound is therefore refused, with the interior value to
+use and, where the optimum on the bound is the point, `nl-sbplx` (ODE backend)
+or a profile, which can place an estimate on a bound. Starts a fit draws are
+redrawn when they land within rounding of a bound. The cost is that chaining an
+optimiser's on-bound optimum into a sampler through `--starts` needs the user to
+move it inward by hand, which the error spells out.
 
 **D4 — Do priors read logarithms of θ computed from z, with the compatibility
 table replaced by a support rule? Decided (2026-10-29): yes.** This is required
@@ -1083,15 +1107,19 @@ becomes correct below. The alternative, keeping `TransformReq` and forcing a log
 map for log-family priors, would reinstate the walled log for every boxed rate
 with a `log_normal` prior.
 
+D4's support rule is a language choice: a prior narrower than the box gives a
+proper truncated target, and refusing it catches a mistaken box or prior rather
+than a mathematical impossibility (§6).
+
 **D5 — NLopt coordinates. Decided (2026-10-29): keep the natural scale here;
 measure z-coordinates under gh#1002.** §9.3 sets out both options. Moving now
 would change the optimiser's conditioning, its stopping rule and its behaviour
 at bounds, with no measurement in the repository to show it helps;
 `docs/dev/agent-verification-conventions.md` asks for the measurement first.
 Keeping B means the optimisers and samplers use different coordinates, which
-changes no reported estimand. The trade-off is that, near a bound, an
-`nl-bobyqa` fit sits on the bound and IF2 just inside it; the near-bound message
-(D10) says so.
+changes no reported estimand. The trade-off is that, near a bound, an NLopt fit
+can sit on the bound while IF2 stops just inside it; the near-bound message
+(D10) names `nl-sbplx` or a profile as the test.
 
 **D6 — A parameter whose IR carries no kind. Decided (2026-10-29): refuse.** The
 compiler always emits a kind (`ast.ml:150-151` makes it mandatory;
@@ -1104,37 +1132,31 @@ builds kind-less parameters gains a kind (commit 3). Option (b), (−∞, ∞), 
 a guess in the other direction. Making `param_kind` non-optional in the IR is
 the complete fix and is an `ir/VERSION` change (§15).
 
-**D8 — The default IF2 and MH step. Decided (2026-10-29): a fixed step in z per
-map: 1/5 for `LogInterval`; for `Interval`, the constant chosen from 2/3, 1/3
-and 1/5 by the decision rule of §12.6; none for a domain with an infinite end.**
-The candidates start from today's default step at the box's midpoint:
-
-- `Interval`: today's logit default is (hi − lo)/6 on the natural scale, which
-  is 2/3 in z at the midpoint, where |g′| = w/4;
-- `LogInterval`: today's log default is ln(hi/lo)/20 in ln θ, which is 1/5 in z
-  at the geometric midpoint, where d ln θ/dz = L/4.
-
-So default dynamics in the interior stay close to today's, and the step stops
-moving with the parameter. The alternatives each fail §9.1's measurement:
+**D8 — The default IF2 and MH step. Decided (2026-10-29): a fixed step in z;
+IF2's default chosen per map family by the §12.6 benchmark; PMMH's and MH's set
+separately.** The step stops moving with the parameter, which removes the
+end-of-box blow-up of the per-particle conversion (b, below) and the
+start-dependence of a conversion at θ₀ (c). The alternatives each fail §9.1's
+measurement:
 
 - (b), today's per-particle conversion, throws particles at the ends (25.3%);
 - (c), conversion once at θ₀, gives each chain a different step, up to 3·10⁸ at
-  a nudged start.
+  a start on an end.
 
-Reproducing the midpoint step is not enough for `Interval`. Reproduced by an
-independent check, `beta` on [0.05, 1] with a flat likelihood and no cooling,
-the share of particles within 10⁻³ of lo / hi:
+IF2's default is one constant for each family: interval, log-interval, and the
+half-bounded maps. Reproducing today's midpoint steps (2/3 in z for the logit's
+(hi − lo)/6, 1/5 for the log's ln(hi/lo)/20) is a starting point, not the
+answer: on a wide `real` box over a log-scale quantity, `lb in [−8, 2]` entering
+as `exp(lb)`, every step from 1/5 to 2/3 left IF2 1.5–38 nats short of what a
+step of 0.02 reaches. §12.6 runs the candidates on narrow and wide boxes and
+short and long budgets together. If one constant per family serves every
+fixture, it is the default; if not, the maintainer chooses, and the launch table
+prints the natural-scale step each default implies. The half-bounded maps get a
+default too, so a `rate` on [0, ∞) runs without an explicit `rw_sd`.
 
-| map and step       | 50 steps     | 200 steps     |
-| ------------------ | ------------ | ------------- |
-| today              | 2.0% / 0.0%  | 0.5% / 2.6%   |
-| `LogInterval`, 1/5 | 0.2% / 0.0%  | 7.3% / 0.1%   |
-| `Interval`, 2/3    | 17.6% / 2.4% | 31.9% / 16.5% |
-
-A flat likelihood exaggerates this, but `Interval` is the map of every positive
-kind boxed [0, hi] (about 309 declarations), so its constant is a benchmarked
-choice with a stated rule (§12.6), not a fixed 2/3. The benchmark also runs half
-and double each default, and the pass criteria apply at the best of the three.
+PMMH's and MH's default is a separate constant, `default_mh_step`, because their
+proposal is adapted from the first warm-up step; its starting value matters
+little and is not benchmarked.
 
 **D9 — The unit of an explicit `rw_sd` (gh#1001). Decided (2026-10-29): z, in
 series (ii); series (i) converts a natural-scale value once at the domain's
@@ -1144,25 +1166,25 @@ explicit `rw_sd` changes meaning; §13 gives the conversion. Option (b), the
 natural scale converted once at the midpoint for good, keeps hand-tuned values
 meaning roughly what they meant, under a unit the user cannot read off the
 coordinate. Option (c), today's per-particle conversion, is refused by §9.1.
-Default runs are identical under (a) and (b), since they use `default_step`.
+Default runs are identical under (a) and (b), since they use `default_if2_step`.
 
-**D10 — The near-bound report for [0, ∞). Decided (2026-10-29): fire when θ̂ <
-0.01·θ₀.** [0, ∞) is the only reachable half-bounded domain (§3.3). It has no
-width, so today's 1%-of-width rule (`runner.rs:2530-2546`) cannot apply, and the
-diagnostic is silent. Option (a), the ratio to the start, is scale-free and
-reads as "the fit moved two orders of magnitude toward zero". Option (b), an
-absolute threshold, needs a unit the parameter does not carry. Option (c),
-silence, leaves a maximum at zero unreported under IF2, which cannot reach it
-(§9.1). The cost of (a) is a false alarm when the start was far above a
-legitimately small estimate. The message says "may be on the bound" and names
-the test (profile, or `nl-bobyqa`).
+**D10 — The near-bound report. Decided (2026-10-29): boxes finite at both ends
+only, at a fixed fraction (1%) of the width from either end; no report on a
+half-infinite domain.** A ratio to the start (θ̂ < 0.01·θ₀) was considered for
+[0, ∞) and dropped: it fires on a legitimately small estimate from a large start
+and is silent for a start on the bound. Telling a maximum on the bound from a
+small interior one needs the likelihood near the bound, which is its own design
+(§15). The message says the estimate may be on the bound and names the test:
+profile the parameter, or refit with `nl-sbplx` (ODE backend only).
 
 **D11 — The map for a positive kind (`rate`, `positive`, `count`, `duration`)
 boxed with 0 < lo. Decided (2026-10-29): `LogInterval`, for positive kinds only,
-subject to the §12.6 benchmark.** These boxes are the common case: every rate in
-the recovery fixtures, and the B-spline scale τ on [10⁻⁶, 2.5]. Option (a),
-`LogInterval`, keeps today's ln θ geometry in the box's interior, so default
-steps and log-spaced starts carry over.
+as a geometry choice, measured beside `Interval` in §12.6.** The support does
+not decide it: both maps keep [lo, hi]. `LogInterval` interpolates geometrically
+between the ends, `Interval` arithmetically. These boxes are the common case:
+every rate in the recovery fixtures, and the B-spline scale τ on [10⁻⁶, 2.5].
+Option (a), `LogInterval`, keeps today's ln θ geometry in the box's interior, so
+default steps and log-spaced starts carry over.
 
 The trade-off is that the transform is no longer a function of the domain alone:
 the kind splits a box with 0 < lo. Choosing by lo > 0 alone would keep that
@@ -1191,5 +1213,8 @@ runs both. If (b) matches (a) on every criterion, (b) wins on simplicity.
   lift the refusal of `9ccb2899`. It is a density term, not a map
   (parameter-roles §13).
 - **NLopt in z-coordinates**, gh#1002 (D5).
+- **A boundary-optimum diagnostic for half-infinite domains** (D10). Whether
+  IF2's small estimate on [0, ∞) is a maximum at 0 needs the likelihood near the
+  bound (a profile or a likelihood-ratio check), which is its own design.
 - **Rounding at use for `count` initial states** (§8). A likelihood that is a
   step function of a parameter is a modelling property no map changes.
