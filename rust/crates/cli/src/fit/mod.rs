@@ -985,6 +985,22 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             std::process::exit(1);
         })
     });
+    // gh#896: the run a sourced rule read, beside the handle as written. The
+    // source's run id is already identity through `deps`; this is the
+    // readable link `fit summary` prints, so no later label can obscure what
+    // the run was started from.
+    let starts_source_record: serde_json::Value = match &resolved_starts.source {
+        None => serde_json::Value::Null,
+        Some(src) => serde_json::json!({
+            "handle": starts_rule.source(),
+            // A stored run's id; none for a file named directly, or a
+            // directory with no run.json, whose dep is the file's digest.
+            "run_id": src.leaf_dir.as_ref()
+                .filter(|d| d.join("run.json").is_file())
+                .map(|_| src.dep.run_id.to_hex()),
+            "artifact": src.dep.artifact,
+        }),
+    };
     if let Some(src) = &resolved_starts.source {
         match &src.leaf_dir {
             Some(leaf) => eprintln!(
@@ -1982,6 +1998,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             "chain_starts_kind": starts_rule.kind().as_str(),
             "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
             "config_identities": run_config_identity.iter().collect::<Vec<_>>(),
+            "starts_source": starts_source_record,
             "wall_time_seconds": stage_elapsed.as_secs_f64(),
         });
         // Declare the tabular outputs' column schema in run.json (proposal

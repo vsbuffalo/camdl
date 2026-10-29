@@ -2788,10 +2788,11 @@ attempt) order, so a healthy run has one `accepted` row per chain at attempt 0.
 That file, not the config, is the authority on what a run did. `fit_state.toml`
 carries the same rule as `chain_init_source` beside
 `chain_starts_kind = "spread" | "point"`, and `fit summary` prints both under
-the leaf's identity line:
+the leaf's identity line, with the run id the handle resolved to when the run
+started (run.json `inputs.starts_source.run_id`):
 
 ```
-seeded from:  from_mle @scout (every chain at one point)
+seeded from:  from_mle @scout, run 4b1e0c9a2f77 (every chain at one point)
 ```
 
 A multi-chain sampler leaf whose kind is `point` is read with its R̂ withheld:
@@ -3718,8 +3719,9 @@ than buried — a real run needs thousands of sweeps. There is a second thing to
 read here: `from_mle` is a point rule, so both chains began at the scout's
 estimate and the between-chain R̂ cannot say whether the posterior was explored.
 `fit summary` on this leaf prints
-`seeded from:  from_mle @scout
-(every chain at one point)` and
+`seeded from:  from_mle @scout, run <scout run id>
+(every chain at one point)`
+and
 `R̂ — not assessed: all 2 chains started at
 one point (starts = from_mle @scout)`
 in place of a verdict (§6.6). To keep R̂ meaningful, start from the priors (drop
@@ -4541,14 +4543,26 @@ wildcard, and carries a populated `inputs`:
   "best_chain": 1,
   "best_loglik": -163.87886531306089,
   "chain_starts_kind": "spread",
+  "config_identities": ["3f0c9e1d…77b2"],
   "fit_hash": "7aac3a33…a90a",
   "method": "if2",
   "n_chains": 2,
   "seed": 1,
   "starts": "from_prior",
+  "starts_source": null,
   "wall_time_seconds": 25.255000542
 }
 ```
+
+`inputs.config_identities` holds the canonical identity of each `fit.toml` the
+run was written from or reused by (a cache hit from a second config with the
+same run identity adds its own); a `fit.toml` handle names the run whose list
+holds the file's identity (§2.2.1). `inputs.starts_source` is `null` unless
+`starts` read a source, and then
+`{"handle": "@scout", "run_id": "<64-hex>", "artifact": "fit_state.toml"}`: the
+handle as written and the run it resolved to when this run started (`run_id` is
+`null` for a file named directly). The source's `run_id` is also this run's
+`deps` entry, which is what keys it.
 
 `inputs.best_chain` is the chain number that produced `inputs.best_loglik` — the
 number of a `chain_N/` directory on this leaf, the same value the leaf's

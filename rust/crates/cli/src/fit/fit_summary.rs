@@ -460,6 +460,15 @@ fn exit_if_nothing_loaded(dir: &str, discovered: &[ResolvedStage], failures: &[L
 /// replicates, sweep cells), prefers Real over Synthetic, lowest
 /// `fit_seed`, then lex-first stage_dir — same priority as
 /// [`crate::fit::table_row::build_row`]'s terminal-stage picker.
+/// The run id a leaf's stored-fit `starts` source resolved to, from its
+/// run.json `inputs.starts_source.run_id` (gh#896); `None` for a run that did
+/// not start from a stored fit.
+fn starts_source_run(stage_dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(stage_dir.join("run.json")).ok()?;
+    let rec: runid::RunRecord = serde_json::from_slice(&bytes).ok()?;
+    rec.inputs.get("starts_source")?.get("run_id")?.as_str().map(String::from)
+}
+
 fn discover_stages(fit_dir: &Path) -> Vec<ResolvedStage> {
     // Read the fit-level view for `methods_declared`; if missing, fall back to
     // walker-order (covers user-built non-canonical fits).
@@ -1350,11 +1359,23 @@ impl Formatter {
     /// them — under every leaf's identity line, so the reader of an R̂ (or an
     /// Â) knows what it can and cannot say. A leaf written before the fields
     /// existed says `unknown` rather than a guess.
+    /// `source_run` is the run id a stored-fit source resolved to when this
+    /// run started (run.json `inputs.starts_source.run_id`, gh#896): the
+    /// handle is how the rule was written, the run id is what it read.
     fn seeded_from_line(
         &self,
         source: Option<&str>,
         kind: Option<crate::fit::starts::ChainStartsKind>,
+        source_run: Option<&str>,
     ) -> String {
+        let named;
+        let source = match (source, source_run) {
+            (Some(src), Some(id)) => {
+                named = format!("{src}, run {}", &id[..12.min(id.len())]);
+                Some(named.as_str())
+            }
+            (src, _) => src,
+        };
         let what = match (source, kind) {
             (Some(src), Some(k)) => format!(
                 "{} ({})",
@@ -1390,7 +1411,11 @@ impl Formatter {
                 .unwrap_or_else(|| format!("{} chains", state.n_chains))],
         ));
         s.push_str(&self.refused_chains_lines(&refused));
-        s.push_str(&self.seeded_from_line(state.chain_init_source.as_deref(), state.chain_starts_kind));
+        s.push_str(&self.seeded_from_line(
+            state.chain_init_source.as_deref(),
+            state.chain_starts_kind,
+            starts_source_run(Path::new(stage_dir)).as_deref(),
+        ));
         s.push('\n');
 
         // Headline — type tag *after* the number (gh#280), so a scraper
@@ -1786,6 +1811,7 @@ impl Formatter {
         s.push_str(&self.seeded_from_line(
             state.as_ref().and_then(|st| st.chain_init_source.as_deref()),
             state.as_ref().and_then(|st| st.chain_starts_kind),
+            starts_source_run(Path::new(stage_dir)).as_deref(),
         ));
 
         s.push_str(&self.verdict_block(diag, &facts, subset, forkable));
@@ -4977,15 +5003,21 @@ mod tests {
         use crate::fit::starts::ChainStartsKind;
         let fmt = plain_formatter();
         assert_eq!(
-            fmt.seeded_from_line(Some("from_mle @mle"), Some(ChainStartsKind::Point)),
+            fmt.seeded_from_line(Some("from_mle @mle"), Some(ChainStartsKind::Point), None),
             "  seeded from:  from_mle @mle (every chain at one point)\n"
         );
         assert_eq!(
-            fmt.seeded_from_line(Some("from_prior"), Some(ChainStartsKind::Spread)),
+            fmt.seeded_from_line(Some("from_prior"), Some(ChainStartsKind::Spread), None),
             "  seeded from:  from_prior (one independent draw per chain)\n"
         );
-        assert_eq!(fmt.seeded_from_line(Some("lhs"), None), "  seeded from:  lhs\n");
-        assert_eq!(fmt.seeded_from_line(None, None), "  seeded from:  unknown\n");
+        assert_eq!(fmt.seeded_from_line(Some("lhs"), None, None), "  seeded from:  lhs\n");
+        assert_eq!(fmt.seeded_from_line(None, None, None), "  seeded from:  unknown\n");
+        // gh#896: a stored-fit source names the run it read beside the handle.
+        assert_eq!(
+            fmt.seeded_from_line(
+                Some("from_mle @mle"), Some(ChainStartsKind::Point), Some(&"ab12".repeat(16))),
+            "  seeded from:  from_mle @mle, run ab12ab12ab12 (every chain at one point)\n"
+        );
     }
 
     // ── the redesigned text layout ───────────────────────────────────────
