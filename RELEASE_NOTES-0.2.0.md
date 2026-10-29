@@ -105,6 +105,52 @@ breaking changes are still expected before 1.0.
 
 These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
+- **`[estimate].transform` is removed.** A fit config that sets `transform` is
+  refused at load, naming the unknown field. Every override that still loaded
+  named the transform the parameter's kind and bounds already select, so results
+  do not change. Migration: delete the line.
+- **An estimated parameter whose IR records no kind is refused.** Only
+  hand-built IR, or IR from before `param_kind` existed, has none; its search
+  box was `[0, ∞)` while the run record called its support `(−∞, ∞)`. Migration:
+  recompile the model with the current `camdlc`.
+- **A parameter's transform is the map onto its bounds, with no clamp.** The
+  transform is chosen from which ends of the search box are finite: identity on
+  `(−∞, ∞)`, θ = lo + eᶻ on `[lo, ∞)`, θ = hi − eᶻ on `(−∞, hi]`, a log-interval
+  map for a `rate`, `positive`, `count` or `duration` boxed `[lo, hi]` with 0 <
+  lo, and an interval (scaled logit) map for every other finite box, including a
+  positive kind boxed `[0, hi]`. The old log transform clamped to its box and
+  gave the target a wall at each end; NUTS on a boxed rate diverged at it (271
+  divergences over 4 × 4,000 draws for τ ~ exponential(5.99) on `[1e-6, 2.5]`,
+  now 0). Posteriors are the same truncated posteriors, but sampling near a
+  bound changes: fewer NUTS divergences, different PMMH and MH acceptance, and
+  different IF2 paths on boxed rates. A start exactly on a bound is moved inward
+  (10⁻¹⁰ of the width) with a notice. The run record's `transform` tag takes
+  `identity`, `lower_bounded`, `upper_bounded`, `interval` or `log_interval`,
+  and loses `transform_from`; `search_from = "fallback"` is gone. Migration:
+  none.
+- **A prior whose support is narrower than the search box is refused.**
+  `log_normal`, `gamma`, `exponential` and `half_normal` need the box within
+  `[0, ∞)`, `beta` within `[0, 1]`, `uniform` and `log_uniform` within their
+  `[lower, upper]`. This replaces the prior × transform table: every prior now
+  reads ln θ (and ln(1 − θ)) from the transformed coordinate, so a `log_normal`,
+  `gamma`, `beta` or `log_uniform` prior is exact on any map, a `beta` on a
+  narrowed `probability` and a `log_normal` on a positive sub-box included.
+  Migration: narrow the bounds, or choose a prior that covers them.
+- **PGAS's MH-within-Gibbs (`--no-nuts`) starts its proposal scale at five times
+  each parameter's step,** the rule PMMH and MH use, else 1.0 in the transformed
+  coordinate. It was a tenth of the transform's spread between 10⁻¹⁰ and 10¹⁰
+  (about 10⁹ for an unbounded `real`). Robbins–Monro adaptation tunes it during
+  burn-in either way. Migration: none.
+- **The near-bound report covers `[0, ∞)`.** IF2's estimate on a parameter
+  bounded only below is reported near its bound when it is below 1% of the way
+  from the bound to the chain's start; the report now says IF2 cannot place an
+  estimate exactly on a bound, and to profile or refit with `nl-bobyqa`.
+- **IF2's "no finite log-likelihood" refusal says whether the start or the
+  perturbed swarm is to blame.** The check runs on each chain's final estimate.
+  When a start scores finite, the refusal now says the perturbation is too large
+  and names each parameter's step, instead of "Initial log-likelihood is -inf at
+  starting parameters".
+
 - **A typed constant `let` cannot be set from outside.**
   `let omega : rate =
   0.01` holds its declared value in every run; `[fixed]`,
@@ -554,6 +600,11 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   isolates. Migration: none; such contrasts now measure the effect.
 
 ## Run identity
+
+- **Every stored fit re-keys** (support-keyed transforms). The hashed fit config
+  carried `"transform": null` on every `[estimate]` entry, and the field is
+  gone; the fit level also folds the engine version. Fits of boxed parameters do
+  not reproduce bit for bit, because the transform changed.
 
 - **Every stored run re-keys at IR 0.41 (typed constants).** A typed `let` with
   a constant body (`let omega : rate = 0.01`) is now a model constant in the

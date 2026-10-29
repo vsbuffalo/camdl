@@ -1,6 +1,6 @@
 ---
 date: 2026-10-26
-status: accepted — D1–D10 decided by the maintainer on 2026-10-26 and 2026-10-27 (§12), D2 and D9 amended on 2026-10-27 (typed constants become an IR section); implementation follows §11
+status: accepted — D1–D10 decided by the maintainer on 2026-10-26 and 2026-10-27 (§12), D2 and D9 amended on 2026-10-27 (typed constants become an IR section), §6.2 and §6.4 amended by 2026-10-29-support-keyed-transforms.md §4.3; implementation follows §11
 area: CLI parameter resolution / inference setup / run records
 issues: gh#965 (typed constants); §13 lists the follow-ups
 related:
@@ -493,16 +493,13 @@ pub enum BoxFrom { FitConfig, Cli, Support }
 pub struct Estimated {
     pub support: Support,
     pub search: SearchBox,
-    pub transform: sim::inference::types::Transform,   // clamps to `search`
-    pub transform_from: TransformFrom,
+    /// The effective domain, mapped onto.
+    pub transform: sim::inference::types::Transform,
     /// Read by the Bayesian methods only; always recorded.
     pub prior: ResolvedPrior,                          // fit::priors_precedence
     /// `[estimate].start`, if written.
     pub start: Option<f64>,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransformFrom { FitConfig, Kind }
-
 /// What declared a parameter's role.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Declaration {
@@ -702,33 +699,32 @@ verified), a box that excludes the negative values a `real` or `instant`
 parameter admits; the partition corrects it. The search box is the fit config's
 or `--estimate`'s bounds, refused if it leaves the support (today's
 tighten-not-loosen rule, `fit/runner.rs:1250-1275`), else the support. The
-transform comes from `[estimate].transform`, else the kind, and clamps to the
-search box (`fit/runner.rs:1240-1250`). A method that needs a finite box —
-`survey`'s Latin hypercube, the `uniform` and `lhs` starts rules — refuses an
-infinite box naming the parameter. The prior is resolved by
-`fit::priors_precedence` (fit config, then the model's `~`, then flat).
+transform is the effective domain's map (support-keyed transforms §4.1). A
+method that needs a finite box — `survey`'s Latin hypercube, the `uniform` and
+`lhs` starts rules — refuses an infinite box naming the parameter. The prior is
+resolved by `fit::priors_precedence` (fit config, then the model's `~`, then
+flat).
 
 **What a search box means under PMMH and PGAS.** Verified for PMMH by reading:
 the acceptance ratio is log-likelihood + log-prior + log-Jacobian on the
 transformed scale (`sim/src/inference/pmmh.rs:707-714`); the prior is the
 untruncated density (`prior.rs:178-240`), with no normalizing constant for the
-box; the box is enforced only by the transform — the `Log` inverse clamps to
-`[lo, hi]` and its log-Jacobian is −∞ outside it (`types.rs:118-143`), the
-`Logit` maps into the box by construction, and `Transform::None` does not
-enforce it at all (`types.rs:130`). So the box restricts where the sampler
-moves, and the target is p(y | θ)·p(θ)·1[θ ∈ box]. For a plain prior that is the
-prior truncated to the box and renormalized, because the missing constant does
-not depend on θ. For a hierarchical leaf it is not: the missing constant
-Z(hyper) = ∫_box p(leaf | hyper) d(leaf) depends on the hyperparameter, so the
-hyperparameter's posterior is wrong when the box cuts off prior mass (§3.2 item
-13). The `truncated_normal` family renormalizes over its own bounds
-(`prior.rs:117`), which is a different mechanism. PGAS is inferred to follow
-PMMH. Two requirements follow: the record stores the box and the prior
-separately, and the launch block says that the box truncates the prior; and
-under PMMH and PGAS a hierarchical leaf whose search box is narrower than its
-support is refused (`HierarchicalLeafBoxed`) until Z(hyper) is computed (§13),
-while an identity-transform parameter's box is enforced by refusing a proposal
-outside it (a −∞ log-prior), so the box means the same under every transform.
+box; at the time of writing the box was enforced only by the transform — the
+`Log` inverse clamped to `[lo, hi]` and its log-Jacobian is −∞ outside it
+(`types.rs:118-143`), the `Logit` maps into the box by construction, and
+`Transform::None` does not enforce it at all (`types.rs:130`). So the box
+restricts where the sampler moves, and the target is p(y | θ)·p(θ)·1[θ ∈ box].
+For a plain prior that is the prior truncated to the box and renormalized,
+because the missing constant does not depend on θ. For a hierarchical leaf it is
+not: the missing constant Z(hyper) = ∫_box p(leaf | hyper) d(leaf) depends on
+the hyperparameter, so the hyperparameter's posterior is wrong when the box cuts
+off prior mass (§3.2 item 13). The `truncated_normal` family renormalizes over
+its own bounds (`prior.rs:117`), which is a different mechanism. PGAS is
+inferred to follow PMMH. Two requirements follow: the record stores the box and
+the prior separately, and the launch block says that the box truncates the
+prior; and under PMMH and PGAS a hierarchical leaf whose search box is narrower
+than its support is refused (`HierarchicalLeafBoxed`) until Z(hyper) is computed
+(§13). No box needs a rejection rule, because every finite end is in the map.
 
 **Simplex groups** are sets of estimated parameters constrained to sum to 1,
 which IF2 perturbs jointly through a log-ratio transform whose softmax inverse
@@ -848,7 +844,7 @@ A profile leaf:
     "gamma": { "role": "estimated", "declared_by": "fit_estimate",
                "support": [0.0, "inf"], "support_from": "kind",
                "search": [0.01, 0.5], "search_from": "fit_config",
-               "transform": "log", "transform_from": "kind",
+               "transform": "log_interval",
                "prior": { "log_normal": { "mu": -2.0, "sigma": 0.5 }, "from": "model_ir" } },
     "N0":    { "role": "fixed", "declared_by": "fit_fixed", "value": 10000,
                "value_from": { "source": "fit_toml_fixed" } }

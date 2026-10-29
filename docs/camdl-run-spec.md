@@ -2464,25 +2464,25 @@ Each entry is `[estimate.<param>]` (or an inline table under `[estimate]`).
 An entry with no fields at all (`beta = {}`) is legal: it means "estimate this,
 take everything from the model."
 
-**Transform defaults** (`runner.rs`, `derive_transform_with_bounds`), keyed on
-the parameter's declared type in the `.camdl`:
+**Transforms** (`runner.rs`, `derive_transform_with_bounds`;
+`sim::inference::types::Transform::for_domain`) map the real line onto the
+_resolved_ bounds, chosen by which ends are finite:
 
-| declared type                           | derived transform                                    |
-| --------------------------------------- | ---------------------------------------------------- |
-| `probability`                           | `logit`, clamped to the resolved bounds              |
-| `rate`, `positive`, `count`, `duration` | `log`, clamped to the resolved bounds                |
-| `instant`, `real`                       | `logit` when both bounds are finite, else `identity` |
-| (no declared type)                      | `log` when `lo >= 0`, else `identity`                |
+| resolved bounds       | declared type                           | transform (record tag)                         |
+| --------------------- | --------------------------------------- | ---------------------------------------------- |
+| `(−∞, ∞)`             | any                                     | θ = z (`identity`)                             |
+| `[lo, ∞)`             | any                                     | θ = lo + eᶻ (`lower_bounded`)                  |
+| `(−∞, hi]`            | any                                     | θ = hi − eᶻ (`upper_bounded`)                  |
+| `[lo, hi]`, 0 < lo    | `rate`, `positive`, `count`, `duration` | ln θ = ln lo + ln(hi/lo)·σ(z) (`log_interval`) |
+| `[lo, hi]`, otherwise | any                                     | θ = lo + (hi − lo)·σ(z) (`interval`)           |
 
-The clamp uses the _resolved_ bounds, so narrowing in `fit.toml` genuinely
-narrows the IF2 search rather than leaving it advisory. Resolution order is
+No transform clamps, and every finite end is z = ±∞, so narrowing in `fit.toml`
+genuinely narrows the IF2 search and the samplers' target. Resolution order is
 `fit.toml [estimate].bounds` → the model's `in [lo, hi]` → the range the
-declared type carries: `[0, 1]` for `probability`, which is what makes its
-`logit` well-formed without an `in [lo, hi]` clause; `(−∞, ∞)` for `real` and
-`instant`; `[0, ∞)` for every other type and an undeclared one. An unbounded
-`real` or `instant` takes the whole line because its `identity` transform
-enforces no box; the record (`fit.meta.json` `partition`) shows it as
-`search: ["-inf", "inf"]`.
+declared type carries: `[0, 1]` for `probability`; `(−∞, ∞)` for `real` and
+`instant`; `[0, ∞)` for `rate`, `positive`, `count` and `duration`. A parameter
+whose IR records no type is refused. The record (`fit.meta.json` `partition`)
+shows an unbounded `real` as `search: ["-inf", "inf"]`.
 
 **Prior wire format.** Externally tagged inline tables, matching what the OCaml
 compiler emits for in-model `~` priors (`PriorDist`,
@@ -2518,10 +2518,13 @@ never falls back to flat silently, because downstream consumers treat the chain
 as the canonical posterior. (`camdl profile` warns instead of erroring; the bar
 there is lower.)
 
-**Prior × transform compatibility** (`runner.rs:2813`) is enforced before any
-fitting. `log_normal`, `half_normal`, `gamma`, `exponential`, and `log_uniform`
-require a `log` transform; `beta` requires `logit` with bounds exactly `[0, 1]`;
-`flat`, `uniform`, `normal`, and `truncated_normal` accept any transform.
+**Prior support** (`validate_prior_transform_compat`) is enforced before any
+fitting: the resolved bounds must lie within the prior family's support —
+`[0, ∞)` for `log_normal`, `half_normal`, `gamma` and `exponential`, `[0, 1]`
+for `beta`, `[lower, upper]` for `uniform` and `log_uniform`; `normal` and
+`flat` accept any bounds, and `truncated_normal`'s truncation must equal them.
+Every prior reads ln θ and ln(1 − θ) from the transformed coordinate, so the
+density is exact under every transform.
 
 ### 6.4 `[fixed]` — held-constant parameters
 
@@ -3467,9 +3470,9 @@ fit: fits/01_mle.toml (method=if2)
   note: `starts = "uniform_unconstrained"` draws every chain's start, so `[estimate].start` is unused here for: beta, gamma. Use `starts = "single"` to start every chain at the declared values, or drop the `start` entries.
 running 4 chains × 200 particles × 10 iterations, cooling=0.7, dt=1
 
-transforms (chain 0 of 4; chains start at different points — see chain_starts.tsv):
-  beta         log     [0.05, 1]  log(0.0934) = -2.37  rw_sd=0.0335 (0.358/step, auto)
-  gamma        log     [0.01, 0.5]  log(0.1775) = -1.73  rw_sd=0.0138 (0.078/step, auto)
+transforms (chain 1 of 4; chains start at different points — see chain_starts.tsv):
+  beta         log_interval  [0.05, 1]  start=0.3757 z=0.72  rw_sd=0.0335 (0.135/step, auto)
+  gamma        log_interval  [0.01, 0.5]  start=0.1405 z=0.73  rw_sd=0.0138 (0.115/step, auto)
 
   ⚠ 2/2 parameters using auto rw_sd. Check traces and set explicit values.
 

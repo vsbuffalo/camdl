@@ -422,13 +422,12 @@ The model file is the source of truth for what _can_ be estimated; the
   (`resolved_priors[].overridden_model_prior`). If the override is not
   deliberate, delete the `prior`; if it should hold for every fit, move it into
   the model.
-- **Transforms** default to the parameter's declared type and its bounds
-  (`docs/camdl-inference-spec.md` §3.2): bounds finite at both ends always get a
-  transform that keeps the parameter inside them, a positive kind whose bounds
-  reach below zero included. `fit.toml` overrides, except that an override that
-  does not keep the bounds or the kind's support is refused (`"identity"` on
-  bounds finite at both ends or on a `rate`'s `[0, ∞)`, `"log"` on bounds below
-  zero, `"logit"` on bounds with an infinite end).
+- **Transforms** follow from the parameter's declared type and its bounds
+  (`docs/camdl-inference-spec.md` §3.2), and there is no override: the transform
+  maps the real line onto the bounds, so the parameter stays inside them and no
+  target has a wall at a bound. A prior whose support is narrower than the
+  bounds is refused (`log_normal` on bounds below zero, `beta` outside
+  `[0, 1]`).
 - **Bounds stay inside the kind.** Where the model declares no `in [lo, hi]`,
   `bounds` may narrow the kind's support (`[0, ∞)` for `rate`, `positive`,
   `count`, `duration`; `[0, 1]` for `probability`) but not leave it; a signed
@@ -436,11 +435,9 @@ The model file is the source of truth for what _can_ be estimated; the
 - **Unbounded parameters.** With no `bounds` here and no `in [lo, hi]` in the
   model, a `real` or `instant` parameter is searched over `(−∞, ∞)` with the
   identity transform; the positive kinds (`rate`, `positive`, `count`,
-  `duration`) over `[0, ∞)` with the log transform; a `probability` over
-  `[0, 1]`. An automatic `rw_sd` is refused for an unbounded parameter (there is
-  no box to scale one from), and for a log-scale box whose lower bound is 0
-  (`rate in [0, 2]`: the step would be ~1e-148); give `rw_sd` or a positive
-  lower bound; at two or more chains the `uniform`, `lhs` and
+  `duration`) over `[0, ∞)` with θ = eᶻ; a `probability` over `[0, 1]`. An
+  automatic `rw_sd` is refused for an unbounded parameter (there is no box to
+  scale one from); give `rw_sd`; at two or more chains the `uniform`, `lhs` and
   `uniform_unconstrained` starts refuse it, the default `uniform_unconstrained`
   included; and `camdl survey` refuses it. `from_prior` draws it from its prior,
   and `single` starts every chain at its `start`.

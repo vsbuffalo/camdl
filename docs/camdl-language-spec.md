@@ -660,13 +660,14 @@ via CLI flags, a `--params` TOML, or inference engines (§4.2).
 ### 4.1 Parameter Types
 
 ```
-rate        : ≥ 0, dimension 1/time. Default transform: log.
+rate        : ≥ 0, dimension 1/time. Default transform: log scale (θ = eᶻ on
+              [0, ∞), log-interval on a box with lo > 0).
 probability : ∈ [0, 1], dimensionless. Default transform: logit. The [0, 1] is
               carried by the type: a `probability` that declares no `in [lo, hi]`
               is searched over [0, 1] by inference, and a supplied value outside
               [0, 1] is rejected. It is the only kind whose type pins a finite
               interval — see §4.4.
-positive    : > 0, dimensionless. Default transform: log.
+positive    : > 0, dimensionless. Default transform: as `rate`.
 count       : dimension P (a population count). Integrality is not enforced —
               `let iota : count = 1e-6` compiles; the type carries the [P]
               dimension, not an integer constraint.
@@ -5089,8 +5090,8 @@ compile-time constants.
   `log(X) ~ Uniform(log lower, log upper)`, so every order of magnitude in
   `[lower, upper]` is equally likely. The honest weakly-informative choice for a
   scale parameter known only to within orders of magnitude (e.g. a coupling
-  rate). Requires `lower, upper > 0`. Use the `Log` transform (the default for
-  `rate`/`positive` parameters).
+  rate). Requires `lower, upper > 0`, and the parameter's bounds must lie within
+  `[lower, upper]`.
 - `truncated_normal(mean, sd)`: a `normal(mean, sd)` truncated to the
   parameter's declared `in [lo, hi]` range — the bounds are the truncation,
   with no second place to disagree. A parameter with a `truncated_normal` prior
