@@ -123,12 +123,20 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   divergences over 4 × 4,000 draws for τ ~ exponential(5.99) on `[1e-6, 2.5]`,
   now 0). Posteriors are the same truncated posteriors, but sampling near a
   bound changes: fewer NUTS divergences, different PMMH and MH acceptance, and
-  different IF2 paths on boxed rates. A start exactly on a bound is moved inward
-  with a notice: to 10⁻¹⁰ of the width inside it on the interval map, 10⁻¹⁰ of
-  ln(hi/lo) inside it in ln θ on the log-interval map, and 10⁻¹⁰ inside it on a
-  half-bounded one. The run record's `transform` tag takes `identity`,
-  `lower_bounded`, `upper_bounded`, `interval` or `log_interval`, and loses
-  `transform_from`; `search_from = "fallback"` is gone. Migration: none.
+  different IF2 paths on boxed rates. The run record's `transform` tag takes
+  `identity`, `lower_bounded`, `upper_bounded`, `interval` or `log_interval`,
+  and loses `transform_from`; `search_from = "fallback"` is gone. Migration:
+  none.
+- **IF2, PMMH, MH and PGAS refuse a start exactly on a bound.** A value on a
+  bound has no finite transformed coordinate, so a chain started there began far
+  out in the map's tail. A declared `start`, a `from_mle` / `from_params` point
+  or a posterior row on a bound is now refused, naming the parameter, the bound
+  and an interior value to start from instead (1% of the box's width inside the
+  end, or 0.01·max(1, |bound|) on a half-bounded domain); a start the fit draws
+  (`uniform`, `lhs`, `uniform_unconstrained`, `from_prior`) is redrawn. The
+  optimisers and `pfilter` still start from the value as given. Migration: move
+  the start inside the box; if the maximum on the bound is the point, profile
+  the parameter or refit with `nl-sbplx` (ODE backend).
 - **A prior whose support is narrower than the search box is refused.**
   `log_normal`, `gamma`, `exponential` and `half_normal` need the box within
   `[0, ∞)`, `beta` within `[0, 1]`, `uniform` and `log_uniform` within their

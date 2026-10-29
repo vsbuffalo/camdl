@@ -188,6 +188,22 @@ impl Transform {
         (lo.is_finite() && theta <= lo) || (hi.is_finite() && theta >= hi)
     }
 
+    /// Whether `theta` is on a finite end or within rounding of one: where
+    /// [`Transform::forward`] gives its edge value or beyond, i.e. σ(z) ≤ ε of
+    /// the way in on the interval maps and θ within ε of the bound on the
+    /// half-bounded ones (ε = [`EDGE_START_EPS`]). A start the fit draws there
+    /// is redrawn (proposal D3).
+    pub fn within_rounding_of_an_end(&self, theta: f64) -> bool {
+        let z_edge = (1.0 / EDGE_START_EPS - 1.0).ln();
+        match self {
+            Transform::Identity => false,
+            Transform::LowerBounded { .. } | Transform::UpperBounded { .. } =>
+                self.forward(theta) <= EDGE_START_EPS.ln(),
+            Transform::Interval { .. } | Transform::LogInterval { .. } =>
+                self.forward(theta).abs() >= z_edge,
+        }
+    }
+
     /// ln |g′(z)|, finite for every finite z.
     pub fn log_jacobian(&self, z: f64) -> f64 {
         match *self {
@@ -919,6 +935,21 @@ mod tests {
     /// A start exactly on a finite end has no finite preimage; the forward
     /// map moves it inward to z = ±ln(1/ε − 1) ≈ ±23.03 on the interval maps
     /// and to θ = lo + ε, z = ln ε, on the half-bounded ones.
+    /// Proposal D3: within rounding of an end is where the forward map gives
+    /// its edge value or beyond.
+    #[test]
+    fn within_rounding_of_an_end_is_where_forward_reaches_its_edge() {
+        let iv = Transform::Interval { lo: 0.0, hi: 1.0 };
+        assert!(iv.within_rounding_of_an_end(0.0) && iv.within_rounding_of_an_end(1.0));
+        assert!(iv.within_rounding_of_an_end(1e-12));
+        assert!(!iv.within_rounding_of_an_end(1e-8) && !iv.within_rounding_of_an_end(0.5));
+        let li = Transform::LogInterval { lo: 0.05, hi: 1.0 };
+        assert!(li.within_rounding_of_an_end(0.05) && !li.within_rounding_of_an_end(0.051));
+        let lb = Transform::LowerBounded { lo: 0.0 };
+        assert!(lb.within_rounding_of_an_end(1e-11) && !lb.within_rounding_of_an_end(1e-9));
+        assert!(!Transform::Identity.within_rounding_of_an_end(0.0));
+    }
+
     #[test]
     fn a_start_on_an_end_maps_to_a_finite_z() {
         let edge = (1.0 / EDGE_START_EPS - 1.0).ln();

@@ -562,13 +562,67 @@ pub fn build_resolved_view_for_init(
     }
 }
 
+/// Whether the rule drew this chain's start, rather than taking one the user
+/// gave: `uniform`'s chain 0 is the declared start, and the sourced rules
+/// and `single` read theirs.
+fn is_drawn(cs: &ChainStart) -> bool {
+    match cs.source {
+        InitSource::UniformDraw { .. } => cs.chain_id != 0,
+        InitSource::UnconstrainedDraw { .. } | InitSource::LhsCell { .. } | InitSource::PriorDraw { .. } => true,
+        InitSource::SeededBase | InitSource::PosteriorRow { .. }
+        | InitSource::MlePoint { .. } | InitSource::ParamsPoint { .. } => false,
+    }
+}
+
+/// Whether any estimated value of `cs` is within rounding of an end of its
+/// domain ([`sim::inference::types::Transform::within_rounding_of_an_end`]).
+fn within_rounding_of_an_end(base_specs: &[EstimatedParam], cs: &ChainStart) -> bool {
+    base_specs.iter().any(|spec| {
+        cs.values.get(&spec.name).is_some_and(|&v| spec.transform.within_rounding_of_an_end(v))
+    })
+}
+
+/// Seed salt for the redraw of a drawn start that landed on a bound, distinct
+/// from [`redraw_chain_start`]'s so the two retries never share a draw.
+const OFF_THE_ENDS_SALT: u64 = 0x5851_f42d_4c95_7f2d;
+
 /// Draw `n_chains` starts under `starts`.
 ///
 /// The bare spread rules fall back to the base point at one chain (there is
 /// nothing to spread); the sourced rules read every chain from their source
 /// at any chain count. Every rule yields the same shape, so one writer
 /// records the result and one provenance serializer reads it.
+///
+/// A start the rule drew that lands within rounding of a bound, which has no
+/// finite transformed coordinate, is redrawn, up to [`MAX_START_ATTEMPTS`]
+/// times (proposal D3): the chain takes its slot of the rule re-run at a
+/// derived seed. A start the user gave is left as given; the methods that
+/// move in the transformed coordinate refuse it if it is on a bound.
 pub fn draw_chain_starts(
+    ctx: &StartContext<'_>,
+    starts: &ResolvedStarts,
+    n_chains: usize,
+    seed: u64,
+) -> Result<DrawnStarts, InitError> {
+    let mut drawn = draw_chain_starts_once(ctx, starts, n_chains, seed)?;
+    for chain_id in 0..drawn.starts.len() {
+        for attempt in 1..=MAX_START_ATTEMPTS {
+            let cs = &drawn.starts[chain_id];
+            if !(is_drawn(cs) && within_rounding_of_an_end(ctx.base_specs, cs)) {
+                break;
+            }
+            let seed_k = seed ^ (attempt as u64).wrapping_mul(OFF_THE_ENDS_SALT);
+            let fresh = draw_chain_starts_once(ctx, starts, n_chains, seed_k)?;
+            if let Some(cs) = fresh.starts.into_iter().nth(chain_id) {
+                drawn.starts[chain_id] = ChainStart { chain_id, ..cs };
+            }
+        }
+    }
+    Ok(drawn)
+}
+
+/// One draw of `n_chains` starts under `starts`, as the rule gives them.
+fn draw_chain_starts_once(
     ctx: &StartContext<'_>,
     starts: &ResolvedStarts,
     n_chains: usize,
@@ -1869,6 +1923,56 @@ mod tests {
             let v = cs.values["beta"];
             assert!((0.4 - 1e-9..=0.5 + 1e-9).contains(&v),
                 "draw {} outside the resolved prior [0.4, 0.5]", v);
+        }
+    }
+
+    /// Proposal D3: a drawn start within rounding of a bound is redrawn.
+    /// beta(0.05, 1) on [0, 1] puts (1e-10)^0.05 ≈ 32% of its draws below
+    /// 1e-10, within rounding of 0 on the interval map; after the redraws
+    /// none of 32 chains is left there (each has 0.32^11 ≈ 4e-6 of staying).
+    #[test]
+    fn from_prior_redraws_a_start_within_rounding_of_a_bound() {
+        let resolved = mk_resolved(
+            vec![mk_param("beta", 0.42, None, Some((0.0, 1.0)))],
+            &["beta"],
+        );
+        let base_specs = specs_for(&resolved);
+        let priors = vec![(
+            "beta".to_string(),
+            Prior::Fixed(Density::Beta { alpha: 0.05, beta: 1.0 }),
+        )];
+        let ctx = StartContext { resolved: &resolved, base_specs: &base_specs, priors: &priors };
+        let rule = ResolvedStarts::bare(ChainStarts::from_prior());
+        let once = draw_chain_starts_once(&ctx, &rule, 32, 7).unwrap();
+        let on_end = |d: &DrawnStarts| d.starts.iter()
+            .filter(|cs| base_specs[0].transform.within_rounding_of_an_end(cs.values["beta"]))
+            .count();
+        assert!(on_end(&once) >= 4, "precondition: the prior draws within rounding of 0");
+        let drawn = draw_chain_starts(&ctx, &rule, 32, 7).unwrap();
+        assert_eq!(on_end(&drawn), 0, "a drawn start within rounding of a bound is redrawn");
+        let ids: Vec<usize> = drawn.starts.iter().map(|cs| cs.chain_id).collect();
+        assert_eq!(ids, (0..32).collect::<Vec<_>>());
+        for (a, b) in once.starts.iter().zip(&drawn.starts) {
+            if !base_specs[0].transform.within_rounding_of_an_end(a.values["beta"]) {
+                assert_eq!(a.values["beta"], b.values["beta"], "a start off the bounds is kept");
+            }
+        }
+    }
+
+    /// A start the user gave is not redrawn: `uniform`'s chain 0 is the
+    /// declared start, here on the bound, and is left for the refusal.
+    #[test]
+    fn a_given_start_on_a_bound_is_not_redrawn() {
+        let resolved = mk_resolved(
+            vec![mk_param("beta", 0.0, None, Some((0.0, 1.0)))],
+            &["beta"],
+        );
+        let base_specs = specs_for(&resolved);
+        let priors = priors_for(&resolved);
+        let ctx = StartContext { resolved: &resolved, base_specs: &base_specs, priors: &priors };
+        for rule in [ChainStarts::Spread(Spread::Uniform), ChainStarts::Point(Point::Declared)] {
+            let drawn = draw_chain_starts(&ctx, &ResolvedStarts::bare(rule), 4, 3).unwrap();
+            assert_eq!(drawn.starts[0].values["beta"], 0.0);
         }
     }
 
