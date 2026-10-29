@@ -5046,6 +5046,35 @@ mod prior_grad_tests {
         }
     }
 
+    /// The value-vs-gradient check of every log-family prior on the two
+    /// bounded maps a fit reaches, `Interval` and `LogInterval`: each reads
+    /// ln θ (and beta ln(1 − θ)) and its z-derivative from the transform's
+    /// `prior_point`, so a wrong sign or a missing term in either the prior's
+    /// gradient arm or the point's derivatives shows as a disagreement with a
+    /// finite difference of the value.
+    #[test]
+    fn log_family_priors_grad_matches_fd_on_the_bounded_maps() {
+        let on = |transform: Transform| EstimatedParam {
+            name: "p".into(), index: 0, initial: 0.5, rw_sd: 0.1, transform,
+            rw_sd_auto: false, perturb_only_at_t0: false,
+        };
+        let zs = [-4.0, -1.5, 0.0, 0.7, 3.0];
+        let unit = [Transform::Interval { lo: 0.1, hi: 0.9 }, Transform::Interval { lo: 0.0, hi: 1.0 },
+                    Transform::LogInterval { lo: 0.1, hi: 0.9 }];
+        let positive = [Transform::Interval { lo: 0.0, hi: 2.0 }, Transform::Interval { lo: 0.05, hi: 5.0 },
+                        Transform::LogInterval { lo: 0.01, hi: 5.0 }];
+        for t in unit {
+            assert_grad_matches_fd(&Prior::Fixed(Density::Beta { alpha: 2.0, beta: 5.0 }), &on(t), &zs);
+            assert_grad_matches_fd(&Prior::Fixed(Density::Beta { alpha: 0.7, beta: 3.0 }), &on(t), &zs);
+        }
+        for t in unit.into_iter().chain(positive) {
+            assert_grad_matches_fd(&Prior::Fixed(Density::Gamma { shape: 2.5, rate: 1.5 }), &on(t), &zs);
+            assert_grad_matches_fd(&Prior::Fixed(Density::TransformedNormal { mean: -0.5, sd: 0.8 }), &on(t), &zs);
+            assert_grad_matches_fd(&Prior::Fixed(Density::HalfNormal { sigma: 1.0 }), &on(t), &zs);
+            assert_grad_matches_fd(&Prior::Fixed(Density::LogUniform { lower: 1e-3, upper: 10.0 }), &on(t), &zs);
+        }
+    }
+
     #[test]
     fn log_normal_grad_matches_fd() {
         // Regression: the TransformedNormal arm returned -(z-μ)/σ² but the
