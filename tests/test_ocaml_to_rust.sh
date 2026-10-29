@@ -11,8 +11,28 @@ FAIL=0
 tmpir=$(mktemp /tmp/camdl_XXXXXX)
 trap 'rm -f "$tmpir"' EXIT
 
+# Goldens of implemented but unreleased features: camdlc compiles them, and
+# every camdl command must refuse them with the "not yet available" message
+# (the smooth B-spline form; rust/crates/cli/src/util.rs refuse_unreleased_smooth).
+UNRELEASED="bspline_smooth"
+
 for camdl in "$GOLDEN"/*.camdl; do
     name=$(basename "$camdl" .camdl)
+
+    if [[ " $UNRELEASED " == *" $name "* ]]; then
+        if "$CAMDL" simulate "$camdl" --seed 1 --stdout > /dev/null 2> "$tmpir.err"; then
+            echo "FAIL [not refused] $name"
+            FAIL=$((FAIL + 1))
+        elif grep -q "is not yet available in this release" "$tmpir.err"; then
+            echo "PASS [refused, unreleased] $name"
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL [refused for another reason] $name"; cat "$tmpir.err"
+            FAIL=$((FAIL + 1))
+        fi
+        rm -f "$tmpir.err"
+        continue
+    fi
 
     if ! "$CAMDLC" "$camdl" > "$tmpir"; then
         echo "FAIL [compile] $name"
