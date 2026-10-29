@@ -634,7 +634,7 @@ pub enum Transform {
 }
 
 impl Transform {
-    /// String form expected by `runner::derive_transform`'s
+    /// String form expected by `runner::derive_transform_with_bounds`'s
     /// `transform_override` argument. The runner still threads
     /// transforms as `Option<&str>` internally; this is the
     /// thin v2-typed → str adapter so callers don't allocate.
@@ -2602,8 +2602,9 @@ impl FitConfig {
             lines.join("\n"), kind.as_str()))
     }
 
-    /// Refuse an explicit `transform = "identity"` on a search box finite at
-    /// both ends, under every method, before a leaf is claimed.
+    /// Refuse an explicit `transform` override that does not keep the search
+    /// box or the kind's support ([`super::runner::check_transform_keeps_box`]),
+    /// under every method, before a leaf is claimed.
     ///
     /// The box is the one the engine searches
     /// ([`super::runner::resolve_search_box`]): fit.toml bounds, else the
@@ -2615,7 +2616,8 @@ impl FitConfig {
             // A box the engine would refuse is the engine's error to report.
             let Ok(bx) = super::runner::resolve_search_box(name, spec.bounds, p) else { continue };
             super::runner::check_transform_keeps_box(
-                name, spec.transform.as_ref().map(|t| t.as_str()), bx)?;
+                name, spec.transform.as_ref().map(|t| t.as_str()), bx,
+                super::runner::kind_support(p))?;
         }
         Ok(())
     }

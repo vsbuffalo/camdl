@@ -1125,27 +1125,6 @@ pub fn print_preflight(
     eprintln!();
 }
 
-/// Derive the transform for a parameter from its IR metadata.
-///
-/// Priority: explicit override > param_kind > bounds fallback.
-///
-/// The param_kind field (populated by the OCaml compiler from the DSL type)
-/// is the primary signal: probability → Logit, rate/positive/count → Log.
-/// The bounds fallback (lo >= 0 → Log) exists for IR files predating
-/// the param_kind field. The hi <= 1.0 probability-detector heuristic
-/// was deliberately removed — it caused R0 on [1, 100] to get logit
-/// instead of log, which is wrong.
-///
-/// The bounds the transform clamps to are [`resolved_bounds`], so a
-/// `probability` that declared no range is a logit over `[0, 1]` rather than
-/// over `[0, ∞)` (gh#763).
-pub fn derive_transform(
-    ir_param: &ir::parameter::Parameter,
-    transform_override: Option<&str>,
-) -> Transform {
-    derive_transform_with_bounds(ir_param, transform_override, default_search_box(ir_param))
-}
-
 /// The box a parameter has when no fit config bounds it: its declared or
 /// kind range ([`resolved_bounds`]), else the support its kind implies —
 /// `(−∞, ∞)` for `real` and `instant`, `[0, ∞)` for `rate`, `positive`,
@@ -1164,13 +1143,23 @@ pub fn default_search_box(ir_param: &ir::parameter::Parameter) -> (f64, f64) {
     })
 }
 
-/// Like `derive_transform`, but the caller supplies explicit `(lo, hi)`
-/// bounds — typically the fit.toml `[estimate].bounds` after validation
-/// against the model's declared range. The resulting `Transform::Log`
-/// or `Transform::Logit` clamps to *these* bounds, which is what IF2
-/// uses to keep particles in the search box. Without this, a fit that
-/// tightens bounds would still see IF2 walk particles out to the model
-/// bounds, defeating the tightening.
+/// Derive the transform for a parameter from its IR metadata and the search
+/// box `(lower, upper)` it clamps to — the fit config's `[estimate].bounds`
+/// when given, else [`default_search_box`] (via [`resolve_search_box`]).
+///
+/// Priority: explicit override > param_kind > bounds fallback.
+///
+/// The param_kind field (populated by the OCaml compiler from the DSL type)
+/// is the primary signal: probability → Logit, rate/positive/count → Log.
+/// The bounds fallback (lo >= 0 → Log) exists for IR files predating
+/// the param_kind field. The hi <= 1.0 probability-detector heuristic
+/// was deliberately removed — it caused R0 on [1, 100] to get logit
+/// instead of log, which is wrong.
+///
+/// The resulting `Transform::Log` or `Transform::Logit` clamps to *these*
+/// bounds, which is what IF2 uses to keep particles in the search box.
+/// Without this, a fit that tightens bounds would still see IF2 walk
+/// particles out to the model bounds, defeating the tightening.
 pub fn derive_transform_with_bounds(
     ir_param: &ir::parameter::Parameter,
     transform_override: Option<&str>,
@@ -1230,29 +1219,66 @@ pub fn derive_transform_with_bounds(
     }
 }
 
-/// Refuse an explicit `transform = "identity"` on a search box that is finite
-/// at both ends.
+/// The range a parameter's kind admits, with its printed form: `[0, 1]` for
+/// `probability`, `[0, ∞)` for `rate`, `positive`, `count` and `duration`.
+/// `None` for `real` and `instant`, whose kind admits the whole line, and for
+/// a parameter whose IR carries no kind.
+pub fn kind_support(ir_param: &ir::parameter::Parameter) -> Option<((f64, f64), &'static str)> {
+    use ir::parameter::ParamKind::*;
+    match ir_param.param_kind? {
+        // Exhaustive over ParamKind (no `_`): a new kind must state its support.
+        Probability => Some(((0.0, 1.0), "[0, 1]")),
+        Rate | Positive | Count | Duration => Some(((0.0, f64::INFINITY), "[0, ∞)")),
+        Real | Instant => None,
+    }
+}
+
+/// Refuse an explicit `transform` override that does not keep the
+/// parameter inside its search box `(lo, hi)` or its kind's support.
 ///
-/// The identity transform applies no clamp, so PMMH and MH proposals and IF2
-/// perturbations walk straight out of such a box: under a flat likelihood the
-/// draws outside it are the prior's mass outside it. Every finite box without
-/// an explicit transform already gets the scaled logit
-/// ([`derive_transform_with_bounds`]), so the remedy is to drop the override.
-/// A box with an infinite end has nothing for a transform to keep, and the
-/// identity transform stays available there.
+/// The samplers and IF2 move a parameter only as far as its transform keeps
+/// it, so an override that keeps less than the box lets the draws leave it:
+///
+/// - `identity` clamps nothing. It is refused on a box finite at both ends
+///   and on a kind whose support has a finite end (`identity` on a `rate`'s
+///   `[0, ∞)` gave 30.8% negative draws under a `normal` prior).
+/// - `log` cannot represent a value ≤ 0, so it is refused on a box reaching
+///   below zero (a negative start maps to log(1e-300) = −690, gh#967).
+/// - `logit` maps a box finite at both ends; with an infinite end it is
+///   degenerate (every value maps to logit(ε), gh#763), so it is refused.
+///
+/// Without an override every box already gets a transform that keeps it
+/// where one exists ([`derive_transform_with_bounds`]), so the remedy is to
+/// drop the override.
 pub fn check_transform_keeps_box(
     name: &str,
     transform_override: Option<&str>,
     (lo, hi): (f64, f64),
+    support: Option<((f64, f64), &'static str)>,
 ) -> Result<(), String> {
-    if transform_override == Some("identity") && lo.is_finite() && hi.is_finite() {
-        return Err(format!(
-            "estimate.{name}: `transform = \"identity\"` with bounds [{lo}, {hi}] — the \
-             identity transform does not keep a parameter inside finite bounds, so the \
-             sampler or IF2 would move {name} outside [{lo}, {hi}]. Drop `transform` \
-             and {name} gets a bounded (scaled-logit) transform automatically."));
-    }
-    Ok(())
+    let finite_box = lo.is_finite() && hi.is_finite();
+    let why = match transform_override {
+        Some("identity") if finite_box => format!(
+            "the identity transform does not keep a parameter inside finite bounds, so \
+             the sampler or IF2 would move {name} outside [{lo}, {hi}]"),
+        Some("identity") => match support {
+            Some((_, shown)) => format!(
+                "{name}'s kind has support {shown}, and the identity transform does not \
+                 keep it there, so the sampler or IF2 would move {name} outside {shown}"),
+            None => return Ok(()),
+        },
+        Some("log") if lo < 0.0 => format!(
+            "the log transform cannot represent a value below 0, so {name} could never \
+             reach the negative part of [{lo}, {hi}]"),
+        Some("logit") if !finite_box => format!(
+            "the logit transform needs bounds finite at both ends, and [{lo}, {hi}] has an \
+             infinite end"),
+        _ => return Ok(()),
+    };
+    let t = transform_override.unwrap_or_default();
+    Err(format!(
+        "estimate.{name}: `transform = \"{t}\"` with bounds [{lo}, {hi}] — {why}. Drop \
+         `transform` and {name} gets a transform that keeps its bounds automatically."))
 }
 
 /// The search box a fit uses for one estimated parameter: the fit.toml
@@ -1288,7 +1314,25 @@ pub fn resolve_search_box(
             }
             Ok((flo, fhi))
         }
-        (Some(b), None) => Ok(b),
+        // Nothing declared: the fit box may narrow the kind's support but not
+        // leave it. A box past it is not kept by the kind's transform, and a
+        // prior on that support is then read on another coordinate (a
+        // log_normal `rate` boxed to [-1, 1] got the scaled logit, whose z the
+        // prior read as ln θ: posterior mean 0.080 where the truncated law has
+        // 0.398).
+        (Some((flo, fhi)), None) => {
+            if let Some(((slo, shi), shown)) = kind_support(ir_param) {
+                if flo < slo || fhi > shi {
+                    let kind = ir_param.param_kind.map(|k| k.as_str()).unwrap_or_default();
+                    return Err(format!(
+                        "estimate.{name}: fit.toml bounds [{flo}, {fhi}] lie outside the \
+                         support of `{kind}`, {shown}. A fit can narrow a parameter's \
+                         support but not leave it. Tighten the fit bounds, or, if {name} \
+                         takes values outside {shown}, declare `in [lo, hi]` in the model."));
+                }
+            }
+            Ok((flo, fhi))
+        }
         (None, Some(b)) => Ok(b),
         // Nothing declared anywhere: the kind's own support (gh#763 —
         // `probability` is `[0, 1]`, `real`/`instant` the whole line), else
@@ -1356,7 +1400,8 @@ pub fn build_if2_params_from_specs(
         // init samplers) AND through the `Transform::{Log, Logit}` clamp
         // bounds (used by IF2 to keep particles in the search box).
         let (lo, hi) = resolve_search_box(&spec.name, spec.bounds, ir_param)?;
-        check_transform_keeps_box(&spec.name, spec.transform.as_deref(), (lo, hi))?;
+        check_transform_keeps_box(
+            &spec.name, spec.transform.as_deref(), (lo, hi), kind_support(ir_param))?;
 
         // Transform: spec override > param_kind > fallback. Built with
         // the resolved (lo, hi) so the clamp bounds match the search box.
@@ -3596,7 +3641,14 @@ pub fn validate_prior_transform_compat(
         let transform_override = estimate.get(name)
             .and_then(|e| e.transform.as_ref())
             .map(|t| t.as_str());
-        let transform = derive_transform(ir_param, transform_override);
+        // The engine's transform is built from the fit box
+        // ([`build_if2_params_from_specs`]), so the check reads that one, not
+        // the model's: they differ where a fit box changes the transform's
+        // family (a kindless parameter boxed below zero gets the scaled logit
+        // where its model box gives Log).
+        let fit_bounds = estimate.get(name).and_then(|e| e.bounds);
+        let search_box = resolve_search_box(name, fit_bounds, ir_param)?;
+        let transform = derive_transform_with_bounds(ir_param, transform_override, search_box);
         let (prior, source) = resolve_prior(name, estimate, model);
 
         let is_log   = matches!(transform, Transform::Log { .. });
@@ -3628,16 +3680,12 @@ pub fn validate_prior_transform_compat(
             TransformReq::Log => {
                 if !is_log { return err("Log"); }
             }
+            // A narrower box than [0, 1] is admitted, declared or from the fit
+            // config alike: beta is a natural-scale density and the samplers
+            // add the log-Jacobian of the scaled logit they use, so the target
+            // is the beta truncated to the box.
             TransformReq::Logit => {
                 if !is_logit { return err("Logit"); }
-                // Beta is on [0, 1]; require logit bounds span that.
-                if let Transform::Logit { lo, hi } = transform {
-                    if lo != 0.0 || hi != 1.0 {
-                        return Err(format!(
-                            "parameter '{}': beta prior requires bounds [0, 1], \
-                             got [{}, {}].", name, lo, hi));
-                    }
-                }
             }
             // flat / uniform / normal / truncated_normal — any transform.
             TransformReq::Any => {}
@@ -4921,7 +4969,7 @@ dt = 1.0
 
         // beta has bounds [0.01, 0.5] and NO `start =`. The fallback
         // is a log-uniform draw within (0.01, 0.5) — beta is param_kind
-        // = "rate" in the seir model, so derive_transform yields
+        // = "rate" in the seir model, so derive_transform_with_bounds yields
         // Transform::Log and the helper picks the log branch. Pre-gh#34
         // this would fail with "parameter 'beta' has no value".
         let fit_toml_path = data_dir.join("fit.toml");
@@ -5312,14 +5360,15 @@ dt = 1.0
         assert!(err.contains("Drop `transform`"), "{err}");
     }
 
-    /// With an infinite end there is no finite box, and the identity
-    /// transform stays available.
+    /// With an infinite end there is no finite box, and on a kind that
+    /// admits the whole line (`support = None`) the identity transform stays
+    /// available.
     #[test]
     fn explicit_identity_with_half_infinite_box_is_allowed() {
-        assert!(check_transform_keeps_box("c", Some("identity"), (0.0, f64::INFINITY)).is_ok());
-        assert!(check_transform_keeps_box("c", Some("identity"), (f64::NEG_INFINITY, 3.0)).is_ok());
-        assert!(check_transform_keeps_box("c", Some("identity"), (0.0, 1.0)).is_err());
-        assert!(check_transform_keeps_box("c", None, (0.0, 1.0)).is_ok());
+        assert!(check_transform_keeps_box("c", Some("identity"), (0.0, f64::INFINITY), None).is_ok());
+        assert!(check_transform_keeps_box("c", Some("identity"), (f64::NEG_INFINITY, 3.0), None).is_ok());
+        assert!(check_transform_keeps_box("c", Some("identity"), (0.0, 1.0), None).is_err());
+        assert!(check_transform_keeps_box("c", None, (0.0, 1.0), None).is_ok());
     }
 
     // ── `probability` carries [0, 1] with no `in [...]` (gh#763) ─────
@@ -5363,7 +5412,8 @@ dt = 1.0
     fn undeclared_probability_gets_a_logit_over_the_unit_interval() {
         let (model, _) = make_unbounded_param_model(
             "rho", 0.5, ir::parameter::ParamKind::Probability);
-        match derive_transform(&model.parameters[0], None) {
+        match derive_transform_with_bounds(
+            &model.parameters[0], None, default_search_box(&model.parameters[0])) {
             Transform::Logit { lo, hi } => {
                 assert_eq!((lo, hi), (0.0, 1.0),
                     "an undeclared `probability` must be a logit over [0, 1]");
@@ -5440,7 +5490,7 @@ dt = 1.0
     }
 
     /// Consumer 4 — the prior-compatibility check. The beta refusal in the
-    /// issue was `derive_transform` handing it `Logit { hi: ∞ }`; the same
+    /// issue was the transform handing it `Logit { hi: ∞ }`; the same
     /// check must still refuse a beta prior on a kind that is genuinely not
     /// on `[0, 1]`, so the test is not vacuous.
     #[test]
@@ -5466,6 +5516,160 @@ dt = 1.0
         let err = validate_prior_transform_compat(&estimate, &rate_model).expect_err(
             "a beta prior on a `rate` must still be refused");
         assert!(err.contains("beta"), "the refusal must name the prior: {err}");
+    }
+
+    // ── A fit box stays inside the kind's support; the prior check reads
+    //    the transform the engine builds; an override keeps the support ──
+
+    /// A one-parameter model whose parameter declares no range (`bounds`
+    /// optional) and carries `prior`.
+    fn model_with_prior(
+        name: &str,
+        kind: Option<ir::parameter::ParamKind>,
+        bounds: Option<(f64, f64)>,
+        prior: ir::parameter::PriorDist,
+    ) -> ir::Model {
+        model_with_param(ir::parameter::Parameter {
+            name: name.into(),
+            value: ir::parameter::ParamValue::Estimated {
+                init: Some(0.5), bounds,
+                prior: ir::parameter::PriorSpec::Dist(prior),
+                transform: ir::parameter::Transform::Identity },
+            param_kind: kind, param_dim: None,
+        })
+    }
+
+    fn est_with(name: &str, bounds: Option<(f64, f64)>, transform: Option<super::super::config_v2::Transform>)
+        -> indexmap::IndexMap<String, super::super::config_v2::EstimateSpecV2>
+    {
+        let mut m = indexmap::IndexMap::new();
+        m.insert(name.to_string(), super::super::config_v2::EstimateSpecV2 {
+            bounds, transform, prior: None,
+            perturb_only_at_t0: false, rw_sd: Some(0.3), start: Some(0.4) });
+        m
+    }
+
+    fn log_normal(mu: f64, sigma: f64) -> ir::parameter::PriorDist {
+        ir::parameter::PriorDist::LogNormal(ir::parameter::LogNormalPrior { mu, sigma })
+    }
+
+    fn beta_25() -> ir::parameter::PriorDist {
+        ir::parameter::PriorDist::Beta(ir::parameter::BetaPrior { alpha: 2.0, beta: 5.0 })
+    }
+
+    /// Defect A, the reviewer's reproduction: `phi : rate ~ log_normal(-1, 0.5)`
+    /// with no declared range and a fit box [-1, 1]. The engine gave the box
+    /// the scaled logit and the prior read z as ln θ: posterior mean 0.080
+    /// where the truncated law has 0.398. The fit must be refused.
+    #[test]
+    fn log_normal_rate_with_a_fit_box_below_zero_is_refused() {
+        use ir::parameter::ParamKind::Rate;
+        let model = model_with_prior("phi", Some(Rate), None, log_normal(-1.0, 0.5));
+        let err = validate_prior_transform_compat(&est_with("phi", Some((-1.0, 1.0)), None), &model)
+            .expect_err("a rate boxed to [-1, 1] must be refused");
+        assert!(err.contains("phi") && err.contains("[-1, 1]") && err.contains("[0, ∞)"),
+            "the refusal must name the parameter, the box and the support: {err}");
+    }
+
+    /// D7: a fit box on a parameter that declares no range may not leave its
+    /// kind's support. A declared range is the support, and a fit box inside
+    /// it is accepted whatever its sign (the gh#967 signed phase).
+    #[test]
+    fn fit_box_outside_the_kinds_support_is_refused() {
+        use ir::parameter::ParamKind::*;
+        let undeclared = |kind| ir::parameter::Parameter {
+            name: "p".into(),
+            value: ir::parameter::ParamValue::Estimated {
+                init: Some(0.5), bounds: None, prior: ir::parameter::PriorSpec::Flat,
+                transform: ir::parameter::Transform::Identity },
+            param_kind: Some(kind), param_dim: None,
+        };
+        for kind in [Rate, Positive, Count, Duration] {
+            let err = resolve_search_box("p", Some((-1.0, 1.0)), &undeclared(kind))
+                .expect_err("a box below zero must be refused");
+            assert!(err.contains("[0, ∞)") && err.contains(kind.as_str()), "{kind}: {err}");
+            assert_eq!(resolve_search_box("p", Some((0.0, 1.0)), &undeclared(kind)), Ok((0.0, 1.0)));
+        }
+        for bx in [(-0.1, 0.5), (0.1, 1.5)] {
+            let err = resolve_search_box("p", Some(bx), &undeclared(Probability))
+                .expect_err("a probability box outside [0, 1] must be refused");
+            assert!(err.contains("[0, 1]"), "{err}");
+        }
+        assert_eq!(resolve_search_box("p", Some((0.1, 0.9)), &undeclared(Probability)), Ok((0.1, 0.9)));
+        for kind in [Real, Instant] {
+            assert_eq!(resolve_search_box("p", Some((-1.0, 1.0)), &undeclared(kind)), Ok((-1.0, 1.0)));
+        }
+        let (model, _) = make_one_param_model("phi", -180.0, 180.0, Some(Duration));
+        assert_eq!(resolve_search_box("phi", Some((-120.0, 120.0)), &model.parameters[0]),
+            Ok((-120.0, 120.0)), "a box inside a declared signed range is accepted");
+    }
+
+    /// The prior check must read the transform built from the fit box. A
+    /// kindless parameter has no support for D7 to enforce; its model box
+    /// [0, ∞) gives Log, but the fit box [-1, 1] gives the scaled logit, on
+    /// which a log_normal reads the wrong coordinate.
+    #[test]
+    fn prior_check_reads_the_transform_of_the_fit_box() {
+        let model = model_with_prior("phi", None, None, log_normal(-1.0, 0.5));
+        let err = validate_prior_transform_compat(&est_with("phi", Some((-1.0, 1.0)), None), &model)
+            .expect_err("log_normal on the fit box's scaled logit must be refused");
+        assert!(err.contains("log_normal") && err.contains("Logit"), "{err}");
+
+        // The converse: a declared signed range gives the model box a logit,
+        // but a fit box inside [1, 100] is searched on Log, which is right.
+        let model = model_with_prior("d", Some(ir::parameter::ParamKind::Duration),
+            Some((-180.0, 180.0)), log_normal(1.0, 1.0));
+        validate_prior_transform_compat(&est_with("d", Some((1.0, 100.0)), None), &model)
+            .expect("log_normal on a fit box the engine log-transforms is admitted");
+    }
+
+    /// A beta prior is a natural-scale density; the samplers add the
+    /// log-Jacobian of the transform they use, so on a scaled logit over
+    /// [0.1, 0.9] the target is the beta truncated to the box. That holds
+    /// whether the box is declared in the model or in the fit config.
+    #[test]
+    fn beta_prior_on_a_narrowed_probability_box_is_admitted_either_way() {
+        use ir::parameter::ParamKind::Probability;
+        let fit_box = model_with_prior("rho", Some(Probability), None, beta_25());
+        validate_prior_transform_compat(&est_with("rho", Some((0.1, 0.9)), None), &fit_box)
+            .expect("beta with a fit-config box [0.1, 0.9]");
+        let declared = model_with_prior("rho", Some(Probability), Some((0.1, 0.9)), beta_25());
+        validate_prior_transform_compat(&est_with("rho", None, None), &declared)
+            .expect("beta with a declared range [0.1, 0.9]");
+    }
+
+    /// Defect B: an override that does not keep the parameter's support or
+    /// its box is refused. `identity` on a `rate` lets 30.8% of draws go
+    /// negative; `log` on a box below zero cannot represent it; `logit` on a
+    /// box with an infinite end is degenerate.
+    #[test]
+    fn transform_overrides_that_do_not_keep_the_support_are_refused() {
+        use ir::parameter::ParamKind::*;
+        let (rate, rate_c) = make_unbounded_param_model("psi", 0.5, Rate);
+        let base = rate_c.default_params.clone();
+        let over = |t: &str, b: Option<(f64, f64)>| ParamSpec {
+            name: "psi".into(), rw_sd: Some(0.1), transform: Some(t.into()),
+            perturb_only_at_t0: false, bounds: b,
+        };
+        let err = build_if2_params_from_specs(&rate, &rate_c, &base, &[over("identity", None)])
+            .expect_err("identity on a rate's [0, ∞) must be refused");
+        assert!(err.contains("psi") && err.contains("identity") && err.contains("[0, ∞)"), "{err}");
+        let err = build_if2_params_from_specs(&rate, &rate_c, &base, &[over("logit", None)])
+            .expect_err("logit on [0, ∞) must be refused");
+        assert!(err.contains("logit"), "{err}");
+        build_if2_params_from_specs(&rate, &rate_c, &base, &[over("log", None)]).expect("log keeps [0, ∞)");
+        build_if2_params_from_specs(&rate, &rate_c, &base, &[over("logit", Some((0.1, 2.0)))])
+            .expect("logit keeps a finite box");
+
+        let (real, real_c) = make_unbounded_param_model("psi", 0.5, Real);
+        let base = real_c.default_params.clone();
+        let err = build_if2_params_from_specs(&real, &real_c, &base, &[over("log", Some((-1.0, 1.0)))])
+            .expect_err("log on a box below zero must be refused");
+        assert!(err.contains("log") && err.contains("[-1, 1]"), "{err}");
+        build_if2_params_from_specs(&real, &real_c, &base, &[over("identity", None)])
+            .expect("identity keeps the whole line");
+        build_if2_params_from_specs(&real, &real_c, &base, &[over("log", Some((0.0, 1.0)))])
+            .expect("log keeps a non-negative box");
     }
 
     // ── Cold-cooling Â suppression (gh#45) ───────────────────────────

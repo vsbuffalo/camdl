@@ -103,11 +103,13 @@ I0 = { perturb_only_at_t0 = true }
 # sigma = { start = 0.1 }
 
 # Optional: override transform (default: derived from parameter type and
-# bounds, §3.2). `transform = "identity"` is refused on bounds finite at both
-# ends, because it does not keep the parameter inside them.
+# bounds, §3.2). An override that does not keep the bounds or the kind's
+# support is refused: "identity" on bounds finite at both ends or on a kind
+# with a finite end, "log" on bounds below zero, "logit" on an infinite end.
 # R0 = { rw_sd = 5.0, transform = "log" }
 
-# Optional: narrow the search region (default: full model bounds)
+# Optional: narrow the search region (default: full model bounds). Where the
+# model declares no range, bounds may narrow the kind's support but not leave it.
 # R0 = { rw_sd = 5.0, bounds = [30.0, 80.0] }
 # gamma = { bounds = [0.05, 0.15] }
 
@@ -174,13 +176,17 @@ knowledge constrains the plausible region.
    | no kind                                         | lower bound ≥ 0     | log          |
 
    The scaled logit maps `[lo, hi]` to the real line whatever the sign of `lo`,
-   so a signed seasonal phase boxed to `[-120, 120]` is searched over that whole
-   interval. The log transform keeps `[lo, hi]` by saturating at its ends; it
-   cannot represent a value below zero, so it is never chosen for a box that
+   so a signed seasonal phase declared `in [-120, 120]` is searched over that
+   whole interval. The log transform keeps `[lo, hi]` by saturating at its ends;
+   it cannot represent a value below zero, so it is never chosen for a box that
    reaches below zero. A `transform` in `fit.toml` overrides the table, except
-   that `transform = "identity"` on a box finite at both ends is refused at
-   config time: the identity transform does not keep a parameter inside finite
-   bounds, and PMMH, MH and IF2 would move it outside them.
+   that an override that does not keep the box or the kind's support is refused
+   at config time — `identity` on a box finite at both ends or on a kind whose
+   support has a finite end, `log` on a box below zero, `logit` on a box with an
+   infinite end — because PMMH, MH and IF2 would move the parameter outside it.
+   A fit-config box on a parameter with no declared range may narrow its kind's
+   support (`[0, ∞)` for the positive kinds, `[0, 1]` for `probability`) but not
+   leave it.
 
    The box is a hard constraint: the target the samplers draw from is the
    posterior truncated to it. Because the transform maps to the box, fit bounds

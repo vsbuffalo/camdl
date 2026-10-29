@@ -751,7 +751,8 @@ pub enum RoleError {
     Missing { role: RoleKind, command: &'static str },
     ScenarioOnRole { scenario: String, name: String, role: RoleKind },
     SimplexPartlyHeld { group: Vec<String>, held: Vec<String> },
-    /// A given search box leaves the model's declared range.
+    /// A given search box leaves the model's declared range or, where none is
+    /// declared, its kind's support.
     BoxOutsideSupport { message: String },
 }
 
@@ -1019,15 +1020,11 @@ fn file_of(by: &Declaration) -> PathBuf {
 /// `duration` `[0, ∞)`; `real`, `instant` and an unannotated parameter
 /// `(−∞, ∞)`.
 pub fn support(p: &ir::parameter::Parameter) -> Support {
-    use ir::parameter::ParamKind::*;
     if let Some((lower, upper)) = p.bounds() {
         return Support { lower, upper, from: SupportFrom::Declared };
     }
-    let (lower, upper) = match p.param_kind {
-        Some(Probability) => (0.0, 1.0),
-        Some(Rate | Positive | Count | Duration) => (0.0, f64::INFINITY),
-        Some(Real | Instant) | None => (f64::NEG_INFINITY, f64::INFINITY),
-    };
+    let (lower, upper) = crate::fit::runner::kind_support(p)
+        .map_or((f64::NEG_INFINITY, f64::INFINITY), |(range, _)| range);
     Support { lower, upper, from: SupportFrom::Kind }
 }
 

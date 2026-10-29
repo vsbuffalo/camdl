@@ -15,7 +15,7 @@
 //!      fell through to no transform; every PMMH and MH draw and every IF2
 //!      iterate must now lie in the box.
 //!   3. `duration_box_straddling_zero_reaches_its_negative_half` (gh#967) — a
-//!      `duration` boxed to `[-1, 1]` got the log transform, which cannot
+//!      `duration` declared `in [-1, 1]` got the log transform, which cannot
 //!      represent a negative value; MH must now put about half its draws
 //!      below zero.
 //!   4. `prior_drawn_starts_lie_inside_the_box` — `starts = "from_prior"`
@@ -241,7 +241,10 @@ fn duration_box_straddling_zero_reaches_its_negative_half() {
         return;
     }
     let tmp = tempdir("gh967");
-    let ir = compile(&tmp.0, "phase", &model_src("  c : duration ~ normal(mu = 0.0, sigma = 1.0)"));
+    // The signed range is declared in the model: a fit-config box may only
+    // narrow a `duration`'s `[0, ∞)` support where nothing is declared.
+    let ir = compile(&tmp.0, "phase",
+        &model_src("  c : duration in [-1.0, 1.0] ~ normal(mu = 0.0, sigma = 1.0)"));
     let (out, results) = run_fit(&tmp.0, &ir, "c = { bounds = [-1, 1], start = -0.5 }", MH, "mh");
     assert!(out.status.success(), "stderr=\n{}", stderr(&out));
     let vals = column_values(&results, "draws.tsv", "c");

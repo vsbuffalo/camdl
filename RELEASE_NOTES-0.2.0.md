@@ -128,6 +128,15 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   `[0, 1]` and a flat likelihood, `pmmh` and `mh` put 66% of draws outside the
   box and `if2` ended every chain outside it. Migration: drop `transform`; a
   bounded parameter gets the scaled logit automatically.
+- **A fit-config box outside the parameter's kind is refused, and so is a
+  `transform` override that does not keep the parameter's support.** Where the
+  model declares no `in [lo, hi]`, `[estimate].bounds` may narrow the kind's
+  support (`[0, ∞)` for `rate`, `positive`, `count` and `duration`; `[0, 1]` for
+  `probability`) but no longer leave it. `transform = "identity"` is refused on
+  a kind whose support has a finite end (a `rate`'s `[0, ∞)`), `"log"` on bounds
+  reaching below zero, and `"logit"` on bounds with an infinite end. Migration:
+  tighten the bounds, or declare the signed range in the model
+  (`phi : duration in [-120, 120]`); drop the `transform` override.
 - **Every search box finite at both ends now gets a transform that keeps the
   parameter inside it.** A `rate`, `positive`, `count` or `duration` whose
   bounds reach below zero (a seasonal phase `duration` boxed to `[-120, 120]`)
@@ -699,6 +708,22 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 ## Fixed
 
 User-visible correctness fixes (selected from ~138):
+
+- **A prior could be evaluated on the wrong coordinate, and an override could
+  leave the support unenforced.** A `rate ~ log_normal(-1, 0.5)` with no
+  declared range and `bounds = [-1, 1]` in the fit config got the scaled logit,
+  whose coordinate the log-normal prior read as ln θ: under MH the posterior
+  mean of a parameter kept out of the likelihood was 0.080 (sd 0.071), where the
+  log-normal truncated to the box has 0.398 (sd 0.183). The prior check now
+  reads the transform the engine builds from the fit box, and the box is refused
+  (above). `transform = "identity"` on a `rate` with a `normal` prior put 30.8%
+  of draws below zero; it is refused. Fits with such a box or override were
+  computed under a wrong prior or an unenforced support. A `beta` prior on a
+  `probability` declared `in [0.1, 0.9]` is now admitted, as it already was with
+  the same box from the fit config: the beta density is evaluated on θ and the
+  sampler adds the scaled logit's Jacobian, so the target is the beta truncated
+  to the box (MH, flat likelihood: mean 0.3152, sd 0.1467; the truncated
+  Beta(2, 5) has 0.3142, 0.1468).
 
 - **`profile --fit` and `survey --fit` ignored `ic_free`.** A fit with
   `ic_free = true` maximises the likelihood without the first observation's

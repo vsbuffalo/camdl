@@ -524,7 +524,7 @@ fn fit_run_priors_cache_invalidates_on_model_ir_prior_change() {
 //     `rw_sd` `(hi − lo)/6` was `inf`, and chain 1 died with
 //     `NonFiniteParameter { name: "rho", value: NaN }`.
 //
-// Three layers decide this cell — `derive_transform`, the IF2 search box in
+// Three layers decide this cell — `derive_transform_with_bounds`, the IF2 search box in
 // `build_if2_params_from_specs`, and `validate_prior_transform_compat` — so it
 // is pinned end to end: a disagreement between them shows up as a refused
 // config or a NaN chain, and no single unit test sees both.

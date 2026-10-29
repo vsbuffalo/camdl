@@ -83,7 +83,7 @@ the synthetic block records the truth a recovery check reads.
 | `bounds = [lo, hi]`                          | search range. _Optional_ — defaults to the model's `parameters { p : rate in [lo,hi] }` range; a `fit.toml` `bounds` may only **narrow** it, never loosen.                                                                                                         |
 | `start = X`                                  | the base starting value. Optional — defaults to the model's declared value, else a draw from bounds. See "Where a chain starts" below.                                                                                                                             |
 | `prior = { … }`                              | prior distribution. **Required** for a `pgas`/`pmmh`/`mh` method; `if2` ignores it. See "Priors" below.                                                                                                                                                            |
-| `transform = "log" \| "logit" \| "identity"` | inference-scale transform. Optional — inferred from the parameter's declared type and its bounds; every bounds finite at both ends gets a transform that keeps the parameter inside them. `"identity"` is refused on bounds finite at both ends.                   |
+| `transform = "log" \| "logit" \| "identity"` | inference-scale transform. Optional — inferred from the parameter's declared type and its bounds; every bounds finite at both ends gets a transform that keeps the parameter inside them. An override that keeps neither, or not the kind's support, is refused.   |
 | `perturb_only_at_t0 = true`                  | an initial-state parameter (e.g. `s0`, `i0`) — perturbed at t=0 only, never at an observation. It is IF2's perturbation schedule, so only `if2` accepts it: any other method refuses the config at load rather than run without it.                                |
 | `rw_sd = X`                                  | IF2 per-parameter random-walk SD. Optional — auto-scaled from bounds. `pmmh` and `mh` also read it: five times it, on the transformed scale, is the initial proposal SD (the adaptive proposal takes over from there). `pgas` and the `nl-*` optimizers ignore it. |
 
@@ -426,8 +426,14 @@ The model file is the source of truth for what _can_ be estimated; the
 - **Transforms** default to the parameter's declared type and its bounds
   (`docs/camdl-inference-spec.md` §3.2): bounds finite at both ends always get a
   transform that keeps the parameter inside them, a positive kind whose bounds
-  reach below zero included. `fit.toml` overrides, except that
-  `transform = "identity"` on bounds finite at both ends is refused.
+  reach below zero included. `fit.toml` overrides, except that an override that
+  does not keep the bounds or the kind's support is refused (`"identity"` on
+  bounds finite at both ends or on a `rate`'s `[0, ∞)`, `"log"` on bounds below
+  zero, `"logit"` on bounds with an infinite end).
+- **Bounds stay inside the kind.** Where the model declares no `in [lo, hi]`,
+  `bounds` may narrow the kind's support (`[0, ∞)` for `rate`, `positive`,
+  `count`, `duration`; `[0, 1]` for `probability`) but not leave it; a signed
+  range is declared in the model (`phi : duration in [-120, 120]`).
 - **Unbounded parameters.** With no `bounds` here and no `in [lo, hi]` in the
   model, a `real` or `instant` parameter is searched over `(−∞, ∞)` with the
   identity transform; the positive kinds (`rate`, `positive`, `count`,
