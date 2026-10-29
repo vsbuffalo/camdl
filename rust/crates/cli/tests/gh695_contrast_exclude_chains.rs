@@ -25,6 +25,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
+/// (gh#896). A path that does not exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
+    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -214,7 +224,7 @@ fn addr(family: &str, excl: Option<&str>) -> String {
 }
 
 fn contrast_path(seg: &Path, name: &str, excl: Option<&str>) -> PathBuf {
-    seg.join(addr("contrasts", excl)).join(format!("{name}.tsv"))
+    predict_out(seg).join(addr("contrasts", excl)).join(format!("{name}.tsv"))
 }
 
 /// The `n_used` cell of a scalar contrast's single band row — the count of
@@ -235,7 +245,7 @@ fn contrast_n_used(path: &Path) -> usize {
 /// The distinct `n_draws` values across a free-forward predictive stream — the
 /// size of the posterior cloud each banded cell pooled.
 fn predictive_n_draws(seg: &Path, stream: &str, excl: Option<&str>) -> Vec<usize> {
-    let path = seg.join(addr("predictive", excl)).join(format!("{stream}.tsv"));
+    let path = predict_out(seg).join(addr("predictive", excl)).join(format!("{stream}.tsv"));
     let txt = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     let mut lines = txt.lines().filter(|l| !l.starts_with('#'));
@@ -259,7 +269,7 @@ fn predictive_n_draws(seg: &Path, stream: &str, excl: Option<&str>) -> Vec<usize
 /// The `chain_selection` object `fit predict` stamps into the manifest at the
 /// address the run wrote to.
 fn manifest_chain_selection(seg: &Path, excl: Option<&str>) -> Option<serde_json::Value> {
-    let path = seg.join(format!("{}.json", addr("predictive", excl)));
+    let path = predict_out(seg).join(format!("{}.json", addr("predictive", excl)));
     let txt = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     let v: serde_json::Value =

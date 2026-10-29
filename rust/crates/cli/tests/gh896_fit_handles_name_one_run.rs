@@ -437,3 +437,32 @@ fn predict_of_a_folder_with_two_runs_lists_them() {
         assert!(all.contains(&leaf.display().to_string()), "lists {}:\n{all}", leaf.display());
     }
 }
+
+/// `fit predict` writes under a directory keyed by the run it read, and its
+/// manifests record that run's id. Two runs of one problem used to write into
+/// the shared folder, the second overwriting the first, and `predictive.json`
+/// named no run.
+#[test]
+fn predict_writes_under_the_run_it_read() {
+    let p = Project::new();
+    let (segment, short, long) = two_pgas_runs(&p);
+    for leaf in [&short, &long] {
+        p.ok(&["fit", "predict", &leaf.to_string_lossy(), "--horizon", "free_forward"]);
+    }
+    assert!(!segment.join("predictive").exists() && !segment.join("predictive.json").exists(),
+        "nothing is written into the shared folder");
+    for (leaf, draws) in [(&short, 6), (&long, 12)] {
+        let (id, _, _) = record(leaf);
+        let out = segment.join("predict").join(&id[..12]);
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(out.join("predictive.json")).unwrap()).unwrap();
+        assert_eq!(manifest["run_id"], id.as_str(), "predictive.json names its run");
+        let observed: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(out.join("observed.json")).unwrap()).unwrap();
+        assert_eq!(observed["run_id"], id.as_str());
+        let tsv = std::fs::read_to_string(out.join("predictive").join("weekly_cases.tsv")).unwrap();
+        assert!(tsv.lines().skip(1).any(|l| l.split('\t').any(|c| c == draws.to_string())),
+            "{} holds this run's {draws}-draw bands", out.display());
+        assert!(out.join("report.json").is_file());
+    }
+}

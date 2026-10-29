@@ -21,6 +21,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
+/// (gh#896). A path that does not exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
+    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn bin() -> PathBuf {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/camdl");
     assert!(
@@ -182,7 +192,7 @@ fn predict_resolves_last_obs_and_censors_past_horizon() {
     // The manifest declares both value_at quantities censorable; the banded
     // TSVs carry the censoring trio. `outbreak_size` (last_obs = 28, inside
     // [0, 40]) bands every draw; `beyond` (t = 70) censors every draw.
-    let manifest_path = segment.join("quantities.json");
+    let manifest_path = predict_out(&segment).join("quantities.json");
     let manifest: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(&manifest_path)
             .unwrap_or_else(|e| panic!("no quantities.json at {}: {e}", manifest_path.display())),
@@ -205,7 +215,7 @@ fn predict_resolves_last_obs_and_censors_past_horizon() {
 
     // The censoring trio + the median, from the banded TSVs.
     let read = |name: &str| -> (u64, u64, f64) {
-        let path = segment.join("quantities").join(format!("{name}.tsv"));
+        let path = predict_out(&segment).join("quantities").join(format!("{name}.tsv"));
         let body = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("no {}: {e}", path.display()));
         let mut lines = body.lines();

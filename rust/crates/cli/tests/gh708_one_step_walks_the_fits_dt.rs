@@ -30,6 +30,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
+/// (gh#896). A path that does not exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
+    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -177,7 +187,7 @@ fn the_one_step_band_is_filtered_on_the_dt_the_fit_used() {
         let draws_path = find(&dir.join("results"), "draws.tsv");
         let segment = draws_path.parent().unwrap().parent().unwrap().parent().unwrap();
         draws.push(std::fs::read_to_string(&draws_path).unwrap());
-        predictive.push(segment.join("predictive").join("cases.tsv"));
+        predictive.push(predict_out(segment).join("predictive").join("cases.tsv"));
     }
 
     // Premise: a chain_binomial fit reads its step from `[config] dt`, so the

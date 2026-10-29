@@ -388,7 +388,7 @@ pub fn cmd_show(a: &crate::args::ShowArgs) {
         Ok(Resolved::Pfilter { leaf, rel_path, created }) => show_pfilter_record(&leaf, &rel_path, created),
         Ok(Resolved::Survey { leaf, rel_path, created }) => show_survey_record(&leaf, &rel_path, created),
         Ok(Resolved::SimEnsemble { leaf, rel_path, created }) => show_sim_ensemble_record(&leaf, &rel_path, created),
-        Ok(Resolved::FitEnvelope { segment, rel_path }) => show_fit_envelope(&segment, &rel_path),
+        Ok(Resolved::FitEnvelope { segment, run, rel_path }) => show_fit_envelope(&segment, run.as_deref(), &rel_path),
         Err(e) => {
             eprintln!("error: {}", e);
             std::process::exit(1);
@@ -471,6 +471,33 @@ fn show_fit_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     println!("{}", "engine".bright_black()); println!("  {}", rec.engine_version);
 }
 
+/// The directories `fit predict` wrote for a fit envelope, each with the
+/// segment-relative prefix its files are listed under (gh#896): the named
+/// run's `predict/<run id>/` (prefix ""), else the folder's one run's, else —
+/// a folder holding several runs — every run's that exists, prefixed
+/// `predict/<run id>/` so a listed path is one `cat --stream` takes.
+fn envelope_outputs(segment: &Path, run: Option<&str>) -> Vec<(PathBuf, String)> {
+    use crate::fit::fit_view::predictions_dir;
+    if let Some(id) = run {
+        return vec![(predictions_dir(segment, id), String::new())];
+    }
+    let ids: Vec<String> = crate::fit::fit_view::FitView::read(segment)
+        .map(|v| v.stages.into_iter().map(|s| s.run_id).collect())
+        .unwrap_or_default();
+    match ids.as_slice() {
+        [one] => vec![(predictions_dir(segment, one), String::new())],
+        _ => ids
+            .iter()
+            .map(|id| predictions_dir(segment, id))
+            .filter(|d| d.is_dir())
+            .map(|d| {
+                let rel = d.strip_prefix(segment).unwrap_or(&d).display().to_string();
+                (d, format!("{rel}/"))
+            })
+            .collect(),
+    }
+}
+
 /// Every address of one artifact family under a fit segment, sorted: the bare
 /// `family` plus every `family-<key>` sibling.
 ///
@@ -514,7 +541,7 @@ fn keyed_children(segment: &Path, family: &str, dirs: bool) -> Vec<String> {
 /// manifests). A read-side projection of the segment directory — there is no
 /// fit-wide `run.json`, so this is the fit's `show` view. Mirrors the visual
 /// style of [`show_fit_record`].
-fn show_fit_envelope(segment: &Path, rel_path: &str) {
+fn show_fit_envelope(segment: &Path, run: Option<&str>, rel_path: &str) {
     println!("{}", "path".bright_black()); println!("  {}", rel_path.cyan());
     println!("{}", "kind".bright_black()); println!("  fit");
     // Fit-level hash + declared methods from the folded view (when the segment
@@ -544,45 +571,51 @@ fn show_fit_envelope(segment: &Path, rel_path: &str) {
     // subset. Discover each family rather than listing fixed names, or an
     // artifact that WAS written would read here as never generated. `observed/`
     // is unkeyed — it is the fit's data, the same under any selection.
-    let mut subs: Vec<String> = keyed_children(segment, "predictive", true);
-    subs.push("observed".into());
-    subs.extend(keyed_children(segment, "contrasts", true));
-    subs.extend(keyed_children(segment, "quantities", true));
-    for sub in &subs {
-        let sub = sub.as_str();
-        if let Ok(entries) = std::fs::read_dir(segment.join(sub)) {
-            let mut files: Vec<String> = entries
-                .flatten()
-                .filter_map(|e| {
-                    let p = e.path();
-                    if p.extension().is_some_and(|x| x == "tsv") {
-                        p.file_name().map(|f| format!("{}/{}", sub, f.to_string_lossy()))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            files.sort();
-            for f in files {
-                println!("  {}", f);
+    for (outputs, prefix) in envelope_outputs(segment, run) {
+        let mut subs: Vec<String> = keyed_children(&outputs, "predictive", true);
+        subs.push("observed".into());
+        subs.extend(keyed_children(&outputs, "contrasts", true));
+        subs.extend(keyed_children(&outputs, "quantities", true));
+        for sub in &subs {
+            let sub = sub.as_str();
+            if let Ok(entries) = std::fs::read_dir(outputs.join(sub)) {
+                let mut files: Vec<String> = entries
+                    .flatten()
+                    .filter_map(|e| {
+                        let p = e.path();
+                        if p.extension().is_some_and(|x| x == "tsv") {
+                            p.file_name()
+                                .map(|f| format!("{}{}/{}", prefix, sub, f.to_string_lossy()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                files.sort();
+                for f in files {
+                    println!("  {}", f);
+                    any = true;
+                }
+            }
+        }
+        let mut manifests: Vec<String> = keyed_children(&outputs, "predictive", false);
+        // gh#892: `fit predict` writes `report.json` on every run — the list of
+        // deterministic failures, empty when nothing refused — keyed by chain
+        // selection like the predictive itself (`report-excl3,5.json`). It is the
+        // file that says whether a predictive is complete, so it belongs beside
+        // the predictive rather than being reachable only by knowing it is there.
+        manifests.extend(keyed_children(&outputs, "report", false));
+        manifests.extend(keyed_children(&outputs, "quantities", false));
+        for manifest in &manifests {
+            if outputs.join(manifest).exists() {
+                println!("  {}{}", prefix, manifest);
                 any = true;
             }
         }
     }
-    let mut manifests: Vec<String> = keyed_children(segment, "predictive", false);
-    // gh#892: `fit predict` writes `report.json` on every run — the list of
-    // deterministic failures, empty when nothing refused — keyed by chain
-    // selection like the predictive itself (`report-excl3,5.json`). It is the
-    // file that says whether a predictive is complete, so it belongs beside
-    // the predictive rather than being reachable only by knowing it is there.
-    manifests.extend(keyed_children(segment, "report", false));
-    manifests.extend(keyed_children(segment, "quantities", false));
-    manifests.push("fit.meta.json".into());
-    for manifest in &manifests {
-        if segment.join(manifest).exists() {
-            println!("  {}", manifest);
-            any = true;
-        }
+    if segment.join("fit.meta.json").exists() {
+        println!("  fit.meta.json");
+        any = true;
     }
     if !any {
         println!("  {}", "(none — run `camdl fit predict` to generate)".dimmed());
@@ -915,15 +948,29 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
         // `fit.meta.json` summary record. A bare relative path without an
         // extension also matches the `.tsv` sibling (so `--stream
         // predictive/weekly_cases` finds `predictive/weekly_cases.tsv`).
-        Resolved::FitEnvelope { segment, rel_path } => {
+        Resolved::FitEnvelope { segment, run, rel_path } => {
             let rel = a.stream.as_deref().unwrap_or("fit.meta.json");
-            let mut path = segment.join(rel);
-            if !path.exists() && Path::new(rel).extension().is_none() {
-                let with_tsv = segment.join(format!("{}.tsv", rel));
-                if with_tsv.exists() {
-                    path = with_tsv;
+            // A stream is looked up in the run's predictions directory first
+            // (gh#896), then in the segment (`fit.meta.json`, or a
+            // `predict/<run id>/…` path when the folder holds several runs).
+            let mut bases: Vec<PathBuf> = envelope_outputs(&segment, run.as_deref())
+                .into_iter()
+                .filter(|(_, prefix)| prefix.is_empty())
+                .map(|(dir, _)| dir)
+                .collect();
+            bases.push(segment.clone());
+            let candidates = |base: &Path| {
+                let mut c = vec![base.join(rel)];
+                if Path::new(rel).extension().is_none() {
+                    c.push(base.join(format!("{}.tsv", rel)));
                 }
-            }
+                c
+            };
+            let path = bases
+                .iter()
+                .flat_map(|b| candidates(b))
+                .find(|p| p.exists())
+                .unwrap_or_else(|| segment.join(rel));
             let bytes = std::fs::read(&path).unwrap_or_else(|e| {
                 eprintln!(
                     "error reading {} in fit {}: {}\n  \
@@ -1206,7 +1253,11 @@ enum Resolved {
     /// is a directory projection: it discovers the predict/quantities artifacts
     /// the fit produced. Reached by `@label`, by the segment dir, or by the
     /// fit-level hash prefix (the `fit_id` that `fit table`/`list` display).
-    FitEnvelope { segment: PathBuf, rel_path: String },
+    ///
+    /// `run` is the run a `@label` named; `fit predict` writes each run's
+    /// outputs under `<segment>/predict/<run id>/` (gh#896), so the envelope's
+    /// output files are that run's, or the folder's one run's.
+    FitEnvelope { segment: PathBuf, run: Option<String>, rel_path: String },
 }
 
 /// Resolve a user-supplied key to a single new-format leaf. Accepts either a
@@ -1226,7 +1277,8 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
         let segment = crate::fit::fit_view::leaf_segment(&leaf.dir)
             .ok_or_else(|| format!("{} is not inside a fit's directory", leaf.dir.display()))?;
         let rel_path = pathdiff_str(&segment, &cwd);
-        return Ok(Resolved::FitEnvelope { segment, rel_path });
+        let run = crate::fit::fit_view::leaf_run_id(&leaf.dir);
+        return Ok(Resolved::FitEnvelope { segment, run, rel_path });
     }
 
     // Path form: read the leaf `run.json` (`RunRecord`) directly.
@@ -1239,7 +1291,7 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
         && !as_path.join("run.json").exists()
     {
         let rel_path = pathdiff_str(as_path, &cwd);
-        return Ok(Resolved::FitEnvelope { segment: as_path.to_path_buf(), rel_path });
+        return Ok(Resolved::FitEnvelope { segment: as_path.to_path_buf(), run: None, rel_path });
     }
     if as_path.is_dir() && as_path.join("run.json").exists() {
         if let Ok(bytes) = std::fs::read(as_path.join("run.json")) {
@@ -1362,7 +1414,7 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
                 Ok(Resolved::SimEnsemble { leaf, rel_path, created })
             } else {
                 let (segment, rel_path) = fit_envelope_matches.into_iter().next().unwrap();
-                Ok(Resolved::FitEnvelope { segment, rel_path })
+                Ok(Resolved::FitEnvelope { segment, run: None, rel_path })
             }
         }
         n => {

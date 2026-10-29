@@ -31,6 +31,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
+/// (gh#896). A path that does not exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
+    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -259,7 +269,7 @@ fn cumulative_infections_on_saved_paths(seg: &Path) -> Vec<f64> {
 
 /// One quantity TSV's single banded row, as `column -> cell`.
 fn banded_row(seg: &Path, name: &str) -> std::collections::HashMap<String, String> {
-    let path = seg.join("quantities").join(format!("{name}.tsv"));
+    let path = predict_out(seg).join("quantities").join(format!("{name}.tsv"));
     let txt = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
     let mut lines = txt.lines();
@@ -269,7 +279,7 @@ fn banded_row(seg: &Path, name: &str) -> std::collections::HashMap<String, Strin
 }
 
 fn manifest_entry(seg: &Path, name: &str) -> serde_json::Value {
-    let txt = std::fs::read_to_string(seg.join("quantities.json")).unwrap();
+    let txt = std::fs::read_to_string(predict_out(seg).join("quantities.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
     v["quantities"]
         .as_array()
@@ -443,7 +453,7 @@ fn a_fit_with_no_saved_paths_censors_instead_of_falling_back() {
         "an anchor PAST the record still bands off the replay, paths or no paths"
     );
     assert_eq!(manifest_entry(&seg, "cum_at_35")["evaluated_on"], "replay");
-    assert!(seg.join("predictive").join("cases.tsv").is_file());
+    assert!(predict_out(&seg).join("predictive").join("cases.tsv").is_file());
 
     let _ = std::fs::remove_dir_all(&dir);
 }

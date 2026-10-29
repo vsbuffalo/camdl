@@ -25,6 +25,16 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
+/// (gh#896). A path that does not exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
+    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let bin = Path::new(&manifest).join("../../target/release/camdl");
@@ -702,7 +712,7 @@ fn fit_predict_scenario_set_and_one_point_sweep_give_one_band() {
         let stderr = ok(&camdl(dir, &argv), &format!("fit predict {extra:?}"));
         let fit = std::fs::read_dir(dir.join("results/fits")).unwrap().flatten().next()
             .unwrap().path();
-        (read(&fit.join("predictive/weekly_cases.tsv")), override_lines(&stderr))
+        (read(&predict_out(&fit).join("predictive/weekly_cases.tsv")), override_lines(&stderr))
     };
     let (by_scenario, n_scenario) = predict(&["--scenario", "k_alt"]);
     let (by_sweep, n_sweep) = predict(&["--sweep", "k=12"]);
