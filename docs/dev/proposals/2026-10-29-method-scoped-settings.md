@@ -1,6 +1,6 @@
 ---
 date: 2026-10-29
-status: proposed — built on the maintainer decisions of 2026-10-29 listed in §1; D1–D16 (§14) are decided; §15 lists five items pending the maintainer; the IF2 default constants are provisional until the transforms benchmark is decided (§4.4)
+status: proposed — built on the maintainer decisions of 2026-10-29 listed in §1; D1–D22 (§14) are decided, nothing is pending; the IF2 default constants are provisional until the transforms benchmark is decided (§4.4)
 area: fit config / run identity / resolved problem and execution plan / IF2, PMMH and MH step sizes / profile CLI
 issues: gh#1001
 supersedes: 2026-10-29-support-keyed-transforms.md D9 and its commit series (ii) (its §11 commits 11–12)
@@ -41,6 +41,19 @@ The maintainer decided, on 2026-10-29:
    the fit level (§5.2).
 6. An unsupported old `fit_state.toml` is refused as an input to a new
    computation and read with one notice by read-only commands (§7.5).
+7. The release waits for parameter-roles Stage 3, so `profile` has one z-scale
+   step interface and never two units at once (§8, §11).
+8. `[method.proposal]` values are exactly the proposal SD the user writes; no
+   factor of five or any other hidden multiplier remains (§3.8, §7.4).
+9. The flag is `initial_state` (`--initial-state` on `profile`). The model
+   property that a parameter enters only the initial state is kept distinct from
+   IF2's perturbation timing (§4.6).
+10. A natural-scale step is converted at the resolved start value, everywhere:
+    migration errors, launch summaries and `profile` (§7.3).
+11. An incorrect initial-state schedule is refused when the model reliably
+    identifies initial-state-only parameters (§4.6).
+12. The resolved perturbation and proposal scales are part of the
+    `ExecutionPlan` and of saved run provenance (§5.6).
 
 ## 2. One key, `rw_sd`, sets two algorithms' steps in a unit about to change, and keeps two fit files of one problem apart
 
@@ -63,7 +76,7 @@ hand-tuned config. This proposal replaces it.
 Because `rw_sd` and `perturb_only_at_t0` sit in `[estimate]`, which the
 problem's identity hashes, and because every method but IF2 refuses
 `perturb_only_at_t0`, an IF2 file and a PGAS file for one problem with an
-initial-value parameter cannot share a fit segment (§3.7). That is the defect
+initial-state parameter cannot share a fit segment (§3.7). That is the defect
 that makes this more than a rename.
 
 After the change, `[estimate]` holds only what is true of a parameter under any
@@ -74,14 +87,14 @@ method (bounds, start, prior), and each algorithm's step is a table of its
 # IF2                                       # PMMH or MH
 [method.perturbation]                       [method.proposal]
 beta = 0.107                                beta = 0.537
-I0   = { sd = 0.174, initial_value = true }
+I0   = { sd = 0.174, initial_state = true }
 ```
 
 A name left out takes the D8 default. The old keys are refused with the new
 spelling and the converted value (§7). The steps and the start leave the
 fit-level digest and enter the method-level digest (§5). `profile`'s `--rw-sd`,
 which both chose the estimated set and gave steps, is replaced by
-`--perturbation` and `--initial-value`, with the estimated set declared by
+`--perturbation` and `--initial-state`, with the estimated set declared by
 `--estimate` (§8).
 
 ## 3. What the code does today
@@ -131,12 +144,12 @@ On the branch:
 | `fit_state.toml` lists them; `fit summary` applies the exemption | `state.rs:62-68`; `fit_summary.rs:1597`, `:3071`; written by `fit/mod.rs:1489`, `nlopt_stage.rs:270-299` |
 
 `profile` reads the flag only from a `--fit` config's `[estimate]`
-(`profile.rs:890-891`). A profile with no `--fit` cannot mark an initial-value
+(`profile.rs:890-891`). A profile with no `--fit` cannot mark an initial-state
 parameter at all, so it perturbs it before every observation. The `camdl-book`
 identifiability chapter does this: it profiles with `I0` and `R_init` estimated
 through `--rw-sd` and no `--fit` (`guide/fitting/identifiability.qmd:402`,
 `:485` at `camdl-book` `5e689ac`). That is a silent case today;
-`--initial-value` (§8) is the fix.
+`--initial-state` (§8) is the fix.
 
 ### 3.3 The steps and the start are part of the problem identity
 
@@ -217,7 +230,7 @@ non-IF2 method and the loader says nothing, so that a problem's IF2 comparator
 file and its PGAS file differ only in `[method]` and share a fit-level hash"
 (`2026-09-08-workflow-first-fit-config.md:934-942`, and its decision 12). Any
 method but IF2 refuses `perturb_only_at_t0` at load (`config_v2.rs:2438-2457`,
-verified). So a model with an initial-value parameter has an IF2 file that
+verified). So a model with an initial-state parameter has an IF2 file that
 carries the flag and a PGAS file that must not; their `[estimate]` tables
 differ, and they land in different fit segments although they pose one problem.
 
@@ -233,7 +246,7 @@ fn an_if2_file_and_a_pgas_file_of_one_problem_share_the_fit_level() {
     // Today: SIR_I0_IF2 has `I0 = { …, perturb_only_at_t0 = true }`;
     // SIR_I0_PGAS has `I0 = { … }`, because PGAS refuses the flag.
     // After: both have the same [estimate]; the IF2 file carries
-    // `[method.perturbation] I0 = { initial_value = true }`.
+    // `[method.perturbation] I0 = { initial_state = true }`.
     let if2 = FitConfig::from_toml_str(SIR_I0_IF2).unwrap();
     let pgas = FitConfig::from_toml_str(SIR_I0_PGAS).unwrap();
     assert_eq!(fit_level_hash_of(&if2.problem), fit_level_hash_of(&pgas.problem));
@@ -245,6 +258,38 @@ which the fit level hashes (inferred from `cas.rs:433-435` and
 `config_v2.rs:573-626`; not run). It turns green in commit 4 of §11. Its
 mutation check adds the resolved IF2 steps to the fit level (`FitDigest`), which
 must turn it red.
+
+### 3.8 Every place a backend multiplies, divides or replaces a user's scale
+
+After this change, every remaining factor is a documented adaptation or a
+recorded backend default.
+
+| what                                                                                                                                          | `origin/main`                                                              | branch `193525d9`                                                                                                       | after this proposal                                                                                                                                 |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PMMH/MH initial proposal = 5 × the IF2 step                                                                                                   | `cli/src/fit/pmmh.rs:1049-1052` (5 × `transformed_sd(rw_sd, θ₀)`)          | `pmmh.rs:1049-1052` → `types.rs:441-447` (5 × the z step, or the default)                                               | **removed**: `[method.proposal]` is the proposal SD (D5)                                                                                            |
+| IF2 step divided by \|g′\| at each particle's current value                                                                                   | `sim/src/inference/if2.rs:428`, `:533`, `:639`                             | removed (fixed step in z, `if2.rs:424`, `:523`)                                                                         | removed; the written z value is the kernel                                                                                                          |
+| IF2 automatic step from the box: ln(hi/lo)/20 at the geometric midpoint, (hi − lo)/6, ±10⁶ for an infinite end                                | `fit/runner.rs:1499-1520` (`auto_rw_sd_from_value`)                        | replaced by `default_if2_step` (`types.rs:141-150`)                                                                     | the D8 default, printed with its natural equivalent at the start                                                                                    |
+| a simplex member's natural-scale automatic value read as a log-ratio SD                                                                       | `runner.rs:681-689` (the member's `EstimatedParam.rw_sd`)                  | `runner.rs:686-689`, `:1516-1535` (`simplex_member_default_step`: the old natural formula, read on the log-ratio scale) | **removed**: one log-ratio constant, `SIMPLEX_LOG_RATIO_STEP` = 1/6, today's value for a member on [0, 1]; a written value is used as written (D20) |
+| PGAS MH-within-Gibbs initial scale                                                                                                            | `sim/src/inference/pgas.rs:3955-3965` (a tenth of the z-range, floor 0.01) | `pgas.rs:3872-3886` (`default_mh_step`, else 1.0 for `Identity`)                                                        | no user scale; **exposed**: the resolved initial scale per parameter is in `PgasPlan` and the run record (§5.6)                                     |
+| PGAS MH-within-Gibbs Robbins–Monro clamp on the log scale, [−20, 5]                                                                           | `pgas.rs:4486`                                                             | `pgas.rs:4405`                                                                                                          | an adaptation bound; documented in `fit-toml.md`                                                                                                    |
+| PGAS NUTS initial step size 0.1 and identity mass, reset to 0.1 after the mass estimate                                                       | `pgas.rs:4097`, `:4415`                                                    | `pgas.rs:4019`, `:4336`                                                                                                 | not per-parameter; dual averaging adapts it; **exposed** as `PgasPlan.nuts_initial_step` and recorded                                               |
+| PMMH/MH Haario shape (2.38²/d)·Cov after `adapt_start`; global scale λ adapted from step one                                                  | `sim/src/inference/pmmh.rs:402-406`, `:654-667`                            | the same lines                                                                                                          | adaptation, not reinterpretation; `fit-toml.md` says the written SD is the shape until `adapt_start` and the whole proposal when `adapt = false`    |
+| IF2 cooling factor on every step                                                                                                              | `if2.rs` (`per_step_cooling`), `IF2Config.cooling_fraction`                | the same                                                                                                                | a declared schedule; unchanged                                                                                                                      |
+| `fit_state.toml` `[rw_sd]` suggestion: MAD calibration, else 0.5 × the step                                                                   | `fit/mod.rs:1434-1439`                                                     | `fit/mod.rs:1432-1437`                                                                                                  | **removed** (§3.5)                                                                                                                                  |
+| `profile`'s `cooling_final`: mean over parameters of each last-iteration SD (natural units on main, z on the branch, mixed across parameters) | `profile.rs:1633-1650`                                                     | `profile.rs` (same computation over `effective_rw_sd`)                                                                  | **replaced** by the last iteration's cooling factor, which is unit-free and the same for every parameter (D21)                                      |
+| `profile` hashes `rw_sd` under `nl-*`, where no step is taken                                                                                 | `profile.rs:1292-1302`                                                     | `profile.rs:1292-1301`                                                                                                  | **removed** (§5.4)                                                                                                                                  |
+| launch-table natural equivalent                                                                                                               | `runner.rs:1080` (at the start)                                            | `runner.rs:1169-1171` (at the box midpoint, `reference_z`)                                                              | at the resolved start everywhere (D19)                                                                                                              |
+| PMMH preflight's one-step spread                                                                                                              | `cli/src/fit/pf_noise.rs:275-283` reads `proposal_sd` as given             | the same                                                                                                                | no factor; reads the resolved proposal                                                                                                              |
+
+The commands that found these:
+
+```sh
+grep -rn "transformed_sd\|\* 5\.0\|5\.0 \*\|/ 20\.0\|/ 6\.0\|nuts_step_size = 0\.1\|2\.38\|clamp(-20" \
+  rust/crates/cli/src rust/crates/sim/src
+grep -rnoE "if2_config\.\w+" rust/crates/cli/src
+```
+
+Each was run on both refs, and every hit was read.
 
 ## 4. The types: `[estimate]` loses the steps, each algorithm variant gains its own table
 
@@ -269,14 +314,15 @@ impl ZSd {
 }
 // Deserialize goes through `new`; the error names the value and the unit.
 
-/// When IF2 perturbs a parameter.
+/// When IF2 perturbs a parameter: IF2's timing, distinct from the model
+/// property `initial_state` that selects it (§4.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PerturbAt {
     /// At t = 0 and before every observation.
     EveryObservation,
-    /// At t = 0 only: an initial-value parameter.
-    InitialValue,
+    /// At t = 0 only: the timing for a parameter declared `initial_state`.
+    TimeZeroOnly,
 }
 
 /// IF2's random-walk perturbation of one estimated parameter.
@@ -343,12 +389,12 @@ Every reader of the removed fields, and what it reads instead:
 | reader (main; branch line where it differs)                                             | after                                                                                 |
 | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | `if2.rs:428`, `:533` (branch `:424`, `:523`): the perturbation SD                       | `config.steps[pi]`'s `sd`, times `cooling_now`                                        |
-| `if2.rs:531` (branch `:521`): the per-observation skip                                  | `config.steps[pi]` is `Single` with `at == InitialValue`, or `SimplexMember`          |
+| `if2.rs:531` (branch `:521`): the per-observation skip                                  | `config.steps[pi]` is `Single` with `at == TimeZeroOnly`, or `SimplexMember`          |
 | `if2.rs:639`, `:722` (branch `:624`, `:705`): diagnostics                               | the same `sd`; `effective_rw_sd` becomes `effective_sd`                               |
 | `profile.rs:1633-1650`, `cooling_final`                                                 | `effective_sd`; the stored profile diagnostic is in z from this release               |
 | `cli/src/fit/pmmh.rs:1049-1052`, `build_proposal_sd`                                    | `ExecutionPlan`'s resolved proposal (§4.4, §6)                                        |
-| `runner.rs:540-543`, the `ic_free` precondition; `fit/mod.rs:809-833`, its startup line | any resolved IF2 step is `InitialValue`                                               |
-| `gating.rs:190`; `fit_summary.rs:1597`, `:3071`                                         | `fit_state.toml`'s initial-value list (§7.5)                                          |
+| `runner.rs:540-543`, the `ic_free` precondition; `fit/mod.rs:809-833`, its startup line | any resolved IF2 step is `TimeZeroOnly`                                               |
+| `gating.rs:190`; `fit_summary.rs:1597`, `:3071`                                         | `fit_state.toml`'s initial-state list (§7.5)                                          |
 | `fit/mod.rs:1434-1439`, `:1489`; `nlopt_stage.rs:262-299`                               | the IVP list from the resolved steps; `[rw_sd]` is deleted (§3.5)                     |
 | `runner.rs:1059-1093` (branch `:1135-1182`), the launch table                           | the resolved steps, with `written`/`default` shown                                    |
 | `runner.rs:369-378`, `:1445-1475` (branch `:1489`), `refuse_degenerate_auto_rw_sd`      | `StepError::NoDefault` (§4.4)                                                         |
@@ -380,7 +426,7 @@ pub struct EstimateSpecV2 {
 // the typed parse, so neither key reaches `deny_unknown_fields`.
 
 /// One `[method.perturbation]` entry. On the wire a bare number is `{ sd = n }`;
-/// a table takes `sd` and `initial_value` and nothing else; an empty table
+/// a table takes `sd` and `initial_state` and nothing else; an empty table
 /// is refused, because it says nothing.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PerturbationSpec {
@@ -388,7 +434,7 @@ pub struct PerturbationSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sd: Option<ZSd>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub initial_value: bool,
+    pub initial_state: bool,
 }
 
 pub enum Algorithm {
@@ -457,7 +503,7 @@ pub enum ResolvedSteps {
 pub enum StepError {
     NotEstimated { table: &'static str, name: String },
     NoDefault { table: &'static str, name: String, kind: &'static str },
-    InitialValueOnSimplexMember { name: String, group: usize },
+    InitialStateOnSimplexMember { name: String, group: usize },
     EmptyEntry { name: String },
 }
 
@@ -507,12 +553,15 @@ The rules, in order:
 5. The identity map has no default: `NoDefault`, naming the table and the kind
    (an undeclared `real` or `instant`), and saying that on this map z is θ
    itself, so the value to write is a natural-scale SD.
-6. `initial_value = true` sets `PerturbAt::InitialValue`.
+6. `initial_state = true` sets `PerturbAt::TimeZeroOnly`. Under IF2 the flag is
+   checked against the model (§4.6): it is refused on a parameter that enters
+   the dynamics, and an estimated parameter that enters only the initial state
+   must carry it.
 7. **A simplex member under IF2** is `If2Step::SimplexMember`. A written `sd` is
    its SD on the log-ratio coordinate; an omitted one takes the branch's
    `simplex_member_default_step` (_branch_ `runner.rs:1516`). Both go into
-   `simplex`, not `params`. `initial_value = true` on a member is
-   `InitialValueOnSimplexMember`, today's refusal (`config_v2.rs:3248-3256`)
+   `simplex`, not `params`. `initial_state = true` on a member is
+   `InitialStateOnSimplexMember`, today's refusal (`config_v2.rs:3248-3256`)
    moved here: the group already perturbs its members at t = 0 only
    (`if2.rs:518-521`).
 8. **A simplex member under PMMH or MH** is an ordinary parameter. Both treat
@@ -521,9 +570,9 @@ The rules, in order:
    own map or its `[method.proposal]` entry.
 
 The launch table prints, per parameter, the map, the SD in z, `written` or
-`default`, the natural-scale SD it implies (at the reference point that §15 (g)
-settles), and `t0 only` for an IVP. "N parameters using auto rw_sd" becomes "N
-parameters use the default step".
+`default`, the natural-scale SD it implies at the resolved start (§7.3), and
+`t0 only` for an `initial_state` parameter. "N parameters using auto rw_sd"
+becomes "N parameters use the default step".
 
 ### 4.5 The names
 
@@ -533,7 +582,15 @@ _PNAS_ 112(3):719–724) and pomp's `mif2` both call the kernel a perturbation
 Metropolis–Hastings term. Under `adapt = false` it is the proposal for the whole
 run; under `adapt = true` it is the proposal's shape until `adapt_start`, while
 a global scale adapts from the first step (`sim/src/inference/pmmh.rs:654-667`).
-**`initial_value`** is the working name for the IVP flag; §15 (f) settles it.
+**`initial_state`** names the model property, not the IF2 timing: "this
+parameter sets only the initial state". It is preferred to pomp's `ivp`, which
+is opaque to anyone who has not used pomp, and to `initial_value`, which names
+pomp's expansion rather than the model fact. IF2's timing is
+`PerturbAt::TimeZeroOnly`, derived from the flag. If perturbation scheduling is
+ever extended (pomp's `ivp(s, lag)`, or a perturbation that stops after some
+observation), a schedule key such as `timing = "initial"` beside `sd` may state
+the timing more clearly than a property flag does; that representation is not
+designed here.
 
 Rejected:
 
@@ -542,6 +599,122 @@ Rejected:
 - **One name for both, such as `[method.step]`**: today's coupling under a new
   name; a value tuned for IF2 would still flow into a PMMH run of the file.
 - **`[method.rw]`, `random_walk`**: both kernels are random walks.
+
+### 4.6 `initial_state` is a model property the IR determines; IF2's timing is checked against it
+
+Two things are kept distinct: the **model property** that a parameter enters
+only the initial state, and IF2's **perturbation timing**
+(`PerturbAt::TimeZeroOnly`). The flag `initial_state = true` declares the first.
+IF2 derives the second from it.
+
+**What the compiler and IR offer today (verified by reading):**
+
+- No analysis classifies parameters by where they enter the model. The OCaml
+  lint lists an unused-parameter check as future work
+  (`ocaml/lib/ir/lint.ml:14`).
+- The nearest template is `referenced_compartments`
+  (`ocaml/lib/ir/lint.ml:94-194`). It walks every surface for compartment
+  references:
+  - transitions: stoichiometry, rate, overdispersion σ², lineage weights;
+  - ODE equations;
+  - intervention actions;
+  - observation projections and likelihoods;
+  - bindings and initial conditions, including law arguments;
+  - the balance constraint;
+  - forcing coefficients.
+- `fit/coeff_guard.rs:327-370` sorts forcings and tables into the
+  initial-condition, rate and observation surfaces. It skips interventions, ODE
+  equations, σ² and balance, because its job is gradient coverage, not a full
+  classification.
+- `ir::Model.ic_grad` (`rust/crates/ir/src/model.rs:447-457`) records, per
+  deterministic initial condition, the parameters with a non-zero derivative.
+  The compiler emits it only on the autodiff path
+  (`ocaml/lib/compiler/compiler.ml:805-843`), and it omits initial-condition
+  laws. It is therefore partial evidence that a parameter enters the initial
+  state, and never evidence that it enters _only_ the initial state.
+
+**The surfaces a parameter can reach in the IR.** All are read from the compiled
+`ir::Model` (`rust/crates/ir/src/model.rs:405-480`).
+
+- **Dynamics or likelihood:**
+  - transition rates, the σ² of `DrawOverdispersed`, and lineage parent-pool
+    weights;
+  - ODE equations;
+  - intervention actions and fire sources: a parametric `at` schedule or a
+    reactive trigger (`rust/crates/ir/src/intervention.rs:169-196`);
+  - observation likelihoods and `DerivedExpr` projections;
+  - the balance expression.
+- **Indirect:** bindings and `per_eval_bindings` (read through `BindingRef`),
+  and time functions and tables (read through `TimeFunc` and `TableLookup`) pass
+  a parameter on to whichever surface reads them.
+- **Initial state:** `initial_conditions`, every expression of each spec
+  (`InitSpec::exprs`, `model.rs:150`), law arguments included.
+- **Neither, for this purpose:**
+  - hierarchical-prior arguments (`parameter.rs:104-108`), which IF2 ignores;
+  - `quantities`, which are outputs;
+  - presets, scenarios and constants, which supply values rather than reference
+    parameters.
+
+The property can therefore be derived reliably from the compiled IR, with no
+compiler or IR change, provided the walk is exhaustive:
+
+```rust
+// rust/crates/cli/src/fit/param_surfaces.rs (new)
+pub struct ParamSurfaces {
+    pub initial_state: BTreeSet<String>,   // reached from initial_conditions
+    pub dynamics: BTreeSet<String>,        // reached from any dynamics or likelihood surface
+}
+pub fn param_surfaces(model: &ir::Model) -> ParamSurfaces;
+impl ParamSurfaces {
+    pub fn initial_state_only(&self, name: &str) -> bool;   // in the first, not the second
+    /// The first dynamics surface naming `name`, for the refusal message.
+    pub fn first_dynamics_use(&self, model: &ir::Model, name: &str) -> Option<String>;
+}
+```
+
+Exhaustiveness is enforced by the compiler, not by review. The function
+destructures `ir::Model { … }` with every field named and no `..`. It matches
+every `ir::Expr` variant with no wildcard arm. So adding an IR field or an
+expression variant does not compile until this function classifies it. Bindings,
+forcings and tables are followed transitively.
+
+Tests, one per surface:
+
+- a parameter that enters only through that surface is classified `dynamics`;
+- `I0` only in `init { I = I0 }` is initial-state-only;
+- `N0` in both `init { S = N0 - I0 }` and a rate is not;
+- `init { I ~ poisson(rate = I0) }` is initial-state-only;
+- a parameter in an `init` and a hierarchical prior's argument is
+  initial-state-only.
+
+**Refusals under IF2** (`fit run` with `algorithm = "if2"`, and every `profile`
+IF2 cell):
+
+- An estimated, initial-state-only parameter without `initial_state` is refused.
+  The message: "`I0` enters only the initial state (`init { I = I0 }`). IF2
+  perturbing it before every observation moves it with nothing to select it
+  after t = 0 (`if2.rs:443-455`). Write
+  `[method.perturbation] I0 = { initial_state = true }`, or
+  `profile --initial-state I0`."
+- `initial_state = true` on a parameter that enters the dynamics is refused,
+  naming the first dynamics use. Perturbing it only at t = 0 would leave it
+  almost unexplored.
+- Simplex members are outside both rules. A member may not carry the flag (§4.4
+  rule 7), and the group perturbs it at t = 0 regardless.
+
+**Where it is not raised.** PGAS, PMMH, MH, `pfilter` and `nl-*` have no
+perturbation timing, so they never warn. A PGAS or PMMH source config therefore
+says nothing on its own. `profile --fit` with such a config is refused only when
+profile's own IF2 cells would perturb an initial-state-only parameter unmarked,
+and the message names that parameter and `--initial-state`. This closes the
+`camdl-book` case of §3.2.
+
+The flag stays explicit although the property is derivable: a schedule is
+declared, not defaulted, and the check makes a wrong declaration impossible to
+run. Deriving the timing automatically is possible later on top of
+`param_surfaces`. Configs that today estimate an initial-state-only parameter
+under IF2 without `perturb_only_at_t0` are newly refused, with the one-line fix
+(§9.1).
 
 ## 5. Identity: the problem digest stops seeing steps and starts; the method digest sees them resolved
 
@@ -648,7 +821,7 @@ precedent of resolving before identity (`config_v2.rs:1321`,
 ```json
 { "kind": "if2",
   "perturbation": { "beta": { "sd": 0.107, "at": "every_observation" },
-                    "I0":   { "sd": 0.174, "at": "initial_value" } },
+                    "I0":   { "sd": 0.174, "at": "t0_only" } },
   "simplex": [ { "p_a": 0.2, "p_b": 0.2, "p_c": 0.2 } ] }
 
 { "kind": "proposal",
@@ -699,10 +872,54 @@ Each is mutation-checked: the named mutation must turn it red.
 | configs identical but for `[method.perturbation] beta`: equal fit level, different method level        | drop `"steps"` from `stage_config_hash`               |
 | the §3.7 IF2 and PGAS files: equal fit level                                                           | add the resolved steps to `FitDigest`                 |
 | `beta = 0.2` on a `LogInterval` parameter against the line omitted: equal method level                 | hash the written table in place of `steps.identity()` |
-| `beta = 0.2` against `beta = { sd = 0.2, initial_value = true }`: different method level               | drop `at` from `identity()`                           |
+| `beta = 0.2` against `beta = { sd = 0.2, initial_state = true }`: different method level               | drop `at` from `identity()`                           |
 | configs identical but for `beta.start`: equal fit level, different method level                        | keep `start` in `identity_view`                       |
 | two `profile --fit` runs whose configs differ only in `[method] particles`: equal base level           | hash the file's bytes again                           |
 | `profile --algorithm nl-sbplx` with and without `[method.perturbation]` in `--fit`: equal method level | hash the perturbation table under `nl-*`              |
+
+### 5.6 The resolved scales are part of the plan and of the saved run record
+
+Each method's `ExecutionPlan` carries every estimated parameter's resolved step
+in z, with its natural-scale equivalent at the resolved start (§6.1):
+
+- `If2Plan.steps`, `If2Plan.simplex`;
+- `PmmhPlan.proposal.sd`, `MhOdePlan.proposal.sd`;
+- `PgasPlan.mwg_initial_scale` and `PgasPlan.nuts_initial_step`.
+
+```rust
+pub struct StepRecord {
+    pub sd_z: f64,
+    pub at: Option<PerturbAt>,         // IF2 only
+    pub start: f64,                    // the resolved start θ₀ it was converted at (§7.3)
+    pub natural_at_start: f64,         // sd_z × |dθ/dz| at θ₀
+}
+```
+
+The saved provenance is `run.json`'s `inputs`, the field the run record keeps
+for "Resolved-input summary for display/audit — provenance, not hashed"
+(`rust/crates/runid/src/record.rs:196-198`). `fit run` fills it in `finalize`
+(`fit/mod.rs:1225-1240`, where it starts `Null`) with:
+
+```json
+"steps": { "kind": "if2", "map": { "beta": "log_interval" },
+           "perturbation": { "beta": { "sd_z": 0.107, "at": "every_observation",
+                                       "start": 0.25, "natural_at_start": 0.02 } } }
+```
+
+`profile` writes the same block into each cell's record, beside its existing
+`parameters_provenance` (`profile.rs:1213-1224`).
+
+This squares with run identity because nothing recorded is new information:
+
+- `sd_z` and `at` are already hashed at the method level (§5.3).
+- `start` is hashed at the method level (§5.2).
+- The map is fixed by the model and the box, both at the fit level.
+- `natural_at_start` is a function of those three.
+
+The record therefore re-encodes identity inputs, which the run-identity rule
+calls presentation (`.claude/rules/run-identity.md`). `from` (written or
+default) is not recorded (D7). `fit_state.toml` keeps only
+`initial_state_params`, which the convergence check reads (§7.5).
 
 ## 6. The resolved problem is shared by every method; the execution plan is per run (amends parameter-roles §6.3, §6.4, §6.6)
 
@@ -776,6 +993,13 @@ pub struct MhProposal {
 }
 pub struct PmmhPlan  { pub proposal: MhProposal, /* chains, particles, iterations, burn_in, thin */ }
 pub struct MhOdePlan { pub proposal: MhProposal, /* chains, iterations, burn_in, thin, burnin_dt, dt_check */ }
+pub struct PgasPlan {
+    /// MH-within-Gibbs initial scale per parameter, in z (backend default, §3.8).
+    pub mwg_initial_scale: IndexMap<String, f64>,
+    /// NUTS initial step size before dual averaging (backend default, §3.8).
+    pub nuts_initial_step: f64,
+    /* chains, particles, sweeps, use_nuts, dense_mass, … */
+}
 ```
 
 `ResolvedSteps` (§4.4) is the step-bearing part of `MethodPlan`: its `If2` arm
@@ -924,31 +1148,66 @@ the notice once; `@handle` resolution of that fit succeeds with the notice;
 
 ### 7.3 How the value is converted, and when it cannot be
 
-The value printed is the z-SD that gives the old natural-scale step at θ₀:
+A natural-scale step is converted at the **resolved start value** θ₀ (D19). The
+same rule holds everywhere a natural step and a z step meet:
+
+- the migration errors;
+- the launch summaries and the run record's `natural_at_start` (§5.6);
+- `profile`'s `--rw-sd` refusal;
+- `profile --rw-sd` on the development branch before Stage 3.
+
+The branch's `Transform::reference_z`, which uses the box midpoint for the
+interval maps (_branch_ `types.rs:163-176`), is replaced by the resolved start.
 
 sd_z = rw_sd / |dθ/dz| at θ₀, for the new map g.
 
-At θ₀ this gives the natural-scale step the old config took there. On main
-PMMH's initial proposal was computed at the same point (`p.initial`,
-`cli/src/fit/pmmh.rs:1051`), so the printed `[method.proposal]` value gives the
-same natural-scale proposal SD at the start to first order; away from θ₀ the
-proposals differ, because main's map and the new one differ. Main's IF2
-converted at every particle's current value (`if2.rs:428`), so no single z-SD
-reproduces it away from θ₀.
+**The conversion is a local approximation.** It matches the old step at θ₀ only.
+IF2 now takes a fixed step in z, so the natural-scale step it implies changes as
+θ moves away from θ₀, and the more so the more curved the map is there.
 
-θ₀ is, in order: the entry's `start`; the model's declared value; for the two
-interval maps, the box's reference point z = 0 (arithmetic midpoint for
-`Interval`, geometric for `LogInterval`), saying which was used. The conversion
-is unavailable, and the message gives the formula with θ₀ to fill in, when:
+- **PMMH:** main computed its initial proposal at the same point (`p.initial`,
+  `cli/src/fit/pmmh.rs:1051`). The printed `[method.proposal]` value therefore
+  gives the old proposal SD at the start to first order. Away from θ₀ the two
+  proposals differ, because main's map and the new one differ.
+- **IF2:** main converted at every particle's current value (`if2.rs:428`), so
+  no single z-SD reproduces it away from θ₀.
 
-- a half-bounded map has no start and no model value, so |dθ/dz| (the distance
-  to the bound) has no reference point;
-- no model is available or it does not compile;
+θ₀ is, in order (D19):
+
+1. the entry's explicit `start`;
+2. the resolved default start: the base point the chain-starts resolution gives
+   when no start is written (today the model's declared value, the
+   `EstimatedParam.initial` of `runner.rs:1418`);
+3. the domain midpoint: arithmetic for `Interval`, geometric for `LogInterval`.
+
+Under a spread starts rule each chain starts elsewhere; the conversion still
+uses this one base point, and the launch summary says so.
+
+**Near a bound the slope goes to 0.** On every map with a finite end, |dθ/dz| →
+0 as θ₀ approaches that end, so the converted sd_z grows without limit. A start
+exactly on a bound is already refused by the transforms series (its D3). For a
+start near one:
+
+- **Converted values above 3 in z are not printed as a recommendation.** A z-SD
+  of 3 already spans most of an interval map's range. For such a parameter the
+  migration message prints the number with its reason: "`rho` starts at 0.1002,
+  2·10⁻⁴ above its bound 0.1, where |dθ/dz| = 2.0·10⁻⁴. A natural step of 0.01
+  there is 50 in z, which crosses the whole box in one step." It then recommends
+  the default step, with the default's natural equivalent at the start.
+- **The launch summary prints the natural equivalent as computed** (small near a
+  bound) and adds "start near bound".
+
+The conversion is unavailable, and the message gives the formula with θ₀ to fill
+in, when:
+
+- a half-bounded map has no start and no default start, so |dθ/dz| (the distance
+  to the bound) has no point to be taken at;
+- no model is available, or it does not compile;
 - the parameter is not in the model (the unknown-parameter refusal applies).
 
 The identity map is always convertible (|dθ/dz| = 1). A simplex member is always
-convertible and unchanged: an explicit `rw_sd` was already read on its log-ratio
-scale (`runner.rs:656-660`).
+convertible and unchanged, because an explicit `rw_sd` was already read on its
+log-ratio scale (`runner.rs:656-660`).
 
 Per map, with θ₀ the conversion point:
 
@@ -964,12 +1223,12 @@ derivative is θ·ln(hi/lo)·σ(1 − σ) with σ = ln(θ/lo)/ln(hi/lo).
 
 ### 7.4 What the message says
 
-| `[method] algorithm`       | `rw_sd` becomes                                      | `perturb_only_at_t0 = true` becomes             |
-| -------------------------- | ---------------------------------------------------- | ----------------------------------------------- |
-| `if2`                      | `[method.perturbation] NAME = <sd_z>`                | `NAME = { sd = <sd_z>, initial_value = true }`  |
-| `pmmh`, `mh`               | `[method.proposal] NAME = <5 × sd_z>` (§15 (e))      | already refused there; delete it                |
-| `pgas`, `pfilter`, `nl-*`  | never read (§3.1); delete it                         | already refused; delete it                      |
-| none (a problem-only file) | both rows above, and `profile --perturbation NAME=…` | the IF2 row, and `profile --initial-value NAME` |
+| `[method] algorithm`       | `rw_sd` becomes                                                       | `perturb_only_at_t0 = true` becomes             |
+| -------------------------- | --------------------------------------------------------------------- | ----------------------------------------------- |
+| `if2`                      | `[method.perturbation] NAME = <sd_z>`                                 | `NAME = { sd = <sd_z>, initial_state = true }`  |
+| `pmmh`, `mh`               | `[method.proposal] NAME = <5 × sd_z>`, the old initial proposal scale | already refused there; delete it                |
+| `pgas`, `pfilter`, `nl-*`  | never read (§3.1); delete it                                          | already refused; delete it                      |
+| none (a problem-only file) | both rows above, and `profile --perturbation NAME=…`                  | the IF2 row, and `profile --initial-state NAME` |
 
 Deleting a line is not neutral: it replaces the old step with the default, which
 is a different step. The message says so and prints, beside each converted
@@ -985,7 +1244,7 @@ error: [estimate] sets step sizes, which are settings of the method:
     [method.perturbation]
     beta  = 0.107                                 # rw_sd 0.02 at start 0.25
     gamma = 0.106                                 # rw_sd 0.01 at start 0.1
-    I0    = { sd = 0.174, initial_value = true }  # rw_sd 2 at start 10
+    I0    = { sd = 0.174, initial_state = true }  # rw_sd 2 at start 10
 
   These give your old step at the start; IF2 now takes a fixed step in z,
   so away from the start the natural-scale step differs.
@@ -993,7 +1252,7 @@ error: [estimate] sets step sizes, which are settings of the method:
   Leaving a parameter out uses the default step instead, which is a
   different step. The default, 0.2 in z for these log-interval maps, gives
   at the start:  beta 0.037 (was 0.02)   gamma 0.019 (was 0.01)   I0 2.30 (was 2)
-  For I0 with the default step write `I0 = { initial_value = true }`.
+  For I0 with the default step write `I0 = { initial_state = true }`.
   See `camdl docs fit-toml`, "Step sizes".
 ```
 
@@ -1006,9 +1265,10 @@ produced by camdl).
 ### 7.5 An old `fit_state.toml` is refused as an input and readable for inspection
 
 `[rw_sd]` is deleted from `FitState` (§3.5); old files that carry it still load.
-The initial-value list is renamed with the flag (§15 (f)). A `fit_state.toml`
-whose schema this release does not support, which includes one that carries
-`perturb_only_at_t0_params`, is handled by its use (D16, maintainer decision):
+The initial-state list is renamed with the flag, `initial_state_params`. A
+`fit_state.toml` whose schema this release does not support, which includes one
+that carries `perturb_only_at_t0_params`, is handled by its use (D16, maintainer
+decision):
 
 - **As an input to a new computation it is refused**: `fit run --resume`, a
   `from_mle` or `from_posterior` starts source, `profile --fit` or
@@ -1017,7 +1277,7 @@ whose schema this release does not support, which includes one that carries
   written under, and says the fit must be run again.
 - **Read-only commands inspect it with one notice**: `fit summary` and
   `fit table` read it, and the notice names the version and the unsupported
-  keys. An old file's initial-value list is read under its old key for this
+  keys. An old file's initial-state list is read under its old key for this
   purpose, so `fit summary` applies the chain-agreement exemption to the
   parameters the run exempted.
 - **Listing commands never abort**: `fit table` reports an unreadable state as
@@ -1044,7 +1304,7 @@ The parameter-roles proposal decides that `profile`'s estimated set comes from
 - `--perturbation NAME=SD[,NAME=SD…]`, repeatable: IF2 perturbation SD in z for
   an estimated name. Under IF2 it overrides `[method.perturbation]` from an IF2
   `--fit` config per name.
-- `--initial-value NAME[,NAME…]`, repeatable: perturb at t = 0 only. It adds to
+- `--initial-state NAME[,NAME…]`, repeatable: perturb at t = 0 only. It adds to
   the IVPs an IF2 `--fit` config declares. There is no flag to remove one,
   because perturbing an initial state at every observation is a different
   estimand, made by editing the config.
@@ -1059,17 +1319,23 @@ The parameter-roles proposal decides that `profile`'s estimated set comes from
 `survey` needs no flag: it declares its estimated set with `--estimate` or
 `[estimate]` (`args/mod.rs:1984-1992`) and takes no step.
 
-The interim, until roles Stage 3 lands, is §15 (c).
+There is no interim. The release that carries the step series waits for
+parameter-roles Stage 3, so no released `profile` takes `--rw-sd` beside
+`[method.perturbation]`: one z-scale interface, never two units at once
+(maintainer decision 7). On the development branch, between the step series and
+Stage 3, `profile --rw-sd` converts at the resolved start like every other path
+(§7.3).
 
 ## 9. What breaks, and the migration text
 
 ### 9.1 Inputs refused
 
-| what                                                | where, and how many                                                                                                                                                                                                                                                                                  |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rw_sd` / `perturb_only_at_t0` in a live fit config | this repository: no committed `.toml` config sets either (`git ls-files '*.toml' \| xargs grep -l rw_sd` → one comment, `tests/fixtures/polio_afp_es/fit.toml:42`); 28 occurrences in inline test configs in 14 Rust files (`git grep -c -E 'rw_sd *= *[0-9]\|perturb_only_at_t0 *= *true' -- rust`) |
-| the same, in sibling repositories (tracked files)   | `camdl-book`: 17 `rw_sd =` in 2 files (`guide/fitting/fits/poisson_free_ic.toml`, `reference/inference-spec.qmd`); `camdl-vignettes`: 77 in 12 files; `ebola-bdbv-camdl`, `camdl-garki`: none                                                                                                        |
-| `profile --rw-sd`                                   | 35 occurrences in 20 test files (`git grep -c -- '"--rw-sd"' -- rust`); `camdl-book` in 5 files; `camdl-vignettes` 14 in 6 files, 7 of them `--rw-sd auto`, already refused by roles D5; `camdl-garki` 3 in 1 file                                                                                   |
+| what                                                                 | where, and how many                                                                                                                                                                                                                                                                                  |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rw_sd` / `perturb_only_at_t0` in a live fit config                  | this repository: no committed `.toml` config sets either (`git ls-files '*.toml' \| xargs grep -l rw_sd` → one comment, `tests/fixtures/polio_afp_es/fit.toml:42`); 28 occurrences in inline test configs in 14 Rust files (`git grep -c -E 'rw_sd *= *[0-9]\|perturb_only_at_t0 *= *true' -- rust`) |
+| the same, in sibling repositories (tracked files)                    | `camdl-book`: 17 `rw_sd =` in 2 files (`guide/fitting/fits/poisson_free_ic.toml`, `reference/inference-spec.qmd`); `camdl-vignettes`: 77 in 12 files; `ebola-bdbv-camdl`, `camdl-garki`: none                                                                                                        |
+| an estimated initial-state-only parameter under IF2 without the flag | newly refused (§4.6), with the one-line fix; the `camdl-book` profiles of `I0` and `R_init` (`identifiability.qmd:402`, `:485`) are such cases                                                                                                                                                       |
+| `profile --rw-sd`                                                    | 35 occurrences in 20 test files (`git grep -c -- '"--rw-sd"' -- rust`); `camdl-book` in 5 files; `camdl-vignettes` 14 in 6 files, 7 of them `--rw-sd auto`, already refused by roles D5; `camdl-garki` 3 in 1 file                                                                                   |
 
 Sibling counts are from
 `git ls-files | xargs grep -h -o -E 'rw_sd *=|rw_sd=|--rw-sd'` (and `-l` for
@@ -1107,7 +1373,7 @@ are not refused (§7.2).
 > ```toml
 > [method.perturbation] # algorithm = "if2"
 > beta = 0.1
-> I0 = { sd = 0.2, initial_value = true } # perturbed at t = 0 only
+> I0 = { sd = 0.2, initial_state = true } # perturbed at t = 0 only
 >
 > [method.proposal] # algorithm = "pmmh" or "mh"
 > beta = 0.5
@@ -1117,7 +1383,10 @@ are not refused (§7.2).
 > the defaults are provisional: currently 0.2 in z on a log-interval or
 > one-sided map and 2/3 on an interval (logit-type) map. Under PMMH, MH and
 > PGAS's MH-within-Gibbs the default is 0.25. An unbounded `real` or `instant`
-> has no default.
+> has no default. A `[method.proposal]` value is exactly the proposal SD: no
+> factor is applied. With `adapt = true` it is the proposal's shape until
+> `adapt_start`, after which adaptation reshapes it; with `adapt = false` it is
+> the proposal for the whole run.
 >
 > **What a step of s in z means:**
 >
@@ -1144,7 +1413,7 @@ are not refused (§7.2).
 > `rw.sd = 0.02` becomes `beta = 0.027`. In general, convert through the natural
 > scale at θ₀: natural step = s_pomp × |dθ/d(pomp coordinate)| (θ₀·s_pomp for
 > `log`), then sd_z = natural step / |dθ/dz| from the conversion table (§7.3).
-> pomp's `ivp(s)` is `{ sd = s, initial_value = true }`. pomp's `pmcmc` proposes
+> pomp's `ivp(s)` is `{ sd = s, initial_state = true }`. pomp's `pmcmc` proposes
 > on the natural scale, so a `mvn_diag_rw` SD divides by |dθ/dz| directly into
 > `[method.proposal]`.
 
@@ -1153,17 +1422,19 @@ are not refused (§7.2).
 > **Step sizes moved from `[estimate]` to `[method]`, in z.** `rw_sd` set IF2's
 > perturbation and one fifth of PMMH's and MH's initial proposal, on the natural
 > scale. Each is now `[method.perturbation]` (IF2) or `[method.proposal]` (PMMH,
-> MH), in z; `perturb_only_at_t0 = true` is `initial_value = true` inside the
-> IF2 entry. A config with the old keys is refused, and the message prints, per
-> parameter, the z value that gives your old step at the start and the natural
-> step the default would give. Deleting a line is not neutral: it switches that
-> parameter to the default step. `pgas` and the `nl-*` optimizers never read
-> `rw_sd`: delete it. `profile --rw-sd` is replaced by `--estimate` (which
-> parameters) and `--perturbation NAME=SD` with `--initial-value NAME` (their
-> IF2 steps). `[estimate].start` no longer changes a fit's fit-level hash, so
-> fits that differ only in starts or steps share a fit segment. Stored fits made
-> before this release are still listed and addressable; their old keys are set
-> aside with a notice. Every fit re-keys at this release.
+> MH), in z; `perturb_only_at_t0 = true` is `initial_state = true` inside the
+> IF2 entry, and IF2 refuses an estimated parameter that enters only the initial
+> state unless it is marked so. A config with the old keys is refused, and the
+> message prints, per parameter, the z value that gives your old step at the
+> start and the natural step the default would give. Deleting a line is not
+> neutral: it switches that parameter to the default step. `pgas` and the `nl-*`
+> optimizers never read `rw_sd`: delete it. `profile --rw-sd` is replaced by
+> `--estimate` (which parameters) and `--perturbation NAME=SD` with
+> `--initial-state NAME` (their IF2 steps). `[estimate].start` no longer changes
+> a fit's fit-level hash, so fits that differ only in starts or steps share a
+> fit segment. Stored fits made before this release are still listed and
+> addressable; their old keys are set aside with a notice. Every fit re-keys at
+> this release.
 
 ## 10. Before and after: one problem fitted by IF2 and by PMMH
 
@@ -1253,11 +1524,11 @@ cooling = 0.7
 [method.perturbation]
 beta = 0.107
 gamma = 0.106
-I0 = { sd = 0.174, initial_value = true }
+I0 = { sd = 0.174, initial_state = true }
 ```
 
 PMMH, carrying the old natural-scale proposal at the start (5 × the IF2 values;
-§15 (e)):
+§7.4):
 
 ```toml
 [method]
@@ -1274,7 +1545,7 @@ I0 = 0.869
 ```
 
 Their fit-level hashes are equal; their method-level hashes differ. With the
-default steps, the IF2 table shrinks to `I0 = { initial_value = true }` and the
+default steps, the IF2 table shrinks to `I0 = { initial_state = true }` and the
 PMMH file needs no `[method.proposal]`; both choices change the steps from the
 old config's.
 
@@ -1322,17 +1593,18 @@ method settings, and its `SettingForNonEstimated` refusal is used by
 `resolve_steps` unchanged.
 
 **The profile flags (§8)** land in parameter-roles Stage 3, which already
-replaces `--rw-sd` as a selector. **`FilterSettings` (§6.4)** follows the merge
-of the support-transforms branch.
+replaces `--rw-sd` as a selector. The release that ships the step series is not
+cut until Stage 3 has landed (D17). **`FilterSettings` (§6.4)** follows the
+merge of the support-transforms branch.
 
 ## 12. Validation
 
 - `ZSd::new` refuses NaN, ±∞, 0 and negatives; deserialization names the value.
 - `PerturbationSpec` reads `beta = 0.1`, `beta = { sd = 0.1 }` and
-  `beta = { initial_value = true }`, and refuses `beta = {}`,
+  `beta = { initial_state = true }`, and refuses `beta = {}`,
   `beta = { sd = 0.1, lag = 2 }` and `beta = "auto"`, naming the accepted forms.
 - `resolve_steps`, per rule of §4.4, including a simplex member under IF2 (its
-  SD in `simplex`, not `params`), `initial_value` on a member (refused), and a
+  SD in `simplex`, not `params`), `initial_state` on a member (refused), and a
   member under PMMH (an ordinary proposal entry).
 - `[method.proposal]` under `if2` and `[method.perturbation]` under `pmmh`,
   `pgas` and `nl-sbplx` are refused with the §4.3 messages.
@@ -1342,6 +1614,12 @@ of the support-transforms branch.
 - The identity tests of §5.5.
 - `profile --algorithm nl-sbplx --perturbation beta=0.1` is refused.
 - The bit-identity checks of §11 commit 2 and §6.3.
+- `param_surfaces`: one test per surface of §4.6, and the two IF2 refusals.
+- A legacy conversion above 3 in z, for a start near a bound, prints its reason
+  and recommends the default (§7.3).
+- `run.json`'s `inputs.steps` carries every estimated parameter's `sd_z`,
+  `start` and `natural_at_start`, and no `from` (§5.6).
+- `profile` cell records carry `cooling_final` as the cooling factor (D21).
 
 ## 13. Amendments to other proposals
 
@@ -1355,13 +1633,17 @@ of the support-transforms branch.
 - §4.1: `EstimatedParam` loses `rw_sd`, `rw_sd_auto` and `perturb_only_at_t0`;
   `natural_step` and `mh_initial_step` go (§4.2 here).
 - §9.1, §9.2: an explicit step is the written table value, in z; the factor of
-  five is §15 (e) here; "`rw_sd` stays IF2's, PMMH's and MH's knob" becomes "IF2
-  and PMMH/MH each have their own".
+  five is removed (D5 here); "`rw_sd` stays IF2's, PMMH's and MH's knob" becomes
+  "IF2 and PMMH/MH each have their own".
 - §9.5: profile and survey no longer build steps through
   `build_if2_params_from_specs`; profile resolves its own (§5.4 here).
 - §10: the `if2.rs` edits read `config.steps` instead of `spec.rw_sd` (§4.2
   here).
 - §13: the series (ii) conversion bullets are replaced by §7.3 here.
+- §9.1 and the launch table: `Transform::reference_z` (the box midpoint for the
+  interval maps) is replaced by the resolved start as the conversion point
+  (D19).
+- `simplex_member_default_step` is replaced by the log-ratio constant of D20.
 
 ### 13.2 Workflow-first fit config (`2026-09-08-workflow-first-fit-config.md`)
 
@@ -1376,9 +1658,9 @@ of the support-transforms branch.
 - §3.2 item 8 is false for `rw_sd` and out of date for `perturb_only_at_t0`
   (§3.4 here); it is re-checked and rewritten there.
 - §4.1: "`--rw-sd`, `[estimate].rw_sd`, `perturb_only_at_t0` … do not declare a
-  role" becomes "`--perturbation`, `--initial-value`, `[method.perturbation]`
+  role" becomes "`--perturbation`, `--initial-state`, `[method.perturbation]`
   and `[method.proposal]` do not declare a role".
-- §4.2's last table row becomes "`--perturbation`, `--initial-value`, or a
+- §4.2's last table row becomes "`--perturbation`, `--initial-state`, or a
   `[method.perturbation]`/`[method.proposal]` key, for a non-estimated name |
   refused".
 - §5.3: `[estimate].start` stays a source of starts and is hashed at the method
@@ -1400,7 +1682,7 @@ of the support-transforms branch.
 - §7.3: the `profile --sweep k … --rw-sd beta=0.02` example becomes
   `--estimate beta,gamma --perturbation beta=0.1`.
 - §10.1: "`--rw-sd` is optional, IF2-only, and sets step sizes only" becomes
-  "`--rw-sd` is removed; `--perturbation` and `--initial-value`, refused under
+  "`--rw-sd` is removed; `--perturbation` and `--initial-state`, refused under
   `nl-*`".
 - §10.2: the `profile --rw-sd …` test migrations become `--estimate` plus
   `--perturbation`.
@@ -1410,7 +1692,7 @@ of the support-transforms branch.
   the method level".
 - §11.2 Stage 2 builds on the plan series (§11 here); Stage 3's "`--rw-sd`
   optional and IF2-only" becomes "`--rw-sd` removed; `--perturbation` and
-  `--initial-value`", and its test "`--sweep k` + `--rw-sd beta=0.02`" becomes
+  `--initial-state`", and its test "`--sweep k` + `--rw-sd beta=0.02`" becomes
   "`--sweep k` + `--perturbation beta=0.1`".
 - D5: `--rw-sd` is refused in every form.
 - §13: "The `rw_sd` scale convention" and "PMMH's own proposal tuning (replacing
@@ -1436,12 +1718,14 @@ non-finite value unrepresentable after load.
 **D4 — The IVP flag is a key inside the perturbation entry.** One entry per
 parameter keeps its IF2 settings in one place, as pomp's `ivp()` is part of the
 parameter's `rw.sd` entry. A separate list was considered; it matches the
-`--initial-value` flag's shape but splits one parameter's settings across two
-places. The key's name is §15 (f).
+`--initial-state` flag's shape but splits one parameter's settings across two
+places. The key is `initial_state` (D18).
 
 **D5 — `[method.proposal]` defaults to `default_mh_step`** (maintainer decision
 3; 0.25 in z, _branch_ `types.rs:83`). Whether a written value is the proposal
-SD itself or one fifth of it is §15 (e).
+SD itself, with no factor of five (maintainer decision 8): a written value is
+exactly the proposal SD, and the legacy message prints 5 × the converted value
+to reproduce the old initial proposal scale.
 
 **D6 — PGAS gets no per-parameter table.** Maintainer decision 3. Its default
 update, NUTS, has no per-parameter proposal; its MH-within-Gibbs starts at
@@ -1479,7 +1763,7 @@ support-transforms branch merges, because it edits `if2.rs` and changes no
 result.
 
 **D14 — Simplex members.** Under IF2 a member's step lives only in its
-`SimplexGroup` (`If2Step::SimplexMember`), and `initial_value` on a member stays
+`SimplexGroup` (`If2Step::SimplexMember`), and `initial_state` on a member stays
 refused. Under PMMH and MH a member is an ordinary proposal entry with
 `default_mh_step` on its own map (§4.4 rules 7–8).
 
@@ -1489,59 +1773,35 @@ a notice for inspection** (maintainer decision; §7.5).
 **D15 — `beta = {}` is refused.** An empty entry has no SD and no flag, so it
 states nothing that omitting the line does not.
 
-## 15. Pending the maintainer
+**D17 — The release waits for parameter-roles Stage 3** (maintainer decision 7).
+`profile` gets `--estimate`, `--perturbation` and `--initial-state` in the same
+release that removes `--rw-sd`, so no released `profile` has two step units. No
+interim precedence rule exists.
 
-Each item below is a design choice this proposal does not make. Options,
-consequences and a recommendation follow each.
+**D18 — The flag is `initial_state`; IF2's timing is `PerturbAt::TimeZeroOnly`**
+(maintainer decision 9; §4.5, §4.6). A future `timing = "initial"` schedule key
+is noted, not designed.
 
-**(c) Whether the release waits for parameter-roles Stage 3, and the interim
-precedence of `--rw-sd` against `[method.perturbation]`.** `profile --rw-sd`
-cannot be removed before `profile --estimate` exists, which is Stage 3's. If the
-release does not wait, profile keeps `--rw-sd` in that release with its two jobs
-(selecting the set, giving natural-scale steps, converted once by the branch's
-`step_from_natural`), and also reads `[method.perturbation]` (z) from an IF2
-`--fit`. The options for that interim: `--rw-sd` overrides per name (today's
-CLI-over-file precedence), or the two are refused together. Waiting removes the
-interim and couples the release to Stage 3. Recommendation: wait, if Stage 3 is
-close; otherwise `--rw-sd` overrides per name, with the launch table naming each
-parameter's source. Leaning.
+**D19 — Conversions happen at the resolved start value: the explicit start, then
+the resolved default start, then the domain midpoint** (maintainer decision 10;
+§7.3). Converted values above 3 in z are reported with their reason and not
+recommended.
 
-**(e) Whether `[method.proposal]` is the proposal SD itself (no factor of
-five).** Today PMMH's initial proposal is five times `rw_sd`, because one number
-served both kernels (`cli/src/fit/pmmh.rs:1045-1048`). With separate names, a
-factor would hide a multiplier in the unit of a value the user writes; keeping
-it makes a converted IF2 value and a PMMH value the same number. Recommendation:
-drop the factor; the legacy message prints the multiplied value. Leaning.
+**D20 — A simplex member's default IF2 step is one log-ratio constant, 1/6.**
+That is the value a member on [0, 1] receives today (`(hi − lo)/6`, _branch_
+`runner.rs:1529`). Members boxed otherwise get the same constant in place of a
+natural-scale formula read on the log-ratio scale (§3.8).
 
-**(f) The IVP flag's name: `initial_value`, `initial_state` or `ivp`.** `ivp` is
-pomp's term and opaque to anyone who has not used pomp; `initial_value` follows
-pomp's expansion ("initial-value parameter"); `initial_state` says what the
-parameter sets in the model. The flag (`--initial-value`), the stored list and
-the launch table follow the choice. Recommendation: `initial_state`, because it
-names the model fact rather than an IF2 term. Leaning.
+**D21 — `profile`'s `cooling_final` is the cooling factor of the last
+iteration.** The mean of per-parameter SDs mixed units across parameters. The
+factor is the quantity the summary meant ("how cool the perturbation got"), and
+it is the same for every parameter.
 
-**(g) One conversion reference point.** The legacy message converts at the start
-θ₀ (§7.3); the branch's launch table and its `step_from_natural` (used by the
-interim `--rw-sd`) convert at the box midpoint for the interval maps
-(`types.rs:163-176`). Using θ₀ everywhere makes every natural-scale number the
-user sees refer to the same point, and makes the interim `--rw-sd` match the
-legacy message; it makes the launch table's number depend on the start. The
-midpoint everywhere makes the shown number a property of the domain, and the
-legacy conversion no longer matches main's PMMH proposal at the start.
-Recommendation: θ₀ everywhere, falling back to the midpoint only when no start
-exists. Leaning.
+**D22 — An incorrect initial-state schedule is refused under IF2** (maintainer
+decision 11; §4.6). The IR determines the property reliably by an exhaustive
+walk, so the check is a refusal, not a warning. Non-IF2 methods never warn.
 
-**(h) `profile --fit` with a non-IF2 config, when a parameter that enters only
-the initial state is not marked.** Such a config has no `[method.perturbation]`,
-so profile perturbs that parameter before every observation unless
-`--initial-value` names it — the book's silent case (§3.2). Options: a warning
-naming the parameter and the flag; a refusal unless the parameter is named by
-`--initial-value` or an explicit `--perturbation`; or nothing. Detecting it
-needs a scan of the IR for parameters referenced only in `initial_conditions`.
-Recommendation: refuse, since the two readings are different estimands and the
-fix is one flag. Leaning.
-
-## 16. Out of scope, each with its reason
+## 15. Out of scope, each with its reason
 
 - **Command-line step overrides for `fit run`.** `fit run` overrides no
   per-algorithm setting today (`args/mod.rs:668-750`: `--starts`,
