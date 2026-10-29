@@ -73,7 +73,9 @@ fn spec(name: &str, index: usize) -> EstimatedParam {
         name: name.into(),
         index,
         initial: 1.0,
-        rw_sd: RW_SD,
+        // The step in z that moves ln θ by RW_SD at θ = 1, the box's geometric
+        // midpoint, where the map's d ln θ / dz is ln(1e8)/4.
+        rw_sd: Transform::for_domain(1e-4, 1e4, true).expect("domain").step_from_natural(RW_SD, 1.0),
         transform: Transform::for_domain(1e-4, 1e4, true).expect("domain"),
         perturb_only_at_t0: false,
         rw_sd_auto: false,

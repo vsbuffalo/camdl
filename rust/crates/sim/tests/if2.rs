@@ -192,12 +192,16 @@ fn test_if2_converges_from_dispersed_start() {
 
     let if2_params = vec![
         EstimatedParam {
+            // Steps in z: natural 0.05 and 0.01 converted once at each box's
+            // midpoint, as `build_if2_params_from_specs` converts them.
             name: "beta".into(), index: 0, initial: 0.8,
-            rw_sd: 0.05, transform: Transform::Interval { lo: 0.01, hi: 2.0 }, perturb_only_at_t0: false, rw_sd_auto: false,
+            rw_sd: Transform::Interval { lo: 0.01, hi: 2.0 }.step_from_natural(0.05, 0.8),
+            transform: Transform::Interval { lo: 0.01, hi: 2.0 }, perturb_only_at_t0: false, rw_sd_auto: false,
         },
         EstimatedParam {
             name: "gamma".into(), index: 1, initial: 0.3,
-            rw_sd: 0.01, transform: Transform::Interval { lo: 0.01, hi: 1.0 }, perturb_only_at_t0: false, rw_sd_auto: false,
+            rw_sd: Transform::Interval { lo: 0.01, hi: 1.0 }.step_from_natural(0.01, 0.3),
+            transform: Transform::Interval { lo: 0.01, hi: 1.0 }, perturb_only_at_t0: false, rw_sd_auto: false,
         },
     ];
 
