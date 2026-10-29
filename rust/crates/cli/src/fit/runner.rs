@@ -1346,6 +1346,25 @@ pub fn near_a_bound(spec: &EstimatedParam, v: f64, start: f64) -> Option<(f64, &
     None
 }
 
+/// The best log-likelihood of the chains' starts, by one particle-filter pass
+/// each at the clean-evaluation particle count (−∞ when none is finite or the
+/// filter fails). Used only after every chain's final estimate scored −∞, to
+/// tell a start the data rule out from a swarm the perturbations moved there.
+fn best_start_loglik(config: &FitRunConfig, per_chain: Option<&[Vec<EstimatedParam>]>) -> f64 {
+    let starts: Vec<&[EstimatedParam]> = match per_chain {
+        Some(pc) if !pc.is_empty() => pc.iter().map(|c| c.as_slice()).collect(),
+        _ => vec![config.estimated_params.as_slice()],
+    };
+    starts.iter().enumerate().map(|(k, specs)| {
+        let mut params = config.base_params.clone();
+        for p in specs.iter() {
+            params[p.index] = p.initial;
+        }
+        run_quick_pfilter(config, &params, config.loglik_eval.n_particles, config.seed ^ k as u64)
+            .unwrap_or(f64::NEG_INFINITY)
+    }).fold(f64::NEG_INFINITY, f64::max)
+}
+
 /// The fraction of the distance from a chain's start to the lower end of a
 /// `[lo, ∞)` domain below which IF2's estimate is reported as near the
 /// bound (proposal D10): θ̂ − lo < 0.01·(θ₀ − lo).
@@ -2434,6 +2453,30 @@ pub fn run_chains_with_per_chain_params(
     // single finite chain makes the winner finite → no fire); the
     // is_empty guard above already handles the all-PFDegenerate case.
     if sim::inference::no_finite_anchor(best_loglik) {
+        // The check above ran on each chain's FINAL estimate, after IF2's
+        // perturbations. Score the starts too: a finite start means the
+        // perturbed swarm, not the start, is what the data rule out.
+        let start_loglik = best_start_loglik(config, per_chain_params);
+        if start_loglik.is_finite() {
+            // The step in z each parameter took at its start: the natural
+            // rw_sd converted there.
+            let steps: Vec<String> = config.estimated_params.iter()
+                .map(|p| format!("{}={:.3}", p.name, p.transformed_sd(p.rw_sd, p.initial)))
+                .collect();
+            collector.push(DiagnosticKind::PerturbedSwarmInfeasible {
+                start_loglik, steps: steps.clone(),
+            });
+            collector.render_to_stderr(HintContext { chains_completed: Some(results.len()) });
+            if let Some(dir) = stage_dir {
+                let _ = collector.write_json(&format!("{}/diagnostics.json", dir));
+            }
+            return Err(format!(
+                "if2: every chain's final estimate has log-likelihood -inf (best = {best_loglik}), \
+                 but a chain's start scores {start_loglik:.1}: the start is feasible and the \
+                 perturbed swarm is not, so the perturbation is too large. The steps at the \
+                 start, in each parameter's transformed coordinate, were {}. Give a smaller explicit rw_sd \
+                 (`rw_sd = …` in its [estimate] entry).", steps.join(", ")));
+        }
         collector.push(DiagnosticKind::InitialLoglikInfinite);
         collector.render_to_stderr(HintContext { chains_completed: Some(results.len()) });
         if let Some(dir) = stage_dir {
