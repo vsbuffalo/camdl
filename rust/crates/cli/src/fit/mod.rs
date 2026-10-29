@@ -1378,7 +1378,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let drawn = runner::draw_chain_starts_for(
                     &run_config, &sweep_config.estimate, &resolved_starts, *chains, seed,
                 ).unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
-                runner::report_starts_on_an_end(&run_config, &drawn);
+                runner::refuse_starts_on_an_end(&run_config, &drawn)
+                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
                 // gh#887: a spread start the filter cannot score is redrawn,
                 // up to MAX_START_ATTEMPTS, before any chain runs; every
                 // attempt is on the record below.

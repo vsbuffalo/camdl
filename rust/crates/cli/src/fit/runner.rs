@@ -776,47 +776,89 @@ pub fn draw_chain_starts_for(
         .map_err(|e| format!("starts = {}: {}", starts.rule.spelled(), e))
 }
 
-/// Print [`starts_on_an_end`]'s notices. Called by the methods that move in
-/// the transformed coordinate (IF2, PMMH, MH, PGAS), where a start on a bound
-/// is moved inward; the optimisers and `pfilter` use the start as given.
-pub fn report_starts_on_an_end(config: &FitRunConfig, drawn: &super::chain_starts::DrawnStarts) {
-    for notice in starts_on_an_end(&config.estimated_params, &drawn.starts) {
-        eprintln!("{notice}");
+/// Refuse every chain start exactly on a finite end of its domain, for the
+/// methods that move in the transformed coordinate (IF2, PMMH, MH, PGAS and
+/// its NUTS block); the optimisers and `pfilter` use the start as given and
+/// do not call this. See [`starts_on_an_end`].
+pub fn refuse_starts_on_an_end(
+    config: &FitRunConfig,
+    drawn: &super::chain_starts::DrawnStarts,
+) -> Result<(), String> {
+    match starts_on_an_end(&config.estimated_params, &drawn.starts) {
+        Some(err) => Err(err),
+        None => Ok(()),
     }
 }
 
-/// One notice per estimated parameter that some chain starts exactly on a
-/// finite end of its domain (support-keyed transforms proposal D3). Such a
-/// start has no finite coordinate (z = ±∞), so the transform's forward map
-/// moves it inward ([`sim::inference::types::EDGE_START_EPS`]); the notice
-/// names the parameter, the chains, the bound and the value the chain then
-/// starts from. A start on a bound arrives legitimately, e.g. an
-/// `nl-bobyqa` optimum on its bound passed on through `--starts`.
+/// The refusal of starts exactly on a finite end of their domain
+/// (support-keyed transforms proposal D3), or `None` when there are none.
+///
+/// A value on an end has no finite transformed coordinate (z = ±∞), so a
+/// chain started there would begin far out in the map's tail. A start the
+/// rule draws is redrawn off the ends before it gets here
+/// ([`super::chain_starts::draw_chain_starts`]); what remains is a start
+/// the user gave — the declared start, a `from_mle` / `from_params` point or
+/// a posterior row. The message names each parameter, its bound, the chains
+/// and an interior value to start from instead, and the methods that can
+/// place an estimate on a bound.
 pub fn starts_on_an_end(
     specs: &[EstimatedParam],
     starts: &[super::chain_starts::ChainStart],
-) -> Vec<String> {
-    let mut notices = Vec::new();
+) -> Option<String> {
+    let mut lines = Vec::new();
     for spec in specs {
-        let on_end: Vec<(usize, f64)> = starts.iter()
-            .filter_map(|c| c.values.get(&spec.name).map(|&v| (c.chain_id, v)))
-            .filter(|&(_, v)| spec.transform.on_an_end(v))
+        let on_end: Vec<&super::chain_starts::ChainStart> = starts.iter()
+            .filter(|c| c.values.get(&spec.name).is_some_and(|&v| spec.transform.on_an_end(v)))
             .collect();
-        let Some(&(_, v)) = on_end.first() else { continue };
-        let (lo, _) = spec.bounds();
-        let which = if lo.is_finite() && v <= lo { "lower" } else { "upper" };
-        let z = spec.to_transformed(v);
-        let moved = spec.from_transformed(z);
-        // The move is tiny next to the bound (σ(z) = 1e-10), so the
-        // new value is printed with enough digits to differ from it.
-        let by = (moved - v).abs();
-        let chains: Vec<String> = on_end.iter().map(|(c, _)| ChainIndex(*c).to_string()).collect();
-        notices.push(format!(
-            "notice: `{}` starts on its {which} bound {v} (chain {}); a bound has no finite \
-             transformed coordinate, so the start is moved inward by {by:.2e}, to {moved:.12e} (z = {z:.2}).",
-            spec.name, chains.join(", ")));
+        let Some(first) = on_end.first() else { continue };
+        let v = first.values[&spec.name];
+        let (lo, hi) = spec.bounds();
+        let lower = lo.is_finite() && v <= lo;
+        let (which, bound) = if lower { ("lower", lo) } else { ("upper", hi) };
+        let chains: Vec<String> = on_end.iter().map(|c| ChainIndex(c.chain_id).to_string()).collect();
+        lines.push(format!(
+            "  `{}` starts on its {which} bound {bound} (chain {}, {}); start it inside, e.g. at {}",
+            spec.name, chains.join(", "), start_origin(&first.source),
+            interior_start(lo, hi, lower)));
     }
-    notices
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "a start exactly on a bound has no finite transformed coordinate, which IF2 and the \
+         samplers move in, so it is refused:\n{}\n  If the maximum on the bound is the point, \
+         profile the parameter, or refit with nl-sbplx (ODE backend only), which can place an \
+         estimate on a bound.",
+        lines.join("\n")))
+}
+
+/// Where a refused start came from, in the user's terms.
+fn start_origin(source: &super::chain_starts::InitSource) -> String {
+    use super::chain_starts::InitSource;
+    match source {
+        InitSource::SeededBase | InitSource::UniformDraw { .. } =>
+            "the declared start: `start` in [estimate], or the model's value".into(),
+        InitSource::MlePoint { path } | InitSource::ParamsPoint { path } =>
+            format!("from {}", path.display()),
+        InitSource::PosteriorRow { row, path } => format!("row {row} of {}", path.display()),
+        other => format!("drawn by `{}`", other.tag()),
+    }
+}
+
+/// A start 1% of the way in from the refused end: 1% of the width for a box
+/// finite at both ends, else 0.01·max(1, |bound|). Printed to five
+/// significant figures, unless rounding would put it back on the bound.
+fn interior_start(lo: f64, hi: f64, lower: bool) -> String {
+    let (bound, sign) = if lower { (lo, 1.0) } else { (hi, -1.0) };
+    let by = if lo.is_finite() && hi.is_finite() {
+        0.01 * (hi - lo)
+    } else {
+        0.01 * bound.abs().max(1.0)
+    };
+    let v = bound + sign * by;
+    let rounded: f64 = format!("{v:.4e}").parse().unwrap_or(v);
+    let inside = if lower { rounded > lo } else { rounded < hi };
+    format!("{}", if inside { rounded } else { v })
 }
 
 /// A fresh start for one chain under the resolved rule — attempt `attempt`
@@ -6748,36 +6790,34 @@ dt = 1.0
         assert_eq!(near_a_bound(&line, -1e9, 0.0), None);
     }
 
+    /// Proposal D3: a start exactly on a bound is refused, once per
+    /// parameter, naming the bound, the chains, where the start came from
+    /// and an interior value to start from instead.
     #[test]
-    fn a_start_on_an_end_gets_one_notice_naming_the_bound_and_the_new_value() {
+    fn a_start_on_an_end_is_refused_with_an_interior_value_to_use() {
         use super::super::chain_starts::{ChainStart, InitSource};
         let specs = vec![
             domain_param("rho", Transform::Interval { lo: 0.0, hi: 1.0 }, 0.5),
             domain_param("kappa", Transform::LowerBounded { lo: 0.0 }, 0.5),
-            domain_param("beta", Transform::LogInterval { lo: 0.1, hi: 2.0 }, 0.5),
+            domain_param("beta", Transform::LogInterval { lo: 0.05, hi: 0.26 }, 0.1),
         ];
-        let start = |chain_id: usize, rho: f64, kappa: f64| ChainStart {
+        let start = |chain_id: usize, rho: f64, kappa: f64, beta: f64| ChainStart {
             chain_id,
             values: [("rho".to_string(), rho), ("kappa".to_string(), kappa),
-                     ("beta".to_string(), 0.5)].into_iter().collect(),
+                     ("beta".to_string(), beta)].into_iter().collect(),
             source: InitSource::SeededBase,
         };
-        let notices = starts_on_an_end(&specs, &[start(0, 1.0, 0.0), start(1, 1.0, 0.3)]);
-        assert_eq!(notices.len(), 2, "one notice per parameter, not per chain: {notices:?}");
-        assert!(notices[0].contains("`rho`") && notices[0].contains("upper bound 1")
-            && notices[0].contains("chain 0, 1") && notices[0].contains("z = 23.03"), "{}", notices[0]);
-        assert!(notices[1].contains("`kappa`") && notices[1].contains("lower bound 0")
-            && notices[1].contains("by 1.00e-10") && notices[1].contains("z = -23.03"), "{}", notices[1]);
-        // A bound away from zero: the printed value must differ from it.
-        let beta = vec![domain_param("beta", Transform::LogInterval { lo: 0.05, hi: 1.0 }, 0.05)];
-        let one = ChainStart {
-            chain_id: 0, values: [("beta".to_string(), 0.05)].into_iter().collect(),
-            source: InitSource::SeededBase,
-        };
-        let n = starts_on_an_end(&beta, &[one]);
-        assert_eq!(n.len(), 1);
-        assert!(!n[0].contains("to 5.000000000000e-2"), "the moved value must show the move: {}", n[0]);
-        assert!(n[0].contains("to 5.0000000"), "{}", n[0]);
-        assert!(starts_on_an_end(&specs, &[start(0, 0.5, 0.3)]).is_empty());
+        let err = starts_on_an_end(&specs, &[start(0, 1.0, 0.0, 0.26), start(1, 1.0, 0.3, 0.1)])
+            .expect("starts on a bound are refused");
+        assert_eq!(err.matches("starts on its").count(), 3, "one line per parameter: {err}");
+        assert!(err.contains("`rho` starts on its upper bound 1 (chain 0, 1"), "{err}");
+        assert!(err.contains("e.g. at 0.99"), "{err}");
+        assert!(err.contains("`kappa` starts on its lower bound 0 (chain 0,"), "{err}");
+        assert!(err.contains("e.g. at 0.01"), "{err}");
+        assert!(err.contains("`beta` starts on its upper bound 0.26") && err.contains("e.g. at 0.2579"),
+            "{err}");
+        assert!(err.contains("`start` in [estimate]"), "{err}");
+        assert!(err.contains("nl-sbplx (ODE backend only)") && err.contains("profile"), "{err}");
+        assert!(starts_on_an_end(&specs, &[start(0, 0.5, 0.3, 0.1)]).is_none());
     }
 }
