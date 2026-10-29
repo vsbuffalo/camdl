@@ -248,11 +248,7 @@ pub(crate) fn resolve_fit_parameters(
             if p.value.resolved_value().is_none() {
                 let bounds = spec.bounds.or_else(|| resolved_bounds(p));
                 let value = spec.start.or_else(|| bounds.map(|(lo, hi)| {
-                    let transform = derive_transform_with_bounds(
-                        p,
-                        spec.transform.as_ref().map(|t| t.as_str()),
-                        (lo, hi),
-                    );
+                    let transform = derive_transform_with_bounds(p, (lo, hi));
                     let log_scale = matches!(transform, Transform::Log { .. });
                     super::init::draw_start_in_bounds(lo, hi, log_scale, seed, name)
                 }));
@@ -711,7 +707,6 @@ fn build_if2_params(
         ParamSpec {
             name: name.clone(),
             rw_sd,
-            transform: est.transform.as_ref().map(|t| t.as_str().to_string()),
             perturb_only_at_t0: est.perturb_only_at_t0,
             // Bounds plumbing (gh#42-followup + bounds-optional fix):
             // pass through the Option as-is. `build_if2_params_from_specs`
@@ -1147,7 +1142,7 @@ pub fn default_search_box(ir_param: &ir::parameter::Parameter) -> (f64, f64) {
 /// box `(lower, upper)` it clamps to — the fit config's `[estimate].bounds`
 /// when given, else [`default_search_box`] (via [`resolve_search_box`]).
 ///
-/// Priority: explicit override > param_kind > bounds fallback.
+/// Priority: param_kind > bounds fallback.
 ///
 /// The param_kind field (populated by the OCaml compiler from the DSL type)
 /// is the primary signal: probability → Logit, rate/positive/count → Log.
@@ -1162,18 +1157,8 @@ pub fn default_search_box(ir_param: &ir::parameter::Parameter) -> (f64, f64) {
 /// particles out to the model bounds, defeating the tightening.
 pub fn derive_transform_with_bounds(
     ir_param: &ir::parameter::Parameter,
-    transform_override: Option<&str>,
     (lower, upper): (f64, f64),
 ) -> Transform {
-    if let Some(t) = transform_override {
-        return match t {
-            "log" => Transform::Log { lo: lower, hi: upper },
-            "logit" => Transform::Logit { lo: lower, hi: upper },
-            // `identity` on a box finite at both ends is refused before this
-            // is reached ([`check_transform_keeps_box`]).
-            _ => Transform::None,
-        };
-    }
     // Every search box finite at both ends gets a transform that keeps the
     // parameter inside it. `Transform::None` clamps nothing, so IF2 and the
     // samplers walk out of the box (gh#66: a bounded `instant` seed-time
@@ -1231,54 +1216,6 @@ pub fn kind_support(ir_param: &ir::parameter::Parameter) -> Option<((f64, f64), 
         Rate | Positive | Count | Duration => Some(((0.0, f64::INFINITY), "[0, ∞)")),
         Real | Instant => None,
     }
-}
-
-/// Refuse an explicit `transform` override that does not keep the
-/// parameter inside its search box `(lo, hi)` or its kind's support.
-///
-/// The samplers and IF2 move a parameter only as far as its transform keeps
-/// it, so an override that keeps less than the box lets the draws leave it:
-///
-/// - `identity` clamps nothing. It is refused on a box finite at both ends
-///   and on a kind whose support has a finite end (`identity` on a `rate`'s
-///   `[0, ∞)` gave 30.8% negative draws under a `normal` prior).
-/// - `log` cannot represent a value ≤ 0, so it is refused on a box reaching
-///   below zero (a negative start maps to log(1e-300) = −690, gh#967).
-/// - `logit` maps a box finite at both ends; with an infinite end it is
-///   degenerate (every value maps to logit(ε), gh#763), so it is refused.
-///
-/// Without an override every box already gets a transform that keeps it
-/// where one exists ([`derive_transform_with_bounds`]), so the remedy is to
-/// drop the override.
-pub fn check_transform_keeps_box(
-    name: &str,
-    transform_override: Option<&str>,
-    (lo, hi): (f64, f64),
-    support: Option<((f64, f64), &'static str)>,
-) -> Result<(), String> {
-    let finite_box = lo.is_finite() && hi.is_finite();
-    let why = match transform_override {
-        Some("identity") if finite_box => format!(
-            "the identity transform does not keep a parameter inside finite bounds, so \
-             the sampler or IF2 would move {name} outside [{lo}, {hi}]"),
-        Some("identity") => match support {
-            Some((_, shown)) => format!(
-                "{name}'s kind has support {shown}, and the identity transform does not \
-                 keep it there, so the sampler or IF2 would move {name} outside {shown}"),
-            None => return Ok(()),
-        },
-        Some("log") if lo < 0.0 => format!(
-            "the log transform cannot represent a value below 0, so {name} could never \
-             reach the negative part of [{lo}, {hi}]"),
-        Some("logit") if !finite_box => format!(
-            "the logit transform needs bounds finite at both ends, and [{lo}, {hi}] has an \
-             infinite end"),
-        _ => return Ok(()),
-    };
-    let t = transform_override.unwrap_or_default();
-    Err(format!(
-        "estimate.{name}: `transform = \"{t}\"` with bounds [{lo}, {hi}] — {why}. Drop \
-         `transform` and {name} gets a transform that keeps its bounds automatically."))
 }
 
 /// The search box a fit uses for one estimated parameter: the fit.toml
@@ -1358,8 +1295,6 @@ pub struct ParamSpec {
     pub name: String,
     /// None = auto from bounds. Some(v) = explicit natural-scale rw_sd.
     pub rw_sd: Option<f64>,
-    /// None = auto from param_kind. Some("log") = override.
-    pub transform: Option<String>,
     /// Perturb only at t=0 (the IF2 schedule for an initial-state
     /// parameter). See `EstimatedParam::perturb_only_at_t0`.
     pub perturb_only_at_t0: bool,
@@ -1400,13 +1335,10 @@ pub fn build_if2_params_from_specs(
         // init samplers) AND through the `Transform::{Log, Logit}` clamp
         // bounds (used by IF2 to keep particles in the search box).
         let (lo, hi) = resolve_search_box(&spec.name, spec.bounds, ir_param)?;
-        check_transform_keeps_box(
-            &spec.name, spec.transform.as_deref(), (lo, hi), kind_support(ir_param))?;
 
-        // Transform: spec override > param_kind > fallback. Built with
-        // the resolved (lo, hi) so the clamp bounds match the search box.
-        let transform = derive_transform_with_bounds(
-            ir_param, spec.transform.as_deref(), (lo, hi));
+        // Transform: param_kind > fallback. Built with the resolved (lo, hi)
+        // so the clamp bounds match the search box.
+        let transform = derive_transform_with_bounds(ir_param, (lo, hi));
 
         // rw_sd: spec explicit > auto from resolved bounds
         let rw_sd = spec.rw_sd
@@ -3663,9 +3595,6 @@ pub fn validate_prior_transform_compat(
                  model or `bounds = [lo, hi]` to `[estimate.{}]`.", name, name));
         }
 
-        let transform_override = estimate.get(name)
-            .and_then(|e| e.transform.as_ref())
-            .map(|t| t.as_str());
         // The engine's transform is built from the fit box
         // ([`build_if2_params_from_specs`]), so the check reads that one, not
         // the model's: they differ where a fit box changes the transform's
@@ -3673,7 +3602,7 @@ pub fn validate_prior_transform_compat(
         // where its model box gives Log).
         let fit_bounds = estimate.get(name).and_then(|e| e.bounds);
         let search_box = resolve_search_box(name, fit_bounds, ir_param)?;
-        let transform = derive_transform_with_bounds(ir_param, transform_override, search_box);
+        let transform = derive_transform_with_bounds(ir_param, search_box);
         let (prior, source) = resolve_prior(name, estimate, model);
 
         let is_log   = matches!(transform, Transform::Log { .. });
@@ -3693,8 +3622,7 @@ pub fn validate_prior_transform_compat(
         let err = |needs: &str| Err(format!(
             "parameter '{}': prior {} is incompatible with transform {}; \
              {} priors require a {} transform. Either fix the param_kind \
-             in the model (or the `transform` override in fit.toml), or \
-             pick a different prior.\n  (prior source: {})",
+             in the model, or pick a different prior.\n  (prior source: {})",
             name, prior_name, transform_name, support_desc, needs, source,
         ));
 
@@ -4400,7 +4328,7 @@ mod tests {
         let est_with_normal = |name: &str, mean: f64, sd: f64| {
             let mut m: IndexMap<String, EstimateSpecV2> = IndexMap::new();
             m.insert(name.to_string(), EstimateSpecV2 {
-                bounds: Some((0.01, 2.0)), transform: None,
+                bounds: Some((0.01, 2.0)), 
                 prior: Some(crate::fit::config_v2::EstimatePriorSpec::Dist(
                     PriorDist::Normal(NormalPrior { mean, sd }))),
                 perturb_only_at_t0: false, rw_sd: None, start: None,
@@ -4486,7 +4414,7 @@ mod tests {
         let model = model_with_param(p);
         let mut est: IndexMap<String, EstimateSpecV2> = IndexMap::new();
         est.insert("beta".into(), EstimateSpecV2 {
-            bounds: Some((0.05, 1.0)), transform: None,
+            bounds: Some((0.05, 1.0)), 
             prior: Some(EstimatePriorSpec::UniformOverBounds {
                 uniform: UniformOverBoundsMarker {} }),
             perturb_only_at_t0: false, rw_sd: None, start: None });
@@ -4533,19 +4461,18 @@ mod tests {
         let model = model_with_param(p);
         let mut est: IndexMap<String, EstimateSpecV2> = IndexMap::new();
         est.insert("kappa".into(), EstimateSpecV2 {
-            bounds: Some((1e-5, 1e-2)), transform: None, prior: None,
+            bounds: Some((1e-5, 1e-2)), prior: None,
             perturb_only_at_t0: false, rw_sd: None, start: None });
 
         // rate param_kind → Log transform → ok.
         assert!(validate_prior_transform_compat(&est, &model).is_ok(),
             "log_uniform on a rate param (→Log) must validate");
 
-        // Force a non-Log transform → must be rejected, naming the fix.
-        // (EstimateSpecV2.transform is the fit-config Transform, distinct from
-        // the IR's Transform on the parameter value.)
-        est.get_mut("kappa").unwrap().transform =
-            Some(crate::fit::config_v2::Transform::Identity);
-        let err = validate_prior_transform_compat(&est, &model).unwrap_err();
+        // A `real` on the same box takes the scaled logit → must be rejected,
+        // naming the fix.
+        let mut real = model.clone();
+        real.parameters[0].param_kind = Some(ParamKind::Real);
+        let err = validate_prior_transform_compat(&est, &real).unwrap_err();
         assert!(err.contains("log_uniform") && err.contains("Log"),
             "error must name log_uniform + the required Log transform: {}", err);
     }
@@ -4571,7 +4498,7 @@ mod tests {
         let est_tn = |lo: f64, hi: f64, blo: f64, bhi: f64| {
             let mut m: IndexMap<String, EstimateSpecV2> = IndexMap::new();
             m.insert("take".into(), EstimateSpecV2 {
-                bounds: Some((blo, bhi)), transform: None,
+                bounds: Some((blo, bhi)), 
                 prior: Some(EstimatePriorSpec::Dist(PriorDist::TruncatedNormal(
                     TruncatedNormalPrior { mean: 0.7, sd: 0.2, lower: lo, upper: hi }))),
                 perturb_only_at_t0: false, rw_sd: None, start: None });
@@ -4896,7 +4823,7 @@ dt = 1.0
         // Override beta with a much narrower normal prior; leave gamma alone.
         let mut estimate: IndexMap<String, EstimateSpecV2> = IndexMap::new();
         estimate.insert("beta".to_string(), EstimateSpecV2 {
-            bounds: Some((0.01, 5.0)), transform: None,
+            bounds: Some((0.01, 5.0)), 
             prior: Some(crate::fit::config_v2::EstimatePriorSpec::Dist(
                 PriorDist::Normal(NormalPrior { mean: 0.25, sd: 0.05 }))),
             perturb_only_at_t0: false, rw_sd: None, start: None,
@@ -5117,7 +5044,6 @@ dt = 1.0
         let specs = vec![ParamSpec {
             name: "beta".into(),
             rw_sd: None,
-            transform: None,
             perturb_only_at_t0: false,
             bounds: Some((0.1, 0.5)),  // tightened
         }];
@@ -5138,7 +5064,6 @@ dt = 1.0
         let specs = vec![ParamSpec {
             name: "beta".into(),
             rw_sd: None,
-            transform: None,
             perturb_only_at_t0: false,
             bounds: Some((1e-3, 0.5)),
         }];
@@ -5161,7 +5086,6 @@ dt = 1.0
         let specs = vec![ParamSpec {
             name: "beta".into(),
             rw_sd: None,
-            transform: None,
             perturb_only_at_t0: false,
             bounds: Some((-0.5, 2.0)),  // wider than model — must reject
         }];
@@ -5180,7 +5104,6 @@ dt = 1.0
         let specs = vec![ParamSpec {
             name: "beta".into(),
             rw_sd: None,
-            transform: None,
             perturb_only_at_t0: false,
             bounds: None,
         }];
@@ -5203,11 +5126,11 @@ dt = 1.0
         let (model, compiled) = make_one_param_model("beta", 1e-6, 1.0, Some(ir::parameter::ParamKind::Rate));
         let base_params = compiled.default_params.clone();
         let wide = vec![ParamSpec {
-            name: "beta".into(), rw_sd: None, transform: None, perturb_only_at_t0: false,
+            name: "beta".into(), rw_sd: None, perturb_only_at_t0: false,
             bounds: None,  // model bounds [1e-6, 1.0]
         }];
         let tight = vec![ParamSpec {
-            name: "beta".into(), rw_sd: None, transform: None, perturb_only_at_t0: false,
+            name: "beta".into(), rw_sd: None, perturb_only_at_t0: false,
             bounds: Some((0.1, 0.5)),
         }];
         let r_wide  = build_if2_params_from_specs(&model, &compiled, &base_params, &wide).unwrap();
@@ -5244,7 +5167,6 @@ dt = 1.0
         let specs = vec![ParamSpec {
             name: "tau".into(),
             rw_sd: None,
-            transform: None,
             perturb_only_at_t0: false,
             bounds: Some((0.0, 55.0)),
         }];
@@ -5273,7 +5195,6 @@ dt = 1.0
         let specs = vec![ParamSpec {
             name: "tau".into(),
             rw_sd: None,
-            transform: None,
             perturb_only_at_t0: false,
             bounds: Some((-30.0, 30.0)),
         }];
@@ -5302,8 +5223,8 @@ dt = 1.0
         };
         // (0.0, INFINITY) is the resolved (lo, hi) when no bounds exist
         // (see build_if2_params_from_specs `(None, None) => (0.0, INF)`).
-        let t_real = derive_transform_with_bounds(&real_param, None, (0.0, f64::INFINITY));
-        let t_instant = derive_transform_with_bounds(&instant_param, None, (0.0, f64::INFINITY));
+        let t_real = derive_transform_with_bounds(&real_param, (0.0, f64::INFINITY));
+        let t_instant = derive_transform_with_bounds(&instant_param, (0.0, f64::INFINITY));
         assert!(matches!(t_real, Transform::None),
             "unbounded real must stay None, got {:?}", t_real);
         assert!(matches!(t_instant, Transform::None),
@@ -5318,9 +5239,9 @@ dt = 1.0
     // never reach its negative part). The scaled logit maps `[lo, hi]`
     // whatever the sign of `lo`, so it is the transform for every such box.
 
-    fn spec_for(name: &str, lo: f64, hi: f64, transform: Option<&str>) -> ParamSpec {
+    fn spec_for(name: &str, lo: f64, hi: f64) -> ParamSpec {
         ParamSpec {
-            name: name.into(), rw_sd: None, transform: transform.map(String::from),
+            name: name.into(), rw_sd: None,
             perturb_only_at_t0: false, bounds: Some((lo, hi)),
         }
     }
@@ -5333,7 +5254,7 @@ dt = 1.0
             "phi", -120.0, 120.0, Some(ir::parameter::ParamKind::Duration));
         let base = compiled.default_params.clone();
         let r = build_if2_params_from_specs(
-            &model, &compiled, &base, &[spec_for("phi", -120.0, 120.0, None)]).expect("ok");
+            &model, &compiled, &base, &[spec_for("phi", -120.0, 120.0)]).expect("ok");
         assert!(matches!(r[0].transform, Transform::Logit { lo, hi } if lo == -120.0 && hi == 120.0),
             "a duration boxed to [-120, 120] must get the scaled logit, got {:?}", r[0].transform);
     }
@@ -5345,7 +5266,7 @@ dt = 1.0
             "d", 1.0, 30.0, Some(ir::parameter::ParamKind::Duration));
         let base = compiled.default_params.clone();
         let r = build_if2_params_from_specs(
-            &model, &compiled, &base, &[spec_for("d", 1.0, 30.0, None)]).expect("ok");
+            &model, &compiled, &base, &[spec_for("d", 1.0, 30.0)]).expect("ok");
         assert!(matches!(r[0].transform, Transform::Log { .. }), "got {:?}", r[0].transform);
     }
 
@@ -5356,7 +5277,7 @@ dt = 1.0
         let (model, compiled) = make_one_param_model("c", -1.0, 1.0, None);
         let base = compiled.default_params.clone();
         let r = build_if2_params_from_specs(
-            &model, &compiled, &base, &[spec_for("c", -1.0, 1.0, None)]).expect("ok");
+            &model, &compiled, &base, &[spec_for("c", -1.0, 1.0)]).expect("ok");
         assert!(matches!(r[0].transform, Transform::Logit { lo, hi } if lo == -1.0 && hi == 1.0),
             "got {:?}", r[0].transform);
     }
@@ -5367,33 +5288,8 @@ dt = 1.0
         use ir::parameter::Parameter;
         let p = Parameter { name: "c".into(), value: ir::parameter::ParamValue::Fixed { value: 0.0 },
             param_kind: None, param_dim: None };
-        let t = derive_transform_with_bounds(&p, None, (-1.0, f64::INFINITY));
+        let t = derive_transform_with_bounds(&p, (-1.0, f64::INFINITY));
         assert!(matches!(t, Transform::None), "got {:?}", t);
-    }
-
-    /// An explicit `transform = "identity"` on a box finite at both ends is
-    /// refused: the identity transform cannot keep the parameter inside.
-    #[test]
-    fn explicit_identity_with_finite_box_is_refused() {
-        let (model, compiled) = make_one_param_model(
-            "c", 0.0, 1.0, Some(ir::parameter::ParamKind::Real));
-        let base = compiled.default_params.clone();
-        let err = build_if2_params_from_specs(
-            &model, &compiled, &base, &[spec_for("c", 0.0, 1.0, Some("identity"))])
-            .expect_err("identity on [0, 1] must be refused");
-        assert!(err.contains("identity transform does not keep"), "{err}");
-        assert!(err.contains("Drop `transform`"), "{err}");
-    }
-
-    /// With an infinite end there is no finite box, and on a kind that
-    /// admits the whole line (`support = None`) the identity transform stays
-    /// available.
-    #[test]
-    fn explicit_identity_with_half_infinite_box_is_allowed() {
-        assert!(check_transform_keeps_box("c", Some("identity"), (0.0, f64::INFINITY), None).is_ok());
-        assert!(check_transform_keeps_box("c", Some("identity"), (f64::NEG_INFINITY, 3.0), None).is_ok());
-        assert!(check_transform_keeps_box("c", Some("identity"), (0.0, 1.0), None).is_err());
-        assert!(check_transform_keeps_box("c", None, (0.0, 1.0), None).is_ok());
     }
 
     // ── `probability` carries [0, 1] with no `in [...]` (gh#763) ─────
@@ -5424,7 +5320,7 @@ dt = 1.0
 
     fn unbounded_spec(name: &str, bounds: Option<(f64, f64)>) -> ParamSpec {
         ParamSpec {
-            name: name.into(), rw_sd: None, transform: None,
+            name: name.into(), rw_sd: None, 
             perturb_only_at_t0: false, bounds,
         }
     }
@@ -5438,7 +5334,7 @@ dt = 1.0
         let (model, _) = make_unbounded_param_model(
             "rho", 0.5, ir::parameter::ParamKind::Probability);
         match derive_transform_with_bounds(
-            &model.parameters[0], None, default_search_box(&model.parameters[0])) {
+            &model.parameters[0], default_search_box(&model.parameters[0])) {
             Transform::Logit { lo, hi } => {
                 assert_eq!((lo, hi), (0.0, 1.0),
                     "an undeclared `probability` must be a logit over [0, 1]");
@@ -5522,7 +5418,7 @@ dt = 1.0
     fn beta_prior_is_admitted_on_an_undeclared_probability_but_not_on_a_rate() {
         use super::super::config_v2::{EstimatePriorSpec, EstimateSpecV2};
         let beta_spec = || EstimateSpecV2 {
-            bounds: None, transform: None,
+            bounds: None, 
             prior: Some(EstimatePriorSpec::Dist(ir::parameter::PriorDist::Beta(
                 ir::parameter::BetaPrior { alpha: 2.0, beta: 5.0 }))),
             perturb_only_at_t0: false, rw_sd: None, start: Some(0.5),
@@ -5564,12 +5460,12 @@ dt = 1.0
         })
     }
 
-    fn est_with(name: &str, bounds: Option<(f64, f64)>, transform: Option<super::super::config_v2::Transform>)
+    fn est_with(name: &str, bounds: Option<(f64, f64)>)
         -> indexmap::IndexMap<String, super::super::config_v2::EstimateSpecV2>
     {
         let mut m = indexmap::IndexMap::new();
         m.insert(name.to_string(), super::super::config_v2::EstimateSpecV2 {
-            bounds, transform, prior: None,
+            bounds, prior: None,
             perturb_only_at_t0: false, rw_sd: Some(0.3), start: Some(0.4) });
         m
     }
@@ -5590,7 +5486,7 @@ dt = 1.0
     fn log_normal_rate_with_a_fit_box_below_zero_is_refused() {
         use ir::parameter::ParamKind::Rate;
         let model = model_with_prior("phi", Some(Rate), None, log_normal(-1.0, 0.5));
-        let err = validate_prior_transform_compat(&est_with("phi", Some((-1.0, 1.0)), None), &model)
+        let err = validate_prior_transform_compat(&est_with("phi", Some((-1.0, 1.0))), &model)
             .expect_err("a rate boxed to [-1, 1] must be refused");
         assert!(err.contains("phi") && err.contains("[-1, 1]") && err.contains("[0, ∞)"),
             "the refusal must name the parameter, the box and the support: {err}");
@@ -5636,7 +5532,7 @@ dt = 1.0
     #[test]
     fn prior_check_reads_the_transform_of_the_fit_box() {
         let model = model_with_prior("phi", None, None, log_normal(-1.0, 0.5));
-        let err = validate_prior_transform_compat(&est_with("phi", Some((-1.0, 1.0)), None), &model)
+        let err = validate_prior_transform_compat(&est_with("phi", Some((-1.0, 1.0))), &model)
             .expect_err("log_normal on the fit box's scaled logit must be refused");
         assert!(err.contains("log_normal") && err.contains("Logit"), "{err}");
 
@@ -5644,7 +5540,7 @@ dt = 1.0
         // but a fit box inside [1, 100] is searched on Log, which is right.
         let model = model_with_prior("d", Some(ir::parameter::ParamKind::Duration),
             Some((-180.0, 180.0)), log_normal(1.0, 1.0));
-        validate_prior_transform_compat(&est_with("d", Some((1.0, 100.0)), None), &model)
+        validate_prior_transform_compat(&est_with("d", Some((1.0, 100.0))), &model)
             .expect("log_normal on a fit box the engine log-transforms is admitted");
     }
 
@@ -5656,45 +5552,11 @@ dt = 1.0
     fn beta_prior_on_a_narrowed_probability_box_is_admitted_either_way() {
         use ir::parameter::ParamKind::Probability;
         let fit_box = model_with_prior("rho", Some(Probability), None, beta_25());
-        validate_prior_transform_compat(&est_with("rho", Some((0.1, 0.9)), None), &fit_box)
+        validate_prior_transform_compat(&est_with("rho", Some((0.1, 0.9))), &fit_box)
             .expect("beta with a fit-config box [0.1, 0.9]");
         let declared = model_with_prior("rho", Some(Probability), Some((0.1, 0.9)), beta_25());
-        validate_prior_transform_compat(&est_with("rho", None, None), &declared)
+        validate_prior_transform_compat(&est_with("rho", None), &declared)
             .expect("beta with a declared range [0.1, 0.9]");
-    }
-
-    /// Defect B: an override that does not keep the parameter's support or
-    /// its box is refused. `identity` on a `rate` lets 30.8% of draws go
-    /// negative; `log` on a box below zero cannot represent it; `logit` on a
-    /// box with an infinite end is degenerate.
-    #[test]
-    fn transform_overrides_that_do_not_keep_the_support_are_refused() {
-        use ir::parameter::ParamKind::*;
-        let (rate, rate_c) = make_unbounded_param_model("psi", 0.5, Rate);
-        let base = rate_c.default_params.clone();
-        let over = |t: &str, b: Option<(f64, f64)>| ParamSpec {
-            name: "psi".into(), rw_sd: Some(0.1), transform: Some(t.into()),
-            perturb_only_at_t0: false, bounds: b,
-        };
-        let err = build_if2_params_from_specs(&rate, &rate_c, &base, &[over("identity", None)])
-            .expect_err("identity on a rate's [0, ∞) must be refused");
-        assert!(err.contains("psi") && err.contains("identity") && err.contains("[0, ∞)"), "{err}");
-        let err = build_if2_params_from_specs(&rate, &rate_c, &base, &[over("logit", None)])
-            .expect_err("logit on [0, ∞) must be refused");
-        assert!(err.contains("logit"), "{err}");
-        build_if2_params_from_specs(&rate, &rate_c, &base, &[over("log", None)]).expect("log keeps [0, ∞)");
-        build_if2_params_from_specs(&rate, &rate_c, &base, &[over("logit", Some((0.1, 2.0)))])
-            .expect("logit keeps a finite box");
-
-        let (real, real_c) = make_unbounded_param_model("psi", 0.5, Real);
-        let base = real_c.default_params.clone();
-        let err = build_if2_params_from_specs(&real, &real_c, &base, &[over("log", Some((-1.0, 1.0)))])
-            .expect_err("log on a box below zero must be refused");
-        assert!(err.contains("log") && err.contains("[-1, 1]"), "{err}");
-        build_if2_params_from_specs(&real, &real_c, &base, &[over("identity", None)])
-            .expect("identity keeps the whole line");
-        build_if2_params_from_specs(&real, &real_c, &base, &[over("log", Some((0.0, 1.0)))])
-            .expect("log keeps a non-negative box");
     }
 
     /// An automatic step that cannot move its parameter is refused: a log box
@@ -5706,7 +5568,7 @@ dt = 1.0
         let auto = |lo: f64, hi: f64| {
             let (model, compiled) = make_one_param_model("z", lo, hi, Some(Rate));
             let base = compiled.default_params.clone();
-            build_if2_params_from_specs(&model, &compiled, &base, &[spec_for("z", lo, hi, None)])
+            build_if2_params_from_specs(&model, &compiled, &base, &[spec_for("z", lo, hi)])
                 .expect("params")
         };
         let err = refuse_degenerate_auto_rw_sd(&auto(0.0, 2.0), "rw_sd").unwrap_err();

@@ -7,9 +7,10 @@
 //! sampler that does not enforce the box puts the prior's mass outside the box
 //! outside it (32% for `[-1, 1]`); one that enforces it puts none there.
 //!
-//!   1. `identity_transform_on_a_finite_box_is_refused_before_sampling` — an
-//!      explicit `transform = "identity"` with bounds `[0, 1]` is refused under
-//!      PMMH, MH and IF2, and no draw is written.
+//!   1. `a_transform_key_in_estimate_is_refused_at_load` — `[estimate]` has
+//!      no `transform` key; a config that carries one, even the map the
+//!      parameter would get anyway, is refused under PMMH, MH and IF2 naming
+//!      the key, and no draw is written.
 //!   2. `kindless_parameter_with_a_negative_box_stays_inside_it` — a parameter
 //!      with no `param_kind` (IR predating the field) and bounds `[-1, 1]`
 //!      fell through to no transform; every PMMH and MH draw and every IF2
@@ -179,22 +180,21 @@ fn assert_inside(vals: &[f64], lo: f64, hi: f64, what: &str) {
 const C_REAL: &str = "  c : real ~ normal(mu = 0.0, sigma = 1.0)";
 
 #[test]
-fn identity_transform_on_a_finite_box_is_refused_before_sampling() {
+fn a_transform_key_in_estimate_is_refused_at_load() {
     if camdlc_bin().is_none() {
         return;
     }
-    let tmp = tempdir("identity");
-    let ir = compile(&tmp.0, "ident", &model_src(C_REAL));
+    let tmp = tempdir("transform_key");
+    let ir = compile(&tmp.0, "ident", &model_src("  c : rate ~ normal(mu = 0.0, sigma = 1.0)"));
     for (method, tag) in [(PMMH, "pmmh"), (MH, "mh"), (IF2, "if2")] {
-        let (out, results) =
-            run_fit(&tmp.0, &ir, "c = { bounds = [0, 1], start = 0.5, transform = \"identity\" }", method, tag);
+        // `log` on a rate's [0, 1] box is the map the parameter gets without
+        // the key; it is refused all the same, because the key is gone.
+        let (out, results) = run_fit(
+            &tmp.0, &ir, "c = { bounds = [0, 1], start = 0.5, rw_sd = 0.1, transform = \"log\" }",
+            method, tag);
         let err = stderr(&out);
-        assert!(!out.status.success(), "{tag}: identity on [0, 1] must be refused; stderr=\n{err}");
-        assert!(
-            err.contains("identity transform does not keep a parameter inside finite bounds"),
-            "{tag}: {err}"
-        );
-        assert!(err.contains("Drop `transform`"), "{tag}: {err}");
+        assert!(!out.status.success(), "{tag}: a `transform` key must be refused; stderr=\n{err}");
+        assert!(err.contains("unknown field `transform`"), "{tag}: {err}");
         assert!(find_all(&results, "draws.tsv").is_empty(), "{tag}: refused before sampling");
         assert!(find_all(&results, "parameter_traces.tsv").is_empty(), "{tag}: refused before sampling");
     }

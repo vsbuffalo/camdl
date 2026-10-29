@@ -295,7 +295,6 @@ mod tests {
     fn mk_estimate_spec(prior: Option<PriorDist>) -> EstimateSpecV2 {
         EstimateSpecV2 {
             bounds: Some((0.01, 2.0)),
-            transform: None,
             prior: prior.map(crate::fit::config_v2::EstimatePriorSpec::Dist),
             perturb_only_at_t0: false,
             rw_sd: None,

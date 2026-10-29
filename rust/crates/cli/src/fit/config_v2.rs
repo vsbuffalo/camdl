@@ -582,11 +582,6 @@ pub struct EstimateSpecV2 {
     #[serde(default)]
     pub bounds: Option<(f64, f64)>,
 
-    /// Transform for inference. If omitted, inferred from the parameter's
-    /// declared type in the .camdl file.
-    #[serde(default)]
-    pub transform: Option<Transform>,
-
     /// Prior distribution. Required for Bayesian methods (PGAS, PMMH).
     /// Optional for MLE (IF2 ignores priors).
     ///
@@ -623,28 +618,6 @@ pub struct EstimateSpecV2 {
     /// model's declared value, else a transform-aware draw within the bounds.
     #[serde(default)]
     pub start: Option<f64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Transform {
-    Log,
-    Logit,
-    Identity,
-}
-
-impl Transform {
-    /// String form expected by `runner::derive_transform_with_bounds`'s
-    /// `transform_override` argument. The runner still threads
-    /// transforms as `Option<&str>` internally; this is the
-    /// thin v2-typed → str adapter so callers don't allocate.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Transform::Log => "log",
-            Transform::Logit => "logit",
-            Transform::Identity => "identity",
-        }
-    }
 }
 
 // Prior specification for `[estimate.<name>.prior]` is `ir::parameter::PriorDist`.
@@ -2602,26 +2575,6 @@ impl FitConfig {
             lines.join("\n"), kind.as_str()))
     }
 
-    /// Refuse an explicit `transform` override that does not keep the search
-    /// box or the kind's support ([`super::runner::check_transform_keeps_box`]),
-    /// under every method, before a leaf is claimed.
-    ///
-    /// The box is the one the engine searches
-    /// ([`super::runner::resolve_search_box`]): fit.toml bounds, else the
-    /// model's declared range, else the kind's. The same check runs again
-    /// where the engine builds its parameters, so no path skips it.
-    pub fn validate_identity_transforms(&self, model: &ir::Model) -> Result<(), String> {
-        for (name, spec) in &self.problem.estimate {
-            let Some(p) = model.parameters.iter().find(|p| p.name == *name) else { continue };
-            // A box the engine would refuse is the engine's error to report.
-            let Ok(bx) = super::runner::resolve_search_box(name, spec.bounds, p) else { continue };
-            super::runner::check_transform_keeps_box(
-                name, spec.transform.as_ref().map(|t| t.as_str()), bx,
-                super::runner::kind_support(p))?;
-        }
-        Ok(())
-    }
-
     /// Refuse, under PMMH and MH, an estimated hierarchical leaf whose search
     /// box cuts into the support of its prior p(leaf | hyperparameter).
     ///
@@ -2654,9 +2607,8 @@ impl FitConfig {
             }
             let Some(p) = model.parameters.iter().find(|p| p.name == *name) else { continue };
             let Some(h) = p.hierarchical() else { continue };
-            let override_str = spec.transform.as_ref().map(|t| t.as_str());
             let Ok(bx) = super::runner::resolve_search_box(name, spec.bounds, p) else { continue };
-            let kept = match super::runner::derive_transform_with_bounds(p, override_str, bx) {
+            let kept = match super::runner::derive_transform_with_bounds(p, bx) {
                 Transform::Log { lo, hi } | Transform::Logit { lo, hi } => (lo, hi),
                 Transform::None => continue,
             };
@@ -5497,7 +5449,6 @@ cooling = 0.9
         for name in names {
             m.insert((*name).to_string(), EstimateSpecV2 {
                 bounds: None,
-                transform: None,
                 prior: None,
                 perturb_only_at_t0: false,
                 rw_sd: None,

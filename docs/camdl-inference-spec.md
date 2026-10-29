@@ -102,12 +102,6 @@ I0 = { perturb_only_at_t0 = true }
 # Optional: override starting value (default: from model)
 # sigma = { start = 0.1 }
 
-# Optional: override transform (default: derived from parameter type and
-# bounds, §3.2). An override that does not keep the bounds or the kind's
-# support is refused: "identity" on bounds finite at both ends or on a kind
-# with a finite end, "log" on bounds below zero, "logit" on an infinite end.
-# R0 = { rw_sd = 5.0, transform = "log" }
-
 # Optional: narrow the search region (default: full model bounds). Where the
 # model declares no range, bounds may narrow the kind's support but not leave it.
 # R0 = { rw_sd = 5.0, bounds = [30.0, 80.0] }

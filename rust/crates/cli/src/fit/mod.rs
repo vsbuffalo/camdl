@@ -507,10 +507,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
-    config.validate_identity_transforms(&model).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    });
     config.validate_hierarchical_leaf_boxes(&model).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);

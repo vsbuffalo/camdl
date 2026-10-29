@@ -108,7 +108,6 @@ pub struct Estimated {
     pub search: SearchBox,
     /// Clamps to `search`.
     pub transform: Transform,
-    pub transform_from: TransformFrom,
     /// Read by the Bayesian methods only; always recorded.
     pub prior: ResolvedPrior,
     /// The prior in the canonical `family(arg=value, ...)` form, for the
@@ -116,13 +115,6 @@ pub struct Estimated {
     pub prior_text: String,
     /// `[estimate].start`, if written.
     pub start: Option<f64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TransformFrom {
-    FitConfig,
-    Kind,
 }
 
 /// How a `[fixed]` entry reached the fit config.
@@ -390,7 +382,6 @@ impl Partition {
                     search: [Bound(est.search.lower), Bound(est.search.upper)],
                     search_from: est.search.from,
                     transform: transform_tag(&est.transform).to_string(),
-                    transform_from: est.transform_from,
                     prior: PriorRecord {
                         dist: est.prior_text.clone(),
                         from: est.prior.source,
@@ -557,7 +548,6 @@ pub enum ParamRecord {
         search: [Bound; 2],
         search_from: BoxFrom,
         transform: String,
-        transform_from: TransformFrom,
         prior: PriorRecord,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start: Option<f64>,
@@ -1047,10 +1037,8 @@ fn estimated(
         (None, None) => BoxFrom::Fallback,
     };
     let search = SearchBox { lower, upper, from };
-    let given = spec.and_then(|s| s.transform.as_ref()).map(|t| t.as_str());
     let transform = crate::fit::runner::derive_transform_with_bounds(
-        p, given, (search.lower, search.upper));
-    let transform_from = if given.is_some() { TransformFrom::FitConfig } else { TransformFrom::Kind };
+        p, (search.lower, search.upper));
     let prior = crate::fit::priors_precedence::resolve_priors_with_precedence(
         std::slice::from_ref(&p.name), inputs.fit_estimate, inputs.model,
     ).remove(0);
@@ -1067,7 +1055,6 @@ fn estimated(
         support,
         search,
         transform,
-        transform_from,
         prior,
         prior_text,
         start: spec.and_then(|s| s.start),

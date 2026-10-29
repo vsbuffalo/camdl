@@ -1897,7 +1897,7 @@ mod tests {
             None);
         p.param_kind = Some(kind);
         let (lower, upper) = crate::fit::runner::resolve_search_box("shift", None, &p).unwrap();
-        let transform = crate::fit::runner::derive_transform_with_bounds(&p, None, (lower, upper));
+        let transform = crate::fit::runner::derive_transform_with_bounds(&p, (lower, upper));
         let resolved = mk_resolved(vec![p], &["shift"]);
         let spec = EstimatedParam {
             name: "shift".into(), index: 0, initial: 0.5, rw_sd: 0.1, transform,

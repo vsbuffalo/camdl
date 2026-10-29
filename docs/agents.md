@@ -421,9 +421,10 @@ stratified models are the common case (an empty patch's force-of-infection is
 `0 / 0`). Write `cond(N > 0, beta * I / N, 0)` rather than relying on
 silent-zero (the runtime no longer silently zeros — it errors).
 
-**Reparameterise to natural support.** Use `transform = "log"` for rates and
-positives, `transform = "logit"` for probabilities. The MCMC moves on the
-transformed scale; bounds are enforced by construction.
+**Reparameterise to natural support.** Declare each parameter's kind (`rate`,
+`probability`, …) and its range; the transform follows from them, and there is
+no override. The MCMC moves on the transformed scale; bounds are enforced by
+construction.
 
 **A `fit.toml` `bounds` may only _narrow_ the model, never widen it.** The
 model's `parameters { p : rate in [lo, hi] }` range is the scientific claim

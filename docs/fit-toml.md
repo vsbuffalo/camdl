@@ -21,7 +21,7 @@ camdl = "model.camdl"
 cases = "data/cases.tsv"
 
 [estimate]                        # the parameters to infer
-beta  = { bounds = [0.001, 0.5], start = 0.04, transform = "log",
+beta  = { bounds = [0.001, 0.5], start = 0.04,
           prior = { log_normal = { mu = -2.0, sigma = 1.0 } } }
 gamma = { bounds = [0.01,  1.0], start = 0.12,
           prior = { log_normal = { mu = -1.2, sigma = 0.5 } } }
@@ -78,14 +78,13 @@ the synthetic block records the truth a recovery check reads.
 
 **`[estimate]`** — the parameters to infer. Each value is an inline table:
 
-| key                                          | meaning                                                                                                                                                                                                                                                            |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `bounds = [lo, hi]`                          | search range. _Optional_ — defaults to the model's `parameters { p : rate in [lo,hi] }` range; a `fit.toml` `bounds` may only **narrow** it, never loosen.                                                                                                         |
-| `start = X`                                  | the base starting value. Optional — defaults to the model's declared value, else a draw from bounds. See "Where a chain starts" below.                                                                                                                             |
-| `prior = { … }`                              | prior distribution. **Required** for a `pgas`/`pmmh`/`mh` method; `if2` ignores it. See "Priors" below.                                                                                                                                                            |
-| `transform = "log" \| "logit" \| "identity"` | inference-scale transform. Optional — inferred from the parameter's declared type and its bounds; every bounds finite at both ends gets a transform that keeps the parameter inside them. An override that keeps neither, or not the kind's support, is refused.   |
-| `perturb_only_at_t0 = true`                  | an initial-state parameter (e.g. `s0`, `i0`) — perturbed at t=0 only, never at an observation. It is IF2's perturbation schedule, so only `if2` accepts it: any other method refuses the config at load rather than run without it.                                |
-| `rw_sd = X`                                  | IF2 per-parameter random-walk SD. Optional — auto-scaled from bounds. `pmmh` and `mh` also read it: five times it, on the transformed scale, is the initial proposal SD (the adaptive proposal takes over from there). `pgas` and the `nl-*` optimizers ignore it. |
+| key                         | meaning                                                                                                                                                                                                                                                            |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bounds = [lo, hi]`         | search range. _Optional_ — defaults to the model's `parameters { p : rate in [lo,hi] }` range; a `fit.toml` `bounds` may only **narrow** it, never loosen.                                                                                                         |
+| `start = X`                 | the base starting value. Optional — defaults to the model's declared value, else a draw from bounds. See "Where a chain starts" below.                                                                                                                             |
+| `prior = { … }`             | prior distribution. **Required** for a `pgas`/`pmmh`/`mh` method; `if2` ignores it. See "Priors" below.                                                                                                                                                            |
+| `perturb_only_at_t0 = true` | an initial-state parameter (e.g. `s0`, `i0`) — perturbed at t=0 only, never at an observation. It is IF2's perturbation schedule, so only `if2` accepts it: any other method refuses the config at load rather than run without it.                                |
+| `rw_sd = X`                 | IF2 per-parameter random-walk SD. Optional — auto-scaled from bounds. `pmmh` and `mh` also read it: five times it, on the transformed scale, is the initial proposal SD (the adaptive proposal takes over from there). `pgas` and the `nl-*` optimizers ignore it. |
 
 **`[fixed]`** — `param = value` for every model parameter you are _not_
 estimating. camdl requires every declared parameter to be either estimated or

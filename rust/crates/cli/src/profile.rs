@@ -877,7 +877,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // Specs honour the fit-toml `[estimate]` block when supplied
     // (gh#73): bounds, transform, and perturb_only_at_t0 flow through to
     // `build_if2_params_from_specs`'s fit-toml-bounds-within-model
-    // resolver. `rw_sd` and `transform` from CLI still win when both
+    // resolver. `rw_sd` from CLI still wins when both
     // sides declare them (CLI `--rw-sd` is the per-invocation
     // override; fit toml's `rw_sd` is the artifact default).
     let specs: Vec<crate::fit::runner::ParamSpec> = param_names_to_estimate.iter().map(|name| {
@@ -886,7 +886,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             name: name.clone(),
             rw_sd: rw_sd_map_raw.get(name).and_then(|v| *v)
                 .or_else(|| from_fit.and_then(|e| e.rw_sd)),
-            transform: from_fit.and_then(|e| e.transform.as_ref().map(|t| t.as_str().to_string())),
             perturb_only_at_t0:
                 from_fit.map(|e| e.perturb_only_at_t0).unwrap_or(false),
             bounds: from_fit.and_then(|e| e.bounds),
