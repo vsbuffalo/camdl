@@ -1362,7 +1362,7 @@ struct LeafObs {
 fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, String> {
     // 1. Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) →
     //    its segment + config.
-    let resolved = crate::fit::handle::resolve_fit(args.fit()?).map_err(|e| e.to_string())?;
+    let resolved = crate::fit::handle::resolve_fit_run(args.fit()?).map_err(|e| e.to_string())?;
     // The run the draws come from: the one the handle named, else the folder's.
     let run_dir = resolved.run_dir().to_path_buf();
     let crate::fit::handle::ResolvedFit { segment, config, .. } = resolved;
