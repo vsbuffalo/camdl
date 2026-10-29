@@ -3782,6 +3782,17 @@ pub fn run_pgas(
         // falls back to exactly the old forward draw off this same `rng`, which
         // the pass never touches, and is therefore bit-identical to a pre-gh#784
         // run.
+        // A start exactly on a bound has no finite z and is moved inward by
+        // `to_transformed` (below); the chain's θ is that moved point from
+        // the first trajectory on, so the reference, the likelihood, the
+        // prior and the Jacobian are all evaluated at one θ. Any other start
+        // is left as given.
+        for spec in if2_params {
+            if spec.transform.on_an_end(current_params[spec.index]) {
+                current_params[spec.index] =
+                    spec.from_transformed(spec.to_transformed(current_params[spec.index]));
+            }
+        }
         eprintln!("  initializing reference trajectory (unconditional SMC pass, \
                    {} particles)...", config.n_particles);
         let init_t0 = std::time::Instant::now();

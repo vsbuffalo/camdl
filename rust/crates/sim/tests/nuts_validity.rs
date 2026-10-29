@@ -777,3 +777,70 @@ fn pmmh_without_a_likelihood_draws_the_truncated_priors() {
         Truncated::new(&priors[j], *lo, *hi).check(&format!("PMMH {}", p.name), &chains, j);
     }
 }
+
+// ── A start on a bound is one point for every term ─────────────────────────
+
+/// τ on `[1e-6, 2.5]` started exactly on its lower end. The forward map moves
+/// it inward (z ≈ −23.03); the first likelihood must be evaluated at that
+/// moved θ, where the prior and the Jacobian are, not at the bound.
+fn tau_on_its_lower_bound() -> (EstimatedParam, f64) {
+    let mut tau = ep(Transform::for_domain(1e-6, 2.5, true).unwrap());
+    tau.name = "tau".into();
+    tau.index = TAU_IDX;
+    tau.initial = 1e-6;
+    let moved = tau.from_transformed(tau.to_transformed(1e-6));
+    assert!(moved > 1e-6, "precondition: the start is moved inward");
+    (tau, moved)
+}
+
+#[test]
+fn pmmh_scores_a_start_on_a_bound_at_the_moved_point() {
+    use sim::inference::pmmh::{run_pmmh, PMMHConfig};
+    let model = prior_only_model();
+    let (tau, moved) = tau_on_its_lower_bound();
+    let mut base = model.default_params.clone();
+    base[TAU_IDX] = 1e-6;
+    let first: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
+    let eval = |p: &[f64], _: u64| -> Result<f64, sim::error::SimError> {
+        first.lock().unwrap().get_or_insert(p[TAU_IDX]);
+        Ok(0.0)
+    };
+    let config = PMMHConfig {
+        n_steps: 3, n_particles: 1, dt: 1.0, proposal_sd: vec![0.1], adapt: false,
+        adapt_start: 0, adapt_stop: 0, thin: 1, burn_in: 0,
+    };
+    run_pmmh(&[tau], &[Prior::Fixed(Density::Exponential { rate: LAMBDA })], &base, &[], &config,
+        &eval, 1, None, None, "start-on-bound".into()).expect("PMMH run");
+    let got = first.lock().unwrap().expect("the likelihood was evaluated");
+    assert_eq!(got, moved, "the first likelihood was evaluated at τ = {got:e}, not the moved {moved:e}");
+}
+
+#[test]
+fn pgas_starts_a_chain_on_a_bound_at_the_moved_point() {
+    let model = prior_only_model();
+    let (tau, moved) = tau_on_its_lower_bound();
+    let mut base = model.default_params.clone();
+    base[TAU_IDX] = 1e-6;
+    let times: Vec<f64> = (1..=PRIOR_T_END as usize).map(|t| t as f64).collect();
+    let observations: Vec<Observation> = times.iter().map(|&t| Observation { time: t, value: 0.0 }).collect();
+    let obs = all_missing_obs(&model, &times);
+    let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
+        ancestor_sampling: true,
+        n_particles: 4,
+        n_sweeps: 0,
+        burn_in: 0,
+        thin: 1,
+        dt: 1.0,
+        use_nuts: true,
+        dense_mass: true,
+        max_tree_depth: 8,
+        trajectory_warmup: 0,
+        csmc_sweeps_per_nuts: 1,
+        step_policy: sim::schedule::StepPolicy::Snap,
+    };
+    let r = run_pgas(&model, &[tau], &[Prior::Fixed(Density::Exponential { rate: LAMBDA })], &base,
+        &config, &observations, &obs, 1, None, None, "start-on-bound".into()).expect("PGAS run");
+    assert_eq!(r.resume_state.params[TAU_IDX], moved,
+        "the chain's θ is the moved start, the point its prior and Jacobian are evaluated at");
+}
