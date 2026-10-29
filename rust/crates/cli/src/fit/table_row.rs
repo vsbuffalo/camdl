@@ -230,7 +230,7 @@ pub fn build_row(
     let mview = MethodView::from(&method_result);
 
     let stem = stem_from_fit_toml_path(&view.fit_toml_path);
-    let created = parse_iso8601_to_unix(&view.created_at);
+    let created = parse_iso8601_to_unix(&terminal.stage.created_at);
     let age_seconds = match created {
         Some(c) => now_unix - c,
         None => 0,
@@ -240,7 +240,8 @@ pub fn build_row(
         schema: TableRowSchema::current(),
         fit_id: short_hash(&view.fit_hash),
         fit_hash: view.fit_hash.clone(),
-        label: view.label(),
+        // The row's run's own label and time (gh#896), never another run's.
+        label: terminal.stage.label.clone(),
         stem,
         model_identity: view.model_identity.clone(),
         methods: completed_methods,
@@ -261,7 +262,7 @@ pub fn build_row(
         params: mview.params,
         delta_ll_vs_best,
         age_seconds,
-        created_at: view.created_at.clone(),
+        created_at: terminal.stage.created_at.clone(),
         stale: false,
         stale_reason: None,
         quantities: BTreeMap::new(),

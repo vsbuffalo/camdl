@@ -91,9 +91,19 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
             }
             _ => ConfigDiff::identity(&entry.view.fit_hash),
         };
-        match table_row::build_row(&entry.fit_dir, diff, 0.0, now_unix) {
-            Ok(r) => rows.push(r),
-            Err(e) => errors.push(format!("{}: {}", entry.fit_dir.display(), e)),
+        // gh#896: one row per run. A folder holding several runs used to get
+        // one row assembled from more than one of them (the label and time of
+        // one beside the estimates of another). Each row is built from its
+        // leaf's own view, so every cell comes from that one run. A leaf whose
+        // method has no tabulated result (pfilter) has no row.
+        for stage in &entry.view.stages {
+            if !crate::fit::method_result::MethodResult::has_result(stage.method) {
+                continue;
+            }
+            match table_row::build_row(&stage.stage_dir, diff.clone(), 0.0, now_unix) {
+                Ok(r) => rows.push(r),
+                Err(e) => errors.push(format!("{}: {}", stage.stage_dir.display(), e)),
+            }
         }
     }
 
@@ -564,15 +574,15 @@ fn render_json(rows: &[TableRow]) {
 fn render_text(rows: &[TableRow], quantities: &[String]) -> String {
     let mut s = String::new();
     let mut head = format!(
-        "{:<10} {:<22} {:<14} {:<8} {:<7} {:<10} {:>10} {:<13} {:>6}",
-        "fit_id", "label", "stem", "method", "methods", "converged", "best_ll", "ll_type", "age"
+        "{:<10} {:<12} {:<22} {:<14} {:<8} {:<7} {:<10} {:>10} {:<13} {:>6}",
+        "fit_id", "run", "label", "stem", "method", "methods", "converged", "best_ll", "ll_type", "age"
     );
     for q in quantities {
         head.push_str(&format!(" {:>12}", truncate(q, 12)));
     }
     head.push('\n');
     s.push_str(&head);
-    s.push_str(&"-".repeat(111 + quantities.len() * 13));
+    s.push_str(&"-".repeat(124 + quantities.len() * 13));
     s.push('\n');
     if rows.is_empty() {
         s.push_str("(no fits matched)\n");
@@ -591,8 +601,8 @@ fn render_text(rows: &[TableRow], quantities: &[String]) -> String {
         let ll_type = super::loglik::LoglikType::tag_or_unknown(r.loglik_type);
         let age = format_age(r.age_seconds);
         let mut line = format!(
-            "{:<10} {:<22} {:<14} {:<8} {:<7} {:<10} {} {:<13} {:>6}",
-            r.fit_id, truncate(label, 22), truncate(&r.stem, 14),
+            "{:<10} {:<12} {:<22} {:<14} {:<8} {:<7} {:<10} {} {:<13} {:>6}",
+            r.fit_id, short_run(&r.run_id), truncate(label, 22), truncate(&r.stem, 14),
             r.method, truncate(&methods, 7), converged, best, ll_type, age,
         );
         for q in quantities {
@@ -612,13 +622,13 @@ fn render_text(rows: &[TableRow], quantities: &[String]) -> String {
 fn render_md(rows: &[TableRow], quantities: &[String]) -> String {
     let mut s = String::new();
     let mut head =
-        String::from("| fit_id | label | stem | method | methods | converged | best_ll | ll_type | age |");
+        String::from("| fit_id | run | label | stem | method | methods | converged | best_ll | ll_type | age |");
     for q in quantities {
         head.push_str(&format!(" {} |", q));
     }
     head.push('\n');
     s.push_str(&head);
-    let mut sep = String::from("|---|---|---|---|---|---|---|---|---|");
+    let mut sep = String::from("|---|---|---|---|---|---|---|---|---|---|");
     for _ in quantities {
         sep.push_str("---|");
     }
@@ -635,8 +645,8 @@ fn render_md(rows: &[TableRow], quantities: &[String]) -> String {
         let ll_type = super::loglik::LoglikType::tag_or_unknown(r.loglik_type);
         let age = format_age(r.age_seconds);
         let mut line = format!(
-            "| `{}` | {} | `{}` | {} | {} | {} | {} | {} | {} |",
-            r.fit_id, label, r.stem, r.method, methods, converged, best, ll_type, age,
+            "| `{}` | `{}` | {} | `{}` | {} | {} | {} | {} | {} | {} |",
+            r.fit_id, short_run(&r.run_id), label, r.stem, r.method, methods, converged, best, ll_type, age,
         );
         for q in quantities {
             let cell = r
@@ -657,7 +667,7 @@ fn render_csv(rows: &[TableRow], quantities: &[String]) -> String {
     // `loglik_type` is appended last (gh#280), then any `--quantity`
     // columns: CSV is positional, so a new column never shifts an
     // existing one out from under a consumer.
-    let mut head = String::from("fit_id,fit_hash,label,stem,model_identity,method,methods,converged,gate_verdict,best_loglik,max_chain_agreement,max_rhat,acceptance_rate,delta_ll_vs_best,age_seconds,created_at,stale,loglik_type,ess_per_iter,ess_per_sec");
+    let mut head = String::from("fit_id,fit_hash,label,stem,model_identity,method,methods,converged,gate_verdict,best_loglik,max_chain_agreement,max_rhat,acceptance_rate,delta_ll_vs_best,age_seconds,created_at,stale,loglik_type,ess_per_iter,ess_per_sec,run_id");
     for q in quantities {
         head.push(',');
         head.push_str(&csv_field(q));
@@ -680,7 +690,7 @@ fn render_csv(rows: &[TableRow], quantities: &[String]) -> String {
         let epi = r.ess_per_iter.map(|v| format!("{}", v)).unwrap_or_default();
         let eps = r.ess_per_sec.map(|v| format!("{}", v)).unwrap_or_default();
         let mut line = format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             r.fit_id,
             r.fit_hash,
             label,
@@ -701,6 +711,7 @@ fn render_csv(rows: &[TableRow], quantities: &[String]) -> String {
             super::loglik::LoglikType::tag_or_unknown(r.loglik_type),
             epi,
             eps,
+            r.run_id,
         );
         for q in quantities {
             // An absent (uncomputable) cell is an empty field, matching the
@@ -723,6 +734,11 @@ fn csv_field(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// A run id's first 12 hex, the prefix `camdl show` and every handle accept.
+fn short_run(run_id: &str) -> &str {
+    &run_id[..12.min(run_id.len())]
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -839,9 +855,10 @@ mod tests {
     fn csv_appends_loglik_type_column() {
         let csv = render_csv(&[row_with_type(Some(crate::fit::loglik::LoglikType::CompleteData))], &[]);
         let header = csv.lines().next().unwrap();
-        // `loglik_type` (gh#280) then the two efficiency columns are all APPENDED,
-        // in order, so no earlier column ever shifts out from under a consumer.
-        assert!(header.ends_with(",loglik_type,ess_per_iter,ess_per_sec"),
+        // `loglik_type` (gh#280), the two efficiency columns and `run_id`
+        // (gh#896) are all APPENDED, in order, so no earlier column ever shifts
+        // out from under a consumer.
+        assert!(header.ends_with(",loglik_type,ess_per_iter,ess_per_sec,run_id"),
             "appended columns come last, in order: {header}");
         // best_loglik stays where it was — the column count grew, header == row.
         assert_eq!(header.split(',').count(),

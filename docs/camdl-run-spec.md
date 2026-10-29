@@ -3070,7 +3070,7 @@ a run left behind; two work on configs; one is a static capability listing.
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `fit run`     | run the `[method]` of a `fit.toml`                                                                                                                     |
 | `fit summary` | render one fit's convergence verdict, θ̂ table and provenance checks; `--explain` defines each column, `--parameters` adds the model's parameter legend |
-| `fit table`   | walk a results tree and render one row per fit                                                                                                         |
+| `fit table`   | walk a results tree and render one row per run                                                                                                         |
 | `fit diff`    | compare two `fit.toml` configs                                                                                                                         |
 | `fit new`     | scaffold a new `fit.toml` derived from an existing one                                                                                                 |
 | `fit predict` | write the posterior-predictive (predicted-vs-observed) artifact                                                                                        |
@@ -4034,17 +4034,19 @@ $ camdl fit new --from fits/01_mle.toml fits/04_derived.toml
 created fits/04_derived.toml
 ```
 
-`fit table` renders every fit under a results root, one row each:
+`fit table` renders every run under a results root, one row each — a problem
+folder holding several runs has several rows, sharing a `fit_id` and told apart
+by `run` (the run id's first 12 hex), and every cell in a row is that run's own:
 
 ```
 $ camdl fit table results/fits
-fit_id     label                  stem           method   methods converged     best_ll ll_type          age
---------------------------------------------------------------------------------------------------------------
-649b2ecc   <unlabelled>           09_pgas_only   pgas     pgas    no                  — complete_data     4m
-2030ba2b   mle                    01_mle         if2      if2     no              -58.4 if2              11m
-812b33c5   <unlabelled>           08_holdoutfil… if2      if2     no              -48.0 if2              13m
-77595169   scout                  02_scout       if2      if2     no              -58.4 if2              23m
-8e6e8964   ode-mle                05_ode         nl-sbplx nl-sb…  no              -58.9 marginal         23m
+fit_id     run          label                  stem           method   methods converged     best_ll ll_type          age
+---------------------------------------------------------------------------------------------------------------------------
+649b2ecc   ea2edd7cbeb3 <unlabelled>           09_pgas_only   pgas     pgas    no                  — complete_data     4m
+2030ba2b   ec3425f877b3 mle                    01_mle         if2      if2     no              -58.4 if2              11m
+812b33c5   26529d207a4b <unlabelled>           08_holdoutfil… if2      if2     no              -48.0 if2              13m
+77595169   0c6804051770 scout                  02_scout       if2      if2     no              -58.4 if2              23m
+8e6e8964   f3c3c026516b ode-mle                05_ode         nl-sbplx nl-sb…  no              -58.9 marginal         23m
 ```
 
 Labels come from `--label` at run time or from the top-level `camdl label`
@@ -5587,15 +5589,17 @@ prior's source.
 
 ### 13.1 `camdl fit table`
 
-Walks a results tree and renders one row per fit — its method, convergence
-verdict, best log-likelihood and its type, age. The `<ROOT>` argument is
+Walks a results tree and renders one row per run — its run id, method,
+convergence verdict, best log-likelihood and its type, age. Rows of one problem
+share a `fit_id`; the JSON row carries the full `run_id` (table_row schema v3),
+the CSV appends it as the last fixed column. The `<ROOT>` argument is
 **required**.
 
 ```
 $ camdl fit table results/fits
-fit_id     label                  stem           method   methods converged     best_ll ll_type          age
---------------------------------------------------------------------------------------------------------------
-4dadedae   <unlabelled>           fit_pgas       pgas     pgas    yes                 — complete_data    15s
+fit_id     run          label                  stem           method   methods converged     best_ll ll_type          age
+---------------------------------------------------------------------------------------------------------------------------
+4dadedae   9df5b6b9cf23 <unlabelled>           fit_pgas       pgas     pgas    yes                 — complete_data    15s
 ```
 
 Read-only by default: every cell is recovered from the on-disk `run.json` and

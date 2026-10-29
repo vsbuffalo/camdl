@@ -535,3 +535,38 @@ fn the_starts_handle_spelling_is_not_identity() {
         .map(|l| record(l).0).collect();
     assert_eq!(ids.len(), 4, "two scouts and two sourced runs: {ids:?}");
 }
+
+/// `fit table` gives each run its own row, with that run's label, time and
+/// numbers. With two runs in one folder it used to print one row whose label
+/// and time were the newest run's and whose run id and estimates were the
+/// other's.
+#[test]
+fn fit_table_gives_each_run_its_own_row() {
+    let p = Project::new();
+    p.config("post.toml", &pgas(4));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "short"]);
+    p.config("post.toml", &pgas(7));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "long"]);
+    let leaves = p.leaves();
+    assert_eq!(leaves.len(), 2);
+
+    let out = p.run(&["fit", "table", &p.fits().to_string_lossy(), "--format", "json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rows = v["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "one row per run: {v}");
+    for leaf in &leaves {
+        let (id, label, rec) = record(leaf);
+        let row = rows.iter().find(|r| r["run_id"] == id.as_str())
+            .unwrap_or_else(|| panic!("no row for run {id}: {v}"));
+        assert_eq!(row["label"].as_str(), label.as_deref(), "the row's label is its run's");
+        assert_eq!(row["created_at"], rec["provenance"]["created_at"], "and its time");
+    }
+
+    let csv = p.ok(&["fit", "table", &p.fits().to_string_lossy(), "--format", "csv"]);
+    assert!(csv.lines().next().unwrap().split(',').any(|c| c == "run_id"), "{csv}");
+    let txt = p.ok(&["fit", "table", &p.fits().to_string_lossy()]);
+    for leaf in &leaves {
+        assert!(txt.contains(&record(leaf).0[..12]), "the text table names each run:\n{txt}");
+    }
+}
