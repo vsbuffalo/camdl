@@ -551,14 +551,25 @@ pub fn format_hard_verdict(
 pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<(), String> {
     let dir = leaf.to_string_lossy().into_owned();
     use crate::run_meta::FitAlgorithm;
-    let verdict: Option<String> = match FitState::load(&dir) {
+    // A verdict that cannot be read is refused, never read as converged; and
+    // `allow` does not lift it — it accepts a verdict of "not converged", not
+    // a missing one. Every fit method writes fit_state.toml, and `from_mle`
+    // reads its estimate from it.
+    let state = FitState::load(&dir).map_err(|e| format!(
+        "starts source {handle}: cannot read its fit_state.toml, so its convergence \
+         cannot be checked: {e}"))?;
+    let verdict: Option<String> = match &state {
         // An nl-* leaf's `tail_chain_agreement` holds relative ranges, not
         // IF2's Â; it is judged by the optimizer's own recorded verdict.
-        Ok(state) if matches!(
+        state if matches!(
             super::methods::parse_algorithm(&state.method),
             Some(FitAlgorithm::NlSbplx | FitAlgorithm::NlBobyqa | FitAlgorithm::NlLbfgs)
         ) => nlopt_source_verdict(&state),
-        Ok(state) if !state.tail_chain_agreement.is_empty() => {
+        // IF2, and a pre-split IF2 leaf (method `scout` / `refine`) that
+        // carries Â. A one-chain IF2 leaf has no Â and no verdict to read.
+        state if parse_algorithm_is(&state.method, FitAlgorithm::If2)
+            || (super::methods::parse_algorithm(&state.method).is_none()
+                && !state.tail_chain_agreement.is_empty()) => {
             let gate = state.resolved_gate.clone().unwrap_or_default();
             match check_scout_convergence(&state, &gate) {
                 ScoutGateVerdict::Ok => None,
@@ -595,7 +606,17 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
                     params.join(", "))),
             }
         }
-        _ => sampler_source_verdict(leaf),
+        state if matches!(
+            super::methods::parse_algorithm(&state.method),
+            Some(FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Mh)
+        ) => sampler_source_verdict(leaf)
+            .map_err(|e| format!("starts source {handle}: {e}"))?,
+        // A pfilter leaf ran no search: there is nothing to converge.
+        state if parse_algorithm_is(&state.method, FitAlgorithm::Pfilter) => None,
+        state => return Err(format!(
+            "starts source {handle}: its fit_state.toml names method `{}`, which this \
+             camdl cannot judge, so its convergence cannot be checked",
+            state.method)),
     };
     match verdict {
         None => Ok(()),
@@ -608,6 +629,10 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
         }
         Some(msg) => Err(format!("starts source {handle}: {msg}")),
     }
+}
+
+fn parse_algorithm_is(method: &str, want: crate::run_meta::FitAlgorithm) -> bool {
+    super::methods::parse_algorithm(method) == Some(want)
 }
 
 /// An nl-* leaf's verdict: the optimizer's own, recorded at the end of its
@@ -644,22 +669,27 @@ fn nlopt_source_verdict(state: &FitState) -> Option<String> {
     }
 }
 
-/// A sampler leaf's stored verdict, through the same classification
-/// `fit summary` renders. `None` when converged, or when there is no verdict
-/// to read (not a sampler leaf, R̂ never applicable).
-fn sampler_source_verdict(leaf: &Path) -> Option<String> {
+/// A leaf's stored sampler verdict, through the same classification
+/// `fit summary` renders. `Ok(None)` when converged, or when the leaf is not a
+/// sampler or its R̂ was never applicable; `Err` when the record or the method
+/// result cannot be read — an unreadable verdict is not a converged one.
+fn sampler_source_verdict(leaf: &Path) -> Result<Option<String>, String> {
     use super::method_result::{MaxRhat, MethodResult, RHAT_CONVERGED_THRESHOLD};
-    let rec = std::fs::read(leaf.join("run.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<runid::RunRecord>(&b).ok())?;
-    let method = rec.inputs.get("method")?.as_str()?.to_string();
-    let typed = MethodResult::load_from(leaf, &method).ok()?;
+    let bytes = std::fs::read(leaf.join("run.json"))
+        .map_err(|e| format!("cannot read its run.json, so its convergence cannot be checked: {e}"))?;
+    let rec = serde_json::from_slice::<runid::RunRecord>(&bytes)
+        .map_err(|e| format!("cannot parse its run.json, so its convergence cannot be checked: {e}"))?;
+    let method = rec.inputs.get("method").and_then(|m| m.as_str())
+        .ok_or("its run.json names no method, so its convergence cannot be checked")?
+        .to_string();
+    let typed = MethodResult::load_from(leaf, &method)
+        .map_err(|e| format!("cannot load its {method} result, so its convergence cannot be checked: {e}"))?;
     let diag = match &typed {
         MethodResult::Pgas(r) => &r.diagnostics,
         MethodResult::Pmmh(r) => &r.diagnostics,
-        _ => return None,
+        _ => return Ok(None),
     };
-    match diag.max_rhat_status() {
+    Ok(match diag.max_rhat_status() {
         MaxRhat::Reported(v) if v < RHAT_CONVERGED_THRESHOLD => None,
         MaxRhat::Reported(v) => Some(format!(
             "its posterior did not converge: max R̂ = {v:.3}, threshold {RHAT_CONVERGED_THRESHOLD}"
@@ -669,12 +699,49 @@ fn sampler_source_verdict(leaf: &Path) -> Option<String> {
             params.join(", ")
         )),
         MaxRhat::NotApplicable { .. } | MaxRhat::NoParams => None,
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch_leaf(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "camdl_gating_{tag}_{}_{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A source whose verdict cannot be read is refused, not read as
+    /// converged — and `--allow-nonconverged-source` does not lift it: the
+    /// flag accepts a verdict of "not converged", not a missing one.
+    #[test]
+    fn a_source_whose_verdict_cannot_be_read_is_refused() {
+        // fit_state.toml present but corrupt.
+        let corrupt = scratch_leaf("corrupt_state");
+        std::fs::write(corrupt.join("fit_state.toml"), "method = \"pgas\"\nseed = [oops\n").unwrap();
+        for allow in [false, true] {
+            let err = check_source_converged(&corrupt, "@corrupt", allow)
+                .expect_err("an unreadable fit_state.toml is refused");
+            assert!(err.contains("@corrupt") && err.contains("fit_state.toml"), "{err}");
+        }
+        std::fs::remove_dir_all(&corrupt).ok();
+
+        // A sampler leaf whose method result cannot be loaded (its
+        // run.json names pgas, and its summary is missing).
+        let sampler = scratch_leaf("no_summary");
+        let mut st = make_state(&[], &[], &[-60.0, -61.0], -60.0);
+        st.method = "pgas".into();
+        st.save(&sampler.to_string_lossy()).unwrap();
+        std::fs::write(sampler.join("run.json"), "{ not json").unwrap();
+        let err = check_source_converged(&sampler, "@sampler", false)
+            .expect_err("an unreadable run.json is refused");
+        assert!(err.contains("@sampler"), "{err}");
+        std::fs::remove_dir_all(&sampler).ok();
+    }
 
     /// An nl-* leaf whose starts landed far apart. Its stored
     /// `tail_chain_agreement` holds per-parameter RELATIVE RANGES (range over
