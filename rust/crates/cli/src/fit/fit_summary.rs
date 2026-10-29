@@ -163,10 +163,20 @@ fn chain_selection_advisory(
 /// A handle whose directory holds no completed method leaf has nothing to
 /// summarise and exits 1 (gh#896); a leaf directory summarises that one run.
 pub fn cmd_fit_summary(args: &FitSummaryArgs) {
-    // Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) → its
-    // segment directory. summary operates on the directory; it needs no config.
-    let segment = match crate::fit::handle::resolve_fit_segment(&args.fit) {
-        Ok(seg) => seg,
+    // Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) to
+    // what it names. A run handle summarises that run; a problem folder in
+    // which one method has several runs is refused with the runs listed,
+    // rather than one chosen by directory order (gh#896). summary operates on
+    // the directory; it needs no config.
+    use crate::fit::handle::{self, FitTarget};
+    let target = handle::resolve_target(&args.fit).and_then(|t| match t {
+        FitTarget::Leaf(leaf) => Ok(leaf.dir),
+        FitTarget::Segment(seg) => {
+            handle::refuse_several_runs_of_one_method(&args.fit, &seg).map(|()| seg)
+        }
+    });
+    let segment = match target {
+        Ok(dir) => dir,
         Err(e) => {
             eprintln!("error: {}", e);
             std::process::exit(1);

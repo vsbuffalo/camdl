@@ -174,3 +174,68 @@ fn summary_of_a_directory_with_no_run_fails() {
     let out = p.run(&["fit", "summary", &empty.to_string_lossy()]);
     assert!(!out.status.success(), "nothing to summarise must not exit 0:\n{}", text(&out));
 }
+
+fn pgas_from(starts: &str) -> String {
+    format!(
+        "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 2\nparticles = 20\n\
+         sweeps = 4\nburn_in = 1\nthin = 1\nstarts = {starts}"
+    )
+}
+
+/// The problem folder (`results/fits/<stem>-<h8>`) a leaf sits in.
+fn segment_of(leaf: &Path) -> PathBuf {
+    leaf.parent().and_then(Path::parent).unwrap().to_path_buf()
+}
+
+/// One file run twice with a changed `[method]` setting: two runs in one
+/// problem folder, differing in `[method]` alone.
+fn two_runs_of_one_file(p: &Project) -> (PathBuf, Vec<PathBuf>) {
+    p.config("scout.toml", &if2(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    p.config("scout.toml", &if2(3));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    let leaves = p.leaves();
+    assert_eq!(leaves.len(), 2, "premise: two runs");
+    assert_eq!(segment_of(&leaves[0]), segment_of(&leaves[1]), "premise: one problem folder");
+    (segment_of(&leaves[0]), leaves)
+}
+
+/// A handle naming a folder that holds two runs is refused, and the refusal
+/// says what actually sets them apart. It used to say "several seeds or
+/// cells" for two runs with one seed that differ in `[method]`.
+#[test]
+fn an_ambiguous_starts_source_names_what_sets_the_runs_apart() {
+    let p = Project::new();
+    let (segment, leaves) = two_runs_of_one_file(&p);
+    p.config("post.toml", &pgas_from(&format!("{{ from_mle = \"{}\" }}", segment.display())));
+
+    let out = p.run(&["fit", "run", "post.toml", "--seed", "1"]);
+    let all = text(&out);
+    assert!(!out.status.success(), "two candidate runs must be refused:\n{all}");
+    assert!(!all.contains("several seeds or cells"), "the runs share a seed:\n{all}");
+    assert!(all.contains("names 2 runs, which differ in `[method]` settings or `--starts`:"),
+        "the refusal names the axis the runs differ on:\n{all}");
+    assert!(!all.contains("fit seed"), "the seeds are equal:\n{all}");
+    for leaf in &leaves {
+        assert!(all.contains(&leaf.display().to_string()), "lists {}:\n{all}", leaf.display());
+    }
+}
+
+/// `fit summary` of a problem folder holding two runs of one method lists
+/// them and fails instead of reporting the one that sorts first.
+#[test]
+fn summary_of_a_folder_with_two_runs_of_one_method_lists_them() {
+    let p = Project::new();
+    let (segment, leaves) = two_runs_of_one_file(&p);
+
+    let out = p.run(&["fit", "summary", &segment.to_string_lossy()]);
+    let all = text(&out);
+    assert!(!out.status.success(), "a choice between two runs is the user's:\n{all}");
+    for leaf in &leaves {
+        assert!(all.contains(&leaf.display().to_string()), "lists {}:\n{all}", leaf.display());
+    }
+    // Each run is still summarised when named.
+    for leaf in &leaves {
+        p.ok(&["fit", "summary", &leaf.to_string_lossy()]);
+    }
+}

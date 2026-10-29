@@ -443,55 +443,18 @@ pub fn resolve_starts(rule: &ChainStarts, allow_nonconverged: bool) -> Result<Re
     })
 }
 
-/// A fit handle → the one method leaf it names.
-///
-/// A leaf is named exactly by its directory or by a prefix of its own
-/// `run_id` (what `camdl show` resolves); a segment handle — `@label`, a
-/// fit-id prefix, a `fit.toml`, the segment directory — names a leaf only
-/// while the segment holds one, since the label lives on the segment and two
-/// method files with one problem share it.
+/// A fit handle → the one method leaf it names
+/// ([`super::handle::resolve_leaf`]): a leaf directory, a run-id prefix or
+/// `@label` names one run; a problem folder names one only while it holds
+/// one, and holding several is refused with the runs listed and what sets
+/// them apart. A directory holding a `fit_state.toml` is taken as named.
 pub fn resolve_fit_leaf(handle: &str) -> Result<PathBuf, String> {
-    use super::handle::FitRef;
-    match FitRef::classify(handle) {
-        // A leaf directory named directly.
-        FitRef::RunDir(dir) if dir.join("fit_state.toml").is_file() => return Ok(dir),
-        // A leaf `run_id` prefix, before the fit-id prefixes a segment answers to.
-        FitRef::HashPrefix(prefix) => {
-            let root = crate::run_paths::output_root(None, None);
-            let mut leaves = crate::cas_read::resolve_fit_prefix(&root, &prefix);
-            match leaves.len() {
-                0 => {}
-                1 => return Ok(leaves.remove(0).dir),
-                n => {
-                    let listed: Vec<String> =
-                        leaves.iter().map(|l| format!("    {}", l.dir.display())).collect();
-                    return Err(format!(
-                        "{handle} is a prefix of {n} method leaves' run_ids; give more \
-                         characters or the leaf directory:\n{}",
-                        listed.join("\n")
-                    ));
-                }
-            }
-        }
-        _ => {}
-    }
-    let segment = super::handle::resolve_fit_segment(handle).map_err(|e| e.to_string())?;
-    let view = super::fit_view::FitView::read(&segment).ok_or_else(|| {
-        format!("{} is not a completed fit (no method leaf with a run.json)", segment.display())
-    })?;
-    match view.stages.len() {
-        0 => Err(format!("{} holds no completed method leaf", segment.display())),
-        1 => Ok(view.stages[0].stage_dir.clone()),
-        n => {
-            let listed: Vec<String> =
-                view.stages.iter().map(|s| format!("    {}", s.stage_dir.display())).collect();
-            Err(format!(
-                "{handle} resolves to {n} method leaves (several seeds or cells); pass the \
-                 leaf directory to name one:\n{}",
-                listed.join("\n")
-            ))
+    if let super::handle::FitRef::RunDir(dir) = super::handle::FitRef::classify(handle) {
+        if dir.join("fit_state.toml").is_file() {
+            return Ok(dir);
         }
     }
+    super::handle::resolve_leaf(handle).map(|leaf| leaf.dir).map_err(|e| e.to_string())
 }
 
 // ─── Context and entry point ─────────────────────────────────────────────────
