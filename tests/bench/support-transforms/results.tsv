@@ -1,0 +1,743 @@
+fixture	variant	family	c	seed	condition	exit	wall_s	cpu_s	ll_best	ll_mean	n_chains	n_inf	in_basin
+sir	br	logint	2/3	1		0	7.6		-59.72	-60.57	8	0	8
+sir	br	logint	2/3	2		0	11.9		-60.47	-60.91	8	0	7
+sir	br	logint	2/3	3		0	14.0		-60.43	-60.55	8	0	8
+sir	br	logint	1/3	1		0	11.7		-58.44	-61.74	8	0	4
+sir	br	logint	1/3	2		0	6.9		-58.39	-60.59	8	0	6
+sir	br	logint	1/3	3		0	6.9		-58.46	-61.71	8	0	4
+sir	br	logint	1/5	1		0	6.7		-58.32	-58.38	8	0	8
+sir	br	logint	1/5	2		0	7.2		-58.34	-58.43	8	0	8
+sir	br	logint	1/5	3		0	6.6		-58.28	-58.39	7	0	7
+sir	br	logint	1/10	1		0	6.9		-58.27	-58.42	7	0	7
+sir	br	logint	1/10	2		0	7.4		-58.28	-58.3	8	0	8
+sir	br	logint	1/10	3		0	6.9		-58.27	-58.51	7	0	7
+sir	br	logint	1/20	1		0	5.9		-58.27	-58.4	6	0	6
+sir	br	logint	1/20	2		0	7.4		-58.24	-58.65	8	0	8
+sir	br	logint	1/20	3		0	6.1		-58.26	-58.77	6	0	6
+sir	br	logint	1/50	1		0	6.6		-58.25	-58.52	6	0	6
+sir	br	logint	1/50	2		0	7.7		-58.26	-58.64	8	0	8
+sir	br	logint	1/50	3		0	6.6		-58.27	-58.8	7	0	7
+sir	ie	interval	2/3	1		0	7.7		-60.43	-61.0	8	0	6
+sir	ie	interval	2/3	2		0	6.9		-60.63	-61.46	8	0	4
+sir	ie	interval	2/3	3		0	7.4		-60.5	-61.27	8	0	6
+sir	ie	interval	1/3	1		0	7.4		-58.31	-60.39	8	0	6
+sir	ie	interval	1/3	2		0	6.9		-58.42	-59.08	8	0	7
+sir	ie	interval	1/3	3		0	7.4		-58.35	-58.66	8	0	8
+sir	ie	interval	1/5	1		0	7.6		-58.29	-58.38	8	0	8
+sir	ie	interval	1/5	2		0	7.1		-58.28	-58.36	8	0	8
+sir	ie	interval	1/5	3		0	6.6		-58.31	-58.39	7	0	7
+sir	ie	interval	1/10	1		0	8.9		-58.27	-58.29	8	0	8
+sir	ie	interval	1/10	2		0	7.9		-58.26	-58.29	8	0	8
+sir	ie	interval	1/10	3		0	5.9		-58.28	-58.55	6	0	6
+sir	ie	interval	1/20	1		0	6.6		-58.24	-58.38	7	0	7
+sir	ie	interval	1/20	2		0	7.1		-58.25	-58.27	8	0	8
+sir	ie	interval	1/20	3		0	4.8		-58.27	-58.43	5	0	5
+sir	ie	interval	1/50	1		0	5.7		-58.25	-58.4	6	0	6
+sir	ie	interval	1/50	2		0	4.6		-58.27	-59.01	5	0	4
+sir	ie	interval	1/50	3		0	4.9		-58.26	-58.42	5	0	5
+sir_0hi	br	interval	2/3	1		0	6.9		-58.71	-58.89	8	0	8
+sir_0hi	br	interval	2/3	2		0	5.9		-58.63	-59.08	7	0	7
+sir_0hi	br	interval	2/3	3		0	5.9		-58.7	-59.03	6	0	6
+sir_0hi	br	interval	1/3	1		0	9.1		-58.33	-58.55	8	0	8
+sir_0hi	br	interval	1/3	2		0	9.7		-58.36	-58.45	7	0	7
+sir_0hi	br	interval	1/3	3		0	7.1		-58.37	-58.46	6	0	6
+sir_0hi	br	interval	1/5	1		0	9.7		-58.3	-58.36	8	0	8
+sir_0hi	br	interval	1/5	2		0	8.9		-58.3	-58.39	7	0	7
+sir_0hi	br	interval	1/5	3		0	7.1		-58.29	-58.34	6	0	6
+sir_0hi	br	interval	1/10	1		0	9.9		-58.28	-58.43	8	0	8
+sir_0hi	br	interval	1/10	2		0	8.7		-58.3	-58.3	7	0	7
+sir_0hi	br	interval	1/10	3		0	7.1		-58.29	-58.49	6	0	6
+sir_0hi	br	interval	1/20	1		0	9.2		-58.28	-58.49	8	0	8
+sir_0hi	br	interval	1/20	2		0	8.2		-58.3	-58.44	7	0	7
+sir_0hi	br	interval	1/20	3		0	7.6		-58.28	-58.44	6	0	6
+sir_0hi	br	interval	1/50	1		0	8.7		-58.28	-59.24	8	0	7
+sir_0hi	br	interval	1/50	2		0	8.7		-58.28	-58.42	7	0	7
+sir_0hi	br	interval	1/50	3		0	7.7		-58.29	-58.48	6	0	6
+sir_wide	br	interval	2/3	1		0	9.7		-70.56	-119.64	8	0	0
+sir_wide	br	interval	2/3	2		0	9.9		-96.32	-127.08	8	0	0
+sir_wide	br	interval	2/3	3		0	8.9		-91.85	-118.82	8	0	0
+sir_wide	br	interval	1/3	1		0	6.4		-61.17	-63.24	7	0	1
+sir_wide	br	interval	1/3	2		0	7.6		-60.33	-63.5	8	0	3
+sir_wide	br	interval	1/3	3		0	10.7		-59.9	-61.96	7	0	3
+sir_wide	br	interval	1/5	1		0	6.1		-61.75	-63.21	5	0	0
+sir_wide	br	interval	1/5	2		0	9.2		-62.25	-63.23	7	0	0
+sir_wide	br	interval	1/5	3		0	7.7		-61.9	-63.34	7	0	0
+sir_wide	br	interval	1/10	1		0	7.4		-58.63	-59.47	5	0	5
+sir_wide	br	interval	1/10	2		0	5.6		-59.53	-59.74	4	0	4
+sir_wide	br	interval	1/10	3		0	8.1		-59.59	-59.94	6	0	6
+sir_wide	br	interval	1/20	1		0	4.9		-58.33	-58.38	3	0	3
+sir_wide	br	interval	1/20	2		0	5.4		-58.34	-58.39	4	0	4
+sir_wide	br	interval	1/20	3		0	6.4		-58.34	-58.43	4	0	4
+sir_wide	br	interval	1/50	1		0	4.9		-58.35	-58.36	3	0	3
+sir_wide	br	interval	1/50	2		0	6.1		-58.31	-58.38	4	0	4
+sir_wide	br	interval	1/50	3		0	4.6		-58.37	-58.37	3	0	3
+seir_age	br	logint	2/3	1		1	27.4				0	0	0
+seir_age	br	logint	2/3	2		0	31.8		-274.61	-316.23	8	6	0
+seir_age	br	logint	1/3	1		0	35.1		-164.78	-196.41	8	4	0
+seir_age	br	logint	1/3	2		0	27.2		-178.75	-221.36	8	4	0
+seir_age	br	logint	1/5	1		0	21.6		-154.04	-164.79	8	0	0
+seir_age	br	logint	1/5	2		0	23.4		-156.1	-162.33	8	0	0
+seir_age	br	logint	1/10	1		0	21.9		-146.3	-147.73	8	0	5
+seir_age	br	logint	1/10	2		0	21.4		-147.22	-148.58	8	0	3
+seir_age	br	logint	1/20	1		0	21.4		-145.41	-145.78	8	0	8
+seir_age	br	logint	1/20	2		0	21.3		-145.36	-145.64	8	0	8
+seir_age	br	logint	1/50	1		0	23.4		-145.19	-146.02	8	0	7
+seir_age	br	logint	1/50	2		0	18.8		-145.18	-145.25	7	0	7
+seir_age	ie	interval	2/3	1		1	20.1				0	0	0
+seir_age	ie	interval	2/3	2		1	18.3				0	0	0
+seir_age	ie	interval	1/3	1		0	18.8		-156.41	-172.37	7	0	0
+seir_age	ie	interval	1/3	2		0	21.1		-168.43	-180.62	8	0	0
+seir_age	ie	interval	1/5	1		0	22.1		-149.18	-152.92	7	0	0
+seir_age	ie	interval	1/5	2		0	27.2		-150.31	-152.98	8	0	0
+seir_age	ie	interval	1/10	1		0	19.9		-146.13	-146.83	7	0	6
+seir_age	ie	interval	1/10	2		0	22.9		-145.88	-146.39	8	0	8
+seir_age	ie	interval	1/20	1		0	20.4		-145.28	-145.46	7	0	7
+seir_age	ie	interval	1/20	2		0	22.2		-145.31	-159.4	8	0	7
+seir_age	ie	interval	1/50	1		0	19.9		-145.19	-146.73	7	0	5
+seir_age	ie	interval	1/50	2		0	21.6		-145.19	-160.72	8	0	5
+ebola	br	logint	2/3	1		0	17.9		-267.67	-298.71	8	0	0
+ebola	br	logint	2/3	2		0	19.8		-277.84	-300.23	8	0	0
+ebola	br	logint	2/3	3		0	18.6		-269.26	-294.49	8	0	0
+ebola	br	logint	1/3	1		0	17.8		-231.41	-236.0	8	0	0
+ebola	br	logint	1/3	2		0	18.6		-232.61	-236.53	8	0	0
+ebola	br	logint	1/3	3		0	18.6		-231.16	-234.77	8	0	0
+ebola	br	logint	1/5	1		0	17.8		-221.64	-223.06	8	0	0
+ebola	br	logint	1/5	2		0	17.8		-222.3	-224.06	8	0	0
+ebola	br	logint	1/5	3		0	19.1		-221.97	-224.68	8	0	0
+ebola	br	logint	1/10	1		0	19.1		-219.17	-219.85	8	0	7
+ebola	br	logint	1/10	2		0	19.9		-219.17	-219.66	8	0	8
+ebola	br	logint	1/10	3		0	24.4		-219.2	-219.76	8	0	8
+ebola	br	logint	1/20	1		0	18.1		-218.41	-218.68	8	0	8
+ebola	br	logint	1/20	2		0	18.8		-218.54	-218.81	8	0	8
+ebola	br	logint	1/20	3		0	17.8		-218.56	-218.82	8	0	8
+ebola	br	logint	1/50	1		0	18.8		-218.32	-218.42	8	0	8
+ebola	br	logint	1/50	2		0	19.3		-218.31	-218.43	8	0	8
+ebola	br	logint	1/50	3		0	18.4		-218.37	-218.45	8	0	8
+ebola	br	interval	2/3	1		0	18.4		-221.64	-223.06	8	0	0
+ebola	br	interval	2/3	2		0	18.1		-222.3	-224.06	8	0	0
+ebola	br	interval	2/3	3		0	18.1		-221.97	-224.68	8	0	0
+ebola	br	interval	1/3	1		0	17.6		-222.57	-223.31	8	0	0
+ebola	br	interval	1/3	2		0	17.3		-221.45	-223.07	8	0	0
+ebola	br	interval	1/3	3		0	17.6		-222.28	-224.13	8	0	0
+ebola	br	interval	1/5	1		0	19.4		-222.38	-223.43	8	0	0
+ebola	br	interval	1/5	2		0	18.1		-221.22	-223.41	8	0	0
+ebola	br	interval	1/5	3		0	18.3		-222.96	-223.6	8	0	0
+ebola	br	interval	1/10	1		0	19.9		-222.91	-224.45	8	0	0
+ebola	br	interval	1/10	2		0	18.9		-222.13	-223.38	8	0	0
+ebola	br	interval	1/10	3		0	17.8		-222.22	-223.95	8	0	0
+ebola	br	interval	1/20	1		0	18.9		-222.43	-223.12	8	0	0
+ebola	br	interval	1/20	2		0	18.9		-222.36	-223.62	8	0	0
+ebola	br	interval	1/20	3		0	18.6		-221.84	-223.65	8	0	0
+ebola	br	interval	1/50	1		0	24.4		-221.33	-223.09	8	0	0
+ebola	br	interval	1/50	2		0	19.1		-222.61	-223.28	8	0	0
+ebola	br	interval	1/50	3		0	17.8		-222.6	-223.76	8	0	0
+ebola	ie	interval	2/3	1		0	20.1		-257.62	-265.37	8	0	0
+ebola	ie	interval	2/3	2		0	19.1		-254.85	-267.64	8	0	0
+ebola	ie	interval	2/3	3		0	18.3		-256.08	-263.32	8	0	0
+ebola	ie	interval	1/3	1		0	18.1		-225.82	-228.78	8	0	0
+ebola	ie	interval	1/3	2		0	19.4		-226.9	-229.16	8	0	0
+ebola	ie	interval	1/3	3		0	18.6		-225.95	-228.7	8	0	0
+ebola	ie	interval	1/5	1		0	18.6		-220.24	-221.17	8	0	3
+ebola	ie	interval	1/5	2		0	19.2		-220.35	-221.33	8	0	2
+ebola	ie	interval	1/5	3		0	18.1		-220.64	-221.21	8	0	3
+ebola	ie	interval	1/10	1		0	18.6		-218.39	-218.6	8	0	8
+ebola	ie	interval	1/10	2		0	16.5		-218.54	-218.92	7	0	7
+ebola	ie	interval	1/10	3		0	14.3		-218.4	-218.53	6	0	6
+ebola	ie	interval	1/20	1		0	18.3		-218.1	-218.2	8	0	8
+ebola	ie	interval	1/20	2		0	16.3		-218.08	-218.18	7	0	7
+ebola	ie	interval	1/20	3		0	17.3		-218.08	-218.21	6	0	6
+ebola	ie	interval	1/50	1		0	18.6		-218.03	-218.08	8	0	8
+ebola	ie	interval	1/50	2		0	16.1		-218.02	-218.46	7	0	7
+ebola	ie	interval	1/50	3		0	12.7		-218.03	-218.06	5	0	5
+sir_lb	br	half	2/3	1		0	5.7		-63.91	-66.78	8	0	0
+sir_lb	br	half	2/3	2		0	5.4		-62.89	-66.55	8	0	0
+sir_lb	br	half	2/3	3		0	5.4		-64.83	-67.16	8	0	0
+sir_lb	br	half	1/3	1		0	5.9		-59.67	-60.5	8	0	8
+sir_lb	br	half	1/3	2		0	5.9		-59.52	-60.21	8	0	8
+sir_lb	br	half	1/3	3		0	5.9		-59.21	-62.29	8	0	7
+sir_lb	br	half	1/5	1		0	7.4		-58.27	-60.08	8	0	7
+sir_lb	br	half	1/5	2		0	6.1		-59.05	-60.43	8	0	7
+sir_lb	br	half	1/5	3		0	6.1		-58.55	-60.3	8	0	7
+sir_lb	br	half	1/10	1		0	6.4		-58.29	-58.32	8	0	8
+sir_lb	br	half	1/10	2		0	6.6		-58.28	-58.35	8	0	8
+sir_lb	br	half	1/10	3		0	6.4		-58.26	-58.33	8	0	8
+sir_lb	br	half	1/20	1		0	7.1		-58.27	-58.29	8	0	8
+sir_lb	br	half	1/20	2		0	6.4		-58.26	-58.29	8	0	8
+sir_lb	br	half	1/20	3		0	6.1		-58.26	-58.28	8	0	8
+sir_lb	br	half	1/50	1		0	6.4		-58.27	-58.27	8	0	8
+sir_lb	br	half	1/50	2		0	6.9		-58.26	-58.28	8	0	8
+sir_lb	br	half	1/50	3		0	6.9		-58.26	-58.28	8	0	8
+ebola_lb	br	half	2/3	1		0	18.3		-378.16	-564.08	8	0	0
+ebola_lb	br	half	2/3	2		0	17.3		-357.88	-609.13	8	0	0
+ebola_lb	br	half	2/3	3		0	17.1		-415.6	-513.76	8	0	0
+ebola_lb	br	half	1/3	1		0	17.5		-236.88	-242.53	8	0	0
+ebola_lb	br	half	1/3	2		0	20.1		-240.18	-244.5	8	0	0
+ebola_lb	br	half	1/3	3		0	19.8		-238.15	-243.51	8	0	0
+ebola_lb	br	half	1/5	1		0	19.6		-224.51	-226.45	8	0	0
+ebola_lb	br	half	1/5	2		0	21.1		-223.79	-225.89	8	0	0
+ebola_lb	br	half	1/5	3		0	20.6		-223.24	-226.46	8	0	0
+ebola_lb	br	half	1/10	1		0	22.1		-219.84	-220.16	8	0	7
+ebola_lb	br	half	1/10	2		0	21.1		-219.46	-220.14	8	0	8
+ebola_lb	br	half	1/10	3		0	44.1		-219.3	-219.68	8	0	8
+ebola_lb	br	half	1/20	1		0	26.2		-218.65	-218.84	8	0	8
+ebola_lb	br	half	1/20	2		0	46.7		-218.55	-218.81	8	0	8
+ebola_lb	br	half	1/20	3		0	31.7		-218.6	-218.9	8	0	8
+ebola_lb	br	half	1/50	1		0	8.4		-218.34	-218.49	2	0	2
+ebola_lb	br	half	1/50	2		0	9.4		-218.37	-218.38	2	0	2
+ebola_lb	br	half	1/50	3		0	12.0		-218.29	-218.43	4	0	4
+polio	br	logint	2/3	1		0	35.3		-716.89	-750.92	4	0	0
+polio	br	logint	1/3	1		0	34.8		-656.42	-676.4	4	0	0
+polio	br	logint	1/5	1		0	35.5		-610.79	-629.83	4	0	0
+polio	br	logint	1/10	1		0	35.5		-555.22	-569.68	4	0	0
+polio	br	logint	1/20	1		0	34.3		-552.06	-552.75	4	0	4
+polio	br	logint	1/50	1		0	34.8		-551.74	-553.44	4	0	3
+polio	br	interval	2/3	1		0	37.3		-610.79	-629.83	4	0	0
+polio	br	interval	1/3	1		0	36.1		-606.82	-648.85	4	0	0
+polio	br	interval	1/5	1		0	34.5		-625.93	-651.0	4	0	0
+polio	br	interval	1/10	1		0	36.2		-619.11	-661.07	4	0	0
+polio	br	interval	1/20	1		0	34.9		-581.09	-619.23	4	0	0
+polio	br	interval	1/50	1		0	33.6		-588.4	-606.05	4	0	0
+gh912	br	logint	2/3	1		0	0.5		-1669.58	-1669.58	2	1	0
+gh912	br	logint	2/3	2		0	0.5		-2317.13	-3215.22	2	0	0
+gh912	br	logint	2/3	3		0	0.3		-2927.85	-2927.85	1	0	0
+gh912	br	logint	2/3	4		0	0.3		-1137.39	-1137.39	1	0	0
+gh912	br	logint	2/3	5		0	0.5		-2109.13	-2109.13	2	1	0
+gh912	br	logint	2/3	6		0	0.3		-1160.03	-1160.03	1	0	0
+gh912	br	logint	2/3	7		0	0.3		-1621.43	-1621.43	1	0	0
+gh912	br	logint	2/3	8		0	0.3		-2226.94	-2226.94	1	0	0
+gh912	br	logint	1/3	1		0	0.3		-4890.46	-4890.46	2	1	0
+gh912	br	logint	1/3	2		0	0.5		-691.75	-799.69	2	0	0
+gh912	br	logint	1/3	3		0	0.5		-883.18	-961.67	2	0	0
+gh912	br	logint	1/3	4		0	0.5		-1253.54	-1253.54	2	1	0
+gh912	br	logint	1/3	5		0	0.3		-3513.52	-3513.52	1	0	0
+gh912	br	logint	1/3	6		0	0.5		-1046.8	-1487.36	2	0	0
+gh912	br	logint	1/3	7		0	0.5		-1261.2	-1261.2	2	1	0
+gh912	br	logint	1/3	8		0	0.5		-657.67	-2942.83	2	0	0
+gh912	br	logint	1/5	1		0	0.5		-1556.41	-1845.66	2	0	0
+gh912	br	logint	1/5	2		0	0.5		-1183.24	-1183.24	2	1	0
+gh912	br	logint	1/5	3		1	0.5				0	0	0
+gh912	br	logint	1/5	4		0	0.5		-755.06	-790.85	2	0	0
+gh912	br	logint	1/5	5		0	0.3		-1257.31	-1257.31	1	0	0
+gh912	br	logint	1/5	6		0	0.5		-1019.82	-1505.52	2	0	0
+gh912	br	logint	1/5	7		0	0.3		-995.66	-995.66	1	0	0
+gh912	br	logint	1/5	8		0	0.5		-768.42	-938.82	2	0	0
+gh912	br	logint	1/10	1		0	0.5		-658.72	-955.81	2	0	0
+gh912	br	logint	1/10	2		0	0.3		-1163.64	-1163.64	1	0	0
+gh912	br	logint	1/10	3		0	0.3		-651.2	-651.2	1	0	0
+gh912	br	logint	1/10	4		0	0.5		-722.26	-723.2	2	0	0
+gh912	br	logint	1/10	5		0	0.5		-702.84	-705.05	2	0	0
+gh912	br	logint	1/10	6		0	0.5		-637.86	-718.24	2	0	0
+gh912	br	logint	1/10	7		0	0.5		-925.77	-925.77	1	0	0
+gh912	br	logint	1/10	8		1	0.3				0	0	0
+gh912	br	logint	1/20	1		0	0.6		-730.92	-756.56	2	0	0
+gh912	br	logint	1/20	2		0	0.3		-688.65	-688.65	1	0	0
+gh912	br	logint	1/20	3		0	0.3		-612.53	-612.53	1	0	0
+gh912	br	logint	1/20	4		0	0.5		-605.85	-676.43	2	0	0
+gh912	br	logint	1/20	5		0	0.5		-638.65	-654.1	2	0	0
+gh912	br	logint	1/20	6		0	0.5		-636.32	-679.03	2	0	0
+gh912	br	logint	1/20	7		1	0.3				0	0	0
+gh912	br	logint	1/20	8		0	0.6		-578.04	-578.04	1	0	0
+gh912	br	logint	1/50	1		0	0.5		-992.93	-992.93	1	0	0
+gh912	br	logint	1/50	2		0	0.6		-727.49	-727.49	1	0	0
+gh912	br	logint	1/50	3		0	0.5		-676.86	-676.86	1	0	0
+gh912	br	logint	1/50	4		0	0.5		-759.82	-862.56	2	0	0
+gh912	br	logint	1/50	5		1	0.5				0	0	0
+gh912	br	logint	1/50	6		0	0.5		-851.11	-851.11	1	0	0
+gh912	br	logint	1/50	7		0	0.5		-1525.7	-1525.7	1	0	0
+gh912	br	logint	1/50	8		0	0.5		-562.43	-826.98	2	0	0
+gh912	br	interval	2/3	1		0	0.5		-1556.41	-1845.66	2	0	0
+gh912	br	interval	2/3	2		0	0.5		-1183.24	-1183.24	2	1	0
+gh912	br	interval	2/3	3		1	0.5				0	0	0
+gh912	br	interval	2/3	4		0	0.8		-755.06	-790.85	2	0	0
+gh912	br	interval	2/3	5		0	0.5		-1257.31	-1257.31	1	0	0
+gh912	br	interval	2/3	6		0	0.5		-1019.82	-1505.52	2	0	0
+gh912	br	interval	2/3	7		0	0.5		-995.66	-995.66	1	0	0
+gh912	br	interval	2/3	8		0	0.8		-768.42	-938.82	2	0	0
+gh912	br	interval	1/3	1		0	0.8		-663.22	-663.22	2	1	0
+gh912	br	interval	1/3	2		0	0.5		-967.88	-967.88	2	1	0
+gh912	br	interval	1/3	3		0	0.5		-623.46	-623.46	1	0	0
+gh912	br	interval	1/3	4		0	0.5		-767.66	-767.66	2	1	0
+gh912	br	interval	1/3	5		0	0.5		-795.34	-795.34	1	0	0
+gh912	br	interval	1/3	6		0	0.3		-1102.65	-1102.65	1	0	0
+gh912	br	interval	1/3	7		0	0.5		-959.78	-959.78	2	1	0
+gh912	br	interval	1/3	8		1	0.5				0	0	0
+gh912	br	interval	1/5	1		0	0.5		-609.11	-857.08	2	0	0
+gh912	br	interval	1/5	2		0	0.5		-1430.03	-1430.03	2	1	0
+gh912	br	interval	1/5	3		0	0.5		-882.66	-1011.81	2	0	0
+gh912	br	interval	1/5	4		0	0.5		-803.41	-884.79	2	0	0
+gh912	br	interval	1/5	5		0	0.5		-1298.91	-1298.91	2	1	0
+gh912	br	interval	1/5	6		0	0.5		-700.8	-828.94	2	0	0
+gh912	br	interval	1/5	7		0	0.3		-1102.13	-1102.13	1	0	0
+gh912	br	interval	1/5	8		0	0.5		-616.1	-712.23	2	0	0
+gh912	br	interval	1/10	1		0	0.5		-624.72	-624.72	1	0	0
+gh912	br	interval	1/10	2		0	0.5		-834.08	-834.08	2	1	0
+gh912	br	interval	1/10	3		0	0.3		-1646.8	-1646.8	1	0	0
+gh912	br	interval	1/10	4		1	0.8				0	0	0
+gh912	br	interval	1/10	5		0	0.3		-818.85	-818.85	1	0	0
+gh912	br	interval	1/10	6		0	0.5		-1538.08	-2222.13	2	0	0
+gh912	br	interval	1/10	7		0	0.3		-1239.17	-1239.17	1	0	0
+gh912	br	interval	1/10	8		0	0.3		-1077.29	-1077.29	1	0	0
+gh912	br	interval	1/20	1		0	0.5		-730.41	-1347.51	2	0	0
+gh912	br	interval	1/20	2		0	0.5		-827.3	-827.3	2	1	0
+gh912	br	interval	1/20	3		0	0.3		-901.92	-901.92	1	0	0
+gh912	br	interval	1/20	4		0	0.5		-718.52	-999.67	2	0	0
+gh912	br	interval	1/20	5		0	0.5		-918.54	-1205.85	2	0	0
+gh912	br	interval	1/20	6		0	0.5		-669.11	-927.51	2	0	0
+gh912	br	interval	1/20	7		0	0.5		-747.35	-747.35	1	0	0
+gh912	br	interval	1/20	8		0	0.5		-926.07	-944.09	2	0	0
+gh912	br	interval	1/50	1		0	0.5		-935.34	-935.34	2	1	0
+gh912	br	interval	1/50	2		0	0.5		-789.62	-1180.73	2	0	0
+gh912	br	interval	1/50	3		0	0.5		-687.7	-774.01	2	0	0
+gh912	br	interval	1/50	4		0	0.5		-1005.97	-1219.79	2	0	0
+gh912	br	interval	1/50	5		0	0.5		-655.55	-655.55	2	1	0
+gh912	br	interval	1/50	6		0	0.8		-1132.72	-1978.81	2	0	0
+gh912	br	interval	1/50	7		0	0.8		-666.91	-1092.25	2	0	0
+gh912	br	interval	1/50	8		0	0.5		-756.5	-1012.57	2	0	0
+sir	main	-	auto	1		0	7.5		-58.27	-58.3	8	0	8
+sir	main	-	auto	2		0	7.3		-58.27	-58.32	8	0	8
+sir	main	-	auto	3		0	6.7		-58.28	-58.31	8	0	8
+sir_0hi	main	-	auto	1		1	0.3				0	0	0
+sir_0hi	main	-	auto	2		1	0.0				0	0	0
+sir_0hi	main	-	auto	3		1	0.0				0	0	0
+sir_wide	main	-	auto	1		0	7.4		-118.76	-187.33	8	0	0
+sir_wide	main	-	auto	2		0	7.2		-158.99	-209.33	8	0	0
+sir_wide	main	-	auto	3		0	6.9		-165.29	-198.45	8	0	0
+seir_age	main	-	auto	1		0	24.5		-148.58	-151.22	8	0	0
+seir_age	main	-	auto	2		0	23.0		-148.38	-150.6	8	0	0
+ebola	main	-	auto	1		0	19.4		-224.5	-225.84	8	0	0
+ebola	main	-	auto	2		0	19.1		-224.24	-225.49	8	0	0
+ebola	main	-	auto	3		0	19.1		-223.56	-225.86	8	0	0
+seir_age	br	logint	1/100	1		0	24.2	268.1	-145.17	-145.99	8	0	7
+seir_age	br	logint	1/100	2		0	24.1	235.9	-145.15	-145.35	7	0	7
+seir_age	br	logint	1/200	1		0	28.9	266.2	-145.19	-160.55	8	0	4
+seir_age	br	logint	1/200	2		0	27.4	235.7	-145.19	-186.15	7	0	4
+ebola	br	logint	1/100	1		0	27.7	220.8	-218.33	-218.73	8	0	7
+ebola	br	logint	1/100	2		0	27.4	227.4	-218.3	-218.87	8	0	7
+ebola	br	logint	1/100	3		0	23.1	222.8	-218.34	-218.84	8	0	7
+ebola	br	logint	1/200	1		0	20.6	217.8	-218.26	-236.3	8	0	7
+ebola	br	logint	1/200	2		0	20.6	224.8	-218.3	-219.13	8	0	7
+ebola	br	logint	1/200	3		0	27.9	221.9	-218.32	-236.85	8	0	6
+polio	br	logint	2/3	1	r8	0	45.7	453.7	-718.27	-742.65	4	0	0
+polio	br	logint	2/3	2	r8	0	49.0	453.5	-715.43	-730.67	4	0	0
+polio	br	logint	1/3	1	r8	0	44.1	455.3	-643.57	-667.63	4	0	0
+polio	br	logint	1/3	2	r8	0	44.4	456.3	-672.82	-689.2	4	0	0
+polio	br	logint	1/5	1	r8	0	42.3	452.1	-610.48	-627.89	4	0	0
+polio	br	logint	1/5	2	r8	0	38.6	457.4	-637.17	-670.36	4	0	0
+polio	br	logint	1/10	1	r8	0	39.0	456.8	-555.41	-568.66	4	0	0
+polio	br	logint	1/10	2	r8	0	36.3	345.6	-553.46	-563.55	3	0	1
+polio	br	logint	1/20	1	r8	0	44.1	451.2	-552.03	-552.8	4	0	4
+polio	br	logint	1/20	2	r8	0	33.0	346.2	-553.31	-556.55	3	0	1
+polio	br	logint	1/50	1	r8	0	38.8	447.7	-552.08	-553.66	4	0	3
+polio	br	logint	1/50	2	r8	0	30.7	346.1	-551.41	-551.74	3	0	3
+polio	br	logint	1/100	1	r8	0	37.3	447.9	-551.16	-573.0	4	0	2
+polio	br	logint	1/100	2	r8	0	29.9	342.1	-551.31	-551.4	3	0	3
+polio	br	logint	1/200	1	r8	0	38.5	447.7	-555.52	-752.18	4	0	0
+polio	br	logint	1/200	2	r8	0	30.2	338.5	-578.94	-641.21	3	0	0
+gh912	br	logint	1/20	1	r8	0	2.6	16.6	-728.16	-747.57	2	0	0
+gh912	br	logint	1/20	2	r8	0	1.3	7.9	-680.31	-680.31	1	0	0
+gh912	br	logint	1/20	3	r8	0	1.6	8.4	-612.06	-612.06	1	0	0
+gh912	br	logint	1/20	4	r8	0	2.6	18.4	-606.4	-671.85	2	0	0
+gh912	br	logint	1/20	5	r8	0	2.3	18.9	-639.74	-655.25	2	0	0
+gh912	br	logint	1/20	6	r8	0	2.6	20.0	-635.76	-677.19	2	0	0
+gh912	br	logint	1/20	7	r8	1	0.3	0.7			0	0	0
+gh912	br	logint	1/20	8	r8	0	1.3	9.9	-578.48	-578.48	1	0	0
+gh912	br	logint	1/20	9	r8	1	0.3	0.4			0	0	0
+gh912	br	logint	1/20	10	r8	0	1.3	10.2	-707.51	-707.51	1	0	0
+gh912	br	logint	1/20	11	r8	0	2.6	19.9	-629.06	-638.48	2	0	0
+gh912	br	logint	1/20	12	r8	0	2.6	19.7	-601.36	-640.0	2	0	0
+gh912	br	logint	1/20	13	r8	0	2.6	19.2	-825.14	-828.89	2	0	0
+gh912	br	logint	1/20	14	r8	0	2.6	20.0	-591.8	-614.53	2	0	0
+gh912	br	logint	1/20	15	r8	0	1.3	10.0	-1183.06	-1183.06	1	0	0
+gh912	br	logint	1/20	16	r8	0	1.3	9.8	-655.81	-655.81	1	0	0
+gh912	br	logint	1/20	17	r8	0	2.3	19.5	-703.8	-896.88	2	0	0
+gh912	br	logint	1/20	18	r8	0	2.1	20.3	-620.61	-726.54	2	0	0
+gh912	br	logint	1/20	19	r8	0	2.1	19.9	-579.05	-674.29	2	0	0
+gh912	br	logint	1/20	20	r8	0	1.0	10.5	-730.43	-730.43	1	0	0
+gh912	br	logint	1/20	21	r8	0	1.0	10.1	-694.43	-694.43	1	0	0
+gh912	br	logint	1/20	22	r8	0	1.0	10.7	-650.4	-650.4	1	0	0
+gh912	br	logint	1/20	23	r8	0	1.0	10.1	-757.28	-757.28	1	0	0
+gh912	br	logint	1/20	24	r8	0	1.0	10.3	-641.73	-641.73	1	0	0
+gh912	br	logint	1/20	25	r8	0	1.0	10.4	-808.58	-808.58	1	0	0
+gh912	br	logint	1/20	26	r8	0	1.0	10.7	-579.95	-579.95	1	0	0
+gh912	br	logint	1/20	27	r8	0	1.0	10.0	-740.86	-740.86	1	0	0
+gh912	br	logint	1/20	28	r8	0	1.0	10.0	-728.38	-728.38	1	0	0
+gh912	br	logint	1/20	29	r8	0	1.0	10.6	-711.08	-711.08	1	0	0
+gh912	br	logint	1/20	30	r8	0	2.1	19.9	-732.71	-816.32	2	0	0
+gh912	br	logint	1/20	31	r8	0	1.0	10.0	-752.22	-752.22	1	0	0
+gh912	br	logint	1/20	32	r8	0	2.1	20.0	-608.15	-721.51	2	0	0
+gh912	br	logint	1/50	1	r8	0	1.6	9.8	-976.9	-976.9	1	0	0
+gh912	br	logint	1/50	2	r8	0	1.0	10.0	-728.03	-728.03	1	0	0
+gh912	br	logint	1/50	3	r8	0	1.0	10.5	-675.64	-675.64	1	0	0
+gh912	br	logint	1/50	4	r8	0	2.1	20.0	-755.32	-860.19	2	0	0
+gh912	br	logint	1/50	5	r8	0	1.0	9.3	-792.04	-792.04	1	0	0
+gh912	br	logint	1/50	6	r8	0	1.0	10.6	-850.49	-850.49	1	0	0
+gh912	br	logint	1/50	7	r8	0	1.0	10.6	-1520.76	-1520.76	1	0	0
+gh912	br	logint	1/50	8	r8	0	2.1	19.5	-562.32	-827.61	2	0	0
+gh912	br	logint	1/50	9	r8	0	1.0	10.8	-727.16	-727.16	1	0	0
+gh912	br	logint	1/50	10	r8	0	1.0	10.5	-1056.19	-1056.19	1	0	0
+gh912	br	logint	1/50	11	r8	0	2.1	20.4	-656.6	-875.85	2	0	0
+gh912	br	logint	1/50	12	r8	0	2.1	20.2	-609.15	-881.42	2	0	0
+gh912	br	logint	1/50	13	r8	0	1.0	10.5	-815.92	-815.92	1	0	0
+gh912	br	logint	1/50	14	r8	0	1.0	10.7	-645.04	-645.04	1	0	0
+gh912	br	logint	1/50	15	r8	0	1.0	10.2	-977.83	-977.83	1	0	0
+gh912	br	logint	1/50	16	r8	0	2.1	19.6	-642.76	-869.17	2	0	0
+gh912	br	logint	1/50	17	r8	0	1.0	10.8	-647.88	-647.88	1	0	0
+gh912	br	logint	1/50	18	r8	0	1.8	20.3	-836.85	-956.12	2	0	0
+gh912	br	logint	1/50	19	r8	0	2.1	19.5	-587.67	-686.11	2	0	0
+gh912	br	logint	1/50	20	r8	1	0.3	0.3			0	0	0
+gh912	br	logint	1/50	21	r8	0	2.1	19.9	-670.27	-949.29	2	0	0
+gh912	br	logint	1/50	22	r8	0	1.1	10.4	-925.4	-925.4	1	0	0
+gh912	br	logint	1/50	23	r8	0	2.1	18.8	-653.08	-774.87	2	0	0
+gh912	br	logint	1/50	24	r8	0	1.0	10.2	-606.27	-606.27	1	0	0
+gh912	br	logint	1/50	25	r8	0	1.0	10.0	-741.05	-741.05	1	0	0
+gh912	br	logint	1/50	26	r8	0	1.0	10.2	-871.29	-871.29	1	0	0
+gh912	br	logint	1/50	27	r8	0	1.6	16.0	-922.64	-1931.28	2	0	0
+gh912	br	logint	1/50	28	r8	0	1.8	19.4	-695.0	-740.81	2	0	0
+gh912	br	logint	1/50	29	r8	0	1.0	10.7	-844.78	-844.78	1	0	0
+gh912	br	logint	1/50	30	r8	0	2.1	20.6	-823.98	-1032.27	2	0	0
+gh912	br	logint	1/50	31	r8	0	1.0	10.1	-1248.15	-1248.15	1	0	0
+gh912	br	logint	1/50	32	r8	0	1.8	20.5	-635.73	-649.36	2	0	0
+sir_wide	br	interval	2/3	1	far30	0	2.8	28.4	-138.39	-204.59	8	1	0
+sir_wide	br	interval	2/3	2	far30	0	2.8	29.8	-116.08	-178.97	8	0	0
+sir_wide	br	interval	2/3	3	far30	0	2.8	28.8	-62.55	-191.32	8	0	0
+sir_wide	br	interval	1/3	1	far30	0	1.3	11.1	-163.65	-163.65	1	0	0
+sir_wide	br	interval	1/3	2	far30	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/3	3	far30	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/5	1	far30	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/5	2	far30	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/5	3	far30	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/10	1	far30	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/10	2	far30	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/10	3	far30	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/20	1	far30	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/20	2	far30	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/20	3	far30	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/50	1	far30	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/50	2	far30	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/50	3	far30	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/100	1	far30	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/100	2	far30	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/100	3	far30	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/200	1	far30	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/200	2	far30	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/200	3	far30	1	0.3	0.1			0	0	0
+sir_0hi	br	interval	2/3	1	far30	0	2.8	28.6	-83.65	-91.86	8	0	0
+sir_0hi	br	interval	2/3	2	far30	0	2.8	28.7	-88.87	-91.97	8	0	0
+sir_0hi	br	interval	2/3	3	far30	0	2.8	28.6	-81.88	-91.23	8	0	0
+sir_0hi	br	interval	1/3	1	far30	0	2.8	29.6	-59.77	-64.5	8	0	2
+sir_0hi	br	interval	1/3	2	far30	0	2.8	29.6	-58.59	-65.42	8	0	1
+sir_0hi	br	interval	1/3	3	far30	0	2.8	29.3	-58.67	-64.55	8	0	1
+sir_0hi	br	interval	1/5	1	far30	0	2.8	29.4	-58.36	-58.6	8	0	8
+sir_0hi	br	interval	1/5	2	far30	0	2.8	29.3	-58.34	-58.62	8	0	8
+sir_0hi	br	interval	1/5	3	far30	0	2.8	29.1	-58.34	-58.54	8	0	8
+sir_0hi	br	interval	1/10	1	far30	0	2.8	29.1	-58.3	-58.58	8	0	8
+sir_0hi	br	interval	1/10	2	far30	0	3.1	28.3	-58.29	-58.56	8	0	8
+sir_0hi	br	interval	1/10	3	far30	0	3.1	28.0	-58.3	-58.45	8	0	8
+sir_0hi	br	interval	1/20	1	far30	0	2.6	27.7	-58.29	-58.58	8	0	8
+sir_0hi	br	interval	1/20	2	far30	0	2.6	27.4	-58.3	-58.52	8	0	8
+sir_0hi	br	interval	1/20	3	far30	0	2.6	27.5	-58.28	-58.51	8	0	8
+sir_0hi	br	interval	1/50	1	far30	0	2.6	27.6	-61.28	-63.23	8	0	0
+sir_0hi	br	interval	1/50	2	far30	0	2.8	28.9	-60.21	-62.58	8	0	1
+sir_0hi	br	interval	1/50	3	far30	0	3.1	26.8	-62.18	-64.48	8	0	0
+sir_0hi	br	interval	1/100	1	far30	0	5.4	26.0	-66.85	-68.18	8	0	0
+sir_0hi	br	interval	1/100	2	far30	0	6.4	25.9	-66.78	-68.31	8	0	0
+sir_0hi	br	interval	1/100	3	far30	0	2.8	27.4	-66.21	-66.94	8	0	0
+sir_0hi	br	interval	1/200	1	far30	0	8.7	24.7	-66.42	-68.59	8	0	0
+sir_0hi	br	interval	1/200	2	far30	0	3.4	25.7	-66.79	-68.74	8	0	0
+sir_0hi	br	interval	1/200	3	far30	0	3.6	25.5	-68.08	-69.41	8	0	0
+seir_age	br	logint	2/3	1	far30	1	10.4	59.1			0	0	0
+seir_age	br	logint	2/3	2	far30	1	12.2	59.0			0	0	0
+seir_age	br	logint	2/3	3	far30	1	10.4	60.0			0	0	0
+seir_age	br	logint	1/3	1	far30	1	6.1	61.8			0	0	0
+seir_age	br	logint	1/3	2	far30	1	5.9	62.3			0	0	0
+seir_age	br	logint	1/3	3	far30	1	7.2	62.5			0	0	0
+seir_age	br	logint	1/5	1	far30	1	6.9	66.4			0	0	0
+seir_age	br	logint	1/5	2	far30	1	6.6	66.1			0	0	0
+seir_age	br	logint	1/5	3	far30	1	7.1	66.5			0	0	0
+seir_age	br	logint	1/10	1	far30	0	9.2	87.3	-159.85	-173.09	8	0	0
+seir_age	br	logint	1/10	2	far30	0	9.9	90.0	-156.49	-172.72	8	0	0
+seir_age	br	logint	1/10	3	far30	0	12.0	86.3	-162.8	-172.46	8	0	0
+seir_age	br	logint	1/20	1	far30	0	9.4	95.1	-149.1	-151.05	8	0	0
+seir_age	br	logint	1/20	2	far30	0	9.2	94.4	-148.48	-150.7	8	0	0
+seir_age	br	logint	1/20	3	far30	0	9.0	95.4	-148.81	-150.46	8	0	0
+seir_age	br	logint	1/50	1	far30	0	11.0	97.1	-150.89	-165.04	8	0	0
+seir_age	br	logint	1/50	2	far30	0	12.5	95.0	-151.15	-165.6	8	0	0
+seir_age	br	logint	1/50	3	far30	0	10.0	97.4	-150.94	-167.8	8	0	0
+seir_age	br	logint	1/100	1	far30	0	8.7	100.0	-191.64	-203.36	8	0	0
+seir_age	br	logint	1/100	2	far30	0	14.0	98.6	-188.2	-205.09	8	0	0
+seir_age	br	logint	1/100	3	far30	0	19.3	99.1	-188.35	-204.82	8	0	0
+seir_age	br	logint	1/200	1	far30	0	22.1	104.3	-222.66	-253.92	8	0	0
+seir_age	br	logint	1/200	2	far30	0	27.2	103.8	-240.62	-260.62	8	0	0
+seir_age	br	logint	1/200	3	far30	0	14.5	105.7	-231.42	-246.18	8	0	0
+ebola	br	logint	2/3	1	far30	0	11.9	76.9	-361.36	-870.0	8	0	0
+ebola	br	logint	2/3	2	far30	0	9.7	77.1	-338.38	-991.39	8	0	0
+ebola	br	logint	2/3	3	far30	0	11.0	75.2	-355.26	-466.64	8	0	0
+ebola	br	logint	1/3	1	far30	0	6.4	61.8	-294.03	-313.93	6	0	0
+ebola	br	logint	1/3	2	far30	0	8.4	68.3	-280.17	-311.0	7	0	0
+ebola	br	logint	1/3	3	far30	0	11.2	73.2	-281.44	-346.57	7	0	0
+ebola	br	logint	1/5	1	far30	1	0.3	0.4			0	0	0
+ebola	br	logint	1/5	2	far30	1	0.3	0.5			0	0	0
+ebola	br	logint	1/5	3	far30	1	0.3	0.5			0	0	0
+ebola	br	logint	1/10	1	far30	1	0.8	0.5			0	0	0
+ebola	br	logint	1/10	2	far30	1	0.4	0.5			0	0	0
+ebola	br	logint	1/10	3	far30	1	0.3	0.5			0	0	0
+ebola	br	logint	1/20	1	far30	1	0.3	0.5			0	0	0
+ebola	br	logint	1/20	2	far30	1	0.3	0.5			0	0	0
+ebola	br	logint	1/20	3	far30	1	0.3	0.5			0	0	0
+ebola	br	logint	1/50	1	far30	1	0.3	0.5			0	0	0
+ebola	br	logint	1/50	2	far30	1	0.3	0.4			0	0	0
+ebola	br	logint	1/50	3	far30	1	0.3	0.5			0	0	0
+ebola	br	logint	1/100	1	far30	1	0.3	0.5			0	0	0
+ebola	br	logint	1/100	2	far30	1	0.3	0.5			0	0	0
+ebola	br	logint	1/100	3	far30	1	0.3	0.4			0	0	0
+ebola	br	logint	1/200	1	far30	1	0.3	0.4			0	0	0
+ebola	br	logint	1/200	2	far30	1	0.3	0.5			0	0	0
+ebola	br	logint	1/200	3	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	2/3	1	far30	1	0.3	0.4			0	0	0
+ebola	br	interval	2/3	2	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	2/3	3	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/3	1	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/3	2	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/3	3	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/5	1	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/5	2	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/5	3	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/10	1	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/10	2	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/10	3	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/20	1	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/20	2	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/20	3	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/50	1	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/50	2	far30	1	0.3	0.6			0	0	0
+ebola	br	interval	1/50	3	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/100	1	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/100	2	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/100	3	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/200	1	far30	1	0.3	0.5			0	0	0
+ebola	br	interval	1/200	2	far30	1	0.3	0.6			0	0	0
+ebola	br	interval	1/200	3	far30	1	0.3	0.5			0	0	0
+sir_lb	br	half	2/3	1	far30	0	4.1	25.4	-60.29	-63.4	8	0	3
+sir_lb	br	half	2/3	2	far30	0	3.3	25.7	-61.13	-64.57	8	0	1
+sir_lb	br	half	2/3	3	far30	0	4.1	26.3	-59.83	-62.38	8	0	3
+sir_lb	br	half	1/3	1	far30	0	3.6	27.2	-61.33	-63.23	8	0	0
+sir_lb	br	half	1/3	2	far30	0	3.3	27.0	-63.31	-64.75	8	0	0
+sir_lb	br	half	1/3	3	far30	0	3.3	26.9	-61.81	-63.37	8	0	0
+sir_lb	br	half	1/5	1	far30	0	3.3	26.8	-60.29	-61.35	8	0	5
+sir_lb	br	half	1/5	2	far30	0	5.1	27.0	-60.95	-62.76	8	0	1
+sir_lb	br	half	1/5	3	far30	0	3.8	27.2	-60.65	-61.76	8	0	4
+sir_lb	br	half	1/10	1	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/10	2	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/10	3	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/20	1	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/20	2	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/20	3	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/50	1	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/50	2	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/50	3	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/100	1	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/100	2	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/100	3	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/200	1	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/200	2	far30	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/200	3	far30	1	0.3	0.2			0	0	0
+ebola_lb	br	half	2/3	1	far30	1	4.8	48.2			0	0	0
+ebola_lb	br	half	2/3	2	far30	1	5.6	49.5			0	0	0
+ebola_lb	br	half	2/3	3	far30	1	4.9	49.3			0	0	0
+ebola_lb	br	half	1/3	1	far30	0	9.1	76.6	-565.04	-2257.23	8	0	0
+ebola_lb	br	half	1/3	2	far30	0	8.2	77.5	-460.28	-785.66	8	0	0
+ebola_lb	br	half	1/3	3	far30	0	9.2	75.9	-495.39	-826.57	8	0	0
+ebola_lb	br	half	1/5	1	far30	0	13.5	68.0	-261.31	-286.34	7	0	0
+ebola_lb	br	half	1/5	2	far30	0	8.6	69.6	-259.33	-273.18	7	0	0
+ebola_lb	br	half	1/5	3	far30	0	7.1	61.5	-257.44	-298.16	6	0	0
+ebola_lb	br	half	1/10	1	far30	1	0.3	0.4			0	0	0
+ebola_lb	br	half	1/10	2	far30	1	0.3	0.4			0	0	0
+ebola_lb	br	half	1/10	3	far30	1	0.3	0.4			0	0	0
+ebola_lb	br	half	1/20	1	far30	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/20	2	far30	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/20	3	far30	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/50	1	far30	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/50	2	far30	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/50	3	far30	1	0.3	0.4			0	0	0
+ebola_lb	br	half	1/100	1	far30	1	0.3	0.4			0	0	0
+ebola_lb	br	half	1/100	2	far30	1	0.3	0.4			0	0	0
+ebola_lb	br	half	1/100	3	far30	1	0.3	0.4			0	0	0
+ebola_lb	br	half	1/200	1	far30	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/200	2	far30	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/200	3	far30	1	0.3	0.3			0	0	0
+sir_wide	br	interval	2/3	1	far150	0	8.7	79.4	-100.26	-136.89	8	0	0
+sir_wide	br	interval	2/3	2	far150	0	8.2	79.8	-111.08	-142.42	8	0	0
+sir_wide	br	interval	2/3	3	far150	0	7.9	81.1	-96.39	-122.1	8	0	0
+sir_wide	br	interval	1/3	1	far150	0	3.3	21.1	-60.47	-60.47	1	0	1
+sir_wide	br	interval	1/3	2	far150	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/3	3	far150	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/5	1	far150	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/5	2	far150	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/5	3	far150	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/10	1	far150	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/10	2	far150	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/10	3	far150	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/20	1	far150	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/20	2	far150	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/20	3	far150	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/50	1	far150	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/50	2	far150	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/50	3	far150	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/100	1	far150	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/100	2	far150	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/100	3	far150	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/200	1	far150	1	0.3	0.1			0	0	0
+sir_wide	br	interval	1/200	2	far150	1	0.3	0.2			0	0	0
+sir_wide	br	interval	1/200	3	far150	1	0.4	0.2			0	0	0
+sir_0hi	br	interval	2/3	1	far150	0	8.4	77.4	-58.7	-58.98	8	0	8
+sir_0hi	br	interval	2/3	2	far150	0	10.9	79.0	-58.55	-59.02	8	0	8
+sir_0hi	br	interval	2/3	3	far150	0	9.9	82.2	-58.62	-58.94	8	0	8
+sir_0hi	br	interval	1/3	1	far150	0	9.7	77.6	-58.35	-58.41	8	0	8
+sir_0hi	br	interval	1/3	2	far150	0	8.6	79.8	-58.31	-58.39	8	0	8
+sir_0hi	br	interval	1/3	3	far150	0	8.4	79.6	-58.38	-58.5	8	0	8
+sir_0hi	br	interval	1/5	1	far150	0	9.7	81.3	-58.34	-58.41	8	0	8
+sir_0hi	br	interval	1/5	2	far150	0	10.2	83.9	-58.3	-58.38	8	0	8
+sir_0hi	br	interval	1/5	3	far150	0	8.7	79.4	-58.29	-58.36	8	0	8
+sir_0hi	br	interval	1/10	1	far150	0	9.4	79.6	-58.29	-58.32	8	0	8
+sir_0hi	br	interval	1/10	2	far150	0	9.4	80.9	-58.27	-58.33	8	0	8
+sir_0hi	br	interval	1/10	3	far150	0	9.2	81.3	-58.26	-58.31	8	0	8
+sir_0hi	br	interval	1/20	1	far150	0	8.9	79.6	-58.27	-58.31	8	0	8
+sir_0hi	br	interval	1/20	2	far150	0	8.9	78.6	-58.26	-58.32	8	0	8
+sir_0hi	br	interval	1/20	3	far150	0	8.9	79.1	-58.27	-58.32	8	0	8
+sir_0hi	br	interval	1/50	1	far150	0	9.2	77.6	-58.26	-58.3	8	0	8
+sir_0hi	br	interval	1/50	2	far150	0	8.7	80.1	-58.27	-58.3	8	0	8
+sir_0hi	br	interval	1/50	3	far150	0	8.6	79.2	-58.28	-58.3	8	0	8
+sir_0hi	br	interval	1/100	1	far150	0	8.7	78.9	-58.49	-58.94	8	0	8
+sir_0hi	br	interval	1/100	2	far150	0	9.7	80.2	-58.76	-59.04	8	0	8
+sir_0hi	br	interval	1/100	3	far150	0	9.9	79.8	-58.63	-59.34	8	0	8
+sir_0hi	br	interval	1/200	1	far150	0	9.9	80.7	-61.0	-61.44	8	0	2
+sir_0hi	br	interval	1/200	2	far150	0	9.9	79.1	-61.29	-61.6	8	0	0
+sir_0hi	br	interval	1/200	3	far150	0	8.9	79.8	-60.92	-61.52	8	0	1
+seir_age	br	logint	2/3	1	far150	1	23.1	236.5			0	0	0
+seir_age	br	logint	2/3	2	far150	0	22.9	255.7	-278.94	-278.94	8	7	0
+seir_age	br	logint	2/3	3	far150	0	22.6	252.2	-282.94	-282.94	8	7	0
+seir_age	br	logint	1/3	1	far150	0	23.6	253.5	-234.13	-234.13	8	7	0
+seir_age	br	logint	1/3	2	far150	0	24.6	254.9	-190.46	-211.49	8	3	0
+seir_age	br	logint	1/3	3	far150	0	28.4	252.3	-213.89	-253.86	8	5	0
+seir_age	br	logint	1/5	1	far150	0	29.4	259.4	-152.68	-161.28	8	0	0
+seir_age	br	logint	1/5	2	far150	0	28.7	260.2	-155.17	-163.17	8	0	0
+seir_age	br	logint	1/5	3	far150	0	28.4	261.2	-156.86	-162.63	8	0	0
+seir_age	br	logint	1/10	1	far150	0	25.6	264.9	-146.04	-148.69	8	0	4
+seir_age	br	logint	1/10	2	far150	0	25.1	263.6	-146.71	-148.27	8	0	4
+seir_age	br	logint	1/10	3	far150	0	24.6	264.8	-147.87	-149.44	8	0	3
+seir_age	br	logint	1/20	1	far150	0	32.0	271.0	-145.63	-145.99	8	0	8
+seir_age	br	logint	1/20	2	far150	0	33.5	271.3	-145.6	-146.02	8	0	8
+seir_age	br	logint	1/20	3	far150	0	30.4	267.0	-145.4	-145.84	8	0	8
+seir_age	br	logint	1/50	1	far150	0	26.9	280.2	-145.27	-149.03	8	0	2
+seir_age	br	logint	1/50	2	far150	0	27.9	283.5	-146.16	-150.13	8	0	1
+seir_age	br	logint	1/50	3	far150	0	25.6	285.5	-145.51	-148.82	8	0	2
+seir_age	br	logint	1/100	1	far150	0	26.2	286.1	-150.91	-171.25	8	0	0
+seir_age	br	logint	1/100	2	far150	0	31.5	277.9	-150.78	-166.11	8	0	0
+seir_age	br	logint	1/100	3	far150	0	32.8	285.2	-150.9	-160.28	8	0	0
+seir_age	br	logint	1/200	1	far150	0	31.2	284.6	-195.05	-202.64	8	0	0
+seir_age	br	logint	1/200	2	far150	0	32.2	286.0	-192.08	-204.9	8	0	0
+seir_age	br	logint	1/200	3	far150	0	30.7	287.4	-189.15	-203.74	8	0	0
+ebola	br	logint	2/3	1	far150	0	21.9	224.1	-270.22	-290.4	8	0	0
+ebola	br	logint	2/3	2	far150	0	21.8	222.8	-264.96	-303.43	8	0	0
+ebola	br	logint	2/3	3	far150	0	22.3	221.6	-262.95	-289.7	8	0	0
+ebola	br	logint	1/3	1	far150	0	24.6	174.4	-233.62	-236.54	6	0	0
+ebola	br	logint	1/3	2	far150	0	27.6	194.0	-232.49	-235.68	7	0	0
+ebola	br	logint	1/3	3	far150	0	23.4	199.8	-234.44	-236.75	7	0	0
+ebola	br	logint	1/5	1	far150	1	0.3	0.5			0	0	0
+ebola	br	logint	1/5	2	far150	1	0.3	0.5			0	0	0
+ebola	br	logint	1/5	3	far150	1	0.3	0.5			0	0	0
+ebola	br	logint	1/10	1	far150	1	0.3	0.5			0	0	0
+ebola	br	logint	1/10	2	far150	1	0.3	0.4			0	0	0
+ebola	br	logint	1/10	3	far150	1	0.3	0.5			0	0	0
+ebola	br	logint	1/20	1	far150	1	0.3	0.5			0	0	0
+ebola	br	logint	1/20	2	far150	1	0.3	0.5			0	0	0
+ebola	br	logint	1/20	3	far150	1	0.3	0.5			0	0	0
+ebola	br	logint	1/50	1	far150	1	0.3	0.4			0	0	0
+ebola	br	logint	1/50	2	far150	1	0.3	0.5			0	0	0
+ebola	br	logint	1/50	3	far150	1	0.3	0.4			0	0	0
+ebola	br	logint	1/100	1	far150	1	0.3	0.5			0	0	0
+ebola	br	logint	1/100	2	far150	1	0.3	0.5			0	0	0
+ebola	br	logint	1/100	3	far150	1	0.3	0.5			0	0	0
+ebola	br	logint	1/200	1	far150	1	0.3	0.4			0	0	0
+ebola	br	logint	1/200	2	far150	1	0.3	0.5			0	0	0
+ebola	br	logint	1/200	3	far150	1	0.3	0.4			0	0	0
+ebola	br	interval	2/3	1	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	2/3	2	far150	1	0.3	0.4			0	0	0
+ebola	br	interval	2/3	3	far150	1	0.3	0.4			0	0	0
+ebola	br	interval	1/3	1	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/3	2	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/3	3	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/5	1	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/5	2	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/5	3	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/10	1	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/10	2	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/10	3	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/20	1	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/20	2	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/20	3	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/50	1	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/50	2	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/50	3	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/100	1	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/100	2	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/100	3	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/200	1	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/200	2	far150	1	0.3	0.5			0	0	0
+ebola	br	interval	1/200	3	far150	1	0.3	0.5			0	0	0
+sir_lb	br	half	2/3	1	far150	0	7.9	68.3	-62.99	-67.04	8	0	0
+sir_lb	br	half	2/3	2	far150	0	7.7	68.7	-64.57	-67.17	8	0	0
+sir_lb	br	half	2/3	3	far150	0	7.9	68.1	-64.32	-67.26	8	0	0
+sir_lb	br	half	1/3	1	far150	0	6.9	75.0	-59.62	-60.16	8	0	8
+sir_lb	br	half	1/3	2	far150	0	6.9	74.0	-59.35	-62.25	8	0	6
+sir_lb	br	half	1/3	3	far150	0	6.9	76.5	-59.63	-60.63	8	0	6
+sir_lb	br	half	1/5	1	far150	0	7.1	80.6	-59.06	-60.13	8	0	7
+sir_lb	br	half	1/5	2	far150	0	6.9	78.6	-59.17	-59.41	8	0	8
+sir_lb	br	half	1/5	3	far150	0	6.9	76.8	-59.12	-59.95	8	0	7
+sir_lb	br	half	1/10	1	far150	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/10	2	far150	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/10	3	far150	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/20	1	far150	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/20	2	far150	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/20	3	far150	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/50	1	far150	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/50	2	far150	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/50	3	far150	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/100	1	far150	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/100	2	far150	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/100	3	far150	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/200	1	far150	1	0.3	0.1			0	0	0
+sir_lb	br	half	1/200	2	far150	1	0.3	0.2			0	0	0
+sir_lb	br	half	1/200	3	far150	1	0.3	0.2			0	0	0
+ebola_lb	br	half	2/3	1	far150	0	18.3	220.8	-407.07	-558.89	8	0	0
+ebola_lb	br	half	2/3	2	far150	0	18.8	221.9	-373.87	-459.4	8	0	0
+ebola_lb	br	half	2/3	3	far150	0	18.3	224.1	-403.78	-554.92	8	0	0
+ebola_lb	br	half	1/3	1	far150	0	18.5	226.1	-237.45	-244.22	8	0	0
+ebola_lb	br	half	1/3	2	far150	0	18.6	226.0	-239.67	-244.59	8	0	0
+ebola_lb	br	half	1/3	3	far150	0	18.6	225.1	-236.62	-240.8	8	0	0
+ebola_lb	br	half	1/5	1	far150	0	16.8	201.8	-223.63	-225.6	7	0	0
+ebola_lb	br	half	1/5	2	far150	0	17.0	204.2	-223.93	-225.16	7	0	0
+ebola_lb	br	half	1/5	3	far150	0	15.5	179.9	-223.18	-225.17	6	0	0
+ebola_lb	br	half	1/10	1	far150	1	0.3	0.5			0	0	0
+ebola_lb	br	half	1/10	2	far150	1	0.3	0.4			0	0	0
+ebola_lb	br	half	1/10	3	far150	1	0.3	0.4			0	0	0
+ebola_lb	br	half	1/20	1	far150	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/20	2	far150	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/20	3	far150	1	0.3	0.4			0	0	0
+ebola_lb	br	half	1/50	1	far150	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/50	2	far150	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/50	3	far150	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/100	1	far150	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/100	2	far150	1	0.3	0.4			0	0	0
+ebola_lb	br	half	1/100	3	far150	1	0.3	0.3			0	0	0
+ebola_lb	br	half	1/200	1	far150	1	0.3	0.4			0	0	0
+ebola_lb	br	half	1/200	2	far150	1	0.3	0.4			0	0	0
+ebola_lb	br	half	1/200	3	far150	1	0.3	0.3			0	0	0
+polio	br	logint	2/3	1	far20	0	18.1	202.6	-694.19	-758.46	4	0	0
+polio	br	logint	1/3	1	far20	0	17.0	205.4	-702.94	-713.13	4	0	0
+polio	br	logint	1/5	1	far20	0	5.9	58.5	-668.53	-668.53	1	0	0
+polio	br	logint	1/10	1	far20	1	0.3	1.4			0	0	0
+polio	br	logint	1/20	1	far20	1	0.3	1.3			0	0	0
+polio	br	logint	1/50	1	far20	1	0.3	1.4			0	0	0
+polio	br	logint	1/100	1	far20	1	0.3	1.4			0	0	0
+polio	br	logint	1/200	1	far20	1	0.3	1.4			0	0	0

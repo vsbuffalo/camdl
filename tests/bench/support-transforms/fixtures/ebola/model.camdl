@@ -1,0 +1,60 @@
+# Base: none — root model
+# Adds: an Ebola-like SEIR with a case-fatality split, for the IF2 step benchmark
+# Changes: nothing else
+#
+# What this model is: S -> E at beta * S * I / N (infection), E -> I at sigma
+# (symptom onset), and from I either death at cfr * gamma or recovery at
+# (1 - cfr) * gamma. N = N0, ten initial infectious.
+#
+# What it is fitted to: weekly reported onsets (the weekly incidence of onset
+# times rho) and weekly deaths (the weekly incidence of death times rho), both
+# negative-binomial with dispersion k. These are the two series an Ebola
+# situation report prints; the benchmark estimates beta, sigma and cfr with
+# gamma, rho and k held at truth.toml.
+time_unit = 'days
+
+compartments { S, E, I, R, D }
+
+parameters {
+  beta  : rate        in [0.05, 2.0]
+  sigma : rate        in [0.02, 1.0]
+  cfr   : probability in [0.0, 1.0]
+  gamma : rate        in [0.01, 1.0]
+  N0    : count
+  I0    : count
+  rho   : probability in [0.1, 1.0]
+  k     : positive    in [1.0, 100.0]
+}
+
+let N = S + E + I + R
+
+transitions {
+  infection : S --> E @ beta * S * I / N
+  onset     : E --> I @ sigma * E
+  death     : I --> D @ cfr * gamma * I
+  recovery  : I --> R @ (1.0 - cfr) * gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+observations {
+  weekly_onsets {
+    columns       { time : time, weekly_onsets : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(onset)
+    emit_schedule = every 7 'days
+    weekly_onsets ~ neg_binomial(mean = rho * projected, r = k)
+  }
+  weekly_deaths {
+    columns       { time : time, weekly_deaths : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(death)
+    emit_schedule = every 7 'days
+    weekly_deaths ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+
+simulate { from = 0 'days  to = 140 'days }

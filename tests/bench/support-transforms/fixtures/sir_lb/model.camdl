@@ -1,0 +1,51 @@
+# Base: tests/recovery/cases/sir/model.camdl
+# Adds: beta and gamma declared with no range, so each is searched over
+#   [0, inf) with the lower-bounded map
+# Changes: nothing else
+#
+# What this model is: a closed SIR in N = 10000. Infection moves S to I at
+# beta * S * I / N, recovery moves I to R at gamma * I.
+#
+# What it is fitted to: weekly reported cases, the weekly incidence of
+# infection times a reporting fraction rho, negative-binomial with dispersion
+# k (rho and k held fixed by the benchmark).
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  beta  : rate                          ~ log_normal(mu = -1.0, sigma = 0.5)
+  gamma : rate                          ~ log_normal(mu = -2.0, sigma = 0.5)
+  N0    : count
+  I0    : count
+  rho   : probability  in [0.1, 0.9]   ~ beta(alpha = 2.0, beta = 5.0)
+  k     : positive     in [1.0, 100.0] ~ half_normal(sigma = 10.0)
+}
+
+let N = S + I + R
+
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}
