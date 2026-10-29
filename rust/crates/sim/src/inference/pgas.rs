@@ -3782,6 +3782,11 @@ pub fn run_pgas(
         // falls back to exactly the old forward draw off this same `rng`, which
         // the pass never touches, and is therefore bit-identical to a pre-gh#784
         // run.
+        //
+        // A start exactly on a bound has no finite z; the fit refuses one
+        // before it gets here (support-keyed transforms proposal D3).
+        debug_assert!(!if2_params.iter().any(|p| p.transform.on_an_end(current_params[p.index])),
+            "a PGAS chain started exactly on a bound");
         eprintln!("  initializing reference trajectory (unconditional SMC pass, \
                    {} particles)...", config.n_particles);
         let init_t0 = std::time::Instant::now();

@@ -457,7 +457,7 @@ fn preflight_refuses_parametric_binomial_n_direct() {
         Expr::Param(ParamExpr { param: "qgam".into() }),
         ir::observation::Projection::CumulativeFlow("infection".into()),
     );
-    let result = attempt_nuts_fit(obs, "qgam", 100.0);
+    let result = attempt_nuts_fit(obs, "qgam", 50.0);
     match result {
         Err(SimError::Validation(msg)) => {
             assert!(msg.contains("qgam"), "must name the refused param; got: {}", msg);
@@ -486,7 +486,7 @@ fn preflight_refuses_parametric_binomial_n_via_projection() {
         Expr::Projected(ProjectedExpr { projected: () }),
         ir::observation::Projection::DerivedExpr(projection_expr),
     );
-    let result = attempt_nuts_fit(obs, "qgam", 100.0);
+    let result = attempt_nuts_fit(obs, "qgam", 50.0);
     match result {
         Err(SimError::Validation(msg)) => {
             assert!(msg.contains("qgam"), "must name the refused param; got: {}", msg);

@@ -585,6 +585,10 @@ pub fn run_pmmh(
         current_params = base_params.to_vec();
 
         // Current state on transformed scale
+        // A start exactly on a bound has no finite z; the fit refuses one
+        // before it gets here (support-keyed transforms proposal D3).
+        debug_assert!(!if2_params.iter().any(|p| p.transform.on_an_end(current_params[p.index])),
+            "a PMMH chain started exactly on a bound");
         current_transformed = if2_params.iter()
             .map(|p| p.to_transformed(current_params[p.index]))
             .collect();
