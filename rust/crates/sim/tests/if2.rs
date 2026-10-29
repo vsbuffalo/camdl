@@ -346,6 +346,50 @@ fn test_if2_no_cooling_explores() {
         "no-cooling beta spread={:.4} — should be wandering, not converging", spread);
 }
 
+/// A likelihood that is flat in every parameter: IF2's swarm is then its
+/// perturbation kernel alone.
+struct FlatObs { obs_times: Vec<f64> }
+
+impl ObservationModel<ParticleState> for FlatObs {
+    fn log_likelihood(&self, _state: &ParticleState, _obs_idx: usize, _params: &[f64]) -> f64 { 0.0 }
+    fn n_observations(&self) -> usize { self.obs_times.len() }
+    fn obs_time(&self, obs_idx: usize) -> f64 { self.obs_times[obs_idx] }
+    fn n_streams(&self) -> usize { 1 }
+    fn sample(&self, _state: &ParticleState, _obs_idx: usize, _params: &[f64], _rng: &mut StatefulRng) -> Vec<f64> { vec![] }
+    fn mean(&self, _state: &ParticleState, _obs_idx: usize, _params: &[f64]) -> Vec<f64> { vec![] }
+}
+
+/// Proposal §9.1: IF2's step is fixed in z. A parameter on the interval map
+/// over [0, 1] that starts at 0.999 (z = 6.9) and takes a step of 0.1 in z
+/// over one uncooled iteration of 10 observations moves by about
+/// 0.1·√11 ≈ 0.33 in z, so the swarm stays above 0.99. Converting the step
+/// at each particle's value, as before, divided it by dθ/dz ≈ 1e-3 there: a
+/// step of ~100 in z that threw the swarm across the whole interval.
+#[test]
+fn the_if2_step_is_fixed_in_z_near_an_end() {
+    let (compiled, true_params) = sir_model();
+    let compiled = Arc::new(compiled);
+    let process = ChainBinomialProcess::new(compiled.clone());
+    let obs_model = FlatObs { obs_times: (1..=10).map(|t| t as f64).collect() };
+    let if2_params = vec![EstimatedParam {
+        name: "beta".into(), index: 0, initial: 0.999, rw_sd: 0.1,
+        transform: Transform::Interval { lo: 0.0, hi: 1.0 }, perturb_only_at_t0: false, rw_sd_auto: false,
+    }];
+    let config = IF2Config {
+        n_particles: 200,
+        n_iterations: 1,
+        cooling_fraction: 1.0,
+        cooling_target_iters: 50, simplex_groups: vec![],
+        dt: 1.0,
+        t_start: 0.0,
+        skip_first_obs_from_loglik: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+    };
+    let result = run_if2(&process, &obs_model, &true_params, &if2_params, &config, 7).unwrap();
+    let mean = result.iterations[0].param_means[0];
+    assert!(mean > 0.99, "the swarm left the end it started at: mean {mean}");
+}
+
 // ── Transform tests ─────────────────────────────────────────────────────
 
 #[test]

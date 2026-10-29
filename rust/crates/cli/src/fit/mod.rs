@@ -1432,7 +1432,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let rw_sd = match runner::auto_rw_sd(&chain_results.results, &run_config.estimated_params) {
                     Ok((rw, _)) => rw,
                     Err(_) => run_config.estimated_params.iter()
-                        .map(|s| (s.name.clone(), s.rw_sd * 0.5))
+                        .map(|s| (s.name.clone(), s.natural_step() * 0.5))
                         .collect(),
                 };
 

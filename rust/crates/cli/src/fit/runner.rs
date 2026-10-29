@@ -649,8 +649,8 @@ pub fn ode_step_dt(config: &FitRunConfig) -> f64 {
 /// - Each member must appear in `[estimate]` (validated upstream by
 ///   `FitConfigV2::validate`, but defended again here).
 /// - Each member must resolve to a model param index.
-/// - rw_sd is read from the corresponding `EstimatedParam.rw_sd` (which
-///   already encodes auto-derivation when `EstimateSpecV2.rw_sd` is None).
+/// - rw_sd is the member's `EstimateSpecV2.rw_sd`, else
+///   `simplex_member_default_step` of its domain.
 ///
 /// rw_sd semantics: the IF2 simplex transform perturbs members on the
 /// log-ratio scale. The user's `EstimateSpecV2.rw_sd` for a simplex
@@ -677,13 +677,16 @@ pub(crate) fn resolve_simplex_groups(
                 "simplex_groups[{}]: member '{}' has no model param index \
                  (model load + estimate parity drift?)",
                 group_idx, name))?;
-            let if2_rw_sd = if2_params.iter()
+            let member = if2_params.iter()
                 .find(|p| p.name == *name)
                 .ok_or_else(|| format!(
                     "simplex_groups[{}]: member '{}' missing from \
                      resolved EstimatedParam list (build_if2_params drift?)",
-                    group_idx, name))?
-                .rw_sd;
+                    group_idx, name))?;
+            // The member's own `rw_sd`, read on the log-ratio scale, else
+            // the simplex default; not the member's step in its own z.
+            let if2_rw_sd = estimate.get(name).and_then(|e| e.rw_sd)
+                .unwrap_or_else(|| simplex_member_default_step(&member.transform));
             indices.push(model_idx);
             rw_sds.push(if2_rw_sd);
         }
@@ -1154,10 +1157,18 @@ pub fn print_preflight(
         }
         let mark = if compressed { " \x1b[33m⚠ compressed\x1b[0m" } else { "" };
         let pos = format!("start={:.4} z={:.2}{}", spec.initial, z, mark);
+        // The step in z, the same for every chain and particle, and the
+        // natural-scale step it is at the reference point (the box's
+        // midpoint, else the start), the unit an explicit rw_sd is written in.
         let source = if spec.rw_sd_auto { "\x1b[33mauto\x1b[0m" } else { "explicit" };
-        let transformed_sd = spec.transformed_sd(spec.rw_sd, spec.initial);
-        eprintln!("  {:12} {}  {}  rw_sd={:.4} ({:.3}/step, {})",
-            spec.name, tname, pos, spec.rw_sd, transformed_sd, source);
+        let at = if matches!(spec.transform, Transform::Interval { .. } | Transform::LogInterval { .. }) {
+            "midpoint"
+        } else {
+            "start"
+        };
+        eprintln!("  {:12} {}  {}  step(z)={:.3} ≈ rw_sd {} at the {at} ({})",
+            spec.name, tname, pos, spec.rw_sd,
+            sim::inference::diagnostic::format_start_value(spec.natural_step()), source);
 
         // Push auto rw_sd info diagnostic
         if spec.rw_sd_auto {
@@ -1461,9 +1472,14 @@ pub fn build_if2_params_from_specs(
         let transform = derive_transform_with_bounds(estimated_kind(ir_param)?, (lo, hi))
             .map_err(|e| format!("estimate.{}: {e}", spec.name))?;
 
-        // rw_sd: spec explicit > auto from resolved bounds
-        let rw_sd = spec.rw_sd
-            .unwrap_or_else(|| auto_rw_sd_from_value(base_params[idx], lo, hi, &transform));
+        // The step in z (proposal §9.1, D8): an explicit natural-scale rw_sd
+        // converted once at the domain's reference point (the midpoint of a
+        // box, else the start), else the map's default step, else none (NaN,
+        // refused under IF2, PMMH and MH by `refuse_degenerate_auto_rw_sd`).
+        let rw_sd = match spec.rw_sd {
+            Some(natural) => transform.step_from_natural(natural, base_params[idx]),
+            None => transform.default_if2_step().unwrap_or(f64::NAN),
+        };
 
         params.push(EstimatedParam {
             name: spec.name.clone(),
@@ -1479,17 +1495,11 @@ pub fn build_if2_params_from_specs(
     Ok(params)
 }
 
-/// Refuse an auto-derived `rw_sd` that cannot move its parameter.
-///
-/// The auto step is a fraction of the box ([`auto_rw_sd_from_value`]), and
-/// two boxes give it no scale:
-///
-/// - a box with an infinite end: ±1e6 is substituted for the end of an
-///   identity-transformed box (an unbounded `real` got 166666.67);
-/// - any other step that is non-finite, ≤ 0, or below 1e-9 of the box width.
-///
-/// A positive kind boxed `[0, hi]` takes the interval map, whose step is a
-/// fraction of the width like any other box's.
+/// Refuse a parameter with no step: no explicit `rw_sd` on the identity map,
+/// an unbounded `real` or `instant`, which has no scale to take a default
+/// step from. Every map with a finite end has a default step in z
+/// ([`sim::inference::types::Transform::default_if2_step`]), so this is the
+/// one case; the non-finite check is a backstop.
 ///
 /// No scale is invented here; the user names one. `how` is the caller's
 /// spelling of an explicit step.
@@ -1500,60 +1510,40 @@ pub fn refuse_degenerate_auto_rw_sd(
     for p in params.iter().filter(|p| p.rw_sd_auto) {
         let (lo, hi) = p.bounds();
         let name = &p.name;
-        if !(lo.is_finite() && hi.is_finite()) {
+        if !p.rw_sd.is_finite() || p.rw_sd <= 0.0 {
             return Err(format!(
-                "`{name}` has search box [{lo}, {hi}], which has an infinite end, so no \
-                 random-walk step (rw_sd) can be derived from it. Give an explicit rw_sd \
-                 ({how}), or finite bounds (`in [lo, hi]` in the model, or \
+                "`{name}` has search box [{lo}, {hi}], unbounded at both ends, so it has no \
+                 scale to take a default random-walk step (rw_sd) from. Give an explicit \
+                 rw_sd ({how}), or bounds (`in [lo, hi]` in the model, or \
                  `bounds = [lo, hi]` in [estimate])."));
-        }
-        if !p.rw_sd.is_finite() || p.rw_sd <= 0.0 || p.rw_sd < 1e-9 * (hi - lo) {
-            return Err(format!(
-                "`{name}` has search box [{lo}, {hi}], from which the automatic random-walk \
-                 step (rw_sd) is {:e}, which cannot move {name}. Give an explicit rw_sd \
-                 ({how}), or narrower bounds (`in [lo, hi]` in the model, or \
-                 `bounds = [lo, hi]` in [estimate]).", p.rw_sd));
         }
     }
     Ok(())
 }
 
-/// Auto-compute rw_sd from bounds on the transformed scale.
+/// A simplex member's default log-ratio step, kept from before support-keyed
+/// transforms so the simplex perturbation is unchanged (proposal §9.5: the
+/// simplex groups use their own log-ratio map): the natural-scale default the
+/// member's box used to give, read as is on the log-ratio scale.
 ///
-/// Returns a natural-scale rw_sd value. At each IF2 perturbation step,
-/// `EstimatedParam::transformed_sd(natural_sd, current_value)` re-converts
-/// this to the transformed scale using the delta method at the CURRENT
-/// parameter value. So the midpoint used here is just a reference point
-/// for expressing the natural-scale number — the actual perturbation
-/// adapts to the current position through transformed_sd. Any reference
-/// point (midpoint, lower bound, current value) would produce the same
-/// perturbation on the transformed scale.
-///
-/// LogInterval: log_range / 20 in ln θ, converted to natural at the geometric midpoint.
-///   For sigma_se in [0.001, 5.0]: log_range = 8.5, log_sd = 0.43, meaning ~±50% per step.
+/// LogInterval: ln(hi/lo)/20 converted at the geometric midpoint.
 /// LowerBounded: as LogInterval with hi = 1000·lo.
-/// Interval: range / 6 on natural scale, 2/3 in z at the midpoint.
-/// Identity, UpperBounded: (hi - lo) / 6, with ±1e6 for an infinite end.
-///
-/// This is a starting heuristic, not a solution. Scout's MAD-based
-/// calibration replaces it for refine. The modeler can override with
-/// explicit rw_sd in fit.toml or --rw-sd on the CLI.
-pub fn auto_rw_sd_from_value(_current_value: f64, lower: f64, upper: f64, transform: &Transform) -> f64 {
+/// Interval: (hi − lo)/6.
+/// Identity, UpperBounded: (hi − lo)/6, with ±1e6 for an infinite end.
+fn simplex_member_default_step(transform: &Transform) -> f64 {
+    let (lower, upper) = transform.bounds();
     let log_auto = |lo: f64, hi: f64| {
         let lo = lo.max(1e-300);
         let hi_val = if hi.is_finite() { hi } else { lo * 1000.0 };
         let log_range = (hi_val / lo).ln();
         let log_sd = log_range / 20.0;
-        // Convert to natural scale at geometric midpoint
         let midpoint = (lo * hi_val).sqrt();
         midpoint * log_sd
     };
     match *transform {
         Transform::LogInterval { lo, hi } => log_auto(lo, hi),
         Transform::LowerBounded { lo } => log_auto(lo, f64::INFINITY),
-        Transform::Interval { lo, hi } => {
-            (hi - lo) / 6.0
-        }
+        Transform::Interval { lo, hi } => (hi - lo) / 6.0,
         Transform::Identity | Transform::UpperBounded { .. } => {
             let lo = if lower.is_finite() { lower } else { -1e6 };
             let hi = if upper.is_finite() { upper } else { 1e6 };
@@ -2521,7 +2511,7 @@ pub fn run_chains_with_per_chain_params(
             // The step in z each parameter took at its start: the natural
             // rw_sd converted there.
             let steps: Vec<String> = config.estimated_params.iter()
-                .map(|p| format!("{}={:.3}", p.name, p.transformed_sd(p.rw_sd, p.initial)))
+                .map(|p| format!("{}={:.3}", p.name, p.rw_sd))
                 .collect();
             collector.push(DiagnosticKind::PerturbedSwarmInfeasible {
                 start_loglik, steps: steps.clone(),
@@ -5223,8 +5213,9 @@ dt = 1.0
 
     #[test]
     fn fit_bounds_propagate_to_rw_sd_auto_log_scale() {
-        // auto_rw_sd_from_value works in transformed-scale units, then
-        // converts to natural scale at the geometric midpoint. The
+        // The automatic step is the same in z for every log-interval box;
+        // its natural-scale size at the geometric midpoint is what an
+        // explicit rw_sd is compared against. The
         // load-bearing thing is that the *log-scale* perturbation
         // magnitude shrinks with tighter bounds — IF2 perturbs in
         // transformed space, so that's what governs how many steps it
@@ -5246,8 +5237,8 @@ dt = 1.0
         // Convert each rw_sd back to log-scale by dividing by midpoint.
         let mid_wide  = (1e-6_f64 * 1.0).sqrt();
         let mid_tight = (0.1_f64 * 0.5).sqrt();
-        let log_sd_wide  = r_wide[0].rw_sd  / mid_wide;
-        let log_sd_tight = r_tight[0].rw_sd / mid_tight;
+        let log_sd_wide  = r_wide[0].natural_step()  / mid_wide;
+        let log_sd_tight = r_tight[0].natural_step() / mid_tight;
         assert!(log_sd_tight < log_sd_wide,
             "tighter bounds must yield smaller log-scale rw_sd \
              (wide_log_sd={}, tight_log_sd={})", log_sd_wide, log_sd_tight);
@@ -5465,8 +5456,8 @@ dt = 1.0
         assert!(out[0].rw_sd.is_finite(),
             "auto rw_sd over an infinite box is inf → NaN on the first \
              perturbation; got {}", out[0].rw_sd);
-        assert!((out[0].rw_sd - 1.0 / 6.0).abs() < 1e-12,
-            "logit auto rw_sd is (hi − lo)/6, got {}", out[0].rw_sd);
+        assert_eq!(out[0].rw_sd, sim::inference::types::IF2_INTERVAL_STEP,
+            "the auto step is the interval map's default in z");
     }
 
     /// Consumer 3 — the fit.toml `[estimate].bounds` override path. An
@@ -5501,9 +5492,8 @@ dt = 1.0
                 "{kind} must keep the [0, ∞) fallback");
             assert_eq!(out[0].transform, Transform::LowerBounded { lo: 0.0 },
                 "{kind} on [0, ∞) takes θ = eᶻ");
-            assert!(out[0].rw_sd.is_finite(),
-                "{kind} auto rw_sd must stay finite (Log handles hi = ∞), got {}",
-                out[0].rw_sd);
+            assert_eq!(out[0].rw_sd, sim::inference::types::IF2_HALF_BOUNDED_STEP,
+                "{kind} on [0, ∞) takes the half-bounded default step in z");
         }
         for kind in [Real, Instant] {
             let (model, compiled) = make_unbounded_param_model("p", 0.5, kind);
@@ -5666,27 +5656,65 @@ dt = 1.0
             .expect("beta with a declared range [0.1, 0.9]");
     }
 
-    /// An automatic step that cannot move its parameter is refused: a log box
-    /// with lower bound 0 (~1e-148) and one whose lower bound is so small the
-    /// step is below 1e-9 of the box width. An ordinary log box passes.
+    /// Proposal §12.1, D8: the automatic step is the map's IF2 default in
+    /// z, the same at every scale of box, and every map with a finite end
+    /// has one; only the identity map (an unbounded `real`) is refused. A
+    /// rate on [0, 2] gets a step above 0.1 in z; under the walled log map it
+    /// got ~1e-148 / θ.
     #[test]
-    fn degenerate_auto_rw_sd_is_refused() {
-        use ir::parameter::ParamKind::Rate;
+    fn the_auto_step_is_the_maps_default_in_z() {
+        use ir::parameter::ParamKind::{Rate, Real};
+        use sim::inference::types::{IF2_INTERVAL_STEP, IF2_LOG_INTERVAL_STEP};
         let auto = |lo: f64, hi: f64| {
             let (model, compiled) = make_one_param_model("z", lo, hi, Some(Rate));
             let base = compiled.default_params.clone();
             build_if2_params_from_specs(&model, &compiled, &base, &[spec_for("z", lo, hi)])
                 .expect("params")
         };
-        // A rate on [0, 2] takes the interval map, whose automatic step is a
-        // fraction of the width: it moves the parameter (it did not under the
-        // walled log map, whose floored lower bound made the step ~1e-148).
         let zero_lo = auto(0.0, 2.0);
         assert_eq!(zero_lo[0].transform, Transform::Interval { lo: 0.0, hi: 2.0 });
+        assert!(zero_lo[0].rw_sd > 0.1, "rate on [0, 2]: step {} in z", zero_lo[0].rw_sd);
+        assert_eq!(zero_lo[0].rw_sd, IF2_INTERVAL_STEP);
         refuse_degenerate_auto_rw_sd(&zero_lo, "rw_sd").expect("a rate on [0, 2] has an auto step");
-        let err = refuse_degenerate_auto_rw_sd(&auto(1e-30, 1.0), "rw_sd").unwrap_err();
-        assert!(err.contains("cannot move"), "{err}");
-        refuse_degenerate_auto_rw_sd(&auto(1e-6, 10.0), "rw_sd").expect("an ordinary log box");
+        for (lo, hi) in [(1e-30, 1.0), (1e-6, 10.0), (0.05, 1.0)] {
+            let p = auto(lo, hi);
+            assert_eq!(p[0].rw_sd, IF2_LOG_INTERVAL_STEP, "[{lo}, {hi}]: the log-interval default");
+            refuse_degenerate_auto_rw_sd(&p, "rw_sd").expect("a log-interval box has an auto step");
+        }
+        let (model, compiled) = make_unbounded_param_model("r", 0.5, Real);
+        let base = compiled.default_params.clone();
+        let real = build_if2_params_from_specs(&model, &compiled, &base, &[unbounded_spec("r", None)])
+            .expect("params");
+        assert!(real[0].rw_sd.is_nan(), "an unbounded real has no default step");
+        let err = refuse_degenerate_auto_rw_sd(&real, "rw_sd").unwrap_err();
+        assert!(err.contains("`r`") && err.contains("explicit rw_sd"), "{err}");
+    }
+
+    /// Proposal §9.1, series (i): an explicit natural-scale rw_sd is
+    /// converted once at the domain's reference point — the box's midpoint
+    /// for the interval maps, where dθ/dz is (hi − lo)/4, or θ·ln(hi/lo)/4 at
+    /// the geometric midpoint; the start for a half-bounded map — and is
+    /// then the same step for every chain.
+    #[test]
+    fn an_explicit_rw_sd_is_converted_once_at_the_reference_point() {
+        use ir::parameter::ParamKind::Rate;
+        let built = |lo: f64, hi: f64, rw: f64| {
+            let (model, compiled) = make_one_param_model("z", lo, hi, Some(Rate));
+            let base = compiled.default_params.clone();
+            let spec = ParamSpec { rw_sd: Some(rw), ..spec_for("z", lo, hi) };
+            build_if2_params_from_specs(&model, &compiled, &base, &[spec]).expect("params")
+        };
+        let p = built(0.0, 2.0, 0.1);
+        assert!((p[0].rw_sd - 0.1 / (2.0 / 4.0)).abs() < 1e-12, "interval: {}", p[0].rw_sd);
+        let p = built(0.05, 1.0, 0.02);
+        let want = 0.02 / ((0.05_f64 * 1.0).sqrt() * (1.0_f64 / 0.05).ln() / 4.0);
+        assert!((p[0].rw_sd - want).abs() < 1e-12, "log-interval: {} vs {want}", p[0].rw_sd);
+        assert!((p[0].natural_step() - 0.02).abs() < 1e-15, "the natural step round-trips");
+        assert!(!p[0].rw_sd_auto);
+        assert!((p[0].mh_initial_step() - 5.0 * want).abs() < 1e-12, "MH starts at 5x an explicit step");
+        let half = EstimatedParam { rw_sd_auto: true, ..p[0].clone() };
+        assert_eq!(half.mh_initial_step(), sim::inference::types::MH_DEFAULT_STEP,
+            "MH starts at its own default when the step is automatic");
     }
 
     // ── Cold-cooling Â suppression (gh#45) ───────────────────────────
@@ -6769,6 +6797,29 @@ dt = 1.0
             name: name.into(), index: 0, initial, rw_sd: 0.1, transform,
             rw_sd_auto: false, perturb_only_at_t0: false,
         }
+    }
+
+    /// Proposal §9.5: a simplex member's log-ratio step is its own `rw_sd`,
+    /// else the simplex default of its box — (hi − lo)/6 on the interval
+    /// map — and not the member's step in its own z.
+    #[test]
+    fn a_simplex_member_keeps_its_log_ratio_default_step() {
+        use super::super::config_v2::{EstimateSpecV2, SimplexGroup};
+        let spec = |rw_sd: Option<f64>| EstimateSpecV2 {
+            bounds: None, prior: None, perturb_only_at_t0: false, rw_sd, start: None,
+        };
+        let estimate: indexmap::IndexMap<String, EstimateSpecV2> =
+            [("p1".to_string(), spec(None)), ("p2".to_string(), spec(Some(0.3)))].into_iter().collect();
+        let index: HashMap<String, usize> = [("p1".to_string(), 0), ("p2".to_string(), 1)].into_iter().collect();
+        let members = vec![
+            EstimatedParam { rw_sd: sim::inference::types::IF2_INTERVAL_STEP, rw_sd_auto: true,
+                ..domain_param("p1", Transform::Interval { lo: 0.0, hi: 1.0 }, 0.5) },
+            EstimatedParam { index: 1, ..domain_param("p2", Transform::Interval { lo: 0.0, hi: 1.0 }, 0.5) },
+        ];
+        let groups = resolve_simplex_groups(
+            &[SimplexGroup { params: vec!["p1".into(), "p2".into()] }], &estimate, &index, &members)
+            .expect("groups");
+        assert_eq!(groups[0].rw_sds, vec![1.0 / 6.0, 0.3]);
     }
 
     #[test]

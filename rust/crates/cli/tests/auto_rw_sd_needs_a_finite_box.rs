@@ -1,14 +1,11 @@
-//! Auto `rw_sd` is a fraction of the search box. A box with an infinite end
-//! gives it no scale: an unbounded `real` parameter got 166666.67 (an
-//! infinite end of its identity box read as ±1e6) and an unbounded `rate`
-//! got ~1e-299 (a lower bound floored at 1e-300). Either makes the IF2
-//! random walk meaningless, and PMMH's and MH's first proposals are five
-//! times it. Such a fit is refused, naming the parameter and the two
-//! remedies; an explicit `rw_sd` runs.
-//!
-//! A positive kind boxed `[0, hi]` (`zeta : rate in [0, 2]` below) takes the
-//! interval map, whose automatic step is a fraction of the width; under the
-//! walled log map it was about 1e-148 and IF2 never moved it.
+//! The automatic step is a default in the transformed coordinate, one per
+//! map (support-keyed transforms proposal D8). Every map with a finite end
+//! has one: an unbounded `rate` (`eta`, θ = eᶻ on [0, ∞)) and a positive
+//! kind boxed `[0, hi]` (`zeta : rate in [0, 2]`, the interval map, whose
+//! step under the walled log map was about 1e-148, so IF2 never moved it)
+//! both run and move. The identity map of an unbounded `real` (`delta`) has
+//! no scale to take a step from: such a fit is refused, naming the parameter
+//! and the two remedies; an explicit `rw_sd` runs.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -113,9 +110,16 @@ fn an_unbounded_real_parameter_has_no_auto_rw_sd() {
     refused(&fit("delta", "", IF2), "delta");
 }
 
+/// A rate on [0, ∞) has the half-bounded map's default step: IF2 runs and
+/// moves it.
 #[test]
-fn an_unbounded_rate_parameter_has_no_auto_rw_sd() {
-    refused(&fit("eta", "", IF2), "eta");
+fn an_unbounded_rate_parameter_has_an_auto_step_that_moves_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = run_in(tmp.path(), "eta", "", IF2, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let vals = param_trace(tmp.path(), "eta");
+    assert!(vals.iter().any(|v| (v - vals[0]).abs() > 1e-6),
+        "eta never moved from {}: {vals:?}", vals[0]);
 }
 
 #[test]
@@ -163,10 +167,14 @@ fn a_positive_kind_boxed_from_zero_has_an_auto_rw_sd_that_moves_it() {
 }
 
 fn zeta_trace(dir: &Path) -> Vec<f64> {
+    param_trace(dir, "zeta")
+}
+
+fn param_trace(dir: &Path, name: &str) -> Vec<f64> {
     let traces = find(&dir.join("res"), "parameter_traces.tsv").expect("parameter_traces.tsv");
     let text = std::fs::read_to_string(traces).unwrap();
     let mut lines = text.lines().filter(|l| !l.starts_with('#'));
-    let col = lines.next().unwrap().split('\t').position(|h| h == "zeta").expect("zeta column");
+    let col = lines.next().unwrap().split('\t').position(|h| h == name).expect("parameter column");
     lines.map(|l| l.split('\t').nth(col).unwrap().parse().unwrap()).collect()
 }
 

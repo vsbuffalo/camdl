@@ -421,7 +421,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 for spec in if2_params {
                     if simplex_member_indices.contains(&spec.index) { continue; }
                     let current = particle_params[i][spec.index];
-                    let sd = spec.transformed_sd(spec.rw_sd, current) * cooling_now;
+                    let sd = spec.rw_sd * cooling_now;
                     let z = spec.to_transformed(current);
                     let new_val = spec.from_transformed(z + rngs[i].normal() * sd);
                     particle_params[i][spec.index] = new_val;
@@ -520,7 +520,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 for spec in if2_params {
                     if spec.perturb_only_at_t0 || simplex_member_indices.contains(&spec.index) { continue; }
                     let current = particle_params[i][spec.index];
-                    let sd = spec.transformed_sd(spec.rw_sd, current) * cooling_now;
+                    let sd = spec.rw_sd * cooling_now;
                     let z = spec.to_transformed(current);
                     let new_val = spec.from_transformed(z + rngs[i].normal() * sd);
                     particle_params[i][spec.index] = new_val;
@@ -621,7 +621,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
 
                     // q_k: effective perturbation / cloud width
                     let sd_u = var_u.sqrt();
-                    let eff_sd = spec.transformed_sd(spec.rw_sd, mean_u) * cooling_now;
+                    let eff_sd = spec.rw_sd * cooling_now;
                     let q = if sd_u > 1e-30 { eff_sd / sd_u } else { 0.0 };
                     q_k_accum[pi] += q;
 

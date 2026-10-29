@@ -434,7 +434,7 @@ fn compression_factor(z: f64) -> f64 {
     1.0 / (4.0 * s * (1.0 - s))
 }
 
-fn format_start_value(v: f64) -> String {
+pub fn format_start_value(v: f64) -> String {
     let mag = v.abs();
     // A NaN `mag` takes the exponential branch here where the two-comparison
     // form took the decimal one; both render NaN and ±inf identically, so the
@@ -615,7 +615,7 @@ impl DiagnosticKind {
                 format!("Profile for '{}' is flat — parameter may not be identifiable.",
                     param),
             Self::AutoRwSd { param, rw_sd } =>
-                format!("Auto rw_sd for '{}': {:.6}.", param, rw_sd),
+                format!("Auto step for '{}': {:.4} in its transformed coordinate.", param, rw_sd),
             Self::CompressedLogitPosition { param, z } =>
                 format!("'{}' starts at |z| = {:.1} > 2 in its transformed coordinate (an \
                          interval or log-interval map), near an end of its box: the map is \

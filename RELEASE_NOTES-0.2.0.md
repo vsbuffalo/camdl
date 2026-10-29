@@ -183,12 +183,21 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   `[0, 1]` and a flat likelihood, `pmmh` and `mh` put 66% of draws outside the
   box and `if2` ended every chain outside it. Migration: drop `transform`; a
   bounded parameter gets the scaled logit automatically.
-- **An automatic `rw_sd` is refused on a log-scale box whose lower bound is 0.**
-  Under `if2`, `pmmh` and `mh`, and in `profile`'s IF2 cells, a `rate`,
-  `positive`, `count` or `duration` boxed `[0, hi]` and given no `rw_sd` now
-  refuses, as an unbounded one already did. Migration: give `rw_sd` in its
-  `[estimate]` entry (`--rw-sd NAME=SD` on `profile`), or a positive lower
-  bound.
+- **IF2 takes a fixed step in the transformed coordinate; `rw_sd` is converted
+  once.** IF2 used to convert the natural-scale `rw_sd` to the transformed
+  coordinate z at each particle's current value, which made the step grow
+  without bound near the ends of a box and throw particles out to them. The step
+  is now fixed in z, the same for every chain and particle: an explicit `rw_sd`
+  is converted once, at the box's midpoint (at the start on a half-bounded
+  domain), and with no `rw_sd` IF2 takes a default step in z for the parameter's
+  transform. Every transform with a finite end has a default, so a `rate`,
+  `positive`, `count` or `duration` on `[0, hi]` or `[0, ∞)` runs without an
+  explicit `rw_sd`; an unbounded `real` or `instant` still needs one. PMMH and
+  MH start their proposal at 1.0 in z, or at five times an explicit `rw_sd`'s
+  step, and adapt from there. The launch table prints the step in z and the
+  natural-scale step it is at the midpoint. Fixed-seed IF2, PMMH and MH runs on
+  boxed parameters change. Migration: none; a hand-tuned `rw_sd` keeps its
+  meaning at the box's midpoint.
 - **A fit-config box outside the parameter's kind is refused, and so is a
   `transform` override that does not keep the parameter's support.** Where the
   model declares no `in [lo, hi]`, `[estimate].bounds` may narrow the kind's
@@ -779,8 +788,10 @@ User-visible correctness fixes (selected from ~138):
   transform floors the lower bound at 1e-300, so the automatic `rw_sd` was about
   1e-148 (printed `rw_sd=0.0000 (0.000/step, auto)`): IF2 never moved the
   parameter, every chain stayed at its start, and the reported MLE was the best
-  of the starts. PMMH and MH began from five times that step. Such a fit is now
-  refused (above); PGAS, which reads no `rw_sd`, was unaffected.
+  of the starts. PMMH and MH began from five times that step. Such a box now
+  takes the interval map with a default step in the transformed coordinate
+  (above), and IF2 moves the parameter; PGAS, which reads no `rw_sd`, was
+  unaffected.
 - **A prior could be evaluated on the wrong coordinate, and an override could
   leave the support unenforced.** A `rate ~ log_normal(-1, 0.5)` with no
   declared range and `bounds = [-1, 1]` in the fit config got the scaled logit,

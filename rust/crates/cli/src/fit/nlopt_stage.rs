@@ -264,7 +264,12 @@ pub fn run_stage(
             .iter()
             .find(|p| p.name == *name)
         {
-            rw_sd.insert(name.clone(), p.rw_sd);
+            // On the natural scale, as an explicit rw_sd is written; a
+            // parameter with no step (NaN) carries none.
+            let natural = p.natural_step();
+            if natural.is_finite() {
+                rw_sd.insert(name.clone(), natural);
+            }
         }
     }
     let perturb_only_at_t0_params: Vec<String> = arc_config

@@ -1048,7 +1048,7 @@ pub fn run_stage(
 /// takes over from here.
 fn build_proposal_sd(config: &FitRunConfig) -> Vec<f64> {
     config.estimated_params.iter().map(|p| {
-        p.transformed_sd(p.rw_sd, p.initial) * 5.0
+        p.mh_initial_step()
     }).collect()
 }
 

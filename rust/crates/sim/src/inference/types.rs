@@ -62,6 +62,22 @@ impl std::fmt::Display for DomainError {
 /// lower-bounded map's absolute inward move, θ = lo + ε, z = ln ε.
 pub const EDGE_START_EPS: f64 = PROB_FRACTION_EPS;
 
+/// IF2's default step in z on the interval map (proposal D8, §12.6).
+pub const IF2_INTERVAL_STEP: f64 = 2.0 / 3.0;
+
+/// IF2's default step in z on the log-interval map (proposal D8, §12.6).
+pub const IF2_LOG_INTERVAL_STEP: f64 = 0.2;
+
+/// IF2's default step in z on the lower- and upper-bounded maps, θ = lo + eᶻ
+/// and θ = hi − eᶻ, where a step of s multiplies the distance to the bound by
+/// about e^±s (proposal D8, §12.6).
+pub const IF2_HALF_BOUNDED_STEP: f64 = 0.2;
+
+/// PMMH's and MH's default initial proposal SD in z, every map with a finite
+/// end (proposal D8). Robbins–Monro adaptation tunes it from the first
+/// warm-up step, so its value matters little.
+pub const MH_DEFAULT_STEP: f64 = 1.0;
+
 /// The logistic function σ(z) = 1/(1 + e⁻ᶻ), on the branch that does not
 /// overflow.
 #[inline]
@@ -114,6 +130,49 @@ impl Transform {
     /// Whether start draws and Latin-hypercube points are log-spaced.
     pub fn log_spaced(&self) -> bool {
         matches!(self, Transform::LogInterval { .. })
+    }
+
+    /// IF2's default step in z (proposal D8), one constant per map family;
+    /// `None` for `Identity`, which has no scale to take one from.
+    pub fn default_if2_step(&self) -> Option<f64> {
+        match self {
+            Transform::Identity => None,
+            Transform::Interval { .. } => Some(IF2_INTERVAL_STEP),
+            Transform::LogInterval { .. } => Some(IF2_LOG_INTERVAL_STEP),
+            Transform::LowerBounded { .. } | Transform::UpperBounded { .. } => Some(IF2_HALF_BOUNDED_STEP),
+        }
+    }
+
+    /// PMMH's and MH's default initial proposal SD in z (proposal D8);
+    /// `None` for `Identity`.
+    pub fn default_mh_step(&self) -> Option<f64> {
+        match self {
+            Transform::Identity => None,
+            _ => Some(MH_DEFAULT_STEP),
+        }
+    }
+
+    /// The coordinate at which a natural-scale step is converted to z, once
+    /// (series (i) of the proposal): the box's midpoint, z = 0, for the
+    /// interval maps (geometric for `LogInterval`), and the start θ₀ for the
+    /// others.
+    pub fn reference_z(&self, theta0: f64) -> f64 {
+        match self {
+            Transform::Interval { .. } | Transform::LogInterval { .. } => 0.0,
+            _ => self.forward(theta0),
+        }
+    }
+
+    /// The step in z from a natural-scale step, converted once at the
+    /// domain's reference point ([`Transform::reference_z`]).
+    pub fn step_from_natural(&self, natural_sd: f64, theta0: f64) -> f64 {
+        natural_sd / self.deriv(self.reference_z(theta0)).abs()
+    }
+
+    /// The natural-scale step a step of `z_step` in z is at the domain's
+    /// reference point: the inverse of [`Transform::step_from_natural`].
+    pub fn natural_from_step(&self, z_step: f64, theta0: f64) -> f64 {
+        z_step * self.deriv(self.reference_z(theta0)).abs()
     }
 
     /// The map's short name, as the partition record and the launch table
@@ -305,9 +364,12 @@ pub struct EstimatedParam {
     pub index: usize,
     /// Starting value for IF2 (or the current value on resume).
     pub initial: f64,
-    /// Random walk standard deviation, natural scale, converted to z at each
-    /// particle's current value by [`EstimatedParam::transformed_sd`].
-    /// Shrinks by `cooling_fraction` each IF2 iteration.
+    /// The step in z: IF2's perturbation SD before cooling (it shrinks by
+    /// `cooling_fraction` each iteration), the same for every chain and
+    /// particle. An explicit natural-scale `rw_sd` is converted to it once
+    /// ([`Transform::step_from_natural`]); otherwise it is the map's
+    /// [`Transform::default_if2_step`], or NaN for `Identity`, which IF2,
+    /// PMMH and MH refuse before they run.
     pub rw_sd: f64,
     /// The effective domain, as the map onto it; the bounds are
     /// [`EstimatedParam::bounds`].
@@ -361,9 +423,23 @@ impl EstimatedParam {
         self.transform.prior_point(z)
     }
 
-    /// Delta method: convert a natural-scale `rw_sd` to z at `current_value`.
-    pub fn transformed_sd(&self, natural_sd: f64, current_value: f64) -> f64 {
-        natural_sd / self.transform_deriv(self.to_transformed(current_value)).abs()
+    /// The natural-scale step `rw_sd` is at the domain's reference point
+    /// ([`Transform::natural_from_step`]): the unit an explicit `rw_sd` is
+    /// written in, and the scale the launch table shows beside the z step.
+    pub fn natural_step(&self) -> f64 {
+        self.transform.natural_from_step(self.rw_sd, self.initial)
+    }
+
+    /// The initial PMMH / MH proposal SD in z (proposal D8): the map's
+    /// [`Transform::default_mh_step`] when the step is automatic, else five
+    /// times the explicit step, since an MH proposal moves further than one
+    /// IF2 perturbation. NaN when there is neither.
+    pub fn mh_initial_step(&self) -> f64 {
+        if self.rw_sd_auto {
+            self.transform.default_mh_step().unwrap_or(f64::NAN)
+        } else {
+            5.0 * self.rw_sd
+        }
     }
 }
 

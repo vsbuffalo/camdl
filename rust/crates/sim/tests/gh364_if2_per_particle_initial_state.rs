@@ -455,9 +455,9 @@ fn pure_ic_ivp_param_is_identified() {
         name: "i0".into(),
         index: 2,
         initial: START_I0,
-        // Natural scale (`EstimatedParam::transformed_sd` divides by dθ/dz):
-        // jitter i0 by ±0.003, i.e. ±30 initial infectious out of N = 10 000.
-        rw_sd: 0.003,
+        // The step in z: ±0.003 in i0 at the box's midpoint, i.e. ±30
+        // initial infectious out of N = 10 000.
+        rw_sd: Transform::Interval { lo: 0.0005, hi: 0.05 }.step_from_natural(0.003, START_I0),
         transform: Transform::Interval { lo: 0.0005, hi: 0.05 },
         perturb_only_at_t0: true,
         rw_sd_auto: false,
