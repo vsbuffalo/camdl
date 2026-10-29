@@ -4001,6 +4001,7 @@ mod tests {
             chain_starts_kind: Some(crate::fit::starts::ChainStartsKind::Spread),
             dt_check: None,
             pf_noise: None,
+            optimizer_convergence: None,
         }
     }
 

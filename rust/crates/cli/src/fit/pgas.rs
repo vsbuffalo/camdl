@@ -1671,6 +1671,7 @@ pub fn run_stage(
         // marginal likelihood estimate, so it runs no PF-variance preflight and
         // has no spread to record.
         pf_noise: None,
+        optimizer_convergence: None,
     };
     state.save(&stage_dir.to_string_lossy())?;
 

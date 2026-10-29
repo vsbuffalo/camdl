@@ -178,6 +178,63 @@ pub struct FitState {
     /// this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pf_noise: Option<crate::fit::pf_noise::PfNoiseCheck>,
+
+    /// An nl-* optimizer's own convergence verdict, as it judged its chains
+    /// at the end of the run (`nlopt_stage::check_convergence`). The verdict
+    /// needs per-chain values and the optimizer tolerance, which the rest of
+    /// this file does not keep, so it is recorded rather than re-derived; the
+    /// warm-start source check and `fit table` read it. `None` on every other
+    /// method, and on nl-* leaves written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimizer_convergence: Option<OptimizerConvergence>,
+}
+
+/// The two-leg verdict an nl-* optimizer reaches on its chains: the chain
+/// agreement leg fails when some parameter's spread across chains is both
+/// wide relative to its bounds and above the optimizer's numerical floor; the
+/// decibans leg fails when the converged chains' log-likelihoods spread past
+/// `gate.decibans_thresh`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OptimizerConvergence {
+    /// Chains that ended `Success` / `XtolReached` / `FtolReached`.
+    pub n_converged: usize,
+    /// Chains that ran out of evaluations (soft failure).
+    pub n_maxeval: usize,
+    /// Chains that failed outright.
+    pub n_failed: usize,
+    /// Largest per-parameter range across chains over the bound width.
+    pub max_rel_range: f64,
+    /// Largest per-parameter range across chains, natural units.
+    pub max_abs_range: f64,
+    pub chain_agreement_failed: bool,
+    /// `max − min` log-likelihood across converged chains, nats.
+    pub delta_loglik: f64,
+    pub decibans_failed: bool,
+}
+
+impl OptimizerConvergence {
+    /// Every chain converged, and both legs pass.
+    pub fn passes(&self) -> bool {
+        self.all_chains_converged() && !self.chain_agreement_failed && !self.decibans_failed
+    }
+
+    /// No chain ran out of evaluations or failed.
+    pub fn all_chains_converged(&self) -> bool {
+        self.n_maxeval == 0 && self.n_failed == 0
+    }
+
+    /// The verdict as `fit table`'s `gate_verdict` column spells it.
+    pub fn gate_verdict(&self) -> &'static str {
+        if !self.all_chains_converged() {
+            return "fail_status";
+        }
+        match (self.chain_agreement_failed, self.decibans_failed) {
+            (false, false) => "pass",
+            (true, false) => "fail_chain_agreement",
+            (false, true) => "fail_db",
+            (true, true) => "fail_both",
+        }
+    }
 }
 
 impl FitState {
@@ -277,6 +334,7 @@ mod tests {
             chain_starts_kind: Some(crate::fit::starts::ChainStartsKind::Spread),
             dt_check: None,
             pf_noise: None,
+            optimizer_convergence: None,
         }
     }
 

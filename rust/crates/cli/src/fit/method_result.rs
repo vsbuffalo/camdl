@@ -798,6 +798,11 @@ pub struct NloptStageResult {
     /// width). NA when n_chains == 1.
     pub max_rel_range: f64,
     pub n_chains: usize,
+    /// The optimizer's recorded verdict (`fit_state.toml`
+    /// `[optimizer_convergence]`); `None` on a leaf written before it was
+    /// recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimizer_convergence: Option<crate::fit::state::OptimizerConvergence>,
 }
 
 /// PMMH-stage result: posterior approximation + scalar acceptance. Convergence
@@ -1007,6 +1012,7 @@ impl NloptStageResult {
             n_converged: state.n_good_chains.unwrap_or(n_chains),
             max_rel_range,
             n_chains,
+            optimizer_convergence: state.optimizer_convergence.clone(),
         })
     }
 }
@@ -1619,6 +1625,7 @@ mod tests {
             chain_starts_kind: Some(crate::fit::starts::ChainStartsKind::Spread),
             dt_check: None,
             pf_noise: None,
+            optimizer_convergence: None,
         }
     }
 

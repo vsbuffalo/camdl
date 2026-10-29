@@ -1523,6 +1523,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // gh#764: IF2 maximises, it does not accept on a likelihood
                     // ratio, so the acceptance ceiling does not apply to it.
                     pf_noise: None,
+                    optimizer_convergence: None,
                 };
                 fit_state.save(&stage_dir.to_string_lossy()).unwrap_or_else(|e| {
                     eprintln!("warning: could not save fit_state: {}", e);

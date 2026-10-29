@@ -3358,9 +3358,13 @@ sweep: 4 points
 `--starts` override) is checked against that source's stored verdict where the
 handle is resolved, before the model is loaded. An IF2 source is judged by its
 own gate — the tail chain-agreement Â leg and the inter-chain log-likelihood
-spread in decibans — and a sampler source by the same R̂ classification
-`fit summary` renders. A source that did not converge is refused with the
-verdict, so a warm start cannot launder one fit's multi-modality into the next:
+spread in decibans — an `nl-*` source by the verdict its optimizer recorded at
+the end of its run (every chain converged, the chains' estimates agree, and
+their log-likelihoods agree in decibans; a leaf written before that verdict was
+recorded is refused, and `--force` re-runs it), and a sampler source by the same
+R̂ classification `fit summary` renders. A source that did not converge is
+refused with the verdict, so a warm start cannot launder one fit's
+multi-modality into the next:
 
 ```
 $ camdl fit run fits/02_posterior.toml
