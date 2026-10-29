@@ -23,7 +23,8 @@ use std::process::Command;
 
 /// The half of the note that identifies it, ANSI-free and independent of which
 /// init mode drew the starts.
-const NOTE: &str = "draws every chain's start, so `[estimate].start` is unused here for";
+const NOTE: &str =
+    "draws every chain's start, so `[estimate].start` does not set where the chains begin for";
 
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -140,6 +141,13 @@ fn a_pmmh_stage_says_that_it_discarded_the_declared_start() {
          declares a prior.\nstderr:\n{}", run.stderr);
     assert!(run.stderr.contains("beta"),
         "and the parameter whose start was discarded.\nstderr:\n{}", run.stderr);
+    // PMMH still reads the declared start: the pre-run likelihood check is
+    // evaluated there, and the initial proposal scale is set at it. Calling it
+    // "unused" was false.
+    assert!(run.stderr.contains(
+        "It still sets the point of the pre-run likelihood check and the scale of the \
+         initial proposal."),
+        "the note says what the start still does under pmmh.\nstderr:\n{}", run.stderr);
 }
 
 /// The path the check used to live on must keep printing it — and print it
@@ -157,6 +165,8 @@ fn the_if2_path_still_says_it_exactly_once() {
     assert_eq!(note_count(&run.stderr), 1,
         "the IF2 note must survive the hoist and must not double up.\n\
          stderr:\n{}", run.stderr);
+    assert!(!run.stderr.contains("still sets the point"),
+        "IF2 reads the declared start nowhere else.\nstderr:\n{}", run.stderr);
 }
 
 /// The negative control: `starts = "single"` is the mode whose whole contract is

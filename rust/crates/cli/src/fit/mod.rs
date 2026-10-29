@@ -1351,11 +1351,22 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 .map(|(n, _)| n.as_str())
                 .collect();
             if !declared.is_empty() {
+                // PMMH and MH still read the declared point: their pre-run
+                // likelihood check is evaluated there, and the initial
+                // proposal scale is converted to the transformed scale at it
+                // (`pmmh::build_proposal_sd`). Only where the chains begin
+                // ignores it.
+                let still_read = if matches!(method.algorithm, Algorithm::PMMH { .. } | Algorithm::Mh { .. }) {
+                    " It still sets the point of the pre-run likelihood check and the \
+                     scale of the initial proposal."
+                } else {
+                    ""
+                };
                 eprintln!(
                     "  \x1b[33mnote:\x1b[0m `starts = \"{}\"` draws every chain's \
-                     start, so `[estimate].start` is unused here for: {}. \
-                     Use `starts = \"single\"` to start every chain at the \
-                     declared values, or drop the `start` entries.",
+                     start, so `[estimate].start` does not set where the chains \
+                     begin for: {}.{still_read} Use `starts = \"single\"` to start \
+                     every chain at the declared values.",
                     starts_rule.tag(), declared.join(", "));
             }
         }
