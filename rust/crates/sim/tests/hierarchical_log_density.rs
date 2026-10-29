@@ -26,6 +26,13 @@ use ir::parameter::{HierarchicalKind, HierarchicalPrior};
 use sim::inference::hierarchical::ParamEnv;
 use sim::inference::prior::{Prior, Density};
 
+/// The prior point a `Log`-transformed parameter presents: θ, with ln θ read
+/// from the coordinate `z`.
+fn at(theta: f64, z: f64) -> sim::inference::prior::PriorPoint {
+    sim::inference::prior::PriorPoint { ln_theta: z, ..sim::inference::prior::PriorPoint::natural(theta) }
+}
+
+
 /// The hierarchical-prior density now routes through the unified
 /// `Prior::log_density_env` (the formula lives once in `Density`); this shim
 /// preserves the Gate-2 battery's original call shape. It maps the IR
@@ -36,7 +43,11 @@ fn hierarchical_log_density<E: ParamEnv>(
     transformed: f64,
     env: &E,
 ) -> f64 {
-    Prior::from_hierarchical_ir(hp).log_density_env(natural, transformed, env)
+    let at = sim::inference::prior::PriorPoint {
+        ln_theta: transformed,
+        ..sim::inference::prior::PriorPoint::natural(natural)
+    };
+    Prior::from_hierarchical_ir(hp).log_density_env(&at, env)
 }
 
 fn env_from(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
@@ -683,7 +694,7 @@ fn hierarchical_density_matches_plain_prior_formula() {
             // x <= 0 both sides short-circuit to -inf regardless of z.
             let z = if x > 0.0 { x.ln() } else { 0.0 };
             let h = hierarchical_log_density(&hp, x, z, &env);
-            let p = prior.log_density(x, z);
+            let p = prior.log_density(&at(x, z));
             assert_eq!(
                 h.to_bits(),
                 p.to_bits(),

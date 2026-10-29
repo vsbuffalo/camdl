@@ -2,7 +2,7 @@
 //! error.
 //!
 //! Background: the NUTS gradient for a hierarchical leaf is stubbed to -inf
-//! (`pgas.rs::prior_log_density_and_grad_z`, "Gate 3b"), and the MH
+//! (`prior.rs::Prior::log_density_and_grad_z`, "Gate 3b"), and the MH
 //! fallback's non-env `log_density` is likewise -inf. So a hierarchical
 //! prior makes the log-posterior -inf everywhere and silently *freezes* the
 //! chain at its starting point — 100% divergent transitions, 0% acceptance,

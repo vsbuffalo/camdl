@@ -4,9 +4,10 @@
 //! parameter at its unconstrained coordinate z,
 //!
 //! ```text
-//!   value(z)    = prior.log_density(θ(z), z) + param.log_jacobian(z)
+//!   value(z)    = prior.log_density(&param.prior_point(z)) + param.log_jacobian(z)
 //!   gradient(z) = prior_grad_z + param.jacobian_grad(z),
-//!   (_, prior_grad_z) = prior_log_density_and_grad_z(prior, param, θ(z), z),
+//!   (_, prior_grad_z) = prior.log_density_and_grad_z(&param.prior_point(z),
+//!                                                    param.transform_deriv(z)),
 //! ```
 //!
 //! to the complete-data log-likelihood. With no likelihood that sum *is* the
@@ -29,7 +30,6 @@
 //! against the analytic answer, which a finite difference of a wrong value
 //! would not catch.
 
-use super::pgas::prior_log_density_and_grad_z;
 use super::prior::Prior;
 use super::types::{EstimatedParam, Transform};
 use ir::parameter::{ExponentialPrior, LogNormalPrior, NormalPrior, PriorDist, UniformPrior};
@@ -50,8 +50,8 @@ fn param(transform: Transform, lower: f64, upper: f64) -> EstimatedParam {
 /// (value, gradient) exactly as the PGAS NUTS closure assembles them for one
 /// parameter with a zero likelihood.
 fn assembled(prior: &Prior, p: &EstimatedParam, z: f64) -> (f64, f64) {
-    let theta = p.from_transformed(z);
-    let (prior_val, prior_grad_z) = prior_log_density_and_grad_z(prior, p, theta, z);
+    let (prior_val, prior_grad_z) =
+        prior.log_density_and_grad_z(&p.prior_point(z), p.transform_deriv(z));
     (prior_val + p.log_jacobian(z), prior_grad_z + p.jacobian_grad(z))
 }
 

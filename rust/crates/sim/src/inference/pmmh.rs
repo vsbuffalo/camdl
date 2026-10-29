@@ -598,7 +598,7 @@ pub fn run_pmmh(
             };
             current_log_prior = if2_params.iter().zip(priors.iter())
                 .zip(current_transformed.iter())
-                .map(|((p, prior), &z)| prior.log_density_env(current_params[p.index], z, &env))
+                .map(|((p, prior), &z)| prior.log_density_env(&p.prior_point(z), &env))
                 .sum();
         }
 
@@ -695,7 +695,7 @@ pub fn run_pmmh(
             };
             if2_params.iter().zip(priors.iter())
                 .zip(proposed_transformed.iter())
-                .map(|((p, prior), &z)| prior.log_density_env(proposed_params[p.index], z, &env))
+                .map(|((p, prior), &z)| prior.log_density_env(&p.prior_point(z), &env))
                 .sum()
         };
 

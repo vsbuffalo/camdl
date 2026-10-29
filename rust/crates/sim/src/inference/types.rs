@@ -8,6 +8,7 @@
 //! live here rather than in `if2.rs` so that removing or replacing IF2
 //! does not take the shared type contract with it.
 
+use super::prior::PriorPoint;
 use super::traits::Resettable;
 
 // ── Parameter transform ───────────────────────────────────────────────────────
@@ -189,6 +190,27 @@ impl EstimatedParam {
                 (hi - lo) * p * (1.0 - p)
             }
             Transform::None => 1.0,
+        }
+    }
+
+    /// θ and the logarithms a prior needs ([`PriorPoint`]) at the coordinate z.
+    ///
+    /// Under `Log`, ln θ is z itself and d ln θ/dz is 1, so the `log_normal`
+    /// density read from it is the one computed from z before this point
+    /// existed. Elsewhere the logarithms are taken from θ.
+    pub fn prior_point(&self, z: f64) -> PriorPoint {
+        let theta = self.from_transformed(z);
+        let dtheta_dz = self.transform_deriv(z);
+        let (ln_theta, d_ln_theta_dz) = match &self.transform {
+            Transform::Log { .. } => (z, 1.0),
+            Transform::Logit { .. } | Transform::None => (theta.ln(), dtheta_dz / theta),
+        };
+        PriorPoint {
+            theta,
+            ln_theta,
+            ln_one_minus: (1.0 - theta).ln(),
+            d_ln_theta_dz,
+            d_ln_one_minus_dz: -dtheta_dz / (1.0 - theta),
         }
     }
 
@@ -718,14 +740,13 @@ mod tests {
         // prior is the sharp case — `Density::TransformedNormal` returns the
         // natural-scale density (it pre-subtracts z) and relies on the caller
         // adding `log_jacobian(z)` back, so the two must not cancel into NaN.
-        use crate::inference::pgas::prior_log_density_and_grad_z;
         use crate::inference::prior::{Density, Prior};
 
         let p = log_param(0.01, 10.0);
         let z = 10.0f64.ln() + 2.0;
-        let theta = p.from_transformed(z);
         let prior = Prior::Fixed(Density::TransformedNormal { mean: 0.0, sd: 1.0 });
-        let (prior_val, prior_grad_z) = prior_log_density_and_grad_z(&prior, &p, theta, z);
+        let (prior_val, prior_grad_z) =
+            prior.log_density_and_grad_z(&p.prior_point(z), p.transform_deriv(z));
 
         let ll = -12.5_f64;
         let log_p = ll + prior_val + p.log_jacobian(z);

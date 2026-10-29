@@ -23,7 +23,6 @@ use crate::inference::numerics::BINOM_PROB_EPS;
 use crate::inference::particle_filter::Observation;
 use crate::inference::resampling::conditional_multinomial_resample;
 use crate::inference::pmmh::Prior;
-use crate::inference::prior::Density;
 use crate::inference::types::{EstimatedParam, RESAMPLE_RNG_STREAM, init_particle_rngs, restore_z_values};
 
 /// Process-noise variance floor below which an overdispersed transition is
@@ -3547,86 +3546,6 @@ pub(crate) fn sample_categorical_log(log_weights: &[f64], rng: &mut StatefulRng)
     Some(weights.len() - 1)
 }
 
-/// Prior log-density AND its gradient on the z (unconstrained) scale.
-///
-/// Delegates the density computation to `Prior::log_density` and computes
-/// only the gradient part here. The chain rule converts d(log prior)/dθ
-/// to d/dz via `param.transform_deriv(z)`. `pub(crate)` so the bounded-transform
-/// tests in `types.rs` check the same prior-gradient authority PGAS's NUTS target
-/// uses, rather than re-deriving it.
-pub(crate) fn prior_log_density_and_grad_z(
-    prior: &Prior, param: &EstimatedParam, theta: f64, z: f64,
-) -> (f64, f64) {
-    let lp = prior.log_density(theta, z);
-    let density = match prior {
-        // Hierarchical priors need an env-aware density AND gradient to
-        // drive NUTS correctly. PGAS+NUTS with hierarchical leaves is
-        // tracked as Gate 3b — needs env threaded through this function
-        // signature. For Gate 3a (PMMH + hierarchical), PMMH does not
-        // call this function, and `run_pgas` refuses hierarchical priors up
-        // front (gh#175), so this arm is a defensive -inf.
-        Prior::Hierarchical(_) => return (f64::NEG_INFINITY, 0.0),
-        Prior::Fixed(d) => d,
-    };
-    let dlp_dz = match density {
-        Density::Flat => 0.0,
-        Density::Uniform { lower, upper } => {
-            if theta < *lower || theta > *upper { return (lp, 0.0); }
-            0.0 // flat density → zero gradient inside support
-        }
-        Density::Normal { mean, sd } => {
-            let dlp_dtheta = -(theta - mean) / (sd * sd);
-            dlp_dtheta * param.transform_deriv(z)
-        }
-        Density::TransformedNormal { mean, sd } => {
-            // d/dz of the NATURAL-scale log-normal density log p(θ(z)).
-            // log_density returns log N(z; μ, σ) − z (it pre-subtracts the
-            // Log Jacobian z), so its z-derivative is −(z−μ)/σ² − 1. The
-            // caller adds jacobian_grad = +1, recovering d/dz log N(z) =
-            // −(z−μ)/σ². Omitting the −1 here left the NUTS gradient for
-            // log_normal priors off by +1 (uncovered: the only FD gradient
-            // test used a flat prior).
-            -(z - mean) / (sd * sd) - 1.0
-        }
-        Density::HalfNormal { sigma } => {
-            if theta < 0.0 { return (lp, 0.0); }
-            let dlp_dtheta = -theta / (sigma * sigma);
-            dlp_dtheta * param.transform_deriv(z)
-        }
-        Density::Beta { alpha, beta } => {
-            if theta <= 0.0 || theta >= 1.0 { return (lp, 0.0); }
-            let dlp_dtheta = (alpha - 1.0) / theta - (beta - 1.0) / (1.0 - theta);
-            dlp_dtheta * param.transform_deriv(z)
-        }
-        Density::Gamma { shape, rate } => {
-            if theta <= 0.0 { return (lp, 0.0); }
-            let dlp_dtheta = (shape - 1.0) / theta - rate;
-            dlp_dtheta * param.transform_deriv(z)
-        }
-        Density::Exponential { rate } => {
-            if theta < 0.0 { return (lp, 0.0); }
-            let dlp_dtheta = -rate;
-            dlp_dtheta * param.transform_deriv(z)
-        }
-        Density::LogUniform { lower, upper } => {
-            if theta < *lower || theta > *upper { return (lp, 0.0); }
-            // d/dθ[−ln θ − const] = −1/θ; chain to z. With the Log transform
-            // this is −1, which the caller's jacobian_grad (+1) cancels → the
-            // z-scale density is flat, as it must be.
-            let dlp_dtheta = -1.0 / theta;
-            dlp_dtheta * param.transform_deriv(z)
-        }
-        Density::TruncatedNormal { mean, sd, lower, upper } => {
-            if theta < *lower || theta > *upper { return (lp, 0.0); }
-            // The normalizer Z is constant in θ, so only the Gaussian kernel
-            // contributes: d/dθ[−0.5((θ−μ)/σ)²] = −(θ−μ)/σ².
-            let dlp_dtheta = -(theta - mean) / (sd * sd);
-            dlp_dtheta * param.transform_deriv(z)
-        }
-    };
-    (lp, dlp_dz)
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // Chain state
 // ═══════════════════════════════════════════════════════════════════
@@ -3765,7 +3684,7 @@ pub fn run_pgas(
 
     // gh#175: PGAS does not support hierarchical priors. The NUTS gradient
     // for a hierarchical leaf is stubbed to -inf (Gate 3b — see
-    // `prior_log_density_and_grad_z`), and the MH fallback's non-env
+    // `Prior::log_density_and_grad_z`), and the MH fallback's non-env
     // `log_density` is likewise -inf. A hierarchical prior therefore makes
     // the log-posterior -inf everywhere, silently freezing the chain at its
     // starting point (100% divergent, 0% acceptance) rather than erroring —
@@ -4064,7 +3983,7 @@ pub fn run_pgas(
         let initial_log_prior: f64 = if2_params.iter().zip(priors.iter())
             .map(|(spec, prior)| {
                 let theta = current_params[spec.index];
-                prior.log_density(theta, spec.to_transformed(theta))
+                prior.log_density(&spec.prior_point(spec.to_transformed(theta)))
             })
             .sum();
         let initial_log_posterior = current_ll + initial_log_prior;
@@ -4282,15 +4201,14 @@ pub fn run_pgas(
                 let mut grad_z = vec![0.0; d];
 
                 for i in 0..d {
-                    let theta = params[if2_params[i].index];
                     let dtheta_dz = if2_params[i].transform_deriv(z[i]);
 
                     // LL gradient: chain rule θ → z
                     grad_z[i] += ll_grad_theta[i] * dtheta_dz;
 
                     // Prior
-                    let (prior_val, prior_grad_z) = prior_log_density_and_grad_z(
-                        &priors[i], &if2_params[i], theta, z[i],
+                    let (prior_val, prior_grad_z) = priors[i].log_density_and_grad_z(
+                        &if2_params[i].prior_point(z[i]), dtheta_dz,
                     );
                     log_p += prior_val;
                     grad_z[i] += prior_grad_z;
@@ -4441,10 +4359,8 @@ pub fn run_pgas(
                     config.dt, obs_model, &obs_at_substep,
                 ))?;
 
-                let proposed_log_prior_i = priors[i].log_density(theta_new, z_new);
-                let current_log_prior_i = priors[i].log_density(
-                    chain.params[spec.index], z_old,
-                );
+                let proposed_log_prior_i = priors[i].log_density(&spec.prior_point(z_new));
+                let current_log_prior_i = priors[i].log_density(&spec.prior_point(z_old));
                 let proposed_log_jac_i = spec.log_jacobian(z_new);
                 let current_log_jac_i = spec.log_jacobian(z_old);
 
@@ -4544,7 +4460,7 @@ pub fn run_pgas(
                 let chain_log_prior: f64 = if2_params.iter().zip(priors.iter())
                     .map(|(spec, prior)| {
                         let theta = chain.params[spec.index];
-                        prior.log_density(theta, spec.to_transformed(theta))
+                        prior.log_density(&spec.prior_point(spec.to_transformed(theta)))
                     })
                     .sum();
                 if !(chain.log_lik + chain_log_prior).is_finite() {
@@ -5081,14 +4997,15 @@ mod theta_proposal_score_tests {
 mod prior_grad_tests {
     //! Finite-difference check of the per-parameter NUTS *target* gradient
     //! assembled exactly as `run_pgas`'s `log_prob_and_grad` closure does it:
-    //!   value(z)    = prior.log_density(θ, z) + param.log_jacobian(z)
+    //!   value(z)    = prior.log_density(&param.prior_point(z)) + param.log_jacobian(z)
     //!   gradient(z) = prior_grad_z + param.jacobian_grad(z)
-    //! where `(_, prior_grad_z) = prior_log_density_and_grad_z(...)`.
+    //! where `(_, prior_grad_z) = prior.log_density_and_grad_z(...)`.
     //!
     //! The only existing FD gradient test (`tests/gradient_check.rs`) uses
     //! `Prior::Flat`, so the prior-gradient arms here had no coverage — this
     //! is the gate for them.
     use super::*;
+    use crate::inference::prior::Density;
     use crate::inference::types::Transform;
 
     fn log_param(lo: f64, hi: f64) -> EstimatedParam {
@@ -5109,14 +5026,13 @@ mod prior_grad_tests {
 
     /// Assemble the per-parameter z-scale target value the NUTS closure sees.
     fn target_value(prior: &Prior, param: &EstimatedParam, z: f64) -> f64 {
-        let theta = param.from_transformed(z);
-        prior.log_density(theta, z) + param.log_jacobian(z)
+        prior.log_density(&param.prior_point(z)) + param.log_jacobian(z)
     }
 
     /// Assemble the analytic z-scale gradient the NUTS closure uses.
     fn target_grad(prior: &Prior, param: &EstimatedParam, z: f64) -> f64 {
-        let theta = param.from_transformed(z);
-        let (_, prior_grad_z) = prior_log_density_and_grad_z(prior, param, theta, z);
+        let (_, prior_grad_z) =
+            prior.log_density_and_grad_z(&param.prior_point(z), param.transform_deriv(z));
         prior_grad_z + param.jacobian_grad(z)
     }
 
