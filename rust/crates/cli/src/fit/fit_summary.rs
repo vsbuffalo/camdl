@@ -1536,6 +1536,12 @@ impl Formatter {
         s.push_str(&format!(
             "    Â leg:           max Â = {:.3} ({})  {}  (threshold {:.2})\n",
             max_a, max_a_param, a_glyph, gate.a_thresh));
+        if !assessed.unavailable.is_empty() {
+            s.push_str(&format!(
+                "    {}\n",
+                self.warn(&format!("Â unavailable (not finite), so not a pass: {}",
+                    assessed.unavailable.join(", ")))));
+        }
         if !assessed.perturb_only_at_t0.is_empty() {
             let listed: Vec<String> = assessed.perturb_only_at_t0.iter()
                 .map(|(n, a)| format!("{n} {a:.3}")).collect();
@@ -1557,7 +1563,9 @@ impl Formatter {
             s.push_str(&format!("    decibans leg:    {} (loglik-eval data not present)\n",
                 self.dim("—")));
         }
-        let overall = if assessed.passes() {
+        let overall = if assessed.is_incomplete() {
+            self.warn("— INCOMPLETE (not a pass)")
+        } else if assessed.passes() {
             self.ok("✓ PASS")
         } else {
             self.err("✗ FAIL")
@@ -2707,6 +2715,10 @@ pub struct GateReport {
     pub sigma_max: Option<f64>,
     pub db_passes: Option<bool>,
     pub overall_pass: Option<bool>,
+    /// Parameters whose Â is unavailable (not finite). Any entry makes the
+    /// verdict incomplete, which is not a pass.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub a_unavailable: Vec<String>,
     /// `"resolved"` when read from `state.resolved_gate`; `"default_fallback"`
     /// when fit_state.toml predates Phase 3 and we substituted
     /// `GateConfig::default()`. Critical signal for downstream readers.
@@ -3038,13 +3050,14 @@ fn if2_stage_report(
     let sigma_max = assessed.spread.map(|leg| leg.sigma_max);
     let db_passes = assessed.spread.map(|leg| leg.passes());
     let overall_pass = Some(assessed.passes());
+    let a_unavailable = assessed.unavailable.clone();
 
     let gate = GateReport {
         max_a_hat: max_a,
         max_a_param,
         a_thresh: gate_cfg.a_thresh,
         a_passes,
-        delta_db, threshold_db, sigma_max, db_passes, overall_pass,
+        delta_db, threshold_db, sigma_max, db_passes, overall_pass, a_unavailable,
         threshold_source,
         resolved_gate: state.resolved_gate.clone(),
         resolved_loglik_eval: state.resolved_loglik_eval.clone(),

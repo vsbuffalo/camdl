@@ -57,6 +57,10 @@ pub enum GateVerdict {
     FailA,
     FailDb,
     FailBoth,
+    /// No Â failed, but some required Â is unavailable (not finite;
+    /// within-chain variance collapsed). Not a pass: the decibans leg does not
+    /// stand in for a missing Â.
+    Incomplete,
 }
 
 // String projection for the four variants is supplied by the
@@ -1081,6 +1085,14 @@ impl If2StageResult {
 fn compute_if2_gate_verdict(state: &FitState) -> GateVerdict {
     let gate = state.resolved_gate.clone().unwrap_or_default();
     let assessed = crate::fit::gating::assess_if2(state, &gate);
+    if assessed.is_incomplete() {
+        // A failed decibans leg is still a failure; otherwise incomplete.
+        return if assessed.spread.is_some_and(|leg| !leg.passes()) {
+            GateVerdict::FailDb
+        } else {
+            GateVerdict::Incomplete
+        };
+    }
     match (assessed.a_passes(), assessed.spread.map(|leg| leg.passes())) {
         (true, Some(true)) | (true, None) => GateVerdict::Pass,
         (false, Some(false)) => GateVerdict::FailBoth,
@@ -1637,6 +1649,39 @@ mod tests {
         let r = If2StageResult::load(dir).unwrap();
         assert_eq!(r.gate_verdict, GateVerdict::Pass,
             "`fit table` must agree with the source check: the t0 Â is reported, not gated");
+    }
+
+    /// A NaN Â (within-chain variance collapsed) is unavailable, and an
+    /// unavailable Â is never a pass: not with no decibans leg, and not with a
+    /// passing one, because chains spread along a ridge can agree in
+    /// log-likelihood while disagreeing in θ. The leaf reads `incomplete` and
+    /// is refused as a starts source, naming the parameter.
+    #[test]
+    fn a_nan_chain_agreement_is_unavailable_and_never_a_pass() {
+        let tmp = tempdir("if2_nan");
+        let dir = tmp.path();
+        write_stage_run(
+            dir,
+            crate::run_meta::FitAlgorithm::If2,
+            4,
+            serde_json::json!({"method": "if2", "iterations": 50}),
+        );
+        for with_decibans in [false, true] {
+            let mut state = synthetic_if2_state();
+            state.tail_chain_agreement =
+                [("R0".to_string(), f64::NAN), ("sigma".to_string(), 1.002)].into_iter().collect();
+            if !with_decibans {
+                state.chain_eval_logliks.clear();
+                state.chain_eval_ses.clear();
+            }
+            state.save(&dir.to_string_lossy()).unwrap();
+            let r = If2StageResult::load(dir).unwrap();
+            assert_eq!(r.gate_verdict, GateVerdict::Incomplete,
+                "NaN Â on R0 (decibans leg present: {with_decibans}) is not a pass");
+            let err = crate::fit::gating::check_source_converged(dir, "@nan", false)
+                .expect_err("a source with an unavailable Â is refused");
+            assert!(err.contains("R0"), "names the parameter: {err}");
+        }
     }
 
     #[test]
@@ -2424,6 +2469,7 @@ mod tests {
             (GateVerdict::FailA, "fail_a"),
             (GateVerdict::FailDb, "fail_db"),
             (GateVerdict::FailBoth, "fail_both"),
+            (GateVerdict::Incomplete, "incomplete"),
         ] {
             let s = serde_json::to_value(variant).unwrap();
             assert_eq!(s, serde_json::Value::String(expected.into()));
