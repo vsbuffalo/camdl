@@ -160,9 +160,103 @@ pub enum SpreadChains {
     Unnamed(Vec<f64>),
 }
 
-/// Check scout's fit_state for pre-refine convergence.
+/// The IF2 convergence assessment of one stored fit: both legs of the
+/// compound gate, measured once. Every reader of an IF2 verdict — the
+/// warm-start source check ([`check_scout_convergence`]), `fit table`
+/// (`method_result::If2StageResult`) and `fit summary`'s gate block — reads
+/// this, so the three cannot disagree about one fit.
 ///
-/// Compound gate (Step 8, proposal §Proposal 3):
+/// The Â leg is taken over the *structural* parameters only. A
+/// `perturb_only_at_t0` parameter is an initial-state value IF2 perturbs once,
+/// at t = 0; its chains are expected to disagree more, so its Â is reported
+/// (`perturb_only_at_t0`) and not gated — the rule `FitState` documents for
+/// the field and the refusal message offers as a remedy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct If2Assessment {
+    /// Â of each structural (gated) parameter, worst first.
+    pub structural: Vec<(String, f64)>,
+    /// Â of each `perturb_only_at_t0` parameter, worst first: reported only.
+    pub perturb_only_at_t0: Vec<(String, f64)>,
+    /// The band of the worst structural Â (`Pass` when there is none).
+    pub a_band: AgreementBand,
+    /// The decibans leg, when the leaf carries clean-eval logliks and SEs for
+    /// at least two chains; `None` otherwise (the leg is not run).
+    pub spread: Option<DecibansLeg>,
+}
+
+/// The inter-chain clean-eval spread against its SE-aware floor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecibansLeg {
+    pub delta_db: f64,
+    /// `max(gate.decibans_thresh, 8 · max(SE) · NATS_TO_DB)`.
+    pub threshold_db: f64,
+    pub sigma_max: f64,
+}
+
+impl DecibansLeg {
+    pub fn passes(&self) -> bool {
+        self.delta_db < self.threshold_db
+    }
+}
+
+impl If2Assessment {
+    /// The Â leg passes: no structural parameter is in the fail band.
+    pub fn a_passes(&self) -> bool {
+        self.a_band != AgreementBand::Fail
+    }
+
+    /// The compound verdict: the Â leg passes, and the decibans leg passes
+    /// where it was run. A leaf without clean-eval data is judged on Â alone.
+    pub fn passes(&self) -> bool {
+        self.a_passes() && self.spread.map_or(true, |leg| leg.passes())
+    }
+
+    /// The worst structural parameter and its Â.
+    pub fn worst_structural(&self) -> Option<&(String, f64)> {
+        self.structural.first()
+    }
+}
+
+/// Measure both legs of the IF2 gate on `state` under `gate`.
+pub fn assess_if2(state: &FitState, gate: &GateConfig) -> If2Assessment {
+    let t0_set: std::collections::HashSet<&str> =
+        state.perturb_only_at_t0_params.iter().map(|s| s.as_str()).collect();
+    let mut structural: Vec<(String, f64)> = Vec::new();
+    let mut perturb_only_at_t0: Vec<(String, f64)> = Vec::new();
+    for (name, &agreement) in &state.tail_chain_agreement {
+        if t0_set.contains(name.as_str()) {
+            perturb_only_at_t0.push((name.clone(), agreement));
+        } else {
+            structural.push((name.clone(), agreement));
+        }
+    }
+    let worst_first = |a: &(String, f64), b: &(String, f64)| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+    };
+    structural.sort_by(worst_first);
+    perturb_only_at_t0.sort_by(worst_first);
+
+    let worst = structural.iter().map(|(_, r)| *r).fold(0.0_f64, f64::max);
+    let a_band = gate.a_band(worst);
+
+    let spread = (state.chain_eval_logliks.len() >= 2
+        && state.chain_eval_ses.len() == state.chain_eval_logliks.len())
+    .then(|| {
+        let hi = state.chain_eval_logliks.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let lo = state.chain_eval_logliks.iter().cloned().fold(f64::INFINITY, f64::min);
+        let sigma_max = state.chain_eval_ses.iter().cloned().fold(0.0_f64, f64::max);
+        DecibansLeg {
+            delta_db: (hi - lo) * NATS_TO_DB,
+            threshold_db: gate.decibans_thresh.max(8.0 * sigma_max * NATS_TO_DB),
+            sigma_max,
+        }
+    });
+    If2Assessment { structural, perturb_only_at_t0, a_band, spread }
+}
+
+/// Check an IF2 leaf's convergence, for the warm-start source check.
+///
+/// Compound gate (Step 8, proposal §Proposal 3), measured by [`assess_if2`]:
 ///
 /// 1. Chain-agreement Â on every structural (non-`perturb_only_at_t0`)
 ///    param must be `< gate.a_thresh`.
@@ -185,31 +279,14 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
     if scout.tail_chain_agreement.is_empty() {
         return ScoutGateVerdict::Ok;
     }
-
-    let t0_set: std::collections::HashSet<&str> =
-        scout.perturb_only_at_t0_params.iter().map(|s| s.as_str()).collect();
-    let mut structural: Vec<(String, f64)> = Vec::new();
-    let mut perturb_only_at_t0: Vec<(String, f64)> = Vec::new();
-    for (name, &agreement) in &scout.tail_chain_agreement {
-        if t0_set.contains(name.as_str()) {
-            perturb_only_at_t0.push((name.clone(), agreement));
-        } else {
-            structural.push((name.clone(), agreement));
-        }
-    }
-    structural.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    perturb_only_at_t0
-        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let worst = structural.iter().map(|(_, r)| *r)
-        .fold(0.0_f64, f64::max);
+    let assessed = assess_if2(scout, gate);
 
     // Step 1 — Â check. Reduced through `GateConfig::a_band`, the same
     // authority every renderer uses, so a printed glyph and this verdict
     // cannot disagree about one number.
-    match gate.a_band(worst) {
+    match assessed.a_band {
         AgreementBand::Fail => {
-            let failing: Vec<(String, f64)> = structural.iter()
+            let failing: Vec<(String, f64)> = assessed.structural.iter()
                 .filter(|(_, r)| gate.a_band(*r) == AgreementBand::Fail)
                 .cloned().collect();
             let loglik_spread = if scout.chain_logliks.len() >= 2 {
@@ -221,20 +298,20 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
             } else { 0.0 };
             return ScoutGateVerdict::Hard {
                 failing,
-                all_structural: structural,
-                perturb_only_at_t0,
+                all_structural: assessed.structural,
+                perturb_only_at_t0: assessed.perturb_only_at_t0,
                 loglik_spread,
             };
         }
         AgreementBand::SoftWarn => {
-            let warnable: Vec<(String, f64)> = structural.into_iter()
+            let warnable: Vec<(String, f64)> = assessed.structural.into_iter()
                 .filter(|(_, r)| gate.a_band(*r) == AgreementBand::SoftWarn)
                 .collect();
             return ScoutGateVerdict::SoftWarn { param_agreement: warnable };
         }
-        // `worst` is a max over finite entries seeded at 0.0, so `NotAssessed`
-        // is unreachable for it; either way there is nothing for the Â leg to
-        // refuse and the decibans leg below carries the verdict.
+        // The worst Â is a max over finite entries seeded at 0.0, so
+        // `NotAssessed` is unreachable for it; either way there is nothing for
+        // the Â leg to refuse and the decibans leg below carries the verdict.
         AgreementBand::Pass | AgreementBand::NotAssessed => {}
     }
 
@@ -242,25 +319,12 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
     // when the scout is pre-§Proposal 1 and didn't write the new fields.
     // The ids are not needed to measure the spread, so their absence does
     // not skip the check; it only stops the refusal naming chains (gh#978).
-    if scout.chain_eval_logliks.len() >= 2
-        && scout.chain_eval_ses.len() == scout.chain_eval_logliks.len()
-    {
-        let hi = scout.chain_eval_logliks.iter().cloned()
-            .fold(f64::NEG_INFINITY, f64::max);
-        let lo = scout.chain_eval_logliks.iter().cloned()
-            .fold(f64::INFINITY, f64::min);
-        let delta_db = (hi - lo) * NATS_TO_DB;
-
-        let sigma_max = scout.chain_eval_ses.iter().cloned()
-            .fold(0.0_f64, f64::max);
-        let se_floor_db = 8.0 * sigma_max * NATS_TO_DB;
-        let threshold_db = gate.decibans_thresh.max(se_floor_db);
-
-        if delta_db >= threshold_db {
+    if let Some(leg) = assessed.spread {
+        if !leg.passes() {
             return ScoutGateVerdict::DecibansSpread {
-                delta_db,
-                threshold_db,
-                sigma_max,
+                delta_db: leg.delta_db,
+                threshold_db: leg.threshold_db,
+                sigma_max: leg.sigma_max,
                 chain_logliks: if scout.chain_eval_ids.len() == scout.chain_eval_logliks.len() {
                     SpreadChains::Named(scout.chain_eval_ids.iter().copied()
                         .zip(scout.chain_eval_logliks.iter().copied()).collect())

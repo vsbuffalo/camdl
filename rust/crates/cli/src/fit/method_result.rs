@@ -1072,48 +1072,16 @@ impl If2StageResult {
     }
 }
 
-/// Apply the compound IF2 gate to the persisted FitState. Mirrors
-/// `Formatter::gate_verdict_block` in `fit_summary.rs` but returns a
-/// typed verdict instead of a rendered block. Falls back to
-/// `GateConfig::default()` when `state.resolved_gate` is absent
-/// (legacy file pre-Phase-3) — that mirrors the existing summary's
-/// fallback. The `loglik_eval` data drives the decibans leg; absent →
-/// the leg is inconclusive and we judge on Â alone.
+/// The compound IF2 gate on the persisted FitState, as a typed verdict:
+/// [`crate::fit::gating::assess_if2`], the one measurement the source check
+/// and `fit summary` also read. Falls back to `GateConfig::default()` when
+/// `state.resolved_gate` is absent (legacy file pre-Phase-3). The decibans
+/// leg is inconclusive when the leaf has no clean-eval data, and the verdict
+/// is then judged on Â alone.
 fn compute_if2_gate_verdict(state: &FitState) -> GateVerdict {
-    use crate::evidence::NATS_TO_DB;
-
     let gate = state.resolved_gate.clone().unwrap_or_default();
-
-    let max_a = state
-        .tail_chain_agreement
-        .values()
-        .copied()
-        .fold(0.0_f64, f64::max);
-    let a_passes = max_a < gate.a_thresh;
-
-    let db_passes = if state.chain_eval_logliks.len() >= 2
-        && state.chain_eval_ses.len() == state.chain_eval_logliks.len()
-    {
-        let hi = state
-            .chain_eval_logliks
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
-        let lo = state
-            .chain_eval_logliks
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
-        let delta_db = (hi - lo) * NATS_TO_DB;
-        let sigma_max = state.chain_eval_ses.iter().copied().fold(0.0_f64, f64::max);
-        let se_floor_db = 8.0 * sigma_max * NATS_TO_DB;
-        let threshold_db = gate.decibans_thresh.max(se_floor_db);
-        Some(delta_db < threshold_db)
-    } else {
-        None
-    };
-
-    match (a_passes, db_passes) {
+    let assessed = crate::fit::gating::assess_if2(state, &gate);
+    match (assessed.a_passes(), assessed.spread.map(|leg| leg.passes())) {
         (true, Some(true)) | (true, None) => GateVerdict::Pass,
         (false, Some(false)) => GateVerdict::FailBoth,
         (false, _) => GateVerdict::FailA,
@@ -1640,6 +1608,35 @@ mod tests {
             dt_check: None,
             pf_noise: None,
         }
+    }
+
+    /// One IF2 fit, one verdict. The fit's only Â failure is on a
+    /// `perturb_only_at_t0` parameter (I0), whose Â the gate reports but does
+    /// not gate on. `check_source_converged` accepts the leaf as a `from_mle`
+    /// source; `fit table` (through `If2StageResult`) and `fit summary` must
+    /// call the same fit converged.
+    #[test]
+    fn if2_verdict_is_the_same_for_the_table_the_summary_and_a_starts_source() {
+        let tmp = tempdir("if2_t0_only");
+        let dir = tmp.path();
+        write_stage_run(
+            dir,
+            crate::run_meta::FitAlgorithm::If2,
+            4,
+            serde_json::json!({"method": "if2", "iterations": 50}),
+        );
+        let mut state = synthetic_if2_state();
+        state.tail_chain_agreement =
+            [("R0".to_string(), 1.001), ("sigma".to_string(), 1.002), ("I0".to_string(), 16.5)]
+                .into_iter().collect();
+        state.perturb_only_at_t0_params = vec!["I0".into()];
+        state.save(&dir.to_string_lossy()).unwrap();
+
+        crate::fit::gating::check_source_converged(dir, "@t0", false)
+            .expect("a from_mle source whose only Â failure is on a t0 parameter is accepted");
+        let r = If2StageResult::load(dir).unwrap();
+        assert_eq!(r.gate_verdict, GateVerdict::Pass,
+            "`fit table` must agree with the source check: the t0 Â is reported, not gated");
     }
 
     #[test]
