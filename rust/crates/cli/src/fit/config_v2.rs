@@ -2013,6 +2013,27 @@ fn detect_removed_condition_from(contents: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuse the removed `[estimate.<name>].transform` key (support-keyed
+/// transforms, D2) before the strict parse, so the user is told the key is
+/// gone and what replaces it rather than a bare serde "unknown field".
+fn detect_removed_estimate_transform(contents: &str) -> Result<(), String> {
+    let value: toml::Value = match toml::from_str(contents) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    let Some(estimate) = value.get("estimate").and_then(|e| e.as_table()) else {
+        return Ok(());
+    };
+    for (name, entry) in estimate {
+        if entry.get("transform").is_some() {
+            return Err(format!(
+                "estimate.{name}: `transform` was removed: the transform follows from the \
+                 parameter's kind and bounds. Delete the line. See `camdl docs fit-toml`."));
+        }
+    }
+    Ok(())
+}
+
 /// The `[stages]` rejection (proposal 2026-09-08-workflow-first-fit-config,
 /// §5). A file that still carries the stage map is refused at load with the
 /// rewrite spelled out: the last-declared stage becomes the file's `[method]`,
@@ -2263,6 +2284,7 @@ impl FitConfig {
         detect_removed_fit_starts(contents)?;
         detect_relocated_config_backend(contents)?;
         detect_removed_condition_from(contents)?;
+        detect_removed_estimate_transform(contents)?;
         detect_nuts_algorithm(contents)?;
         let wire: FitConfigWire = toml::from_str(contents)
             .map_err(|e| format!("parse error: {}", e))?;
@@ -3942,6 +3964,25 @@ cooling = 0.7
                 parse(&mh).unwrap_or_else(|e| panic!("the same file with mh validates: {e}"));
             }
         }
+    }
+
+    #[test]
+    fn a_transform_key_in_estimate_says_it_was_removed() {
+        let base = "[model]\ncamdl = \"models/sir.camdl\"\n\
+                    [data.observations]\nweekly_cases = \"data/cases.tsv\"\n\
+                    [fixed]\nN0 = 1000000\n[method]\nalgorithm = \"if2\"\n\
+                    backend = \"chain_binomial\"\nchains = 8\nparticles = 1000\n\
+                    iterations = 80\ncooling = 0.70\n";
+        let stale = format!("{base}[estimate]\nbeta = {{ bounds = [0.01, 2.0], transform = \"log\" }}\n");
+        let err = FitConfig::from_toml_str(&stale).expect_err("`transform` is not a key");
+        assert!(err.contains("estimate.beta") && err.contains("`transform` was removed")
+            && err.contains("kind and bounds") && err.contains("Delete the line"),
+            "must say the key was removed and to delete the line; got: {err}");
+        let table = format!("{base}[estimate.beta]\nbounds = [0.01, 2.0]\ntransform = \"logit\"\n");
+        assert!(FitConfig::from_toml_str(&table).unwrap_err().contains("`transform` was removed"));
+        let without = stale.replace(", transform = \"log\"", "");
+        assert!(FitConfig::from_toml_str(&without).is_ok(),
+            "the same file without the key must parse: {:?}", FitConfig::from_toml_str(&without).err());
     }
 
     #[test]

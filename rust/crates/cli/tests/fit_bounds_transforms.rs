@@ -198,7 +198,7 @@ fn a_transform_key_in_estimate_is_refused_at_load() {
             method, tag);
         let err = stderr(&out);
         assert!(!out.status.success(), "{tag}: a `transform` key must be refused; stderr=\n{err}");
-        assert!(err.contains("unknown field `transform`"), "{tag}: {err}");
+        assert!(err.contains("`transform` was removed") && err.contains("Delete the line"), "{tag}: {err}");
         assert!(find_all(&results, "draws.tsv").is_empty(), "{tag}: refused before sampling");
         assert!(find_all(&results, "parameter_traces.tsv").is_empty(), "{tag}: refused before sampling");
     }
