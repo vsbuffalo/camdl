@@ -288,17 +288,21 @@ pub fn resolve_label(root: &Path, name: &str) -> Result<LeafRef, ResolveError> {
 pub fn resolve_leaf(s: &str) -> Result<LeafRef, ResolveError> {
     match resolve_target(s)? {
         FitTarget::Leaf(leaf) => Ok(leaf),
-        FitTarget::Segment(segment) => {
-            let mut leaves = completed_leaves(&segment);
-            match leaves.len() {
-                0 => Err(ResolveError::NotFound(format!(
-                    "{} holds no completed fit run",
-                    segment.display()
-                ))),
-                1 => Ok(LeafRef::of(leaves.remove(0))),
-                _ => Err(ResolveError::AmbiguousRuns { handle: s.to_string(), runs: leaves }),
-            }
-        }
+        FitTarget::Segment(segment) => only_run(s, &segment),
+    }
+}
+
+/// The one completed run in a problem folder, or a refusal: none, or several
+/// listed with what sets them apart.
+fn only_run(handle: &str, segment: &Path) -> Result<LeafRef, ResolveError> {
+    let mut leaves = completed_leaves(segment);
+    match leaves.len() {
+        0 => Err(ResolveError::NotFound(format!(
+            "{} holds no completed fit run",
+            segment.display()
+        ))),
+        1 => Ok(LeafRef::of(leaves.remove(0))),
+        _ => Err(ResolveError::AmbiguousRuns { handle: handle.to_string(), runs: leaves }),
     }
 }
 
@@ -372,6 +376,18 @@ pub fn resolve_fit(s: &str) -> Result<ResolvedFit, ResolveError> {
         None => load_config_for_segment(&segment).map_err(ResolveError::NotFound)?,
     };
     Ok(ResolvedFit { segment, leaf, config })
+}
+
+/// [`resolve_fit`] for a verb that reads one run (`fit predict`, `compare`):
+/// a problem-folder handle names its one run, and holding several it is
+/// refused with the runs listed rather than one chosen by a rule (gh#896).
+/// The returned `leaf` is always `Some`.
+pub fn resolve_fit_run(s: &str) -> Result<ResolvedFit, ResolveError> {
+    let mut resolved = resolve_fit(s)?;
+    if resolved.leaf.is_none() {
+        resolved.leaf = Some(only_run(s, &resolved.segment)?.dir);
+    }
+    Ok(resolved)
 }
 
 /// Recover the config for a segment reached by run-dir / `@label` / hash.

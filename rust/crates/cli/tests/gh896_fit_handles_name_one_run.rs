@@ -410,3 +410,30 @@ fn a_config_that_reused_a_stored_run_names_it() {
     assert_eq!(p.leaves().len(), 1);
     p.ok(&["fit", "summary", "seeded.toml"]);
 }
+
+/// Two PGAS runs of one file, sweeps 4 then 7: (folder, short run, long run).
+fn two_pgas_runs(p: &Project) -> (PathBuf, PathBuf, PathBuf) {
+    p.config("post.toml", &pgas(4));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1"]);
+    let short = p.leaves();
+    p.config("post.toml", &pgas(7));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1"]);
+    let long: Vec<PathBuf> = p.leaves().into_iter().filter(|l| !short.contains(l)).collect();
+    assert_eq!((short.len(), long.len()), (1, 1), "premise: two runs");
+    (segment_of(&short[0]), short[0].clone(), long[0].clone())
+}
+
+/// `fit predict <folder>` holding two runs lists them and fails. It used to
+/// replay the last leaf with draws in directory order.
+#[test]
+fn predict_of_a_folder_with_two_runs_lists_them() {
+    let p = Project::new();
+    let (segment, short, long) = two_pgas_runs(&p);
+    let out = p.run(&["fit", "predict", &segment.to_string_lossy(), "--horizon", "free_forward"]);
+    let all = text(&out);
+    assert!(!out.status.success(), "a choice between two runs is the user's:\n{all}");
+    assert!(all.contains("names 2 runs"), "{all}");
+    for leaf in [&short, &long] {
+        assert!(all.contains(&leaf.display().to_string()), "lists {}:\n{all}", leaf.display());
+    }
+}

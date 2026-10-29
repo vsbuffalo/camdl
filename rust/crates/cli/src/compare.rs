@@ -882,7 +882,7 @@ fn load_trace(
             None));
     }
     // Not an explicit prequential → treat as a fit handle and derive.
-    match crate::fit::handle::resolve_fit(path) {
+    match crate::fit::handle::resolve_fit_run(path) {
         Ok(resolved) => {
             let data = fit_data_identity(&resolved);
             derive_prequential(&resolved, derive, selection)
