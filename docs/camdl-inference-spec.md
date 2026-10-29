@@ -85,10 +85,11 @@ dt = 1.0
 
 # ── Estimated parameters ──────────────────────────────
 # Every parameter here will be perturbed during IF2.
-# rw_sd is optional: if omitted, auto-computed from parameter bounds
-# as (hi-lo)/6 on the transformed scale (tier 1 heuristic).
-# If specified, rw_sd is on the NATURAL scale (converted internally
-# via delta method).
+# rw_sd is optional: if omitted, IF2 takes its default step in the
+# parameter's transformed coordinate z, one per transform (rule 2 of §3.2).
+# If specified, rw_sd is on the NATURAL scale, converted once to z at the
+# box's midpoint (the start, on a half-bounded domain); IF2 then takes the
+# same step in z for every chain and particle.
 [estimate]
 R0 = { rw_sd = 5.0 }
 sigma = {} # auto rw_sd from bounds
