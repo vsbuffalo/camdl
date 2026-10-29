@@ -5533,8 +5533,8 @@ dt = 1.0
     /// Proposal §12.1, D8: the automatic step is the map's IF2 default in
     /// z, the same at every scale of box, and every map with a finite end
     /// has one; only the identity map (an unbounded `real`) is refused. A
-    /// rate on [0, 2] gets a step above 0.1 in z; under the walled log map it
-    /// got ~1e-148 / θ.
+    /// rate on [0, 2] gets the interval map's step, 1/20 in z; under the walled
+    /// log map it got ~1e-148 / θ, which never moved it.
     #[test]
     fn the_auto_step_is_the_maps_default_in_z() {
         use ir::parameter::ParamKind::{Rate, Real};
@@ -5547,7 +5547,7 @@ dt = 1.0
         };
         let zero_lo = auto(0.0, 2.0);
         assert_eq!(zero_lo[0].transform, Transform::Interval { lo: 0.0, hi: 2.0 });
-        assert!(zero_lo[0].rw_sd > 0.1, "rate on [0, 2]: step {} in z", zero_lo[0].rw_sd);
+        assert!(zero_lo[0].rw_sd > 1e-3, "rate on [0, 2]: step {} in z", zero_lo[0].rw_sd);
         assert_eq!(zero_lo[0].rw_sd, IF2_INTERVAL_STEP);
         refuse_degenerate_auto_rw_sd(&zero_lo, "rw_sd").expect("a rate on [0, 2] has an auto step");
         for (lo, hi) in [(1e-30, 1.0), (1e-6, 10.0), (0.05, 1.0)] {

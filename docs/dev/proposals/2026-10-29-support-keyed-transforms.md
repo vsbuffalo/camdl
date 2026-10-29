@@ -914,8 +914,8 @@ each map and each of the domains [0, ∞), [0, 1], [0, 2], [10⁻⁶, 2.5], [1, 
 - a value on each end maps to the finite z of §5; a user-given start on an end
   is refused naming an interior value, and a drawn one is redrawn;
 - `default_if2_step` and `default_mh_step` for each map; auto `rw_sd` for a rate
-  on [0, 2] gives a step in z above 0.1 (red on main, §3.3), and a rate on [0,
-  ∞) gets one too.
+  on [0, 2] gives the interval map's default step in z (red on main, where it
+  was about 1e-148/θ, §3.3), and a rate on [0, ∞) gets one too.
 
 Each test is mutation-checked: reverting its fix turns it red.
 
@@ -1160,6 +1160,15 @@ default too, so a `rate` on [0, ∞) runs without an explicit `rw_sd`.
 PMMH's and MH's default is a separate constant, `default_mh_step`, because their
 proposal is adapted from the first warm-up step; its starting value matters
 little and is not benchmarked.
+
+The benchmark
+(`docs/dev/notes/2026-10-29-support-keyed-transforms-benchmark.md`) found no
+step that serves every condition of any family, and the maintainer chose
+`Interval` 1/20, `LogInterval` 1/20 and the half-bounded maps 1/5. These are
+pragmatic starting heuristics, chosen for robustness to poor initialisation, not
+optimal values. The half-bounded maps take the larger step because they have no
+box to spread chain starts over, and from a far start every smaller step tried
+let all chains collapse.
 
 **D9 — The unit of an explicit `rw_sd` (gh#1001). Decided (2026-10-29): z, in
 series (ii); series (i) converts a natural-scale value once at the domain's

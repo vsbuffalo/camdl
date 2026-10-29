@@ -71,6 +71,10 @@ chains = 1
 particles = 100
 iterations = 5
 cooling = 0.7
+# Every fit starts at beta = 0.4: what is compared is the configuration, and a
+# prior draw far from the data can stop a 100-particle chain at IF2's default
+# step (1/20 in z).
+starts = "single"
 "#)
 }
 
