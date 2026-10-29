@@ -215,9 +215,9 @@ fn leaf_at(dir: &Path) -> Option<crate::cas_read::Leaf> {
         .then(|| crate::cas_read::Leaf { dir: dir.to_path_buf(), record })
 }
 
-/// Resolve a handle to what it names: a leaf directory, a run-id prefix or
-/// `@label` names one run; a problem folder or a fit-id prefix names that
-/// folder; a `fit.toml` names the folder whose archived config it matches.
+/// Resolve a handle to what it names: a leaf directory, a run-id prefix,
+/// `@label` or a `fit.toml` names one run; a problem folder or a fit-id prefix
+/// names that folder.
 pub fn resolve_target(s: &str) -> Result<FitTarget, ResolveError> {
     match FitRef::classify(s) {
         FitRef::RunDir(dir) => match leaf_at(&dir) {
@@ -248,7 +248,7 @@ pub fn resolve_target(s: &str) -> Result<FitTarget, ResolveError> {
             let root = crate::run_paths::output_root(None, None);
             Ok(FitTarget::Leaf(resolve_label(&root, &name)?))
         }
-        FitRef::Config(path) => Ok(FitTarget::Segment(resolve_config(&path)?.0)),
+        FitRef::Config(path) => Ok(FitTarget::Leaf(resolve_config(&path)?.0)),
     }
 }
 
@@ -347,8 +347,8 @@ impl ResolvedFit {
 pub fn resolve_fit(s: &str) -> Result<ResolvedFit, ResolveError> {
     let (target, live_config) = match FitRef::classify(s) {
         FitRef::Config(path) => {
-            let (seg, cfg) = resolve_config(&path)?;
-            (FitTarget::Segment(seg), Some(cfg))
+            let (leaf, cfg) = resolve_config(&path)?;
+            (FitTarget::Leaf(leaf), Some(cfg))
         }
         _ => (resolve_target(s)?, None),
     };
@@ -423,32 +423,37 @@ fn load_config_for_segment(segment: &Path) -> Result<FitConfig, String> {
 /// The canonical identity of a fit.toml's text — what the config MEANS, with
 /// comments, whitespace, and float spelling discarded (gh#653). Parsed with the
 /// production parser, so a config this cannot parse cannot match a fit either.
-fn config_identity(text: &str) -> Result<String, String> {
+/// `fit run` records it on every leaf it writes or reuses, in
+/// `inputs.config_identities`.
+pub(crate) fn config_identity(text: &str) -> Result<String, String> {
     let config = FitConfig::from_toml_str(text)?;
     crate::fit::cas::config_identity_hash(&config)
 }
 
-/// The Config (`fit.toml`) branch: match the config's MEANING against the
-/// archived config of every fit segment under the root it names. Returns the
-/// matched segment and the live config (loaded once here).
+/// The Config (`fit.toml`) branch: the runs made from this config's MEANING —
+/// the completed fit leaves whose recorded `inputs.config_identities` include
+/// the file's — under the root it names. Returns the one run and the live config
+/// (loaded once here).
 ///
-/// The match used to be a SHA-256 over the config's raw bytes, recorded in each
-/// sidecar as `fit_toml_hash`. That conflates two questions: which exact bytes
-/// produced this fit (provenance — the raw hash answers it, and the sidecar
-/// still records it) and whether a config means the same thing (identity — the
-/// raw hash gets it wrong, because reflowing a comment, reordering two
-/// top-level tables, or writing `1.00` for `1.0` all change the bytes and none
-/// change the meaning). A comment reflow across a set of national configs
-/// orphaned hours of completed sampling: the fits were in the store, and
-/// `compare` reported "no completed fit found" (gh#653).
+/// Each run records the identity of the config it was read from, so the file
+/// in hand names the runs made from it as it now reads, not the problem
+/// folder's latest archived config (gh#896). Several matches — several fit
+/// seeds, a `--starts` override, older camdl builds — are narrowed to the runs
+/// this camdl build wrote, the ones `fit run` of this file would reuse; when
+/// that leaves one, it is the answer and the others are noted, and otherwise
+/// the runs are listed.
 ///
-/// Retroactive by construction: the identity is computed from each segment's
-/// archived `fit.toml.original` at lookup time, so fits already on disk resolve
-/// under this rule without re-stamping, and old and new fits take one code path.
-/// A segment whose archive is missing or unparseable therefore cannot be
-/// matched — so those segments are named in the not-found message rather than
-/// silently passed over.
-fn resolve_config(path: &Path) -> Result<(PathBuf, FitConfig), ResolveError> {
+/// Identity is the canonical hash of the parsed value tree, not the raw bytes
+/// (gh#653): reflowing a comment, reordering two top-level tables, or writing
+/// `1.00` for `1.0` changes the bytes and not the meaning. A comment reflow
+/// across a set of national configs once orphaned hours of completed
+/// sampling. The raw-bytes hash is still recorded in each sidecar as
+/// `fit_toml_hash`, as provenance.
+///
+/// A stored run that records no config identity (written before runs carried
+/// one) cannot be matched by file, so the not-found message counts them
+/// rather than passing over them silently.
+fn resolve_config(path: &Path) -> Result<(LeafRef, FitConfig), ResolveError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| ResolveError::NotFound(format!("cannot read fit config {}: {e}", path.display())))?;
     let wanted = config_identity(&text)
@@ -457,48 +462,53 @@ fn resolve_config(path: &Path) -> Result<(PathBuf, FitConfig), ResolveError> {
         .map_err(|e| ResolveError::NotFound(format!("cannot load fit config {}: {e}", path.display())))?;
     let cas_root = crate::run_paths::output_root(None, config.problem.output_dir.as_deref());
     let fits_dir = cas_root.join("fits");
-    let mut matches: Vec<PathBuf> = Vec::new();
-    let mut unreadable: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&fits_dir) {
-        for entry in entries.flatten() {
-            let seg = entry.path();
-            if !seg.is_dir() || crate::run_meta::read_fit_sidecar(&seg).is_none() {
-                continue;
-            }
-            let archived = seg.join("fit.toml.original");
-            let outcome = std::fs::read_to_string(&archived)
-                .map_err(|e| e.to_string())
-                .and_then(|t| config_identity(&t));
-            match outcome {
-                Ok(h) if h == wanted => matches.push(seg),
-                Ok(_) => {}
-                Err(e) => unreadable.push(format!("    {}: {e}", seg.display())),
-            }
+    let completed: Vec<crate::cas_read::Leaf> = crate::cas_read::walk_fit_leaves(&cas_root)
+        .into_iter()
+        .filter(|l| l.record.status == runid::RunStatus::Completed)
+        .collect();
+    let recorded = |l: &crate::cas_read::Leaf| -> Option<Vec<String>> {
+        l.record.inputs.get("config_identities").and_then(|v| v.as_array()).map(|a| {
+            a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
+        })
+    };
+    let unrecorded = completed.iter().filter(|l| recorded(l).is_none()).count();
+    let mut matches: Vec<crate::cas_read::Leaf> = completed
+        .into_iter()
+        .filter(|l| recorded(l).is_some_and(|ids| ids.contains(&wanted)))
+        .collect();
+    matches.sort_by(|a, b| a.dir.cmp(&b.dir));
+    if matches.len() > 1 {
+        let (this_build, other): (Vec<_>, Vec<_>) = matches
+            .into_iter()
+            .partition(|l| l.record.engine_version == crate::version::VERSION_SHORT);
+        if this_build.len() == 1 {
+            eprintln!(
+                "note: {} also matches {} run(s) by other camdl builds; using this build's",
+                path.display(),
+                other.len()
+            );
         }
+        matches = if this_build.is_empty() { other } else { this_build };
     }
-    matches.sort();
     match matches.len() {
         0 => {
             let mut msg = format!(
-                "no completed fit found for {} under {}.\n  Run `camdl fit run {}` first.",
+                "no completed fit run of {} as it now reads, under {}.\n  Run `camdl fit run {}` first.",
                 path.display(),
                 fits_dir.display(),
                 path.display()
             );
-            if !unreadable.is_empty() {
-                unreadable.sort();
+            if unrecorded > 0 {
                 msg.push_str(&format!(
-                    "\n  {} fit director{} could not be checked (no readable \
-                     fit.toml.original):\n{}",
-                    unreadable.len(),
-                    if unreadable.len() == 1 { "y" } else { "ies" },
-                    unreadable.join("\n")
+                    "\n  {unrecorded} stored run(s) record no config identity (written before \
+                     runs carried one) and cannot be matched by file; name one by its leaf \
+                     directory or run_id."
                 ));
             }
             Err(ResolveError::NotFound(msg))
         }
-        1 => Ok((matches.remove(0), config)),
-        _ => Err(ResolveError::Ambiguous { handle: path.display().to_string(), candidates: matches }),
+        1 => Ok((LeafRef::of(matches.remove(0)), config)),
+        _ => Err(ResolveError::AmbiguousRuns { handle: path.display().to_string(), runs: matches }),
     }
 }
 
@@ -666,9 +676,29 @@ cooling = 0.7
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// Plant one completed fit run under `seg` whose record lists
+    /// `identities` as the configs it was reached from (`None`: a run written
+    /// before runs recorded any). Returns the leaf directory.
+    fn plant_run(seg: &Path, identities: Option<&[String]>) -> PathBuf {
+        let leaf = seg.join("if2-00000000").join("seed_1-00000000");
+        std::fs::create_dir_all(&leaf).unwrap();
+        let inputs = match identities {
+            Some(ids) => serde_json::json!({ "method": "if2", "config_identities": ids }),
+            None => serde_json::json!({ "method": "if2" }),
+        };
+        let rec = serde_json::json!({
+            "format_version": 1, "kind": "fit_stage", "run_id": "ab".repeat(32),
+            "hash_version": 1, "ir_version": "0.7", "engine_version": crate::version::VERSION_SHORT,
+            "levels": [], "status": "completed", "artifacts": {}, "inputs": inputs,
+        });
+        std::fs::write(leaf.join("run.json"), rec.to_string()).unwrap();
+        leaf
+    }
+
     /// Stand up `<tmp>/fits/a.toml` plus a segment under `<tmp>/results/fits/`
-    /// whose archived config is `archived`, and resolve `live` as a `fit.toml`
-    /// handle against it. Returns the resolution outcome and the segment.
+    /// holding one run made from `archived`, and resolve `live` as a
+    /// `fit.toml` handle against it. Returns the resolved run's directory,
+    /// the planted run's, and the temp root.
     fn resolve_live_against_archive(
         slug: &str,
         archived: &str,
@@ -681,10 +711,10 @@ cooling = 0.7
             fit_toml_hash: crate::hashing::sha256_hex(archived.as_bytes()),
             ..Default::default()
         };
-        // Archives `fit.toml.original` from the config on disk, as a fit does.
         crate::run_meta::write_fit_sidecar(&seg, &toml_path, &side).unwrap();
+        let leaf = plant_run(&seg, Some(&[config_identity(archived).unwrap()]));
         std::fs::write(&toml_path, live).unwrap();
-        (resolve_config(&toml_path).map(|r| r.0), seg, tmp)
+        (resolve_config(&toml_path).map(|r| r.0.dir), leaf, tmp)
     }
 
     /// The archived config, written portably (`output_dir` points at the
@@ -764,7 +794,7 @@ cooling    = 0.70
         assert_ne!(changed, ARCHIVED);
         let (got, _seg, tmp) = resolve_live_against_archive("particles", ARCHIVED, &changed);
         let err = got.expect_err("a changed particle count is a different fit").to_string();
-        assert!(err.contains("no completed fit found"), "got: {err}");
+        assert!(err.contains("no completed fit run of"), "got: {err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -775,31 +805,56 @@ cooling    = 0.70
         assert_ne!(changed, ARCHIVED);
         let (got, _seg, tmp) = resolve_live_against_archive("datapath", ARCHIVED, &changed);
         let err = got.expect_err("a changed data path is a different fit").to_string();
-        assert!(err.contains("no completed fit found"), "got: {err}");
+        assert!(err.contains("no completed fit run of"), "got: {err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn a_segment_with_no_archived_config_is_named_not_skipped() {
-        // The identity of a stored fit is computed from its archived config, so
-        // a segment without one cannot be matched. Say which segment and why —
-        // a silent skip reads as "that fit was never run".
-        let (tmp, toml_path, seg) = portable_project("noarchive");
+    fn a_run_with_no_recorded_config_is_counted_not_skipped() {
+        // A run is matched by the config identity it records, so one written
+        // before runs recorded any cannot be matched by file. Say so — a
+        // silent skip reads as "that fit was never run".
+        let (tmp, toml_path, seg) = portable_project("noidentity");
         std::fs::write(&toml_path, ARCHIVED).unwrap();
+        plant_run(&seg, None);
+
+        let err = resolve_config(&toml_path).map(|r| r.0)
+            .expect_err("no recorded identity, no match")
+            .to_string();
+        assert!(
+            err.contains("1 stored run(s) record no config identity"),
+            "the unmatchable run is counted; got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_config_names_the_run_made_from_it_not_the_folders_latest() {
+        // gh#896: two runs in one folder, made from two versions of one file.
+        // The file as it now reads names the run made from it, whatever the
+        // folder's archive holds.
+        let (tmp, toml_path, seg) = portable_project("tworuns");
+        let older = ARCHIVED.replace("particles = 10", "particles = 20");
+        std::fs::write(&toml_path, &older).unwrap();
         let side = crate::run_meta::FitSidecar {
             fit_toml_path: toml_path.to_string_lossy().into_owned(),
             ..Default::default()
         };
         crate::run_meta::write_fit_sidecar(&seg, &toml_path, &side).unwrap();
-        std::fs::remove_file(seg.join("fit.toml.original")).unwrap();
+        let a = plant_run(&seg, Some(&[config_identity(ARCHIVED).unwrap()]));
+        let b = seg.join("if2-11111111").join("seed_1-00000000");
+        std::fs::create_dir_all(&b).unwrap();
+        let rec = std::fs::read_to_string(a.join("run.json")).unwrap()
+            .replace(&config_identity(ARCHIVED).unwrap(), &config_identity(&older).unwrap())
+            .replace(&"ab".repeat(32), &"cd".repeat(32));
+        std::fs::write(b.join("run.json"), rec).unwrap();
 
-        let err = resolve_config(&toml_path).map(|r| r.0)
-            .expect_err("no archive, no match")
-            .to_string();
-        assert!(
-            err.contains("could not be checked") && err.contains("sir-0000beef"),
-            "the unmatchable segment is named; got: {err}"
-        );
+        for (text, want) in [(ARCHIVED, &a), (older.as_str(), &b)] {
+            std::fs::write(&toml_path, text).unwrap();
+            let got = resolve_config(&toml_path).map(|r| r.0.dir)
+                .unwrap_or_else(|e| panic!("resolves: {e}"));
+            assert_eq!(std::fs::canonicalize(&got).unwrap(), std::fs::canonicalize(want).unwrap());
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

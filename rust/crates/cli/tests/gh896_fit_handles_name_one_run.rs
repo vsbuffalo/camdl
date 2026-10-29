@@ -375,3 +375,32 @@ fn camdl_label_labels_a_fit_run_once() {
     assert!(!folder.status.success(), "{}", text(&folder));
     assert!(text(&folder).contains("a problem folder, not a run"), "{}", text(&folder));
 }
+
+/// A `fit.toml` names the run made from the file as it now reads. One file
+/// run with 2 chains then 3 leaves both runs in one folder whose archive is
+/// the 3-chain config; `fit summary scout.toml` used to report whichever run
+/// sorted first.
+#[test]
+fn a_config_names_the_run_made_from_it() {
+    let p = Project::new();
+    let (_segment, _leaves) = two_runs_of_one_file(&p); // 2 chains, then 3
+    let now = p.ok(&["fit", "summary", "scout.toml"]);
+    assert!(now.contains("3 chains"), "the file says 3 chains:\n{now}");
+    p.config("scout.toml", &if2(2));
+    let back = p.ok(&["fit", "summary", "scout.toml"]);
+    assert!(back.contains("2 chains"), "the file says 2 chains again:\n{back}");
+}
+
+/// A second config that reaches a stored run by a cache hit names it too:
+/// `fit_seeds = [1]` and `--seed 1` are one run from two config texts.
+#[test]
+fn a_config_that_reused_a_stored_run_names_it() {
+    let p = Project::new();
+    p.config("scout.toml", &if2(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    p.config_with("seeded.toml", "fit_seeds = [1]", &if2(2));
+    let run = p.ok(&["fit", "run", "seeded.toml"]);
+    assert!(run.contains("cache hit"), "premise: one run, reused:\n{run}");
+    assert_eq!(p.leaves().len(), 1);
+    p.ok(&["fit", "summary", "seeded.toml"]);
+}

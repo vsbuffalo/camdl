@@ -102,8 +102,9 @@ that one leaf, so every reader that takes a fit directory accepts a leaf.
 Two recorded-not-hashed fields join the leaf's `run.json` `inputs`:
 
 ```rust
-"config_identity": "<hex>"   // config_identity_hash of the fit.toml the run read;
-                             // absent for a CLI-only run
+"config_identities": ["<hex>"] // config_identity_hash of each fit.toml the run was
+                               // written or reused from (a cache hit from a second
+                               // config with the same run identity adds its own)
 "starts_source": {           // present iff `starts` read a stored fit or file
     "handle": "@scout",      // as written
     "run_id": "<hex>",       // the source leaf's run_id; null for a file named directly
@@ -121,7 +122,7 @@ to that run, and is what `fit summary` prints. Neither field enters any hash.
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `fit run --label L`            | refused when the invocation writes more than one leaf (several `fit_seeds`, synthetic datasets, sweep points); refused before any sampling when `L` already names another run under the store root, or this run is already stored under another label |
 | `camdl label <run_id> L`       | a fit run is addressed by its leaf `run_id`; refused when `L` names another run or the run already has a different label; a fit-id prefix is refused with its runs listed                                                                             |
-| `@L` in any handle             | that one leaf; a `fit.toml` names the runs whose `config_identity` matches it, narrowed to this camdl build's runs when that leaves one                                                                                                               |
+| `@L` in any handle             | that one leaf; a `fit.toml` names the runs whose `config_identities` hold its identity, narrowed to this camdl build's runs when that leaves one                                                                                                      |
 | `fit summary <handle>`         | a run handle summarises that run; a problem folder holding several runs of one method is refused with the runs listed; a target with no completed run exits 1                                                                                         |
 | `fit predict`, `compare`       | read the named run when the handle names one (the segment-level choice for a problem-folder handle, and where `fit predict` writes, are unchanged and remain gh#896's open half)                                                                      |
 | `fit summary` of a sourced run | `seeded from:` names the source's run id beside its handle                                                                                                                                                                                            |
