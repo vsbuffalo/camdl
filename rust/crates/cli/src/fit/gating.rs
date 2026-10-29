@@ -375,7 +375,9 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
         return ScoutGateVerdict::Incomplete { params: assessed.unavailable };
     }
 
-    if assessed.a_band == AgreementBand::SoftWarn {
+    // Only a source the assessment passes gets the soft-band warning; every
+    // way of not passing has returned above.
+    if assessed.a_band == AgreementBand::SoftWarn && assessed.passes() {
         let warnable: Vec<(String, f64)> = assessed.all_finite().into_iter()
             .filter(|(_, r)| gate.a_band(*r) == AgreementBand::SoftWarn)
             .collect();

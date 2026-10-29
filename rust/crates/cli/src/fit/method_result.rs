@@ -1713,6 +1713,35 @@ mod tests {
         let r = If2StageResult::load(dir).unwrap();
         assert_eq!(r.gate_verdict, GateVerdict::FailA,
             "`fit table` agrees with the source check");
+
+        // A soft-band Â (between A_SOFT = 1.05 and a_thresh = 1.10) does not
+        // excuse a NaN Â or a failing decibans leg: both are refused as a
+        // source, as `fit table` reads them (incomplete / fail_db).
+        let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
+        let soft = |state: &mut FitState| {
+            state.resolved_gate = Some(gate.clone());
+            state.perturb_only_at_t0_params = vec![];
+        };
+        let mut nan = synthetic_if2_state();
+        soft(&mut nan);
+        nan.tail_chain_agreement =
+            [("R0".to_string(), 1.07), ("sigma".to_string(), f64::NAN)].into_iter().collect();
+        nan.chain_eval_logliks.clear();
+        nan.chain_eval_ses.clear();
+        nan.save(&dir.to_string_lossy()).unwrap();
+        assert!(crate::fit::gating::check_source_converged(dir, "@soft_nan", false).is_err(),
+            "soft band + NaN Â is refused");
+        assert_eq!(If2StageResult::load(dir).unwrap().gate_verdict, GateVerdict::Incomplete);
+
+        let mut spread = synthetic_if2_state();
+        soft(&mut spread);
+        spread.tail_chain_agreement =
+            [("R0".to_string(), 1.07), ("sigma".to_string(), 1.002)].into_iter().collect();
+        spread.chain_eval_logliks = vec![-3800.0, -3900.0, -3810.0, -3805.0];
+        spread.save(&dir.to_string_lossy()).unwrap();
+        assert!(crate::fit::gating::check_source_converged(dir, "@soft_db", false).is_err(),
+            "soft band + failing decibans leg is refused");
+        assert_eq!(If2StageResult::load(dir).unwrap().gate_verdict, GateVerdict::FailDb);
     }
 
     /// A NaN Â (within-chain variance collapsed) is unavailable, and an
