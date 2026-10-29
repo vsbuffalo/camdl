@@ -1,6 +1,6 @@
 ---
 date: 2026-10-29
-status: proposed — implements maintainer decisions D3 (assessment thresholds leave run identity) and D4 (refuse unsupported old records as inputs, keep them inspectable) of 2026-10-29; §11 records the calls made under them; §12 names the one value left to the maintainer
+status: proposed — implements maintainer decisions D3 (assessment thresholds leave run identity) and D4 (refuse unsupported old records as inputs, keep them inspectable) of 2026-10-29; §11 records the calls made under them; §12 records the maintainer's decision on the default thresholds (gh#84); nothing is pending
 area: fit result records / convergence verdicts / run identity / fit table, fit summary, fit predict
 issues: none filed; the follow-ups are named in §13
 related:
@@ -354,9 +354,9 @@ pub struct LeafMeasurements<'a> {
 ```rust
 // rust/crates/cli/src/fit/assess.rs
 
-/// Every post-run threshold. Defaults are today's values (§5), so a fit judged
-/// before and after this proposal under the default policy gets the same verdict
-/// except where §8 says otherwise.
+/// Every post-run threshold. Defaults are today's values (§5) except the ESS
+/// minimums, which are new (§12); a fit judged before and after this proposal
+/// under the default policy gets the same verdict except where §8 says.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DiagnosticPolicy {
@@ -378,9 +378,10 @@ pub struct NloptPolicy {
     pub decibans_thresh: f64,     // 30.0   (shares GateConfig today)
 }
 pub struct PosteriorPolicy {
-    pub max_rhat: f64,            // 1.05   (method_result.rs:585)
+    pub max_rhat: f64,            // 1.05   (method_result.rs:585; decided, §12)
     pub severe_rhat: f64,         // 1.5    (method_result.rs:590), display band only
-    pub min_ess: Option<f64>,     // None: not applied today (§3.3)
+    pub min_ess_bulk: f64,        // 100    (new; decided, §12)
+    pub min_ess_tail: f64,        // 100    (new; decided, §12)
 }
 pub struct DtCheckPolicy {
     pub tolerance: DtTolerance,
@@ -430,9 +431,10 @@ policy finds the fit already stored.
 a_thresh = 1.01
 decibans_thresh = 30
 
-[assessment.posterior]
+[assessment.posterior] # a project stricter than the defaults
 max_rhat = 1.01
-min_ess = 400
+min_ess_bulk = 400
+min_ess_tail = 400
 ```
 
 ### 4.4 The assessment
@@ -476,7 +478,7 @@ pub struct Leg {
 pub enum LegKind {
     TailA, TailAInitialValue, DecibansSpread,          // IF2
     OptimizerStatus, ParameterRange,                   // NLopt (+ DecibansSpread)
-    MaxRhat, MinEss,                                   // samplers
+    MaxRhat, MinEssBulk, MinEssTail,                   // samplers
     DtHalving, DtPlateau,                              // dt-check
 }
 
@@ -510,10 +512,14 @@ careful site:
 - **Posterior** (`PosteriorDiagnostics::max_rhat_status`'s rule). `MaxRhat`
   fails at or above `max_rhat`, and an unassessable R̂ is
   `NotAssessed(SamplerFailure)` and sinks the verdict to `Fail`, as
-  `sampler_source_verdict` does (`gating.rs:508-511`). `MinEss` fails below
-  `min_ess` and is absent when `min_ess` is `None`. A point start makes the
-  verdict `NotAssessed(PointStart)` (`demote_point_start`,
-  `method_result.rs:397-415`, applied from `point_start`, `:935`).
+  `sampler_source_verdict` does (`gating.rs:508-511`). `MinEssBulk` and
+  `MinEssTail` fail when any estimated parameter's bulk or tail ESS (both
+  already stored per parameter, `ParamConvergence::Scored.ess_bulk` and
+  `.ess_tail`, `method_result.rs:195-197`) is below `min_ess_bulk` or
+  `min_ess_tail`; an undefined ESS makes the leg `NotAssessed`, which does not
+  pass the verdict. A point start makes the verdict `NotAssessed(PointStart)`
+  (`demote_point_start`, `method_result.rs:397-415`, applied from `point_start`,
+  `:935`).
 - **dt-check** (today's `dt_check.rs` rule): `DtHalving` and `DtPlateau` against
   `max(tolerance, se_floor_sigmas · σ_max)`, `Warn` for a plateau leg in
   `[τ, 2τ)` as today's `Marginal`.
@@ -554,7 +560,8 @@ pub struct PolicyArgs {
     #[arg(long)] pub decibans_thresh: Option<f64>,   // IF2 and NLopt, as today
     #[arg(long)] pub agreement_range: Option<f64>,   // NLopt rel_range
     #[arg(long)] pub max_rhat: Option<f64>,
-    #[arg(long)] pub min_ess: Option<f64>,
+    #[arg(long)] pub min_ess_bulk: Option<f64>,
+    #[arg(long)] pub min_ess_tail: Option<f64>,
     #[arg(long)] pub dt_check_tolerance: Option<f64>,
     #[arg(long, conflicts_with = "dt_check_tolerance")] pub dt_check_strict: bool,
     /// A TOML file holding an `[assessment]` table.
@@ -594,15 +601,15 @@ constant is covered by the engine version, which the fit level folds.
 | NLopt relative-range and absolute-floor thresholds                                                                                                     | `nlopt_stage.rs:735-736`; literal `table_row.rs:294`                                                    | 0.05, 2.0                         | assessment policy                                   | code                                                            | `nlopt.rel_range`, `nlopt.abs_range_xtol`                            |
 | R̂ certification bar                                                                                                                                    | `RHAT_CONVERGED_THRESHOLD`, `method_result.rs:585`                                                      | 1.05                              | assessment policy                                   | no (read time, unrecorded)                                      | `posterior.max_rhat`, recorded                                       |
 | R̂ severe band                                                                                                                                          | `RHAT_SEVERE_THRESHOLD`, `method_result.rs:590`                                                         | 1.5                               | assessment policy (display)                         | no                                                              | `posterior.severe_rhat`                                              |
-| minimum ESS                                                                                                                                            | —                                                                                                       | none                              | assessment policy                                   | —                                                               | `posterior.min_ess`, default `None`                                  |
+| minimum ESS                                                                                                                                            | —                                                                                                       | none                              | assessment policy                                   | —                                                               | `posterior.min_ess_bulk`, `min_ess_tail`, default 100 each           |
 | dt-check `threshold_nats`, `--dt-check-strict`                                                                                                         | `config_v2.rs:1920`; `dt_check.rs:115-120`; stored `:83-86`                                             | 2.0 / 0.5 nats (strict 0.5 / 0.1) | **assessment policy**                               | **yes** (gh#730)                                                | `[assessment.dt_check]`, `--dt-check-tolerance`, `--dt-check-strict` |
 | dt-check SE floor `4 · σ_max`                                                                                                                          | `dt_check.rs:128-130`                                                                                   | 4                                 | assessment policy                                   | code                                                            | `dt_check.se_floor_sigmas`                                           |
 | run-time findings: Â > 1.1, Â > 1.5 with spread > 50, ESS at θ̂ < 5 %, R̂ report 1.1, loglik spread 3·3 nats, chain outlier \|z\| > 3.5, starved ESS 1 % | `runner.rs:2565-2569`, `:2587`, `:2923`; `gating.rs:106`; `chain_diagnostics.rs:99`; `filter_ess.rs:60` | as listed                         | assessment (findings written to `diagnostics.json`) | code                                                            | unchanged; out of scope (§13)                                        |
 
 The three bold rows are the ones that move a value out of run identity. Every
 other assessment value is a code constant today and becomes a policy field with
-the same default, so no stored fit's verdict moves under the default policy
-except as §8 states.
+the same default, except the two ESS minimums, which are new (§12); no stored
+fit's verdict moves under the default policy except as §8 states.
 
 ## 6. Old records are refused as inputs and read for inspection (D4)
 
@@ -719,16 +726,26 @@ Under the default policy:
    (`table_row.rs:39-42`) is bumped.
 8. A row whose read-time verdict differs from the one recorded at run time is
    marked `*`, with a footer giving the recorded verdict and its policy digest.
+   A leaf written before Stage 2 has no recorded assessment; its as-run verdict
+   is computed under the policy it ran with (its stored `resolved_gate` for IF2
+   and NLopt, else the pre-proposal constants: R̂ below 1.05 and no ESS minimum),
+   so the comparison exists for every stored fit.
+9. A sampler fit (PGAS, PMMH, MH) with any estimated parameter's bulk or tail
+   ESS below 100 now fails, with `gate_verdict = "fail_ess"`. A stored fit that
+   passed when it ran and fails only on ESS is shown with the `*` mark of item
+   8, as-run `pass` beside read-time `fail_ess`; it is never silently re-judged.
+   `--as-run` shows the old verdict, and a project can set its own minimums in
+   `[assessment.posterior]`.
 
 Configuration and flags:
 
-9. `[method.gate]` and `[method.dt_check] threshold_nats` are refused with the
-   new spelling (`[assessment.if2]`, `[assessment.dt_check] tolerance`) and the
-   value converted. `--decibans-thresh` and `--dt-check-strict` keep their names
-   and stop re-keying.
-10. Changing a threshold no longer re-runs a fit: `fit run` with a new
+10. `[method.gate]` and `[method.dt_check] threshold_nats` are refused with the
+    new spelling (`[assessment.if2]`, `[assessment.dt_check] tolerance`) and the
+    value converted. `--decibans-thresh` and `--dt-check-strict` keep their
+    names and stop re-keying.
+11. Changing a threshold no longer re-runs a fit: `fit run` with a new
     `--decibans-thresh` is a cache hit that prints the new verdict.
-11. The source check judges a source under the consuming run's policy, not the
+12. The source check judges a source under the consuming run's policy, not the
     gate the source was run with.
 
 ## 9. Stages
@@ -756,12 +773,13 @@ field of `fit_state.toml` by value (its layout changes in Stages 2 and 3).
 `chain_results.tsv`, the fit sidecar's search box and the method's `tolerance`;
 samplers from `PosteriorDiagnostics`). Every caller of §7 except the end-of-run
 reports moves to `assess`; the policy is `resolved_gate` where present, else the
-defaults, exactly as today. Branch `fix/settings-silent-noops` is adding the
-shared `assess_if2`, which covers all four IF2 sites including
-`if2_stage_report` and gives an NLopt source its own rule; Stage 1 takes it as
-the IF2 arm of `assess` unchanged and adds the `Measurements`, `AppliedPolicy`
-and `Assessment` types around it. Whichever of its tests already cover items 1,
-2 and 4 of §8 are not duplicated here. Tests, each red on `a9a89178`:
+defaults, exactly as today, with the ESS minimums at zero until Stage 2 (§12).
+Branch `fix/settings-silent-noops` is adding the shared `assess_if2`, which
+covers all four IF2 sites including `if2_stage_report` and gives an NLopt source
+its own rule; Stage 1 takes it as the IF2 arm of `assess` unchanged and adds the
+`Measurements`, `AppliedPolicy` and `Assessment` types around it. Whichever of
+its tests already cover items 1, 2 and 4 of §8 are not duplicated here. Tests,
+each red on `a9a89178`:
 
 - the settings-fixes agreement test (§3.1), extended to
   `fit summary --format
@@ -784,9 +802,10 @@ is flattened into `fit run`, `fit table` and `fit summary`;
 `DtCheckResult`'s `verdict`, `threshold_nats` and `threshold_se_aware_nats` are
 removed; the IF2 and NLopt runners call `assess` at the end and record the
 result in `provenance.assessment`; `fit table --as-run` and the `*` marker land.
-This re-keys every IF2, NLopt and dt-checked MH fit once (their method payload
-loses the gate and the tolerance); the release re-keys every fit regardless.
-Tests:
+The ESS minimums of §12 take their decided defaults of 100 here, with the §12
+test. This re-keys every IF2, NLopt and dt-checked MH fit once (their method
+payload loses the gate and the tolerance); the release re-keys every fit
+regardless. Tests:
 
 ```rust
 /// D3: a threshold changes the verdict a reader sees, not the run.
@@ -914,15 +933,25 @@ reads `FitState`, so no second compatibility layer is written.
 **`initial_loglik` is deleted unless Stage 3 finds a reader.** Three of four
 writers fill it with a sentinel.
 
-## 12. Pending the maintainer
+## 12. Default thresholds: decided by the maintainer (gh#84)
 
-**The default R̂ and ESS values.** `PosteriorPolicy` ships with `max_rhat = 1.05`
-and `min_ess = None`, today's behaviour. Vehtari et al. (2021) recommend R̂ <
-1.01 for the rank-normalized statistic and a bulk ESS above 400 before R̂ is
-read; adopting them is the gh#84 threshold decision, already with the
-maintainer. Under this proposal it is a change of two defaults, and every stored
-Bayesian fit whose verdict it changes is marked in `fit table` (§8 item 8)
-rather than silently re-judged.
+**Posterior samplers default to max R̂ 1.05, bulk ESS ≥ 100 and tail ESS ≥ 100
+per estimated parameter** (maintainer decision, 2026-10-29). The R̂ bar is
+today's; the two ESS minimums are new, since no ESS minimum is applied today
+(§3.3). Each is a field of `PosteriorPolicy` and is overridable per project in
+`[assessment.posterior]` and per command with `--max-rhat`, `--min-ess-bulk` and
+`--min-ess-tail`. For reference, Vehtari et al. (2021) recommend R̂ < 1.01 for
+the rank-normalized statistic and an ESS above 400 for four chains; a project
+that wants those writes them in `[assessment.posterior]` (§4.3).
+
+Because the ESS minimums are new, some stored sampler fits that were reported
+converged now fail. Under the read-time policy they are shown with the `*` mark,
+with the as-run verdict beside the new one (§8 items 8 and 9), and are never
+silently re-judged. The ESS minimums therefore take effect in Stage 2, together
+with the recorded and as-run verdicts and the `*` mark; Stage 1 runs them at
+zero so that no verdict changes without the mark. Stage 2's test: a stored PMMH
+fixture with R̂ below 1.05 and one parameter's tail ESS below 100 reads
+`fail_ess` with `*` in `fit table`, and `pass` under `--as-run`.
 
 ## 13. Out of scope, each with its reason
 
