@@ -1554,7 +1554,29 @@ impl Algorithm {
     /// A `None` argument leaves the field as the toml declared it, so a run
     /// with no CLI overrides keys identically to a bare `fit run` of the same
     /// file.
-    pub fn apply_cli_overrides(&mut self, cli: &CliStageOverrides) {
+    ///
+    /// A flag this method does not read is refused, never dropped: which
+    /// methods read which flag is the one table [`OverrideFlag::methods`], and
+    /// a flag that only means something beside another setting (`--adapt-start`
+    /// needs adaptation on; `--max-tree-depth` needs NUTS) is refused when the
+    /// overrides leave that setting off.
+    pub fn apply_cli_overrides(&mut self, cli: &CliStageOverrides) -> Result<(), String> {
+        let method = self.method_kind();
+        for flag in cli.passed() {
+            if !flag.methods().contains(&method) {
+                return Err(flag.refusal(method));
+            }
+        }
+        self.write_cli_overrides(cli)?;
+        self.refuse_inert_cli_overrides(cli)
+    }
+
+    /// Write each override into the field it names, on the arms that have
+    /// that field. The table in [`OverrideFlag::methods`] must agree with
+    /// these arms exactly — a test runs every flag on every method through
+    /// this function and checks that it moves the method iff the table lists
+    /// it.
+    fn write_cli_overrides(&mut self, cli: &CliStageOverrides) -> Result<(), String> {
         // ── Sampler and output overrides (gh#540) ──
         // Each of these used to be written into the `*StageOpts` struct at the
         // dispatch site, AFTER the identity was taken from this one — so a run
@@ -1590,14 +1612,14 @@ impl Algorithm {
                 if let Some(s) = cli.adapt_start { *adapt_start = s; }
                 if cli.no_dt_check { dt_check.enabled = false; }
                 if let Some(n) = cli.dt_check_halvings { dt_check.n_halvings = n; }
-                resolve_dt_check_strict(dt_check, *backend, cli.dt_check_strict);
+                resolve_dt_check_strict(dt_check, *backend, cli.dt_check_strict)?;
             }
             Algorithm::IF2 { cooling_target_iters, gate, dt_check, backend, .. } => {
                 if let Some(n) = cli.cooling_target_iters { *cooling_target_iters = n; }
                 if let Some(db) = cli.decibans_thresh { gate.decibans_thresh = db; }
                 if cli.no_dt_check { dt_check.enabled = false; }
                 if let Some(n) = cli.dt_check_halvings { dt_check.n_halvings = n; }
-                resolve_dt_check_strict(dt_check, *backend, cli.dt_check_strict);
+                resolve_dt_check_strict(dt_check, *backend, cli.dt_check_strict)?;
             }
             Algorithm::PFilter { record_ancestry, record_prequential, .. } => {
                 // One-way overrides to true: the toml can opt out
@@ -1610,9 +1632,157 @@ impl Algorithm {
                 if cli.no_dt_check { cfg.dt_check.enabled = false; }
                 if let Some(n) = cli.dt_check_halvings { cfg.dt_check.n_halvings = n; }
                 let backend = cfg.backend;
-                resolve_dt_check_strict(&mut cfg.dt_check, backend, cli.dt_check_strict);
+                resolve_dt_check_strict(&mut cfg.dt_check, backend, cli.dt_check_strict)?;
             }
         }
+        Ok(())
+    }
+
+    /// The second half of the refusal: a flag the method reads, but which the
+    /// method's settings — after the overrides above — leave with nothing to
+    /// do. Each would otherwise run, re-key and change nothing.
+    fn refuse_inert_cli_overrides(&self, cli: &CliStageOverrides) -> Result<(), String> {
+        let method = self.method_name();
+        let inert = |flag: &str, why: &str| -> Result<(), String> {
+            Err(format!("{flag} has no effect on this `{method}` method: {why}. Drop the flag."))
+        };
+        if let Algorithm::PGAS { use_nuts: false, .. } = self {
+            for (given, flag) in [(cli.max_tree_depth.is_some(), "--max-tree-depth"),
+                                  (cli.diagonal_mass, "--diagonal-mass")] {
+                if given {
+                    return inert(flag, "it tunes the NUTS θ-move, and `use_nuts` is off \
+                        (`--no-nuts`, or `use_nuts = false` in [method]), so the θ-move is \
+                        Metropolis-within-Gibbs");
+                }
+            }
+        }
+        if let Algorithm::PMMH { adapt: false, .. } | Algorithm::Mh { adapt: false, .. } = self {
+            if cli.adapt_start.is_some() {
+                return inert("--adapt-start", "it sets when proposal adaptation begins, and \
+                    adaptation is off (`--no-adapt`, or `adapt = false` in [method])");
+            }
+        }
+        let dt_check = match self {
+            Algorithm::IF2 { dt_check, .. } | Algorithm::Mh { dt_check, .. } => Some(dt_check),
+            Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c) => Some(&c.dt_check),
+            _ => None,
+        };
+        if let Some(dt_check) = dt_check {
+            if !dt_check.enabled {
+                for (given, flag) in [(cli.dt_check_halvings.is_some(), "--dt-check-halvings"),
+                                      (cli.dt_check_strict, "--dt-check-strict")] {
+                    if given {
+                        return inert(flag, "the dt-check does not run (`--no-dt-check`, or \
+                            `[method.dt_check] enabled = false`)");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One `fit run` flag that writes into the method, i.e. one field of
+/// [`CliStageOverrides`].
+///
+/// The point is the table in [`OverrideFlag::methods`]: which methods read the
+/// flag. A flag passed to any other method is refused by
+/// [`Algorithm::apply_cli_overrides`], so no explicit option is ever silently
+/// dropped. [`CliStageOverrides::passed`] destructures the struct without `..`,
+/// so a field added there does not compile until it names its flag here, and
+/// the match in `methods` does not compile until the flag has a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverrideFlag {
+    MaxTreeDepth,
+    TrajectoryWarmup,
+    CsmcSweepsPerNuts,
+    NTrajectories,
+    DiagonalMass,
+    NoNuts,
+    NoAncestorSampling,
+    NoAdapt,
+    AdaptStart,
+    CoolingTargetIters,
+    DecibansThresh,
+    NoDtCheck,
+    DtCheckHalvings,
+    DtCheckStrict,
+    Binomial,
+    RecordAncestry,
+    RecordPrequential,
+}
+
+impl OverrideFlag {
+    /// Every flag; the table test walks it.
+    #[cfg(test)]
+    pub const ALL: [OverrideFlag; 17] = [
+        OverrideFlag::MaxTreeDepth, OverrideFlag::TrajectoryWarmup,
+        OverrideFlag::CsmcSweepsPerNuts, OverrideFlag::NTrajectories,
+        OverrideFlag::DiagonalMass, OverrideFlag::NoNuts,
+        OverrideFlag::NoAncestorSampling, OverrideFlag::NoAdapt,
+        OverrideFlag::AdaptStart, OverrideFlag::CoolingTargetIters,
+        OverrideFlag::DecibansThresh, OverrideFlag::NoDtCheck,
+        OverrideFlag::DtCheckHalvings, OverrideFlag::DtCheckStrict,
+        OverrideFlag::Binomial, OverrideFlag::RecordAncestry,
+        OverrideFlag::RecordPrequential,
+    ];
+
+    /// The flag as typed on the command line.
+    pub fn spelling(self) -> &'static str {
+        match self {
+            OverrideFlag::MaxTreeDepth => "--max-tree-depth",
+            OverrideFlag::TrajectoryWarmup => "--trajectory-warmup",
+            OverrideFlag::CsmcSweepsPerNuts => "--csmc-sweeps-per-nuts",
+            OverrideFlag::NTrajectories => "--n-trajectories",
+            OverrideFlag::DiagonalMass => "--diagonal-mass",
+            OverrideFlag::NoNuts => "--no-nuts",
+            OverrideFlag::NoAncestorSampling => "--no-ancestor-sampling",
+            OverrideFlag::NoAdapt => "--no-adapt",
+            OverrideFlag::AdaptStart => "--adapt-start",
+            OverrideFlag::CoolingTargetIters => "--cooling-target-iters",
+            OverrideFlag::DecibansThresh => "--decibans-thresh",
+            OverrideFlag::NoDtCheck => "--no-dt-check",
+            OverrideFlag::DtCheckHalvings => "--dt-check-halvings",
+            OverrideFlag::DtCheckStrict => "--dt-check-strict",
+            OverrideFlag::Binomial => "--binomial",
+            OverrideFlag::RecordAncestry => "--record-ancestry",
+            OverrideFlag::RecordPrequential => "--record-prequential",
+        }
+    }
+
+    /// The methods that read this flag. Every other method refuses it.
+    pub fn methods(self) -> &'static [crate::run_meta::FitAlgorithm] {
+        use crate::run_meta::FitAlgorithm::*;
+        match self {
+            OverrideFlag::MaxTreeDepth
+            | OverrideFlag::TrajectoryWarmup
+            | OverrideFlag::CsmcSweepsPerNuts
+            | OverrideFlag::NTrajectories
+            | OverrideFlag::DiagonalMass
+            | OverrideFlag::NoNuts
+            | OverrideFlag::NoAncestorSampling
+            | OverrideFlag::Binomial => &[Pgas],
+            OverrideFlag::NoAdapt | OverrideFlag::AdaptStart => &[Pmmh, Mh],
+            OverrideFlag::CoolingTargetIters => &[If2],
+            OverrideFlag::DecibansThresh => &[If2, NlSbplx, NlBobyqa, NlLbfgs],
+            OverrideFlag::NoDtCheck
+            | OverrideFlag::DtCheckHalvings
+            | OverrideFlag::DtCheckStrict => &[If2, Mh, NlSbplx, NlBobyqa, NlLbfgs],
+            OverrideFlag::RecordAncestry | OverrideFlag::RecordPrequential => &[Pfilter],
+        }
+    }
+
+    /// The error for this flag on a method that does not read it.
+    fn refusal(self, method: crate::run_meta::FitAlgorithm) -> String {
+        let accepted: Vec<&str> = self.methods().iter().map(|m| m.as_str()).collect();
+        format!(
+            "{} does not apply to this fit's method, `{}`: only {} read{} it, so it would \
+             change nothing. Drop the flag, or run a method that reads it.",
+            self.spelling(),
+            method.as_str(),
+            accepted.iter().map(|m| format!("`{m}`")).collect::<Vec<_>>().join(", "),
+            if accepted.len() == 1 { "s" } else { "" },
+        )
     }
 }
 
@@ -1687,20 +1857,64 @@ pub struct CliStageOverrides {
 /// is taken — into the `threshold_nats` the config already carries and already
 /// hashes.
 ///
-/// A TOML-set `threshold_nats` wins, preserving today's semantics exactly: the
-/// flag was already inert whenever the stage declared its own threshold.
+/// A TOML-set `threshold_nats` leaves the flag nothing to select, so the flag
+/// is refused there rather than silently ignored.
 fn resolve_dt_check_strict(
     dt_check: &mut DtCheckConfig,
     backend: crate::run_meta::InferenceBackend,
     strict: bool,
-) {
-    if strict && dt_check.threshold_nats.is_none() {
-        dt_check.threshold_nats =
-            Some(super::dt_check::default_threshold_for_backend(backend, true));
+) -> Result<(), String> {
+    if !strict {
+        return Ok(());
     }
+    if let Some(declared) = dt_check.threshold_nats {
+        return Err(format!(
+            "--dt-check-strict selects the dt-check's default strict threshold, and this \
+             method declares its own (`[method.dt_check] threshold_nats = {declared}`), \
+             which the flag would not change. Drop the flag, or edit `threshold_nats`."
+        ));
+    }
+    dt_check.threshold_nats = Some(super::dt_check::default_threshold_for_backend(backend, true));
+    Ok(())
 }
 
 impl CliStageOverrides {
+    /// The flags this set carries, in [`OverrideFlag::ALL`] order.
+    ///
+    /// Destructured without `..`: a field added to the struct is a compile
+    /// error here until it names its [`OverrideFlag`], which in turn cannot
+    /// compile without a row in [`OverrideFlag::methods`].
+    pub fn passed(&self) -> Vec<OverrideFlag> {
+        let CliStageOverrides {
+            max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts, n_trajectories,
+            diagonal_mass, no_nuts, no_ancestor_sampling, no_adapt, adapt_start,
+            cooling_target_iters, decibans_thresh, no_dt_check, dt_check_halvings,
+            dt_check_strict, binomial, record_ancestry, record_prequential,
+        } = self;
+        [
+            (max_tree_depth.is_some(), OverrideFlag::MaxTreeDepth),
+            (trajectory_warmup.is_some(), OverrideFlag::TrajectoryWarmup),
+            (csmc_sweeps_per_nuts.is_some(), OverrideFlag::CsmcSweepsPerNuts),
+            (n_trajectories.is_some(), OverrideFlag::NTrajectories),
+            (*diagonal_mass, OverrideFlag::DiagonalMass),
+            (*no_nuts, OverrideFlag::NoNuts),
+            (*no_ancestor_sampling, OverrideFlag::NoAncestorSampling),
+            (*no_adapt, OverrideFlag::NoAdapt),
+            (adapt_start.is_some(), OverrideFlag::AdaptStart),
+            (cooling_target_iters.is_some(), OverrideFlag::CoolingTargetIters),
+            (decibans_thresh.is_some(), OverrideFlag::DecibansThresh),
+            (*no_dt_check, OverrideFlag::NoDtCheck),
+            (dt_check_halvings.is_some(), OverrideFlag::DtCheckHalvings),
+            (*dt_check_strict, OverrideFlag::DtCheckStrict),
+            (binomial.is_some(), OverrideFlag::Binomial),
+            (*record_ancestry, OverrideFlag::RecordAncestry),
+            (*record_prequential, OverrideFlag::RecordPrequential),
+        ]
+        .into_iter()
+        .filter_map(|(given, flag)| given.then_some(flag))
+        .collect()
+    }
+
     /// True when nothing was passed — the caller skips the whole override step,
     /// so a run with no CLI overrides keys byte-identically to before and no
     /// stored fit is invalidated.
@@ -3622,7 +3836,8 @@ starts     = "{starts}"
         ];
         for (flag, base, cli) in cases {
             let mut overridden = base.clone();
-            overridden.algorithm.apply_cli_overrides(&cli);
+            overridden.algorithm.apply_cli_overrides(&cli)
+                .unwrap_or_else(|e| panic!("{flag}: {e}"));
             assert_ne!(
                 base.identity_payload(), overridden.identity_payload(),
                 "{flag} changes what the stage computes or stores, so it must \
@@ -3643,7 +3858,7 @@ starts     = "{starts}"
 
         let mut if2 = scout_method("single");
         if2.algorithm.apply_cli_overrides(&CliStageOverrides {
-            dt_check_strict: true, ..Default::default() });
+            dt_check_strict: true, ..Default::default() }).unwrap();
         match &if2.algorithm {
             Algorithm::IF2 { dt_check, backend, .. } => assert_eq!(
                 dt_check.threshold_nats,
@@ -3655,16 +3870,16 @@ starts     = "{starts}"
         // so a change to the constant surfaces here rather than in a fit.
         assert_eq!(default_threshold_for_backend(InferenceBackend::ChainBinomial, true), 0.5);
 
-        // A TOML-declared threshold wins: the flag stays inert there.
+        // A TOML-declared threshold leaves the flag nothing to select: it is
+        // refused rather than silently ignored.
         let mut declared = scout_method("single");
         if let Algorithm::IF2 { dt_check, .. } = &mut declared.algorithm {
             dt_check.threshold_nats = Some(1.25);
         }
-        let before = declared.clone();
-        declared.algorithm.apply_cli_overrides(&CliStageOverrides {
-            dt_check_strict: true, ..Default::default() });
-        assert_eq!(before.identity_payload(), declared.identity_payload(),
-            "a stage that declares threshold_nats must be unmoved by the flag");
+        let err = declared.algorithm.apply_cli_overrides(&CliStageOverrides {
+            dt_check_strict: true, ..Default::default() }).unwrap_err();
+        assert!(err.contains("--dt-check-strict") && err.contains("threshold_nats = 1.25"),
+            "{err}");
     }
 
     /// The subtractive payload is include-by-default: every stage field is in
@@ -3723,7 +3938,7 @@ starts     = "{starts}"
         let base = pgas_method();
         let mut more = pgas_method();
         more.algorithm.apply_cli_overrides(&CliStageOverrides {
-            n_trajectories: Some(500), ..Default::default() });
+            n_trajectories: Some(500), ..Default::default() }).unwrap();
         assert_ne!(base.algorithm.cas_n_trajectories(), more.algorithm.cas_n_trajectories(),
             "`--n-trajectories` must reach `cas_n_trajectories` — it reads the \
              stage, and the flag used to be applied to the opts struct instead, \
@@ -3787,7 +4002,7 @@ starts     = "{starts}"
         let base = pgas_method();
         let mut overridden = pgas_method();
         overridden.algorithm.apply_cli_overrides(&CliStageOverrides {
-            no_ancestor_sampling: true, ..Default::default() });
+            no_ancestor_sampling: true, ..Default::default() }).unwrap();
         match &overridden.algorithm {
             Algorithm::PGAS { ancestor_sampling, .. } => assert!(!ancestor_sampling),
             other => panic!("expected PGAS, got {}", other.method_name()),
@@ -3801,8 +4016,166 @@ starts     = "{starts}"
     fn no_cli_override_leaves_the_stage_identity_untouched() {
         let declared = scout_method("uniform");
         let mut untouched = scout_method("uniform");
-        untouched.algorithm.apply_cli_overrides(&CliStageOverrides::default());
+        untouched.algorithm.apply_cli_overrides(&CliStageOverrides::default()).unwrap();
         assert_eq!(declared.identity_payload(), untouched.identity_payload());
+    }
+
+    /// One base method per algorithm, each set so that every flag the
+    /// algorithm reads moves something (the pfilter base declares both record
+    /// fields false, so the one-way override to true is visible).
+    fn base_method_for(algo: crate::run_meta::FitAlgorithm) -> Method {
+        use crate::run_meta::FitAlgorithm as A;
+        let nl = |wrap: fn(NloptStageConfig) -> Algorithm| {
+            let mut m = nl_sbplx_method();
+            if let Algorithm::NlSbplx(cfg) = m.algorithm.clone() { m.algorithm = wrap(cfg); }
+            m
+        };
+        match algo {
+            A::If2 => scout_method("single"),
+            A::Pgas => pgas_method(),
+            A::Pmmh => pmmh_method(),
+            A::Mh => mh_method(),
+            A::Pfilter => pfilter_method(),
+            A::NlSbplx => nl_sbplx_method(),
+            A::NlBobyqa => nl(Algorithm::NlBobyqa),
+            A::NlLbfgs => nl(Algorithm::NlLbfgs),
+        }
+    }
+
+    /// The overrides with only `flag` passed, at a value off every default.
+    fn only(flag: OverrideFlag) -> CliStageOverrides {
+        let d = CliStageOverrides::default();
+        match flag {
+            OverrideFlag::MaxTreeDepth => CliStageOverrides { max_tree_depth: Some(7), ..d },
+            OverrideFlag::TrajectoryWarmup => CliStageOverrides { trajectory_warmup: Some(3), ..d },
+            OverrideFlag::CsmcSweepsPerNuts => CliStageOverrides { csmc_sweeps_per_nuts: Some(4), ..d },
+            OverrideFlag::NTrajectories => CliStageOverrides { n_trajectories: Some(500), ..d },
+            OverrideFlag::DiagonalMass => CliStageOverrides { diagonal_mass: true, ..d },
+            OverrideFlag::NoNuts => CliStageOverrides { no_nuts: true, ..d },
+            OverrideFlag::NoAncestorSampling => CliStageOverrides { no_ancestor_sampling: true, ..d },
+            OverrideFlag::NoAdapt => CliStageOverrides { no_adapt: true, ..d },
+            OverrideFlag::AdaptStart => CliStageOverrides { adapt_start: Some(42), ..d },
+            OverrideFlag::CoolingTargetIters => CliStageOverrides { cooling_target_iters: Some(20), ..d },
+            OverrideFlag::DecibansThresh => CliStageOverrides { decibans_thresh: Some(5.0), ..d },
+            OverrideFlag::NoDtCheck => CliStageOverrides { no_dt_check: true, ..d },
+            OverrideFlag::DtCheckHalvings => CliStageOverrides { dt_check_halvings: Some(3), ..d },
+            OverrideFlag::DtCheckStrict => CliStageOverrides { dt_check_strict: true, ..d },
+            OverrideFlag::Binomial => CliStageOverrides {
+                binomial: Some(sim::rng::BinomialAlgorithm::Btrs), ..d },
+            OverrideFlag::RecordAncestry => CliStageOverrides { record_ancestry: true, ..d },
+            OverrideFlag::RecordPrequential => CliStageOverrides { record_prequential: true, ..d },
+        }
+    }
+
+    /// Every override flag is in the table, and the table is the truth: on
+    /// every method, a flag the table lists is accepted AND changes the
+    /// method, and a flag it does not list is refused with a message naming
+    /// the flag, the method, and the methods that read it. A flag the table
+    /// claims but `apply_cli_overrides` ignores fails the first half; a flag
+    /// applied but missing from the table fails the second.
+    #[test]
+    fn every_override_flag_is_refused_on_a_method_that_does_not_read_it() {
+        use crate::run_meta::FitAlgorithm as A;
+        // `OverrideFlag::ALL` covers every field: setting every flag in it
+        // leaves no field of the struct at its default. The destructure has
+        // no `..`, so a new field is a compile error here too.
+        let mut all = CliStageOverrides::default();
+        for flag in OverrideFlag::ALL {
+            let one = only(flag);
+            assert_eq!(one.passed(), vec![flag], "{} round-trips through passed()", flag.spelling());
+            let CliStageOverrides {
+                max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts, n_trajectories,
+                diagonal_mass, no_nuts, no_ancestor_sampling, no_adapt, adapt_start,
+                cooling_target_iters, decibans_thresh, no_dt_check, dt_check_halvings,
+                dt_check_strict, binomial, record_ancestry, record_prequential,
+            } = one;
+            all.max_tree_depth = all.max_tree_depth.or(max_tree_depth);
+            all.trajectory_warmup = all.trajectory_warmup.or(trajectory_warmup);
+            all.csmc_sweeps_per_nuts = all.csmc_sweeps_per_nuts.or(csmc_sweeps_per_nuts);
+            all.n_trajectories = all.n_trajectories.or(n_trajectories);
+            all.diagonal_mass |= diagonal_mass;
+            all.no_nuts |= no_nuts;
+            all.no_ancestor_sampling |= no_ancestor_sampling;
+            all.no_adapt |= no_adapt;
+            all.adapt_start = all.adapt_start.or(adapt_start);
+            all.cooling_target_iters = all.cooling_target_iters.or(cooling_target_iters);
+            all.decibans_thresh = all.decibans_thresh.or(decibans_thresh);
+            all.no_dt_check |= no_dt_check;
+            all.dt_check_halvings = all.dt_check_halvings.or(dt_check_halvings);
+            all.dt_check_strict |= dt_check_strict;
+            all.binomial = all.binomial.or(binomial);
+            all.record_ancestry |= record_ancestry;
+            all.record_prequential |= record_prequential;
+        }
+        assert_eq!(all.passed(), OverrideFlag::ALL.to_vec(),
+            "OverrideFlag::ALL must name every CliStageOverrides field");
+
+        let methods = [A::If2, A::Pgas, A::Pmmh, A::Mh, A::Pfilter,
+                       A::NlSbplx, A::NlBobyqa, A::NlLbfgs];
+        for flag in OverrideFlag::ALL {
+            for algo in methods {
+                let base = base_method_for(algo);
+                assert_eq!(base.algorithm.method_kind(), algo);
+                // The table agrees with the writer: the flag moves this
+                // method exactly when the table lists it. Without this a row
+                // dropped from the table would turn a working flag into a
+                // refused one, and nothing would notice.
+                let mut written = base.clone();
+                let wrote = written.algorithm.write_cli_overrides(&only(flag)).is_ok()
+                    && format!("{:?}", base.algorithm) != format!("{:?}", written.algorithm);
+                assert_eq!(wrote, flag.methods().contains(&algo),
+                    "{} on `{}`: the writer {} the method, but the table {} it",
+                    flag.spelling(), algo.as_str(),
+                    if wrote { "moves" } else { "does not move" },
+                    if flag.methods().contains(&algo) { "lists" } else { "does not list" });
+                let mut overridden = base.clone();
+                let got = overridden.algorithm.apply_cli_overrides(&only(flag));
+                if flag.methods().contains(&algo) {
+                    got.unwrap_or_else(|e| panic!("{} on {}: {e}", flag.spelling(), algo.as_str()));
+                    assert_ne!(format!("{:?}", base.algorithm), format!("{:?}", overridden.algorithm),
+                        "{} is listed for `{}` but changed nothing there",
+                        flag.spelling(), algo.as_str());
+                } else {
+                    let err = got.expect_err(&format!(
+                        "{} must be refused on `{}`", flag.spelling(), algo.as_str()));
+                    assert!(err.contains(flag.spelling()), "{err}");
+                    assert!(err.contains(&format!("`{}`", algo.as_str())), "{err}");
+                    for m in flag.methods() {
+                        assert!(err.contains(&format!("`{}`", m.as_str())), "names `{}`: {err}", m.as_str());
+                    }
+                }
+            }
+        }
+    }
+
+    /// A flag the method reads, beside a setting that leaves it nothing to do,
+    /// is refused rather than run, re-keyed and ignored.
+    #[test]
+    fn a_flag_left_inert_by_another_setting_is_refused() {
+        let cases: Vec<(&str, Method, CliStageOverrides)> = vec![
+            ("--max-tree-depth", pgas_method(),
+             CliStageOverrides { no_nuts: true, max_tree_depth: Some(7), ..Default::default() }),
+            ("--diagonal-mass", pgas_method(),
+             CliStageOverrides { no_nuts: true, diagonal_mass: true, ..Default::default() }),
+            ("--adapt-start", pmmh_method(),
+             CliStageOverrides { no_adapt: true, adapt_start: Some(42), ..Default::default() }),
+            ("--adapt-start", mh_method(),
+             CliStageOverrides { no_adapt: true, adapt_start: Some(42), ..Default::default() }),
+            ("--dt-check-halvings", scout_method("single"),
+             CliStageOverrides { no_dt_check: true, dt_check_halvings: Some(3), ..Default::default() }),
+            ("--dt-check-strict", nl_sbplx_method(),
+             CliStageOverrides { no_dt_check: true, dt_check_strict: true, ..Default::default() }),
+        ];
+        for (flag, base, cli) in cases {
+            let mut m = base.clone();
+            let err = m.algorithm.apply_cli_overrides(&cli)
+                .expect_err(&format!("{flag} is inert here and must be refused"));
+            assert!(err.contains(flag), "{err}");
+        }
+        // The same flag beside the setting it needs is fine.
+        let mut m = pgas_method();
+        m.algorithm.apply_cli_overrides(&CliStageOverrides {
+            max_tree_depth: Some(7), ..Default::default() }).unwrap();
     }
 
     #[test]

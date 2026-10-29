@@ -370,7 +370,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     {
         let method = config.inference.method.as_mut().expect("checked above");
         if !cli_overrides.is_empty() {
-            method.algorithm.apply_cli_overrides(&cli_overrides);
+            // A flag the method does not read is refused here, before any
+            // work, rather than dropped (`OverrideFlag::methods`).
+            if let Err(e) = method.algorithm.apply_cli_overrides(&cli_overrides) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
         }
         if let Some(starts) = &a.starts {
             method.starts = Some(starts.clone());
@@ -529,6 +534,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // the runners consume.
     let method: config_v2::Method = config.inference.method.clone().expect("checked above");
     let allow_nonconverged_source = a.allow_nonconverged_source;
+    // Only a fit source carries a convergence verdict to lift.
+    if allow_nonconverged_source {
+        use crate::fit::starts::{ChainStarts, Point, Spread};
+        let rule = method.starts().unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1) });
+        if !matches!(rule, ChainStarts::Point(Point::FromMle { .. })
+                         | ChainStarts::Spread(Spread::FromPosterior { .. })) {
+            eprintln!("error: --allow-nonconverged-source lifts the refusal of a `from_mle` or \
+                       `from_posterior` source whose stored verdict is not converged, and this \
+                       fit starts from `{}`, which has no such verdict, so the flag would change \
+                       nothing. Drop the flag.", rule.tag());
+            std::process::exit(1);
+        }
+    }
     if let Some(msg) = config.point_start_multichain_note() {
         // gh#71: a point-started multi-chain sampler's R̂ is uninformative;
         // the summary will report it as not assessed. A note, not an error —
@@ -679,18 +697,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             eprintln!("error: {}", msg);
             std::process::exit(1);
         }
-    }
-
-    // gh#audit-H12: --record-prequential and --record-ancestry only have
-    // effect on a PFilter method. Refuse them on any other, so they are never
-    // silently dropped.
-    if (a.record_prequential || a.record_ancestry)
-        && !matches!(method.algorithm, Algorithm::PFilter { .. })
-    {
-        let flag = if a.record_prequential { "--record-prequential" } else { "--record-ancestry" };
-        eprintln!("error: {} applies to a `pfilter` method, and this fit's method is \
-                   `{}`.", flag, method.algorithm.method_name());
-        std::process::exit(1);
     }
 
     // gh#604: every key the user typed under `[data.observations]` /
@@ -855,6 +861,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // A cross-seed roll-up view (per-method chain-R̂ across fit_seeds) is a
     // derived index, deferred to M4 (gh#154) — the same home as the profile
     // and grid roll-ups. The same applies to `dataset_idx` for synthetic fits.
+    // `fit_seeds` in the file replaces the single base seed, so `--seed`
+    // beside it would be read nowhere.
+    if a.seed.is_some() && config.inference.fit_seeds.is_some() {
+        eprintln!("error: --seed sets the single seed of a fit, and {fit_path} declares \
+                   `fit_seeds`, which replaces it, so the flag would change nothing. Drop \
+                   --seed, or delete `fit_seeds` from the file.");
+        std::process::exit(1);
+    }
     let fit_seeds: Vec<u64> = match &config.inference.fit_seeds {
         Some(list) => list.clone(),
         None       => vec![base_seed],
