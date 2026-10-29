@@ -212,7 +212,8 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
 /// command tree so a rename cannot leave this printing a command again.
 pub(crate) const UNLABELLED_HINT_COMMANDS: [&str; 2] = [
     "camdl fit run --label \"<short description>\" fit.toml",
-    "camdl label <hash> \"<short description>\"",
+    // A run id, not the fit id the table shows: a label names one run (gh#896).
+    "camdl label <run_id> \"<short description>\"",
 ];
 
 /// Emit a one-line stderr hint when the count of unlabelled fits in
@@ -247,7 +248,8 @@ mod unlabelled_hint_tests {
     fn argv(line: &str) -> Vec<String> {
         let filled = line
             .replace("<short description>", "a short description")
-            .replace("<hash>", "0a1b2c3d");
+            .replace("<hash>", "0a1b2c3d")
+            .replace("<run_id>", "0a1b2c3d4e5f");
         let mut out: Vec<String> = Vec::new();
         let mut cur = String::new();
         let mut quoted = false;
