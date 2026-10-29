@@ -1,6 +1,6 @@
 ---
 date: 2026-10-29
-status: proposed — built on the maintainer decisions of 2026-10-29 listed in §1; D1–D16 (§14) are decided; §15 lists six items pending the maintainer; the IF2 default constants are provisional until the transforms benchmark is decided (§4.4)
+status: proposed — built on the maintainer decisions of 2026-10-29 listed in §1; D1–D16 (§14) are decided; §15 lists five items pending the maintainer; the IF2 default constants are provisional until the transforms benchmark is decided (§4.4)
 area: fit config / run identity / resolved problem and execution plan / IF2, PMMH and MH step sizes / profile CLI
 issues: gh#1001
 supersedes: 2026-10-29-support-keyed-transforms.md D9 and its commit series (ii) (its §11 commits 11–12)
@@ -39,6 +39,8 @@ The maintainer decided, on 2026-10-29:
    `ExecutionPlan` (§6).
 5. Consequently `[estimate].start` is execution, hashed at the method level, not
    the fit level (§5.2).
+6. An unsupported old `fit_state.toml` is refused as an input to a new
+   computation and read with one notice by read-only commands (§7.5).
 
 ## 2. One key, `rw_sd`, sets two algorithms' steps in a unit about to change, and keeps two fit files of one problem apart
 
