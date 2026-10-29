@@ -1,0 +1,9 @@
+# The §8.4 truth (proposal 2026-10-27-estimable-bsplines): fixed epidemic
+# parameters of seir_k12_truth.camdl; β(t) comes from beta_true.tsv.
+sigma = 0.1
+gamma = 0.125
+rho = 0.5
+k = 10.0
+N0 = 1000000
+E0 = 10
+I0 = 10

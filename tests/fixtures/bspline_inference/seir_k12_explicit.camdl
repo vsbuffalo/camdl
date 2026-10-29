@@ -1,0 +1,72 @@
+# §8.2 benchmark fixture (proposal 2026-10-27-estimable-bsplines §8.2, §8.4):
+# a chain-binomial SEIR whose log transmission rate per day is a cubic
+# B-spline with twelve explicit coefficients over the window [0, 168] days,
+# held to day 182, fitted to 182 daily onset counts observed as
+# neg_binomial(mean = rho * onsets, r = k). sigma, gamma, rho, k, N0, E0 and
+# I0 are fixed in the fit. seir_k12_truth.camdl is the same model with the
+# spline replaced by the truth β(t) (beta_true.tsv).
+
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+let N = S + E + I + R
+
+parameters {
+  sigma : rate        in [0.01, 1.0]
+  gamma : rate        in [0.01, 1.0]
+  rho   : probability in [0.01, 1.0]
+  k     : positive    in [0.1, 1000]
+  N0    : count       in [100, 10000000]
+  E0    : count       in [0, 1000]
+  I0    : count       in [0, 1000]
+  # log β per day at the k-th coefficient; prior centred on R ≈ 1.2
+  b1  : real 'ratio ~ normal(mu = -1.9, sigma = 1.0)
+  b2  : real 'ratio ~ normal(mu = -1.9, sigma = 1.0)
+  b3  : real 'ratio ~ normal(mu = -1.9, sigma = 1.0)
+  b4  : real 'ratio ~ normal(mu = -1.9, sigma = 1.0)
+  b5  : real 'ratio ~ normal(mu = -1.9, sigma = 1.0)
+  b6  : real 'ratio ~ normal(mu = -1.9, sigma = 1.0)
+  b7  : real 'ratio ~ normal(mu = -1.9, sigma = 1.0)
+  b8  : real 'ratio ~ normal(mu = -1.9, sigma = 1.0)
+  b9  : real 'ratio ~ normal(mu = -1.9, sigma = 1.0)
+  b10 : real 'ratio ~ normal(mu = -1.9, sigma = 1.0)
+  b11 : real 'ratio ~ normal(mu = -1.9, sigma = 1.0)
+  b12 : real 'ratio ~ normal(mu = -1.9, sigma = 1.0)
+}
+
+forcing {
+  beta_t : bspline 'per_day {
+    window  = [0 'days, 168 'days]
+    n_basis = 12
+    link    = log
+    coefs   = [b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12]
+  }
+}
+
+transitions {
+  infection   : S --> E @ beta_t * S * (I / N)
+  progression : E --> I @ sigma * E
+  recovery    : I --> R @ gamma * I
+}
+
+init {
+  S = N0 - E0 - I0
+  E = E0
+  I = I0
+}
+
+observations {
+  onsets {
+    columns       { time : time, onsets : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(progression)
+    emit_schedule = every 1 'days
+    onsets        ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 182 'days
+}

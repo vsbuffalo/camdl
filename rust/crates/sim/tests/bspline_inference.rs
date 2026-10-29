@@ -428,3 +428,40 @@ fn write_recovery_datasets() {
         std::fs::write(format!("{dir}/onsets_{seed}.tsv"), body).unwrap();
     }
 }
+
+/// §8.4: the benchmark's data-generating model differs from the fitted one
+/// only in the transmission forcing (an `interpolated` truth for the
+/// twelve-coefficient spline) and in the coefficients themselves: every
+/// compartment, transition rate, initial condition, observation stream,
+/// other parameter and the simulation window are identical.
+#[test]
+fn k12_truth_and_fit_models_differ_only_in_the_forcing() {
+    let read = |n: &str| -> serde_json::Value {
+        let p = format!("{}/../../../tests/fixtures/bspline_inference/ir/{n}.ir.json", env!("CARGO_MANIFEST_DIR"));
+        serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+    };
+    let (fit, truth) = (read("seir_k12_explicit")["model"].clone(), read("seir_k12_truth")["model"].clone());
+    let is_coef = |p: &serde_json::Value| {
+        let n = p["name"].as_str().unwrap();
+        n.starts_with('b') && n[1..].parse::<u32>().is_ok()
+    };
+    let others = |m: &serde_json::Value| -> Vec<serde_json::Value> {
+        m["parameters"].as_array().unwrap().iter().filter(|p| !is_coef(p)).cloned().collect()
+    };
+    assert_eq!(others(&fit), others(&truth), "the non-coefficient parameters differ");
+    assert_eq!(fit["parameters"].as_array().unwrap().iter().filter(|p| is_coef(p)).count(), 12);
+    let strip = |m: &serde_json::Value| -> serde_json::Value {
+        let mut m = m.clone();
+        let o = m.as_object_mut().unwrap();
+        for k in ["parameters", "time_functions", "name", "description"] {
+            o.remove(k);
+        }
+        // Gradients follow the parameters: the truth has no coefficients.
+        for t in o["transitions"].as_array_mut().unwrap() {
+            t.as_object_mut().unwrap().remove("rate_grad");
+        }
+        m
+    };
+    assert_eq!(strip(&fit), strip(&truth), "the models differ outside the forcing");
+    assert_ne!(fit["time_functions"], truth["time_functions"]);
+}

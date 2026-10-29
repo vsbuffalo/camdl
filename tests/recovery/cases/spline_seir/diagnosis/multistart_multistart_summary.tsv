@@ -1,0 +1,9 @@
+form	seed	feasible_starts	if2_fits	good_distinct_solutions	rhat_beta	bulk_ess_beta	tail_ess_beta	rhat_Reff	bulk_ess_Reff	tail_ess_Reff	divergent	region_switches
+explicit	23	8	8	2	1.113	37	107	1.11	38	102	0	152,186,179,229
+explicit	31	8	8	1	1.06	91	165	1.06	92	181	0	0,0,0,0
+explicit	47	8	8	1	1.03	132	201	1.029	133	206	0	0,0,0,0
+explicit	59	8	8	2	1.145	24	95	1.143	25	116	0	220,211,176,240
+smooth	23	6	6	1	1.085	55	124	1.085	52	124	188	0,0,0,0
+smooth	31	5	5	1	1.037	87	34	1.036	88	35	495	0,0,0,0
+smooth	47	6	6	1	1.026	117	43	1.026	115	44	57	0,0,0,0
+smooth	59	7	7	2	1.079	57	102	1.078	56	111	472	459,404,334,499

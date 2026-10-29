@@ -1,0 +1,9 @@
+seed	form	tuning	n_divergent	logtau_divergent	logtau_other	curvature_divergent	curvature_other
+23	explicit	rung4c	0		NaN		0.00041452094087024915
+31	explicit	rung4c	0		NaN		0.00015987215411460902
+47	explicit	rung4c	0		NaN		0.00011351887227888068
+59	explicit	rung4c	0		NaN		0.00016679055771688485
+23	smooth	rung4c	7	-0.868	-3.18	0.0004333983577752257	0.00003150771836648127
+31	smooth	rung4c	0		-3.188		0.000017959902460495953
+47	smooth	rung4c	0		-3.058		0.000019961901859029995
+59	smooth	rung4c	0		-2.902		0.00003467266759423237

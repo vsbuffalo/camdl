@@ -323,7 +323,7 @@ BSPLINE_INFERENCE_DIR := tests/fixtures/bspline_inference
 update-bspline-inference-golden: build-ocaml
 	@echo "Recompiling B-spline inference fixtures..."
 	@mkdir -p $(BSPLINE_INFERENCE_DIR)/ir
-	@for f in seir_bspline_small seir_bspline_recovery prior_only_smooth seir_smooth_recovery sbc_smooth prior_only_explicit; do \
+	@for f in seir_bspline_small seir_bspline_recovery prior_only_smooth seir_smooth_recovery sbc_smooth prior_only_explicit seir_k12_explicit seir_k12_truth; do \
 	  $(CAMDLC) $(BSPLINE_INFERENCE_DIR)/$$f.camdl -o $(BSPLINE_INFERENCE_DIR)/ir/$$f.ir.json; \
 	done
 

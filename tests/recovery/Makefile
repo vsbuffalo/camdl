@@ -138,6 +138,50 @@ smooth-warmup-length:
 	  --with polars==2.1.0 --with arviz==1.3.0 python scripts/diagnose_warmup_length.py \
 	  --multistart-dir $(DIAG)/multistart --out-dir $(DIAG)/warmup --camdl rust/target/release/camdl
 
+# R3's recovery pass criteria for the explicit form on the from_prior and the
+# IF2-started fit-run draws (scripts/r3c_explicit_criteria.py →
+# results/diagnosis/r3c_explicit.tsv). Needs smooth-diagnosis and smooth-multistart.
+.PHONY: r3c-explicit
+r3c-explicit:
+	cd $(REPO) && uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 --with polars==2.1.0 \
+	  --with arviz==1.3.0 python scripts/r3c_explicit_criteria.py --diag-dir $(DIAG)
+
+# The diagnosis result tables, TSV only, copied from the ignored results/ tree
+# into the committed cases/spline_seir/diagnosis/ (the runs themselves stay
+# uncommitted; these are their summaries).
+DIAG_TABLES := summary_default.tsv summary_single.tsv summary_rung4c.tsv summary_depth.tsv \
+  divergences_default.tsv divergences_rung4c.tsv divergence_report.tsv stuck_chains.tsv \
+  r3c_explicit.tsv multistart/multistart_summary.tsv multistart/multistart_solutions.tsv \
+  warmup/warmup_length.tsv
+.PHONY: diagnosis-extract
+diagnosis-extract:
+	@mkdir -p $(HERE)/cases/spline_seir/diagnosis
+	@for f in $(DIAG_TABLES); do cp $(DIAG)/$$f $(HERE)/cases/spline_seir/diagnosis/$$(echo $$f | tr / _); done
+	@ls $(HERE)/cases/spline_seir/diagnosis
+
+# The §8.2 benchmark of the explicit form (proposal §8.2, §8.4).
+# k12-truth: the truth β(t) table the generating model reads (committed).
+# k12-data: 182 daily onsets simulated from seir_k12_truth at
+#   cases/spline_k12/truth.toml, seed 8 (ignored results/).
+# k12-benchmark: PGAS, the β(t) plot and IF2 + pfilter scores
+#   (scripts/k12_benchmark.py); tables and plot to the committed
+#   docs/dev/notes/assets/2026-10-29-explicit-bspline-benchmark/. About 30 minutes.
+K12 := $(HERE)/cases/spline_k12
+K12_OUT := $(REPO)/docs/dev/notes/assets/2026-10-29-explicit-bspline-benchmark
+.PHONY: k12-truth k12-data k12-benchmark
+k12-truth:
+	cd $(REPO) && python3 scripts/gen_k12_truth.py --out tests/fixtures/bspline_inference/beta_true.tsv
+k12-data:
+	cd $(REPO)/rust && cargo build --quiet --release -p cli
+	cd $(K12) && CAMDLC=$(CAMDLC_PATH) $(REPO)/rust/target/release/camdl simulate \
+	  $(REPO)/tests/fixtures/bspline_inference/seir_k12_truth.camdl --params truth.toml \
+	  --backend chain_binomial --seed 8 --obs-only-dir results/data
+k12-benchmark: k12-data
+	cd $(REPO) && CAMDLC=$(CAMDLC_PATH) uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 \
+	  --with polars==2.1.0 --with arviz==1.3.0 --with matplotlib==3.10.7 python scripts/k12_benchmark.py \
+	  --data $(K12)/results/data/onsets.tsv --work-dir $(K12)/results --out-dir $(K12_OUT) \
+	  --camdl rust/target/release/camdl --repo .
+
 .PHONY: calibrate-smooth-prior
 calibrate-smooth-prior:
 	cd $(REPO) && uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 python \
