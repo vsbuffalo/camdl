@@ -136,6 +136,12 @@ simulate { from = 0 'days  to = 6 'days }
 }
 
 /// A two-row draws file: each chain draws one row as its start.
+/// The impossible row's `iota`: 1e-300 importations per susceptible per day,
+/// which never produces an event, so `prevalence(I)` stays 0 as at `iota = 0`.
+/// Not 0 itself, which is `iota`'s lower bound: a start exactly on a bound is
+/// refused before the filter runs (support-keyed transforms proposal D3).
+const IMPOSSIBLE_IOTA: f64 = 1e-300;
+
 fn write_draws(dir: &Path, iotas: (f64, f64)) -> PathBuf {
     let draws = format!(
         "# gh#607 PGAS chain-start refusal test fixture\n\
@@ -356,7 +362,7 @@ fn run_fit_seeded(
 #[test]
 fn a_refused_start_is_redrawn_and_the_chain_runs() {
     // One impossible row (iota = 0) beside one healthy row.
-    let Some(run) = run_fit("redraw", (0.0, 0.2)) else { return };
+    let Some(run) = run_fit("redraw", (IMPOSSIBLE_IOTA, 0.2)) else { return };
 
     assert!(run.ok,
         "the fit must succeed: a refused draw is redrawn.\n\
@@ -375,7 +381,7 @@ fn a_refused_start_is_redrawn_and_the_chain_runs() {
     assert!(rows.iter().all(|r| r.status != "refused"),
         "no chain may be refused while the other row is scoreable: {rows:?}");
     for r in &rejected {
-        assert_eq!(r.iota, 0.0, "only the impossible row is rejected: {r:?}");
+        assert_eq!(r.iota, IMPOSSIBLE_IOTA, "only the impossible row is rejected: {r:?}");
         // The reason names which term was non-finite — `observation` is a
         // bad start, `transition` would be a step_one/density bug (gh#80) —
         // and that the chain was given its probation sweep before the redraw.
@@ -419,7 +425,7 @@ fn a_refused_start_is_redrawn_and_the_chain_runs() {
 /// exiting 0.
 #[test]
 fn all_chains_refused_is_an_error() {
-    let Some(run) = run_fit("allbad", (0.0, 0.0)) else { return };
+    let Some(run) = run_fit("allbad", (IMPOSSIBLE_IOTA, IMPOSSIBLE_IOTA)) else { return };
 
     assert!(!run.ok,
         "a fit whose every chain start is refused must exit NON-ZERO.\n\
@@ -452,7 +458,7 @@ fn all_chains_refused_is_an_error() {
         assert_eq!(mine.len(), 10, "chain {chain}: ten attempts on the record: {mine:?}");
         assert_eq!(mine.iter().filter(|r| r.status == "rejected").count(), 9, "{mine:?}");
         assert_eq!(mine.last().unwrap().status, "refused", "{mine:?}");
-        assert!(mine.iter().all(|r| r.iota == 0.0), "{mine:?}");
+        assert!(mine.iter().all(|r| r.iota == IMPOSSIBLE_IOTA), "{mine:?}");
         let attempts: Vec<usize> = mine.iter().map(|r| r.attempt).collect();
         assert_eq!(attempts, (0..10).collect::<Vec<_>>(), "attempts are numbered in order");
     }
@@ -595,7 +601,7 @@ fn fit_summary_reports_a_chain_refused_at_its_start() {
     let rows = |dir: &Path| {
         let mut draws = String::from("beta\tgamma\tiota\n");
         for k in 0..10 {
-            let iota = if k == 0 { 0.2 } else { 0.0 };
+            let iota = if k == 0 { 0.2 } else { IMPOSSIBLE_IOTA };
             draws.push_str(&format!("0.30\t0.10\t{iota}\n"));
         }
         let p = dir.join("starts.tsv");
