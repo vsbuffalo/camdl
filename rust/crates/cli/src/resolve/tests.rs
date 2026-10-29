@@ -745,8 +745,13 @@ fn cas_identity_pins() {
         // `Model::hash_into` folds the new `constants` list unconditionally,
         // so its length prefix enters every kind's `model` level — the same
         // deliberate, version-bumped re-key as `per_eval_bindings` at 0.19.
+        //
+        // Deleting `[estimate].transform` (support-keyed transforms, D2)
+        // moved `fit` only: the hashed fit config carried the field as
+        // `"transform": null` on every estimate entry, and it is gone. Every
+        // accepted override was redundant, so no stored output changes.
         ("sim", "3dee14e9b5a1f616ea7a212da362411cfc6322c3563930f2fe51c3284251328d"),
-        ("fit", "679914b688c15736c1f0fd498dea7900c4755b643aa82a41f13f5e93d50c3871"),
+        ("fit", "2d856225901551de097324c30f543a4d9e9675c6ca2d91af62583e56016d0326"),
         ("pfilter", "5fd865eeec440336717f28371ebf0ab7ba5683edaa2a9aa159b4c9fb9abd60da"),
         ("survey", "ffd67c4afd54a278839b8db0bc1da82e4ccbdb7f76d48961f97f52c1f6d946ac"),
         ("sim_ensemble", "13159a37074a633faa11b460b171acd4589bab177df512b8774d5811d818ccf5"),

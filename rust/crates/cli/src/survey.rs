@@ -898,11 +898,8 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
                     let bounds = spec.bounds
                         .or_else(|| crate::params_resolver::resolved_bounds(p));
                     let v = spec.start.or_else(|| bounds.map(|(lo, hi)| {
-                        let transform = crate::fit::runner::derive_transform_with_bounds(
-                            p,
-                            spec.transform.as_ref().map(|t| t.as_str()),
-                            (lo, hi),
-                        );
+                        let transform =
+                            crate::fit::runner::derive_transform_with_bounds(p, (lo, hi));
                         let log_scale = matches!(
                             transform, sim::inference::types::Transform::Log { .. }
                         );
@@ -951,7 +948,6 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             .map(|&(name, spec)| ParamSpec {
                 name: name.clone(),
                 rw_sd: spec.rw_sd,
-                transform: spec.transform.as_ref().map(|t| t.as_str().to_string()),
                 perturb_only_at_t0: spec.perturb_only_at_t0,
                 // Pass through Option as-is; build_if2_params_from_specs
                 // resolves fit.toml > model > unbounded.
@@ -1142,7 +1138,6 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         let specs: Vec<ParamSpec> = a.estimate.iter().map(|e| ParamSpec {
             name: e.name.clone(),
             rw_sd: None,
-            transform: None,
             perturb_only_at_t0: false,
             bounds: Some((e.lo, e.hi)),
         }).collect();
