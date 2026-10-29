@@ -178,6 +178,30 @@ fn stage_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<Fit
     })
 }
 
+/// The segment a fit leaf directory sits in (`<seg>/<algorithm>-<h8>/seed_<n>-<h8>`),
+/// or `None` when `dir` is not a fit leaf (holds no `FitStage` `run.json`).
+pub fn leaf_segment(dir: &Path) -> Option<PathBuf> {
+    let bytes = std::fs::read(dir.join("run.json")).ok()?;
+    let rec: RunRecord = serde_json::from_slice(&bytes).ok()?;
+    if rec.kind != ArtifactKind::FitStage {
+        return None;
+    }
+    let lexical = dir.parent().and_then(Path::parent).filter(|p| !p.as_os_str().is_empty());
+    match lexical {
+        Some(seg) => Some(seg.to_path_buf()),
+        None => std::fs::canonicalize(dir).ok()?.parent()?.parent().map(Path::to_path_buf),
+    }
+}
+
+/// Whether two paths name one directory, lexically or after resolving links.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => false,
+        }
+}
+
 impl FitView {
     /// Project a CAS fit segment (`fits/{stem}-{h8}/`) into a fit-level view.
     /// Collects its `FitStage` leaves, sorts by method label then seed, reads
@@ -188,10 +212,21 @@ impl FitView {
     /// with empty provenance. For a Bayesian fit (`pgas`/`pmmh` leaf), an empty
     /// `resolved_priors` is a dropped-provenance bug signal (gh#75) and is
     /// flagged. Returns `None` when `seg` holds no `FitStage` leaves.
-    pub fn read(seg: &Path) -> Option<FitView> {
+    ///
+    /// A leaf directory reads as the view of that one run (gh#896): the
+    /// problem's provenance from the segment the leaf sits in, and `stages`
+    /// holding the leaf alone. Every reader that takes a fit directory
+    /// therefore reads exactly the run a leaf path names, never a sibling.
+    pub fn read(dir: &Path) -> Option<FitView> {
+        let (seg, only): (PathBuf, Option<&Path>) = match leaf_segment(dir) {
+            Some(seg) => (seg, Some(dir)),
+            None => (dir.to_path_buf(), None),
+        };
+        let seg = seg.as_path();
         let mut leaves: Vec<(PathBuf, RunRecord)> = crate::cas_read::walk_records(seg)
             .into_iter()
             .filter(|(_, r)| r.kind == ArtifactKind::FitStage)
+            .filter(|(d, _)| only.is_none_or(|o| same_dir(d, o)))
             .collect();
         if leaves.is_empty() {
             return None;
@@ -420,6 +455,30 @@ mod tests {
         assert_eq!(refine.method, FitAlgorithm::Pgas, "pgas method");
         assert_eq!(refine.best_loglik, Some(-56.7), "pgas best_loglik");
         assert_eq!(refine.best_chain, Some(ChainIndex(1)), "pgas best_chain");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// gh#896: a leaf directory is a fit view of that one run. The problem's
+    /// provenance comes from the segment the leaf sits in; the runs are the
+    /// leaf alone, so a reader handed a leaf reads that run and no sibling.
+    #[test]
+    fn a_leaf_directory_reads_as_the_view_of_that_one_run() {
+        let tmp = crate::test_support::unique_temp_dir("fit_view_leaf");
+        let seg = tmp.join("fits").join("demo-abcd1234");
+        write_two_stage_fit(&seg, "abcd1234");
+        let leaf = seg.join("if2-1fb03eee").join("seed_1-06cbd6b3");
+
+        let view = FitView::read(&leaf).expect("a leaf directory is a fit view");
+        assert_eq!(view.stages.len(), 1, "the leaf alone, not its sibling");
+        assert_eq!(view.stages[0].method, FitAlgorithm::If2);
+        assert_eq!(view.stages[0].stage_dir, leaf);
+        assert_eq!(view.methods_declared, vec!["if2"]);
+        assert_eq!(view.created_at, "2026-04-27T00:00:01Z", "this run's time, not the latest");
+        // Problem provenance is the segment's.
+        assert_eq!(view.model, "sir.camdl");
+        assert_eq!(view.estimated, vec!["beta", "gamma"]);
+        assert_eq!(view.fit_hash, "abcd1234".to_string() + &"0".repeat(56));
 
         std::fs::remove_dir_all(&tmp).ok();
     }

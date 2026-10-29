@@ -160,8 +160,8 @@ fn chain_selection_advisory(
 /// leaf the walker found failed to load, so the rendered summary has nothing
 /// behind it (gh#905, [`exit_if_nothing_loaded`]).
 ///
-/// A segment with no completed leaf at all is not an error: it reports
-/// "(no completed stages found)" and exits 0.
+/// A handle whose directory holds no completed method leaf has nothing to
+/// summarise and exits 1 (gh#896); a leaf directory summarises that one run.
 pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     // Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) → its
     // segment directory. summary operates on the directory; it needs no config.
@@ -179,6 +179,13 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     // The full set of completed method leaves, walker-discovered, in label
     // order (see `discover_stages`).
     let discovered = discover_stages(Path::new(&dir));
+    if discovered.is_empty() {
+        eprintln!(
+            "error: no completed method leaf under {dir}, so there is nothing to summarise.\n  \
+             Pass a fit's directory, a leaf directory, @label, a run-id prefix, or its fit.toml."
+        );
+        std::process::exit(1);
+    }
 
     // gh#103 (H17): warn (once, to stderr) when the fit has instant-kind
     // calendar-date parameters but the model declares no `origin` — the
