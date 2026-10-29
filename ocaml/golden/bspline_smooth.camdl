@@ -24,7 +24,7 @@ parameters {
   #' slope of the log transmission rate, per day
   b_b     : real [1/T] ~ normal(mu = 0.0, sigma = 0.005)
   #' curvature scale; PC prior with P(tau_b > 0.5) = 0.05
-  tau_b   : positive 'ratio in [1e-6, 2.5] ~ exponential(rate = 5.99)
+  tau_b   : positive 'ratio ~ exponential(rate = 5.99)
   #' whitened curvature modes
   z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
   #' total population size
