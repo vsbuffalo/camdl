@@ -1854,8 +1854,8 @@ impl Formatter {
             MaxRhat::Unassessable { params } => {
                 s.push_str(&format!("  {} NOT converged\n", self.err("✗")));
                 s.push_str(&format!(
-                    "    R̂ could not be computed for {} of {} parameters, which is a \
-                     sampler failure, not a missing number\n",
+                    "    R̂ is unavailable for {} of {} parameters (a sampler failure, or a \
+                     summary that does not record it), so the fit is not certified\n",
                     params.len(),
                     diag.per_param.len()
                 ));

@@ -697,7 +697,8 @@ fn sampler_source_verdict(leaf: &Path) -> Result<Option<String>, String> {
             "its posterior did not converge: max R̂ = {v:.3}, threshold {RHAT_CONVERGED_THRESHOLD}"
         )),
         MaxRhat::Unassessable { params } => Some(format!(
-            "its R̂ could not be computed for {} — a sampler failure, not a missing number",
+            "its R̂ is unavailable for {} — a sampler failure, or a summary that does not \
+             record it — so it is not certified",
             params.join(", ")
         )),
         MaxRhat::NotApplicable { .. } | MaxRhat::NoParams => None,
