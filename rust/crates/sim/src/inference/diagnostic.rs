@@ -146,6 +146,16 @@ pub enum DiagnosticKind {
         n_particles: usize,
     },
     InitialLoglikInfinite,
+    /// IF2's final estimate scored −∞ in every chain although a chain's
+    /// start scores finite: the check runs on the perturbed swarm's
+    /// estimate, not on the start, so the perturbation moved the swarm
+    /// where the data rule it out. `steps` are `name=step` for each
+    /// parameter, the step in its transformed coordinate.
+    PerturbedSwarmInfeasible {
+        #[serde(with = "json_f64")]
+        start_loglik: f64,
+        steps: Vec<String>,
+    },
     /// gh#110. The chain's *initial* PF evaluation at its starting
     /// θ returned NEG_INFINITY (typically via Err(PFDegenerate)
     /// collapsing through run_quick_pfilter_with_dt's Err→-∞ path).
@@ -447,6 +457,7 @@ impl DiagnosticKind {
     pub fn severity(&self) -> Severity {
         match self {
             Self::InitialLoglikInfinite => Severity::Error,
+            Self::PerturbedSwarmInfeasible { .. } => Severity::Error,
             Self::BadInit { .. } => Severity::Error,
             Self::RhatHigh { rhat, .. } if *rhat > CONVERGENCE_ERROR_SEVERITY => Severity::Error,
             Self::RhatHigh { .. } => Severity::Warning,
@@ -509,6 +520,14 @@ impl DiagnosticKind {
                     ess_mean, ess_min, n_particles),
             Self::InitialLoglikInfinite =>
                 "Initial log-likelihood is -inf at starting parameters.".into(),
+            Self::PerturbedSwarmInfeasible { start_loglik, steps } => {
+                let shown = steps.join(", ");
+                format!(
+                    "IF2's final estimate has log-likelihood -inf in every chain, but the start \
+                     is finite (log-likelihood {start_loglik:.1}): the perturbed swarm left the \
+                     region the data allow, so the perturbation is too large. Steps in each \
+                     parameter's transformed coordinate: {shown}.")
+            }
             Self::BadInit { chain_id, params, reason, .. } => {
                 let pretty = params.iter()
                     .map(|(k, v)| format!("{}={}", k, format_start_value(*v)))
@@ -628,6 +647,10 @@ impl DiagnosticKind {
             Self::InitialLoglikInfinite => vec![
                 "Check starting values are within parameter bounds",
                 "Run with --verbosity debug for per-substep diagnostics",
+            ],
+            Self::PerturbedSwarmInfeasible { .. } => vec![
+                "Give a smaller explicit rw_sd to the parameters the data constrain most",
+                "chain_N/parameter_traces.tsv shows where each chain's estimate went",
             ],
             Self::BadInit { .. } => {
                 let mut hints = vec![
@@ -1086,6 +1109,9 @@ mod tests {
             DiagnosticKind::LowESS { obs_time: x, ess: x, n_particles: 10, ess_fraction: x },
             DiagnosticKind::LowESSAtMLE { ess_mean: x, ess_min: x, n_particles: 10 },
             DiagnosticKind::InitialLoglikInfinite,
+            DiagnosticKind::PerturbedSwarmInfeasible {
+                start_loglik: x, steps: vec!["beta=0.200".into()],
+            },
             DiagnosticKind::BadInit {
                 chain_id: 3,
                 params: std::collections::BTreeMap::from([("beta".to_string(), x)]),
@@ -1162,6 +1188,7 @@ mod tests {
             ZeroRateNonzeroFlow { .. } => 24,
             ResumeConfigMismatch { .. } => 25,
             ResumeParamMissing { .. } => 26,
+            PerturbedSwarmInfeasible { .. } => 27,
         }
     }
 
@@ -1216,7 +1243,7 @@ mod tests {
     fn every_variant_round_trips_non_finite_numbers_losslessly() {
         let covered: std::collections::BTreeSet<usize> =
             every_variant(0.5).iter().map(variant_index).collect();
-        assert_eq!(covered, (0..27).collect(),
+        assert_eq!(covered, (0..28).collect(),
             "every_variant must build one of every DiagnosticKind variant");
 
         for x in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
@@ -1247,6 +1274,7 @@ mod tests {
             r#"{"type":"low_e_s_s","obs_time":0.25,"ess":0.25,"n_particles":10,"ess_fraction":0.25}"#,
             r#"{"type":"low_e_s_s_at_m_l_e","ess_mean":0.25,"ess_min":0.25,"n_particles":10}"#,
             r#"{"type":"initial_loglik_infinite"}"#,
+            r#"{"type":"perturbed_swarm_infeasible","start_loglik":0.25,"steps":["beta=0.200"]}"#,
             concat!(
                 r#"{"type":"bad_init","chain_id":3,"params":{"beta":0.25},"#,
                 r#""reason":"every particle scored -inf","attempts":[{"stream":"cases","#,
