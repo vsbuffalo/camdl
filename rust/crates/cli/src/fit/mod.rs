@@ -2636,13 +2636,17 @@ fn check_label_is_free(
     if let Some(h) = holder {
         let id = h.run_id_hex();
         return Err(format!(
-            "the label \"{label}\" already names run {} ({}, {}, status {:?}).\n  \
+            "the label \"{label}\" already names run {} ({}, {}, {}).\n  \
              A label names one run and never moves: give this run another label, \
              or use @{label} to start from that run.",
             &id[..12],
             h.dir.display(),
             h.record.provenance.created_at.as_deref().unwrap_or("time not recorded"),
-            h.record.status,
+            match h.record.status {
+                runid::RunStatus::Completed => "completed",
+                runid::RunStatus::Running => "still running",
+                runid::RunStatus::Failed => "failed",
+            },
         ));
     }
     let stored = crate::cas_read::walk_fit_leaves(root)
