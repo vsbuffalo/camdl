@@ -1,0 +1,53 @@
+# Base: ../ebola/model.camdl
+# Adds: beta and sigma declared with no range, so each is searched over
+#   [0, inf) with the lower-bounded map
+# Changes: nothing else
+#
+# What this model is and what it is fitted to: as ../ebola/model.camdl.
+time_unit = 'days
+
+compartments { S, E, I, R, D }
+
+parameters {
+  beta  : rate
+  sigma : rate
+  cfr   : probability in [0.0, 1.0]
+  gamma : rate        in [0.01, 1.0]
+  N0    : count
+  I0    : count
+  rho   : probability in [0.1, 1.0]
+  k     : positive    in [1.0, 100.0]
+}
+
+let N = S + E + I + R
+
+transitions {
+  infection : S --> E @ beta * S * I / N
+  onset     : E --> I @ sigma * E
+  death     : I --> D @ cfr * gamma * I
+  recovery  : I --> R @ (1.0 - cfr) * gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+observations {
+  weekly_onsets {
+    columns       { time : time, weekly_onsets : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(onset)
+    emit_schedule = every 7 'days
+    weekly_onsets ~ neg_binomial(mean = rho * projected, r = k)
+  }
+  weekly_deaths {
+    columns       { time : time, weekly_deaths : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(death)
+    emit_schedule = every 7 'days
+    weekly_deaths ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+
+simulate { from = 0 'days  to = 140 'days }
