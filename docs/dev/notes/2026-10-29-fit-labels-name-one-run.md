@@ -61,9 +61,7 @@ A handle resolves to a target, and a run verb needs a leaf:
 // fit/handle.rs
 pub struct LeafRef {
     pub dir: PathBuf,          // .../fits/<stem>-<h8>/<algorithm>-<h8>/seed_<n>-<h8>
-    pub run_id: ContentHash,   // run.json `run_id`: the identity
-    pub label: Option<String>, // run.json `provenance.label`
-}
+}                              // its run.json carries the run_id and the label
 
 pub enum FitTarget {
     /// One run: `@label`, a leaf directory, a run-id prefix, or a `fit.toml`
@@ -79,14 +77,16 @@ pub enum ResolveError {
     Ambiguous { handle: String, candidates: Vec<PathBuf> },
     /// Several runs where one is needed, each listed with its run id, method
     /// hash, seed, chains, creation time and label, and the axes on which the
-    /// candidates differ (`[method]` settings, fit seed, dataset, camdl build)
-    /// computed from the candidates rather than asserted.
-    AmbiguousRuns { handle: String, runs: Vec<LeafRef> },
+    /// candidates differ (the problem, `[method]` settings or `--starts`, fit
+    /// seed, camdl build) computed from their records rather than asserted.
+    AmbiguousRuns { handle: String, runs: Vec<cas_read::Leaf> },
 }
 
 pub fn resolve_target(handle: &str) -> Result<FitTarget, ResolveError>;
 /// `Segment` with one leaf → that leaf; with several → `AmbiguousRuns`.
 pub fn resolve_leaf(handle: &str) -> Result<LeafRef, ResolveError>;
+/// `@name` → the one completed run under `root` carrying `name`.
+pub fn resolve_label(root: &Path, name: &str) -> Result<LeafRef, ResolveError>;
 
 pub struct ResolvedFit {
     pub segment: PathBuf,        // the problem folder: archive, sidecar, model IR
