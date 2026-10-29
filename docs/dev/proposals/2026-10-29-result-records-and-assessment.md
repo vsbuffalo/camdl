@@ -6,7 +6,7 @@ issues: none filed; the follow-ups are named in §13
 related:
   - ../inference-architecture.md (the invariants this implements: I6, I7, I8)
   - 2026-10-26-parameter-roles.md (accepted; untouched by this proposal)
-  - 2026-10-29-method-scoped-settings.md (branch docs/method-scoped-settings at 5363e7be; §10 here states the order: Stage 3 after its commit 3, on its D16 loader split)
+  - 2026-10-29-method-scoped-settings.md (branch docs/method-scoped-settings at 2df329b0; §10 here states the order: Stage 3 after its commit 3, on its D16 loader split)
 ---
 
 # A fit stores what it measured; whether it converged is computed when someone asks, under a policy that is named
@@ -83,12 +83,12 @@ between-chain statistics are uninformative; no clean evaluation).
 
 ### 3.1 The IF2 verdict: four implementations, three rules
 
-| site                                                        | initial-value parameters (`perturb_only_at_t0`) | decibans leg missing | warning band (`A_SOFT`)                   |
-| ----------------------------------------------------------- | ----------------------------------------------- | -------------------- | ----------------------------------------- |
-| `check_scout_convergence`, `gating.rs:182-260`              | exempt from the Â leg                           | judged on Â alone    | yes, `SoftWarn`                           |
-| `compute_if2_gate_verdict`, `method_result.rs:1082-1123`    | included                                        | judged on Â alone    | no                                        |
-| `Formatter::gate_verdict_block`, `fit_summary.rs:1520-1560` | included                                        | prints the Â leg     | glyphs only, through `GateConfig::a_band` |
-| `if2_stage_report`, `fit_summary.rs:3028-3056`              | included                                        | `overall_pass: None` | no                                        |
+| site                                                        | initial-state parameters (`perturb_only_at_t0`) | decibans leg missing | warning band (`A_SOFT`)                                                                              |
+| ----------------------------------------------------------- | ----------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------- |
+| `check_scout_convergence`, `gating.rs:182-260`              | exempt from the Â leg                           | judged on Â alone    | yes, `SoftWarn`, empty at the default `a_thresh` (`gating.rs:27-30`)                                 |
+| `compute_if2_gate_verdict`, `method_result.rs:1082-1123`    | included                                        | judged on Â alone    | no                                                                                                   |
+| `Formatter::gate_verdict_block`, `fit_summary.rs:1520-1560` | included                                        | prints the Â leg     | no: the leg is `max_a < a_thresh` (`:1532`); per-parameter glyphs use `GateConfig::a_band` (`:1512`) |
+| `if2_stage_report`, `fit_summary.rs:3028-3056`              | included                                        | `overall_pass: None` | no                                                                                                   |
 
 All verified by reading. The first is what the warm-start source check applies
 (`check_source_converged`, `gating.rs:439-480`); the second is `fit table`'s
@@ -97,7 +97,7 @@ are `fit summary`'s text and its JSON, Markdown and LaTeX outputs. The JSON
 document embeds the `fit table` row (`FitSummaryDoc.table_row`,
 `fit_summary.rs:2622-2629`) beside the per-method report, so one
 `fit summary --format json` can carry two IF2 verdicts computed by different
-rules. An IF2 fit whose only Â failure is on an initial-value parameter is
+rules. An IF2 fit whose only Â failure is on an initial-state parameter is
 therefore accepted as a `from_mle` source and reported as failed by `fit table`
 and `fit summary`. Branch `fix/settings-silent-noops` adds a test pinning that
 the three agree
@@ -237,9 +237,10 @@ pub struct If2Agreement {
     /// Tail chain-agreement Â per estimated parameter; NaN where the
     /// within-chain variance collapsed. Empty with one chain.
     pub tail_a: BTreeMap<String, f64>,
-    /// Parameters perturbed only at t = 0. The rule judges them separately
-    /// (§4.4). Named as method-scoped-settings D10 names it.
-    pub initial_value_params: Vec<String>,
+    /// Parameters perturbed only at t = 0 (declared `initial_state`). The rule
+    /// judges them separately (§4.4). Named as method-scoped-settings §7.5
+    /// names the list.
+    pub initial_state_params: Vec<String>,
     /// `None` when clean evaluation did not run.
     pub clean_eval: Option<CleanEval>,
 }
@@ -293,15 +294,22 @@ pub struct SamplerRecord {
     // (camdl.fit-summary/v2), loaded as the existing `PosteriorDiagnostics`.
 }
 
-/// Today's `DtCheckResult` without `verdict`, `threshold_nats` and
-/// `threshold_se_aware_nats`.
+/// Today's `DtCheckResult` (`dt_check.rs:68-94`) without the fields that are
+/// judgements: `verdict`, `threshold_nats`, `threshold_se_aware_nats`, and
+/// `notes`, which is built from the verdict and τ (`build_notes`,
+/// `dt_check.rs:191`) and is rendered from the `Assessment` instead.
+/// `pf_se_inflation`, today a boolean against a hard-coded 2×
+/// (`pf_se_inflation_fires`, `dt_check.rs:142-147`), is stored as the ratio
+/// it compares, and the 2× becomes `DtCheckPolicy::se_inflation_ratio`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DtCheckLadder {
     pub ladder: Vec<LadderEntry>,
     pub leg1_delta_nats: f64,
     pub leg2_delta_nats: f64,
     pub sigma_max_nats: f64,
-    pub pf_se_inflation: bool,
+    /// max over the halved rungs of `se / se(fit rung)`; `None` when the fit
+    /// rung's SE is zero or not finite (where today's check returns false).
+    pub se_inflation_ratio: Option<f64>,
 }
 
 impl ResultRecord {
@@ -368,7 +376,6 @@ pub struct DiagnosticPolicy {
 
 pub struct If2Policy {
     pub a_thresh: f64,            // 1.01   (config_v2.rs:1863)
-    pub a_warn: f64,              // 1.05   (A_SOFT, gating.rs:33)
     pub decibans_thresh: f64,     // 30.0   (config_v2.rs:1864)
     pub se_floor_sigmas: f64,     // 8.0    (gating.rs:256)
 }
@@ -386,6 +393,9 @@ pub struct PosteriorPolicy {
 pub struct DtCheckPolicy {
     pub tolerance: DtTolerance,
     pub se_floor_sigmas: f64,     // 4.0    (dt_check.rs:128-130)
+    /// Above this SE ratio the report notes filter-noise inflation; it never
+    /// changes the verdict, as today.
+    pub se_inflation_ratio: f64,  // 2.0    (dt_check.rs:146)
 }
 pub enum DtTolerance {
     /// 2.0 nats chain-binomial, 0.5 ODE (dt_check.rs:115-120).
@@ -462,7 +472,7 @@ pub enum Question { OptimizersAgree, ChainsMix, DtStable }
 pub enum Verdict { Pass, Warn, Fail, NotAssessed(NotAssessed) }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NotAssessed { OneChain, PointStart, NoMeasurement, SamplerFailure(Vec<String>) }
+pub enum NotAssessed { OneChain, PointStart, NoMeasurement }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Leg {
@@ -476,7 +486,7 @@ pub struct Leg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LegKind {
-    TailA, TailAInitialValue, DecibansSpread,          // IF2
+    TailA, TailAInitialState, DecibansSpread,          // IF2
     OptimizerStatus, ParameterRange,                   // NLopt (+ DecibansSpread)
     MaxRhat, MinEssBulk, MinEssTail,                   // samplers
     DtHalving, DtPlateau,                              // dt-check
@@ -490,36 +500,47 @@ impl Assessment {
 }
 ```
 
-The rules, one per variant, each the rule the code already applies at its most
-careful site:
+The rules, one per variant, each the most specific rule the code already applies
+for that question:
 
 - **IF2** (`check_scout_convergence`'s rule). The `TailA` leg fails when Â ≥
-  `a_thresh` on a parameter not in `initial_value_params`, and warns in
-  `[a_warn, a_thresh)`. The `TailAInitialValue` leg reports those parameters' Â
-  and never fails the verdict. The `DecibansSpread` leg fails when the
+  `a_thresh` on a parameter not in `initial_state_params`. The
+  `TailAInitialState` leg reports those parameters' Â and gives `Warn`, naming
+  them, when one is at or above `a_thresh`: the fit still counts as converged,
+  so the source check behaves as it does today, but the parameter is visibly
+  marked. A NaN Â (within-chain variance collapsed) is not assessed for that
+  parameter: it is listed in the leg as not assessed, the leg is judged on the
+  finite Â values, and when no Â is finite the verdict is the `DecibansSpread`
+  leg's, as the run's own message says (`runner.rs:2525-2528`). Today a NaN is
+  skipped by `fold(0.0, f64::max)` and so passes silently (`gating.rs:202`,
+  `method_result.rs:1087-1091`). The `DecibansSpread` leg fails when the
   clean-evaluation spread in decibans is ≥
   `max(decibans_thresh,
   se_floor_sigmas · σ_max · NATS_TO_DB)`, and is
   `NotAssessed(NoMeasurement)` without clean evaluation, in which case the
-  verdict is the Â leg's. With one chain the verdict is `NotAssessed(OneChain)`.
+  verdict is the Â leg's. With no finite Â and no clean evaluation the verdict
+  is `NotAssessed(NoMeasurement)`. With one chain the verdict is
+  `NotAssessed(OneChain)`.
 - **NLopt** (`check_convergence`'s rule, `nlopt_stage.rs:738-815`).
   `OptimizerStatus` fails unless every chain converged; `ParameterRange` fails
   on a parameter whose relative range exceeds `rel_range` and whose absolute
   range exceeds `abs_range_xtol · xtol_rel · max(|θ̂₀|, 1)`; `DecibansSpread`
   fails when the converged chains' spread exceeds `decibans_thresh`. With one
-  chain, `ParameterRange` and `DecibansSpread` are `NotAssessed(OneChain)` and
-  the verdict is the status leg's, as `fit table` does today.
+  chain the verdict is `NotAssessed(OneChain)`, as for IF2: one optimizer chain
+  cannot show agreement. The status leg is still reported.
 - **Posterior** (`PosteriorDiagnostics::max_rhat_status`'s rule). `MaxRhat`
-  fails at or above `max_rhat`, and an unassessable R̂ is
-  `NotAssessed(SamplerFailure)` and sinks the verdict to `Fail`, as
-  `sampler_source_verdict` does (`gating.rs:508-511`). `MinEssBulk` and
-  `MinEssTail` fail when any estimated parameter's bulk or tail ESS (both
-  already stored per parameter, `ParamConvergence::Scored.ess_bulk` and
-  `.ess_tail`, `method_result.rs:195-197`) is below `min_ess_bulk` or
-  `min_ess_tail`; an undefined ESS makes the leg `NotAssessed`, which does not
-  pass the verdict. A point start makes the verdict `NotAssessed(PointStart)`
-  (`demote_point_start`, `method_result.rs:397-415`, applied from `point_start`,
-  `:935`).
+  fails at or above `max_rhat`. An R̂ that cannot be computed for a parameter is
+  a sampler failure and fails the leg, naming the parameter, as
+  `sampler_source_verdict` refuses it today (`gating.rs:508-511`). `MinEssBulk`
+  and `MinEssTail` take the minimum over estimated parameters of the bulk and
+  tail ESS (both already stored per parameter,
+  `ParamConvergence::Scored.ess_bulk` and `.ess_tail`,
+  `method_result.rs:195-197`) and fail below `min_ess_bulk` or `min_ess_tail`.
+  An undefined tail ESS (typically a parameter piled on a bound) gives `Warn` on
+  `MinEssTail`, naming the parameter; an undefined bulk ESS fails `MinEssBulk`,
+  naming it, as an uncomputable R̂ does. A point start makes the verdict
+  `NotAssessed(PointStart)` (`demote_point_start`, `method_result.rs:397-415`,
+  applied from `point_start`, `:935`).
 - **dt-check** (today's `dt_check.rs` rule): `DtHalving` and `DtPlateau` against
   `max(tolerance, se_floor_sigmas · σ_max)`, `Warn` for a plateau leg in
   `[τ, 2τ)` as today's `Marginal`.
@@ -528,9 +549,11 @@ careful site:
 
 Three kinds of surface report a verdict, and each carries its `AppliedPolicy`:
 
-1. **At the end of a run**, the method's runner calls `assess` under the run's
-   policy (CLI flags, then the fit config's `[assessment]`, then the defaults),
-   prints it, and records it in `run.json` as
+1. **At the end of a run**, every method's runner (IF2, the three NLopt
+   optimizers, PMMH, MH and PGAS) calls `assess` under the run's policy, for its
+   convergence question and, where the dt-check ran (IF2, NLopt, MH), for that
+   too. Under the run's policy (CLI flags, then the fit config's `[assessment]`,
+   then the defaults), it prints the result and records it in `run.json` as
    `provenance.assessment = { convergence, dt_check }`. `provenance` is where
    recorded-only facts about one execution already live (`argv`, `created_at`,
    `host`; `runid/src/record.rs:144-161`), so the run's identity and its
@@ -582,29 +605,30 @@ every policy flag.
 (`config_v2.rs:1365-1400`) and `CliStageOverrides` (`:1635-1680`); a code
 constant is covered by the engine version, which the fit level folds.
 
-| value                                                                                                                                                  | where                                                                                                   | default                           | class                                               | in identity today                                               | after                                                                |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- | --------------------------------- | --------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------- |
-| IF2 `iterations`, `particles`, `chains`, `cooling`                                                                                                     | `Algorithm::IF2`, `config_v2.rs:995-1030`                                                               | per config                        | execution control                                   | yes                                                             | unchanged                                                            |
-| IF2 `cooling_target_iters`, `--cooling-target-iters`                                                                                                   | `config_v2.rs:1011`, `:1596`                                                                            | 50 (`:1752`)                      | execution control (cooling)                         | yes                                                             | unchanged                                                            |
-| IF2 clean evaluation `n_particles`, `n_replicates`, `combine`                                                                                          | `LoglikEvalConfig`, `config_v2.rs:1736-1750`                                                            | 4000 × 8, logmeanexp              | execution control (what is measured)                | yes                                                             | unchanged; recorded in `CleanEval`                                   |
-| dt-check `enabled`, `n_halvings`, `n_particles`, `n_replicates`                                                                                        | `DtCheckConfig`, `config_v2.rs:1886-1925`                                                               | on, 2                             | execution control (what is measured)                | yes                                                             | unchanged                                                            |
-| NLopt `tolerance` (`xtol_rel`), `max_evals`                                                                                                            | `config_v2.rs:1256-1263`                                                                                | 1e-6, 5000 (`:1276-1277`)         | execution control (stopping)                        | yes                                                             | unchanged; `xtol_rel` recorded                                       |
-| PMMH/MH `iterations`, `burn_in`, `thin`, `adapt`, `adapt_start`                                                                                        | `Algorithm::PMMH`/`Mh`; defaults `pmmh.rs:37-38`                                                        | 5000 burn-in, thin 10             | execution control                                   | yes (`iterations` as target length)                             | unchanged                                                            |
-| PMMH adaptation target 0.234 + 0.206/d                                                                                                                 | `sim/src/inference/pmmh.rs:320-322`                                                                     | —                                 | execution control (adaptation)                      | code                                                            | unchanged                                                            |
-| PGAS `sweeps`, `burn_in`, `thin`, NUTS settings                                                                                                        | `Algorithm::PGAS`; defaults `cli/src/fit/pgas.rs:217-218`                                               | 2000, 5                           | execution control                                   | yes                                                             | unchanged                                                            |
-| PGAS MH-within-Gibbs target 0.44; NUTS dual-averaging target 0.80                                                                                      | `sim/src/inference/pgas.rs:3953`, `:4110`, `:4416`                                                      | —                                 | execution control (adaptation)                      | code                                                            | unchanged                                                            |
-| particle-filter substep budget                                                                                                                         | `ITER_BUDGET`, `sim/src/inference/degeneracy.rs:81`                                                     | 1e10                              | execution control (termination)                     | code (fit); `profile --pf-max-substeps` keyed, `profile.rs:160` | unchanged                                                            |
-| IF2 `gate.a_thresh`                                                                                                                                    | `GateConfig`, `config_v2.rs:1855`                                                                       | 1.01 (`:1863`)                    | **assessment policy**                               | **yes**                                                         | `[assessment.if2] a_thresh`, `--a-thresh`                            |
-| IF2 and NLopt `gate.decibans_thresh`, `--decibans-thresh`                                                                                              | `config_v2.rs:1860`, `:1597`, `:1609`                                                                   | 30 (`:1864`)                      | **assessment policy**                               | **yes**                                                         | `[assessment.if2]`, `[assessment.nlopt]`, `--decibans-thresh`        |
-| SE floor `8 · σ_max` on the decibans leg                                                                                                               | `gating.rs:256`, copies `:290`, `method_result.rs:1109`, `fit_summary.rs:1549`, `:3050`                 | 8                                 | assessment policy                                   | code                                                            | `if2.se_floor_sigmas`                                                |
-| Â warning band `A_SOFT`                                                                                                                                | `gating.rs:33`                                                                                          | 1.05                              | assessment policy                                   | code                                                            | `if2.a_warn`                                                         |
-| NLopt relative-range and absolute-floor thresholds                                                                                                     | `nlopt_stage.rs:735-736`; literal `table_row.rs:294`                                                    | 0.05, 2.0                         | assessment policy                                   | code                                                            | `nlopt.rel_range`, `nlopt.abs_range_xtol`                            |
-| R̂ certification bar                                                                                                                                    | `RHAT_CONVERGED_THRESHOLD`, `method_result.rs:585`                                                      | 1.05                              | assessment policy                                   | no (read time, unrecorded)                                      | `posterior.max_rhat`, recorded                                       |
-| R̂ severe band                                                                                                                                          | `RHAT_SEVERE_THRESHOLD`, `method_result.rs:590`                                                         | 1.5                               | assessment policy (display)                         | no                                                              | `posterior.severe_rhat`                                              |
-| minimum ESS                                                                                                                                            | —                                                                                                       | none                              | assessment policy                                   | —                                                               | `posterior.min_ess_bulk`, `min_ess_tail`, default 100 each           |
-| dt-check `threshold_nats`, `--dt-check-strict`                                                                                                         | `config_v2.rs:1920`; `dt_check.rs:115-120`; stored `:83-86`                                             | 2.0 / 0.5 nats (strict 0.5 / 0.1) | **assessment policy**                               | **yes** (gh#730)                                                | `[assessment.dt_check]`, `--dt-check-tolerance`, `--dt-check-strict` |
-| dt-check SE floor `4 · σ_max`                                                                                                                          | `dt_check.rs:128-130`                                                                                   | 4                                 | assessment policy                                   | code                                                            | `dt_check.se_floor_sigmas`                                           |
-| run-time findings: Â > 1.1, Â > 1.5 with spread > 50, ESS at θ̂ < 5 %, R̂ report 1.1, loglik spread 3·3 nats, chain outlier \|z\| > 3.5, starved ESS 1 % | `runner.rs:2565-2569`, `:2587`, `:2923`; `gating.rs:106`; `chain_diagnostics.rs:99`; `filter_ess.rs:60` | as listed                         | assessment (findings written to `diagnostics.json`) | code                                                            | unchanged; out of scope (§13)                                        |
+| value                                                                                                                                                  | where                                                                                                   | default                           | class                                               | in identity today                                               | after                                                                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- | --------------------------------- | --------------------------------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| IF2 `iterations`, `particles`, `chains`, `cooling`                                                                                                     | `Algorithm::IF2`, `config_v2.rs:995-1030`                                                               | per config                        | execution control                                   | yes                                                             | unchanged                                                                                                                                                  |
+| IF2 `cooling_target_iters`, `--cooling-target-iters`                                                                                                   | `config_v2.rs:1011`, `:1596`                                                                            | 50 (`:1752`)                      | execution control (cooling)                         | yes                                                             | unchanged                                                                                                                                                  |
+| IF2 clean evaluation `n_particles`, `n_replicates`, `combine`                                                                                          | `LoglikEvalConfig`, `config_v2.rs:1736-1750`                                                            | 4000 × 8, logmeanexp              | execution control (what is measured)                | yes                                                             | unchanged; recorded in `CleanEval`                                                                                                                         |
+| dt-check `enabled`, `n_halvings`, `n_particles`, `n_replicates`                                                                                        | `DtCheckConfig`, `config_v2.rs:1886-1925`                                                               | on, 2                             | execution control (what is measured)                | yes                                                             | unchanged                                                                                                                                                  |
+| NLopt `tolerance` (`xtol_rel`), `max_evals`                                                                                                            | `config_v2.rs:1256-1263`                                                                                | 1e-6, 5000 (`:1276-1277`)         | execution control (stopping)                        | yes                                                             | unchanged; `xtol_rel` recorded                                                                                                                             |
+| PMMH/MH `iterations`, `burn_in`, `thin`, `adapt`, `adapt_start`                                                                                        | `Algorithm::PMMH`/`Mh`; defaults `pmmh.rs:37-38`                                                        | 5000 burn-in, thin 10             | execution control                                   | yes (`iterations` as target length)                             | unchanged                                                                                                                                                  |
+| PMMH adaptation target 0.234 + 0.206/d                                                                                                                 | `sim/src/inference/pmmh.rs:320-322`                                                                     | —                                 | execution control (adaptation)                      | code                                                            | unchanged                                                                                                                                                  |
+| PGAS `sweeps`, `burn_in`, `thin`, NUTS settings                                                                                                        | `Algorithm::PGAS`; defaults `cli/src/fit/pgas.rs:217-218`                                               | 2000, 5                           | execution control                                   | yes                                                             | unchanged                                                                                                                                                  |
+| PGAS MH-within-Gibbs target 0.44; NUTS dual-averaging target 0.80                                                                                      | `sim/src/inference/pgas.rs:3953`, `:4110`, `:4416`                                                      | —                                 | execution control (adaptation)                      | code                                                            | unchanged                                                                                                                                                  |
+| particle-filter substep budget                                                                                                                         | `ITER_BUDGET`, `sim/src/inference/degeneracy.rs:81`                                                     | 1e10                              | execution control (termination)                     | code (fit); `profile --pf-max-substeps` keyed, `profile.rs:160` | unchanged                                                                                                                                                  |
+| IF2 `gate.a_thresh`                                                                                                                                    | `GateConfig`, `config_v2.rs:1855`                                                                       | 1.01 (`:1863`)                    | **assessment policy**                               | **yes**                                                         | `[assessment.if2] a_thresh`, `--a-thresh`                                                                                                                  |
+| IF2 and NLopt `gate.decibans_thresh`, `--decibans-thresh`                                                                                              | `config_v2.rs:1860`, `:1597`, `:1609`                                                                   | 30 (`:1864`)                      | **assessment policy**                               | **yes**                                                         | `[assessment.if2]`, `[assessment.nlopt]`, `--decibans-thresh`                                                                                              |
+| SE floor `8 · σ_max` on the decibans leg                                                                                                               | `gating.rs:256`, copies `:290`, `method_result.rs:1109`, `fit_summary.rs:1549`, `:3050`                 | 8                                 | assessment policy                                   | code                                                            | `if2.se_floor_sigmas`                                                                                                                                      |
+| Â warning band `A_SOFT`                                                                                                                                | `gating.rs:33`                                                                                          | 1.05                              | assessment policy                                   | code                                                            | dropped: above the default `a_thresh` 1.01 the band is empty (`gating.rs:27-30`), so it never fires; IF2 `Warn` comes from initial-state parameters (§4.4) |
+| NLopt relative-range and absolute-floor thresholds                                                                                                     | `nlopt_stage.rs:735-736`; literal `table_row.rs:294`                                                    | 0.05, 2.0                         | assessment policy                                   | code                                                            | `nlopt.rel_range`, `nlopt.abs_range_xtol`                                                                                                                  |
+| R̂ certification bar                                                                                                                                    | `RHAT_CONVERGED_THRESHOLD`, `method_result.rs:585`                                                      | 1.05                              | assessment policy                                   | no (read time, unrecorded)                                      | `posterior.max_rhat`, recorded                                                                                                                             |
+| R̂ severe band                                                                                                                                          | `RHAT_SEVERE_THRESHOLD`, `method_result.rs:590`                                                         | 1.5                               | assessment policy (display)                         | no                                                              | `posterior.severe_rhat`                                                                                                                                    |
+| minimum ESS                                                                                                                                            | —                                                                                                       | none                              | assessment policy                                   | —                                                               | `posterior.min_ess_bulk`, `min_ess_tail`, default 100 each                                                                                                 |
+| dt-check `threshold_nats`, `--dt-check-strict`                                                                                                         | `config_v2.rs:1920`; `dt_check.rs:115-120`; stored `:83-86`                                             | 2.0 / 0.5 nats (strict 0.5 / 0.1) | **assessment policy**                               | **yes** (gh#730)                                                | `[assessment.dt_check]`, `--dt-check-tolerance`, `--dt-check-strict`                                                                                       |
+| dt-check SE floor `4 · σ_max`                                                                                                                          | `dt_check.rs:128-130`                                                                                   | 4                                 | assessment policy                                   | code                                                            | `dt_check.se_floor_sigmas`                                                                                                                                 |
+| dt-check SE-inflation note `2×`                                                                                                                        | `dt_check.rs:146`                                                                                       | 2                                 | assessment (note only)                              | code                                                            | `dt_check.se_inflation_ratio`; the ratio is stored                                                                                                         |
+| run-time findings: Â > 1.1, Â > 1.5 with spread > 50, ESS at θ̂ < 5 %, R̂ report 1.1, loglik spread 3·3 nats, chain outlier \|z\| > 3.5, starved ESS 1 % | `runner.rs:2565-2569`, `:2587`, `:2923`; `gating.rs:106`; `chain_diagnostics.rs:99`; `filter_ess.rs:60` | as listed                         | assessment (findings written to `diagnostics.json`) | code                                                            | unchanged; out of scope (§13)                                                                                                                              |
 
 The three bold rows are the ones that move a value out of run identity. Every
 other assessment value is a code constant today and becomes a policy field with
@@ -664,15 +688,34 @@ error: fits/sir-198ada3a/if2-607db55a/seed_1-06cbd6b3/fit_state.toml was
   `camdl fit summary <leaf>`.
 ```
 
-**Input paths** call `load_input` and so refuse: `fit run --resume`, the
-`from_mle` and `from_posterior` starts (`chain_starts.rs:1031`), `profile`'s
-`from_mle` start (`profile.rs:1953`), the runner reading back the record it just
-wrote (`mod.rs:2101`), and the warm-start source check.
+**Input paths** call `load_input` and so refuse. This is the one list, and
+method-scoped-settings §7.5 is to carry the same one: the `from_mle` start
+(`chain_starts.rs:1031`), `profile`'s `from_mle` start (`profile.rs:1953`), the
+warm-start source check for `from_mle` and `from_posterior`
+(`check_source_converged`, its load at `gating.rs:441`), and the runner reading
+back the record it just wrote (`mod.rs:2101`). Three paths are not on it because
+they do not read `fit_state.toml`: `fit run --resume` copies only
+`resume_state.bin` and `parameter_traces.tsv` from the base's chain directories
+(`copy_resume_carryover`, `mod.rs:2131-2149`), and `profile --fit` and
+`--fixed-file` read the fit config and `mle_params.toml`.
+
+**`fit predict` is an inspection reader.** Its numbers come from `draws.tsv` and
+`mle_params.toml`; it reads the record only to label convergence (the
+point-start demotion, `predict.rs:789`, `:865`, and from Stage 4 the
+assessment). It therefore calls `load_for_inspection`, so a pre-v1 fit can still
+be predicted from, with the notice. `method_result::point_start` today swallows
+every load error with `.ok()?` (`method_result.rs:936`), so a corrupt or
+one-based record silently loses its point-start demotion and predict reports R̂
+as assessed. It becomes
+`point_start(dir) -> Result<Option<(usize, String)>, RecordError>`, and both
+predict call sites propagate the error. A completed leaf always has a record
+(`load_stage_result_or_exit`, `mod.rs:2096-2110`), so a missing file is an error
+too.
 
 **The inspection path.** `fit summary` and `fit table` call
 `load_for_inspection`. A legacy state is adapted into `Measurements` by the
 Stage 1 adapter, which already reads `FitState`, so an old fit is assessed under
-the reader's policy with the initial-value exemption applied to the parameters
+the reader's policy with the initial-state exemption applied to the parameters
 the run exempted (its old key is read for this, per D16), and the notice is
 printed once. That adapter is the whole compatibility surface: the frozen
 `legacy::FitState` is read-only and is not written by anything. `fit table` over
@@ -684,15 +727,17 @@ new `run_id` beside the old one.
 
 ## 7. Call sites
 
-| caller                              | today                                                                      | after                                                                                                      |
-| ----------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| warm-start source check             | `check_scout_convergence` or `sampler_source_verdict`, `gating.rs:439-512` | `assess` of the source under the consumer's policy; refuses on `Fail` unless `--allow-nonconverged-source` |
-| `fit table`                         | `table_row.rs:289-372`, one rule per `from_*`                              | `TableRow::from(&Inspected, &AppliedPolicy)` through `assess`                                              |
-| `fit summary` text                  | `gate_verdict_block`, `fit_summary.rs:1520-1600`; R̂ at `:1819-1825`        | renders `Assessment.legs`                                                                                  |
-| `fit summary` JSON, Markdown, LaTeX | `if2_stage_report`, `fit_summary.rs:3028-3070`                             | serializes `Assessment`                                                                                    |
-| end of an IF2 run                   | Â table against `config.gate`, `runner.rs:2530-2552`                       | `assess`, printed, recorded in `provenance.assessment`                                                     |
-| end of an NLopt run                 | `check_convergence` + `print_verdict`, `nlopt_stage.rs:218`, `:818`        | `assess`, printed, recorded                                                                                |
-| `fit predict`                       | prints `fit_rhat_max` / `fit_ess_min`, no verdict                          | prints the fit's assessment once in its launch block; TSV columns unchanged                                |
+| caller                              | today                                                                                           | after                                                                                                      |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| warm-start source check             | `check_scout_convergence` or `sampler_source_verdict`, `gating.rs:439-512`                      | `assess` of the source under the consumer's policy; refuses on `Fail` unless `--allow-nonconverged-source` |
+| `fit table`                         | `table_row.rs:289-372`, one rule per `from_*`                                                   | `TableRow::from(&Inspected, &AppliedPolicy)` through `assess`                                              |
+| `fit summary` text                  | `gate_verdict_block`, `fit_summary.rs:1520-1600`; R̂ at `:1819-1825`                             | renders `Assessment.legs`                                                                                  |
+| `fit summary` JSON, Markdown, LaTeX | `if2_stage_report`, `fit_summary.rs:3028-3070`                                                  | serializes `Assessment`                                                                                    |
+| end of an IF2 run                   | Â table against `config.gate`, `runner.rs:2530-2552`                                            | `assess`, printed, recorded in `provenance.assessment`                                                     |
+| end of an NLopt run                 | `check_convergence` + `print_verdict`, `nlopt_stage.rs:218`, `:818`                             | `assess`, printed, recorded                                                                                |
+| end of a PMMH or MH run             | R̂/ESS block against `RHAT_CONVERGED_THRESHOLD`, `pmmh.rs:792-795` through `runner.rs:3100-3113` | `assess` (chains mix; dt-check for MH), printed, recorded                                                  |
+| end of a PGAS run                   | the same block, `pgas.rs:1371-1374`                                                             | `assess`, printed, recorded                                                                                |
+| `fit predict`                       | prints `fit_rhat_max` / `fit_ess_min`, no verdict                                               | prints the fit's assessment once in its launch block; TSV columns unchanged                                |
 
 `check_scout_convergence`, `compute_if2_gate_verdict`, `GateVerdict`,
 `If2StageResult.gate_verdict`, `NloptStageResult.max_rel_range`'s verdict use,
@@ -704,7 +749,7 @@ stay as renderers of an `Assessment`'s legs.
 
 Under the default policy:
 
-1. An IF2 fit whose only Â failure is on an initial-value parameter is reported
+1. An IF2 fit whose only Â failure is on an initial-state parameter is reported
    converged by `fit table` and `fit summary`, as the source check already
    reports it (§3.1).
 2. `fit summary --format json` gives an IF2 fit without clean evaluation an
@@ -714,35 +759,54 @@ Under the default policy:
    a pass into `fail_db`.
 4. An NLopt leaf used as a `from_mle` source is refused when its chains
    disagree, where today nothing refuses it (§3.2).
-5. A single-chain IF2 fit's row reads `not_assessed` with `converged` false,
-   where it read `pass`, as a single-chain sampler already does.
-6. `gate_verdict` for sampler rows reads `pass`, `fail_rhat`, `fail_ess` or
-   `not_assessed`, where it read `n/a` beside a `converged` of false. IF2 rows
-   keep `pass`, `fail_a`, `fail_db`, `fail_both`; NLopt rows keep
-   `fail_chain_agreement` and `fail_status` and gain `fail_db`.
+5. A single-chain IF2 or NLopt fit's row reads `not_assessed` with `converged`
+   false, where it read `pass`, as a single-chain sampler already does.
+6. `gate_verdict` takes one code per verdict. Sampler rows read `pass`, `warn`,
+   `fail_rhat`, `fail_ess` or `not_assessed`, where they read `n/a`
+   (`table_row.rs:345`, `:363`). IF2 rows read `pass`, `warn` (an initial-state
+   parameter at or above `a_thresh`), `fail_a`, `fail_db`, `fail_both` or
+   `not_assessed`; today's `pass`, `fail_a`, `fail_db`, `fail_both` keep their
+   meaning (`method_result.rs:41-60`). NLopt rows read `pass`, `fail_status`,
+   `fail_chain_agreement`, `fail_db` or `not_assessed`; `fail_db` and
+   `not_assessed` are new (`table_row.rs:296-303`). A NaN Â is no longer a
+   silent pass (§4.4).
 7. `fit table` and `fit summary` print the policy they judged under: one line
    naming its digest and every non-default value. The JSON row gains
    `assessment` and `recorded_assessment` and its `TableRowSchema` version
    (`table_row.rs:39-42`) is bumped.
 8. A row whose read-time verdict differs from the one recorded at run time is
    marked `*`, with a footer giving the recorded verdict and its policy digest.
-   A leaf written before Stage 2 has no recorded assessment; its as-run verdict
-   is computed under the policy it ran with (its stored `resolved_gate` for IF2
-   and NLopt, else the pre-proposal constants: R̂ below 1.05 and no ESS minimum),
-   so the comparison exists for every stored fit.
+   A row with no recorded verdict is marked `†`, with the footer "judged under
+   policy <digest>; no verdict recorded at run time". That is every leaf written
+   before Stage 2, and the mark lands in Stage 1, with the first rule change, so
+   no verdict moves unmarked between stages. For a sampler leaf written before
+   Stage 2 the as-run verdict can be reconstructed faithfully, because the
+   posterior rule does not change and its policy then was fixed (R̂ below 1.05,
+   no ESS minimum); such a row gets `*` as well when the reconstruction differs.
+   For an IF2 or NLopt leaf the rule itself changes (items 1, 3, 5), so no
+   as-run verdict is claimed and the row carries `†` only.
+   `fit table --converged` and `--gate-failed` filter on the read-time verdict
+   (`fit_table.rs:378-382`); when they exclude rows whose recorded or
+   reconstructed verdict differs, a footer counts them ("3 rows excluded whose
+   as-run verdict was converged; `--as-run` to filter on it").
 9. A sampler fit (PGAS, PMMH, MH) with any estimated parameter's bulk or tail
    ESS below 100 now fails, with `gate_verdict = "fail_ess"`. A stored fit that
    passed when it ran and fails only on ESS is shown with the `*` mark of item
-   8, as-run `pass` beside read-time `fail_ess`; it is never silently re-judged.
-   `--as-run` shows the old verdict, and a project can set its own minimums in
-   `[assessment.posterior]`.
+   8, as-run `pass` beside read-time `fail_ess`, whether its as-run verdict was
+   recorded (Stage 2 onward) or reconstructed (earlier sampler leaves); it is
+   never silently re-judged. `--as-run` shows the old verdict, and a project can
+   set its own minimums in `[assessment.posterior]`.
 
 Configuration and flags:
 
 10. `[method.gate]` and `[method.dt_check] threshold_nats` are refused with the
-    new spelling (`[assessment.if2]`, `[assessment.dt_check] tolerance`) and the
-    value converted. `--decibans-thresh` and `--dt-check-strict` keep their
-    names and stop re-keying.
+    new spelling (`[assessment.if2]`, `[assessment.nlopt]`,
+    `[assessment.dt_check] tolerance`) and the value converted. Under an `nl-*`
+    method, `[method.gate] a_thresh` is refused as having no meaning for `nl-*`,
+    with no converted spelling: NLopt agreement is judged by relative and
+    absolute range (§4.4), and `[assessment.nlopt]` has no `a_thresh` field
+    (`deny_unknown_fields`). `--decibans-thresh` and `--dt-check-strict` keep
+    their names and stop re-keying.
 11. Changing a threshold no longer re-runs a fit: `fit run` with a new
     `--decibans-thresh` is a cache hit that prints the new verdict.
 12. The source check judges a source under the consuming run's policy, not the
@@ -790,8 +854,14 @@ each red on `a9a89178`:
   `from_mle` source (item 4);
 - a single-chain IF2 row is `not_assessed` (item 5).
 
-Each is mutation-checked: restoring the old rule at its site turns its test red.
-Fixed-seed check: no writer changes, so all outputs are byte-identical.
+- a stored IF2 leaf whose only Â failure is on an initial-state parameter reads
+  `warn`, `converged` true, with the `†` mark of §8 item 8;
+- an IF2 leaf with one NaN Â and a failing decibans leg reads `fail_db`.
+
+The `†` mark lands in this stage (§8 item 8), so every verdict this stage
+changes is marked as not recorded at run time. Each test is mutation-checked:
+restoring the old rule at its site turns its test red. Fixed-seed check: no
+writer changes, so all outputs are byte-identical.
 
 **Stage 2: thresholds leave run identity (D3).** `FitConfig` gains
 `assessment: DiagnosticPolicySpec`; `GateConfig` leaves `Algorithm::IF2` and the
@@ -800,12 +870,13 @@ NLopt config; `DtCheckConfig.threshold_nats` leaves `[method]`;
 is flattened into `fit run`, `fit table` and `fit summary`;
 `config_identity_hash` subtracts `assessment`; `FitState.resolved_gate` and
 `DtCheckResult`'s `verdict`, `threshold_nats` and `threshold_se_aware_nats` are
-removed; the IF2 and NLopt runners call `assess` at the end and record the
-result in `provenance.assessment`; `fit table --as-run` and the `*` marker land.
-The ESS minimums of §12 take their decided defaults of 100 here, with the §12
-test. This re-keys every IF2, NLopt and dt-checked MH fit once (their method
-payload loses the gate and the tolerance); the release re-keys every fit
-regardless. Tests:
+removed; every runner (IF2, NLopt, PMMH, MH, PGAS) calls `assess` at the end,
+for its convergence question and its dt-check, and records the result in
+`provenance.assessment`; `fit table --as-run`, the `*` marker and the filter
+footer of §8 item 8 land. The ESS minimums of §12 take their decided defaults of
+100 here, together with sampler recording, with the §12 test. This re-keys every
+IF2, NLopt and dt-checked MH fit once (their method payload loses the gate and
+the tolerance); the release re-keys every fit regardless. Tests:
 
 ```rust
 /// D3: a threshold changes the verdict a reader sees, not the run.
@@ -869,22 +940,25 @@ TSV it writes is byte-identical at a fixed seed.
   source by NLopt's rule (§3.2). Stage 1 wraps that function rather than writing
   a second one. Its refusal of inert flags is the model for `PolicyArgs`'
   refusals (§4.6).
-- **`docs/method-scoped-settings`** (`5363e7be`): its D16 (maintainer decision,
+- **`docs/method-scoped-settings`** (`2df329b0`): its D16 (maintainer decision,
   its §7.5) splits `FitState::load` by use into `FitState::load_input`, which
   refuses an unsupported old `fit_state.toml` naming the producer and schema
   versions, and `FitState::load_for_inspection`, which `fit summary` and
   `fit table` use and which returns the state with one notice. Stage 3 lands
   after its commit 3 and keeps that split: `ResultRecord::load_input` and
   `ResultRecord::load_for_inspection` (§6) are the same two functions on the new
-  type, and there is no key-specific refusal. Stage 3 also takes its name
-  `initial_value_params`. Its §5.2 moves `[estimate].start` out of the fit-level
-  digest (`Problem::identity_view()`) and hashes the resolved starts at the
-  method level, which settles the problem-identity half of D2 that this proposal
-  does not touch. Its `ExecutionPlan` carries no policy: `MethodPlan` holds
-  execution controls only, and `GateConfig` leaving `[method]` in Stage 2
-  removes the one assessment field its `If2Plan` would otherwise inherit. Either
-  order of Stage 2 and its commit 3 works; both edit `Algorithm::IF2`, so the
-  second rebases.
+  type, and there is no key-specific refusal. Stage 3 also takes its flag name
+  `initial_state` and list name `initial_state_params` (its §7.5). The two
+  documents carry one list of input paths, §6 here; `fit run --resume` is not on
+  it. Its §5.2 moves `[estimate].start` out of the fit-level digest
+  (`Problem::identity_view()`) and hashes the resolved starts at the method
+  level, which settles the problem-identity half of D2 that this proposal does
+  not touch. Its `ExecutionPlan` (its §6.1) carries no policy: `MethodPlan`
+  holds execution controls only. Its `If2Plan` (as of `2df329b0`) holds no
+  `gate` and keeps only the dt-check measurement controls (`enabled`,
+  `n_halvings`, particles, replicates); the tolerance is `DtCheckPolicy` here.
+  `MhOdePlan.dt_check` is read the same way. Either order of Stage 2 and its
+  commit 3 works; both edit `Algorithm::IF2`, so the second rebases.
 - **`2026-10-26-parameter-roles.md`** (accepted) and its Stage 2: no type here
   depends on `ResolvedProblem`; `NloptAgreement.search_box` is filled from the
   search box the partition resolves once it exists, and from the fit sidecar
@@ -912,16 +986,17 @@ would make the policy identity under the run-identity rule, which is how
 of one `run_id`.
 
 **The reader's policy is the default view, with a marker where it disagrees with
-the recorded one.** The verdict a user acts on should be the standard they hold
-now; the marker and `--as-run` keep the historical verdict visible, so nothing
-flips silently. The alternative, showing recorded verdicts by default, would let
-a tightened default leave old fits reading as converged.
+the recorded one, and another where nothing was recorded.** The verdict a user
+acts on should be the standard they hold now; the marker and `--as-run` keep the
+historical verdict visible, so nothing flips silently. The alternative, showing
+recorded verdicts by default, would let a tightened default leave old fits
+reading as converged.
 
 **The source check uses the consumer's policy.** The question is whether this
 run should start from that fit, which is the consumer's judgement. The outcome
 is recorded in the consumer's `run.json`.
 
-**Each rule is the most careful one the code already has.** IF2 takes
+**Each rule is the most specific one the code already has.** IF2 takes
 `check_scout_convergence`'s, NLopt takes the stage's own, samplers keep theirs.
 No statistic is new.
 
@@ -947,11 +1022,13 @@ that wants those writes them in `[assessment.posterior]` (§4.3).
 Because the ESS minimums are new, some stored sampler fits that were reported
 converged now fail. Under the read-time policy they are shown with the `*` mark,
 with the as-run verdict beside the new one (§8 items 8 and 9), and are never
-silently re-judged. The ESS minimums therefore take effect in Stage 2, together
-with the recorded and as-run verdicts and the `*` mark; Stage 1 runs them at
-zero so that no verdict changes without the mark. Stage 2's test: a stored PMMH
-fixture with R̂ below 1.05 and one parameter's tail ESS below 100 reads
-`fail_ess` with `*` in `fit table`, and `pass` under `--as-run`.
+silently re-judged: a sampler fit run from Stage 2 onward has its verdict
+recorded by its runner (§4.5), and an earlier one has its as-run verdict
+reconstructed under the fixed pre-proposal posterior policy. The ESS minimums
+therefore take effect in Stage 2, together with sampler recording and the `*`
+mark; Stage 1 runs them at zero. Stage 2's test: a stored PMMH fixture with R̂
+below 1.05 and one parameter's tail ESS below 100 reads `fail_ess` with `*` in
+`fit table`, and `pass` under `--as-run`.
 
 ## 13. Out of scope, each with its reason
 
@@ -961,8 +1038,5 @@ fixture with R̂ below 1.05 and one parameter's tail ESS below 100 reads
   separate change if a finding ever needs a user-settable threshold.
 - **`profile` and `survey` verdicts**: they report likelihood surfaces, not
   convergence; neither calls any verdict function listed in §3.
-- **`[estimate].start` in the problem digest**
-  (`docs/dev/inference-architecture.md` I1): moved out of the fit-level digest
-  by method-scoped-settings §5.2 (`Problem::identity_view()`, starts hashed at
-  the method level), a coordinated amendment to parameter-roles.
+
 - **Splitting `runner.rs`**: after these stages, as decided.

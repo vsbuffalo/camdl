@@ -28,7 +28,7 @@ the seed. It is fully validated before launch, and it is the only configuration
 an engine receives. It is not a catch-all: a setting belongs to exactly one
 method's arm, and a setting one method needs is never carried, as a placeholder,
 by another. The split is defined in
-`proposals/2026-10-29-method-scoped-settings.md` §5.4 (branch
+`proposals/2026-10-29-method-scoped-settings.md` §6.1 (branch
 `docs/method-scoped-settings`).
 
 **`RunRecord`** (`run.json`) is what was executed: the factored identity levels
@@ -54,16 +54,16 @@ accepted to rejected. The design is
 
 **I1. The problem does not depend on how it is attempted.** _Violated today._
 `[estimate].rw_sd` and `perturb_only_at_t0` (IF2 and MH settings) and
-`[estimate].start` live in `EstimateSpecV2`
-(`cli/src/fit/config_v2.rs:574-600`), which the fit level hashes whole
-(`fit_config_blob_hash`, `cas.rs:433-435`). The value resolver draws starts with
-the seed (`resolve_fit_parameters(fit,
-seed)`, `runner.rs:171-174`, draw at
-`:245-265`). Branch `docs/method-scoped-settings` (`5363e7be`) moves both out of
-the problem: the step keys into `[method]` tables (its §4), and `start` out of
-the fit-level digest through `Problem::identity_view()`, with the method level
-hashing the resolved starts (its §5.2, a coordinated amendment to
-parameter-roles).
+`[estimate].start` live in `EstimateSpecV2` (`cli/src/fit/config_v2.rs:574`;
+`perturb_only_at_t0` at `:613`, `rw_sd` at `:619`, `start` at `:625`), which the
+fit level hashes whole (`fit_config_blob_hash`, `cas.rs:433-435`). The value
+resolver draws starts with the seed (`resolve_fit_parameters(fit,
+seed)`,
+`runner.rs:171-174`, draw at `:245-265`). Branch `docs/method-scoped-settings`
+moves both out of the problem: the step keys into `[method]` tables (its §4),
+and `start` out of the fit-level digest through `Problem::identity_view()`, with
+the method level hashing the resolved starts (its §5.2, a coordinated amendment
+to parameter-roles).
 
 **I2. An engine receives one validated plan, with nothing for other methods.**
 _Violated today._ `FitRunConfig::build` takes IF2's `n_iterations`, `cooling`
@@ -92,7 +92,9 @@ the identity; parents are recorded by run ID.** _Violated today for labels._
 (`cli/src/fit/handle.rs:133-141`, the label read from the segment's
 `fit.meta.json`); branch `fix/gh896-handles` moves the label to the leaf.
 Parents hold: a warm-start source that is a stored run is recorded by its
-`run_id` and the consumed file's digest (`cas.rs:658-670`).
+`run_id` and the consumed file's digest (`cas.rs:658-670`). A source directory
+with no readable `run.json` is recorded by the consumed file's digest in the
+`run_id` slot (`cas.rs:661-665`), which names content rather than a run.
 
 **I6. Each method writes its own result type.** _Violated today._ One flat
 `FitState` (`cli/src/fit/state.rs:19-182`) is written by IF2, NLopt, PMMH, MH
@@ -102,7 +104,7 @@ per-parameter relative range under the field named for IF2's Â
 
 **I7. One assessment rule per measurement type, applied under a recorded
 policy.** _Violated today._ The IF2 verdict is computed four times with three
-rules: `check_scout_convergence` exempts initial-value parameters and has a
+rules: `check_scout_convergence` exempts initial-state parameters and has a
 warning band (`gating.rs:182-260`); `compute_if2_gate_verdict` exempts nothing
 (`method_result.rs:1082-1123`); `fit summary`'s text block exempts nothing
 (`fit_summary.rs:1527-1532`) and its structured block returns no overall verdict
