@@ -206,13 +206,9 @@ pub struct OutputView {
     pub columns: Vec<String>,
 }
 
-/// Core inference knobs shared by pfilter / if2 / profile
+/// Core inference knobs shared by pfilter / profile
 #[derive(Args, Clone)]
 pub struct InferenceCore {
-    /// Number of particles
-    #[arg(long)]
-    pub particles: usize,
-
     /// Step size
     #[arg(long, default_value_t = 1.0)]
     pub dt: f64,
@@ -1557,6 +1553,10 @@ pub struct PfilterArgs {
     #[command(flatten)]
     pub scenario: ScenarioArgs,
 
+    /// Number of particles
+    #[arg(long)]
+    pub particles: usize,
+
     #[command(flatten)]
     pub inference: InferenceCore,
 
@@ -1774,9 +1774,14 @@ pub struct ProfileArgs {
     #[arg(long, value_name = "NAME=SPEC", required = true)]
     pub sweep: Vec<SweepSpec>,
 
-    /// IF2 iterations per grid point
-    #[arg(long, default_value_t = 50)]
-    pub iterations: usize,
+    /// Particles per IF2 cell. Required for `--algorithm if2`; refused for
+    /// an nl-* cell, which runs no particle filter.
+    #[arg(long)]
+    pub particles: Option<usize>,
+
+    /// IF2 iterations per grid point (default 50). Refused for an nl-* cell.
+    #[arg(long)]
+    pub iterations: Option<usize>,
 
     /// Independent IF2 starts per grid point — a count, not a rule.
     /// `--starts` is the rule the chains are drawn from; this is how
@@ -1818,20 +1823,23 @@ pub struct ProfileArgs {
     #[arg(long = "pmmh-rho", value_name = "F", hide = true)]
     pub _removed_pmmh_rho: Option<String>,
 
-    /// IF2 cooling fraction: the perturbation SD reaches this fraction of
-    /// its initial value at iteration `--cooling-target-iters`, then keeps
-    /// cooling (pomp's `cooling.fraction.50`, the same schedule `fit run`'s
-    /// `cooling` means).
-    #[arg(long, default_value_t = 0.95)]
-    pub cooling: f64,
+    /// IF2 cooling fraction (default 0.95): the perturbation SD reaches this
+    /// fraction of its initial value at iteration `--cooling-target-iters`,
+    /// then keeps cooling (pomp's `cooling.fraction.50`, the same schedule
+    /// `fit run`'s `cooling` means). Refused for an nl-* cell.
+    #[arg(long)]
+    pub cooling: Option<f64>,
 
     /// The iteration at which `--cooling` is reached (default 50, pomp's
-    /// `cooling.fraction.50`; `fit run`'s `cooling_target_iters`).
-    #[arg(long, value_name = "N",
-          default_value_t = sim::inference::if2::CoolingSchedule::POMP_TARGET_ITERS)]
-    pub cooling_target_iters: usize,
+    /// `cooling.fraction.50`; `fit run`'s `cooling_target_iters`). Refused
+    /// for an nl-* cell.
+    #[arg(long, value_name = "N")]
+    pub cooling_target_iters: Option<usize>,
 
-    /// Random-walk SDs
+    /// The estimated set, and for IF2 each parameter's random-walk SD:
+    /// `NAME=SD,...`, `NAME=auto,...`, or `auto` (every parameter not swept,
+    /// pinned or a model constant). An nl-* cell perturbs nothing, so it takes
+    /// names only (`NAME=auto` or `auto`) and refuses an SD.
     #[arg(long)]
     pub rw_sd: Option<RwSd>,
 
@@ -2793,6 +2801,40 @@ mod tests {
         assert!(schedule.multiplier_at_iter(7, 10) > 0.5, "still cooling at the run's end");
         let a = try_parse_profile(&["--iterations", "10", "--cooling-target-iters", "10"]).unwrap();
         assert_eq!(crate::profile::profile_cooling_schedule(&a).target_iters, 10);
+    }
+
+    /// An nl-* profile cell runs no particle filter and perturbs nothing, so
+    /// the IF2 flags are refused there rather than hashed and ignored; an
+    /// `--rw-sd` that only names the estimated set is accepted.
+    #[test]
+    fn profile_refuses_if2_flags_on_an_nlopt_cell() {
+        let parse = |extra: &[&str]| {
+            let mut full: Vec<&str> = vec![
+                "camdl", "profile", "model.camdl", "--data", "cases.tsv",
+                "--sweep", "R0=lin(0.5,5,5)", "--algorithm", "nl-sbplx", "--backend", "ode",
+            ];
+            full.extend(extra);
+            match Cli::try_parse_from(full).unwrap().command {
+                Command::Profile(a) => a,
+                _ => unreachable!(),
+            }
+        };
+        for (extra, flag) in [
+            (&["--rw-sd", "auto", "--particles", "100"][..], "--particles"),
+            (&["--rw-sd", "auto", "--iterations", "10"][..], "--iterations"),
+            (&["--rw-sd", "auto", "--cooling", "0.5"][..], "--cooling"),
+            (&["--rw-sd", "auto", "--cooling-target-iters", "9"][..], "--cooling-target-iters"),
+            (&["--rw-sd", "auto", "--pf-max-substeps", "1000"][..], "--pf-max-substeps"),
+            (&["--rw-sd", "beta=0.1"][..], "beta"),
+        ] {
+            let err = crate::profile::refuse_if2_flags_for_nlopt(&parse(extra), "nl-sbplx")
+                .expect_err(&format!("{flag} is refused on an nl-sbplx cell"));
+            assert!(err.contains(flag) && err.contains("nl-sbplx"), "{err}");
+        }
+        for extra in [&["--rw-sd", "auto"][..], &["--rw-sd", "beta=auto,gamma=auto"][..]] {
+            crate::profile::refuse_if2_flags_for_nlopt(&parse(extra), "nl-sbplx")
+                .unwrap_or_else(|e| panic!("{extra:?} names the estimated set: {e}"));
+        }
     }
 
     /// gh#889: `camdl profile --starts` is the same rule grammar

@@ -66,7 +66,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
     sim::eval_stats::set_allow_degenerate_rates(a.inference.allow_degenerate_rates);  // gh#audit-C6
     let ir_path = a.model.to_string_lossy().into_owned();
-    let n_particles = a.inference.particles;
+    let n_particles = a.particles;
     let dt = a.inference.dt;
     let seed = a.inference.seed;
     let n_replicates = a.replicates;

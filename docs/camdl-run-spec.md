@@ -6314,28 +6314,33 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
                             lin(min,max,n) | log10(min,max,n). Every value must lie
                             in the parameter's bounds (the model's, narrowed by
                             --fit [estimate]); the swept name is recorded `focal`
---particles N               required
+--particles N               IF2 particles per cell: required for if2, refused for nl-*
 --fixed NAME=VALUE          pin a parameter AND remove it from [estimate] (repeatable)
 --fixed-file TOML           bulk form of the above (repeatable, later files win)
---iterations N              IF2 iterations per grid point (default 50)
---starts N                  independent starts per grid point (default 3)
---init MODE                 the same rules `fit run --starts` spells, as a bare
-                            mode; note the default here is `uniform`
---posterior / --mle / --params / (companions for the sourced init modes)
+--iterations N              IF2 iterations per grid point (default 50; refused for nl-*)
+--n-starts N                independent starts per grid point (default 3)
+--starts SPEC               where each cell's starts are drawn: the rule grammar
+                            `fit run --starts` takes (default `uniform`)
 --cooling F                 IF2 cooling fraction (default 0.95), reached at
                             --cooling-target-iters as in a fit's `cooling`
---cooling-target-iters N    iteration the fraction is reached at (default 50)
+                            (refused for nl-*)
+--cooling-target-iters N    iteration the fraction is reached at (default 50;
+                            refused for nl-*)
 --rw-sd SPEC                NAME=SD,... or `auto`: every parameter that is not
                             swept, pinned (--fixed, --fixed-file, [fixed]) or a
-                            model constant (`let`)
+                            model constant (`let`). An nl-* cell takes names
+                            only (NAME=auto, or `auto`) and refuses an SD
 --algorithm NAME            per-cell algorithm (default if2); pair with --backend
 --backend NAME              chain_binomial (default) or ode
 --fit PATH                  fit.toml supplying the estimated set, bounds, the
                             fixed list and [[simplex_groups]] (honoured by IF2;
-                            every member must be estimated)
+                            every member must be estimated); an nl-* [method]
+                            there also sets each nl-* cell's tolerance and
+                            max_evals (else 1e-4 and 1500)
 --seeds SPEC                run the whole grid at each seed (multi-seed sensitivity)
 --data / --obs / --time-format / --dt / --seed / --parallel / --scenario /
---enable / --disable / --table / --allow-degenerate-rates / --pf-max-substeps
+--enable / --disable / --table / --allow-degenerate-rates /
+--pf-max-substeps (if2 only)
 -o, --output FILE           profile TSV (default stdout)
 --label TEXT
 ```

@@ -150,7 +150,13 @@ struct ProfileBaseLevel<'a> {
 #[derive(serde::Serialize)]
 struct ProfileMethodLevel<'a> {
     algorithm: &'a str,
-    if2: ProfileIf2Knobs,
+    /// The knobs an IF2 cell reads; absent on an nl-* cell, which reads none
+    /// of them (and refuses them on the command line).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    if2: Option<ProfileIf2Knobs>,
+    /// The optimizer budget an nl-* cell reads; absent on an IF2 cell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nlopt: Option<ProfileNloptKnobs>,
     /// Resolved per-parameter perturbation magnitudes, sorted by name.
     rw_sd: &'a [(&'a str, Option<f64>)],
     /// `--rw-sd auto` derives magnitudes from the model rather than the flag,
@@ -176,6 +182,82 @@ struct ProfileIf2Knobs {
     starts: usize,
 }
 
+#[derive(serde::Serialize)]
+struct ProfileNloptKnobs {
+    tolerance: f64,
+    max_evals: usize,
+    dt: f64,
+    starts: usize,
+}
+
+/// `--iterations` when not given: IF2 iterations per cell.
+const PROFILE_DEFAULT_ITERATIONS: usize = 50;
+/// `--cooling` when not given.
+const PROFILE_DEFAULT_COOLING: f64 = 0.95;
+/// An nl-* cell's `xtol_rel` when `--fit` names no nl-* method: looser than a
+/// fit's default, because a profile explores a landscape rather than
+/// certifying one optimum.
+const PROFILE_NLOPT_TOLERANCE: f64 = 1e-4;
+/// An nl-* cell's evaluation budget when `--fit` names no nl-* method.
+const PROFILE_NLOPT_MAX_EVALS: usize = 1500;
+
+/// An nl-* cell's `(tolerance, max_evals, from the fit)`: the `--fit`
+/// method's own when it is an nl-* optimizer, else the profile defaults.
+pub(crate) fn nlopt_cell_budget(
+    fit_method: Option<&crate::fit::config_v2::Algorithm>,
+) -> (f64, usize, bool) {
+    use crate::fit::config_v2::Algorithm;
+    match fit_method {
+        Some(Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c)) => {
+            (c.tolerance, c.max_evals, true)
+        }
+        _ => (PROFILE_NLOPT_TOLERANCE, PROFILE_NLOPT_MAX_EVALS, false),
+    }
+}
+
+/// Refuse the IF2-only flags on an nl-* profile: its cells run no particle
+/// filter and perturb nothing, so each would be hashed into the run and read
+/// by nothing. `--rw-sd` still names the estimated set there, so names
+/// (`NAME=auto`, or `auto`) are accepted and a step size is refused.
+pub(crate) fn refuse_if2_flags_for_nlopt(
+    a: &crate::args::ProfileArgs,
+    algorithm: &str,
+) -> Result<(), String> {
+    let given: Vec<&str> = [
+        (a.particles.is_some(), "--particles"),
+        (a.iterations.is_some(), "--iterations"),
+        (a.cooling.is_some(), "--cooling"),
+        (a.cooling_target_iters.is_some(), "--cooling-target-iters"),
+        (a.inference.pf_max_substeps.is_some(), "--pf-max-substeps"),
+    ]
+    .into_iter()
+    .filter_map(|(on, flag)| on.then_some(flag))
+    .collect();
+    if !given.is_empty() {
+        return Err(format!(
+            "{} {} IF2 settings, and an `{algorithm}` cell runs no particle filter and \
+             perturbs nothing, so {} would change nothing. Drop {}.",
+            given.join(", "),
+            if given.len() == 1 { "is an" } else { "are" },
+            if given.len() == 1 { "it" } else { "they" },
+            if given.len() == 1 { "it" } else { "them" },
+        ));
+    }
+    if let Some(crate::args::types::RwSd::Map(m)) = &a.rw_sd {
+        let mut with_sd: Vec<&str> =
+            m.iter().filter(|(_, v)| v.is_some()).map(|(k, _)| k.as_str()).collect();
+        with_sd.sort();
+        if !with_sd.is_empty() {
+            return Err(format!(
+                "--rw-sd gives a random-walk step for {}, and an `{algorithm}` cell perturbs \
+                 nothing. Name the estimated parameters without a step (`NAME=auto`), or \
+                 use `--rw-sd auto`.",
+                with_sd.join(", ")));
+        }
+    }
+    Ok(())
+}
+
 /// A profile cell's IF2 cooling schedule: the one `fit run` uses, from the
 /// same two numbers, so `--cooling c` means what `cooling = c` means in a
 /// fit — `c` reached at `--cooling-target-iters` (default 50), whatever
@@ -183,7 +265,12 @@ struct ProfileIf2Knobs {
 pub(crate) fn profile_cooling_schedule(
     a: &crate::args::ProfileArgs,
 ) -> sim::inference::if2::CoolingSchedule {
-    sim::inference::if2::CoolingSchedule { fraction: a.cooling, target_iters: a.cooling_target_iters }
+    sim::inference::if2::CoolingSchedule {
+        fraction: a.cooling.unwrap_or(PROFILE_DEFAULT_COOLING),
+        target_iters: a
+            .cooling_target_iters
+            .unwrap_or(sim::inference::if2::CoolingSchedule::POMP_TARGET_ITERS),
+    }
 }
 
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
@@ -249,11 +336,25 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     crate::fit::methods::emit_status_banner(method.algorithm, method.backend);
 
     let ir_path = a.model.to_string_lossy().into_owned();
-    let n_particles = a.inference.particles;
-    let n_iterations = a.iterations;
+    // The IF2-only flags are refused on an nl-* cell, and `--particles` is
+    // required on an IF2 one; past this point each cell reads only its own.
+    let n_particles = match profile_algo {
+        ProfileAlgo::If2 => a.particles.unwrap_or_else(|| {
+            eprintln!("error: --particles is required for an if2 profile");
+            std::process::exit(1);
+        }),
+        ProfileAlgo::Nlopt(_) => {
+            if let Err(e) = refuse_if2_flags_for_nlopt(a, algo_name) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+            0
+        }
+    };
+    let n_iterations = a.iterations.unwrap_or(PROFILE_DEFAULT_ITERATIONS);
     let n_starts = a.n_starts;
-    let cooling = a.cooling;
     let cooling_schedule = profile_cooling_schedule(a);
+    let cooling = cooling_schedule.fraction;
     let dt = a.inference.dt;
     let seed_base = a.inference.seed;
     let parallel = a.inference.parallel;
@@ -391,6 +492,22 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         (indexmap::IndexMap::new(), None, indexmap::IndexMap::new(),
          (None, Vec::new(), Vec::new()), Vec::new(),
          crate::fit::config_v2::LikelihoodObjective::Full, Ok(Vec::new()))
+    };
+
+    // An nl-* cell's optimizer budget: the `--fit` file's own, when its
+    // [method] is an nl-* optimizer (so a profile of that fit optimizes each
+    // cell as the fit did), else the profile's defaults. Recorded in the
+    // method identity either way.
+    let (nl_tolerance, nl_max_evals, nl_from_fit): (f64, usize, bool) = match a.fit.as_ref() {
+        Some(fit_path) => {
+            let cfg = crate::fit::config_v2::FitConfig::load(&fit_path.to_string_lossy())
+                .unwrap_or_else(|e| {
+                    eprintln!("error: failed to load --fit toml '{}': {}", fit_path.display(), e);
+                    std::process::exit(1);
+                });
+            nlopt_cell_budget(cfg.inference.method.as_ref().map(|m| &m.algorithm))
+        }
+        None => nlopt_cell_budget(None),
     };
 
     // The scenario this profile runs under: the fit config's top-level
@@ -1304,15 +1421,21 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     //    `-inf` (unlike pfilter, which aborts), so a tripped budget could bake
     //    an -inf loglik into a cached cell that a later default-budget run was
     //    then served.
-    let mut rw_sd_blob: Vec<(&str, Option<f64>)> =
-        specs.iter().map(|s| (s.name.as_str(), s.rw_sd)).collect();
+    // An nl-* cell reads the estimated set, not the step sizes.
+    let mut rw_sd_blob: Vec<(&str, Option<f64>)> = specs.iter()
+        .map(|s| (s.name.as_str(),
+                  if matches!(profile_algo, ProfileAlgo::If2) { s.rw_sd } else { None }))
+        .collect();
     rw_sd_blob.sort_by(|a, b| a.0.cmp(b.0));
     let method_config_hash = crate::fit::cas::canonical_config_hash(&ProfileMethodLevel {
         algorithm: &algorithm,
-        if2: ProfileIf2Knobs {
+        if2: matches!(profile_algo, ProfileAlgo::If2).then(|| ProfileIf2Knobs {
             particles: n_particles, iterations: n_iterations,
             cooling, cooling_target_iters: cooling_schedule.target_iters, dt, starts: n_starts,
-        },
+        }),
+        nlopt: matches!(profile_algo, ProfileAlgo::Nlopt(_)).then(|| ProfileNloptKnobs {
+            tolerance: nl_tolerance, max_evals: nl_max_evals, dt, starts: n_starts,
+        }),
         rw_sd: &rw_sd_blob,
         rw_sd_auto,
         simplex_groups: &simplex_names,
@@ -1360,7 +1483,10 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         ProfileAlgo::If2 => eprintln!(
             "profile: IF2 per cell = {} particles × {} iterations", n_particles, n_iterations),
         ProfileAlgo::Nlopt(_) => eprintln!(
-            "profile: deterministic ODE MLE per cell (no particle filter)"),
+            "profile: deterministic ODE MLE per cell (no particle filter), tolerance {:e}, \
+             at most {} evaluations{}",
+            nl_tolerance, nl_max_evals,
+            if nl_from_fit { " (the --fit method's)" } else { "" }),
     }
 
     // ── Progress + cache scan ─────────────────────────────────────────
@@ -1688,17 +1814,10 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 let bounds: Vec<(f64, f64)> =
                     per_start_specs.iter().map(|p| (p.lower, p.upper)).collect();
                 let ode_dt = compiled.model.simulation.dt.unwrap_or(dt);
-                // Per-cell NLopt knobs: looser than fit.toml stages
-                // because profile is landscape exploration, not a
-                // single converged MLE. With 11+ free params on a
-                // typhoid-class model each ODE solve runs ~100ms-1s,
-                // so a 1500-eval budget is ~5 min per cell — fast
-                // enough for routine 1D profiles, expensive enough to
-                // converge on the ridge. Tunable later via dedicated
-                // `--nlopt-tolerance` / `--nlopt-max-evals` flags
-                // when downstream tuning surfaces a need.
-                let tolerance = 1e-4;
-                let max_evals = 1500;
+                // Per-cell NLopt budget: the `--fit` file's nl-* method's,
+                // else the profile defaults (`PROFILE_NLOPT_*`).
+                let tolerance = nl_tolerance;
+                let max_evals = nl_max_evals;
                 diag.algo = Some(crate::profile_diagnostics::DiagAlgo::Nlopt);
                 match crate::fit::nlopt_stage::optimize_cell(
                     nlopt_algo,
@@ -1761,7 +1880,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 "cooling": cooling, "cooling_target_iters": cooling_schedule.target_iters,
                 "dt": dt }),
             ProfileAlgo::Nlopt(_) => serde_json::json!({
-                "tolerance": 1e-4, "max_evals": 1500,
+                "tolerance": nl_tolerance, "max_evals": nl_max_evals,
                 "dt": compiled.model.simulation.dt.unwrap_or(dt) }),
         };
         // A non-finite cell loglik serialises as JSON `null` (JSON has no
@@ -2178,10 +2297,11 @@ mod tests {
         let init = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Lhs);
         let method_struct = serde_json::to_value(ProfileMethodLevel {
             algorithm: "if2",
-            if2: ProfileIf2Knobs {
+            if2: Some(ProfileIf2Knobs {
                 particles: 30, iterations: 5, cooling: 0.7, cooling_target_iters: 50,
                 dt: 1.0, starts: 1,
-            },
+            }),
+            nlopt: None,
             rw_sd: &rw_sd,
             rw_sd_auto: false,
             simplex_groups: &[],
@@ -2206,10 +2326,11 @@ mod tests {
         let groups = vec![vec!["p1".to_string(), "p2".to_string()]];
         let with_groups = serde_json::to_value(ProfileMethodLevel {
             algorithm: "if2",
-            if2: ProfileIf2Knobs {
+            if2: Some(ProfileIf2Knobs {
                 particles: 30, iterations: 5, cooling: 0.7, cooling_target_iters: 50,
                 dt: 1.0, starts: 1,
-            },
+            }),
+            nlopt: None,
             rw_sd: &rw_sd,
             rw_sd_auto: false,
             simplex_groups: &groups,
@@ -2219,6 +2340,21 @@ mod tests {
         let mut literal_with_groups = method_literal.clone();
         literal_with_groups["simplex_groups"] = serde_json::json!(groups);
         assert_eq!(with_groups, literal_with_groups);
+    }
+
+    /// An nl-* profile optimizes each cell with the `--fit` file's own
+    /// tolerance and budget when its [method] is an nl-* optimizer; it used to
+    /// hard-code 1e-4 / 1500 and ignore them.
+    #[test]
+    fn nlopt_cells_use_the_fit_methods_budget() {
+        let cfg = crate::fit::config_v2::FitConfig::from_toml_str(
+            "[model]\ncamdl = \"m.camdl\"\n[estimate]\nbeta = { bounds = [0.1, 2.0] }\n\
+             [fixed]\nN0 = 1000\n[method]\nalgorithm = \"nl-sbplx\"\nbackend = \"ode\"\n\
+             chains = 2\ntolerance = 1e-7\nmax_evals = 900\n").unwrap();
+        let method = cfg.inference.method.unwrap();
+        assert_eq!(nlopt_cell_budget(Some(&method.algorithm)), (1e-7, 900, true));
+        assert_eq!(nlopt_cell_budget(None),
+            (PROFILE_NLOPT_TOLERANCE, PROFILE_NLOPT_MAX_EVALS, false));
     }
 
     // ── starts_values_from_init_method: the starts rule's point ───────
