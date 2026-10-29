@@ -117,8 +117,7 @@ fn run_if2_refuses_an_estimated_event_time() {
     let config = IF2Config {
         n_particles: 4,
         n_iterations: 1,
-        cooling_fraction: 0.5,
-        cooling_target_iters: 50,
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 50 },
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],

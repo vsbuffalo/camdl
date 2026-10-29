@@ -89,8 +89,7 @@ fn ridge_spread(n_iterations: usize, seed: u64) -> f64 {
         n_particles: N_PARTICLES,
         n_iterations,
         // No cooling to speak of: the property is about carrying, not cooling.
-        cooling_fraction: 0.999,
-        cooling_target_iters: 50,
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 0.999, target_iters: 50 },
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],

@@ -158,8 +158,7 @@ fn if2_initial_state_uses_each_particles_own_theta() {
     let config = IF2Config {
         n_particles: 16,
         n_iterations: 3,
-        cooling_fraction: 0.9,
-        cooling_target_iters: 50,
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 0.9, target_iters: 50 },
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],
@@ -470,8 +469,7 @@ fn pure_ic_ivp_param_is_identified() {
     let config = IF2Config {
         n_particles: 600,
         n_iterations: 30,
-        cooling_fraction: 0.5,
-        cooling_target_iters: 30,
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 30 },
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],

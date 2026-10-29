@@ -8,7 +8,7 @@
 //! exponent 2.0, which reaches the fraction at the midpoint and `fraction²` at
 //! the endpoint — twice as fast as pomp.
 
-use sim::inference::if2::{cooling_multiplier_at_iter, per_step_cooling_factor};
+use sim::inference::if2::CoolingSchedule;
 
 #[test]
 fn fraction_reached_at_target_iters_not_midpoint() {
@@ -18,7 +18,7 @@ fn fraction_reached_at_target_iters_not_midpoint() {
     for &frac in &[0.05, 0.5, 0.7, 0.95] {
         for &target in &[25usize, 50, 80] {
             for &n_obs in &[1usize, 10, 52] {
-                let at_target = cooling_multiplier_at_iter(frac, target, n_obs, target);
+                let at_target = CoolingSchedule { fraction: frac, target_iters: target }.multiplier_at_iter(n_obs, target);
                 assert!(
                     (at_target - frac).abs() < 1e-12,
                     "at iter=target={target}, multiplier must equal cooling_fraction={frac}, \
@@ -39,7 +39,7 @@ fn matches_pomp_geometric_schedule() {
     let target = 50;
     for &n_obs in &[1usize, 10, 100] {
         for &iter in &[1usize, 25, 40, 50, 80] {
-            let camdl = cooling_multiplier_at_iter(frac, target, n_obs, iter);
+            let camdl = CoolingSchedule { fraction: frac, target_iters: target }.multiplier_at_iter(n_obs, iter);
             let pomp = frac.powf(iter as f64 / target as f64);
             assert!(
                 (camdl - pomp).abs() < 1e-12,
@@ -51,12 +51,12 @@ fn matches_pomp_geometric_schedule() {
 
 #[test]
 fn per_step_factor_consistent_with_at_iter() {
-    // The at-iter multiplier is exactly per_step_cooling_factor raised to the
+    // The at-iter multiplier is exactly the per-step factor raised to the
     // iteration's global-step count (iter * (1 + n_obs)).
     let (frac, target, n_obs) = (0.05, 50usize, 10usize);
-    let per_step = per_step_cooling_factor(frac, target, n_obs);
+    let per_step = CoolingSchedule { fraction: frac, target_iters: target }.per_step_factor(n_obs);
     for &iter in &[1usize, 10, 25, 50] {
-        let a = cooling_multiplier_at_iter(frac, target, n_obs, iter);
+        let a = CoolingSchedule { fraction: frac, target_iters: target }.multiplier_at_iter(n_obs, iter);
         let b = per_step.powf((iter * (1 + n_obs)) as f64);
         assert!((a - b).abs() < 1e-12, "iter={iter}: {a} vs {b}");
     }

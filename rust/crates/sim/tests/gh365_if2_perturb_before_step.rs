@@ -153,8 +153,7 @@ fn if2_weights_the_same_theta_that_drove_the_step() {
     let config = IF2Config {
         n_particles: 16,
         n_iterations: 3,
-        cooling_fraction: 0.9,
-        cooling_target_iters: 50,
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 0.9, target_iters: 50 },
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],

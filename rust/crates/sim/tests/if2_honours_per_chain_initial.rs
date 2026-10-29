@@ -88,8 +88,7 @@ fn config() -> IF2Config {
     IF2Config {
         n_particles: 32,
         n_iterations: 2,
-        cooling_fraction: 0.9,
-        cooling_target_iters: 50,
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 0.9, target_iters: 50 },
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],

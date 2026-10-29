@@ -266,8 +266,7 @@ fn if2_bails_on_ess_collapse() {
     let config = IF2Config {
         n_particles: 200,
         n_iterations: 3,
-        cooling_fraction: 0.5,
-        cooling_target_iters: 10,
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 10 },
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],
@@ -436,8 +435,7 @@ fn if2_theta_hat_is_identical_across_thread_counts() {
     let config = IF2Config {
         n_particles: 100,
         n_iterations: 4,
-        cooling_fraction: 0.5,
-        cooling_target_iters: 10,
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 10 },
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],
@@ -649,8 +647,7 @@ fn if2_iteration_budget_aborts_pre_window() {
     let config = IF2Config {
         n_particles,
         n_iterations: 3,
-        cooling_fraction: 0.5,
-        cooling_target_iters: 10,
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 10 },
         dt,
         t_start: 0.0,
         simplex_groups: vec![],

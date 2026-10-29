@@ -2025,7 +2025,7 @@ fn default_loglik_eval_particles() -> usize { 4000 }
 fn default_loglik_eval_replicates() -> usize { 8 }
 /// Pomp's `cooling.fraction.50` default: cooling fraction is reached
 /// at iteration 50, then continues at the noise floor.
-fn default_cooling_target_iters() -> usize { 50 }
+fn default_cooling_target_iters() -> usize { sim::inference::if2::CoolingSchedule::POMP_TARGET_ITERS }
 
 // PGAS defaults
 fn default_max_tree_depth() -> usize { 10 }
