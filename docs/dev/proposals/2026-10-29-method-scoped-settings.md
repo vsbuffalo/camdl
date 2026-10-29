@@ -358,6 +358,9 @@ pub struct EstimatedParam {                  pub struct EstimatedParam {
     pub perturb_only_at_t0: bool,
 }
 // `natural_step` and `mh_initial_step` (branch types.rs:433-447) are deleted.
+// `rw_sd_auto` (main types.rs:66) is provenance inside an engine type; it is
+// deleted, and its job (written or default) is `StepFrom`, held by the CLI
+// and recorded in run.json, never seen by an engine (I2).
 ```
 
 IF2 takes its steps beside the parameters, as PMMH already takes
@@ -483,7 +486,7 @@ as `binomial` and `ancestor_sampling` are (`config_v2.rs:2207-2211`).
 // rust/crates/cli/src/fit/steps.rs (new)
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StepFrom { Written, Default }       // shown in the launch table only
+pub enum StepFrom { Written, Default }       // launch table and run.json inputs; never hashed
 
 pub struct ResolvedPerturbation { pub step: If2Step, pub from: StepFrom }
 pub struct ResolvedProposal { pub sd: ZSd, pub from: StepFrom }
@@ -673,20 +676,92 @@ impl ParamSurfaces {
 }
 ```
 
-Exhaustiveness is enforced by the compiler, not by review. The function
-destructures `ir::Model { … }` with every field named and no `..`. It matches
-every `ir::Expr` variant with no wildcard arm. So adding an IR field or an
-expression variant does not compile until this function classifies it. Bindings,
-forcings and tables are followed transitively.
+**Exhaustive matching is necessary, not sufficient.** The function destructures
+`ir::Model { … }` with every field named and no `..`, and matches every
+`ir::Expr` variant with no wildcard arm. Adding an IR field or an expression
+variant therefore does not compile until this function classifies it. That
+proves only that every field and variant is _visited_, not that each is
+classified _correctly_. Three further rules give the semantic guarantee.
 
-Tests, one per surface:
+1. **Transitive dependencies, with cycles handled.** A parameter reaches a
+   surface when that surface reads:
+   - a binding (`BindingRef`, in `bindings` and `per_eval_bindings`),
+   - a time function (`TimeFunc`, through its coefficients),
+   - or a table (`TableLookup`, through its values)
 
-- a parameter that enters only through that surface is classified `dynamics`;
-- `I0` only in `init { I = I0 }` is initial-state-only;
-- `N0` in both `init { S = N0 - I0 }` and a rate is not;
-- `init { I ~ poisson(rate = I0) }` is initial-state-only;
-- a parameter in an `init` and a hierarchical prior's argument is
-  initial-state-only.
+   that itself reaches the parameter, at any depth. The walk keeps a visited set
+   per surface, keyed by binding, time-function and table name, so it terminates
+   on any IR. Classification is a union over everything reachable, so a
+   revisited node adds nothing.
+
+   The compiler already refuses definition cycles: a `let` cycle is E201
+   (`check_let_cycles`, `ocaml/lib/compiler/expander.ml:83-85`, gh#492), and an
+   initial-condition cycle is `InitDependencyCycle`
+   (`ocaml/lib/compiler/compiler.ml:497`). So the visited set guards only
+   hand-built IR.
+2. **References outside expressions count.** Some parameter references are
+   names, not `Expr` nodes. A reactive trigger's threshold is one:
+   `TriggerThreshold::Param` (`rust/crates/ir/src/intervention.rs:304`). Each
+   such field is classified explicitly. The destructuring rule makes a new one
+   impossible to miss.
+3. **Uncertainty fails conservatively.** A reference the walk cannot resolve
+   makes the classification `Uncertain`, naming the reference and the surface.
+   Examples: a `BindingRef`, `TimeFunc` or `TableLookup` whose name is absent
+   from the model, or a `PerEvalRef` without its binding. Under `Uncertain`,
+   every parameter is treated as entering the dynamics. So `initial_state` is
+   refused for all of them, and the refusal names the unresolved reference. The
+   "must carry `initial_state`" refusal is not raised. An uncertain
+   classification can therefore never license `initial_state`.
+
+```rust
+pub enum Classification {
+    Resolved(ParamSurfaces),
+    Uncertain { reason: String, surface: &'static str },
+}
+pub fn param_surfaces(model: &ir::Model) -> Classification;
+```
+
+**Parameters that reach neither the initial state nor the dynamics** are a
+defined class: `unused_by_likelihood`. Its behaviour depends on whether the
+parameter appears anywhere at all.
+
+- **At compile time,** a parameter referenced nowhere, not even in a prior, is
+  the planned unused-parameter lint (`ocaml/lib/ir/lint.ml:14`). That lint is a
+  warning, because such a model is still well-formed to simulate.
+- **At fit time, estimating such a parameter is a request with no defined
+  effect** (invariant I3), so it is refused:
+  - under every method, when the parameter appears nowhere;
+  - under IF2 and `nl-*`, also when it appears only in a hierarchical-prior
+    argument, because those methods ignore priors and nothing selects it.
+- **A hyperparameter under PMMH, MH or PGAS** appears only in prior arguments
+  and is accepted. It enters the posterior through the prior, which is its
+  purpose.
+
+The refusal names the parameter and says it enters neither the initial state nor
+the likelihood.
+
+**Tests run on compiled models**, real `.camdl` files through `camdlc`, not only
+hand-built IR:
+
+- the SIR recovery case (`tests/recovery/cases/sir/model.camdl`):
+  - `init { S = N0 - I0  I = I0 }`, with `N` a `let` over compartments, so `N0`
+    and `I0` are initial-state-only;
+  - `beta`, `gamma`, `rho` and `k` are dynamics;
+- initial-condition laws (`ocaml/golden/init_laws.camdl`): each law's parameter
+  is initial-state-only;
+- a parametric `at [...]` (`ocaml/golden/sia_anchored_dates.camdl:52`): the
+  timing parameter is dynamics;
+- a reactive trigger with a parameter threshold
+  (`tests/fixtures/reactive/reactive_sir_observed_threshold.camdl:37`): the
+  threshold is dynamics;
+- a model with forcing (`ocaml/golden/flu_data_forcing.camdl`) and one with
+  inline tables (`rust/crates/sim/tests/fixtures/licm_ab.camdl`): a coefficient
+  parameter is dynamics, through the forcing or table;
+- a hand-built IR for each path that `camdlc` cannot produce:
+  - a binding cycle, which must terminate;
+  - an unresolved `BindingRef`, which must give `Uncertain`;
+  - a parameter in an `init` and a hierarchical prior's argument, which must be
+    initial-state-only.
 
 **Refusals under IF2** (`fit run` with `algorithm = "if2"`, and every `profile`
 IF2 cell):
@@ -697,6 +772,11 @@ IF2 cell):
   after t = 0 (`if2.rs:443-455`). Write
   `[method.perturbation] I0 = { initial_state = true }`, or
   `profile --initial-state I0`."
+- These refusals are about the IF2 schedule, not the statistical target.
+  Perturbing an initial-state-only parameter before every observation is an
+  incorrect IF2 schedule for the same estimand: the random walk after t = 0
+  moves the parameter with nothing to select it, so the estimate degrades. The
+  target is unchanged.
 - `initial_state = true` on a parameter that enters the dynamics is refused,
   naming the first dynamics use. Perturbing it only at t = 0 would leave it
   almost unexplored.
@@ -832,9 +912,9 @@ precedent of resolving before identity (`config_v2.rs:1321`,
 { "kind": "none" }
 ```
 
-`StepFrom` appears in the launch table on stderr and nowhere that is addressed:
-not in `run.json`, `fit.meta.json`, `fit_state.toml` or a profile record. A
-value in an addressed artifact is the value that ran.
+`StepFrom` is never hashed. It appears in the launch table, and in the run
+record's unhashed `inputs` (§5.6), so a reader can tell whether a step was
+written or defaulted.
 
 `resume_guard` (`cas.rs:603`) hashes the same levels with the extension
 dimension zeroed. A PMMH or MH resume under a different proposal is therefore
@@ -902,6 +982,7 @@ pub struct StepRecord {
     pub at: Option<PerturbAt>,         // IF2 only
     pub start: f64,                    // the resolved start θ₀ it was converted at (§7.3)
     pub natural_at_start: f64,         // sd_z × |dθ/dz| at θ₀
+    pub from: StepFrom,                // written or default; recorded, never hashed
 }
 ```
 
@@ -913,7 +994,8 @@ for "Resolved-input summary for display/audit — provenance, not hashed"
 ```json
 "steps": { "kind": "if2", "map": { "beta": "log_interval" },
            "perturbation": { "beta": { "sd_z": 0.107, "at": "every_observation",
-                                       "start": 0.25, "natural_at_start": 0.02 } } }
+                                       "start": 0.25, "natural_at_start": 0.02,
+                                       "from": "written" } } }
 ```
 
 `profile` writes the same block into each cell's record, beside its existing
@@ -922,13 +1004,20 @@ for "Resolved-input summary for display/audit — provenance, not hashed"
 This squares with run identity because nothing recorded is new information:
 
 - `sd_z` and `at` are already hashed at the method level (§5.3).
+- `from` (`written` or `default`) is a per-execution fact outside the hash. A
+  written default and an omitted name run the same numbers and share one
+  execution identity. Which one the user wrote is provenance.
 - `start` is hashed at the method level (§5.2).
 - The map is fixed by the model and the box, both at the fit level.
 - `natural_at_start` is a function of those three.
 
 The record therefore re-encodes identity inputs, which the run-identity rule
-calls presentation (`.claude/rules/run-identity.md`). `from` (written or
-default) is not recorded (D7). `fit_state.toml` keeps only
+calls presentation (`.claude/rules/run-identity.md`). Recording `from` there
+follows an existing precedent: the run record already keeps per-execution facts
+outside the hash. Its `provenance` holds `argv`, `host`, `created_at` and
+`thread_count` (`rust/crates/runid/src/record.rs:144-160`), none of which keys
+the run. Two runs that share an identity may have different `from` values, as
+they may have different `argv`. `fit_state.toml` keeps only
 `initial_state_params`, which the convergence check reads (§7.5).
 
 ## 6. The resolved problem is shared by every method; the execution plan is per run (amends parameter-roles §6.3, §6.4, §6.6)
@@ -976,6 +1065,17 @@ pub struct ExecutionPlan {
 }
 
 impl ExecutionPlan {
+    /// Validates that `method` can run on `problem`, and refuses if it cannot.
+    /// Takes the problem by shared `Arc`: no `&mut`, no owned copy. A method
+    /// may refuse a problem; it can never reinterpret its priors, roles or
+    /// constraints.
+    pub fn new(
+        problem: Arc<ResolvedProblem>,
+        method: &config_v2::Method,
+        steps: ResolvedSteps,
+        starts: fit::chain_starts::DrawnStarts,
+        seed: u64,
+    ) -> Result<ExecutionPlan, PlanError>;
     pub fn n_chains(&self) -> usize;              // from `method`
     pub fn identity(&self, ctx: &IdentityInputs) -> Result<ResolvedFitStage, String>;  // the three levels and run_id
 }
@@ -985,6 +1085,33 @@ impl ExecutionPlan {
 // (`UnboundedForMethod`, `HyperOverHeldLeaf`, `HierarchicalLeafBoxed`, each
 // raised only for the methods they concern), the `ic_free` precondition
 // (which reads the IF2 steps), and the initial-state checks of §4.6.
+//
+// **The rule: a method may refuse a problem, never reinterpret it.**
+// `ExecutionPlan::new` receives `Arc<ResolvedProblem>`, and `ResolvedProblem`
+// has no interior mutability and no `&mut self` methods, so the type system
+// stops a plan from changing a prior, a role, a box or a transform. Today a
+// method can reinterpret a problem; for example, PMMH filled its step from
+// IF2's automatic value (roles §6.4). What a method needs that the problem
+// does not state is method configuration, and goes in `MethodPlan`.
+//
+// **Plans are fully resolved** (invariant I2, `docs/dev/inference-architecture.md`:
+// "no `Option` that lets the engine pick a default later"). Today PGAS's and
+// PMMH's `burn_in` and `thin` are `Option` in the method
+// (`config_v2.rs:1066-1069`) and are filled at dispatch: PGAS 2000 and 5
+// (`cli/src/fit/pgas.rs:217-218`, `:237-238`), PMMH and MH 5000 and 10
+// (`cli/src/fit/pmmh.rs:37-38`, `:54-55`, `:72-73`). This has two
+// consequences:
+//
+// - a file that writes the default and one that omits it key differently;
+// - changing a default changes execution without changing the method payload.
+//
+// The plan series resolves them when the plan is built. `PgasPlan`,
+// `PmmhPlan` and `MhOdePlan` hold `burn_in: usize` and `thin: usize`.
+// `Method::resolve_defaults` fills them before the identity is taken, as
+// `resolve_starts` does, so the method level hashes the resolved numbers and
+// the engines receive concrete values. The omitted `rw_sd`, today resolved
+// inside `FitRunConfig::build` after the identity is taken
+// (`runner.rs:1411-1413`), is the same defect; `resolve_steps` (§4.4) fixes it.
 
 /// Per-method settings, typed per method. Not `InferenceMethod`, the
 /// (algorithm, backend) registry entry (`fit/methods.rs:50`).
@@ -1084,10 +1211,11 @@ no verdicts.
    receives today, derived from the plan.
 2. Backends move to consume the plan one at a time (IF2, PMMH, MH, PGAS,
    `pfilter`, `nl-*`), each in its own commit.
-3. Each structural commit keeps fixed-seed numerical behaviour: an IF2, a PMMH,
-   a PGAS and an NLopt fit of `tests/recovery/cases/sir` at a fixed seed produce
-   bit-identical `fit_state.toml`, `draws.tsv` and per-chain outputs before and
-   after.
+3. Resolving `burn_in` and `thin` in the plan (I2) is its own commit. It keeps
+   output bit-identical, since the resolved numbers equal the dispatch defaults,
+   and it re-keys only through the payload.
+4. Each structural commit keeps fixed-seed numerical behaviour, proved by the
+   fixed-seed pin of §11.
 
 This lands before parameter-roles Stage 2, which then builds on it (§11).
 
@@ -1408,8 +1536,8 @@ The parameter-roles proposal decides that `profile`'s estimated set comes from
   `--fit` config per name.
 - `--initial-state NAME[,NAME…]`, repeatable: perturb at t = 0 only. It adds to
   the initial-state parameters an IF2 `--fit` config declares. There is no flag
-  to remove one, because perturbing an initial state at every observation is a
-  different estimand, made by editing the config.
+  to remove one, because perturbing an initial-state-only parameter at every
+  observation is an incorrect IF2 schedule (§4.6), which this proposal refuses.
 - Under `--algorithm nl-*` both flags are refused: the optimizers take no step.
 - `--rw-sd` is a removed-flag trap, like `_removed_pmmh_rho`
   (`args/mod.rs:1815-1819`). After the model loads it prints the `--estimate`
@@ -1664,8 +1792,42 @@ already, because the fit level folds the engine version, which includes the git
 hash (transforms §13, verified there at `cas.rs:501-521` and
 `version.rs:12-15`). No `ir/VERSION` bump and no golden change is involved.
 
-**The step series, on `feat/support-transforms`**, each commit green under
-`make test`:
+**Four independently landable series.** Each has its own regression tests and
+can land, or be reverted, without the others:
+
+- **A. The step correction** (below): the rename, z units, no factor, the legacy
+  refusal, resolved steps and their identity, and profile's reading of
+  `[method.perturbation]`.
+- **B. The plan series** (§6): `ResolvedProblem` and `ExecutionPlan`, and
+  `burn_in`/`thin` resolution.
+- **C. `param_surfaces` and the initial-state refusals** (§4.6). Its tests are
+  the compiled-model classification tests and the two IF2 refusals.
+- **D. The profile flags** (§8), in parameter-roles Stage 3.
+
+A does not need B, C or D. C needs only A's `initial_state` key. D needs A and
+parameter-roles Stage 3.
+
+**Every structural commit names one test that proves fixed-seed outputs
+unchanged:** `fixed_seed_fit_outputs_are_bit_identical`, in a new
+`rust/crates/cli/tests/fit_fixed_seed_pin.rs`, modelled on `determinism_pin.rs`.
+
+- It runs `tests/recovery/cases/sir` at seed 1 under IF2, `nl-sbplx`, PMMH and
+  PGAS with default steps.
+- It compares `draws.tsv`, every `chain_*` TSV, `chain_results.tsv`,
+  `chain_evaluations.tsv` and `mle_params.toml` byte for byte, and every numeric
+  field of `fit_state.toml` by value, against pins committed under
+  `tests/fixtures/fit_pins/sir_seed1/`.
+- It is the result-records proposal's fixed-seed check (its §9), shared rather
+  than duplicated.
+- A commit that intends a numerical change re-captures the pins, and the pin
+  diff is that commit's subject.
+
+Run IDs are not compared, because the engine version moves them. In series A
+with default steps, every commit keeps the pins: the defaults and the default
+PMMH initial proposal are unchanged.
+
+**Series A, the step correction, on `feat/support-transforms`**, each commit
+green under `make test`:
 
 1. Delete `FitState.rw_sd`, `runner::auto_rw_sd` and the NLopt copy (§3.5):
    written, never read. Its own commit.
@@ -1692,11 +1854,15 @@ hash (transforms §13, verified there at `cas.rs:501-521` and
    `nl-*`, and its base and method levels change (§5.4).
 8. Documents (§9.2–§9.4) and the amended proposals' status lines (§13).
 
-**The plan series (§6)**, before parameter-roles Stage 2: `ExecutionPlan` at the
-CLI boundary first, then one backend per commit, each bit-identical at a fixed
-seed. Parameter-roles Stage 2 then builds `ResolvedProblem` without starts or
-method settings, and its `SettingForNonEstimated` refusal is used by
-`resolve_steps` unchanged.
+**Series C** follows A on any branch: `param_surfaces` with its compiled-model
+tests, then the initial-state refusals and the `unused_by_likelihood` refusal,
+each in its own commit with its red test.
+
+**Series B, the plan series (§6)**, before parameter-roles Stage 2:
+`ExecutionPlan` at the CLI boundary first, then one backend per commit, each
+bit-identical at a fixed seed. Parameter-roles Stage 2 then builds
+`ResolvedProblem` without starts or method settings, and its
+`SettingForNonEstimated` refusal is used by `resolve_steps` unchanged.
 
 **Landing order:**
 
@@ -1736,7 +1902,8 @@ merge of the support-transforms branch.
 - A legacy conversion above 3 in z, for a start near a bound, prints its reason
   and recommends the default (§7.3).
 - `run.json`'s `inputs.steps` carries every estimated parameter's `sd_z`,
-  `start` and `natural_at_start`, and no `from` (§5.6).
+  `start`, `natural_at_start` and `from`, and two configs differing only in
+  writing a default have equal method-level hashes and different `from` (§5.6).
 - `profile` cell records carry `cooling_final` as the cooling factor (D21).
 
 ## 13. Amendments to other proposals
@@ -1805,7 +1972,7 @@ merge of the support-transforms branch.
   `perturbation gamma = 0.2 (default, z)`, with the natural-scale equivalent.
 - §7.2: the record's `per_param` entry becomes
   `"perturbation": {"gamma": {"sd": 0.2, "at": "every_observation"}}` under IF2
-  and `"proposal": {…}` under PMMH and MH; no `from`.
+  and `"proposal": {…}` under PMMH and MH, each with its unhashed `from`.
 - §7.3: the `profile --sweep k … --rw-sd beta=0.02` example becomes
   `--estimate beta,gamma --perturbation beta=0.1`.
 - §10.1: "`--rw-sd` is optional, IF2-only, and sets step sizes only" becomes
@@ -1860,9 +2027,10 @@ update, NUTS, has no per-parameter proposal; its MH-within-Gibbs starts at
 
 **D7 — The method level hashes the resolved steps, and the written
 `[estimate].start` values (`starts_base`) beside the starts rule; `from` is
-never hashed or stored.** A written default and an omitted name key the same, as
-`starts` does (§5.3). The start moves to the method level by maintainer decision
-5 (§5.2).
+recorded in the run record's unhashed `inputs` and never hashed.** A written
+default and an omitted name key the same, as `starts` does (§5.3). The run
+record still says which the user wrote, as it records `argv` (§5.6). The start
+moves to the method level by maintainer decision 5 (§5.2).
 
 **D8 — Live configs with the old keys are refused; stored copies are set aside
 with one notice.** Refusing a stored copy would make every pre-release fit
