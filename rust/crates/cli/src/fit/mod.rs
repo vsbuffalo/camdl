@@ -697,6 +697,24 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             eprintln!("error: {}", msg);
             std::process::exit(1);
         }
+        // PGAS runs NUTS only where the compiler emitted rate gradients
+        // (`nuts_active`, the predicate the sampler itself uses); elsewhere it
+        // falls back to Metropolis-within-Gibbs. Say so — and refuse an
+        // explicit `use_nuts = true` the model cannot honour.
+        if let Algorithm::PGAS { use_nuts: true, .. } = &method.algorithm {
+            if !sim::inference::pgas::nuts_active(true, &compiled) {
+                let declared = std::fs::read_to_string(&fit_path)
+                    .map(|c| config_v2::method_declares_key(&c, "use_nuts"))
+                    .unwrap_or(false);
+                match config_v2::nuts_unavailable(declared) {
+                    Ok(note) => eprintln!("\x1b[33mnote:\x1b[0m {note}"),
+                    Err(e) => {
+                        eprintln!("error: {fit_path}: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
     }
 
     // gh#604: every key the user typed under `[data.observations]` /
