@@ -449,6 +449,15 @@ fn exit_if_nothing_loaded(dir: &str, discovered: &[ResolvedStage], failures: &[L
     std::process::exit(1);
 }
 
+/// The run id a leaf's stored-fit `starts` source resolved to, from its
+/// run.json `inputs.starts_source.run_id` (gh#896); `None` for a run that did
+/// not start from a stored fit.
+fn starts_source_run(stage_dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(stage_dir.join("run.json")).ok()?;
+    let rec: runid::RunRecord = serde_json::from_slice(&bytes).ok()?;
+    rec.inputs.get("starts_source")?.get("run_id")?.as_str().map(String::from)
+}
+
 /// Walk the fit_dir and return one `ResolvedStage` per completed method
 /// leaf. Order matches `FitView.methods_declared` (label order); leaves that
 /// didn't complete are dropped; leaves that completed but aren't in
@@ -460,15 +469,6 @@ fn exit_if_nothing_loaded(dir: &str, discovered: &[ResolvedStage], failures: &[L
 /// replicates, sweep cells), prefers Real over Synthetic, lowest
 /// `fit_seed`, then lex-first stage_dir — same priority as
 /// [`crate::fit::table_row::build_row`]'s terminal-stage picker.
-/// The run id a leaf's stored-fit `starts` source resolved to, from its
-/// run.json `inputs.starts_source.run_id` (gh#896); `None` for a run that did
-/// not start from a stored fit.
-fn starts_source_run(stage_dir: &Path) -> Option<String> {
-    let bytes = std::fs::read(stage_dir.join("run.json")).ok()?;
-    let rec: runid::RunRecord = serde_json::from_slice(&bytes).ok()?;
-    rec.inputs.get("starts_source")?.get("run_id")?.as_str().map(String::from)
-}
-
 fn discover_stages(fit_dir: &Path) -> Vec<ResolvedStage> {
     // Read the fit-level view for `methods_declared`; if missing, fall back to
     // walker-order (covers user-built non-canonical fits).

@@ -28,11 +28,13 @@ pub enum FitRef {
     /// `@name` — the leading `@` sigil is the label marker (stripped here);
     /// names the one run labelled `name`.
     Label(String),
-    /// A `fit.toml` config → its unique run (or an ambiguity list).
+    /// A `fit.toml` config → the run made from it as it now reads (or an
+    /// ambiguity list).
     Config(PathBuf),
-    /// An existing fit results (segment) directory.
+    /// An existing directory: a run's leaf, or a problem folder (segment).
     RunDir(PathBuf),
-    /// A fit-level hash prefix (what `fit table` / `list` display as `fit_id`).
+    /// A run's `run_id` prefix, else a fit-level hash prefix (what `fit table`
+    /// / `list` display as `fit_id`).
     HashPrefix(String),
 }
 
