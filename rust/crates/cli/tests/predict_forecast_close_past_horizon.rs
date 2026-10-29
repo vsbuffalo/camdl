@@ -65,12 +65,15 @@ fn tempdir(tag: &str) -> PathBuf {
     p
 }
 
-/// `results/fits/<stem>-<hash>/<sub>/<name>.tsv`.
+/// `results/fits/<stem>-<hash>/predict/<run id>/<sub>/<name>.tsv`.
 fn find_artifact(root: &Path, sub: &str, name: &str) -> Option<PathBuf> {
     for e in std::fs::read_dir(root.join("fits")).ok()?.flatten() {
-        let p = e.path().join(sub).join(format!("{name}.tsv"));
-        if p.is_file() {
-            return Some(p);
+        // gh#896: `fit predict` writes under `<segment>/predict/<run id>/`.
+        for run in std::fs::read_dir(e.path().join("predict")).into_iter().flatten().flatten() {
+            let p = run.path().join(sub).join(format!("{name}.tsv"));
+            if p.is_file() {
+                return Some(p);
+            }
         }
     }
     None

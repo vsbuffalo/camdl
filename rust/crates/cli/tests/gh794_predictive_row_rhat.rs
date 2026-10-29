@@ -42,6 +42,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
+/// (gh#896). A path that does not exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
+    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -68,9 +78,12 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
 
 fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
     for e in std::fs::read_dir(root.join("fits")).ok()?.flatten() {
-        let p = e.path().join(sub).join(format!("{stream}.tsv"));
-        if p.is_file() {
-            return Some(p);
+        // gh#896: `fit predict` writes under `<segment>/predict/<run id>/`.
+        for run in std::fs::read_dir(e.path().join("predict")).into_iter().flatten().flatten() {
+            let p = run.path().join(sub).join(format!("{stream}.tsv"));
+            if p.is_file() {
+                return Some(p);
+            }
         }
     }
     None
@@ -78,7 +91,7 @@ fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
 
 fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
     for e in std::fs::read_dir(root.join("fits")).ok()?.flatten() {
-        let p = e.path().join(name);
+        let p = predict_out(&e.path()).join(name);
         if p.is_file() {
             return Some(p);
         }

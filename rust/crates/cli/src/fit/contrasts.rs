@@ -123,7 +123,8 @@ struct ArmDrawResult {
 
 // ── Entry point ─────────────────────────────────────────────────────────────────
 
-/// Compute and write every `contrasts/<name>.tsv` under `segment`. Called by
+/// Compute and write every `contrasts/<name>.tsv` under `out_dir`, the run's
+/// predictions directory ([`crate::fit::fit_view::predictions_dir`]). Called by
 /// `fit predict` only when `model.contrasts` is non-empty, so a model without a
 /// `contrasts {}` block is byte-identical to before.
 ///
@@ -143,10 +144,9 @@ struct ArmDrawResult {
 /// the cloud the free-forward rows do — the alternative is an artifact whose
 /// manifest says a chain was excluded and whose numbers include it.
 ///
-/// `run_dir` is the run whose draws are banded: the leaf the handle named, or
-/// `segment` itself.
+/// `run_dir` is the run whose draws are banded: the leaf the handle named.
 pub fn emit_contrasts(
-    segment: &Path,
+    out_dir: &Path,
     run_dir: &Path,
     stage: Option<&str>,
     selection: Option<&ChainSelection>,
@@ -478,7 +478,7 @@ pub fn emit_contrasts(
         }
 
         let content = band_and_render(&c.name, &shaped)?;
-        written.push(write_tsv(segment, &contrasts_sub, &c.name, &content)?);
+        written.push(write_tsv(out_dir, &contrasts_sub, &c.name, &content)?);
     }
     Ok(written)
 }

@@ -29,6 +29,16 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
+/// (gh#896). A path that does not exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
+    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -200,11 +210,12 @@ impl Fixture {
         run(bin, &self.tmp, &args)
     }
 
-    /// The predictive/quantities artifact names directly under the segment,
+    /// The predictive/quantities artifact names directly under the run's
+    /// predictions directory (`<segment>/predict/<run id>/`, gh#896),
     /// sorted. This IS the run directory as a reader (`ls`, `camdl-scope`) sees
     /// it, which is the surface the bug corrupts.
     fn artifact_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(&self.seg)
+        let mut names: Vec<String> = std::fs::read_dir(predict_out(&self.seg))
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -215,12 +226,12 @@ impl Fixture {
     }
 
     fn read(&self, rel: &str) -> String {
-        std::fs::read_to_string(self.seg.join(rel))
+        std::fs::read_to_string(predict_out(&self.seg).join(rel))
             .unwrap_or_else(|e| panic!("reading {rel} under the segment: {e}"))
     }
 
     fn exists(&self, rel: &str) -> bool {
-        self.seg.join(rel).exists()
+        predict_out(&self.seg).join(rel).exists()
     }
 }
 
@@ -483,7 +494,7 @@ fn without_the_flag_the_artifact_names_are_the_historical_ones() {
         "the observed half does not depend on the chain selection"
     );
     assert!(
-        !f.seg.join("observed-excl3").exists(),
+        !predict_out(&f.seg).join("observed-excl3").exists(),
         "…so it is not keyed either"
     );
 

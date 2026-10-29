@@ -23,6 +23,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
+/// (gh#896). A path that does not exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
+    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -132,7 +142,7 @@ fn segment(results: &Path) -> PathBuf {
     let fits = results.join("fits");
     for e in std::fs::read_dir(&fits).expect("results/fits exists").flatten() {
         let p = e.path();
-        if p.join("predictive.json").is_file() || p.join("report.json").is_file() {
+        if predict_out(&p).join("predictive.json").is_file() || predict_out(&p).join("report.json").is_file() {
             return p;
         }
     }
@@ -180,7 +190,7 @@ fn a_refused_tail_still_writes_the_one_step_artifact_and_records_the_failure() {
 
     // 2. The one-step half — complete, data-conditioned, never reaching the
     //    horizon — is on disk. This is the object the old behaviour discarded.
-    let pred = seg.join("predictive").join("weekly_cases.tsv");
+    let pred = predict_out(&seg).join("predictive").join("weekly_cases.tsv");
     assert!(
         pred.is_file(),
         "the one-step predictive must be written even though the tail refused; \
@@ -207,7 +217,7 @@ fn a_refused_tail_still_writes_the_one_step_artifact_and_records_the_failure() {
 
     // 3. The failure is recorded, naming the site and carrying the reason.
     let report: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(seg.join("report.json")).expect("report.json is written"),
+        &std::fs::read_to_string(predict_out(&seg).join("report.json")).expect("report.json is written"),
     )
     .expect("report.json parses");
     let failures = report["failures"].as_array().expect("failures is a list");

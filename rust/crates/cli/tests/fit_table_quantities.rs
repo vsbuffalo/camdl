@@ -19,6 +19,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
+/// (gh#896). A path that does not exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
+    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -240,7 +250,7 @@ fn quantity_derives_on_demand_then_reads_existing() {
 
     let results = tmp.join("results");
     let seg = fit_segment_dir(&results);
-    let peak_tsv = seg.join("quantities").join("peak.tsv");
+    let peak_tsv = predict_out(&seg).join("quantities").join("peak.tsv");
     assert!(
         !peak_tsv.exists(),
         "precondition: the fit must not be predicted yet (no quantities/peak.tsv)"
@@ -272,7 +282,8 @@ fn quantity_derives_on_demand_then_reads_existing() {
         peak.is_finite() && peak > 0.0,
         "derived peak median must be finite and positive, got {peak}"
     );
-    // The derive populated the fit's `quantities/` output on disk.
+    // The derive populated the run's `quantities/` output on disk.
+    let peak_tsv = predict_out(&seg).join("quantities").join("peak.tsv");
     assert!(
         peak_tsv.exists(),
         "--quantity must have DERIVED quantities/peak.tsv via fit predict"
@@ -346,7 +357,7 @@ cooling = 0.7
     );
     // Not derivable → no spawn → no derived output on disk.
     assert!(
-        !seg.join("quantities").join("peak.tsv").exists(),
+        !predict_out(&seg).join("quantities").join("peak.tsv").exists(),
         "an optimizer fit must not derive a quantities TSV"
     );
 

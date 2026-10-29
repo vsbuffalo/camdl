@@ -195,6 +195,22 @@ pub fn leaf_segment(dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Where `fit predict` writes for one run: `<segment>/predict/<run id, 12 hex>/`
+/// (gh#896). Keyed by the run, so two runs of one problem keep separate
+/// predictives, and outside the leaf, whose exact-set manifest admits no
+/// regenerated files. The full run id is recorded in the manifests written
+/// there (`predictive.json`, `observed.json`).
+pub fn predictions_dir(segment: &Path, run_id: &str) -> PathBuf {
+    segment.join("predict").join(&run_id[..12.min(run_id.len())])
+}
+
+/// The `run_id` (full hex) a fit leaf's `run.json` records, when `dir` is one.
+pub fn leaf_run_id(dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(dir.join("run.json")).ok()?;
+    let rec: RunRecord = serde_json::from_slice(&bytes).ok()?;
+    (rec.kind == ArtifactKind::FitStage).then(|| rec.run_id.to_hex())
+}
+
 /// Whether two paths name one directory, lexically or after resolving links.
 fn same_dir(a: &Path, b: &Path) -> bool {
     a == b

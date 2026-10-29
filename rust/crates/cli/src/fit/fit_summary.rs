@@ -2988,6 +2988,7 @@ fn build_summary_table_row(fit_dir: &Path, now_unix: i64) -> TableRow {
                 model_identity: String::new(),
                 methods: Vec::new(),
                 method: String::new(),
+                run_id: String::new(),
                 config_diff_from_baseline: ConfigDiff::identity(""),
                 converged: false,
                 gate_verdict: "n/a".into(),

@@ -351,13 +351,14 @@ results/fits/{stem}-{fit_hash8}/
   synthetic/truth.toml              # [synthetic] fits only
   synthetic/data/ds_NN/<stream>.tsv # [synthetic] fits only, one directory per
                                     #   sim seed, one file per stream
-  predictive/<stream>.tsv           # `fit predict` output (§2.2.2)
-  predictive.json
-  observed/<stream>.tsv
-  observed.json
-  quantities/<name>.tsv             # `quantities {}` sidecar, when requested
-  quantities.json
-  report.json                       # what `fit predict` computed, and what
+  predict/{run_id12}/               # `fit predict` output for one run (§2.2.2)
+    predictive/<stream>.tsv
+    predictive.json                 #   records the full run_id it replays
+    observed/<stream>.tsv
+    observed.json
+    quantities/<name>.tsv           # `quantities {}` sidecar, when requested
+    quantities.json
+    report.json                     # what `fit predict` computed, and what
                                     #   refused (§2.2.2)
   {method}-{method_hash8}/          # the [method], labelled by its algorithm
     seed_{n}-{seed_hash8}/          # one per fit seed — the leaf
@@ -366,8 +367,10 @@ results/fits/{stem}-{fit_hash8}/
 ```
 
 The archived files and the `predictive`/`observed`/`quantities` outputs are
-**regenerated sidecars**: they are not part of any leaf's file manifest, carry
-no `run_id`, and are overwritten in place.
+**regenerated sidecars**: they are not part of any leaf's file manifest, and a
+rerun of `fit predict` overwrites them in place. The predict outputs sit under
+`predict/<run_id12>/`, one directory per run they replay, and their manifests
+record that run's full `run_id`.
 
 **What the fit hash covers.** The fit level is a `FitDigest` over the whole
 model IR digest (which itself folds `ir/VERSION` and the engine version), the
@@ -508,17 +511,21 @@ disagree with what was fit.
 #### 2.2.2 `fit predict` predictive artifact
 
 `camdl fit predict <fit>` resolves the fit handle — `@label`, a `fit.toml` path,
-a run directory, or a `fit_hash` prefix — to its segment and writes two tidy,
-plot-ready families of files there, plus a JSON manifest for each.
+a leaf or problem-folder directory, or a hash prefix — to one run, refusing a
+problem folder that holds several with the runs listed. It writes two tidy,
+plot-ready families of files under `predict/<run_id12>/` in that run's segment —
+outside the leaf, whose exact-set manifest admits no regenerated files — plus a
+JSON manifest for each that records the full `run_id`. Two runs of one problem
+keep separate predictives, and each file is attributable to the run it replays.
 
 ```
-results/fits/<stem>-<hash8>/predictive/<stream>.tsv
+results/fits/<stem>-<hash8>/predict/<run_id12>/predictive/<stream>.tsv
   scenario | sweep:<param>… | time | <dims…> | horizon | treatment
            | fit_rhat_max | fit_ess_min
            | rhat_mean | ess_mean | rhat_pred | ess_pred
            | n_draws | q05 | q25 | q50 | q75 | q95
 
-results/fits/<stem>-<hash8>/observed/<stream>.tsv
+results/fits/<stem>-<hash8>/predict/<run_id12>/observed/<stream>.tsv
   time | <dims…> | value
 ```
 
@@ -618,11 +625,12 @@ tidy keys. A hole — a scheduled but unobserved cell — renders as an empty
 per stratum, using `index_dims` from the `fit.meta.json` schema and no
 run-store, DSL, or likelihood knowledge.
 
-`predictive.json` (schema tag `camdl.predictive/v3`) declares, per stream, which
-columns are join coordinates versus band versus per-cell diagnostics, the
-`value_kind`, and the band's quantile levels; it also carries a
-`chain_selection` block when `--exclude-chains` narrowed the cloud, so a
-chain-subset band is never mistakable for a full-cloud one.
+`predictive.json` (schema tag `camdl.predictive/v3`) records the `run_id` whose
+draws it replays and declares, per stream, which columns are join coordinates
+versus band versus per-cell diagnostics, the `value_kind`, and the band's
+quantile levels; it also carries a `chain_selection` block when
+`--exclude-chains` narrowed the cloud, so a chain-subset band is never
+mistakable for a full-cloud one.
 
 **The tag is load-bearing, and a stored artifact must be read under its own.**
 The three versions do not carry the same numbers under the same column names:
@@ -3768,10 +3776,10 @@ $ camdl fit predict fits/02_posterior.toml --n-draws 20
 fit predict: free_forward horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
 fit predict: one_step horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
 fit predict: horizon=free_forward+one_step(20 draws) treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 60 draws from pgas method 'pgas'
-wrote fits/../results/fits/02_posterior-77595169/predictive/weekly_cases.tsv
-wrote fits/../results/fits/02_posterior-77595169/predictive.json
-wrote fits/../results/fits/02_posterior-77595169/observed/weekly_cases.tsv
-wrote fits/../results/fits/02_posterior-77595169/observed.json
+wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>/predictive/weekly_cases.tsv
+wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>/predictive.json
+wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>/observed/weekly_cases.tsv
+wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>/observed.json
 ```
 
 ```

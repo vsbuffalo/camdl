@@ -23,6 +23,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
+/// (gh#896). A path that does not exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
+    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -174,13 +184,13 @@ fn one_non_finite_quantity_drops_out_and_everything_else_is_written() {
     //    about. One reporting-only expression must not cost a stream its
     //    posterior predictive.
     assert!(
-        seg.join("predictive").join("weekly_cases.tsv").is_file(),
+        predict_out(&seg).join("predictive").join("weekly_cases.tsv").is_file(),
         "the stream's predictive must survive a broken quantity:\n{stdout}\n{stderr}"
     );
-    assert!(seg.join("observed").join("weekly_cases.tsv").is_file());
+    assert!(predict_out(&seg).join("observed").join("weekly_cases.tsv").is_file());
 
     // 3. The other quantities are written; only the offending one is missing.
-    let qdir = seg.join("quantities");
+    let qdir = predict_out(&seg).join("quantities");
     for name in ["prevalence", "peak", "never"] {
         assert!(
             qdir.join(format!("{name}.tsv")).is_file(),
@@ -194,7 +204,7 @@ fn one_non_finite_quantity_drops_out_and_everything_else_is_written() {
 
     // 4. …and the manifest does not advertise the file nobody wrote.
     let manifest: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(seg.join("quantities.json")).unwrap(),
+        &std::fs::read_to_string(predict_out(&seg).join("quantities.json")).unwrap(),
     )
     .unwrap();
     let listed: Vec<&str> = manifest["quantities"]
@@ -212,7 +222,7 @@ fn one_non_finite_quantity_drops_out_and_everything_else_is_written() {
 
     // 5. The failure is recorded with the quantity name and a draw index.
     let report: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(seg.join("report.json")).expect("report.json is written"),
+        &std::fs::read_to_string(predict_out(&seg).join("report.json")).expect("report.json is written"),
     )
     .unwrap();
     let failures = report["failures"].as_array().unwrap();

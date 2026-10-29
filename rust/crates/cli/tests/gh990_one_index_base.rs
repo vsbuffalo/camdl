@@ -24,6 +24,16 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
+/// (gh#896). A path that does not exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
+    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -298,7 +308,7 @@ fn a_pgas_leaf_numbers_its_chains_from_zero_on_every_surface() {
     ok(&camdl(dir, &["fit", "predict", &seg_s, "--horizon", "free_forward",
         "--exclude-chains", "1"]), "predict --exclude-chains 1");
     let prov: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(seg.join("predictive-excl1.json")).unwrap()).unwrap();
+        &std::fs::read_to_string(predict_out(&seg).join("predictive-excl1.json")).unwrap()).unwrap();
     assert_eq!(prov["chain_selection"]["excluded"], serde_json::json!([1]));
     assert_eq!(prov["chain_selection"]["kept"], serde_json::json!([0]));
     assert_eq!(prov["chain_selection"]["n_total"], serde_json::json!(2));
@@ -315,7 +325,7 @@ fn a_pgas_leaf_numbers_its_chains_from_zero_on_every_surface() {
     // `--by-chain`: the `chain` column carries 0, 1 and `all`.
     ok(&camdl(dir, &["fit", "predict", &seg_s, "--horizon", "free_forward", "--by-chain"]),
         "predict --by-chain");
-    let pred = std::fs::read_to_string(seg.join("predictive").join("weekly_cases.tsv")).unwrap();
+    let pred = std::fs::read_to_string(predict_out(&seg).join("predictive").join("weekly_cases.tsv")).unwrap();
     let mut lines = pred.lines();
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
     assert_eq!(header[0], "chain", "{header:?}");

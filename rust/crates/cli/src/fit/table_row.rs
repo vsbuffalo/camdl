@@ -33,7 +33,11 @@ use crate::fit::method_result::{
 /// left the plural key spelling a word the config, the store levels and
 /// the CLI no longer use, and it is machine-read.
 pub const SCHEMA_NAME: &str = "table_row";
-pub const SCHEMA_VERSION: u32 = 2;
+///
+/// v3 (gh#896): `run_id`, the run the row reports. `fit predict` writes each
+/// run's quantities under `<segment>/predict/<run id>/`, so a row's
+/// `quantities` are read from its run's directory, not the folder's.
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct TableRowSchema {
@@ -80,6 +84,9 @@ pub struct TableRow {
     /// a `run.json` on disk. `methods` is what ran; this is the one whose
     /// numbers the rest of the row reports.
     pub method: String,
+    /// The terminal run's `run_id` (full hex): the one run whose numbers the
+    /// row reports, and whose predictions directory `quantities` come from.
+    pub run_id: String,
     pub config_diff_from_baseline: ConfigDiff,
     /// Method-uniform convergence boolean (proposal §3, `converged`):
     /// IF2 → `gate_verdict == Pass`; PGAS / PMMH → `max_rhat < 1.05`.
@@ -138,7 +145,7 @@ pub struct TableRow {
     /// Populated only when `fit table --quantity <NAME>` is requested:
     /// each entry is the posterior median (q50 of the `fitted` row)
     /// of a scalar quantity from the model's `quantities {}` block,
-    /// read from `<fit_dir>/quantities/<NAME>.tsv` (derived on demand
+    /// read from `<fit_dir>/predict/<run id>/quantities/<NAME>.tsv` (derived on demand
     /// via `fit predict` when absent). An uncomputable quantity for a
     /// row is simply absent from the map. A field addition is
     /// non-breaking under schema v1 (proposal §3); the
@@ -238,6 +245,7 @@ pub fn build_row(
         model_identity: view.model_identity.clone(),
         methods: completed_methods,
         method,
+        run_id: terminal.stage.run_id.clone(),
         config_diff_from_baseline: config_diff,
         converged: mview.converged,
         gate_verdict: mview.gate_verdict,
@@ -577,12 +585,13 @@ mod tests {
 
     /// The discriminator every consumer keys on. v2 is the `stages` →
     /// `methods` rename (gh#890): a key that changes name under an unchanged
-    /// version is the vintage problem gh#728 describes, one file later.
+    /// version is the vintage problem gh#728 describes, one file later. v3
+    /// adds `run_id` (gh#896).
     #[test]
-    fn schema_pin_is_v2() {
+    fn schema_pin_is_v3() {
         let s = TableRowSchema::current();
         assert_eq!(s.name, "table_row");
-        assert_eq!(s.version, 2);
+        assert_eq!(s.version, 3);
     }
 
     #[test]

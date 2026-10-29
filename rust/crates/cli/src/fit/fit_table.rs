@@ -128,21 +128,29 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
             },
             None => None,
         };
-        let dir_by_hash: std::collections::HashMap<&str, &std::path::Path> = pre_filtered
-            .iter()
-            .map(|e| (e.view.fit_hash.as_str(), e.fit_dir.as_path()))
-            .collect();
+        // gh#896: a row reports one run, and `fit predict` writes that run's
+        // quantities under `<segment>/predict/<run id>/`; so each cell is read
+        // from, and derived by predicting, the row's own run.
+        let run_by_id: std::collections::HashMap<&str, (&std::path::Path, &std::path::Path)> =
+            pre_filtered
+                .iter()
+                .flat_map(|e| {
+                    e.view.stages.iter().map(move |st| {
+                        (st.run_id.as_str(), (e.fit_dir.as_path(), st.stage_dir.as_path()))
+                    })
+                })
+                .collect();
         for r in &mut rows {
-            let Some(fit_dir) = dir_by_hash.get(r.fit_hash.as_str()).copied() else {
+            let Some((fit_dir, leaf)) = run_by_id.get(r.run_id.as_str()).copied() else {
                 continue;
             };
-            // Does this fit carry a posterior cloud? Resolved once per fit
+            // Does this run carry a posterior cloud? Resolved once per row
             // through the artifact authority. "No cloud" renders `—`; any
             // other failure — a leaf refused for counting its chains from 1
             // (gh#990), whose `quantities-excl<ids>/` addresses and cloud
             // would be read under the wrong chain numbers — fails the table.
             let has_cloud = match crate::posterior_draws::resolve_posterior_draws(
-                &fit_dir.to_string_lossy(), None,
+                &leaf.to_string_lossy(), None,
             ) {
                 Ok(_) => true,
                 Err(crate::posterior_draws::PosteriorDrawsError::NoPosterior(_)) => false,
@@ -153,7 +161,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
             };
             for name in &args.quantities {
                 if let Some(median) =
-                    resolve_quantity_median(fit_dir, name, selection.as_ref(), has_cloud)
+                    resolve_quantity_median(fit_dir, leaf, &r.run_id, name, selection.as_ref(), has_cloud)
                 {
                     r.quantities.insert(name.clone(), median);
                 }
@@ -421,7 +429,7 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
 ///      return the `fitted` row's `q50`.
 ///   2. **Derive on demand**: else, if the fit carries a posterior
 ///      cloud (`has_cloud`, from `resolve_posterior_draws`), spawn `camdl fit predict
-///      <fit_dir> --horizon free_forward` (the single source of truth
+///      <the row's leaf> --horizon free_forward` (the single source of truth
 ///      for the simulate-per-draw + quantity-evaluation loop) and
 ///      re-read the file.
 ///   3. **Not derivable** (optimizer fit, no draws): `None`.
@@ -436,6 +444,8 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
 /// cell renders `—` and never fails the whole table.
 fn resolve_quantity_median(
     fit_dir: &std::path::Path,
+    leaf: &std::path::Path,
+    run_id: &str,
     name: &str,
     selection: Option<&crate::chain_selection::ChainSelection>,
     has_cloud: bool,
@@ -447,7 +457,9 @@ fn resolve_quantity_median(
     // silently replaced every listed fit's pooled quantities with a chain-subset
     // one, and a second `--exclude-chains` replaced that.
     let sub = crate::chain_selection::artifact_name("quantities", selection);
-    let tsv = fit_dir.join(&sub).join(format!("{name}.tsv"));
+    let tsv = crate::fit::fit_view::predictions_dir(fit_dir, run_id)
+        .join(&sub)
+        .join(format!("{name}.tsv"));
 
     // (1) Fast path: an already-computed quantities TSV at that address. It was
     // banded over exactly this cloud, so it answers this cell.
@@ -470,7 +482,7 @@ fn resolve_quantity_median(
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("fit")
         .arg("predict")
-        .arg(fit_dir)
+        .arg(leaf)
         .arg("--horizon")
         .arg("free_forward")
         .env("CAMDL_SKIP_VERSION_CHECK", "1");
@@ -796,6 +808,7 @@ mod tests {
             model_identity: "mid".into(),
             methods: vec!["pgas".into()],
             method: "pgas".into(),
+            run_id: "ab".repeat(32),
             config_diff_from_baseline: super::super::config_diff::ConfigDiff::identity(""),
             converged: true,
             gate_verdict: "n/a".into(),
@@ -881,7 +894,7 @@ mod tests {
             "and so does the JSON key consumers parse: {json}");
         // The tag a consumer keys on to know which of the two contracts it is
         // holding. A rename under an unchanged version is the gh#728 problem.
-        assert_eq!(table_row::SCHEMA_VERSION, 2,
+        assert_eq!(table_row::SCHEMA_VERSION, 3,
             "a renamed key bumps the row schema version");
     }
 

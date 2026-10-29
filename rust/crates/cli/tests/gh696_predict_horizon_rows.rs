@@ -52,12 +52,15 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
         .expect("spawn camdl")
 }
 
-/// `results/fits/<stem>-<hash>/<sub>/<stream>.tsv`.
+/// `results/fits/<stem>-<hash>/predict/<run id>/<sub>/<stream>.tsv`.
 fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
     for e in std::fs::read_dir(root.join("fits")).ok()?.flatten() {
-        let p = e.path().join(sub).join(format!("{stream}.tsv"));
-        if p.is_file() {
-            return Some(p);
+        // gh#896: `fit predict` writes under `<segment>/predict/<run id>/`.
+        for run in std::fs::read_dir(e.path().join("predict")).into_iter().flatten().flatten() {
+            let p = run.path().join(sub).join(format!("{stream}.tsv"));
+            if p.is_file() {
+                return Some(p);
+            }
         }
     }
     None

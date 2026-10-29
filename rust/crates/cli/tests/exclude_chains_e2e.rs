@@ -14,6 +14,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
+/// (gh#896). A path that does not exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
+    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -306,14 +316,14 @@ fn exclude_outlier_chain_moves_bands_and_is_recorded() {
     // Full cloud (all 4 chains): free-forward predictive.
     let out = run(&bin, &tmp, &["fit", "predict", &seg_str, "--horizon", "free_forward"]);
     assert!(out.status.success(), "full predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    let full = std::fs::read_to_string(seg.join("predictive").join("weekly_cases.tsv")).unwrap();
+    let full = std::fs::read_to_string(predict_out(&seg).join("predictive").join("weekly_cases.tsv")).unwrap();
     let full_rows = free_forward_rows(&full);
     assert!(!full_rows.is_empty(), "full predictive has free-forward rows");
     // n_draws over the full cloud = all 120 draws (4 chains × 30).
     assert!(full_rows.iter().all(|r| r.n_draws == 120), "full cloud replays 120 draws: {full_rows:?}");
     // predictive.json for the full run has NO chain_selection.
     let full_json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(seg.join("predictive.json")).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(predict_out(&seg).join("predictive.json")).unwrap()).unwrap();
     assert!(
         full_json.get("chain_selection").is_none(),
         "a full-cloud predictive.json must not stamp chain_selection"
@@ -334,7 +344,7 @@ fn exclude_outlier_chain_moves_bands_and_is_recorded() {
     );
 
     let excl =
-        std::fs::read_to_string(seg.join("predictive-excl3").join("weekly_cases.tsv")).unwrap();
+        std::fs::read_to_string(predict_out(&seg).join("predictive-excl3").join("weekly_cases.tsv")).unwrap();
     let excl_rows = free_forward_rows(&excl);
     // n_draws dropped from 120 to 90 (chain 3's 30 draws gone).
     assert!(excl_rows.iter().all(|r| r.n_draws == 90), "excluded cloud replays 90 draws: {excl_rows:?}");
@@ -353,12 +363,12 @@ fn exclude_outlier_chain_moves_bands_and_is_recorded() {
     // its own address, so it can never replace the run's canonical predictive
     // (gh#795). Both the TSV and the manifest are still the full-cloud ones.
     assert_eq!(
-        std::fs::read_to_string(seg.join("predictive").join("weekly_cases.tsv")).unwrap(),
+        std::fs::read_to_string(predict_out(&seg).join("predictive").join("weekly_cases.tsv")).unwrap(),
         full,
         "the pooled predictive must not be overwritten by a chain-subset run"
     );
     let still_full: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(seg.join("predictive.json")).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(predict_out(&seg).join("predictive.json")).unwrap()).unwrap();
     assert!(
         still_full.get("chain_selection").is_none(),
         "…nor the pooled manifest"
@@ -366,7 +376,7 @@ fn exclude_outlier_chain_moves_bands_and_is_recorded() {
 
     // Provenance stamped: chain_selection = {excluded:[3], kept:[0,1,2], n_total:4}.
     let j: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(seg.join("predictive-excl3.json")).unwrap(),
+        &std::fs::read_to_string(predict_out(&seg).join("predictive-excl3.json")).unwrap(),
     )
     .unwrap();
     let cs = j.get("chain_selection").expect("chain-subset predictive.json stamps chain_selection");
@@ -398,7 +408,7 @@ fn exclude_well_mixed_chain_barely_moves_but_is_recorded() {
     );
     assert!(out.status.success(), "baseline exclude-3 failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let base_rows = free_forward_rows(
-        &std::fs::read_to_string(seg.join("predictive-excl3").join("weekly_cases.tsv")).unwrap(),
+        &std::fs::read_to_string(predict_out(&seg).join("predictive-excl3").join("weekly_cases.tsv")).unwrap(),
     );
     assert!(base_rows.iter().all(|r| r.n_draws == 90), "baseline keeps 3 tight chains (90 draws)");
 
@@ -410,7 +420,7 @@ fn exclude_well_mixed_chain_barely_moves_but_is_recorded() {
     );
     assert!(out.status.success(), "well-mixed exclude failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let neg_rows = free_forward_rows(
-        &std::fs::read_to_string(seg.join("predictive-excl1,3").join("weekly_cases.tsv")).unwrap(),
+        &std::fs::read_to_string(predict_out(&seg).join("predictive-excl1,3").join("weekly_cases.tsv")).unwrap(),
     );
     assert!(neg_rows.iter().all(|r| r.n_draws == 60), "two tight chains remain (60 draws)");
 
@@ -418,7 +428,7 @@ fn exclude_well_mixed_chain_barely_moves_but_is_recorded() {
     // selection has its OWN manifest, so the full-cloud run below cannot
     // overwrite it (gh#795).
     let j: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(seg.join("predictive-excl1,3.json")).unwrap(),
+        &std::fs::read_to_string(predict_out(&seg).join("predictive-excl1,3.json")).unwrap(),
     )
     .unwrap();
     let cs = j.get("chain_selection").expect("even a small-effect exclusion is stamped");
@@ -430,7 +440,7 @@ fn exclude_well_mixed_chain_barely_moves_but_is_recorded() {
     let out = run(&bin, &tmp, &["fit", "predict", &seg_str, "--horizon", "free_forward"]);
     assert!(out.status.success());
     let full_rows = free_forward_rows(
-        &std::fs::read_to_string(seg.join("predictive").join("weekly_cases.tsv")).unwrap(),
+        &std::fs::read_to_string(predict_out(&seg).join("predictive").join("weekly_cases.tsv")).unwrap(),
     );
 
     // Removing the OUTLIER (full → base) moves the q95 band a lot; removing a
@@ -593,7 +603,7 @@ fn predict_subset_recomputes_convergence_agreeing_with_summary() {
     let out = run(&bin, &tmp, &["fit", "predict", &seg_str, "--horizon", "free_forward"]);
     assert!(out.status.success(), "full predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let (full_rhat_s, full_ess_s) = free_forward_convergence_cells(
-        &std::fs::read_to_string(seg.join("predictive").join("weekly_cases.tsv")).unwrap(),
+        &std::fs::read_to_string(predict_out(&seg).join("predictive").join("weekly_cases.tsv")).unwrap(),
     );
     let full_rhat: f64 = full_rhat_s.parse().unwrap();
     let full_ess: f64 = full_ess_s.parse().unwrap();
@@ -615,7 +625,7 @@ fn predict_subset_recomputes_convergence_agreeing_with_summary() {
     );
     assert!(out.status.success(), "excluded predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let (excl_rhat_s, excl_ess_s) = free_forward_convergence_cells(
-        &std::fs::read_to_string(seg.join("predictive-excl3").join("weekly_cases.tsv")).unwrap(),
+        &std::fs::read_to_string(predict_out(&seg).join("predictive-excl3").join("weekly_cases.tsv")).unwrap(),
     );
     let excl_rhat: f64 = excl_rhat_s.parse().expect("recomputed rhat_max cell parses");
     let excl_ess: f64 = excl_ess_s.parse().expect("recomputed ess_min cell parses");

@@ -24,6 +24,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
+/// (gh#896). A path that does not exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
+    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_camdl"))
 }
@@ -182,7 +192,7 @@ impl Fit {
 
     /// The `quantities*` addresses the fit segment currently holds, sorted.
     fn addresses(&self) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(&self.segment)
+        let mut names: Vec<String> = std::fs::read_dir(predict_out(&self.segment))
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -239,7 +249,7 @@ fn a_vocabulary_applied_to_a_fit_produces_its_table_and_not_the_models() {
         dir.starts_with("quantities-"),
         "a supplied vocabulary writes a keyed address, got {dir}"
     );
-    let qdir = f.segment.join(dir);
+    let qdir = predict_out(&f.segment).join(dir);
     assert!(qdir.join("attack_rate.tsv").exists(), "the vocabulary's quantity is emitted");
     assert!(
         qdir.join("r_zero.tsv").exists(),
@@ -251,7 +261,7 @@ fn a_vocabulary_applied_to_a_fit_produces_its_table_and_not_the_models() {
         "the model's own quantities block must NOT be consulted"
     );
     assert!(
-        !f.segment.join("quantities").join("model_peak.tsv").exists(),
+        !predict_out(&f.segment).join("quantities").join("model_peak.tsv").exists(),
         "…and this predict must not have written the model's block anywhere"
     );
 }
@@ -263,7 +273,7 @@ fn without_a_vocabulary_the_models_own_block_is_reported() {
     let f = fitted("control");
     assert_ok(&f.predict(None), "fit predict");
     assert_eq!(f.addresses(), vec!["quantities", "quantities.json"]);
-    assert!(f.segment.join("quantities").join("model_peak.tsv").exists());
+    assert!(predict_out(&f.segment).join("quantities").join("model_peak.tsv").exists());
 }
 
 // ── The vocabulary keys the artifact ────────────────────────────────────────
@@ -298,9 +308,9 @@ fn two_vocabularies_on_one_fit_are_two_addresses_and_one_is_one() {
         .iter()
         .find(|n| !n.ends_with(".json") && *n != dir_a)
         .expect("B's own directory");
-    assert!(f.segment.join(dir_a).join("attack_rate.tsv").exists());
-    assert!(f.segment.join(dir_b).join("peak_time.tsv").exists());
-    assert!(!f.segment.join(dir_a).join("peak_time.tsv").exists());
+    assert!(predict_out(&f.segment).join(dir_a).join("attack_rate.tsv").exists());
+    assert!(predict_out(&f.segment).join(dir_b).join("peak_time.tsv").exists());
+    assert!(!predict_out(&f.segment).join(dir_a).join("peak_time.tsv").exists());
 }
 
 #[test]
@@ -358,7 +368,7 @@ fn the_manifest_records_the_vocabulary() {
         .find(|n| n.ends_with(".json"))
         .expect("a manifest");
     let m: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(f.segment.join(&name)).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(predict_out(&f.segment).join(&name)).unwrap()).unwrap();
     assert!(m["vocabulary"]["file"].as_str().unwrap().ends_with("va.camdl"), "{m}");
     assert_eq!(m["vocabulary"]["sha256"].as_str().unwrap().len(), 64);
 }

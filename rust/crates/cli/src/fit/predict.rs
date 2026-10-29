@@ -1366,6 +1366,14 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     // The run the draws come from: the one the handle named, else the folder's.
     let run_dir = resolved.run_dir().to_path_buf();
     let crate::fit::handle::ResolvedFit { segment, config, .. } = resolved;
+    // gh#896: everything predict writes goes under a directory keyed by the
+    // run it read, so a second run's predict cannot overwrite this one's and
+    // every file is attributable to one run.
+    let run_id: String = crate::fit::fit_view::leaf_run_id(&run_dir)
+        .ok_or_else(|| format!("{} is not a fit run (no run.json)", run_dir.display()))?;
+    let out_dir = crate::fit::fit_view::predictions_dir(&segment, &run_id);
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
     // The problem half is all a replay reads: model, data, fixed, estimate.
     let config = config.problem;
 
@@ -2585,7 +2593,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
         }));
 
         let pred_tsv = render_predictive_tsv_sections(&index_dims, &sections);
-        written.push(write_tsv(&segment, &predictive_sub, source, &pred_tsv)?);
+        written.push(write_tsv(&out_dir, &predictive_sub, source, &pred_tsv)?);
     }
     // `predictive.json`: the per-stream join contract beside the predictive
     // TSVs — a sibling of `quantities.json`, NOT in the run_id-keyed CAS leaf
@@ -2610,6 +2618,8 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             //     and the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred`
             //     channels join them.
             "schema": "camdl.predictive/v3",
+            // gh#896: the run whose draws these bands replay.
+            "run_id": run_id,
             "calendar": calendar.to_json(),
             "streams": predictive_manifest_entries,
         });
@@ -2621,7 +2631,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
         if let Some(info) = posterior.selection() {
             manifest["chain_selection"] = info.to_json();
         }
-        let path = segment.join(format!("{predictive_sub}.json"));
+        let path = out_dir.join(format!("{predictive_sub}.json"));
         let text = serde_json::to_string_pretty(&manifest)
             .map_err(|e| format!("serializing predictive manifest: {e}"))?;
         std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
@@ -2635,7 +2645,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     let mut observed_manifest_entries: Vec<serde_json::Value> = Vec::new();
     for (source, index_dims, rows) in observed_by_stream(&leaves, schema.as_ref()) {
         let obs_tsv = render_observed_tsv(&index_dims, &rows);
-        written.push(write_tsv(&segment, "observed", &source, &obs_tsv)?);
+        written.push(write_tsv(&out_dir, "observed", &source, &obs_tsv)?);
         let file = format!("observed/{source}.tsv");
         let mut coordinates: Vec<String> = vec!["time".to_string()];
         coordinates.extend(index_dims.iter().cloned());
@@ -2649,10 +2659,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     if !observed_manifest_entries.is_empty() {
         let manifest = serde_json::json!({
             "schema": "camdl.observed/v1",
+            "run_id": run_id,
             "calendar": calendar.to_json(),
             "streams": observed_manifest_entries,
         });
-        let path = segment.join("observed.json");
+        let path = out_dir.join("observed.json");
         let text = serde_json::to_string_pretty(&manifest)
             .map_err(|e| format!("serializing observed manifest: {e}"))?;
         std::fs::write(&path, text)
@@ -2679,12 +2690,12 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
         selection.as_ref(),
     );
     for (name, content) in &quantity_outputs {
-        written.push(write_tsv(&segment, &quantities_sub, name, content)?);
+        written.push(write_tsv(&out_dir, &quantities_sub, name, content)?);
     }
     if let Some(manifest) = &quantity_manifest {
         let manifest =
             crate::quantities_file::stamp_provenance(manifest, vocabulary.as_ref())?;
-        let path = segment.join(format!("{quantities_sub}.json"));
+        let path = out_dir.join(format!("{quantities_sub}.json"));
         std::fs::write(&path, &manifest)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         written.push(path);
@@ -2700,7 +2711,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     // describes, never over a chain the manifest says was dropped (gh#695).
     if !model.contrasts.is_empty() {
         let paths = crate::fit::contrasts::emit_contrasts(
-            &segment,
+            &out_dir,
             &run_dir,
             None,
             selection.as_ref(),
@@ -2716,7 +2727,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     // the predictive is (gh#795) — a subset predictive is a different object,
     // and so is the record of what failed while producing it.
     written.push(crate::fit::failures::write_report(
-        &segment,
+        &out_dir,
         &crate::chain_selection::artifact_name("report", selection.as_ref()),
         &failures,
     )?);
