@@ -1,6 +1,6 @@
 ---
 date: 2026-10-29
-status: proposed — built on the maintainer decisions of 2026-10-29 listed in §1; D1–D15 (§14) are decided; §15 lists eight items pending the maintainer
+status: proposed — built on the maintainer decisions of 2026-10-29 listed in §1; D1–D16 (§14) are decided; §15 lists six items pending the maintainer; the IF2 default constants are provisional until the transforms benchmark is decided (§4.4)
 area: fit config / run identity / resolved problem and execution plan / IF2, PMMH and MH step sizes / profile CLI
 issues: gh#1001
 supersedes: 2026-10-29-support-keyed-transforms.md D9 and its commit series (ii) (its §11 commits 11–12)
@@ -492,6 +492,16 @@ The rules, in order:
 3. A written `sd` is used as written.
 4. An omitted name, or an entry with no `sd`, takes `default_if2_step()` under
    IF2 and `default_mh_step()` under PMMH and MH (_branch_ `types.rs:141-160`).
+   The MH constant is 0.25 in z, for PMMH, MH and PGAS's MH-within-Gibbs
+   (`types.rs:83`). The IF2 constants in the code are 2/3 on `Interval` and 0.2
+   on `LogInterval` and the half-bounded maps (`types.rs:66-74`); they are
+   provisional. The transforms benchmark
+   (`docs/dev/notes/2026-10-29-support-keyed-transforms-benchmark.md`,
+   "Interpretation") found smaller steps better on every family and, under its
+   rule, points to 1/20 on `Interval`, 1/50 on the half-bounded maps, and 1/20
+   or 1/50 on `LogInterval`; the choice is the maintainer's under that proposal.
+   Every default quoted in this document is the current constant and moves with
+   that decision.
 5. The identity map has no default: `NoDefault`, naming the table and the kind
    (an undeclared `real` or `instant`), and saying that on this map z is θ
    itself, so the value to write is a natural-scale SD.
@@ -979,8 +989,8 @@ error: [estimate] sets step sizes, which are settings of the method:
   so away from the start the natural-scale step differs.
 
   Leaving a parameter out uses the default step instead, which is a
-  different step. The default, 0.2 in z for these log-interval maps, is
-  at the start:  beta 0.0372   gamma 0.0189   I0 2.30   (natural scale)
+  different step. The default, 0.2 in z for these log-interval maps, gives
+  at the start:  beta 0.037 (was 0.02)   gamma 0.019 (was 0.01)   I0 2.30 (was 2)
   For I0 with the default step write `I0 = { initial_value = true }`.
   See `camdl docs fit-toml`, "Step sizes".
 ```
@@ -991,11 +1001,37 @@ The values come from the `LogInterval` row of §7.3: β on [0.05, 1] at 0.25 has
 10 has 11.513, giving 0.1737 and 2.30 (verified by evaluating the formula; not
 produced by camdl).
 
-### 7.5 The stored `fit_state.toml`
+### 7.5 An old `fit_state.toml` is refused as an input and readable for inspection
 
-`[rw_sd]` is deleted from `FitState` (§3.5); old files still load. The
-initial-value list is renamed with the flag (§15 (f)); what happens to an old
-file that carries `perturb_only_at_t0_params` is §15 (d).
+`[rw_sd]` is deleted from `FitState` (§3.5); old files that carry it still load.
+The initial-value list is renamed with the flag (§15 (f)). A `fit_state.toml`
+whose schema this release does not support, which includes one that carries
+`perturb_only_at_t0_params`, is handled by its use (D16, maintainer decision):
+
+- **As an input to a new computation it is refused**: `fit run --resume`, a
+  `from_mle` or `from_posterior` starts source, `profile --fit` or
+  `--fixed-file` from the fit. The error names the producer version
+  (`FitState.camdl_version`, `state.rs:30-32`) and the schema version it was
+  written under, and says the fit must be run again.
+- **Read-only commands inspect it with one notice**: `fit summary` and
+  `fit table` read it, and the notice names the version and the unsupported
+  keys. An old file's initial-value list is read under its old key for this
+  purpose, so `fit summary` applies the chain-agreement exemption to the
+  parameters the run exempted.
+- **Listing commands never abort**: `fit table` reports an unreadable state as
+  an error in that fit's row and lists the rest (it already matches on the load
+  result, `fit_summary.rs:618`, `:2857`).
+
+`FitState::load` therefore takes the use: `FitState::load_input(dir)` refuses,
+and `FitState::load_for_inspection(dir)` returns the state with its notice. The
+precedent for a refusal inside `load` is `chain_index::refuse_one_based_layout`
+(`state.rs:190`).
+
+Tests: a pre-release IF2 state with `perturb_only_at_t0_params` is refused as a
+`from_mle` source, naming the version; `fit summary` on it exempts the listed
+IVPs and prints the notice once; `fit table` over a store with one such fit and
+one unreadable state lists both, the second as a row error. Each is red when
+`load_input` and `load_for_inspection` are swapped.
 
 ## 8. `profile` declares its estimated set with `--estimate` and its steps with `--perturbation`
 
@@ -1030,13 +1066,18 @@ The interim, until roles Stage 3 lands, is §15 (c).
 | what                                                | where, and how many                                                                                                                                                                                                                                                                                  |
 | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `rw_sd` / `perturb_only_at_t0` in a live fit config | this repository: no committed `.toml` config sets either (`git ls-files '*.toml' \| xargs grep -l rw_sd` → one comment, `tests/fixtures/polio_afp_es/fit.toml:42`); 28 occurrences in inline test configs in 14 Rust files (`git grep -c -E 'rw_sd *= *[0-9]\|perturb_only_at_t0 *= *true' -- rust`) |
-| the same, in sibling repositories (tracked files)   | `camdl-book`: 17 (`rw_sd =` or `rw_sd=`) in `guide/fitting/fits/poisson_free_ic.toml` and five `.qmd` pages; `camdl-vignettes`: 77 in 18 files outside `results/`                                                                                                                                    |
-| `profile --rw-sd`                                   | 35 occurrences in 20 test files (`git grep -c -- '"--rw-sd"' -- rust`); `camdl-book` 14, `camdl-vignettes` 14, `camdl-garki` 3                                                                                                                                                                       |
+| the same, in sibling repositories (tracked files)   | `camdl-book`: 17 `rw_sd =` in 2 files (`guide/fitting/fits/poisson_free_ic.toml`, `reference/inference-spec.qmd`); `camdl-vignettes`: 77 in 12 files; `ebola-bdbv-camdl`, `camdl-garki`: none                                                                                                        |
+| `profile --rw-sd`                                   | 35 occurrences in 20 test files (`git grep -c -- '"--rw-sd"' -- rust`); `camdl-book` in 5 files; `camdl-vignettes` 14 in 6 files, 7 of them `--rw-sd auto`, already refused by roles D5; `camdl-garki` 3 in 1 file                                                                                   |
 
-Sibling counts:
-`git ls-files | xargs grep -h -o -E 'rw_sd *=|--rw-sd|perturb_only_at_t0'` in
-each repository, excluding `_freeze/` and `results/`. Stored fits are not
-refused (§7.2).
+Sibling counts are from
+`git ls-files | xargs grep -h -o -E 'rw_sd *=|rw_sd=|--rw-sd'` (and `-l` for
+files) in each repository, excluding `_freeze/` and `results/`. The sibling
+TOMLs that carry `rw_sd` use the schema before `[method]` (`[stages.scout]` in
+the book, `[scout]` in the vignettes; `grep -l '^\[method\]'` over the
+vignettes' rw_sd-carrying TOMLs → none), so they already fail to load on main
+(`detect_legacy_stages`, `config_v2.rs:2289`). What this change newly breaks in
+the sibling repositories is mainly their `--rw-sd` command lines. Stored fits
+are not refused (§7.2).
 
 ### 9.2 Code and documents that change
 
@@ -1070,9 +1111,11 @@ refused (§7.2).
 > beta = 0.5
 > ```
 >
-> A parameter you leave out takes a default chosen from its domain: under IF2
-> 2/3 on an interval map and 0.2 on a log-interval or half-bounded map; under
-> PMMH and MH 0.25. An unbounded `real` or `instant` has no default.
+> A parameter you leave out takes a default chosen from its domain. Under IF2
+> the defaults are provisional: currently 0.2 in z on a log-interval or
+> one-sided map and 2/3 on an interval (logit-type) map. Under PMMH, MH and
+> PGAS's MH-within-Gibbs the default is 0.25. An unbounded `real` or `instant`
+> has no default.
 >
 > **What a step of s in z means:**
 >
@@ -1089,14 +1132,19 @@ refused (§7.2).
 > bounds, check the natural-scale step the launch table prints.
 >
 > **Porting from pomp.** pomp's `mif2` applies `rw.sd` on its transformed
-> (estimation) scale. Where camdl's map is the same coordinate, copy the number:
-> `log` on a positive parameter with no upper bound is camdl's `LowerBounded`
-> with lo = 0, `logit` on [0, 1] is camdl's `Interval` on [0, 1], and no
-> transformation is `Identity`. Otherwise convert through the natural scale at
-> your start: natural step = s × |dθ/d(pomp coordinate)| (θ₀·s for `log`), then
-> sd_z = natural step / |dθ/dz| from the conversion table. pomp's `ivp(s)` is
-> `{ sd = s, initial_value = true }`. pomp's `pmcmc` proposes on the natural
-> scale, so a `mvn_diag_rw` SD converts the same way into `[method.proposal]`.
+> (estimation) scale. That scale equals camdl's z only where the maps coincide:
+> pomp `log` on an unboxed rate (camdl `LowerBounded` at 0), pomp `logit` on an
+> unboxed probability (camdl `Interval` on [0, 1]), and no transformation
+> (`Identity`). There, copy the number. A boxed parameter has a different z. For
+> pomp `log` on a camdl `LogInterval` [lo, hi], divide by L·s(1 − s), with L =
+> ln(hi/lo) and s = ln(θ₀/lo)/L at your start θ₀. Example: β in [0.05, 1] at
+> 0.25 has L = 3.00 and s = 0.537, so L·s(1 − s) = 0.745, and pomp's
+> `rw.sd = 0.02` becomes `beta = 0.027`. In general, convert through the natural
+> scale at θ₀: natural step = s_pomp × |dθ/d(pomp coordinate)| (θ₀·s_pomp for
+> `log`), then sd_z = natural step / |dθ/dz| from the conversion table (§7.3).
+> pomp's `ivp(s)` is `{ sd = s, initial_value = true }`. pomp's `pmcmc` proposes
+> on the natural scale, so a `mvn_diag_rw` SD divides by |dθ/dz| directly into
+> `[method.proposal]`.
 
 ### 9.4 Release notes
 
@@ -1433,6 +1481,9 @@ result.
 refused. Under PMMH and MH a member is an ordinary proposal entry with
 `default_mh_step` on its own map (§4.4 rules 7–8).
 
+**D16 — An unsupported old `fit_state.toml` is refused as an input and read with
+a notice for inspection** (maintainer decision; §7.5).
+
 **D15 — `beta = {}` is refused.** An empty entry has no SD and no flag, so it
 states nothing that omitting the line does not.
 
@@ -1452,17 +1503,6 @@ CLI-over-file precedence), or the two are refused together. Waiting removes the
 interim and couples the release to Stage 3. Recommendation: wait, if Stage 3 is
 close; otherwise `--rw-sd` overrides per name, with the launch table naming each
 parameter's source. Leaning.
-
-**(d) A stored `fit_state.toml` carrying `perturb_only_at_t0_params`.** The list
-is renamed with the flag (f). The options: refuse such a file at
-`FitState::load` (precedent `chain_index::refuse_one_based_layout`,
-`state.rs:190`), which makes old IVP fits unreadable by `fit summary`; keep the
-stored key's old name, which leaves the retired vocabulary in new records; or
-read the old key as the new list with one notice, as §7.2 does for stored
-configs. Loading it silently as an empty list is not an option: `fit summary`
-would then apply the chain-agreement threshold to the IVPs and report a failure
-the run did not have. Recommendation: read with one notice, for consistency with
-§7.2. Leaning.
 
 **(e) Whether `[method.proposal]` is the proposal SD itself (no factor of
 five).** Today PMMH's initial proposal is five times `rw_sd`, because one number
