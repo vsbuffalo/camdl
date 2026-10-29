@@ -606,7 +606,8 @@ impl DiagnosticKind {
             Self::ParamNearBound { param, value, bound, bound_type } =>
                 format!("'{}' = {} is near {} bound {} and may be on it. IF2 cannot \
                          place an estimate exactly on a bound; to test whether the maximum \
-                         is on it, profile '{}' or refit with nl-bobyqa, which can.",
+                         is on it, profile '{}', or refit with nl-sbplx (ODE backend only), \
+                         which can.",
                     param, format_start_value(*value), bound_type, format_start_value(*bound),
                     param),
             Self::ProfileCIUnbounded { param, direction } =>
@@ -1215,8 +1216,9 @@ mod tests {
         assert!(!r.contains("reduced") && !r.contains("logit position"), "{r}");
     }
 
-    /// A near-bound report shows a small estimate, not `0.0000`: on `[0, ∞)`
-    /// the report fires precisely when θ̂ is small.
+    /// A near-bound report shows a small estimate, not `0.0000` (a box
+    /// [0, 1e-3] reports one below 1e-5), and names the methods that can
+    /// place an estimate on the bound (proposal D10).
     #[test]
     fn a_small_near_bound_value_is_shown() {
         let d = DiagnosticKind::ParamNearBound {
@@ -1224,6 +1226,8 @@ mod tests {
         };
         let r = d.render();
         assert!(r.contains("'c' = 3.2000e-6") && r.contains("bound 0.0000"), "{r}");
+        assert!(r.contains("profile 'c', or refit with nl-sbplx (ODE backend only)"), "{r}");
+        assert!(!r.contains("bobyqa"), "{r}");
     }
 
     /// A rank-normalized R̂ is `+∞` when every chain sat at its own single
