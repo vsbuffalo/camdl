@@ -59,8 +59,11 @@ accepted to rejected. The design is
 (`fit_config_blob_hash`, `cas.rs:433-435`). The value resolver draws starts with
 the seed (`resolve_fit_parameters(fit,
 seed)`, `runner.rs:171-174`, draw at
-`:245-265`). The step keys are moved by method-scoped-settings; `start` is moved
-by no proposal yet.
+`:245-265`). Branch `docs/method-scoped-settings` (`5363e7be`) moves both out of
+the problem: the step keys into `[method]` tables (its §4), and `start` out of
+the fit-level digest through `Problem::identity_view()`, with the method level
+hashing the resolved starts (its §5.2, a coordinated amendment to
+parameter-roles).
 
 **I2. An engine receives one validated plan, with nothing for other methods.**
 _Violated today._ `FitRunConfig::build` takes IF2's `n_iterations`, `cooling`
