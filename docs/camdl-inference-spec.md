@@ -176,9 +176,12 @@ knowledge constrains the plausible region.
    `[lo, hi]` with lo > 0 keeps log geometry in its interior. No transform
    clamps: a finite end is z = ±∞, so no target has a wall and a sampler near a
    bound sees the log-Jacobian's tail rather than a cliff. A start exactly on an
-   end has no finite z and is moved inward (to σ(z) = 10⁻¹⁰ of the width, z ≈
-   ±23.03, or θ = lo + 10⁻¹⁰), with one notice per parameter. There is no
-   `transform` override.
+   end has no finite z and is moved inward, with one notice per parameter (by
+   the transforms' `EDGE_START_EPS`, ε = 10⁻¹⁰): on the interval map to σ(z) =
+   ε, z ≈ ±23.03, which is ε·(hi − lo) inside the end; on the log-interval map
+   to the same z, which is ε of ln(hi/lo) inside in ln θ, about lo·ln(hi/lo)·ε
+   inside lo; on the lower- and upper-bounded maps to θ = lo + ε or hi − ε, z =
+   ln ε. There is no `transform` override.
 
    The box is a hard constraint: the target the samplers draw from is the
    posterior truncated to it, and IF2 maximises the likelihood over it. Under

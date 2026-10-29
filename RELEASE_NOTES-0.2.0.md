@@ -124,10 +124,11 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   now 0). Posteriors are the same truncated posteriors, but sampling near a
   bound changes: fewer NUTS divergences, different PMMH and MH acceptance, and
   different IF2 paths on boxed rates. A start exactly on a bound is moved inward
-  (10⁻¹⁰ of the width) with a notice. The run record's `transform` tag takes
-  `identity`, `lower_bounded`, `upper_bounded`, `interval` or `log_interval`,
-  and loses `transform_from`; `search_from = "fallback"` is gone. Migration:
-  none.
+  with a notice: to 10⁻¹⁰ of the width inside it on the interval map, 10⁻¹⁰ of
+  ln(hi/lo) inside it in ln θ on the log-interval map, and 10⁻¹⁰ inside it on a
+  half-bounded one. The run record's `transform` tag takes `identity`,
+  `lower_bounded`, `upper_bounded`, `interval` or `log_interval`, and loses
+  `transform_from`; `search_from = "fallback"` is gone. Migration: none.
 - **A prior whose support is narrower than the search box is refused.**
   `log_normal`, `gamma`, `exponential` and `half_normal` need the box within
   `[0, ∞)`, `beta` within `[0, 1]`, `uniform` and `log_uniform` within their
