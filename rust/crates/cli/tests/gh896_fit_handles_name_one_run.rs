@@ -239,3 +239,32 @@ fn summary_of_a_folder_with_two_runs_of_one_method_lists_them() {
         p.ok(&["fit", "summary", &leaf.to_string_lossy()]);
     }
 }
+
+fn pgas(sweeps: u32) -> String {
+    format!(
+        "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 2\nparticles = 20\n\
+         sweeps = {sweeps}\nburn_in = 1\nthin = 1\nstarts = \"from_prior\""
+    )
+}
+
+/// `fit predict <leaf>` replays that run's draws. Two PGAS runs of one file
+/// differ in `sweeps`, so their draw counts tell which was read; a leaf
+/// directory used to be refused for having no `fit.meta.json` beside it.
+#[test]
+fn predict_of_a_leaf_reads_that_run() {
+    let p = Project::new();
+    p.config("post.toml", &pgas(4));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1"]);
+    let short = p.leaves();
+    p.config("post.toml", &pgas(7));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1"]);
+    let long: Vec<PathBuf> = p.leaves().into_iter().filter(|l| !short.contains(l)).collect();
+    assert_eq!((short.len(), long.len()), (1, 1), "premise: two runs");
+
+    // 2 chains × (sweeps − burn_in) retained draws.
+    for (leaf, draws) in [(&short[0], 6), (&long[0], 12)] {
+        let all = p.ok(&["fit", "predict", &leaf.to_string_lossy(), "--horizon", "free_forward"]);
+        assert!(all.contains(&format!("{draws} draws from")),
+            "{} holds {draws} draws:\n{all}", leaf.display());
+    }
+}
