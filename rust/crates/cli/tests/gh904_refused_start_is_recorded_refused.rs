@@ -16,8 +16,10 @@
 //! init was used") contradicted them.
 //!
 //! The fixture makes the refusal deterministic rather than probabilistic: the
-//! SEIR golden IR at `beta = 0.001` in a population of 1000 with one infective
-//! produces no infections over a week, so the negative-binomial mean
+//! SEIR golden IR at `beta = 0.0011` (just inside the box's lower end, since a
+//! start exactly on a bound is refused before the sampler runs) in a
+//! population of 1000 with one infective produces no infections over a week,
+//! so the negative-binomial mean
 //! `rho * projected` is exactly 0 while the data say 5000 — a value outside
 //! the family's support, so every particle scores `-inf` and the start is
 //! refused on its first and only attempt.
@@ -100,7 +102,7 @@ weekly_cases = "{data}"
 
 [estimate.beta]
 bounds = [0.001, 0.002]
-start  = 0.001
+start  = 0.0011
 prior  = {{ log_normal = {{ mu = -7.0, sigma = 0.5 }} }}
 
 [fixed]
