@@ -1526,10 +1526,10 @@ impl Formatter {
         // table` read, so the three cannot disagree about this fit.
         let assessed = crate::fit::gating::assess_if2(state, &gate);
 
-        // Â leg — over the structural parameters; a perturb_only_at_t0 Â is
-        // reported on its own line and not gated.
-        let (max_a, max_a_param) = assessed.worst_structural()
-            .map(|(n, a)| (*a, n.clone()))
+        // Â leg — over every estimated parameter, initial-state ones
+        // included; the dynamics-only sub-verdict is reported beside it.
+        let (max_a, max_a_param) = assessed.worst()
+            .map(|(n, a)| (a, n))
             .unwrap_or((0.0, "—".into()));
         let a_passes = assessed.a_passes();
         let a_glyph = if a_passes { self.ok("✓") } else { self.err("✗") };
@@ -1543,12 +1543,10 @@ impl Formatter {
                     assessed.unavailable.join(", ")))));
         }
         if !assessed.perturb_only_at_t0.is_empty() {
-            let listed: Vec<String> = assessed.perturb_only_at_t0.iter()
-                .map(|(n, a)| format!("{n} {a:.3}")).collect();
+            let dynamics = if assessed.dynamics_a_passes(&gate) { "✓" } else { "✗" };
             s.push_str(&format!(
                 "    {}\n",
-                self.dim(&format!("perturb_only_at_t0, reported not gated: Â {}",
-                    listed.join(", ")))));
+                self.dim(&format!("dynamics only (without perturb_only_at_t0): {dynamics}"))));
         }
 
         // Decibans leg
@@ -3042,8 +3040,8 @@ fn if2_stage_report(
     // The one IF2 measurement the text block, `fit table` and the source
     // check also read (`gating::assess_if2`).
     let assessed = crate::fit::gating::assess_if2(state, &gate_cfg);
-    let max_a = assessed.worst_structural().map(|(_, a)| *a).unwrap_or(0.0);
-    let max_a_param = assessed.worst_structural().map(|(n, _)| n.clone());
+    let max_a = assessed.worst().map(|(_, a)| a).unwrap_or(0.0);
+    let max_a_param = assessed.worst().map(|(n, _)| n);
     let a_passes = assessed.a_passes();
     let delta_db = assessed.spread.map(|leg| leg.delta_db);
     let threshold_db = assessed.spread.map(|leg| leg.threshold_db);
@@ -4073,9 +4071,9 @@ mod tests {
     }
 
     /// The structured report (`--format json|md|latex`) carries the same IF2
-    /// verdict the text block and `fit table` do: a t0-only Â failure passes
-    /// the Â leg, and a leaf without clean-eval data still gets an overall
-    /// verdict, judged on Â alone, as `fit table`'s `gate_verdict` is.
+    /// verdict the text block and `fit table` do: an initial-state Â failure
+    /// fails the Â leg, and a leaf without clean-eval data still gets an
+    /// overall verdict, judged on Â alone, as `fit table`'s `gate_verdict` is.
     #[test]
     fn structured_gate_report_is_the_same_verdict_as_the_table() {
         let mut state = synthetic_fit_state();
@@ -4085,10 +4083,11 @@ mod tests {
         let report = if2_stage_report(
             "scout", "/nonexistent", &state, None, None, None, &CalendarContext::default());
         let gate = report.gate.expect("an IF2 report has a gate");
-        assert!(gate.a_passes, "the t0 Â is reported, not gated: {gate:?}");
-        assert_eq!(gate.max_a_param.as_deref(), Some("sigma"));
-        assert_eq!(gate.overall_pass, Some(true));
+        assert!(!gate.a_passes, "the initial-state Â is gated: {gate:?}");
+        assert_eq!(gate.max_a_param.as_deref(), Some("I0"));
+        assert_eq!(gate.overall_pass, Some(false));
 
+        state.tail_chain_agreement.remove("I0");
         state.chain_eval_logliks.clear();
         state.chain_eval_ses.clear();
         let report = if2_stage_report(
@@ -4127,19 +4126,19 @@ mod tests {
         assert!(block.contains("overall:"));
     }
 
-    /// The gate block reads the same assessment the source check does: a fit
-    /// whose only Â failure is a `perturb_only_at_t0` parameter passes the Â
-    /// leg, and the t0 Â is still printed, marked as not gated.
+    /// The gate block reads the same assessment the source check does: an
+    /// initial-state Â failure fails the Â leg and the overall verdict, and
+    /// the dynamics-only sub-verdict is reported beside it.
     #[test]
-    fn gate_block_reports_but_does_not_gate_a_t0_parameter() {
+    fn gate_block_gates_a_t0_parameter_and_reports_the_dynamics_sub_verdict() {
         let mut state = synthetic_fit_state();
         state.tail_chain_agreement =
             [("R0".to_string(), 1.001), ("sigma".to_string(), 1.002), ("I0".to_string(), 16.5)]
                 .into_iter().collect();
         let block = plain_formatter().gate_verdict_block(&state);
-        assert!(block.contains("max Â = 1.002 (sigma)"), "{block}");
-        assert!(block.contains("I0 16.500") && block.contains("not gated"), "{block}");
-        assert!(block.contains("PASS"), "{block}");
+        assert!(block.contains("max Â = 16.500 (I0)"), "{block}");
+        assert!(block.contains("dynamics only (without perturb_only_at_t0): ✓"), "{block}");
+        assert!(block.contains("FAIL"), "{block}");
     }
 
     #[test]

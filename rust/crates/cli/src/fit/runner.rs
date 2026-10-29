@@ -4641,17 +4641,16 @@ dt = 1.0
         std::fs::remove_dir_all(&dir2).ok();
     }
 
-    /// End-to-end pin for the scout-convergence exemption: a parameter
-    /// declared `perturb_only_at_t0` in fit.toml must land in
-    /// `FitState::perturb_only_at_t0_params` and be exempted from the
-    /// refine-stage Â check, even at an Â far above `a_thresh`.
+    /// End-to-end pin: a parameter declared `perturb_only_at_t0` in fit.toml
+    /// lands in `FitState::perturb_only_at_t0_params`, and is gated by the Â
+    /// check like any other estimate — an Â far above `a_thresh` fails it.
     ///
     /// The unit test in `gating.rs` starts from a hand-written FitState, so it
     /// cannot see a break in the TOML → `EstimatedParam` → FitState chain.
     /// This one spans that chain: it derives the name list with the same
     /// expression `fit/mod.rs` uses when it writes the scout's fit_state.
     #[test]
-    fn perturb_only_at_t0_param_is_exempt_from_the_scout_a_check() {
+    fn perturb_only_at_t0_param_is_recorded_and_gated_by_the_a_check() {
         use crate::fit::gating::{check_scout_convergence, ScoutGateVerdict};
         use crate::fit::state::FitState;
 
@@ -4698,19 +4697,11 @@ dt = 1.0
             pf_noise: None,
         };
         let gate = super::super::config_v2::GateConfig::default();
-        match check_scout_convergence(&mk_state(names.clone()), &gate) {
-            ScoutGateVerdict::Ok => {}
-            other => panic!(
-                "I0 is perturb_only_at_t0 and must be exempt from the Â check; \
-                 got {other:?}"),
+        for t0 in [names.clone(), vec![]] {
+            assert!(matches!(check_scout_convergence(&mk_state(t0.clone()), &gate),
+                             ScoutGateVerdict::Hard { .. }),
+                "Â = 16.5 on I0 fails the check (declared t0: {t0:?})");
         }
-
-        // Negative control: the SAME Â on a parameter that is NOT declared
-        // perturb_only_at_t0 must fail, so the pass above is the exemption
-        // doing work rather than the check being inert.
-        assert!(matches!(check_scout_convergence(&mk_state(vec![]), &gate),
-                         ScoutGateVerdict::Hard { .. }),
-            "Â = 16.5 on a structural param must fail the scout check");
 
         std::fs::remove_dir_all(&dir).ok();
     }

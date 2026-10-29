@@ -59,10 +59,10 @@ pub struct FitState {
     pub tail_chain_agreement: BTreeMap<String, f64>,
 
     /// Names of estimated parameters declared `perturb_only_at_t0 = true`.
-    /// Refine's Â check exempts these — an initial-state parameter is
-    /// expected to be harder to identify and shouldn't block the pipeline
-    /// when structural convergence is fine. Stored here (not re-derived
-    /// from fit.toml in the downstream) so the two can't drift.
+    /// Their Â is gated like every other estimate's; the names let a
+    /// renderer report the dynamics-only sub-verdict beside the overall one.
+    /// Stored here (not re-derived from fit.toml in the downstream) so the
+    /// two can't drift.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub perturb_only_at_t0_params: Vec<String>,
 

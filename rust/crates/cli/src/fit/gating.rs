@@ -114,14 +114,14 @@ pub enum ScoutGateVerdict {
     Ok,
     SoftWarn { param_agreement: Vec<(String, f64)> },
     Hard {
-        /// All structural params with Â ≥ `gate.a_thresh`. Named and
+        /// Every param (initial-state ones included) with Â ≥ `gate.a_thresh`. Named and
         /// sorted worst-first so the error message leads with the
         /// most obvious failure.
         failing: Vec<(String, f64)>,
-        /// Every structural Â, for the full diagnostic table.
+        /// Every dynamics (non-initial-state) Â, for the full diagnostic table.
         all_structural: Vec<(String, f64)>,
-        /// Â for the `perturb_only_at_t0` (initial-state) params —
-        /// reported but not gated.
+        /// Â for the `perturb_only_at_t0` (initial-state) params, gated like
+        /// the rest and listed apart.
         perturb_only_at_t0: Vec<(String, f64)>,
         /// Spread across scout's per-chain final logliks. A wide
         /// spread is the strongest signal of multi-modality.
@@ -171,23 +171,26 @@ pub enum SpreadChains {
 /// (`method_result::If2StageResult`) and `fit summary`'s gate block — reads
 /// this, so the three cannot disagree about one fit.
 ///
-/// The Â leg is taken over the *structural* parameters only. A
-/// `perturb_only_at_t0` parameter is an initial-state value IF2 perturbs once,
-/// at t = 0; its chains are expected to disagree more, so its Â is reported
-/// (`perturb_only_at_t0`) and not gated — the rule `FitState` documents for
-/// the field and the refusal message offers as a remedy.
+/// The overall verdict judges every estimated parameter, initial-state
+/// (`perturb_only_at_t0`) parameters included: an estimate whose chains
+/// disagree is not converged, whatever IF2's perturbation schedule for it.
+/// The two kinds are listed apart, so a renderer can also report the
+/// dynamics-only sub-verdict ([`If2Assessment::dynamics_a_passes`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct If2Assessment {
-    /// Finite Â of each structural (gated) parameter, worst first.
+    /// Finite Â of each dynamics (not `perturb_only_at_t0`) parameter, worst
+    /// first.
     pub structural: Vec<(String, f64)>,
-    /// Structural parameters whose Â is not finite — within-chain variance
+    /// Parameters (of either kind) whose Â is not finite — within-chain variance
     /// collapsed, so the statistic is unavailable there. Never a pass: the
     /// decibans leg does not stand in for it, because chains spread along a
     /// ridge can agree in log-likelihood while disagreeing in θ.
     pub unavailable: Vec<String>,
-    /// Â of each `perturb_only_at_t0` parameter, worst first: reported only.
+    /// Finite Â of each `perturb_only_at_t0` (initial-state) parameter,
+    /// worst first.
     pub perturb_only_at_t0: Vec<(String, f64)>,
-    /// The band of the worst structural Â (`Pass` when there is none).
+    /// The band of the worst finite Â over every parameter (`Pass` when there
+    /// is none).
     pub a_band: AgreementBand,
     /// The decibans leg, when the leaf carries clean-eval logliks and SEs for
     /// at least two chains; `None` otherwise (the leg is not run).
@@ -210,9 +213,24 @@ impl DecibansLeg {
 }
 
 impl If2Assessment {
-    /// No finite structural Â is in the fail band.
+    /// No finite Â, of any estimated parameter, is in the fail band.
     pub fn a_passes(&self) -> bool {
         self.a_band != AgreementBand::Fail
+    }
+
+    /// The dynamics-only sub-verdict: no finite Â of a non-initial-state
+    /// parameter fails. Reported beside the overall verdict, never instead
+    /// of it.
+    pub fn dynamics_a_passes(&self, gate: &GateConfig) -> bool {
+        self.structural.iter().all(|(_, a)| gate.a_band(*a) != AgreementBand::Fail)
+    }
+
+    /// Every finite Â, worst first: the parameters the verdict judges.
+    pub fn all_finite(&self) -> Vec<(String, f64)> {
+        let mut all: Vec<(String, f64)> =
+            self.structural.iter().chain(&self.perturb_only_at_t0).cloned().collect();
+        all.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        all
     }
 
     /// No finite Â failed, but some required Â is unavailable: the verdict
@@ -230,9 +248,9 @@ impl If2Assessment {
             && self.spread.map_or(true, |leg| leg.passes())
     }
 
-    /// The worst structural parameter and its Â.
-    pub fn worst_structural(&self) -> Option<&(String, f64)> {
-        self.structural.first()
+    /// The worst parameter, of either kind, and its Â.
+    pub fn worst(&self) -> Option<(String, f64)> {
+        self.all_finite().into_iter().next()
     }
 }
 
@@ -244,12 +262,12 @@ pub fn assess_if2(state: &FitState, gate: &GateConfig) -> If2Assessment {
     let mut unavailable: Vec<String> = Vec::new();
     let mut perturb_only_at_t0: Vec<(String, f64)> = Vec::new();
     for (name, &agreement) in &state.tail_chain_agreement {
-        if t0_set.contains(name.as_str()) {
-            perturb_only_at_t0.push((name.clone(), agreement));
-        } else if agreement.is_finite() {
-            structural.push((name.clone(), agreement));
-        } else {
+        if !agreement.is_finite() {
             unavailable.push(name.clone());
+        } else if t0_set.contains(name.as_str()) {
+            perturb_only_at_t0.push((name.clone(), agreement));
+        } else {
+            structural.push((name.clone(), agreement));
         }
     }
     let worst_first = |a: &(String, f64), b: &(String, f64)| {
@@ -258,7 +276,8 @@ pub fn assess_if2(state: &FitState, gate: &GateConfig) -> If2Assessment {
     structural.sort_by(worst_first);
     perturb_only_at_t0.sort_by(worst_first);
 
-    let worst = structural.iter().map(|(_, r)| *r).fold(0.0_f64, f64::max);
+    let worst = structural.iter().chain(&perturb_only_at_t0)
+        .map(|(_, r)| *r).fold(0.0_f64, f64::max);
     let a_band = gate.a_band(worst);
 
     let spread = (state.chain_eval_logliks.len() >= 2
@@ -280,8 +299,8 @@ pub fn assess_if2(state: &FitState, gate: &GateConfig) -> If2Assessment {
 ///
 /// Compound gate (Step 8, proposal §Proposal 3), measured by [`assess_if2`]:
 ///
-/// 1. Chain-agreement Â on every structural (non-`perturb_only_at_t0`)
-///    param must be `< gate.a_thresh`.
+/// 1. Chain-agreement Â on every estimated param, `perturb_only_at_t0`
+///    ones included, must be `< gate.a_thresh`.
 ///    Failure → `Hard`. Â in `[A_SOFT, gate.a_thresh)` → `SoftWarn`.
 /// 2. If both `chain_eval_logliks` and `chain_eval_ses` are populated
 ///    (≥ 2 entries), the inter-chain decibans-spread of clean-eval
@@ -308,9 +327,9 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
     // cannot disagree about one number.
     match assessed.a_band {
         AgreementBand::Fail => {
-            let failing: Vec<(String, f64)> = assessed.structural.iter()
+            let failing: Vec<(String, f64)> = assessed.all_finite().into_iter()
                 .filter(|(_, r)| gate.a_band(*r) == AgreementBand::Fail)
-                .cloned().collect();
+                .collect();
             let loglik_spread = if scout.chain_logliks.len() >= 2 {
                 let hi = scout.chain_logliks.iter().cloned()
                     .fold(f64::NEG_INFINITY, f64::max);
@@ -326,7 +345,7 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
             };
         }
         AgreementBand::SoftWarn => {
-            let warnable: Vec<(String, f64)> = assessed.structural.into_iter()
+            let warnable: Vec<(String, f64)> = assessed.all_finite().into_iter()
                 .filter(|(_, r)| gate.a_band(*r) == AgreementBand::SoftWarn)
                 .collect();
             return ScoutGateVerdict::SoftWarn { param_agreement: warnable };
@@ -482,9 +501,11 @@ pub fn format_hard_verdict(
             }));
     }
     for (name, agreement) in perturb_only_at_t0 {
+        let band = gate.a_band(*agreement);
+        let marker = if band == AgreementBand::Pass { " " } else { band.glyph() };
         msg.push_str(&format!(
-            "      {:<10} Â = {:>6.3}   (perturb_only_at_t0 — not gated)\n",
-            name, agreement));
+            "    {} {:<10} Â = {:>6.3}   (initial state, perturb_only_at_t0)\n",
+            marker, name, agreement));
     }
     if loglik_spread > 0.0 {
         msg.push_str(&format!("\n  Loglik spread: {:.1} (best chain loglik {:.1})\n",
@@ -508,9 +529,8 @@ pub fn format_hard_verdict(
     } else {
         msg.push_str("\n    ");
     }
-    msg.push_str("- mark weakly-identified initial-state params as \
-                  `perturb_only_at_t0 = true`\n      \
-                  (reported but not gated)\n\n  \
+    msg.push_str("- fix a weakly identified initial-state parameter rather than \
+                  estimate it\n\n  \
                   To start from it anyway (the starts may launder multi-modality):\n    \
                   camdl fit run fit.toml --allow-nonconverged-source");
     msg
@@ -673,9 +693,9 @@ mod tests {
                     "beta (Â=3.5) must fail the gate: {:?}", names);
                 assert!(names.contains(&"gamma"),
                     "gamma (Â=1.2) must fail: {:?}", names);
-                // The perturb_only_at_t0 param I0 must NOT appear in failing.
-                assert!(!names.contains(&"I0"),
-                    "I0 is perturb_only_at_t0 — must not be in failing: {:?}",
+                // An initial-state (perturb_only_at_t0) param is gated too.
+                assert!(names.contains(&"I0"),
+                    "I0 (Â=16.5) is perturb_only_at_t0 and still fails: {:?}",
                     names);
                 // Loglik spread computed: 854.6 − 60.2 = 794.4
                 assert!((loglik_spread - 794.4).abs() < 0.1,
@@ -686,10 +706,10 @@ mod tests {
     }
 
     #[test]
-    fn perturb_only_at_t0_agreement_not_gated_even_when_extreme() {
-        // All structural params are green; only the perturb_only_at_t0 params
-        // have extreme Â. The check must pass — an initial-state parameter is
-        // expected to be hard to identify.
+    fn perturb_only_at_t0_agreement_is_gated() {
+        // All dynamics params are green; only the perturb_only_at_t0 params
+        // have extreme Â. The check fails: an estimate whose chains disagree
+        // is not converged, initial state or not.
         let s = make_state(
             &[("beta", 1.02), ("gamma", 1.01), ("I0", 16.5), ("R_init", 5.5)],
             &["I0", "R_init"],
@@ -697,10 +717,15 @@ mod tests {
             -60.2,
         );
         match check_scout_convergence(&s, &legacy_gate()) {
-            ScoutGateVerdict::Ok => (),
-            other => panic!(
-                "expected Ok (perturb_only_at_t0 exempt), got {:?}", other),
+            ScoutGateVerdict::Hard { failing, .. } => {
+                let names: Vec<&str> = failing.iter().map(|(n, _)| n.as_str()).collect();
+                assert_eq!(names, vec!["I0", "R_init"], "worst first");
+            }
+            other => panic!("expected Hard on the initial-state params, got {:?}", other),
         }
+        assert!(!assess_if2(&s, &legacy_gate()).a_passes());
+        assert!(assess_if2(&s, &legacy_gate()).dynamics_a_passes(&legacy_gate()),
+            "the dynamics-only sub-verdict passes");
     }
 
     #[test]

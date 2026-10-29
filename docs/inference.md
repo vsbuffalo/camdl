@@ -674,6 +674,10 @@ forward — whereas a parameter like R₀ is perturbed at every observation time
 The flag is IF2's schedule, so only an `if2` config accepts it; any other method
 refuses the config at load rather than run without it.
 
+The flag changes how IF2 perturbs the parameter, not how its convergence is
+judged: its tail chain agreement Â is gated like every other estimate's, and
+`fit summary` reports the dynamics-only sub-verdict beside the overall one.
+
 Under IF2 that single t=0 jitter is the _only_ channel through which the data
 can inform an initial-condition parameter, so each particle then builds its own
 initial compartment counts from its own jittered value: particle $j$ starts at
