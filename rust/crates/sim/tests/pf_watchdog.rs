@@ -255,7 +255,9 @@ fn if2_bails_on_ess_collapse() {
         index: beta_idx,
         name: "beta".into(),
         initial: 5.0,
-        rw_sd: 0.1,
+        // The step in z: a natural-scale 0.1 converted once at the box's
+        // geometric midpoint, as `build_if2_params_from_specs` converts one.
+        rw_sd: Transform::for_domain(0.01, 100.0, true).expect("domain").step_from_natural(0.1, 5.0),
         rw_sd_auto: false,
         transform: Transform::for_domain(0.01, 100.0, true).expect("domain"),
         perturb_only_at_t0: false,

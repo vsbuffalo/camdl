@@ -3881,7 +3881,7 @@ pub fn run_pgas(
 
     let log_proposal_sd: Vec<f64> = if2_params.iter()
         .map(|p| {
-            let step = 5.0 * p.transformed_sd(p.rw_sd, p.initial);
+            let step = p.mh_initial_step();
             if step.is_finite() && step > 0.0 { step.ln() } else { 0.0 }
         })
         .collect();

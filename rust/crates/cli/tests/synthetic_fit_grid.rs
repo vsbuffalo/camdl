@@ -309,10 +309,10 @@ cases = "{}"
 /// the runner `process::exit(1)`-ed on the first chain error, killing the
 /// whole fit even when other chains were healthy.
 ///
-/// Base seed 2 is chosen because one of its IF2 chains deterministically
-/// collapses ESS around obs window 8 (verified under the support-keyed
-/// transforms; seed 33 no longer collapses there); with several chains at
-/// least one survives, so a correct runner completes the fit.
+/// Base seed 2 at 30 particles is chosen because one of its IF2 chains
+/// deterministically collapses ESS at obs window 7 (verified with IF2's step
+/// fixed in z; at 100 particles no seed in 1–40 collapses); with several
+/// chains at least one survives, so a correct runner completes the fit.
 #[test]
 fn fit_run_skips_degenerate_if2_chain_and_continues() {
     let bin = camdl_sim();
@@ -344,7 +344,7 @@ N0 = 1000
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 6
-particles = 100
+particles = 30
 iterations = 5
 cooling = 0.7
 "#, out.display(), ir.display(), data_tsv.display())).unwrap();

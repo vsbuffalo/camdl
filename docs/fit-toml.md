@@ -84,7 +84,7 @@ the synthetic block records the truth a recovery check reads.
 | `start = X`                                  | the base starting value. Optional — defaults to the model's declared value, else a draw from bounds. See "Where a chain starts" below.                                                                                                                                                                                                  |
 | `prior = { … }`                              | prior distribution. **Required** for a `pgas`/`pmmh`/`mh` method. It also picks the default chain starts under every method, `if2` included: `from_prior` when every estimated parameter has one. See "Priors" below.                                                                                                                   |
 | `perturb_only_at_t0 = true`                  | an initial-state parameter (e.g. `s0`, `i0`) — perturbed at t=0 only, never at an observation. It is IF2's perturbation schedule, so only `if2` accepts it: any other method refuses the config at load rather than run without it.                                                                                                     |
-| `rw_sd = X`                                  | IF2 per-parameter random-walk SD. Optional — auto-scaled from bounds. `pmmh` and `mh` also read it: five times it, converted to the transformed scale at the parameter's declared `start` (else the model value), is the initial proposal SD (the adaptive proposal takes over from there). `pgas` reads it only when its θ-step is MH-within-Gibbs (`--no-nuts`, or a model the compiler emitted no gradients for): five times it is the initial proposal scale there. Under NUTS, `pgas`'s default, and in the `nl-*` optimizers it is ignored. |
+| `rw_sd = X`                 | IF2 per-parameter random-walk SD, on the natural scale, converted once to the parameter's transformed coordinate (at the box's midpoint, or at the start on a half-bounded domain); IF2 then takes that same step in z for every chain and particle. Optional — the default is a step in z per transform (an unbounded `real` or `instant` has none and needs one). `pmmh` and `mh` also read it: five times the converted step is the initial proposal SD; with no `rw_sd` they start from 0.25 in z (the adaptive proposal takes over from there). `pgas` reads it the same way only when its θ-step is MH-within-Gibbs (`--no-nuts`, or a model the compiler emitted no gradients for). Under NUTS, `pgas`'s default, and in the `nl-*` optimizers it is ignored. |
 
 **`[fixed]`** — `param = value` for every model parameter you are _not_
 estimating. camdl requires every declared parameter to be either estimated or
@@ -446,9 +446,9 @@ The model file is the source of truth for what _can_ be estimated; the
 - **Unbounded parameters.** With no `bounds` here and no `in [lo, hi]` in the
   model, a `real` or `instant` parameter is searched over `(−∞, ∞)` with the
   identity transform; the positive kinds (`rate`, `positive`, `count`,
-  `duration`) over `[0, ∞)` with θ = eᶻ; a `probability` over `[0, 1]`. An
-  automatic `rw_sd` is refused for an unbounded parameter (there is no box to
-  scale one from); give `rw_sd`; at two or more chains the `uniform`, `lhs` and
+  `duration`) over `[0, ∞)` with θ = eᶻ; a `probability` over `[0, 1]`. A `real`
+  or `instant` on `(−∞, ∞)` has no automatic `rw_sd` (there is no scale to take
+  one from); give `rw_sd`. At two or more chains the `uniform`, `lhs` and
   `uniform_unconstrained` starts refuse it, the default `uniform_unconstrained`
   included; and `camdl survey` refuses it. `from_prior` draws it from its prior,
   and `single` starts every chain at its `start`.

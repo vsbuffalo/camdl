@@ -75,8 +75,8 @@ starts = "single"
 }
 
 /// The step that spreads the swarm across both signs of `a`: a natural-scale
-/// rw_sd of 1.0, which at the start a = 0.9 is 1.0 / (6·σ(z)σ(−z)) = 0.733
-/// in `a`'s transformed coordinate (z = ln(3.9/2.1)).
+/// rw_sd of 1.0, converted once at the midpoint of `a`'s box [−3, 3], where
+/// dθ/dz = 6/4, to 1.0 / 1.5 = 0.667 in `a`'s transformed coordinate.
 const LARGE_RW_SD: f64 = 1.0;
 
 #[test]
@@ -111,7 +111,7 @@ fn a_feasible_start_with_too_large_a_step_names_the_perturbed_swarm() {
     assert!(!bad.status.success(), "every final estimate is -inf, so the fit refuses:\n{err}");
     assert!(err.contains("the start is feasible and the perturbed swarm is not"),
         "the refusal must say the perturbed swarm, not the start, is infeasible:\n{err}");
-    assert!(err.contains("a=0.733"), "the refusal must name the step in z:\n{err}");
+    assert!(err.contains("a=0.667"), "the refusal must name the step in z:\n{err}");
     assert!(!err.contains("Initial log-likelihood is -inf at starting parameters"),
         "the start is feasible; it must not be blamed:\n{err}");
 }
