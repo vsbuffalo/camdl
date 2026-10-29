@@ -660,14 +660,18 @@ via CLI flags, a `--params` TOML, or inference engines (§4.2).
 ### 4.1 Parameter Types
 
 ```
-rate        : ≥ 0, dimension 1/time. Default transform: log scale (θ = eᶻ on
-              [0, ∞), log-interval on a box with lo > 0).
+rate        : ≥ 0, dimension 1/time. Default transform, by its bounds: θ = eᶻ
+              on [0, ∞); θ = lo + eᶻ on [lo, ∞); log-interval, ln θ = ln lo +
+              ln(hi/lo)·σ(z), on [lo, hi] with lo > 0; interval, θ = lo +
+              (hi − lo)·σ(z), on [0, hi].
 probability : ∈ [0, 1], dimensionless. Default transform: logit. The [0, 1] is
               carried by the type: a `probability` that declares no `in [lo, hi]`
               is searched over [0, 1] by inference, and a supplied value outside
               [0, 1] is rejected. It is the only kind whose type pins a finite
               interval — see §4.4.
-positive    : > 0, dimensionless. Default transform: as `rate`.
+positive    : > 0, dimensionless. Default transform: as `rate` — θ = eᶻ on
+              [0, ∞), θ = lo + eᶻ on [lo, ∞), log-interval on [lo, hi] with
+              lo > 0, interval on [0, hi].
 count       : dimension P (a population count). Integrality is not enforced —
               `let iota : count = 1e-6` compiles; the type carries the [P]
               dimension, not an integer constraint.
