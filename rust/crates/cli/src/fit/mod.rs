@@ -528,7 +528,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // used is never a thing to infer.
     let starts_resolution = {
         let method = config.inference.method.as_mut().expect("checked above");
-        method.resolve_starts(&config.problem, &model)
+        method.resolve_starts(&config.problem, &model).unwrap_or_else(|e| {
+            eprintln!("error: {fit_path}: {e}");
+            std::process::exit(1);
+        })
     };
     // From here the method is read-only: the identity below sees exactly what
     // the runners consume.

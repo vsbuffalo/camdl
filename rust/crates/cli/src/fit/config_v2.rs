@@ -1318,9 +1318,20 @@ impl Method {
     /// fixed relative error in a rate is a standardised residual that grows
     /// with the square root of the population, and wide bounds carry no
     /// scale. A prior does.
-    pub fn resolve_starts(&mut self, problem: &Problem, model: &ir::Model) -> StartsResolution {
+    ///
+    /// A `pfilter` method is the exception: it scores one θ, so it takes
+    /// [`Method::resolve_pfilter_point`]'s rule instead and never defaults to
+    /// a draw.
+    pub fn resolve_starts(
+        &mut self,
+        problem: &Problem,
+        model: &ir::Model,
+    ) -> Result<StartsResolution, String> {
+        if matches!(self.algorithm, Algorithm::PFilter { .. }) {
+            return self.resolve_pfilter_point(problem);
+        }
         if let Some(declared) = &self.starts {
-            return StartsResolution::Declared(declared.clone());
+            return Ok(StartsResolution::Declared(declared.clone()));
         }
         use super::priors_precedence::{resolve_priors_with_precedence, PriorSource};
         let names: Vec<String> = problem.estimate.keys().cloned().collect();
@@ -1342,7 +1353,50 @@ impl Method {
             StartsResolution::DefaultUniformUnconstrained { without_prior }
         };
         self.starts = Some(resolved.rule());
-        resolved
+        Ok(resolved)
+    }
+
+    /// The θ a `pfilter` method scores must be determined by the file, not
+    /// drawn behind the user's back: a `start` for every estimated parameter
+    /// (the `single` rule, which is the default here when they are all
+    /// given), a sourced rule (`from_mle`, `from_params`, `from_posterior`),
+    /// or `from_prior` asked for by name. The bounds-based spread rules
+    /// (`uniform_unconstrained`, `lhs`, `uniform`) draw a spread of chain
+    /// starts a one-θ filter has no use for, and are refused.
+    fn resolve_pfilter_point(&mut self, problem: &Problem) -> Result<StartsResolution, String> {
+        let without_start: Vec<&str> = problem.estimate.iter()
+            .filter(|(_, spec)| spec.start.is_none())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let remedy = "Give every estimated parameter a `start` in [estimate], name a point \
+                      with `starts = { from_mle = \"@fit\" }` or `{ from_params = \
+                      \"theta.toml\" }`, or ask for one prior draw with `starts = \"from_prior\"`.";
+        let missing = || format!(
+            "a `pfilter` method scores the log-likelihood at one θ, and this file does not \
+             determine it: {} {} no `start` in [estimate]. {remedy}",
+            without_start.join(", "),
+            if without_start.len() == 1 { "has" } else { "have" });
+        match &self.starts {
+            Some(rule @ (ChainStarts::Point(Point::FromMle { .. } | Point::FromParams { .. })
+                | ChainStarts::Spread(Spread::FromPosterior { .. } | Spread::FromPrior))) => {
+                Ok(StartsResolution::Declared(rule.clone()))
+            }
+            Some(rule @ ChainStarts::Point(Point::Declared)) if without_start.is_empty() => {
+                Ok(StartsResolution::Declared(rule.clone()))
+            }
+            Some(ChainStarts::Point(Point::Declared)) => Err(missing()),
+            Some(rule @ ChainStarts::Spread(
+                Spread::UniformUnconstrained | Spread::Lhs | Spread::Uniform,
+            )) => Err(format!(
+                "`starts = \"{}\"` draws a spread of chain starts within the bounds, and a \
+                 `pfilter` method scores the log-likelihood at one θ. {remedy}",
+                rule.tag())),
+            None if without_start.is_empty() => {
+                self.starts = Some(ChainStarts::Point(Point::Declared));
+                Ok(StartsResolution::DefaultDeclaredPoint)
+            }
+            None => Err(missing()),
+        }
     }
 
     /// Hashable subset of the method that defines its statistical
@@ -1428,6 +1482,9 @@ pub enum StartsResolution {
     DefaultFromPrior,
     /// Absent, and these parameters have no sampleable prior.
     DefaultUniformUnconstrained { without_prior: Vec<String> },
+    /// Absent on a `pfilter` method, and every estimated parameter declares
+    /// a `start`: the filter scores that point.
+    DefaultDeclaredPoint,
 }
 
 impl StartsResolution {
@@ -1438,6 +1495,7 @@ impl StartsResolution {
             StartsResolution::DefaultUniformUnconstrained { .. } => {
                 ChainStarts::uniform_unconstrained()
             }
+            StartsResolution::DefaultDeclaredPoint => ChainStarts::Point(Point::Declared),
         }
     }
 
@@ -1448,6 +1506,10 @@ impl StartsResolution {
             StartsResolution::DefaultFromPrior => format!(
                 "{} — default: every estimated parameter declares a prior",
                 ChainStarts::from_prior().describe()
+            ),
+            StartsResolution::DefaultDeclaredPoint => format!(
+                "{} — default for pfilter: every estimated parameter declares a start",
+                ChainStarts::Point(Point::Declared).describe()
             ),
             StartsResolution::DefaultUniformUnconstrained { without_prior } => format!(
                 "{} — default: no sampleable prior on {}",
@@ -6516,6 +6578,72 @@ cooling = 0.70
         assert!(err.contains("resolve_starts"), "{err}");
     }
 
+    /// A `pfilter` method scores the log-likelihood at one θ, so the file must
+    /// determine it: a `start` for every estimated parameter, a sourced point
+    /// or cloud, or an explicitly requested `from_prior` draw. With none of
+    /// those it is refused — it used to score one random prior draw (the
+    /// default rule when every parameter has a prior) and report that as the
+    /// filter's log-likelihood.
+    #[test]
+    fn pfilter_needs_a_determined_theta() {
+        let model = model_with_scenario("baseline", &[]);
+        let cfg_with = |estimate: &str, starts: &str| -> FitConfig {
+            parse(&format!(r#"
+[model]
+camdl = "models/sir.camdl"
+
+[data.observations]
+weekly_cases = "data/cases.tsv"
+
+[estimate]
+{estimate}
+
+[fixed]
+N0 = 1000000
+
+[method]
+algorithm = "pfilter"
+backend = "chain_binomial"
+particles = 100
+{starts}
+"#)).unwrap()
+        };
+        let with_prior = "beta = { bounds = [0.01, 2.0], prior = { log_normal = { mu = 0.0, sigma = 1.0 } } }";
+        let with_start = "beta = { bounds = [0.01, 2.0], start = 0.4, prior = { log_normal = { mu = 0.0, sigma = 1.0 } } }";
+
+        // Priors and nothing else: refused, not a random prior draw.
+        let cfg = cfg_with(with_prior, "");
+        let mut m = method(&cfg);
+        let err = m.resolve_starts(&cfg.problem, &model)
+            .expect_err("pfilter with no determined θ is refused");
+        assert!(err.contains("beta") && err.contains("from_prior") && err.contains("start"), "{err}");
+        // A spread rule does not determine θ either.
+        for rule in ["lhs", "uniform", "uniform_unconstrained", "single"] {
+            let cfg = cfg_with(with_prior, &format!("starts = \"{rule}\""));
+            let mut m = method(&cfg);
+            assert!(m.resolve_starts(&cfg.problem, &model).is_err(), "{rule} is refused");
+        }
+        // Every parameter has a start: that point, under `single`.
+        let cfg = cfg_with(with_start, "");
+        let mut m = method(&cfg);
+        m.resolve_starts(&cfg.problem, &model).unwrap();
+        assert_eq!(m.starts, Some(ChainStarts::Point(Point::Declared)));
+        // `single` with every start declared, an explicit from_prior, and a
+        // sourced point are accepted as written.
+        for (estimate, starts) in [
+            (with_start, "starts = \"single\""),
+            (with_prior, "starts = \"from_prior\""),
+            (with_prior, "starts = { from_params = \"theta.toml\" }"),
+            (with_prior, "starts = { from_mle = \"@fit\" }"),
+            (with_prior, "starts = { from_posterior = \"@fit\" }"),
+        ] {
+            let cfg = cfg_with(estimate, starts);
+            let mut m = method(&cfg);
+            m.resolve_starts(&cfg.problem, &model)
+                .unwrap_or_else(|e| panic!("`{starts}` determines θ: {e}"));
+        }
+    }
+
     /// The default (§8, item 20): `from_prior` when every estimated
     /// parameter has a prior the chains can be drawn from, otherwise
     /// `uniform_unconstrained`, naming the parameters without one. A spelled
@@ -6551,7 +6679,7 @@ sweeps = 100
             "beta = { bounds = [0.01, 2.0], prior = { log_normal = { mu = 0.0, sigma = 1.0 } } }\n\
              gamma = { bounds = [0.01, 1.0], prior = { half_normal = { sigma = 1.0 } } }");
         let mut m = method(&cfg);
-        let decided = m.resolve_starts(&cfg.problem, &model);
+        let decided = m.resolve_starts(&cfg.problem, &model).unwrap();
         assert_eq!(decided, StartsResolution::DefaultFromPrior);
         assert_eq!(m.starts, Some(ChainStarts::from_prior()));
         assert!(decided.describe().contains("from_prior"), "{}", decided.describe());
@@ -6562,7 +6690,7 @@ sweeps = 100
             "beta = { bounds = [0.01, 2.0], prior = { log_normal = { mu = 0.0, sigma = 1.0 } } }\n\
              gamma = { bounds = [0.01, 1.0] }");
         let mut m = method(&cfg);
-        let decided = m.resolve_starts(&cfg.problem, &model);
+        let decided = m.resolve_starts(&cfg.problem, &model).unwrap();
         assert_eq!(decided, StartsResolution::DefaultUniformUnconstrained {
             without_prior: vec!["gamma".into()] });
         assert_eq!(m.starts, Some(ChainStarts::uniform_unconstrained()));
@@ -6573,14 +6701,14 @@ sweeps = 100
         let cfg = problem_with(
             "beta = { bounds = [0.01, 2.0], prior = { flat = {} } }");
         let mut m = method(&cfg);
-        assert!(matches!(m.resolve_starts(&cfg.problem, &model),
+        assert!(matches!(m.resolve_starts(&cfg.problem, &model).unwrap(),
             StartsResolution::DefaultUniformUnconstrained { .. }));
 
         // A spelled rule is left alone whatever the priors say.
         let cfg = problem_with("beta = { bounds = [0.01, 2.0] }");
         let mut m = method(&cfg);
         m.starts = Some(ChainStarts::Spread(Spread::Lhs));
-        let decided = m.resolve_starts(&cfg.problem, &model);
+        let decided = m.resolve_starts(&cfg.problem, &model).unwrap();
         assert_eq!(decided, StartsResolution::Declared(ChainStarts::Spread(Spread::Lhs)));
         assert_eq!(m.starts, Some(ChainStarts::Spread(Spread::Lhs)));
     }

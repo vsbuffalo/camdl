@@ -194,6 +194,12 @@ which two method files of one problem share: while it holds one leaf the label
 is enough, and once it holds several the refusal lists them — name the leaf by
 its directory or its `run_id` prefix.
 
+**A `pfilter` method scores one θ**, so the file must determine it: a `start`
+for every estimated parameter (then `starts` defaults to `single`), a sourced
+rule (`from_mle`, `from_params`, `from_posterior`), or `starts = "from_prior"`
+asked for by name for one prior draw. Anything else — including priors alone, or
+a bounds-based spread rule — is refused rather than scored at a random draw.
+
 **The default.** When the file does not say, `starts` is `from_prior` if every
 estimated parameter has a prior the chains can be drawn from, and
 `uniform_unconstrained` otherwise; `fit run` prints which, and why. A
