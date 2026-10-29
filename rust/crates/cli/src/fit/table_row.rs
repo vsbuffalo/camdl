@@ -62,9 +62,9 @@ pub struct TableRow {
     pub fit_id: String,
     /// Full 64-char fit-level hash (`FitView.fit_hash`).
     pub fit_hash: String,
-    /// User-supplied display label, set at fit-run time via
-    /// `--label "..."` or post-hoc via `camdl label <hash>
-    /// "<text>"`. None when the user hasn't labelled the fit.
+    /// The labels of this fit's runs ([`FitView::label`]), each set at
+    /// `fit run --label "..."` or post-hoc by `camdl label <run_id> "<text>"`.
+    /// None when no run is labelled.
     pub label: Option<String>,
     /// fit.toml stem — the basename of `FitView.fit_toml_path` minus
     /// trailing `.fit.toml` / `.toml` extension.
@@ -233,7 +233,7 @@ pub fn build_row(
         schema: TableRowSchema::current(),
         fit_id: short_hash(&view.fit_hash),
         fit_hash: view.fit_hash.clone(),
-        label: view.label.clone(),
+        label: view.label(),
         stem,
         model_identity: view.model_identity.clone(),
         methods: completed_methods,

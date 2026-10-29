@@ -517,15 +517,13 @@ fn keyed_children(segment: &Path, family: &str, dirs: bool) -> Vec<String> {
 fn show_fit_envelope(segment: &Path, rel_path: &str) {
     println!("{}", "path".bright_black()); println!("  {}", rel_path.cyan());
     println!("{}", "kind".bright_black()); println!("  fit");
-    // Label lives once on the sidecar (never identity-bearing).
-    if let Some(label) = crate::run_meta::read_fit_sidecar(segment)
-        .and_then(|s| s.label)
-    {
-        println!("{}", "label".bright_black()); println!("  {}", label);
-    }
     // Fit-level hash + declared methods from the folded view (when the segment
     // holds method leaves; an output-only / incomplete segment skips these).
+    // Labels are its runs' (gh#896), never identity-bearing.
     if let Some(view) = crate::fit::fit_view::FitView::read(segment) {
+        if let Some(label) = view.label() {
+            println!("{}", "label".bright_black()); println!("  {}", label);
+        }
         let short = if view.fit_hash.len() >= 8 { &view.fit_hash[..8] } else { &view.fit_hash };
         println!("{}", "fit".bright_black()); println!("  {}", short.dimmed());
         if !view.methods_declared.is_empty() {
@@ -1219,41 +1217,16 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // `@label` is UNAMBIGUOUSLY a fit handle (no leaf or sim carries a `@`
-    // sigil), so resolve it to the fit's output envelope before any leaf/hash
-    // logic. Scan `fits/` for a segment whose sidecar label matches.
+    // sigil), so resolve it before any leaf/hash logic: the one run carrying
+    // the label (gh#896), shown as the output envelope of the problem folder
+    // it sits in — where `fit predict` writes.
     if let crate::fit::handle::FitRef::Label(name) = crate::fit::handle::FitRef::classify(key) {
-        let fits_dir = Path::new(root).join("fits");
-        let mut matches: Vec<PathBuf> = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&fits_dir) {
-            for entry in entries.flatten() {
-                let seg = entry.path();
-                if seg.is_dir()
-                    && crate::run_meta::read_fit_sidecar(&seg)
-                        .and_then(|s| s.label)
-                        .as_deref()
-                        == Some(name.as_str())
-                {
-                    matches.push(seg);
-                }
-            }
-        }
-        matches.sort();
-        return match matches.len() {
-            0 => Err(format!("no fit found for @{} under {}", name, fits_dir.display())),
-            1 => {
-                let segment = matches.remove(0);
-                let rel_path = pathdiff_str(&segment, &cwd);
-                Ok(Resolved::FitEnvelope { segment, rel_path })
-            }
-            n => {
-                let mut msg = format!("'@{}' is ambiguous, matches {} fits:\n", name, n);
-                for seg in &matches {
-                    msg.push_str(&format!("  {:<14} {}\n", "fit", pathdiff_str(seg, &cwd)));
-                }
-                msg.push_str("pass a run directory or a longer hash prefix to disambiguate");
-                Err(msg)
-            }
-        };
+        let leaf = crate::fit::handle::resolve_label(Path::new(root), &name)
+            .map_err(|e| e.to_string())?;
+        let segment = crate::fit::fit_view::leaf_segment(&leaf.dir)
+            .ok_or_else(|| format!("{} is not inside a fit's directory", leaf.dir.display()))?;
+        let rel_path = pathdiff_str(&segment, &cwd);
+        return Ok(Resolved::FitEnvelope { segment, rel_path });
     }
 
     // Path form: read the leaf `run.json` (`RunRecord`) directly.
@@ -1655,7 +1628,7 @@ fn print_fits_json(fits: &[FitEntry]) {
             },
             "kind": "fit",
             "hash": v.fit_hash,
-            "label": v.label,
+            "label": v.label(),
             "model": v.model,
             "model_identity": v.model_identity,
             "fit_toml_path": v.fit_toml_path,
@@ -1713,9 +1686,10 @@ fn print_fits_table(fits: &[FitEntry], now: SystemTime) {
             } else { joined }
         };
         let methods = f.view.methods_declared.join(",");
-        if f.view.label.is_none() { unlabelled += 1; }
+        let view_label = f.view.label();
+        if view_label.is_none() { unlabelled += 1; }
         let hash_short = short_hash_cell(&f.view.fit_hash);
-        let label_cell = label_cell(&f.view.label);
+        let label_cell = label_cell(&view_label);
         table.add_row(vec![
             Cell::new(rel_time).fg(comfy_table::Color::Yellow),
             hash_short,

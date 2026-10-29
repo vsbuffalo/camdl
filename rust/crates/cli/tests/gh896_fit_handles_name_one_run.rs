@@ -60,8 +60,13 @@ impl Project {
 
     /// Write `name` holding the shared problem and `method` as its `[method]`.
     fn config(&self, name: &str, method: &str) {
+        self.config_with(name, "", method)
+    }
+
+    /// [`Project::config`] with `top` written before the first table.
+    fn config_with(&self, name: &str, top: &str, method: &str) {
         let text = format!(
-            r#"
+            r#"{top}
 [model]
 camdl = "{ir}"
 
@@ -267,4 +272,106 @@ fn predict_of_a_leaf_reads_that_run() {
         assert!(all.contains(&format!("{draws} draws from")),
             "{} holds {draws} draws:\n{all}", leaf.display());
     }
+}
+
+/// The `run_id` a leaf's `run.json` records, and its label.
+fn record(leaf: &Path) -> (String, Option<String>, serde_json::Value) {
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap();
+    let id = v["run_id"].as_str().unwrap().to_string();
+    let label = v["provenance"]["label"].as_str().map(String::from);
+    (id, label, v)
+}
+
+/// A label names the one run it was given to and never moves. Rerunning a
+/// changed file under the same label is refused before any sampling; a
+/// second label on a rerun names the new run without touching the first;
+/// and a run started from `@scout` records the scout's run id.
+#[test]
+fn a_label_names_one_run_and_never_moves() {
+    let p = Project::new();
+    p.config("scout.toml", &if2(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    let first = p.leaves();
+    assert_eq!(first.len(), 1);
+    let (scout_id, scout_label, _) = record(&first[0]);
+    assert_eq!(scout_label.as_deref(), Some("scout"), "the label is on the run");
+
+    // Same file, changed `[method]`, same label: refused, nothing written.
+    p.config("scout.toml", &if2(3));
+    let out = p.run(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    let all = text(&out);
+    assert!(!out.status.success(), "a held label is refused:\n{all}");
+    assert!(all.contains(&format!("already names run {}", &scout_id[..12])), "{all}");
+    assert_eq!(p.leaves(), first, "the refused run wrote no leaf");
+
+    // Under a new label it runs, and the old label still names the old run.
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout3"]);
+    let second: Vec<PathBuf> = p.leaves().into_iter().filter(|l| !first.contains(l)).collect();
+    assert_eq!(second.len(), 1);
+    assert_eq!(record(&second[0]).1.as_deref(), Some("scout3"));
+    assert_eq!(record(&first[0]).1.as_deref(), Some("scout"), "the first label did not move");
+
+    // A cache hit under its own label is fine; under another it is refused.
+    p.config("scout.toml", &if2(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    let out = p.run(&["fit", "run", "scout.toml", "--seed", "1", "--label", "renamed"]);
+    assert!(!out.status.success(), "a run keeps its label:\n{}", text(&out));
+    assert!(text(&out).contains("already stored as @scout"), "{}", text(&out));
+
+    // `@scout` names the first run; the dependent run records its run id.
+    p.config("post.toml", &pgas_from("{ from_mle = \"@scout\" }"));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1"]);
+    let post: Vec<PathBuf> = p
+        .leaves()
+        .into_iter()
+        .filter(|l| !first.contains(l) && !second.contains(l))
+        .collect();
+    assert_eq!(post.len(), 1);
+    let (_, _, rec) = record(&post[0]);
+    let deps: Vec<&str> =
+        rec["deps"].as_array().unwrap().iter().map(|d| d["run_id"].as_str().unwrap()).collect();
+    assert_eq!(deps, vec![scout_id.as_str()], "the source's run id is in deps");
+}
+
+/// One invocation writing several runs has no one run to give a label to.
+#[test]
+fn a_label_on_an_invocation_that_writes_several_runs_is_refused() {
+    let p = Project::new();
+    p.config_with("seeds.toml", "fit_seeds = [1, 2]", &if2(2));
+    let out = p.run(&["fit", "run", "seeds.toml", "--label", "both"]);
+    let all = text(&out);
+    assert!(!out.status.success(), "{all}");
+    assert!(all.contains("names one run, but this invocation writes 2 method leaves"), "{all}");
+    assert!(p.leaves().is_empty(), "nothing ran");
+}
+
+/// `camdl label` gives a fit run a label once: a held label or a relabel is
+/// refused, and a fit id (a problem folder, not a run) is refused with its
+/// runs listed.
+#[test]
+fn camdl_label_labels_a_fit_run_once() {
+    let p = Project::new();
+    p.config("scout.toml", &if2(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    p.config("scout.toml", &if2(3));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    let leaves = p.leaves();
+    let ids: Vec<(String, Option<String>)> =
+        leaves.iter().map(|l| { let (i, lab, _) = record(l); (i, lab) }).collect();
+    let (labelled, unlabelled) = if ids[0].1.is_some() { (&ids[0], &ids[1]) } else { (&ids[1], &ids[0]) };
+
+    let held = p.run(&["label", &unlabelled.0[..12], "scout"]);
+    assert!(!held.status.success(), "a held label is refused:\n{}", text(&held));
+    let relabel = p.run(&["label", &labelled.0[..12], "other"]);
+    assert!(!relabel.status.success(), "a label never moves:\n{}", text(&relabel));
+
+    p.ok(&["label", &unlabelled.0[..12], "wide"]);
+    let out = p.ok(&["fit", "summary", "@wide"]);
+    assert!(out.contains("3 chains"), "@wide is the 3-chain run:\n{out}");
+
+    let fit_id = record(&leaves[0]).2["levels"][0]["hash"].as_str().unwrap()[..8].to_string();
+    let folder = p.run(&["label", &fit_id, "folder"]);
+    assert!(!folder.status.success(), "{}", text(&folder));
+    assert!(text(&folder).contains("a problem folder, not a run"), "{}", text(&folder));
 }
