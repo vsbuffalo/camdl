@@ -223,9 +223,9 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   `gamma`, `beta` or `log_uniform` prior is exact on any map, a `beta` on a
   narrowed `probability` and a `log_normal` on a positive sub-box included.
   Migration: narrow the bounds, or choose a prior that covers them.
-- **PGAS's MH-within-Gibbs (`--no-nuts`) starts its proposal scale at five times
-  each parameter's step,** the rule PMMH and MH use, else 1.0 in the transformed
-  coordinate. It was a tenth of the transform's spread between 10⁻¹⁰ and 10¹⁰
+- **PGAS's MH-within-Gibbs (`--no-nuts`) starts its proposal scale at 0.25 in
+  the transformed coordinate for every parameter,** its own default; it does not
+  read `rw_sd`. It was a tenth of the transform's spread between 10⁻¹⁰ and 10¹⁰
   (about 10⁹ for an unbounded `real`). Robbins–Monro adaptation tunes it during
   burn-in either way. Migration: none.
 - **The near-bound report names the test for a maximum on the bound.** IF2's
