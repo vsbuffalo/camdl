@@ -62,6 +62,11 @@ pub enum ResolveError {
     /// The handle matched more than one fit — the candidates are listed so the
     /// user can disambiguate (a run directory, or a longer hash prefix).
     Ambiguous { handle: String, candidates: Vec<PathBuf> },
+    /// The handle names several runs where one is needed (gh#896). Each run is
+    /// listed with what tells it apart, and the message states the axes on
+    /// which the runs actually differ — computed from their records, never
+    /// assumed.
+    AmbiguousRuns { handle: String, runs: Vec<crate::cas_read::Leaf> },
 }
 
 impl std::fmt::Display for ResolveError {
@@ -78,7 +83,196 @@ impl std::fmt::Display for ResolveError {
                     "  Pass a run directory or a longer hash prefix to disambiguate."
                 )
             }
+            ResolveError::AmbiguousRuns { handle, runs } => {
+                writeln!(
+                    f,
+                    "{handle} names {} runs, which differ in {}:",
+                    runs.len(),
+                    differing_axes(runs)
+                )?;
+                for r in runs {
+                    writeln!(f, "    {}", run_line(r))?;
+                }
+                write!(f, "  Name one run by its leaf directory or a run-id prefix.")
+            }
         }
+    }
+}
+
+/// The level of a fit leaf's identity named `name`, as `(label, hash hex)`.
+fn level<'a>(r: &'a crate::cas_read::Leaf, name: &str) -> Option<(&'a str, String)> {
+    r.record
+        .levels
+        .iter()
+        .find(|l| l.name == name)
+        .map(|l| (l.label.as_str(), l.hash.to_hex()))
+}
+
+/// What sets a set of runs of one handle apart, read from their identity
+/// levels and build: `[method]` settings, fit seed, the problem (model, data,
+/// parameters), or the camdl build — whichever actually vary.
+fn differing_axes(runs: &[crate::cas_read::Leaf]) -> String {
+    let varies = |key: &dyn Fn(&crate::cas_read::Leaf) -> Option<String>| {
+        let first = runs.first().map(key);
+        runs.iter().any(|r| Some(key(r)) != first)
+    };
+    let mut axes: Vec<&str> = Vec::new();
+    if varies(&|r| level(r, "fit").map(|l| l.1)) {
+        axes.push("the problem (model, data or parameters)");
+    }
+    if varies(&|r| level(r, "method").map(|l| l.1)) {
+        axes.push("`[method]` settings or `--starts`");
+    }
+    if varies(&|r| level(r, "seed").map(|l| l.1)) {
+        axes.push("fit seed");
+    }
+    if varies(&|r| Some(r.record.engine_version.clone())) {
+        axes.push("the camdl build that ran them");
+    }
+    match axes.as_slice() {
+        [] => "nothing their records show".to_string(),
+        [one] => one.to_string(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// One listed run: run id, method level, seed, chains, when, label, where.
+fn run_line(r: &crate::cas_read::Leaf) -> String {
+    let id = r.run_id_hex();
+    let method = level(r, "method")
+        .map(|(label, hash)| format!("{label}-{}", &hash[..8.min(hash.len())]))
+        .unwrap_or_default();
+    let chains = r
+        .record
+        .inputs
+        .get("n_chains")
+        .and_then(|v| v.as_u64())
+        .map(|n| format!("{n} chains"))
+        .unwrap_or_default();
+    let when = r.record.provenance.created_at.clone().unwrap_or_default();
+    let label = r
+        .record
+        .provenance
+        .label
+        .as_deref()
+        .map(|l| format!("@{l}"))
+        .unwrap_or_default();
+    let parts = [
+        format!("run {}", &id[..12.min(id.len())]),
+        method,
+        format!("seed {}", r.seed()),
+        chains,
+        when,
+        label,
+        r.dir.display().to_string(),
+    ];
+    parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  ")
+}
+
+/// One stored fit run, named by a handle: a method leaf
+/// (`fits/<stem>-<h8>/<algorithm>-<h8>/seed_<n>-<h8>/`) and the identity its
+/// `run.json` records.
+#[derive(Debug, Clone)]
+pub struct LeafRef {
+    pub dir: PathBuf,
+}
+
+impl LeafRef {
+    fn of(leaf: crate::cas_read::Leaf) -> LeafRef {
+        LeafRef { dir: leaf.dir }
+    }
+}
+
+/// What a handle names once resolved: one run, or a problem folder that holds
+/// one or more runs.
+#[derive(Debug, Clone)]
+pub enum FitTarget {
+    Leaf(LeafRef),
+    Segment(PathBuf),
+}
+
+/// The completed fit leaves directly under a problem folder, in directory
+/// order.
+fn completed_leaves(segment: &Path) -> Vec<crate::cas_read::Leaf> {
+    let mut leaves: Vec<crate::cas_read::Leaf> = crate::cas_read::walk_records(segment)
+        .into_iter()
+        .filter(|(_, r)| {
+            r.kind == runid::ArtifactKind::FitStage && r.status == runid::RunStatus::Completed
+        })
+        .map(|(dir, record)| crate::cas_read::Leaf { dir, record })
+        .collect();
+    leaves.sort_by(|a, b| a.dir.cmp(&b.dir));
+    leaves
+}
+
+/// The fit leaf at `dir`, when `dir` is one.
+fn leaf_at(dir: &Path) -> Option<crate::cas_read::Leaf> {
+    let bytes = std::fs::read(dir.join("run.json")).ok()?;
+    let record: runid::RunRecord = serde_json::from_slice(&bytes).ok()?;
+    (record.kind == runid::ArtifactKind::FitStage)
+        .then(|| crate::cas_read::Leaf { dir: dir.to_path_buf(), record })
+}
+
+/// Resolve a handle to what it names: a leaf directory or a run-id prefix
+/// names one run; a problem folder or a fit-id prefix names that folder; a
+/// `fit.toml` and `@label` name the folder they match.
+pub fn resolve_target(s: &str) -> Result<FitTarget, ResolveError> {
+    match FitRef::classify(s) {
+        FitRef::RunDir(dir) => match leaf_at(&dir) {
+            Some(leaf) => Ok(FitTarget::Leaf(LeafRef::of(leaf))),
+            None => Ok(FitTarget::Segment(resolve_inner(s)?.0)),
+        },
+        FitRef::HashPrefix(prefix) => {
+            let root = crate::run_paths::output_root(None, None);
+            let mut leaves = crate::cas_read::resolve_fit_prefix(&root, &prefix);
+            match leaves.len() {
+                0 => Ok(FitTarget::Segment(resolve_inner(s)?.0)),
+                1 => Ok(FitTarget::Leaf(LeafRef::of(leaves.remove(0)))),
+                _ => {
+                    leaves.sort_by(|a, b| a.dir.cmp(&b.dir));
+                    Err(ResolveError::AmbiguousRuns { handle: s.to_string(), runs: leaves })
+                }
+            }
+        }
+        FitRef::Label(_) | FitRef::Config(_) => Ok(FitTarget::Segment(resolve_inner(s)?.0)),
+    }
+}
+
+/// Resolve a handle to the one run it names. A problem folder names a run
+/// only while it holds one; holding several, it is refused with the runs
+/// listed and what sets them apart.
+pub fn resolve_leaf(s: &str) -> Result<LeafRef, ResolveError> {
+    match resolve_target(s)? {
+        FitTarget::Leaf(leaf) => Ok(leaf),
+        FitTarget::Segment(segment) => {
+            let mut leaves = completed_leaves(&segment);
+            match leaves.len() {
+                0 => Err(ResolveError::NotFound(format!(
+                    "{} holds no completed fit run",
+                    segment.display()
+                ))),
+                1 => Ok(LeafRef::of(leaves.remove(0))),
+                _ => Err(ResolveError::AmbiguousRuns { handle: s.to_string(), runs: leaves }),
+            }
+        }
+    }
+}
+
+/// Refuse a problem folder in which one method has several runs, listing
+/// them: a reader that shows one run per method would otherwise choose
+/// among them by directory order.
+pub fn refuse_several_runs_of_one_method(handle: &str, segment: &Path) -> Result<(), ResolveError> {
+    let leaves = completed_leaves(segment);
+    let method = |l: &crate::cas_read::Leaf| level(l, "method").map(|m| m.0.to_string());
+    let repeated: Vec<crate::cas_read::Leaf> = leaves
+        .iter()
+        .filter(|l| leaves.iter().filter(|o| method(o) == method(l)).count() > 1)
+        .cloned()
+        .collect();
+    if repeated.is_empty() {
+        Ok(())
+    } else {
+        Err(ResolveError::AmbiguousRuns { handle: handle.to_string(), runs: repeated })
     }
 }
 
@@ -90,13 +284,6 @@ impl std::fmt::Display for ResolveError {
 pub struct ResolvedFit {
     pub segment: PathBuf,
     pub config: FitConfig,
-}
-
-/// Resolve a raw fit handle to its segment directory only (no config load).
-/// The cheaper entry point for verbs that operate on the directory (e.g.
-/// `fit summary`); [`resolve_fit`] layers the config load on top.
-pub fn resolve_fit_segment(s: &str) -> Result<PathBuf, ResolveError> {
-    Ok(resolve_inner(s)?.0)
 }
 
 /// Resolve a raw fit handle to its segment + the config that governs its data.
@@ -462,7 +649,7 @@ cooling = 0.7
         // Archives `fit.toml.original` from the config on disk, as a fit does.
         crate::run_meta::write_fit_sidecar(&seg, &toml_path, &side).unwrap();
         std::fs::write(&toml_path, live).unwrap();
-        (resolve_fit_segment(&toml_path.to_string_lossy()), seg, tmp)
+        (resolve_inner(&toml_path.to_string_lossy()).map(|r| r.0), seg, tmp)
     }
 
     /// The archived config, written portably (`output_dir` points at the
@@ -571,7 +758,7 @@ cooling    = 0.70
         crate::run_meta::write_fit_sidecar(&seg, &toml_path, &side).unwrap();
         std::fs::remove_file(seg.join("fit.toml.original")).unwrap();
 
-        let err = resolve_fit_segment(&toml_path.to_string_lossy())
+        let err = resolve_inner(&toml_path.to_string_lossy()).map(|r| r.0)
             .expect_err("no archive, no match")
             .to_string();
         assert!(
@@ -579,6 +766,49 @@ cooling    = 0.70
             "the unmatchable segment is named; got: {err}"
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A fit leaf record whose `method` and `seed` levels hash to the given
+    /// one-character stems, for the ambiguity wording tests.
+    fn leaf_with(method: char, seed: char, dir: &str) -> crate::cas_read::Leaf {
+        let h = |c: char| c.to_string().repeat(64);
+        let record: runid::RunRecord = serde_json::from_str(&format!(
+            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit}","schema_version":1}},{{"name":"method","label":"if2","hash":"{m}","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"{s}","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"if2","n_chains":2}},"provenance":{{}}}}"#,
+            run = format!("{method}{seed}").repeat(32),
+            fit = h('0'),
+            m = h(method),
+            s = h(seed),
+        ))
+        .unwrap();
+        crate::cas_read::Leaf { dir: PathBuf::from(dir), record }
+    }
+
+    #[test]
+    fn ambiguity_names_only_the_axes_that_differ() {
+        let method_only = ResolveError::AmbiguousRuns {
+            handle: "@x".into(),
+            runs: vec![leaf_with('a', '1', "fits/a"), leaf_with('b', '1', "fits/b")],
+        }
+        .to_string();
+        assert!(method_only.contains("@x names 2 runs, which differ in `[method]` settings or `--starts`:"),
+            "{method_only}");
+        assert!(!method_only.contains("seed,") && !method_only.contains("fit seed"), "{method_only}");
+
+        let seed_only = ResolveError::AmbiguousRuns {
+            handle: "@x".into(),
+            runs: vec![leaf_with('a', '1', "fits/a"), leaf_with('a', '2', "fits/b")],
+        }
+        .to_string();
+        assert!(seed_only.contains("which differ in fit seed:"), "{seed_only}");
+
+        let both = ResolveError::AmbiguousRuns {
+            handle: "@x".into(),
+            runs: vec![leaf_with('a', '1', "fits/a"), leaf_with('b', '2', "fits/b")],
+        }
+        .to_string();
+        assert!(both.contains("which differ in `[method]` settings or `--starts` and fit seed:"),
+            "{both}");
+        assert!(both.contains("fits/a") && both.contains("fits/b"), "lists both: {both}");
     }
 
     #[test]
