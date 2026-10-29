@@ -701,15 +701,17 @@ conversion at θ₀ (`cli/src/fit/pmmh.rs:1049-1052`). Their own default is
 separate from IF2's because the two steps do different jobs: IF2's sets the
 perturbation kernel the whole run uses, while the MH proposal is adapted from
 the first warm-up step, so its starting value matters little. PGAS's
-MH-within-Gibbs initial scale (`pgas.rs:3957-3965`) follows the same rule.
+MH-within-Gibbs initial scale (`pgas.rs:3957-3965`) starts at `default_mh_step`
+and does not read `rw_sd`: `rw_sd` stays IF2's, PMMH's and MH's knob, and no
+further algorithm comes to depend on it.
 
 The formula it replaces is not one tenth of the domain's z-width. It evaluates
 the forward map at `lower.max(1e-10)` and `upper.min(1e10)`. For a box lying
 below 10⁻¹⁰, such as an `instant` on [−120, −60], both points are outside the
 domain, the clamped logit maps both to the same z, and the scale is the floor
 0.01. Under the new forward map the same evaluation would trip the
-`debug_assert!` of §5. A parameter with no default (an unbounded `Identity`) and
-no explicit `rw_sd` starts MH-within-Gibbs at 1.0 in z. Robbins–Monro adaptation
+`debug_assert!` of §5. A parameter with no default (an unbounded `Identity`)
+starts MH-within-Gibbs at 1.0 in z. Robbins–Monro adaptation
 (`pgas.rs:3941-3950`) tunes the scale during burn-in in every case. NUTS, the
 default, uses none of this.
 
@@ -802,9 +804,9 @@ The edits to the high-risk files, taken from the compiler listing of §3.2:
     prior calls at `:3561`, `:4068`, `:4445-4446` and `:4548` pass
     `prior_point`;
   - commit 6: the MH-within-Gibbs initial scale (`:3957-3965`, reading
-    `lower`/`upper` at `:3960-3961`) becomes 5 × `rw_sd`, else 1.0 (§9.2), and
-    the test module's hand-built transforms (`:5097`, `:5105`, `:5179`) move to
-    the new variants.
+    `lower`/`upper` at `:3960-3961`) becomes `default_mh_step`, else 1.0 (§9.2),
+    and the test module's hand-built transforms (`:5097`, `:5105`, `:5179`) move
+    to the new variants.
 
   The NUTS target's Jacobian lines (`:4286-4300`) and the MH-within-Gibbs ratio
   (`:4428-4449`) are unchanged.
@@ -858,12 +860,12 @@ before both.
    `default_if2_step()`, or converts an explicit natural-scale `rw_sd` once at
    the domain's reference point. That point is z = 0 for the interval maps (the
    box's midpoint, geometric for `LogInterval`) and θ₀ for the others. IF2 reads
-   `rw_sd` directly. PMMH, MH and PGAS's MH-within-Gibbs start at
-   `default_mh_step()`, or at 5 × an explicit `rw_sd`. The launch table
-   (`runner.rs:1059-1080`) prints the map, the z-step and the natural-scale step
-   it implies at the midpoint. Its `CompressedLogitPosition` warning is computed
-   on the map's own z. This commit changes IF2 and MH dynamics and is the one
-   the benchmark measures.
+   `rw_sd` directly. PMMH and MH start at `default_mh_step()`, or at 5 × an
+   explicit `rw_sd`; PGAS's MH-within-Gibbs starts at `default_mh_step()`. The
+   launch table (`runner.rs:1059-1080`) prints the map, the z-step and the
+   natural-scale step it implies at the midpoint. Its `CompressedLogitPosition`
+   warning is computed on the map's own z. This commit changes IF2 and MH
+   dynamics and is the one the benchmark measures.
 8. The near-bound report for boxes finite at both ends only (D10, §9.1).
 9. The IF2 constants from §12.6.
 10. Documentation:
