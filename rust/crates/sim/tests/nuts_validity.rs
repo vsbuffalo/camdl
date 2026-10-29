@@ -28,7 +28,7 @@
 //!    a record of current behaviour, not a statement of what is correct.
 //!
 //! The per-parameter target *value and gradient* the PGAS closure assembles
-//! from these pieces (`prior_log_density_and_grad_z` is crate-private) are
+//! from these pieces (`Prior::log_density_and_grad_z`) are
 //! checked against analytic densities in `src/inference/nuts_target_tests.rs`.
 //!
 //! Every stochastic test runs at a fixed seed, so it is deterministic; each
@@ -60,6 +60,13 @@ use sim::inference::pmmh::Prior;
 use sim::inference::prior::Density;
 use sim::inference::{BoundObs, MultiStreamObsModel};
 use sim::rng::StatefulRng;
+
+/// The prior point a `Log`-transformed parameter presents: θ, with ln θ read
+/// from the coordinate `z`.
+fn at(theta: f64, z: f64) -> sim::inference::prior::PriorPoint {
+    sim::inference::prior::PriorPoint { ln_theta: z, ..sim::inference::prior::PriorPoint::natural(theta) }
+}
+
 
 /// The exponential prior rate on τ used throughout (the rate of the B-spline
 /// smoothing-scale prior these diagnostics were first run for).
@@ -201,12 +208,12 @@ type Target<'a> = dyn Fn(&[f64]) -> (f64, Vec<f64>) + Sync + 'a;
 /// The one-parameter z-scale target the PGAS NUTS closure assembles for an
 /// exponential(λ) prior with no likelihood: prior + log-Jacobian, with the
 /// gradient chained through `transform_deriv` (the `Exponential` arm of
-/// `pgas::prior_log_density_and_grad_z`, d log p/dθ = −λ).
+/// `Prior::log_density_and_grad_z`, d log p/dθ = −λ).
 fn exponential_target(p: EstimatedParam) -> impl Fn(&[f64]) -> (f64, Vec<f64>) + Sync {
     let prior = Prior::Fixed(Density::Exponential { rate: LAMBDA });
     move |z: &[f64]| {
         let theta = p.from_transformed(z[0]);
-        let value = prior.log_density(theta, z[0]) + p.log_jacobian(z[0]);
+        let value = prior.log_density(&at(theta, z[0])) + p.log_jacobian(z[0]);
         let grad = -LAMBDA * p.transform_deriv(z[0]) + p.jacobian_grad(z[0]);
         (value, vec![grad])
     }

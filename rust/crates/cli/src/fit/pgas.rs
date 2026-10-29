@@ -831,9 +831,8 @@ pub fn run_stage(
                 // Stream trace row via shared TraceWriter
                 let log_prior: f64 = config.estimated_params.iter().zip(priors.iter())
                     .map(|(spec, prior)| {
-                        let natural = result.params[spec.index];
-                        let z = spec.to_transformed(natural);
-                        prior.log_density(natural, z)
+                        let z = spec.to_transformed(result.params[spec.index]);
+                        prior.log_density(&spec.prior_point(z))
                     })
                     .sum();
                 let log_posterior = result.log_complete_data_ll + log_prior;

@@ -173,7 +173,7 @@ fn rung3_target_values_reaching_nuts() {
          ep(Transform::Log { lo: 1e-6, hi: 2.5 }, 1e-6, 2.5), Box::new(|z| z - LAMBDA * z.exp()), vec![-12.0, -2.0, 0.0, 0.9]),
     ];
     for (label, prior, p, analytic, zs) in &cases {
-        let got: Vec<f64> = zs.iter().map(|&z| prior.log_density(p.from_transformed(z), z) + p.log_jacobian(z)).collect();
+        let got: Vec<f64> = zs.iter().map(|&z| prior.log_density(&p.prior_point(z)) + p.log_jacobian(z)).collect();
         let offsets: Vec<f64> = got.iter().zip(zs).map(|(g, &z)| g - analytic(z)).collect();
         let spread = offsets.iter().fold(0.0_f64, |m, o| m.max((o - offsets[0]).abs()));
         println!("rung3 {label}: offset spread {spread:.2e} over z = {zs:?}; transform_deriv {:?}, jacobian_grad {:?}",
