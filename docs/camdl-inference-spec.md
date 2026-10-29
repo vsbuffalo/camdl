@@ -202,11 +202,12 @@ knowledge constrains the plausible region.
    falls outside; an unbounded `real` or `instant` is drawn from its prior
    unrestricted, negative values included.
 
-4. **Boundary proximity warning.** If the MLE is within 1% of a fit bound — or,
-   on `[0, ∞)`, below 1% of the way from the bound to the chain's start — warn
-   that the true MLE may be on the bound or outside the search region. IF2
-   cannot place an estimate exactly on a bound; to test whether the maximum is
-   on it, profile the parameter or refit with `nl-bobyqa`:
+4. **Boundary proximity warning.** If the MLE is within 1% of the width from
+   either end of a box finite at both ends, warn that the true MLE may be on the
+   bound or outside the search region. IF2 cannot place an estimate exactly on a
+   bound; to test whether the maximum is on it, profile the parameter, or refit
+   with `nl-sbplx` (ODE backend only). A domain with an infinite end, such as
+   `[0, ∞)`, has no width and gets no warning:
 
    ```
    ⚠ R0 = 30.2 is within 1% of fit lower bound (30.0).
