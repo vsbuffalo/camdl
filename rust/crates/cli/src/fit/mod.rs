@@ -355,6 +355,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         eprintln!("error: {}: {}", fit_path, e);
         std::process::exit(1);
     }
+    // `[method]` keys the method's own settings leave inert. Here and not in
+    // the shared parser, which also reads stored fits' archived configs.
+    {
+        let contents = std::fs::read_to_string(&fit_path).unwrap_or_else(|e| {
+            eprintln!("error: cannot read {fit_path}: {e}");
+            std::process::exit(1);
+        });
+        let method = config.inference.method.as_ref().expect("checked above");
+        if let Err(e) = config_v2::refuse_inert_method_keys_in(&contents, method) {
+            eprintln!("error: {fit_path}: {e}");
+            std::process::exit(1);
+        }
+    }
     // gh#audit-C6 / gh#189: degenerate-rate handling is a keyed `[config]` field
     // (folds into the fit-identity hash via the config blob), set before any rate
     // evaluation. Was a CLI flag, which silently bypassed the run_id.
