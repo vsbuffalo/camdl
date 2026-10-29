@@ -140,6 +140,11 @@ pub enum ScoutGateVerdict {
         /// the chain it belongs to when `fit_state.toml` records it.
         chain_logliks: SpreadChains,
     },
+    /// No Â failed, but these parameters' Â is not finite (their
+    /// within-chain variance collapsed), so the Â leg is incomplete. The
+    /// decibans leg does not stand in for it: chains spread along a ridge can
+    /// agree in log-likelihood while disagreeing in θ. Not a pass.
+    Incomplete { params: Vec<String> },
 }
 
 /// The per-chain clean-eval logliks behind a `DecibansSpread` refusal.
@@ -173,8 +178,13 @@ pub enum SpreadChains {
 /// the field and the refusal message offers as a remedy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct If2Assessment {
-    /// Â of each structural (gated) parameter, worst first.
+    /// Finite Â of each structural (gated) parameter, worst first.
     pub structural: Vec<(String, f64)>,
+    /// Structural parameters whose Â is not finite — within-chain variance
+    /// collapsed, so the statistic is unavailable there. Never a pass: the
+    /// decibans leg does not stand in for it, because chains spread along a
+    /// ridge can agree in log-likelihood while disagreeing in θ.
+    pub unavailable: Vec<String>,
     /// Â of each `perturb_only_at_t0` parameter, worst first: reported only.
     pub perturb_only_at_t0: Vec<(String, f64)>,
     /// The band of the worst structural Â (`Pass` when there is none).
@@ -200,15 +210,24 @@ impl DecibansLeg {
 }
 
 impl If2Assessment {
-    /// The Â leg passes: no structural parameter is in the fail band.
+    /// No finite structural Â is in the fail band.
     pub fn a_passes(&self) -> bool {
         self.a_band != AgreementBand::Fail
     }
 
-    /// The compound verdict: the Â leg passes, and the decibans leg passes
-    /// where it was run. A leaf without clean-eval data is judged on Â alone.
+    /// No finite Â failed, but some required Â is unavailable: the verdict
+    /// is incomplete, which is not a pass.
+    pub fn is_incomplete(&self) -> bool {
+        self.a_passes() && !self.unavailable.is_empty()
+    }
+
+    /// The compound verdict: every required Â is available and passes, and
+    /// the decibans leg passes where it was run. A leaf without clean-eval
+    /// data is judged on Â alone.
     pub fn passes(&self) -> bool {
-        self.a_passes() && self.spread.map_or(true, |leg| leg.passes())
+        self.a_passes()
+            && self.unavailable.is_empty()
+            && self.spread.map_or(true, |leg| leg.passes())
     }
 
     /// The worst structural parameter and its Â.
@@ -222,12 +241,15 @@ pub fn assess_if2(state: &FitState, gate: &GateConfig) -> If2Assessment {
     let t0_set: std::collections::HashSet<&str> =
         state.perturb_only_at_t0_params.iter().map(|s| s.as_str()).collect();
     let mut structural: Vec<(String, f64)> = Vec::new();
+    let mut unavailable: Vec<String> = Vec::new();
     let mut perturb_only_at_t0: Vec<(String, f64)> = Vec::new();
     for (name, &agreement) in &state.tail_chain_agreement {
         if t0_set.contains(name.as_str()) {
             perturb_only_at_t0.push((name.clone(), agreement));
-        } else {
+        } else if agreement.is_finite() {
             structural.push((name.clone(), agreement));
+        } else {
+            unavailable.push(name.clone());
         }
     }
     let worst_first = |a: &(String, f64), b: &(String, f64)| {
@@ -251,7 +273,7 @@ pub fn assess_if2(state: &FitState, gate: &GateConfig) -> If2Assessment {
             sigma_max,
         }
     });
-    If2Assessment { structural, perturb_only_at_t0, a_band, spread }
+    If2Assessment { structural, unavailable, perturb_only_at_t0, a_band, spread }
 }
 
 /// Check an IF2 leaf's convergence, for the warm-start source check.
@@ -333,6 +355,10 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
                 },
             };
         }
+    }
+
+    if assessed.is_incomplete() {
+        return ScoutGateVerdict::Incomplete { params: assessed.unavailable };
     }
 
     ScoutGateVerdict::Ok
@@ -532,6 +558,12 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
                 } => Some(format_decibans_spread_verdict(
                     delta_db, threshold_db, sigma_max, &chain_logliks,
                 )),
+                ScoutGateVerdict::Incomplete { params } => Some(format!(
+                    "its convergence verdict is incomplete: chain agreement Â is \
+                     unavailable (not finite; within-chain variance collapsed) for {}. \
+                     The decibans leg does not stand in for it: chains spread along a \
+                     ridge can agree in log-likelihood while disagreeing in θ.",
+                    params.join(", "))),
             }
         }
         _ => sampler_source_verdict(leaf),
