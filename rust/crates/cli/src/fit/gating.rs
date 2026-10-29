@@ -245,7 +245,7 @@ impl If2Assessment {
     pub fn passes(&self) -> bool {
         self.a_passes()
             && self.unavailable.is_empty()
-            && self.spread.map_or(true, |leg| leg.passes())
+            && self.spread.is_none_or(|leg| leg.passes())
     }
 
     /// The worst parameter, of either kind, and its Â.
@@ -564,14 +564,14 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
         state if matches!(
             super::methods::parse_algorithm(&state.method),
             Some(FitAlgorithm::NlSbplx | FitAlgorithm::NlBobyqa | FitAlgorithm::NlLbfgs)
-        ) => nlopt_source_verdict(&state),
+        ) => nlopt_source_verdict(state),
         // IF2, and a pre-split IF2 leaf (method `scout` / `refine`) that
         // carries Â. A one-chain IF2 leaf has no Â and no verdict to read.
         state if parse_algorithm_is(&state.method, FitAlgorithm::If2)
             || (super::methods::parse_algorithm(&state.method).is_none()
                 && !state.tail_chain_agreement.is_empty()) => {
             let gate = state.resolved_gate.clone().unwrap_or_default();
-            match check_scout_convergence(&state, &gate) {
+            match check_scout_convergence(state, &gate) {
                 ScoutGateVerdict::Ok => None,
                 ScoutGateVerdict::SoftWarn { param_agreement } => {
                     // Between the soft and hard bands: usable, but say which
