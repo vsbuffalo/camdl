@@ -142,8 +142,12 @@ struct ArmDrawResult {
 /// `(θ, X)` cloud through the draws authority, so a contrast bands over exactly
 /// the cloud the free-forward rows do — the alternative is an artifact whose
 /// manifest says a chain was excluded and whose numbers include it.
+///
+/// `run_dir` is the run whose draws are banded: the leaf the handle named, or
+/// `segment` itself.
 pub fn emit_contrasts(
     segment: &Path,
+    run_dir: &Path,
     stage: Option<&str>,
     selection: Option<&ChainSelection>,
     model: &ir::Model,
@@ -155,7 +159,7 @@ pub fn emit_contrasts(
     // both for the (θ, X) cloud below and for the stage dir the saved paths are
     // read from — so the filtered cloud and the paths can never come from
     // different stages.
-    let pref = crate::posterior_draws::resolve_posterior_draws(&segment.to_string_lossy(), stage)?
+    let pref = crate::posterior_draws::resolve_posterior_draws(&run_dir.to_string_lossy(), stage)?
         .with_selection(selection.cloned());
 
     // The forkable subset, classified by LatentPath. A point-estimate fit is

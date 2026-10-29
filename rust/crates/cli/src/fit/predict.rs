@@ -701,11 +701,16 @@ impl FitResult {
     /// draws authority ([`PosteriorDrawsRef::load_params_with_info`]) — the one
     /// place a chain filter meets a cloud — and its provenance is carried onto
     /// the returned [`PosteriorDraws`].
+    ///
+    /// `run_dir` is where the run is read from — a named leaf, or `segment`
+    /// itself — and `segment` is the problem folder whose sidecar names the
+    /// estimated parameters.
     pub fn resolve(
         segment: &Path,
+        run_dir: &Path,
         selection: Option<ChainSelection>,
     ) -> Result<FitResult, String> {
-        let seg_str = segment.to_str().ok_or("fit path is not valid UTF-8")?;
+        let seg_str = run_dir.to_str().ok_or("fit path is not valid UTF-8")?;
         match posterior_draws::resolve_posterior_draws(seg_str, None) {
             Ok(pref) => {
                 let pref = pref.with_selection(selection);
@@ -726,7 +731,7 @@ impl FitResult {
                     .draws_path
                     .parent()
                     .map(Path::to_path_buf)
-                    .unwrap_or_else(|| segment.to_path_buf());
+                    .unwrap_or_else(|| run_dir.to_path_buf());
                 // Convergence for the band. With NO chain selection this is the
                 // stage's stored full-cloud summary. With `--exclude-chains`
                 // active the stored summary describes the WHOLE cloud (including
@@ -763,7 +768,7 @@ impl FitResult {
             // (gh#990) among them — is the answer, not a reason to reclassify.
             Err(posterior_draws::PosteriorDrawsError::Other(e)) => Err(e),
             Err(posterior_draws::PosteriorDrawsError::NoPosterior(e)) => {
-                if let Some(view) = crate::fit::fit_view::FitView::read(segment) {
+                if let Some(view) = crate::fit::fit_view::FitView::read(run_dir) {
                     if let Some(s) = view.stages.last() {
                         return Ok(FitResult::PointEstimate {
                             method: Some(s.method),
@@ -1357,8 +1362,10 @@ struct LeafObs {
 fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, String> {
     // 1. Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) →
     //    its segment + config.
-    let crate::fit::handle::ResolvedFit { segment, config } =
-        crate::fit::handle::resolve_fit(args.fit()?).map_err(|e| e.to_string())?;
+    let resolved = crate::fit::handle::resolve_fit(args.fit()?).map_err(|e| e.to_string())?;
+    // The run the draws come from: the one the handle named, else the folder's.
+    let run_dir = resolved.run_dir().to_path_buf();
+    let crate::fit::handle::ResolvedFit { segment, config, .. } = resolved;
     // The problem half is all a replay reads: model, data, fixed, estimate.
     let config = config.problem;
 
@@ -1370,7 +1377,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
         .as_deref()
         .map(ChainSelection::parse_exclude)
         .transpose()?;
-    let fit_result = FitResult::resolve(&segment, selection.clone())?;
+    let fit_result = FitResult::resolve(&segment, &run_dir, selection.clone())?;
     let treatment = fit_result.into_treatment();
     // The label the artifact carries, derived from the treatment before we
     // unwrap the cloud (v1 only ever reaches `posterior` here, but the label is
@@ -2694,6 +2701,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     if !model.contrasts.is_empty() {
         let paths = crate::fit::contrasts::emit_contrasts(
             &segment,
+            &run_dir,
             None,
             selection.as_ref(),
             &model,

@@ -276,19 +276,49 @@ pub fn refuse_several_runs_of_one_method(handle: &str, segment: &Path) -> Result
     }
 }
 
-/// A resolved fit: its segment directory + the loaded config.
+/// A resolved fit: its problem folder, the run the handle named (when it
+/// named one), and the loaded config.
 ///
 /// The proposal's full `SealedFit` (model IR + posterior ensemble + diagnostics)
-/// is Phase 4; the verbs today consume exactly the segment + config that the old
-/// `resolve_segment` returned, so that is what resolution yields.
+/// is Phase 4; the verbs today consume the segment + config, plus the leaf a
+/// run handle names (gh#896).
 pub struct ResolvedFit {
+    /// The problem folder: archived model IR, `fit.meta.json`, and where
+    /// `fit predict` writes.
     pub segment: PathBuf,
+    /// The run a leaf directory, run-id prefix or `@label` named; `None` for a
+    /// problem-folder handle.
+    pub leaf: Option<PathBuf>,
     pub config: FitConfig,
 }
 
-/// Resolve a raw fit handle to its segment + the config that governs its data.
+impl ResolvedFit {
+    /// Where a reader takes the run from: the named leaf, else the problem
+    /// folder (whose readers choose among its runs).
+    pub fn run_dir(&self) -> &Path {
+        self.leaf.as_deref().unwrap_or(&self.segment)
+    }
+}
+
+/// Resolve a raw fit handle to its segment, the run it names, and the config
+/// that governs its data.
 pub fn resolve_fit(s: &str) -> Result<ResolvedFit, ResolveError> {
-    let (segment, live_config) = resolve_inner(s)?;
+    let (target, live_config) = match FitRef::classify(s) {
+        FitRef::Config(path) => {
+            let (seg, cfg) = resolve_config(&path)?;
+            (FitTarget::Segment(seg), Some(cfg))
+        }
+        _ => (resolve_target(s)?, None),
+    };
+    let (segment, leaf) = match target {
+        FitTarget::Segment(seg) => (seg, None),
+        FitTarget::Leaf(l) => {
+            let seg = crate::fit::fit_view::leaf_segment(&l.dir).ok_or_else(|| {
+                ResolveError::NotFound(format!("{} is not inside a fit's directory", l.dir.display()))
+            })?;
+            (seg, Some(l.dir))
+        }
+    };
     let config = match live_config {
         // The Config (`fit.toml`) handle named the live config — its relative
         // data/model paths already resolve against the config's own directory.
@@ -297,7 +327,7 @@ pub fn resolve_fit(s: &str) -> Result<ResolvedFit, ResolveError> {
         // config; recover one whose data paths resolve correctly.
         None => load_config_for_segment(&segment).map_err(ResolveError::NotFound)?,
     };
-    Ok(ResolvedFit { segment, config })
+    Ok(ResolvedFit { segment, leaf, config })
 }
 
 /// The 4-way resolution to a segment. The Config branch also returns the

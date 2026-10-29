@@ -1059,14 +1059,23 @@ fn derive_prequential(
     selection: Option<&ChainSelection>,
 ) -> Result<(PrequentialTrace, Option<f64>), String> {
     let segment = &resolved.segment;
+    // The run θ̂ comes from: the leaf the handle named, else the folder's.
+    let run_dir = resolved.run_dir();
     let config = &resolved.config.problem;
 
     // gh#729: the filter this shells out to is chain-binomial. The θ̂ below
     // comes from the fit's method leaf (both `resolve_posterior_draws` and
     // `winner_params_toml` pick it), so that method's backend is the one the
-    // derived score must match.
-    if let Some(method) = &resolved.config.inference.method {
-        check_derivable_backend(method.algorithm.backend(), segment)?;
+    // derived score must match. A named run's backend is its own record's;
+    // the archived config describes the folder's latest run, which may not
+    // be it (gh#896).
+    let backend = match &resolved.leaf {
+        Some(leaf) => crate::fit::fit_view::FitView::read(leaf)
+            .and_then(|v| v.stages.first().map(|s| s.backend)),
+        None => resolved.config.inference.method.as_ref().map(|m| m.algorithm.backend()),
+    };
+    if let Some(backend) = backend {
+        check_derivable_backend(backend, run_dir)?;
     }
 
     // (a) θ — what the prequential is scored at. With `--draws M ≥ 2` and a
@@ -1079,12 +1088,12 @@ fn derive_prequential(
     // the posterior MEAN over `draws.tsv`; only an optimizer fit (IF2/NLopt)
     // has a single winner file.
     let theta_tomls: Vec<String> = if derive.draws >= 2 {
-        match thinned_draws_params_tomls(segment, selection, derive.draws)? {
+        match thinned_draws_params_tomls(run_dir, selection, derive.draws)? {
             Some(tomls) => tomls,
-            None => vec![point_estimate_params_toml(segment, selection)?],
+            None => vec![point_estimate_params_toml(run_dir, selection)?],
         }
     } else {
-        vec![point_estimate_params_toml(segment, selection)?]
+        vec![point_estimate_params_toml(run_dir, selection)?]
     };
     let is_mixture = theta_tomls.len() >= 2;
 
