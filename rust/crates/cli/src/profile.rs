@@ -190,26 +190,6 @@ struct ProfileNloptKnobs {
     starts: usize,
 }
 
-/// The step every profile cell (IF2 and nl-*) integrates at, by the one dt
-/// rule (`crate::dt_rule`): the model's declared step; a written one — `--dt`,
-/// or the `--fit` file's `[config] dt` — must agree with it, and with each
-/// other; 1.0 when nothing declares one.
-pub(crate) fn resolve_profile_dt(
-    cli_dt: Option<f64>,
-    fit_dt: Option<f64>,
-    model_dt: Option<f64>,
-) -> Result<f64, String> {
-    if let (Some(cli), Some(fit)) = (cli_dt, fit_dt) {
-        if cli != fit {
-            return Err(format!(
-                "--dt {cli} and the --fit file's `[config] dt = {fit}` disagree; drop one."
-            ));
-        }
-    }
-    let what = if cli_dt.is_some() { "--dt" } else { "the --fit file's [config] dt" };
-    crate::dt_rule::effective_dt(model_dt, cli_dt.or(fit_dt)).map_err(|m| m.message(what))
-}
-
 /// `--iterations` when not given: IF2 iterations per cell.
 const PROFILE_DEFAULT_ITERATIONS: usize = 50;
 /// `--cooling` when not given.
@@ -544,7 +524,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let raw = std::fs::read_to_string(p).unwrap_or_default();
         crate::fit::config_v2::written_config_dt(&raw)
     });
-    let dt = resolve_profile_dt(a.inference.dt, fit_written_dt, model_pre.simulation.dt)
+    let dt = crate::dt_rule::effective_dt_for_command(a.inference.dt, fit_written_dt, model_pre.simulation.dt)
         .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
 
     // An nl-* cell's optimizer budget: the `--fit` file's own, when its
@@ -2407,24 +2387,6 @@ mod tests {
         assert_eq!(nlopt_cell_budget(Some(&method.algorithm)), (1e-7, 900, true));
         assert_eq!(nlopt_cell_budget(None),
             (PROFILE_NLOPT_TOLERANCE, PROFILE_NLOPT_MAX_EVALS, false));
-    }
-
-    /// Every profile cell, IF2 and nl-*, steps at the model's declared dt
-    /// (the one dt rule); a written --dt or --fit `[config] dt` must agree
-    /// with it and with each other.
-    #[test]
-    fn every_profile_cell_steps_at_the_models_dt() {
-        assert_eq!(resolve_profile_dt(None, None, Some(0.5)), Ok(0.5));
-        assert_eq!(resolve_profile_dt(Some(0.5), Some(0.5), Some(0.5)), Ok(0.5));
-        assert_eq!(resolve_profile_dt(None, None, None), Ok(1.0));
-        assert_eq!(resolve_profile_dt(Some(0.25), None, None), Ok(0.25));
-        assert_eq!(resolve_profile_dt(None, Some(0.25), None), Ok(0.25));
-        let err = resolve_profile_dt(Some(0.25), None, Some(0.5)).unwrap_err();
-        assert!(err.contains("--dt = 0.25") && err.contains("dt = 0.5"), "{err}");
-        let err = resolve_profile_dt(None, Some(0.25), Some(0.5)).unwrap_err();
-        assert!(err.contains("--fit file's [config] dt = 0.25"), "{err}");
-        let err = resolve_profile_dt(Some(0.5), Some(0.25), None).unwrap_err();
-        assert!(err.contains("disagree"), "{err}");
     }
 
     // ── starts_values_from_init_method: the starts rule's point ───────

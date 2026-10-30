@@ -214,3 +214,34 @@ fn profile_cells_step_at_the_models_dt() {
         assert!(ok, "agreeing values run:\n{err}");
     }
 }
+
+fn pfilter(dir: &Path, ir: &Path, extra: &[&str]) -> (bool, String) {
+    let out = Command::new(camdl_bin())
+        .args(["pfilter"]).arg(ir).arg("--data").arg(dir.join("cases.tsv"))
+        .args(["--particles", "50", "--param", "beta=0.4", "--param", "gamma=0.3",
+               "--param", "N0=10000"])
+        .args(extra)
+        .env("CAMDL_OUTPUT_DIR", dir.join("res"))
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output().unwrap();
+    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// `camdl pfilter` scores at the model's dt; a differing --dt is refused; an
+/// agreeing one, or --dt on a model with no step, runs at it.
+#[test]
+fn pfilter_runs_at_the_models_dt() {
+    let tmp = tempdir("pfilter_dt");
+    let ir = write_model(&tmp.0, Some(0.5));
+    let (ok, err) = pfilter(&tmp.0, &ir, &[]);
+    assert!(ok && err.contains("dt=0.5"), "{err}");
+    let (ok, err) = pfilter(&tmp.0, &ir, &["--dt", "0.25"]);
+    assert!(!ok && err.contains("--dt = 0.25"), "{err}");
+    let (ok, err) = pfilter(&tmp.0, &ir, &["--dt", "0.5"]);
+    assert!(ok, "{err}");
+
+    let tmp = tempdir("pfilter_no_model_dt");
+    let ir = write_model(&tmp.0, None);
+    let (ok, err) = pfilter(&tmp.0, &ir, &["--dt", "0.25"]);
+    assert!(ok && err.contains("dt=0.25"), "{err}");
+}

@@ -6285,7 +6285,10 @@ camdl fit predict [FIT]
 --particles N               required
 --params FILE / --param NAME=VALUE / --table NAME=FILE
 --scenario NAME | --enable NAME | --disable NAME
---dt DT                     (default 1)   --seed N (default 1)
+--dt DT                     step for a model that declares none (default 1);
+                            the model's declared dt is the step, and a
+                            different --dt or --fit [config] dt is refused
+--seed N (default 1)
 --parallel N                Rayon threads, 0 = all cores (env CAMDL_PARALLEL)
 --allow-degenerate-rates
 --data [NAME=]PATH          observation TSV; repeatable. `--data PATH` binds the

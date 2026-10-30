@@ -67,7 +67,6 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     sim::eval_stats::set_allow_degenerate_rates(a.inference.allow_degenerate_rates);  // gh#audit-C6
     let ir_path = a.model.to_string_lossy().into_owned();
     let n_particles = a.particles;
-    let dt = a.inference.dt.unwrap_or(crate::dt_rule::DEFAULT_DT);
     let seed = a.inference.seed;
     let n_replicates = a.replicates;
     let trace_path: Option<String> = a.trace.clone();
@@ -112,6 +111,19 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // Load model (supports .camdl via camdlc)
     let (mut model_in, _model_json) = crate::util::load_model(&ir_path)
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    // The one dt rule (`crate::dt_rule`): the model's declared step; a
+    // `--dt` or `--fit` `[config] dt` that differs is refused; 1.0 when
+    // nothing declares one.
+    let fit_written_dt: Option<f64> = a.fit.as_ref().and_then(|p| {
+        let raw = std::fs::read_to_string(p).unwrap_or_default();
+        crate::fit::config_v2::written_config_dt(&raw)
+    });
+    let dt = crate::dt_rule::effective_dt_for_command(
+        a.inference.dt, fit_written_dt, model_in.simulation.dt,
+    ).unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    });
 
     // ── Resolve --data flags (gh#90) ─────────────────────────────────
     //
