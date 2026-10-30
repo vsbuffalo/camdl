@@ -1,6 +1,7 @@
 ---
 date: 2026-10-26
 status: accepted — D1–D10 decided by the maintainer on 2026-10-26 and 2026-10-27 (§12), D2 and D9 amended on 2026-10-27 (typed constants become an IR section); implementation follows §11
+amended_by: 2026-10-29-method-scoped-settings.md §13.3 (ResolvedProblem without starts or method settings; ExecutionPlan; start leaves Estimated; RoleInputs.method removed; finding 8 corrected — PMMH reads rw_sd)
 area: CLI parameter resolution / inference setup / run records
 issues: gh#965 (typed constants); §13 lists the follow-ups
 related:

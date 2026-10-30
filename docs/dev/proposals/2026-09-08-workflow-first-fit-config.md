@@ -1,11 +1,13 @@
 # Workflow-first fit config: a method, not stages; checks as fit verbs
 
-**Status:** Proposal **Date:** 2026-09-08 **Motivation:** the `[stages]` half of
-`fit.toml` is a pipeline engine whose one composition primitive, `init_mle`,
-destroys the property that convergence diagnostics need, and whose vocabulary
-(an algorithm per entry) cannot express the workflow steps the Bayesian workflow
-literature treats as core. Replace it with a problem/method split, one method
-per file, and workflow steps as `fit` subcommands.
+**Amended by:** 2026-10-29-method-scoped-settings.md §13.2 (rw_sd and
+perturb_only_at_t0 move under [method]; the §9 follow-up is done). **Status:**
+Proposal **Date:** 2026-09-08 **Motivation:** the `[stages]` half of `fit.toml`
+is a pipeline engine whose one composition primitive, `init_mle`, destroys the
+property that convergence diagnostics need, and whose vocabulary (an algorithm
+per entry) cannot express the workflow steps the Bayesian workflow literature
+treats as core. Replace it with a problem/method split, one method per file, and
+workflow steps as `fit` subcommands.
 
 **Scope:** `rust/crates/cli/src/fit/config_v2.rs` (`FitConfigV2`, `Stage`,
 `StartsFrom`), `fit/init.rs` (`InitMethod`), the `fit run` stage loop in
