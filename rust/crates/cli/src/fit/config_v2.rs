@@ -2585,6 +2585,15 @@ pub fn method_declares_key(contents: &str, key: &str) -> bool {
     table_declares_key(contents, "method", key)
 }
 
+/// The `[config] dt` this fit.toml source writes, or `None` when it leaves
+/// the step to its default. For the one dt rule (`crate::dt_rule`), which
+/// must tell a written step from a defaulted one.
+pub fn written_config_dt(contents: &str) -> Option<f64> {
+    let raw: toml::Value = toml::from_str(contents).ok()?;
+    let dt = raw.get("config")?.get("dt")?;
+    dt.as_float().or_else(|| dt.as_integer().map(|i| i as f64))
+}
+
 /// Whether table `[table]` of this fit.toml source spells `key`, as opposed
 /// to the parsed config carrying it at its serde default.
 pub fn table_declares_key(contents: &str, table: &str, key: &str) -> bool {

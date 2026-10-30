@@ -149,3 +149,68 @@ fn without_a_model_dt_the_config_dt_is_the_step() {
     assert!(ok, "{err}");
     assert!(err.contains("dt=0.5"), "{err}");
 }
+
+/// `camdl profile` over a model, with a `--fit` file supplying the base
+/// point; `fit_config` lands in that file, `extra` on the command line.
+fn profile(dir: &Path, ir: &Path, algo: &[&str], fit_config: &str, extra: &[&str]) -> (bool, String, String) {
+    let fit = dir.join("pf.toml");
+    std::fs::write(&fit, format!(r#"
+{fit_config}
+[model]
+camdl = "{ir}"
+[data.observations]
+cases = "{data}"
+[estimate]
+beta = {{ bounds = [0.05, 5.0], start = 0.4 }}
+gamma = {{ bounds = [0.01, 1.0], start = 0.3 }}
+[fixed]
+N0 = 10000
+"#, ir = ir.display(), data = dir.join("cases.tsv").display())).unwrap();
+    let out = Command::new(camdl_bin())
+        .args(["profile"]).arg(ir).arg("--fit").arg(&fit)
+        .arg("--data").arg(dir.join("cases.tsv"))
+        .args(["--sweep", "beta=0.4,0.5", "--rw-sd", "gamma=auto", "--n-starts", "1"])
+        .args(algo).args(extra)
+        .env("CAMDL_OUTPUT_DIR", dir.join("res"))
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output().unwrap();
+    // The step each stored cell records.
+    let mut dts = String::new();
+    let mut stack = vec![dir.join("res")];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() { stack.push(p) }
+            else if p.file_name().and_then(|n| n.to_str()) == Some("run.json") {
+                let v: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+                if let Some(dt) = v.pointer("/inputs/algorithm/dt") { dts.push_str(&format!("{dt} ")); }
+            }
+        }
+    }
+    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned(), dts)
+}
+
+const PROFILE_IF2: &[&str] = &["--particles", "50", "--iterations", "2"];
+const PROFILE_NL: &[&str] = &["--algorithm", "nl-sbplx", "--backend", "ode"];
+
+/// Profile cells, IF2 and nl-*, step at the model's dt; a differing --dt or
+/// --fit `[config] dt` is refused; an agreeing one runs.
+#[test]
+fn profile_cells_step_at_the_models_dt() {
+    for algo in [PROFILE_IF2, PROFILE_NL] {
+        let tmp = tempdir("profile_dt");
+        let ir = write_model(&tmp.0, Some(0.5));
+        let (ok, err, dts) = profile(&tmp.0, &ir, algo, "", &[]);
+        assert!(ok, "{err}");
+        assert!(!dts.is_empty() && dts.split_whitespace().all(|d| d == "0.5"),
+            "every cell at the model's 0.5: {dts:?}\n{err}");
+
+        let (ok, err, _) = profile(&tmp.0, &ir, algo, "", &["--dt", "0.25"]);
+        assert!(!ok && err.contains("--dt = 0.25"), "{err}");
+        let (ok, err, _) = profile(&tmp.0, &ir, algo, "[config]\ndt = 0.25\n", &[]);
+        assert!(!ok && err.contains("[config] dt = 0.25"), "{err}");
+        let (ok, err, _) = profile(&tmp.0, &ir, algo, "[config]\ndt = 0.5\n", &["--dt", "0.5"]);
+        assert!(ok, "agreeing values run:\n{err}");
+    }
+}

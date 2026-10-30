@@ -6357,8 +6357,9 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
                             there also sets each nl-* cell's tolerance and
                             max_evals (else 1e-4 and 1500)
 --seeds SPEC                run the whole grid at each seed (multi-seed sensitivity)
---dt X                      step (default 1.0); an nl-* cell steps at the model's
-                            declared dt when it has one, and refuses a different --dt
+--dt X                      step for a model that declares none (default 1.0);
+                            every cell steps at the model's declared dt, and a
+                            different --dt or --fit [config] dt is refused
 --data / --obs / --time-format / --seed / --parallel / --scenario /
 --enable / --disable / --table / --allow-degenerate-rates /
 --pf-max-substeps (if2 only)
