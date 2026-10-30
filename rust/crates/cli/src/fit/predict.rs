@@ -1485,22 +1485,15 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     // One calendar block for every sidecar manifest this run writes
     // (predictive / observed / quantities), read once off the model.
     let calendar = io::CalendarMeta::from_model(&model);
-    // Two step grids, because this command does two different things with a
-    // step (gh#708). `dt` is the model's own — what a forward replay of this
-    // model uses, which is what the free-forward horizon is. `one_step_dt` is
-    // the grid the FIT walked — the one dt rule's step (`crate::dt_rule`): the
-    // model's declared dt when it has one, else the fit's `[config] dt` — and
-    // the one-step band re-filters the observed series through the fitted
-    // model, so it belongs on that one. They differ only for a model that
-    // declares no dt and a fit whose `[config] dt` is not 1.0.
+    // The step this command walks, for both horizons: the step the FIT ran
+    // at, by the one dt rule (`crate::dt_rule`) — the model's declared dt, else
+    // the fit's `[config] dt`. The one-step band re-filters the observed
+    // series through the fitted model, and the free-forward replay runs the
+    // fitted model forward; either one on another step would be a different
+    // process than the posterior describes (gh#708). The two grids used to be
+    // separate and could disagree; under the rule they are one, so the notice
+    // that named the difference is gone.
     let (dt, one_step_dt) = predict_step_grids(model.simulation.dt, config.config.dt);
-    if (one_step_dt - dt).abs() > 1e-12 {
-        eprintln!(
-            "fit predict: the one-step band is filtered on the fit's dt = {one_step_dt} \
-             (the model declares `simulate {{ dt = {dt} }}`, which the free-forward \
-             replay uses)"
-        );
-    }
 
     // 3b. Parse the prospective scenario overlay (reusing simulate's ScenarioRef
     // surface). No `--scenario` → a single `fitted` row (the fitted model, no
@@ -2369,15 +2362,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             compiled.clone(),
             &model,
             &config,
-            // gh#708: the fit's `[config] dt`, not the model's `simulate { dt }`.
-            // The one-step band is an INFERENCE operation — it re-filters the
-            // observed series through the fitted model — so it must walk the
-            // grid the likelihood walked. Under `chain_binomial` the step sets
-            // the transition probability `1 - exp(-rate·dt)`, so a different dt
-            // is a different process, and the band would be plotted against the
-            // data as though it came from the one the posterior describes. The
-            // free-forward horizon below takes the model's own dt; that one is
-            // a forward replay of the model, which is a different question.
+            // gh#708: the step the fit's likelihood walked (the one dt rule).
+            // The one-step band re-filters the observed series through the
+            // fitted model; under `chain_binomial` the step sets the transition
+            // probability `1 - exp(-rate·dt)`, so another dt would be a
+            // different process plotted against the data.
             one_step_dt,
             args.stream.as_deref(),
             fit,
@@ -3437,14 +3426,13 @@ fn pool_one_step_draws(
 /// rows carry no convergence cells for the same reason the free-forward ones do
 /// not -- a between-chain statistic has nothing to compare one chain against.)
 #[allow(clippy::too_many_arguments)]
-/// `fit predict`'s two step grids, `(free_forward, one_step)`: the model's
-/// own step for a forward replay (1.0 when it declares none), and the step
-/// the fit ran at for the one-step band (`dt_rule::resolved_dt`).
+/// `fit predict`'s step grids, `(free_forward, one_step)`: both the step
+/// the fit ran at (`dt_rule::resolved_dt`), so neither horizon replays a
+/// different process than the fit. Kept as a pair so the two call sites
+/// still name which grid they walk.
 fn predict_step_grids(model_dt: Option<f64>, config_dt: f64) -> (f64, f64) {
-    (
-        model_dt.unwrap_or(crate::dt_rule::DEFAULT_DT),
-        crate::dt_rule::resolved_dt(model_dt, config_dt),
-    )
+    let fitted = crate::dt_rule::resolved_dt(model_dt, config_dt);
+    (fitted, fitted)
 }
 
 fn one_step_bands(
@@ -3835,7 +3823,10 @@ mod tests {
     #[test]
     fn the_one_step_band_walks_the_models_dt() {
         assert_eq!(predict_step_grids(Some(0.5), 1.0), (0.5, 0.5));
-        assert_eq!(predict_step_grids(None, 0.25), (1.0, 0.25));
+        assert_eq!(predict_step_grids(None, 0.25), (0.25, 0.25));
+        // No model dt, `[config] dt = 7`: the fit ran at 7, so the free-forward
+        // replay steps at 7 too, not at 1.0.
+        assert_eq!(predict_step_grids(None, 7.0).0, 7.0, "free-forward at the fitted step");
     }
     use crate::fit::row_convergence::ChainOfDraw;
 
