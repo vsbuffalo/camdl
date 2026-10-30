@@ -111,6 +111,15 @@ pub fn cmd_fit_methods() {
 /// gh#191: the model-capability gate must run on the fit-run path, against
 /// the method's declared simulation backend. Returns the offending message
 /// prefixed with the method's name so the user knows where to look.
+/// Where the run's `starts` rule came from, for the prefix of an error about
+/// it: `--starts <spec>` when the flag set it, else the fit file.
+fn starts_origin(a: &crate::args::FitRunArgs, fit_path: &str) -> String {
+    match &a.starts {
+        Some(rule) => format!("--starts {}", rule.spelled()),
+        None => fit_path.to_string(),
+    }
+}
+
 /// A `from_mle` / `from_params` point that does not name every estimated
 /// parameter leaves the missing ones to a bounds-uniform draw. Under a
 /// `pfilter`, which scores exactly one θ, that is a random θ: refused, naming
@@ -576,7 +585,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     let starts_resolution = {
         let method = config.inference.method.as_mut().expect("checked above");
         method.resolve_starts(&config.problem, &model).unwrap_or_else(|e| {
-            eprintln!("error: {fit_path}: {e}");
+            eprintln!("error: {}: {e}", starts_origin(a, &fit_path));
             std::process::exit(1);
         })
     };
@@ -1067,7 +1076,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         if let Some(src) = &resolved_starts.source {
             let estimated: Vec<&str> = config.problem.estimate.keys().map(|k| k.as_str()).collect();
             if let Err(e) = refuse_pfilter_point_source_missing(&resolved_starts.rule, &src.file, &estimated) {
-                eprintln!("error: {fit_path}: {e}");
+                eprintln!("error: {}: {e}", starts_origin(a, &fit_path));
                 std::process::exit(1);
             }
         }
