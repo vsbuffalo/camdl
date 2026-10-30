@@ -994,3 +994,69 @@ fn survey_records_a_distinct_model_identity_per_data_vintage() {
          model_identity must differ: {identities:?}"
     );
 }
+
+/// The observation-anchor window is read from the data at the step the fit
+/// integrates at (the one dt rule), because the reader refuses an observation
+/// that is not a multiple of that step. A model with no declared `dt` and a
+/// written `[config] dt = 0.5` fits at 0.5, so data at half-day times
+/// (7.5, 14.5, ...) must
+/// anchor; read at the model's default 1.0 it was refused.
+#[test]
+fn anchors_resolve_at_the_step_the_fit_runs_at() {
+    let bin = bin();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = write_model(tmp.path(), "last_obs + 4 'weeks");
+    let data = tmp.path().join("cases.tsv");
+    let mut body = String::from("time\tcases\n");
+    for i in 1..=8 {
+        body.push_str(&format!("{}\t{}\n", 7.0 * i as f64 + 0.5, 5 + i));
+    }
+    std::fs::write(&data, body).unwrap();
+    let toml = write_fit_toml(tmp.path(), &model, &data);
+    let text = std::fs::read_to_string(&toml).unwrap().replace("dt = 1.0", "dt = 0.5");
+    std::fs::write(&toml, text).unwrap();
+
+    let o = Command::new(&bin)
+        .args(["fit", "run"])
+        .arg(&toml)
+        .arg("--no-progress")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+        .output()
+        .expect("spawn fit run");
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        o.status.success(),
+        "data at multiples of the fit's dt = 0.5 must anchor:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("is not a multiple of dt"),
+        "the anchor reader must use the fit's step:\n{stderr}"
+    );
+
+    // `fit predict` reads the stored fit; it must not refuse the anchors.
+    let fits = tmp.path().join("results").join("fits");
+    let segment = std::fs::read_dir(&fits)
+        .unwrap_or_else(|e| panic!("no fits dir {}: {e}", fits.display()))
+        .filter_map(|d| d.ok().map(|d| d.path()))
+        .find(|p| p.is_dir())
+        .expect("one fit segment");
+    let o = Command::new(&bin)
+        .args(["fit", "predict"])
+        .arg(&segment)
+        .args(["--n-draws", "5"])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+        .output()
+        .expect("spawn fit predict");
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    // Half-day observation times need a finer output grid than this model has,
+    // so predict can refuse later for that reason; it must not refuse the
+    // anchors themselves.
+    assert!(
+        !stderr.contains("is not a multiple of dt")
+            && !stderr.contains("resolving this model's observation anchors"),
+        "fit predict must anchor at the fit's dt:\n{stderr}"
+    );
+}

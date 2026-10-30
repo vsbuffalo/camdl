@@ -190,7 +190,9 @@ pub(crate) fn resolve_fit_parameters(
     // through `run_fit` — same window, same function, so resolving again is
     // idempotent rather than a second opinion.
     if crate::obs_anchor::model_is_anchored(&model_pre) {
-        let dt0 = model_pre.simulation.dt.unwrap_or(1.0);
+        // The anchor reader loads the data at the step the fit integrates at
+        // (it refuses times that are not multiples of it): the one dt rule.
+        let dt0 = crate::dt_rule::resolved_dt(model_pre.simulation.dt, fit.config.dt);
         let (first, last) = crate::obs_anchors_from_config(&model_pre, fit, dt0)
             .map_err(|e| {
                 format!("resolving this model's observation anchors from [data]: {e}")

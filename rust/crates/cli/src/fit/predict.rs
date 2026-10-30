@@ -1486,7 +1486,9 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     // allowed, which is the existing no-op precedent.
     let resolved_obs_anchors: Option<ir::anchor::ObsAnchorTimes> =
         if crate::obs_anchor::model_is_anchored(&model) {
-            let dt0 = model.simulation.dt.unwrap_or(1.0);
+            // The step the fit ran at (the one dt rule), as the anchor reader's
+            // alignment check needs.
+            let dt0 = crate::dt_rule::resolved_dt(model.simulation.dt, config.config.dt);
             let (first, last) =
                 crate::obs_anchors_from_config(&model, &config, dt0).map_err(|e| {
                     format!("resolving this model's observation anchors from the fit's data: {e}")
