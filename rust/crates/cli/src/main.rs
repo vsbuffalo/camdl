@@ -29,6 +29,7 @@ mod sweep;         // the design axis: --sweep / --sweep-file expansion, checks,
 mod engine;        // run_job: the engine behind simulate's cell grid (run-spec §3.1)
 mod cas_sink;      // CasSink: the content-addressed store sink for simulate's cells
 mod eval;
+mod dt_rule;      // the one integration-step rule: the model's declared dt, else the written one
 mod pfilter;        // used internally by fit runner for data loading
 mod prequential_out; // the one prequential.tsv/.json writer (gh#650)
 mod pfilter_cas;    // gh#147 (M3.3): pfilter-eval CAS identity (model/config/params/seed)

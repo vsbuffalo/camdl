@@ -102,11 +102,13 @@ the Bayesian `mh`). Each algorithm is valid on exactly one backend —
 and no execution order: a file declares one method, and a pipeline is two files
 run in turn.
 
-**`[config]`** — fit-wide simulator settings: `dt` (the integrator step, default
-`1.0`). The `dt` you care about lives here; a `dt` written at the top level of
-the file is a typo, not a setting. (The forward backend for synthetic-data
-generation is `[synthetic].backend`, not a `[config]` setting — gh#241; the
-method declares its own `backend`.)
+**`[config]`** — fit-wide simulator settings: `dt`, the integrator step for a
+model that declares none (default `1.0`). A model that declares
+`simulate { dt = … }` is integrated at that step by every method; a
+`[config] dt` that differs from it is refused, and an agreeing one is accepted.
+A `dt` written at the top level of the file is a typo, not a setting. (The
+forward backend for synthetic-data generation is `[synthetic].backend`, not a
+`[config]` setting — gh#241; the method declares its own `backend`.)
 
 ## How paths resolve
 

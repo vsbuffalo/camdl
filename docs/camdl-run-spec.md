@@ -2396,11 +2396,11 @@ with the serde list quoted in §6.9.
 
 `[config]` (`FitBackendConfig`, `config_v2.rs:294`):
 
-| key                      | type                  | default         | meaning                                                                                                      |
-| ------------------------ | --------------------- | --------------- | ------------------------------------------------------------------------------------------------------------ |
-| `dt`                     | float                 | `1.0`           | Integrator step. This is the only honored `dt`; a top-level `dt` is a load error.                            |
-| `obs_alignment`          | `"exact"` \| `"snap"` | algorithm's own | How observation times relate to the `dt` grid. Resolved per algorithm (§6.5); an unsupported request errors. |
-| `allow_degenerate_rates` | bool                  | `false`         | Treat a numerical collapse in a rate expression (div-by-zero, `Pow`→NaN, `Sqrt` of a negative) as `0.0`.     |
+| key                      | type                  | default                      | meaning                                                                                                                                                                 |
+| ------------------------ | --------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dt`                     | float                 | the model's `dt`, else `1.0` | Integrator step. A model's declared `simulate { dt }` is the step; a `[config] dt` that differs is refused, an agreeing one accepted. A top-level `dt` is a load error. |
+| `obs_alignment`          | `"exact"` \| `"snap"` | algorithm's own              | How observation times relate to the `dt` grid. Resolved per algorithm (§6.5); an unsupported request errors.                                                            |
+| `allow_degenerate_rates` | bool                  | `false`                      | Treat a numerical collapse in a rate expression (div-by-zero, `Pow`→NaN, `Sqrt` of a negative) as `0.0`.                                                                |
 
 `[config] backend` was relocated to `[synthetic] backend` (gh#241) and is
 rejected with a migration message.

@@ -508,6 +508,26 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
+    // The one dt rule (`crate::dt_rule`): the model's declared step is the
+    // integration step for every method; a `[config] dt` the file writes that
+    // differs is refused. The resolved step is written into the config before
+    // anything reads it — the observation grid, the synthetic generator, every
+    // runner, and the fit identity, which so keys on the step the fit ran at.
+    {
+        let contents = std::fs::read_to_string(&fit_path).unwrap_or_else(|e| {
+            eprintln!("error: cannot read {fit_path}: {e}");
+            std::process::exit(1);
+        });
+        let written = config_v2::table_declares_key(&contents, "config", "dt")
+            .then_some(config.problem.config.dt);
+        match crate::dt_rule::effective_dt(model.simulation.dt, written) {
+            Ok(dt) => config.problem.config.dt = dt,
+            Err(m) => {
+                eprintln!("error: {fit_path}: {}", m.message("[config] dt"));
+                std::process::exit(1);
+            }
+        }
+    }
     // How each `[fixed]` name reached the config, for the partition — read
     // before the expansion below folds a scenario's names into the inline
     // values. An error is the expansion's to report.
@@ -755,17 +775,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         if let Err(msg) = gate_run_method_against_model(&method.algorithm, &compiled, config.problem.config.dt) {
             eprintln!("error: {}", msg);
             std::process::exit(1);
-        }
-        if method.algorithm.backend() == crate::run_meta::InferenceBackend::Ode {
-            let contents = std::fs::read_to_string(&fit_path).unwrap_or_default();
-            if let Err(e) = config_v2::refuse_ode_config_dt(
-                config_v2::table_declares_key(&contents, "config", "dt"),
-                config.problem.config.dt,
-                compiled.model.simulation.dt,
-            ) {
-                eprintln!("error: {fit_path}: {e}");
-                std::process::exit(1);
-            }
         }
         // PGAS runs NUTS only where the compiler emitted rate gradients
         // (`nuts_active`, the predicate the sampler itself uses); elsewhere it

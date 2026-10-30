@@ -2594,25 +2594,6 @@ pub fn table_declares_key(contents: &str, table: &str, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// An ODE-backend method integrates at the model's declared `dt` when it has
-/// one (`runner::ode_step_dt`), so a `[config] dt` the file writes that
-/// differs is not the integration step it reads as: refused.
-/// `config_dt_written` is whether the file spells it (the parsed value is
-/// defaulted otherwise).
-pub fn refuse_ode_config_dt(
-    config_dt_written: bool,
-    config_dt: f64,
-    model_dt: Option<f64>,
-) -> Result<(), String> {
-    match model_dt {
-        Some(model) if config_dt_written && config_dt != model => Err(format!(
-            "`[config] dt = {config_dt}` is not the integration step: an ODE-backend method \
-             integrates at the model's declared dt = {model}. Delete the line, or change the \
-             model's `dt`."
-        )),
-        _ => Ok(()),
-    }
-}
 
 /// The NUTS θ-move was asked for and the model has no rate gradients to run
 /// it on (no estimated parameter reaches a transition rate), so PGAS would run

@@ -24,7 +24,7 @@ use crate::fit::config_v2::{Algorithm, DtCheckConfig, GateConfig, Method, NloptS
 use crate::fit::dt_check;
 use crate::fit::loglik::LoglikType;
 use crate::fit::methods::check_model_capabilities;
-use crate::fit::runner::{ode_step_dt, FitRunConfig};
+use crate::fit::runner::FitRunConfig;
 use sim::inference::compute_ode_loglik;
 use crate::fit::state::FitState;
 use crate::fit::provenance;
@@ -151,7 +151,8 @@ pub fn run_stage(
     // one ODE solve + one obs scoring pass with no reconstruction.
     let obs_model = Arc::new(arc_config.build_obs_model());
     let obs_times: Vec<f64> = arc_config.observations.iter().map(|o| o.time).collect();
-    let dt = ode_step_dt(&arc_config);
+    // The one dt rule: `FitRunConfig` carries the resolved step.
+    let dt = arc_config.if2_config.dt;
 
     let t0 = std::time::Instant::now();
     // At most one chain per worker (gh#821, `chain_fanout`).
@@ -342,7 +343,7 @@ pub fn run_stage(
         // methods::validate_combo); record it from the inference domain
         // (total `From<InferenceBackend>` into the forward provenance field).
         backend: crate::run_meta::InferenceBackend::Ode.into(),
-        dt: ode_step_dt(&arc_config),
+        dt: arc_config.if2_config.dt,
         loglik: winner.loglik,
         loglik_sd: 0.0,
         n_particles: 0,

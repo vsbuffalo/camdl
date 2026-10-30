@@ -156,7 +156,8 @@ pub fn run_stage(
     } else {
         Vec::new()
     };
-    let ode_dt: f64 = if is_ode_mh { runner::ode_step_dt(&config) } else { dt };
+    // One step for both: `FitRunConfig` carries the resolved one (dt_rule).
+    let ode_dt: f64 = dt;
     // gh#396 follow-on: coarse warm-up step for the deterministic ODE-MH
     // likelihood. Validated up front (same soundness rules as `nuts`: prevalence
     // only, genuine warm-up window, step LARGER than dt) so a misconfigured fit
