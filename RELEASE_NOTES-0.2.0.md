@@ -105,6 +105,23 @@ breaking changes are still expected before 1.0.
 
 These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
+- **One integration-step rule for every backend and command.** A model's
+  declared `simulate { dt = … }` is the step every fit method (`if2`, `pgas`,
+  `pmmh`, `pfilter`, `mh`, `nl-*`), every `camdl profile` cell, `camdl pfilter`
+  and `fit predict`'s one-step band integrates at. A written `[config] dt`, a
+  `--dt`, or a `--fit` file's `[config] dt` that differs from it is refused; an
+  agreeing value is accepted; 1.0 is the default only when the model declares no
+  step. Before, the chain-binomial methods, profile's IF2 cells and
+  `camdl pfilter` used `[config] dt` / `--dt` (default 1.0) and ignored the
+  model's step without a word. `camdl simulate --dt` still overrides: a
+  simulation fits nothing. Chain-binomial fits, profiles and pfilter runs of a
+  model that declares `dt` re-key and now run at that step. No model in this
+  repository declares one outside a simulate-only golden fixture
+  (`ocaml/golden/sir_dt.camdl`), and no downstream model is known to. Migration:
+  if a model declares `dt` and its fit or command writes a different one, drop
+  the written value to run at the model's step, or change the model's `dt` to
+  the step you meant.
+
 - **`fit run` refuses a flag the method does not read.** Each method-specific
   flag is accepted only by the methods that read it (`--cooling-target-iters`:
   if2; `--decibans-thresh`: if2, `nl-*`; `--no-dt-check`, `--dt-check-halvings`,
