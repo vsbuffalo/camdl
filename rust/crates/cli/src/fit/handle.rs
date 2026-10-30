@@ -293,12 +293,46 @@ pub fn resolve_label(root: &Path, name: &str) -> Result<LeafRef, ResolveError> {
         .collect();
     match runs.len() {
         0 => Err(ResolveError::NotFound(format!(
-            "no completed fit run labelled @{name} under {}",
-            root.join("fits").display()
+            "no completed fit run labelled @{name} under {}{}",
+            root.join("fits").display(),
+            folder_label_hint(root, name)
         ))),
         1 => Ok(LeafRef::of(runs.remove(0))),
         _ => Err(ResolveError::AmbiguousRuns { handle: format!("@{name}"), runs }),
     }
+}
+
+/// For a label no run carries: the problem folders whose `fit.meta.json` still
+/// holds it — where a camdl before gh#896 stored a fit's label — with the
+/// command that gives it to each of their runs. Empty when there are none.
+fn folder_label_hint(root: &Path, name: &str) -> String {
+    let mut out = String::new();
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(root.join("fits"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|seg| {
+            crate::run_meta::read_fit_sidecar(seg).and_then(|s| s.label).as_deref() == Some(name)
+        })
+        .collect();
+    folders.sort();
+    for seg in folders {
+        out.push_str(&format!(
+            "\n  {} records @{name} in its fit.meta.json, where an older camdl kept a \
+             fit's label; a label now names one run. Give it to the run you mean:",
+            seg.display()
+        ));
+        for leaf in completed_leaves(&seg) {
+            let id = leaf.run_id_hex();
+            out.push_str(&format!(
+                "\n    camdl label {} \"{name}\"    # {}",
+                &id[..12.min(id.len())],
+                leaf.dir.display()
+            ));
+        }
+    }
+    out
 }
 
 /// Resolve a handle to the one run it names. A problem folder names a run

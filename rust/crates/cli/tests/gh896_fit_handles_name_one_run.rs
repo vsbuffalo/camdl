@@ -667,3 +667,25 @@ fn concurrent_labels_give_one_label_to_one_run() {
         assert_eq!((ok, holders), (1, 1), "one run takes {label}");
     }
 }
+
+/// A label stored by an older camdl on the problem folder's fit.meta.json is
+/// no longer read; `@label` says where it is and prints the command that
+/// gives it to a run.
+#[test]
+fn a_folder_label_from_an_older_camdl_gets_the_relabel_command() {
+    let p = Project::new();
+    p.config("scout.toml", &if2(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    let leaf = p.leaves().remove(0);
+    let meta = segment_of(&leaf).join("fit.meta.json");
+    let mut side: serde_json::Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+    side["label"] = serde_json::json!("old");
+    std::fs::write(&meta, side.to_string()).unwrap();
+
+    let out = p.run(&["fit", "summary", "@old"]);
+    let all = text(&out);
+    assert!(!out.status.success(), "{all}");
+    let id = record(&leaf).0;
+    assert!(all.contains(&format!("camdl label {} \"old\"", &id[..12])),
+        "names the command that labels the folder's run:\n{all}");
+}
