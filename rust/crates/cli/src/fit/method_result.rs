@@ -992,6 +992,44 @@ fn posterior_diagnostics(
     Ok(diag)
 }
 
+/// θ̂ for an optimizer leaf: its stored point (`start_values`, which for IF2
+/// also holds the fixed parameters) restricted to the estimated set. That set
+/// is `tail_chain_agreement`'s keys when the run computed Â (one per estimated
+/// parameter), else the fit's own record of it (`fit.meta.json` `estimated`,
+/// in the nearest ancestor segment). Only a leaf with neither — written
+/// before either existed — falls back to every stored value.
+fn theta_hat_from_state(stage_dir: &Path, state: &FitState) -> BTreeMap<String, f64> {
+    let estimated = estimated_names(Some(stage_dir), state);
+    state
+        .start_values
+        .iter()
+        .filter(|(name, _)| estimated.as_ref().is_none_or(|set| set.contains(*name)))
+        .map(|(k, v)| (k.clone(), *v))
+        .collect()
+}
+
+/// The estimated parameters of an optimizer leaf, for [`theta_hat_from_state`]
+/// and `fit summary`'s parameter listings. `None` only when the leaf records
+/// neither Â nor (with `stage_dir`) a `fit.meta.json` `estimated` list.
+pub(crate) fn estimated_names(
+    stage_dir: Option<&Path>,
+    state: &FitState,
+) -> Option<std::collections::BTreeSet<String>> {
+        if !state.tail_chain_agreement.is_empty() {
+            Some(state.tail_chain_agreement.keys().cloned().collect())
+        } else {
+            stage_dir?
+                .ancestors()
+                .skip(1)
+                .take(4)
+                .find_map(crate::run_meta::read_fit_sidecar)
+                // A sidecar written before `estimated` was recorded carries an
+                // empty list: no record, not "nothing estimated".
+                .filter(|side| !side.estimated.is_empty())
+                .map(|side| side.estimated.into_iter().collect())
+        }
+}
+
 // ── NloptStageResult ────────────────────────────────────────────────
 
 impl NloptStageResult {
@@ -1007,15 +1045,7 @@ impl NloptStageResult {
         // theta_hat: estimated parameters only. NLopt's tail_chain_agreement
         // (per-param relative range) carries one entry per estimated param
         // — same trick the IF2 loader uses to filter to the estimated set.
-        let theta_hat: BTreeMap<String, f64> = if state.tail_chain_agreement.is_empty() {
-            state.start_values.iter().map(|(k, v)| (k.clone(), *v)).collect()
-        } else {
-            state
-                .tail_chain_agreement
-                .keys()
-                .filter_map(|name| state.start_values.get(name).map(|v| (name.clone(), *v)))
-                .collect()
-        };
+        let theta_hat = theta_hat_from_state(stage_dir, &state);
 
         let max_rel_range = state
             .tail_chain_agreement
@@ -1057,19 +1087,7 @@ impl If2StageResult {
         // is empty (legacy file), fall back to the full start_values
         // map (which over-includes fixed params, but is the best we
         // can do without re-reading fit.toml).
-        let theta_hat: BTreeMap<String, f64> = if state.tail_chain_agreement.is_empty() {
-            state
-                .start_values
-                .iter()
-                .map(|(k, v)| (k.clone(), *v))
-                .collect()
-        } else {
-            state
-                .tail_chain_agreement
-                .keys()
-                .filter_map(|name| state.start_values.get(name).map(|v| (name.clone(), *v)))
-                .collect()
-        };
+        let theta_hat = theta_hat_from_state(stage_dir, &state);
 
         let max_chain_agreement = state
             .tail_chain_agreement
@@ -1775,6 +1793,30 @@ mod tests {
                 .expect_err("a source with an unavailable Â is refused");
             assert!(err.contains("R0"), "names the parameter: {err}");
         }
+    }
+
+    /// θ̂ is the estimated parameters only. With no Â (a one-chain IF2 run, or
+    /// fewer than two converged nl-* chains), the loaders fell back to every
+    /// `start_values` entry, which for IF2 includes the fixed parameters:
+    /// `fit table`'s `params` (JSON) and `fit summary`'s "θ̂ (N estimated
+    /// params)" then listed N0 as estimated. The estimated set is read from
+    /// the fit's `fit.meta.json` instead.
+    #[test]
+    fn theta_hat_excludes_fixed_parameters_without_chain_agreement() {
+        let tmp = tempdir("theta_hat_fixed");
+        let seg = tmp.path();
+        std::fs::write(seg.join("fit.meta.json"),
+            serde_json::json!({"estimated": ["R0", "sigma"]}).to_string()).unwrap();
+        let dir = seg.join("if2-abcd").join("seed_1-ef01");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_stage_run(&dir, crate::run_meta::FitAlgorithm::If2, 1,
+            serde_json::json!({"method": "if2", "iterations": 50}));
+        let mut state = synthetic_if2_state();
+        state.tail_chain_agreement.clear(); // one chain: no Â
+        state.save(&dir.to_string_lossy()).unwrap();
+        let r = If2StageResult::load(&dir).unwrap();
+        assert_eq!(r.theta_hat.keys().cloned().collect::<Vec<_>>(), vec!["R0", "sigma"],
+            "the fixed N0 is not an estimate");
     }
 
     #[test]

@@ -1409,7 +1409,7 @@ impl Formatter {
         s.push_str(&self.gate_verdict_block(state));
 
         // Per-parameter table
-        s.push_str(&self.parameter_table(state));
+        s.push_str(&self.parameter_table(state, Some(std::path::Path::new(stage_dir))));
 
         // Per-chain loglik-eval table
         if !state.chain_eval_logliks.is_empty() {
@@ -1583,7 +1583,7 @@ impl Formatter {
         s
     }
 
-    fn parameter_table(&self, state: &FitState) -> String {
+    fn parameter_table(&self, state: &FitState, stage_dir: Option<&std::path::Path>) -> String {
         let mut s = String::new();
         // The Â column is glyphed against the SAME gate the block above
         // reports, so one number cannot print ✗ there and ✓ here.
@@ -1605,12 +1605,13 @@ impl Formatter {
         // Filter to params we have agreement data for (these are the
         // estimated ones); fixed params are noise here. Fall back to
         // showing everything if no agreement data.
-        let est_keys: Vec<&String> = if state.tail_chain_agreement.is_empty() {
-            keys.clone()
-        } else {
-            keys.iter().filter(|k| state.tail_chain_agreement.contains_key(k.as_str()))
-                .copied().collect()
-        };
+        // The estimated parameters (Â's keys, else the fit's record of
+        // them); fixed params are noise here. Everything only when the leaf
+        // records neither.
+        let estimated = crate::fit::method_result::estimated_names(stage_dir, state);
+        let est_keys: Vec<&String> = keys.iter()
+            .filter(|k| estimated.as_ref().is_none_or(|set| set.contains(k.as_str())))
+            .copied().collect();
         // Sized to the names present: `{:12}` was a minimum width, so a
         // longer name shifted the `=` and every column after it.
         let w = name_col_width(est_keys.iter().map(|k| k.as_str()), 12);
@@ -3076,12 +3077,11 @@ fn if2_stage_report(
         .map(|s| s.as_str()).collect();
     let mut keys: Vec<&String> = state.start_values.keys().collect();
     keys.sort();
-    let est_keys: Vec<&String> = if state.tail_chain_agreement.is_empty() {
-        keys.clone()
-    } else {
-        keys.iter().filter(|k| state.tail_chain_agreement.contains_key(k.as_str()))
-            .copied().collect()
-    };
+    let estimated = crate::fit::method_result::estimated_names(
+        Some(std::path::Path::new(stage_dir)), state);
+    let est_keys: Vec<&String> = keys.iter()
+        .filter(|k| estimated.as_ref().is_none_or(|set| set.contains(k.as_str())))
+        .copied().collect();
     let parameters: Vec<ParameterReport> = est_keys.iter().map(|k| {
         let estimate = state.start_values[*k];
         ParameterReport {
@@ -4181,7 +4181,7 @@ mod tests {
             gate.a_thresh
         );
         let fmt = plain_formatter();
-        let table = fmt.parameter_table(&state);
+        let table = fmt.parameter_table(&state, None);
         let r0 = table.lines().find(|l| l.contains("R0")).expect("an R0 row");
         assert!(
             !r0.contains('✓'),
@@ -4202,7 +4202,7 @@ mod tests {
         let mut state = synthetic_fit_state();
         state.tail_chain_agreement.insert("sigma".into(), f64::NAN);
         let fmt = plain_formatter();
-        let table = fmt.parameter_table(&state);
+        let table = fmt.parameter_table(&state, None);
         let sigma = table.lines().find(|l| l.contains("sigma")).expect("a sigma row");
         assert!(
             !sigma.contains('✗'),
@@ -4229,7 +4229,7 @@ mod tests {
         state.start_values.insert("N".into(), 2_400_000.0);
         state.tail_chain_agreement.insert("N".into(), 1.02);
         let fmt = plain_formatter();
-        let table = fmt.parameter_table(&state);
+        let table = fmt.parameter_table(&state, None);
         let cols: Vec<usize> = table
             .lines()
             .filter(|l| l.contains("Â="))
@@ -4251,7 +4251,7 @@ mod tests {
     fn parameter_table_filters_to_estimated_params() {
         let state = synthetic_fit_state();
         let fmt = plain_formatter();
-        let block = fmt.parameter_table(&state);
+        let block = fmt.parameter_table(&state, None);
         assert!(block.contains("R0"), "R0 row missing: {}", block);
         assert!(block.contains("Â=1.040"), "R0 agreement missing: {}", block);
         assert!(block.contains("sigma"));
@@ -5999,7 +5999,7 @@ mod tests {
     fn if2_text_parameter_table_annotates_instant_date() {
         let state = instant_fit_state();
         let fmt = Formatter { use_color: false, cal: instant_cal(), explain: false };
-        let block = fmt.parameter_table(&state);
+        let block = fmt.parameter_table(&state, None);
         // tau row carries the calendar date; numeric value preserved.
         assert!(block.contains("tau"), "tau row missing: {}", block);
         assert!(block.contains("(2020-03-18)"),
@@ -6015,7 +6015,7 @@ mod tests {
         let state = instant_fit_state();
         // Default (no origin) context → numeric-only, no crash, no date.
         let fmt = plain_formatter();
-        let block = fmt.parameter_table(&state);
+        let block = fmt.parameter_table(&state, None);
         assert!(block.contains("tau"), "tau row missing: {}", block);
         assert!(!block.contains("2020-"),
             "no date should appear without an origin: {}", block);
