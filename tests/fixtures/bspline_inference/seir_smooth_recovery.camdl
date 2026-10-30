@@ -1,0 +1,69 @@
+# R3 recovery fixture with the smooth prior (proposal
+# 2026-10-27-estimable-bsplines §6.4, §8.1): `seir_bspline_recovery` with its
+# five explicit coefficients replaced by `smooth`, so log beta(t) is a level a
+# at mid-window (t = 43 days), a slope b per day, and three whitened curvature
+# modes z scaled by tau, with the PC prior tau ~ exponential(5.99)
+# (P(tau > 0.5) = 0.05, §6.5). Fitted to the same daily onset counts,
+# neg_binomial(mean = rho * onsets, r = k); E0, I0, rho and k are fixed. The
+# explicit truth [-0.7, -1.0, -1.6, -1.4, -1.9] is a = -1.32, b = -0.0118 per
+# day and tau·|z| = 0.22 in these coordinates.
+
+time_unit = 'days
+
+dimensions { mode = [m1, m2, m3] }
+
+compartments { S, E, I, R }
+
+let N = S + E + I + R
+
+parameters {
+  sigma : rate        in [0.01, 1.0]
+  gamma : rate        in [0.01, 1.0]
+  rho   : probability in [0.01, 1.0]
+  k     : positive    in [0.1, 1000]
+  # log beta at mid-window; the explicit fit's coefficient prior
+  a       : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  # slope of log beta per day: one SD changes beta by e^1.72 ≈ 5.6 across the window
+  b       : real [1/T] ~ normal(mu = 0.0, sigma = 0.02)
+  tau     : positive 'ratio ~ exponential(rate = 5.99)
+  z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
+  N0    : count       in [100, 10000000]
+  E0    : count       in [0, 1000]
+  I0    : count       in [0, 1000]
+}
+
+forcing {
+  beta_t : bspline 'per_day {
+    window  = [0 'days, 86 'days]
+    n_basis = 5
+    link    = log
+    coefs   = smooth(level = a, slope = b, scale = tau, modes = z, per = 1 'weeks)
+  }
+}
+
+transitions {
+  infection   : S --> E @ beta_t * S * (I / N)
+  progression : E --> I @ sigma * E
+  recovery    : I --> R @ gamma * I
+}
+
+init {
+  S = N0 - E0 - I0
+  E = E0
+  I = I0
+}
+
+observations {
+  onsets {
+    columns       { time : time, onsets : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(progression)
+    emit_schedule = every 1 'days
+    onsets        ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}

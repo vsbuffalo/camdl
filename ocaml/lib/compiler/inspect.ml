@@ -349,7 +349,7 @@ let run_summary ppf (model : Ir.model) ctx (sum : Expander.model_summary) =
 let rec expr_node_count (e : Ir.expr) : int =
   let open Ir in
   match e with
-  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _
   | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> 1
   | BinOp b -> 1 + expr_node_count b.left + expr_node_count b.right
   | UnOp u  -> 1 + expr_node_count u.arg
@@ -371,7 +371,7 @@ let rec reduce_term_count (e : Ir.expr) : int =
   | Cond c  -> reduce_term_count c.pred + reduce_term_count c.then_ + reduce_term_count c.else_
   | TableLookup (_, idxs) -> List.fold_left (fun a i -> a + reduce_term_count i) 0 idxs
   | UncheckedDim u -> reduce_term_count u.inner
-  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _
   | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> 0
 
 (* Count BindingRefs to [name] within an expr tree. *)
@@ -386,7 +386,7 @@ let rec count_bindingref name (e : Ir.expr) : int =
   | TableLookup (_, idxs) -> List.fold_left (fun a i -> a + count_bindingref name i) 0 idxs
   | Reduce terms -> List.fold_left (fun a t -> a + count_bindingref name t) 0 terms
   | UncheckedDim u -> count_bindingref name u.inner
-  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | Projected
+  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _ | Projected
   | ObsColumnRef _ | ObsAnchor _ -> 0
 
 (* All rate exprs of a model (the cost surface inspect can see — gradients are
@@ -415,7 +415,7 @@ let rec count_hazard_idioms (e : Ir.expr) : int =
     | TableLookup (_, idxs) -> List.fold_left (fun a i -> a + count_hazard_idioms i) 0 idxs
     | Reduce terms -> List.fold_left (fun a t -> a + count_hazard_idioms t) 0 terms
     | UncheckedDim u -> count_hazard_idioms u.inner
-    | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+    | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _
     | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> 0)
 
 (* Structural hash of an expr, for detecting duplicated subexpressions. A
@@ -444,6 +444,7 @@ let rec expr_hash (e : Ir.expr) : int =
   | UncheckedDim u -> mix 15 [ expr_hash u.inner ]
   | ObsColumnRef c -> mix 16 [ Hashtbl.hash c ]
   | ObsAnchor a -> mix 18 [ Hashtbl.hash a.anchor; Hashtbl.hash a.offset ]
+  | ForcingBasis { forcing; index; space } -> mix 19 [ Hashtbl.hash forcing; index; Hashtbl.hash space ]
 
 (* Number of distinct non-trivial subexpressions that recur ≥ [threshold]
    times across all given roots. "Non-trivial" excludes single-node leaves
@@ -463,7 +464,7 @@ let count_duplicated_subexprs ?(threshold = 3) (roots : Ir.expr list) : int =
     | TableLookup (_, idxs) -> List.iter walk idxs
     | Reduce terms -> List.iter walk terms
     | UncheckedDim u -> walk u.inner
-    | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+    | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _
     | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> ()
   in
   List.iter walk roots;
@@ -1291,6 +1292,8 @@ let run_tables ppf (model : Ir.model) ctx (pattern : string option) =
    `data =`, `read()` tables, `read()` dimensions), use
    `camdlc --emit-deps FILE.json` — that is the depfile, this is the human
    view. *)
+let link_note = function Ir.Link_identity -> "" | Ir.Link_log -> ", log link"
+
 let run_forcings ppf (model : Ir.model) (pattern : string option) =
   let faint s = Term_style.dim_style Fmt.string ppf s in
   let kind_label (tf : Ir.time_function) = match tf.kind with
@@ -1299,8 +1302,15 @@ let run_forcings ppf (model : Ir.model) (pattern : string option) =
     | Ir.Interpolated i -> Printf.sprintf "interpolated (%d knots)" (List.length i.times)
     | Ir.Periodic p   -> Printf.sprintf "periodic (%d bins)" (List.length p.values)
     | Ir.Fourier f    -> Printf.sprintf "fourier (%d harmonics)" (List.length f.harmonics)
-    | Ir.PeriodicSpline s -> Printf.sprintf "periodic_spline (n_basis %d, degree %d)"
-                               s.n_basis s.degree
+    | Ir.PeriodicSpline s -> Printf.sprintf "periodic_spline (n_basis %d, degree %d%s)"
+                               s.n_basis s.degree (link_note s.link)
+    | Ir.BSpline b ->
+      let n_intervals, form = match b.knots with
+        | Ir.Knots_uniform { n_intervals; _ } -> n_intervals, "uniform"
+        | Ir.Knots_explicit bps -> List.length bps - 1, "explicit"
+      in
+      Printf.sprintf "bspline (n_basis %d, degree %d, %s knots%s)"
+        (n_intervals + b.degree) b.degree form (link_note b.link)
   in
   let forcings = match pattern with
     | None     -> model.time_functions

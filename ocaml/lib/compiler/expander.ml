@@ -5724,7 +5724,7 @@ let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None)
       | Ir.UnOp  u -> check_refs u.arg
       | Ir.Cond  c -> check_refs c.pred; check_refs c.then_; check_refs c.else_
       | Ir.Pop _ | Ir.PopSum _ -> ()  (* caught elsewhere *)
-      | Ir.TimeFunc _ -> ()
+      | Ir.TimeFunc _ | Ir.ForcingBasis _ -> ()
       | Ir.TableLookup (_, args) -> List.iter check_refs args
       | Ir.UncheckedDim u -> check_refs u.inner
       | Ir.Reduce terms -> List.iter check_refs terms
@@ -6508,6 +6508,7 @@ let resolve_comp_name ctx env e =
       | Ir.Const _    -> "a constant"
       | Ir.Cond _     -> "a conditional"
       | Ir.TimeFunc _ -> "a time-function reference"
+      | Ir.ForcingBasis _ -> "a forcing basis function"
       | Ir.TableLookup _ -> "a table lookup"
       | Ir.Time       -> "the time symbol"
       | Ir.Dt         -> "the integrator step `dt`"
@@ -6672,31 +6673,156 @@ let expand_time_function_one ctx fname (env : (string * string) list)
      `coefs`, `times`, …): an anchor is a TIME, so it belongs in a knot list and
      nowhere else. Routing it through the shared closure would silently make
      `values = [last_obs]` legal. *)
-  let get_breakpoints_list () =
-    match List.assoc_opt "breakpoints" fargs with
+  let get_anchor_list key ~what ~example =
+    match List.assoc_opt key fargs with
     | None ->
       Diagnostics.error ctx.diags ~code:"E403" ~loc:Diagnostics.no_loc
         ~message:(Printf.sprintf
-          "time function '%s' missing required argument 'breakpoints'" fname)
-        ~hint:"Add 'breakpoints = [<time>, ...]' to the forcing function body."
+          "time function '%s' missing required argument '%s'" fname key)
+        ~hint:(Printf.sprintf "Add '%s = [<time>, ...]' to the forcing function body." key)
         ();
       []
     | Some fv ->
       let one (e : expr) : Ir.expr =
-        match classify_anchor ctx
-                ~what:"a `breakpoints` entry"
-                ~example:"`breakpoints = [last_obs, last_obs + 1 'weeks]`"
-                ~loc:Diagnostics.no_loc e with
+        match classify_anchor ctx ~what ~example ~loc:Diagnostics.no_loc e with
         | AnchorAt a -> Ir.ObsAnchor a
         (* The classifier already reported; keep expanding so the author sees
            every error in one pass. *)
         | AnchorBad -> Ir.Const 0.0
         | AnchorNone -> resolve_expr ctx env e
       in
-      (match expr_of_farg "breakpoints" fv with
+      (match expr_of_farg key fv with
        | Some (EList es) -> List.map one es
        | Some e          -> [one e]
        | None            -> [])
+  in
+  let get_breakpoints_list () =
+    get_anchor_list "breakpoints" ~what:"a `breakpoints` entry"
+      ~example:"`breakpoints = [last_obs, last_obs + 1 'weeks]`"
+  in
+  (* The spline kinds' shared readers (periodic_spline, bspline). *)
+  let spline_int_const kind expr label default =
+    let ir = resolve_expr ctx env expr in
+    let unwrap = function
+      | Ir.Const f -> Some f
+      | Ir.UncheckedDim { inner = Ir.Const f; _ } -> Some f
+      | _ -> None
+    in
+    match unwrap ir with
+    | Some f when Float.is_integer f && f >= 0.0 -> int_of_float f
+    | _ ->
+      Diagnostics.error ctx.diags ~code:"E408" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "%s '%s': '%s' must be a non-negative integer constant" kind fname label)
+        ~hint:(Printf.sprintf "Use a numeric integer literal, e.g. %s = 6" label)
+        ();
+      default
+  in
+  (* The runtime evaluator's fixed workspaces hold degree <= 5
+     (`sim::bspline::MAX_DEGREE`). *)
+  let spline_max_degree = 5 in
+  let spline_degree () =
+    let d = match List.assoc_opt "degree" fargs with
+      | None -> 3
+      | Some fv -> (match expr_of_farg "degree" fv with
+          | Some e -> spline_int_const fkind e "degree" 3 | None -> 3)
+    in
+    if d > spline_max_degree then begin
+      Diagnostics.error ctx.diags ~code:"E408" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf "%s '%s': degree (%d) must be at most %d"
+                    fkind fname d spline_max_degree)
+        ~hint:"Use degree = 3 (cubic) unless you need otherwise."
+        ();
+      3
+    end else d
+  in
+  (* Proposal 2026-10-27-estimable-bsplines §6.4: `coefs = smooth(level = a,
+     slope = b, scale = tau, modes = z, per = 1 'weeks)`, the whitened
+     penalized curve. `modes` names an indexed parameter family with exactly
+     n_basis - 2 cells, each declared `real` with prior exactly
+     normal(mu = 0, sigma = 1), so the name stays honest; `level`, `slope` and
+     `scale` are scalar expressions; `per` is the reference duration. *)
+  let spline_smooth ~knots_ok ~n_basis ~degree kws =
+    let err code msg hint =
+      Diagnostics.error ctx.diags ~code ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf "bspline '%s': %s" fname msg) ~hint ()
+    in
+    let keys = [ "level"; "slope"; "scale"; "modes"; "per" ] in
+    List.iter (fun (k, _) ->
+      if not (List.mem k keys) then
+        err "E413" (Printf.sprintf "`smooth` has no argument '%s'" k)
+          "smooth takes level, slope, scale, modes and per.") kws;
+    let arg k = match List.assoc_opt k kws with
+      | Some e -> Some e
+      | None ->
+        err "E413" (Printf.sprintf "`smooth` is missing '%s'" k)
+          "smooth(level = a, slope = b, scale = tau, modes = z, per = 1 'weeks)";
+        None
+    in
+    let expr k = match arg k with Some e -> resolve_expr ctx env e | None -> Ir.Const 0.0 in
+    if degree < 2 then
+      err "E413" (Printf.sprintf "`smooth` needs degree at least 2, so the curve has curvature; it is %d" degree)
+        "Use degree = 3 (the default).";
+    let level = expr "level" and slope = expr "slope" and scale = expr "scale" and per = expr "per" in
+    let n_modes = n_basis - 2 in
+    let modes = match arg "modes" with
+      | None -> []
+      | Some (EIdent (fam, _)) ->
+        (match List.find_opt (function PIndexed p -> p.pname = fam | PScalar _ -> false) ctx.param_decls with
+         | Some (PIndexed p) ->
+           let cells = expand_indexed_decl_names ctx p.pname p.pdims in
+           if knots_ok && List.length cells <> n_modes then
+             err "E413" (Printf.sprintf
+                 "`modes = %s` has %d cells but %d basis functions need n_basis - 2 = %d"
+                 fam (List.length cells) n_basis n_modes)
+               "Index the family by a dimension with n_basis - 2 levels.";
+           let const_of e = match resolve_expr ctx env e with
+             | Ir.Const v | Ir.UncheckedDim { inner = Ir.Const v; _ } -> Some v
+             | Ir.UnOp { op = Ir.Neg; arg = Ir.Const v } -> Some (-. v)
+             | _ -> None
+           in
+           let standard_normal = match p.pprior with
+             | Some { ps_name = "normal"; ps_args; ps_pool_over = None } ->
+               List.length ps_args = 2
+               && (match List.assoc_opt "mu" ps_args with Some e -> const_of e = Some 0.0 | None -> false)
+               && (match List.assoc_opt "sigma" ps_args with Some e -> const_of e = Some 1.0 | None -> false)
+             | _ -> false
+           in
+           if p.pkind <> PReal || not standard_normal then
+             err "E414" (Printf.sprintf
+                 "the modes `%s` must be declared `real` with prior exactly normal(mu = 0.0, sigma = 1.0)" fam)
+               (Printf.sprintf "Declare `%s[...] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)`, with no range, so the samplers move it on the identity scale." fam);
+           List.map (fun c -> Ir.Param c) cells
+         | _ ->
+           err "E413" (Printf.sprintf "`modes = %s` must name an indexed parameter family" fam)
+             "Declare `z[mode] : real ... ~ normal(mu = 0.0, sigma = 1.0)` and write `modes = z`.";
+           [])
+      | Some _ ->
+        err "E413" "`modes` must be the bare name of an indexed parameter family"
+          "Write `modes = z` for a family `z[mode]`.";
+        []
+    in
+    Ir.Coefs_smooth { level; slope; scale; modes; per }
+  in
+  (* `link = identity | log`, a bare closed enum (as `method`). *)
+  let spline_link () =
+    match List.assoc_opt "link" fargs with
+    | None | Some (FExpr (EIdent ("identity", _))) -> Ir.Link_identity
+    | Some (FExpr (EIdent ("log", _))) -> Ir.Link_log
+    | Some (FExpr (EIdent (v, _))) ->
+      Diagnostics.error ctx.diags ~code:"E411" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "forcing '%s': unknown link '%s' — expected identity or log" fname v)
+        ~hint:"link is a bare enum: `link = log`"
+        ();
+      Ir.Link_identity
+    | Some _ ->
+      Diagnostics.error ctx.diags ~code:"E411" ~loc:Diagnostics.no_loc
+        ~message:(Printf.sprintf
+          "forcing '%s': link must be a bare enum — write link = log or link = identity" fname)
+        ~hint:"one of: identity, log"
+        ();
+      Ir.Link_identity
   in
   (* A file selector (a `data =` path or a `*_col =` file column): REQUIRE a
      quoted string (E410 if bare). A bare identifier here would be
@@ -6888,7 +7014,8 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                                        "key_col"; "table"; "time_dim"; "times"; "values"]
           | "periodic"        -> Some ["period"; "on"; "step"; "values"]
           | "fourier"         -> Some ["period"; "harmonics"]
-          | "periodic_spline" -> Some ["period"; "n_basis"; "degree"; "coefs"]
+          | "periodic_spline" -> Some ["period"; "n_basis"; "degree"; "coefs"; "link"]
+          | "bspline"         -> Some ["window"; "breakpoints"; "n_basis"; "degree"; "link"; "coefs"]
           | _                 -> None) with
    | None -> ()
    | Some keys ->
@@ -7176,24 +7303,6 @@ let expand_time_function_one ctx fname (env : (string * string) list)
          positions from period/n_basis. See proposal at
          docs/dev/proposals/2026-05-12-periodic-bspline-algorithm.md. *)
       let period_expr = get_kw "period" in
-      let unwrap_int_const expr label default =
-        let ir = resolve_expr ctx env expr in
-        let unwrap = function
-          | Ir.Const f -> Some f
-          | Ir.UncheckedDim { inner = Ir.Const f; _ } -> Some f
-          | _ -> None
-        in
-        match unwrap ir with
-        | Some f when Float.is_integer f && f >= 0.0 -> int_of_float f
-        | _ ->
-          Diagnostics.error ctx.diags ~code:"E408" ~loc:Diagnostics.no_loc
-            ~message:(Printf.sprintf
-              "periodic_spline '%s': '%s' must be a non-negative integer constant"
-              fname label)
-            ~hint:"Use a numeric integer literal, e.g. n_basis = 6"
-            ();
-          default
-      in
       let n_basis = match List.assoc_opt "n_basis" fargs with
         | None ->
           Diagnostics.error ctx.diags ~code:"E408" ~loc:Diagnostics.no_loc
@@ -7201,13 +7310,22 @@ let expand_time_function_one ctx fname (env : (string * string) list)
             ~hint:"Add 'n_basis = <int>' (number of basis functions, e.g. 6)"
             ();
           1
-        | Some fv -> (match expr_of_farg "n_basis" fv with Some e -> unwrap_int_const e "n_basis" 1 | None -> 1)
+        | Some fv -> (match expr_of_farg "n_basis" fv with
+            | Some e -> spline_int_const fkind e "n_basis" 1 | None -> 1)
       in
-      let degree = match List.assoc_opt "degree" fargs with
-        | None -> 3
-        | Some fv -> (match expr_of_farg "degree" fv with Some e -> unwrap_int_const e "degree" 3 | None -> 3)
+      let degree = spline_degree () in
+      (match List.assoc_opt "coefs" fargs with
+       | Some (FExpr (EFuncCall ("smooth", _))) ->
+         Diagnostics.error ctx.diags ~code:"E413" ~loc:Diagnostics.no_loc
+           ~message:(Printf.sprintf
+             "periodic_spline '%s': `smooth(...)` is accepted only as the coefs of a bspline" fname)
+           ~hint:"A periodic spline's wrap-around penalty is a different matrix; give explicit coefs."
+           ()
+       | _ -> ());
+      let coefs = match List.assoc_opt "coefs" fargs with
+        | Some (FExpr (EFuncCall ("smooth", _))) -> List.init n_basis (fun _ -> Ir.Const 0.0)
+        | _ -> get_kw_list "coefs"
       in
-      let coefs = get_kw_list "coefs" in
       if n_basis <= degree then
         Diagnostics.error ctx.diags ~code:"E408" ~loc:Diagnostics.no_loc
           ~message:(Printf.sprintf
@@ -7222,12 +7340,86 @@ let expand_time_function_one ctx fname (env : (string * string) list)
             fname (List.length coefs) n_basis)
           ~hint:"Provide exactly n_basis coefficient values."
           ();
-      Ir.PeriodicSpline { period = period_expr; n_basis; degree; coefs }
+      Ir.PeriodicSpline { period = period_expr; n_basis; degree; coefs;
+                          link = spline_link () }
+    | "bspline" ->
+      (* Proposal 2026-10-27-estimable-bsplines §4.3: a clamped B-spline over a
+         window, held at its end values outside it. Two knot forms, exactly one
+         of which is given: `window = [a, b]` with `n_basis` (n_basis − degree
+         equal intervals), or explicit `breakpoints` (n_basis implied). Window
+         ends and breakpoints read observation anchors like `piecewise`
+         breakpoints. *)
+      let degree = spline_degree () in
+      let shape_error msg hint =
+        Diagnostics.error ctx.diags ~code:"E408" ~loc:Diagnostics.no_loc
+          ~message:(Printf.sprintf "bspline '%s': %s" fname msg) ~hint ()
+      in
+      let knots = match List.mem_assoc "window" fargs, List.mem_assoc "breakpoints" fargs with
+        | true, true ->
+          shape_error "give either `window` (with `n_basis`) or `breakpoints`, not both"
+            "Keep `window = [a, b]` and `n_basis` for equal intervals, or `breakpoints = [...]` for your own.";
+          Ir.Knots_explicit []
+        | false, false ->
+          shape_error "missing its knots"
+            "Add `window = [a, b]` and `n_basis = <int>`, or `breakpoints = [a, ..., b]`.";
+          Ir.Knots_explicit []
+        | true, false ->
+          let ends = get_anchor_list "window" ~what:"a `window` end"
+              ~example:"`window = [0 'days, last_obs - 2 'weeks]`" in
+          let n_basis = match List.assoc_opt "n_basis" fargs with
+            | None ->
+              shape_error "`window` needs `n_basis`"
+                "Add `n_basis = <int>`, the number of basis functions (coefficients).";
+              degree + 1
+            | Some fv -> (match expr_of_farg "n_basis" fv with
+                | Some e -> spline_int_const fkind e "n_basis" (degree + 1) | None -> degree + 1)
+          in
+          if n_basis <= degree then
+            shape_error (Printf.sprintf "n_basis (%d) must be greater than degree (%d)" n_basis degree)
+              "Increase n_basis or lower degree.";
+          (match ends with
+           | [ lower; upper ] ->
+             Ir.Knots_uniform { lower; upper; n_intervals = max 1 (n_basis - degree) }
+           | _ ->
+             shape_error (Printf.sprintf "`window` has %d entries; it is [start, end]" (List.length ends))
+               "Write `window = [a, b]`.";
+             Ir.Knots_explicit [])
+        | false, true ->
+          if List.mem_assoc "n_basis" fargs then
+            shape_error "`n_basis` is implied by `breakpoints` (their count − 1 + degree); remove it"
+              "Remove `n_basis`, or use `window = [a, b]` with `n_basis` for equal intervals.";
+          let bps = get_breakpoints_list () in
+          if List.length bps < 2 then
+            shape_error (Printf.sprintf "`breakpoints` has %d entries; it needs at least 2 (the window ends)"
+                           (List.length bps))
+              "List the window start, any interior knots, and the window end.";
+          Ir.Knots_explicit bps
+      in
+      let n_basis = match knots with
+        | Ir.Knots_uniform { n_intervals; _ } -> n_intervals + degree
+        | Ir.Knots_explicit bps -> max 0 (List.length bps - 1) + degree
+      in
+      (* A knot-form error above already reported; a count against no knots
+         would only repeat it. *)
+      let knots_ok = match knots with Ir.Knots_explicit [] -> false | _ -> true in
+      let coefs = match List.assoc_opt "coefs" fargs with
+        | Some (FExpr (EFuncCall ("smooth", kws))) ->
+          spline_smooth ~knots_ok ~n_basis ~degree kws
+        | _ ->
+          let coefs = get_kw_list "coefs" in
+          if knots_ok && List.length coefs <> n_basis then
+            shape_error (Printf.sprintf
+                "coefs has length %d but the knots give %d basis functions (intervals + degree)"
+                (List.length coefs) n_basis)
+              "Provide one coefficient per basis function.";
+          Ir.Coefs_explicit coefs
+      in
+      Ir.BSpline { knots; degree; coefs; link = spline_link () }
     | k ->
       Diagnostics.error ctx.diags ~code:"E408" ~loc:Diagnostics.no_loc
         ~message:(Printf.sprintf "unknown time function kind '%s' in '%s'" k fname)
-        ~detail:"Supported kinds: sinusoidal, piecewise, interpolated, periodic, fourier, periodic_spline."
-        ~hint:(Printf.sprintf "Change the kind to one of: sinusoidal, piecewise, interpolated, periodic, fourier, periodic_spline.")
+        ~detail:"Supported kinds: sinusoidal, piecewise, interpolated, periodic, fourier, periodic_spline, bspline."
+        ~hint:(Printf.sprintf "Change the kind to one of: sinusoidal, piecewise, interpolated, periodic, fourier, periodic_spline, bspline.")
         ();
       Ir.Piecewise { breakpoints = []; values = [] }
   in
@@ -7241,6 +7433,20 @@ let expand_time_function_one ctx fname (env : (string * string) list)
   let scale_expr e =
     if scale = 1.0 then e
     else Ir.BinOp { op = Mul; left = e; right = Ir.Const scale }
+  in
+  (* A spline's unit scale s goes through its coefficients. Identity link:
+     each coefficient times s (as every value-carrying kind). Log link
+     (proposal §4.4): each coefficient plus ln s, so by the partition of unity
+     the value is s·exp(g) exactly. The shift is a dimensionless escape whose
+     reason names it, so the dimension checker can see past it to the
+     user's coefficient, which must itself be dimensionless (E301). *)
+  let spline_scale link e = match link with
+    | Ir.Link_identity -> scale_expr e
+    | Ir.Link_log ->
+      Ir.BinOp { op = Add; left = e;
+                 right = Ir.UncheckedDim { inner = Ir.Const (Float.log scale);
+                                           dim_p = 0; dim_t = 0;
+                                           reason = Ir.spline_log_shift_reason } }
   in
   let kind = if scale = 1.0 then kind else
     match kind with
@@ -7261,7 +7467,21 @@ let expand_time_function_one ctx fname (env : (string * string) list)
     | Ir.PeriodicSpline ps ->
       (* gh#59 v2: scale applies to the coefficient values (n_basis/
          degree are integers, period is dimensional and unchanged). *)
-      Ir.PeriodicSpline { ps with Ir.coefs = List.map scale_expr ps.coefs }
+      Ir.PeriodicSpline { ps with Ir.coefs = List.map (spline_scale ps.link) ps.coefs }
+    | Ir.BSpline ({ coefs = Ir.Coefs_explicit cs; _ } as b) ->
+      Ir.BSpline { b with Ir.coefs = Ir.Coefs_explicit (List.map (spline_scale b.link) cs) }
+    (* smooth: w = level 1 + slope (xi - t_m) + (scale/kappa) M z, and the
+       basis sums to one, so under the log link + ln s goes to the level alone,
+       and under identity s multiplies level, slope and scale (z is a pure
+       number). *)
+    | Ir.BSpline ({ coefs = Ir.Coefs_smooth sm; _ } as b) ->
+      let coefs = match b.link with
+        | Ir.Link_log -> Ir.Coefs_smooth { sm with level = spline_scale Ir.Link_log sm.level }
+        | Ir.Link_identity ->
+          Ir.Coefs_smooth { sm with level = scale_expr sm.level; slope = scale_expr sm.slope;
+                                    scale = scale_expr sm.scale }
+      in
+      Ir.BSpline { b with Ir.coefs }
   in
   let dim = unit_lit_to_dim funit in
   (* gh#314: optional `lag = <duration>` — an evaluation-time shift applied
@@ -11249,7 +11469,7 @@ let build_model_structure ctx expanded_trs =
     | Ir.TableLookup (_, args) ->
       List.fold_left collect_numerator_pops acc args
     | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Time | Ir.Dt | Ir.Projected
-    | Ir.ObsColumnRef _ | Ir.ObsAnchor _ | Ir.TimeFunc _ -> acc
+    | Ir.ObsColumnRef _ | Ir.ObsAnchor _ | Ir.TimeFunc _ | Ir.ForcingBasis _ -> acc
     | Ir.UncheckedDim u -> collect_numerator_pops acc u.inner
     (* Every term of a sum is a numerator contribution (like Add). *)
     | Ir.Reduce terms -> List.fold_left collect_numerator_pops acc terms
@@ -11310,7 +11530,7 @@ let rec expr_contains_param_or_pop = function
   | Ir.BindingRef _ -> false
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   | Ir.Const _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _
-  | Ir.ObsAnchor _ | Ir.TimeFunc _ -> false
+  | Ir.ObsAnchor _ | Ir.TimeFunc _ | Ir.ForcingBasis _ -> false
 
 (* Treat `UncheckedDim { inner = Const c; ... }` (the IR form of unit
    literals like `1 'days`) as a constant for L401 matching. *)
@@ -11381,7 +11601,7 @@ let rec walk_expr_for_l401 ~on_match e =
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
-  | Ir.TimeFunc _ -> ()
+  | Ir.TimeFunc _ | Ir.ForcingBasis _ -> ()
 
 let lint_l401 ctx (expanded_trs : Ir.transition list) =
   (* Avoid duplicate emits when the same expanded transition rate fires
@@ -11509,7 +11729,7 @@ let rec l403_rate_forcing_in is_rate_forcing = function
   | Ir.TableLookup (_, args) ->
     List.find_map (l403_rate_forcing_in is_rate_forcing) args
   | Ir.Reduce terms -> List.find_map (l403_rate_forcing_in is_rate_forcing) terms
-  | Ir.TimeFunc _ | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
+  | Ir.TimeFunc _ | Ir.ForcingBasis _ | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
   | Ir.BindingRef _ -> None
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
@@ -11563,7 +11783,7 @@ let rec walk_expr_for_l403 mags ~on_match e =
     List.iter (walk_expr_for_l403 mags ~on_match) terms
   | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
-  | Ir.TimeFunc _ | Ir.BindingRef _ -> ()
+  | Ir.TimeFunc _ | Ir.ForcingBasis _ | Ir.BindingRef _ -> ()
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
 let lint_l403 ctx (transitions : Ir.transition list)

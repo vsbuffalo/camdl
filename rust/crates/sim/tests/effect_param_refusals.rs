@@ -16,7 +16,8 @@
 //!   plain `init` assignment.
 //!
 //! The model is the book's seeding idiom on `sir_basic`:
-//! `events { founders_arrive : add(I, n_seed) at [tau] }`.
+//! `events { founders_arrive : add(I, n_seed) at [tau] }`. A periodic-spline
+//! variant reaches the amount through a forcing coefficient instead.
 
 use std::sync::Arc;
 
@@ -212,4 +213,78 @@ fn pgas_refuses_an_estimated_plain_init_assignment() {
 #[test]
 fn pgas_accepts_a_rate_parameter() {
     run_pgas_estimating(&seeding_model(), &["beta"]).expect("a rate parameter is scored by PGAS");
+}
+
+/// A spline coefficient is live (proposal 2026-10-27-estimable-bsplines §4.2,
+/// §4.3), so a parameter can reach an effect amount through the forcing. PGAS
+/// must refuse it as it refuses a direct amount: the event `add(I, season)`
+/// reads forcing `season`, whose second coefficient is `c2`. Checked for both
+/// spline kinds.
+fn refuses_a_spline_coefficient_in_an_effect_amount(kind: ir::time_func::TimeFuncKind) {
+    use ir::expr::{Expr, TimeFuncRef, TimeFuncWrap};
+    use ir::time_func::TimeFunction;
+    let base = seeding_model();
+    let mut model = (*base.model).clone();
+    model.parameters.push(ir::parameter::Parameter {
+        name: "c2".into(),
+        value: ir::parameter::ParamValue::Fixed { value: 2.0 },
+        param_kind: None,
+        param_dim: None,
+    });
+    model.time_functions.push(TimeFunction {
+        name: "season".into(),
+        kind,
+        dim: (0, 0),
+        lag: None,
+        data_source: None,
+    });
+    let mut doc = serde_json::to_value(&model).unwrap();
+    doc["interventions"][0]["actions"][0]["add"]["count"] =
+        serde_json::to_value(Expr::TimeFunc(TimeFuncWrap { time_func: TimeFuncRef { name: "season".into() } })).unwrap();
+    let model: ir::Model = serde_json::from_value(doc).unwrap();
+    let model = Arc::new(CompiledModel::new(model).expect("compile"));
+    let err = run_pgas_estimating(&model, &["beta", "c2"]).expect_err("must be refused");
+    assert_eq!(
+        err,
+        "model validation error: pgas: `c2` is estimated and sets the amount of event \
+         `founders_arrive`, which the PGAS parameter move cannot score, so the sampler cannot \
+         move `c2` through it. Fit with PMMH, or fix `c2`."
+    );
+    // Control: the same model with only `beta` estimated is not refused.
+    run_pgas_estimating(&model, &["beta"]).expect("a rate parameter alone is scored by PGAS");
+}
+
+fn spline_coefs() -> Vec<ir::expr::Expr> {
+    use ir::expr::Expr;
+    vec![
+        Expr::const_(1.0), Expr::param("c2"), Expr::const_(1.0),
+        Expr::const_(1.0), Expr::const_(1.0), Expr::const_(1.0),
+    ]
+}
+
+#[test]
+fn pgas_refuses_an_estimated_spline_coefficient_in_an_effect_amount() {
+    use ir::time_func::{PeriodicSpline, SplineLink, TimeFuncKind};
+    refuses_a_spline_coefficient_in_an_effect_amount(TimeFuncKind::PeriodicSpline(PeriodicSpline {
+        period: ir::expr::Expr::const_(4.0),
+        n_basis: 6,
+        degree: 3,
+        coefs: spline_coefs(),
+        link: SplineLink::Identity,
+    }));
+}
+
+#[test]
+fn pgas_refuses_an_estimated_bspline_coefficient_in_an_effect_amount() {
+    use ir::time_func::{BSpline, BSplineKnots, SplineCoefs, SplineLink, TimeFuncKind};
+    refuses_a_spline_coefficient_in_an_effect_amount(TimeFuncKind::BSpline(BSpline {
+        knots: BSplineKnots::Uniform {
+            lower: ir::expr::Expr::const_(0.0),
+            upper: ir::expr::Expr::const_(10.0),
+            n_intervals: 3,
+        },
+        degree: 3,
+        coefs: SplineCoefs::Explicit { coefs: spline_coefs() },
+        link: SplineLink::Identity,
+    }));
 }

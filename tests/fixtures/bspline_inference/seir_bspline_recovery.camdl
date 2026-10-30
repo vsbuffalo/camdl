@@ -1,0 +1,62 @@
+# R3 recovery fixture (proposal 2026-10-27-estimable-bsplines §8.1, §8.4, scaled
+# down): a chain-binomial SEIR whose log transmission rate is a cubic B-spline
+# with five estimable coefficients over [0, 86] days, two weeks before the last
+# of 100 daily onset counts, observed as neg_binomial(mean = rho * onsets,
+# r = k). The truth lies in the spline space; E0, I0, rho and k are fixed.
+
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+let N = S + E + I + R
+
+parameters {
+  sigma : rate        in [0.01, 1.0]
+  gamma : rate        in [0.01, 1.0]
+  rho   : probability in [0.01, 1.0]
+  k     : positive    in [0.1, 1000]
+  b1    : real 'ratio
+  b2    : real 'ratio
+  b3    : real 'ratio
+  b4    : real 'ratio
+  b5    : real 'ratio
+  N0    : count       in [100, 10000000]
+  E0    : count       in [0, 1000]
+  I0    : count       in [0, 1000]
+}
+
+forcing {
+  beta_t : bspline 'per_day {
+    window  = [0 'days, 86 'days]
+    n_basis = 5
+    link    = log
+    coefs   = [b1, b2, b3, b4, b5]
+  }
+}
+
+transitions {
+  infection   : S --> E @ beta_t * S * (I / N)
+  progression : E --> I @ sigma * E
+  recovery    : I --> R @ gamma * I
+}
+
+init {
+  S = N0 - E0 - I0
+  E = E0
+  I = I0
+}
+
+observations {
+  onsets {
+    columns       { time : time, onsets : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(progression)
+    emit_schedule = every 1 'days
+    onsets        ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}

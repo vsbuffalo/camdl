@@ -702,6 +702,75 @@ fn ir_contrasts_excluded_from_hash() {
     );
 }
 
+/// Proposal 2026-10-27-estimable-bsplines §5.6: a spline's `link` is run
+/// identity. Under a `'ratio` unit the expander's unit rewrite is the identity
+/// for both links, so two models differing only in `link` carry identical
+/// coefficients — and would share a `run_id`, the store serving one the other's
+/// trajectory (exp g against g), unless `link` itself is hashed. Checked for
+/// both spline kinds.
+#[test]
+fn ir_spline_link_changes_hash() {
+    use ir::time_func::{BSpline, BSplineKnots, PeriodicSpline, SplineCoefs, SplineLink};
+    let coefs = || vec![Expr::const_(0.2), Expr::const_(-0.1), Expr::const_(0.4), Expr::const_(0.0)];
+    let bspline = |link| {
+        TimeFuncKind::BSpline(BSpline {
+            knots: BSplineKnots::Uniform { lower: Expr::const_(0.0), upper: Expr::const_(30.0), n_intervals: 1 },
+            degree: 3,
+            coefs: SplineCoefs::Explicit { coefs: coefs() },
+            link,
+        })
+    };
+    let periodic = |link| {
+        TimeFuncKind::PeriodicSpline(PeriodicSpline {
+            period: Expr::const_(7.0),
+            n_basis: 4,
+            degree: 3,
+            coefs: coefs(),
+            link,
+        })
+    };
+    for (what, kind) in [("bspline", &bspline as &dyn Fn(SplineLink) -> TimeFuncKind), ("periodic_spline", &periodic)] {
+        let mut ident = representative_model();
+        ident.time_functions[0].kind = kind(SplineLink::Identity);
+        let mut log = representative_model();
+        log.time_functions[0].kind = kind(SplineLink::Log);
+        assert_ne!(
+            ident.content_hash(),
+            log.content_hash(),
+            "{what}: two models differing only in `link` must hash differently"
+        );
+    }
+}
+
+/// Proposal 2026-10-27-estimable-bsplines §5.3: the `forcing_basis` expression
+/// hashes by its forcing and its index (appended as tag 18, so no earlier
+/// variant's hash moves). Gradient maps themselves stay out of model identity
+/// (`SV = 2`), so this pins the node's own hash, which any future hashed use of
+/// it relies on.
+#[test]
+fn ir_forcing_basis_hashes_its_forcing_and_index() {
+    use ir::expr::{ForcingBasisRef, ForcingBasisWrap};
+    let fb = |name: &str, index: u32| {
+        Expr::ForcingBasis(ForcingBasisWrap {
+            forcing_basis: ForcingBasisRef { name: name.into(), index, space: ir::expr::BasisSpace::Spline },
+        })
+        .content_hash()
+    };
+    let spaced = |space| {
+        Expr::ForcingBasis(ForcingBasisWrap { forcing_basis: ForcingBasisRef { name: "f".into(), index: 0, space } })
+            .content_hash()
+    };
+    use ir::expr::BasisSpace;
+    assert_ne!(spaced(BasisSpace::Spline), spaced(BasisSpace::Whitened), "the space is hashed");
+    assert_ne!(spaced(BasisSpace::Whitened), spaced(BasisSpace::Linear), "the space is hashed");
+    assert_ne!(fb("f", 0), fb("f", 1), "the basis index is hashed");
+    assert_ne!(fb("f", 0), fb("g", 0), "the forcing name is hashed");
+    assert_eq!(fb("f", 2), fb("f", 2));
+    assert_ne!(fb("f", 0), Expr::TimeFunc(ir::expr::TimeFuncWrap {
+        time_func: ir::expr::TimeFuncRef { name: "f".into() } }).content_hash(),
+        "a basis node is not its forcing's value");
+}
+
 /// gh#314: a forcing `lag` is run identity. Two models that differ only by a
 /// forcing's evaluation-time shift produce different trajectories, so they must
 /// re-key. This pins that `TimeFunction::lag` is actually folded into the hash

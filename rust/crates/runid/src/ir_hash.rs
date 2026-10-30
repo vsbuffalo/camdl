@@ -37,6 +37,7 @@ use ir::anchor::AnchoredTime;
 use ir::expr::{
     BinOp, BinOpExpr, BinOpWrap, BindingRefWrap, CondExpr, CondWrap, ConstExpr, ConstRefExpr,
     DtExpr, Expr,
+    BasisSpace, ForcingBasisRef, ForcingBasisWrap,
     ObsAnchorWrap, ObsColumnRefExpr, ParamExpr, PerEvalRefWrap, PopExpr, PopSumExpr,
     ProjectedExpr, ReduceWrap, TableLookupExpr, TableLookupWrap, TimeExpr, TimeFuncRef,
     TimeFuncWrap, UnOp, UnOpExpr, UnOpWrap, UncheckedDimExpr, UncheckedDimWrap,
@@ -66,8 +67,8 @@ use ir::parameter::{
 };
 use ir::table::{OobPolicy, Table, TableSource};
 use ir::time_func::{
-    Fourier, InterpMethod, Interpolated, Periodic, PeriodicSpline, Piecewise, Sinusoidal,
-    TimeFuncKind, TimeFunction,
+    BSpline, BSplineKnots, Fourier, InterpMethod, Interpolated, Periodic, PeriodicSpline, Piecewise,
+    Sinusoidal, SplineCoefs, SplineLink, TimeFuncKind, TimeFunction,
 };
 use ir::transition::{
     DrawMethod, StoichiometryEntry, Transition, TransitionLineage, TransitionMetadata,
@@ -302,6 +303,19 @@ impl ContentAddressed for Expr {
             Expr::ConstRef(ConstRefExpr { const_ref }) => {
                 h.write_u32(18);
                 h.write_str(const_ref);
+            }
+            // Appended after the model-constant reference (proposal
+            // 2026-10-27-estimable-bsplines §5.3), so every earlier variant
+            // keeps its tag.
+            Expr::ForcingBasis(ForcingBasisWrap { forcing_basis: ForcingBasisRef { name, index, space } }) => {
+                h.write_u32(19);
+                h.write_str(name);
+                index.hash_into(h);
+                h.write_u32(match space {
+                    BasisSpace::Spline => 0,
+                    BasisSpace::Whitened => 1,
+                    BasisSpace::Linear => 2,
+                });
             }
         }
     }
@@ -898,15 +912,56 @@ impl ContentAddressed for TimeFuncKind {
                 // harmonics: Vec<(Expr, Expr)>.
                 harmonics.hash_into(h);
             }
-            TimeFuncKind::PeriodicSpline(PeriodicSpline { period, n_basis, degree, coefs }) => {
+            TimeFuncKind::PeriodicSpline(PeriodicSpline { period, n_basis, degree, coefs, link }) => {
                 h.write_u32(5);
                 period.hash_into(h);
                 n_basis.hash_into(h);
                 degree.hash_into(h);
                 coefs.hash_into(h);
+                hash_spline_link(*link, h);
+            }
+            TimeFuncKind::BSpline(BSpline { knots, degree, coefs, link }) => {
+                h.write_u32(6);
+                match knots {
+                    BSplineKnots::Uniform { lower, upper, n_intervals } => {
+                        h.write_u32(0);
+                        lower.hash_into(h);
+                        upper.hash_into(h);
+                        n_intervals.hash_into(h);
+                    }
+                    BSplineKnots::Explicit { breakpoints } => {
+                        h.write_u32(1);
+                        breakpoints.hash_into(h);
+                    }
+                }
+                degree.hash_into(h);
+                match coefs {
+                    SplineCoefs::Explicit { coefs } => {
+                        h.write_u32(0);
+                        coefs.hash_into(h);
+                    }
+                    SplineCoefs::Smooth { level, slope, scale, modes, per } => {
+                        h.write_u32(1);
+                        level.hash_into(h);
+                        slope.hash_into(h);
+                        scale.hash_into(h);
+                        modes.hash_into(h);
+                        per.hash_into(h);
+                    }
+                }
+                hash_spline_link(*link, h);
             }
         }
     }
+}
+
+/// A spline's `link` (proposal 2026-10-27-estimable-bsplines §5.6). Matched
+/// exhaustively, so a new link is a compile error here.
+fn hash_spline_link(link: SplineLink, h: &mut CanonicalHasher) {
+    h.write_u32(match link {
+        SplineLink::Identity => 0,
+        SplineLink::Log => 1,
+    });
 }
 
 impl ContentAddressed for TimeFunction {

@@ -1,0 +1,53 @@
+# Gradient fixture for `smooth` through the complete-data log-likelihood
+# (proposal 2026-10-27-estimable-bsplines §8.1, R2): a log-link smooth spline
+# transmission rate, lagged, its window ending before the horizon, observed
+# as Poisson incidence.
+
+time_unit = 'days
+
+dimensions { mode = [m1, m2, m3, m4] }
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  gamma   : rate in [0.01, 1.0]
+  a       : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  b       : real [1/T] ~ normal(mu = 0.0, sigma = 0.01)
+  tau     : positive 'ratio ~ exponential(rate = 5.99)
+  z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
+  rho     : probability in [0.01, 1.0]
+}
+
+forcing {
+  beta_t : bspline 'per_day {
+    window  = [0 'days, 50 'days]
+    n_basis = 6
+    link    = log
+    lag     = 2 'days
+    coefs   = smooth(level = a, slope = b, scale = tau, modes = z, per = 1 'weeks)
+  }
+}
+
+transitions {
+  infection : S --> I @ beta_t * S * (I / N)
+  recovery  : I --> R @ gamma * I
+}
+
+init { S = 9900  I = 100 }
+
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    cases         ~ poisson(rate = rho * projected)
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 63 'days
+}

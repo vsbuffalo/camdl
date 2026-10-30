@@ -103,11 +103,16 @@ pub fn resolve_from_config(
     resolve_with(model, |m| crate::obs_anchors_from_config(m, config, dt))
 }
 
+/// Also prints the `spline-held-past-window` notice against the model's
+/// resolved horizon, anchored or not, so the three commands that resolve
+/// through here (`pfilter`, `profile`, `survey`) report a hold exactly as
+/// `simulate` and `fit` do.
 fn resolve_with(
     model: &mut ir::Model,
     read_window: impl FnOnce(&ir::Model) -> Result<(f64, f64), String>,
 ) -> Result<bool, String> {
     if !model_is_anchored(model) {
+        spline_hold_notices(model, &[], model.simulation.t_end).emit_stderr();
         return Ok(false);
     }
     let (first, last) = read_window(model).map_err(|e| {
@@ -119,6 +124,7 @@ fn resolve_with(
     })?;
     let moved = substitute(model, ObsAnchorTimes { first, last })?;
     report(&moved, model);
+    spline_hold_notices(model, &moved, model.simulation.t_end).emit_stderr();
     Ok(true)
 }
 
@@ -271,7 +277,7 @@ fn substitute_expr(
         }
         Expr::UncheckedDim(w) => substitute_expr(&mut w.unchecked_dim.inner, anchors, site, out),
         Expr::Const(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
-        | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_)
+        | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_)
         | Expr::ObsColumnRef(_) | Expr::BindingRef(_) | Expr::PerEvalRef(_) => {}
     }
 }
@@ -307,6 +313,28 @@ fn validate_after_substitution(model: &ir::Model) -> Result<(), String> {
                     p.name
                 ));
             }
+        }
+    }
+
+    // A `bspline` window or breakpoint list read from anchors can invert under
+    // one data vintage and not another, exactly as a piecewise fork can. The
+    // runtime refuses it too (`bspline::Knots`), but here the message can say
+    // that the anchors are the cause.
+    for tf in &model.time_functions {
+        let ir::time_func::TimeFuncKind::BSpline(b) = &tf.kind else { continue };
+        let exprs = bspline_knot_exprs(&b.knots);
+        let knots: Vec<f64> = exprs.iter().filter_map(|e| const_value(e)).collect();
+        if knots.len() != exprs.len() {
+            continue;
+        }
+        if knots.windows(2).any(|w| w[0].is_nan() || w[1].is_nan() || w[1] <= w[0]) {
+            return Err(format!(
+                "forcing '{}' has its window or breakpoints out of order after \
+                 resolving its observation anchors: {:?}. A bspline needs strictly \
+                 increasing knots (window start before window end). Check the \
+                 anchor offsets against the literal knots.",
+                tf.name, knots
+            ));
         }
     }
 
@@ -356,12 +384,27 @@ fn validate_after_substitution(model: &ir::Model) -> Result<(), String> {
     Ok(())
 }
 
+/// The value of a knot that is constant once its anchors are substituted:
+/// a literal, a unit literal, or `+ − × ÷` and negation over those
+/// (`60 'days + 2 'weeks`). Anything else — a parameter — is `None`.
 fn const_value(e: &Expr) -> Option<f64> {
+    use ir::expr::{BinOp, UnOp};
     match e {
         Expr::Const(c) => Some(c.value),
         // Unit literals (`60 'days`) lower to a dimensional escape around a
         // constant; see through it, as every other analysis does.
         Expr::UncheckedDim(w) => const_value(&w.unchecked_dim.inner),
+        Expr::UnOp(w) if w.un_op.op == UnOp::Neg => const_value(&w.un_op.arg).map(|v| -v),
+        Expr::BinOp(w) => {
+            let (l, r) = (const_value(&w.bin_op.left)?, const_value(&w.bin_op.right)?);
+            match w.bin_op.op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                BinOp::Div => Some(l / r),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -380,7 +423,7 @@ fn expr_has_anchor(e: &Expr) -> bool {
         Expr::Reduce(w) => w.reduce.iter().any(expr_has_anchor),
         Expr::UncheckedDim(w) => expr_has_anchor(&w.unchecked_dim.inner),
         Expr::Const(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
-        | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_)
+        | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_)
         | Expr::ObsColumnRef(_) | Expr::BindingRef(_) | Expr::PerEvalRef(_) => false,
     }
 }
@@ -398,6 +441,15 @@ fn forcing_exprs(k: &ir::time_func::TimeFuncKind) -> Vec<&Expr> {
             .chain(f.harmonics.iter().flat_map(|(a, b)| [a, b]))
             .collect(),
         K::PeriodicSpline(s) => std::iter::once(&s.period).chain(&s.coefs).collect(),
+        K::BSpline(b) => bspline_knot_exprs(&b.knots).into_iter().chain(b.coefs.exprs()).collect(),
+    }
+}
+
+/// A `bspline` forcing's knot expressions: the window ends, or the breakpoints.
+fn bspline_knot_exprs(k: &ir::time_func::BSplineKnots) -> Vec<&Expr> {
+    match k {
+        ir::time_func::BSplineKnots::Uniform { lower, upper, .. } => vec![lower, upper],
+        ir::time_func::BSplineKnots::Explicit { breakpoints } => breakpoints.iter().collect(),
     }
 }
 
@@ -412,7 +464,76 @@ fn forcing_exprs_mut(k: &mut ir::time_func::TimeFuncKind) -> Vec<&mut Expr> {
             .chain(f.harmonics.iter_mut().flat_map(|(a, b)| [a, b]))
             .collect(),
         K::PeriodicSpline(s) => std::iter::once(&mut s.period).chain(&mut s.coefs).collect(),
+        K::BSpline(b) => {
+            let knots: Vec<&mut Expr> = match &mut b.knots {
+                ir::time_func::BSplineKnots::Uniform { lower, upper, .. } => vec![lower, upper],
+                ir::time_func::BSplineKnots::Explicit { breakpoints } => breakpoints.iter_mut().collect(),
+            };
+            knots.into_iter().chain(b.coefs.exprs_mut()).collect()
+        }
     }
+}
+
+/// The notice code for a `bspline` forcing held past its window (proposal
+/// 2026-10-27-estimable-bsplines §4.3, D4).
+pub const SPLINE_HELD_PAST_WINDOW: &str = "spline-held-past-window";
+
+/// One info notice for each `bspline` forcing whose window ends before the
+/// run's horizon (proposal §4.3, D4). Past its window end b a bspline holds its
+/// value at b (evaluated at t − lag), so a forecast there carries the curve's
+/// last value rather than an extrapolated trend; this says so, once per job.
+///
+/// `model` is the run's model with its anchors already substituted, `anchors`
+/// what [`substitute`] returned for it (empty when it had none), and `horizon`
+/// the run's resolved `t_end`. A window end or lag that is not a constant here
+/// (a parameter lag) cannot be compared, so it gets no notice.
+pub fn spline_hold_notices(
+    model: &ir::Model,
+    anchors: &[ResolvedAnchor],
+    horizon: f64,
+) -> crate::notice::Notices {
+    let cal = |t: f64| {
+        model
+            .origin
+            .as_deref()
+            .and_then(|o| ir::caltime::internal_to_date(o, t, &model.time_unit).ok())
+            .map(|d| format!(" ({d})"))
+            .unwrap_or_default()
+    };
+    model
+        .time_functions
+        .iter()
+        .filter_map(|tf| {
+            let ir::time_func::TimeFuncKind::BSpline(b) = &tf.kind else { return None };
+            let end = const_value(bspline_knot_exprs(&b.knots).last()?)?;
+            let lag = match &tf.lag {
+                None => 0.0,
+                Some(e) => const_value(e)?,
+            };
+            let from = end + lag;
+            // NaN on either side means the comparison is undecidable: no notice.
+            if horizon.is_nan() || from.is_nan() || horizon <= from {
+                return None;
+            }
+            let site = tf_name(&tf.name);
+            let anchored = anchors
+                .iter()
+                .find(|a| a.site == site && a.resolved == end)
+                .map(|a| format!("; its window ends at {}", a.anchor))
+                .unwrap_or_default();
+            Some(crate::notice::Notice::info(
+                SPLINE_HELD_PAST_WINDOW,
+                format!(
+                    "forcing `{}` is held at its value at t = {end}{} from t = {from}{} to the \
+                     horizon t = {horizon}{}{anchored}",
+                    tf.name,
+                    cal(end),
+                    cal(from),
+                    cal(horizon)
+                ),
+            ))
+        })
+        .collect()
 }
 
 /// The stderr line every resolving command prints, so a reader of the log can

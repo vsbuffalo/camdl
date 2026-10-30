@@ -53,7 +53,7 @@ let is_invariant (tbls : (string, table) Hashtbl.t) (e : expr) : bool =
     match e with
     | Const _ | Param _ | ConstRef _ -> true
     | PerEvalRef _ -> true   (* its body is invariant; never present in LICM input *)
-    | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _
+    | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _ | BindingRef _
     | Projected | ObsColumnRef _ -> false
     (* gh#616: NOT invariant. Its value comes from the run, not from theta, so
        hoisting it into a theta-stable per-eval binding would cache a value that
@@ -95,7 +95,7 @@ let rec contains_expensive (e : expr) : bool =
     contains_expensive pred || contains_expensive then_ || contains_expensive else_
   | TableLookup (_, idxs) -> List.exists contains_expensive idxs
   | UncheckedDim u -> contains_expensive u.inner
-  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _
   | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> false
 
 let binop_tag = function
@@ -120,6 +120,9 @@ let rec canon (e : expr) : string =
   | PopSum ps -> "S[" ^ String.concat ";" ps ^ "]"
   | Time -> "t" | Dt -> "d"
   | TimeFunc n -> "F" ^ n ^ ";"
+  | ForcingBasis { forcing; index; space } ->
+    Printf.sprintf "Fb%s#%d%s;" forcing index
+      (match space with Space_spline -> "" | Space_whitened -> "w" | Space_linear -> "l")
   | Projected -> "@" | ObsColumnRef c -> "O" ^ c ^ ";"
   (* Anchor and offset both enter the key: two knots that differ only in offset
      are different subtrees and must never share a per-eval binding. *)
@@ -183,7 +186,7 @@ let rec rw ctx (e : expr) : expr =
     | TableLookup (t, idxs) -> TableLookup (t, List.map (rw ctx) idxs)
     (* Variant leaves (the invariant leaves Const/Param/PerEvalRef are handled in
        the `is_invariant` branch above and never reach here). *)
-    | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _ | PerEvalRef _
+    | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _ | BindingRef _ | PerEvalRef _
     | Projected | ObsColumnRef _ | ObsAnchor _ | Const _ | Param _ | ConstRef _ -> e
 
 (* Hoist invariant subexpressions out of the dynamics surfaces. Folding a subset

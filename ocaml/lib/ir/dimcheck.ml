@@ -352,6 +352,8 @@ let rec infer st ~ctx (e : expr) : dim =
   | Dt   -> Known (make 0 1)  (* gh#54: dt has dimension T, same as t *)
   (* gh#616: an observation anchor resolves to a model TIME. *)
   | ObsAnchor _ -> Known (make 0 1)
+  (* A basis function is a pure number (the basis sums to one). *)
+  | ForcingBasis _ -> Known dimensionless
   | TimeFunc name ->
     (match Hashtbl.find_opt st.tf_dims name with
      | Some d -> resolve st d
@@ -507,6 +509,7 @@ let rec propagate st ~ctx (e : expr) (expected : dim_vec) : unit =
        is explicitly exempted from checker-driven dimensional
        constraints. *)
     ()
+  | ForcingBasis _ -> ()
   | TimeFunc name ->
     (* If the time function's dim is unknown, bind it *)
     (match Hashtbl.find_opt st.tf_dims name with
@@ -667,6 +670,7 @@ let rec read_dim st (e : expr) : dim =
   | Time -> Known (make 0 1)
   | Dt   -> Known (make 0 1)
   | ObsAnchor _ -> Known (make 0 1)   (* gh#616: a model time *)
+  | ForcingBasis _ -> Known dimensionless
   | TimeFunc name ->
     (match Hashtbl.find_opt st.tf_dims name with
      | Some d -> resolve st d
@@ -761,6 +765,10 @@ let rec expr_to_short_string (e : expr) : string =
   | Time -> "t"
   | Dt   -> "dt"
   | TimeFunc s -> Printf.sprintf "%s(t)" s
+  | ForcingBasis { forcing; index; space } ->
+    Printf.sprintf "%s_%d(%s)"
+      (match space with Space_spline -> "basis" | Space_whitened -> "whitened" | Space_linear -> "linear")
+      index forcing
   | TableLookup (s, _) -> Printf.sprintf "%s[...]" s
   | Projected -> "projected"
   | ObsColumnRef c -> c
@@ -996,6 +1004,60 @@ let check_model (m : model) : result =
            (e.g. `lag = 10 'days`) or a parameter declared `: duration`."
           tf.name)
         d (make 0 1)
+  ) m.time_functions;
+
+  (* Proposal 2026-10-27-estimable-bsplines §4.4: under `link = log` a spline
+     is s·exp(Σ c_k B_k), so every coefficient is a log-value and must be
+     dimensionless — the same requirement, and the same code, as any `exp`
+     argument. The expander's ln s unit shift is a marked escape; the check
+     reads the coefficient under it. *)
+  List.iter (fun (tf : time_function) ->
+    let log_coefs = match tf.kind with
+      | PeriodicSpline { link = Link_log; coefs; _ } -> coefs
+      | BSpline { link = Link_log; coefs = Coefs_explicit cs; _ } -> cs
+      | _ -> []
+    in
+    (* §6.4: smooth's reference duration is a duration; under the log link its
+       level and scale are pure numbers and its slope a rate per unit time. *)
+    (match tf.kind with
+     | BSpline { coefs = Coefs_smooth { level; slope; scale; per; _ }; link; _ } ->
+       let need what e want code =
+         st.subject <- None;
+         let ctx = Printf.sprintf "forcing '%s' smooth %s" tf.name what in
+         constrain_known st ~code
+           ~message:(Printf.sprintf "forcing '%s': smooth `%s` must have dimension %s"
+                       tf.name what (dim_display want))
+           (infer st ~ctx e) want
+       in
+       need "per" per (make 0 1) "E301";
+       if link = Link_log then begin
+         let level = match level with
+           | BinOp { op = Add; left; right = UncheckedDim { reason; _ } }
+             when reason = spline_log_shift_reason -> left
+           | e -> e
+         in
+         need "level" level dimensionless "E301";
+         need "slope" slope (make 0 (-1)) "E301";
+         need "scale" scale dimensionless "E301"
+       end
+     | _ -> ());
+    List.iteri (fun k c ->
+      let c = match c with
+        | BinOp { op = Add; left; right = UncheckedDim { reason; _ } }
+          when reason = spline_log_shift_reason -> left
+        | c -> c
+      in
+      st.subject <- None;
+      let ctx = Printf.sprintf "forcing '%s' coefficient %d" tf.name (k + 1) in
+      let d = infer st ~ctx c in
+      constrain_known st ~code:"E301"
+        ~message:(Printf.sprintf
+          "forcing '%s': coefficient %d must be dimensionless — under `link = log` \
+           the coefficients are log-values, and the forcing takes its unit from \
+           its declaration. Declare the coefficient's parameter `'ratio`."
+          tf.name (k + 1))
+        d dimensionless
+    ) log_coefs
   ) m.time_functions;
 
   (* Fix B: precompute each shared binding's dim in declaration (topological)

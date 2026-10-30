@@ -64,6 +64,42 @@ pub struct TimeFuncRef {
     pub name: String,
 }
 
+/// Basis function `index` (0-based) of spline forcing `name`, at the
+/// forcing's own evaluation time — t − lag, clamped to a `bspline`'s window or
+/// wrapped by a `periodic_spline`'s period. ∂f/∂cₖ = Bₖ(t): the derivative
+/// node the compiler emits for a spline coefficient (proposal
+/// 2026-10-27-estimable-bsplines §5.1). Only ever inside a gradient map.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForcingBasisRef {
+    pub name: String,
+    pub index: u32,
+    /// Which basis (§6.4); omitted when `spline`, the only space an
+    /// explicit-coefficient forcing has.
+    #[serde(default, skip_serializing_if = "BasisSpace::is_spline")]
+    pub space: BasisSpace,
+}
+
+/// The function a `forcing_basis` node evaluates, at the forcing's clamped
+/// evaluation time t_c (proposal §6.4):
+/// - `Spline`: Bₖ(t_c), the k-th B-spline;
+/// - `Whitened`: Wₖ(t_c)/κ = Σⱼ M_jk Bⱼ(t_c)/κ, a `smooth` forcing's k-th
+///   whitened mode (κ known only to the runtime when the window is anchored);
+/// - `Linear`: t_c − t_m (index 0), a `smooth` forcing's slope direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BasisSpace {
+    #[default]
+    Spline,
+    Whitened,
+    Linear,
+}
+
+impl BasisSpace {
+    pub fn is_spline(&self) -> bool {
+        matches!(self, BasisSpace::Spline)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TableLookupExpr {
     pub table:   String,
@@ -182,6 +218,11 @@ pub struct TimeFuncWrap {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForcingBasisWrap {
+    pub forcing_basis: ForcingBasisRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TableLookupWrap {
     pub table_lookup: TableLookupExpr,
 }
@@ -277,6 +318,7 @@ pub enum Expr {
     PerEvalRef(PerEvalRefWrap),
     ObsColumnRef(ObsColumnRefExpr),
     ObsAnchor(ObsAnchorWrap),
+    ForcingBasis(ForcingBasisWrap),
 }
 
 // ── Convenience constructors ──────────────────────────────────────────────────
@@ -417,12 +459,15 @@ impl<'de> Deserialize<'de> for Expr {
                     "obs_anchor" => {
                         Expr::ObsAnchor(ObsAnchorWrap { obs_anchor: map.next_value()? })
                     }
+                    "forcing_basis" => {
+                        Expr::ForcingBasis(ForcingBasisWrap { forcing_basis: map.next_value()? })
+                    }
                     other => {
                         return Err(de::Error::custom(format!(
                             "unknown expression node kind '{other}' (expected one of: const, \
                              param, const_ref, pop, pop_sum, time, dt, bin_op, un_op, cond, time_func, \
                              table_lookup, projected, unchecked_dim, reduce, binding_ref, \
-                             per_eval_ref, obs_column_ref, obs_anchor)"
+                             per_eval_ref, obs_column_ref, obs_anchor, forcing_basis)"
                         )))
                     }
                 };
@@ -481,6 +526,12 @@ mod deserialize_tests {
             Expr::obs_anchor(crate::anchor::AnchoredTime {
                 anchor: crate::anchor::ObsAnchor::First,
                 offset: -7.0,
+            }),
+            Expr::ForcingBasis(ForcingBasisWrap {
+                forcing_basis: ForcingBasisRef { name: "log_beta".into(), index: 2, space: BasisSpace::Spline },
+            }),
+            Expr::ForcingBasis(ForcingBasisWrap {
+                forcing_basis: ForcingBasisRef { name: "log_beta".into(), index: 0, space: BasisSpace::Whitened },
             }),
         ] {
             roundtrip(&e);

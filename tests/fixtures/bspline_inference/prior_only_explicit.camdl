@@ -1,0 +1,48 @@
+# R3 prior-only fixture for explicit coefficients (proposal
+# 2026-10-27-estimable-bsplines §8.1): X --> D @ f·X with X0 = 0, so every flow
+# is zero, and one observation stream whose every value is missing in the
+# test. The complete-data likelihood is constant, and PGAS+NUTS should draw
+# the six coefficients' independent normal(-1.5, 1) priors.
+
+time_unit = 'days
+
+compartments { X, D }
+
+parameters {
+  b1 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  b2 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  b3 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  b4 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  b5 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  b6 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+}
+
+forcing {
+  f : bspline 'per_day {
+    window  = [0 'days, 60 'days]
+    n_basis = 6
+    link    = log
+    coefs   = [b1, b2, b3, b4, b5, b6]
+  }
+}
+
+transitions {
+  decay : X --> D @ f * X
+}
+
+init { X = 0 }
+
+observations {
+  removals {
+    columns       { time : time, removals : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(decay)
+    emit_schedule = every 1 'days
+    removals      ~ poisson(rate = projected)
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 60 'days
+}

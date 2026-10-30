@@ -1,0 +1,60 @@
+# Gradient fixture for spline coefficients through the complete-data
+# log-likelihood (proposal 2026-10-27-estimable-bsplines §8.1, R2): a log-link
+# spline in the transmission rate (lagged, window ending before the horizon)
+# and an identity-link spline in a Poisson observation mean.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  gamma : rate in [0.01, 1.0]
+  b1 : real 'ratio in [-5, 2]
+  b2 : real 'ratio in [-5, 2]
+  b3 : real 'ratio in [-5, 2]
+  b4 : real 'ratio in [-5, 2]
+  b5 : real 'ratio in [-5, 2]
+  r1 : real 'ratio in [0, 1]
+  r2 : real 'ratio in [0, 1]
+  r3 : real 'ratio in [0, 1]
+  r4 : real 'ratio in [0, 1]
+}
+
+forcing {
+  beta_t : bspline 'per_day {
+    window  = [0 'days, 50 'days]
+    n_basis = 5
+    link    = log
+    lag     = 2 'days
+    coefs   = [b1, b2, b3, b4, b5]
+  }
+  rho_t : bspline 'ratio {
+    breakpoints = [0 'days, 30 'days, 60 'days]
+    degree      = 2
+    coefs       = [r1, r2, r3, r4]
+  }
+}
+
+transitions {
+  infection : S --> I @ beta_t * S * (I / N)
+  recovery  : I --> R @ gamma * I
+}
+
+init { S = 9900  I = 100 }
+
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    cases         ~ poisson(rate = rho_t * projected)
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 63 'days
+}

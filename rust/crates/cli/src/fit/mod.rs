@@ -25,6 +25,8 @@ fn resolve_anchors_into_temp_ir(
     let mut env = ir::envelope_from_str(&src)
         .map_err(|e| format!("IR load error from {ir_path}: {e}"))?;
     if !crate::obs_anchor::model_is_anchored(&env.model) {
+        crate::obs_anchor::spline_hold_notices(&env.model, &[], env.model.simulation.t_end)
+            .emit_stderr();
         return Ok(ir_path.to_string());
     }
     let dt0 = env.model.simulation.dt.unwrap_or(1.0);
@@ -35,6 +37,8 @@ fn resolve_anchors_into_temp_ir(
         ir::anchor::ObsAnchorTimes { first, last },
     )?;
     crate::obs_anchor::report(&moved, &env.model);
+    crate::obs_anchor::spline_hold_notices(&env.model, &moved, env.model.simulation.t_end)
+        .emit_stderr();
 
     // A fresh temp, never the input path: `resolve_ir_path` returns a
     // user-supplied `.ir.json` unchanged, and a command must not rewrite the
@@ -573,6 +577,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         std::process::exit(1);
     });
     config.validate_hierarchical_leaf_boxes(&model).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
+    config.validate_smooth_scale(&model).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
+    config.validate_smooth_coordinates(&model).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });

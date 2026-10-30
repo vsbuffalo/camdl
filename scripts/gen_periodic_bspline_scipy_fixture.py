@@ -12,7 +12,7 @@ no centering shift. camdl applies a `(degree-1)/2` centering shift
 (Wand & Ormerod 2008 §3 convention, matching pomp), so we ROLL the
 coefficient vector before feeding it to scipy to compensate.
 
-Run: uv run --with scipy --with numpy scripts/gen_periodic_bspline_scipy_fixture.py
+Run: make fixtures-bspline (pins the scipy and numpy versions)
 """
 from __future__ import annotations
 

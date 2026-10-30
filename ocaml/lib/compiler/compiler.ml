@@ -414,6 +414,13 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
       Printf.sprintf "unknown time_function referenced: '%s'" s,
       Some "check the `time_functions` block for a matching declaration",
       site_loc site
+    | ForcingBasisOutsideGradient (s, site) ->
+      (* No DSL spelling reaches this: autodiff writes the node only into
+         gradient maps. A hit is a compiler bug or hand-written IR. *)
+      "E519",
+      Printf.sprintf "a basis function of forcing '%s' appears outside a gradient" s,
+      Some "forcing_basis is a derivative node; only the compiler's gradient entries may hold it",
+      site_loc site
     | DuplicateFlowInUnion (s, site) ->
       (* gh#678. The expander's lowering-site check (E342) catches this on the
          .camdl path with a located span and a binder-aware hint; E514 is the
@@ -616,8 +623,8 @@ let run_lint (d : compile_detail) : Diagnostics.diagnostic list =
     parameters, returning the transition list with [rate_grad] filled in,
     paired with any diagnostics produced. A non-differentiable construct
     that a parameter cannot legitimately drive — `mod` over a parameter,
-    structural forcing data (interpolation knots / spline basis / piecewise
-    steps), or a non-constant table lookup index — yields an E600 (with
+    structural forcing data (interpolation knots / piecewise steps / a
+    spline's knots, window or period), or a non-constant table lookup index — yields an E600 (with
     source location) and leaves that transition's [rate_grad] empty. Live
     coefficients whose gradient is not yet emitted (a periodic step value, an
     inline-table value via a non-constant index — gh#215) are NOT errors: the

@@ -2930,7 +2930,7 @@ fn build_simulate_cas_sink(
     // change no hashed field, and two vintages would share a `run_id` while
     // reporting different numbers. Whoever lands F23 must key the resolved
     // anchor EXPLICITLY; no model field will do it for them.
-    let base_model = util::load_run_model(run)?;
+    let (base_model, base_anchors) = util::load_run_model_and_anchors(run)?;
 
     // Resolve each simulate scenario into the hash-relevant delta. A name
     // matching a model preset reads its effective delta via
@@ -2985,6 +2985,7 @@ fn build_simulate_cas_sink(
         model_path: display_path.to_string(),
         model_stem,
         base_model,
+        base_anchors,
         backend: run.backend,
         dt: run.dt,
         allow_degenerate_rates,

@@ -243,6 +243,9 @@ pub(crate) fn resolve_fit_parameters(
     // model-declared `value`), fall back to a Transform-aware
     // uniform draw within bounds.
     let mut seeded: HashMap<String, crate::params_resolver::ValueSource> = HashMap::new();
+    let start_priors: HashMap<String, Prior> = fit.estimate.keys()
+        .map(|n| (n.clone(), resolve_prior(n, &fit.estimate, &model_pre).0))
+        .collect();
     for (name, spec) in &fit.estimate {
         if let Some(p) = model_pre.parameters.iter_mut().find(|p| p.name == *name) {
             if p.value.resolved_value().is_none() {
@@ -255,7 +258,23 @@ pub(crate) fn resolve_fit_parameters(
                     );
                     let log_scale = matches!(transform, Transform::Log { .. });
                     super::init::draw_start_in_bounds(lo, hi, log_scale, seed, name)
-                }));
+                })).or_else(|| {
+                    // No start and no finite box (an unbounded `real` or
+                    // `instant`, searched over (−∞, ∞)): a draw from the
+                    // parameter's proper prior, keyed by (seed, name) as the
+                    // box draw is. With no proper prior either, the resolver
+                    // below refuses the parameter as having no value.
+                    let prior = &start_priors[name];
+                    if matches!(prior, Prior::Fixed(Density::Flat) | Prior::Hierarchical(_)) {
+                        return None;
+                    }
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    seed.hash(&mut h);
+                    name.hash(&mut h);
+                    let mut rng = sim::rng::StatefulRng::new(h.finish());
+                    Some(super::chain_starts::sample_prior_natural(prior, &mut rng, None))
+                });
                 if let Some(v) = value {
                     // Fill the optimiser start without collapsing to a Fixed
                     // constant — keeps the parameter estimated (bounds/prior

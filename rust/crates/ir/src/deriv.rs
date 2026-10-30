@@ -39,8 +39,9 @@ pub enum UnsupportedReason {
     /// A Periodic forcing's step value or period — a live coefficient whose
     /// derivative is deliberately not emitted (tier 2b).
     PeriodicCoeff,
-    /// A structural forcing coefficient a parameter cannot drive: Piecewise /
-    /// Interpolated / PeriodicSpline knots, precomputed at construction (tier 3).
+    /// Structural forcing data a parameter cannot drive: Piecewise /
+    /// Interpolated knots and values, a spline's knots, window or period —
+    /// fixed at construction (tier 3).
     StructuralForcing,
     /// An inline-table value reached by a non-constant index (tier 2b/3).
     NonConstTableIndex,
@@ -71,8 +72,9 @@ impl UnsupportedReason {
                 "drives a Periodic forcing's step value or period, whose derivative \
                  the compiler does not emit (gh#215)",
             UnsupportedReason::StructuralForcing =>
-                "drives a structural forcing coefficient (a Piecewise / Interpolated / \
-                 PeriodicSpline knot), precomputed at construction and not differentiable",
+                "drives structural forcing data — an interpolated or piecewise forcing's \
+                 knots or values, or a spline's knots, window or period — fixed when the \
+                 model is built and not differentiable",
             UnsupportedReason::NonConstTableIndex =>
                 "selects an inline-table value through a non-constant index, whose \
                  derivative the compiler does not emit",

@@ -59,6 +59,87 @@ pub struct PeriodicSpline {
     pub n_basis: u32,
     pub degree:  u32,
     pub coefs:   Vec<Expr>,
+    /// How the basis sum becomes the forcing value. Omitted when identity, so
+    /// a model without `link = log` serializes as before.
+    #[serde(default, skip_serializing_if = "SplineLink::is_identity")]
+    pub link:    SplineLink,
+}
+
+/// The map from a spline's basis sum g(t) = Σ cₖ Bₖ(t) to the forcing value:
+/// `Identity` (f = g) or `Log` (f = exp g, positive by construction). Proposal
+/// 2026-10-27-estimable-bsplines §4.4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplineLink {
+    #[default]
+    Identity,
+    Log,
+}
+
+impl SplineLink {
+    pub fn is_identity(&self) -> bool {
+        matches!(self, SplineLink::Identity)
+    }
+}
+
+/// The knots of a clamped `bspline` forcing (proposal §4.3). `Uniform` keeps
+/// its window ends as single expressions, because an end may be an
+/// observation anchor the runtime substitutes; `n_intervals` equal intervals
+/// span it. `Explicit` lists strictly increasing breakpoints, the first and
+/// last being the window. Both are structural: a parameter there is refused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BSplineKnots {
+    Uniform { lower: Expr, upper: Expr, n_intervals: u32 },
+    Explicit { breakpoints: Vec<Expr> },
+}
+
+/// A spline's coefficients.
+///
+/// - `Explicit`: one live expression per basis function.
+/// - `Smooth` (proposal 2026-10-27-estimable-bsplines §6.3–§6.4): the
+///   whitened penalized curve w = level·1 + slope·(ξ − t_m·1) +
+///   (scale/κ)·M·modes, with M built by the runtime from the resolved knots
+///   (`sim::spline_penalty`) and κ = √(K − 2)·per^{3/2}. `modes` has K − 2
+///   entries; `per` is the reference duration, structural.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplineCoefs {
+    Explicit { coefs: Vec<Expr> },
+    Smooth { level: Expr, slope: Expr, scale: Expr, modes: Vec<Expr>, per: Expr },
+}
+
+impl SplineCoefs {
+    /// Every expression the coefficient form carries, `per` included.
+    pub fn exprs(&self) -> Vec<&Expr> {
+        match self {
+            SplineCoefs::Explicit { coefs } => coefs.iter().collect(),
+            SplineCoefs::Smooth { level, slope, scale, modes, per } => {
+                [level, slope, scale, per].into_iter().chain(modes).collect()
+            }
+        }
+    }
+
+    pub fn exprs_mut(&mut self) -> Vec<&mut Expr> {
+        match self {
+            SplineCoefs::Explicit { coefs } => coefs.iter_mut().collect(),
+            SplineCoefs::Smooth { level, slope, scale, modes, per } => {
+                [level, slope, scale, per].into_iter().chain(modes.iter_mut()).collect()
+            }
+        }
+    }
+}
+
+/// A clamped B-spline of `degree` over a window, held at its end values
+/// outside it (proposal §4.3). The basis has `n_intervals + degree`
+/// functions, so that is the coefficient count.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BSpline {
+    pub knots:  BSplineKnots,
+    pub degree: u32,
+    pub coefs:  SplineCoefs,
+    #[serde(default, skip_serializing_if = "SplineLink::is_identity")]
+    pub link:   SplineLink,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +151,46 @@ pub enum TimeFuncKind {
     Periodic(Periodic),
     Fourier(Fourier),                  // gh#59
     PeriodicSpline(PeriodicSpline),    // gh#59
+    // `rename_all` would spell this `b_spline`.
+    #[serde(rename = "bspline")]
+    BSpline(BSpline),                  // proposal 2026-10-27-estimable-bsplines
+}
+
+impl TimeFuncKind {
+    /// The number of basis functions of a spline kind — the index range of its
+    /// `forcing_basis` nodes — or `None` for a kind that has no basis.
+    pub fn spline_basis_count(&self) -> Option<usize> {
+        match self {
+            TimeFuncKind::PeriodicSpline(ps) => Some(ps.n_basis as usize),
+            TimeFuncKind::BSpline(b) => {
+                let n_intervals = match &b.knots {
+                    BSplineKnots::Uniform { n_intervals, .. } => *n_intervals as usize,
+                    BSplineKnots::Explicit { breakpoints } => breakpoints.len().saturating_sub(1),
+                };
+                Some(n_intervals + b.degree as usize)
+            }
+            TimeFuncKind::Sinusoidal(_)
+            | TimeFuncKind::Piecewise(_)
+            | TimeFuncKind::Interpolated(_)
+            | TimeFuncKind::Periodic(_)
+            | TimeFuncKind::Fourier(_) => None,
+        }
+    }
+
+    /// The index range of a `forcing_basis` node in `space` on this forcing,
+    /// or `None` if the forcing has no such basis: `Spline` on either spline
+    /// kind; `Whitened` (K − 2 modes) and `Linear` (one) only on a `bspline`
+    /// whose coefficients are `smooth`.
+    pub fn basis_count(&self, space: crate::expr::BasisSpace) -> Option<usize> {
+        use crate::expr::BasisSpace;
+        let smooth = matches!(self, TimeFuncKind::BSpline(BSpline { coefs: SplineCoefs::Smooth { .. }, .. }));
+        match space {
+            BasisSpace::Spline => self.spline_basis_count(),
+            BasisSpace::Whitened if smooth => self.spline_basis_count().map(|k| k.saturating_sub(2)),
+            BasisSpace::Linear if smooth => Some(1),
+            BasisSpace::Whitened | BasisSpace::Linear => None,
+        }
+    }
 }
 
 /// Compile-time provenance for a forcing declared `data = "path"`.

@@ -1,0 +1,58 @@
+# §8.2 truth fixture (proposal 2026-10-27-estimable-bsplines §8.4):
+# seir_k12_explicit.camdl with the spline replaced by the truth
+# β(t) = 0.125 · (0.7 + 1.5/(1 + exp((t − 90)/10))) per day, read from
+# beta_true.tsv (make -f tests/recovery/Makefile k12-truth). It generates the
+# benchmark's data; a test asserts the two IRs differ only in that forcing
+# and the coefficients.
+
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+let N = S + E + I + R
+
+parameters {
+  sigma : rate        in [0.01, 1.0]
+  gamma : rate        in [0.01, 1.0]
+  rho   : probability in [0.01, 1.0]
+  k     : positive    in [0.1, 1000]
+  N0    : count       in [100, 10000000]
+  E0    : count       in [0, 1000]
+  I0    : count       in [0, 1000]
+}
+
+forcing {
+  beta_t : interpolated 'per_day {
+    data      = "beta_true.tsv"
+    time_col  = "t"
+    value_col = "beta"
+    method    = linear
+  }
+}
+
+transitions {
+  infection   : S --> E @ beta_t * S * (I / N)
+  progression : E --> I @ sigma * E
+  recovery    : I --> R @ gamma * I
+}
+
+init {
+  S = N0 - E0 - I0
+  E = E0
+  I = I0
+}
+
+observations {
+  onsets {
+    columns       { time : time, onsets : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(progression)
+    emit_schedule = every 1 'days
+    onsets        ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 182 'days
+}

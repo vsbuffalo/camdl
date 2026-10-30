@@ -89,6 +89,13 @@ and expr =
      list (the interception is scoped to that key), which is why it is a
      structural knot rather than a value in the dynamics. *)
   | ObsAnchor of anchored_time
+  (* Basis function [index] (0-based) of spline forcing [forcing], at the
+     forcing's own evaluation time — t − lag, clamped to a bspline's window or
+     wrapped by a periodic_spline's period (proposal
+     2026-10-27-estimable-bsplines §5.1). ∂f/∂c_k = B_k(t): the derivative node
+     autodiff emits for a spline coefficient. Only ever inside a gradient map;
+     the DSL has no syntax for it. *)
+  | ForcingBasis of { forcing : string; index : int; space : basis_space }
   (* Per-expression dimensional escape: asserts the wrapped subexpression
      has dimension `(dim_p, dim_t)` without the checker verifying. The
      user-supplied `reason` is retained for audit trails (run.json) and
@@ -96,6 +103,12 @@ and expr =
      evaluates `inner` and returns its value. See
      docs/dev/proposals/notes/unchecked-dim-escape.md. *)
   | UncheckedDim of unchecked_dim_expr
+
+(* Which function a [ForcingBasis] evaluates (proposal §6.4): the k-th
+   B-spline; a smooth forcing's k-th whitened mode divided by kappa (kappa is
+   known only to the runtime when the window is anchored); or its linear
+   direction t_c - t_m (index 0). *)
+and basis_space = Space_spline | Space_whitened | Space_linear
 
 and unchecked_dim_expr = {
   inner:  expr;
@@ -236,11 +249,49 @@ type fourier = { period: expr; harmonics: (expr * expr) list }
    defaults to 3 (cubic). Standard de Boor recurrence + periodic
    wrap-fold; algorithm from de Boor 1978 §X, Eilers & Marx 1996,
    Wand & Ormerod 2008. *)
+(* How a spline's basis sum g(t) = Σ c_k B_k(t) becomes the forcing value:
+   identity (f = g) or log (f = exp g). Proposal
+   2026-10-27-estimable-bsplines §4.4. Serialized only when log. *)
+type spline_link = Link_identity | Link_log
+
+(* The [UncheckedDim.reason] of the ln s shift the expander adds to each
+   coefficient of a log-link spline whose unit has scale s ≠ 1. The dimension
+   checker recognises exactly this node, so the coefficient under it is still
+   required to be dimensionless. *)
+let spline_log_shift_reason = "log-link unit scale"
+
 type periodic_spline = {
   period:  expr;
   n_basis: int;
   degree:  int;
   coefs:   expr list;
+  link:    spline_link;
+}
+
+(* The knots of a clamped `bspline` forcing (proposal §4.3). [Knots_uniform]
+   keeps its window ends as single expressions, because an end may be an
+   observation anchor the runtime substitutes; [n_intervals] equal intervals
+   span it. [Knots_explicit] lists strictly increasing breakpoints, first and
+   last being the window. Both are structural. *)
+type bspline_knots =
+  | Knots_uniform  of { lower : expr; upper : expr; n_intervals : int }
+  | Knots_explicit of expr list
+
+(* One live expression per basis function, or the whitened penalized curve
+   w = level 1 + slope (xi - t_m 1) + (scale/kappa) M modes of proposal §6.3,
+   whose M the runtime builds from the resolved knots; kappa =
+   sqrt(K - 2) per^(3/2), [per] the reference duration (structural). *)
+type spline_coefs =
+  | Coefs_explicit of expr list
+  | Coefs_smooth of { level : expr; slope : expr; scale : expr; modes : expr list; per : expr }
+
+(* A clamped B-spline of [degree] over a window, held at its end values
+   outside it; n_intervals + degree basis functions. *)
+type bspline = {
+  knots:  bspline_knots;
+  degree: int;
+  coefs:  spline_coefs;
+  link:   spline_link;
 }
 
 type time_func_kind =
@@ -250,6 +301,7 @@ type time_func_kind =
   | Periodic      of periodic
   | Fourier       of fourier            (* gh#59 *)
   | PeriodicSpline of periodic_spline   (* gh#59 *)
+  | BSpline       of bspline            (* proposal 2026-10-27-estimable-bsplines *)
 
 (* Compile-time provenance for a forcing declared `data = "path"`. The knots
    are read from the file and INLINED into [Interpolated] at compile time, so

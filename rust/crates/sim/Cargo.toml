@@ -100,3 +100,10 @@ harness = false
 [[bench]]
 name = "binomial_ab"
 harness = false
+
+# Before/after for the B-spline span evaluator (proposal 2026-10-27 §9 Stage 1):
+# the old recursive periodic evaluator (a test oracle) against the new one:
+#   cargo bench -p sim --bench spline_eval
+[[bench]]
+name = "spline_eval"
+harness = false

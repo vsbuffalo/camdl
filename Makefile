@@ -265,7 +265,7 @@ test-install:
 
 # ── Golden file management ────────────────────────────────────────────────────
 
-.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden update-gradient-golden
+.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden update-gradient-golden update-bspline-inference-golden
 
 # Recompile all DSL fixtures → ocaml/golden/*.ir.json
 update-ocaml-golden: build-ocaml
@@ -276,7 +276,7 @@ update-ocaml-golden: build-ocaml
 		$(CAMDLC) "$$src" > "$$out"; \
 	done
 
-update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden update-contrasts-golden update-gradient-golden
+update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden update-contrasts-golden update-gradient-golden update-bspline-inference-golden
 
 # Recompile the corner-case fixtures (params baked via --set) →
 # tests/fixtures/corner_cases/ir/*.ir.json. These pin the off-grid /
@@ -312,6 +312,20 @@ update-gradient-golden: build-ocaml
 	@mkdir -p $(GRADIENT_DIR)/ir
 	@$(CAMDLC) $(GRADIENT_DIR)/seir_seasonal_lagged.camdl -o $(GRADIENT_DIR)/ir/seir_seasonal_lagged.ir.json
 	@$(CAMDLC) $(GRADIENT_DIR)/sir_pow_zero_base.camdl -o $(GRADIENT_DIR)/ir/sir_pow_zero_base.ir.json
+	@$(CAMDLC) $(GRADIENT_DIR)/bspline_forcing_grad.camdl -o $(GRADIENT_DIR)/ir/bspline_forcing_grad.ir.json
+	@$(CAMDLC) $(GRADIENT_DIR)/sir_bspline_fit.camdl -o $(GRADIENT_DIR)/ir/sir_bspline_fit.ir.json
+	@$(CAMDLC) $(GRADIENT_DIR)/bspline_smooth_grad.camdl -o $(GRADIENT_DIR)/ir/bspline_smooth_grad.ir.json
+	@$(CAMDLC) $(GRADIENT_DIR)/sir_smooth_fit.camdl -o $(GRADIENT_DIR)/ir/sir_smooth_fit.ir.json
+
+# Recompile the B-spline R3 inference fixtures → tests/fixtures/bspline_inference/ir/
+# (rust/crates/sim/tests/bspline_inference.rs; proposal 2026-10-27-estimable-bsplines §8.1).
+BSPLINE_INFERENCE_DIR := tests/fixtures/bspline_inference
+update-bspline-inference-golden: build-ocaml
+	@echo "Recompiling B-spline inference fixtures..."
+	@mkdir -p $(BSPLINE_INFERENCE_DIR)/ir
+	@for f in seir_bspline_small seir_bspline_recovery prior_only_smooth seir_smooth_recovery sbc_smooth prior_only_explicit seir_k12_explicit seir_k12_truth; do \
+	  $(CAMDLC) $(BSPLINE_INFERENCE_DIR)/$$f.camdl -o $(BSPLINE_INFERENCE_DIR)/ir/$$f.ir.json; \
+	done
 
 # Recompile the regression fixtures (params baked via --set) →
 # tests/fixtures/regression/ir/*.ir.json. These reproduce specific fixed bugs;
@@ -410,6 +424,48 @@ check-contrasts-golden: build-ocaml
 	done; \
 	if [ $$fail -ne 0 ]; then exit 1; fi; \
 	echo "  contrasts goldens in sync"
+
+# ── B-spline reference fixtures ───────────────────────────────────────────────
+
+.PHONY: fixtures-bspline
+
+# Regenerate the oracle TSVs the B-spline evaluator is checked against
+# (rust/crates/sim/tests/bspline_reference_fixtures.rs and
+# periodic_bspline_oracle.rs; proposal 2026-10-27-estimable-bsplines §8.1 R1).
+# They are references, never inputs; CI reads the committed files offline.
+# Networked only through uv's first fetch of the pinned scipy/numpy; needs R
+# with `splines` (base) and `pomp`. Byte-identical on re-run: `git status` is
+# clean afterwards.
+BSPLINE_FIXTURES := rust/crates/sim/tests/fixtures
+BSPLINE_PY := uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 python
+fixtures-bspline:
+	$(BSPLINE_PY) scripts/gen_bspline_scipy_fixtures.py --out-dir $(BSPLINE_FIXTURES)
+	$(BSPLINE_PY) scripts/gen_periodic_bspline_scipy_fixture.py --out $(BSPLINE_FIXTURES)/periodic_bspline_scipy.tsv
+	Rscript scripts/gen_bspline_splines_fixture.R $(BSPLINE_FIXTURES)
+	Rscript scripts/gen_periodic_bspline_pomp_fixture.R
+
+# ── B-spline validation harness ───────────────────────────────────────────────
+
+.PHONY: validate-bspline
+
+# Every committed check of proposal 2026-10-27-estimable-bsplines §8.1 (R1–R4),
+# the heavy R3 PGAS+NUTS runs included (release build; they are #[ignore]d in
+# `make test` for time). Offline: the reference TSVs are committed (regenerate
+# with `make fixtures-bspline`). R5 (simulation-based calibration) is not here.
+validate-bspline: build-ocaml build-rust
+	@mkdir -p $(CAMDLC_BIN)
+	@ln -sf $(CAMDLC_ABS) $(CAMDLC_BIN)/camdlc
+	cd ocaml && dune exec test/test_compiler.exe -- test bspline_forcing
+	cd rust && cargo test -p sim --lib bspline
+	cd rust && cargo test -p sim --lib spline_penalty
+	cd rust && cargo test -p sim --test bspline_reference_fixtures --test bspline_recursion_oracle \
+	  --test periodic_bspline_oracle --test bspline_forcing --test bspline_gradient_check --test bspline_harness \
+	  --test smooth_prior_calibration
+	cd rust && cargo test -p ir --test forcing_basis_validate --test schema_validates_goldens
+	cd rust && cargo test -p runid --lib ir_spline_link_changes_hash
+	cd rust && cargo test -p runid --lib ir_forcing_basis_hashes_its_forcing_and_index
+	cd rust && PATH="$(CAMDLC_BIN):$$PATH" CAMDL_SKIP_VERSION_CHECK=1 cargo test -p cli --test bspline_e2e
+	cd rust && cargo test --release -p sim --test bspline_inference --test bspline_harness -- --ignored --skip sweeps_to_convergence
 
 # ── Release / changelog ───────────────────────────────────────────────────────
 

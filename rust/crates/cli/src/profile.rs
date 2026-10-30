@@ -714,6 +714,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 eprintln!("error: {msg}");
                 std::process::exit(1);
             }
+            crate::obs_anchor::spline_hold_notices(&model_pre, &[], model_pre.simulation.t_end)
+                .emit_stderr();
             false
         }
     };

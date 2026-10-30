@@ -13,15 +13,14 @@ use crate::state::{IntState, RealState};
 /// references a parameter (`amplitude = alpha`) is therefore not frozen at
 /// construction; there is no `f64` slot for it to freeze into. (Incident
 /// `2026-06-09-forcing-coefficient-param-frozen-at-construction.md`; proposal
-/// `2026-06-09-const-parametric-forcing.md` §3.) Only `Sinusoidal`, `Periodic`,
-/// and `Fourier` carry scalar coefficients.
+/// `2026-06-09-const-parametric-forcing.md` §3.) `Sinusoidal`, `Periodic`,
+/// `Fourier`, `PeriodicSpline` and `BSpline` carry live coefficients.
 ///
 /// **Structural data stays precomputed `f64`.** Interpolation knot arrays, the
-/// cubic-spline basis (a construction-time Thomas solve), the periodic-spline
-/// coefficients (consumed by the de Boor evaluator), and piecewise step
-/// arrays/breakpoints are *data*, not coefficients — a param-referencing entry
-/// in any of these is rejected at construction (see the build loop) rather than
-/// silently frozen.
+/// cubic-spline basis (a construction-time Thomas solve), a spline's period,
+/// window and breakpoints, and piecewise step arrays/breakpoints are *data*,
+/// not coefficients — a param-referencing entry in any of these is rejected at
+/// construction (see the build loop) rather than silently frozen.
 #[derive(Debug, Clone)]
 pub enum CompiledTimeFuncKind {
     Sinusoidal {
@@ -41,13 +40,227 @@ pub enum CompiledTimeFuncKind {
     /// (`period_inv = 1/period` is computed per evaluation); harmonics is a flat
     /// `[(a_1, b_1), (a_2, b_2), …]` of live coefficient pairs.
     Fourier { period: ResolvedExpr, harmonics: Vec<(ResolvedExpr, ResolvedExpr)> },
-    /// gh#59 v2 (2026-05-12): periodic B-spline forcing with uniform
-    /// knots and standard de Boor recurrence. Evaluated by
-    /// `periodic_bspline::eval_periodic_bspline` — see proposal at
-    /// `docs/dev/proposals/2026-05-12-periodic-bspline-algorithm.md`
-    /// for algorithm provenance (de Boor 1978 §X, Eilers & Marx
-    /// 1996, Wand & Ormerod 2008).
-    PeriodicSpline { period: f64, n_basis: u32, degree: u32, coefs: Vec<f64> },
+    /// gh#59 v2: periodic B-spline forcing with uniform knots. The period is
+    /// structural; the coefficients are live, as Fourier's harmonics are.
+    PeriodicSpline(CompiledPeriodicSpline),
+    /// A clamped B-spline over a window, held at its end values outside it
+    /// (proposal 2026-10-27-estimable-bsplines §4.3). Knots are structural;
+    /// the coefficients are live.
+    BSpline(CompiledBSpline),
+}
+
+/// `link = log` maps the basis sum g to exp(g); identity leaves it.
+#[inline]
+fn apply_link(link: ir::time_func::SplineLink, g: f64) -> f64 {
+    match link {
+        ir::time_func::SplineLink::Identity => g,
+        ir::time_func::SplineLink::Log => g.exp(),
+    }
+}
+
+/// A compiled `bspline` forcing: checked knots and degree, one live
+/// coefficient per basis function, and the link. A call evaluates only the
+/// `degree + 1` coefficients nonzero at the clamped time.
+#[derive(Debug, Clone)]
+pub struct CompiledBSpline {
+    knots: crate::bspline::Knots,
+    degree: usize,
+    coefs: CompiledSplineCoefs,
+    link: ir::time_func::SplineLink,
+}
+
+/// A `bspline`'s coefficients, compiled.
+#[derive(Debug, Clone)]
+pub enum CompiledSplineCoefs {
+    /// One live expression per basis function.
+    Explicit(Vec<ResolvedExpr>),
+    /// The whitened penalized curve of proposal §6.3: the coefficients are
+    /// w = level·1 + slope·(ξ − t_m·1) + (scale/κ)·M·modes, so
+    /// g(t) = level + slope·(t_c − t_m) + (scale/κ) Σᵢ modesᵢ Wᵢ(t_c), with
+    /// Wᵢ = Σⱼ M_ji Bⱼ (partition of unity and linear precision give the first
+    /// two terms without the basis). `whitening` is built from the resolved
+    /// knots; κ = √(K − 2)·per^{3/2}.
+    Smooth {
+        level: ResolvedExpr,
+        slope: ResolvedExpr,
+        scale: ResolvedExpr,
+        modes: Vec<ResolvedExpr>,
+        whitening: std::sync::Arc<crate::spline_penalty::Whitening>,
+        kappa: f64,
+    },
+}
+
+impl CompiledBSpline {
+    /// Refuses a degree above [`crate::bspline::MAX_DEGREE`], an explicit
+    /// coefficient count other than `n_intervals + degree`, and a smooth form
+    /// whose whitening is not for these knots and degree or whose mode count
+    /// is not K − 2.
+    pub fn new(
+        knots: crate::bspline::Knots,
+        degree: usize,
+        coefs: CompiledSplineCoefs,
+        link: ir::time_func::SplineLink,
+    ) -> Result<Self, String> {
+        if degree > crate::bspline::MAX_DEGREE {
+            return Err(format!("degree ({degree}) must be at most {}", crate::bspline::MAX_DEGREE));
+        }
+        let n_basis = knots.n_intervals() + degree;
+        match &coefs {
+            CompiledSplineCoefs::Explicit(cs) if cs.len() != n_basis => {
+                return Err(format!(
+                    "coefs length ({}) must equal the number of basis functions ({n_basis}: \
+                     {} intervals + degree {degree})",
+                    cs.len(),
+                    knots.n_intervals()
+                ));
+            }
+            CompiledSplineCoefs::Smooth { modes, whitening, .. } => {
+                if whitening.n_basis() != n_basis {
+                    return Err(format!("the whitening has {} basis functions, the knots {n_basis}", whitening.n_basis()));
+                }
+                if modes.len() != n_basis - 2 {
+                    return Err(format!("smooth needs {} modes (n_basis − 2), got {}", n_basis - 2, modes.len()));
+                }
+            }
+            CompiledSplineCoefs::Explicit(_) => {}
+        }
+        Ok(CompiledBSpline { knots, degree, coefs, link })
+    }
+
+    /// Every live expression the forcing reads (coefficients, or the smooth
+    /// form's level, slope, scale and modes).
+    pub fn exprs(&self) -> Vec<&ResolvedExpr> {
+        match &self.coefs {
+            CompiledSplineCoefs::Explicit(cs) => cs.iter().collect(),
+            CompiledSplineCoefs::Smooth { level, slope, scale, modes, .. } => {
+                [level, slope, scale].into_iter().chain(modes).collect()
+            }
+        }
+    }
+
+    /// The window end b, clamped into: t_c = clamp(t, a, b).
+    #[inline]
+    fn clamp(&self, t: f64) -> f64 {
+        let (a, b) = self.knots.window();
+        t.clamp(a, b)
+    }
+
+    /// f(t) = h(g(clamp(t, a, b))), h the link, evaluating each live
+    /// expression it reads through `value`.
+    #[inline]
+    pub fn eval(&self, t: f64, mut value: impl FnMut(&ResolvedExpr) -> f64) -> f64 {
+        let s = crate::bspline::span(&self.knots, self.degree, t);
+        let g = match &self.coefs {
+            CompiledSplineCoefs::Explicit(cs) => {
+                let mut g = 0.0;
+                for (r, &v) in s.values.iter().enumerate().take(self.degree + 1) {
+                    g += v * value(&cs[s.first + r]);
+                }
+                g
+            }
+            CompiledSplineCoefs::Smooth { level, slope, scale, modes, whitening, kappa } => {
+                let tc = self.clamp(t);
+                let mut curv = 0.0;
+                for (i, z) in modes.iter().enumerate() {
+                    let zi = value(z);
+                    let mut wi = 0.0;
+                    for (r, &v) in s.values.iter().enumerate().take(self.degree + 1) {
+                        wi += v * whitening.m.at(s.first + r, i);
+                    }
+                    curv += zi * wi;
+                }
+                value(level) + value(slope) * (tc - whitening.t_mid) + value(scale) / kappa * curv
+            }
+        };
+        apply_link(self.link, g)
+    }
+
+    /// A `forcing_basis` in `space` at t, before the link: Bₖ(t_c);
+    /// Wₖ(t_c)/κ; or t_c − t_m. NaN for an index outside the space or a space
+    /// this forcing lacks (validation refuses both first).
+    #[inline]
+    pub fn basis(&self, t: f64, k: usize, space: ir::expr::BasisSpace) -> f64 {
+        use ir::expr::BasisSpace;
+        match (space, &self.coefs) {
+            (BasisSpace::Spline, _) => crate::bspline::basis(&self.knots, self.degree, t, k),
+            (BasisSpace::Whitened, CompiledSplineCoefs::Smooth { whitening, kappa, .. }) if k < whitening.n_modes() => {
+                let s = crate::bspline::span(&self.knots, self.degree, t);
+                let mut w = 0.0;
+                for (r, &v) in s.values.iter().enumerate().take(self.degree + 1) {
+                    w += v * whitening.m.at(s.first + r, k);
+                }
+                w / kappa
+            }
+            (BasisSpace::Linear, CompiledSplineCoefs::Smooth { whitening, .. }) if k == 0 => {
+                self.clamp(t) - whitening.t_mid
+            }
+            (BasisSpace::Whitened | BasisSpace::Linear, _) => f64::NAN,
+        }
+    }
+
+    /// The number of B-spline basis functions, K.
+    pub fn n_basis(&self) -> usize {
+        self.knots.n_intervals() + self.degree
+    }
+
+    /// The smooth form's whitening, when it has one.
+    pub fn whitening(&self) -> Option<&crate::spline_penalty::Whitening> {
+        match &self.coefs {
+            CompiledSplineCoefs::Smooth { whitening, .. } => Some(whitening),
+            CompiledSplineCoefs::Explicit(_) => None,
+        }
+    }
+}
+
+/// A compiled `periodic_spline` forcing (proposal
+/// 2026-10-27-estimable-bsplines §4.2): the structural basis — period,
+/// n_basis, degree — checked once, and one live coefficient expression per
+/// basis function, evaluated per call against the params slice. A call
+/// evaluates only the `degree + 1` coefficients nonzero at `t`.
+#[derive(Debug, Clone)]
+pub struct CompiledPeriodicSpline {
+    basis: crate::periodic_bspline::PeriodicBasis,
+    coefs: Vec<ResolvedExpr>,
+    link: ir::time_func::SplineLink,
+}
+
+impl CompiledPeriodicSpline {
+    /// Refuses a coefficient count other than `basis.n_basis()`.
+    pub fn new(
+        basis: crate::periodic_bspline::PeriodicBasis,
+        coefs: Vec<ResolvedExpr>,
+        link: ir::time_func::SplineLink,
+    ) -> Result<Self, String> {
+        if coefs.len() != basis.n_basis() {
+            return Err(format!(
+                "coefs length ({}) must equal n_basis ({})",
+                coefs.len(),
+                basis.n_basis()
+            ));
+        }
+        Ok(CompiledPeriodicSpline { basis, coefs, link })
+    }
+
+    /// The live coefficient expressions, in basis order.
+    pub fn coefs(&self) -> &[ResolvedExpr] {
+        &self.coefs
+    }
+
+    /// f(t), evaluating each coefficient it reads through `value`.
+    #[inline]
+    pub fn eval(&self, t: f64, mut value: impl FnMut(&ResolvedExpr) -> f64) -> f64 {
+        apply_link(self.link, self.basis.eval(t, |k| value(&self.coefs[k])))
+    }
+
+    /// Bₖ(t), basis function `k` of the sum, before the link.
+    #[inline]
+    pub fn basis(&self, t: f64, k: usize) -> f64 {
+        self.basis.basis(t, k)
+    }
+
+    pub fn n_basis(&self) -> usize {
+        self.coefs.len()
+    }
 }
 
 /// Natural cubic spline with precomputed coefficients.
@@ -365,6 +578,13 @@ fn forcing_exprs(k: &ir::time_func::TimeFuncKind) -> Vec<&Expr> {
             .chain(f.harmonics.iter().flat_map(|(a, b)| [a, b]))
             .collect(),
         K::PeriodicSpline(s) => std::iter::once(&s.period).chain(&s.coefs).collect(),
+        K::BSpline(b) => {
+            let knots: Vec<&Expr> = match &b.knots {
+                ir::time_func::BSplineKnots::Uniform { lower, upper, .. } => vec![lower, upper],
+                ir::time_func::BSplineKnots::Explicit { breakpoints } => breakpoints.iter().collect(),
+            };
+            knots.into_iter().chain(b.coefs.exprs()).collect()
+        }
     }
 }
 
@@ -383,7 +603,7 @@ fn first_obs_anchor(e: &Expr) -> Option<&ir::anchor::AnchoredTime> {
         Expr::Reduce(w) => w.reduce.iter().find_map(first_obs_anchor),
         Expr::UncheckedDim(w) => first_obs_anchor(&w.unchecked_dim.inner),
         Expr::Const(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
-        | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_)
+        | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_)
         | Expr::ObsColumnRef(_) | Expr::BindingRef(_) | Expr::PerEvalRef(_) => None,
     }
 }
@@ -412,7 +632,7 @@ fn expr_refs_param(expr: &Expr) -> bool {
         | Expr::PopSum(_)
         | Expr::Time(_)
         | Expr::Dt(_)
-        | Expr::TimeFunc(_)
+        | Expr::TimeFunc(_) | Expr::ForcingBasis(_)
         | Expr::Projected(_)
         | Expr::ObsColumnRef(_)
         | Expr::BindingRef(_)
@@ -654,7 +874,7 @@ fn collect_param_names(expr: &Expr, out: &mut Vec<String>) {
         Expr::Reduce(w) => w.reduce.iter().for_each(|e| collect_param_names(e, out)),
         Expr::UncheckedDim(w) => collect_param_names(&w.unchecked_dim.inner, out),
         Expr::Const(_) | Expr::ConstRef(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
-        | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
+        | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
         | Expr::ObsAnchor(_)
         | Expr::BindingRef(_) | Expr::PerEvalRef(_) => {}
     }
@@ -696,7 +916,7 @@ fn collect_binding_refs(expr: &Expr, out: &mut Vec<String>) {
         Expr::Reduce(w) => w.reduce.iter().for_each(|e| collect_binding_refs(e, out)),
         Expr::UncheckedDim(w) => collect_binding_refs(&w.unchecked_dim.inner, out),
         Expr::Const(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
-        | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_)
+        | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_)
         | Expr::ObsColumnRef(_) | Expr::ObsAnchor(_) | Expr::PerEvalRef(_) => {}
     }
 }
@@ -725,12 +945,13 @@ fn render_expr(expr: &Expr) -> String {
     }
 }
 
-/// Evaluate a *structural* forcing array element (interpolation knot, spline
-/// coefficient, periodic-spline coef, piecewise breakpoint/value) to `f64`.
+/// Evaluate a *structural* forcing array element (interpolation knot or value,
+/// piecewise breakpoint/value, a spline's period, window end or breakpoint) to
+/// `f64`.
 ///
 /// Unlike scalar coefficients, these feed a structure derived at construction
-/// (a sorted knot table, a Thomas-solved spline basis, the de Boor evaluator),
-/// so they cannot vary live. A param-referencing entry is rejected with a clear
+/// (a sorted knot table, a Thomas-solved spline basis, a periodic spline's
+/// knot spacing), so they cannot vary live. A param-referencing entry is rejected with a clear
 /// error rather than silently baked to its default-param value (the freeze).
 fn eval_structural(
     forcing: &str,
@@ -747,8 +968,9 @@ fn eval_structural(
         return Err(SimError::Validation(format!(
             "forcing '{forcing}': {what} references parameter {plist}, but it is \
              structural data — {what}s are fixed at construction and cannot be \
-             estimated. Use a scalar-coefficient forcing (sinusoidal, periodic, \
-             fourier) for an estimated parameter, or make this value constant."
+             estimated. Use a forcing with live coefficients (sinusoidal, periodic, \
+             fourier, or a periodic_spline or bspline coefficient) for an estimated \
+             parameter, or make this value constant."
         )));
     }
     eval_table_expr(expr, param_index, consts, params)
@@ -1040,7 +1262,7 @@ fn expr_contains_dt_memo(e: &Expr, bindings: &HashMap<&str, &Expr>, memo: &mut H
         }
         // A time_func is a named reference to a model-level forcing; its body
         // is not inline here and cannot itself read the substep `dt`.
-        Expr::TimeFunc(_) => false,
+        Expr::TimeFunc(_) | Expr::ForcingBasis(_) => false,
         Expr::TableLookup(w) => w.table_lookup.indices.iter().any(|e| expr_contains_dt_memo(e, bindings, memo)),
         Expr::UncheckedDim(w) => expr_contains_dt_memo(&w.unchecked_dim.inner, bindings, memo),
         Expr::Reduce(w) => w.reduce.iter().any(|e| expr_contains_dt_memo(e, bindings, memo)),
@@ -1442,6 +1664,9 @@ impl CompiledModel {
             ResolvedExpr::PerEvalRef(slot) => {
                 self.resolved.per_eval_bindings.get(*slot).and_then(read)
             }
+            // A basis function is ∂f/∂cₖ: a function of t alone, the
+            // coefficient's parameter having been differentiated away.
+            ResolvedExpr::ForcingBasis { .. } => None,
             ResolvedExpr::TimeFunc(i) => {
                 let tf = self.time_func_cache.get(*i)?;
                 let lag = tf.lag.as_ref().and_then(read);
@@ -1454,11 +1679,12 @@ impl CompiledModel {
                     }
                     CompiledTimeFuncKind::Fourier { period, harmonics } => read(period)
                         .or_else(|| harmonics.iter().find_map(|(a, b)| read(a).or_else(|| read(b)))),
+                    CompiledTimeFuncKind::PeriodicSpline(ps) => ps.coefs().iter().find_map(read),
+                    CompiledTimeFuncKind::BSpline(b) => b.exprs().into_iter().find_map(read),
                     CompiledTimeFuncKind::Piecewise { .. }
                     | CompiledTimeFuncKind::Interpolated { .. }
                     | CompiledTimeFuncKind::Constant { .. }
-                    | CompiledTimeFuncKind::CubicSpline(_)
-                    | CompiledTimeFuncKind::PeriodicSpline { .. } => None,
+                    | CompiledTimeFuncKind::CubicSpline(_) => None,
                 })
             }
             ResolvedExpr::Const(_)
@@ -1563,6 +1789,12 @@ impl CompiledModel {
         // path that never resolved, and running it would produce a plausible
         // wrong horizon or a wrong forcing fork.
         refuse_unresolved_anchors(&model)?;
+        // A `forcing_basis` in a gradient must name a spline forcing and one of
+        // its basis functions (proposal 2026-10-27-estimable-bsplines §5.1);
+        // the resolution context cannot see forcing kinds, so it is checked here.
+        ir::validate::validate_forcing_basis(&model).map_err(|errs| {
+            SimError::Validation(errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))
+        })?;
 
         // gh#257: the output schedule's `t += step` and each recurring
         // intervention's `t += period` are infinite-loop hazards with the same
@@ -1782,11 +2014,12 @@ impl CompiledModel {
             }
         }
 
-        // Build each time function. Scalar coefficients (Sinusoidal / Periodic /
-        // Fourier) resolve to live `ResolvedExpr`, evaluated per-step against the
-        // params slice; structural arrays (interpolation knots, spline bases,
-        // periodic-spline coefs, piecewise steps) stay precomputed `f64` and
-        // reject param references. Build-time numeric checks that depend on a
+        // Build each time function. Live coefficients (Sinusoidal / Periodic /
+        // Fourier, and PeriodicSpline's basis coefficients) resolve to
+        // `ResolvedExpr`, evaluated per-step against the params slice;
+        // structural data (interpolation knots and values, the cubic-spline
+        // basis, piecewise steps, a periodic spline's period) stays
+        // precomputed `f64` and rejects param references. Build-time numeric checks that depend on a
         // now-live coefficient evaluate it at `default_params` for the early
         // diagnostic (the live path guards the runtime value).
         let mut time_func_cache: Vec<CompiledTimeFunc> = Vec::with_capacity(model.time_functions.len());
@@ -1890,30 +2123,63 @@ impl CompiledModel {
                 }
                 TimeFuncKind::PeriodicSpline(ps) => {
                     let period = eval_structural(&tf.name, "periodic_spline period", &ps.period, &param_index, &const_values, &default_params)?;
-                    if period <= 0.0 {
-                        return Err(SimError::Validation(format!(
-                            "periodic_spline period must be positive, got {}", period)));
-                    }
-                    if ps.n_basis <= ps.degree {
-                        return Err(SimError::Validation(format!(
-                            "periodic_spline: n_basis ({}) must exceed degree ({})",
-                            ps.n_basis, ps.degree)));
-                    }
-                    let coefs: Result<Vec<f64>, SimError> = ps.coefs.iter()
-                        .map(|e| eval_structural(&tf.name, "periodic_spline coefficient", e, &param_index, &const_values, &default_params))
+                    let basis = crate::periodic_bspline::PeriodicBasis::new(
+                        period, ps.n_basis as usize, ps.degree as usize,
+                    )
+                    .map_err(|e| SimError::Validation(format!(
+                        "periodic_spline forcing '{}': {e}", tf.name)))?;
+                    let coefs: Result<Vec<ResolvedExpr>, SimError> = ps.coefs.iter()
+                        .map(|e| resolve_coeff(e, &param_index, &const_values))
                         .collect();
-                    let cs = coefs?;
-                    if cs.len() != ps.n_basis as usize {
-                        return Err(SimError::Validation(format!(
-                            "periodic_spline: coefs length ({}) must equal n_basis ({})",
-                            cs.len(), ps.n_basis)));
-                    }
-                    CompiledTimeFuncKind::PeriodicSpline {
-                        period,
-                        n_basis: ps.n_basis,
-                        degree: ps.degree,
-                        coefs: cs,
-                    }
+                    CompiledTimeFuncKind::PeriodicSpline(
+                        CompiledPeriodicSpline::new(basis, coefs?, ps.link).map_err(|e| SimError::Validation(
+                            format!("periodic_spline forcing '{}': {e}", tf.name)))?,
+                    )
+                }
+                TimeFuncKind::BSpline(b) => {
+                    use ir::time_func::{BSplineKnots, SplineCoefs};
+                    let bad = |e: String| SimError::Validation(format!("bspline forcing '{}': {e}", tf.name));
+                    let knot = |what: &str, e: &Expr| {
+                        eval_structural(&tf.name, what, e, &param_index, &const_values, &default_params)
+                    };
+                    let knots = match &b.knots {
+                        BSplineKnots::Uniform { lower, upper, n_intervals } => {
+                            let a = knot("bspline window start", lower)?;
+                            let z = knot("bspline window end", upper)?;
+                            crate::bspline::Knots::uniform(a, z, *n_intervals as usize).map_err(bad)?
+                        }
+                        BSplineKnots::Explicit { breakpoints } => {
+                            let xs: Result<Vec<f64>, SimError> = breakpoints.iter()
+                                .map(|e| knot("bspline breakpoint", e))
+                                .collect();
+                            crate::bspline::Knots::explicit(xs?).map_err(bad)?
+                        }
+                    };
+                    let coefs = match &b.coefs {
+                        SplineCoefs::Explicit { coefs } => CompiledSplineCoefs::Explicit(
+                            coefs.iter().map(|e| resolve_coeff(e, &param_index, &const_values)).collect::<Result<_, _>>()?,
+                        ),
+                        SplineCoefs::Smooth { level, slope, scale, modes, per } => {
+                            // The reference duration is structural, like the knots.
+                            let t_ref = eval_structural(&tf.name, "smooth reference duration `per`", per, &param_index, &const_values, &default_params)?;
+                            if !(t_ref.is_finite() && t_ref > 0.0) {
+                                return Err(bad(format!("smooth `per` must be a positive duration, got {t_ref}")));
+                            }
+                            let whitening = crate::spline_penalty::Whitening::new(&knots, b.degree as usize).map_err(bad)?;
+                            let kappa = crate::spline_penalty::kappa(whitening.n_basis(), t_ref);
+                            CompiledSplineCoefs::Smooth {
+                                level: resolve_coeff(level, &param_index, &const_values)?,
+                                slope: resolve_coeff(slope, &param_index, &const_values)?,
+                                scale: resolve_coeff(scale, &param_index, &const_values)?,
+                                modes: modes.iter().map(|e| resolve_coeff(e, &param_index, &const_values)).collect::<Result<_, _>>()?,
+                                whitening: std::sync::Arc::new(whitening),
+                                kappa,
+                            }
+                        }
+                    };
+                    CompiledTimeFuncKind::BSpline(
+                        CompiledBSpline::new(knots, b.degree as usize, coefs, b.link).map_err(bad)?,
+                    )
                 }
             };
             // gh#314: resolve the optional lag into a live coefficient. It uses

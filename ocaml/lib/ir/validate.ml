@@ -18,6 +18,8 @@ type error =
   | UnknownConstant       of string * site
   | UnknownTable          of string * site
   | UnknownTimeFunction   of string * site
+  | ForcingBasisOutsideGradient of string * site
+      (* proposal 2026-10-27-estimable-bsplines §5.1: a derivative-only node *)
   | UnknownTransition     of string * site
   | DuplicateFlowInUnion  of string * site  (* gh#678: a flow union must be disjoint *)
   | RealCompartmentInStoichiometry of string * string  (* transition, compartment *)
@@ -40,6 +42,8 @@ let error_to_string = function
   | UnknownConstant     (s, _) -> Printf.sprintf "unknown constant: %s" s
   | UnknownTable        (s, _) -> Printf.sprintf "unknown table: %s" s
   | UnknownTimeFunction (s, _) -> Printf.sprintf "unknown time_function: %s" s
+  | ForcingBasisOutsideGradient (s, _) ->
+    Printf.sprintf "forcing_basis of '%s' outside a gradient map; only derivative entries may hold it" s
   | UnknownTransition   (s, _) -> Printf.sprintf "unknown transition: %s" s
   | DuplicateFlowInUnion (s, _) ->
     Printf.sprintf
@@ -77,7 +81,7 @@ module SS = Set.Make(String)
 let first_param (e : expr) : string option =
   let rec go = function
     | Param p -> Some p
-    | Const _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | BindingRef _
+    | Const _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _ | BindingRef _
     | Projected | ObsColumnRef _ | ObsAnchor _ -> None
     | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
     | BinOp b -> (match go b.left with Some _ as r -> r | None -> go b.right)
@@ -117,6 +121,8 @@ let check_expr_refs ~site ~comps ~params ~constants ~tables ~tfs errors e =
     | Cond c  -> go c.pred; go c.then_; go c.else_
     | TimeFunc n ->
       if not (SS.mem n tfs) then errors := UnknownTimeFunction (n, site) :: !errors
+    (* Model expressions only (gradients are not walked here). *)
+    | ForcingBasis { forcing; _ } -> errors := ForcingBasisOutsideGradient (forcing, site) :: !errors
     | TableLookup (t, idxs) ->
       (if not (SS.mem t tables) then errors := UnknownTable (t, site) :: !errors);
       List.iter go idxs

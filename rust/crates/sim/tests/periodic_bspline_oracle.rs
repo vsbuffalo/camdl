@@ -11,7 +11,7 @@
 //! two ecosystems with non-overlapping code paths — the strongest
 //! correctness signal available for numerical code at this layer.
 
-use sim::periodic_bspline::eval_periodic_bspline;
+use sim::periodic_bspline::PeriodicBasis;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -38,7 +38,7 @@ fn read_tsv_pairs(path: &Path) -> Vec<(f64, f64)> {
 }
 
 /// Fixed test parameters; must match the fixture generators.
-fn fixture_params() -> (f64, u32, u32, Vec<f64>) {
+fn fixture_params() -> (f64, usize, usize, Vec<f64>) {
     (
         4.0,                                    // period
         6,                                      // n_basis
@@ -54,9 +54,10 @@ fn periodic_bspline_matches_scipy() {
     assert!(!pairs.is_empty(), "scipy fixture is empty");
 
     let (period, n_basis, degree, coefs) = fixture_params();
+    let basis = PeriodicBasis::new(period, n_basis, degree).unwrap();
     let mut max_diff: f64 = 0.0;
     for (t, expected) in &pairs {
-        let actual = eval_periodic_bspline(*t, period, n_basis, degree, &coefs);
+        let actual = basis.eval(*t, |k| coefs[k]);
         let diff = (actual - expected).abs();
         if diff > max_diff { max_diff = diff; }
     }
@@ -73,9 +74,10 @@ fn periodic_bspline_matches_pomp() {
     assert!(!pairs.is_empty(), "pomp fixture is empty");
 
     let (period, n_basis, degree, coefs) = fixture_params();
+    let basis = PeriodicBasis::new(period, n_basis, degree).unwrap();
     let mut max_diff: f64 = 0.0;
     for (t, expected) in &pairs {
-        let actual = eval_periodic_bspline(*t, period, n_basis, degree, &coefs);
+        let actual = basis.eval(*t, |k| coefs[k]);
         let diff = (actual - expected).abs();
         if diff > max_diff { max_diff = diff; }
     }

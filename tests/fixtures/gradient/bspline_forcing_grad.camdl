@@ -1,0 +1,65 @@
+# Gradient fixture for spline coefficients (proposal
+# 2026-10-27-estimable-bsplines §8.1, R2): one transition per case, each rate
+# `forcing * X`, so ∂rate/∂c is the forcing's coefficient derivative times X.
+# Cases: identity link; log link with a constant lag; a user-written exp of an
+# identity-link 'ratio spline; coefficients that are arithmetic over a
+# parameter (the chain rule); a log-link periodic spline.
+
+time_unit = 'days
+
+compartments { X, D1, D2, D3, D4, D5 }
+
+parameters {
+  c1 : real 'ratio in [-3, 3]
+  c2 : real 'ratio in [-3, 3]
+  c3 : real 'ratio in [-3, 3]
+  c4 : real 'ratio in [-3, 3]
+  c5 : real 'ratio in [-3, 3]
+  c6 : real 'ratio in [-3, 3]
+  a  : real 'ratio in [-3, 3]
+}
+
+forcing {
+  f_id : bspline 'per_day {
+    window  = [0 'days, 60 'days]
+    n_basis = 6
+    coefs   = [c1, c2, c3, c4, c5, c6]
+  }
+  f_log : bspline 'per_week {
+    window  = [0 'days, 60 'days]
+    n_basis = 6
+    link    = log
+    lag     = 3 'days
+    coefs   = [c1, c2, c3, c4, c5, c6]
+  }
+  f_exp : bspline 'ratio {
+    breakpoints = [0 'days, 10 'days, 25 'days, 60 'days]
+    coefs       = [c1, c2, c3, c4, c5, c6]
+  }
+  f_con : bspline 'per_day {
+    window  = [0 'days, 60 'days]
+    n_basis = 4
+    coefs   = [a, 2 * a, 0.1, -a]
+  }
+  f_per : periodic_spline 'per_day {
+    period  = 7 'days
+    n_basis = 6
+    link    = log
+    coefs   = [c1, c2, c3, c4, c5, c6]
+  }
+}
+
+transitions {
+  t_id  : X --> D1 @ f_id * X
+  t_log : X --> D2 @ f_log * X
+  t_exp : X --> D3 @ exp(f_exp) * 0.1 'per_day * X
+  t_con : X --> D4 @ f_con * X
+  t_per : X --> D5 @ f_per * X
+}
+
+init { X = 1000 }
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}

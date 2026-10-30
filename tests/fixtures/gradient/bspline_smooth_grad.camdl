@@ -1,0 +1,50 @@
+# Gradient fixture for the `smooth` coefficient form (proposal
+# 2026-10-27-estimable-bsplines §8.1, R2): ∂rate/∂(level, slope, scale, modes)
+# for a log-link smooth spline with a constant lag and an identity-link one.
+# Each rate is `forcing * X`.
+
+time_unit = 'days
+
+dimensions {
+  mode = [m1, m2, m3, m4, m5, m6]
+  imode = [i1, i2, i3, i4]
+}
+
+compartments { X, D1, D2 }
+
+parameters {
+  a       : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  b       : real [1/T] ~ normal(mu = 0.0, sigma = 0.01)
+  tau     : positive 'ratio ~ exponential(rate = 5.99)
+  z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
+  c       : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
+  d       : real [1/T] ~ normal(mu = 0.0, sigma = 0.1)
+  s       : positive 'ratio ~ exponential(rate = 1.0)
+  y[imode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
+}
+
+forcing {
+  f_log : bspline 'per_week {
+    window  = [0 'days, 60 'days]
+    n_basis = 8
+    link    = log
+    lag     = 3 'days
+    coefs   = smooth(level = a, slope = b, scale = tau, modes = z, per = 1 'weeks)
+  }
+  f_id : bspline 'ratio {
+    breakpoints = [0 'days, 10 'days, 25 'days, 60 'days]
+    coefs       = smooth(level = c, slope = d, scale = s, modes = y, per = 5 'days)
+  }
+}
+
+transitions {
+  t_log : X --> D1 @ f_log * X
+  t_id  : X --> D2 @ f_id * 0.1 'per_day * X
+}
+
+init { X = 1000 }
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}

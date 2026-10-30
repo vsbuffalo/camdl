@@ -1,5 +1,5 @@
 //! Structural forcing data (interpolation knots, the cubic-spline basis,
-//! periodic-spline coefficients, piecewise steps) is precomputed `f64` and
+//! piecewise steps, a periodic spline's period) is precomputed `f64` and
 //! cannot be a live parameter — its value feeds a sorted knot table or a
 //! construction-time solve, so it cannot vary per step. A param-referencing
 //! entry must be rejected at `CompiledModel::new` with a clear error, never
@@ -105,20 +105,60 @@ fn linear_interp_knot_value_param_is_rejected() {
     );
 }
 
+/// A periodic-spline coefficient that names a parameter is a live coefficient,
+/// evaluated per call like a Fourier harmonic (proposal
+/// 2026-10-27-estimable-bsplines §4.2): the model builds, and the forcing's
+/// value moves with the parameter in the params slice, the model built once.
 #[test]
-fn periodic_spline_coef_param_is_rejected() {
-    // de Boor basis coefficients are structural; a parameter coef cannot be live.
-    assert_structural_rejection(
-        TimeFuncKind::PeriodicSpline(PeriodicSpline {
-            period: Expr::const_(4.0),
-            n_basis: 6,
-            degree: 3,
-            coefs: vec![
-                Expr::const_(1.0), Expr::param("v"), Expr::const_(1.0),
-                Expr::const_(1.0), Expr::const_(1.0), Expr::const_(1.0),
-            ],
-        }),
-        "periodic-spline coefficient",
+fn periodic_spline_coef_param_builds_live() {
+    use sim::periodic_bspline::PeriodicBasis;
+    use sim::resolved_expr::{eval_resolved, ResolvedExpr};
+    let model = CompiledModel::new(model_with_forcing(TimeFuncKind::PeriodicSpline(PeriodicSpline {
+        period: Expr::const_(4.0),
+        n_basis: 6,
+        degree: 3,
+        coefs: vec![
+            Expr::const_(1.0), Expr::param("v"), Expr::const_(1.0),
+            Expr::const_(1.0), Expr::const_(1.0), Expr::const_(1.0),
+        ],
+        link: Default::default(),
+    })))
+    .unwrap_or_else(|e| panic!("a parameter coefficient is live, not structural: {e}"));
+    let (int_s, real_s) = model.initial_state_mean(&model.default_params).unwrap();
+    let basis = PeriodicBasis::new(4.0, 6, 3).unwrap();
+    for v in [1.0, 2.5, -0.75] {
+        let params = [v];
+        let coefs = [1.0, v, 1.0, 1.0, 1.0, 1.0];
+        for t in [0.0, 0.3, 1.1, 2.0, 3.7, 9.4] {
+            let ctx = sim::propensity::EvalCtx {
+                model: &model, int_s: &int_s, real_s: &real_s, params: &params,
+                t, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None,
+            };
+            let got = eval_resolved(&ResolvedExpr::TimeFunc(0), &ctx);
+            let want = basis.eval(t, |k| coefs[k]);
+            assert_eq!(got.to_bits(), want.to_bits(), "v={v} t={t}: forcing {got}, spline at v {want}");
+        }
+    }
+}
+
+/// The span evaluator's workspaces hold degree ≤ `bspline::MAX_DEGREE` (5); a
+/// larger degree is refused at build, naming the forcing, rather than
+/// reaching the evaluator. The compiler does not bound the degree today.
+#[test]
+fn periodic_spline_degree_above_max_is_refused() {
+    let degree = sim::bspline::MAX_DEGREE as u32 + 1;
+    let err = CompiledModel::new(model_with_forcing(TimeFuncKind::PeriodicSpline(PeriodicSpline {
+        period: Expr::const_(4.0),
+        n_basis: 9,
+        degree,
+        coefs: vec![Expr::const_(1.0); 9],
+        link: Default::default(),
+    })))
+    .err()
+    .expect("degree 6 must be refused");
+    assert_eq!(
+        err.to_string(),
+        "model validation error: periodic_spline forcing 'f': degree (6) must be at most 5"
     );
 }
 

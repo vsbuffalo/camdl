@@ -1,0 +1,82 @@
+#' SIR whose log transmission rate is a cubic B-spline with the smooth
+#' coefficient form: a level at mid-window, a slope per day, and ten whitened
+#' curvature modes scaled by tau, whose prior bounds the total curvature
+#' measured in weeks. The rate gradients carry the whitened and linear basis
+#' spaces.
+#' @base bspline_param_coefs.camdl
+#' @adds the smooth coefficient form and its priors
+#' @changes the window is [0, 168] days with twelve basis functions
+
+time_unit = 'days
+
+dimensions { mode = [m1, m2, m3, m4, m5, m6, m7, m8, m9, m10] }
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  #' recovery rate; the mean infectious period is 1/gamma
+  #' @symbol γ
+  gamma   : rate     in [0.001, 1.0]
+  #' log transmission rate per day at mid-window (R ≈ 1.2 at the prior mean)
+  a_b     : real 'ratio ~ normal(mu = -1.9, sigma = 0.6)
+  #' slope of the log transmission rate, per day
+  b_b     : real [1/T] ~ normal(mu = 0.0, sigma = 0.005)
+  #' curvature scale; PC prior with P(tau_b > 0.5) = 0.05
+  tau_b   : positive 'ratio ~ exponential(rate = 5.99)
+  #' whitened curvature modes
+  z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
+  #' total population size
+  N0      : count    in [100, 100000]
+  #' initial number infectious
+  I0      : count    in [1, 1000]
+}
+
+forcing {
+  beta_t : bspline 'per_day {
+    window  = [0 'days, 168 'days]
+    n_basis = 12
+    link    = log
+    coefs   = smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks)
+  }
+}
+
+transitions {
+  infection : S --> I  @ beta_t * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 182 'days
+}
+
+scenarios {
+  baseline_scenario {
+    label = "baseline"
+    set = {
+      gamma = 0.125
+      a_b   = -1.9
+      b_b   = -0.002
+      tau_b = 0.3
+      z_m1  = 0.8
+      z_m2  = -0.5
+      z_m3  = 1.1
+      z_m4  = 0.2
+      z_m5  = -0.9
+      z_m6  = 0.4
+      z_m7  = -0.3
+      z_m8  = 0.6
+      z_m9  = -1.2
+      z_m10 = 0.1
+      N0    = 10000
+      I0    = 10
+    }
+  }
+}
