@@ -303,6 +303,30 @@ pub(crate) fn profile_cooling_schedule(
     }
 }
 
+/// The IF2 configuration every IF2 profile cell runs with, built from the
+/// command line in one place: the particles, the iterations, the cooling
+/// schedule a fit's `cooling` would mean (`profile_cooling_schedule`), the
+/// step and the degeneracy budget.
+pub(crate) fn profile_if2_config(
+    a: &crate::args::ProfileArgs,
+    n_particles: usize,
+    t_start: f64,
+    simplex_groups: Vec<sim::inference::if2::SimplexGroup>,
+    skip_first_obs_from_loglik: bool,
+) -> IF2Config {
+    IF2Config {
+        n_particles,
+        n_iterations: a.iterations.unwrap_or(PROFILE_DEFAULT_ITERATIONS),
+        cooling: profile_cooling_schedule(a),
+        dt: a.inference.dt.unwrap_or(DEFAULT_DT),
+        t_start,
+        simplex_groups,
+        skip_first_obs_from_loglik,
+        max_substeps: a.inference.pf_max_substeps
+            .unwrap_or(sim::inference::degeneracy::ITER_BUDGET), // gh#241
+    }
+}
+
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // The `--pmmh-*` flags went with per-cell PMMH. They are trapped so a
     // stale script is answered with the reason rather than clap's
@@ -1737,14 +1761,12 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let mut diag = crate::profile_diagnostics::PerStartDiagnostics::default();
         let (final_loglik, mle_params): (f64, Vec<f64>) = match profile_algo {
             ProfileAlgo::If2 => {
-                let config = IF2Config {
-                    n_particles, n_iterations,
-                    cooling: cooling_schedule, dt,
-                    t_start: process.compiled.model.simulation.t_start,
-                    simplex_groups: simplex_groups.clone(),
-                    skip_first_obs_from_loglik: objective.skips_first_observation(),
-                    max_substeps: a.inference.pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET), // gh#241
-                };
+                let config = profile_if2_config(
+                    a, n_particles,
+                    process.compiled.model.simulation.t_start,
+                    simplex_groups.clone(),
+                    objective.skips_first_observation(),
+                );
                 let result = run_if2(
                     &*process, &*obs_model_obj, &params, per_start_specs, &config, job_seed,
                 );
@@ -2459,6 +2481,24 @@ mod tests {
         let (origin, values) = starts_values_from_init_method(&init).unwrap().unwrap();
         assert_eq!(origin, crate::params_resolver::StartsOrigin::Mle { fit: handle });
         assert_eq!(values, vec![("beta".to_string(), 0.5)]);
+    }
+
+    /// `profile --starts from_mle=<sampler leaf>` is refused, as `fit run`'s
+    /// is: a sampler's stored point is one visited state, not an MLE.
+    #[test]
+    fn starts_from_mle_refuses_a_sampler_leaf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let leaf = tmp.path().join("pmmh-abcdef12").join("seed_1-01234567");
+        std::fs::create_dir_all(&leaf).unwrap();
+        write_toml(&leaf, "fit_state.toml",
+            "method = \"pmmh\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
+             best_loglik = -311.13\ninitial_loglik = -400.0\nbest_chain = 1\nn_chains = 2\n\n\
+             [start_values]\nbeta = 0.5\n");
+        let init = crate::fit::starts::ChainStarts::Point(crate::fit::starts::Point::FromMle {
+            source: crate::fit::starts::Handle(leaf.to_string_lossy().into_owned()),
+        });
+        let err = starts_values_from_init_method(&init).unwrap_err();
+        assert!(err.contains("from_posterior") && err.contains("pmmh"), "{err}");
     }
 
     #[test]

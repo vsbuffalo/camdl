@@ -2803,6 +2803,12 @@ mod tests {
         assert!(schedule.multiplier_at_iter(7, 10) > 0.5, "still cooling at the run's end");
         let a = try_parse_profile(&["--iterations", "10", "--cooling-target-iters", "10"]).unwrap();
         assert_eq!(crate::profile::profile_cooling_schedule(&a).target_iters, 10);
+        // And the IF2Config each cell runs with carries that schedule.
+        let a = try_parse_profile(&["--iterations", "10", "--cooling", "0.5"]).unwrap();
+        let config = crate::profile::profile_if2_config(&a, 100, 0.0, vec![], false);
+        assert_eq!(config.n_iterations, 10);
+        assert_eq!(config.cooling,
+            sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 50 });
     }
 
     /// An nl-* profile cell runs no particle filter and perturbs nothing, so
