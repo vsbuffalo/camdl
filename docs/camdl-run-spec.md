@@ -1799,6 +1799,10 @@ sims
 with a separate `ensembles` block carrying `CELLS` instead of `SCENARIO`/`SEED`.
 `--limit` defaults to 50; `--all` removes the cap.
 
+In `--format json` a fit row's `methods[]` holds one entry per run, each with
+its own `run_id`, `label` and `created_at`; the row-level `label` is a display
+string, every run's label joined with `", "`, and names no run (gh#896).
+
 Paths are printed relative to the root you asked for, so they are copy-paste
 ready into `camdl show` / `camdl cat`. Short-hash prefix resolution is git-style:
 

@@ -689,3 +689,26 @@ fn a_folder_label_from_an_older_camdl_gets_the_relabel_command() {
     assert!(all.contains(&format!("camdl label {} \"old\"", &id[..12])),
         "names the command that labels the folder's run:\n{all}");
 }
+
+/// `camdl list --format json` gives every run its own label in `methods[]`;
+/// the folder-level `label` is only the joined display string.
+#[test]
+fn camdl_list_json_labels_each_run() {
+    let p = Project::new();
+    p.config("post.toml", &pgas(4));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "short"]);
+    p.config("post.toml", &pgas(7));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "long"]);
+    let out = p.run(&["list", "--kind", "fit", "--format", "json",
+        &p.dir().join("results").to_string_lossy()]);
+    assert!(out.status.success(), "{}", text(&out));
+    let line = String::from_utf8_lossy(&out.stdout).lines()
+        .find(|l| l.contains("\"kind\":\"fit\"")).unwrap().to_string();
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    for leaf in p.leaves() {
+        let (id, label, _) = record(&leaf);
+        let entry = v["methods"].as_array().unwrap().iter()
+            .find(|m| m["run_id"] == id.as_str()).unwrap_or_else(|| panic!("{v}"));
+        assert_eq!(entry["label"].as_str(), label.as_deref(), "{entry}");
+    }
+}
