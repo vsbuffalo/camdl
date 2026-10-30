@@ -1630,7 +1630,7 @@ impl Formatter {
                 // rather than printing `Â=NaN ✗`, which reads as a failure the
                 // estimator never assessed (gh#45).
                 Some(r) if !r.is_finite() => {
-                    self.dim("Â=n/a (W ≈ 0; rely on Δ_dB)").to_string()
+                    self.dim("Â unavailable — verdict incomplete").to_string()
                 }
                 Some(r) => format!("Â={:.3} {}", r, self.a_glyph(&gate, r)),
                 None => self.dim("Â=—").to_string(),
@@ -4193,7 +4193,7 @@ mod tests {
 
     /// A parameter whose within-chain variance collapsed has NO Â — the G-R
     /// formula divides by it, so `compute_chain_agreement` returns NaN and the
-    /// end-of-stage block prints "n/a (W ≈ 0; rely on Δ_dB)". The summary
+    /// end-of-stage block prints "Â unavailable (W ≈ 0) — verdict incomplete". The summary
     /// table compared that NaN to a literal, and every comparison against NaN
     /// is false, so it fell through to ✗ — reporting "this parameter failed"
     /// for a parameter that was never assessed.
@@ -4209,8 +4209,8 @@ mod tests {
             "an unassessable Â is not a failure:\n{sigma}"
         );
         assert!(
-            sigma.contains("n/a"),
-            "and it must say so, naming why:\n{sigma}"
+            sigma.contains("unavailable — verdict incomplete"),
+            "and it must say so, and what it does to the verdict:\n{sigma}"
         );
     }
 
