@@ -2,8 +2,9 @@
 //! that leaves an estimated parameter out is refused: the draw would fill it
 //! from a bounds-uniform draw, a random θ.
 //!
-//! End-to-end via the built `camdl` binary; skipped when the release binary or
-//! `camdlc.exe` is missing.
+//! End-to-end via the built `camdl` binary. A missing release binary or
+//! `camdlc.exe` fails the test (run `make build`, or `make test-fast`, which
+//! builds both) rather than passing it without running.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -32,10 +33,11 @@ fn tempdir(tag: &str) -> TempDir {
 
 
 fn run_pfilter(tmp: &TempDir, params_toml: &str) -> Option<(bool, String)> {
-    let camdlc = camdlc()?;
-    if !camdl_bin().exists() {
-        return None;
-    }
+    let camdlc = camdlc().expect(
+        "camdlc.exe is missing: run `make build-ocaml` (this test must not pass without running)");
+    assert!(camdl_bin().exists(),
+        "the release camdl binary is missing: run `make build-rust` (this test must not pass \
+         without running)");
     let dir = &tmp.0;
     let model = dir.join("sir.camdl");
     std::fs::write(&model, r#"
