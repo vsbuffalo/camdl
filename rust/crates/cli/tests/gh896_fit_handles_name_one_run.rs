@@ -887,3 +887,24 @@ fn fit_table_skips_runs_that_have_not_completed() {
         .map(|r| r["run_id"].as_str().unwrap()).collect();
     assert_eq!(ids, vec![record(&leaves[1]).0.as_str()], "only the completed run has a row");
 }
+
+/// `simulate --draws posterior --fit <folder>` counts only runs that hold
+/// posterior draws: a folder with one IF2 and one PGAS run names the PGAS run,
+/// and the message says which.
+#[test]
+fn simulate_posterior_draws_narrow_to_runs_with_draws() {
+    let p = Project::new();
+    p.config("mix.toml", &if2(2));
+    p.ok(&["fit", "run", "mix.toml", "--seed", "1"]);
+    p.config("mix.toml", &pgas(4));
+    p.ok(&["fit", "run", "mix.toml", "--seed", "1"]);
+    let leaves = p.leaves();
+    assert_eq!(leaves.len(), 2);
+    let segment = segment_of(&leaves[0]);
+    assert_eq!(segment, segment_of(&leaves[1]), "premise: one folder");
+    let pgas_leaf = leaves.iter().find(|l| l.join("draws.tsv").is_file()).unwrap();
+    let ir = golden_ir().to_string_lossy().into_owned();
+    let all = p.ok(&["simulate", &ir, "--draws", "posterior", "--fit", &segment.to_string_lossy(),
+        "--seed", "1", "--output-dir", "sims"]);
+    assert!(all.contains(&pgas_leaf.display().to_string()), "the PGAS run is used and named:\n{all}");
+}
