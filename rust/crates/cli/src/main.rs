@@ -1709,11 +1709,27 @@ fn run_simulate(a: &args::SimulateArgs) {
             // Resolve the fit run's canonical post-warm-up draws cloud (the
             // terminal Bayesian stage's draws.tsv). --fit names the fit results
             // directory here, not a config TOML.
-            let fit_ref = fit_path_for_draws.as_ref().unwrap_or_else(|| {
+            let fit_handle = fit_path_for_draws.as_ref().unwrap_or_else(|| {
                 eprintln!("error: --draws posterior requires --fit <fit results dir> \
                     (the directory `camdl fit run` printed)");
                 std::process::exit(1);
             });
+            // gh#896: the draws are one run's. `--fit` is a fit handle
+            // (`@label`, a leaf or problem-folder directory, a run-id prefix,
+            // a fit.toml) resolved to the run it names; a folder holding
+            // several runs is refused with them listed rather than one picked
+            // by directory order. A bare directory holding a draws.tsv is
+            // taken as named.
+            let fit_ref: &String = &if std::path::Path::new(fit_handle).join("draws.tsv").is_file() {
+                fit_handle.clone()
+            } else {
+                crate::fit::handle::resolve_leaf(fit_handle)
+                    .map(|leaf| leaf.dir.to_string_lossy().into_owned())
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: --fit {fit_handle}: {e}");
+                        std::process::exit(1);
+                    })
+            };
             if matches!(init_state_arg, Some(InitStateSourceArg::Fit)) {
                 let (rows, source) = resolve_paired_posterior(
                     fit_ref, &ir_path_compiled, a.n_draws,
