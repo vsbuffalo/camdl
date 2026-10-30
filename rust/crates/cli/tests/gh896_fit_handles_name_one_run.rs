@@ -599,3 +599,34 @@ fn simulate_posterior_draws_come_from_the_named_run() {
     assert!(all.contains("6 draws from") && all.contains(&short.display().to_string()),
         "the draws are the labelled run's:\n{all}");
 }
+
+/// A `fit.toml` handle names only a run the file alone makes. A run made with
+/// an identity-bearing override — `--seed`, `--starts`, `--sweep`,
+/// `--decibans-thresh` — is not the file's run, so the file does not name it:
+/// `fit summary seedy.toml` used to report the `--seed 7` run although
+/// `fit run seedy.toml` computes seed 1.
+#[test]
+fn a_config_does_not_name_a_run_made_with_overrides() {
+    let p = Project::new();
+    p.config("seedy.toml", &if2(2));
+    let overridden: [&[&str]; 4] = [
+        &["--seed", "7"],
+        &["--seed", "1", "--starts", "lhs"],
+        &["--seed", "1", "--sweep", "gamma=0.25"],
+        &["--seed", "1", "--decibans-thresh", "3"],
+    ];
+    for extra in overridden {
+        let mut args = vec!["fit", "run", "seedy.toml"];
+        args.extend_from_slice(extra);
+        p.ok(&args);
+        let out = p.run(&["fit", "summary", "seedy.toml"]);
+        assert!(!out.status.success(),
+            "the file does not name a run made with {extra:?}:\n{}", text(&out));
+    }
+    // An override that restates the file is the file's run.
+    p.ok(&["fit", "run", "seedy.toml", "--seed", "1"]);
+    let made = p.leaves();
+    let out = p.ok(&["fit", "summary", "seedy.toml"]);
+    assert!(out.contains("2 chains"), "{out}");
+    assert_eq!(made.len(), 5, "four overridden runs and the file's own: {made:?}");
+}

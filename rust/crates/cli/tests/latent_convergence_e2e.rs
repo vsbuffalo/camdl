@@ -398,8 +398,10 @@ fn pgas_stage_publishes_latent_path_convergence_that_matches_its_own_paths() {
             .map(|l| l.trim().to_string())
             .collect()
     }
+    // The leaf, not the fit.toml: the run was made with `--seed 11`, which the
+    // file alone does not make, so the file does not name it (gh#896).
     let s = Command::new(&bin)
-        .arg("fit").arg("summary").arg(&fit)
+        .arg("fit").arg("summary").arg(&stage)
         .output().expect("spawn camdl");
     assert!(s.status.success(),
         "fit summary failed: {}", String::from_utf8_lossy(&s.stderr));

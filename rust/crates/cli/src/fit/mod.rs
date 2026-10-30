@@ -361,6 +361,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         std::process::exit(1);
     }
 
+    // gh#896: the method as the file alone spells it, before any CLI override,
+    // so a run can be told apart from the run `fit run <file>` would make.
+    let mut file_method: config_v2::Method =
+        config.inference.method.clone().expect("checked above");
     // gh#514 / gh#540: the CLI overrides — `--starts` and the sampler knobs —
     // all change where the chains begin or what the method computes, and
     // therefore the stored output. They are written INTO the method here,
@@ -528,6 +532,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // From here the method is read-only: the identity below sees exactly what
     // the runners consume.
     let method: config_v2::Method = config.inference.method.clone().expect("checked above");
+    // gh#896: whether the method this run uses is the one the file alone
+    // resolves to. A CLI override that changes it (`--starts`, a sampler
+    // knob, `--decibans-thresh`) makes a run the file does not name.
+    let _ = file_method.resolve_starts(&config.problem, &model);
+    let method_is_the_files = serde_json::to_value(&file_method).ok()
+        == serde_json::to_value(&method).ok();
+    // The seeds the file alone runs: its `fit_seeds`, else the default seed.
+    let file_seeds: Vec<u64> = config.inference.fit_seeds.clone().unwrap_or_else(|| vec![1]);
     let allow_nonconverged_source = a.allow_nonconverged_source;
     if let Some(msg) = config.point_start_multichain_note() {
         // gh#71: a point-started multi-chain sampler's R̂ is uninformative;
@@ -1039,6 +1051,16 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         for (name, val) in sweep_point {
             sweep_config.fixed.values.insert(name.clone(), *val);
         }
+        // gh#896: the config identity is recorded on this run only when the
+        // file alone makes it — no `--resume`, a method, seed and problem
+        // (after `--sweep`) that the file's own resolve to — so a `fit.toml`
+        // handle never names a run an identity-bearing override made.
+        let file_makes_this_run = a.resume.is_none()
+            && method_is_the_files
+            && file_seeds.contains(&seed)
+            && serde_json::to_value(&sweep_config).ok() == serde_json::to_value(&cell_problem).ok();
+        let cell_config_identity: Option<&String> =
+            run_config_identity.as_ref().filter(|_| file_makes_this_run);
 
         // IC4 in 2026-04-19 inference review batch 3: reject
         // prior × transform combinations that silently produce a
@@ -1303,7 +1325,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     eprintln!("  \x1b[33mcache hit — reusing {}\x1b[0m",
                         dir.strip_prefix(&cas_root).unwrap_or(&dir).display());
                     // This config now names the stored run too.
-                    if let Some(id) = &run_config_identity {
+                    if let Some(id) = cell_config_identity {
                         if let Err(e) =
                             crate::cas_sink::ensure_input_listed(&dir, "config_identities", id)
                         {
@@ -1997,7 +2019,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             "starts": starts_rule.spelled(),
             "chain_starts_kind": starts_rule.kind().as_str(),
             "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
-            "config_identities": run_config_identity.iter().collect::<Vec<_>>(),
+            "config_identities": cell_config_identity.into_iter().collect::<Vec<_>>(),
             "starts_source": starts_source_record,
             "wall_time_seconds": stage_elapsed.as_secs_f64(),
         });
