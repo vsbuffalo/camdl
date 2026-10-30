@@ -449,15 +449,15 @@ fn r3_prior_only_run_draws_the_smooth_prior() {
     let (kk, d) = (wh.n_basis(), wh.n_modes());
     let breakpoints = [0.0, 20.0, 40.0, 60.0]; // window [0, 60], K = 6, cubic
 
-    let est_p = |name: &str, transform: Transform, lo: f64, hi: f64, init: f64| EstimatedParam {
+    let est_p = |name: &str, transform: Transform, _lo: f64, _hi: f64, init: f64| EstimatedParam {
         name: name.into(), index: model.param_index[name], initial: init, rw_sd: 0.05, transform,
-        lower: lo, upper: hi, rw_sd_auto: false, perturb_only_at_t0: false,
+        rw_sd_auto: false, perturb_only_at_t0: false,
     };
     let inf = f64::INFINITY;
     let mut est = vec![
-        est_p("a", Transform::None, -inf, inf, a_mu),
-        est_p("b", Transform::None, -inf, inf, 0.0),
-        est_p("tau", Transform::Log { lo: 0.0, hi: f64::INFINITY }, 0.0, f64::INFINITY, 0.2),
+        est_p("a", Transform::Identity, -inf, inf, a_mu),
+        est_p("b", Transform::Identity, -inf, inf, 0.0),
+        est_p("tau", Transform::LowerBounded { lo: 0.0 }, 0.0, f64::INFINITY, 0.2),
     ];
     let mut priors = vec![
         Prior::Fixed(Density::Normal { mean: a_mu, sd: a_sd }),
@@ -465,7 +465,7 @@ fn r3_prior_only_run_draws_the_smooth_prior() {
         Prior::Fixed(Density::Exponential { rate: lambda }),
     ];
     for i in 1..=d {
-        est.push(est_p(&format!("z_m{i}"), Transform::None, -inf, inf, 0.0));
+        est.push(est_p(&format!("z_m{i}"), Transform::Identity, -inf, inf, 0.0));
         priors.push(Prior::Fixed(Density::Normal { mean: 0.0, sd: 1.0 }));
     }
     let times: Vec<f64> = (1..=60).map(|t| t as f64).collect();
@@ -640,10 +640,9 @@ fn r3_prior_only_run_draws_the_explicit_prior() {
     }
     let model = Arc::new(CompiledModel::new(ir_m).unwrap());
     let names: Vec<String> = (1..=6).map(|i| format!("b{i}")).collect();
-    let inf = f64::INFINITY;
     let est: Vec<EstimatedParam> = names.iter().map(|n| EstimatedParam {
         name: n.clone(), index: model.param_index[n.as_str()], initial: -1.5, rw_sd: 0.05,
-        transform: Transform::None, lower: -inf, upper: inf, rw_sd_auto: false, perturb_only_at_t0: false,
+        transform: Transform::Identity, rw_sd_auto: false, perturb_only_at_t0: false,
     }).collect();
     let priors = vec![Prior::Fixed(Density::Normal { mean: -1.5, sd: 1.0 }); 6];
     let times: Vec<f64> = (1..=60).map(|t| t as f64).collect();

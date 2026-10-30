@@ -89,13 +89,13 @@ fn first_chain_beta(root: &Path) -> f64 {
     row[beta].parse().unwrap_or_else(|_| panic!("non-numeric beta {:?}", row[beta]))
 }
 
-/// The value inside `log(...)` on the preflight table's `beta` row.
+/// The value after `start=` on the preflight table's `beta` row.
 fn preflight_beta(stderr: &str) -> f64 {
     let line = stderr.lines()
         .find(|l| l.trim_start().starts_with("beta "))
         .unwrap_or_else(|| panic!("no beta row in the transforms table:\n{stderr}"));
-    let open = line.find("log(").unwrap_or_else(|| panic!("no log(...) in {line:?}")) + 4;
-    let close = line[open..].find(')').unwrap_or_else(|| panic!("unterminated log( in {line:?}")) + open;
+    let open = line.find("start=").unwrap_or_else(|| panic!("no start= in {line:?}")) + 6;
+    let close = line[open..].find(' ').map_or(line.len(), |c| c + open);
     line[open..close].parse()
         .unwrap_or_else(|_| panic!("non-numeric preflight start {:?}", &line[open..close]))
 }

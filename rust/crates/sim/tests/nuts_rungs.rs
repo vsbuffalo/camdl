@@ -157,20 +157,17 @@ fn rung3_target_values_reaching_nuts() {
     // log_prob_and_grad closure). Up to a constant it must equal the analytic
     // log density of the coordinate z: for an identity normal, log N(z); for
     // τ on the log scale, z − λeᶻ.
-    let ep = |transform: Transform, lo: f64, hi: f64| EstimatedParam {
-        name: "p".into(), index: 0, initial: 0.0, rw_sd: 0.1, transform, lower: lo, upper: hi,
+    let ep = |transform: Transform| EstimatedParam {
+        name: "p".into(), index: 0, initial: 0.0, rw_sd: 0.1, transform,
         rw_sd_auto: false, perturb_only_at_t0: false,
     };
-    let inf = f64::INFINITY;
     let cases: Vec<(&str, Prior, EstimatedParam, Box<dyn Fn(f64) -> f64>, Vec<f64>)> = vec![
         ("normal(-1, 0.6), identity", Prior::Fixed(Density::Normal { mean: -1.0, sd: 0.6 }),
-         ep(Transform::None, -inf, inf), Box::new(|z| -0.5 * ((z + 1.0) / 0.6_f64).powi(2)), vec![-3.0, -1.0, 0.4]),
+         ep(Transform::Identity), Box::new(|z| -0.5 * ((z + 1.0) / 0.6_f64).powi(2)), vec![-3.0, -1.0, 0.4]),
         ("normal(0, 0.01), identity", Prior::Fixed(Density::Normal { mean: 0.0, sd: 0.01 }),
-         ep(Transform::None, -inf, inf), Box::new(|z| -0.5 * (z / 0.01_f64).powi(2)), vec![-0.03, 0.0, 0.02]),
+         ep(Transform::Identity), Box::new(|z| -0.5 * (z / 0.01_f64).powi(2)), vec![-0.03, 0.0, 0.02]),
         ("exponential(5.99), log, unboxed", Prior::Fixed(Density::Exponential { rate: LAMBDA }),
-         ep(Transform::Log { lo: 0.0, hi: inf }, 0.0, inf), Box::new(|z| z - LAMBDA * z.exp()), vec![-12.0, -2.0, 0.0, 1.5]),
-        ("exponential(5.99), log, box [1e-6, 2.5]", Prior::Fixed(Density::Exponential { rate: LAMBDA }),
-         ep(Transform::Log { lo: 1e-6, hi: 2.5 }, 1e-6, 2.5), Box::new(|z| z - LAMBDA * z.exp()), vec![-12.0, -2.0, 0.0, 0.9]),
+         ep(Transform::LowerBounded { lo: 0.0 }), Box::new(|z| z - LAMBDA * z.exp()), vec![-12.0, -2.0, 0.0, 1.5]),
     ];
     for (label, prior, p, analytic, zs) in &cases {
         let got: Vec<f64> = zs.iter().map(|&z| prior.log_density(&p.prior_point(z)) + p.log_jacobian(z)).collect();
@@ -181,9 +178,6 @@ fn rung3_target_values_reaching_nuts() {
             zs.iter().map(|&z| p.jacobian_grad(z)).collect::<Vec<_>>());
         assert!(spread <= 1e-9, "{label}: the target value differs from the analytic density by a non-constant");
     }
-    // Outside the box, the boxed log transform is a wall.
-    let p = ep(Transform::Log { lo: 1e-6, hi: 2.5 }, 1e-6, 2.5);
-    println!("rung3 box walls: log_jacobian(1.0) = {}, log_jacobian(-14.0) = {}", p.log_jacobian(1.0), p.log_jacobian(-14.0));
 }
 
 // ── Rungs 2 and 4: through run_pgas ─────────────────────────────────────────
@@ -223,8 +217,8 @@ fn pgas_rung(label: &str, fixture: &str, fixed: &[(&str, f64)], data: Option<(&s
         let initial = if n == "tau" { 0.2 } else if n == "a" { -1.5 } else { 0.0 };
         EstimatedParam {
             name: n.clone(), index: model.param_index[n.as_str()], initial, rw_sd: 0.05,
-            transform: if positive { Transform::Log { lo, hi } } else { Transform::None },
-            lower: lo, upper: hi, rw_sd_auto: false, perturb_only_at_t0: false,
+            transform: Transform::for_domain(lo, hi, positive).unwrap(),
+            rw_sd_auto: false, perturb_only_at_t0: false,
         }
     }).collect();
     let priors: Vec<Prior> = priors_ir.into_iter().map(|(p, _, _)| p).collect();

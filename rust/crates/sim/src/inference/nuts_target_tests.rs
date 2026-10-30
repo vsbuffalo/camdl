@@ -15,15 +15,16 @@
 //! it can be written down exactly as a density of z. These tests evaluate the
 //! assembled value and gradient at fixed points and compare them with those
 //! exact densities — the normalising constant included, so a dropped or
-//! doubled Jacobian (a constant offset for `Logit`, a linear one for `Log`)
+//! doubled Jacobian (a constant offset for `Interval`, a linear one for
+//! `LowerBounded`)
 //! cannot hide in "equal up to a constant".
 //!
 //! The priors are built with `Prior::from_ir` from the IR's `PriorDist`, the
 //! path a fit takes, and each transform is the one
 //! `cli::fit::runner::derive_transform_with_bounds` gives the parameter's
-//! kind and box: a `positive` with no box → `Log { 0, ∞ }`, a boxed
-//! `positive` → `Log { lo, hi }`, a `real` with no box → `None`, a `real`
-//! with a finite box → `Logit { lo, hi }`.
+//! kind and box: a `positive` with no box → `LowerBounded { 0 }`, a
+//! `positive` boxed with 0 < lo → `LogInterval { lo, hi }`, a `real` with no
+//! box → `Identity`, a `real` with a finite box → `Interval { lo, hi }`.
 //!
 //! The finite-difference consistency of these gradients is checked by
 //! `pgas::prior_grad_tests`; this file checks the value and the gradient
@@ -40,10 +41,10 @@ use ir::parameter::{ExponentialPrior, LogNormalPrior, NormalPrior, PriorDist, Un
 const TOL: f64 = 1e-12;
 const HALF_LN_2PI: f64 = 0.918_938_533_204_672_8;
 
-fn param(transform: Transform, lower: f64, upper: f64) -> EstimatedParam {
+fn param(transform: Transform) -> EstimatedParam {
     EstimatedParam {
         name: "p".into(), index: 0, initial: 0.0, rw_sd: 0.1, transform,
-        lower, upper, rw_sd_auto: false, perturb_only_at_t0: false,
+        rw_sd_auto: false, perturb_only_at_t0: false,
     }
 }
 
@@ -74,8 +75,7 @@ fn sigmoid(z: f64) -> f64 {
 #[test]
 fn normal_on_the_identity_scale() {
     let prior = Prior::from_ir(&PriorDist::Normal(NormalPrior { mean: -1.0, sd: 0.6 }));
-    let inf = f64::INFINITY;
-    let p = param(Transform::None, -inf, inf);
+    let p = param(Transform::Identity);
     let exact = |z: f64| {
         let u = (z + 1.0) / 0.6;
         (-HALF_LN_2PI - 0.6_f64.ln() - 0.5 * u * u, -(z + 1.0) / 0.36)
@@ -89,27 +89,36 @@ fn normal_on_the_identity_scale() {
 fn exponential_on_the_log_scale() {
     let lambda = 5.99;
     let prior = Prior::from_ir(&PriorDist::Exponential(ExponentialPrior { rate: lambda }));
-    let p = param(Transform::Log { lo: 0.0, hi: f64::INFINITY }, 0.0, f64::INFINITY);
+    let p = param(Transform::LowerBounded { lo: 0.0 });
     let exact = |z: f64| (lambda.ln() + z - lambda * z.exp(), 1.0 - lambda * z.exp());
     check("exponential(5.99), log", &prior, &p, &exact, &[-12.0, -4.0, -2.0, 0.0, 1.5]);
 }
 
-/// The same with the box [1e-6, 2.5]: identical inside, and outside it the
-/// target is −∞ with a zero gradient (the box truncates the support — the
-/// current behaviour `tests/nuts_validity.rs::boxed_log_wall_produces_divergences_under_nuts`
-/// records the cost of under NUTS).
+/// The same prior boxed to [1e-6, 2.5], a positive kind with 0 < lo →
+/// `LogInterval`: ln θ = ln lo + L·σ(z) with L = ln(hi/lo), so
+/// θ′(z) = θ·L·σ(z)σ(−z) and
+///   log p(z) = ln λ − λθ + ln θ + ln L + ln σ(z) + ln σ(−z),
+///   d/dz     = −λθ′ + L·σ(z)σ(−z) + 1 − 2σ(z).
+/// The target is finite at every z: the box's ends are z = ±∞, not a wall.
 #[test]
-fn exponential_on_a_boxed_log_scale() {
+fn exponential_on_a_log_interval_box() {
     let (lambda, lo, hi) = (5.99, 1e-6_f64, 2.5_f64);
     let prior = Prior::from_ir(&PriorDist::Exponential(ExponentialPrior { rate: lambda }));
-    let p = param(Transform::Log { lo, hi }, lo, hi);
-    let exact = |z: f64| (lambda.ln() + z - lambda * z.exp(), 1.0 - lambda * z.exp());
-    check("exponential(5.99), log box", &prior, &p, &exact,
-        &[lo.ln() + 1e-3, -4.0, -2.0, 0.0, hi.ln() - 1e-3]);
-    for z in [lo.ln() - 1e-3, lo.ln() - 2.0, hi.ln() + 1e-3, hi.ln() + 2.0] {
+    let p = param(Transform::for_domain(lo, hi, true).expect("domain"));
+    assert!(matches!(p.transform, Transform::LogInterval { .. }));
+    let l = (hi / lo).ln();
+    let exact = |z: f64| {
+        let s = sigmoid(z);
+        let theta = lo * (l * s).exp();
+        let dtheta = theta * l * s * (1.0 - s);
+        (lambda.ln() - lambda * theta + theta.ln() + l.ln() + s.ln() + (1.0 - s).ln(),
+         -lambda * dtheta + l * s * (1.0 - s) + 1.0 - 2.0 * s)
+    };
+    check("exponential(5.99), log-interval box", &prior, &p, &exact,
+        &[-8.0, -4.0, -1.0, 0.0, 1.0, 4.0, 8.0]);
+    for z in [-40.0, -20.0, 20.0, 40.0] {
         let (v, g) = assembled(&prior, &p, z);
-        assert_eq!(v, f64::NEG_INFINITY, "outside the box at z={z}");
-        assert_eq!(g, 0.0, "outside the box at z={z}");
+        assert!(v.is_finite() && g.is_finite(), "no wall at z={z}: value {v}, gradient {g}");
     }
 }
 
@@ -121,7 +130,7 @@ fn exponential_on_a_boxed_log_scale() {
 fn uniform_on_a_scaled_logit_box() {
     let (a, b) = (-3.0, 5.0);
     let prior = Prior::from_ir(&PriorDist::Uniform(UniformPrior { lower: a, upper: b }));
-    let p = param(Transform::Logit { lo: a, hi: b }, a, b);
+    let p = param(Transform::Interval { lo: a, hi: b });
     let exact = |z: f64| {
         let s = sigmoid(z);
         // ln σ(z) = −ln(1 + e^{−z}), ln(1 − σ(z)) = −ln(1 + eᶻ): no cancellation.
@@ -138,7 +147,7 @@ fn uniform_on_a_scaled_logit_box() {
 fn log_normal_on_the_log_scale() {
     let (mu, sigma) = (1.0, 0.5);
     let prior = Prior::from_ir(&PriorDist::LogNormal(LogNormalPrior { mu, sigma }));
-    let p = param(Transform::Log { lo: 0.0, hi: f64::INFINITY }, 0.0, f64::INFINITY);
+    let p = param(Transform::LowerBounded { lo: 0.0 });
     let exact = |z: f64| {
         let u = (z - mu) / sigma;
         (-HALF_LN_2PI - sigma.ln() - 0.5 * u * u, -(z - mu) / (sigma * sigma))

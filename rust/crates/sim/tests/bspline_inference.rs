@@ -94,14 +94,14 @@ impl Fit {
     fn smooth(model: Arc<CompiledModel>, times: &[f64], counts: &[f64]) -> Self {
         let obs_model = observed(&model, times, counts);
         let observations = times.iter().map(|&t| Observation { time: t, value: 0.0 }).collect();
-        let p = |name: &str, lo: f64, hi: f64, transform: Transform, initial: f64| EstimatedParam {
+        let p = |name: &str, _lo: f64, _hi: f64, transform: Transform, initial: f64| EstimatedParam {
             name: name.into(), index: model.param_index[name], initial, rw_sd: 0.05, transform,
-            lower: lo, upper: hi, rw_sd_auto: false, perturb_only_at_t0: false,
+            rw_sd_auto: false, perturb_only_at_t0: false,
         };
         let mut est = vec![
-            p("a", f64::NEG_INFINITY, f64::INFINITY, Transform::None, -1.5),
-            p("b", f64::NEG_INFINITY, f64::INFINITY, Transform::None, 0.0),
-            p("tau", 0.0, f64::INFINITY, Transform::Log { lo: 0.0, hi: f64::INFINITY }, 0.2),
+            p("a", f64::NEG_INFINITY, f64::INFINITY, Transform::Identity, -1.5),
+            p("b", f64::NEG_INFINITY, f64::INFINITY, Transform::Identity, 0.0),
+            p("tau", 0.0, f64::INFINITY, Transform::LowerBounded { lo: 0.0 }, 0.2),
         ];
         let mut priors = vec![
             Prior::Fixed(Density::Normal { mean: -1.5, sd: 1.0 }),
@@ -109,7 +109,7 @@ impl Fit {
             Prior::Fixed(Density::Exponential { rate: 5.99 }),
         ];
         for i in 1..=3 {
-            est.push(p(&format!("z_m{i}"), f64::NEG_INFINITY, f64::INFINITY, Transform::None, 0.0));
+            est.push(p(&format!("z_m{i}"), f64::NEG_INFINITY, f64::INFINITY, Transform::Identity, 0.0));
             priors.push(Prior::Fixed(Density::Normal { mean: 0.0, sd: 1.0 }));
         }
         Fit { model, obs_model, observations, est, priors }
@@ -123,9 +123,7 @@ impl Fit {
             index: model.param_index[*n],
             initial: start,
             rw_sd: 0.05,
-            transform: Transform::None,
-            lower: -8.0,
-            upper: 2.0,
+            transform: Transform::Identity,
             rw_sd_auto: false,
             perturb_only_at_t0: false,
         }).collect::<Vec<_>>();

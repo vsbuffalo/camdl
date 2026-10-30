@@ -576,8 +576,10 @@ impl DiagnosticKind {
                     target, rate * 100.0, kernel.band_label())
             }
             Self::ParamNearBound { param, value, bound, bound_type } =>
-                format!("'{}' = {:.4} is near {} bound {:.4}.",
-                    param, value, bound_type, bound),
+                format!("'{}' = {:.4} is near {} bound {:.4} and may be on it. IF2 cannot \
+                         place an estimate exactly on a bound; to test whether the maximum \
+                         is on it, profile '{}' or refit with nl-bobyqa, which can.",
+                    param, value, bound_type, bound, param),
             Self::ProfileCIUnbounded { param, direction } =>
                 format!("Profile CI for '{}' is unbounded {}.", param, direction),
             Self::FlatProfile { param, .. } =>

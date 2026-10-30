@@ -137,7 +137,7 @@ fn pgas(m: &Arc<CompiledModel>, times: &[f64]) -> Result<(), String> {
     let beta = m.param_index["beta"];
     let est = vec![EstimatedParam {
         name: "beta".into(), index: beta, initial: 0.0, rw_sd: 0.1,
-        transform: Transform::None, lower: 0.0, upper: 1.0, rw_sd_auto: false, perturb_only_at_t0: false,
+        transform: Transform::Identity, rw_sd_auto: false, perturb_only_at_t0: false,
     }];
     let config = PGASConfig {
         binomial: sim::rng::BinomialAlgorithm::Btpe, ancestor_sampling: true,

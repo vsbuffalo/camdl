@@ -154,15 +154,19 @@ burn_in    = 2
 thin       = 1
 starts     = "single"
 "#,
+        // 50 particles and a 200-particle clean evaluation: at 20 and 50 the
+        // final θ̂ scored −∞ on 1 seed in 6 (measured on the transform before
+        // and after support-keyed transforms alike), a budget failure that
+        // says nothing about the progress record under test.
         "if2" => r#"algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 1
-particles  = 20
+particles  = 50
 iterations = 3
 cooling    = 0.9
 starts     = "single"
 [method.loglik_eval]
-n_particles  = 50
+n_particles  = 200
 n_replicates = 2
 [method.dt_check]
 enabled = false

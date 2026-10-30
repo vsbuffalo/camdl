@@ -245,10 +245,9 @@ fn pgas_nuts_admits_spline_coefficients() {
     let observations: Vec<Observation> = times.iter().map(|&t| Observation { time: t, value: 0.0 }).collect();
     let est: Vec<EstimatedParam> = ["b1", "b2", "b3", "b4", "b5", "r2"].iter().map(|n| {
         let index = model.param_index[*n];
-        let (lower, upper) = if n.starts_with('r') { (0.0, 1.0) } else { (-5.0, 2.0) };
         EstimatedParam {
             name: (*n).into(), index, initial: model.default_params[index], rw_sd: 0.05,
-            transform: Transform::None, lower, upper, rw_sd_auto: false, perturb_only_at_t0: false,
+            transform: Transform::Identity, rw_sd_auto: false, perturb_only_at_t0: false,
         }
     }).collect();
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat); est.len()];

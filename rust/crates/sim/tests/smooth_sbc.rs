@@ -83,14 +83,14 @@ fn one(model: &Arc<CompiledModel>, sim_id: usize) -> Vec<usize> {
     let obs_model = MultiStreamObsModel::new(BoundObs::bind(0.0, specs).unwrap().0, model.clone()).unwrap();
     let observations: Vec<Observation> = times.iter().map(|&t| Observation { time: t, value: 0.0 }).collect();
     let inf = f64::INFINITY;
-    let ep = |name: &str, transform: Transform, lo: f64, hi: f64, initial: f64| EstimatedParam {
+    let ep = |name: &str, transform: Transform, _lo: f64, _hi: f64, initial: f64| EstimatedParam {
         name: name.into(), index: model.param_index[name], initial, rw_sd: 0.05, transform,
-        lower: lo, upper: hi, rw_sd_auto: false, perturb_only_at_t0: false,
+        rw_sd_auto: false, perturb_only_at_t0: false,
     };
     let mut est = vec![
-        ep("a", Transform::None, -inf, inf, -3.0),
-        ep("b", Transform::None, -inf, inf, 0.0),
-        ep("tau", Transform::Log { lo: 0.0, hi: f64::INFINITY }, 0.0, f64::INFINITY, 0.2),
+        ep("a", Transform::Identity, -inf, inf, -3.0),
+        ep("b", Transform::Identity, -inf, inf, 0.0),
+        ep("tau", Transform::LowerBounded { lo: 0.0 }, 0.0, f64::INFINITY, 0.2),
     ];
     let mut priors = vec![
         Prior::Fixed(Density::Normal { mean: -3.0, sd: 0.3 }),
@@ -98,7 +98,7 @@ fn one(model: &Arc<CompiledModel>, sim_id: usize) -> Vec<usize> {
         Prior::Fixed(Density::Exponential { rate: LAMBDA }),
     ];
     for i in 1..=4 {
-        est.push(ep(&format!("z_m{i}"), Transform::None, -inf, inf, 0.0));
+        est.push(ep(&format!("z_m{i}"), Transform::Identity, -inf, inf, 0.0));
         priors.push(Prior::Fixed(Density::Normal { mean: 0.0, sd: 1.0 }));
     }
     let config = PGASConfig {

@@ -9,12 +9,6 @@ use sim::inference::MultiStreamObsModel;
 use sim::inference::particle_filter::Observation;
 use sim::rng::StatefulRng;
 
-/// The prior point a `Log`-transformed parameter presents: θ, with ln θ read
-/// from the coordinate `z`.
-fn at(theta: f64, z: f64) -> sim::inference::prior::PriorPoint {
-    sim::inference::prior::PriorPoint { ln_theta: z, ..sim::inference::prior::PriorPoint::natural(theta) }
-}
-
 
 fn load_model(path: &str) -> ir::Model {
     let json = std::fs::read_to_string(path)
@@ -416,10 +410,9 @@ fn test_nuts_target_gradient_on_z_scale() {
             index: i,
             name: p.name.clone(),
             initial: p.value.resolved_value().unwrap_or(0.5),
-            lower: p.bounds().map_or(0.001, |b| b.0),
-            upper: p.bounds().map_or(100.0, |b| b.1),
             rw_sd: 0.02,
-            transform: Transform::Log { lo: 0.001, hi: 100.0 },
+            // A box that holds every parameter's value (N0 = 1000).
+            transform: Transform::for_domain(0.001, 1e5, true).expect("domain"),
             rw_sd_auto: false,
             perturb_only_at_t0: false,
         })
@@ -465,39 +458,17 @@ fn test_nuts_target_gradient_on_z_scale() {
         let mut grad_z = vec![0.0; d_nuts];
 
         for i in 0..d_nuts {
-            let theta = params[if2_params[i].index];
-            let dtheta_dz = match &if2_params[i].transform {
-                Transform::Log { .. } => z_val[i].exp(),
-                Transform::Logit { lo, hi } => {
-                    let p = 1.0 / (1.0 + (-z_val[i]).exp());
-                    (hi - lo) * p * (1.0 - p)
-                }
-                Transform::None => 1.0,
-            };
+            let dtheta_dz = if2_params[i].transform_deriv(z_val[i]);
 
             // LL: chain rule
             grad_z[i] += ll_grad_theta[i] * dtheta_dz;
 
             // Prior (Flat → 0)
-            log_p += priors[i].log_density(&at(theta, z_val[i]));
+            log_p += priors[i].log_density(&if2_params[i].prior_point(z_val[i]));
 
             // Jacobian
-            let log_jac = match &if2_params[i].transform {
-                Transform::Log { .. } => z_val[i],
-                Transform::Logit { lo, hi } => {
-                    let p = 1.0 / (1.0 + (-z_val[i]).exp());
-                    ((hi - lo) * p * (1.0 - p)).ln()
-                }
-                Transform::None => 0.0,
-            };
-            let jac_grad = match &if2_params[i].transform {
-                Transform::Log { .. } => 1.0,
-                Transform::Logit { .. } => {
-                    let p = 1.0 / (1.0 + (-z_val[i]).exp());
-                    1.0 - 2.0 * p
-                }
-                Transform::None => 0.0,
-            };
+            let log_jac = if2_params[i].log_jacobian(z_val[i]);
+            let jac_grad = if2_params[i].jacobian_grad(z_val[i]);
             log_p += log_jac;
             grad_z[i] += jac_grad;
         }

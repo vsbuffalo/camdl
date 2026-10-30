@@ -99,9 +99,11 @@ pub enum BoxFrom {
 /// An estimated parameter: its support, search box and prior are distinct.
 #[derive(Debug, Clone)]
 pub struct Estimated {
+    /// From the model: declared range, else kind.
     pub support: Support,
+    /// From the user, within the support.
     pub search: SearchBox,
-    /// Clamps to `search`.
+    /// The effective domain, support ∩ search, as the map onto it.
     pub transform: Transform,
     /// Read by the Bayesian methods only; always recorded.
     pub prior: ResolvedPrior,
@@ -410,11 +412,7 @@ impl CellPartition<'_> {
 }
 
 fn transform_tag(t: &Transform) -> &'static str {
-    match t {
-        Transform::Log { .. } => "log",
-        Transform::Logit { .. } => "logit",
-        Transform::None => "identity",
-    }
+    t.tag()
 }
 
 // ─── The stored record ───────────────────────────────────────────────────────
@@ -1017,6 +1015,23 @@ pub fn support(p: &ir::parameter::Parameter, kind: ir::parameter::ParamKind) -> 
     Support { lower, upper, from: SupportFrom::Kind }
 }
 
+/// support ∩ search, as the map onto it ([`Transform::for_domain`]). The
+/// search box is refused before this when it leaves the support
+/// ([`crate::fit::runner::resolve_search_box`]), so the intersection is the
+/// search box; it is still taken, so a record never names a domain wider than
+/// the support. The kind enters only to split a finite box with 0 < lo
+/// between `LogInterval` (positive kinds) and `Interval` (proposal D11).
+pub fn effective_domain(
+    support: &Support,
+    search: &SearchBox,
+    kind: ir::parameter::ParamKind,
+) -> Result<Transform, RoleError> {
+    let lo = support.lower.max(search.lower);
+    let hi = support.upper.min(search.upper);
+    crate::fit::runner::derive_transform_with_bounds(kind, (lo, hi))
+        .map_err(|message| RoleError::BoxOutsideSupport { message })
+}
+
 fn estimated(
     p: &ir::parameter::Parameter,
     spec: Option<&EstimateSpecV2>,
@@ -1037,8 +1052,7 @@ fn estimated(
         (None, None) => BoxFrom::Support,
     };
     let search = SearchBox { lower, upper, from };
-    let transform = crate::fit::runner::derive_transform_with_bounds(
-        kind, (search.lower, search.upper));
+    let transform = effective_domain(&support, &search, kind)?;
     let prior = crate::fit::priors_precedence::resolve_priors_with_precedence(
         std::slice::from_ref(&p.name), inputs.fit_estimate, inputs.model,
     ).remove(0);
@@ -1436,7 +1450,7 @@ mod tests {
         let Role::Estimated(beta) = &p.entries["beta"].role else { panic!("beta estimated") };
         assert_eq!(beta.support, Support { lower: 0.05, upper: 1.0, from: SupportFrom::Declared });
         assert_eq!(beta.search, SearchBox { lower: 0.1, upper: 0.9, from: BoxFrom::FitConfig });
-        assert!(matches!(beta.transform, Transform::Log { lo, hi } if lo == 0.1 && hi == 0.9));
+        assert_eq!(beta.transform, Transform::LogInterval { lo: 0.1, hi: 0.9 });
         let Role::Estimated(tau) = &p.entries["tau"].role else { panic!("tau estimated") };
         assert_eq!(tau.support, Support {
             lower: f64::NEG_INFINITY, upper: f64::INFINITY, from: SupportFrom::Kind });
@@ -1445,7 +1459,7 @@ mod tests {
         // must not claim one.
         assert_eq!(tau.search, SearchBox {
             lower: f64::NEG_INFINITY, upper: f64::INFINITY, from: BoxFrom::Support });
-        assert!(matches!(tau.transform, Transform::None));
+        assert!(matches!(tau.transform, Transform::Identity));
     }
 
     #[test]

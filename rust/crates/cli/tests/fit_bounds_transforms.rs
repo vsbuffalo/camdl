@@ -20,6 +20,11 @@
 //!      below zero.
 //!   4. `prior_drawn_starts_lie_inside_the_box` — `starts = "from_prior"`
 //!      drew `normal(0, 1)` starts with no regard to the box `[0, 1]`.
+//!   6. `log_normal_on_a_positive_sub_box_is_the_truncated_log_normal`
+//!      (support-keyed transforms §12.2) — a `rate` with no declared range,
+//!      `~ log_normal(-1, 0.5)`, fit box [0.05, 1], under MH: the parameter
+//!      takes `LogInterval`, and the draws must be the log-normal truncated
+//!      to the box.
 //!   5. `hierarchical_leaf_box_that_cuts_the_prior_is_refused` — a
 //!      `normal(mu, 1)` leaf boxed to `[1, 2]` biases `mu` under PMMH and MH,
 //!      and is refused before sampling; IF2 reads no prior and runs; a
@@ -366,9 +371,9 @@ simulate {{ from = 0 'days  to = 6 'days }}
 }
 
 /// A hierarchical leaf with no box anywhere still has one: its kind's
-/// support, which the transform keeps (`[0, ∞)` under `log` for `rate`,
-/// `positive`, `count` and `duration`; `[0, 1]` under the logit for
-/// `probability`). A `normal(mu, 1)` prior puts mass outside that support,
+/// support, which the transform keeps (`[0, ∞)` under the lower-bounded map
+/// for `rate`, `positive`, `count` and `duration`; `[0, 1]` under the
+/// interval map for `probability`). A `normal(mu, 1)` prior puts mass outside that support,
 /// and PMMH and MH would score the leaf against the normal density
 /// truncated to it without dividing by P(support | mu). That missing
 /// constant moves with `mu`, so leaving it out biases `mu`. The refusal must
@@ -430,4 +435,80 @@ fn kind_support_that_cuts_a_hierarchical_prior_is_refused() {
     assert!(!out.status.success(), "pgas: must be refused; stderr=\n{err}");
     assert!(err.contains("PGAS does not support hierarchical priors (parameter 'a1')"), "pgas: {err}");
     assert!(find_all(&results, "draws.tsv").is_empty(), "pgas: refused before sampling");
+}
+
+/// Proposal §12.2, the companion of the interim fix's refusal of the box
+/// [−1, 1]: the same prior, `c : rate ~ log_normal(-1, 0.5)` with no declared
+/// range, on the fit box [0.05, 1], under MH. `c` takes `LogInterval` and
+/// reads ln θ from its own coordinate, so the posterior (the likelihood is
+/// flat in `c`) is the log-normal truncated to [0.05, 1]. Its mean and
+/// standard deviation, by quadrature, must match the draws to 4 Monte Carlo
+/// standard errors, each MCSE from batch means (20 batches per chain).
+#[test]
+fn log_normal_on_a_positive_sub_box_is_the_truncated_log_normal() {
+    if camdlc_bin().is_none() {
+        return;
+    }
+    let (mu, sigma, lo, hi) = (-1.0_f64, 0.5_f64, 0.05_f64, 1.0_f64);
+    // The truncated law by quadrature on 200,000 midpoints.
+    let n = 200_000;
+    let h = (hi - lo) / n as f64;
+    let (mut z, mut m1, mut m2) = (0.0, 0.0, 0.0);
+    for i in 0..n {
+        let x = lo + (i as f64 + 0.5) * h;
+        let u = (x.ln() - mu) / sigma;
+        let d = (-0.5 * u * u).exp() / x;
+        z += d;
+        m1 += x * d;
+        m2 += x * x * d;
+    }
+    let mean = m1 / z;
+    let sd = (m2 / z - mean * mean).sqrt();
+
+    let tmp = tempdir("lognormal_subbox");
+    let ir = compile(&tmp.0, "ln", &model_src("  c : rate ~ log_normal(mu = -1.0, sigma = 0.5)"));
+    let mh = "algorithm = \"mh\"\nbackend = \"ode\"\nchains = 4\niterations = 12000\nburn_in = 2000";
+    let (out, results) = run_fit(&tmp.0, &ir, "c = { bounds = [0.05, 1], start = 0.3, rw_sd = 0.05 }", mh, "mh");
+    assert!(out.status.success(), "stderr=\n{}", stderr(&out));
+    let mut chains: Vec<Vec<f64>> = Vec::new();
+    for f in find_all(&results, "draws.tsv") {
+        let text = std::fs::read_to_string(&f).unwrap();
+        let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        let ic = header.iter().position(|h| *h == "c").unwrap();
+        let ch = header.iter().position(|h| *h == "chain");
+        for l in lines {
+            let cells: Vec<&str> = l.split('\t').collect();
+            let k: usize = ch.map_or(0, |i| cells[i].parse().unwrap());
+            if chains.len() <= k { chains.resize(k + 1, Vec::new()); }
+            chains[k].push(cells[ic].parse().unwrap());
+        }
+    }
+    let all: Vec<f64> = chains.iter().flatten().copied().collect();
+    assert_inside(&all, lo, hi, "mh");
+    let mcse = |f: &dyn Fn(f64) -> f64| {
+        let mut batch_means = Vec::new();
+        for c in &chains {
+            let b = c.len() / 20;
+            for k in 0..20 {
+                let s: f64 = c[k * b..(k + 1) * b].iter().map(|&x| f(x)).sum();
+                batch_means.push(s / b as f64);
+            }
+        }
+        let nb = batch_means.len() as f64;
+        let m = batch_means.iter().sum::<f64>() / nb;
+        (batch_means.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (nb - 1.0) / nb).sqrt()
+    };
+    let n_all = all.len() as f64;
+    let got_mean = all.iter().sum::<f64>() / n_all;
+    let got_m2 = all.iter().map(|x| x * x).sum::<f64>() / n_all;
+    let got_sd = (got_m2 - got_mean * got_mean).sqrt();
+    let se_mean = mcse(&|x| x);
+    // sd = sqrt(E x² − (E x)²): delta-method MCSE through E x², with the
+    // mean's error alongside it.
+    let se_sd = (mcse(&|x| x * x) / (2.0 * got_sd)).hypot(se_mean * got_mean / got_sd);
+    eprintln!("truncated log-normal [0.05, 1]: mean {got_mean:.4} (law {mean:.4}, MCSE {se_mean:.4}), \
+               sd {got_sd:.4} (law {sd:.4}, MCSE {se_sd:.4})");
+    assert!((got_mean - mean).abs() < 4.0 * se_mean, "mean {got_mean} vs {mean} (MCSE {se_mean})");
+    assert!((got_sd - sd).abs() < 4.0 * se_sd, "sd {got_sd} vs {sd} (MCSE {se_sd})");
 }

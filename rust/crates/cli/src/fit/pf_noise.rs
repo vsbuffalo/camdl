@@ -653,14 +653,12 @@ mod tests {
         let specs = vec![
             EstimatedParam {
                 name: "beta".into(), index: 0, initial: 0.4, rw_sd: 0.02,
-                transform: Transform::Log { lo: 0.001, hi: 5.0 },
-                lower: 0.001, upper: 5.0, rw_sd_auto: false,
+                transform: Transform::for_domain(0.001, 5.0, true).expect("domain"), rw_sd_auto: false,
                 perturb_only_at_t0: false,
             },
             EstimatedParam {
                 name: "gamma".into(), index: 1, initial: 0.2, rw_sd: 0.01,
-                transform: Transform::Log { lo: 0.01, hi: 1.0 },
-                lower: 0.01, upper: 1.0, rw_sd_auto: false,
+                transform: Transform::for_domain(0.01, 1.0, true).expect("domain"), rw_sd_auto: false,
                 perturb_only_at_t0: false,
             },
         ];
@@ -672,7 +670,11 @@ mod tests {
         assert_ne!(a, draw_proposed_theta(&base, &specs, &sd, 8));
         assert!(a[0] != base[0] && a[1] != base[1], "both parameters must move: {a:?}");
         assert_eq!(a[2], base[2], "a non-estimated parameter must not move");
-        // A zero step is a no-op, which pins that the step is the multiplier.
-        assert_eq!(draw_proposed_theta(&base, &specs, &[0.0, 0.0], 7), base);
+        // A zero step is a no-op up to the transform's θ → z → θ rounding,
+        // which pins that the step is the multiplier.
+        let still = draw_proposed_theta(&base, &specs, &[0.0, 0.0], 7);
+        for (x, b) in still.iter().zip(&base) {
+            assert!((x - b).abs() <= 1e-14 * b.abs(), "zero step moved {b} to {x}");
+        }
     }
 }

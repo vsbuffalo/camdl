@@ -1333,9 +1333,7 @@ fn if2_lls(cfg: &Config, n_particles: usize, reps: usize, seed: u64) -> Vec<f64>
         index: beta,
         initial: params[beta],
         rw_sd: 0.0,
-        transform: Transform::None,
-        lower: 0.0,
-        upper: 100.0,
+        transform: Transform::Identity,
         rw_sd_auto: false,
         perturb_only_at_t0: false,
     }];
