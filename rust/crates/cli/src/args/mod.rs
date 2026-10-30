@@ -1729,9 +1729,9 @@ OUTPUT
 
   Full reference: docs/inference.md, `Per-cell diagnostics` section.
 
-  --dt on an nl-* (ODE) profile: each cell integrates at the model's own
-  `dt` when it declares one, as `fit run` does, and a different --dt is
-  refused rather than ignored.
+  --dt: every cell (IF2 and nl-*) integrates at the model's own `dt` when
+  it declares one, as `fit run` does; a different --dt, or a different
+  `[config] dt` in the --fit file, is refused rather than ignored.
 "))]
 pub struct ProfileArgs {
     /// IR JSON or .camdl model file
@@ -2807,7 +2807,7 @@ mod tests {
         assert_eq!(crate::profile::profile_cooling_schedule(&a).target_iters, 10);
         // And the IF2Config each cell runs with carries that schedule.
         let a = try_parse_profile(&["--iterations", "10", "--cooling", "0.5"]).unwrap();
-        let config = crate::profile::profile_if2_config(&a, 100, 0.0, vec![], false);
+        let config = crate::profile::profile_if2_config(&a, 100, 1.0, 0.0, vec![], false);
         assert_eq!(config.n_iterations, 10);
         assert_eq!(config.cooling,
             sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 50 });

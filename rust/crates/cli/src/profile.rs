@@ -190,36 +190,6 @@ struct ProfileNloptKnobs {
     starts: usize,
 }
 
-/// `--dt` when not given (`camdl pfilter` and `camdl profile`).
-pub(crate) const DEFAULT_DT: f64 = 1.0;
-
-/// An ODE cell steps at the model's declared `dt` when it has one — the step
-/// `fit run`'s ODE methods use too (`runner::ode_step_dt`). An explicit
-/// `--dt` that differs would be silently ignored, so it is refused; one that
-/// agrees, or a `--dt` on a model that declares none, is used.
-pub(crate) fn refuse_overridden_dt(
-    cli_dt: Option<f64>,
-    model_dt: Option<f64>,
-    algorithm: &str,
-) -> Result<(), String> {
-    match (cli_dt, model_dt) {
-        (Some(cli), Some(model)) if cli != model => Err(format!(
-            "--dt {cli} would be ignored: an `{algorithm}` cell integrates the ODE at the \
-             model's declared dt = {model}, as `fit run` does. Drop --dt, or change the \
-             model's `dt`."
-        )),
-        _ => Ok(()),
-    }
-}
-
-/// The step an ODE (nl-*) cell integrates at: the model's declared `dt`,
-/// else the profile's — the rule `fit run` applies (`runner::ode_step_dt`).
-/// One function for the cell, its stored payload and the run identity, so
-/// the identity hashes the step the cell used.
-pub(crate) fn ode_cell_dt(profile_dt: f64, model_dt: Option<f64>) -> f64 {
-    model_dt.unwrap_or(profile_dt)
-}
-
 /// `--iterations` when not given: IF2 iterations per cell.
 const PROFILE_DEFAULT_ITERATIONS: usize = 50;
 /// `--cooling` when not given.
@@ -310,6 +280,7 @@ pub(crate) fn profile_cooling_schedule(
 pub(crate) fn profile_if2_config(
     a: &crate::args::ProfileArgs,
     n_particles: usize,
+    dt: f64,
     t_start: f64,
     simplex_groups: Vec<sim::inference::if2::SimplexGroup>,
     skip_first_obs_from_loglik: bool,
@@ -318,7 +289,7 @@ pub(crate) fn profile_if2_config(
         n_particles,
         n_iterations: a.iterations.unwrap_or(PROFILE_DEFAULT_ITERATIONS),
         cooling: profile_cooling_schedule(a),
-        dt: a.inference.dt.unwrap_or(DEFAULT_DT),
+        dt,
         t_start,
         simplex_groups,
         skip_first_obs_from_loglik,
@@ -409,7 +380,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let n_starts = a.n_starts;
     let cooling_schedule = profile_cooling_schedule(a);
     let cooling = cooling_schedule.fraction;
-    let dt = a.inference.dt.unwrap_or(DEFAULT_DT);
     let seed_base = a.inference.seed;
     let parallel = a.inference.parallel;
     let output_tsv_path: Option<String> = a.output.as_ref().map(|p| p.to_string_lossy().into_owned());
@@ -547,6 +517,15 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
          (None, Vec::new(), Vec::new()), Vec::new(),
          crate::fit::config_v2::LikelihoodObjective::Full, Ok(Vec::new()))
     };
+
+    // The step every cell integrates at (the one dt rule), from the model,
+    // --dt and the --fit file's written `[config] dt`.
+    let fit_written_dt: Option<f64> = a.fit.as_ref().and_then(|p| {
+        let raw = std::fs::read_to_string(p).unwrap_or_default();
+        crate::fit::config_v2::written_config_dt(&raw)
+    });
+    let dt = crate::dt_rule::effective_dt_for_command(a.inference.dt, fit_written_dt, model_pre.simulation.dt)
+        .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
 
     // An nl-* cell's optimizer budget: the `--fit` file's own, when its
     // [method] is an nl-* optimizer (so a profile of that fit optimizes each
@@ -812,12 +791,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let compiled = Arc::new(CompiledModel::new(model.clone())
         .unwrap_or_else(|e| { eprintln!("{:?}", e); std::process::exit(1); }));
     let base_params = compiled.default_params.clone();
-    if let ProfileAlgo::Nlopt(_) = profile_algo {
-        if let Err(e) = refuse_overridden_dt(a.inference.dt, compiled.model.simulation.dt, algo_name) {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
-    }
 
     // Reject overdispersed models on the ODE backend (and any other
     // backend / model-capability mismatch). The `validate_combo` call
@@ -1495,7 +1468,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         }),
         nlopt: matches!(profile_algo, ProfileAlgo::Nlopt(_)).then(|| ProfileNloptKnobs {
             tolerance: nl_tolerance, max_evals: nl_max_evals,
-            dt: ode_cell_dt(dt, compiled.model.simulation.dt), starts: n_starts,
+            dt, starts: n_starts,
         }),
         rw_sd: &rw_sd_blob,
         rw_sd_auto,
@@ -1762,7 +1735,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let (final_loglik, mle_params): (f64, Vec<f64>) = match profile_algo {
             ProfileAlgo::If2 => {
                 let config = profile_if2_config(
-                    a, n_particles,
+                    a, n_particles, dt,
                     process.compiled.model.simulation.t_start,
                     simplex_groups.clone(),
                     objective.skips_first_observation(),
@@ -1872,7 +1845,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     per_start_specs.iter().map(|p| p.index).collect();
                 let bounds: Vec<(f64, f64)> =
                     per_start_specs.iter().map(|p| (p.lower, p.upper)).collect();
-                let ode_dt = ode_cell_dt(dt, compiled.model.simulation.dt);
+                let ode_dt = dt;
                 // Per-cell NLopt budget: the `--fit` file's nl-* method's,
                 // else the profile defaults (`PROFILE_NLOPT_*`).
                 let tolerance = nl_tolerance;
@@ -1940,7 +1913,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 "dt": dt }),
             ProfileAlgo::Nlopt(_) => serde_json::json!({
                 "tolerance": nl_tolerance, "max_evals": nl_max_evals,
-                "dt": ode_cell_dt(dt, compiled.model.simulation.dt) }),
+                "dt": dt }),
         };
         // A non-finite cell loglik serialises as JSON `null` (JSON has no
         // ±inf/NaN), and every consumer that reads `best_loglik` — the curve,
@@ -2414,25 +2387,6 @@ mod tests {
         assert_eq!(nlopt_cell_budget(Some(&method.algorithm)), (1e-7, 900, true));
         assert_eq!(nlopt_cell_budget(None),
             (PROFILE_NLOPT_TOLERANCE, PROFILE_NLOPT_MAX_EVALS, false));
-    }
-
-    /// An ODE cell steps at the model's declared dt, as `fit run` does; an
-    /// explicit `--dt` that differs used to be ignored without a word.
-    /// The nl-* identity hashes the step the cell integrates at — the
-    /// model's declared dt when there is one — not the profile's default.
-    #[test]
-    fn an_ode_cell_steps_and_is_keyed_at_the_models_dt() {
-        assert_eq!(ode_cell_dt(1.0, Some(0.1)), 0.1);
-        assert_eq!(ode_cell_dt(0.5, None), 0.5);
-    }
-
-    #[test]
-    fn an_overridden_dt_is_refused_on_an_ode_cell() {
-        let err = refuse_overridden_dt(Some(0.5), Some(1.0), "nl-sbplx").unwrap_err();
-        assert!(err.contains("--dt 0.5") && err.contains("dt = 1"), "{err}");
-        refuse_overridden_dt(Some(1.0), Some(1.0), "nl-sbplx").unwrap();
-        refuse_overridden_dt(Some(0.5), None, "nl-sbplx").unwrap();
-        refuse_overridden_dt(None, Some(1.0), "nl-sbplx").unwrap();
     }
 
     // ── starts_values_from_init_method: the starts rule's point ───────

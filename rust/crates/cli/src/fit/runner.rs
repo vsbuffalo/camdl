@@ -382,7 +382,10 @@ impl FitRunConfig {
         // Resolve any single-file shorthand (`[data] file = "..."`) into
         // the canonical per-stream map by mapping every model-declared
         // stream name to that file. From here on the loop is the same.
-        let dt = fit.config.dt;
+        // The one dt rule (`crate::dt_rule`): the model's declared step, else
+        // the config's. `fit run` has already refused a written `[config] dt`
+        // that disagrees; a reader of a stored fit gets the step it ran at.
+        let dt = crate::dt_rule::resolved_dt(model.simulation.dt, fit.config.dt);
         let data_spec = fit.data_spec()?;
         // `--data`/`[data.observations]` keys by the `from <label>` SOURCE
         // (defaults to the stream name; §2.4). Resolve against the distinct
@@ -627,19 +630,6 @@ impl FitRunConfig {
             max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         }
     }
-}
-
-/// ODE step size for `compute_ode_loglik`: prefer `model.simulation.dt`,
-/// fall back to the IF2-config's dt (the CLI default of 1.0 unless
-/// otherwise set). Either way RK4 substeps are aligned to user-declared
-/// output times by the obs-time matching loop above.
-pub fn ode_step_dt(config: &FitRunConfig) -> f64 {
-    config
-        .compiled
-        .model
-        .simulation
-        .dt
-        .unwrap_or(config.if2_config.dt)
 }
 
 // load_model is now in util.rs
@@ -4531,6 +4521,34 @@ dt = 1.0
             &fit_toml_path.to_string_lossy())
             .expect("v2 fit.toml parse")
             .problem
+    }
+
+    /// The one dt rule (`crate::dt_rule`): a model that declares
+    /// `simulate { dt = … }` is integrated at that step by every method built
+    /// on `FitRunConfig` — IF2, PGAS, PMMH and pfilter all read
+    /// `if2_config.dt` / `smc_config().dt` — whatever the config's (defaulted
+    /// or agreeing) `[config] dt` says. A model with no declared step keeps
+    /// the config's.
+    #[test]
+    fn a_models_declared_dt_is_the_step_every_method_runs_at() {
+        let dir = ic_free_test_dir("model_dt");
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let golden = format!("{manifest}/../../../ocaml/golden/seir_observations.ir.json");
+        let mut ir: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&golden).unwrap()).unwrap();
+        ir["model"]["simulation"]["dt"] = serde_json::json!(7.0);
+        let ir_path = dir.join("seir_dt7.ir.json");
+        std::fs::write(&ir_path, ir.to_string()).unwrap();
+        let fit = ic_free_fixture(&dir, false, false);
+        let mut with_dt = fit.clone();
+        with_dt.model.camdl = ir_path.to_string_lossy().into_owned();
+        let config = FitRunConfig::build(&with_dt, None, 1, 100, 1, 0.5, 50, 1, false)
+            .expect("builds");
+        assert_eq!(config.if2_config.dt, 7.0, "the model's declared step");
+        assert_eq!(config.smc_config().dt, 7.0);
+        let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false).unwrap();
+        assert_eq!(config.if2_config.dt, 1.0, "no declared step: the config's");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn ic_free_test_dir(tag: &str) -> std::path::PathBuf {

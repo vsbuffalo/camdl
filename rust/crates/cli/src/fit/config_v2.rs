@@ -2585,6 +2585,15 @@ pub fn method_declares_key(contents: &str, key: &str) -> bool {
     table_declares_key(contents, "method", key)
 }
 
+/// The `[config] dt` this fit.toml source writes, or `None` when it leaves
+/// the step to its default. For the one dt rule (`crate::dt_rule`), which
+/// must tell a written step from a defaulted one.
+pub fn written_config_dt(contents: &str) -> Option<f64> {
+    let raw: toml::Value = toml::from_str(contents).ok()?;
+    let dt = raw.get("config")?.get("dt")?;
+    dt.as_float().or_else(|| dt.as_integer().map(|i| i as f64))
+}
+
 /// Whether table `[table]` of this fit.toml source spells `key`, as opposed
 /// to the parsed config carrying it at its serde default.
 pub fn table_declares_key(contents: &str, table: &str, key: &str) -> bool {
@@ -2594,25 +2603,6 @@ pub fn table_declares_key(contents: &str, table: &str, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// An ODE-backend method integrates at the model's declared `dt` when it has
-/// one (`runner::ode_step_dt`), so a `[config] dt` the file writes that
-/// differs is not the integration step it reads as: refused.
-/// `config_dt_written` is whether the file spells it (the parsed value is
-/// defaulted otherwise).
-pub fn refuse_ode_config_dt(
-    config_dt_written: bool,
-    config_dt: f64,
-    model_dt: Option<f64>,
-) -> Result<(), String> {
-    match model_dt {
-        Some(model) if config_dt_written && config_dt != model => Err(format!(
-            "`[config] dt = {config_dt}` is not the integration step: an ODE-backend method \
-             integrates at the model's declared dt = {model}. Delete the line, or change the \
-             model's `dt`."
-        )),
-        _ => Ok(()),
-    }
-}
 
 /// The NUTS θ-move was asked for and the model has no rate gradients to run
 /// it on (no estimated parameter reaches a transition rate), so PGAS would run

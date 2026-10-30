@@ -526,21 +526,21 @@ is `free_forward` (run the fitted model forward from the start, `p(y_t | θ)`) o
 draw and pooling over particles × draws); both stack under one header. The two
 horizons walk **different step grids, on purpose**: `free_forward` is a replay
 of the model and takes the model's own `simulate { dt }`, while `one_step` is an
-inference operation — it re-filters the observed series — and takes the fit's
-`[config] dt`, the grid the likelihood walked. The two differ only when a model
-declares `simulate { dt }` and its fit declares a different `[config] dt`; when
-they do, the run says which grid the one-step band used. The `treatment` column
-is `posterior` when the band averages over the whole draw cloud — the only
-treatment the band-builder accepts today, enforced by typing rather than a
-runtime check, so a posterior-labelled band over a single point estimate is
-unrepresentable — with `plug_in` reserved. `fit_rhat_max`/ `fit_ess_min` are the
-producing leaf's **rank-normalized split R̂** and **bulk-ESS** of Vehtari et al.
-(2021) — the maximum R̂ and the minimum ESS over the leaf's estimated parameters
-— empty when the leaf reported none, and `fit_ess_min` withheld entirely
-whenever any assessed parameter has no pooled ESS rather than minimized over the
-ones that do. Their names say whose numbers they are: the fit's worst parameter,
-repeated identically on every row — provenance, not a statement about the value
-beside them.
+inference operation — it re-filters the observed series — and takes the step the
+fit ran at: the model's declared `dt` when it has one (the one dt rule), else
+the fit's `[config] dt`. The two differ only for a model that declares no `dt`
+and a fit whose `[config] dt` is not 1.0; when they do, the run says which grid
+the one-step band used. The `treatment` column is `posterior` when the band
+averages over the whole draw cloud — the only treatment the band-builder accepts
+today, enforced by typing rather than a runtime check, so a posterior-labelled
+band over a single point estimate is unrepresentable — with `plug_in` reserved.
+`fit_rhat_max`/ `fit_ess_min` are the producing leaf's **rank-normalized split
+R̂** and **bulk-ESS** of Vehtari et al. (2021) — the maximum R̂ and the minimum
+ESS over the leaf's estimated parameters — empty when the leaf reported none,
+and `fit_ess_min` withheld entirely whenever any assessed parameter has no
+pooled ESS rather than minimized over the ones that do. Their names say whose
+numbers they are: the fit's worst parameter, repeated identically on every row —
+provenance, not a statement about the value beside them.
 
 Beside them sit two per-row convergence channels, both reducing the same draws
 the quantiles pool over but grouped by the chain each draw came from.
@@ -2396,11 +2396,11 @@ with the serde list quoted in §6.9.
 
 `[config]` (`FitBackendConfig`, `config_v2.rs:294`):
 
-| key                      | type                  | default         | meaning                                                                                                      |
-| ------------------------ | --------------------- | --------------- | ------------------------------------------------------------------------------------------------------------ |
-| `dt`                     | float                 | `1.0`           | Integrator step. This is the only honored `dt`; a top-level `dt` is a load error.                            |
-| `obs_alignment`          | `"exact"` \| `"snap"` | algorithm's own | How observation times relate to the `dt` grid. Resolved per algorithm (§6.5); an unsupported request errors. |
-| `allow_degenerate_rates` | bool                  | `false`         | Treat a numerical collapse in a rate expression (div-by-zero, `Pow`→NaN, `Sqrt` of a negative) as `0.0`.     |
+| key                      | type                  | default                      | meaning                                                                                                                                                                 |
+| ------------------------ | --------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dt`                     | float                 | the model's `dt`, else `1.0` | Integrator step. A model's declared `simulate { dt }` is the step; a `[config] dt` that differs is refused, an agreeing one accepted. A top-level `dt` is a load error. |
+| `obs_alignment`          | `"exact"` \| `"snap"` | algorithm's own              | How observation times relate to the `dt` grid. Resolved per algorithm (§6.5); an unsupported request errors.                                                            |
+| `allow_degenerate_rates` | bool                  | `false`                      | Treat a numerical collapse in a rate expression (div-by-zero, `Pow`→NaN, `Sqrt` of a negative) as `0.0`.                                                                |
 
 `[config] backend` was relocated to `[synthetic] backend` (gh#241) and is
 rejected with a migration message.
@@ -6285,7 +6285,10 @@ camdl fit predict [FIT]
 --particles N               required
 --params FILE / --param NAME=VALUE / --table NAME=FILE
 --scenario NAME | --enable NAME | --disable NAME
---dt DT                     (default 1)   --seed N (default 1)
+--dt DT                     step for a model that declares none (default 1);
+                            the model's declared dt is the step, and a
+                            different --dt or --fit [config] dt is refused
+--seed N (default 1)
 --parallel N                Rayon threads, 0 = all cores (env CAMDL_PARALLEL)
 --allow-degenerate-rates
 --data [NAME=]PATH          observation TSV; repeatable. `--data PATH` binds the
@@ -6357,8 +6360,9 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
                             there also sets each nl-* cell's tolerance and
                             max_evals (else 1e-4 and 1500)
 --seeds SPEC                run the whole grid at each seed (multi-seed sensitivity)
---dt X                      step (default 1.0); an nl-* cell steps at the model's
-                            declared dt when it has one, and refuses a different --dt
+--dt X                      step for a model that declares none (default 1.0);
+                            every cell steps at the model's declared dt, and a
+                            different --dt or --fit [config] dt is refused
 --data / --obs / --time-format / --seed / --parallel / --scenario /
 --enable / --disable / --table / --allow-degenerate-rates /
 --pf-max-substeps (if2 only)
