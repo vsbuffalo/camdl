@@ -3218,6 +3218,17 @@ impl PredictOptions {
             sweep: args.sweep.iter().map(|s| (s.name.clone(), s.grid.expand())).collect(),
             by_chain: args.by_chain,
         }
+        .normalised()
+    }
+
+    /// The options in their canonical form: the scenario, enable and disable
+    /// lists as sets (sorted), so the order they were spelled in does not key
+    /// a different address.
+    pub(crate) fn normalised(mut self) -> Self {
+        self.scenarios.sort();
+        self.enable.sort();
+        self.disable.sort();
+        self
     }
 
     /// The address key: `None` for the defaults (the output keeps the bare
@@ -3912,6 +3923,27 @@ fn plugin_refusal(method: Option<FitAlgorithm>, leaf: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    const FREE_FORWARD_KEY: &str = "9ef30aee";
+    const SCENARIOS_AB_KEY: &str = "3e5a4f48";
+
+    /// gh#896: a predict's address key is pinned. It names stored outputs, so a
+    /// change to it — a reordered or renamed field of `PredictOptions`, a new
+    /// default — orphans every keyed predict and must be a deliberate edit of
+    /// these values, not a side effect.
+    #[test]
+    fn the_predict_address_key_is_pinned() {
+        assert_eq!(PredictOptions::defaults().address_key(), None, "defaults keep the bare address");
+        assert_eq!(PredictOptions::free_forward().address_key().as_deref(), Some(FREE_FORWARD_KEY));
+        let scen = |names: &[&str]| PredictOptions {
+            scenarios: names.iter().map(|n| n.to_string()).collect(),
+            ..PredictOptions::defaults()
+        }
+        .normalised();
+        assert_eq!(scen(&["b", "a"]).address_key(), scen(&["a", "b"]).address_key(),
+            "the scenario set, not its spelling order, keys the address");
+        assert_eq!(scen(&["b", "a"]).address_key().as_deref(), Some(SCENARIOS_AB_KEY));
+    }
+
     use super::*;
     use crate::fit::row_convergence::ChainOfDraw;
 
