@@ -228,29 +228,48 @@ pub fn resolve_target(s: &str) -> Result<FitTarget, ResolveError> {
             None => Err(ResolveError::NotFound(format!("no such fit directory: {}", dir.display()))),
         },
         FitRef::HashPrefix(prefix) => {
-            let root = crate::run_paths::output_root(None, None);
-            let mut leaves = crate::cas_read::resolve_fit_prefix(&root, &prefix);
-            match leaves.len() {
-                0 => {
-                    let seg = resolve_by(&prefix, |seg| {
-                        crate::fit::fit_view::FitView::read(seg)
-                            .map(|v| v.fit_hash.starts_with(&prefix))
-                            .unwrap_or(false)
-                    })?;
-                    Ok(FitTarget::Segment(seg))
-                }
-                1 => Ok(FitTarget::Leaf(LeafRef::of(leaves.remove(0)))),
-                _ => {
-                    leaves.sort_by(|a, b| a.dir.cmp(&b.dir));
-                    Err(ResolveError::AmbiguousRuns { handle: s.to_string(), runs: leaves })
-                }
-            }
+            resolve_hash_prefix(&crate::run_paths::output_root(None, None), &prefix)
         }
         FitRef::Label(name) => {
             let root = crate::run_paths::output_root(None, None);
             Ok(FitTarget::Leaf(resolve_label(&root, &name)?))
         }
         FitRef::Config(path) => Ok(FitTarget::Leaf(resolve_config(&path)?.0)),
+    }
+}
+
+/// A hex prefix under `root`: a run's `run_id`, or a problem folder's fit id.
+/// Both namespaces are searched; a prefix matching in both is refused with
+/// every match listed rather than resolved to the run (gh#896), and several
+/// matches in one namespace are refused as before.
+fn resolve_hash_prefix(root: &Path, prefix: &str) -> Result<FitTarget, ResolveError> {
+    let mut leaves = crate::cas_read::resolve_fit_prefix(root, prefix);
+    leaves.sort_by(|a, b| a.dir.cmp(&b.dir));
+    let fits_dir = root.join("fits");
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(&fits_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|seg| {
+            seg.is_dir()
+                && crate::fit::fit_view::FitView::read(seg)
+                    .is_some_and(|v| v.fit_hash.starts_with(prefix))
+        })
+        .collect();
+    folders.sort();
+    match (leaves.len(), folders.len()) {
+        (0, 0) => Err(ResolveError::NotFound(format!(
+            "no fit found for {prefix} under {}",
+            fits_dir.display()
+        ))),
+        (1, 0) => Ok(FitTarget::Leaf(LeafRef::of(leaves.remove(0)))),
+        (_, 0) => Err(ResolveError::AmbiguousRuns { handle: prefix.to_string(), runs: leaves }),
+        (0, 1) => Ok(FitTarget::Segment(folders.remove(0))),
+        _ => Err(ResolveError::Ambiguous {
+            handle: prefix.to_string(),
+            candidates: leaves.into_iter().map(|l| l.dir).chain(folders).collect(),
+        }),
     }
 }
 
@@ -527,36 +546,6 @@ fn resolve_config(path: &Path) -> Result<(LeafRef, FitConfig), ResolveError> {
         }
         1 => Ok((LeafRef::of(matches.remove(0)), config)),
         _ => Err(ResolveError::AmbiguousRuns { handle: path.display().to_string(), runs: matches }),
-    }
-}
-
-/// Scan `fits/` segments under the default output root and return the unique
-/// one matching `pred`. Used by the fit-id prefix branch, which has
-/// no config to name a custom root — they resolve against the conventional
-/// `results/` root (or `CAMDL_OUTPUT_DIR`); a fit under a custom `output_dir`
-/// is reached by its run dir or `fit.toml`.
-fn resolve_by(
-    handle: &str,
-    pred: impl Fn(&Path) -> bool,
-) -> Result<PathBuf, ResolveError> {
-    let fits_dir = crate::run_paths::output_root(None, None).join("fits");
-    let mut matches: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&fits_dir) {
-        for entry in entries.flatten() {
-            let seg = entry.path();
-            if seg.is_dir() && pred(&seg) {
-                matches.push(seg);
-            }
-        }
-    }
-    matches.sort();
-    match matches.len() {
-        0 => Err(ResolveError::NotFound(format!(
-            "no fit found for {handle} under {}",
-            fits_dir.display()
-        ))),
-        1 => Ok(matches.remove(0)),
-        _ => Err(ResolveError::Ambiguous { handle: handle.to_string(), candidates: matches }),
     }
 }
 
@@ -917,6 +906,37 @@ cooling    = 0.70
         assert!(both.contains("which differ in `[method]` settings or `--starts` and fit seed:"),
             "{both}");
         assert!(both.contains("fits/a") && both.contains("fits/b"), "lists both: {both}");
+    }
+
+    /// gh#896: a hex prefix matching both a run's id and a problem folder's
+    /// fit id is refused with both listed, not resolved to the run.
+    #[test]
+    fn a_prefix_matching_a_run_and_a_fit_id_is_refused() {
+        let root = crate::test_support::unique_temp_dir("handle_prefix_both");
+        let seg = root.join("fits").join("demo-abcd0000");
+        let leaf = seg.join("if2-11111111").join("seed_1-22222222");
+        std::fs::create_dir_all(&leaf).unwrap();
+        crate::run_meta::write_fit_sidecar(
+            &seg, Path::new("nonexistent.toml"), &crate::run_meta::FitSidecar::default()).unwrap();
+        let rec = serde_json::json!({
+            "format_version": 1, "kind": "fit_stage", "run_id": format!("abcd9{}", "0".repeat(59)),
+            "hash_version": 1, "ir_version": "0.7", "engine_version": "0.1.0+test",
+            "levels": [
+                {"name": "fit", "label": "demo", "hash": format!("abcd0{}", "0".repeat(59)), "schema_version": 1},
+                {"name": "method", "label": "if2", "hash": "1".repeat(64), "schema_version": 1},
+                {"name": "seed", "label": "seed_1", "hash": "2".repeat(64), "schema_version": 1}],
+            "status": "completed", "artifacts": {}, "inputs": {"method": "if2"},
+        });
+        std::fs::write(leaf.join("run.json"), rec.to_string()).unwrap();
+
+        let err = resolve_hash_prefix(&root, "abcd").expect_err("both namespaces match").to_string();
+        assert!(err.contains("abcd resolves to 2 fits"), "{err}");
+        assert!(err.contains(&leaf.display().to_string()) && err.contains(&seg.display().to_string()),
+            "lists the run and the folder: {err}");
+        // A longer prefix in one namespace resolves.
+        assert!(matches!(resolve_hash_prefix(&root, "abcd9").unwrap(), FitTarget::Leaf(_)));
+        assert!(matches!(resolve_hash_prefix(&root, "abcd0").unwrap(), FitTarget::Segment(_)));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
