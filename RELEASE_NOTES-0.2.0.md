@@ -119,9 +119,14 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   ignored there), `--seed` beside `fit_seeds`, and `--allow-nonconverged-source`
   with a starts rule that is not `from_mle` / `from_posterior`. Migration: drop
   the flag.
-- **A `[method]` key its own settings leave inert is refused at load:**
-  `max_tree_depth` or `dense_mass` with `use_nuts = false`, `adapt_start` with
-  `adapt = false`. Migration: delete the line.
+- **A `[method]` key its own settings leave inert is refused by `fit run`:**
+  `max_tree_depth` or `dense_mass` with `use_nuts = false` (or on PGAS's
+  Metropolis-within-Gibbs fallback for a model with no rate gradients, with
+  `--max-tree-depth` / `--diagonal-mass` too), `adapt_start` with
+  `adapt = false`, any other `[method.dt_check]` key beside `enabled = false`,
+  and a `[method.gate]` table (or `--decibans-thresh`) on a one-chain `if2` /
+  `nl-*` method. A stored fit with such a key is still listed and resolvable.
+  Migration: delete the line.
 - **PGAS says when it cannot run NUTS.** On a model with no rate gradients (no
   parameter reaches a transition rate) PGAS uses Metropolis-within-Gibbs; an
   explicit `use_nuts = true` is now refused, and the default prints a notice.
