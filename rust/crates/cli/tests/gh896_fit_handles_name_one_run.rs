@@ -453,7 +453,11 @@ fn predict_writes_under_the_run_it_read() {
         "nothing is written into the shared folder");
     for (leaf, draws) in [(&short, 6), (&long, 12)] {
         let (id, _, _) = record(leaf);
-        let out = segment.join("predict").join(&id[..12]);
+        // `--horizon free_forward` keys the address: `<id12>-<options key>`.
+        let out = std::fs::read_dir(segment.join("predict")).unwrap().flatten()
+            .map(|e| e.path())
+            .find(|d| d.file_name().unwrap().to_string_lossy().starts_with(&id[..12]))
+            .unwrap_or_else(|| panic!("no predict directory for run {id}"));
         let manifest: serde_json::Value = serde_json::from_slice(
             &std::fs::read(out.join("predictive.json")).unwrap()).unwrap();
         assert_eq!(manifest["run_id"], id.as_str(), "predictive.json names its run");
@@ -711,4 +715,29 @@ fn camdl_list_json_labels_each_run() {
             .find(|m| m["run_id"] == id.as_str()).unwrap_or_else(|| panic!("{v}"));
         assert_eq!(entry["label"].as_str(), label.as_deref(), "{entry}");
     }
+}
+
+/// A predict output's address is keyed by the options that shape it, as well
+/// as by its run. `--n-draws 3` used to overwrite the default predict of the
+/// same run in place; each now has its own directory, whose manifest records
+/// the options.
+#[test]
+fn predict_options_key_their_own_output() {
+    let p = Project::new();
+    p.config("post.toml", &pgas(7));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1"]);
+    let leaf = p.leaves().remove(0);
+    let l = leaf.to_string_lossy().into_owned();
+    p.ok(&["fit", "predict", &l, "--horizon", "free_forward"]);
+    p.ok(&["fit", "predict", &l, "--horizon", "free_forward", "--n-draws", "3"]);
+    let dirs: Vec<PathBuf> = std::fs::read_dir(segment_of(&leaf).join("predict")).unwrap()
+        .flatten().map(|e| e.path()).collect();
+    assert_eq!(dirs.len(), 2, "two option sets, two addresses: {dirs:?}");
+    let mut n_draws: Vec<u64> = dirs.iter().map(|d| {
+        let m: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(d.join("predictive.json")).unwrap()).unwrap();
+        m["options"]["n_draws"].as_u64().unwrap_or_else(|| panic!("options recorded: {m}"))
+    }).collect();
+    n_draws.sort();
+    assert_eq!(n_draws[0], 3, "{n_draws:?}");
 }

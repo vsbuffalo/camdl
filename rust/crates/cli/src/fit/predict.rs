@@ -1371,7 +1371,9 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     // every file is attributable to one run.
     let run_id: String = crate::fit::fit_view::leaf_run_id(&run_dir)
         .ok_or_else(|| format!("{} is not a fit run (no run.json)", run_dir.display()))?;
-    let out_dir = crate::fit::fit_view::predictions_dir(&segment, &run_id);
+    let options = PredictOptions::of(args);
+    let out_dir = crate::fit::fit_view::predictions_dir(
+        &segment, &run_id, options.address_key().as_deref());
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
     // The problem half is all a replay reads: model, data, fixed, estimate.
@@ -2618,8 +2620,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             //     and the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred`
             //     channels join them.
             "schema": "camdl.predictive/v3",
-            // gh#896: the run whose draws these bands replay.
+            // gh#896: the run whose draws these bands replay, and the options
+            // that shaped them (they also key this directory's address).
             "run_id": run_id,
+            "options": options,
             "calendar": calendar.to_json(),
             "streams": predictive_manifest_entries,
         });
@@ -2660,6 +2664,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
         let manifest = serde_json::json!({
             "schema": "camdl.observed/v1",
             "run_id": run_id,
+            "options": options,
             "calendar": calendar.to_json(),
             "streams": observed_manifest_entries,
         });
@@ -3154,6 +3159,78 @@ fn band_row(
 /// never replayed silently — a full free-forward replay of a long-burn-in ODE
 /// fit is thousands of ~seconds-each solves (gh#387).
 pub(crate) const DEFAULT_PREDICT_DRAWS: usize = 200;
+
+/// The `fit predict` options that shape its output, beyond the run it reads
+/// (gh#896), resolved to the values the predict used. They key the output
+/// address ([`Self::address_key`]) and are recorded in its manifests, so two
+/// predicts of one run with different options are two artifacts and a reader
+/// can tell which it holds. `--exclude-chains` and `--quantities` key their
+/// own sub-addresses inside the directory and are not repeated here.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct PredictOptions {
+    pub horizon: &'static str,
+    pub n_draws: usize,
+    pub seed: u64,
+    pub stream: Option<String>,
+    pub scenarios: Vec<String>,
+    pub enable: Vec<String>,
+    pub disable: Vec<String>,
+    pub sweep: Vec<(String, Vec<f64>)>,
+    pub by_chain: bool,
+}
+
+impl PredictOptions {
+    /// What `fit predict <run>` with no options uses.
+    pub(crate) fn defaults() -> Self {
+        PredictOptions {
+            horizon: "all",
+            n_draws: DEFAULT_PREDICT_DRAWS,
+            seed: 1,
+            stream: None,
+            scenarios: Vec::new(),
+            enable: Vec::new(),
+            disable: Vec::new(),
+            sweep: Vec::new(),
+            by_chain: false,
+        }
+    }
+
+    /// The free-forward horizon alone, every other option at its default —
+    /// what `fit table --quantity` derives with.
+    pub(crate) fn free_forward() -> Self {
+        PredictOptions { horizon: "free_forward", ..Self::defaults() }
+    }
+
+    pub(crate) fn of(args: &crate::args::FitPredictArgs) -> Self {
+        use crate::args::types::HorizonArg;
+        PredictOptions {
+            horizon: match args.horizon {
+                None => "all",
+                Some(HorizonArg::FreeForward) => "free_forward",
+                Some(HorizonArg::OneStep) => "one_step",
+            },
+            n_draws: args.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS),
+            seed: args.seed.unwrap_or(1),
+            stream: args.stream.clone(),
+            scenarios: args.scenarios.clone(),
+            enable: args.enable.clone(),
+            disable: args.disable.clone(),
+            sweep: args.sweep.iter().map(|s| (s.name.clone(), s.grid.expand())).collect(),
+            by_chain: args.by_chain,
+        }
+    }
+
+    /// The address key: `None` for the defaults (the output keeps the bare
+    /// `predict/<run_id12>/`), else the first 8 hex of the SHA-256 of the
+    /// options' JSON.
+    pub(crate) fn address_key(&self) -> Option<String> {
+        if *self == Self::defaults() {
+            return None;
+        }
+        let json = serde_json::to_string(self).unwrap_or_default();
+        Some(crate::hashing::sha256_hex(json.as_bytes())[..8].to_string())
+    }
+}
 
 /// Evenly-spaced, deterministic subsample of a posterior cloud down to `cap`
 /// draws (the whole cloud when `cap >= len`, always at least one). Both horizons

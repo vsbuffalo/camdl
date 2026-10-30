@@ -29,6 +29,30 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where the latest `fit predict` of a run in `seg` wrote:
+/// `<seg>/predict/<run id>[-<options key>]/` (gh#896), the directory whose
+/// `report*.json` (one written by every predict) is newest. A path that does not
+/// exist while nothing has been predicted.
+fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
+    std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path())
+        .filter_map(|d| {
+            // Newest `report*.json` (keyed by chain selection) in the directory.
+            let t = std::fs::read_dir(&d).ok()?.flatten()
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.starts_with("report") && n.ends_with(".json")
+                })
+                .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
+                .max()?;
+            Some((t, d))
+        })
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, d)| d)
+        .unwrap_or_else(|| seg.join("predict").join("none"))
+}
+
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -68,12 +92,11 @@ fn tempdir(tag: &str) -> PathBuf {
 /// `results/fits/<stem>-<hash>/predict/<run id>/<sub>/<name>.tsv`.
 fn find_artifact(root: &Path, sub: &str, name: &str) -> Option<PathBuf> {
     for e in std::fs::read_dir(root.join("fits")).ok()?.flatten() {
-        // gh#896: `fit predict` writes under `<segment>/predict/<run id>/`.
-        for run in std::fs::read_dir(e.path().join("predict")).into_iter().flatten().flatten() {
-            let p = run.path().join(sub).join(format!("{name}.tsv"));
-            if p.is_file() {
-                return Some(p);
-            }
+        // gh#896: the latest `fit predict` of the run writes under
+        // `<segment>/predict/<run id>[-<options key>]/`.
+        let p = predict_out(&e.path()).join(sub).join(format!("{name}.tsv"));
+        if p.is_file() {
+            return Some(p);
         }
     }
     None

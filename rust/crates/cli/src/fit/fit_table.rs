@@ -467,7 +467,10 @@ fn resolve_quantity_median(
     // silently replaced every listed fit's pooled quantities with a chain-subset
     // one, and a second `--exclude-chains` replaced that.
     let sub = crate::chain_selection::artifact_name("quantities", selection);
-    let tsv = crate::fit::fit_view::predictions_dir(fit_dir, run_id)
+    // The address the derivation below writes: the run's, keyed by the
+    // free-forward options it passes (gh#896).
+    let key = crate::fit::predict::PredictOptions::free_forward().address_key();
+    let tsv = crate::fit::fit_view::predictions_dir(fit_dir, run_id, key.as_deref())
         .join(&sub)
         .join(format!("{name}.tsv"));
 

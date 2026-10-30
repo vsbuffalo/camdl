@@ -42,13 +42,27 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where `fit predict` wrote for the one run in `seg`: `<seg>/predict/<run id>/`
-/// (gh#896). A path that does not exist while nothing has been predicted.
+/// Where the latest `fit predict` of a run in `seg` wrote:
+/// `<seg>/predict/<run id>[-<options key>]/` (gh#896), the directory whose
+/// `report*.json` (one written by every predict) is newest. A path that does not
+/// exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    let runs: Vec<std::path::PathBuf> = std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path()).collect();
-    assert!(runs.len() <= 1, "expected one predicted run under {}: {runs:?}", seg.display());
-    runs.into_iter().next().unwrap_or_else(|| seg.join("predict").join("none"))
+    std::fs::read_dir(seg.join("predict"))
+        .into_iter().flatten().flatten().map(|e| e.path())
+        .filter_map(|d| {
+            // Newest `report*.json` (keyed by chain selection) in the directory.
+            let t = std::fs::read_dir(&d).ok()?.flatten()
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.starts_with("report") && n.ends_with(".json")
+                })
+                .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
+                .max()?;
+            Some((t, d))
+        })
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, d)| d)
+        .unwrap_or_else(|| seg.join("predict").join("none"))
 }
 
 
@@ -78,12 +92,11 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
 
 fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
     for e in std::fs::read_dir(root.join("fits")).ok()?.flatten() {
-        // gh#896: `fit predict` writes under `<segment>/predict/<run id>/`.
-        for run in std::fs::read_dir(e.path().join("predict")).into_iter().flatten().flatten() {
-            let p = run.path().join(sub).join(format!("{stream}.tsv"));
-            if p.is_file() {
-                return Some(p);
-            }
+        // gh#896: the latest `fit predict` of the run writes under
+        // `<segment>/predict/<run id>[-<options key>]/`.
+        let p = predict_out(&e.path()).join(sub).join(format!("{stream}.tsv"));
+        if p.is_file() {
+            return Some(p);
         }
     }
     None
@@ -421,6 +434,8 @@ fn by_chain_adds_a_chain_column_and_leaves_the_pooled_rows_byte_identical() {
     );
 
     predict_with(&bin, &tmp, &["--by-chain"]);
+    // `--by-chain` keys its own address (gh#896): re-find the latest file.
+    let pred = find_artifact(&tmp.join("results"), "predictive", "weekly_cases").unwrap();
     let with_chain = std::fs::read_to_string(&pred).unwrap();
     let header: Vec<&str> = with_chain.lines().next().unwrap().split('\t').collect();
     assert_eq!(header[0], "chain", "the chain column leads: {header:?}");
@@ -688,6 +703,8 @@ fn by_chain_decomposes_the_one_step_horizon_too() {
     let pooled_only = std::fs::read_to_string(&pred).unwrap();
 
     predict_with(&bin, &tmp, &["--by-chain"]);
+    // `--by-chain` keys its own address (gh#896): re-find the latest file.
+    let pred = find_artifact(&tmp.join("results"), "predictive", "weekly_cases").unwrap();
     let with_chain = std::fs::read_to_string(&pred).unwrap();
     let header: Vec<&str> = with_chain.lines().next().unwrap().split('\t').collect();
     let ix = |name: &str| col(&header, name);

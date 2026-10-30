@@ -351,7 +351,8 @@ results/fits/{stem}-{fit_hash8}/
   synthetic/truth.toml              # [synthetic] fits only
   synthetic/data/ds_NN/<stream>.tsv # [synthetic] fits only, one directory per
                                     #   sim seed, one file per stream
-  predict/{run_id12}/               # `fit predict` output for one run (§2.2.2)
+  predict/{run_id12}[-{opts8}]/     # `fit predict` output for one run (§2.2.2),
+                                    #   keyed by non-default predict options
     predictive/<stream>.tsv
     predictive.json                 #   records the full run_id it replays
     observed/<stream>.tsv
@@ -517,6 +518,17 @@ plot-ready families of files under `predict/<run_id12>/` in that run's segment �
 outside the leaf, whose exact-set manifest admits no regenerated files — plus a
 JSON manifest for each that records the full `run_id`. Two runs of one problem
 keep separate predictives, and each file is attributable to the run it replays.
+
+The directory is also keyed by the predict options that shape its output —
+`--horizon`, `--n-draws`, `--seed`, `--stream`, `--scenario`/`--enable`/
+`--disable`, `--sweep`, `--by-chain` — resolved to the values used: the defaults
+write `predict/<run_id12>/`, any other set `predict/<run_id12>-<opts8>/` (the
+first 8 hex of the SHA-256 of the options' JSON), and `predictive.json` /
+`observed.json` record them under `options`. Two predicts of one run with
+different options are two artifacts, so neither overwrites the other, and
+`fit table --quantity` reads the address its own free-forward derivation writes.
+`--exclude-chains` and `--quantities` key sub-addresses inside the directory
+(`predictive-excl3/`, `quantities-<key8>/`).
 
 ```
 results/fits/<stem>-<hash8>/predict/<run_id12>/predictive/<stream>.tsv
