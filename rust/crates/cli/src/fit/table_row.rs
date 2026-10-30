@@ -301,11 +301,7 @@ impl MethodView {
             converged,
             gate_verdict: verdict.into(),
             best_loglik: Some(r.best_loglik),
-            max_chain_agreement: if r.n_chains > 1 {
-                Some(r.max_rel_range)
-            } else {
-                None
-            },
+            max_chain_agreement: r.chain_agreement(),
             max_rhat: None,
             acceptance_rate: None,
             ess_at_mle: None,

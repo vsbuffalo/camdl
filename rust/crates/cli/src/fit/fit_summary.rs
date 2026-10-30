@@ -672,11 +672,12 @@ fn format_text(
                     crate::fit::loglik::LoglikType::from(&typed).tag(),
                     r.n_converged, r.n_chains
                 );
-                if r.n_chains > 1 {
-                    println!(
-                        "    chain-agreement: max rel range = {:.2}% bound",
-                        r.max_rel_range * 100.0
-                    );
+                match r.chain_agreement() {
+                    Some(range) => println!(
+                        "    chain-agreement: max rel range = {:.2}% bound", range * 100.0),
+                    None if r.n_chains > 1 => println!(
+                        "    chain-agreement: not computed (fewer than two converged chains)"),
+                    None => {}
                 }
                 println!("    θ̂ ({} estimated params):", r.theta_hat.len());
                 let w = name_col_width(r.theta_hat.keys().map(String::as_str), 14);

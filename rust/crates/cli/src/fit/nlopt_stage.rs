@@ -819,6 +819,21 @@ fn check_convergence(
     }
 }
 
+/// The chain-agreement line of the end-of-run verdict. With fewer than two
+/// converged chains the leg is not computed, and says so rather than
+/// printing a 0.00% range and a ✓.
+fn chain_agreement_line(v: &ConvergenceVerdict) -> String {
+    if v.n_converged < 2 {
+        return "  chain-agreement: not computed (fewer than two converged chains)".to_string();
+    }
+    format!(
+        "  chain-agreement: rel range = {:.2}% bound | abs range = {:.3e}   {}",
+        v.max_rel_range * 100.0,
+        v.max_abs_range,
+        if v.chain_agreement_failed { "\x1b[31m✗\x1b[0m" } else { "\x1b[32m✓\x1b[0m" }
+    )
+}
+
 fn print_verdict(
     v: &ConvergenceVerdict,
     wall_secs: f64,
@@ -832,12 +847,7 @@ fn print_verdict(
         "  status: {} converged, {} max-eval, {} failed (of {})",
         v.n_converged, v.n_maxeval, v.n_failed, n_chains
     );
-    eprintln!(
-        "  chain-agreement: rel range = {:.2}% bound | abs range = {:.3e}   {}",
-        v.max_rel_range * 100.0,
-        v.max_abs_range,
-        if v.chain_agreement_failed { bad } else { ok }
-    );
+    eprintln!("{}", chain_agreement_line(v));
     eprintln!(
         "  loglik-eval:     Δ = {:.1} dB / threshold {:.0} dB                {}",
         v.delta_loglik * NATS_TO_DB,
@@ -1214,6 +1224,18 @@ mod tests {
             "the max-eval chain is not part of the agreement: max_rel_range = {}", v.max_rel_range);
         assert!(!v.decibans_failed);
         assert_eq!(v.n_maxeval, 1, "the status count still reports it");
+    }
+
+    /// A leg that was not computed is not printed as passing.
+    #[test]
+    fn an_uncomputed_agreement_leg_says_so() {
+        let chains = vec![
+            (0, outcome(-100.0, vec![0.5], OptStatus::Converged(SuccessState::XtolReached))),
+        ];
+        let v = check_convergence(&chains, &names(1), &[(0.0, 1.0)], &GateConfig::default(), 1e-6);
+        let line = chain_agreement_line(&v);
+        assert!(line.contains("not computed (fewer than two converged chains)")
+            && !line.contains('✓'), "{line}");
     }
 
     #[test]

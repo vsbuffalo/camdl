@@ -1037,6 +1037,15 @@ pub(crate) fn estimated_names(
 // ── NloptStageResult ────────────────────────────────────────────────
 
 impl NloptStageResult {
+    /// The chain-agreement measurement (largest relative range across the
+    /// converged chains), or `None` when the leg was not computed: fewer than
+    /// two converged chains, where the stored 0.0 is a placeholder.
+    pub fn chain_agreement(&self) -> Option<f64> {
+        let compared = self.optimizer_convergence.as_ref()
+            .map_or(self.n_chains, |v| v.n_converged);
+        (compared >= 2).then_some(self.max_rel_range)
+    }
+
     pub fn load(stage_dir: &Path, method: &str) -> Result<Self, MethodResultError> {
         let n_chains = inputs_n_chains(&read_stage_inputs(stage_dir)?);
         let state = FitState::load(&stage_dir.to_string_lossy()).map_err(|e| {
@@ -1854,6 +1863,26 @@ mod tests {
             decibans_failed: false,
         };
         assert_eq!(one.gate_verdict(), "not_assessed");
+    }
+
+    /// With fewer than two converged nl-* chains the chain-agreement leg is
+    /// not computed: the stored range is a placeholder 0.0, which must not
+    /// surface as a measured agreement.
+    #[test]
+    fn an_uncomputed_nlopt_chain_agreement_is_none() {
+        let mut r = NloptStageResult {
+            best_loglik: -10.0, best_chain: ChainIndex(0), theta_hat: BTreeMap::new(),
+            algorithm: "nl-sbplx".into(), n_converged: 1, max_rel_range: 0.0, n_chains: 2,
+            optimizer_convergence: Some(crate::fit::state::OptimizerConvergence {
+                n_converged: 1, n_maxeval: 1, n_failed: 0, max_rel_range: 0.0,
+                max_abs_range: 0.0, chain_agreement_failed: false, delta_loglik: 0.0,
+                decibans_failed: false,
+            }),
+        };
+        assert_eq!(r.chain_agreement(), None, "one converged chain: not computed");
+        if let Some(v) = &mut r.optimizer_convergence { v.n_converged = 2; v.n_maxeval = 0; }
+        r.n_converged = 2;
+        assert_eq!(r.chain_agreement(), Some(0.0));
     }
 
     #[test]
