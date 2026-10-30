@@ -753,10 +753,17 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // explicit `use_nuts = true` the model cannot honour.
         if let Algorithm::PGAS { use_nuts: true, .. } = &method.algorithm {
             if !sim::inference::pgas::nuts_active(true, &compiled) {
-                let declared = std::fs::read_to_string(&fit_path)
-                    .map(|c| config_v2::method_declares_key(&c, "use_nuts"))
-                    .unwrap_or(false);
-                match config_v2::nuts_unavailable(declared) {
+                let contents = std::fs::read_to_string(&fit_path).unwrap_or_default();
+                let declared = config_v2::method_declares_key(&contents, "use_nuts");
+                // The NUTS tuning settings, inert on the fallback as they are
+                // under `use_nuts = false`.
+                let tuning: Vec<&str> = [
+                    (config_v2::method_declares_key(&contents, "max_tree_depth"), "max_tree_depth"),
+                    (config_v2::method_declares_key(&contents, "dense_mass"), "dense_mass"),
+                    (a.max_tree_depth.is_some(), "--max-tree-depth"),
+                    (a.diagonal_mass, "--diagonal-mass"),
+                ].into_iter().filter_map(|(on, name)| on.then_some(name)).collect();
+                match config_v2::nuts_unavailable(declared, &tuning) {
                     Ok(note) => eprintln!("\x1b[33mnote:\x1b[0m {note}"),
                     Err(e) => {
                         eprintln!("error: {fit_path}: {e}");

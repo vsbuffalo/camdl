@@ -111,3 +111,10 @@ fn the_default_falls_back_with_a_notice() {
     assert!(ok, "the default runs, by Metropolis-within-Gibbs:\n{err}");
     assert!(err.contains("Metropolis-within-Gibbs, not NUTS"), "says so:\n{err}");
 }
+
+#[test]
+fn nuts_tuning_on_the_fallback_is_refused() {
+    let Some((ok, err)) = run("tuning", "max_tree_depth = 8") else { return };
+    assert!(!ok, "max_tree_depth on the Metropolis-within-Gibbs fallback must be refused:\n{err}");
+    assert!(err.contains("max_tree_depth") && err.contains("Metropolis-within-Gibbs"), "{err}");
+}
