@@ -1698,3 +1698,105 @@ fn find_leaf_verifies_as_lookup_does() {
     assert_eq!(find_leaf(&root, ArtifactKind::Sim, &asked), None);
     cleanup(&root);
 }
+
+// ── gh#896: in-place record updates ─────────────────────────────────────────
+
+/// Concurrent record updates and augments of one leaf lose nothing: each
+/// update is one read-edit-write under the leaf's `.lock`, the lock `augment`
+/// takes, so neither writes back a stale snapshot over the other.
+#[test]
+fn record_updates_and_augments_of_one_leaf_lose_nothing() {
+    let root = tmp_root("update_race");
+    let store = std::sync::Arc::new(FsCasStore::new(&root));
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"traj")).unwrap();
+    let mut handles = Vec::new();
+    for i in 0..12 {
+        let dest = dest.clone();
+        handles.push(std::thread::spawn(move || {
+            update_record(&dest, |r| {
+                    r.children.entry("ids".into()).or_default().push(id(i));
+                    Ok(true)
+                })
+                .unwrap()
+        }));
+    }
+    // One augment: two concurrent augments race in `augment`'s own advisory
+    // pre-check, which is not what this test is about.
+    for i in 0..1 {
+        let (store, dest) = (store.clone(), dest.clone());
+        handles.push(std::thread::spawn(move || {
+            let name = format!("log_{i}.tsv");
+            // An augment refuses a live holder; retry until it gets the lock.
+            loop {
+                match store.augment(&dest, &LeafIdentity::new(a), &name, b"x") {
+                    Ok(()) => break,
+                    Err(CasError::FitInProgress { .. }) => {
+                        std::thread::sleep(std::time::Duration::from_millis(5))
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    match store.lookup(&dest, &LeafIdentity::new(a)) {
+        Lookup::Hit(r) => {
+            assert_eq!(r.children["ids"].len(), 12, "every update survives");
+            assert_eq!(r.artifacts.len(), 2, "the augment survives: {:?}", r.artifacts.keys());
+        }
+        other => panic!("the leaf stays a Hit, got {other:?}"),
+    }
+    cleanup(&root);
+}
+
+/// A refused edit leaves the record as it was.
+#[test]
+fn a_refused_record_update_writes_nothing() {
+    let root = tmp_root("update_refused");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"traj")).unwrap();
+    let before = fs::read(dest.join("run.json")).unwrap();
+    let err = update_record(&dest, |r| {
+            r.provenance.label = Some("x".into());
+            Err("no".into())
+        })
+        .unwrap_err();
+    assert!(matches!(err, CasError::EditRefused { .. }), "{err}");
+    assert_eq!(fs::read(dest.join("run.json")).unwrap(), before);
+    cleanup(&root);
+}
+
+/// What a crash in the middle of an update leaves — the reserved
+/// `run.json.tmp` and a `.lock` naming a dead pid — keeps the leaf a Hit, and
+/// the next update takes the dead lock over.
+#[test]
+fn a_crashed_record_update_leaves_a_hit() {
+    let _serial = super::RECLAIM_HOOK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tmp_root("update_crash");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"traj")).unwrap();
+    let mut child = std::process::Command::new("true").spawn().expect("spawn");
+    let dead_pid = child.id();
+    child.wait().expect("reap");
+    fs::write(dest.join(".lock"), dead_pid.to_string()).unwrap();
+    fs::write(dest.join("run.json.tmp"), b"{ half written").unwrap();
+    assert!(matches!(store.lookup(&dest, &LeafIdentity::new(a)), Lookup::Hit(_)));
+    update_record(&dest, |r| {
+            r.provenance.label = Some("after".into());
+            Ok(true)
+        })
+        .expect("a dead holder's lock is taken over");
+    match store.lookup(&dest, &LeafIdentity::new(a)) {
+        Lookup::Hit(r) => assert_eq!(r.provenance.label.as_deref(), Some("after")),
+        other => panic!("{other:?}"),
+    }
+    cleanup(&root);
+}

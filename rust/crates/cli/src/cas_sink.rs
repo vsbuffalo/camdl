@@ -851,44 +851,18 @@ fn pid_is_alive(_pid: u32) -> bool {
 }
 
 /// Rewrite a leaf's `run.json` through `edit`, which returns whether it changed
-/// the record. The read, the edit and the write are one step under a lock
-/// beside the leaf (in its parent, outside the leaf's exact-set manifest), and
-/// the record is written to a uniquely named temporary file then renamed over
-/// `run.json`, so two writers can neither interleave nor share a temp file.
+/// the record: the store's one record-update path ([`runid::update_record`]),
+/// under the leaf's `.lock` and through the reserved `run.json.tmp`, so no two
+/// updates — and no update and an `augment` — interleave, and a crash leaves
+/// only files the store's exact-set check ignores (gh#896).
 fn rewrite_record(
     leaf_dir: &std::path::Path,
     edit: impl FnOnce(&mut runid::RunRecord) -> Result<bool, String>,
 ) -> Result<(), String> {
-    let name = leaf_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "leaf".into());
-    let lock_path = leaf_dir
-        .parent()
-        .unwrap_or(leaf_dir)
-        .join(format!(".{name}.record.lock"));
-    let _lock = FileLock::acquire(&lock_path)?;
-    let path = leaf_dir.join("run.json");
-    let txt = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {}", path.display(), e))?;
-    let mut rec: runid::RunRecord = serde_json::from_str(&txt)
-        .map_err(|e| format!("parse {}: {}", path.display(), e))?;
-    if !edit(&mut rec)? {
-        return Ok(()); // already current — no rewrite
-    }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = leaf_dir.join(format!("run.json.tmp.{}.{nanos}", std::process::id()));
-    let json = serde_json::to_string_pretty(&rec)
-        .map_err(|e| format!("serialize run.json: {}", e))?;
-    std::fs::write(&tmp, json)
-        .and_then(|_| std::fs::rename(&tmp, &path))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("write {}: {}", path.display(), e)
-        })
+    runid::update_record(leaf_dir, edit).map_err(|e| match e {
+        runid::CasError::EditRefused { reason, .. } => reason,
+        other => format!("update {}: {other}", leaf_dir.join("run.json").display()),
+    })
 }
 
 /// Ensure a leaf's `run.json` carries `provenance.label == Some(label)`,

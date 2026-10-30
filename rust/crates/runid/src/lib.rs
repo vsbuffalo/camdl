@@ -81,7 +81,8 @@ pub use layout::{path_label, segment, store_path};
 pub use record::{FileChecksum, LevelId, Provenance, RunRecord, RunStatus, FORMAT_VERSION};
 pub use runid_derive::RunInput;
 pub use store::{
-    find_leaf, Artifacts, CasError, CasStore, FsCasStore, LeafIdentity, Lookup, StaleReason,
+    find_leaf, update_record, Artifacts, CasError, CasStore, FsCasStore, LeafIdentity, Lookup,
+    StaleReason,
 };
 
 #[cfg(test)]

@@ -741,3 +741,27 @@ fn predict_options_key_their_own_output() {
     n_draws.sort();
     assert_eq!(n_draws[0], 3, "{n_draws:?}");
 }
+
+/// A crash in the middle of a record update (`camdl label`, a cache hit's
+/// config record) leaves only what the store's own write protocol leaves — the
+/// reserved `run.json.tmp` and a `.lock` naming a dead process — so the next
+/// `fit run` is still a cache hit and the next update takes the lock over. A
+/// temp file the store does not reserve would stale the completed run.
+#[test]
+fn a_crashed_record_update_leaves_a_cache_hit() {
+    let p = Project::new();
+    p.config("scout.toml", &if2(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    let leaf = p.leaves().remove(0);
+    let mut child = Command::new("true").spawn().unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    std::fs::write(leaf.join(".lock"), dead.to_string()).unwrap();
+    std::fs::write(leaf.join("run.json.tmp"), "{ half written").unwrap();
+
+    let out = p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    assert!(out.contains("cache hit"), "the crashed update did not stale the run:\n{out}");
+    let id = record(&leaf).0;
+    p.ok(&["label", &id[..12], "after-crash"]);
+    assert_eq!(record(&leaf).1.as_deref(), Some("after-crash"));
+}
