@@ -2582,10 +2582,35 @@ pub fn refuse_inert_method_keys_in(contents: &str, method: &Method) -> Result<()
 /// explicit request must be told apart (an explicit `use_nuts = true` the
 /// model cannot honour is refused; the default falls back with a notice).
 pub fn method_declares_key(contents: &str, key: &str) -> bool {
+    table_declares_key(contents, "method", key)
+}
+
+/// Whether table `[table]` of this fit.toml source spells `key`, as opposed
+/// to the parsed config carrying it at its serde default.
+pub fn table_declares_key(contents: &str, table: &str, key: &str) -> bool {
     toml::from_str::<toml::Value>(contents)
         .ok()
-        .and_then(|v| v.get("method").and_then(|m| m.as_table()).map(|t| t.contains_key(key)))
+        .and_then(|v| v.get(table).and_then(|m| m.as_table()).map(|t| t.contains_key(key)))
         .unwrap_or(false)
+}
+
+/// An ODE-backend method integrates at the model's declared `dt` when it has
+/// one (`runner::ode_step_dt`), so a `[config] dt` the file writes that
+/// differs would be ignored: refused. `config_dt_written` is whether the
+/// file spells it (the parsed value is defaulted otherwise).
+pub fn refuse_ode_config_dt(
+    config_dt_written: bool,
+    config_dt: f64,
+    model_dt: Option<f64>,
+) -> Result<(), String> {
+    match model_dt {
+        Some(model) if config_dt_written && config_dt != model => Err(format!(
+            "`[config] dt = {config_dt}` would be ignored: an ODE-backend method integrates \
+             at the model's declared dt = {model}. Delete the line, or change the model's \
+             `dt`."
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// The NUTS θ-move was asked for and the model has no rate gradients to run

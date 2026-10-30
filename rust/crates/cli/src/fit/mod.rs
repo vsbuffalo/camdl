@@ -756,6 +756,17 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             eprintln!("error: {}", msg);
             std::process::exit(1);
         }
+        if method.algorithm.backend() == crate::run_meta::InferenceBackend::Ode {
+            let contents = std::fs::read_to_string(&fit_path).unwrap_or_default();
+            if let Err(e) = config_v2::refuse_ode_config_dt(
+                config_v2::table_declares_key(&contents, "config", "dt"),
+                config.problem.config.dt,
+                compiled.model.simulation.dt,
+            ) {
+                eprintln!("error: {fit_path}: {e}");
+                std::process::exit(1);
+            }
+        }
         // PGAS runs NUTS only where the compiler emitted rate gradients
         // (`nuts_active`, the predicate the sampler itself uses); elsewhere it
         // falls back to Metropolis-within-Gibbs. Say so — and refuse an
