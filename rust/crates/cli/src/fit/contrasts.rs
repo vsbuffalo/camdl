@@ -154,6 +154,7 @@ pub fn emit_contrasts(
     backend: ForwardBackend,
     seed: u64,
     obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
+    config_dt: f64,
 ) -> Result<Vec<PathBuf>, String> {
     // The draws authority, carrying the run's chain selection: one resolve, used
     // both for the (θ, X) cloud below and for the stage dir the saved paths are
@@ -381,7 +382,7 @@ pub fn emit_contrasts(
         .parent()
         .ok_or_else(|| format!("draws path has no parent: {}", pref.draws_path.display()))?;
     let col_spec = io::trajectories::TrajColumnSpec::from_model(model, &[]);
-    let dt = model.simulation.dt.unwrap_or(1.0);
+    let dt = arm_step(model.simulation.dt, config_dt);
 
     // Both arms simulate to the model's run-end horizon (the same horizon the
     // predict free-forward path uses). With the fork derived (below), the arm's
@@ -503,6 +504,14 @@ pub fn emit_contrasts(
 /// INDEPENDENT contrasts: `runs` is the union over every contrast in the model,
 /// so a pairwise check would reject two contrasts that are each internally
 /// consistent.
+/// The step a contrast arm replays at: the step the fit ran at, by the one dt
+/// rule (`dt_rule::resolved_dt`) — the model's declared dt, else the fit's
+/// `[config] dt`. An arm on another step would be a different process than the
+/// posterior it forks from.
+fn arm_step(model_dt: Option<f64>, config_dt: f64) -> f64 {
+    crate::dt_rule::resolved_dt(model_dt, config_dt)
+}
+
 fn check_arm_horizons(model: &ir::Model, runs: &[String]) -> Result<(), String> {
     let model_end = model.simulation.t_end;
     for run in runs {
@@ -1441,6 +1450,16 @@ mod tests {
             levels: vec![],
             payload: LeafPayload::Series(xs.to_vec()),
         }
+    }
+
+    /// Contrast arms replay at the step the fit ran at: the model's declared
+    /// dt, else the fit's `[config] dt` (a model with no dt and `dt = 7` fits
+    /// at 7, so its arms step at 7, not 1.0).
+    #[test]
+    fn contrast_arms_step_at_the_fits_dt() {
+        assert_eq!(arm_step(Some(0.5), 1.0), 0.5);
+        assert_eq!(arm_step(None, 7.0), 7.0);
+        assert_eq!(arm_step(None, 1.0), 1.0);
     }
 
     #[test]

@@ -2718,6 +2718,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             posterior.backend,
             seed,
             quantity_obs_anchors,
+            config.config.dt,
         )?;
         written.extend(paths);
     }
