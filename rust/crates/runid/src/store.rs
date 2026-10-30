@@ -155,6 +155,11 @@ pub enum CasError {
          is nondeterministic. Staged bytes preserved in .quarantine/."
     )]
     DivergentRecompute { path: String, file: String, ours: String, theirs: String },
+    /// An [`update_record`] edit refused the change it was asked
+    /// to make (e.g. a fit run that already carries another label); the
+    /// record is left as it was.
+    #[error("{reason}")]
+    EditRefused { path: String, reason: String },
 }
 
 /// A bundle of named output files (e.g. `{traj.tsv, event_log.tsv}`).
@@ -944,6 +949,71 @@ enum ExactSet {
     Corrupt,
     /// An unlisted, non-child entry is present.
     Orphan,
+}
+
+/// Read-modify-write a leaf's `run.json` — its recorded-not-hashed fields
+/// (`provenance`, `inputs`, `children`) — under the leaf's `.lock`, the
+/// lock `augment`, `claim_streaming` and the stale-lock reclaim take. Every
+/// in-place update of a stored record goes through here, so no two
+/// updates, and no update and an `augment`, interleave.
+///
+/// `edit` gets the record as it is under the lock and returns whether it
+/// changed it (`false` writes nothing), or a refusal, returned as
+/// [`CasError::EditRefused`] with the record untouched. A live holder of
+/// `.lock` is waited for (an update is short) up to 30 s; a dead one is
+/// reclaimed through `reclaim_or_refuse`'s `.reclaim` protocol.
+///
+/// Crash-safety: the record is written through the reserved
+/// `run.json.tmp` and renamed, both covered by `is_reserved`, so a crash
+/// mid-update leaves only reserved files (and a dead-pid `.lock` the next
+/// taker reclaims) — never an unmanifested file that would stale a
+/// completed leaf.
+pub fn update_record(
+    path: &Path,
+    edit: impl FnOnce(&mut RunRecord) -> Result<bool, String>,
+) -> Result<(), CasError> {
+    let lock = path.join(".lock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match OpenOptions::new().write(true).create_new(true).open(&lock) {
+            Ok(mut f) => {
+                write!(f, "{}", std::process::id())?;
+                f.sync_all()?;
+                break;
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => match reclaim_or_refuse(path, &lock) {
+                Ok(()) => break,
+                Err(CasError::FitInProgress { .. })
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => return Err(e),
+            },
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let outcome = (|| -> Result<(), CasError> {
+        let mut record = match read_record(path) {
+            ReadResult::Ok(r) => *r,
+            _ => {
+                return Err(CasError::SchemaDrift { path: path.display().to_string() })
+            }
+        };
+        match edit(&mut record) {
+            Ok(false) => Ok(()),
+            Ok(true) => {
+                write_record_atomic(path, &record)?;
+                fsync_dir(path)?;
+                Ok(())
+            }
+            Err(reason) => {
+                Err(CasError::EditRefused { path: path.display().to_string(), reason })
+            }
+        }
+    })();
+    fs::remove_file(&lock).ok();
+    outcome
 }
 
 /// Files the exact-set check and manifest builder ignore: the record itself,
