@@ -141,12 +141,14 @@ pub struct TableRow {
     /// Step-7 stale flag. Today always `false`.
     pub stale: bool,
     pub stale_reason: Option<String>,
-    /// Per-fit generated-quantity medians, keyed by quantity name.
+    /// The row's run's generated-quantity medians, keyed by quantity name.
     /// Populated only when `fit table --quantity <NAME>` is requested:
     /// each entry is the posterior median (q50 of the `fitted` row)
     /// of a scalar quantity from the model's `quantities {}` block,
-    /// read from `<fit_dir>/predict/<run id>/quantities/<NAME>.tsv` (derived on demand
-    /// via `fit predict` when absent). An uncomputable quantity for a
+    /// read from the run's free-forward predict,
+    /// `<fit_dir>/predict/<run id>-<free-forward options key>/quantities/<NAME>.tsv`
+    /// (derived there on demand by `fit predict --horizon free_forward` when
+    /// absent; gh#896). An uncomputable quantity for a
     /// row is simply absent from the map. A field addition is
     /// non-breaking under schema v1 (proposal §3); the
     /// `skip_serializing_if` empty-map guard keeps the no-quantity case
