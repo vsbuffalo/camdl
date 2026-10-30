@@ -1488,13 +1488,12 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     // Two step grids, because this command does two different things with a
     // step (gh#708). `dt` is the model's own — what a forward replay of this
     // model uses, which is what the free-forward horizon is. `one_step_dt` is
-    // the grid the FIT walked, from its `[config] dt`, and the one-step band
-    // re-filters the observed series through the fitted model, so it belongs
-    // on that one. They are the same number on every fit that does not declare
-    // both, which is most of them; the pair is named here so a reader can see
-    // which is which at the two call sites.
-    let dt = model.simulation.dt.unwrap_or(1.0);
-    let one_step_dt = config.config.dt;
+    // the grid the FIT walked — the one dt rule's step (`crate::dt_rule`): the
+    // model's declared dt when it has one, else the fit's `[config] dt` — and
+    // the one-step band re-filters the observed series through the fitted
+    // model, so it belongs on that one. They differ only for a model that
+    // declares no dt and a fit whose `[config] dt` is not 1.0.
+    let (dt, one_step_dt) = predict_step_grids(model.simulation.dt, config.config.dt);
     if (one_step_dt - dt).abs() > 1e-12 {
         eprintln!(
             "fit predict: the one-step band is filtered on the fit's dt = {one_step_dt} \
@@ -3438,6 +3437,16 @@ fn pool_one_step_draws(
 /// rows carry no convergence cells for the same reason the free-forward ones do
 /// not -- a between-chain statistic has nothing to compare one chain against.)
 #[allow(clippy::too_many_arguments)]
+/// `fit predict`'s two step grids, `(free_forward, one_step)`: the model's
+/// own step for a forward replay (1.0 when it declares none), and the step
+/// the fit ran at for the one-step band (`dt_rule::resolved_dt`).
+fn predict_step_grids(model_dt: Option<f64>, config_dt: f64) -> (f64, f64) {
+    (
+        model_dt.unwrap_or(crate::dt_rule::DEFAULT_DT),
+        crate::dt_rule::resolved_dt(model_dt, config_dt),
+    )
+}
+
 fn one_step_bands(
     compiled: std::sync::Arc<sim::CompiledModel>,
     model: &ir::Model,
@@ -3819,6 +3828,15 @@ fn plugin_refusal(method: Option<FitAlgorithm>, leaf: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one-step band walks the step the fit ran at: under the one dt rule
+    /// that is the model's declared dt whenever it has one — the fit's
+    /// `[config] dt` (a default 1.0 here) used to win.
+    #[test]
+    fn the_one_step_band_walks_the_models_dt() {
+        assert_eq!(predict_step_grids(Some(0.5), 1.0), (0.5, 0.5));
+        assert_eq!(predict_step_grids(None, 0.25), (1.0, 0.25));
+    }
     use crate::fit::row_convergence::ChainOfDraw;
 
     #[test]
