@@ -783,73 +783,6 @@ fn read_traj_digest(dir: &std::path::Path) -> Option<runid::ContentHash> {
     rec.artifacts.get("traj.tsv").map(|c| c.digest)
 }
 
-/// An exclusive lock file (`O_EXCL` create), released on drop. It records the
-/// holder's pid; a lock whose holder has died is reclaimed, and a live holder
-/// is waited for up to [`LOCK_WAIT`]. Used to make the read-check-write of a
-/// run record, and the check-and-write of a fit label, one step (gh#896).
-pub(crate) struct FileLock {
-    path: std::path::PathBuf,
-}
-
-/// How long [`FileLock::acquire`] waits for a live holder before refusing.
-const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
-
-impl FileLock {
-    pub(crate) fn acquire(path: &std::path::Path) -> Result<FileLock, String> {
-        Self::acquire_within(path, LOCK_WAIT)
-    }
-
-    fn acquire_within(path: &std::path::Path, wait: std::time::Duration) -> Result<FileLock, String> {
-        let deadline = std::time::Instant::now() + wait;
-        loop {
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
-                Ok(mut f) => {
-                    use std::io::Write;
-                    let _ = write!(f, "{}", std::process::id());
-                    return Ok(FileLock { path: path.to_path_buf() });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let holder: Option<u32> = std::fs::read_to_string(path)
-                        .ok()
-                        .and_then(|t| t.trim().parse().ok());
-                    if holder.is_some_and(|pid| !pid_is_alive(pid)) {
-                        let _ = std::fs::remove_file(path); // a dead holder's lock
-                        continue;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        return Err(format!(
-                            "{} is held by another camdl (pid {}); retry when it has \
-                             finished, or remove the file if no camdl is running",
-                            path.display(),
-                            holder.map(|p| p.to_string()).unwrap_or_else(|| "unknown".into())
-                        ));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(e) => return Err(format!("cannot create lock {}: {e}", path.display())),
-            }
-        }
-    }
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-#[cfg(unix)]
-fn pid_is_alive(pid: u32) -> bool {
-    // SAFETY: signal 0 delivers nothing; it probes existence and permission.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-}
-
-#[cfg(not(unix))]
-fn pid_is_alive(_pid: u32) -> bool {
-    true
-}
-
 /// Rewrite a leaf's `run.json` through `edit`, which returns whether it changed
 /// the record: the store's one record-update path ([`runid::update_record`]),
 /// under the leaf's `.lock` and through the reserved `run.json.tmp`, so no two
@@ -900,12 +833,83 @@ pub(crate) fn set_fit_label(leaf_dir: &std::path::Path, label: &str) -> Result<(
 }
 
 /// The store-wide lock under which a fit label is checked for uniqueness and
-/// written (`<root>/fits/.labels.lock`), so two writers cannot both find a
-/// label free and both take it.
-pub(crate) fn fit_label_lock(root: &std::path::Path) -> Result<FileLock, String> {
-    let fits = root.join("fits");
-    std::fs::create_dir_all(&fits).map_err(|e| format!("cannot create {}: {e}", fits.display()))?;
-    FileLock::acquire(&fits.join(".labels.lock"))
+/// written (gh#896): an `flock(2)` exclusive lock on `<root>/.fit-labels.lock`
+/// (beside the store's kind directories, not inside `fits/`, which holds only
+/// fit folders),
+/// so two writers cannot both find a label free and both take it. The kernel
+/// releases it when the holder drops it, exits or crashes, so there is no stale
+/// lock to reclaim and no pid to trust; the file stays in the store and holds
+/// `pid <n> on <host>` of the latest holder, for the refusal message only.
+pub(crate) struct LabelLock {
+    _file: std::fs::File,
+}
+
+impl std::fmt::Debug for LabelLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LabelLock")
+    }
+}
+
+/// How long [`fit_label_lock`] waits for another holder before refusing.
+const LABEL_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+pub(crate) fn fit_label_lock(root: &std::path::Path) -> Result<LabelLock, String> {
+    fit_label_lock_within(root, LABEL_LOCK_WAIT)
+}
+
+fn fit_label_lock_within(
+    root: &std::path::Path,
+    wait: std::time::Duration,
+) -> Result<LabelLock, String> {
+    use std::io::{Seek, Write};
+    use std::os::unix::io::AsRawFd;
+    std::fs::create_dir_all(root).map_err(|e| format!("cannot create {}: {e}", root.display()))?;
+    let path = root.join(".fit-labels.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        // SAFETY: flock on an fd we own; LOCK_NB makes it non-blocking.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            let _ = file.set_len(0);
+            let _ = file.rewind();
+            let _ = write!(file, "pid {} on {}", std::process::id(), hostname());
+            return Ok(LabelLock { _file: file });
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+            return Err(format!("cannot lock {}: {err}", path.display()));
+        }
+        if std::time::Instant::now() >= deadline {
+            let recorded = std::fs::read_to_string(&path).unwrap_or_default();
+            let recorded = recorded.trim();
+            return Err(format!(
+                "the store's label lock {} is held by another process (the latest holder \
+                 recorded {}); a fit label is being written. Retry when it has finished.",
+                path.display(),
+                if recorded.is_empty() { "nothing" } else { recorded }
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// This machine's hostname, for the label lock's holder note.
+fn hostname() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes at most buf.len() bytes into buf.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return "unknown host".to_string();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
 /// Ensure a leaf's `run.json` lists `value` in its `inputs[key]` array,
@@ -1202,21 +1206,25 @@ mod tests {
         assert_eq!(ids.len(), 16, "every writer's entry survives: {ids:?}");
     }
 
-    /// A held lock excludes a second holder; a dead holder's lock is reclaimed.
+    /// gh#896: the store's label lock excludes a second holder while held, is
+    /// free again once dropped, and is never blocked by a lock file whose
+    /// recorded holder is not holding it — a crashed process, or a live
+    /// process that reused its pid.
     #[test]
-    fn a_file_lock_excludes_and_a_dead_holders_is_reclaimed() {
-        let dir = crate::test_support::unique_temp_dir("file_lock");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(".x.lock");
-        let held = FileLock::acquire(&path).unwrap();
-        assert!(FileLock::acquire_within(&path, std::time::Duration::from_millis(100)).is_err(),
-            "a live holder excludes");
+    fn the_label_lock_is_held_only_while_held() {
+        let root = crate::test_support::unique_temp_dir("label_lock");
+        let short = std::time::Duration::from_millis(100);
+        let held = fit_label_lock(&root).unwrap();
+        let err = fit_label_lock_within(&root, short).expect_err("a held lock excludes");
+        assert!(err.contains("held by another process"), "{err}");
+        assert!(err.contains(&format!("pid {}", std::process::id())), "names the recorded holder: {err}");
         drop(held);
-        assert!(!path.exists(), "released on drop");
-        // pid 0x7fff_fff0 is not a live process.
-        std::fs::write(&path, "2147483632").unwrap();
-        let _again = FileLock::acquire_within(&path, std::time::Duration::from_millis(100))
-            .expect("a dead holder's lock is reclaimed");
+        let again = fit_label_lock_within(&root, short).expect("free once dropped");
+        drop(again);
+        // A file naming a live pid (ours) that does not hold the lock.
+        std::fs::write(root.join(".fit-labels.lock"), format!("{}", std::process::id())).unwrap();
+        fit_label_lock_within(&root, short).expect("a recorded pid alone does not hold the lock");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     use super::*;

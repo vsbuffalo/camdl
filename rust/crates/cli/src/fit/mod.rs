@@ -1162,27 +1162,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 eprintln!("error: fit-method resume key: {}", e);
                 std::process::exit(1);
             });
-        // gh#896: the label is checked against this run's identity before any
-        // sampling — a label held by another run, or a run already stored
-        // under another label, is refused here rather than after the work.
-        // The check and the write that takes the label (the claim below, or
-        // the cache-hit record) happen under one store-wide lock, so two
-        // concurrent runs cannot both find the label free.
-        let label_lock: Option<crate::cas_sink::FileLock> = match &validated_label {
-            Some(label) => {
-                let lock = crate::cas_sink::fit_label_lock(&cas_root).unwrap_or_else(|e| {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                });
-                if let Err(e) = check_label_is_free(&cas_root, label, &resolved.run_id) {
-                    drop(lock); // `exit` runs no destructors
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-                Some(lock)
-            }
-            None => None,
-        };
         let cas_path = runid::store_path(&cas_root, runid::ArtifactKind::FitStage, &resolved.levels);
         // gh#147 (M3.2): write the fit-level sidecar once per fit segment
         // (`cas_path`'s grandparent: `.../fits/{stem}-{h8}/`). Done before the
@@ -1331,6 +1310,26 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         } else {
             crate::resolve::WritePolicy::Reuse
         };
+        // gh#896: the label is checked against this run's identity before any
+        // sampling, under the store-wide label lock, which is held only from
+        // here to the write that takes the label — the claim below, or the
+        // cache-hit record — and dropped before every exit on the way, so two
+        // concurrent runs cannot both find the label free.
+        let label_lock: Option<crate::cas_sink::LabelLock> = match &validated_label {
+            Some(label) => {
+                let lock = crate::cas_sink::fit_label_lock(&cas_root).unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+                if let Err(e) = check_label_is_free(&cas_root, label, &resolved.run_id) {
+                    drop(lock);
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+                Some(lock)
+            }
+            None => None,
+        };
         if a.resume.is_none() {
             match crate::resolve::check_reuse(&store, &cas_root, &resolved_artifact, policy) {
                 Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
@@ -1347,7 +1346,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // A label given to an unlabelled stored run is recorded on
                     // it (`check_label_is_free` refused every other case).
                     if let Some(label) = &validated_label {
-                        if let Err(e) = crate::cas_sink::set_fit_label(&dir, label) {
+                        let written = crate::cas_sink::set_fit_label(&dir, label);
+                        drop(label_lock);
+                        if let Err(e) = written {
                             eprintln!("error: label the stored run {}: {e}", dir.display());
                             std::process::exit(1);
                         }
@@ -1356,6 +1357,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 }
                 Ok(crate::resolve::ReuseVerdict::MustRun) => {}
                 Err(e) => {
+                    drop(label_lock);
                     eprintln!("error: fit method cache check {}: {}", cas_path.display(), e);
                     std::process::exit(1);
                 }
@@ -1370,6 +1372,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 unreachable!("Streaming write mode never returns a committed path")
             }
             Err(e) => {
+                drop(label_lock);
                 eprintln!("error: claim fit method {}: {}", cas_path.display(), e);
                 std::process::exit(1);
             }
