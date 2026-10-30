@@ -197,20 +197,29 @@ order. Every handle now names one run, or is refused with the runs listed.
 
 - **One integration-step rule for every backend and command.** A model's
   declared `simulate { dt = … }` is the step every fit method (`if2`, `pgas`,
-  `pmmh`, `pfilter`, `mh`, `nl-*`), every `camdl profile` cell, `camdl pfilter`
-  and `fit predict`'s one-step band integrates at. A written `[config] dt`, a
-  `--dt`, or a `--fit` file's `[config] dt` that differs from it is refused; an
-  agreeing value is accepted; 1.0 is the default only when the model declares no
-  step. Before, the chain-binomial methods, profile's IF2 cells and
-  `camdl pfilter` used `[config] dt` / `--dt` (default 1.0) and ignored the
-  model's step without a word. `camdl simulate --dt` still overrides: a
-  simulation fits nothing. Chain-binomial fits, profiles and pfilter runs of a
-  model that declares `dt` re-key and now run at that step. No model in this
-  repository declares one outside a simulate-only golden fixture
+  `pmmh`, `pfilter`, `mh`, `nl-*`), every `camdl profile` cell (IF2 and `nl-*`),
+  `camdl pfilter`, and `fit predict` integrates at. `fit predict` runs both of
+  its horizons (the one-step band and the free-forward replay) and its
+  counterfactual contrast arms on the one step the fit ran at, and reads the
+  fit's observation anchors at it. A written `[config] dt`, a `--dt`, or a
+  `--fit` file's `[config] dt` that differs from the model's is refused (this
+  includes an `nl-*` or `mh` fit, and `camdl profile --algorithm nl-* --dt X`);
+  an agreeing value is accepted; 1.0 is the default only when the model declares
+  no step. When the model declares none, the written value is the step. Before,
+  the chain-binomial methods, profile's IF2 cells and `camdl pfilter` used
+  `[config] dt` / `--dt` (default 1.0) and ignored the model's step without a
+  word. `camdl simulate --dt` still overrides: a simulation fits nothing.
+  Chain-binomial fits, profiles and pfilter runs of a model that declares `dt`
+  re-key and now run at that step. One more change, for a model that declares no
+  `dt` whose fit has a `[config] dt` other than 1.0: the free-forward replay and
+  the contrast arms of `fit predict` used to step at 1.0 and now step at the
+  fit's `[config] dt`, so their bands change. No model in this repository
+  declares a step outside a simulate-only golden fixture
   (`ocaml/golden/sir_dt.camdl`), and no downstream model is known to. Migration:
   if a model declares `dt` and its fit or command writes a different one, drop
   the written value to run at the model's step, or change the model's `dt` to
-  the step you meant.
+  the step you meant; for an `nl-*` / `mh` fit or profile, delete the
+  `[config] dt` line or the `--dt`.
 - **`fit run` refuses a flag the method does not read.** Each method-specific
   flag is accepted only by the methods that read it (`--cooling-target-iters`:
   if2; `--decibans-thresh`: if2, `nl-*`; `--no-dt-check`, `--dt-check-halvings`,
@@ -283,12 +292,6 @@ order. Every handle now names one run, or is refused with the runs listed.
   / `from_params` source that leaves one out is refused (it used to fill it from
   a bounds-uniform draw). Migration: add the parameter to the source, or give it
   a `start` and use `starts = "single"`.
-- **`camdl profile --algorithm nl-* --dt X`** is refused when the model declares
-  a different `dt`: an ODE cell integrates at the model's dt, as `fit run` does.
-  Migration: drop `--dt`.
-- **An `nl-*` / `mh` fit whose `[config] dt` differs from the model's declared
-  `dt` is refused**: an ODE-backend method integrates at the model's dt.
-  Migration: delete the `[config] dt` line.
 - **`[estimate].transform` is removed.** A fit config that sets `transform` is
   refused at load, naming the unknown field. Every override that still loaded
   named the transform the parameter's kind and bounds already select, so results
