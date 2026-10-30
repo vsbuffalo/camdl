@@ -865,3 +865,25 @@ fn bare_envelope_paths_mean_the_default_options_only() {
         .to_string();
     p.ok(&["cat", "@post", "--stream", &keyed, "--root", &root]);
 }
+
+/// `fit table` rows are completed runs: a run still running (or failed) has
+/// no row.
+#[test]
+fn fit_table_skips_runs_that_have_not_completed() {
+    let p = Project::new();
+    p.config("scout.toml", &if2(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    p.config("scout.toml", &if2(3));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    let leaves = p.leaves();
+    let mut rec = record(&leaves[0]).2;
+    rec["status"] = serde_json::json!("running");
+    std::fs::write(leaves[0].join("run.json"), serde_json::to_string_pretty(&rec).unwrap()).unwrap();
+
+    let out = p.run(&["fit", "table", &p.fits().to_string_lossy(), "--format", "json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let ids: Vec<&str> = v["rows"].as_array().unwrap().iter()
+        .map(|r| r["run_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec![record(&leaves[1]).0.as_str()], "only the completed run has a row");
+}

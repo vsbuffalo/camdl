@@ -54,6 +54,9 @@ pub struct FitStageView {
     pub label: Option<String>,
     /// When the run was written (`provenance.created_at`, ISO 8601 UTC).
     pub created_at: String,
+    /// Whether the run's record says `completed` (not still running, nor
+    /// failed): only a completed run is reported as a result.
+    pub completed: bool,
     /// Simulation backend the stage ran on. Defaults to `ChainBinomial` when
     /// absent.
     pub backend: InferenceBackend,
@@ -171,6 +174,7 @@ fn stage_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<Fit
         run_id: rec.run_id.to_hex(),
         label: rec.provenance.label.clone(),
         created_at: rec.provenance.created_at.clone().unwrap_or_default(),
+        completed: rec.status == runid::RunStatus::Completed,
         backend,
         seed: inputs.get("seed").and_then(|v| v.as_u64()).unwrap_or(0),
         n_chains: inputs.get("n_chains").and_then(|v| v.as_u64()).unwrap_or(0) as usize,

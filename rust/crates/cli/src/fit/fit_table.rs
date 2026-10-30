@@ -94,10 +94,13 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
         // gh#896: one row per run. A folder holding several runs used to get
         // one row assembled from more than one of them (the label and time of
         // one beside the estimates of another). Each row is built from its
-        // leaf's own view, so every cell comes from that one run. A leaf whose
-        // method has no tabulated result (pfilter) has no row.
+        // leaf's own view, so every cell comes from that one run. A run that
+        // has not completed, or whose method has no tabulated result
+        // (pfilter), has no row.
         for stage in &entry.view.stages {
-            if !crate::fit::method_result::MethodResult::has_result(stage.method) {
+            if !stage.completed
+                || !crate::fit::method_result::MethodResult::has_result(stage.method)
+            {
                 continue;
             }
             match table_row::build_row(&stage.stage_dir, diff.clone(), 0.0, now_unix) {
