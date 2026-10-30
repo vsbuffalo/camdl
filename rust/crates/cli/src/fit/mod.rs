@@ -108,9 +108,6 @@ pub fn cmd_fit_methods() {
 
 // ─── New `camdl fit run` entry point (config_v2) ────────────────────────────
 
-/// gh#191: the model-capability gate must run on the fit-run path, against
-/// the method's declared simulation backend. Returns the offending message
-/// prefixed with the method's name so the user knows where to look.
 /// Where the run's `starts` rule came from, for the prefix of an error about
 /// it: `--starts <spec>` when the flag set it, else the fit file.
 fn starts_origin(a: &crate::args::FitRunArgs, fit_path: &str) -> String {
@@ -154,6 +151,9 @@ fn refuse_pfilter_point_source_missing(
     ))
 }
 
+/// gh#191: the model-capability gate must run on the fit-run path, against
+/// the method's declared simulation backend. Returns the offending message
+/// prefixed with the method's name so the user knows where to look.
 fn gate_run_method_against_model(
     algorithm: &config_v2::Algorithm,
     compiled: &sim::CompiledModel,

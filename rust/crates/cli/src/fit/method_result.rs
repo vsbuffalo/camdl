@@ -1019,19 +1019,19 @@ pub(crate) fn estimated_names(
     stage_dir: Option<&Path>,
     state: &FitState,
 ) -> Option<std::collections::BTreeSet<String>> {
-        if !state.tail_chain_agreement.is_empty() {
-            Some(state.tail_chain_agreement.keys().cloned().collect())
-        } else {
-            stage_dir?
-                .ancestors()
-                .skip(1)
-                .take(4)
-                .find_map(crate::run_meta::read_fit_sidecar)
-                // A sidecar written before `estimated` was recorded carries an
-                // empty list: no record, not "nothing estimated".
-                .filter(|side| !side.estimated.is_empty())
-                .map(|side| side.estimated.into_iter().collect())
-        }
+    if !state.tail_chain_agreement.is_empty() {
+        Some(state.tail_chain_agreement.keys().cloned().collect())
+    } else {
+        stage_dir?
+            .ancestors()
+            .skip(1)
+            .take(4)
+            .find_map(crate::run_meta::read_fit_sidecar)
+            // A sidecar written before `estimated` was recorded carries an
+            // empty list: no record, not "nothing estimated".
+            .filter(|side| !side.estimated.is_empty())
+            .map(|side| side.estimated.into_iter().collect())
+    }
 }
 
 // ── NloptStageResult ────────────────────────────────────────────────
@@ -1474,11 +1474,6 @@ fn read_typed_map<T: serde::de::DeserializeOwned>(
         .unwrap_or_default()
 }
 
-/// Extract a `{ "<param>": f64 }` object from a summary value into a
-/// `BTreeMap`. Non-finite entries (a NaN ESS serialized as JSON `null`) are
-/// dropped — `v.as_f64()` yields `None`, so an ungated diagnostic reads as
-/// absent rather than poisoning the map. Shared by the PGAS/PMMH loaders'
-/// `rhat` + `ess` extraction.
 /// Like [`read_f64_map`], but a non-number entry (JSON `null`, a NaN) is kept
 /// as NaN rather than dropped: for R̂, an entry that is there but has no value
 /// is an unavailable statistic, and dropping it lets the parameter vanish from
@@ -1509,6 +1504,12 @@ fn unreadable_keys<T: serde::de::DeserializeOwned>(
         .unwrap_or_default()
 }
 
+/// Extract a `{ "<param>": f64 }` object from a summary value into a
+/// `BTreeMap`. Non-finite entries (a NaN ESS serialized as JSON `null`) are
+/// dropped — `v.as_f64()` yields `None`, so an ungated diagnostic reads as
+/// absent rather than poisoning the map. Shared by the PGAS/PMMH loaders'
+/// ESS and secondary R̂ extraction (the headline `rhat`
+/// is read with [`read_f64_map_keeping_nan`].)
 fn read_f64_map(summary: &serde_json::Value, key: &str) -> BTreeMap<String, f64> {
     summary
         .get(key)

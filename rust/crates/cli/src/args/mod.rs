@@ -209,9 +209,7 @@ pub struct OutputView {
 /// Core inference knobs shared by pfilter / profile
 #[derive(Args, Clone)]
 pub struct InferenceCore {
-    /// Step size (default 1.0). An ODE (nl-*) profile cell integrates at the
-    /// model's own `dt` when it declares one, as `fit run` does, and refuses a
-    /// different `--dt` rather than ignore it.
+    /// Step size (default 1.0).
     #[arg(long)]
     pub dt: Option<f64>,
 
@@ -1730,6 +1728,10 @@ OUTPUT
                                   not the target.
 
   Full reference: docs/inference.md, `Per-cell diagnostics` section.
+
+  --dt on an nl-* (ODE) profile: each cell integrates at the model's own
+  `dt` when it declares one, as `fit run` does, and a different --dt is
+  refused rather than ignored.
 "))]
 pub struct ProfileArgs {
     /// IR JSON or .camdl model file

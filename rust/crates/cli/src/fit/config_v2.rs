@@ -2596,8 +2596,9 @@ pub fn table_declares_key(contents: &str, table: &str, key: &str) -> bool {
 
 /// An ODE-backend method integrates at the model's declared `dt` when it has
 /// one (`runner::ode_step_dt`), so a `[config] dt` the file writes that
-/// differs would be ignored: refused. `config_dt_written` is whether the
-/// file spells it (the parsed value is defaulted otherwise).
+/// differs is not the integration step it reads as: refused.
+/// `config_dt_written` is whether the file spells it (the parsed value is
+/// defaulted otherwise).
 pub fn refuse_ode_config_dt(
     config_dt_written: bool,
     config_dt: f64,
@@ -2605,9 +2606,9 @@ pub fn refuse_ode_config_dt(
 ) -> Result<(), String> {
     match model_dt {
         Some(model) if config_dt_written && config_dt != model => Err(format!(
-            "`[config] dt = {config_dt}` would be ignored: an ODE-backend method integrates \
-             at the model's declared dt = {model}. Delete the line, or change the model's \
-             `dt`."
+            "`[config] dt = {config_dt}` is not the integration step: an ODE-backend method \
+             integrates at the model's declared dt = {model}. Delete the line, or change the \
+             model's `dt`."
         )),
         _ => Ok(()),
     }

@@ -177,7 +177,7 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   / `from_params` source that leaves one out is refused (it used to fill it from
   a bounds-uniform draw). Migration: add the parameter to the source, or give it
   a `start` and use `starts = "single"`.
-- **`camdl profile --algorithm`nl-*`--dt X`** is refused when the model declares
+- **`camdl profile --algorithm nl-* --dt X`** is refused when the model declares
   a different `dt`: an ODE cell integrates at the model's dt, as `fit run` does.
   Migration: drop `--dt`.
 - **An `nl-*` / `mh` fit whose `[config] dt` differs from the model's declared
