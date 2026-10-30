@@ -1,8 +1,9 @@
 ---
 date: 2026-10-29
-status: accepted — D1–D11 decided by the maintainer on 2026-10-29 (§14); D8's IF2 constants are measured during implementation by the §12.6 benchmark
+status: accepted — D1–D11 decided by the maintainer on 2026-10-29 (§14); D8's IF2 constants decided from the §12.6 benchmark
+amended_by: 2026-10-29-method-scoped-settings.md §13.1 (supersedes D9 and series (ii); defaults per its §4.4)
 area: inference setup / sim inference transforms / priors / IF2 and MH step sizes
-issues: closes gh#470; carries gh#1001 (commit series ii); gh#1002 is the optimiser follow-up (D5)
+issues: closes gh#470; gh#1001 moves to method-scoped settings (series ii superseded); gh#1002 is the optimiser follow-up (D5)
 related:
   - 2026-10-26-parameter-roles.md (accepted; §4.4 states what this amends in its §6.2 and §6.4)
 ---
@@ -63,7 +64,9 @@ start exactly on a bound has no finite z and is refused (D3).
   A leapfrog step across one has infinite energy error, and NUTS records a
   _divergence_.
 - **Step.** The standard deviation of IF2's per-observation perturbation, or of
-  an MH proposal, in z. In the fit config it is `rw_sd`.
+  an MH proposal, in z. In the fit config it is `rw_sd` here; method-scoped
+  settings (§13.1 there) moves it to `[method.perturbation]` (IF2) and
+  `[method.proposal]` (PMMH, MH).
 - **σ, softplus.** σ(z) = 1/(1 + e⁻ᶻ) is the logistic function; softplus(x) =
   ln(1 + eˣ), evaluated as max(x, 0) + log1p(e^(−|x|)), which neither overflows
   nor loses precision.
@@ -228,7 +231,9 @@ supplied, then the perturbations are applied on the transformed (estimation)
 scale". The source is pomp's `man/mif2.Rd`; the sentence is present at pomp
 6.5.0.0, read from GitHub master on 2026-10-28, and gh#1001 cites 6.4.0.6. The
 `EstimatedParam.rw_sd` field doc (`types.rs:56-57`) already says "on the
-_transformed_ scale". Series (ii) resolves both (§11).
+_transformed_ scale". Series (i) makes the field doc true (the step is held in
+z); the unit an explicit value is written in is settled by method-scoped
+settings, which supersedes this proposal's series (ii).
 
 **Half-bounded boxes are reachable only through an override.** The DSL has no
 infinity literal, `1e400` makes `camdlc` emit `Infinity`, which `camdl` refuses,
@@ -658,10 +663,12 @@ It is also the kernel pomp's `mif2` applies (§3.3). The default is
 log-interval, and the half-bounded maps — measured by §12.6 (D8). Every map with
 a finite end has one, so a `rate` on [0, ∞) runs without an explicit `rw_sd`;
 `Identity` has no scale and still needs one. An explicit `rw_sd` is converted to
-z once, in series (i), and read in z directly from series (ii) on (§11, D9).
-Where no single constant serves a family's fixtures, the launch table prints
-each parameter's default step together with the natural-scale step it implies at
-the box's midpoint, so the user sees the scale and can override it.
+z once, at the reference point; method-scoped settings (§13.1 there) replaces
+that with steps written in z in each method's own table, converted at the
+resolved start. Where no single constant serves a family's fixtures, the launch
+table prints each parameter's default step together with the natural-scale step
+it implies at the box's midpoint, so the user sees the scale and can override
+it.
 
 **A maximum on a bound is approached, not reached.** Under the walled log a
 perturbation past an end was clamped onto it, so the swarm could hold mass
@@ -704,7 +711,8 @@ the first warm-up step, so its starting value matters little. PGAS's
 MH-within-Gibbs initial scale (`pgas.rs:3957-3965`) starts every parameter at
 its own constant, `PGAS_MWG_DEFAULT_STEP` (0.25 in z, the same value as PMMH's
 default but a separate setting), and does not read `rw_sd`: `rw_sd` stays IF2's,
-PMMH's and MH's knob, and no further algorithm comes to depend on it.
+PMMH's and MH's knob, and no further algorithm comes to depend on it (method-
+scoped settings then gives IF2 and PMMH/MH each their own).
 
 The formula it replaces is not one tenth of the domain's z-width. It evaluates
 the forward map at `lower.max(1e-10)` and `upper.min(1e10)`. For a box lying
@@ -822,9 +830,9 @@ site is missed.
 
 ## 11. Two commit series; each commit is green and bisectable
 
-Both series ship in one release. Series (ii) follows (i), and either can be
-reverted alone. Each commit passes `make test`. The interim fix (§3.4) lands
-before both.
+Series (i) is below. Series (ii) is superseded by method-scoped settings (§13.1
+there) and is kept here only as the record of what it was. Each commit passes
+`make test`. The interim fix (§3.4) lands before both.
 
 **Series (i), the transform refactor.**
 
@@ -876,7 +884,8 @@ before both.
 - `docs/fit-toml.md` and `docs/agents.md` (the override);
 - the parameter-roles amendments of §4.3.
 
-**Series (ii), the `rw_sd` scale (gh#1001).**
+**Series (ii), the `rw_sd` scale (gh#1001) — superseded by method-scoped
+settings §13.1; not to be implemented.**
 
 11. An explicit `rw_sd` is read in z directly, as pomp's `mif2` reads `rw.sd`.
     The conversion of commit 7 and `transformed_sd` are deleted, along with its
@@ -1046,7 +1055,8 @@ sits relative to the ends is not a criterion. The measurements go in a
   step no longer grows, a positive kind on [0, hi] moves at all for the first
   time (§3.3), and a `rate` on [0, ∞) no longer needs an explicit `rw_sd`. With
   an explicit `rw_sd`, series (i) keeps the natural-scale unit and converts it
-  once at the midpoint. Series (ii) reads it in z:
+  once at the midpoint. Its later unit and key are method-scoped settings' (§7.3
+  there gives that conversion); for reference, a step read in z is:
   - a value tuned on the natural scale converts as rw_sd_z =
     rw_sd_natural/|g′(0)|;
   - for `LogInterval` that is rw_sd_natural/(θ_mid·L/4), where θ_mid = √(lo·hi);
@@ -1170,15 +1180,17 @@ optimal values. The half-bounded maps take the larger step because they have no
 box to spread chain starts over, and from a far start every smaller step tried
 let all chains collapse.
 
-**D9 — The unit of an explicit `rw_sd` (gh#1001). Decided (2026-10-29): z, in
-series (ii); series (i) converts a natural-scale value once at the domain's
-midpoint.** Option (a) matches pomp's `mif2`. It makes the user's number the
-kernel IF2 runs, and lets `transformed_sd` and its false comment go. Every
-explicit `rw_sd` changes meaning; §13 gives the conversion. Option (b), the
-natural scale converted once at the midpoint for good, keeps hand-tuned values
-meaning roughly what they meant, under a unit the user cannot read off the
-coordinate. Option (c), today's per-particle conversion, is refused by §9.1.
-Default runs are identical under (a) and (b), since they use `default_if2_step`.
+**D9 — The unit of an explicit `rw_sd` (gh#1001). Superseded by method-scoped
+settings §13.1: an explicit step is not read in a new unit under its old name;
+it moves to per-method tables. Series (i) converts a natural-scale value once at
+the domain's midpoint.** As decided on 2026-10-29, before that supersession:
+Option (a) matches pomp's `mif2`. It makes the user's number the kernel IF2
+runs, and lets `transformed_sd` and its false comment go. Every explicit `rw_sd`
+changes meaning; §13 gives the conversion. Option (b), the natural scale
+converted once at the midpoint for good, keeps hand-tuned values meaning roughly
+what they meant, under a unit the user cannot read off the coordinate. Option
+(c), today's per-particle conversion, is refused by §9.1. Default runs are
+identical under (a) and (b), since they use `default_if2_step`.
 
 **D10 — The near-bound report. Decided (2026-10-29): boxes finite at both ends
 only, at a fixed fraction (1%) of the width from either end; no report on a
