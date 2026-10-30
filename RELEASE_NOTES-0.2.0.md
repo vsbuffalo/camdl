@@ -175,6 +175,9 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 - **`camdl profile --algorithm`nl-*`--dt X`** is refused when the model declares
   a different `dt`: an ODE cell integrates at the model's dt, as `fit run` does.
   Migration: drop `--dt`.
+- **An `nl-*` / `mh` fit whose `[config] dt` differs from the model's declared
+  `dt` is refused**: an ODE-backend method integrates at the model's dt.
+  Migration: delete the `[config] dt` line.
 
 - **A typed constant `let` cannot be set from outside.**
   `let omega : rate =
@@ -802,6 +805,8 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   the highest log-posterior draw (natural-scale prior, no Jacobian)"; the
   "`[estimate].start` is unused here" note no longer claims that under PMMH/MH,
   where the start still sets the pre-run check and the initial proposal scale.
+- **θ̂ lists only estimated parameters.** A one-chain IF2 fit's `fit table`
+  `params` and `fit summary` estimates no longer include its fixed parameters.
 - **Stricter convergence readings.** A soft-band Â no longer lets a starts
   source skip its decibans leg or an unavailable Â; a sampler parameter whose
   stored R̂ is `null`, or whose refusal this build cannot read, makes the R̂
