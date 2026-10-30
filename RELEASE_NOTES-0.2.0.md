@@ -105,6 +105,69 @@ breaking changes are still expected before 1.0.
 
 These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
+### A fit handle names one run (gh#896)
+
+A problem folder (`results/fits/<stem>-<h8>/`) holds every run of one problem —
+a rerun with a changed `[method]` setting writes a sibling leaf — and handles
+used to name the folder, each verb then picking a run inside it by directory
+order. Every handle now names one run, or is refused with the runs listed.
+
+- **A label names one run and never moves.** `fit run --label L` records `L` on
+  that run's `run.json`, and is refused when another run holds `L`, when the run
+  is already stored under another label, or when the invocation writes several
+  runs (`fit_seeds`, synthetic datasets, sweep points). Migration: give each run
+  its own label; label one run of a multi-run invocation afterwards with
+  `camdl label <run_id> L`.
+- **`camdl label <fit_id>` is refused.** A fit id names a problem folder, not a
+  run; the refusal lists the folder's runs. A fit run's label cannot be changed
+  once set. Migration: `camdl label <run_id> L`, with the run id from
+  `fit table`'s `run` column or `camdl list --format json`.
+- **Labels stored in `fit.meta.json` are no longer read.** An older camdl kept a
+  fit's label on the problem folder; `@L` now finds only a run labelled `L`, and
+  its not-found message names any folder still holding `L` with the
+  `camdl label <run_id> "L"` for each of its runs. Migration: run that command
+  for the run you mean.
+- **`fit predict` output moved to `<segment>/predict/<run_id12>/`.** It used to
+  be written into the problem folder (`predictive/`, `observed/`,
+  `quantities*/`, `contrasts*/`, their manifests, `report.json`); now it is
+  written per run, and under `predict/<run_id12>-<opts8>/` when predicted with
+  non-default options (`--horizon`, `--n-draws`, `--seed`, `--scenario`,
+  `--sweep`, `--by-chain`). `predictive.json` and `observed.json` record the
+  `run_id` and the `options`. Folder-level outputs written by an older camdl are
+  orphaned: nothing reads them. Migration: rerun `camdl fit predict <run>`;
+  readers (camdl-scope) read `predict/<run_id12>/`; delete the old folder-level
+  files.
+- **`table_row` schema v3.** `fit table` gives one row per run (rows of one
+  problem share a `fit_id`), each row's label, time and numbers its run's own,
+  and the row gains `run_id`; the text and markdown tables gain a `run` column
+  and the CSV appends `run_id` after `ess_per_sec`. `fit summary --format json`
+  embeds the same row. Migration: key rows on `run_id`, not `fit_id`.
+- **A folder holding several runs is refused where one run is read.**
+  `fit summary` (when one method has several runs), `fit predict`, `compare`,
+  `simulate --draws posterior --fit`, and
+  `starts = { from_mle | from_posterior
+  = ... }` sources list the runs and
+  name what sets them apart. A hex prefix matching both a run id and a fit id is
+  refused the same way. Migration: name the run — its leaf directory, a run-id
+  prefix, `@label`, or the `fit.toml` it was made from.
+- **A `fit.toml` handle names the run made from the file as it now reads.** It
+  matches the config identities recorded on each run
+  (`inputs.config_identities`) rather than the folder's last archived config,
+  and a run made with an identity-bearing override (`--seed` outside the file's
+  seeds, `--starts`, a sampler flag, `--decibans-thresh`, `--sweep`, `--resume`)
+  records none. Runs stored before this change record none either, so a
+  `fit.toml` cannot find them. Migration: rerun `fit run <file>` (a cache hit
+  records the file on an existing run of this build), or name the run by its
+  directory or run id.
+- **Every run with a sourced `starts` rule re-keys once.** The method identity
+  hashes a `from_mle` / `from_posterior` / `from_params` rule by its kind; the
+  source run enters through `deps` (its run id and the consumed file's digest).
+  `@scout`, the scout's directory and its run-id prefix are now one run, where
+  they were three. This applies to `fit run` and `camdl profile --starts`.
+  Migration: none; such runs rerun once and are reused thereafter.
+- **Fit summaries show the source run.** `seeded from:` reads
+  `from_mle @scout, run <id12> (…)`, from run.json `inputs.starts_source`.
+
 - **A typed constant `let` cannot be set from outside.**
   `let omega : rate =
   0.01` holds its declared value in every run; `[fixed]`,
