@@ -212,6 +212,14 @@ pub(crate) fn refuse_overridden_dt(
     }
 }
 
+/// The step an ODE (nl-*) cell integrates at: the model's declared `dt`,
+/// else the profile's — the rule `fit run` applies (`runner::ode_step_dt`).
+/// One function for the cell, its stored payload and the run identity, so
+/// the identity hashes the step the cell used.
+pub(crate) fn ode_cell_dt(profile_dt: f64, model_dt: Option<f64>) -> f64 {
+    model_dt.unwrap_or(profile_dt)
+}
+
 /// `--iterations` when not given: IF2 iterations per cell.
 const PROFILE_DEFAULT_ITERATIONS: usize = 50;
 /// `--cooling` when not given.
@@ -1462,7 +1470,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             cooling, cooling_target_iters: cooling_schedule.target_iters, dt, starts: n_starts,
         }),
         nlopt: matches!(profile_algo, ProfileAlgo::Nlopt(_)).then(|| ProfileNloptKnobs {
-            tolerance: nl_tolerance, max_evals: nl_max_evals, dt, starts: n_starts,
+            tolerance: nl_tolerance, max_evals: nl_max_evals,
+            dt: ode_cell_dt(dt, compiled.model.simulation.dt), starts: n_starts,
         }),
         rw_sd: &rw_sd_blob,
         rw_sd_auto,
@@ -1841,7 +1850,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     per_start_specs.iter().map(|p| p.index).collect();
                 let bounds: Vec<(f64, f64)> =
                     per_start_specs.iter().map(|p| (p.lower, p.upper)).collect();
-                let ode_dt = compiled.model.simulation.dt.unwrap_or(dt);
+                let ode_dt = ode_cell_dt(dt, compiled.model.simulation.dt);
                 // Per-cell NLopt budget: the `--fit` file's nl-* method's,
                 // else the profile defaults (`PROFILE_NLOPT_*`).
                 let tolerance = nl_tolerance;
@@ -1909,7 +1918,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 "dt": dt }),
             ProfileAlgo::Nlopt(_) => serde_json::json!({
                 "tolerance": nl_tolerance, "max_evals": nl_max_evals,
-                "dt": compiled.model.simulation.dt.unwrap_or(dt) }),
+                "dt": ode_cell_dt(dt, compiled.model.simulation.dt) }),
         };
         // A non-finite cell loglik serialises as JSON `null` (JSON has no
         // ±inf/NaN), and every consumer that reads `best_loglik` — the curve,
@@ -2387,6 +2396,14 @@ mod tests {
 
     /// An ODE cell steps at the model's declared dt, as `fit run` does; an
     /// explicit `--dt` that differs used to be ignored without a word.
+    /// The nl-* identity hashes the step the cell integrates at — the
+    /// model's declared dt when there is one — not the profile's default.
+    #[test]
+    fn an_ode_cell_steps_and_is_keyed_at_the_models_dt() {
+        assert_eq!(ode_cell_dt(1.0, Some(0.1)), 0.1);
+        assert_eq!(ode_cell_dt(0.5, None), 0.5);
+    }
+
     #[test]
     fn an_overridden_dt_is_refused_on_an_ode_cell() {
         let err = refuse_overridden_dt(Some(0.5), Some(1.0), "nl-sbplx").unwrap_err();
