@@ -532,12 +532,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // From here the method is read-only: the identity below sees exactly what
     // the runners consume.
     let method: config_v2::Method = config.inference.method.clone().expect("checked above");
-    // gh#896: whether the method this run uses is the one the file alone
-    // resolves to. A CLI override that changes it (`--starts`, a sampler
-    // knob, `--decibans-thresh`) makes a run the file does not name.
+    // gh#896: the method the file alone resolves to, for the identity of the
+    // run `fit run <file>` with no CLI options would key (below, per cell).
     let _ = file_method.resolve_starts(&config.problem, &model);
-    let method_is_the_files = serde_json::to_value(&file_method).ok()
-        == serde_json::to_value(&method).ok();
     // The seeds the file alone runs: its `fit_seeds`, else the default seed.
     let file_seeds: Vec<u64> = config.inference.fit_seeds.clone().unwrap_or_else(|| vec![1]);
     let allow_nonconverged_source = a.allow_nonconverged_source;
@@ -997,6 +994,18 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             std::process::exit(1);
         })
     });
+    // gh#896: the deps the file's own starts rule folds — the same as this
+    // run's when no `--starts` override changed the rule; `None` when the
+    // file's own source cannot be resolved (then the file names no run).
+    let file_starts_deps: Option<Vec<runid::inputs::ArtifactRef>> = match file_method.starts() {
+        Ok(rule) if *rule == starts_rule => {
+            Some(resolved_starts.source.iter().map(|s| s.dep.clone()).collect())
+        }
+        Ok(rule) => chain_starts::resolve_starts(rule, true)
+            .ok()
+            .map(|r| r.source.iter().map(|s| s.dep.clone()).collect()),
+        Err(_) => None,
+    };
     // gh#896: the run a sourced rule read, beside the handle as written. The
     // source's run id is already identity through `deps`; this is the
     // readable link `fit summary` prints, so no later label can obscure what
@@ -1051,16 +1060,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         for (name, val) in sweep_point {
             sweep_config.fixed.values.insert(name.clone(), *val);
         }
-        // gh#896: the config identity is recorded on this run only when the
-        // file alone makes it — no `--resume`, a method, seed and problem
-        // (after `--sweep`) that the file's own resolve to — so a `fit.toml`
-        // handle never names a run an identity-bearing override made.
-        let file_makes_this_run = a.resume.is_none()
-            && method_is_the_files
-            && file_seeds.contains(&seed)
-            && serde_json::to_value(&sweep_config).ok() == serde_json::to_value(&cell_problem).ok();
-        let cell_config_identity: Option<&String> =
-            run_config_identity.as_ref().filter(|_| file_makes_this_run);
 
         // IC4 in 2026-04-19 inference review batch 3: reject
         // prior × transform combinations that silently produce a
@@ -1155,6 +1154,39 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             eprintln!("error: fit-method identity: {}", e);
             std::process::exit(1);
         });
+        // gh#896: the config identity is recorded on this run only when it is
+        // the run `fit run <file>` with no CLI options keys: this cell's
+        // identity recomputed from the file's own method, the file's starts
+        // source, and the problem before `--sweep`, must equal this run's.
+        // Every identity-bearing option (`--starts`, sampler knobs,
+        // `--decibans-thresh`, `--sweep`, `--resume`) shows up as a different
+        // run_id rather than through a list of flags. Two inputs cannot be
+        // recomputed here: a seed the file does not run has no file cell, and
+        // `--emit-every` changes the [synthetic] data generated before this
+        // point, which the file alone would generate without it.
+        let file_run_id: Option<runid::ContentHash> =
+            if emit_every.is_some() || !file_seeds.contains(&seed) {
+                None
+            } else {
+                file_starts_deps.as_ref().and_then(|file_deps| {
+                    cas::resolve_fit_stage(&cas::FitStageCtx {
+                        model: &model,
+                        fit_stem: &fit_stem,
+                        ir_version: &ir_version_str,
+                        engine_version: crate::version::VERSION_SHORT,
+                        problem: &cell_problem,
+                        data_paths: &effective_obs,
+                        method: &file_method,
+                        seed,
+                        deps: file_deps.clone(),
+                    })
+                    .ok()
+                    .map(|r| r.run_id)
+                })
+            };
+        let cell_config_identity: Option<&String> = run_config_identity
+            .as_ref()
+            .filter(|_| file_run_id == Some(resolved.run_id));
         // gh#583 item G: the `--resume` key is this identity less its
         // extension dimension — the same levels, not a second hand-listed hash.
         let resume_guard = cas::resume_guard(&cas::FitStageCtx { deps: starts_deps, ..ctx })

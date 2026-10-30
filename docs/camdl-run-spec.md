@@ -4588,12 +4588,15 @@ wildcard, and carries a populated `inputs`:
 `inputs.config_identities` holds the canonical identity of each `fit.toml` the
 run was written from or reused by (a cache hit from a second config with the
 same run identity adds its own); a `fit.toml` handle names the run whose list
-holds the file's identity (§2.2.1). A config is listed only on a run the file
-alone makes: a run made with an identity-bearing override (`--seed` outside the
-file's seeds, a `--starts` or sampler flag that changes the resolved method,
-`--decibans-thresh`, a `--sweep` value the file does not hold, `--resume`) lists
-none, so the file never names it. `inputs.starts_source` is `null` unless
-`starts` read a source, and then
+holds the file's identity (§2.2.1). A config is listed only on the run the file
+alone makes: `fit run` recomputes, per cell, the run_id that `fit run <file>`
+with no options would key (the file's own method and starts source, the problem
+before `--sweep`) and lists the config only when it equals the run's own. Every
+identity-bearing option — `--starts`, a sampler flag, `--decibans-thresh`,
+`--sweep`, `--resume` — therefore makes a run the file does not name; so do a
+`--seed` outside the file's seeds and `--emit-every`, which changes the
+[synthetic] data generated before the identity is taken. `inputs.starts_source`
+is `null` unless `starts` read a source, and then
 `{"handle": "@scout", "run_id": "<64-hex>", "artifact": "fit_state.toml"}`: the
 handle as written and the run it resolved to when this run started (`run_id` is
 `null` for a file named directly). The source's `run_id` is also this run's

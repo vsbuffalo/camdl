@@ -797,3 +797,48 @@ fn fit_table_filters_select_runs() {
     std::fs::write(long.join("run.json"), serde_json::to_string_pretty(&rec).unwrap()).unwrap();
     assert_eq!(rows(&["--since-seconds", "3600"]), vec!["short"]);
 }
+
+/// A synthetic fit run with `--emit-every` fits data the file alone would not
+/// generate, so the file does not name that run. The rule is the run's
+/// identity, not a list of flags: the run the file names is the one whose
+/// run_id `fit run <file>` keys.
+#[test]
+fn a_config_does_not_name_a_run_made_with_emit_every() {
+    let p = Project::new();
+    std::fs::write(p.dir().join("truth.toml"),
+        "beta = 0.3\nsigma = 0.25\ngamma = 0.3\nrho = 0.5\nk = 10.0\np_detect = 0.5\nN0 = 1000\nI0 = 1\n").unwrap();
+    std::fs::write(p.dir().join("synth.toml"), format!(r#"
+[model]
+camdl = "{ir}"
+
+[synthetic]
+true_params = "truth.toml"
+sim_seeds = [1]
+
+[estimate.beta]
+bounds = [0.01, 0.5]
+start  = 0.123
+
+[fixed]
+sigma    = 0.25
+gamma    = 0.3
+rho      = 0.5
+k        = 10.0
+p_detect = 0.5
+N0       = 1000
+I0       = 1
+
+[method]
+{method}
+
+[config]
+dt = 1.0
+"#, ir = golden_ir().display(), method = if2(2))).unwrap();
+
+    p.ok(&["fit", "run", "synth.toml", "--seed", "1", "--emit-every", "detection=7"]);
+    let out = p.run(&["fit", "summary", "synth.toml"]);
+    assert!(!out.status.success(),
+        "the file does not name a run fitted to --emit-every data:\n{}", text(&out));
+    p.ok(&["fit", "run", "synth.toml", "--seed", "1"]);
+    p.ok(&["fit", "summary", "synth.toml"]);
+}
