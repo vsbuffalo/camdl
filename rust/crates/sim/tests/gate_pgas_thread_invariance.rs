@@ -127,9 +127,7 @@ fn run_once() -> PGASResult {
         index: compiled.param_index["beta"],
         initial: 0.3,
         rw_sd: 0.02,
-        transform: Transform::Log { lo: 0.01, hi: 2.0 },
-        lower: 0.01,
-        upper: 2.0,
+        transform: Transform::for_domain(0.01, 2.0, true).expect("domain"),
         rw_sd_auto: false,
         perturb_only_at_t0: false,
     }];

@@ -1,14 +1,14 @@
 //! Auto `rw_sd` is a fraction of the search box. A box with an infinite end
 //! gives it no scale: an unbounded `real` parameter got 166666.67 (an
-//! infinite end of its `Transform::None` box read as ±1e6) and an unbounded
-//! `rate` got ~1e-299 (`Transform::Log` from a lower bound floored at
-//! 1e-300). Either makes the IF2 random walk meaningless, and PMMH's and
-//! MH's first proposals are five times it. Such a fit is refused, naming the
-//! parameter and the two remedies; an explicit `rw_sd` runs.
+//! infinite end of its identity box read as ±1e6) and an unbounded `rate`
+//! got ~1e-299 (a lower bound floored at 1e-300). Either makes the IF2
+//! random walk meaningless, and PMMH's and MH's first proposals are five
+//! times it. Such a fit is refused, naming the parameter and the two
+//! remedies; an explicit `rw_sd` runs.
 //!
-//! A positive kind boxed `[0, hi]` has the same defect with a finite box: its
-//! `Transform::Log` lower bound is floored at 1e-300, so the auto step is
-//! about 1e-148 (`zeta : rate in [0, 2]` below) and IF2 never moves it.
+//! A positive kind boxed `[0, hi]` (`zeta : rate in [0, 2]` below) takes the
+//! interval map, whose automatic step is a fraction of the width; under the
+//! walled log map it was about 1e-148 and IF2 never moved it.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -139,37 +139,44 @@ fn a_profile_cell_needs_the_same_scale() {
     refused(&out, "delta");
 }
 
-/// The auto step of a `Log` box with lower bound 0 is ~1e-148: refused under
-/// IF2, PMMH and MH, and in profile's IF2 cells.
+/// A positive kind boxed `[0, 2]` has an automatic step: IF2, PMMH and MH
+/// run, profile's IF2 cell runs, and IF2 moves the parameter.
 #[test]
-fn a_log_box_with_lower_bound_zero_has_no_auto_rw_sd() {
+fn a_positive_kind_boxed_from_zero_has_an_auto_rw_sd_that_moves_it() {
     let mh = "algorithm = \"mh\"\nbackend = \"ode\"\nchains = 1\n\
               iterations = 20\nburn_in = 5\nstarts = \"single\"";
     let prior = ", prior = { uniform = {} }";
     for (method, extra, tag) in [(IF2, "", "if2"), (PMMH, prior, "pmmh"), (mh, prior, "mh")] {
         let out = fit("zeta", extra, method);
-        refused(&out, "zeta");
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(err.contains("[0, 2]") && err.contains("lower bound is 0"),
-            "{tag}: the refusal names the box and why:\n{err}");
+        assert!(out.status.success(), "{tag}: {}", String::from_utf8_lossy(&out.stderr));
     }
     let out = run("zeta", "", IF2, &["profile", "model.camdl", "--fit", "fit.toml",
         "--sweep", "beta=0.3", "--rw-sd", "auto", "--n-starts", "1", "--particles", "20",
         "--iterations", "2"]);
-    refused(&out, "zeta");
+    assert!(out.status.success(), "profile: {}", String::from_utf8_lossy(&out.stderr));
+    let tmp = tempfile::tempdir().unwrap();
+    let out = run_in(tmp.path(), "zeta", "", IF2, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let vals = zeta_trace(tmp.path());
+    assert!(vals.iter().any(|v| (v - vals[0]).abs() > 1e-6),
+        "zeta never moved from {}: {vals:?}", vals[0]);
+}
+
+fn zeta_trace(dir: &Path) -> Vec<f64> {
+    let traces = find(&dir.join("res"), "parameter_traces.tsv").expect("parameter_traces.tsv");
+    let text = std::fs::read_to_string(traces).unwrap();
+    let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+    let col = lines.next().unwrap().split('\t').position(|h| h == "zeta").expect("zeta column");
+    lines.map(|l| l.split('\t').nth(col).unwrap().parse().unwrap()).collect()
 }
 
 /// With an explicit `rw_sd` the same box runs, and IF2 moves the parameter.
 #[test]
-fn an_explicit_rw_sd_on_a_zero_lower_log_box_moves_it() {
+fn an_explicit_rw_sd_on_a_box_from_zero_moves_it() {
     let tmp = tempfile::tempdir().unwrap();
     let out = run_in(tmp.path(), "zeta", ", rw_sd = 0.1", IF2, &["fit", "run", "fit.toml", "--seed", "1"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let traces = find(&tmp.path().join("res"), "parameter_traces.tsv").expect("parameter_traces.tsv");
-    let text = std::fs::read_to_string(traces).unwrap();
-    let mut lines = text.lines().filter(|l| !l.starts_with('#'));
-    let col = lines.next().unwrap().split('\t').position(|h| h == "zeta").expect("zeta column");
-    let vals: Vec<f64> = lines.map(|l| l.split('\t').nth(col).unwrap().parse().unwrap()).collect();
+    let vals = zeta_trace(tmp.path());
     assert!(vals.iter().any(|v| (v - vals[0]).abs() > 1e-6),
         "zeta never moved from {}: {vals:?}", vals[0]);
 }

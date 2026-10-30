@@ -2992,20 +2992,6 @@ impl FitConfig {
             lines.join("\n"), kind.as_str()))
     }
 
-    /// Refuse, under PMMH and MH, an estimated hierarchical leaf whose search
-    /// box cuts into the support of its prior p(leaf | hyperparameter).
-    ///
-    /// The samplers score the leaf against the prior density restricted to
-    /// the box but not renormalised by P(box | hyperparameter). For a fixed
-    /// prior that constant does not move and the omission is harmless; for a
-    /// hierarchical leaf it depends on the hyperparameter, so leaving it out
-    /// biases the hyperparameter (`mu ~ normal(0, 1)` with four leaves
-    /// `a_k ~ normal(mu, 1)` boxed to `[1, 2]` gives a posterior mean of 1.18
-    /// for `mu` under a flat likelihood, where the truth is 0). PGAS already
-    /// refuses hierarchical priors, and IF2 and the optimizers read no prior.
-    ///
-    /// The box compared is the one the transform enforces: `Transform::None`
-    /// (a box with an infinite end on an unconstrained kind) enforces none.
     /// Proposal 2026-10-27-estimable-bsplines §6.4: IF2 and the NLopt
     /// optimizers read no prior, and the likelihood depends on a `smooth`
     /// forcing's scale τ and modes z only through w = … + (τ/κ)Mz, so an
@@ -3083,11 +3069,18 @@ impl FitConfig {
                 let Some(p) = model.parameters.iter().find(|p| p.name == name) else { continue };
                 let Ok(bx) = super::runner::resolve_search_box(&name, spec.bounds, p) else { continue };
                 let Ok(pkind) = super::runner::estimated_kind(p) else { continue };
-                // A log transform on (0, ∞) has no wall; any finite end does.
-                match super::runner::derive_transform_with_bounds(pkind, bx) {
-                    Transform::None => {}
-                    Transform::Log { lo, hi } if lo <= 0.0 && hi == f64::INFINITY => {}
-                    Transform::Log { lo, hi } | Transform::Logit { lo, hi } => {
+                let Ok(transform) = super::runner::derive_transform_with_bounds(pkind, bx) else { continue };
+                // The identity on (−∞, ∞), and θ = eᶻ on [0, ∞), keep the
+                // coordinates the smooth prior is built in; every map onto a
+                // box with another finite end bends them.
+                match transform {
+                    Transform::Identity => {}
+                    Transform::LowerBounded { lo: 0.0 } => {}
+                    Transform::LowerBounded { .. }
+                    | Transform::UpperBounded { .. }
+                    | Transform::Interval { .. }
+                    | Transform::LogInterval { .. } => {
+                        let (lo, hi) = transform.bounds();
                         bent.push(format!("  {name}: search box [{lo}, {hi}]"));
                     }
                 }
@@ -3111,9 +3104,23 @@ impl FitConfig {
         Ok(())
     }
 
+    /// Refuse, under PMMH and MH, an estimated hierarchical leaf whose search
+    /// box cuts into the support of its prior p(leaf | hyperparameter).
+    ///
+    /// The samplers score the leaf against the prior density restricted to
+    /// the box but not renormalised by P(box | hyperparameter). For a fixed
+    /// prior that constant does not move and the omission is harmless; for a
+    /// hierarchical leaf it depends on the hyperparameter, so leaving it out
+    /// biases the hyperparameter (`mu ~ normal(0, 1)` with four leaves
+    /// `a_k ~ normal(mu, 1)` boxed to `[1, 2]` gives a posterior mean of 1.18
+    /// for `mu` under a flat likelihood, where the truth is 0). PGAS already
+    /// refuses hierarchical priors, and IF2 and the optimizers read no prior.
+    ///
+    /// The box compared is the effective domain the transform maps onto
+    /// ([`sim::inference::types::Transform::bounds`]); an unbounded `real` or
+    /// `instant` leaf has the whole line and cannot cut into a support.
     pub fn validate_hierarchical_leaf_boxes(&self, model: &ir::Model) -> Result<(), String> {
         use crate::run_meta::FitAlgorithm;
-        use sim::inference::types::Transform;
         let Some(method) = &self.inference.method else {
             return Ok(());
         };
@@ -3131,10 +3138,8 @@ impl FitConfig {
             let Some(h) = p.hierarchical() else { continue };
             let Ok(bx) = super::runner::resolve_search_box(name, spec.bounds, p) else { continue };
             let Ok(kind) = super::runner::estimated_kind(p) else { continue };
-            let kept = match super::runner::derive_transform_with_bounds(kind, bx) {
-                Transform::Log { lo, hi } | Transform::Logit { lo, hi } => (lo, hi),
-                Transform::None => continue,
-            };
+            let Ok(transform) = super::runner::derive_transform_with_bounds(kind, bx) else { continue };
+            let kept = transform.bounds();
             if box_cuts_into_support(kept, hierarchical_support(h)) {
                 cut.push(format!(
                     "  {name}: bounds [{}, {}], prior {}",

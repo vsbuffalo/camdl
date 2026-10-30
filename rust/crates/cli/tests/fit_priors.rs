@@ -665,8 +665,8 @@ fn if2_on_an_undeclared_probability_searches_the_unit_interval() {
     assert!(out.status.success(),
         "IF2 over `rho : probability` (no `in [...]`) must run (gh#763); \
          output:\n{log}");
-    assert!(log.contains("logit") && log.contains("[0, 1]"),
-        "the transform table must report a logit over [0, 1]; output:\n{log}");
+    assert!(log.contains("interval") && log.contains("[0, 1]"),
+        "the transform table must report the interval map over [0, 1]; output:\n{log}");
     assert!(!log.contains("[0, inf]"),
         "no search box may be reported as [0, inf]; output:\n{log}");
     assert!(!log.contains("rw_sd=inf"),

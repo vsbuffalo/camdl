@@ -414,8 +414,7 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
             index: compiled.param_index["beta"],
             initial: 0.5,
             rw_sd: 0.05,
-            transform: Transform::Log { lo: 0.1, hi: 2.0 },
-            lower: 0.1, upper: 2.0,
+            transform: Transform::for_domain(0.1, 2.0, true).expect("domain"),
             rw_sd_auto: false, perturb_only_at_t0: false,
         },
     ];
@@ -480,8 +479,7 @@ fn exact_alignment_rejected_on_always_active_event_model() {
         name: "beta".into(),
         index: compiled.param_index["beta"],
         initial: 0.5, rw_sd: 0.05,
-        transform: Transform::Log { lo: 0.1, hi: 2.0 },
-        lower: 0.1, upper: 2.0, rw_sd_auto: false, perturb_only_at_t0: false,
+        transform: Transform::for_domain(0.1, 2.0, true).expect("domain"), rw_sd_auto: false, perturb_only_at_t0: false,
     }];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
     let obs_model = MultiStreamObsModel::empty(compiled.clone());

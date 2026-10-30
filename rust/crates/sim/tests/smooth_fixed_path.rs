@@ -83,23 +83,23 @@ fn observed(model: &Arc<CompiledModel>, times: &[f64], counts: &[f64]) -> MultiS
 /// samples them.
 fn problem(model: &CompiledModel, smooth: bool) -> (Vec<EstimatedParam>, Vec<Prior>) {
     let inf = f64::INFINITY;
-    let ep = |name: &str, transform: Transform, lo: f64, hi: f64, initial: f64| EstimatedParam {
+    let ep = |name: &str, transform: Transform, _lo: f64, _hi: f64, initial: f64| EstimatedParam {
         name: name.into(), index: model.param_index[name], initial, rw_sd: 0.05, transform,
-        lower: lo, upper: hi, rw_sd_auto: false, perturb_only_at_t0: false,
+        rw_sd_auto: false, perturb_only_at_t0: false,
     };
     let normal = |mean: f64, sd: f64| Prior::Fixed(Density::Normal { mean, sd });
     if !smooth {
-        let est = (1..=5).map(|i| ep(&format!("b{i}"), Transform::None, -inf, inf, -1.5)).collect();
+        let est = (1..=5).map(|i| ep(&format!("b{i}"), Transform::Identity, -inf, inf, -1.5)).collect();
         return (est, vec![normal(-1.5, 1.0); 5]);
     }
     let mut est = vec![
-        ep("a", Transform::None, -inf, inf, -1.5),
-        ep("b", Transform::None, -inf, inf, 0.0),
-        ep("tau", Transform::Log { lo: 0.0, hi: f64::INFINITY }, 0.0, f64::INFINITY, 0.2),
+        ep("a", Transform::Identity, -inf, inf, -1.5),
+        ep("b", Transform::Identity, -inf, inf, 0.0),
+        ep("tau", Transform::LowerBounded { lo: 0.0 }, 0.0, f64::INFINITY, 0.2),
     ];
     let mut priors = vec![normal(-1.5, 1.0), normal(0.0, 0.02), Prior::Fixed(Density::Exponential { rate: 5.99 })];
     for i in 1..=3 {
-        est.push(ep(&format!("z_m{i}"), Transform::None, -inf, inf, 0.0));
+        est.push(ep(&format!("z_m{i}"), Transform::Identity, -inf, inf, 0.0));
         priors.push(normal(0.0, 1.0));
     }
     (est, priors)
@@ -154,7 +154,7 @@ fn fixed_path_chain(model: &CompiledModel, path: &PGASTrajectory, obs: &MultiStr
     let to_theta = |u: &[f64]| -> Vec<f64> {
         let mut th = model.default_params.clone();
         for (p, &x) in est.iter().zip(u) {
-            th[p.index] = match p.transform { Transform::Log { .. } => x.exp(), _ => x };
+            th[p.index] = match p.transform { Transform::LowerBounded { .. } => x.exp(), _ => x };
         }
         th
     };
@@ -169,7 +169,7 @@ fn fixed_path_chain(model: &CompiledModel, path: &PGASTrajectory, obs: &MultiStr
             let (lpr, dpr) = log_prior(&priors[i], x);
             total += lpr;
             match est[i].transform {
-                Transform::Log { .. } => {
+                Transform::LowerBounded { .. } => {
                     total += u[i];
                     grad[i] = (g[i] + dpr) * x + 1.0;
                 }
@@ -183,7 +183,7 @@ fn fixed_path_chain(model: &CompiledModel, path: &PGASTrajectory, obs: &MultiStr
     };
     let mut rng = StatefulRng::new(seed);
     let mut u: Vec<f64> = est.iter().map(|p| match p.transform {
-        Transform::Log { .. } => p.initial.ln(), _ => p.initial,
+        Transform::LowerBounded { .. } => p.initial.ln(), _ => p.initial,
     } + 0.1 * rng.normal()).collect();
     let (mut l, mut g) = lp(&u);
     let mut cfg = NUTSConfig { max_tree_depth: 10, step_size: 0.05, mass_matrix: MassMatrix::identity(d) };

@@ -3,7 +3,7 @@
 //! No particle filter, no model: `run_pmmh` takes the likelihood as a closure,
 //! so the adaptation can be driven by a synthetic target whose exact posterior
 //! is known. The target on the transformed scale is a standard normal in `D`
-//! dimensions (`Transform::None` + `Density::Flat` ⇒ posterior = likelihood),
+//! dimensions (`Transform::Identity` + `Density::Flat` ⇒ posterior = likelihood),
 //! for which the optimal random-walk proposal SD is 2.38/√D and the optimal
 //! acceptance rate is known analytically.
 //!
@@ -55,9 +55,7 @@ fn params() -> Vec<EstimatedParam> {
             index: i,
             initial: 0.0,
             rw_sd: 1.0,
-            transform: Transform::None,
-            lower: -50.0,
-            upper: 50.0,
+            transform: Transform::Identity,
             rw_sd_auto: false,
             perturb_only_at_t0: false,
         })

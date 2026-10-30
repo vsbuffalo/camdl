@@ -318,13 +318,13 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
 
     // Build typed CAS inputs.
     let bounds_map: HashMap<String, (f64, f64)> = resolved.estimated.iter()
-        .map(|ep| (ep.name.clone(), (ep.lower, ep.upper)))
+        .map(|ep| (ep.name.clone(), ep.bounds()))
         .collect();
     let estimated_names: Vec<String> = resolved.estimated.iter()
         .map(|ep| ep.name.clone()).collect();
     let stem = crate::hashing::path_stem_slug(&a.model.to_string_lossy());
     let bounds_vec: Vec<(String, f64, f64)> = resolved.estimated.iter()
-        .map(|ep| (ep.name.clone(), ep.lower, ep.upper)).collect();
+        .map(|ep| (ep.name.clone(), ep.bounds().0, ep.bounds().1)).collect();
     let fixed_vec: Vec<(String, f64)> = resolved.fixed.iter()
         .map(|(n, v)| (n.clone(), *v)).collect();
     let data_hashes_vec: Vec<(String, String)> = resolved.data_hashes.iter()
@@ -679,8 +679,8 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
 fn refuse_survey_without_finite_boxes(estimated: &[EstimatedParam]) -> Result<(), String> {
     let open: Vec<String> = estimated
         .iter()
-        .filter(|p| !(p.lower.is_finite() && p.upper.is_finite()))
-        .map(|p| format!("`{}` [{}, {}]", p.name, p.lower, p.upper))
+        .filter(|p| !(p.bounds().0.is_finite() && p.bounds().1.is_finite()))
+        .map(|p| format!("`{}` [{}, {}]", p.name, p.bounds().0, p.bounds().1))
         .collect();
     if open.is_empty() {
         return Ok(());
@@ -900,11 +900,9 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
                     // No kind: no seeded start; resolution refuses it.
                     let kind = p.param_kind;
                     let v = spec.start.or_else(|| bounds.zip(kind).map(|((lo, hi), kind)| {
-                        let transform =
-                            crate::fit::runner::derive_transform_with_bounds(kind, (lo, hi));
-                        let log_scale = matches!(
-                            transform, sim::inference::types::Transform::Log { .. }
-                        );
+                        let log_scale =
+                            crate::fit::runner::derive_transform_with_bounds(kind, (lo, hi))
+                                .is_ok_and(|t| t.log_spaced());
                         crate::fit::init::draw_start_in_bounds(lo, hi, log_scale, a.seed, name)
                     }));
                     if let Some(value) = v {
@@ -1678,27 +1676,24 @@ fn emit_bound_clustering_warning(
 
     let mut warnings: Vec<String> = Vec::new();
     for (i, spec) in estimated.iter().enumerate() {
-        if !spec.lower.is_finite() || !spec.upper.is_finite() { continue; }
+        let (lo, hi) = spec.bounds();
+        if !lo.is_finite() || !hi.is_finite() { continue; }
         let mut vals: Vec<f64> = top.iter().map(|r| r.param_values[i]).collect();
         vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median = vals[vals.len() / 2];
 
-        // For Log-typed bounds (both > 0) measure the pin fraction in
-        // log space — otherwise a Log-bounds [1e-5, 1.0] median of
-        // 1e-4 looks "near the lower bound" on linear scale even
-        // though it's the geometric midpoint.
-        let (frac_to_lo, frac_to_hi) = if matches!(spec.transform,
-            sim::inference::types::Transform::Log { .. })
-            && spec.lower > 0.0 && spec.upper > 0.0
-        {
-            let log_lo = spec.lower.ln();
-            let log_hi = spec.upper.ln();
-            let log_med = median.max(spec.lower).ln();
+        // For a log-spaced domain measure the pin fraction in log space —
+        // otherwise a [1e-5, 1.0] median of 1e-4 looks "near the lower
+        // bound" on linear scale even though it's the geometric midpoint.
+        let (frac_to_lo, frac_to_hi) = if spec.transform.log_spaced() {
+            let log_lo = lo.ln();
+            let log_hi = hi.ln();
+            let log_med = median.max(lo).ln();
             let span = log_hi - log_lo;
             ((log_med - log_lo) / span, (log_hi - log_med) / span)
         } else {
-            let span = spec.upper - spec.lower;
-            ((median - spec.lower) / span, (spec.upper - median) / span)
+            let span = hi - lo;
+            ((median - lo) / span, (hi - median) / span)
         };
 
         if frac_to_lo < BOUND_PIN_FRACTION {
@@ -1706,14 +1701,14 @@ fn emit_bound_clustering_warning(
                 "  '{}' top-{:.0}% median = {} pinned near LOWER bound {} \
                  (within {:.0}% of bound width)",
                 spec.name, top_pct * 100.0,
-                format_param_value_short(median), format_param_value_short(spec.lower),
+                format_param_value_short(median), format_param_value_short(lo),
                 frac_to_lo * 100.0));
         } else if frac_to_hi < BOUND_PIN_FRACTION {
             warnings.push(format!(
                 "  '{}' top-{:.0}% median = {} pinned near UPPER bound {} \
                  (within {:.0}% of bound width)",
                 spec.name, top_pct * 100.0,
-                format_param_value_short(median), format_param_value_short(spec.upper),
+                format_param_value_short(median), format_param_value_short(hi),
                 frac_to_hi * 100.0));
         }
     }
@@ -1756,7 +1751,8 @@ fn emit_start_rank_report(
         let mut d2 = 0.0_f64;
         for (i, spec) in estimated.iter().enumerate() {
             let Some(s) = target[i] else { continue };
-            let span = (spec.upper - spec.lower).max(1e-30);
+            let (lo, hi) = spec.bounds();
+            let span = (hi - lo).max(1e-30);
             let dx = (row.param_values[i] - s) / span;
             d2 += dx * dx;
         }
@@ -2033,12 +2029,12 @@ mod tests {
         let estimated = vec![
             EstimatedParam {
                 name: "beta".into(), index: 0, initial: 0.5, rw_sd: 0.1,
-                transform: Transform::None, lower: 0.0, upper: 1.0,
+                transform: Transform::Identity,
                 rw_sd_auto: false, perturb_only_at_t0: false,
             },
             EstimatedParam {
                 name: "gamma".into(), index: 1, initial: 0.2, rw_sd: 0.1,
-                transform: Transform::None, lower: 0.01, upper: 0.5,
+                transform: Transform::Identity,
                 rw_sd_auto: false, perturb_only_at_t0: false,
             },
         ];
@@ -2081,7 +2077,7 @@ mod tests {
         use sim::inference::types::{Transform, EstimatedParam};
         let estimated = vec![EstimatedParam {
             name: "beta".into(), index: 0, initial: 0.5, rw_sd: 0.1,
-            transform: Transform::None, lower: 0.0, upper: 1.0,
+            transform: Transform::Identity,
             rw_sd_auto: false, perturb_only_at_t0: false,
         }];
         let rows = vec![

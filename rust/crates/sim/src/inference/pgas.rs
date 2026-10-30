@@ -3863,24 +3863,21 @@ pub fn run_pgas(
     // to target 44% acceptance (optimal for 1D MH, Roberts & Rosenthal 2001).
     // The adaptation rate c/√sweep decays to zero, so the proposal stabilizes.
     //
-    // Initial scale: (upper - lower) / 10 on the TRANSFORMED scale, giving
-    // the chain room to explore broadly during early burn-in. The Robbins-Monro
-    // then narrows it to the right scale for each parameter. Starting too
-    // small (e.g., rw_sd × 0.1) causes the chain to get stuck near its
-    // starting values — the adaptation sees ~44% acceptance (because steps
-    // are tiny) and never discovers that larger steps are needed.
+    // Initial scale: five times the parameter's step in z, the rule PMMH and
+    // MH use for their first proposal, else 1.0 in z where the step is not
+    // finite and positive. Robbins-Monro adaptation tunes it during burn-in
+    // whatever it starts at. (This replaced one tenth of the forward map's
+    // spread between `lower.max(1e-10)` and `upper.min(1e10)`, which read a
+    // box the transform did not always keep, gave ~1e9 for an unbounded
+    // `real`, and the floor 0.01 for a box lying below 1e-10.)
     const TARGET_ACCEPTANCE: f64 = 0.44;
     const ADAPT_C: f64 = 2.0; // adaptation speed (higher = faster convergence)
     let adapt_end = config.burn_in; // stop adapting at end of burn-in
 
     let log_proposal_sd: Vec<f64> = if2_params.iter()
         .map(|p| {
-            let lo = p.to_transformed(p.lower.max(1e-10));
-            let hi = p.to_transformed(p.upper.min(1e10));
-            let range = (hi - lo).abs();
-            // 10% of the transformed-scale range: broad enough to explore,
-            // Robbins-Monro will shrink to the right scale within ~200 sweeps
-            (range / 10.0).max(0.01).ln()
+            let step = 5.0 * p.transformed_sd(p.rw_sd, p.initial);
+            if step.is_finite() && step > 0.0 { step.ln() } else { 0.0 }
         })
         .collect();
 
@@ -5011,16 +5008,16 @@ mod prior_grad_tests {
     fn log_param(lo: f64, hi: f64) -> EstimatedParam {
         EstimatedParam {
             name: "p".into(), index: 0, initial: 1.0, rw_sd: 0.1,
-            transform: Transform::Log { lo, hi },
-            lower: lo, upper: hi, rw_sd_auto: false, perturb_only_at_t0: false,
+            transform: Transform::for_domain(lo, hi, true).expect("domain"),
+            rw_sd_auto: false, perturb_only_at_t0: false,
         }
     }
 
-    fn identity_param(lo: f64, hi: f64) -> EstimatedParam {
+    fn identity_param() -> EstimatedParam {
         EstimatedParam {
             name: "p".into(), index: 0, initial: 0.0, rw_sd: 0.1,
-            transform: Transform::None,
-            lower: lo, upper: hi, rw_sd_auto: false, perturb_only_at_t0: false,
+            transform: Transform::Identity,
+            rw_sd_auto: false, perturb_only_at_t0: false,
         }
     }
 
@@ -5066,34 +5063,37 @@ mod prior_grad_tests {
         assert_grad_matches_fd(&Prior::Fixed(Density::HalfNormal { sigma: 1.0 }), &lp, &[-1.0, 0.0, 1.0]);
         assert_grad_matches_fd(&Prior::Fixed(Density::Gamma { shape: 2.0, rate: 1.5 }), &lp, &[-1.0, 0.0, 1.0]);
         assert_grad_matches_fd(&Prior::Fixed(Density::Exponential { rate: 0.7 }), &lp, &[-1.0, 0.0, 1.0]);
-        let ip = identity_param(-5.0, 5.0);
+        let ip = identity_param();
         assert_grad_matches_fd(&Prior::Fixed(Density::Normal { mean: 0.3, sd: 0.8 }), &ip, &[-1.0, 0.0, 1.0]);
     }
 
     #[test]
     fn log_uniform_grad_matches_fd() {
-        // On the Log transform the z-scale density is flat → gradient 0.
+        // On the log-interval map of its own box, log_uniform is uniform in
+        // ln θ = ln lo + L·σ(z), so z has the logistic density σ(z)σ(−z) and
+        // the target gradient is −tanh(z/2).
         let p = log_param(1e-5, 1e-2);
-        let zs = [(1e-4_f64).ln(), (1e-3_f64).ln(), (5e-3_f64).ln()];
-        assert_grad_matches_fd(&Prior::Fixed(Density::LogUniform { lower: 1e-5, upper: 1e-2 }), &p, &zs);
-        // And it really is flat (gradient ≈ 0 everywhere interior).
+        assert!(matches!(p.transform, Transform::LogInterval { .. }));
+        let zs = [-2.0, 0.0, 1.5];
+        let prior = Prior::Fixed(Density::LogUniform { lower: 1e-5, upper: 1e-2 });
+        assert_grad_matches_fd(&prior, &p, &zs);
         for &z in &zs {
-            assert!(target_grad(&Prior::Fixed(Density::LogUniform { lower: 1e-5, upper: 1e-2 }), &p, z).abs() < 1e-9);
+            let g = target_grad(&prior, &p, z);
+            assert!((g + (z / 2.0_f64).tanh()).abs() < 1e-9, "z={z}: gradient {g}");
         }
     }
 
     #[test]
     fn truncated_normal_grad_matches_fd() {
         // Identity transform, bounds = truncation support.
-        let ip = identity_param(0.3, 1.0);
+        let ip = identity_param();
         assert_grad_matches_fd(
             &Prior::Fixed(Density::TruncatedNormal { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 }),
             &ip, &[0.4, 0.7, 0.95]);
         // Logit transform onto [0.3, 1.0] — bounds equal truncation support.
         let lp = EstimatedParam {
             name: "p".into(), index: 0, initial: 0.7, rw_sd: 0.1,
-            transform: Transform::Logit { lo: 0.3, hi: 1.0 },
-            lower: 0.3, upper: 1.0, rw_sd_auto: false, perturb_only_at_t0: false,
+            transform: Transform::Interval { lo: 0.3, hi: 1.0 }, rw_sd_auto: false, perturb_only_at_t0: false,
         };
         assert_grad_matches_fd(
             &Prior::Fixed(Density::TruncatedNormal { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 }),

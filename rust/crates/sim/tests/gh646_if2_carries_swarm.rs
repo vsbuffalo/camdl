@@ -74,9 +74,7 @@ fn spec(name: &str, index: usize) -> EstimatedParam {
         index,
         initial: 1.0,
         rw_sd: RW_SD,
-        transform: Transform::Log { lo: 1e-4, hi: 1e4 },
-        lower: 1e-4,
-        upper: 1e4,
+        transform: Transform::for_domain(1e-4, 1e4, true).expect("domain"),
         perturb_only_at_t0: false,
         rw_sd_auto: false,
     }
