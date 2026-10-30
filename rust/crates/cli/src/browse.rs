@@ -472,30 +472,50 @@ fn show_fit_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
 }
 
 /// The directories `fit predict` wrote for a fit envelope, each with the
-/// segment-relative prefix its files are listed under (gh#896): the named
-/// run's `predict/<run id>/` (prefix ""), else the folder's one run's, else —
-/// a folder holding several runs — every run's that exists, prefixed
-/// `predict/<run id>/` so a listed path is one `cat --stream` takes.
+/// segment-relative prefix its files are listed under (gh#896). For one run —
+/// the named one, or the folder's only one — one directory is listed bare
+/// (prefix ""): its default-options `predict/<run id>/`, or, when that does
+/// not exist and the run was predicted under exactly one set of options,
+/// that `predict/<run id>-<key>/`; every other directory of the run is listed
+/// under its own prefix. For a folder holding several runs, every run's
+/// directories are listed under their prefixes. A listed path is one
+/// `cat --stream` takes.
 fn envelope_outputs(segment: &Path, run: Option<&str>) -> Vec<(PathBuf, String)> {
-    use crate::fit::fit_view::predictions_dir;
-    if let Some(id) = run {
-        return vec![(predictions_dir(segment, id), String::new())];
-    }
-    let ids: Vec<String> = crate::fit::fit_view::FitView::read(segment)
-        .map(|v| v.stages.into_iter().map(|s| s.run_id).collect())
-        .unwrap_or_default();
-    match ids.as_slice() {
-        [one] => vec![(predictions_dir(segment, one), String::new())],
-        _ => ids
-            .iter()
-            .map(|id| predictions_dir(segment, id))
-            .filter(|d| d.is_dir())
-            .map(|d| {
-                let rel = d.strip_prefix(segment).unwrap_or(&d).display().to_string();
-                (d, format!("{rel}/"))
+    let ids: Vec<String> = match run {
+        Some(id) => vec![id.to_string()],
+        None => crate::fit::fit_view::FitView::read(segment)
+            .map(|v| v.stages.into_iter().map(|s| s.run_id).collect())
+            .unwrap_or_default(),
+    };
+    let single = ids.len() == 1;
+    let mut out: Vec<(PathBuf, String)> = Vec::new();
+    for id in &ids {
+        let bare = crate::fit::fit_view::predictions_dir(segment, id, None);
+        let stem = bare.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(segment.join("predict"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|d| {
+                let n = d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                d.is_dir() && (n.starts_with(&format!("{stem}-")) || (!single && n == stem))
             })
-            .collect(),
+            .collect();
+        dirs.sort();
+        if single {
+            if bare.is_dir() || dirs.len() != 1 {
+                out.push((bare.clone(), String::new()));
+            } else {
+                out.push((dirs.remove(0), String::new()));
+            }
+        }
+        for d in dirs {
+            let rel = d.strip_prefix(segment).unwrap_or(&d).display().to_string();
+            out.push((d, format!("{rel}/")));
+        }
     }
+    out
 }
 
 /// Every address of one artifact family under a fit segment, sorted: the bare

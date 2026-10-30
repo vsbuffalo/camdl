@@ -199,12 +199,19 @@ pub fn leaf_segment(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Where `fit predict` writes for one run: `<segment>/predict/<run id, 12 hex>/`
-/// (gh#896). Keyed by the run, so two runs of one problem keep separate
-/// predictives, and outside the leaf, whose exact-set manifest admits no
-/// regenerated files. The full run id is recorded in the manifests written
-/// there (`predictive.json`, `observed.json`).
-pub fn predictions_dir(segment: &Path, run_id: &str) -> PathBuf {
-    segment.join("predict").join(&run_id[..12.min(run_id.len())])
+/// (gh#896), or `<run id, 12 hex>-<options key>/` when the predict was run
+/// with non-default options (`fit::predict::PredictOptions::address_key`).
+/// Keyed by the run, so two runs of one problem keep separate predictives,
+/// and by the options, so a `--n-draws 3` predict does not overwrite the
+/// default one; outside the leaf, whose exact-set manifest admits no
+/// regenerated files. The full run id and the options are recorded in the
+/// manifests written there (`predictive.json`, `observed.json`, `report.json`).
+pub fn predictions_dir(segment: &Path, run_id: &str, options_key: Option<&str>) -> PathBuf {
+    let run = &run_id[..12.min(run_id.len())];
+    segment.join("predict").join(match options_key {
+        Some(k) => format!("{run}-{k}"),
+        None => run.to_string(),
+    })
 }
 
 /// The `run_id` (full hex) a fit leaf's `run.json` records, when `dir` is one.
