@@ -1468,7 +1468,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         }),
         nlopt: matches!(profile_algo, ProfileAlgo::Nlopt(_)).then(|| ProfileNloptKnobs {
             tolerance: nl_tolerance, max_evals: nl_max_evals,
-            dt: dt, starts: n_starts,
+            dt, starts: n_starts,
         }),
         rw_sd: &rw_sd_blob,
         rw_sd_auto,
