@@ -1,0 +1,5 @@
+seed	arm	burn_in	divergent	tau_warmup_q05_q95	tau_kept_q05_q95	rhat_beta	bulk_ess_beta	tail_ess_beta	metric_logtau_sd	kept_logtau_sd	logtau_div_median	logtau_all_median	div_above_tau_q90
+31	baseline	1000	495	0.003-0.194	0.004-0.211	1.037	87	34	0.797	1.316	-1.765	-2.941	0.394
+31	long_warmup	3000	275	0.004-0.255	0.003-0.179	1.061	66	31	1.119	1.284	-2.038	-3.104	0.349
+59	baseline	1000	472	0.009-0.265	0.007-0.278	1.079	57	102	0.559	1.194	-1.55	-2.423	0.456
+59	long_warmup	3000	292	0.005-0.291	0.004-0.250	1.039	67	34	1.107	1.386	-1.435	-2.729	0.644

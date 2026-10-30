@@ -1,0 +1,9 @@
+seed	starts	draws	coefs_inside_99	outside	worst_curve_error	passes
+23	from_prior	12000	5	-	0.174	true
+23	if2_starts	12000	5	-	0.185	true
+31	from_prior	12000	5	-	0.103	true
+31	if2_starts	12000	5	-	0.1	true
+47	from_prior	12000	5	-	0.104	true
+47	if2_starts	12000	5	-	0.078	true
+59	from_prior	12000	5	-	0.114	true
+59	if2_starts	12000	5	-	0.094	true

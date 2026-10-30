@@ -1,0 +1,39 @@
+# Prior-only bisection fixture, no spline: the level a, slope b, scale tau and four modes of the smooth fixture, as scalars entering one rate.
+# X0 = 0, so every flow is zero, and the one observation stream has every
+# value missing in the test: the complete-data likelihood is constant and
+# PGAS+NUTS should draw the priors exactly.
+
+time_unit = 'days
+
+compartments { X, D }
+
+parameters {
+  a  : real ~ normal(mu = -1.0, sigma = 0.6)
+  b  : real ~ normal(mu = 0.0, sigma = 0.01)
+  tau : positive in [1e-6, 2.5] ~ exponential(rate = 5.99)
+  z1 : real ~ normal(mu = 0.0, sigma = 1.0)
+  z2 : real ~ normal(mu = 0.0, sigma = 1.0)
+  z3 : real ~ normal(mu = 0.0, sigma = 1.0)
+  z4 : real ~ normal(mu = 0.0, sigma = 1.0)
+}
+
+transitions {
+  decay : X --> D @ exp(a + b + tau * (z1 + z2 + z3 + z4)) * 1.0 'per_day * X
+}
+
+init { X = 0 }
+
+observations {
+  removals {
+    columns       { time : time, removals : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(decay)
+    emit_schedule = every 1 'days
+    removals      ~ poisson(rate = projected)
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 60 'days
+}

@@ -1,0 +1,9 @@
+seed	form	tuning	wall_s	kept_per_chain	divergent	leapfrog_mean	renewal_mean	rhat_z	ess_z	ess_per_s_z	rhat_tau	ess_tau	ess_per_s_tau	rhat_a	ess_a	ess_per_s_a	rhat_b	ess_b	ess_per_s_b	rhat_w	ess_w	ess_per_s_w	rhat_beta	ess_beta	ess_per_s_beta	rhat_Reff	ess_Reff	ess_per_s_Reff
+23	explicit	single	79.2	3000	0	5.6	0.785													1.099	34	0.43	1.075	47	0.6	1.074	47	0.59
+31	explicit	single	103.8	3000	0	7.3	0.782													1.073	43	0.41	1.063	51	0.49	1.06	54	0.52
+47	explicit	single	105.8	3000	0	5.5	0.78													1.065	73	0.69	1.053	83	0.79	1.052	83	0.79
+59	explicit	single	93.5	3000	0	7.1	0.788													1.186	20	0.22	1.152	24	0.26	1.15	24	0.26
+23	smooth	single	237.2	3000	95	24.6	0.786	1.022	206	0.87	1.065	66	0.28	1.003	361	1.52	1.017	160	0.67	1.053	69	0.29	1.049	72	0.3	1.05	71	0.3
+31	smooth	single	226.4	3000	273	15.1	0.784	1.056	88	0.39	1.19	15	0.07	1.146	20	0.09	1.059	52	0.23	1.17	17	0.08	1.134	22	0.1	1.135	22	0.1
+47	smooth	single	191.5	3000	29	17.9	0.778	1.022	270	1.41	1.081	45	0.24	1.009	503	2.62	1.015	268	1.4	1.061	78	0.41	1.068	49	0.26	1.07	50	0.26
+59	smooth	single	239.9	3000	55	22.0	0.786	1.019	166	0.69	1.025	103	0.43	1.015	333	1.39	1.004	309	1.29	1.034	98	0.41	1.037	83	0.34	1.037	83	0.35

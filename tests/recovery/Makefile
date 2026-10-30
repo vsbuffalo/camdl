@@ -18,6 +18,10 @@
 #   make -f tests/recovery/Makefile survey     # likelihood survey — best-ll bar
 #   make -f tests/recovery/Makefile all        # synth + the three fits
 #   make -f tests/recovery/Makefile clean      # remove generated data + results
+#   make -f tests/recovery/Makefile smooth-diagnosis   # pgas sampling diagnosis (≈1 h)
+#   make -f tests/recovery/Makefile calibrate-smooth-prior
+#                                              # the smooth scale prior's calibration
+#                                              # table (committed; scipy/numpy pinned)
 #
 # Append `--progress plain` to any target for the CI/plain bar form, or
 # `--no-progress` to silence. Uses `cargo run` (dev build) so it works from a
@@ -80,3 +84,105 @@ all: if2 pgas pmmh ## synth + all three fits
 
 clean: ## remove generated data/ + results/
 	rm -rf $(CASE)/data $(CASE)/results
+
+# Proposal 2026-10-27-estimable-bsplines §6.5: the prior-predictive table the
+# smooth scale prior tau ~ exponential(lambda) is calibrated from. Committed;
+# byte-identical on re-run (fixed seed, pinned scipy/numpy). Cross-checked
+# against camdl's own whitening by rust/crates/sim/tests/bspline_harness.rs.
+# Sampling diagnosis of the smooth and explicit R3 recovery fits through
+# `camdl fit run` (release build; about an hour): the four recovery datasets
+# from the R3 tests, then scripts/diagnose_smooth_sampling.py. Writes under
+# cases/spline_seir/results/diagnosis/ (not committed: timings vary).
+DIAG := $(HERE)/cases/spline_seir/results/diagnosis
+.PHONY: smooth-diagnosis
+smooth-diagnosis:
+	cd $(REPO)/rust && cargo build --quiet --release -p cli
+	cd $(REPO)/rust && CAMDL_RECOVERY_DATA_DIR=$(DIAG)/data cargo test --quiet --release -p sim \
+	  --test bspline_inference write_recovery_datasets -- --ignored
+	cd $(REPO) && CAMDLC=$(CAMDLC_PATH) uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 \
+	  --with polars==2.1.0 --with arviz==1.3.0 python scripts/diagnose_smooth_sampling.py \
+	  --data-dir $(DIAG)/data --out-dir $(DIAG) --camdl rust/target/release/camdl --repo . $(if $(ONLY),--only $(ONLY))
+
+# Per-chain divergence report over whatever smooth-diagnosis runs exist
+# (scripts/report_smooth_divergences.py → results/diagnosis/divergence_report.tsv).
+.PHONY: smooth-divergence-report
+smooth-divergence-report:
+	cd $(REPO) && uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 --with polars==2.1.0 \
+	  --with arviz==1.3.0 python scripts/report_smooth_divergences.py --diag-dir $(DIAG)
+
+# Stuck-chain test over the default smooth-diagnosis runs: marginal pfilter
+# log-likelihood at each chain's θ, and a PGAS restart at that θ with a fresh
+# latent path (scripts/diagnose_stuck_chains.py → results/diagnosis/stuck_chains.tsv).
+.PHONY: smooth-stuck-chains
+smooth-stuck-chains:
+	cd $(REPO) && CAMDLC=$(CAMDLC_PATH) uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 \
+	  --with polars==2.1.0 --with arviz==1.3.0 python scripts/diagnose_stuck_chains.py \
+	  --diag-dir $(DIAG) --camdl rust/target/release/camdl --repo .
+
+# Experimental, opt-in: PGAS chains started around distinct IF2 solutions,
+# each with its own latent path (scripts/diagnose_multistart.py →
+# results/diagnosis/multistart/). Changes no default. About two hours.
+.PHONY: smooth-multistart
+smooth-multistart:
+	cd $(REPO) && CAMDLC=$(CAMDLC_PATH) uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 \
+	  --with polars==2.1.0 --with arviz==1.3.0 python scripts/diagnose_multistart.py \
+	  --data-dir $(DIAG)/data --out-dir $(DIAG)/multistart --camdl rust/target/release/camdl --repo .
+
+# H1 vs H2 for the smooth divergences: the smooth multistart chains of seeds
+# 31 and 59 rerun from the same starts and seed with burn_in 3,000 instead of
+# 1,000 (scripts/diagnose_warmup_length.py → results/diagnosis/warmup/).
+# Needs smooth-multistart first. About forty minutes.
+.PHONY: smooth-warmup-length
+smooth-warmup-length:
+	cd $(REPO) && CAMDLC=$(CAMDLC_PATH) uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 \
+	  --with polars==2.1.0 --with arviz==1.3.0 python scripts/diagnose_warmup_length.py \
+	  --multistart-dir $(DIAG)/multistart --out-dir $(DIAG)/warmup --camdl rust/target/release/camdl
+
+# R3's recovery pass criteria for the explicit form on the from_prior and the
+# IF2-started fit-run draws (scripts/r3c_explicit_criteria.py →
+# results/diagnosis/r3c_explicit.tsv). Needs smooth-diagnosis and smooth-multistart.
+.PHONY: r3c-explicit
+r3c-explicit:
+	cd $(REPO) && uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 --with polars==2.1.0 \
+	  --with arviz==1.3.0 python scripts/r3c_explicit_criteria.py --diag-dir $(DIAG)
+
+# The diagnosis result tables, TSV only, copied from the ignored results/ tree
+# into the committed cases/spline_seir/diagnosis/ (the runs themselves stay
+# uncommitted; these are their summaries).
+DIAG_TABLES := summary_default.tsv summary_single.tsv summary_rung4c.tsv summary_depth.tsv \
+  divergences_default.tsv divergences_rung4c.tsv divergence_report.tsv stuck_chains.tsv \
+  r3c_explicit.tsv multistart/multistart_summary.tsv multistart/multistart_solutions.tsv \
+  warmup/warmup_length.tsv
+.PHONY: diagnosis-extract
+diagnosis-extract:
+	@mkdir -p $(HERE)/cases/spline_seir/diagnosis
+	@for f in $(DIAG_TABLES); do cp $(DIAG)/$$f $(HERE)/cases/spline_seir/diagnosis/$$(echo $$f | tr / _); done
+	@ls $(HERE)/cases/spline_seir/diagnosis
+
+# The §8.2 benchmark of the explicit form (proposal §8.2, §8.4).
+# k12-truth: the truth β(t) table the generating model reads (committed).
+# k12-data: 182 daily onsets simulated from seir_k12_truth at
+#   cases/spline_k12/truth.toml, seed 8 (ignored results/).
+# k12-benchmark: PGAS, the β(t) plot and IF2 + pfilter scores
+#   (scripts/k12_benchmark.py); tables and plot to the committed
+#   docs/dev/notes/assets/2026-10-29-explicit-bspline-benchmark/. About 30 minutes.
+K12 := $(HERE)/cases/spline_k12
+K12_OUT := $(REPO)/docs/dev/notes/assets/2026-10-29-explicit-bspline-benchmark
+.PHONY: k12-truth k12-data k12-benchmark
+k12-truth:
+	cd $(REPO) && python3 scripts/gen_k12_truth.py --out tests/fixtures/bspline_inference/beta_true.tsv
+k12-data:
+	cd $(REPO)/rust && cargo build --quiet --release -p cli
+	cd $(K12) && CAMDLC=$(CAMDLC_PATH) $(REPO)/rust/target/release/camdl simulate \
+	  $(REPO)/tests/fixtures/bspline_inference/seir_k12_truth.camdl --params truth.toml \
+	  --backend chain_binomial --seed 8 --obs-only-dir results/data
+k12-benchmark: k12-data
+	cd $(REPO) && CAMDLC=$(CAMDLC_PATH) uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 \
+	  --with polars==2.1.0 --with arviz==1.3.0 --with matplotlib==3.10.7 python scripts/k12_benchmark.py \
+	  --data $(K12)/results/data/onsets.tsv --work-dir $(K12)/results --out-dir $(K12_OUT) \
+	  --camdl rust/target/release/camdl --repo .
+
+.PHONY: calibrate-smooth-prior
+calibrate-smooth-prior:
+	cd $(REPO) && uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 python \
+	  scripts/calibrate_smooth_prior.py --out tests/recovery/cases/spline_seir/smooth_prior_calibration.tsv

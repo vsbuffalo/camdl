@@ -1,0 +1,46 @@
+# Rung fixture (nuts_rungs.rs): the smooth spline with tau unboxed and
+# X0 = 10^4, every observation missing: PGAS conditions NUTS on a latent
+# path that does depend on the parameters, so p(theta | X) is not the prior.
+
+time_unit = 'days
+
+dimensions { mode = [m1, m2, m3, m4] }
+
+compartments { X, D }
+
+parameters {
+  a       : real 'ratio ~ normal(mu = -1.0, sigma = 0.6)
+  b       : real [1/T] ~ normal(mu = 0.0, sigma = 0.01)
+  tau     : positive 'ratio ~ exponential(rate = 5.99)
+  z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
+}
+
+forcing {
+  f : bspline 'per_day {
+    window  = [0 'days, 60 'days]
+    n_basis = 6
+    link    = log
+    coefs   = smooth(level = a, slope = b, scale = tau, modes = z, per = 1 'weeks)
+  }
+}
+
+transitions {
+  decay : X --> D @ f * X
+}
+
+init { X = 10000 }
+
+observations {
+  removals {
+    columns       { time : time, removals : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(decay)
+    emit_schedule = every 1 'days
+    removals      ~ poisson(rate = projected)
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 60 'days
+}

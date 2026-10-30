@@ -1,0 +1,35 @@
+# Prior-only bisection fixture, no spline: only tau, an exponential prior on
+# the log scale, with no search box (the log transform then has no bounds to
+# saturate at).
+# X0 = 0, so every flow is zero, and the one observation stream has every
+# value missing in the test: the complete-data likelihood is constant and
+# PGAS+NUTS should draw the priors exactly.
+
+time_unit = 'days
+
+compartments { X, D }
+
+parameters {
+  tau : positive ~ exponential(rate = 5.99)
+}
+
+transitions {
+  decay : X --> D @ tau * 1.0 'per_day * X
+}
+
+init { X = 0 }
+
+observations {
+  removals {
+    columns       { time : time, removals : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(decay)
+    emit_schedule = every 1 'days
+    removals      ~ poisson(rate = projected)
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 60 'days
+}
