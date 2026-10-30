@@ -429,11 +429,18 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
         );
     };
     order("predictive/weekly_cases.tsv", "predictive-excl1,3/weekly_cases.tsv");
-    order("\n  predictive.json", "predictive-excl1,3.json");
+    order("/predictive.json", "predictive-excl1,3.json");
 
     // …and the name `show` prints is a name `cat --stream` takes, so the
     // discovery loop closes: no keyed artifact is listed but unreachable.
-    let out = run(&bin, &f.tmp, &["cat", &seg, "--stream", "predictive-excl3/weekly_cases.tsv"]);
+    // `--horizon free_forward` keys the predict's address (gh#896), so its
+    // files are listed and read under `predict/<dir>/`.
+    let prefix = format!(
+        "predict/{}/",
+        predict_out(&f.seg).file_name().unwrap().to_string_lossy()
+    );
+    let stream = format!("{prefix}predictive-excl3/weekly_cases.tsv");
+    let out = run(&bin, &f.tmp, &["cat", &seg, "--stream", &stream]);
     assert_ok(&out, "camdl cat --stream predictive-excl3/weekly_cases.tsv");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),

@@ -842,3 +842,26 @@ dt = 1.0
     p.ok(&["fit", "run", "synth.toml", "--seed", "1"]);
     p.ok(&["fit", "summary", "synth.toml"]);
 }
+
+/// In `camdl show`/`cat` of a fit, a bare path (`predictive/…`) always means
+/// the run's default-options predict, and an options-keyed predict is always
+/// named under its `predict/<dir>/` prefix, so one path never names different
+/// artifacts as predicts come and go.
+#[test]
+fn bare_envelope_paths_mean_the_default_options_only() {
+    let p = Project::new();
+    p.config("post.toml", &pgas(7));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "post"]);
+    p.ok(&["fit", "predict", "@post", "--horizon", "free_forward", "--n-draws", "3"]);
+    let root = p.dir().join("results").to_string_lossy().into_owned();
+
+    let out = p.run(&["cat", "@post", "--stream", "predictive/weekly_cases.tsv", "--root", &root]);
+    assert!(!out.status.success(),
+        "no default-options predict exists, so the bare path names nothing:\n{}", text(&out));
+    let show = p.ok(&["show", "@post", "--root", &root]);
+    let keyed = show.lines().map(str::trim)
+        .find(|l| l.starts_with("predict/") && l.ends_with("/predictive/weekly_cases.tsv"))
+        .unwrap_or_else(|| panic!("the keyed predict is listed under its prefix:\n{show}"))
+        .to_string();
+    p.ok(&["cat", "@post", "--stream", &keyed, "--root", &root]);
+}

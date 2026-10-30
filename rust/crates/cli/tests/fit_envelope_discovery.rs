@@ -144,7 +144,9 @@ thin = 1
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"],
+        // Default options: their outputs are the bare paths `show`/`cat`
+        // name (gh#896).
+        &["fit", "predict", "--fit", "fit.toml"],
     );
     assert!(
         out.status.success(),

@@ -473,11 +473,11 @@ fn show_fit_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
 
 /// The directories `fit predict` wrote for a fit envelope, each with the
 /// segment-relative prefix its files are listed under (gh#896). For one run —
-/// the named one, or the folder's only one — one directory is listed bare
-/// (prefix ""): its default-options `predict/<run id>/`, or, when that does
-/// not exist and the run was predicted under exactly one set of options,
-/// that `predict/<run id>-<key>/`; every other directory of the run is listed
-/// under its own prefix. For a folder holding several runs, every run's
+/// the named one, or the folder's only one — its default-options
+/// `predict/<run id>/` is listed bare (prefix ""), and every options-keyed
+/// `predict/<run id>-<key>/` under its own prefix, so a bare path always
+/// means the default options and never names a different artifact as
+/// predicts come and go. For a folder holding several runs, every run's
 /// directories are listed under their prefixes. A listed path is one
 /// `cat --stream` takes.
 fn envelope_outputs(segment: &Path, run: Option<&str>) -> Vec<(PathBuf, String)> {
@@ -504,11 +504,7 @@ fn envelope_outputs(segment: &Path, run: Option<&str>) -> Vec<(PathBuf, String)>
             .collect();
         dirs.sort();
         if single {
-            if bare.is_dir() || dirs.len() != 1 {
-                out.push((bare.clone(), String::new()));
-            } else {
-                out.push((dirs.remove(0), String::new()));
-            }
+            out.push((bare.clone(), String::new()));
         }
         for d in dirs {
             let rel = d.strip_prefix(segment).unwrap_or(&d).display().to_string();
