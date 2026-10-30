@@ -1717,18 +1717,22 @@ fn run_simulate(a: &args::SimulateArgs) {
             // gh#896: the draws are one run's. `--fit` is a fit handle
             // (`@label`, a leaf or problem-folder directory, a run-id prefix,
             // a fit.toml) resolved to the run it names; a folder holding
-            // several runs is refused with them listed rather than one picked
-            // by directory order. A bare directory holding a draws.tsv is
-            // taken as named.
+            // several runs with posterior draws is refused with them listed
+            // rather than one picked by directory order; runs without draws
+            // (an optimizer beside a sampler) are no rival. A bare directory
+            // holding a draws.tsv is taken as named.
             let fit_ref: &String = &if std::path::Path::new(fit_handle).join("draws.tsv").is_file() {
                 fit_handle.clone()
             } else {
-                crate::fit::handle::resolve_leaf(fit_handle)
-                    .map(|leaf| leaf.dir.to_string_lossy().into_owned())
+                let (leaf, note) = crate::fit::handle::resolve_run_with_draws(fit_handle)
                     .unwrap_or_else(|e| {
                         eprintln!("error: --fit {fit_handle}: {e}");
                         std::process::exit(1);
-                    })
+                    });
+                if let Some(note) = note {
+                    eprintln!("draws: {note}");
+                }
+                leaf.dir.to_string_lossy().into_owned()
             };
             if matches!(init_state_arg, Some(InitStateSourceArg::Fit)) {
                 let (rows, source) = resolve_paired_posterior(

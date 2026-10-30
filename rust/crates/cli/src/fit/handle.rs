@@ -345,6 +345,43 @@ pub fn resolve_leaf(s: &str) -> Result<LeafRef, ResolveError> {
     }
 }
 
+/// A handle to the one run whose posterior draws a reader replays (gh#896): a
+/// run handle names its run; a problem folder names its one completed run
+/// that wrote a `draws.tsv`, so an optimizer run beside a sampler run is not
+/// a rival. Several such runs are refused with them listed. Returns the run
+/// and, when the folder also held runs without draws, a note saying which
+/// run was used.
+pub fn resolve_run_with_draws(s: &str) -> Result<(LeafRef, Option<String>), ResolveError> {
+    match resolve_target(s)? {
+        FitTarget::Leaf(leaf) => Ok((leaf, None)),
+        FitTarget::Segment(segment) => {
+            let all = completed_leaves(&segment);
+            let total = all.len();
+            let mut with_draws: Vec<crate::cas_read::Leaf> =
+                all.into_iter().filter(|l| l.dir.join("draws.tsv").is_file()).collect();
+            match with_draws.len() {
+                0 => Err(ResolveError::NotFound(format!(
+                    "{} holds no completed run with posterior draws (draws.tsv); \
+                     a sampler (pgas, pmmh, mh) writes them",
+                    segment.display()
+                ))),
+                1 => {
+                    let leaf = with_draws.remove(0);
+                    let note = (total > 1).then(|| {
+                        format!(
+                            "{} holds {total} runs; using the one with posterior draws, {}",
+                            segment.display(),
+                            leaf.dir.display()
+                        )
+                    });
+                    Ok((LeafRef::of(leaf), note))
+                }
+                _ => Err(ResolveError::AmbiguousRuns { handle: s.to_string(), runs: with_draws }),
+            }
+        }
+    }
+}
+
 /// The one completed run in a problem folder, or a refusal: none, or several
 /// listed with what sets them apart.
 fn only_run(handle: &str, segment: &Path) -> Result<LeafRef, ResolveError> {
