@@ -228,6 +228,10 @@ impl OptimizerConvergence {
         if !self.all_chains_converged() {
             return "fail_status";
         }
+        // One converged chain: neither leg had two chains to compare.
+        if self.n_converged < 2 {
+            return "not_assessed";
+        }
         match (self.chain_agreement_failed, self.decibans_failed) {
             (false, false) => "pass",
             (true, false) => "fail_chain_agreement",

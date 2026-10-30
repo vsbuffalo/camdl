@@ -1561,7 +1561,9 @@ impl Formatter {
             s.push_str(&format!("    decibans leg:    {} (loglik-eval data not present)\n",
                 self.dim("—")));
         }
-        let overall = if assessed.is_incomplete() {
+        let overall = if assessed.is_not_assessed() {
+            self.warn("— NOT ASSESSED (one chain: nothing to compare between chains)")
+        } else if assessed.is_incomplete() {
             self.warn("— INCOMPLETE (not a pass)")
         } else if assessed.passes() {
             self.ok("✓ PASS")
@@ -3057,7 +3059,8 @@ fn if2_stage_report(
     let threshold_db = assessed.spread.map(|leg| leg.threshold_db);
     let sigma_max = assessed.spread.map(|leg| leg.sigma_max);
     let db_passes = assessed.spread.map(|leg| leg.passes());
-    let overall_pass = Some(assessed.passes());
+    // `None` when nothing was assessed (one chain): neither a pass nor a fail.
+    let overall_pass = (!assessed.is_not_assessed()).then(|| assessed.passes());
     let a_unavailable = assessed.unavailable.clone();
 
     let gate = GateReport {
@@ -4149,6 +4152,18 @@ mod tests {
         assert!(block.contains("max Â = 16.500 (I0)"), "{block}");
         assert!(block.contains("dynamics only (without perturb_only_at_t0): ✓"), "{block}");
         assert!(block.contains("FAIL"), "{block}");
+    }
+
+    /// One chain: no Â and no decibans spread. The block must not say PASS.
+    #[test]
+    fn a_one_chain_gate_block_says_not_assessed() {
+        let mut state = synthetic_fit_state();
+        state.n_chains = 1;
+        state.tail_chain_agreement.clear();
+        state.chain_eval_logliks = vec![-3804.9];
+        state.chain_eval_ses = vec![1.0];
+        let block = plain_formatter().gate_verdict_block(&state);
+        assert!(block.contains("NOT ASSESSED") && !block.contains("PASS"), "{block}");
     }
 
     #[test]
@@ -6172,7 +6187,7 @@ mod tests {
             best_loglik: -3804.9,
             best_chain: ChainIndex(1),
             theta_hat: BTreeMap::new(),
-            max_chain_agreement: 1.04,
+            max_chain_agreement: Some(1.04),
             gate_verdict: crate::fit::method_result::GateVerdict::Pass,
             ess_at_mle: None,
             n_chains: 8,

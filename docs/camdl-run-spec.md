@@ -5587,16 +5587,16 @@ stale, stale_reason
 `gate_verdict` is the method's convergence verdict, the one `fit summary` and a
 `from_mle` / `from_posterior` source check read:
 
-| value                  | method    | meaning                                                                                                                            |
-| ---------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `pass`                 | if2, nl-* | every leg passes                                                                                                                   |
-| `fail_a`               | if2       | some estimated parameter's tail chain agreement Â (initial-state ones included) is at or above the threshold                       |
-| `fail_db`              | if2, nl-* | the chains' log-likelihoods spread past the decibans floor                                                                         |
-| `fail_both`            | if2, nl-* | both                                                                                                                               |
-| `incomplete`           | if2       | no Â failed, but some Â is not finite (within-chain variance collapsed): not a pass, and the decibans leg does not stand in for it |
-| `fail_chain_agreement` | nl-*      | the converged chains' estimates disagree                                                                                           |
-| `fail_status`          | nl-*      | a chain ran out of evaluations or failed                                                                                           |
-| `not_assessed`         | nl-*      | the leaf predates the recorded optimizer verdict; re-run it with `--force`                                                         |
+| value                  | method    | meaning                                                                                                                                                                                                                                                 |
+| ---------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pass`                 | if2, nl-* | every leg passes                                                                                                                                                                                                                                        |
+| `fail_a`               | if2       | some estimated parameter's tail chain agreement Â (initial-state ones included) is at or above the threshold                                                                                                                                            |
+| `fail_db`              | if2, nl-* | the chains' log-likelihoods spread past the decibans floor                                                                                                                                                                                              |
+| `fail_both`            | if2, nl-* | both                                                                                                                                                                                                                                                    |
+| `incomplete`           | if2       | no Â failed, but some Â is not finite (within-chain variance collapsed): not a pass, and the decibans leg does not stand in for it                                                                                                                      |
+| `fail_chain_agreement` | nl-*      | the converged chains' estimates disagree                                                                                                                                                                                                                |
+| `fail_status`          | nl-*      | a chain ran out of evaluations or failed                                                                                                                                                                                                                |
+| `not_assessed`         | if2, nl-* | nothing was assessed: one chain (one converged nl-* chain), so there is nothing to compare between chains; or an nl-* leaf that predates the recorded optimizer verdict (re-run it with `--force`). Not a pass, though a starts-source check accepts it |
 
 For an optimizer method `converged` is true exactly when `gate_verdict` is
 `pass`. A sampler row carries `gate_verdict = "n/a"`, and `converged` is its R̂

@@ -233,6 +233,16 @@ impl If2Assessment {
         all
     }
 
+    /// Nothing was assessed: no Â of any kind (the run had one chain, or the
+    /// leaf predates Â) and no decibans leg. Not a pass; a starts-source
+    /// check still accepts it, having no verdict to contradict.
+    pub fn is_not_assessed(&self) -> bool {
+        self.structural.is_empty()
+            && self.perturb_only_at_t0.is_empty()
+            && self.unavailable.is_empty()
+            && self.spread.is_none()
+    }
+
     /// No finite Â failed, but some required Â is unavailable: the verdict
     /// is incomplete, which is not a pass.
     pub fn is_incomplete(&self) -> bool {
@@ -243,7 +253,8 @@ impl If2Assessment {
     /// the decibans leg passes where it was run. A leaf without clean-eval
     /// data is judged on Â alone.
     pub fn passes(&self) -> bool {
-        self.a_passes()
+        !self.is_not_assessed()
+            && self.a_passes()
             && self.unavailable.is_empty()
             && self.spread.is_none_or(|leg| leg.passes())
     }

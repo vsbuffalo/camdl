@@ -61,6 +61,9 @@ pub enum GateVerdict {
     /// within-chain variance collapsed). Not a pass: the decibans leg does not
     /// stand in for a missing Â.
     Incomplete,
+    /// Nothing was assessed: one chain, so there is no between-chain
+    /// agreement or spread to judge. Not a pass.
+    NotAssessed,
 }
 
 // String projection for the four variants is supplied by the
@@ -84,8 +87,9 @@ pub struct If2StageResult {
     /// Gelman-Rubin R̂** — they're computed differently (Â is
     /// per-parameter chain-agreement on the IF2 trace's tail; R̂ is
     /// the standard MCMC convergence diagnostic). Renderers must not
-    /// merge the two columns. See proposal §2.
-    pub max_chain_agreement: f64,
+    /// merge the two columns. See proposal §2. `None` when no Â was
+    /// computed (one chain), rather than a 0.0 that reads as perfect.
+    pub max_chain_agreement: Option<f64>,
     pub gate_verdict: GateVerdict,
     /// Particle-filter ESS evaluated at the clean-eval winner θ̂.
     /// `None` when the stage didn't compute one (e.g. clean-eval was
@@ -1089,11 +1093,9 @@ impl If2StageResult {
         // can do without re-reading fit.toml).
         let theta_hat = theta_hat_from_state(stage_dir, &state);
 
-        let max_chain_agreement = state
-            .tail_chain_agreement
-            .values()
-            .copied()
-            .fold(0.0_f64, f64::max);
+        let max_chain_agreement = (!state.tail_chain_agreement.is_empty()).then(|| {
+            state.tail_chain_agreement.values().copied().fold(0.0_f64, f64::max)
+        });
 
         let gate_verdict = compute_if2_gate_verdict(&state);
 
@@ -1128,6 +1130,9 @@ impl If2StageResult {
 fn compute_if2_gate_verdict(state: &FitState) -> GateVerdict {
     let gate = state.resolved_gate.clone().unwrap_or_default();
     let assessed = crate::fit::gating::assess_if2(state, &gate);
+    if assessed.is_not_assessed() {
+        return GateVerdict::NotAssessed;
+    }
     if assessed.is_incomplete() {
         // A failed decibans leg is still a failure; otherwise incomplete.
         return if assessed.spread.is_some_and(|leg| !leg.passes()) {
@@ -1819,6 +1824,38 @@ mod tests {
             "the fixed N0 is not an estimate");
     }
 
+    /// A one-chain IF2 run computes no Â and no decibans spread: nothing was
+    /// assessed, so `fit table` must not report a pass (it read converged /
+    /// `pass`, because the worst Â folds from 0.0 over an empty list). The
+    /// starts-source check still accepts the leaf: there is no verdict to
+    /// contradict.
+    #[test]
+    fn a_one_chain_if2_fit_is_not_assessed() {
+        let tmp = tempdir("if2_one_chain");
+        let dir = tmp.path();
+        write_stage_run(dir, crate::run_meta::FitAlgorithm::If2, 1,
+            serde_json::json!({"method": "if2", "iterations": 50}));
+        let mut state = synthetic_if2_state();
+        state.method = "if2".into();
+        state.n_chains = 1;
+        state.tail_chain_agreement.clear();
+        state.chain_eval_logliks = vec![-3804.9];
+        state.chain_eval_ses = vec![1.0];
+        state.save(&dir.to_string_lossy()).unwrap();
+        let r = If2StageResult::load(dir).unwrap();
+        assert_eq!(r.gate_verdict, GateVerdict::NotAssessed);
+        assert_eq!(r.max_chain_agreement, None, "no Â, not a perfect 0.0");
+        crate::fit::gating::check_source_converged(dir, "@one", false)
+            .expect("a one-chain source has no verdict to contradict");
+        // The optimizer's verdict on one converged chain is not assessed either.
+        let one = crate::fit::state::OptimizerConvergence {
+            n_converged: 1, n_maxeval: 0, n_failed: 0, max_rel_range: 0.0,
+            max_abs_range: 0.0, chain_agreement_failed: false, delta_loglik: 0.0,
+            decibans_failed: false,
+        };
+        assert_eq!(one.gate_verdict(), "not_assessed");
+    }
+
     #[test]
     fn loads_if2_stage_result_pass_verdict() {
         let tmp = tempdir("if2_pass");
@@ -1849,7 +1886,7 @@ mod tests {
         // Decibans spread is small, db_passes = true.
         // Verdict: FailA.
         assert_eq!(r.gate_verdict, GateVerdict::FailA);
-        assert!((r.max_chain_agreement - 1.04).abs() < 1e-9);
+        assert!((r.max_chain_agreement.unwrap() - 1.04).abs() < 1e-9);
     }
 
     #[test]
@@ -2641,6 +2678,7 @@ mod tests {
             (GateVerdict::FailDb, "fail_db"),
             (GateVerdict::FailBoth, "fail_both"),
             (GateVerdict::Incomplete, "incomplete"),
+            (GateVerdict::NotAssessed, "not_assessed"),
         ] {
             let s = serde_json::to_value(variant).unwrap();
             assert_eq!(s, serde_json::Value::String(expected.into()));

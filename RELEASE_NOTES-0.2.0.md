@@ -161,8 +161,13 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   from `nl-*` profiles; pass `--cooling-target-iters N` to keep an old schedule.
 - **`fit table`'s `gate_verdict` (text and the JSON schema) has new values:**
   `incomplete` (an IF2 Â is not finite), `fail_db` and `fail_both` on `nl-*`
-  rows, and `not_assessed` (an `nl-*` leaf written before its optimizer verdict
-  was recorded). An `nl-*` row that read `pass` or `fail_chain_agreement` under
+  rows, and `not_assessed` (a one-chain `if2` run or a one-converged-chain
+  `nl-*` run, which has nothing to compare between chains, or an `nl-*` leaf
+  written before its optimizer verdict was recorded). A one-chain run used to
+  read `pass` with `converged = true` and `max_chain_agreement = 0.0`; it now
+  reads `not_assessed`, `converged = false`, and no `max_chain_agreement`, and
+  `fit summary` says NOT ASSESSED instead of PASS (it is still accepted as a
+  starts source). An `nl-*` row that read `pass` or `fail_chain_agreement` under
   the old relative-range rule can now read otherwise. Migration: a consumer
   matching on `gate_verdict` must handle the new values; `converged` is still
   the boolean.

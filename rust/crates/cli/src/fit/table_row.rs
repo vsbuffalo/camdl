@@ -291,7 +291,10 @@ impl MethodView {
         // source check reads. A leaf written before it was recorded is not
         // assessed rather than judged by a weaker rule.
         let (converged, verdict) = match &r.optimizer_convergence {
-            Some(v) => (v.passes(), v.gate_verdict()),
+            // `converged` is the table's verdict, so it is `pass` only: a
+            // one-chain run is accepted as a starts source (`passes`) but
+            // reads not_assessed here.
+            Some(v) => (v.gate_verdict() == "pass", v.gate_verdict()),
             None => (false, "not_assessed"),
         };
         Self {
@@ -322,7 +325,7 @@ impl MethodView {
             converged: matches!(r.gate_verdict, GateVerdict::Pass),
             gate_verdict: gate_str,
             best_loglik: Some(r.best_loglik),
-            max_chain_agreement: Some(r.max_chain_agreement),
+            max_chain_agreement: r.max_chain_agreement,
             max_rhat: None,
             acceptance_rate: None,
             ess_at_mle: r.ess_at_mle.clone(),
