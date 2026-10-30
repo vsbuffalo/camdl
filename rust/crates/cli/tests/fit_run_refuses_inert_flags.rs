@@ -6,8 +6,9 @@
 //! `--seed` beside a file's `fit_seeds`, and `--allow-nonconverged-source`
 //! with a starts rule that has no stored verdict to lift.
 //!
-//! End-to-end via the built `camdl` binary; skipped when the release binary or
-//! `camdlc.exe` is missing.
+//! End-to-end via the built `camdl` binary. A missing release binary or
+//! `camdlc.exe` fails the test (run `make build`, or `make test-fast`, which
+//! builds both) rather than passing it without running.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,10 +38,11 @@ fn tempdir(tag: &str) -> TempDir {
 /// Write a small SIR model and an `nl-sbplx` fit of it; `extra` is appended
 /// to the top level of the fit file. Returns the fit file's path.
 fn write_fit(tmp: &TempDir, extra: &str) -> Option<PathBuf> {
-    let camdlc = camdlc()?;
-    if !camdl_bin().exists() {
-        return None;
-    }
+    let camdlc = camdlc().expect(
+        "camdlc.exe is missing: run `make build-ocaml` (this test must not pass without running)");
+    assert!(camdl_bin().exists(),
+        "the release camdl binary is missing: run `make build-rust` (this test must not pass \
+         without running)");
     let dir = &tmp.0;
     let model = dir.join("sir.camdl");
     std::fs::write(&model, r#"
@@ -161,4 +163,24 @@ fn an_nlopt_fit_records_its_convergence_verdict() {
     let state = std::fs::read_to_string(found.expect("a fit_state.toml")).unwrap();
     assert!(state.contains("[optimizer_convergence]") && state.contains("chain_agreement_failed"),
         "{state}");
+}
+
+/// The inert-key refusal runs at `fit run` (not in the shared parser, which
+/// also reads stored fits' archived configs): an `mh` method with
+/// `adapt = false` beside `adapt_start` is refused before any work.
+#[test]
+fn an_inert_method_key_is_refused_at_fit_run() {
+    let tmp = tempdir("inert_key");
+    let Some(fit) = write_fit(&tmp, "") else { return };
+    let src = std::fs::read_to_string(&fit).unwrap()
+        .replace("beta = { bounds = [0.05, 5.0], start = 1.5 }",
+                 "beta = { bounds = [0.05, 5.0], start = 1.5, prior = { log_normal = { mu = 0.0, sigma = 1.0 } } }")
+        .replace("algorithm = \"nl-sbplx\"\nbackend = \"ode\"\nchains = 1\n",
+                 "algorithm = \"mh\"\nbackend = \"ode\"\nchains = 2\niterations = 10\nadapt = false\nadapt_start = 5\n");
+    assert!(src.contains("adapt_start = 5"), "fixture rewrite applied:\n{src}");
+    std::fs::write(&fit, src).unwrap();
+    let (ok, err) = run(&fit, &[]);
+    assert!(!ok, "adapt_start beside adapt = false must be refused:\n{err}");
+    assert!(err.contains("adapt_start") && err.contains("no effect"), "{err}");
+    assert!(!tmp.0.join("out").exists(), "refused before any work");
 }

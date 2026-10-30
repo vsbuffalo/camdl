@@ -3,8 +3,9 @@
 //! Metropolis-within-Gibbs. An explicit `use_nuts = true` is then refused;
 //! the default falls back with a notice.
 //!
-//! End-to-end via the built `camdl` binary; skipped when the release binary or
-//! `camdlc.exe` is missing.
+//! End-to-end via the built `camdl` binary. A missing release binary or
+//! `camdlc.exe` fails the test (run `make build`, or `make test-fast`, which
+//! builds both) rather than passing it without running.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,10 +25,11 @@ fn camdlc() -> Option<PathBuf> {
 /// rate: the transition rates use typed constants, so the IR carries no
 /// rate gradient. Returns (exit success, stderr).
 fn run(tag: &str, use_nuts_line: &str) -> Option<(bool, String)> {
-    let camdlc = camdlc()?;
-    if !camdl_bin().exists() {
-        return None;
-    }
+    let camdlc = camdlc().expect(
+        "camdlc.exe is missing: run `make build-ocaml` (this test must not pass without running)");
+    assert!(camdl_bin().exists(),
+        "the release camdl binary is missing: run `make build-rust` (this test must not pass \
+         without running)");
     let ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     let dir = std::env::temp_dir().join(format!("camdl_nuts_nograd_{tag}_{}_{ns}", std::process::id()));
