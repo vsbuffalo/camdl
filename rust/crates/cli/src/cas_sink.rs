@@ -783,65 +783,182 @@ fn read_traj_digest(dir: &std::path::Path) -> Option<runid::ContentHash> {
     rec.artifacts.get("traj.tsv").map(|c| c.digest)
 }
 
-/// Ensure a leaf's `run.json` carries `provenance.label == Some(label)`,
-/// rewriting it atomically (tmp + rename) only when it differs. `provenance`
-/// is metadata, not identity — the run_id and exact-set are untouched — so this
-/// is the same in-place relabel `camdl label` performs, applied at write time
-/// so an explicit `--label` survives a CAS cache hit. Idempotent: a no-op when
-/// the leaf already has the requested label (e.g. a fresh commit).
-pub(crate) fn ensure_provenance_label(leaf_dir: &std::path::Path, label: &str) -> Result<(), String> {
+/// An exclusive lock file (`O_EXCL` create), released on drop. It records the
+/// holder's pid; a lock whose holder has died is reclaimed, and a live holder
+/// is waited for up to [`LOCK_WAIT`]. Used to make the read-check-write of a
+/// run record, and the check-and-write of a fit label, one step (gh#896).
+pub(crate) struct FileLock {
+    path: std::path::PathBuf,
+}
+
+/// How long [`FileLock::acquire`] waits for a live holder before refusing.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl FileLock {
+    pub(crate) fn acquire(path: &std::path::Path) -> Result<FileLock, String> {
+        Self::acquire_within(path, LOCK_WAIT)
+    }
+
+    fn acquire_within(path: &std::path::Path, wait: std::time::Duration) -> Result<FileLock, String> {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+                Ok(mut f) => {
+                    use std::io::Write;
+                    let _ = write!(f, "{}", std::process::id());
+                    return Ok(FileLock { path: path.to_path_buf() });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let holder: Option<u32> = std::fs::read_to_string(path)
+                        .ok()
+                        .and_then(|t| t.trim().parse().ok());
+                    if holder.is_some_and(|pid| !pid_is_alive(pid)) {
+                        let _ = std::fs::remove_file(path); // a dead holder's lock
+                        continue;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "{} is held by another camdl (pid {}); retry when it has \
+                             finished, or remove the file if no camdl is running",
+                            path.display(),
+                            holder.map(|p| p.to_string()).unwrap_or_else(|| "unknown".into())
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => return Err(format!("cannot create lock {}: {e}", path.display())),
+            }
+        }
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 delivers nothing; it probes existence and permission.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn pid_is_alive(_pid: u32) -> bool {
+    true
+}
+
+/// Rewrite a leaf's `run.json` through `edit`, which returns whether it changed
+/// the record. The read, the edit and the write are one step under a lock
+/// beside the leaf (in its parent, outside the leaf's exact-set manifest), and
+/// the record is written to a uniquely named temporary file then renamed over
+/// `run.json`, so two writers can neither interleave nor share a temp file.
+fn rewrite_record(
+    leaf_dir: &std::path::Path,
+    edit: impl FnOnce(&mut runid::RunRecord) -> Result<bool, String>,
+) -> Result<(), String> {
+    let name = leaf_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "leaf".into());
+    let lock_path = leaf_dir
+        .parent()
+        .unwrap_or(leaf_dir)
+        .join(format!(".{name}.record.lock"));
+    let _lock = FileLock::acquire(&lock_path)?;
     let path = leaf_dir.join("run.json");
     let txt = std::fs::read_to_string(&path)
         .map_err(|e| format!("read {}: {}", path.display(), e))?;
     let mut rec: runid::RunRecord = serde_json::from_str(&txt)
         .map_err(|e| format!("parse {}: {}", path.display(), e))?;
-    if rec.provenance.label.as_deref() == Some(label) {
+    if !edit(&mut rec)? {
         return Ok(()); // already current — no rewrite
     }
-    rec.provenance.label = Some(label.to_string());
-    let tmp = leaf_dir.join("run.json.tmp");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = leaf_dir.join(format!("run.json.tmp.{}.{nanos}", std::process::id()));
     let json = serde_json::to_string_pretty(&rec)
         .map_err(|e| format!("serialize run.json: {}", e))?;
     std::fs::write(&tmp, json)
         .and_then(|_| std::fs::rename(&tmp, &path))
-        .map_err(|e| format!("write {}: {}", path.display(), e))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("write {}: {}", path.display(), e)
+        })
+}
+
+/// Ensure a leaf's `run.json` carries `provenance.label == Some(label)`,
+/// rewriting it only when it differs. `provenance` is metadata, not identity —
+/// the run_id and exact-set are untouched — applied at write time so an
+/// explicit `simulate --label` survives a CAS cache hit, which relabels a sim.
+/// Idempotent: a no-op when the leaf already has the requested label. A fit
+/// run's label never moves; fits use [`set_fit_label`].
+pub(crate) fn ensure_provenance_label(leaf_dir: &std::path::Path, label: &str) -> Result<(), String> {
+    rewrite_record(leaf_dir, |rec| {
+        if rec.provenance.label.as_deref() == Some(label) {
+            return Ok(false);
+        }
+        rec.provenance.label = Some(label.to_string());
+        Ok(true)
+    })
+}
+
+/// Give a fit run `label`, compare-and-set (gh#896): a no-op when it already
+/// carries it, refused when it carries another, written when it has none.
+/// Store-wide uniqueness is the caller's check, made under
+/// [`fit_label_lock`].
+pub(crate) fn set_fit_label(leaf_dir: &std::path::Path, label: &str) -> Result<(), String> {
+    rewrite_record(leaf_dir, |rec| match rec.provenance.label.as_deref() {
+        Some(l) if l == label => Ok(false),
+        Some(other) => Err(format!(
+            "{} is already labelled @{other}; a fit run keeps the label it was first given",
+            leaf_dir.display()
+        )),
+        None => {
+            rec.provenance.label = Some(label.to_string());
+            Ok(true)
+        }
+    })
+}
+
+/// The store-wide lock under which a fit label is checked for uniqueness and
+/// written (`<root>/fits/.labels.lock`), so two writers cannot both find a
+/// label free and both take it.
+pub(crate) fn fit_label_lock(root: &std::path::Path) -> Result<FileLock, String> {
+    let fits = root.join("fits");
+    std::fs::create_dir_all(&fits).map_err(|e| format!("cannot create {}: {e}", fits.display()))?;
+    FileLock::acquire(&fits.join(".labels.lock"))
 }
 
 /// Ensure a leaf's `run.json` lists `value` in its `inputs[key]` array,
-/// rewriting it atomically (tmp + rename) only when it is missing. `inputs`
-/// is the recorded-not-hashed display projection, so the run_id and the
-/// exact-set are untouched — the same in-place record update
-/// [`ensure_provenance_label`] performs. Used for the config identities a fit
-/// run was reached from (gh#896): a cache hit from a second config with the
-/// same run identity adds that config's.
+/// rewriting it only when it is missing. `inputs` is the recorded-not-hashed
+/// display projection, so the run_id and the exact-set are untouched. Used for
+/// the config identities a fit run was reached from (gh#896): a cache hit from
+/// a second config with the same run identity adds that config's.
 pub(crate) fn ensure_input_listed(
     leaf_dir: &std::path::Path,
     key: &str,
     value: &str,
 ) -> Result<(), String> {
-    let path = leaf_dir.join("run.json");
-    let txt = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {}", path.display(), e))?;
-    let mut rec: runid::RunRecord = serde_json::from_str(&txt)
-        .map_err(|e| format!("parse {}: {}", path.display(), e))?;
-    let obj = rec
-        .inputs
-        .as_object_mut()
-        .ok_or_else(|| format!("{}: `inputs` is not an object", path.display()))?;
-    let list = obj.entry(key.to_string()).or_insert_with(|| serde_json::json!([]));
-    let arr = list
-        .as_array_mut()
-        .ok_or_else(|| format!("{}: `inputs.{key}` is not a list", path.display()))?;
-    if arr.iter().any(|v| v.as_str() == Some(value)) {
-        return Ok(()); // already listed — no rewrite
-    }
-    arr.push(serde_json::Value::String(value.to_string()));
-    let tmp = leaf_dir.join("run.json.tmp");
-    let json = serde_json::to_string_pretty(&rec)
-        .map_err(|e| format!("serialize run.json: {}", e))?;
-    std::fs::write(&tmp, json)
-        .and_then(|_| std::fs::rename(&tmp, &path))
-        .map_err(|e| format!("write {}: {}", path.display(), e))
+    rewrite_record(leaf_dir, |rec| {
+        let obj = rec
+            .inputs
+            .as_object_mut()
+            .ok_or_else(|| "`inputs` is not an object".to_string())?;
+        let list = obj.entry(key.to_string()).or_insert_with(|| serde_json::json!([]));
+        let arr = list
+            .as_array_mut()
+            .ok_or_else(|| format!("`inputs.{key}` is not a list"))?;
+        if arr.iter().any(|v| v.as_str() == Some(value)) {
+            return Ok(false);
+        }
+        arr.push(serde_json::Value::String(value.to_string()));
+        Ok(true)
+    })
 }
 
 /// Ensure a leaf's `run.json` declares every id in `ids` under its `obs`
@@ -854,24 +971,16 @@ fn ensure_obs_children_declared(
     leaf_dir: &std::path::Path,
     ids: &[runid::ContentHash],
 ) -> Result<(), String> {
-    let path = leaf_dir.join("run.json");
-    let txt = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {}", path.display(), e))?;
-    let mut rec: runid::RunRecord = serde_json::from_str(&txt)
-        .map_err(|e| format!("parse {}: {}", path.display(), e))?;
-    let declared = rec.children.entry("obs".to_string()).or_default();
-    let missing: Vec<runid::ContentHash> =
-        ids.iter().filter(|id| !declared.contains(id)).copied().collect();
-    if missing.is_empty() {
-        return Ok(()); // already current — no rewrite
-    }
-    declared.extend(missing);
-    let tmp = leaf_dir.join("run.json.tmp");
-    let json = serde_json::to_string_pretty(&rec)
-        .map_err(|e| format!("serialize run.json: {}", e))?;
-    std::fs::write(&tmp, json)
-        .and_then(|_| std::fs::rename(&tmp, &path))
-        .map_err(|e| format!("write {}: {}", path.display(), e))
+    rewrite_record(leaf_dir, |rec| {
+        let declared = rec.children.entry("obs".to_string()).or_default();
+        let missing: Vec<runid::ContentHash> =
+            ids.iter().filter(|id| !declared.contains(id)).copied().collect();
+        if missing.is_empty() {
+            return Ok(false);
+        }
+        declared.extend(missing);
+        Ok(true)
+    })
 }
 
 // ─── Observation ensemble writer (CLI review #4) ───────────────────────────
@@ -1060,6 +1169,82 @@ fn write_obs_into_cas(
 
 #[cfg(test)]
 mod tests {
+    /// A leaf directory holding a minimal fit-stage `run.json` with `label`.
+    fn record_leaf(tag: &str, label: Option<&str>) -> std::path::PathBuf {
+        let leaf = crate::test_support::unique_temp_dir(tag).join("if2-00000000").join("seed_1-00000000");
+        std::fs::create_dir_all(&leaf).unwrap();
+        let mut rec = serde_json::json!({
+            "format_version": 1, "kind": "fit_stage", "run_id": "ab".repeat(32),
+            "hash_version": 1, "ir_version": "0.7", "engine_version": "0.1.0+test",
+            "levels": [], "status": "completed", "artifacts": {}, "inputs": {"method": "if2"},
+            "provenance": {},
+        });
+        if let Some(l) = label {
+            rec["provenance"]["label"] = serde_json::json!(l);
+        }
+        std::fs::write(leaf.join("run.json"), rec.to_string()).unwrap();
+        leaf
+    }
+
+    fn stored_label(leaf: &std::path::Path) -> Option<String> {
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap();
+        v["provenance"]["label"].as_str().map(String::from)
+    }
+
+    /// gh#896: a fit run's label is compare-and-set — another label on it is
+    /// refused and left in place, the same label is a no-op, none is written.
+    #[test]
+    fn a_fit_label_is_compare_and_set() {
+        let held = record_leaf("label_cas_held", Some("scout"));
+        let err = set_fit_label(&held, "renamed").expect_err("a label never moves");
+        assert!(err.contains("already labelled @scout"), "{err}");
+        assert_eq!(stored_label(&held).as_deref(), Some("scout"));
+        set_fit_label(&held, "scout").expect("the same label is a no-op");
+        let fresh = record_leaf("label_cas_fresh", None);
+        set_fit_label(&fresh, "wide").unwrap();
+        assert_eq!(stored_label(&fresh).as_deref(), Some("wide"));
+    }
+
+    /// gh#896: concurrent read-modify-writes of one record lose nothing — each
+    /// is one step under the record lock, through its own temporary file.
+    #[test]
+    fn concurrent_record_edits_lose_no_update() {
+        let leaf = record_leaf("record_race", None);
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let leaf = leaf.clone();
+                std::thread::spawn(move || {
+                    ensure_input_listed(&leaf, "config_identities", &format!("id{i}")).unwrap()
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap();
+        let ids = v["inputs"]["config_identities"].as_array().unwrap();
+        assert_eq!(ids.len(), 16, "every writer's entry survives: {ids:?}");
+    }
+
+    /// A held lock excludes a second holder; a dead holder's lock is reclaimed.
+    #[test]
+    fn a_file_lock_excludes_and_a_dead_holders_is_reclaimed() {
+        let dir = crate::test_support::unique_temp_dir("file_lock");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".x.lock");
+        let held = FileLock::acquire(&path).unwrap();
+        assert!(FileLock::acquire_within(&path, std::time::Duration::from_millis(100)).is_err(),
+            "a live holder excludes");
+        drop(held);
+        assert!(!path.exists(), "released on drop");
+        // pid 0x7fff_fff0 is not a live process.
+        std::fs::write(&path, "2147483632").unwrap();
+        let _again = FileLock::acquire_within(&path, std::time::Duration::from_millis(100))
+            .expect("a dead holder's lock is reclaimed");
+    }
+
     use super::*;
 
     // ── --table content folds into the run identity (Q1) ─────────────────────

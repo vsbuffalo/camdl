@@ -630,3 +630,40 @@ fn a_config_does_not_name_a_run_made_with_overrides() {
     assert!(out.contains("2 chains"), "{out}");
     assert_eq!(made.len(), 5, "four overridden runs and the file's own: {made:?}");
 }
+
+/// Concurrent `camdl label` of different runs with one label: exactly one
+/// takes it. The uniqueness check and the write are one step under a
+/// store-wide lock; without it several could find the label free.
+#[test]
+fn concurrent_labels_give_one_label_to_one_run() {
+    let p = Project::new();
+    for k in 0..6 {
+        // Six runs of one cheap method, told apart by their cooling.
+        p.config("scout.toml", &if2(2).replace("cooling = 0.7", &format!("cooling = 0.7{k}")));
+        p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    }
+    let ids: Vec<String> = p.leaves().iter().map(|l| record(l).0).collect();
+    assert_eq!(ids.len(), 6);
+    for _round in 0..3 {
+        let label = format!("race{_round}");
+        let children: Vec<std::process::Child> = ids
+            .iter()
+            .map(|id| {
+                Command::new(binary())
+                    .current_dir(p.dir())
+                    .env("CAMDL_OUTPUT_DIR", p.dir().join("results"))
+                    .args(["label", &id[..12], &label])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        let ok = children.into_iter()
+            .map(|c| c.wait_with_output().unwrap().status.success())
+            .filter(|s| *s)
+            .count();
+        let holders = p.leaves().iter().filter(|l| record(l).1.as_deref() == Some(label.as_str())).count();
+        assert_eq!((ok, holders), (1, 1), "one run takes {label}");
+    }
+}

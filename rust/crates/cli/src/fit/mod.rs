@@ -1165,12 +1165,24 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // gh#896: the label is checked against this run's identity before any
         // sampling — a label held by another run, or a run already stored
         // under another label, is refused here rather than after the work.
-        if let Some(label) = &validated_label {
-            if let Err(e) = check_label_is_free(&cas_root, label, &resolved.run_id) {
-                eprintln!("error: {e}");
-                std::process::exit(1);
+        // The check and the write that takes the label (the claim below, or
+        // the cache-hit record) happen under one store-wide lock, so two
+        // concurrent runs cannot both find the label free.
+        let label_lock: Option<crate::cas_sink::FileLock> = match &validated_label {
+            Some(label) => {
+                let lock = crate::cas_sink::fit_label_lock(&cas_root).unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+                if let Err(e) = check_label_is_free(&cas_root, label, &resolved.run_id) {
+                    drop(lock); // `exit` runs no destructors
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+                Some(lock)
             }
-        }
+            None => None,
+        };
         let cas_path = runid::store_path(&cas_root, runid::ArtifactKind::FitStage, &resolved.levels);
         // gh#147 (M3.2): write the fit-level sidecar once per fit segment
         // (`cas_path`'s grandparent: `.../fits/{stem}-{h8}/`). Done before the
@@ -1335,7 +1347,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // A label given to an unlabelled stored run is recorded on
                     // it (`check_label_is_free` refused every other case).
                     if let Some(label) = &validated_label {
-                        if let Err(e) = crate::cas_sink::ensure_provenance_label(&dir, label) {
+                        if let Err(e) = crate::cas_sink::set_fit_label(&dir, label) {
                             eprintln!("error: label the stored run {}: {e}", dir.display());
                             std::process::exit(1);
                         }
@@ -1363,6 +1375,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
         };
         let stage_dir = write.dir().to_path_buf();
+        // The claimed record carries the label; another run's check now sees it.
+        drop(label_lock);
 
         // gh#147 (M3.2): seed the resumed leaf with the base chain's state
         // (resume_state.bin + parameter_traces.tsv per chain), copied from the
@@ -2843,12 +2857,16 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
                 run.dir.display());
             std::process::exit(1);
         }
-        if let Err(e) = check_label_is_free(&root, &new_label, &run.record.run_id) {
+        // Check and write under the store-wide label lock, compare-and-set.
+        let lock = crate::cas_sink::fit_label_lock(&root).unwrap_or_else(|e| {
             eprintln!("error: {e}");
             std::process::exit(1);
-        }
+        });
+        let written = check_label_is_free(&root, &new_label, &run.record.run_id)
+            .and_then(|()| crate::cas_sink::set_fit_label(&run.dir, &new_label));
+        drop(lock); // released before any `exit`, which runs no destructors
         let prior = run.record.provenance.label.clone();
-        if let Err(e) = crate::cas_sink::ensure_provenance_label(&run.dir, &new_label) {
+        if let Err(e) = written {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
@@ -2885,14 +2903,12 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
 
     // Per-leaf kinds (sim / pfilter / survey): the label lives in the leaf's
     // `run.json` `provenance.label`. These are always written `Completed`, so
-    // there is no in-progress gate. Rewrite atomically (write tmp + rename).
+    // there is no in-progress gate. Rewritten under the record lock, through a
+    // uniquely named temporary file.
     if let Ok(txt) = std::fs::read_to_string(&run_json_path) {
-        if let Ok(mut rec) = serde_json::from_str::<runid::RunRecord>(&txt) {
+        if let Ok(rec) = serde_json::from_str::<runid::RunRecord>(&txt) {
             let prior = rec.provenance.label.clone();
-            rec.provenance.label = Some(new_label.clone());
-            let tmp = run_dir.join("run.json.tmp");
-            let json = serde_json::to_string_pretty(&rec).unwrap_or_default();
-            if let Err(e) = std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, &run_json_path)) {
+            if let Err(e) = crate::cas_sink::ensure_provenance_label(&run_dir, &new_label) {
                 eprintln!("error: cannot write {}: {}", run_json_path.display(), e);
                 std::process::exit(1);
             }
