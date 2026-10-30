@@ -134,9 +134,22 @@ order. Every handle now names one run, or is refused with the runs listed.
   non-default options (`--horizon`, `--n-draws`, `--seed`, `--scenario`,
   `--sweep`, `--by-chain`). `predictive.json` and `observed.json` record the
   `run_id` and the `options`. Folder-level outputs written by an older camdl are
-  orphaned: nothing reads them. Migration: rerun `camdl fit predict <run>`;
-  readers (camdl-scope) read `predict/<run_id12>/`; delete the old folder-level
-  files.
+  orphaned: nothing reads them. `fit table --quantity` derives into the
+  free-forward keyed directory, `predict/<run_id12>-<opts8>/`, not the bare one.
+  `camdl show`/`cat` of a fit name the default-options predict by bare paths
+  (`predictive/<stream>.tsv`) and every keyed one under `predict/<dir>/`.
+  Migration: rerun `camdl fit predict <run>` and delete the old folder-level
+  files. **The camdl-watcher viewer must be updated** — it still reads the
+  folder (checked at its `origin/main`): `camdl_watch/predictive.py` reads
+  `<run_dir>/predictive/` and `observed/` and their `.json` manifests;
+  `camdl_watch/quantities.py` reads `<run_dir>/quantities.json` and
+  `quantities/`; both must read `<run_dir>/predict/<run_id12>/` for the run
+  shown, and treat `predict/<run_id12>-<opts8>/` as separate predicts of that
+  run, telling them apart by `options` in `predictive.json`;
+  `camdl_watch/ingest.py` (`_native_labels`) keys labels by folder from
+  `camdl list --format json`'s row-level `label`, which is now a joined display
+  string — it must key them per run, from `methods[].label` and
+  `methods[].run_id`.
 - **`table_row` schema v3.** `fit table` gives one row per run (rows of one
   problem share a `fit_id`), each row's label, time and numbers its run's own,
   and the row gains `run_id`; the text and markdown tables gain a `run` column
@@ -148,7 +161,9 @@ order. Every handle now names one run, or is refused with the runs listed.
   `starts = { from_mle | from_posterior
   = ... }` sources list the runs and
   name what sets them apart. A hex prefix matching both a run id and a fit id is
-  refused the same way. Migration: name the run — its leaf directory, a run-id
+  refused the same way. `simulate --draws posterior` counts only runs with
+  posterior draws, so an optimizer run beside one sampler run is no rival, and
+  says which run it used. Migration: name the run — its leaf directory, a run-id
   prefix, `@label`, or the `fit.toml` it was made from.
 - **A `fit.toml` handle names the run made from the file as it now reads.** It
   matches the config identities recorded on each run
@@ -165,6 +180,15 @@ order. Every handle now names one run, or is refused with the runs listed.
   `@scout`, the scout's directory and its run-id prefix are now one run, where
   they were three. This applies to `fit run` and `camdl profile --starts`.
   Migration: none; such runs rerun once and are reused thereafter.
+- **Fit labels are written under a store lock.** `fit run --label` and
+  `camdl label` of a fit take an `flock(2)` lock on `<root>/.fit-labels.lock`
+  from the label check to the write; a second writer waits up to 30 s, then is
+  refused naming the holder's recorded pid and host. The lock file stays in the
+  store (the kernel releases the lock itself when its holder exits). Every
+  in-place update of a stored `run.json` (labels, config identities, obs
+  children) also takes the leaf's own `.lock`, the store's existing lock, and a
+  `camdl label` that finds a live holder waits for it the same way. Migration:
+  none; a refusal after 30 s means another camdl is writing a label.
 - **Fit summaries show the source run.** `seeded from:` reads
   `from_mle @scout, run <id12> (…)`, from run.json `inputs.starts_source`.
 
