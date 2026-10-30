@@ -2592,9 +2592,17 @@ pub fn method_declares_key(contents: &str, key: &str) -> bool {
 /// it on (no estimated parameter reaches a transition rate), so PGAS would run
 /// Metropolis-within-Gibbs instead. Explicitly requested: refused. The
 /// default: a notice, then the fallback.
-pub fn nuts_unavailable(use_nuts_declared: bool) -> Result<String, String> {
+pub fn nuts_unavailable(use_nuts_declared: bool, nuts_tuning: &[&str]) -> Result<String, String> {
     let why = "the model has no rate gradients to run it on: no parameter reaches a \
                transition rate, so there is nothing for NUTS to differentiate";
+    if !use_nuts_declared && !nuts_tuning.is_empty() {
+        return Err(format!(
+            "{} tune{} the NUTS θ-move, and PGAS will update θ by Metropolis-within-Gibbs: \
+             {why}. Drop {}.",
+            nuts_tuning.join(", "),
+            if nuts_tuning.len() == 1 { "s" } else { "" },
+            if nuts_tuning.len() == 1 { "it" } else { "them" }));
+    }
     if use_nuts_declared {
         Err(format!(
             "`use_nuts = true` asks PGAS for the NUTS θ-move, and {why}. Set \
@@ -4556,10 +4564,16 @@ cooling = 0.7
         assert!(!method_declares_key(defaulted, "use_nuts"));
         assert!(!method_declares_key("use_nuts = true\n[method]\n", "use_nuts"),
             "only a key under [method] counts");
-        let err = nuts_unavailable(true).unwrap_err();
+        let err = nuts_unavailable(true, &[]).unwrap_err();
         assert!(err.contains("use_nuts = true") && err.contains("rate gradients"), "{err}");
-        let note = nuts_unavailable(false).unwrap();
+        let note = nuts_unavailable(false, &[]).unwrap();
         assert!(note.contains("Metropolis-within-Gibbs"), "{note}");
+        // On the fallback the NUTS tuning settings are inert, as under
+        // `use_nuts = false`.
+        for given in ["max_tree_depth", "dense_mass", "--max-tree-depth", "--diagonal-mass"] {
+            let err = nuts_unavailable(false, &[given]).unwrap_err();
+            assert!(err.contains(given) && err.contains("Metropolis-within-Gibbs"), "{err}");
+        }
     }
 
     /// A known `[method]` key the method's settings leave inert is refused at
