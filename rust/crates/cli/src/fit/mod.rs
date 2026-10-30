@@ -2867,6 +2867,26 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
 mod tests {
     use super::*;
 
+    /// The `from_mle` branch of the pfilter point refusal: a stored fit (here
+    /// an nl-* leaf, whose fit_state.toml holds the estimated values) that
+    /// lacks one of this fit's estimated parameters is refused; one that
+    /// names them all is accepted.
+    #[test]
+    fn a_pfilter_from_mle_source_missing_a_parameter_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("fit_state.toml");
+        std::fs::write(&state, "method = \"nl-sbplx\"\nseed = 1\ntimestamp = \"t\"\n\
+            best_loglik = -1.0\ninitial_loglik = -2.0\nbest_chain = 0\nn_chains = 1\n\
+            [start_values]\nbeta = 0.4\n").unwrap();
+        let rule = starts::ChainStarts::Point(starts::Point::FromMle {
+            source: starts::Handle("@nl".into()),
+        });
+        let err = refuse_pfilter_point_source_missing(&rule, &state, &["beta", "gamma"])
+            .expect_err("gamma is missing from the source");
+        assert!(err.contains("gives no value for gamma") && err.contains("from_mle"), "{err}");
+        refuse_pfilter_point_source_missing(&rule, &state, &["beta"]).unwrap();
+    }
+
     // ── gh#191: per-stage capability gate on `fit run` ─────────────
 
     /// A chain_binomial IF2 method — the inference path that carries no

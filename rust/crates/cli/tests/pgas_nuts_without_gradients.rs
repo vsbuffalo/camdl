@@ -24,7 +24,7 @@ fn camdlc() -> Option<PathBuf> {
 /// Fit a model whose only estimated parameter (`rho`) is an observation
 /// rate: the transition rates use typed constants, so the IR carries no
 /// rate gradient. Returns (exit success, stderr).
-fn run(tag: &str, use_nuts_line: &str) -> Option<(bool, String)> {
+fn run(tag: &str, use_nuts_line: &str) -> (bool, String) {
     let camdlc = camdlc().expect(
         "camdlc.exe is missing: run `make build-ocaml` (this test must not pass without running)");
     assert!(camdl_bin().exists(),
@@ -97,26 +97,26 @@ burn_in = 2
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    Some((out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned()))
+    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
 #[test]
 fn an_explicit_use_nuts_without_gradients_is_refused() {
-    let Some((ok, err)) = run("explicit", "use_nuts = true") else { return };
+    let (ok, err) = run("explicit", "use_nuts = true");
     assert!(!ok, "use_nuts = true on a gradient-free model must be refused:\n{err}");
     assert!(err.contains("use_nuts = true") && err.contains("rate gradients"), "{err}");
 }
 
 #[test]
 fn the_default_falls_back_with_a_notice() {
-    let Some((ok, err)) = run("default", "") else { return };
+    let (ok, err) = run("default", "");
     assert!(ok, "the default runs, by Metropolis-within-Gibbs:\n{err}");
     assert!(err.contains("Metropolis-within-Gibbs, not NUTS"), "says so:\n{err}");
 }
 
 #[test]
 fn nuts_tuning_on_the_fallback_is_refused() {
-    let Some((ok, err)) = run("tuning", "max_tree_depth = 8") else { return };
+    let (ok, err) = run("tuning", "max_tree_depth = 8");
     assert!(!ok, "max_tree_depth on the Metropolis-within-Gibbs fallback must be refused:\n{err}");
     assert!(err.contains("max_tree_depth") && err.contains("Metropolis-within-Gibbs"), "{err}");
 }

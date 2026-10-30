@@ -37,12 +37,12 @@ fn tempdir(tag: &str) -> TempDir {
 
 /// Write a small SIR model and an `nl-sbplx` fit of it; `extra` is appended
 /// to the top level of the fit file. Returns the fit file's path.
-fn write_fit(tmp: &TempDir, extra: &str) -> Option<PathBuf> {
+fn write_fit(tmp: &TempDir, extra: &str) -> PathBuf {
     write_fit_with_model_dt(tmp, extra, None)
 }
 
 /// [`write_fit`] with the model's `simulate {}` declaring `dt = <model_dt>`.
-fn write_fit_with_model_dt(tmp: &TempDir, extra: &str, model_dt: Option<f64>) -> Option<PathBuf> {
+fn write_fit_with_model_dt(tmp: &TempDir, extra: &str, model_dt: Option<f64>) -> PathBuf {
     let camdlc = camdlc().expect(
         "camdlc.exe is missing: run `make build-ocaml` (this test must not pass without running)");
     assert!(camdl_bin().exists(),
@@ -107,7 +107,7 @@ backend = "ode"
 chains = 1
 starts = "single"
 "#, out = dir.join("out").display(), ir = ir.display(), data = data.display())).unwrap();
-    Some(fit)
+    fit
 }
 
 fn run(fit: &Path, args: &[&str]) -> (bool, String) {
@@ -121,7 +121,7 @@ fn run(fit: &Path, args: &[&str]) -> (bool, String) {
 #[test]
 fn a_flag_the_method_does_not_read_is_refused() {
     let tmp = tempdir("method");
-    let Some(fit) = write_fit(&tmp, "") else { return };
+    let fit = write_fit(&tmp, "");
     let (ok, err) = run(&fit, &["--cooling-target-iters", "20"]);
     assert!(!ok, "--cooling-target-iters on nl-sbplx must be refused:\n{err}");
     assert!(err.contains("--cooling-target-iters") && err.contains("`nl-sbplx`")
@@ -132,7 +132,7 @@ fn a_flag_the_method_does_not_read_is_refused() {
 #[test]
 fn seed_beside_fit_seeds_is_refused() {
     let tmp = tempdir("seed");
-    let Some(fit) = write_fit(&tmp, "fit_seeds = [3]") else { return };
+    let fit = write_fit(&tmp, "fit_seeds = [3]");
     let (ok, err) = run(&fit, &["--seed", "7"]);
     assert!(!ok, "--seed beside fit_seeds must be refused:\n{err}");
     assert!(err.contains("--seed") && err.contains("fit_seeds"), "{err}");
@@ -141,7 +141,7 @@ fn seed_beside_fit_seeds_is_refused() {
 #[test]
 fn allow_nonconverged_source_without_a_fit_source_is_refused() {
     let tmp = tempdir("source");
-    let Some(fit) = write_fit(&tmp, "") else { return };
+    let fit = write_fit(&tmp, "");
     let (ok, err) = run(&fit, &["--allow-nonconverged-source"]);
     assert!(!ok, "--allow-nonconverged-source with `starts = \"single\"` must be refused:\n{err}");
     assert!(err.contains("--allow-nonconverged-source") && err.contains("`single`"), "{err}");
@@ -153,7 +153,7 @@ fn allow_nonconverged_source_without_a_fit_source_is_refused() {
 #[test]
 fn an_nlopt_fit_records_its_convergence_verdict() {
     let tmp = tempdir("nl_verdict");
-    let Some(fit) = write_fit(&tmp, "") else { return };
+    let fit = write_fit(&tmp, "");
     let (ok, err) = run(&fit, &["--no-dt-check"]);
     assert!(ok, "the fit runs:\n{err}");
     let mut stack = vec![tmp.0.join("out")];
@@ -176,7 +176,7 @@ fn an_nlopt_fit_records_its_convergence_verdict() {
 #[test]
 fn an_inert_method_key_is_refused_at_fit_run() {
     let tmp = tempdir("inert_key");
-    let Some(fit) = write_fit(&tmp, "") else { return };
+    let fit = write_fit(&tmp, "");
     let src = std::fs::read_to_string(&fit).unwrap()
         .replace("beta = { bounds = [0.05, 5.0], start = 1.5 }",
                  "beta = { bounds = [0.05, 5.0], start = 1.5, prior = { log_normal = { mu = 0.0, sigma = 1.0 } } }")
@@ -196,13 +196,13 @@ fn an_inert_method_key_is_refused_at_fit_run() {
 #[test]
 fn an_ode_fit_refuses_a_config_dt_the_model_overrides() {
     let tmp = tempdir("cfg_dt");
-    let Some(fit) = write_fit_with_model_dt(&tmp, "[config]\ndt = 0.25\n", Some(0.5)) else { return };
+    let fit = write_fit_with_model_dt(&tmp, "[config]\ndt = 0.25\n", Some(0.5));
     let (ok, err) = run(&fit, &["--no-dt-check"]);
     assert!(!ok, "[config] dt = 0.25 beside the model's dt = 0.5 must be refused:\n{err}");
     assert!(err.contains("dt = 0.25") && err.contains("0.5"), "{err}");
 
     let tmp = tempdir("cfg_dt_same");
-    let Some(fit) = write_fit_with_model_dt(&tmp, "[config]\ndt = 0.5\n", Some(0.5)) else { return };
+    let fit = write_fit_with_model_dt(&tmp, "[config]\ndt = 0.5\n", Some(0.5));
     let (ok, err) = run(&fit, &["--no-dt-check"]);
     assert!(ok, "an agreeing [config] dt runs:\n{err}");
 }

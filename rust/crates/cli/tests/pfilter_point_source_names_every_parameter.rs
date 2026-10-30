@@ -32,11 +32,11 @@ fn tempdir(tag: &str) -> TempDir {
 }
 
 
-fn run_pfilter(tmp: &TempDir, params_toml: &str) -> Option<(bool, String)> {
+fn run_pfilter(tmp: &TempDir, params_toml: &str) -> (bool, String) {
     run_pfilter_with(tmp, params_toml, false)
 }
 
-fn run_pfilter_with(tmp: &TempDir, params_toml: &str, via_flag: bool) -> Option<(bool, String)> {
+fn run_pfilter_with(tmp: &TempDir, params_toml: &str, via_flag: bool) -> (bool, String) {
     let camdlc = camdlc().expect(
         "camdlc.exe is missing: run `make build-ocaml` (this test must not pass without running)");
     assert!(camdl_bin().exists(),
@@ -107,13 +107,13 @@ starts = {{ from_params = "{theta}" }}
         cmd.arg("--starts").arg(format!("from_params={}", dir.join("theta.toml").display()));
     }
     let out = cmd.output().unwrap();
-    Some((out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned()))
+    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
 #[test]
 fn a_pfilter_point_missing_a_parameter_is_refused() {
     let tmp = tempdir("missing");
-    let Some((ok, err)) = run_pfilter(&tmp, "beta = 1.2\n") else { return };
+    let (ok, err) = run_pfilter(&tmp, "beta = 1.2\n");
     assert!(!ok, "a from_params point without gamma must be refused:\n{err}");
     assert!(err.contains("gives no value for gamma") && err.contains("scores the log-likelihood at one θ"),
         "refused for that reason, not by a later filter failure:\n{err}");
@@ -122,7 +122,7 @@ fn a_pfilter_point_missing_a_parameter_is_refused() {
 #[test]
 fn a_pfilter_point_naming_every_parameter_runs() {
     let tmp = tempdir("complete");
-    let Some((ok, err)) = run_pfilter(&tmp, "beta = 0.4\ngamma = 0.3\n") else { return };
+    let (ok, err) = run_pfilter(&tmp, "beta = 0.4\ngamma = 0.3\n");
     assert!(ok, "every θ given:\n{err}");
 }
 
@@ -131,7 +131,7 @@ fn a_pfilter_point_naming_every_parameter_runs() {
 #[test]
 fn the_refusal_names_the_flag_when_the_flag_set_the_rule() {
     let tmp = tempdir("via_flag");
-    let Some((ok, err)) = run_pfilter_with(&tmp, "beta = 1.2\n", true) else { return };
+    let (ok, err) = run_pfilter_with(&tmp, "beta = 1.2\n", true);
     assert!(!ok, "{err}");
     assert!(err.contains("error: --starts from_params"), "{err}");
 }
