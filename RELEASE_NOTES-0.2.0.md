@@ -107,8 +107,8 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
 - **`fit run` refuses a flag the method does not read.** Each method-specific
   flag is accepted only by the methods that read it (`--cooling-target-iters`:
-  if2; `--decibans-thresh`: if2, nl-_; `--no-dt-check`, `--dt-check-halvings`,
-  `--dt-check-strict`: if2, mh, nl-_; `--max-tree-depth`, `--diagonal-mass`,
+  if2; `--decibans-thresh`: if2, `nl-*`; `--no-dt-check`, `--dt-check-halvings`,
+  `--dt-check-strict`: if2, mh, `nl-*`; `--max-tree-depth`, `--diagonal-mass`,
   `--trajectory-warmup`, `--csmc-sweeps-per-nuts`, `--n-trajectories`,
   `--no-nuts`, `--no-ancestor-sampling`, `--binomial`: pgas; `--no-adapt`,
   `--adapt-start`: pmmh, mh; `--record-ancestry`, `--record-prequential`:
@@ -141,26 +141,33 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   `fit_state.toml` / `run.json`; not liftable by `--allow-nonconverged-source`),
   when an IF2 source's Â fails on an initial-state (`perturb_only_at_t0`)
   parameter, when any Â is not finite (the verdict is incomplete), and when an
-  nl-* source's optimizer did not converge to one optimum (it could never be
+  `nl-*` source's optimizer did not converge to one optimum (it could never be
   refused before) or predates the recorded verdict (re-run it with `--force`).
   `--allow-nonconverged-source` starts from a refused-as-unconverged source
   anyway.
-- __`camdl profile`: one cooling schedule, and nl-_ cells read only their own
-  knobs._* `--cooling c` is reached at iteration 50 (`--cooling-target-iters`),
+- **`camdl profile`: one cooling schedule, and `nl-*` cells read only their own
+  knobs.** `--cooling c` is reached at iteration 50 (`--cooling-target-iters`),
   as a fit's `cooling` is, not at the last iteration: results change whenever
-  `--iterations` ≠ 50. On an nl-* profile, `--particles`, `--iterations`,
+  `--iterations` ≠ 50. On an `nl-*` profile, `--particles`, `--iterations`,
   `--cooling`, `--cooling-target-iters`, `--pf-max-substeps` and an `--rw-sd`
   step size are refused (`--rw-sd auto` / `NAME=auto` still name the estimated
-  set), and a `--fit` whose `[method]` is nl-* sets each cell's `tolerance` and
-  `max_evals` (else 1e-4 / 1500 as before). Migration: drop the IF2 flags from
-  nl-* profiles; pass `--cooling-target-iters N` to keep an old schedule.
+  set), and a `--fit` whose `[method]` is `nl-*` sets each cell's `tolerance`
+  and `max_evals` (else 1e-4 / 1500 as before). Migration: drop the IF2 flags
+  from `nl-*` profiles; pass `--cooling-target-iters N` to keep an old schedule.
+- **`fit table`'s `gate_verdict` (text and the JSON schema) has new values:**
+  `incomplete` (an IF2 Â is not finite), `fail_db` and `fail_both` on `nl-*`
+  rows, and `not_assessed` (an `nl-*` leaf written before its optimizer verdict
+  was recorded). An `nl-*` row that read `pass` or `fail_chain_agreement` under
+  the old relative-range rule can now read otherwise. Migration: a consumer
+  matching on `gate_verdict` must handle the new values; `converged` is still
+  the boolean.
 - **`fit_state.toml` no longer writes `[rw_sd]`**, which recorded no step any
   method ran with; old leaves still load.
 - **A `pfilter` point source must name every estimated parameter.** A `from_mle`
   / `from_params` source that leaves one out is refused (it used to fill it from
   a bounds-uniform draw). Migration: add the parameter to the source, or give it
   a `start` and use `starts = "single"`.
-- **`camdl profile --algorithm nl-* --dt X`** is refused when the model declares
+- **`camdl profile --algorithm`nl-*`--dt X`** is refused when the model declares
   a different `dt`: an ODE cell integrates at the model's dt, as `fit run` does.
   Migration: drop `--dt`.
 
@@ -615,7 +622,7 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 ## Run identity
 
 - **Every stored `camdl profile` run re-keys** (the method level now carries
-  only the knobs its cell reads, plus IF2's `cooling_target_iters` and nl-*'s
+  only the knobs its cell reads, plus IF2's `cooling_target_iters` and `nl-*`'s
   `tolerance` / `max_evals`); a `pfilter` fit whose every parameter declares a
   `start` re-keys (its default rule is now `single`). IF2 fits keep their keys
   and are bit-identical (the shared cooling schedule computes the same powers).
@@ -782,10 +789,10 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   `--format json/md/latex`) and the warm-start source check now read one
   assessment, which judges every estimated parameter (initial-state ones
   included; `fit summary` also shows the dynamics-only sub-verdict). A NaN Â is
-  never a pass: `fit table` reports `incomplete`. nl-* rows in `fit table` use
-  the optimizer's recorded verdict (`fail_db` / `fail_both` added; a leaf
-  written before it reads `not_assessed`). `fit table --quantity` refuses a fit
-  whose result cannot be read instead of dropping it.
+  never a pass, and `nl-*` rows in `fit table` use the optimizer's recorded
+  verdict (the new `gate_verdict` values are listed under Breaking changes).
+  `fit table --quantity` refuses a fit whose result cannot be read instead of
+  dropping it.
 - **Labels that said the wrong thing.** PMMH/MH's "MAP loglik" is now "loglik at
   the highest log-posterior draw (natural-scale prior, no Jacobian)"; the
   "`[estimate].start` is unused here" note no longer claims that under PMMH/MH,
@@ -793,9 +800,9 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 - **Stricter convergence readings.** A soft-band Â no longer lets a starts
   source skip its decibans leg or an unavailable Â; a sampler parameter whose
   stored R̂ is `null`, or whose refusal this build cannot read, makes the R̂
-  verdict unavailable (not converged) instead of vanishing from the max; an nl-*
-  run's chain-agreement leg judges the converged chains, as its decibans leg
-  does, so a max-eval chain no longer fails it on its own (the status count
+  verdict unavailable (not converged) instead of vanishing from the max; an
+  `nl-*` run's chain-agreement leg judges the converged chains, as its decibans
+  leg does, so a max-eval chain no longer fails it on its own (the status count
   still fails the verdict).
 
 User-visible correctness fixes (selected from ~138):
