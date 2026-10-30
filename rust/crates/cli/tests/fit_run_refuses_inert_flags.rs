@@ -38,6 +38,11 @@ fn tempdir(tag: &str) -> TempDir {
 /// Write a small SIR model and an `nl-sbplx` fit of it; `extra` is appended
 /// to the top level of the fit file. Returns the fit file's path.
 fn write_fit(tmp: &TempDir, extra: &str) -> Option<PathBuf> {
+    write_fit_with_model_dt(tmp, extra, None)
+}
+
+/// [`write_fit`] with the model's `simulate {}` declaring `dt = <model_dt>`.
+fn write_fit_with_model_dt(tmp: &TempDir, extra: &str, model_dt: Option<f64>) -> Option<PathBuf> {
     let camdlc = camdlc().expect(
         "camdlc.exe is missing: run `make build-ocaml` (this test must not pass without running)");
     assert!(camdl_bin().exists(),
@@ -66,8 +71,8 @@ observations {
   }
 }
 init { S = 9990  I = 10 }
-simulate { from = 0 'days  to = 20 'days }
-"#).unwrap();
+simulate { from = 0 'days  to = 20 'days SIMDT}
+"#.replace("SIMDT", &model_dt.map(|d| format!(" dt = {d} 'days ")).unwrap_or_default())).unwrap();
     let out = Command::new(&camdlc).arg(&model).output().unwrap();
     assert!(out.status.success(), "camdlc: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join("sir.ir.json");
@@ -183,4 +188,21 @@ fn an_inert_method_key_is_refused_at_fit_run() {
     assert!(!ok, "adapt_start beside adapt = false must be refused:\n{err}");
     assert!(err.contains("adapt_start") && err.contains("no effect"), "{err}");
     assert!(!tmp.0.join("out").exists(), "refused before any work");
+}
+
+/// An ODE method integrates at the model's declared dt (`runner::ode_step_dt`),
+/// so a `[config] dt` written in the file that differs would be ignored:
+/// refused. One that agrees, or a model that declares none, runs.
+#[test]
+fn an_ode_fit_refuses_a_config_dt_the_model_overrides() {
+    let tmp = tempdir("cfg_dt");
+    let Some(fit) = write_fit_with_model_dt(&tmp, "[config]\ndt = 0.25\n", Some(0.5)) else { return };
+    let (ok, err) = run(&fit, &["--no-dt-check"]);
+    assert!(!ok, "[config] dt = 0.25 beside the model's dt = 0.5 must be refused:\n{err}");
+    assert!(err.contains("dt = 0.25") && err.contains("0.5"), "{err}");
+
+    let tmp = tempdir("cfg_dt_same");
+    let Some(fit) = write_fit_with_model_dt(&tmp, "[config]\ndt = 0.5\n", Some(0.5)) else { return };
+    let (ok, err) = run(&fit, &["--no-dt-check"]);
+    assert!(ok, "an agreeing [config] dt runs:\n{err}");
 }
