@@ -110,8 +110,25 @@ const IF2: &str = "algorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 2
 const PFILTER: &str = "algorithm = \"pfilter\"\nbackend = \"chain_binomial\"\nparticles = 50\n\
     starts = \"single\"\n";
 
-/// A chain-binomial IF2 fit runs at the model's declared step, not the
-/// `[config] dt` default of 1.0 it used to.
+const PGAS: &str = "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 1\n\
+    particles = 50\nsweeps = 6\nburn_in = 2\nstarts = \"single\"\n";
+
+/// The fit directory a run stored under `dir/out/fits` (one segment).
+fn fit_segment_name(dir: &Path) -> String {
+    let mut names: Vec<String> = std::fs::read_dir(dir.join("out").join("fits"))
+        .expect("out/fits")
+        .filter_map(|d| d.ok().map(|d| d.file_name().to_string_lossy().into_owned()))
+        .collect();
+    assert_eq!(names.len(), 1, "one stored fit: {names:?}");
+    names.pop().unwrap()
+}
+
+/// A chain-binomial fit runs at the model's declared step, not the
+/// `[config] dt` default of 1.0 it used to. Asserted on the step actually
+/// walked, not on a config value: PGAS's reference trajectory has one substep
+/// per step over the 20 observed days, so 40 at dt = 0.5 (20 at dt = 1.0); and
+/// the fit's identity keys on the step it ran at, so leaving `[config] dt`
+/// out and writing the agreeing value store under one name.
 #[test]
 fn a_chain_binomial_fit_runs_at_the_models_dt() {
     let tmp = tempdir("if2_model_dt");
@@ -119,6 +136,26 @@ fn a_chain_binomial_fit_runs_at_the_models_dt() {
     let (ok, err) = fit_run(&write_fit(&tmp.0, &ir, "", IF2));
     assert!(ok, "{err}");
     assert!(err.contains("dt=0.5"), "IF2 runs at the model's dt = 0.5:\n{err}");
+
+    let tmp = tempdir("pgas_model_dt");
+    let ir = write_model(&tmp.0, Some(0.5));
+    let (ok, err) = fit_run(&write_fit(&tmp.0, &ir, "", PGAS));
+    assert!(ok, "{err}");
+    assert!(
+        err.contains("reference: 40 substeps"),
+        "PGAS walks 20 days at the model's 0.5, 40 substeps:\n{err}"
+    );
+    let omitted = fit_segment_name(&tmp.0);
+
+    // The same directory and model, now spelling the agreeing step: the fit
+    // identity is unchanged, so no second stored fit appears.
+    let (ok, err) = fit_run(&write_fit(&tmp.0, &ir, "[config]\ndt = 0.5\n", PGAS));
+    assert!(ok, "{err}");
+    assert_eq!(
+        fit_segment_name(&tmp.0),
+        omitted,
+        "omitting [config] dt and writing the model's own step are one fit identity"
+    );
 }
 
 /// A written `[config] dt` that differs from the model's is refused, for a
