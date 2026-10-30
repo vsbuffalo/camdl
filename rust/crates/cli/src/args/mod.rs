@@ -415,8 +415,10 @@ pub struct SimulateArgs {
     pub sweep_file: Option<PathBuf>,
 
     /// Companion for `--draws`. With `--draws prior`, a fit.toml supplying
-    /// priors. With `--draws posterior`, the fit results directory to read the
-    /// posterior draws from. With `--draws <file.tsv>`, a fit.toml (or results
+    /// priors. With `--draws posterior`, the fit run to read the posterior
+    /// draws from, by handle (`@label`, a leaf or results directory, a run-id
+    /// prefix, a fit.toml); a results directory holding several runs is
+    /// refused with them listed (gh#896). With `--draws <file.tsv>`, a fit.toml (or results
     /// dir) whose `[fixed]` block backfills parameters absent from the file's
     /// columns — never overwriting a column the file provides (#273).
     /// Also consulted (without --draws) by an anchored `--to`: the fit's

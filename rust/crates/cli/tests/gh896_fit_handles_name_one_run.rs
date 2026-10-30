@@ -570,3 +570,32 @@ fn fit_table_gives_each_run_its_own_row() {
         assert!(txt.contains(&record(leaf).0[..12]), "the text table names each run:\n{txt}");
     }
 }
+
+/// `simulate --draws posterior --fit` reads the run its handle names: a
+/// folder holding two runs is refused with them listed (it used to replay the
+/// last in directory order), and `@label` is accepted.
+#[test]
+fn simulate_posterior_draws_come_from_the_named_run() {
+    let p = Project::new();
+    p.config("post.toml", &pgas(4));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "short"]);
+    p.config("post.toml", &pgas(7));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1"]);
+    let leaves = p.leaves();
+    let short = leaves.iter().find(|l| record(l).1.as_deref() == Some("short")).unwrap().clone();
+    let segment = segment_of(&short);
+    let ir = golden_ir().to_string_lossy().into_owned();
+    let sim = |fit: &str| p.run(&["simulate", &ir, "--draws", "posterior", "--fit", fit,
+        "--seed", "1", "--output-dir", "sims"]);
+
+    let out = sim(&segment.to_string_lossy());
+    let all = text(&out);
+    assert!(!out.status.success(), "a folder holding two runs is refused:\n{all}");
+    assert!(all.contains("names 2 runs"), "{all}");
+
+    let out = sim("@short");
+    let all = text(&out);
+    assert!(out.status.success(), "@label names one run:\n{all}");
+    assert!(all.contains("6 draws from") && all.contains(&short.display().to_string()),
+        "the draws are the labelled run's:\n{all}");
+}
