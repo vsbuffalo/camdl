@@ -765,3 +765,35 @@ fn a_crashed_record_update_leaves_a_cache_hit() {
     p.ok(&["label", &id[..12], "after-crash"]);
     assert_eq!(record(&leaf).1.as_deref(), Some("after-crash"));
 }
+
+/// `fit table --label-pattern` and `--since-seconds` select runs, the unit a
+/// row is. They used to select folders, so a folder holding a matching run
+/// kept every one of its rows.
+#[test]
+fn fit_table_filters_select_runs() {
+    let p = Project::new();
+    p.config("post.toml", &pgas(4));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "short"]);
+    p.config("post.toml", &pgas(7));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "long"]);
+    let rows = |extra: &[&str]| -> Vec<String> {
+        let mut args = vec!["fit", "table"];
+        let fits = p.fits().to_string_lossy().into_owned();
+        args.push(&fits);
+        args.extend_from_slice(&["--format", "json"]);
+        args.extend_from_slice(extra);
+        let out = p.run(&args);
+        assert!(out.status.success(), "{}", text(&out));
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["rows"].as_array().unwrap().iter()
+            .map(|r| r["label"].as_str().unwrap_or("").to_string()).collect()
+    };
+    assert_eq!(rows(&["--label-pattern", "short"]), vec!["short"]);
+
+    // Age the `long` run's record by six years: `--since-seconds` keeps `short`.
+    let long = p.leaves().into_iter().find(|l| record(l).1.as_deref() == Some("long")).unwrap();
+    let mut rec = record(&long).2;
+    rec["provenance"]["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    std::fs::write(long.join("run.json"), serde_json::to_string_pretty(&rec).unwrap()).unwrap();
+    assert_eq!(rows(&["--since-seconds", "3600"]), vec!["short"]);
+}

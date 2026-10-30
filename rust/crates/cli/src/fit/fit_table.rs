@@ -41,7 +41,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     // walker / MethodResult load on rows the user filtered out.
     let pre_filtered: Vec<&FitDirEntry> = entries
         .iter()
-        .filter(|e| matches_outer_filters(e, args, now_unix))
+        .filter(|e| matches_outer_filters(e, args))
         .collect();
 
     // Pick the baseline fit (lowest fit_hash among the pre-filtered
@@ -108,7 +108,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     }
 
     // Inner filters that key on the loaded TableRow.
-    rows.retain(|r| matches_row_filters(r, args));
+    rows.retain(|r| matches_row_filters(r, args, now_unix));
 
     // `--quantity <NAME>`: fill each surviving row's posterior-median
     // cell for each requested scalar quantity. Read-or-derive (mirrors
@@ -328,7 +328,7 @@ fn load_archived_fit_toml(fit_dir: &std::path::Path) -> Result<FitConfig, String
     FitConfig::load(&archive.to_string_lossy())
 }
 
-fn matches_outer_filters(entry: &FitDirEntry, args: &FitTableArgs, now_unix: i64) -> bool {
+fn matches_outer_filters(entry: &FitDirEntry, args: &FitTableArgs) -> bool {
     let view: &FitView = &entry.view;
 
     if let Some(model) = &args.model {
@@ -338,26 +338,6 @@ fn matches_outer_filters(entry: &FitDirEntry, args: &FitTableArgs, now_unix: i64
     }
     if let Some(prefix) = &args.hash {
         if !view.fit_hash.starts_with(prefix.as_str()) {
-            return false;
-        }
-    }
-    if let Some(secs) = args.since_seconds {
-        if let Some(created) = parse_iso_to_unix(&view.created_at) {
-            if now_unix - created > secs {
-                return false;
-            }
-        }
-    }
-    if let Some(pat) = &args.label_pattern {
-        // A label names one run (gh#896): the fit matches when any of its
-        // runs' labels does, and an unlabelled fit is matched as "".
-        let labels: Vec<&str> = view.stages.iter().filter_map(|s| s.label.as_deref()).collect();
-        let matched = if labels.is_empty() {
-            glob_match(pat, "")
-        } else {
-            labels.iter().any(|l| glob_match(pat, l))
-        };
-        if !matched {
             return false;
         }
     }
@@ -396,7 +376,21 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     pi == p.len()
 }
 
-fn matches_row_filters(row: &TableRow, args: &FitTableArgs) -> bool {
+/// Filters on a row, which is one run (gh#896): its method and verdict, its
+/// own label (an unlabelled run matched as "") and its own creation time.
+fn matches_row_filters(row: &TableRow, args: &FitTableArgs, now_unix: i64) -> bool {
+    if let Some(secs) = args.since_seconds {
+        if let Some(created) = parse_iso_to_unix(&row.created_at) {
+            if now_unix - created > secs {
+                return false;
+            }
+        }
+    }
+    if let Some(pat) = &args.label_pattern {
+        if !glob_match(pat, row.label.as_deref().unwrap_or("")) {
+            return false;
+        }
+    }
     if let Some(method) = &args.with_method {
         if row.method != method.as_str() {
             return false;
