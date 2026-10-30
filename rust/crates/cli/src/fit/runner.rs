@@ -2520,13 +2520,13 @@ pub fn run_chains_with_per_chain_params(
         // Â = chain agreement (renamed from Rhat: this is not a
         // posterior mixing statistic; it measures IF2 optimizer chain
         // agreement). Suppress the leg entirely when every param's W
-        // collapsed; print per-param "n/a (W ≈ 0)" alongside finite
-        // entries when only some collapsed.
+        // collapsed; print per-param "unavailable" alongside finite
+        // entries when only some collapsed. An unavailable Â is never a pass
+        // (`gating::assess_if2`): the verdict is incomplete.
         if n_finite == 0 {
-            eprintln!("\nÂ: suppressed — within-chain variance below numerical \
-                       threshold for all estimated params (typical for refine \
-                       under cold cooling). Rely on Δ_dB leg of the compound \
-                       gate above for the convergence verdict.");
+            eprintln!("\nÂ: unavailable — within-chain variance below numerical \
+                       threshold for every estimated parameter, so the \
+                       convergence verdict is incomplete (not a pass).");
         } else {
             // Name the statistic and the threshold. Â is IF2 chain agreement,
             // NOT a posterior R̂, and the band comes from the gate that will
@@ -2548,7 +2548,7 @@ pub fn run_chains_with_per_chain_params(
                         eprintln!("  {:12} Â={:.3} {}", spec.name, r, status);
                     }
                     Some(_) => {
-                        eprintln!("  {:12} Â=n/a (W ≈ 0; rely on Δ_dB)", spec.name);
+                        eprintln!("  {:12} Â unavailable (W ≈ 0) — verdict incomplete", spec.name);
                     }
                     None => {}
                 }
