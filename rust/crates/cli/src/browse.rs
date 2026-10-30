@@ -1657,6 +1657,10 @@ fn print_fits_json(fits: &[FitEntry]) {
                     // and neither is addressable.
                     "method_hash": s.method_hash,
                     "run_id": s.run_id,
+                    // The run's own label and time (gh#896): a label names one
+                    // run, so it belongs on the run's entry.
+                    "label": s.label,
+                    "created_at": s.created_at,
                     "path": leaf_rel_path(&f.rel_path, &f.fit_dir, &s.stage_dir),
                     "backend": s.backend.as_str(),
                     "seed": s.seed,
@@ -1680,6 +1684,8 @@ fn print_fits_json(fits: &[FitEntry]) {
             },
             "kind": "fit",
             "hash": v.fit_hash,
+            // Display only: every run's label, joined with ", " (gh#896). A
+            // label names one run; read `methods[].label` to address it.
             "label": v.label(),
             "model": v.model,
             "model_identity": v.model_identity,
