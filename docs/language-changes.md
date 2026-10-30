@@ -13,6 +13,48 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-10-29 — `bspline` forcing with estimable coefficients
+
+**What.** A new forcing kind, `bspline`: a clamped B-spline over a window, β(t)
+= Σₖ cₖ Bₖ(t) (or exp of it with `link = log`), held at its end value past the
+window. Knots come from `window = [a, b]` with `n_basis`, or from explicit
+`breakpoints`; window ends may be dates or observation anchors. Coefficients may
+be parameters and carry emitted gradients, so PGAS with NUTS, IF2 and the
+particle filter can estimate them. `periodic_spline` coefficients are now live
+parameters too, and `periodic_spline` accepts `link`. A run whose horizon passes
+the window end prints the notice `spline-held-past-window` (language spec,
+"B-spline forcing").
+
+**Guidance.** Keep `n_basis` small, five or six. Explicit coefficients have
+independent priors, so nothing ties neighbouring coefficients together: with
+twelve, the posterior median of β(t) wandered up to 0.55 in log β from the truth
+on the benchmark outbreak
+(`docs/dev/notes/2026-10-29-explicit-bspline-measurement.md`).
+
+**Known limitation: stuck chains under the default starts.** With
+`starts = "from_prior"` (the default when every coefficient has a prior), some
+chains settled in a region that fits the data far worse and stayed there; β(t)'s
+R̂ was 1.18–1.50 on the benchmark recovery datasets, and `fit summary` flags it.
+Workaround: start the chains from distinct good points, for example from IF2
+fits (`starts = { from_mle = "<IF2 fit>" }`, or one `from_params` fit per
+chain), and give IF2 an explicit small `rw_sd` (0.05 on the coefficients; the
+automatic step can make every particle infeasible).
+
+**Not yet available.** `coefs = smooth(level, slope, scale, modes, per)`, a
+penalized form with a calibrated prior on curvature, compiles but every `camdl`
+command refuses it: "forcing `beta_t`: `coefs = smooth(...)` is not yet
+available in this release". Use explicit coefficients.
+
+**Also.** An estimated `real` declared without a range and given no `start` no
+longer fails `fit run` with "has no value": its placeholder start is a draw from
+its prior.
+
+**Diagnostics.** E408 (knot and coefficient shape), E409 (unknown argument),
+E411 (unknown `link`), E301 (a dimensioned coefficient under `link = log`), E600
+(a parameter in a knot).
+
+---
+
 ## 2026-10-27 — a typed constant `let` is a model constant, not a parameter
 
 **What.** A typed `let` with a constant body (`let omega : rate = 0.01`)

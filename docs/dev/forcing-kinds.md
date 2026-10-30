@@ -48,6 +48,7 @@ transmission rate that moves smoothly through an outbreak on no known date.
 Window ends may be observation anchors (`last_obs - 2 'weeks`). Coefficients may
 be parameters and carry an emitted gradient (a `forcing_basis` node), so NUTS
 can fit them; the knots, window and period are structural (E600). Or
+(implemented, refused by every `camdl` command until released)
 `coefs = smooth(level, slope, scale, modes, per)`: a line plus whitened
 curvature modes under a penalized-complexity prior on the scale, the penalty Ω
 and its whitening built by the runtime (`sim/src/spline_penalty.rs`); its

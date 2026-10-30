@@ -341,64 +341,9 @@ fn pfilter_profile_and_survey_notice_the_hold() {
                    "--output", &s(&tmp.path().join("survey_out"))].map(String::from).to_vec());
 }
 
-/// §6.4: under IF2 (no prior), an estimated `smooth` scale is a ridge with no
-/// maximum, and `fit run` refuses it by name before running; with the scale
-/// fixed, the same fit is not refused by this rule.
-#[test]
-fn if2_refuses_an_estimated_smooth_scale() {
-    let tmp = tempfile::tempdir().unwrap();
-    let model = repo().join("tests/fixtures/gradient/sir_smooth_fit.camdl");
-    let data = tmp.path().join("cases.tsv");
-    let mut body = String::from("time\tcases\n");
-    for w in 1..=9 {
-        body.push_str(&format!("{}\t{}\n", 7 * w, 20 + 7 * w));
-    }
-    std::fs::write(&data, body).unwrap();
-    let fit = |estimate_tau: bool| -> (bool, String) {
-        let toml = tmp.path().join(format!("fit_{estimate_tau}.toml"));
-        let (est, fixed) = if estimate_tau {
-            ("tau = { bounds = [1e-6, 2.5], start = 0.5 }\n", "")
-        } else {
-            ("", "tau = 0.5\n")
-        };
-        std::fs::write(&toml, format!(
-            "output_dir = \"{out}\"\n[model]\ncamdl = \"{model}\"\n[data.observations]\ncases = \"{data}\"\n\
-             [config]\ndt = 1.0\n[estimate]\na = {{ bounds = [-8.0, 2.0], start = -1.5 }}\n{est}\
-             [fixed]\ngamma = 0.15\nb = 0.0\nrho = 0.5\nz_m1 = 0.0\nz_m2 = 0.0\nz_m3 = 0.0\nz_m4 = 0.0\n{fixed}\
-             [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 20\niterations = 1\ncooling = 0.7\n",
-            out = tmp.path().join(format!("results_{estimate_tau}")).display(),
-            model = model.display(), data = data.display(),
-        )).unwrap();
-        let o = Command::new(bin())
-            .args(["fit", "run", toml.to_str().unwrap()])
-            .env("CAMDL_SKIP_VERSION_CHECK", "1")
-            .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-            .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
-            .output().unwrap();
-        (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
-    };
-    let (ok, stderr) = fit(true);
-    assert!(!ok, "an estimated smooth scale under if2 must be refused:\n{stderr}");
-    assert!(stderr.contains("`tau` is the scale of the smooth forcing `beta_t`, and `if2` reads no prior"), "{stderr}");
-    // Past this rule the run starts (the filter's own outcome on these
-    // synthetic counts is not what is tested here).
-    let (_, stderr) = fit(false);
-    assert!(!stderr.contains("is the scale of the smooth forcing") && stderr.contains("(method=if2)"),
-        "a fixed scale passes the rule and the run starts:\n{stderr}");
-}
-
-/// A tiny pgas fit of `sir_smooth_fit` estimating the level `a` and one mode,
-/// `a` either with a fit.toml box or, as the fixture declares it, unbounded
-/// with no start; returns (success, stderr).
-fn pgas_smooth_fit(tmp: &Path, boxed: bool) -> (bool, String) {
-    let a = if boxed { "a = { bounds = [-8.0, 2.0] }\n" } else { "a = {}\n" };
-    pgas_smooth_fit_with(tmp, &format!("boxed_{boxed}"), &format!("{a}z_m1 = {{}}\n"), "tau = 0.3\n")
-}
-
-/// The same fit with the given `[estimate]` lines and the fixed value of
-/// `tau` (empty when it is estimated).
-fn pgas_smooth_fit_with(tmp: &Path, tag: &str, estimate: &str, fixed_tau: &str) -> (bool, String) {
-    let model = repo().join("tests/fixtures/gradient/sir_smooth_fit.camdl");
+/// A tiny pgas `fit run` of `model` on weekly synthetic counts, with the given
+/// `[estimate]` and extra `[fixed]` lines; returns (success, stderr).
+fn pgas_fit(tmp: &Path, tag: &str, model: &Path, estimate: &str, fixed: &str) -> (bool, String) {
     let data = tmp.join("cases.tsv");
     let mut body = String::from("time\tcases\n");
     for w in 1..=9 {
@@ -408,8 +353,7 @@ fn pgas_smooth_fit_with(tmp: &Path, tag: &str, estimate: &str, fixed_tau: &str) 
     let toml = tmp.join(format!("fit_{tag}.toml"));
     std::fs::write(&toml, format!(
         "output_dir = \"{out}\"\n[model]\ncamdl = \"{model}\"\n[data.observations]\ncases = \"{data}\"\n\
-         [config]\ndt = 1.0\n[estimate]\n{estimate}\
-         [fixed]\ngamma = 0.15\nb = 0.0\nrho = 0.5\n{fixed_tau}z_m2 = 0.0\nz_m3 = 0.0\nz_m4 = 0.0\n\
+         [config]\ndt = 1.0\n[estimate]\n{estimate}[fixed]\n{fixed}\
          [method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 8\nsweeps = 4\nburn_in = 2\n",
         out = tmp.join(format!("results_{tag}")).display(),
         model = model.display(), data = data.display(),
@@ -425,36 +369,72 @@ fn pgas_smooth_fit_with(tmp: &Path, tag: &str, estimate: &str, fixed_tau: &str) 
 
 /// An unbounded `real` with a proper prior and no `start` runs under the
 /// default `starts = from_prior`: the placeholder start is a prior draw (it
-/// was refused as "has no value" before).
+/// was refused as "has no value" before). Explicit log-link coefficients.
 #[test]
-fn pgas_runs_unbounded_smooth_coordinates_without_starts() {
+fn pgas_runs_unbounded_coefficients_without_starts() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ok, stderr) = pgas_smooth_fit(tmp.path(), false);
+    let model = tmp.path().join("sir_unbounded.camdl");
+    std::fs::write(&model, r#"time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R
+parameters {
+  gamma : rate in [0.01, 1.0]
+  c1 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  c2 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  c3 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  c4 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  rho : probability in [0.01, 1.0]
+}
+forcing {
+  beta_t : bspline 'per_day {
+    window  = [0 'days, 63 'days]
+    n_basis = 4
+    link    = log
+    coefs   = [c1, c2, c3, c4]
+  }
+}
+transitions {
+  infection : S --> I @ beta_t * S * (I / N)
+  recovery  : I --> R @ gamma * I
+}
+init { S = 9900  I = 100 }
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    cases         ~ poisson(rate = rho * projected)
+  }
+}
+simulate {
+  from = 0 'days
+  to   = 63 'days
+}
+"#).unwrap();
+    let (ok, stderr) = pgas_fit(tmp.path(), "unbounded", &model, "c1 = {}\nc2 = {}\nc3 = {}\nc4 = {}\n",
+                                "gamma = 0.15\nrho = 0.5\n");
     assert!(ok && !stderr.contains("has no value"), "the unbounded fit must run:\n{stderr}");
 }
 
-/// §6.3-§6.4: the samplers must move a `smooth` forcing's level, slope and
-/// modes on the identity scale. A finite search box on one of them (here a
-/// fit.toml `bounds` on the level `a`) would give it the scaled logit, so
-/// `fit run` refuses it by name under pgas; unbounded, the rule passes.
+/// The smooth coefficient form is implemented but not yet released: every
+/// command refuses a model that uses it, with the explicit-coefficient remedy.
 #[test]
-fn pgas_refuses_a_boxed_smooth_coordinate() {
+fn smooth_coefficients_are_not_yet_available() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ok, stderr) = pgas_smooth_fit(tmp.path(), true);
-    assert!(!ok, "a boxed smooth level under pgas must be refused:\n{stderr}");
-    assert!(stderr.contains("feed the level, slope, scale or modes of the")
-        && stderr.contains("  a: search box [-8, 2]"), "{stderr}");
-    let (ok, stderr) = pgas_smooth_fit(tmp.path(), false);
-    assert!(ok && !stderr.contains("feed the level, slope, scale or modes"), "{stderr}");
-}
-
-/// The smooth scale is refused with a box too (a boxed log scale is a wall
-/// the sampler's steps cross as divergences); unboxed, it runs.
-#[test]
-fn pgas_refuses_a_boxed_smooth_scale() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ok, stderr) = pgas_smooth_fit_with(tmp.path(), "tau_boxed", "a = {}\nz_m1 = {}\ntau = { bounds = [1e-6, 2.5] }\n", "");
-    assert!(!ok && stderr.contains("  tau: search box [0.000001, 2.5]"), "{stderr}");
-    let (ok, stderr) = pgas_smooth_fit_with(tmp.path(), "tau_free", "a = {}\nz_m1 = {}\ntau = {}\n", "");
-    assert!(ok, "an unboxed scale runs:\n{stderr}");
+    let model = repo().join("tests/fixtures/gradient/sir_smooth_fit.camdl");
+    let (ok, stderr) = pgas_fit(tmp.path(), "smooth", &model, "a = {}\n",
+        "gamma = 0.15\nb = 0.0\nrho = 0.5\ntau = 0.3\nz_m1 = 0.0\nz_m2 = 0.0\nz_m3 = 0.0\nz_m4 = 0.0\n");
+    assert!(!ok && stderr.contains("`coefs = smooth(...)` is not yet available in this release")
+        && stderr.contains("keep `n_basis` small"), "fit run must refuse smooth:\n{stderr}");
+    let o = Command::new(bin())
+        .args(["simulate", model.to_str().unwrap(), "--param", "a=-1.5", "--param", "b=0", "--param", "tau=0.3",
+               "--param", "z_m1=0", "--param", "z_m2=0", "--param", "z_m3=0", "--param", "z_m4=0",
+               "--param", "gamma=0.15", "--param", "rho=0.5", "--seed", "1", "--stdout"])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+        .output().unwrap();
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success() && stderr.contains("is not yet available in this release"), "simulate must refuse smooth:\n{stderr}");
 }
