@@ -1,6 +1,6 @@
 ---
 date: 2026-10-30
-status: proposed; every design question is decided
+status: proposed — design approved by external review; ready for implementation pending maintainer acceptance
 area: DSL parameters, indexed expressions, family priors, bspline coefficients, IR family metadata, fit-config and CLI parameter names
 related:
   - 2026-10-27-estimable-bsplines.md (D5, section 6.4 smooth, E413 and E414)
@@ -341,11 +341,17 @@ negative infinity), so the log-posterior would be negative infinity everywhere
 and the chain would freeze at its start while looking well mixed; refusing is
 the honest alternative. Implementing that gradient is the subject of
 `2026-06-04-hierarchical-priors-gate3-pgas-nuts.md` and is out of scope here.
-Even once it exists, the centred form is a poor target for NUTS: when the data
-say little about a province, the posterior of `(sd_b, b[p, k])` has the "funnel"
-shape (the spread of `b` collapses as `sd_b` goes to zero), which a fixed step
-size cannot traverse. The non-centred form below removes the funnel and is the
-form recommended for PGAS.
+The choice between the two forms is also a sampling question. When the data say
+little about a province, the centred posterior of `(sd_b, b[p, k])` has the
+classic small-scale funnel (the spread of `b` collapses as `sd_b` goes to zero),
+which a gradient sampler with a fixed step size traverses poorly. The
+non-centred form below avoids that funnel and is often preferable when province
+effects are weakly informed by the data; for a strongly identified province the
+centred form can mix better. The non-centred form does not remove all posterior
+dependence: `mu_b`, `sd_b` and `z` can still be confounded with each other and
+with observation parameters such as a reporting fraction. It is the practical
+form under PGAS today because PGAS refuses hierarchical priors (the gh#175
+gradient stub), not because it is better in every model.
 
 **The non-centred form.** camdl has no built-in reparameterisation of
 hierarchical priors (verified: no non-centred transform in `ocaml/lib` or
@@ -374,6 +380,37 @@ province `p` at position `k` is `mu_b_k + sd_b * z_p_k`, which has the
 distribution `normal(mu_b[k], sd_b)` given the hyperparameters, exactly as in
 the centred form. What differs is what is estimated: the cells of `z` are
 standardised deviations, and the province coefficients are derived quantities.
+
+`sd_b` is a scale on the log-transmission coefficients: a province deviation of
+one `sd_b` at a knot multiplies that province's transmission there by
+`exp(sd_b)` relative to the national curve. The prior `exponential(rate = 2)`
+has mean 0.5, so a typical province sits within about a factor of
+`exp(0.5) ≈ 1.6` of the national curve at a knot, with a tail allowing larger
+departures. Whether that is the intended spread is a modelling judgement to be
+checked with a prior-predictive plot of the province and national curves (draws
+of `beta_t` for each province from the prior alone) before fitting.
+
+**Modelling note.** The six national coefficients `mu_b[k]` have independent
+priors, so the national curve itself carries no curvature regularisation: its
+smoothness comes only from the basis. Combining a whitened curvature prior
+(`smooth`, estimable-bsplines proposal) for the national curve with the province
+deviations here would separate smooth national variation from province
+departures. That combination is out of scope.
+
+**Per-cell prior resolution is a new capability, and needs focused
+implementation review.** Today every cell of a family has the same prior, and a
+hierarchical prior references only scalar hyperparameters. After this change a
+family can have a different prior per cell, each referencing different cells of
+other families, so the prior defines a dependency graph over scalar parameters
+that is larger and less regular than any the code has seen. Every consumer of
+the prior must work from one resolved graph, built once from the IR: the prior
+density, prior simulation (which must draw parents before children, in
+dependency order), prior gradients, inference-method eligibility (the PGAS
+refusal above and any similar check), and initialisation and start draws. No
+consumer may rebuild its own view of which parameter depends on which. Tests
+(section 6, test 5) require that each method either evaluates the resulting
+prior correctly or refuses it explicitly, and that prior simulation respects
+dependency order.
 
 ### 2.6 Family metadata in the IR
 
@@ -435,6 +472,12 @@ was it written?". It is the model source the fit records, not the hash. Two
 spellings with one computational identity have different provenance, as any
 textual edit does.
 
+Cached outputs must never be attributed to a different source model. When a run
+is reused because its computational identity matches, the provenance reported
+for it is that of the run that produced it (its recorded model source), and any
+view of it under the current model states that it was reused, rather than
+relabelling it as produced by the current source.
+
 The consequence is a rule for every reader of family structure: viewers,
 summaries, trace grouping and the fit-config resolver take the family structure
 from the _current compiled model_, never from a cached numerical artifact. A
@@ -484,6 +527,17 @@ as in `coefs = mu_b + sd_b * z[p]`. The rules:
 - the length of the result is the slice length for the purpose of `n_basis`
   (section 2.9), and the ordering rule E416 (section 2.10) applies to every
   slice operand.
+
+Units and domain. The expanded scalar expressions go through the existing
+dimensional analysis exactly as a hand-written list would, so `+` and `-`
+require operands with the same unit, and `*` and `/` combine units; under
+`link = log` the result must be dimensionless (E301, unchanged). A divisor must
+be a constant (a literal or constant arithmetic), and a constant zero divisor is
+refused; a parameter-valued divisor, scalar or slice, is refused with E420. The
+alternative, allowing a divisor whose parameter kind is strictly positive, was
+rejected for now: no motivating model needs division, a positive kind can still
+approach zero at the edge of its support where the coefficient and its gradient
+blow up, and the restriction can be lifted later without breaking a model.
 
 This arithmetic exists only inside a list-valued context, which in this proposal
 is `coefs` alone. A slice is still not a number in a rate, a `let`, a prior
@@ -697,10 +751,18 @@ configured both as a family and per cell; choose one", with no silent
 precedence. A cell-level override of a family-level setting is a later, separate
 design.
 
-The compiler half (2.1-2.13, the IR field) and the fit-config and CLI half
-(2.14, 2.15) ship in the same release, because the IR field has no reader
-without the resolver and the resolver has no source for membership without the
-IR field.
+Implementation is split into two stages that are tested independently and ship
+in the same release:
+
+- **Stage A:** sized families (2.1-2.3), indexed and partial access (2.4), the
+  IR family metadata (2.6, 2.7), `coefs = <family or slice>` with E415 and E416
+  (2.8-2.10, 2.12, 2.13), and fit-config, scenario and CLI name resolution
+  (2.14, 2.15). Within Stage A the compiler and the fit-config resolver land
+  together, because the IR field has no reader without the resolver and the
+  resolver has no source for membership without the IR field.
+- **Stage B:** declaration binders, per-cell prior resolution and its single
+  resolved dependency graph (2.5), and element-wise `coefs` arithmetic (2.8).
+  Stage B builds on Stage A and has its own green gate before it merges.
 
 ## 3. Before and after
 
@@ -817,14 +879,14 @@ form (section 2.5).
 
 ## 5. What changes where, and how big
 
-| Piece                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Estimate                                                                       |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| Parser (`parser.mly`): `real[N]` and `real[k in N]` kind suffix on the scalar and indexed `param_decl` shapes (factor the bounds/prior tail first); optional `p in dim` binders on declaration axes; full and partial index forms in expressions; E417                                                                                                                                                                                                                  | medium, 1.5 days                                                               |
-| AST and expander: sized axis and binders in `PIndexed`/`PScalar`; name producer; per-cell prior resolution with a binder environment; indexed-reference resolution in `resolve_expr`; E230 against lowered names; E236 mapping indexed references to families; binder substitution in `coefs`; element-wise slice arithmetic in `coefs`, expanded to per-element scalar expressions; E415, E416, E418, E419, E420; `n_basis` table; the separate `periodic_spline` path | large, 4 days; the compiler lists every `param_decl` and index match to extend |
-| IR: `parameter_families` in `ir.ml` and `serde.ml`; `ir/VERSION` 0.43; Rust `ir` crate; bound and skipped in `ir_hash.rs`; every golden regenerated (human reviewed)                                                                                                                                                                                                                                                                                                    | medium, 1.5 days, plus golden review                                           |
-| Tree-sitter: `grammar.js` (`real[N]`, `real[k in N]`, declaration binders, index forms), regenerate the committed `src/parser.c`, `grammar.json`, `node-types.json` with the pinned `npx -y tree-sitter-cli@0.22.6 generate`; corpus tests                                                                                                                                                                                                                              | small, 0.5 day, plus review of a large generated diff                          |
-| Language spec: sections 4.3, 7 (bspline, smooth, periodic_spline), the new error codes; edited by hand, never `dprint fmt` on `docs/camdl-language-spec.md`; also the warning catalog, cheatsheet, user-features, and a `language-changes.md` entry for the E413-to-E415 renumbering                                                                                                                                                                                    | small, 1 day                                                                   |
-| Rust fit config and CLI: `[estimate]` family expansion through the IR metadata; indexed and lowered names in fit-config keys, scenario `set`, `--fixed`, `--param`; refusal of mixed settings, slice keys and duplicates; scalar partition keyed in the resolved problem (parameter-roles Stage 2); summaries group by the current model's families                                                                                                                     | medium to large, 3 days                                                        |
+| Piece                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Estimate                                                                                                                                                                                                                                                                                                                                               |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Parser (`parser.mly`): `real[N]` and `real[k in N]` kind suffix on the scalar and indexed `param_decl` shapes (factor the bounds/prior tail first); optional `p in dim` binders on declaration axes; full and partial index forms in expressions; E417                                                                                                                                                                                                                  | medium, 1.5 days                                                                                                                                                                                                                                                                                                                                       |
+| AST and expander: sized axis and binders in `PIndexed`/`PScalar`; name producer; per-cell prior resolution with a binder environment; indexed-reference resolution in `resolve_expr`; E230 against lowered names; E236 mapping indexed references to families; binder substitution in `coefs`; element-wise slice arithmetic in `coefs`, expanded to per-element scalar expressions; E415, E416, E418, E419, E420; `n_basis` table; the separate `periodic_spline` path | Stage A: large, 3 days. Stage B (binders, indexed prior references, per-cell resolution, new expression shapes in `coefs`, unit and divisor checks, cycle detection over families): large, 5 days, plus focused review. The compiler lists every `param_decl`, prior and index match to extend, and the prior-consumer audit of 2.5 crosses into Rust. |
+| IR: `parameter_families` in `ir.ml` and `serde.ml`; `ir/VERSION` 0.43; Rust `ir` crate; bound and skipped in `ir_hash.rs`; every golden regenerated (human reviewed)                                                                                                                                                                                                                                                                                                    | medium, 1.5 days, plus golden review                                                                                                                                                                                                                                                                                                                   |
+| Tree-sitter: `grammar.js` (`real[N]`, `real[k in N]`, declaration binders, index forms), regenerate the committed `src/parser.c`, `grammar.json`, `node-types.json` with the pinned `npx -y tree-sitter-cli@0.22.6 generate`; corpus tests                                                                                                                                                                                                                              | small, 0.5 day, plus review of a large generated diff                                                                                                                                                                                                                                                                                                  |
+| Language spec: sections 4.3, 7 (bspline, smooth, periodic_spline), the new error codes; edited by hand, never `dprint fmt` on `docs/camdl-language-spec.md`; also the warning catalog, cheatsheet, user-features, and a `language-changes.md` entry for the E413-to-E415 renumbering                                                                                                                                                                                    | small, 1 day                                                                                                                                                                                                                                                                                                                                           |
+| Rust fit config and CLI: `[estimate]` family expansion through the IR metadata; indexed and lowered names in fit-config keys, scenario `set`, `--fixed`, `--param`; refusal of mixed settings, slice keys and duplicates; scalar partition keyed in the resolved problem (parameter-roles Stage 2); summaries group by the current model's families                                                                                                                     | medium to large, 3 days                                                                                                                                                                                                                                                                                                                                |
 
 The compiler half touches none of the high-risk inference files (`pgas.rs`,
 `pgas_grad.rs`, `obs_loglik.rs`, `obs_model.rs`, `if2.rs`,
@@ -844,28 +906,43 @@ Each test is mutation-checked (revert the source, keep the test, confirm red).
    hand-written scalar versions (the non-centred one with hand-written
    coefficient lists `[mu_b_0 + sd_b * z_kinshasa_0, ...]`, the centred one with
    18 hand-written per-cell priors): equal IR content and hash.
-2. **Density and gradient equivalence.** The same pairs: equal log prior, equal
-   log likelihood and equal gradients, deterministically evaluated at a set of
-   fixed parameter vectors. Fixed-seed sampler output (posterior draws) is
-   compared for equality only for pairs whose execution path is identical (the
-   same scalar IR in the same parameter order, test 1); where the order differs,
-   only the deterministic evaluations are compared, because a different
-   parameter order legitimately changes the random-number stream.
-3. **Prior sampling.** Draws from a family prior have the declared marginals;
+2. **Density and gradient equivalence.** The pairs of test 1 (same model, two
+   spellings, same coordinates): equal log prior, equal log likelihood and equal
+   gradients, deterministically evaluated at a set of fixed parameter vectors.
+   Fixed-seed sampler output (posterior draws) is compared for equality only for
+   pairs whose execution path is identical (the same scalar IR in the same
+   parameter order, test 1); where the order differs, only the deterministic
+   evaluations are compared, because a different parameter order legitimately
+   changes the random-number stream.
+3. **Centred versus non-centred.** These are the same model in different
+   coordinates, so their densities are not compared. Instead the induced
+   distribution of the coefficients is: draw from the prior of each form,
+   compute the province coefficients (`b` directly, or `mu_b + sd_b * z`), and
+   compare per-coefficient means, variances and pairwise covariances within
+   Monte Carlo error, and the marginals by a two-sample Kolmogorov-Smirnov test
+   at a pre-stated level.
+4. **Prior sampling.** Draws from a family prior have the declared marginals;
    cells are independent given fixed hyperparameters; with a shared scalar mean,
    the empirical pairwise covariance matches `Var(mu_b)`; with position-indexed
    means, same-position cells across provinces covary by `Var(mu_b[k])` and
    different-position cells are uncorrelated; with a shared scale only, cells
    are uncorrelated but their absolute deviations are positively correlated.
-4. **Per-cell prior resolution and backend coverage.** In the centred Ebola
+5. **Per-cell prior resolution and method coverage.** In the centred Ebola
    model, the prior of each `b_<province>_<k>` references `mu_b_<k>` and `sd_b`;
    a reference `mu_b[k]` with `mu_b : real[4]` and `k in 6` is E418; a binder
    colliding with a parameter name is refused; a family whose prior references
    itself is E236; a hand-written `mu = mu_b_kinshasa` is accepted. The centred
    model runs under PMMH and is refused by PGAS with the existing gh#175
    message; the non-centred model runs under PGAS (a short run, asserting it
-   starts and moves, not a convergence claim).
-5. **Partial indexing.** For `b[province, age] : real[6]`: `b[p, a, 3]` is a
+   starts and moves, not a convergence claim). For a model with per-cell priors,
+   every method that uses the prior (PGAS, PMMH, MH) either evaluates the prior
+   density and gradient correctly, checked against an independent hand-computed
+   value at fixed parameter vectors, or refuses the model with an explicit
+   message; none silently evaluates a different prior. Prior simulation respects
+   dependency order: in a chain `a -> mu_b[k] -> b[p, k]` declared in reverse
+   order in the source, drawn children are distributed given the drawn parents
+   (checked by moments), and initialisation and start draws use the same order.
+6. **Partial indexing.** For `b[province, age] : real[6]`: `b[p, a, 3]` is a
    scalar, `b[p, a]` is accepted as `coefs`, `b[p]` and `b` as `coefs` are E420
    naming the free axes, `b[p]` as a number is E420, `b[province, a, 3]` (a
    dimension name as index) is refused with the binder hint, four indices is
@@ -873,13 +950,16 @@ Each test is mutation-checked (revert the source, keep the test, confirm red).
    arithmetic: `mu_b + sd_b * z[p]` expands per element as stated;
    `mu_b - z[p]`, `-z[p]` and `z[p] / 2` likewise; operands of lengths 6 and 4
    are E420 naming both; a 2-D operand is E420; `mu_b[0] + sd_b` (no slice) as
-   `coefs` is E420; `mu_b + 1` used in a rate is E420.
-6. **Round-trip names.** Names, order and membership of a family are identical
+   `coefs` is E420; `mu_b + 1` used in a rate is E420. Units: adding a
+   `'per_day` scalar to a `'ratio` slice is refused by the existing dimensional
+   check; under `link = log` a dimensioned result is E301; a parameter-valued
+   divisor (`z[p] / sd_b`) is E420; a constant zero divisor is refused.
+7. **Round-trip names.** Names, order and membership of a family are identical
    through compile, fit config expansion, outputs (summaries, traces) and
    reload, for `b : real[6]` and `b[province] : real[6]`. Summaries group a
    cached run's columns by the families of the model compiled now, asserted by
    reusing a run produced by the hand-written spelling.
-7. **Boundaries.** Size 1; sizes 0, negative, fractional and non-literal (E417);
+8. **Boundaries.** Size 1; sizes 0, negative, fractional and non-literal (E417);
    family-versus-scalar collision (`b : real[6]` beside `b_3`, E278);
    family-versus-family collision (`b_k : real[3]` and `b[g] : real[3]` with a
    level `k`, E278); constant index 6 on a 6-cell family (E418, with "indexed 0
@@ -887,23 +967,23 @@ Each test is mutation-checked (revert the source, keep the test, confirm red).
    `coefs` by two forcings (accepted, shared coefficients, asserted in the IR);
    `n_basis` disagreeing with the slice (E415); `coefs = b[p]` yielding
    different coefficients per province in the expanded forcings.
-8. **Ordering.** A file-derived dimension as the free axis of `coefs` is E416
+9. **Ordering.** A file-derived dimension as the free axis of `coefs` is E416
    with the original and with row-shuffled files alike (the decision does not
    read the rows); an inline-list dimension is accepted, in declared order.
-9. **periodic_spline.** A slice of length `n_basis` is accepted; `n_basis`
-   omitted infers the slice length; a disagreeing `n_basis` is E415; an inferred
-   count not greater than `degree` is E408.
-10. **Fit config and CLI names.** `b = {}` expands to all cells; `"b[3]"`,
+10. **periodic_spline.** A slice of length `n_basis` is accepted; `n_basis`
+    omitted infers the slice length; a disagreeing `n_basis` is E415; an
+    inferred count not greater than `degree` is E408.
+11. **Fit config and CLI names.** `b = {}` expands to all cells; `"b[3]"`,
     `"b[kinshasa, 2]"`, `b_3`, scenario `b[3] = 0.3` and `--fixed 'b[3]=0.3'`
     each reach the intended cell; the same cell named in both forms is a
     duplicate error; a slice key is refused; mixed family and per-cell settings
     are refused; `b = {}`, six `"b[k]"` entries and six `b_k` entries have the
     same resolved scalar partition and the same fit identity; output columns use
     lowered names.
-11. **Smooth.** `z : real[10]` with a non-standard prior as `modes` is E414;
+12. **Smooth.** `z : real[10]` with a non-standard prior as `modes` is E414;
     with `normal(0, 1)` accepted and `n_basis` 12.
-12. **Tree-sitter.** Corpus entries for `real[N]`, `real[k in N]`, declaration
+13. **Tree-sitter.** Corpus entries for `real[N]`, `real[k in N]`, declaration
     binders and full and partial indexing; regeneration with the pinned CLI is
     reproducible.
-13. **Diagnostics.** Each new code (E415 to E420 and the fit-config refusals)
+14. **Diagnostics.** Each new code (E415 to E420 and the fit-config refusals)
     has a test asserting the exact message, location and hint.
