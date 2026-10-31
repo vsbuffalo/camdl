@@ -1,6 +1,6 @@
 ---
 date: 2026-10-30
-status: proposed — design approved by external review; ready for implementation pending maintainer acceptance
+status: accepted 2026-10-30 — design approved by external review and the maintainer; implement in two stages (A then B)
 area: DSL parameters, indexed expressions, family priors, bspline coefficients, IR family metadata, fit-config and CLI parameter names
 related:
   - 2026-10-27-estimable-bsplines.md (D5, section 6.4 smooth, E413 and E414)
@@ -942,6 +942,9 @@ Each test is mutation-checked (revert the source, keep the test, confirm red).
    dependency order: in a chain `a -> mu_b[k] -> b[p, k]` declared in reverse
    order in the source, drawn children are distributed given the drawn parents
    (checked by moments), and initialisation and start draws use the same order.
+   IF2 and the nl-* optimisers ignore priors in their objective but draw their
+   default `from_prior` starts from them, so the start-draw test covers them
+   too.
 6. **Partial indexing.** For `b[province, age] : real[6]`: `b[p, a, 3]` is a
    scalar, `b[p, a]` is accepted as `coefs`, `b[p]` and `b` as `coefs` are E420
    naming the free axes, `b[p]` as a number is E420, `b[province, a, 3]` (a
