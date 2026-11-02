@@ -3656,8 +3656,11 @@ name (e.g. `I`) is not a single compartment after expansion, so write the
 **expanded stratum name** directly (`I_child_p1 = ...`, `add(I_child_p1, 5)`).
 The compiler verifies both verbs' targets against the expanded compartment
 table and rejects a stratified family or an unknown name with **E265**; the
-family case lists the available cells. (Index-binder forms like `I[child, p1]`
-on the left of a `set` are not part of the grammar.)
+family case lists the available cells. A target may also be written indexed,
+`I[child, p1] = ...` or `add(I[child, p1], 5)`, and inside an indexed family
+(§13.3) its indices may be the family's binders, including a
+`c in compartments` binder: `c[a] = ...`. An indexed target must index every
+dimension of its compartment, and names one cell (E265 otherwise; see §13.3).
 
 **Pairing rule for a bare stratified `transfer`.** The two endpoints pair
 cell-for-cell, and may do so only when they are **declared with the same
@@ -3780,6 +3783,33 @@ members whose `base_name` is `"sia"` — no need to enumerate them individually
 
 Individual members can still be addressed by their expanded name (`"sia_north"`)
 when fine-grained control is needed.
+
+**Indexed `set` and `add` targets.** Inside a family the target of a `set`, and
+of an `add`, may be indexed by the family's binders. With a `c in compartments`
+binder, one family covers every compartment:
+
+```camdl preamble=iv-patch
+events {
+  # every compartment in each patch halved at t = 200 (a cull, or a census correction)
+  halve[c in compartments, p in patch] : { c[p] = 0.5 * c[p]  at = [200] }
+}
+
+interventions {
+  reseed[p in patch] : add(I[p], 5) at [300]
+}
+```
+
+`halve` expands to one `set` per cell (`S_north = 0.5 * S_north`, …, one for each
+compartment and patch). Every instance due at one instant reads the same
+pre-event state (§13.10), so a family whose right-hand side reads *other* cells,
+such as an age shift `c[a] = … c[b] …`, is a simultaneous map: the result does not
+depend on the order in which the instances are declared or expanded. An indexed
+target must index every dimension of its compartment: a `set` does not fan out
+over an omitted dimension the way a transition does (§9.5), because `c[a]` on its
+right-hand side would then be ambiguous between the cell and the stratum total.
+`S[a]` on a compartment stratified by `[age, vx]` is **E265**, naming the
+unindexed dimension. Named indices (`S[vx = v, age = a]`) are placed in declared
+order, as everywhere else.
 
 **Per-patch timing from a table.** When SIA rounds happen on different dates per
 patch, store the schedule in a table and reference it in the `at` list:

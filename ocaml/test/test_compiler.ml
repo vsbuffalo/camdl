@@ -2081,6 +2081,97 @@ let test_intervention_multi_set () =
   Alcotest.(check (list string)) "targets S then I, in source order"
     ["S"; "I"] targets
 
+(* Indexed `set` and `add` targets in effect families (proposal
+   2026-11-01-indexed-set-targets). A family's binders may appear on the left of
+   a `set` and in an `add` target, including a `c in compartments` binder; each
+   instance names exactly one expanded cell. *)
+let indexed_effects_src ?(by_vx = false) body =
+  let strat, trans, init =
+    if by_vx then
+      "stratify(by = age)\n    stratify(by = vx)",
+      "recover[a in age, v in vx] : I[a, v] --> S[a, v] @ gamma * I[a, v]",
+      "S[a in age, v in vx] = 100  I[a in age, v in vx] = 1"
+    else
+      "stratify(by = age)",
+      "recover[a in age] : I[a] --> S[a] @ gamma * I[a]",
+      "S[a in age] = 100  I[a in age] = 1"
+  in
+  Printf.sprintf {|
+    time_unit = 'years
+    compartments { S, I }
+    dimensions { age = [a0, a1, a2]  vx = [never, vac] }
+    %s
+    parameters { gamma : rate }
+    transitions { %s }
+    init { %s }
+    %s
+    simulate { from = 0 'years  to = 3 'years }
+  |} strat trans init body
+
+(* Every Set action in the model, as (event name, target, cells the value reads). *)
+let set_actions (m : Ir.model) =
+  let rec pops (e : Ir.expr) = match e with
+    | Ir.Pop c -> [c]
+    | Ir.BinOp { left; right; _ } -> pops left @ pops right
+    | Ir.UnOp { arg; _ } -> pops arg
+    | _ -> []
+  in
+  List.concat_map (fun (iv : Ir.intervention) ->
+    List.filter_map (function
+      | Ir.Set s -> Some (iv.Ir.name, s.Ir.compartment, pops s.Ir.value)
+      | _ -> None) iv.Ir.actions) m.Ir.interventions
+
+let test_indexed_set_family_expands_per_cell () =
+  let m = compile_expect_ok (indexed_effects_src
+    {|events { double[c in compartments, a in age] : { c[a] = 2 * c[a]  at = [1] } }|}) in
+  let got = List.sort compare (List.map (fun (_, tgt, reads) -> (tgt, reads)) (set_actions m)) in
+  let want = List.sort compare (List.concat_map (fun c ->
+    List.map (fun a -> let cell = c ^ "_" ^ a in (cell, [cell])) ["a0"; "a1"; "a2"]) ["S"; "I"]) in
+  Alcotest.(check (list (pair string (list string))))
+    "one set per (compartment, age) cell, each reading its own cell" want got;
+  Alcotest.(check bool) "family instances share base_name 'double'" true
+    (List.for_all (fun (iv : Ir.intervention) -> iv.Ir.base_name = Some "double")
+       m.Ir.interventions)
+
+let test_indexed_set_where_filters () =
+  let m = compile_expect_ok (indexed_effects_src
+    {|events { reset[c in compartments, a in age] : { c[a] = 0  at = [1] } where a != a0 }|}) in
+  let tgts = List.sort compare (List.map (fun (_, t, _) -> t) (set_actions m)) in
+  Alcotest.(check (list string)) "no a0 targets"
+    ["I_a1"; "I_a2"; "S_a1"; "S_a2"] tgts
+
+let test_indexed_set_literal_compartment () =
+  let m = compile_expect_ok (indexed_effects_src
+    {|events { seed[a in age] : { I[a] = 5  at = [1] } }|}) in
+  let tgts = List.sort compare (List.map (fun (_, t, _) -> t) (set_actions m)) in
+  Alcotest.(check (list string)) "I cells only" ["I_a0"; "I_a1"; "I_a2"] tgts
+
+let test_indexed_set_named_indices () =
+  let m = compile_expect_ok (indexed_effects_src ~by_vx:true
+    {|events { mark[a in age, v in vx] : { S[vx = v, age = a] = 1  at = [1] } }|}) in
+  let tgts = List.sort compare (List.map (fun (_, t, _) -> t) (set_actions m)) in
+  Alcotest.(check (list string)) "named indices placed in declared order (age, vx)"
+    ["S_a0_never"; "S_a0_vac"; "S_a1_never"; "S_a1_vac"; "S_a2_never"; "S_a2_vac"] tgts
+
+let test_indexed_set_mixed_indices_rejected () =
+  compile_expect_error_code ~code:"E326" ~contains:"mixes positional and named"
+    (indexed_effects_src ~by_vx:true
+       {|events { mark[a in age, v in vx] : { S[a, vx = v] = 1  at = [1] } }|})
+
+let test_indexed_set_underindexed_rejected () =
+  compile_expect_error_code ~code:"E265" ~contains:"vx"
+    (indexed_effects_src ~by_vx:true
+       {|events { reset[a in age] : { S[a] = 0  at = [1] } }|})
+
+let test_indexed_add_family () =
+  let m = compile_expect_ok (indexed_effects_src
+    {|events { seed[a in age] : add(I[a], 5) at [1] }|}) in
+  let tgts = List.sort compare (List.concat_map (fun (iv : Ir.intervention) ->
+    List.filter_map (function
+      | Ir.AddAction a -> Some a.Ir.add_compartment
+      | _ -> None) iv.Ir.actions) m.Ir.interventions) in
+  Alcotest.(check (list string)) "one add per I cell" ["I_a0"; "I_a1"; "I_a2"] tgts
+
 (* Option-b: a block intervention with a schedule but NO action is an author
    error, not a silent no-op. Before, it defaulted to `ATransfer []` and
    misfired later as E261 ("transfer missing from/to"); now it is a located
@@ -14563,6 +14654,20 @@ let () =
         `Quick test_intervention_multi_set;
       Alcotest.test_case "E296 block intervention with no action rejected"
         `Quick test_intervention_no_action;
+      Alcotest.test_case "indexed set family expands one set per cell"
+        `Quick test_indexed_set_family_expands_per_cell;
+      Alcotest.test_case "indexed set family: where filters instances"
+        `Quick test_indexed_set_where_filters;
+      Alcotest.test_case "indexed set family: literal compartment target"
+        `Quick test_indexed_set_literal_compartment;
+      Alcotest.test_case "indexed set family: named indices placed by dimension"
+        `Quick test_indexed_set_named_indices;
+      Alcotest.test_case "indexed set family: E326 on mixed indices"
+        `Quick test_indexed_set_mixed_indices_rejected;
+      Alcotest.test_case "indexed set family: E265 when a dimension is left unindexed"
+        `Quick test_indexed_set_underindexed_rejected;
+      Alcotest.test_case "indexed add family expands one add per cell"
+        `Quick test_indexed_add_family;
       Alcotest.test_case "E265 set on a bare stratified family (gh#461)"
         `Quick test_set_bare_stratified_target_rejected;
       Alcotest.test_case "E265 add to an undeclared compartment (gh#461)"

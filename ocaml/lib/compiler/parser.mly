@@ -1096,16 +1096,16 @@ intervention_decl:
       { { ivname = name; ivindices = ibs; ivaction = [ATransfer kwargs]; ivschedule = sched; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) at [...] *)
-  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT COMMA count = expr RPAREN AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET guard = where_clause_opt
-      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, [], count)]; ivschedule = SAtTimes ts; ivguard = guard;
+  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET guard = where_clause_opt
+      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, idxs, count)]; ivschedule = SAtTimes ts; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) { every = T, from = T0, to = T1 } — recurring schedule *)
-  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT COMMA count = expr RPAREN LBRACE sched = recurring_body RBRACE guard = where_clause_opt
-      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, [], count)]; ivschedule = sched; ivguard = guard;
+  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN LBRACE sched = recurring_body RBRACE guard = where_clause_opt
+      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, idxs, count)]; ivschedule = sched; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) every PERIOD at_day DAY *)
-  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT COMMA count = expr RPAREN EVERY period = expr AT_DAY day = expr guard = where_clause_opt
-      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, [], count)]; ivschedule = SEveryAtDay (period, day); ivguard = guard;
+  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN EVERY period = expr AT_DAY day = expr guard = where_clause_opt
+      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, idxs, count)]; ivschedule = SEveryAtDay (period, day); ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* ── Reactive interventions (gh#204) ─────────────────────────────────────────
@@ -1181,8 +1181,8 @@ reactive_kv:
 reactive_action:
   | TRANSFER LPAREN kwargs = separated_list(COMMA, transfer_kwarg) RPAREN
       { ATransfer kwargs }
-  | ADD LPAREN comp = IDENT COMMA count = expr RPAREN
-      { AAdd (comp, [], count) }
+  | ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN
+      { AAdd (comp, idxs, count) }
 
 (* Recurring schedule body: kwargs in any order, newline-separated
    (matches the rest of camdl's block style — no commas required). *)
@@ -1241,9 +1241,11 @@ iv_kv:
       { `Schedule (SAtTimes ts) }
   | EVERY EQ e = expr FROM EQ f = expr TO EQ t = expr
       { `Schedule (SRecurring (e, Some f, Some t)) }
-  | IDENT EQ e = expr
-      { (* action hint -- simplified *)
-        `Action (ASet ($1, [], e)) }
+  (* A `set` entry: `COMP = expr`, or an indexed target `c[a] = expr` inside an
+     effect family (proposal 2026-11-01-indexed-set-targets). The expander
+     resolves the target to one expanded cell. *)
+  | comp = IDENT idxs = index_items_opt EQ e = expr
+      { `Action (ASet (comp, idxs, e)) }
 
 (* ── ODE block ───────────────────────────────────────────────────────────── *)
 

@@ -7576,19 +7576,57 @@ let expand_time_functions ctx : Ir.time_function list * (string * float) list =
   (List.map fst pairs,
    List.map (fun ((tf : Ir.time_function), s) -> (tf.Ir.name, s)) pairs)
 
-(* The expanded name a `set`/`add` target denotes. Both verbs build it the same
-   way, and both must then be validated — see [check_action_target]. *)
-(* gh#459: the ONE `index_item_to_str` caller deliberately left unrouted. A
-   named index cannot reach here: the grammar builds every `set`/`add` with an
-   empty index list — `AAdd (comp, [], count)` at parser.mly:995, 999, 1003,
-   1080 and `ASet ($1, [], e)` at :1141 — so `idxs` is always `[]` and the
-   first branch below is the only one taken from parsed source. If the grammar
-   ever gains an indexed action target, this needs `resolve_index_order` with
-   `comp_dims`. *)
-let concrete_action_target env comp idxs =
-  match List.map (index_item_to_str env) idxs with
-  | []       -> comp
-  | idx_vals -> String.concat "_" (comp :: idx_vals)
+(* The expanded cell a `set`/`add` target denotes (proposal
+   2026-11-01-indexed-set-targets). Both verbs resolve it the same way, and the
+   result then goes through [check_action_target].
+
+   The target is a compartment name, optionally indexed. Inside an effect family
+   the name may be a `c in compartments` binder, which stands for the compartment
+   bound in this instance's environment; any other name is the compartment
+   itself. Index items resolve through the environment (a binder gives its
+   level; a literal level stands for itself), and named items are placed in the
+   compartment's declared dimension order by [resolve_index_order].
+
+   An indexed target must index every dimension of its compartment (E265). A
+   `set` does not fan out over an omitted dimension the way a transition does
+   (spec section 9.5): its right-hand side would then be ambiguous, since `c[a]`
+   there could mean the cell being set or the stratum total. Returns the base
+   compartment and the concrete cell name, or [None] after reporting that error,
+   so the caller emits no action for the instance. *)
+let resolve_action_target ctx ~name ~loc ~verb env comp idxs =
+  let base = match List.assoc_opt comp env with
+    | Some bound when Hashtbl.mem ctx.comp_tbl bound -> bound
+    | _ -> comp
+  in
+  match idxs with
+  | [] -> Some (base, base)
+  | _ ->
+    let dims = comp_dims ctx base in
+    let items = resolve_index_order ctx ~loc
+        ~what:(Printf.sprintf "%s target '%s'" verb base) ~dims idxs in
+    let n_items = List.length items and n_dims = List.length dims in
+    if Hashtbl.mem ctx.comp_tbl base && n_items < n_dims then begin
+      let indexed = List.filter_map index_item_dim items in
+      let missing =
+        if List.length indexed = n_items then
+          List.filter (fun d -> not (List.mem d indexed)) dims
+        else List.filteri (fun i _ -> i >= n_items) dims
+      in
+      Diagnostics.error ctx.diags ~code:"E265" ~loc
+        ~message:(Printf.sprintf
+          "intervention '%s' %s '%s' with %d of its %d dimensions indexed, \
+           which leaves %s unindexed; a %s names one cell"
+          name verb base n_items n_dims
+          (String.concat ", " (List.map (fun d -> "'" ^ d ^ "'") missing))
+          (if verb = "sets" then "set" else "add"))
+        ~hint:(Printf.sprintf
+          "index every dimension of '%s', in declared order (%s), binding each \
+           missing one in the family as `x in <dimension>`"
+          base (String.concat ", " dims))
+        ();
+      None
+    end else
+      Some (base, String.concat "_" (base :: List.map (index_item_to_str env) items))
 
 (* gh#461: a `set`/`add` target must name exactly ONE expanded compartment.
    `set` previously also accepted a stratified base name and `add` was not
@@ -7837,13 +7875,17 @@ let resolve_intervention_action ctx env ~name ~family ~loc ~binders (action : ac
        end
      | _ -> [])
   | ASet (comp, idxs, expr) ->
-    let concrete = concrete_action_target env comp idxs in
-    check_action_target ctx ~name ~loc ~verb:"sets" ~base:comp ~concrete;
-    [Ir.Set { Ir.compartment = concrete; Ir.value = resolve_expr ctx env expr }]
+    (match resolve_action_target ctx ~name ~loc ~verb:"sets" env comp idxs with
+     | None -> []
+     | Some (base, concrete) ->
+       check_action_target ctx ~name ~loc ~verb:"sets" ~base ~concrete;
+       [Ir.Set { Ir.compartment = concrete; Ir.value = resolve_expr ctx env expr }])
   | AAdd (comp, idxs, expr) ->
-    let concrete = concrete_action_target env comp idxs in
-    check_action_target ctx ~name ~loc ~verb:"adds to" ~base:comp ~concrete;
-    [Ir.AddAction { Ir.add_compartment = concrete; Ir.add_count = resolve_expr ctx env expr }]
+    (match resolve_action_target ctx ~name ~loc ~verb:"adds to" env comp idxs with
+     | None -> []
+     | Some (base, concrete) ->
+       check_action_target ctx ~name ~loc ~verb:"adds to" ~base ~concrete;
+       [Ir.AddAction { Ir.add_compartment = concrete; Ir.add_count = resolve_expr ctx env expr }])
 
 let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
   let t_start = match ctx.simulate with
