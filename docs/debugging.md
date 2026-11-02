@@ -99,3 +99,26 @@ The planned `--trace` flag would add the remaining traced columns (forcing
 functions and let bindings, e.g. `school`, `beta_base`). It is **not yet
 implemented**. Until then, use `camdl dev eval` for time-dependent quantities
 and post-hoc trajectory analysis for state-dependent quantities.
+
+## A model that is slow to compile: `CAMDL_TIME_PASSES`
+
+`CAMDL_TIME_PASSES=1` makes the compiler print how long each pass took, to
+stderr, at the end of a compile:
+
+```
+$ CAMDL_TIME_PASSES=1 camdlc model.camdl -o /dev/null --no-state-grad
+[camdl pass timing]  (processor seconds, CAMDL_TIME_PASSES)
+  expand           1.131 s   31.6%
+  autodiff         0.374 s   10.5%
+  ...
+  serialize        1.990 s   55.6%
+  TOTAL            3.578 s  100.0%
+```
+
+Compare a compile with and without `--no-state-grad`. Without it, `camdlc` also
+builds the state Jacobian (`rate_state_grad`, each rate's derivative with
+respect to each compartment). Only a gradient fit on the ODE backend
+(`nl-lbfgs`) reads it, and its cost grows with transitions × compartments, so on
+a large stratified model it can take minutes where everything else takes
+seconds. `camdl simulate` and `fit` with every other method compile without it,
+and so does `camdl check`.

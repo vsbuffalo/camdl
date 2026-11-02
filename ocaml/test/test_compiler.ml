@@ -2172,6 +2172,44 @@ let test_indexed_add_family () =
       | _ -> None) iv.Ir.actions) m.Ir.interventions) in
   Alcotest.(check (list string)) "one add per I cell" ["I_a0"; "I_a1"; "I_a2"] tgts
 
+(* Collecting diagnostics (`camdlc check`) must not build the state Jacobian
+   ([rate_state_grad]). It emits no diagnostic, and it is the one pass whose
+   cost grows with transitions x compartments: on this all-to-all age-coupled
+   SIR with 200 ages it took about 7 s, while every other pass takes well under
+   a tenth of that. The 2 s bound leaves a wide margin on either side, so a
+   slow machine does not make it flaky; a regression that brings the Jacobian
+   back into `check` overshoots it many times over. *)
+let test_check_skips_state_jacobian () =
+  let n = 200 in
+  let levels = String.concat ", " (List.init n (Printf.sprintf "g%d")) in
+  let src = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I, R }
+    dimensions { age = [%s] }
+    stratify(by = age)
+    parameters { beta : rate  gamma : rate }
+    let N[a in age] = S[a] + I[a] + R[a]
+    let prev[a in age] = sum(b in age, I[b] / N[b])
+    transitions {
+      infection[a in age] : S[a] --> I[a] @ beta * prev[a] * S[a]
+      recovery[a in age]  : I[a] --> R[a] @ gamma * I[a]
+    }
+    init { S[a in age] = 990  I[a in age] = 10 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} levels in
+  let before = !Compiler.no_state_grad in
+  let t0 = Unix.gettimeofday () in
+  let diags = Compiler.collect_diagnostics ~name:"check_scaling" src in
+  let dt = Unix.gettimeofday () -. t0 in
+  Alcotest.(check int) "the model is clean" 0
+    (List.length (List.filter (fun (d : Diagnostics.diagnostic) ->
+       d.Diagnostics.severity = Diagnostics.Error) diags));
+  Alcotest.(check bool) "the caller's state-Jacobian setting is restored" before
+    !Compiler.no_state_grad;
+  if dt > 2.0 then
+    Alcotest.failf "collecting diagnostics took %.2f s on a %d-age model: the state \
+                    Jacobian is being built again" dt n
+
 (* Option-b: a block intervention with a schedule but NO action is an author
    error, not a silent no-op. Before, it defaulted to `ATransfer []` and
    misfired later as E261 ("transfer missing from/to"); now it is a located
@@ -14654,6 +14692,8 @@ let () =
         `Quick test_intervention_multi_set;
       Alcotest.test_case "E296 block intervention with no action rejected"
         `Quick test_intervention_no_action;
+      Alcotest.test_case "check does not build the state Jacobian"
+        `Quick test_check_skips_state_jacobian;
       Alcotest.test_case "indexed set family expands one set per cell"
         `Quick test_indexed_set_family_expands_per_cell;
       Alcotest.test_case "indexed set family: where filters instances"

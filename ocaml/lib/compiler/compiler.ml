@@ -936,8 +936,18 @@ let collect_detail ?(name = "model") ?(filename = "<input>") (src : string)
         code (e.g. an init-membership error: a located E277 from [expand_init]
         would otherwise be shadowed by a no-location E513 from [run_validate]).
         gh#114 reviewer feedback: one root cause → one diagnostic. *)
-     if not (Diagnostics.has_errors d.ctx.diags) then
-       ignore (run_analysis d));
+     if not (Diagnostics.has_errors d.ctx.diags) then begin
+       (* Collecting diagnostics never needs the state Jacobian
+          ([rate_state_grad]): it emits no diagnostic (a problem in it is a
+          serialized [DEUnsupported] the fit-time gate refuses on), and only a
+          gradient fit on the ODE backend reads it. It is also the one pass
+          whose cost grows with transitions x compartments, so `camdlc check`
+          on a 4,428-cell model took 26 min with it and 7 s without. *)
+       let saved = !no_state_grad in
+       no_state_grad := true;
+       Fun.protect ~finally:(fun () -> no_state_grad := saved)
+         (fun () -> ignore (run_analysis d))
+     end);
   (detail, diags, source)
 
 (* [collect_diagnostics] is the thin test/tooling projection of
