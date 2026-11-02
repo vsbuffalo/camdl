@@ -407,38 +407,57 @@ pub trait EventArena {
 /// a `set` is not refused: it acts in the earlier inflow phase, and the `set`
 /// then overwrites the post-inflow value (language spec §13.10).
 fn refuse_coincident_sets(model: &CompiledModel, event_idx: &[usize], t: f64) -> Result<(), SimError> {
-    // (compartment, event name, is_set) for every drain-and-`set` action.
-    let touches = || {
-        event_idx.iter().flat_map(move |&iv_idx| {
-            let iv = &model.model.interventions[iv_idx];
-            iv.actions.iter().flat_map(move |a| {
-                let name = iv.name.as_str();
-                let v: Vec<(&str, &str, bool)> = match a {
-                    Action::Set(sa) => vec![(sa.compartment.as_str(), name, true)],
-                    Action::FractionTransfer(ft) => {
-                        vec![(ft.src.as_str(), name, false), (ft.dst.as_str(), name, false)]
-                    }
-                    Action::AbsoluteTransfer(at) => {
-                        vec![(at.src.as_str(), name, false), (at.dst.as_str(), name, false)]
-                    }
-                    Action::Add(_) => vec![],
-                };
-                v.into_iter()
-            })
-        })
-    };
-    // Fast path: the common batch carries no `set`. Finding that walks the due
-    // events' actions once, without allocating beyond the per-action list.
-    if !touches().any(|(_, _, is_set)| is_set) {
+    // Most event batches contain no sets. Avoid building an index for them.
+    if !event_idx.iter().any(|&i| model.model.interventions[i].actions.iter()
+        .any(|a| matches!(a, Action::Set(_)))) {
         return Ok(());
     }
-    let all: Vec<(&str, &str, bool)> = touches().collect();
-    for (i, &(comp, set_name, is_set)) in all.iter().enumerate() {
-        if !is_set || all[..i].iter().any(|&(c, _, s)| c == comp && s) {
-            continue; // reported with the compartment's first `set`
+
+    #[derive(Default)]
+    struct Touches<'a> {
+        sets: Vec<&'a str>,
+        first_transfer: Option<&'a str>,
+    }
+    let mut targets: std::collections::HashMap<&str, Touches<'_>> =
+        std::collections::HashMap::new();
+    let mut first_set_order = Vec::new();
+    for &i in event_idx {
+        let iv = &model.model.interventions[i];
+        let name = iv.name.as_str();
+        for action in &iv.actions {
+            match action {
+                Action::Set(sa) => {
+                    let comp = sa.compartment.as_str();
+                    let entry = targets.entry(comp).or_default();
+                    if entry.sets.is_empty() {
+                        first_set_order.push(comp);
+                    }
+                    // Match Vec::dedup on the old ordered, per-target set list:
+                    // only consecutive equal names collapse.
+                    if entry.sets.last().copied() != Some(name) {
+                        entry.sets.push(name);
+                    }
+                }
+                Action::FractionTransfer(ft) => {
+                    for comp in [ft.src.as_str(), ft.dst.as_str()] {
+                        targets.entry(comp).or_default().first_transfer.get_or_insert(name);
+                    }
+                }
+                Action::AbsoluteTransfer(at) => {
+                    for comp in [at.src.as_str(), at.dst.as_str()] {
+                        targets.entry(comp).or_default().first_transfer.get_or_insert(name);
+                    }
+                }
+                Action::Add(_) => {}
+            }
         }
-        let mut sets: Vec<&str> = all.iter().filter(|&&(c, _, s)| c == comp && s).map(|&(_, n, _)| n).collect();
-        sets.dedup();
+    }
+    // Hash iteration must never choose which conflict is reported. Preserve
+    // first-set order and the multiple-sets-before-transfer diagnostic priority.
+    for comp in first_set_order {
+        let entry = &targets[comp];
+        let sets = &entry.sets;
+        let set_name = sets[0];
         if sets.len() >= 2 {
             let names = sets.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ");
             return Err(SimError::Validation(format!(
@@ -447,7 +466,7 @@ fn refuse_coincident_sets(model: &CompiledModel, event_idx: &[usize], t: f64) ->
                  sets different times or merge them into one"
             )));
         }
-        if let Some(&(_, other, _)) = all.iter().find(|&&(c, _, s)| c == comp && !s) {
+        if let Some(other) = entry.first_transfer {
             return Err(SimError::Validation(format!(
                 "a `set` and a `transfer` on compartment '{comp}' at t={t}: event '{set_name}' \
                  sets it and event '{other}' moves people from or into it at the same instant, \
@@ -1259,6 +1278,97 @@ mod tests {
     // ── apply_event_phases: the §13.10 order over both arenas (gh#985) ───────
     // One effect whose actions are declared drain/`set` first and inflow last,
     // so a pass in declaration order would get each case wrong. S=100, I=0.
+
+    // Frozen pre-optimization scan: compare decisions AND diagnostic order.
+    fn scan_coincident_sets(model: &CompiledModel, event_idx: &[usize], t: f64) -> Result<(), SimError> {
+        // (compartment, event name, is_set) for every drain-and-`set` action.
+        let touches = || {
+            event_idx.iter().flat_map(move |&iv_idx| {
+                let iv = &model.model.interventions[iv_idx];
+                iv.actions.iter().flat_map(move |a| {
+                    let name = iv.name.as_str();
+                    let v: Vec<(&str, &str, bool)> = match a {
+                        Action::Set(sa) => vec![(sa.compartment.as_str(), name, true)],
+                        Action::FractionTransfer(ft) => {
+                            vec![(ft.src.as_str(), name, false), (ft.dst.as_str(), name, false)]
+                        }
+                        Action::AbsoluteTransfer(at) => {
+                            vec![(at.src.as_str(), name, false), (at.dst.as_str(), name, false)]
+                        }
+                        Action::Add(_) => vec![],
+                    };
+                    v.into_iter()
+                })
+            })
+        };
+        // Fast path: the common batch carries no `set`. Finding that walks the due
+        // events' actions once, without allocating beyond the per-action list.
+        if !touches().any(|(_, _, is_set)| is_set) {
+            return Ok(());
+        }
+        let all: Vec<(&str, &str, bool)> = touches().collect();
+        for (i, &(comp, set_name, is_set)) in all.iter().enumerate() {
+            if !is_set || all[..i].iter().any(|&(c, _, s)| c == comp && s) {
+                continue; // reported with the compartment's first `set`
+            }
+            let mut sets: Vec<&str> = all.iter().filter(|&&(c, _, s)| c == comp && s).map(|&(_, n, _)| n).collect();
+            sets.dedup();
+            if sets.len() >= 2 {
+                let names = sets.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ");
+                return Err(SimError::Validation(format!(
+                    "more than one `set` on compartment '{comp}' at t={t}: events {names} each set it \
+                     at the same instant, and their combined effect is not defined — give the \
+                     sets different times or merge them into one"
+                )));
+            }
+            if let Some(&(_, other, _)) = all.iter().find(|&&(c, _, s)| c == comp && !s) {
+                return Err(SimError::Validation(format!(
+                    "a `set` and a `transfer` on compartment '{comp}' at t={t}: event '{set_name}' \
+                     sets it and event '{other}' moves people from or into it at the same instant, \
+                     and their combined value is one neither event names — give them different \
+                     times or merge them into one"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn coincident_set_index_matches_scan_for_ordered_batches() {
+        let actions = [
+            Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(1.0) }),
+            Action::Set(SetAction { compartment: "I".into(), value: Expr::const_(1.0) }),
+            Action::Set(SetAction { compartment: "W".into(), value: Expr::const_(1.0) }),
+            Action::Add(AddAction { compartment: "S".into(), count: Expr::const_(1.0) }),
+            Action::FractionTransfer(FractionTransfer { src: "S".into(), dst: "I".into(), fraction: Expr::const_(0.5) }),
+            Action::AbsoluteTransfer(AbsoluteTransfer { src: "I".into(), dst: "S".into(), count: Expr::const_(1.0) }),
+        ];
+        let mut m = model_with(vec![]);
+        let template = m.model.interventions[0].clone();
+        // All four-action batches, with repeated and distinct event names.
+        for pattern in 0..3 {
+            for code in 0..actions.len().pow(4) {
+                let mut n = code;
+                std::sync::Arc::make_mut(&mut m.model).interventions.clear();
+                for i in 0..4 {
+                    let mut iv = template.clone();
+                    iv.name = match pattern {
+                        0 => format!("event_{i}"),
+                        1 => "same".into(),
+                        _ => format!("event_{}", i % 2),
+                    };
+                    iv.actions = vec![actions[n % actions.len()].clone()];
+                    n /= actions.len();
+                    std::sync::Arc::make_mut(&mut m.model).interventions.push(iv);
+                }
+                for due in [vec![], vec![0], vec![0, 1, 2, 3], vec![3, 1, 0, 2], vec![0, 1, 0, 3]] {
+                    let actual = refuse_coincident_sets(&m, &due, 7.0).map_err(|e| e.to_string());
+                    let expected = scan_coincident_sets(&m, &due, 7.0).map_err(|e| e.to_string());
+                    assert_eq!(actual, expected, "pattern={pattern} code={code} due={due:?}");
+                }
+            }
+        }
+    }
 
     fn set_then_add() -> CompiledModel {
         model_with(vec![
