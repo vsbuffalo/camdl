@@ -6961,6 +6961,20 @@ let expand_time_function_one ctx fname (env : (string * string) list)
           err (Printf.sprintf
             "forcing '%s': indexed by dimension '%s', but table '%s' has no such dimension"
             fname d tbl)) stratum_dims;
+      (* A dimension may index the table more than once (a contact matrix
+         `age × age × week`). Each such axis needs its own binder: one binder
+         over `age` cannot stand for two `age` axes. *)
+      let count x l = List.length (List.filter (( = ) x) l) in
+      let axis_dims = List.filter (fun d -> d <> time_dim) tdims in
+      List.iter (fun d ->
+        let n_axes = count d axis_dims and n_binders = count d stratum_dims in
+        if n_axes > 0 && n_axes <> n_binders then
+          err ~hint:(Printf.sprintf
+            "bind each '%s' axis separately, in the table's axis order, e.g. `[a in %s, b in %s]`"
+            d d d)
+            (Printf.sprintf
+              "forcing '%s': table '%s' has %d '%s' axes but the forcing binds '%s' %d time(s)"
+              fname tbl n_axes d d n_binders)) (List.sort_uniq compare stratum_dims);
       let cells = match Hashtbl.find_opt ctx.table_index tbl with
         | Some (arr, _) -> arr | None -> [||] in
       if Array.length cells = 0 then
@@ -6969,13 +6983,30 @@ let expand_time_function_one ctx fname (env : (string * string) list)
             (an external `--table` cannot be sliced)" fname tbl); [])
       else begin
         let sizes = List.map (fun d -> List.length (dim_levels_or_empty ctx d)) tdims in
-        let stratum_pos d =
-          match List.find_opt (fun (_, dd) -> dd = d) stratum with
-          | Some (v, _) ->
-            let lvl = match List.assoc_opt v env with Some l -> l | None -> v in
-            int_of_float (dim_value_index ctx ~loc:Diagnostics.no_loc d lvl)
-          | None -> 0
+        (* Table axes are matched to the forcing's binders by position: the
+           k-th non-time axis over dimension d takes the k-th binder over d.
+           Keying by dimension name alone would give every axis over d the
+           first binder's level, reading only the diagonal of an `age × age`
+           table. [fixed] is aligned to [tdims]; [None] marks the time axis. *)
+        let level_of (v, d) =
+          let lvl = match List.assoc_opt v env with Some l -> l | None -> v in
+          int_of_float (dim_value_index ctx ~loc:Diagnostics.no_loc d lvl)
         in
+        let rec take_first d = function
+          | [] -> None
+          | (v, dd) :: rest when dd = d -> Some (level_of (v, dd), rest)
+          | b :: rest ->
+            Option.map (fun (i, rest') -> (i, b :: rest')) (take_first d rest)
+        in
+        let rec assign tds binders = match tds with
+          | [] -> []
+          | d :: rest when d = time_dim -> None :: assign rest binders
+          | d :: rest ->
+            (match take_first d binders with
+             | Some (i, binders') -> Some i :: assign rest binders'
+             | None -> Some 0 :: assign rest binders)   (* already reported as E229 *)
+        in
+        let fixed = assign tdims stratum in
         (* One knot per level of [time_dim]. An UNDECLARED time_dim yields no
            levels, so the forcing gets zero knots and the Rust knot-builder
            rejects it at load (`compiled_model.rs`) instead of the compiler
@@ -6984,7 +7015,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
            independent finding that gets its own issue rather than riding along
            on this change. *)
         let pairs = List.mapi (fun j lvl ->
-          let positions = List.map (fun d -> if d = time_dim then j else stratum_pos d) tdims in
+          let positions = List.map (function None -> j | Some i -> i) fixed in
           let off = row_major_offset positions sizes in
           let cell = if off >= 0 && off < Array.length cells then cells.(off) else Ir.Const 0.0 in
           let t = match float_of_string_opt lvl with

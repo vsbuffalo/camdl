@@ -3730,6 +3730,74 @@ let test_gh345_table_unaccounted_dim_rejected () =
     if not (contains_substring ~needle:"season" e) then
       Alcotest.failf "error must name the unaccounted `season` dimension, got: %s" e
 
+(* A table-backed forcing indexed twice over the same dimension (a
+   time-varying contact matrix, `W[a in age, b in age]` over `age × age × yr`)
+   must map the table's axes to the binders by position. Keying the lookup by
+   dimension name gave both age axes the first binder's level, so every cell
+   W[i, j] silently read the diagonal W[i, i]. Each cell's value here encodes
+   its own indices (100·i + 10·j + year), so any mis-mapping is visible. *)
+let repeated_dim_src ~binders = Printf.sprintf {|
+    time_unit = 'years
+    compartments { S, I }
+    dimensions {
+      age = [g0, g1, g2]
+      yr  = read("camdl_tbl_rep.tsv", column = "yr")
+    }
+    stratify(by = age)
+    parameters { beta : rate }
+    tables { W_data : age × age × yr = read("camdl_tbl_rep.tsv") }
+    forcing {
+      W[%s] : interpolated 'ratio { table = W_data  time_dim = yr  method = constant }
+    }
+    let N[a in age] = S[a] + I[a]
+    transitions {
+      infect[a in age] : S[a] --> I[a] @ beta * S[a] * I[a] / N[a]
+    }
+    init { S[a in age] = 99  I[a in age] = 1 }
+  |} binders
+
+let write_repeated_dim_tsv dir =
+  let oc = open_out (Filename.concat dir "camdl_tbl_rep.tsv") in
+  output_string oc "age\tage\tyr\tW\n";
+  for i = 0 to 2 do for j = 0 to 2 do for y = 0 to 1 do
+    Printf.fprintf oc "g%d\tg%d\t%d\t%d\n" i j y (100 * i + 10 * j + y)
+  done done done;
+  close_out oc
+
+let test_table_forcing_repeated_dim_positional () =
+  let dir = Filename.get_temp_dir_name () in
+  write_repeated_dim_tsv dir;
+  let src = repeated_dim_src ~binders:"a in age, b in age" in
+  let m = match Compiler.compile ~name:"tblrep" ~filename:(Filename.concat dir "m.camdl") src with
+    | Ok m    -> m
+    | Error e -> Alcotest.failf "compile failed: %s" e
+  in
+  for i = 0 to 2 do for j = 0 to 2 do
+    let name = Printf.sprintf "W_g%d_g%d" i j in
+    match List.find_opt (fun (tf : Ir.time_function) -> tf.name = name) m.time_functions with
+    | Some { kind = Ir.Interpolated it; _ } ->
+      let v = List.map (function Ir.Const x -> x | _ -> Alcotest.failf "%s: non-const knot" name) it.values in
+      let base = float_of_int (100 * i + 10 * j) in
+      Alcotest.(check (list (float 1e-9))) (name ^ " = W_data[i, j, ·]") [base; base +. 1.0] v
+    | _ -> Alcotest.failf "interpolated forcing %s not found" name
+  done done
+
+(* The same keying let one binder over `age` stand for two `age` axes: the
+   set-based accounting saw `age` covered and the lookup read the diagonal.
+   Each non-time table axis needs its own binder; one short is E229. *)
+let test_table_forcing_repeated_dim_underindexed_rejected () =
+  let dir = Filename.get_temp_dir_name () in
+  write_repeated_dim_tsv dir;
+  let src = repeated_dim_src ~binders:"a in age" in
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile ~name:"tblrep1" ~filename:(Filename.concat dir "m.camdl") src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Ok _    -> Alcotest.failf "expected E229: one `age` binder for a table with two `age` axes"
+  | Error e ->
+    if not (contains_substring ~needle:"E229" e) then
+      Alcotest.failf "expected error code E229, got: %s" e
+
 (* Control: `mu * S / 365.25` — a bare conversion constant, but no rate forcing
    anywhere in the numerator. Must not fire. *)
 let test_l403_no_fire_on_unrelated_div () =
@@ -14650,6 +14718,8 @@ let () =
       Alcotest.test_case "gh#345 indexed file-backed forcing"       `Quick test_gh345_indexed_file_backed_forcing;
       Alcotest.test_case "gh#345 table-backed forcing"              `Quick test_gh345_table_backed_forcing;
       Alcotest.test_case "gh#345 table forcing unaccounted dim"     `Quick test_gh345_table_unaccounted_dim_rejected;
+      Alcotest.test_case "table forcing: repeated dim is positional" `Quick test_table_forcing_repeated_dim_positional;
+      Alcotest.test_case "table forcing: repeated dim under-indexed" `Quick test_table_forcing_repeated_dim_underindexed_rejected;
     ];
     "compile_outcome", [
       Alcotest.test_case "clean model returns Some value, no errors" `Quick test_compile_outcome_clean_returns_value;
