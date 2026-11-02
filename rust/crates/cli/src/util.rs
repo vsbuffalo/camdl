@@ -209,6 +209,13 @@ fn check_camdlc_version_once(camdlc: &std::path::Path) {
     });
 }
 
+/// The first file named `name` in a `PATH` directory, as `which` finds it.
+fn which_on_path(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).map(|d| d.join(name)).find(|c| c.is_file())
+    })
+}
+
 /// Find the camdlc compiler binary via a priority chain:
 ///
 /// 1a. `camdlc-<GIT_HASH>` in same directory as running binary — exact match,
@@ -257,10 +264,7 @@ fn find_camdlc() -> Result<std::path::PathBuf, String> {
         // Resolve the on-PATH camdlc to a real path so the shadowing
         // detector can compare it to where camdl is running from.
         // `which`-style lookup via PATH walk; canonicalise on hit.
-        let resolved = std::env::var_os("PATH")
-            .and_then(|paths| std::env::split_paths(&paths)
-                .map(|d| d.join(camdlc_name()))
-                .find(|c| c.is_file()));
+        let resolved = which_on_path(camdlc_name());
         CAMDLC_CHECKED.get_or_init(|| {
             if version_check_disabled() { return; }
             let hint = resolved.as_deref().and_then(detect_camdl_shadowing);
@@ -591,15 +595,35 @@ pub(crate) fn licm_enabled() -> bool {
         || std::env::var_os("CAMDL_NO_LICM").is_some())
 }
 
+/// Identity of the camdlc binary that compiles on a cache miss: the runtime's
+/// git hash together with the compiler file's canonical path, size and
+/// modification time. The runtime hash alone is not enough. Under
+/// `CAMDL_SKIP_VERSION_CHECK=1` (every test harness, and the ad-hoc runs
+/// CLAUDE.md documents) the compiler can be any build, and a rebuilt but
+/// uncommitted camdlc reports the same git hash as its predecessor, so a key on
+/// the runtime alone serves a rebuilt compiler its predecessor's IR. Any
+/// rebuild or reinstall changes the file's size or mtime. `None` when no
+/// camdlc resolves: the caller then skips the cache, and the compile reports
+/// the missing compiler.
+fn camdlc_identity() -> Option<String> {
+    let cc = find_camdlc().ok()?;
+    // A PATH hit comes back as the bare name; resolve it to the file it runs.
+    let file = if cc.components().count() == 1 { which_on_path(&cc.to_string_lossy())? } else { cc };
+    let canon = std::fs::canonicalize(&file).unwrap_or(file);
+    let md = std::fs::metadata(&canon).ok()?;
+    let mtime = md.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    Some(format!("{}|{}|{}|{}", crate::version::GIT_HASH, canon.display(), md.len(), mtime))
+}
+
 /// The content-addressed cache key for a compiled `.camdl`. Folds the model
-/// bytes together with the compiler git hash and the IR schema version, so a
+/// bytes together with the compiler identity and the IR schema version, so a
 /// model edit, a camdlc upgrade, or an IR-format change each produces a
 /// distinct key (no stale IR can be served). `.camdl` is single-file (no
 /// includes), so the model bytes are the whole compile input.
 ///
 /// The key must fold in EVERY input that changes the emitted IR bytes: the
-/// model source, the camdlc git-hash, the IR schema version, and the compiler
-/// switches that alter output. That switch set is `CAMDL_NO_CONSTANT_FOLD`
+/// model source, the compiler that will run (`camdlc_identity`), the IR schema
+/// version, and the compiler switches that alter output. That switch set is `CAMDL_NO_CONSTANT_FOLD`
 /// (presence flips the fold pass off → unfolded/dense IR), `CAMDL_NO_LICM` /
 /// `--no-licm` (presence flips loop-invariant code motion OFF → inlined IR
 /// without `per_eval_bindings`; LICM is on by default), and `--no-state-grad`
@@ -616,17 +640,17 @@ pub(crate) fn licm_enabled() -> bool {
 /// Jacobian it needs, so the two variants must not collide in this cache.
 pub(crate) fn ir_cache_key(
     content: &[u8],
-    camdlc_ver: &str,
+    compiler_id: &str,
     ir_ver: &str,
     fold_disabled: bool,
     licm_enabled: bool,
     state_grad_emitted: bool,
     quantities: Option<&[u8]>,
 ) -> String {
-    let mut buf = Vec::with_capacity(content.len() + camdlc_ver.len() + ir_ver.len() + 8);
+    let mut buf = Vec::with_capacity(content.len() + compiler_id.len() + ir_ver.len() + 8);
     buf.extend_from_slice(content);
     buf.push(0);
-    buf.extend_from_slice(camdlc_ver.as_bytes());
+    buf.extend_from_slice(compiler_id.as_bytes());
     buf.push(0);
     buf.extend_from_slice(ir_ver.as_bytes());
     buf.push(0);
@@ -1131,13 +1155,13 @@ pub fn resolve_ir_path_with_quantities(
     let cache_target: Option<(std::path::PathBuf, String)> = if ir_cache_disabled() {
         None
     } else {
-        match (std::fs::read(path), ir_cache_dir()) {
-            (Ok(content), Some(dir)) => {
+        match (std::fs::read(path), ir_cache_dir(), camdlc_identity()) {
+            (Ok(content), Some(dir), Some(compiler_id)) => {
                 // `CAMDL_NO_CONSTANT_FOLD` and `--no-licm`/`CAMDL_NO_LICM` each
                 // change the IR camdlc emits, so both belong in the key — else
                 // flipping one serves the stale variant.
                 let fold_disabled = std::env::var_os("CAMDL_NO_CONSTANT_FOLD").is_some();
-                let key = ir_cache_key(&content, crate::version::GIT_HASH, ir::IR_VERSION.trim(), fold_disabled, licm_enabled(), needs_state_grad, quantities.map(|q| q.bytes.as_slice()));
+                let key = ir_cache_key(&content, &compiler_id, ir::IR_VERSION.trim(), fold_disabled, licm_enabled(), needs_state_grad, quantities.map(|q| q.bytes.as_slice()));
                 Some((dir.join(format!("{}.ir.json", key)), key))
             }
             _ => None,
@@ -1946,7 +1970,7 @@ mod ir_cache_key_tests {
 
     #[test]
     fn key_is_stable_and_distinguishes_content_compiler_and_schema() {
-        // Args: (content, camdlc_ver, ir_ver, fold_disabled, licm_enabled,
+        // Args: (content, compiler_id, ir_ver, fold_disabled, licm_enabled,
         //        state_grad_emitted). `a` = full IR (state-Jacobian emitted).
         let a = ir_cache_key(b"model A", "git1", "0.7", false, false, true, None);
         // Same inputs → same key (cache hit).

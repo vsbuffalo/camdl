@@ -134,6 +134,35 @@ fn ir_compiled_once_then_reused_across_runs() {
         "second run of the SAME model reuses the cached IR — camdlc must NOT run again");
 }
 
+/// A different camdlc binary must not be served IR another compiler wrote.
+/// The key used to fold in the *runtime's* git hash, not the compiler's, so
+/// under `CAMDL_SKIP_VERSION_CHECK=1` (every test harness and the documented
+/// ad-hoc workflow) a rebuilt camdlc was handed its predecessor's IR -- and a
+/// rebuilt-but-uncommitted camdlc shares a git hash with its predecessor
+/// anyway. Two shims stand in for two compiler builds.
+#[test]
+fn a_different_camdlc_binary_does_not_share_a_cache_entry() {
+    let Some((bin, real)) = skip_if_unbuilt() else { return; };
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("sir.camdl");
+    std::fs::write(&model, SIR).unwrap();
+    let cache = tmp.path().join("ircache");
+    let (dir_a, dir_b) = (tmp.path().join("cc_a"), tmp.path().join("cc_b"));
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+    let (count_a, count_b) = (tmp.path().join("a.log"), tmp.path().join("b.log"));
+    let shim_a = counting_shim(&dir_a, &real, &count_a);
+    let shim_b = counting_shim(&dir_b, &real, &count_b);
+
+    run_simulate(&bin, &shim_a, &model, &cache, &tmp.path().join("o1"), false);
+    assert_eq!(compiles(&count_a), 1, "compiler A compiles on the cold cache");
+    run_simulate(&bin, &shim_b, &model, &cache, &tmp.path().join("o2"), false);
+    assert_eq!(compiles(&count_b), 1,
+        "compiler B must compile itself, not be served compiler A's cached IR");
+    run_simulate(&bin, &shim_a, &model, &cache, &tmp.path().join("o3"), false);
+    assert_eq!(compiles(&count_a), 1, "compiler A's own entry is still a hit");
+}
+
 #[test]
 fn editing_the_model_invalidates_the_cache() {
     let Some((bin, real)) = skip_if_unbuilt() else { return; };
