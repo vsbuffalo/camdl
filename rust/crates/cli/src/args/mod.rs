@@ -497,7 +497,7 @@ pub struct SimulateArgs {
     /// re-loads under the model that produced it. This is what the
     /// simulation-based self-consistency test needs: simulating on a regular
     /// grid would give the synthetic fit more information than the real fit
-    /// has. Requires --obs-dir or --obs-only-dir. The parameter vector comes
+    /// has. Requires --obs-dir, --obs-only-dir or --projected-out. The parameter vector comes
     /// from --params/--param (one dataset, written into the directory) or
     /// from --draws (one `ds_NN/` subdirectory per draw). What it produces is
     /// a dataset, not a run: no trajectory and no store leaf are written, with
@@ -509,6 +509,22 @@ pub struct SimulateArgs {
         "emit_every", "dates", "init_state", "quantities_out", "event_log",
     ])]
     pub design_from: Option<PathBuf>,
+
+    /// Write each observation stream's projected value on the design that
+    /// `--design-from` binds: the model quantity the stream's `projected = …`
+    /// expression defines, before any observation noise. One TSV per stream,
+    /// with the stream's temporal column(s) and a `projected` column at full
+    /// precision; a row that is a hole in the data still gets its value. With
+    /// --draws, one `ds_NN/` subdirectory per draw. The value is a
+    /// deterministic function of the run, so no data column is needed and
+    /// gh#829 does not apply. It is not a dataset: the column is named
+    /// `projected`, not the stream's observed column, so it cannot be bound
+    /// back as data by accident. A likelihood may transform the projection
+    /// (`mean = 0.86 * projected`); this writes the projection itself. Like
+    /// --quantities-out, a sidecar outside run identity. Usable with or
+    /// without --obs-dir / --obs-only-dir.
+    #[arg(long, value_name = "DIR", requires = "design_from")]
+    pub projected_out: Option<PathBuf>,
 
     /// Add a calendar `date` column (rendered from the model `origin` +
     /// `time_unit`) alongside the numeric `t`/`time` column in trajectory

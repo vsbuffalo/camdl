@@ -315,6 +315,19 @@ pub(crate) fn design_from_bound_streams(
 ) -> Result<Vec<StreamPlan>, String> {
     let irs: Vec<&ObservationModel> = streams.iter().map(|s| &s.obs_model_ir).collect();
     check_streams_round_trip(&irs)?;
+    plans_for_bound_streams(streams, files, time_opts)
+}
+
+/// The per-stream row plans of a bound design, without the round-trip checks.
+/// [`design_from_bound_streams`] adds those checks for a dataset that is meant
+/// to be read back; [`write_projected_dataset`] writes projections, which are
+/// never bound back as data, so the refusals (a data column the writer cannot
+/// fill, a long-form stream, a shared source) do not apply to it.
+pub(crate) fn plans_for_bound_streams(
+    streams: &[crate::fit::runner::ObsStream],
+    files: &indexmap::IndexMap<String, String>,
+    time_opts: &crate::caltime_load::TimeOpts<'_>,
+) -> Result<Vec<StreamPlan>, String> {
     streams.iter()
         .map(|s| {
             let obs = &s.obs_model_ir;
@@ -634,6 +647,43 @@ pub(crate) fn simulate_dataset(
     Ok(written)
 }
 
+/// Write each stream's projected value on `plans`, one file per stream, into
+/// `out_dir`: the stream's temporal column(s) and a `projected` column. The
+/// projection is the stream's `projected = …` expression over each row's
+/// period, the value the likelihood scores before any of its own arguments
+/// transform it, computed by the same [`crate::project_coverages`] that
+/// [`simulate_dataset`] draws from. No observation noise, no RNG, and no data
+/// column is read, so the run is deterministic in `run`'s parameters.
+pub(crate) fn write_projected_dataset(
+    run: &crate::util::SimRun,
+    plans: &[StreamPlan],
+    out_dir: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    let (traj, model) = crate::util::run_simulation(run)?;
+    if model.observations.is_empty() {
+        return Err("model has no `observations { }` block, so there is no \
+             projection to write".to_string());
+    }
+    // Project every stream before creating any file, as [`simulate_dataset`]
+    // does: no partial output beside a failure.
+    let mut projected: Vec<Vec<f64>> = Vec::with_capacity(plans.len());
+    for sp in plans {
+        let obs = model.observations.iter().find(|o| o.name == sp.name).ok_or_else(|| format!(
+            "the observation design names stream '{}', which the model this run \
+             simulated does not declare", sp.name))?;
+        projected.push(crate::project_coverages(&traj, obs, &model, &sp.plan.coverages())?);
+    }
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| format!("cannot create {}: {}", out_dir.display(), e))?;
+    let mut written = Vec::with_capacity(plans.len());
+    for (sp, values) in plans.iter().zip(projected) {
+        let path = out_dir.join(format!("{}.tsv", sp.name));
+        write_stream_columns(&path, &sp.plan, "projected", &values, &[], RowValues::Projected)?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
 /// Write one stream's file: the declared temporal column(s), then the scored
 /// column, then any `extra` columns, one line per planned row.
 ///
@@ -649,6 +699,31 @@ pub(crate) fn write_stream_file(
     plan: &EmitPlan,
     values: &[f64],
     extra: &[(String, Vec<f64>)],
+) -> Result<(), String> {
+    write_stream_columns(path, plan, &plan.scored, values, extra, RowValues::Observed)
+}
+
+/// How [`write_stream_columns`] writes a row's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowValues {
+    /// A drawn observation: [`format_obs_value`], and `NA` on a row the plan
+    /// marks unobserved, so the file re-loads with the design's holes.
+    Observed,
+    /// A projection: the value on every row (a hole in the data still has a
+    /// projection) at full round-trip precision, because a projection is read
+    /// as a number, often differenced, never as a count.
+    Projected,
+}
+
+/// [`write_stream_file`] with the scored column's header and the value format
+/// chosen by the caller.
+pub(crate) fn write_stream_columns(
+    path: &Path,
+    plan: &EmitPlan,
+    scored: &str,
+    values: &[f64],
+    extra: &[(String, Vec<f64>)],
+    mode: RowValues,
 ) -> Result<(), String> {
     use std::io::Write;
     if values.len() != plan.rows.len() {
@@ -671,9 +746,9 @@ pub(crate) fn write_stream_file(
     );
     let io = |e: std::io::Error| format!("{}: {}", path.display(), e);
     match &plan.columns {
-        TemporalColumns::Time(t) => write!(out, "{t}\t{}", plan.scored).map_err(io)?,
+        TemporalColumns::Time(t) => write!(out, "{t}\t{scored}").map_err(io)?,
         TemporalColumns::Window { start, stop } => {
-            write!(out, "{start}\t{stop}\t{}", plan.scored).map_err(io)?
+            write!(out, "{start}\t{stop}\t{scored}").map_err(io)?
         }
     }
     for (name, _) in extra {
@@ -689,9 +764,10 @@ pub(crate) fn write_stream_file(
             }
             _ => write!(out, "{}", cell(row.label)?).map_err(io)?,
         }
-        match row.observed {
-            true => write!(out, "\t{}", format_obs_value(value)).map_err(io)?,
-            false => write!(out, "\tNA").map_err(io)?,
+        match (mode, row.observed) {
+            (RowValues::Observed, true) => write!(out, "\t{}", format_obs_value(value)).map_err(io)?,
+            (RowValues::Observed, false) => write!(out, "\tNA").map_err(io)?,
+            (RowValues::Projected, _) => write!(out, "\t{value}").map_err(io)?,
         }
         for (_, column) in extra {
             write!(out, "\t{}", format_obs_value(column[ri])).map_err(io)?;
@@ -1031,6 +1107,56 @@ mod tests {
             "every period the fit was bound over must survive the round trip");
         let got_holes: Vec<bool> = reloaded[0].cells.iter().map(|c| c.is_none()).collect();
         assert_eq!(got_holes, want_holes, "and every hole");
+    }
+
+    /// `--projected-out`: each row's value is the stream's projection over that
+    /// row's own period, here `incidence(infection)` summed independently from
+    /// the trajectory's per-interval flows. The hole row still gets its value;
+    /// the column is `projected`, never the stream's observed name, so the file
+    /// cannot be bound back as data.
+    #[test]
+    fn projections_on_a_bound_design_are_the_flow_over_each_rows_period() {
+        let tmp = tempdir("projected");
+        let ir = windowed_model(tmp.path());
+        let data = tmp.path().join("cases.tsv");
+        std::fs::write(&data, "win_start\twin_stop\tcases\n\
+             0\t1\t3\n\
+             1\t2\t5\n\
+             2\t5\t20\n\
+             5\t6\tNA\n\
+             6\t9\t11\n").unwrap();
+        let run = fixture_run(&ir, 7);
+        let bound = bind(&run, &data);
+        let (compiled, model) = crate::util::resolve_run_model(&run).unwrap();
+        let opts = crate::caltime_load::TimeOpts {
+            origin: model.origin.as_deref(),
+            time_unit: &model.time_unit,
+            dt: run.dt,
+            t_start: compiled.model.simulation.t_start,
+            format: crate::caltime_load::TimeFormat::Auto,
+        };
+        let plans = plans_for_bound_streams(&bound, &effective(&data), &opts).unwrap();
+
+        let out = tmp.path().join("proj");
+        let written = write_projected_dataset(&run, &plans, &out).unwrap();
+        assert_eq!(written.len(), 1);
+        let text = std::fs::read_to_string(&written[0]).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(lines.next().unwrap(), "win_start\twin_stop\tprojected");
+        let got: Vec<f64> = lines.map(|l| l.rsplit('\t').next().unwrap().parse().unwrap()).collect();
+
+        // Independent arithmetic: the same seed reproduces the same trajectory;
+        // a row (a, b] collects the flows of every snapshot with a < t <= b.
+        let (traj, model) = crate::util::run_simulation(&run).unwrap();
+        let inf = model.transitions.iter().position(|t| t.name == "infection").unwrap();
+        let flow_over = |a: f64, b: f64| -> f64 {
+            traj.snapshots.iter().filter(|s| s.t > a && s.t <= b).map(|s| s.flows.value(inf)).sum()
+        };
+        let want: Vec<f64> = [(0.0, 1.0), (1.0, 2.0), (2.0, 5.0), (5.0, 6.0), (6.0, 9.0)]
+            .iter().map(|&(a, b)| flow_over(a, b)).collect();
+        assert_eq!(got, want, "projection = infection flow over each row's own period");
+        assert!(want.iter().any(|&v| v > 0.0), "a non-degenerate run: some infections happen");
+        assert_eq!(got.len(), 5, "the hole row (5, 6] is written with its value, not NA");
     }
 
     /// Proposal 2026-09-09: the one data column the model generates. A

@@ -1997,17 +1997,18 @@ fn run_simulate(a: &args::SimulateArgs) {
     // conflicts (args/mod.rs) with every knob that pipeline owns, so nothing
     // a user passed is silently dropped here.
     if let Some(ref design_toml) = a.design_from {
-        let Some(ref dir) = obs_dir else {
+        if obs_dir.is_none() && a.projected_out.is_none() {
             eprintln!(
                 "error: --design-from writes one file per observation stream, so it \
-                 needs a directory: pass --obs-only-dir DIR (dataset only) or \
-                 --obs-dir DIR."
+                 needs a directory: pass --obs-only-dir DIR (dataset only), \
+                 --obs-dir DIR, or --projected-out DIR (each stream's projected value)."
             );
             std::process::exit(1);
-        };
+        }
         if let Err(e) = simulate_on_bound_design(
             design_toml, &base_sim_run, &draws, draws_path.is_some(),
-            std::path::Path::new(dir), dt,
+            obs_dir.as_ref().map(std::path::Path::new),
+            a.projected_out.as_deref(), dt,
         ) {
             eprintln!("error: {e}");
             std::process::exit(1);
@@ -3844,7 +3845,8 @@ fn simulate_on_bound_design(
     base_run: &util::SimRun,
     draws: &[HashMap<String, f64>],
     draws_given: bool,
-    dir: &std::path::Path,
+    dir: Option<&std::path::Path>,
+    projected_dir: Option<&std::path::Path>,
     dt: f64,
 ) -> Result<(), String> {
     // The parameter vectors this writes a dataset for. Without `--draws` the
@@ -3893,20 +3895,32 @@ fn simulate_on_bound_design(
     let streams = fit::runner::resolve_and_load_obs_streams(
         &model, &compiled, &effective, dt, &time_opts,
     )?;
-    let design = obs_emit::design_from_bound_streams(&streams, &effective, &time_opts)?;
+    // A dataset meant to be read back is checked for the round trip; projections
+    // are never bound back as data, so they use the plans alone.
+    let design = match dir {
+        Some(_) => obs_emit::design_from_bound_streams(&streams, &effective, &time_opts)?,
+        None => obs_emit::plans_for_bound_streams(&streams, &effective, &time_opts)?,
+    };
+    let per_point = |root: &std::path::Path, i: usize| if points.len() == 1 {
+        root.to_path_buf()
+    } else {
+        root.join(fit::config_v2::format_dataset_dir(i + 1))
+    };
 
     for (i, point) in points.iter().enumerate() {
-        let out_dir = if points.len() == 1 {
-            dir.to_path_buf()
-        } else {
-            dir.join(fit::config_v2::format_dataset_dir(i + 1))
-        };
         let run = run_for(i, point);
-        let written = obs_emit::simulate_dataset(
-            &run, obs_emit::ObservationDesign::Bound(&design), &out_dir,
-        )?;
-        for f in &written {
-            eprintln!("observations written to {}", f.path.display());
+        if let Some(dir) = dir {
+            let written = obs_emit::simulate_dataset(
+                &run, obs_emit::ObservationDesign::Bound(&design), &per_point(dir, i),
+            )?;
+            for f in &written {
+                eprintln!("observations written to {}", f.path.display());
+            }
+        }
+        if let Some(pdir) = projected_dir {
+            for path in obs_emit::write_projected_dataset(&run, &design, &per_point(pdir, i))? {
+                eprintln!("projections written to {}", path.display());
+            }
         }
     }
     Ok(())

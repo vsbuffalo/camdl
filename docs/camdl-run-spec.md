@@ -1945,7 +1945,8 @@ camdl simulate model.camdl --params theta.toml \
     --design-from fit.toml --obs-only-dir synth/
 ```
 
-It requires `--obs-dir` or `--obs-only-dir` (one file per stream), and takes θ
+It requires `--obs-dir`, `--obs-only-dir` or `--projected-out` (one file per
+stream), and takes θ
 from `--params`/`--param` — one dataset, written into the directory — or from
 `--draws`, which writes one `ds_NN/` subdirectory per draw so each dataset stays
 a file set the loader can bind on its own. What it produces is a **dataset, not
@@ -1962,6 +1963,31 @@ to read that column from when the data is what is being generated, and writing
 (long-form) stream is refused for the same reason in a different shape: its
 family shares one file per `source`, which one file per stream would not
 re-load.
+
+**Projections on the design: `--projected-out DIR`.** With `--design-from`,
+`--projected-out DIR` writes each stream's *projected* value on the same rows:
+the model quantity the stream's `projected = …` expression defines over each
+row's period, before any observation noise. One file per stream holds the
+stream's temporal column(s) and a column named `projected`, at full round-trip
+precision. A hole in the data still gets its value, because the projection
+exists whether or not the row was observed. It may be passed with or without
+`--obs-dir` / `--obs-only-dir`, and with `--draws` it writes one `ds_NN/`
+subdirectory per draw.
+
+```
+camdl simulate model.camdl --draws perturbations.tsv \
+    --design-from fit.toml --projected-out projections/
+```
+
+A projection reads no likelihood argument, so the data-column refusal above
+(gh#829) does not apply: a stream whose dispersion or denominator comes from a
+data file is projected like any other. Nor do the round-trip refusals, because
+the file is not a dataset: its column is `projected`, not the stream's observed
+name, so it cannot be bound back as data by accident. The value is the
+projection itself; a likelihood may transform it (`mean = 0.86 * projected`).
+Projections are what a sensitivity or identifiability analysis differentiates,
+and what a posterior-predictive mean averages. Like `--quantities-out`, the
+output is a sidecar outside run identity.
 
 `--obs-only` / `--obs-only-dir` suppress only the *loose* trajectory mirror; the
 store leaf still holds `traj.tsv`. In every mode the sampled observations are
