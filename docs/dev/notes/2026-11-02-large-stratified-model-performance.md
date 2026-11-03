@@ -413,14 +413,262 @@ cargo clippy -p sim --all-targets --offline -- -D warnings
 That is 529 simulation unit tests, 27 cross-backend lifecycle tests, three
 event/transition co-drain tests and the trajectory-baseline test: 560 tests
 total. The new scan-comparison oracle is included in the unit tests. Clippy
-passed with warnings denied. The full `make test` gate has not been run; this
-change remains uncommitted and needs that gate before landing.
+passed with warnings denied. At this stage the full `make test` gate had not yet
+been run; the later attempt and final review are recorded below.
 
 A subsequent `make test CARGO_WRAP=` attempt passed workspace Clippy, compiler
 checks and golden synchronization, then stopped in the non-simulation Rust
 suite: `cli --test store_leaf_found_by_hash`,
 `renaming_the_model_file_keeps_every_leaf_a_hit`, created distinct store leaves
 after a model-file rename. The full gate is therefore not green. The failure is
-outside the modified event-validation path; its baseline status was not checked.
-The optional sccache wrapper was disabled because it failed with an environment
-permission error before invoking the compiler.
+outside the modified event-validation path; its baseline status was not checked
+at that point (see final review below). The optional sccache wrapper was
+disabled because it failed with an environment permission error before invoking
+the compiler.
+
+## Second profiling pass: schedule construction
+
+A full-process Samply recording of the conflict-check-optimized three-arm run
+captured 25,368 main-thread samples over approximately 26.1 seconds. Symbols
+were resolved using Samply's presymbolication sidecar. Inclusive attribution
+(recursive frames counted once per sample) was:
+
+| Path                       | Main-thread samples |
+| -------------------------- | ------------------: |
+| Rate expression evaluation |               53.9% |
+| Effect-plan construction   |               13.5% |
+| JSON deserialization       |               12.1% |
+| Forcing evaluation         |                8.6% |
+
+These are inclusive categories and can overlap; forcing evaluation is part of
+expression evaluation. This supersedes an earlier five-second sample beginning
+six seconds after launch, in which plan construction occupied about 53% of the
+window. That window identified the hotspot but substantially overstated its
+whole-run share. The full profile bounds the benefit of eliminating plan
+construction at roughly 1.16x on this run.
+
+The exact-time effect planner runs once at the start of every ODE solve,
+including every ODE likelihood evaluation. At integration boundaries consumers
+read the prepared batches. Construction resolves firing times, sorts time/event
+pairs, groups instants using EFFECT_EPS, and produces event indices in
+declaration order. The old collection loop tested membership and sorted the
+growing batch after each append. Large simultaneous event families repeatedly
+scanned and sorted the same growing vector.
+
+The second optimization appends during collection, then sorts and deduplicates
+each completed batch once. A vector remains appropriate for ordered consumption;
+a new hash-set representation is unnecessary. Time grouping, origin handling and
+per-effect time deduplication are unchanged. The old algorithm is retained as a
+test-only oracle: 2,000 generated schedules compare exact origin indices, firing
+times and batches, including unsorted inputs, duplicates, outside-window times,
+and values around the grouping tolerance.
+
+Three alternating before/after pairs, comparing against the first optimization:
+
+| Variant                      | Wall seconds           | Median |
+| ---------------------------- | ---------------------- | -----: |
+| Indexed conflict checker     | 24.783, 25.474, 25.164 | 25.164 |
+| Plus completed-batch sorting | 22.217, 22.520, 22.410 | 22.410 |
+
+That is a further 1.12x speedup, or about 11% less total time. All trajectory
+headers and values match byte-for-byte. Whole-file hashes differ because the new
+binary embeds a newer commit hash in the first comment line; direct file
+comparison finds that version banner is the only difference. Do not describe
+these particular files as having identical whole-file hashes.
+
+The recording used `samply record --save-only --unstable-presymbolicate` around
+the complete simulation command, with output directed to the null device. Timing
+pairs were run without the profiler and wrote the complete TSV files. Raw
+profiles, symbol sidecars and timing logs remain local artifacts; private inputs
+and identifying paths are omitted here.
+
+The second change passes the same focused validation command as the first: 530
+unit tests plus 31 lifecycle/co-drain/trajectory tests (561 total), and sim
+all-target Clippy with warnings denied. No schema or golden changes are needed.
+The previously recorded full-gate CLI store-identity failure remains unresolved;
+the second change was left pending review at that stage.
+
+The next profile-driven priority is repeated expression evaluation, which now
+has the largest measured share. Event buffer reuse remains a bounded candidate,
+but its whole-run contribution has not been isolated. Shared forcing values per
+stage, shared parameter-and-state expressions and evaluation dispatch should be
+measured independently rather than assumed to provide multiplicative gains.
+
+## Evaluator contender measurements
+
+The next investigation compares evaluation strategies before choosing a
+production implementation. The measurements use a scratch Rust executable linked
+directly to the existing release `sim` and `ir` libraries, with the same Rust
+toolchain. No production evaluator source was changed for these probes.
+
+### Method
+
+The timed unit is one complete transition-rate vector, with the binding cache
+invalidated for each evaluation as it is at an ODE stage. It excludes parsing,
+model construction, expression rewriting, bytecode construction, rate guards,
+stoichiometric accumulation and integration. It is therefore a rate-vector
+benchmark, not a complete RHS or likelihood benchmark.
+
+Two input sets were used: twelve synthetic perturbations of the initial state,
+and twelve states sampled evenly from saved trajectories. The latter use the
+recorded population values and evaluate at a small offset from the snapshot
+time. These are rounded output snapshots, not exact internal Runge–Kutta stage
+states. The fixed parameter point is identical across variants. A broader
+parameter cloud and post-intervention trajectories remain untested.
+
+Each process checks every transition rate bit-for-bit against the original tree
+interpreter at all twelve input states before timing. Each timed batch performs
+1,200 rate-vector evaluations; seven batches run per process. Contenders run in
+forward then reverse order, producing fourteen batch observations per contender
+and model. These are correlated observations from two processes, not fourteen
+independent machine trials. The shared machine produces some timing variation;
+small differences and overlapping ranges should not be treated as established
+wins. Other benchmark/build work was kept sequential; a scratch source copy
+coincided with part of the later specialization experiment, further weakening
+small specialization claims.
+
+### Contenders
+
+- **Tree:** the current evaluator with its existing per-stage binding cache.
+- **Bytecode:** the existing flat VM, with its own cache and reusable scratch.
+- **Forcing memo:** replace each referenced forcing with a shared, on-demand
+  binding. This measures one concrete memoization mechanism; it does not prove
+  that every possible forcing-cache design has the same cost.
+- **CSE:** share repeated structural subexpressions of at least four nodes via
+  on-demand binding slots. Structural matching and rewriting happen outside the
+  timer. No algebraic reassociation is performed.
+- **CSE + bytecode:** execute that shared representation with the flat VM.
+- **Parameter specialization:** evaluate parameter/constant-only arithmetic once
+  outside the timer, substituting constants for the fixed parameter point. Its
+  bytecode combination is also measured separately.
+
+The CSE and specialization probes establish finite-value equality on these input
+sets, not production readiness. They do not validate gradient handling,
+error-attribution side effects, cache lifetimes across changed parameters, or
+construction-cost amortization. Runtime lowering could keep the wire IR intact;
+compiler-emitted shared derivative representations would need a separate design.
+
+### Rate-vector results
+
+Medians in microseconds on trajectory-derived inputs:
+
+| Model    |   Tree | Bytecode | Forcing memo |    CSE | CSE + bytecode |
+| -------- | -----: | -------: | -----------: | -----: | -------------: |
+| baseline |  299.6 |    177.0 |        324.7 |  285.5 |          175.1 |
+| one      |  456.6 |    285.8 |        461.6 |  374.7 |          248.0 |
+| three    | 1373.9 |    848.2 |       1235.6 | 1090.9 |          722.6 |
+
+The synthetic-perturbation control shows the same broad ordering. Bytecode is
+consistently faster on all sizes (about 1.6–1.7x here). CSE adds a useful
+benefit on the larger configurations, and its combination with bytecode reaches
+about 1.9x on the largest rate vector. These gains overlap and must not be
+multiplied. Forcing memoization alone regresses on the baseline, is
+approximately flat on one arm, and helps somewhat on three arms. It is not the
+best first candidate. The small baseline CSE difference is within observed
+timing variation.
+
+The structural probe adds 180, 344 and 1,015 sharing slots respectively; the
+forcing memo adds 6,728 slots in each model. A logical traversal of one
+large-model input, honoring existing binding memoization and conditional
+branches, counts 429,798 expression-node visits, 1,230 binding misses, 91,266
+binding hits and 49,200 forcing references to 6,728 distinct forcings. These
+counts exclude work inside forcing implementations. Many repeated forcing
+references do not imply that the proposed extra cache is cheap enough to win.
+
+Parameter specialization is a separate experiment with its own tree controls.
+The existing compiler LICM pass deliberately leaves cheap arithmetic inline
+(`licm.ml`, `contains_expensive`), so this probes a broader policy rather than
+claiming LICM does not exist. Its results and full-solve bytecode check follow.
+
+### Parameter specialization probe
+
+Medians in microseconds, with separate contemporaneous tree controls:
+
+| Model    |   Tree | Specialization | Specialization + bytecode |
+| -------- | -----: | -------------: | ------------------------: |
+| baseline |  287.0 |          281.7 |                     172.2 |
+| one      |  595.8 |          442.1 |                     280.8 |
+| three    | 1350.6 |         1184.8 |                     800.3 |
+
+The one-arm tree control is noisy (471–727 microseconds across batches), so its
+apparent specialization gain is not reliable enough to rank. The large-model
+specialization result is modest compared with bytecode; baseline specialization
+is effectively flat within timing spread. Specialization plus bytecode does not
+beat the earlier sharing-plus-bytecode result on the large model. These separate
+runs are not a precise head-to-head ranking of the combinations. A production
+specialization strategy would also pay rebuilding costs at every changed
+parameter point, which this timed region excludes.
+
+### Full-solve bytecode validation
+
+A scratch runtime copy routes the ODE rate loop through the existing flat VM
+when enabled. The same executable runs both paths, toggled by `CAMDL_EVAL_FLAT`.
+Both retain per-rate table-error clearing and rate guards; this prototype
+creates a flat cache/scratch buffer per stage rather than implementing
+production scratch reuse. It includes the completed-batch schedule optimization.
+Real-valued explicit ODE equations still use the tree path.
+
+Three alternating timing pairs per model include JSON loading, VM construction,
+integration, guards and complete TSV output, with compilation excluded:
+
+| Model    | Tree seconds (three runs) | Bytecode seconds (three runs) | Median speedup |
+| -------- | ------------------------- | ----------------------------- | -------------: |
+| baseline | 7.223, 6.835, 6.783       | 5.360, 5.671, 5.470           |          1.25x |
+| one      | 8.871, 8.762, 8.842       | 6.786, 6.744, 6.772           |          1.31x |
+| three    | 22.123, 21.809, 21.853    | 16.450, 16.558, 16.487        |          1.33x |
+
+All six complete trajectory files per model have identical SHA-256 hashes,
+including the version banner because each pair uses the same executable. The
+flat path actually executes in the ODE loop; merely setting the existing toggle
+on an unmodified runtime would not establish this result.
+
+The initial scratch build omitted files embedded by the CLI. A prematurely
+launched set of comparisons consequently used the old copied binary; that entire
+set was discarded. The table above was rerun only after the scratch build
+completed successfully and its executable timestamp was checked.
+
+### Decision supported by these measurements
+
+The strongest next implementation candidate is wiring the existing bytecode VM
+into ODE rate evaluation with appropriate scratch ownership. It wins across all
+three model sizes in both isolated and full-solve tests, with exact outputs at
+the measured parameter point. General-purpose CSE is the next candidate, with
+additional gradient and error-semantics design work. Forcing memoization and
+broader parameter specialization should not precede those based on this data.
+
+These experiments do not certify a production bytecode change: error cases,
+rejected stages, explicit real-valued equations, sensitivity paths, stochastic
+backends and a parameter cloud still need their appropriate validation. No JIT,
+matrix-kernel or tensor-IR implementation was benchmarked; no measured gain is
+claimed for those larger designs. MCMC throughput and effective samples per
+second were not measured. The production evaluator source remains unchanged.
+
+## Final review of completed-batch sorting (2026-11-03)
+
+The production change remains confined to `EffectPlan::build_exact`: collect
+indices using the existing time-group anchors, then sort and deduplicate once
+per batch. The old scan/sort implementation and generated comparison test live
+in the test module. No event values, grouping tolerance, origin behavior,
+declaration-order semantics, grid planner, schema or goldens change.
+
+The final focused run passes 562 tests: 530 simulation unit tests, 27 lifecycle
+tests, three co-drain tests, one binding-cache A/B test and one
+trajectory-baseline test. Sim all-target Clippy also passes with warnings
+denied. Tests were rerun after moving the oracle into the test module; the
+production algorithm is the same one used for the 25.164-to-22.410-second
+measurement above.
+
+The full-gate store-identity failure is now reproduced independently in a
+scratch source copy with the committed `effect_plan.rs` and the unmodified
+production ODE evaluator, excluding this schedule optimization and all bytecode
+probes. `cargo test -p cli --test store_leaf_found_by_hash --offline` gives the
+same model-file-rename failure (two tests pass, one fails). The local compiler
+was pinned for that baseline comparison and version checking bypassed as
+documented. This establishes that the schedule fix does not introduce that
+failure. The store-identity defect remains unresolved and the full gate is still
+not green; no assertion or gate was weakened to conceal it.
+
+The completed-batch optimization and this investigation update are suitable for
+check-in as a bounded performance change with that baseline failure documented.
+Experimental ODE bytecode, workspace reuse, CSE and specialization remain
+scratch prototypes and are not part of the production change.

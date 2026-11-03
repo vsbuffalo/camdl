@@ -277,16 +277,19 @@ impl EffectPlan {
         for (t, iv_idx) in pairs {
             match (plan.times.last(), plan.batches.last_mut()) {
                 (Some(&anchor), Some(batch)) if t - anchor <= EFFECT_EPS => {
-                    if !batch.contains(&iv_idx) {
-                        batch.push(iv_idx);
-                        batch.sort_unstable();
-                    }
+                    batch.push(iv_idx);
                 }
                 _ => {
                     plan.times.push(t);
                     plan.batches.push(vec![iv_idx]);
                 }
             }
+        }
+        // Consumers require declaration order, but collection only needs
+        // time order. Canonicalize each completed batch once, not per append.
+        for batch in &mut plan.batches {
+            batch.sort_unstable();
+            batch.dedup();
         }
         plan
     }
@@ -375,6 +378,77 @@ fn warn_once(note: &SnapNote) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_batch_collection_matches_incremental_scan() {
+        let candidates = [-1.0, -EFFECT_EPS, 0.0, EFFECT_EPS, 0.5,
+            0.5 + 0.75 * EFFECT_EPS, 0.5 + 1.5 * EFFECT_EPS,
+            1.0, 1.0 + EFFECT_EPS, 2.0];
+        let mut seed = 42_u64;
+        for _ in 0..2000 {
+            let mut times = vec![Vec::new(); 8];
+            for own in &mut times {
+                for _ in 0..12 {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    own.push(candidates[(seed >> 32) as usize % candidates.len()]);
+                }
+            }
+            let actual = EffectPlan::build_exact(&times, 0.0, 1.0);
+            let expected = build_exact_scan(&times, 0.0, 1.0);
+            assert_eq!(actual.at_origin, expected.at_origin);
+            assert_eq!(actual.times, expected.times);
+            assert_eq!(actual.batches, expected.batches);
+        }
+    }
+
+    // Previous implementation retained only as an equivalence oracle.
+    fn build_exact_scan(fire_times: &[Vec<f64>], t_start: f64, t_end: f64) -> EffectPlan {
+        let mut at_origin = Vec::new();
+        let mut pairs: Vec<(f64, usize)> = Vec::new();
+        for (iv_idx, times) in fire_times.iter().enumerate() {
+            let mut own: Vec<f64> = times
+                .iter()
+                .copied()
+                .filter(|&t| t >= t_start - EFFECT_EPS && t <= t_end + EFFECT_EPS)
+                .collect();
+            own.sort_by(|a, b| a.total_cmp(b));
+            // One fire per instant: times within EFFECT_EPS of the first of a
+            // run are that one fire.
+            let mut anchor: Option<f64> = None;
+            for t in own {
+                if anchor.is_some_and(|a| t - a <= EFFECT_EPS) {
+                    continue;
+                }
+                anchor = Some(t);
+                if (t - t_start).abs() <= EFFECT_EPS {
+                    at_origin.push(iv_idx);
+                } else {
+                    pairs.push((t, iv_idx));
+                }
+            }
+        }
+        // Stable sort: a tie keeps declaration order.
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut plan = EffectPlan { at_origin, ..Default::default() };
+        for (t, iv_idx) in pairs {
+            match (plan.times.last(), plan.batches.last_mut()) {
+                (Some(&anchor), Some(batch)) if t - anchor <= EFFECT_EPS => {
+                    if !batch.contains(&iv_idx) {
+                        batch.push(iv_idx);
+                        batch.sort_unstable();
+                    }
+                }
+                _ => {
+                    plan.times.push(t);
+                    plan.batches.push(vec![iv_idx]);
+                }
+            }
+        }
+        plan
+    }
+
+
+
     use ir::{
         expr::Expr,
         intervention::{
