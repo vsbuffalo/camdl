@@ -139,17 +139,18 @@ order. Every handle now names one run, or is refused with the runs listed.
   `camdl show`/`cat` of a fit name the default-options predict by bare paths
   (`predictive/<stream>.tsv`) and every keyed one under `predict/<dir>/`.
   Migration: rerun `camdl fit predict <run>` and delete the old folder-level
-  files. **The camdl-watcher viewer must be updated** — it still reads the
-  folder (checked at its `origin/main`): `camdl_watch/predictive.py` reads
-  `<run_dir>/predictive/` and `observed/` and their `.json` manifests;
-  `camdl_watch/quantities.py` reads `<run_dir>/quantities.json` and
-  `quantities/`; both must read `<run_dir>/predict/<run_id12>/` for the run
-  shown, and treat `predict/<run_id12>-<opts8>/` as separate predicts of that
-  run, telling them apart by `options` in `predictive.json`;
-  `camdl_watch/ingest.py` (`_native_labels`) keys labels by folder from
-  `camdl list --format json`'s row-level `label`, which is now a joined display
-  string — it must key them per run, from `methods[].label` and
-  `methods[].run_id`.
+  files. **The camdl-scope viewer must be updated**
+  ([vsbuffalo/camdl-scope#9](https://github.com/vsbuffalo/camdl-scope/issues/9))
+  — it still reads predict output at the old folder-level path (checked at its
+  `origin/main`): `camdl_watch/predictive.py` reads `<run_dir>/predictive/` and
+  `observed/` and their `.json` manifests; `camdl_watch/quantities.py` reads
+  `<run_dir>/quantities.json` and `quantities/`; both must read
+  `<run_dir>/predict/<run_id12>/` for the run shown, and treat
+  `predict/<run_id12>-<opts8>/` as separate predicts of that run, telling them
+  apart by `options` in `predictive.json`; `camdl_watch/ingest.py`
+  (`_native_labels`) keys labels by folder from `camdl list --format json`'s
+  row-level `label`, which is now a joined display string — it must key them per
+  run, from `methods[].label` and `methods[].run_id`.
 - **`table_row` schema v3.** `fit table` gives one row per run (rows of one
   problem share a `fit_id`), each row's label, time and numbers its run's own,
   and the row gains `run_id`; the text and markdown tables gain a `run` column
