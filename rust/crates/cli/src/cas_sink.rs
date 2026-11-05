@@ -851,6 +851,8 @@ pub(crate) fn set_fit_label(leaf_dir: &std::path::Path, label: &str) -> Result<(
 /// releases it when the holder drops it, exits or crashes, so there is no stale
 /// lock to reclaim and no pid to trust; the file stays in the store and holds
 /// `pid <n> on <host>` of the latest holder, for the refusal message only.
+// Off Unix the lock is refused, so nothing constructs one.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct LabelLock {
     _file: std::fs::File,
 }
@@ -868,6 +870,7 @@ pub(crate) fn fit_label_lock(root: &std::path::Path) -> Result<LabelLock, String
     fit_label_lock_within(root, LABEL_LOCK_WAIT)
 }
 
+#[cfg(unix)]
 fn fit_label_lock_within(
     root: &std::path::Path,
     wait: std::time::Duration,
@@ -911,7 +914,23 @@ fn fit_label_lock_within(
     }
 }
 
+/// Off Unix there is no `flock(2)`, and writing a label without the lock would
+/// let two writers both find it free and both take it: refused, not skipped.
+#[cfg(not(unix))]
+fn fit_label_lock_within(
+    root: &std::path::Path,
+    _wait: std::time::Duration,
+) -> Result<LabelLock, String> {
+    Err(format!(
+        "cannot take the store's label lock {}: fit label locking is unsupported on \
+         this platform (it needs flock(2), available only on Unix), and a label is \
+         not written without it",
+        root.join(".fit-labels.lock").display()
+    ))
+}
+
 /// This machine's hostname, for the label lock's holder note.
+#[cfg(unix)]
 fn hostname() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: gethostname writes at most buf.len() bytes into buf.
@@ -1221,6 +1240,7 @@ mod tests {
     /// free again once dropped, and is never blocked by a lock file whose
     /// recorded holder is not holding it — a crashed process, or a live
     /// process that reused its pid.
+    #[cfg(unix)]
     #[test]
     fn the_label_lock_is_held_only_while_held() {
         let root = crate::test_support::unique_temp_dir("label_lock");
