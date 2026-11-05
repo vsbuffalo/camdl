@@ -273,10 +273,6 @@ order. Every handle now names one run, or is refused with the runs listed.
 - **An `nl-*` / `mh` fit whose `[config] dt` differs from the model's declared
   `dt` is refused**: an ODE-backend method integrates at the model's dt.
   Migration: delete the `[config] dt` line.
-<<<<<<< HEAD
-||||||| parent of 39932546 (docs: support-keyed transforms, and the benchmark that holds commit 6)
-
-=======
 - **`[estimate].transform` is removed.** A fit config that sets `transform` is
   refused at load, naming the unknown field. Every override that still loaded
   named the transform the parameter's kind and bounds already select, so results
@@ -334,8 +330,6 @@ order. Every handle now names one run, or is refused with the runs listed.
   When a start scores finite, the refusal now says the perturbation is too large
   and names each parameter's step, instead of "Initial log-likelihood is -inf at
   starting parameters".
-
->>>>>>> 39932546 (docs: support-keyed transforms, and the benchmark that holds commit 6)
 - **A typed constant `let` cannot be set from outside.**
   `let omega : rate =
   0.01` holds its declared value in every run; `[fixed]`,
