@@ -1195,6 +1195,16 @@
           }
         ]
       },
+      "dimension": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "dim_clause",
+            "named": true
+          }
+        ]
+      },
       "indices": {
         "multiple": false,
         "required": false,

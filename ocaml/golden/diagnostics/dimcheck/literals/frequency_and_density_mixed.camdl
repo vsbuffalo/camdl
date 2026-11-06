@@ -1,0 +1,26 @@
+# invariant: frequency- and density-dependent terms, separate parameters, one rate
+# spec: §5.2
+# expect: (none)
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  gamma : rate     in [0.01, 1.0]
+  N0    : count    in [100, 100000]
+  I0    : count    in [1, 1000]
+  beta_f : rate
+  beta_d : positive
+}
+
+let N = S + I + R
+
+transitions {
+  infection : S --> I @ beta_f * S * I / N + beta_d * S * I
+  recovery  : I --> R @ gamma * I
+
+}
+
+init { S = N0 - I0  I = I0 }
+
+simulate { from = 0 'days  to = 100 'days }

@@ -432,12 +432,15 @@ declaration:
       { DTimepoints tps }
   | STRATIFY LPAREN sa = stratify_args RPAREN
       { DStratify sa }
-  | d = doc_opt LET name = IDENT ibs = index_bindings_opt COLON pk = param_kind EQ body = expr
-      { DLet { lname = name; lindices = ibs; lshape = None; lkind = Some pk; lbody = body;
-               ldoc = d } }
+  (* A typed `let` takes the parameter type grammar, `dim` clause included:
+     `let b : positive dim P^-1*T^-1 = 0.0001` (2026-11-06 dimension checking
+     §5.2, decision 2). *)
+  | d = doc_opt LET name = IDENT ibs = index_bindings_opt COLON ka = param_type_ann EQ body = expr
+      { DLet { lname = name; lindices = ibs; lshape = None; lkind = Some (fst ka);
+               ldim = snd ka; lbody = body; ldoc = d } }
   | d = doc_opt LET name = IDENT ibs = index_bindings_opt shape = let_shape_opt EQ body = expr
-      { DLet { lname = name; lindices = ibs; lshape = shape; lkind = None; lbody = body;
-               ldoc = d } }
+      { DLet { lname = name; lindices = ibs; lshape = shape; lkind = None; ldim = None;
+               lbody = body; ldoc = d } }
   | SCENARIOS LBRACE ss = list(scenario_block) RBRACE
       { DScenarios ss }
   | BALANCE LBRACE target = IDENT EQ e = expr RBRACE

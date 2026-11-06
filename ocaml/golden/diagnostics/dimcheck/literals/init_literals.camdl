@@ -1,0 +1,25 @@
+# invariant: whole-term literals and literal arithmetic in initial values are counts
+# spec: §5.2
+# expect: (none)
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  gamma : rate     in [0.01, 1.0]
+  N0    : count    in [100, 100000]
+  I0    : count    in [1, 1000]
+  beta : rate
+}
+
+let N = S + I + R
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+
+}
+
+init { S = 0.95 * 10000 - 50  I = 10  R = 0 }
+
+simulate { from = 0 'days  to = 100 'days }

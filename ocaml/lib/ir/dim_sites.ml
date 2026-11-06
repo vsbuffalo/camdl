@@ -64,14 +64,13 @@ type obligation =
   | Free                 (* operator rules only; nothing required of the value *)
   | Exempt  of exemption (* not read *)
 
+(* A literal is dimensionless, except zero, which takes any dimension, and a
+   literal that is an entire additive term of a [Whole_terms] position, which
+   takes the position's dimension (§5.2). *)
 type literals =
-  | Literals_dimensionless   (* a literal is dimensionless; 0 takes any *)
-  | Whole_terms              (* a literal that is an entire additive term of
-                                the expression takes the position's dimension:
-                                `count = 50`, `at [t_seed + 7]` (§5.2) *)
-  | Literals_free            (* every literal takes the dimension its context
-                                needs: initial conditions, until the literal
-                                rule of §5.2 lands *)
+  | Literals_dimensionless
+  | Whole_terms              (* `I = 10`, `S = N0 - 50`, `rate = 100`,
+                                `count = 50`, `at [t_seed + 7]` *)
 
 type strength =
   | Binding   (* a model position: its equations enter the solve *)
@@ -128,7 +127,7 @@ let transition_sites acc (tr : transition) =
         lineage } = tr in
   let subject = STransition name in
   add acc ~subject ~role:(Printf.sprintf "transition '%s' rate" name) ~code:"E300"
-    (Has rate_total) (E rate);
+    ~literals:Whole_terms (Has rate_total) (E rate);
   (match draw_method with
    | DrawOverdispersed { sigma_sq; sigma_sq_grad = _ (* derivative map *) } ->
      add acc ~subject ~role:(Printf.sprintf "overdispersion sigma^2 in '%s'" name)
@@ -144,7 +143,7 @@ let transition_sites acc (tr : transition) =
 let ode_site acc ({ compartment; derivative } : ode_equation) =
   add acc ~subject:(SOde compartment)
     ~role:(Printf.sprintf "ODE d(%s)/dt" compartment) ~code:"E306"
-    (Has rate_total) (E derivative)
+    ~literals:Whole_terms (Has rate_total) (E derivative)
 
 let forcing_sites acc (tf : time_function) =
   let { name; kind; dim = (fp, ft); lag; data_source = _ } = tf in
@@ -305,17 +304,10 @@ let observation_sites acc (obs : observation_model) =
    | DerivedExpr e -> site ~code:"E302" "projection" (Defines (K_stream name)) e
    | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _
    | FlowRatio { numerator = _; denominator = _ } -> ());
-  (* A bare literal count (`n = 100`) is a count by context. *)
+  (* An expected count or a denominator; a literal term is a count (`n = 100`). *)
   let count what e =
-    let rec bare e = match[@warning "-4"] e with
-      | Const _ -> true
-      | UnOp { op = Neg; arg } -> bare arg
-      | UnOp _ | BinOp _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt
-      | Cond _ | TimeFunc _ | TableLookup _ | Reduce _ | BindingRef _
-      | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ | ForcingBasis _
-      | UncheckedDim _ -> false
-    in
-    site what (if bare e then Free else Has population) e
+    add acc ~subject ~stream ~literals:Whole_terms ~code:"E304"
+      ~role:(Printf.sprintf "observation '%s': %s" name what) (Has population) (E e)
   in
   let prob what e = site what (Has dimensionless) e in
   match likelihood with
@@ -378,7 +370,7 @@ let binding_site acc ({ bname; bexpr } : binding) =
 let init_sites acc ((comp, spec) : string * init_spec) =
   let subject = SInit comp in
   let need what e want =
-    add acc ~subject ~literals:Literals_free ~code:"E313"
+    add acc ~subject ~literals:Whole_terms ~code:"E313"
       ~role:(Printf.sprintf "initial value of '%s': %s" comp what) (Has want) (E e) in
   let d ({ expr; grad = _; proj_grad = _ } : diffable) = expr in
   match spec with
@@ -397,7 +389,7 @@ let init_sites acc ((comp, spec) : string * init_spec) =
 let balance_site acc ({ balance_target; balance_expr } : balance_spec) =
   add acc
     ~role:(Printf.sprintf "balance expression for '%s'" balance_target) ~code:"E305"
-    (Has population) (E balance_expr)
+    ~literals:Whole_terms (Has population) (E balance_expr)
 
 let quantity_sites acc (q : quantity) =
   let { q_name; q_stratum = _; q_body; q_dimension = _ (* written by the checker *) } = q in

@@ -4543,6 +4543,22 @@
                     "type": "SYMBOL",
                     "name": "param_kind"
                   }
+                },
+                {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "FIELD",
+                      "name": "dimension",
+                      "content": {
+                        "type": "SYMBOL",
+                        "name": "dim_clause"
+                      }
+                    },
+                    {
+                      "type": "BLANK"
+                    }
+                  ]
                 }
               ]
             },

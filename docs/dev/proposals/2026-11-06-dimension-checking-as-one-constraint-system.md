@@ -569,6 +569,11 @@ The rule this proposal adopts (decision 1):
 > dimension: `I = 10`, `S = N0 - 50`, `add(I, 10)`, `rate = 100`, and a constant
 > importation term `beta * S * I / N + 0.5`.
 
+As implemented, arithmetic of literals counts as a literal: `S = 0.95 * 10000`
+is a count, since a number written as arithmetic is still a number, while as a
+factor it is dimensionless, so `(1/730) * R` and `0.0001 * S * I` in a rate are
+still refused.
+
 A literal inside a product, a ratio of literals included, is dimensionless.
 `(1/730) * R` in a rate becomes E300, with a fix-it to `R / (730 'days)`.
 Measured on the repo's tracked models: one occurrence
@@ -614,6 +619,12 @@ the parameter grammar reused.
   term).
 
 ### 5.5 `unchecked_dim` stays the only escape
+
+As implemented, the inner expression is not inferred, which departs from the
+next paragraph: the escape's motivating case, He et al.'s (I + ι)^α, is exactly
+a count under a parameter exponent, which the rule of §5.4 refuses, so inferring
+the inside would refuse the escape's own example. The escape stays opaque, as
+before this work.
 
 Its inner expression is still inferred (so a mistake inside it that is unrelated
 to the asserted dimension, such as `exp` of a count, is still found), but the

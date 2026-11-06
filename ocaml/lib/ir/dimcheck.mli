@@ -73,4 +73,8 @@ type prior_source = {
     resolved parameter and generated-quantity dimensions. [prior_args] are the
     model's priors as written; without them only hierarchical priors, whose
     arguments the IR keeps, are checked for explicit units. *)
-val check_model : ?prior_args:prior_source list -> model -> result
+val check_model :
+  ?prior_args:prior_source list -> ?constant_dims:(string * (int * int)) list ->
+  model -> result
+(** [constant_dims] are the `dim` clauses of typed constants, which the IR's
+    constant record does not carry. *)

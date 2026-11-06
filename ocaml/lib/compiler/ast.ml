@@ -294,6 +294,7 @@ type let_binding = {
   lindices : index_binding list;
   lshape   : string list option;  (* Some dims → shaped literal, None → scalar/indexed *)
   lkind    : param_type option;   (* optional type annotation: count, rate, etc. *)
+  ldim     : dim_annotation option;   (* a `dim` clause on the annotation *)
   lbody    : expr;
   (* gh#508: `#'` prose. A derived quantity is where a modelling assumption
      hides — whether `let N[p] = S[p] + E[p] + I[p]` is "total population" or

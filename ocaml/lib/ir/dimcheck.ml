@@ -247,7 +247,7 @@ let kind_dim : param_kind -> dim_vec option = function
   | Instant | Duration -> Some time_dim
   | Positive | Real -> None
 
-let declare_model st (m : model) =
+let declare_model st ~constant_dims (m : model) =
   List.iter (fun (p : parameter) ->
     let key = Dim_sites.K_param p.name in
     ignore (var_of st key);
@@ -258,7 +258,9 @@ let declare_model st (m : model) =
   List.iter (fun (c : constant) ->
     let key = Dim_sites.K_param c.c_name in
     ignore (var_of st key);
-    Option.iter (declare st key) (kind_dim c.c_kind)) m.constants;
+    match List.assoc_opt c.c_name constant_dims with
+    | Some (dp, dt) -> declare st key (make dp dt)
+    | None -> Option.iter (declare st key) (kind_dim c.c_kind)) m.constants;
   List.iter (fun (t : table) ->
     match Option.bind (Option.bind t.cell_kind param_kind_of_name) kind_dim with
     | Some v -> declare st (Dim_sites.K_table t.name) v
@@ -302,11 +304,6 @@ let declare_quantities st (m : model) =
 
 (* ── Expressions ───────────────────────────────────────────────────────── *)
 
-let rec is_bare_const = function
-  | Const _ -> true
-  | UnOp { op = Neg; arg } -> is_bare_const arg
-  | _ -> false
-
 let rec chain_add = function
   | [] -> Const 0.0
   | [ t ] -> t
@@ -328,7 +325,7 @@ let rational (x : float) : (int * int) option =
 
 (* The binary-operator rules, shared by model expressions, derived quantities
    and contrasts. [exponent] is the power's exponent when it is a literal. *)
-let binop st ~site ~code ~what (op : bin_op) ?exponent ~fresh_div l r : value =
+let binop st ~site ~code ~what (op : bin_op) ?exponent l r : value =
   let opname = match op with
     | Add -> "+" | Sub -> "-" | Min -> "min" | Max -> "max" | Mod -> "%"
     | Eq -> "==" | Neq -> "!=" | Lt -> "<" | Gt -> ">" | Le -> "<=" | Ge -> ">="
@@ -343,11 +340,10 @@ let binop st ~site ~code ~what (op : bin_op) ?exponent ~fresh_div l r : value =
   | Mul ->
     (match l, r with Any, d | d, Any -> d | F a, F b -> F (form_add a b))
   | Div ->
-    if fresh_div then F (var_form (fresh st))
-    else (match l, r with
-        | Any, _ -> Any
-        | _, Any -> l
-        | F a, F b -> F (form_sub a b))
+    (match l, r with
+     | Any, _ -> Any
+     | _, Any -> l
+     | F a, F b -> F (form_sub a b))
   | Pow ->
     (* The exponent is a pure number. *)
     (match r with
@@ -426,16 +422,19 @@ let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
   let g = gen st ~site in
   match e with
   | Const 0.0 -> Any
+  (* Arithmetic of literals is a number written as arithmetic: as a whole term
+     it takes the position's dimension (`S = 0.95 * 10000`); as a factor it is
+     dimensionless (`(1/730) * R` in a rate is not a rate). *)
+  | _ when term && site.literals = Dim_sites.Whole_terms && Dim_sites.is_constant_expr e -> Any
   | Const _ ->
     (match site.literals with
-     | Dim_sites.Literals_free -> F (var_form (fresh st))
-     | Whole_terms when term -> Any
+     | Dim_sites.Whole_terms when term -> Any
      | Whole_terms | Literals_dimensionless -> F (const_form dimensionless))
   | BinOp { op = (Add | Sub) as op; left; right }
     when not (match right with UncheckedDim { reason; _ } -> reason = spline_log_shift_reason
                                | _ -> false) ->
     let l = g ~term left and r = g ~term right in
-    binop st ~site:(Some site) ~code:"E302" ~what op ~fresh_div:false l r
+    binop st ~site:(Some site) ~code:"E302" ~what op l r
   | UnOp { op = Neg; arg } -> g ~term arg
   | Param n | ConstRef n ->
     Hashtbl.replace st.used n ();
@@ -468,11 +467,7 @@ let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
   | BinOp b ->
     let l = g b.left and r = g b.right in
     let exponent = static_value st b.right in
-    let fresh_div =
-      (* A ratio of two literals takes the dimension its context needs, until
-         the literal rule of §5.2 lands. *)
-      b.op = Div && is_bare_const b.left && is_bare_const b.right in
-    binop st ~site:(Some site) ~code:"E302" ~what b.op ?exponent ~fresh_div l r
+    binop st ~site:(Some site) ~code:"E302" ~what b.op ?exponent l r
   | UnOp u -> unop st ~site:(Some site) ~what u.op (g u.arg)
   | Cond c ->
     ignore (g c.pred);
@@ -492,8 +487,7 @@ let rec gen_scalar st ~(site : Dim_sites.site) (se : scalar_expr) : value =
   | SUnOp { op; arg } -> unop st ~site:(Some site) ~what:site.role op (g arg)
   | SBinOp { op; left; right } ->
     let exponent = match right with SConst n -> Some n | _ -> None in
-    binop st ~site:(Some site) ~code:"E302" ~what:site.role op ?exponent ~fresh_div:false
-      (g left) (g right)
+    binop st ~site:(Some site) ~code:"E302" ~what:site.role op ?exponent (g left) (g right)
   | SCond { pred; then_; else_ } ->
     ignore (g pred);
     let t = g then_ and f = g else_ in
@@ -510,7 +504,7 @@ let rec gen_contrast st ~(site : Dim_sites.site) (ce : contrast_expr) : value =
     let l = gen_contrast st ~site left and r = gen_contrast st ~site right in
     (match op with
      | Add | Sub | Mul | Div ->
-       binop st ~site:(Some site) ~code:"E297" ~what:site.role op ~fresh_div:false l r
+       binop st ~site:(Some site) ~code:"E297" ~what:site.role op l r
      | Pow | Mod | Min | Max | Eq | Neq | Lt | Gt | Le | Ge -> F (var_form (fresh st)))
 
 (* One site: its expression's equations, then its obligation. *)
@@ -804,13 +798,13 @@ let check_priors (out : solved) st (priors : prior_source list) : diagnostic lis
 
 (* ── Main check ────────────────────────────────────────────────────────── *)
 
-let check_model ?prior_args (m : model) : result =
+let check_model ?prior_args ?(constant_dims = []) (m : model) : result =
   let constants = Hashtbl.create 16 in
   List.iter (fun (c : constant) -> Hashtbl.replace constants c.c_name c.c_value) m.constants;
   let st = { constants; used = Hashtbl.create 64; t_only = false; t_only_eqs = Hashtbl.create 16; next_var = 0; keys = Hashtbl.create 256; declared = []; structure = [];
              obligation = []; info = Hashtbl.create 1024; next_eq = 0;
              tf_dims = Hashtbl.create 16 } in
-  declare_model st m;
+  declare_model st ~constant_dims m;
   declare_quantities st m;
   let sites = Dim_sites.sites m in
   List.iter (add_site st) sites;

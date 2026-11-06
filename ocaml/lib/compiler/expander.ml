@@ -3377,6 +3377,14 @@ let let_constant_kind (lb : let_binding) : param_type option =
 
 let let_is_typed_const (lb : let_binding) : bool = let_constant_kind lb <> None
 
+(* The `dim` clause of each typed constant that has one. The IR's constant
+   carries only its kind, so the clause reaches the dimension checker here. *)
+let constant_dims ctx : (string * (int * int)) list =
+  List.filter_map (fun (lb : let_binding) ->
+    match let_constant_kind lb, lb.ldim with
+    | Some _, Some d -> Some (lb.lname, d)
+    | _ -> None) ctx.let_bindings
+
 let body_refs_param_or_let ctx (e : expr) : bool =
   let visited = Hashtbl.create 8 in
   let rec go (e : expr) : bool =
@@ -6079,7 +6087,8 @@ let rec literal_units (e : expr) =
    kind's: `let tau : rate = 30 'days` would otherwise be the number 30.0 of
    kind rate, the literal's dimension silently dropped (E282). *)
 let check_constant_units ctx (lb : let_binding) (pk : param_type) =
-  match Param_annot.kind_dim pk, literal_units lb.lbody with
+  let declared = match lb.ldim with Some d -> Some d | None -> Param_annot.kind_dim pk in
+  match declared, literal_units lb.lbody with
   | Some k, `Units d when d <> k ->
     let show (p, t) = Dimcheck.display_dim (Dimcheck.make p t) in
     Diagnostics.error ctx.diags

@@ -709,33 +709,25 @@ let read_file path =
   close_in ic;
   Bytes.to_string s
 
+(* A golden model is dimensionally clean through the real pipeline, which
+   checks the model before constant folding: a table lookup such as
+   `age_dur[a]` there still carries its declared cell dimension, which the
+   folded IR that [Compiler.compile] returns has replaced by a number. *)
 let test_golden_no_dim_errors model_name () =
   let camdl_path = Filename.concat golden_dir (model_name ^ ".camdl") in
   if not (Sys.file_exists camdl_path) then
     Alcotest.skip ()
   else begin
     let src = read_file camdl_path in
-    let ir = match
-      (try Compiler.compile ~name:model_name src
-       with exn -> Error (Printexc.to_string exn))
-    with
-      | Ok m -> m
-      | Error _e ->
-        (* Some models need data files that don't exist in test env — skip *)
-        Alcotest.skip ()
-    in
-    let r = Dimcheck.check_model ir in
-    let errors = List.filter (fun (d : Dimcheck.diagnostic) ->
-      d.severity = Dimcheck.Error
-    ) r.diagnostics in
-    if errors <> [] then begin
-      let msgs = List.map (fun (d : Dimcheck.diagnostic) ->
-        Printf.sprintf "  [%s] %s%s" d.code d.message
-          (match d.detail with Some s -> "\n    " ^ s | None -> "")
-      ) errors in
-      Alcotest.failf "golden model %s has dimension errors:\n%s"
-        model_name (String.concat "\n" msgs)
-    end
+    let diags = Compiler.collect_diagnostics ~name:model_name ~filename:camdl_path src in
+    let is_dimension_code c =
+      String.length c = 4 && c.[0] = 'E' && c.[1] = '3' && (c.[2] = '0' || c.[2] = '1') in
+    let errors = List.filter (fun (d : Diagnostics.diagnostic) ->
+      d.severity = Diagnostics.Error && is_dimension_code d.code) diags in
+    if errors <> [] then
+      Alcotest.failf "golden model %s has dimension errors:\n%s" model_name
+        (String.concat "\n" (List.map (fun (d : Diagnostics.diagnostic) ->
+           Printf.sprintf "  [%s] %s" d.code d.message) errors))
   end
 
 (* ── Union-Find Linking ────────────────────────────────────────────────── *)
@@ -1426,7 +1418,7 @@ let test_init_value_determines () =
   let ds = diags_of (sir_with ~params:"beta : rate  k : positive" ~forcing:""
       ~init:"S = 990  I = k * 10  R = 0" ~rate:"beta * S * I / (S + I + R)") in
   Alcotest.(check bool) "no errors" false (has_code "E313" ds);
-  Alcotest.(check bool) "k undetermined: the literal 10 is free" true
+  Alcotest.(check bool) "k determined: a literal factor is a pure number" false
     (List.exists (mentions "k") (i300_names ds));
   let ds = diags_of (sir_with ~params:"beta : rate  k : positive" ~forcing:""
       ~init:"S = 990  I = k * S  R = 0" ~rate:"beta * S * I / (S + I + R)") in
@@ -1439,7 +1431,8 @@ let test_init_value_wrong_dimension () =
       ~init:"S = 990  I = beta * S  R = 0" ~rate:"beta * S * I / (S + I + R)") in
   Alcotest.(check bool) "E313 for a rate times a count" true (has_code "E313" ds)
 
-(* Literals in an initial condition take the dimension the context needs. *)
+(* A literal, or arithmetic of literals, that is a whole term of an initial
+   value is a count. *)
 let test_init_literals_free () =
   let ds = diags_of (sir_with ~params:"beta : rate" ~forcing:""
       ~init:"S = 0.06 * 1000 - 50  I = 10  R = 0" ~rate:"beta * S * I / (S + I + R)") in

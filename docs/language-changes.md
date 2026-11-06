@@ -126,6 +126,32 @@ or `sia[r in round] : transfer(…) at
 [t_start[r]]` if each round has its own
 date.
 
+## 2026-11-06 — One literal rule; typed constants take a `dim` clause
+
+**What.** A numeric literal is dimensionless, with two exceptions: zero takes
+any dimension, and a literal, or arithmetic of literals, that is a whole
+additive term of a rate, a derivative, a balance, an initial value, a
+count-valued likelihood argument, an intervention count or a quantity threshold
+takes that position's dimension (`I = 10`, `S = N0 - 50`, `S = 0.95 * 10000`, a
+constant importation `beta * S * I / N + 0.5`). A ratio of literals no longer
+takes whatever dimension its context needs: `(1/730) * R` in a rate was a rate,
+and is now refused, like `0.0001 * S * I` always was. A literal coefficient that
+carries a dimension is a typed constant, which now accepts the parameter's `dim`
+clause.
+
+**Migration.**
+
+| Old                   | New                                                           |
+| --------------------- | ------------------------------------------------------------- |
+| `@ (1/730) * R`       | `let waning : rate = 1 / (730 'days)`, then `@ waning * R`    |
+| `@ (1/10000) * S * I` | `let b : positive dim P^-1*T^-1 = 0.0001`, then `@ b * S * I` |
+
+**Diagnostics.** The rate, derivative or initial value reports its usual code
+(E300, E306, E313). A typed constant whose unit literals disagree with its `dim`
+clause is E282.
+
+---
+
 ## 2026-11-06 — Unit literals keep their meaning in constants and products
 
 **What.** Three fixes to how a unit literal is read. `'count` now has dimension
