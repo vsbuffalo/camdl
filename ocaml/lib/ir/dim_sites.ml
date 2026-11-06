@@ -123,7 +123,6 @@ let add acc ?(subject : subject option) ?(literals = Literals_dimensionless) ?(s
   acc.out <- s :: acc.out
 
 let pending step = Exempt (Pending step)
-let pending_quantities    = pending "the quantities rule (§8 step 4)"
 let pending_smooth        = pending "the smooth-spline rule (§8 step 4, §5.8)"
 
 let transition_sites acc (tr : transition) =
@@ -406,24 +405,31 @@ let quantity_sites acc (q : quantity) =
   | QBDerived se ->
     add acc ?subject ~role:(role "body") ~code:"E297" (Defines (K_quantity q_name)) (Scalar se)
   | QBReduced { source; reduce } ->
-    (match source with
-     | QSState e ->
-       add acc ?subject ~role:(role "series") ~code:"E302" (Defines (K_series q_name)) (E e)
-     | QSObservation _ -> ());
-    let threshold what e =
-      add acc ?subject ~role:(role what) ~code:"E317" pending_quantities (E e) in
+    let series = match source with
+      | QSState e ->
+        add acc ?subject ~role:(role "series") ~code:"E302" (Defines (K_series q_name)) (E e);
+        K_series q_name
+      | QSObservation stream -> K_stream stream
+    in
+    (* A threshold is compared with the series, so it has its dimension; a
+       literal threshold is read in it. A `value_at` time is a time. *)
+    let threshold e =
+      add acc ?subject ~role:(role "threshold") ~code:"E317" ~literals:Whole_terms
+        (Equals series) (E e) in
     match reduce with
     | None | Some RIntegral -> ()
     | Some (RValue v) ->
       (match v with
        | VFinal | VMax | VMin | VMean -> ()
-       | VCountAbove e | VCountBelow e -> threshold "threshold" e
-       | VValueAt (ATime e) -> threshold "`value_at` time" e
+       | VCountAbove e | VCountBelow e -> threshold e
+       | VValueAt (ATime e) ->
+         add acc ?subject ~role:(role "`value_at` time") ~code:"E317" ~literals:Whole_terms
+           (Has time) (E e)
        | VValueAt (AObs { anchor = _; offset = _ }) -> ())
     | Some (RTime t) ->
       (match t with
        | TimeOfMax | TimeOfMin -> ()
-       | FirstAbove e | FirstBelow e | LastAbove e | LastBelow e -> threshold "threshold" e)
+       | FirstAbove e | FirstBelow e | LastAbove e | LastBelow e -> threshold e)
 
 let contrast_site acc ({ c_name; c_body } : contrast) =
   add acc ~subject:(SContrast c_name) ~role:(Printf.sprintf "contrast '%s'" c_name)
