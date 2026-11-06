@@ -4894,18 +4894,26 @@ let find_identical_members ctx ~indices ~errors_before ~key
     (members : ((string * string) list * 'a) list) : ('a list * string list) option =
   if indices = [] || count_errors ctx <> errors_before then None
   else begin
-    let same (_, a) (_, b) = compare (key a) (key b) = 0 in
+    (* Sort on the key and scan neighbours: n log n comparisons rather than
+       the n² of comparing every pair, which matters for a transition family
+       over a large product of dimensions. [List.stable_sort] keeps
+       declaration order within a group of equal keys, so the group and the
+       two members whose bindings name the idle binders are reported in the
+       order they were declared. *)
+    let keyed = List.map (fun (env, m) -> (key m, env, m)) members in
+    let sorted =
+      List.stable_sort (fun (ka, _, _) (kb, _, _) -> compare ka kb) keyed in
     let rec first_dup = function
-      | [] -> None
-      | x :: rest ->
-        (match List.find_opt (same x) rest with
-         | Some y -> Some (x, y)
-         | None   -> first_dup rest)
+      | (ka, env_a, _) :: (((kb, env_b, _) :: _) as rest) ->
+        if compare ka kb = 0 then Some (ka, env_a, env_b) else first_dup rest
+      | _ -> None
     in
-    match first_dup members with
+    match first_dup sorted with
     | None -> None
-    | Some (((env_a, _) as a), (env_b, _)) ->
-      let group = List.map snd (List.filter (same a) members) in
+    | Some (k, env_a, env_b) ->
+      let group =
+        List.filter_map (fun (k', _, m) ->
+            if compare k' k = 0 then Some m else None) keyed in
       let idle = List.filter (fun v ->
           List.assoc_opt v env_a <> List.assoc_opt v env_b)
           (loop_vars_of_indices indices) in
