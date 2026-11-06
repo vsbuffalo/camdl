@@ -343,12 +343,8 @@ let test_param_consistent () =
   Alcotest.(check bool) "consistent param OK" true (no_errors r)
 
 let test_param_inconsistent () =
-  (* alpha:positive used as rate in one (alpha * A → T^-1 inferred, needs P*T^-1)
-     and as count in another (alpha + B as rate).
-     With a single unknown-kind param, cross-transition conflict → E300 or E303.
-     The checker uses global param dims, so if alpha is inferred as T^-1 from
-     transition 1 (alpha * A = P*T^-1 → alpha = T^-1), then in transition 2
-     alpha alone would be T^-1 which is E300. *)
+  (* alpha : positive. t1 (alpha * A = P·T⁻¹) fixes alpha = T⁻¹, so t2's rate,
+     alpha alone, is T⁻¹ where P·T⁻¹ is required: E300. *)
   let m = empty_model
     ~compartments:[mk_compartment "A"; mk_compartment "B"]
     ~parameters:[mk_param ~kind:(Some Ir.Positive) "alpha"]
@@ -358,9 +354,7 @@ let test_param_inconsistent () =
     ]
     () in
   let r = Dimcheck.check_model m in
-  (* E303 (cross-transition inconsistency) or E300/E302 from unification *)
-  Alcotest.(check bool) "inconsistent param error"
-    true (has_error "E300" r || has_error "E302" r || has_error "E303" r)
+  Alcotest.(check bool) "inconsistent param error" true (has_error "E300" r)
 
 (* ── Transcendental Functions ──────────────────────────────────────────── *)
 
@@ -730,7 +724,7 @@ let test_golden_no_dim_errors model_name () =
            Printf.sprintf "  [%s] %s" d.code d.message) errors))
   end
 
-(* ── Union-Find Linking ────────────────────────────────────────────────── *)
+(* ── Unknowns linked through a sum ─────────────────────────────────────── *)
 
 let test_unknown_unknown_linking_conflict () =
   (* Two unknown params: alpha and kappa, used in two transitions.
@@ -755,8 +749,8 @@ let test_unknown_unknown_linking_catches_conflict () =
   (* alpha and kappa linked via addition (must be same dim).
      t1: alpha * S — alpha needs T^-1
      t2: kappa alone — kappa needs P*T^-1
-     t3: (alpha + kappa) — links them, but they need different dims.
-     Should produce E302 or E303. *)
+     t3: (alpha + kappa) — links them, but they need different dims: a
+     contradiction, at the sum (E302) or at a rate (E300). *)
   let m = empty_model
     ~compartments:[mk_compartment "S"]
     ~parameters:[mk_param ~kind:(Some Ir.Positive) "alpha";
@@ -769,9 +763,27 @@ let test_unknown_unknown_linking_catches_conflict () =
     () in
   let r = Dimcheck.check_model m in
   Alcotest.(check bool) "linked unknowns conflict detected"
-    true (has_error "E300" r || has_error "E302" r || has_error "E303" r)
+    true (has_error "E300" r || has_error "E302" r)
 
-(* ── E303 Cross-Transition Diagnostic ─────────────────────────────────── *)
+(* ── Table lookup indices ──────────────────────────────────────────────── *)
+
+(* An index selects a level, so it is a pure number (E311). The DSL resolves
+   every index to a literal level, so only a hand-built model can carry another
+   one; the rule holds for the IR anyway. *)
+let test_table_index_is_dimensionless () =
+  let table = { Ir.name = "w"; source = Ir.Inline [ Const 0.1; Const 0.2 ];
+                out_of_bounds = Ir.Error; cell_kind = Some "rate" } in
+  let model idx = empty_model
+    ~compartments:[mk_compartment "S"; mk_compartment "I"]
+    ~tables:[table]
+    ~transitions:[mk_transition "t" (BinOp { op = Mul; left = TableLookup ("w", [idx]);
+                                             right = pop "I" })]
+    () in
+  Alcotest.(check bool) "a literal index is fine" true (no_errors (Dimcheck.check_model (model (Const 1.0))));
+  Alcotest.(check bool) "a count as an index is E311" true
+    (has_error "E311" (Dimcheck.check_model (model (pop "S"))))
+
+(* ── One parameter, two dimensions ───────────────────────────────────── *)
 
 let test_param_two_dimensions () =
   (* alpha used as a rate (T^-1) in `infection` via alpha * S * I / N, but as
@@ -802,11 +814,10 @@ let test_param_two_dimensions () =
   Alcotest.(check bool) "a contradiction naming both transitions"
     true (List.exists names_both r.diagnostics)
 
-(* ── Check Phase No Duplicate Errors ──────────────────────────────────── *)
+(* ── Each error reported once ──────────────────────────────────────────── *)
 
-let test_check_phase_no_duplicates () =
-  (* A simple valid model should have exactly 0 errors.
-     This tests that the read-only check phase doesn't create spurious errors. *)
+let test_valid_model_no_errors () =
+  (* A valid model has exactly 0 errors. *)
   let m = empty_model
     ~compartments:[mk_compartment "S"; mk_compartment "I";
                    mk_compartment "R"; mk_compartment "N"]
@@ -823,7 +834,7 @@ let test_check_phase_no_duplicates () =
   Alcotest.(check bool) "no errors" true (no_errors r);
   Alcotest.(check int) "exactly 0 errors" 0 (error_count r)
 
-let test_check_phase_single_error () =
+let test_single_error_reported_once () =
   (* A model with one clear error should report it exactly once. *)
   let m = empty_model
     ~compartments:[mk_compartment "S"]
@@ -1003,11 +1014,10 @@ observations {
   Alcotest.(check bool) "probability column feeding poisson rate must E304"
     true (has_e304_in src)
 
-(* A strict likelihood argument is checked exactly even inside an observation,
-   so a product of two unknowns there is an equation: `rate = rho * X0 *
-   projected` with `rho : probability` and `projected` a count pins X0 to
-   dimensionless. *)
-let test_contract_arg_product_determines () =
+(* A likelihood argument's product is an equation like any other: `rate = rho
+   * X0 * projected` with `rho : probability` and `projected` a count pins X0
+   to dimensionless. *)
+let test_likelihood_arg_product_determines () =
   let src = {camdl|
 compartments { S, I, R }
 parameters { beta : rate  gamma : rate  rho : probability  X0 : positive  s : positive }
@@ -1482,7 +1492,7 @@ let () =
       Alcotest.test_case "two products jointly determine" `Quick test_two_products_jointly_determine;
       Alcotest.test_case "nested products, fractional"    `Quick test_nested_products_infeasible;
       Alcotest.test_case "single product still free"      `Quick test_single_product_still_free;
-      Alcotest.test_case "contract arg product determines" `Quick test_contract_arg_product_determines;
+      Alcotest.test_case "likelihood arg product determines" `Quick test_likelihood_arg_product_determines;
     ];
     "arithmetic", [
       Alcotest.test_case "add same dim"            `Quick test_add_same_dim;
@@ -1577,9 +1587,12 @@ let () =
       Alcotest.test_case "sir_dim_annotated"        `Quick (test_golden_no_dim_errors "sir_dim_annotated");
       Alcotest.test_case "seir_age_table_rates"     `Quick (test_golden_no_dim_errors "seir_age_table_rates");
     ];
-    "union_find", [
+    "linked_unknowns", [
       Alcotest.test_case "linked unknowns consistent"  `Quick test_unknown_unknown_linking_conflict;
       Alcotest.test_case "linked unknowns conflict"    `Quick test_unknown_unknown_linking_catches_conflict;
+    ];
+    "table_index", [
+      Alcotest.test_case "an index is a pure number" `Quick test_table_index_is_dimensionless;
     ];
     "param_two_dimensions", [
       Alcotest.test_case "contradiction across transitions" `Quick test_param_two_dimensions;
@@ -1591,9 +1604,9 @@ let () =
       Alcotest.test_case "rate from duration OK"       `Quick test_rate_times_duration_ok;
       Alcotest.test_case "instant vector each [T]"     `Quick test_instant_vector_each_is_time;
     ];
-    "check_phase", [
-      Alcotest.test_case "no duplicate errors"         `Quick test_check_phase_no_duplicates;
-      Alcotest.test_case "single error reported once"  `Quick test_check_phase_single_error;
+    "reporting", [
+      Alcotest.test_case "no duplicate errors"         `Quick test_valid_model_no_errors;
+      Alcotest.test_case "single error reported once"  `Quick test_single_error_reported_once;
     ];
     "dim_clause", [
       Alcotest.test_case "positive dim 1 is [1]"         `Quick test_positive_ratio_is_dimensionless;

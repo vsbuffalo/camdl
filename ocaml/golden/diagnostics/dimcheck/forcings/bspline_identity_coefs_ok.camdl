@@ -1,0 +1,34 @@
+# invariant: an identity-link 'per_day spline with per-day coefficients compiles
+# spec: §5.1, forcing values
+# expect: (none)
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  gamma : rate in [0.01, 1.0]
+  b1 : positive dim 1/T in [0.01, 1.0]
+  b2 : positive dim 1/T in [0.01, 1.0]
+  b3 : positive dim 1/T in [0.01, 1.0]
+  b4 : positive dim 1/T in [0.01, 1.0]
+}
+
+let N = S + I + R
+
+forcing {
+  beta_t : bspline 'per_day {
+    window  = [0 'days, 100 'days]
+    n_basis = 4
+    link    = identity
+    coefs   = [b1, b2, b3, b4]
+  }
+}
+
+transitions {
+  infection : S --> I @ beta_t * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 100 'days }

@@ -63,7 +63,6 @@ let test_contradiction () =
    | [ c ] ->
      Alcotest.(check bool) "contradiction" true (c.kind = Contradiction);
      Alcotest.(check int) "culprit is the second" 7 c.culprit.origin.site;
-     Alcotest.(check bool) "reduced 0 = P" true (c.reduced = ([], vec 1 0));
      Alcotest.(check bool) "context names the first" true
        (List.exists (fun (x : origin) -> x.site = 0) c.context)
    | cs -> Alcotest.failf "expected one conflict, got %d" (List.length cs));

@@ -1073,7 +1073,12 @@ let run_let ppf ctx name =
 (* ── --dims ─────────────────────────────────────────────────────────────── *)
 
 let run_dims ppf (model : Ir.model) ctx =
-  let dc_result = Dimcheck.check_model model in
+  (* The same inputs the compiler gives the checker, so `inspect --dims` and
+     a compile agree on every dimension. *)
+  let dc_result =
+    Dimcheck.check_model ~prior_args:(Expander.prior_sources ctx)
+      ~constant_dims:(Expander.constant_dims ctx)
+      ~typed_lets:(Expander.typed_let_uses ctx) model in
   (* Build a lookup: param name → (kind, has_explicit_dim) from AST *)
   let param_info = List.filter_map (fun (p : Ir.parameter) ->
     let ast_decl = decl_of_param ctx p in

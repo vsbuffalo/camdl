@@ -46,6 +46,7 @@ type subject = Dim_sites.subject =
   | SParameter   of string   (** a parameter, for a diagnostic about its prior *)
   | SQuantity    of string
   | SIntervention of string  (** an intervention, event or reactive trigger *)
+  | SLet         of string   (** a typed `let`, for its annotation *)
 
 type diagnostic = {
   severity : severity;
@@ -77,6 +78,14 @@ type prior_source = {
     arguments the IR keeps, are checked for explicit units. *)
 val check_model :
   ?prior_args:prior_source list -> ?constant_dims:(string * (int * int)) list ->
-  model -> result
+  ?typed_lets:(string * (int * int) * expr) list -> model -> result
 (** [constant_dims] are the `dim` clauses of typed constants, which the IR's
-    constant record does not carry. *)
+    constant record does not carry. [typed_lets] are the expanded bodies of
+    typed, non-constant `let`s with their declared dimension; the IR inlines
+    them, so it keeps no node for the annotation (E318). Both side inputs come from the expander;
+    the compiler and `camdlc inspect` pass them. A model checked without them
+    (an IR reloaded from JSON, a model built in a test) gets weaker results,
+    never contradictory ones: a constant with a `dim` clause is inferred from
+    its use instead of declared, and the unit literals of constant priors are
+    not checked, since the IR no longer holds them. The next IR schema bump
+    puts the clause on the constant record, which removes the first gap. *)

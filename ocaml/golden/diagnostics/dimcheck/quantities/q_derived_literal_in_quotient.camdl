@@ -1,0 +1,22 @@
+# invariant: a literal inside a derived quantity's quotient is a pure number, so it cannot be added to a count
+# spec: §5.2
+# expect: E302 Error
+time_unit = 'days
+compartments { S, I, R }
+parameters {
+  beta  : rate ~ normal(mu = 0.3, sigma = 0.1)
+  gamma : rate
+
+}
+let N = S + I + R
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+init { S = 990  I = 10 }
+quantities {
+  peak = final(I)
+  frac = (peak + 2) / peak
+}
+simulate { from = 0 'days  to = 10 'days }

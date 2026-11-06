@@ -127,6 +127,12 @@ type context = {
      from the IR, and the dimension checker needs it (proposal
      2026-11-06-dimension-checking §5.9). Reversed. *)
   mutable prior_sources   : Dimcheck.prior_source list;
+  (* Every expanded body of a typed `let` whose body is not constant, with the
+     dimension its annotation declares: `let incidence : rate = ...` is
+     inlined (or hoisted) at each use, so the IR keeps no node for the
+     annotation, and the dimension checker enforces it from these (E318). *)
+  mutable typed_let_uses  : (string * (int * int) * Ir.expr) list;
+  typed_let_seen          : (string * Ir.expr, unit) Hashtbl.t;
   (* Declared value-column names of the observation stream currently being
      expanded (2026-06-10 observation data-entry §3). While set, an identifier
      in a likelihood expression matching one of these names resolves to
@@ -211,6 +217,8 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   hoisted_rev          = [];
   suppress_hoist       = false;
   prior_sources        = [];
+  typed_let_uses       = [];
+  typed_let_seen       = Hashtbl.create 16;
   obs_aux_cols         = [];
   table_index          = Hashtbl.create 16;
   site_tallies         = [];
@@ -850,6 +858,13 @@ let transition_loc ctx name =
     ~loc_of:(fun t -> t.trloc) name
 
 let prior_sources ctx = List.rev ctx.prior_sources
+
+let typed_let_uses ctx = List.rev ctx.typed_let_uses
+
+let let_loc ctx name =
+  match List.find_opt (fun (lb : let_binding) -> lb.lname = name) ctx.let_bindings with
+  | Some lb -> diag_loc_of_ast_ctx ctx lb.lloc
+  | None -> Diagnostics.no_loc
 
 let param_loc ctx name =
   find_decl_loc ctx ~decls:ctx.param_decls
@@ -3382,6 +3397,21 @@ let let_constant_kind (lb : let_binding) : param_type option =
 
 let let_is_typed_const (lb : let_binding) : bool = let_constant_kind lb <> None
 
+(* Record an expanded body of a typed, non-constant `let` for the dimension
+   checker; returns the body unchanged. A kind that fixes no dimension
+   (`positive`, `real`) without a `dim` clause asserts nothing. *)
+let note_typed_let ctx (lb : let_binding) (e : Ir.expr) : Ir.expr =
+  (match lb.lkind with
+   | Some pk when not (let_is_typed_const lb) ->
+     let declared = match lb.ldim with Some d -> Some d | None -> Param_annot.kind_dim pk in
+     (match declared with
+      | Some d when not (Hashtbl.mem ctx.typed_let_seen (lb.lname, e)) ->
+        Hashtbl.replace ctx.typed_let_seen (lb.lname, e) ();
+        ctx.typed_let_uses <- (lb.lname, d, e) :: ctx.typed_let_uses
+      | Some _ | None -> ())
+   | Some _ | None -> ());
+  e
+
 (* The `dim` clause of each typed constant that has one. The IR's constant
    carries only its kind, so the clause reaches the dimension checker here. *)
 let constant_dims ctx : (string * (int * int)) list =
@@ -3963,9 +3993,9 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
       if let_is_hoistable ctx lb && not ctx.suppress_hoist then
         let concrete = String.concat "_" (base_name :: List.map snd inner_env) in
         register_hoisted_binding ctx concrete
-          (fun () -> normalize_expr (resolve_expr ctx inner_env lb.lbody))
+          (fun () -> note_typed_let ctx lb (normalize_expr (resolve_expr ctx inner_env lb.lbody)))
       else
-        normalize_expr (resolve_expr ctx (inner_env @ env) lb.lbody)
+        note_typed_let ctx lb (normalize_expr (resolve_expr ctx (inner_env @ env) lb.lbody))
     (* 2b. Shaped let? → flatten body, compute row-major index, resolve cell *)
     | Some lb when lb.lshape <> None ->
       let shape = Option.get lb.lshape in
@@ -4603,9 +4633,9 @@ and resolve_ident_name ctx name ~loc =
       (* Fix B: a state-only scalar let (e.g. a mixed-compartment total) is
          extracted into a shared binding once instead of inlined per use. *)
       register_hoisted_binding ctx name
-        (fun () -> normalize_expr (resolve_expr ctx [] lb.lbody))
+        (fun () -> note_typed_let ctx lb (normalize_expr (resolve_expr ctx [] lb.lbody)))
     else
-      normalize_expr (resolve_expr ctx [] lb.lbody)
+      note_typed_let ctx lb (normalize_expr (resolve_expr ctx [] lb.lbody))
   | None ->
   (* 4. Forcing / time function? *)
   if Hashtbl.mem ctx.func_tbl name then
@@ -6058,11 +6088,13 @@ let expand_parameters ctx =
 (* Typed constant `let`s → the IR's `constants` section, evaluated once here.
    The same predicate decides which carry their `#'` prose into the doc index
    — see [let_constant_kind]. *)
-(* The dimension a constant body's unit literals give it, when they alone
-   determine it: [`Units d]; [`Bare] for bare numbers only; [`Other] when
-   something else decides (a function, a sum of disagreeing units). *)
+(* The dimension a constant body's unit literals give it: [`Units d] when
+   they alone determine it; [`Bare] for bare numbers only; [`Conflict (a, b)]
+   when two explicit units disagree in a sum, which no reading of the body
+   can rescue; [`Other] when something else decides (a function). *)
 let rec literal_units (e : expr) =
   let combine f a b = match a, b with
+    | (`Conflict _ as c), _ | _, (`Conflict _ as c) -> c
     | `Units x, `Units y -> `Units (f x y)
     | `Bare, (`Units _ as u) | (`Units _ as u), `Bare -> u
     | `Bare, `Bare -> `Bare
@@ -6074,7 +6106,7 @@ let rec literal_units (e : expr) =
   | EUnOp (Neg, a) -> literal_units a
   | EBinOp ((Add | Sub), a, b) ->
     (match literal_units a, literal_units b with
-     | `Units x, `Units y when x <> y -> `Other
+     | `Units x, `Units y when x <> y -> `Conflict (x, y)
      | x, y -> combine (fun x _ -> x) x y)
   | EBinOp (Mul, a, b) ->
     combine (fun (p1, t1) (p2, t2) -> (p1 + p2, t1 + t2)) (literal_units a) (literal_units b)
@@ -6093,11 +6125,21 @@ let rec literal_units (e : expr) =
    kind rate, the literal's dimension silently dropped (E282). *)
 let check_constant_units ctx (lb : let_binding) (pk : param_type) =
   let declared = match lb.ldim with Some d -> Some d | None -> Param_annot.kind_dim pk in
+  let loc = diag_loc_of_ast_ctx ctx lb.lloc in
+  let show (p, t) = Dimcheck.display_dim (Dimcheck.make p t) in
   match declared, literal_units lb.lbody with
-  | Some k, `Units d when d <> k ->
-    let show (p, t) = Dimcheck.display_dim (Dimcheck.make p t) in
+  | _, `Conflict (a, b) ->
     Diagnostics.error ctx.diags
-      ~code:"E282" ~loc:Diagnostics.no_loc
+      ~code:"E282" ~loc
+      ~message:(Printf.sprintf
+        "constant '%s': its unit literals disagree, %s combined with %s"
+        lb.lname (show a) (show b))
+      ~hint:"A sum of unit literals must be in one dimension; write each term \
+             in the constant's own units."
+      ()
+  | Some k, `Units d when d <> k ->
+    Diagnostics.error ctx.diags
+      ~code:"E282" ~loc
       ~message:(Printf.sprintf
         "constant '%s' is declared `%s`, but its unit literals give it \
          dimension %s, not %s"

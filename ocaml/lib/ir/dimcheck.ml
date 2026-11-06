@@ -38,8 +38,15 @@ let dimensionless = make 0 0
 let population    = make 1 0
 let time_dim      = make 0 1
 
-let dim_mul a b = Array.init n_bases (fun i -> a.(i) + b.(i))
-let dim_div a b = Array.init n_bases (fun i -> a.(i) - b.(i))
+(* Exponent arithmetic is checked, as in the solver: an exponent that leaves
+   the native integer range raises [Dim_solve.Overflow], reported as E310,
+   never a wrapped value. *)
+let ( +! ) = Dim_solve.checked_add
+let ( *! ) = Dim_solve.checked_mul
+let ( -! ) a b = a +! (b *! (-1))
+
+let dim_mul a b = Array.init n_bases (fun i -> a.(i) +! b.(i))
+let dim_div a b = Array.init n_bases (fun i -> a.(i) -! b.(i))
 let dim_eq  a b = a = b
 
 let display_dim d =
@@ -85,6 +92,7 @@ type subject = Dim_sites.subject =
   | SParameter   of string
   | SQuantity    of string
   | SIntervention of string
+  | SLet         of string
 
 type diagnostic = {
   severity : severity;
@@ -169,11 +177,11 @@ let rec merge f xs ys =
     else if vy < vx then (let c = f 0 cy in if c = 0 then merge f xs ty else (vy, c) :: merge f xs ty)
     else (let c = f cx cy in if c = 0 then merge f tx ty else (vx, c) :: merge f tx ty)
 
-let form_add a b = { vars = merge ( + ) a.vars b.vars; k = dim_mul a.k b.k }
-let form_sub a b = { vars = merge ( - ) a.vars b.vars; k = dim_div a.k b.k }
+let form_add a b = { vars = merge ( +! ) a.vars b.vars; k = dim_mul a.k b.k }
+let form_sub a b = { vars = merge ( -! ) a.vars b.vars; k = dim_div a.k b.k }
 let form_scale n a =
   if n = 0 then const_form dimensionless
-  else { vars = List.map (fun (v, c) -> (v, n * c)) a.vars; k = Array.map (( * ) n) a.k }
+  else { vars = List.map (fun (v, c) -> (v, n *! c)) a.vars; k = Array.map (( *! ) n) a.k }
 
 (* ── Checker state ─────────────────────────────────────────────────────── *)
 
@@ -218,7 +226,11 @@ let emit st stage ~site ~code kind (f : form) (rhs : dim_vec) =
   let id = st.next_eq in
   st.next_eq <- id + 1;
   Hashtbl.replace st.info id { site; code; kind };
-  if st.t_only then Hashtbl.replace st.t_only_eqs id ();
+  (* A count-noise sd (§5.6) frees the P exponent of its sums, powers and
+     roots; a function's argument stays dimensionless in every base, since
+     the count-noise reasoning says nothing about exp or log of a count. *)
+  let t_only = st.t_only && (match kind with Function_arg _ -> false | _ -> true) in
+  if t_only then Hashtbl.replace st.t_only_eqs id ();
   let e = { Dim_solve.terms = f.vars; rhs = dim_div rhs f.k;
             origin = { site = id; stage; what = code } } in
   match stage with
@@ -457,7 +469,15 @@ let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
      | Some d -> F (const_form d)
      | None -> F (var_form (fresh st)))
   | TableLookup (n, idx) ->
-    List.iter (fun i -> ignore (g i)) idx;
+    (* an index selects a level: a pure number (E311) *)
+    List.iter (fun i ->
+      match g i with
+      | Any -> ()
+      | F f ->
+        if not (f.vars = [] && dim_eq f.k dimensionless) then
+          emit st Structure ~site:(Some site) ~code:"E311"
+            (Function_arg { fn = Printf.sprintf "an index of table '%s' in %s" n what; arg = f })
+            f dimensionless) idx;
     F (var_form (var_of st (Dim_sites.K_table n)))
   | Projected ->
     (match site.stream with
@@ -491,7 +511,8 @@ let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
 let rec gen_scalar st ~(site : Dim_sites.site) (se : scalar_expr) : value =
   let g = gen_scalar st ~site in
   match se with
-  | SConst _ -> Any
+  | SConst 0.0 -> Any
+  | SConst _ -> F (const_form dimensionless)
   | SParam p -> Hashtbl.replace st.used p (); F (var_form (var_of st (Dim_sites.K_param p)))
   | SQRef q -> F (var_form (var_of st (Dim_sites.K_quantity q.qref_name)))
   | SUnOp { op; arg } -> unop st ~site:(Some site) ~what:site.role op (g arg)
@@ -587,7 +608,7 @@ let solve_all st (eqs : Dim_solve.eqn list) : solved =
 let form_value out (f : form) : dim_vec option =
   List.fold_left (fun acc (v, c) ->
     match acc, out.value v with
-    | Some k, Some d -> Some (Array.mapi (fun i ki -> ki + c * d.(i)) k)
+    | Some k, Some d -> Some (Array.mapi (fun i ki -> ki +! (c *! d.(i))) k)
     | _ -> None) (Some (Array.copy f.k)) f.vars
 
 let show out f = match form_value out f with
@@ -750,7 +771,7 @@ let rec prior_value ~report (e : expr) : prior_value =
      | Coord, _ | _, Coord -> Coord)
   | BinOp { op = Pow; left; right = Const n } when Float.is_integer n ->
     (match pv left with
-     | Units a -> Units (Array.map (( * ) (Float.to_int n)) a)
+     | Units a -> Units (Array.map (( *! ) (Float.to_int n)) a)
      | x -> x)
   | UnOp { op = Neg; arg } -> pv arg
   | BinOp { op = _; left; right } -> ignore (pv left); ignore (pv right); Coord
@@ -789,7 +810,25 @@ let check_priors (out : solved) st (priors : prior_source list) : diagnostic lis
                      "prior of '%s': explicit units disagree inside `%s`" param arg;
                    detail = Some (Printf.sprintf "%s is combined with %s"
                                     (dim_display a) (dim_display b)) } :: !inner in
-      let v = prior_value ~report e in
+      (* Each whole additive term of the argument is read on its own: a unit
+         literal term asserts a quantity in the argument's units whatever the
+         other terms are, so `m_h + 1 'days` on a rate's `mu` is checked even
+         though `m_h` is a coordinate. Terms of explicit units that disagree
+         are refused whatever θ is. *)
+      let rec terms e = match[@warning "-4"] e with
+        | BinOp { op = (Add | Sub); left; right } -> terms left @ terms right
+        | UnOp { op = Neg; arg } -> terms arg
+        | e -> [ e ] in
+      let values = List.map (prior_value ~report) (terms e) in
+      let units = List.filter_map (function Units d -> Some d | Bare | Coord -> None) values in
+      (match units with
+       | a :: rest ->
+         (match List.find_opt (fun b -> not (dim_eq a b)) rest with
+          | Some b when not (List.exists (fun (d : diagnostic) -> d.subject = subject) !inner) ->
+            report a b
+          | Some _ | None -> ())
+       | [] -> ());
+      let v = match units with d :: _ -> Units d | [] -> Bare in
       let top = match v, convention family arg with
         | Units d, Some conv ->
           let expected = match conv with
@@ -801,12 +840,12 @@ let check_priors (out : solved) st (priors : prior_source list) : diagnostic lis
              let log_scale = family = "log_normal" in
              [ { severity = Error; code = "E316"; subject;
                  message = Printf.sprintf
-                   "prior of '%s': `%s` has a unit literal of dimension %s, but a %s                     prior's `%s` is %s" param arg (dim_display d) family arg
+                   "prior of '%s': `%s` has a unit literal of dimension %s, but a %s prior's `%s` is %s" param arg (dim_display d) family arg
                    (dim_display x);
-                 detail = Some "a unit literal is converted to the model's units, and                                 that conversion is right only in the argument's own                                 dimension";
+                 detail = Some "a unit literal is converted to the model's units, and that conversion is right only in the argument's own dimension";
                  hint = Some (if log_scale then
-                   "`mu` and `sigma` of a log-normal are the mean and sd of ln θ,                     numbers in model units. To give a median with a unit, write                     `mu = log(0.2 'per_day)`, which converts the value before taking                     its log; `sigma` is a plain number."
-                 else "write the argument in the parameter's own units, or as a bare                        number in model units") } ]
+                   "`mu` and `sigma` of a log-normal are the mean and sd of ln θ, numbers in model units. To give a median with a unit, write `mu = log(0.2 'per_day)`, which converts the value before taking its log; `sigma` is a plain number."
+                 else "write the argument in the parameter's own units, or as a bare number in model units") } ]
            | Some _ | None -> [])
         | (Units _ | Bare | Coord), _ -> []
       in
@@ -826,7 +865,7 @@ let check_priors (out : solved) st (priors : prior_source list) : diagnostic lis
                         then Printf.sprintf "the prior's median is exp(%s) in %s's units" h param
                         else "the sd of ln θ, a pure number"));
                  hint = Some (Printf.sprintf
-                   "if '%s' is meant as a median %s, write `%s = log(%s)`; if it is                     meant as a log-coordinate, declare it `real dim 1`"
+                   "if '%s' is meant as a median %s, write `%s = log(%s)`; if it is meant as a log-coordinate, declare it `real dim 1`"
                    h (display_dim d) arg h) } ]
            | Some _ | None -> [])
         | _ -> []
@@ -835,7 +874,7 @@ let check_priors (out : solved) st (priors : prior_source list) : diagnostic lis
 
 (* ── Main check ────────────────────────────────────────────────────────── *)
 
-let check_model ?prior_args ?(constant_dims = []) (m : model) : result =
+let check_model_exn ?prior_args ~constant_dims ~typed_lets (m : model) : result =
   let constants = Hashtbl.create 16 in
   List.iter (fun (c : constant) -> Hashtbl.replace constants c.c_name c.c_value) m.constants;
   let st = { constants; used = Hashtbl.create 64; t_only = false; t_only_eqs = Hashtbl.create 16; next_var = 0; keys = Hashtbl.create 256; declared = []; structure = [];
@@ -844,7 +883,16 @@ let check_model ?prior_args ?(constant_dims = []) (m : model) : result =
   declare_model st ~constant_dims m;
   declare_quantities st m;
   let sites = Dim_sites.sites m in
-  List.iter (add_site st) sites;
+  (* A typed `let`'s annotation, at each of its expanded bodies. *)
+  let let_sites = List.map (fun (name, (p, t), e) ->
+    { Dim_sites.subject = Some (SLet name);
+      role = Printf.sprintf "let '%s'" name; expr = Dim_sites.E e;
+      obligation = Has (make p t); literals = Whole_terms; code = "E318";
+      strength = Binding; stream = None;
+      note = Some "the `let` is declared with a kind or `dim` clause, and its \
+                   body must have that dimension; fix the body, or the \
+                   annotation if it was mistaken" }) typed_lets in
+  List.iter (add_site st) (sites @ let_sites);
   let out = solve_all st
       (List.rev st.declared @ List.rev st.structure @ List.rev st.obligation) in
   let errors =
@@ -898,3 +946,17 @@ let check_model ?prior_args ?(constant_dims = []) (m : model) : result =
         | Estimated _ | Fixed _ | Required -> None) m.parameters in
   let prior_diags = check_priors out st priors in
   { diagnostics = errors @ prior_diags @ infos; param_dims = resolved; quantity_dims }
+
+(* An exponent too large for a native integer (a power of a power of a power,
+   ...) is reported, never wrapped: the guarantee the solver keeps holds through
+   equation generation too. *)
+let check_model ?prior_args ?(constant_dims = []) ?(typed_lets = []) (m : model) : result =
+  try check_model_exn ?prior_args ~constant_dims ~typed_lets m
+  with Dim_solve.Overflow msg ->
+    { diagnostics = [ { severity = Error; code = "E310"; subject = None;
+                        message = "a dimension exponent in this model is too large to represent";
+                        detail = Some msg;
+                        hint = Some "a power of a power multiplies exponents; write the \
+                                     exponent as one number, or wrap a deliberate term in \
+                                     `unchecked_dim(...)`" } ];
+      param_dims = []; quantity_dims = [] }

@@ -1,0 +1,28 @@
+# invariant: a typed let whose body has its declared dimension, and one with a dim clause, compile
+# spec: language spec §8.4, typed let bindings
+# expect: (none)
+time_unit = 'days
+
+compartments { S, I, R }
+
+dimensions { age = [young, old] }
+
+stratify(by = age)
+
+parameters {
+  beta  : rate in [0.01, 2.0]
+  gamma : rate in [0.01, 1.0]
+}
+
+let N[a in age] = S[a] + I[a] + R[a]
+let pc[a in age] : rate = gamma * I[a] / N[a]
+let inflow : positive dim P/T = gamma * I[young]
+
+transitions {
+  infection[a in age] : S[a] --> I[a] @ beta * S[a] * I[a] / N[a]
+  recovery[a in age]  : I[a] --> R[a] @ pc[a] * I[a] + 0 * inflow
+}
+
+init { S[a in age] = 990  I[a in age] = 10 }
+
+simulate { from = 0 'days  to = 10 'days }

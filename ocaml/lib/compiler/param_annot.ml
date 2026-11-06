@@ -57,7 +57,7 @@ let eval (e : dim_expr) : (int * int, string) result =
     (Ok (0, 0)) e
 
 (* The dimension a kind keyword fixes; [None] for the two kinds whose
-   dimension is inferred (or given by `dim`). Mirrors [Dimcheck.param_dim_of_kind]. *)
+   dimension is inferred (or given by `dim`). Mirrors [Dimcheck.kind_dim]. *)
 let kind_dim : param_type -> (int * int) option = function
   | PRate -> Some (0, -1)
   | PProbability -> Some (0, 0)

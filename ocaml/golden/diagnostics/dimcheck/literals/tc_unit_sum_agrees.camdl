@@ -1,0 +1,19 @@
+# invariant: unit literals of one dimension summed in a typed constant compile
+# spec: §5.3
+# expect: (none)
+time_unit = 'days
+compartments { S, I, R }
+parameters {
+  beta  : rate ~ normal(mu = 0.3, sigma = 0.1)
+  gamma : rate
+
+}
+let N = S + I + R
+let tau : rate = 1 'per_day + 1 'per_week
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ tau * I
+}
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 10 'days }

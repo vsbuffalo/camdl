@@ -6620,6 +6620,29 @@ let test_attack_rate_literal_population () =
     (dim_of (compile_expect_ok (src ~lets:"let N0 : count = 1000" "(N0 - S) / N0")));
   Alcotest.(check (option (pair int int))) "'count literal: dimensionless"
     (Some (0, 0)) (dim_of (compile_expect_ok (src "1 - S / (1000 'count)")));
+  (* a derived quantity's literal is a pure number, so a power of pure numbers
+     is dimensionless rather than undetermined *)
+  let derived = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate }
+    let N = S + I + R
+    transitions {
+      infection : S --> I @ beta * S * I / N
+      recovery  : I --> R @ gamma * I
+    }
+    init { S = 990  I = 10 }
+    quantities {
+      peak = final(I)
+      pw   = 2 ^ (peak / peak)
+    }
+    simulate { from = 0 'days  to = 10 'days }
+  |} in
+  (match List.find_opt (fun (q : Ir.quantity) -> q.q_name = "pw")
+           (compile_expect_ok derived).Ir.quantities with
+   | Some q -> Alcotest.(check (option (pair int int))) "derived power: dimensionless"
+                 (Some (0, 0)) q.q_dimension
+   | None -> Alcotest.fail "no pw quantity");
   let diags = Compiler.collect_diagnostics ~name:"attack" (src "(1000 - S) / 1000") in
   match List.find_opt (fun (d : Diagnostics.diagnostic) -> d.code = "E302") diags with
   | None -> Alcotest.fail "expected E302 for bare-number population"

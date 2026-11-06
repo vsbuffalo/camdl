@@ -13,7 +13,6 @@ type conflict_kind = Contradiction | Not_integral
 type conflict = {
   culprit : eqn;
   kind    : conflict_kind;
-  reduced : (var * int) list * int array;
   context : origin list;
 }
 
@@ -42,6 +41,9 @@ let ( *! ) a b =
     then overflow "*" a b
     else p
   end
+
+let checked_add = ( +! )
+let checked_mul = ( *! )
 
 let vec_axpy c x y = Array.mapi (fun i yi -> yi -! (c *! x.(i))) y   (* y - c·x *)
 
@@ -130,7 +132,7 @@ let add_eqn st (e : eqn) =
   let terms, rhs, ctx = reduce st (terms_of_list e.terms) (Array.copy e.rhs) [e.origin] in
   if IM.is_empty terms then begin
     if not (is_zero rhs) then
-      st.conflicts <- { culprit = e; kind = Contradiction; reduced = ([], rhs);
+      st.conflicts <- { culprit = e; kind = Contradiction;
                         context = ctx } :: st.conflicts
   end else
     let unit_pivot =
@@ -284,7 +286,7 @@ let solve ~nbases eqns =
       let terms, rhs, ctx = reduce st (terms_of_list e.terms) (Array.copy e.rhs) ctx in
       if IM.is_empty terms then begin
         if not (is_zero rhs) then
-          st.conflicts <- { culprit = e; kind = Contradiction; reduced = ([], rhs);
+          st.conflicts <- { culprit = e; kind = Contradiction;
                             context = ctx } :: st.conflicts;
         acc
       end else
@@ -292,7 +294,7 @@ let solve ~nbases eqns =
         match classify nbases candidate with
         | None -> candidate
         | Some kind ->
-          st.conflicts <- { culprit = e; kind; reduced = (IM.bindings terms, rhs);
+          st.conflicts <- { culprit = e; kind; 
                             context = ctx } :: st.conflicts;
           acc)
       [] (List.rev st.residual)

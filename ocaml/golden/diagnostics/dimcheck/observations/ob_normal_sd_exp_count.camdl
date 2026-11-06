@@ -1,0 +1,21 @@
+# invariant: a function's argument stays dimensionless inside a count-noise sd
+# spec: §5.6
+# expect: E301 Error
+time_unit = 'days
+compartments { S, I, R }
+parameters { beta : rate  gamma : rate  rho : probability }
+let N = S + I + R
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+observations {
+  y {
+    columns { time : time, y : count }
+    covers = closing_at(time, 7 'days)
+    projected = incidence(infection)
+    y ~ normal(mean = rho * projected, sd = exp(projected))
+  }
+}
+init { S = 990  I = 10 }
+simulate { from = 0 'days  to = 10 'days }

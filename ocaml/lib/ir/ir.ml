@@ -542,7 +542,7 @@ type likelihood =
    `duration`). Was a free [string option]; the typed enum is rejected at IR
    deserialisation rather than re-parsed by every consumer (the gh#191
    stringly-typed surface). The dimensional meaning of each kind lives in
-   [Dimcheck.param_dim_of_kind]; `instant`/`duration` are time-typed ([T]) per
+   [Dimcheck.kind_dim]; `instant`/`duration` are time-typed ([T]) per
    the 2026-05-22 calendar-time proposal. *)
 type param_kind =
   | Rate

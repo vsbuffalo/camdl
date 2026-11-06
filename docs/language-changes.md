@@ -126,6 +126,21 @@ or `sia[r in round] : transfer(…) at
 [t_start[r]]` if each round has its own
 date.
 
+## 2026-11-06 — A typed `let` is held to its annotation
+
+**What.** The kind or `dim` clause on a `let` whose body is not a constant
+(`let flow : rate = gamma * I`) was accepted and then ignored: the body was
+inlined with whatever dimension it had. It is now enforced at every use, so a
+body whose dimension differs from the annotation is refused.
+
+**Migration.** Fix whichever is wrong. If the body is right, correct the
+annotation (`let flow : positive dim P/T = gamma * I`) or drop it; if the
+annotation is right, fix the body.
+
+**Diagnostics.** E318, located at the `let`.
+
+---
+
 ## 2026-11-06 — One literal rule; typed constants take a `dim` clause
 
 **What.** A numeric literal is dimensionless, with two exceptions: zero takes

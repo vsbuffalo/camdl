@@ -447,9 +447,11 @@ since `d^y` with `y` changing during a fit is not a dimension; `unchecked_dim`
 match the mean's T exponent, but its P exponent is free: variance formulas for
 counts add a term in the count to one in its square (He et al. 2010,
 ρ(1−ρ)C + ρ²ψ²C²), which is consistent because a count is a number of
-individuals rather than a quantity whose unit can be rescaled. On a `real`
-column the `sd` has the mean's dimension exactly, and the column's dimension is
-inferred from the two.
+individuals rather than a quantity whose unit can be rescaled. The exemption
+covers the sd's sums, products, powers and roots; the argument of `exp`, `log`
+or a trigonometric function stays dimensionless, so `sd = exp(projected)` is
+E301. On a `real` column the `sd` has the mean's dimension exactly, and the
+column's dimension is inferred from the two.
 
 **What a compile guarantees.** Every expression that reaches the dynamics,
 observations, interventions, initial conditions and quantities has been
@@ -553,7 +555,9 @@ closer to a modelling linter.
    `normal(mu = 0.2 'per_day)` under weeks is 1.4, and `log_normal(mu =
    log(0.2 'per_day))` under weeks converts the rate before taking its log. A
    conversion is right only in the argument's own dimension, so a unit literal
-   whose dimension disagrees with the argument is **E316**:
+   whose dimension disagrees with the argument is **E316**. Each whole term of
+   an argument is read on its own: in `mu = m_h + 1 'days` the literal still
+   asserts a duration, whatever `m_h` is. The arguments' dimensions:
 
    | Family                        | Argument                    | Dimension |
    | ----------------------------- | --------------------------- | --------- |
@@ -2158,9 +2162,13 @@ adding it to a population compartment (`I + 1e-6`) triggers E302. The typed form
 (`I + iota` where `iota : count`) resolves this because `iota` carries the
 population dimension.
 
-For non-constant bodies (e.g., `let N = S + I + R`), the type annotation is
-accepted syntactically but the binding is still inlined as usual. The dimension
-of such expressions is inferred from their structure.
+A typed `let` with a non-constant body is still inlined (or shared as a
+binding) at each use, and its annotation is enforced there: every expanded body
+must have the declared dimension, or it is **E318**, located at the `let`.
+`let incidence : rate = gamma * I / N` is a checked assertion that the body is
+a per-capita rate; `let flow : rate = gamma * I` is refused, since it is a
+population rate (`positive dim P/T`). A `let` without an annotation takes its
+body's dimension.
 
 ---
 
@@ -6722,6 +6730,7 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E315 | Error   | An intervention time is not T, or a trigger threshold is not its stream's dimension        |
 | E316 | Error   | A unit literal in a prior argument disagrees with the argument's dimension (§2.2.3)        |
 | E317 | Error   | A quantity threshold is not its series' dimension, or a `value_at` time is not T           |
+| E318 | Error   | A typed `let`'s body does not have its declared kind or `dim` clause (§8.4)                 |
 | I316 | Info    | A log-normal `mu` or `sigma` is directly a dimensioned parameter (§2.2.3)                  |
 | E347 | Error   | Observation stream declares its temporal columns twice or by half — `: time` plus window columns, half a pair, or `covers` with window columns (§12.1.1) |
 | E348 | Error   | `covers` or window columns on a stream whose `projected` reads state at an instant (§12.1.1) |

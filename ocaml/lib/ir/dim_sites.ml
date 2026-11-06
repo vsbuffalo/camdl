@@ -36,6 +36,7 @@ type subject =
   | SParameter   of string   (* parameter whose prior *)
   | SQuantity    of string
   | SIntervention of string   (* intervention, event or reactive trigger *)
+  | SLet         of string   (* a typed `let`, for its annotation *)
 
 (* Things whose dimension other positions refer to. *)
 type key =
@@ -79,7 +80,6 @@ type strength =
   | Checked   (* a prior argument: never constrains the model (§5.9) *)
 
 type site = {
-  id         : int;
   subject    : subject option;
   role       : string;           (* "transition 'infection' rate", ... *)
   expr       : site_expr;
@@ -112,14 +112,12 @@ let rec is_constant_expr (e : expr) : bool =
 
 (* ── Building sites ────────────────────────────────────────────────────── *)
 
-type acc = { mutable next : int; mutable out : site list }
+type acc = { mutable out : site list }
 
 let add acc ?(subject : subject option) ?(literals = Literals_dimensionless) ?(strength = Binding)
     ?stream ?note ~role ~code obligation expr =
-  let s = { id = acc.next; subject; role; expr; obligation; literals; code;
-            strength; stream; note } in
-  acc.next <- acc.next + 1;
-  acc.out <- s :: acc.out
+  acc.out <- { subject; role; expr; obligation; literals; code; strength; stream; note }
+             :: acc.out
 
 
 let transition_sites acc (tr : transition) =
@@ -449,7 +447,7 @@ let sites (m : model) : site list =
         transitions; ode_equations; time_functions; tables; interventions;
         observations; parameters; bindings; initial_conditions; balance;
         quantities; contrasts } = m in
-  let acc = { next = 0; out = [] } in
+  let acc = { out = [] } in
   (* Bindings first: each defines a name other positions use, and the solver
      blames the later of two disagreeing equations, so a definition must not
      be the one blamed for a use's mistake. *)

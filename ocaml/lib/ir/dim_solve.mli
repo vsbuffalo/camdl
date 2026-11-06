@@ -48,9 +48,6 @@ type conflict_kind =
 type conflict = {
   culprit : eqn;                         (** the equation that could not be added *)
   kind    : conflict_kind;
-  reduced : (var * int) list * int array;
-  (** the culprit after reduction against the accepted rows: [([], r)] for a
-      contradiction of the unit system, "0 = r" *)
   context : origin list;
   (** origins of the accepted equations the culprit was reduced with, its own
       first; deduplicated and capped, enough to name what it conflicts with *)
@@ -60,6 +57,11 @@ type outcome
 
 exception Overflow of string
 (** An intermediate coefficient left the native integer range. *)
+
+val checked_add : int -> int -> int
+val checked_mul : int -> int -> int
+(** Integer addition and multiplication that raise {!Overflow} rather than
+    wrap; for building equations with the same guarantee the solver keeps. *)
 
 val solve : nbases:int -> eqn list -> outcome
 (** Raises [Invalid_argument] if some [rhs] does not have [nbases] entries, and

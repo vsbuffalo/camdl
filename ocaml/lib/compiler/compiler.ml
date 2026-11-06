@@ -568,11 +568,13 @@ let run_dimcheck_full (d : compile_detail)
       | Some (Dimcheck.SParameter p)   -> Expander.param_loc       d.ctx p
       | Some (Dimcheck.SQuantity q)    -> Expander.quantity_loc    d.ctx q
       | Some (Dimcheck.SIntervention i) -> Expander.interv_loc     d.ctx i
+      | Some (Dimcheck.SLet l)         -> Expander.let_loc         d.ctx l
       | Some (Dimcheck.SBinding _) | None -> Diagnostics.no_loc
     in
     let result =
       Dimcheck.check_model ~prior_args:(Expander.prior_sources d.ctx)
-        ~constant_dims:(Expander.constant_dims d.ctx) d.model in
+        ~constant_dims:(Expander.constant_dims d.ctx)
+        ~typed_lets:(Expander.typed_let_uses d.ctx) d.model in
     let diags =
       List.map (fun (dc : Dimcheck.diagnostic) ->
         let loc = loc_of_subject dc.subject in
