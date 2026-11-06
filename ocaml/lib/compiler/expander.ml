@@ -5602,6 +5602,81 @@ type prior_classification =
   [ `Plain        of Ir.prior_dist
   | `Hierarchical of Ir.hierarchical_prior ]
 
+(* Argument-name checks shared by constant and hierarchical priors: duplicate
+   (E234), unknown (E233, with the `mean`/`mu` hint) and missing (E231)
+   keyword arguments against the family's signature. *)
+let check_prior_arg_names ctx ~loc ~qualify (ps : prior_spec) expected_args =
+  let seen = Hashtbl.create 4 in
+  List.iter (fun (k, _) ->
+    if Hashtbl.mem seen k then
+      Diagnostics.error ctx.diags
+        ~code:"E234" ~loc
+        ~message:(qualify (Printf.sprintf "duplicate argument '%s' in prior '%s'" k ps.ps_name))
+        ~hint:"Keyword arguments may appear at most once."
+        ()
+    else
+      Hashtbl.add seen k ()
+  ) ps.ps_args;
+  (* m19/C4/C10 in 2026-04-19 review: observation likelihoods use
+     `normal(mean=..., sd=...)`; priors use `normal(mu=..., sigma=...)`.
+     Users routinely mix them up. If the typo is one of these, the hint
+     names the correct spelling explicitly. *)
+  let mean_mu_hint k =
+    match k, ps.ps_name with
+    | ("mean", ("normal" | "log_normal")) ->
+      Some "prior `normal` / `log_normal` uses `mu` (not `mean`); \
+            `mean`/`sd` are used in observation likelihoods"
+    | ("sd", ("normal" | "log_normal" | "half_normal")) ->
+      Some "prior `normal` / `log_normal` / `half_normal` uses \
+            `sigma` (not `sd`); `mean`/`sd` are used in observation \
+            likelihoods"
+    | _ -> None
+  in
+  List.iter (fun (k, _) ->
+    if not (List.mem k expected_args) then
+      let hint = match mean_mu_hint k with
+        | Some h -> h
+        | None   -> "Remove the unknown argument or check the spelling."
+      in
+      Diagnostics.error ctx.diags
+        ~code:"E233" ~loc
+        ~message:(qualify (Printf.sprintf "unknown argument '%s' for prior '%s'" k ps.ps_name))
+        ~detail:(Printf.sprintf "Distribution '%s' accepts: %s." ps.ps_name (String.concat ", " expected_args))
+        ~hint
+        ()
+  ) ps.ps_args;
+  List.iter (fun key ->
+    if not (List.mem_assoc key ps.ps_args) then
+      Diagnostics.error ctx.diags
+        ~code:"E231" ~loc
+        ~message:(qualify (Printf.sprintf "prior '%s' missing required argument '%s'" ps.ps_name key))
+        ~detail:(Printf.sprintf "The distribution %s requires a '%s' argument." ps.ps_name key)
+        ~hint:(Printf.sprintf "Add '%s = <value>' to the prior arguments." key)
+        ()
+  ) expected_args
+
+(* Domain checks shared by constant and hierarchical priors, over the
+   arguments whose value is known at compile time: every such value finite,
+   and the family's constraints (E235). A hierarchical prior passes only its
+   constant arguments; the rest depend on parameter values and the runtime
+   maps an out-of-domain value to a log-density of -inf. *)
+let check_prior_arg_values ctx ~loc ~qualify (ps : prior_spec) vals =
+  let non_finite =
+    List.find_opt (fun (_, v) -> not (Float.is_finite v)) vals in
+  let problem = match non_finite with
+    | Some (k, v) ->
+      Some (Printf.sprintf "argument '%s' is not a finite number (got %g)" k v)
+    | None -> validate_prior_values ps.ps_name vals
+  in
+  match problem with
+  | None -> ()
+  | Some msg ->
+    Diagnostics.error ctx.diags
+      ~code:"E235" ~loc
+      ~message:(qualify (Printf.sprintf "invalid prior '%s': %s" ps.ps_name msg))
+      ~hint:"Check the distribution's domain: shapes/rates/sigmas must be positive, uniform lower < upper."
+      ()
+
 let resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None) ctx ~pname (ps : prior_spec) : Ir.prior_dist =
   (* Prefix every diagnostic message with the parameter name so users
      can locate bad priors in models with many parameters. *)
@@ -5623,48 +5698,7 @@ let resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None) ctx ~pname (
   if expected_args = [] && prior_arg_signature ps.ps_name = None then
     err_invalid_placeholder
   else begin
-    (* Signature check: duplicate kwargs. *)
-    let seen = Hashtbl.create 4 in
-    List.iter (fun (k, _) ->
-      if Hashtbl.mem seen k then
-        Diagnostics.error ctx.diags
-          ~code:"E234" ~loc
-          ~message:(qualify (Printf.sprintf "duplicate argument '%s' in prior '%s'" k ps.ps_name))
-          ~hint:"Keyword arguments may appear at most once."
-          ()
-      else
-        Hashtbl.add seen k ()
-    ) ps.ps_args;
-
-    (* Signature check: unknown kwargs.
-       m19/C4/C10 in 2026-04-19 review: observation likelihoods use
-       `normal(mean=..., sd=...)`; priors use `normal(mu=..., sigma=...)`.
-       Users routinely mix them up. If the typo is one of these, the
-       hint names the correct spelling explicitly. *)
-    let mean_mu_hint k =
-      match k, ps.ps_name with
-      | ("mean", ("normal" | "log_normal")) ->
-        Some "prior `normal` / `log_normal` uses `mu` (not `mean`); \
-              `mean`/`sd` are used in observation likelihoods"
-      | ("sd", ("normal" | "log_normal" | "half_normal")) ->
-        Some "prior `normal` / `log_normal` / `half_normal` uses \
-              `sigma` (not `sd`); `mean`/`sd` are used in observation \
-              likelihoods"
-      | _ -> None
-    in
-    List.iter (fun (k, _) ->
-      if not (List.mem k expected_args) then
-        let hint = match mean_mu_hint k with
-          | Some h -> h
-          | None   -> "Remove the unknown argument or check the spelling."
-        in
-        Diagnostics.error ctx.diags
-          ~code:"E233" ~loc
-          ~message:(qualify (Printf.sprintf "unknown argument '%s' for prior '%s'" k ps.ps_name))
-          ~detail:(Printf.sprintf "Distribution '%s' accepts: %s." ps.ps_name (String.concat ", " expected_args))
-          ~hint
-          ()
-    ) ps.ps_args;
+    check_prior_arg_names ctx ~loc ~qualify ps expected_args;
 
     (* Resolve each expected arg to a constant float. *)
     let get_float key =
@@ -5682,26 +5716,12 @@ let resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None) ctx ~pname (
             ();
           0.0
         end
-      | None ->
-        Diagnostics.error ctx.diags
-          ~code:"E231" ~loc
-          ~message:(qualify (Printf.sprintf "prior '%s' missing required argument '%s'" ps.ps_name key))
-          ~detail:(Printf.sprintf "The distribution %s requires a '%s' argument." ps.ps_name key)
-          ~hint:(Printf.sprintf "Add '%s = <value>' to the prior arguments." key)
-          ();
-        0.0
+      | None -> 0.0  (* E231, reported by [check_prior_arg_names] *)
     in
+    let present = List.filter (fun k -> List.mem_assoc k ps.ps_args) expected_args in
     let vals = List.map (fun k -> (k, get_float k)) expected_args in
-
-    (* Value validation: per-distribution constraints. *)
-    (match validate_prior_values ps.ps_name vals with
-     | None -> ()
-     | Some msg ->
-       Diagnostics.error ctx.diags
-         ~code:"E235" ~loc
-         ~message:(qualify (Printf.sprintf "invalid prior '%s': %s" ps.ps_name msg))
-         ~hint:"Check the distribution's domain: shapes/rates/sigmas must be positive, uniform lower < upper."
-         ());
+    check_prior_arg_values ctx ~loc ~qualify ps
+      (List.filter (fun (k, _) -> List.mem k present) vals);
 
     let v k = List.assoc k vals in
     match ps.ps_name with
@@ -5769,7 +5789,12 @@ let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None)
     (* Validate distribution name but allow parameter references in args. *)
     let qualify msg = Printf.sprintf "parameter '%s': %s" pname msg in
     (match prior_arg_signature ps.ps_name with
-     | Some _ -> ()
+     | Some expected_args ->
+       check_prior_arg_names ctx ~loc ~qualify ps expected_args;
+       check_prior_arg_values ctx ~loc ~qualify ps
+         (List.filter_map (fun (k, e) ->
+            if List.mem k expected_args && is_const_expr e
+            then Some (k, eval_const_expr ctx e) else None) ps.ps_args)
      | None ->
        Diagnostics.error ctx.diags
          ~code:"E232" ~loc
@@ -5786,6 +5811,18 @@ let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None)
       | PScalar  { pname; _ } -> Some pname
       | PIndexed { pname; _ } -> Some pname
     ) ctx.param_decls in
+    let refuse_runtime what =
+      Diagnostics.error ctx.diags
+        ~code:"E230" ~loc
+        ~message:(qualify (Printf.sprintf
+          "prior argument depends on %s" what))
+        ~detail:"A prior is evaluated once per parameter draw, before any \
+                 simulation: its arguments may use parameters, literals and \
+                 functions of them, but not time, compartments, bindings, \
+                 forcings, tables or observations."
+        ~hint:"Write the argument in terms of hyperparameters and literals."
+        ()
+    in
     let rec check_refs e =
       match e with
       | Ir.Param n when not (List.mem n param_names) ->
@@ -5808,17 +5845,22 @@ let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None)
                    typed `let` is a model constant, not a parameter."
           ~hint:"Write the value inline, or declare it in `parameters { }`."
           ()
-      | Ir.Param _ | Ir.Const _ | Ir.Projected | Ir.ObsColumnRef _ | Ir.Time
-      | Ir.Dt | Ir.ObsAnchor _ -> ()
+      | Ir.Param _ | Ir.Const _ -> ()
       | Ir.BinOp b -> check_refs b.left; check_refs b.right
       | Ir.UnOp  u -> check_refs u.arg
       | Ir.Cond  c -> check_refs c.pred; check_refs c.then_; check_refs c.else_
-      | Ir.Pop _ | Ir.PopSum _ -> ()  (* caught elsewhere *)
-      | Ir.TimeFunc _ | Ir.ForcingBasis _ -> ()
-      | Ir.TableLookup (_, args) -> List.iter check_refs args
       | Ir.UncheckedDim u -> check_refs u.inner
       | Ir.Reduce terms -> List.iter check_refs terms
-      | Ir.BindingRef _ -> ()
+      (* A prior is evaluated once per parameter draw, with no time, state,
+         forcing, table or observation in scope; the runtime would read each
+         of these as NaN (hierarchical.rs, eval_prior_arg) and the prior would
+         be -inf everywhere. *)
+      | Ir.Time | Ir.Dt -> refuse_runtime "the simulation time"
+      | Ir.Pop _ | Ir.PopSum _ | Ir.BindingRef _ -> refuse_runtime "the model state"
+      | Ir.TimeFunc _ | Ir.ForcingBasis _ -> refuse_runtime "a forcing"
+      | Ir.TableLookup _ -> refuse_runtime "a table"
+      | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _ ->
+        refuse_runtime "an observation"
       | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
     in
     List.iter (fun (_, e) -> check_refs e) resolved_args;
