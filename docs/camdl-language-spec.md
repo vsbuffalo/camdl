@@ -4621,6 +4621,9 @@ Output emission is confined to `[start, simulation.t_end]`: `simulation.t_end`
 is the sole horizon authority, and output times are derived from it at emission
 — a regular schedule enumerates up to `t_end`, and an explicit `at = [...]` time
 beyond the horizon is not emitted (never against a frozen post-horizon state).
+The final trajectory row is therefore the last output time at or before `t_end`;
+a firing after that time (for example between a final weekly output at 14 and a
+`t_end` of 20) appears in no row.
 
 Synthetic observations (forward simulation) are not part of the trajectory
 output; they are produced by the simulate command's `--obs` family of flags
