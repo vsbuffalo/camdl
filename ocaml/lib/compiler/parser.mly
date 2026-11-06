@@ -345,6 +345,7 @@
 %token INIT TIMEPOINTS SCENARIOS EXTENDS STRATIFY LET FROM TO WHERE SUM
 %token CONSECUTIVE IN BY DIMENSIONS ONLY REAL INTEGER RATE PROBABILITY POSITIVE COUNT
 %token INSTANT DURATION
+%token DIM   (* `dim` clause on a parameter (2026-11-05 size brackets §3.2) *)
 %token AND OR NOT IF THEN ELSE EVERY UNTIL AT_KW FORMAT DESCRIPTION NULL TRANSFER LIKELIHOOD ORIGIN BALANCE EVENTS ADD AT_DAY
 %token COLUMNS EMIT_SCHEDULE COVERS
 %token QUANTITIES   (* proposal 2026-06-25: generated quantities *)
@@ -514,36 +515,36 @@ param_decl_sep:
 
 param_decl:
   (* scalar, no bounds, no prior *)
-  | d = doc_opt name = IDENT COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt
-      { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = None; pdoc = d;
+  | d = doc_opt name = IDENT COLON ka = param_type_ann
+      { PScalar { pname = name; pkind = fst ka; pdim = snd ka; pbounds = None; pprior = None; pdoc = d;
                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* scalar, no bounds, with prior *)
-  | d = doc_opt name = IDENT COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt TILDE pr = prior_clause
-      { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = Some pr; pdoc = d;
+  | d = doc_opt name = IDENT COLON ka = param_type_ann TILDE pr = prior_clause
+      { PScalar { pname = name; pkind = fst ka; pdim = snd ka; pbounds = None; pprior = Some pr; pdoc = d;
                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* scalar, with bounds, no prior *)
-  | d = doc_opt name = IDENT COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET
-      { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = None; pdoc = d;
+  | d = doc_opt name = IDENT COLON ka = param_type_ann IN LBRACKET lo = expr COMMA hi = expr RBRACKET
+      { PScalar { pname = name; pkind = fst ka; pdim = snd ka; pbounds = Some (lo, hi); pprior = None; pdoc = d;
                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* scalar, with bounds, with prior *)
-  | d = doc_opt name = IDENT COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
-      { PScalar { pname = name; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
+  | d = doc_opt name = IDENT COLON ka = param_type_ann IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
+      { PScalar { pname = name; pkind = fst ka; pdim = snd ka; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, no bounds, no prior *)
-  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt
-      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = None; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON ka = param_type_ann
+      { PIndexed { pname = name; pdims = dims; pkind = fst ka; pdim = snd ka; pbounds = None; pprior = None; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, no bounds, with prior *)
-  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt TILDE pr = prior_clause
-      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = None; pprior = Some pr; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON ka = param_type_ann TILDE pr = prior_clause
+      { PIndexed { pname = name; pdims = dims; pkind = fst ka; pdim = snd ka; pbounds = None; pprior = Some pr; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, no prior *)
-  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET
-      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = None; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON ka = param_type_ann IN LBRACKET lo = expr COMMA hi = expr RBRACKET
+      { PIndexed { pname = name; pdims = dims; pkind = fst ka; pdim = snd ka; pbounds = Some (lo, hi); pprior = None; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, with prior *)
-  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON pk = param_kind pu = param_unit_opt da = dim_annotation_opt IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
-      { PIndexed { pname = name; pdims = dims; pkind = pk; pdim = da; punit = pu; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
+  | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON ka = param_type_ann IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
+      { PIndexed { pname = name; pdims = dims; pkind = fst ka; pdim = snd ka; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 prior_clause:
@@ -563,86 +564,41 @@ prior_name:
 prior_kwarg:
   | k = kw_arg_name EQ v = expr { (k, v) }
 
-dim_annotation_opt:
-  | (* empty *) { None }
-  | LBRACKET da = dim_literal RBRACKET { Some da }
+(* What follows a parameter's kind (proposal 2026-11-05-size-brackets-and-dim-clause
+   §3): an optional size bracket and an optional `dim` clause, in that order.
+   A unit literal or a dimension in the bracket is the old notation; both are
+   parsed so [Param_annot.resolve] can refuse them with a fix-it rather than a
+   bare syntax error. *)
+param_type_ann:
+  | pk = param_kind pu = param_unit_opt sz = size_bracket_opt dc = dim_clause_opt
+      { (pk, Param_annot.resolve ~kind:pk ~kind_end:$endpos(pk)
+               ~unit_:pu ~bracket:sz ~clause:dc) }
 
-(* Optional tier-3 unit literal on a parameter kind (gh#60):
-   `tau : positive 'ratio`. Syntactically accepted after any kind; the
-   expander restricts it to `positive`/`real` (E281) and rejects a clash with
-   a `[dim]` bracket (E282). *)
 param_unit_opt:
   | (* empty *) { None }
-  | u = unit_lit { Some u }
+  | u = unit_lit { Some (u, $startpos, $endpos) }
 
-dim_literal:
-  (* [1] — dimensionless *)
-  | n = INT
-      { if n = 1 then (0, 0)
-        else begin
-          Parser_errors.push_error ~sp:$startpos ~ep:$endpos
-            ~code:"E103"
-            ~msg:(Printf.sprintf "unknown dimension '[%d]' — expected one of: [1], [P], [T], [T^-1], [1/T], [P/T], [P*T^-1]" n);
-          (0, 0)
-        end }
-  (* [P] — population *)
-  | id = IDENT { match id with
-      | "P" -> (1, 0)
-      | "T" -> (0, 1)
-      | _ ->
-        Parser_errors.push_error ~sp:$startpos ~ep:$endpos
-          ~code:"E103"
-          ~msg:(Printf.sprintf "unknown dimension '[%s]' — expected one of: [1], [P], [T], [T^-1], [1/T], [P/T], [P*T^-1]" id);
-        (0, 0) }
-  (* [T^-1] — per-capita rate *)
-  | id = IDENT CARET MINUS m = INT
-      { match id with
-      | "P" -> (- m, 0)
-      | "T" -> (0, - m)
-      | _ ->
-        Parser_errors.push_error ~sp:$startpos ~ep:$endpos
-          ~code:"E103"
-          ~msg:(Printf.sprintf "unknown dimension '[%s^-%d]' — expected one of: [1], [P], [T], [T^-1], [1/T], [P/T], [P*T^-1]" id m);
-        (0, 0) }
-  (* [P*T^-1] — population-level rate *)
-  | id1 = IDENT STAR id2 = IDENT CARET MINUS m = INT
-      { match (id1, id2) with
-      | ("P", "T") -> (1, - m)
-      | ("T", "P") -> (- m, 1)
-      | _ ->
-        Parser_errors.push_error ~sp:$startpos ~ep:$endpos
-          ~code:"E103"
-          ~msg:(Printf.sprintf "unknown dimension '[%s*%s^-%d]' — expected one of: [1], [P], [T], [T^-1], [1/T], [P/T], [P*T^-1]" id1 id2 m);
-        (0, 0) }
-  (* [P/T] — population-level rate (alternative syntax) *)
-  | id1 = IDENT SLASH id2 = IDENT
-      { match (id1, id2) with
-      | ("P", "T") -> (1, -1)
-      | ("T", "P") -> (-1, 1)
-      | ("P", "P") -> (0, 0)
-      | ("T", "T") -> (0, 0)
-      | _ ->
-        Parser_errors.push_error ~sp:$startpos ~ep:$endpos
-          ~code:"E103"
-          ~msg:(Printf.sprintf "unknown dimension '[%s/%s]' — expected one of: [1], [P], [T], [T^-1], [1/T], [P/T], [P*T^-1]" id1 id2);
-        (0, 0) }
-  (* [1/T] — per-capita rate (alternative syntax) *)
-  | n = INT SLASH id = IDENT
-      { if n = 1 then
-        match id with
-        | "P" -> (-1, 0)
-        | "T" -> (0, -1)
-        | _ ->
-          Parser_errors.push_error ~sp:$startpos ~ep:$endpos
-            ~code:"E103"
-            ~msg:(Printf.sprintf "unknown dimension '[1/%s]' — expected one of: [1], [P], [T], [T^-1], [1/T], [P/T], [P*T^-1]" id);
-          (0, 0)
-      else begin
-        Parser_errors.push_error ~sp:$startpos ~ep:$endpos
-          ~code:"E103"
-          ~msg:(Printf.sprintf "unknown dimension '[%d/%s]' — expected one of: [1], [P], [T], [T^-1], [1/T], [P/T], [P*T^-1]" n id);
-        (0, 0)
-      end }
+size_bracket_opt:
+  | (* empty *) { None }
+  | LBRACKET items = separated_nonempty_list(COMMA, dim_expr) RBRACKET
+      { Some (items, $startpos, $endpos) }
+
+dim_clause_opt:
+  | (* empty *) { None }
+  | DIM e = dim_expr { Some (e, $startpos, $endpos) }
+
+(* A dimension over the base dimensions P and T: `1`, `P`, `T^-1`, `P/T`,
+   `P*T^-1`, `P^2/T`. Evaluated (and refused if malformed) by [Param_annot]. *)
+dim_expr:
+  | f = dim_factor                  { [ (1, f) ] }
+  | e = dim_expr STAR f = dim_factor  { e @ [ (1, f) ] }
+  | e = dim_expr SLASH f = dim_factor { e @ [ (-1, f) ] }
+
+dim_factor:
+  | n = INT                             { Param_annot.FInt n }
+  | id = IDENT                          { Param_annot.base_factor id 1 }
+  | id = IDENT CARET n = INT            { Param_annot.base_factor id n }
+  | id = IDENT CARET MINUS n = INT      { Param_annot.base_factor id (- n) }
 
 param_kind:
   | RATE        { PRate }
@@ -1060,6 +1016,10 @@ obs_column:
         in { oc_name = name; oc_role = r } }
   | name = IDENT COLON pk = param_kind comma_opt
       { { oc_name = name; oc_role = ColValue pk } }
+  (* `dim` is a keyword (the parameter `dim` clause), so the column role
+     arrives as its token. *)
+  | name = IDENT COLON DIM comma_opt
+      { { oc_name = name; oc_role = ColDim name } }
 
 (* Optional separator: columns may be comma- or newline-separated. *)
 comma_opt:
@@ -1624,6 +1584,7 @@ kw_arg_name:
   | INTEGER     { "integer" }
   | EVERY       { "every" }  (* date_range(start, end, every = 7 'days) — §4 *)
   | TO          { "to" }     (* hyper_erlang branch(..., to = D) — staged-residence §4 *)
+  | DIM         { "dim" }    (* unchecked_dim(e, dim = population, ...) *)
 
 kw_expr:
   | k = kw_arg_name EQ v = expr { (k, v) }

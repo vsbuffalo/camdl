@@ -35,6 +35,7 @@
   "to"
   "where"
   "in"
+  "dim"
   "by"
   "values"
   "only"
@@ -90,7 +91,7 @@
   "integer"
 ] @type.builtin
 
-(dim_literal) @type            ; `[1]`, `[P]`, `[T^-1]`, `[P*T^-1]`, etc.
+(dim_clause) @type             ; `dim 1`, `dim P`, `dim T^-1`, `dim P/T`, etc.
 
 ; ── Operators ─────────────────────────────────────────────────────────────────
 

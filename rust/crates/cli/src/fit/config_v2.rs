@@ -3113,8 +3113,8 @@ impl FitConfig {
                      scaled logit bends the coordinates the smooth prior is built in (the modes \
                      are standard normal by construction), and a boxed log scale is a wall the \
                      sampler's steps cross as divergences. Declare them without a range, e.g. \
-                     `z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)` and \
-                     `tau : positive 'ratio ~ exponential(rate = 5.99)`, and give no `bounds` \
+                     `z[mode] : real dim 1 ~ normal(mu = 0.0, sigma = 1.0)` and \
+                     `tau : positive dim 1 ~ exponential(rate = 5.99)`, and give no `bounds` \
                      in [estimate], so the level, slope and modes are sampled on the identity \
                      scale and the scale on the log scale over (0, ∞).",
                     tf.name, bent.join("\n"), kind.as_str()));

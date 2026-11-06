@@ -5361,7 +5361,7 @@ let test_multi_index_param_expansion () =
     compartments { }
     stratify(by = village)
     stratify(by = season)
-    parameters { mu[village, season] : positive 'ratio in [0.1, 5.0] }
+    parameters { mu[village, season] : positive dim 1 in [0.1, 5.0] }
     simulate { from = 0  to = 10 }
   |} in
   let m = compile_expect_ok src in
@@ -5379,7 +5379,7 @@ let test_multi_index_param_3dim () =
     stratify(by = village)
     stratify(by = season)
     stratify(by = species)
-    parameters { m[village, season, species] : positive 'ratio in [0.1, 5.0] }
+    parameters { m[village, season, species] : positive dim 1 in [0.1, 5.0] }
     simulate { from = 0  to = 10 }
   |} in
   let m = compile_expect_ok src in
@@ -5397,8 +5397,8 @@ let test_multi_index_param_use () =
     stratify(by = village)
     stratify(by = season)
     parameters {
-      mu[village, season] : positive 'ratio in [0.1, 5.0]
-      b[village]          : positive 'ratio in [0.1, 5.0]
+      mu[village, season] : positive dim 1 in [0.1, 5.0]
+      b[village]          : positive dim 1 in [0.1, 5.0]
     }
     let C[v in village, s in season] = mu[v,s] * b[v]
     observations {
@@ -5418,7 +5418,7 @@ let test_multi_index_dup_dim_e331 () =
     dimensions { village = [kwaru, ajura] }
     compartments { }
     stratify(by = village)
-    parameters { mu[village, village] : positive 'ratio in [0.1, 5.0] }
+    parameters { mu[village, village] : positive dim 1 in [0.1, 5.0] }
     simulate { from = 0  to = 10 }
   |}
 
@@ -5427,7 +5427,7 @@ let test_multi_index_unknown_dim_e330 () =
     dimensions { village = [kwaru, ajura] }
     compartments { }
     stratify(by = village)
-    parameters { mu[village, nonesuch] : positive 'ratio in [0.1, 5.0] }
+    parameters { mu[village, nonesuch] : positive dim 1 in [0.1, 5.0] }
     simulate { from = 0  to = 10 }
   |}
 
@@ -5437,7 +5437,7 @@ let test_multi_index_empty_dim_e330 () =
     compartments { }
     stratify(by = village)
     stratify(by = empty)
-    parameters { mu[village, empty] : positive 'ratio in [0.1, 5.0] }
+    parameters { mu[village, empty] : positive dim 1 in [0.1, 5.0] }
     simulate { from = 0  to = 10 }
   |}
 
@@ -5449,7 +5449,7 @@ let test_multi_index_use_arity_e299 () =
     compartments { }
     stratify(by = village)
     stratify(by = season)
-    parameters { mu[village, season] : positive 'ratio in [0.1, 5.0] }
+    parameters { mu[village, season] : positive dim 1 in [0.1, 5.0] }
     let C[v in village] = mu[v]
     observations {
       obs[v in village] {
@@ -8637,7 +8637,7 @@ let test_unchecked_dim_parses () =
   let src = {|
     time_unit = 'days
     compartments { S, I, R }
-    parameters { beta : rate  alpha : real [1]  iota : real [P] }
+    parameters { beta : rate  alpha : real dim 1  iota : real dim P }
     transitions {
       infection : S --> I
         @ beta * unchecked_dim((I + iota)^alpha,
@@ -8673,7 +8673,7 @@ let test_unchecked_dim_requires_reason () =
   let src = {|
     time_unit = 'days
     compartments { S, I }
-    parameters { beta : rate  alpha : real [1]  iota : real [P] }
+    parameters { beta : rate  alpha : real dim 1  iota : real dim P }
     transitions {
       infect : S --> I
         @ beta * unchecked_dim((I + iota)^alpha, dim = population) * S / (S + I)
@@ -8688,7 +8688,7 @@ let test_unchecked_dim_unknown_dim_name () =
   let src = {|
     time_unit = 'days
     compartments { S, I }
-    parameters { beta : rate  alpha : real [1]  iota : real [P] }
+    parameters { beta : rate  alpha : real dim 1  iota : real dim P }
     transitions {
       infect : S --> I
         @ beta * unchecked_dim((I + iota)^alpha,
@@ -8709,8 +8709,8 @@ let test_unchecked_dim_he_style_typechecks () =
     compartments { S, E, I, R }
     parameters {
       beta  : rate
-      alpha : real [1]
-      iota  : real [P]
+      alpha : real dim 1
+      iota  : real dim P
       sigma : rate
       gamma : rate
     }
@@ -11280,7 +11280,7 @@ let test_bspline_log_link_dimensioned_coef_e301 () =
     [ "bspline"; "periodic_spline" ]
 
 (* ── smooth coefficient form (proposal 2026-10-27-estimable-bsplines §6.4) ── *)
-let smooth_model ?(params = "") ?(modes = "z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)")
+let smooth_model ?(params = "") ?(modes = "z[mode] : real dim 1 ~ normal(mu = 0.0, sigma = 1.0)")
     ?(kind = "bspline") ?(knots = "window = [0 'days, 168 'days]\n        n_basis = 12")
     ?(extra = "link = log") ?(smooth = "smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks)") () =
   Printf.sprintf {|
@@ -11289,9 +11289,9 @@ let smooth_model ?(params = "") ?(modes = "z[mode] : real 'ratio ~ normal(mu = 0
     compartments { S, I, R }
     parameters {
       gamma : rate in [0.01, 1.0]
-      a_b   : real 'ratio ~ normal(mu = -1.9, sigma = 0.6)
-      b_b   : real [1/T] ~ normal(mu = 0.0, sigma = 0.005)
-      tau_b : positive 'ratio ~ exponential(rate = 5.99)
+      a_b   : real dim 1 ~ normal(mu = -1.9, sigma = 0.6)
+      b_b   : real dim 1/T ~ normal(mu = 0.0, sigma = 0.005)
+      tau_b : positive dim 1 ~ exponential(rate = 5.99)
       %s
       %s
     }
@@ -11352,9 +11352,9 @@ let test_smooth_refusals () =
   compile_expect_error_code ~code:"E413" ~contains:"has no argument 'tau'"
     (smooth_model ~smooth:"smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks, tau = 1)" ());
   compile_expect_error_code ~code:"E414" ~contains:"prior exactly normal(mu = 0.0, sigma = 1.0)"
-    (smooth_model ~modes:"z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 2.0)" ());
+    (smooth_model ~modes:"z[mode] : real dim 1 ~ normal(mu = 0.0, sigma = 2.0)" ());
   compile_expect_error_code ~code:"E414" ~contains:"must be declared `real`"
-    (smooth_model ~modes:"z[mode] : positive 'ratio in [0, 8] ~ normal(mu = 0.0, sigma = 1.0)" ())
+    (smooth_model ~modes:"z[mode] : positive dim 1 in [0, 8] ~ normal(mu = 0.0, sigma = 1.0)" ())
 
 (* A parameter in `per` sets kappa and is structural. *)
 let test_smooth_param_per_is_e600 () =
@@ -11523,11 +11523,11 @@ let test_known_unit_literal_still_ok () =
   let src = {|
     time_unit = 'days
     compartments { S, I, R }
-    parameters { beta : positive 'per_day  gamma : rate }
+    parameters { beta : rate }
     let N = S + I + R
     transitions {
       infection : S --> I  @ beta * S * I / N
-      recovery  : I --> R  @ gamma * I
+      recovery  : I --> R  @ 0.1 'per_day * I
     }
     init { S = 999  I = 1 }
   |} in

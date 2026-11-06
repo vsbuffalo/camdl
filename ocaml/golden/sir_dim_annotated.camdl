@@ -1,5 +1,5 @@
 # SIR model with explicit dimension annotations on parameters.
-# Tests Phase 2 of dimensional analysis: [dim] syntax.
+# Exercises the `dim` clause on `real` and `positive` parameters.
 
 time_unit = 'days
 
@@ -10,9 +10,9 @@ let N = S + I + R
 parameters {
     beta      : rate                    # inferred T^-1 (no annotation needed)
     gamma     : rate in [0.01, 1.0]     # rate with bounds, no annotation
-    amplitude : real [1]                # explicitly dimensionless
-    mu        : positive [P*T^-1]       # population-level rate via annotation
-    coupling  : positive [1]            # dimensionless positive
+    amplitude : real dim 1              # explicitly dimensionless
+    mu        : positive dim P/T        # population-level rate via annotation
+    coupling  : positive dim 1          # dimensionless positive
 }
 
 transitions {

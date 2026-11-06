@@ -19,12 +19,12 @@ parameters {
   #' @symbol γ
   gamma : rate     in [0.001, 1.0]
   #' seasonal multiplier at the k-th basis function
-  s1    : real 'ratio in [0, 3]
-  s2    : real 'ratio in [0, 3]
-  s3    : real 'ratio in [0, 3]
-  s4    : real 'ratio in [0, 3]
-  s5    : real 'ratio in [0, 3]
-  s6    : real 'ratio in [0, 3]
+  s1    : real dim 1 in [0, 3]
+  s2    : real dim 1 in [0, 3]
+  s3    : real dim 1 in [0, 3]
+  s4    : real dim 1 in [0, 3]
+  s5    : real dim 1 in [0, 3]
+  s6    : real dim 1 in [0, 3]
   #' total population size
   N0    : count    in [100, 100000]
   #' initial number infectious

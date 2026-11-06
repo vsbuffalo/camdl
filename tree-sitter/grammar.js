@@ -116,21 +116,24 @@ module.exports = grammar({
         optional($.param_index),
         ":",
         field("kind", $.param_kind),
-        optional(field("dim_annotation_unit", $.unit_literal)),
-        optional(field("dim_annotation_bracket", $.dim_literal)),
+        optional(field("size", $.size_bracket)),
+        optional(field("dimension", $.dim_clause)),
         optional($.param_bounds),
         optional($.param_prior),
       ),
 
-    // Tier-3 dimension annotation in square brackets, e.g. `[1]`, `[P]`,
-    // `[T^-1]`, `[P*T^-1]`, `[P/T]`. The OCaml parser validates the exact
-    // set; tree-sitter accepts any short token sequence so highlighting
-    // works while errors land at compile time.
-    dim_literal: ($) =>
-      seq(
-        "[",
-        repeat1(choice($.identifier, $.number, "*", "/", "^", "-")),
-        "]",
+    // A parameter family's size after the kind, e.g. `real[6]`.
+    size_bracket: ($) => seq("[", commaSep1($.number), "]"),
+
+    // A parameter's dimension, e.g. `dim 1`, `dim T^-1`, `dim P/T`. The OCaml
+    // parser validates it; tree-sitter accepts the shape for highlighting.
+    dim_clause: ($) =>
+      seq("dim", $.dim_factor, repeat(seq(choice("*", "/"), $.dim_factor))),
+
+    dim_factor: ($) =>
+      choice(
+        $.number,
+        seq($.identifier, optional(seq("^", optional("-"), $.number))),
       ),
 
     param_index: ($) => seq("[", field("dim", $.identifier), "]"),

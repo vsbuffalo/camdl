@@ -9,12 +9,12 @@ time_unit = 'days
 compartments { X, D }
 
 parameters {
-  b1 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
-  b2 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
-  b3 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
-  b4 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
-  b5 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
-  b6 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  b1 : real dim 1 ~ normal(mu = -1.5, sigma = 1.0)
+  b2 : real dim 1 ~ normal(mu = -1.5, sigma = 1.0)
+  b3 : real dim 1 ~ normal(mu = -1.5, sigma = 1.0)
+  b4 : real dim 1 ~ normal(mu = -1.5, sigma = 1.0)
+  b5 : real dim 1 ~ normal(mu = -1.5, sigma = 1.0)
+  b6 : real dim 1 ~ normal(mu = -1.5, sigma = 1.0)
 }
 
 forcing {

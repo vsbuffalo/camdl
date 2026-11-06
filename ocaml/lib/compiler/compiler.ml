@@ -283,10 +283,16 @@ let front_end_collect ?(name = "model") ?(filename = "<input>")
        Lexer.pending_warnings := [];
        (* Drain parser-action errors collected from semantic actions that
           used to `failwith` (n3 in the 2026-04-19 compiler review). *)
-       List.iter (fun (sp, ep, code, msg, hint) ->
+       List.iter (fun (sp, ep, code, msg, hint, fix) ->
+         let fixes = match fix with
+           | None -> []
+           | Some (fsp, fep, replacement) ->
+             [ { Diagnostics.fix_loc =
+                   Diagnostics.loc_of_positions ~file:(unit_file fsp) fsp fep;
+                 replacement } ] in
          Diagnostics.error ctx.diags ~code
            ~loc:(Diagnostics.loc_of_positions ~file:(unit_file sp) sp ep)
-           ~message:msg ?hint ()
+           ~message:msg ?hint ~fixes ()
        ) (List.rev !Parser_errors.pending_errors);
        Parser_errors.pending_errors := [];
        (Some { model; ctx; summary; source }, ctx.diags, source))

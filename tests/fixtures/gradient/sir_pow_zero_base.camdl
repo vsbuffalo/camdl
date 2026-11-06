@@ -22,7 +22,7 @@ let N = S + I + R
 parameters {
   beta  : rate
   gamma : rate
-  alpha : positive [1] in [1.0, 2.0]   # exponent ≥ 1: ∂(R^alpha)/∂R is finite at R = 0
+  alpha : positive dim 1 in [1.0, 2.0]   # exponent ≥ 1: ∂(R^alpha)/∂R is finite at R = 0
 }
 
 transitions {

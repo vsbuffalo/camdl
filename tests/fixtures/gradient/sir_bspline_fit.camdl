@@ -11,15 +11,15 @@ let N = S + I + R
 
 parameters {
   gamma : rate in [0.01, 1.0]
-  b1 : real 'ratio in [-5, 2]
-  b2 : real 'ratio in [-5, 2]
-  b3 : real 'ratio in [-5, 2]
-  b4 : real 'ratio in [-5, 2]
-  b5 : real 'ratio in [-5, 2]
-  r1 : real 'ratio in [0, 1]
-  r2 : real 'ratio in [0, 1]
-  r3 : real 'ratio in [0, 1]
-  r4 : real 'ratio in [0, 1]
+  b1 : real dim 1 in [-5, 2]
+  b2 : real dim 1 in [-5, 2]
+  b3 : real dim 1 in [-5, 2]
+  b4 : real dim 1 in [-5, 2]
+  b5 : real dim 1 in [-5, 2]
+  r1 : real dim 1 in [0, 1]
+  r2 : real dim 1 in [0, 1]
+  r3 : real dim 1 in [0, 1]
+  r4 : real dim 1 in [0, 1]
 }
 
 forcing {

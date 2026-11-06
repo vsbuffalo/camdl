@@ -22,11 +22,11 @@ parameters {
   rho   : probability in [0.01, 1.0]
   k     : positive    in [0.1, 1000]
   # log beta at mid-window; the explicit fit's coefficient prior
-  a       : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  a       : real dim 1 ~ normal(mu = -1.5, sigma = 1.0)
   # slope of log beta per day: one SD changes beta by e^1.72 ≈ 5.6 across the window
-  b       : real [1/T] ~ normal(mu = 0.0, sigma = 0.02)
-  tau     : positive 'ratio ~ exponential(rate = 5.99)
-  z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
+  b       : real dim 1/T ~ normal(mu = 0.0, sigma = 0.02)
+  tau     : positive dim 1 ~ exponential(rate = 5.99)
+  z[mode] : real dim 1 ~ normal(mu = 0.0, sigma = 1.0)
   N0    : count       in [100, 10000000]
   E0    : count       in [0, 1000]
   I0    : count       in [0, 1000]

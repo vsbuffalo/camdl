@@ -17,12 +17,12 @@ parameters {
   #' @symbol γ
   gamma : rate     in [0.001, 1.0]
   #' log transmission rate (per day) at the spline's k-th coefficient
-  b1    : real 'ratio in [-6, 1]
-  b2    : real 'ratio in [-6, 1]
-  b3    : real 'ratio in [-6, 1]
-  b4    : real 'ratio in [-6, 1]
-  b5    : real 'ratio in [-6, 1]
-  b6    : real 'ratio in [-6, 1]
+  b1    : real dim 1 in [-6, 1]
+  b2    : real dim 1 in [-6, 1]
+  b3    : real dim 1 in [-6, 1]
+  b4    : real dim 1 in [-6, 1]
+  b5    : real dim 1 in [-6, 1]
+  b6    : real dim 1 in [-6, 1]
   #' total population size
   N0    : count    in [100, 100000]
   #' initial number infectious

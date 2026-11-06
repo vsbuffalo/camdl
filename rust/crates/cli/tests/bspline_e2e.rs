@@ -379,10 +379,10 @@ compartments { S, I, R }
 let N = S + I + R
 parameters {
   gamma : rate in [0.01, 1.0]
-  c1 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
-  c2 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
-  c3 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
-  c4 : real 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  c1 : real dim 1 ~ normal(mu = -1.5, sigma = 1.0)
+  c2 : real dim 1 ~ normal(mu = -1.5, sigma = 1.0)
+  c3 : real dim 1 ~ normal(mu = -1.5, sigma = 1.0)
+  c4 : real dim 1 ~ normal(mu = -1.5, sigma = 1.0)
   rho : probability in [0.01, 1.0]
 }
 forcing {

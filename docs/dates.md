@@ -371,10 +371,11 @@ _bound_ from contaminating uses of the parameter.
 years would make the date↔number conversion drift by an accumulating residual
 under repeated conversion, which silently mis-aligns rendered dates from the
 calendar. Switch to `time_unit =
-'days` (or `'weeks`); per-month rate parameters
-(`beta : rate
-'per_month`) and affine duration literals (`5 'months` as a
-length) continue to work, because the expander converts them at compile time.
+'days` (or `'weeks`); affine duration literals
+(`5 'months` as a length) and rate literals (`0.2 'per_month`) continue to work,
+because the expander converts them at compile time. A parameter has no scale of
+its own — its value is always in the model's `time_unit` — so a rate parameter's
+value must then be supplied per day.
 
 The unanchored case is unaffected: `time_unit = 'months` with no `origin` is
 fine (the dacca configuration). The constant-day rule only fires when an
@@ -683,10 +684,15 @@ axis. `simulate { to = 600 }` was 600 months; after the switch it's 600 days.
 minutes). Observation data columns and intervention schedules shift the same
 way.
 
-**What survives unchanged.** Any _typed_ position — anything that carries its
-own unit literal — converts correctly. `beta : positive 'per_month` keeps
-working (the expander converts to per-axis-unit). `1 'months` as a duration
-value keeps working (it's an affine span of ≈ 30.44 days regardless of axis).
+**What survives unchanged.** Any _typed_ position — any value that carries its
+own unit literal — converts correctly. `1 'months` as a duration value keeps
+working (it's an affine span of ≈ 30.44 days regardless of axis), and so does a
+rate literal such as `0.2 'per_month`.
+
+**What does not.** A parameter has no scale of its own: its value is always read
+in the model's `time_unit`. After the switch, the value you supply for a rate
+parameter `beta` is per day, so a per-month value must be divided by ≈ 30.44 —
+the compiler cannot do it for you, because the value arrives at fit or run time.
 
 **Before** (unanchored monthly):
 
@@ -695,8 +701,8 @@ time_unit = 'months
 # no origin
 
 parameters {
-  beta  : positive 'per_month
-  gamma : positive 'per_month
+  beta  : rate        # per month
+  gamma : rate        # per month
   ...
 }
 
@@ -720,8 +726,8 @@ time_unit = 'days
 origin    = date("1891-01-01")
 
 parameters {
-  beta  : positive 'per_month # unchanged — expander converts to per-day
-  gamma : positive 'per_month
+  beta  : rate        # now per day: supply the per-month value / 30.44
+  gamma : rate        # likewise
   ...
 }
 
@@ -762,7 +768,7 @@ unit-literal annotation) is the smallest diff.
 ## Why `'months` is fine in some places and forbidden in others
 
 A natural confusion reading the rules above: `5 'months` works in a table value
-or a parameter bound, `beta : positive 'per_month` works everywhere, but
+or a parameter bound, `0.2 'per_month` works in any rate expression, but
 `date + 6 'months` is a hard error. That looks contradictory. It isn't.
 
 The principle: **a calendar month is unambiguous as a _length_ and unambiguous

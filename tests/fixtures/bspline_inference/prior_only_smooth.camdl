@@ -12,10 +12,10 @@ dimensions { mode = [m1, m2, m3, m4] }
 compartments { X, D }
 
 parameters {
-  a       : real 'ratio ~ normal(mu = -1.0, sigma = 0.6)
-  b       : real [1/T] ~ normal(mu = 0.0, sigma = 0.01)
-  tau     : positive 'ratio ~ exponential(rate = 5.99)
-  z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
+  a       : real dim 1 ~ normal(mu = -1.0, sigma = 0.6)
+  b       : real dim 1/T ~ normal(mu = 0.0, sigma = 0.01)
+  tau     : positive dim 1 ~ exponential(rate = 5.99)
+  z[mode] : real dim 1 ~ normal(mu = 0.0, sigma = 1.0)
 }
 
 forcing {

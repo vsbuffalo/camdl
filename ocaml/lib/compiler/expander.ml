@@ -5303,50 +5303,6 @@ let ir_param_kind_of_ast : Ast.param_type -> Ir.param_kind = function
   | PInstant     -> Ir.Instant
   | PDuration    -> Ir.Duration
 
-(* Resolve a parameter's [Ir.param_dim] (the explicit (P,T) annotation) from
-   the optional bracket annotation [pdim] and the optional tier-3 unit literal
-   [punit] (gh#60). A unit literal is sugar for the dimension half of the
-   bracket annotation: `positive 'ratio` ≡ `positive [1]`, `positive 'per_year`
-   ≡ `positive [T^-1]`, `real 'count` ≡ `real [P]`. The scale half of the unit
-   plays no role for a parameter — its value is always supplied in model time
-   units (spec §2.4). The unit literal is only meaningful on the
-   dimension-under-determined kinds (`positive`, `real`); on a kind whose
-   dimension the keyword already fixes it is rejected (E281), and it may not be
-   combined with a redundant/conflicting bracket annotation (E282). *)
-let resolve_param_dim ctx ~loc ~pname (pkind : Ast.param_type)
-    (pdim : (int * int) option) (punit : unit_lit option) : (int * int) option =
-  match punit with
-  | None -> pdim
-  | Some u ->
-    (match pkind with
-     | PPositive | PReal -> ()
-     | _ ->
-       Diagnostics.error ctx.diags
-         ~code:"E281"
-         ~loc
-         ~message:(Printf.sprintf
-           "parameter '%s': a unit literal ('%s) is only allowed on the \
-            'positive' and 'real' kinds"
-           pname (unit_lit_to_string u))
-         ~hint:(Printf.sprintf
-           "the '%s' kind already fixes the dimension; drop the unit literal"
-           (Ir.param_kind_name (ir_param_kind_of_ast pkind)))
-         ());
-    (match pdim with
-     | None -> ()
-     | Some _ ->
-       Diagnostics.error ctx.diags
-         ~code:"E282"
-         ~loc
-         ~message:(Printf.sprintf
-           "parameter '%s': cannot give both a unit literal ('%s) and a \
-            bracket dimension annotation"
-           pname (unit_lit_to_string u))
-         ~hint:"use one or the other — a unit literal already supplies the \
-                dimension"
-         ());
-    Some (unit_lit_to_dim u)
-
 let rec eval_const_expr ctx = function
   | EConst f -> f
   | EUnit (f, u) -> unit_to_model_time ctx f u
@@ -5935,11 +5891,11 @@ let build_doc_index ctx : Ir.doc_index =
 let expand_parameters ctx =
   let from_params = List.concat_map (fun pd ->
     match pd with
-    | PScalar { pname; pbounds; pkind; pdim; punit; pprior; ploc; _ } ->
+    | PScalar { pname; pbounds; pkind; pdim; pprior; ploc; _ } ->
       let bounds = resolve_bounds ctx pbounds in
       let pk = Some (ir_param_kind_of_ast pkind) in
       let loc = diag_loc_of_ast_ctx ctx ploc in
-      let dim = resolve_param_dim ctx ~loc ~pname pkind pdim punit in
+      let dim = pdim in
       let (prior, hierarchical) = match pprior with
         | None -> (None, None)
         | Some ps -> (match classify_and_resolve_prior_spec ctx ~loc ~bounds ~pname ps with
@@ -5951,7 +5907,7 @@ let expand_parameters ctx =
          Ir.param_kind = pk;
          Ir.param_dim  = dim;
        }]
-    | PIndexed { pname; pdims; pbounds; pkind; pdim = pdim_ann; punit; pprior; ploc; _ } ->
+    | PIndexed { pname; pdims; pbounds; pkind; pdim = pdim_ann; pprior; ploc; _ } ->
       (* N-dim indexed parameter: one scalar param per cell of the cartesian
          product of the index dimensions' levels. Names mangle
          `<base>_<l1>_<l2>_…` via `expand_indexed_decl_names` (the same producer
@@ -5998,7 +5954,7 @@ let expand_parameters ctx =
       else begin
         let bounds = resolve_bounds ctx pbounds in
         let pk = Some (ir_param_kind_of_ast pkind) in
-        let resolved_dim = resolve_param_dim ctx ~loc ~pname pkind pdim_ann punit in
+        let resolved_dim = pdim_ann in
         let (prior, hierarchical) = match pprior with
           | None -> (None, None)
           | Some ps -> (match classify_and_resolve_prior_spec ctx ~loc ~bounds ~pname ps with

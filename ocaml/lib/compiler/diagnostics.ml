@@ -20,6 +20,14 @@ type loc = {
   end_col  : int;
 }
 
+(* A machine-applicable fix-it: replace the source text spanned by [fix_loc]
+   with [replacement]. Serialized under `--json-errors` so an editor or agent
+   can apply it without parsing the hint prose. *)
+type fix = {
+  fix_loc     : loc;
+  replacement : string;
+}
+
 type diagnostic = {
   severity : severity;
   code     : string;              (* "E100", "W200", etc. *)
@@ -28,6 +36,7 @@ type diagnostic = {
   detail   : string option;
   hint     : string option;
   related  : (loc * string) list; (* secondary locations + labels *)
+  fixes    : fix list;
 }
 
 (* ── Collection ─────────────────────────────────────────────────────────────── *)
@@ -172,6 +181,12 @@ let diagnostic_to_json (d : diagnostic) : Yojson.Safe.t =
     | None   -> fields
     | Some s -> fields @ [("hint", `String s)]
   in
+  let fields = match d.fixes with
+    | [] -> fields
+    | fs -> fields @ [("fixes", `List (List.map (fun f ->
+        `Assoc [ ("loc", loc_to_json f.fix_loc);
+                 ("replacement", `String f.replacement) ]) fs))]
+  in
   `Assoc fields
 
 (* Total order on diagnostics for stable, source-following output: sort
@@ -225,17 +240,17 @@ let render t cache : string =
    post-expansion passes return [diagnostic list] and let the caller emit
    (gh#181), so they construct via these; the expansion phase still emits
    directly through [error]/[warning]/[info] below. *)
-let mk_error ~code ~loc ~message ?detail ?hint ?(related=[]) () =
-  { severity=Error; code; loc; message; detail; hint; related }
+let mk_error ~code ~loc ~message ?detail ?hint ?(related=[]) ?(fixes=[]) () =
+  { severity=Error; code; loc; message; detail; hint; related; fixes }
 
-let mk_warning ~code ~loc ~message ?detail ?hint ?(related=[]) () =
-  { severity=Warning; code; loc; message; detail; hint; related }
+let mk_warning ~code ~loc ~message ?detail ?hint ?(related=[]) ?(fixes=[]) () =
+  { severity=Warning; code; loc; message; detail; hint; related; fixes }
 
-let mk_info ~code ~loc ~message ?detail ?hint ?(related=[]) () =
-  { severity=Info; code; loc; message; detail; hint; related }
+let mk_info ~code ~loc ~message ?detail ?hint ?(related=[]) ?(fixes=[]) () =
+  { severity=Info; code; loc; message; detail; hint; related; fixes }
 
-let error t ~code ~loc ~message ?detail ?hint ?(related=[]) () =
-  emit t (mk_error ~code ~loc ~message ?detail ?hint ~related ())
+let error t ~code ~loc ~message ?detail ?hint ?(related=[]) ?(fixes=[]) () =
+  emit t (mk_error ~code ~loc ~message ?detail ?hint ~related ~fixes ())
 
 let warning t ~code ~loc ~message ?detail ?hint ?(related=[]) () =
   emit t (mk_warning ~code ~loc ~message ?detail ?hint ~related ())

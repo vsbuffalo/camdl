@@ -126,6 +126,46 @@ or `sia[r in round] : transfer(…) at
 [t_start[r]]` if each round has its own
 date.
 
+## 2026-11-05 — Brackets after a kind mean size; dimensions are a `dim` clause
+
+**What.** A parameter's dimension is written with a `dim` clause after the kind:
+`b : real dim T^-1`, `alpha : positive dim 1`, `mu : positive dim P/T`. Brackets
+directly after a kind now mean a parameter family's size (`b : real[6]`, which
+lands with parameter families), so they no longer give a dimension. A unit
+literal is no longer accepted on a parameter declaration: it carries a scale,
+and a parameter's value is always in the model's `time_unit`, so the scale was
+silently dropped (`gamma : positive 'per_year` compiled to the same IR as
+`'per_day`, gh#1006). `dim` is now a keyword.
+
+Dimension inference also became complete for products of unknowns, and forcing
+arguments and initial conditions are now dimension-checked (E312, E313), so
+fewer parameters need a `dim` clause at all.
+
+**Migration.**
+
+| Old                      | New                    |
+| ------------------------ | ---------------------- |
+| `x : real [1]`           | `x : real dim 1`       |
+| `x : real [1/T]`         | `x : real dim 1/T`     |
+| `x : positive [P*T^-1]`  | `x : positive dim P/T` |
+| `x : positive 'ratio`    | `x : positive dim 1`   |
+| `x : real 'count`        | `x : real dim P`       |
+| `x : positive 'per_year` | `x : positive dim 1/T` |
+| `x : rate 'per_day`      | `x : rate`             |
+
+The dimension is unchanged by the rewrite, and so is the IR. A `'per_month` or
+`'per_year` parameter's value was always read per `time_unit`; if you supplied
+values on the unit's own scale, convert them.
+
+**Diagnostics.** A dimension in brackets is E116; a unit literal on a parameter
+E117; `kind[1]` E417 ("a parameter family needs at least two cells"; if it was a
+dimension, write `dim 1`); `kind[n]` with n ≥ 2 E119 until parameter families
+land; a `dim` clause on a kind that fixes its dimension E281. Each refusal
+carries a machine-applicable fix-it under `--json-errors`. A model that uses
+`dim` as an identifier must rename it.
+
+---
+
 ## 2026-10-29 — `bspline` forcing with estimable coefficients
 
 **What.** A new forcing kind, `bspline`: a clamped B-spline over a window, β(t)

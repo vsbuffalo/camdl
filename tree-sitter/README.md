@@ -44,8 +44,7 @@ Surface covered:
 - Filtered sums (`sum(q in patch where dist[p, q] < 50 and q != p, I[q])`) and
   table guards in `where` clauses.
 - Tier-3 dimension annotations on parameter declarations — both unit literals
-  (`tau : positive 'ratio`) and bracket forms (`mu : positive
-  [P*T^-1]`).
+  (`tau : positive dim 1`) and bracket forms (`mu : positive dim P/T`).
 - Range literals inside list expressions (`on = [7 'days : 100 'days]`).
 - Multi-name shared table declarations (`pop, init_sus : patch = read(...)`).
 - Indexed scenario overrides (`R0[north] = 2.5` in a `set = { ... }` block).

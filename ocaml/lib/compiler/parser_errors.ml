@@ -9,17 +9,25 @@
    giving the user a proper diagnostic with source location instead of
    a bare stack trace. *)
 
+(* A machine-applicable fix-it: replace the source between the two positions
+   with the text. *)
+type fix = Lexing.position * Lexing.position * string
+
 let pending_errors
-  : (Lexing.position * Lexing.position * string * string * string option) list ref
+  : (Lexing.position * Lexing.position * string * string * string option * fix option) list ref
   = ref []
 
 let push_error ~sp ~ep ~code ~msg =
-  pending_errors := (sp, ep, code, msg, None) :: !pending_errors
+  pending_errors := (sp, ep, code, msg, None, None) :: !pending_errors
 
 (* Like [push_error] but carries hint text. Kept as a separate entry point
    so the many existing [push_error] call sites need no change. *)
 let push_error_hint ~sp ~ep ~code ~msg ~hint =
-  pending_errors := (sp, ep, code, msg, Some hint) :: !pending_errors
+  pending_errors := (sp, ep, code, msg, Some hint, None) :: !pending_errors
+
+(* Like [push_error_hint], with an optional fix-it. *)
+let push_error_fix ~sp ~ep ~code ~msg ~hint ~(fix : fix option) =
+  pending_errors := (sp, ep, code, msg, Some hint, fix) :: !pending_errors
 
 (* Helper for parser semantic actions: convert menhir $startpos/$endpos
    into an Ast.loc suitable for stashing in decl records so the

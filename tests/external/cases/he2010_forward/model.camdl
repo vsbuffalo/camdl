@@ -20,13 +20,13 @@ parameters {
   sigma     : rate        in [0.01, 0.5]    # 1/latent period (day^-1)
   gamma     : rate        in [0.01, 0.5]    # 1/infectious period (day^-1)
   mu        : rate        in [1e-6, 0.01]   # death rate (day^-1)
-  alpha     : positive [1] in [0.5, 1.0]    # mixing exponent (dimensionless)
+  alpha     : positive dim 1 in [0.5, 1.0]    # mixing exponent (dimensionless)
   iota      : count       in [0.01, 100.0]  # importation floor: enters FOI as (I + iota)^alpha — dimensionless count, NOT a rate. He et al. MLE: 2.9
-  sigma_se  : positive [1] in [0.001, 5.0]  # extra-demographic noise σ² (dimensionless)
+  sigma_se  : positive dim 1 in [0.001, 5.0]  # extra-demographic noise σ² (dimensionless)
   amplitude : probability in [0.0001, 0.9999] # term-time forcing amplitude
   cohort    : probability in [0.0001, 0.9999] # fraction of births entering at school start
   rho       : probability in [0.0001, 0.9999] # reporting probability
-  psi       : positive [1] in [0.001, 1.0]  # measurement overdispersion (He et al. eq. 6)
+  psi       : positive dim 1 in [0.001, 1.0]  # measurement overdispersion (He et al. eq. 6)
   s0        : probability in [0.001, 0.5]   # initial susceptible fraction (He et al. MLE ≈ 0.0297). Wider than He et al.'s search range to give IF2's logit transform ≥ 3 log-units of margin on both sides of truth; earlier [0.005, 0.25] pinned chains at the lower logit bound (see he2010-synthetic.qmd diagnostic)
   e0        : probability in [1e-6, 0.01]   # initial exposed fraction
   i0        : probability in [1e-6, 0.01]   # initial infected fraction

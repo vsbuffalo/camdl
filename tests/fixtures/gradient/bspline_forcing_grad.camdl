@@ -10,13 +10,13 @@ time_unit = 'days
 compartments { X, D1, D2, D3, D4, D5 }
 
 parameters {
-  c1 : real 'ratio in [-3, 3]
-  c2 : real 'ratio in [-3, 3]
-  c3 : real 'ratio in [-3, 3]
-  c4 : real 'ratio in [-3, 3]
-  c5 : real 'ratio in [-3, 3]
-  c6 : real 'ratio in [-3, 3]
-  a  : real 'ratio in [-3, 3]
+  c1 : real dim 1 in [-3, 3]
+  c2 : real dim 1 in [-3, 3]
+  c3 : real dim 1 in [-3, 3]
+  c4 : real dim 1 in [-3, 3]
+  c5 : real dim 1 in [-3, 3]
+  c6 : real dim 1 in [-3, 3]
+  a  : real dim 1 in [-3, 3]
 }
 
 forcing {

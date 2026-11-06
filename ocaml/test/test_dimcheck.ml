@@ -619,7 +619,7 @@ let test_sqrt_odd_powers_fail () =
 (* ── Explicit Dimension Annotations ───────────────────────────────────── *)
 
 let test_dim_annotation_dimensionless () =
-  (* amplitude : real [1] — explicitly dimensionless, used as multiplier *)
+  (* amplitude : real dim 1 — explicitly dimensionless, used as multiplier *)
   let m = empty_model
     ~compartments:[mk_compartment "S"]
     ~parameters:[mk_param ~kind:(Some Ir.Rate) "beta";
@@ -636,7 +636,7 @@ let test_dim_annotation_dimensionless () =
    | None -> Alcotest.fail "amplitude dim not resolved")
 
 let test_dim_annotation_pop_rate () =
-  (* mu : positive [P/T] — population-level rate, used alone as transition rate *)
+  (* mu : positive dim P/T — population-level rate, used alone as transition rate *)
   let m = empty_model
     ~compartments:[mk_compartment "S"]
     ~parameters:[mk_param ~kind:(Some Ir.Positive) ~dim:(Some (1, -1)) "mu"]
@@ -670,7 +670,7 @@ let test_dim_annotation_resolves_i300 () =
    | None -> ())
 
 let test_dim_annotation_conflict () =
-  (* mu : positive [1] used as mu * S — gives 1 * P = P, not P*T^-1 → E300 *)
+  (* mu : positive dim 1 used as mu * S — gives 1 * P = P, not P*T^-1 → E300 *)
   let m = empty_model
     ~compartments:[mk_compartment "S"]
     ~parameters:[mk_param ~kind:(Some Ir.Positive) ~dim:(Some (0, 0)) "mu"]
@@ -1160,14 +1160,13 @@ let test_neg_binomial_mean_scaled_projection_ok () =
             ~likelihood:"neg_binomial(mean = rho * (1.0 + gamma * q_comm / tau) \
                          * projected, r = k)")
 
-(* ── Tier-3 unit literal on positive/real param kinds (gh#60) ──────────── *)
+(* ── The `dim` clause on positive/real (2026-11-05 size brackets §3) ─────── *)
 
-(* `positive`/`real` may carry an optional tier-3 unit literal that supplies the
-   parameter's dimension (the dimension half of the unit; a parameter's scale is
-   always the model time unit). `positive 'ratio` ≡ `positive [1]`,
-   `real 'count` ≡ `real [P]`. The unit is sugar over the bracket annotation and
-   flows to `param_dim`; dimcheck consumes it unchanged. A unit on a kind whose
-   dimension is already fixed is E281; a unit combined with a bracket is E282. *)
+(* `positive` and `real` may carry a `dim` clause giving the parameter's
+   dimension, which flows to `param_dim`; dimcheck consumes it unchanged. A
+   `dim` clause on a kind whose dimension is fixed is E281. The notations it
+   replaces — a dimension bracket and a unit literal — are refused with a
+   fix-it (E116, E117), and a bracket is a family size (E417 below 2). *)
 
 let compile_ok name src =
   match Compiler.compile ~name src with
@@ -1177,7 +1176,7 @@ let compile_ok name src =
 let dim_of_param name (r : Dimcheck.result) =
   Option.map (fun a -> (a.(0), a.(1))) (param_dim_of name r)
 
-(* `tau : positive 'ratio` carries dimension [1] (dimensionless) and, used as a
+(* `tau : positive dim 1` carries dimension [1] (dimensionless) and, used as a
    dimensionless multiplier on a valid rate, produces no errors. *)
 let test_positive_ratio_is_dimensionless () =
   let src = {camdl|
@@ -1185,7 +1184,7 @@ compartments { S, I, R }
 parameters {
   beta  : rate
   gamma : rate
-  tau   : positive 'ratio in [0.001, 3.0]
+  tau   : positive dim 1 in [0.001, 3.0]
 }
 let N = S + I + R
 transitions {
@@ -1195,11 +1194,11 @@ transitions {
 |camdl} in
   let m = compile_ok "positive-ratio" src in
   let r = Dimcheck.check_model m in
-  Alcotest.(check bool) "positive 'ratio compiles clean" true (no_errors r);
+  Alcotest.(check bool) "positive dim 1 compiles clean" true (no_errors r);
   Alcotest.(check (option (pair int int))) "tau is [1]"
     (Some (0, 0)) (dim_of_param "tau" r)
 
-(* `real 'count` carries dimension [P] (population). Used as a count seed inside
+(* `real dim P` carries dimension [P] (population). Used as a count seed inside
    `(I + iota)`, the addition typechecks (P + P). *)
 let test_real_count_is_population () =
   let src = {camdl|
@@ -1207,7 +1206,7 @@ compartments { S, I, R }
 parameters {
   beta : rate
   gamma : rate
-  iota : real 'count in [0.0, 10.0]
+  iota : real dim P in [0.0, 10.0]
 }
 let N = S + I + R
 transitions {
@@ -1217,31 +1216,30 @@ transitions {
 |camdl} in
   let m = compile_ok "real-count" src in
   let r = Dimcheck.check_model m in
-  Alcotest.(check bool) "real 'count compiles clean" true (no_errors r);
+  Alcotest.(check bool) "real dim P compiles clean" true (no_errors r);
   Alcotest.(check (option (pair int int))) "iota is [P]"
     (Some (1, 0)) (dim_of_param "iota" r)
 
-(* `positive 'per_year` carries dimension [T^-1]. With `time_unit = 'days` the
-   dimension half is what matters (the per-year scale does not change the
-   exponents); used alone as a per-capita * pop rate, it typechecks. *)
+(* `positive dim 1/T` carries dimension [T^-1]; used alone as a per-capita *
+   pop rate, it typechecks. *)
 let test_positive_per_year_is_rate () =
   let src = {camdl|
 time_unit = 'days
 compartments { S, I }
 parameters {
-  iota : positive 'per_year in [0.0001, 0.1]
+  iota : positive dim 1/T in [0.0001, 0.1]
 }
 transitions {
   importation : S --> I @ iota * S
 }
 |camdl} in
-  let m = compile_ok "positive-per-year" src in
+  let m = compile_ok "positive-per-time" src in
   let r = Dimcheck.check_model m in
-  Alcotest.(check bool) "positive 'per_year compiles clean" true (no_errors r);
+  Alcotest.(check bool) "positive dim 1/T compiles clean" true (no_errors r);
   Alcotest.(check (option (pair int int))) "iota is [T^-1]"
     (Some (0, -1)) (dim_of_param "iota" r)
 
-(* The dimension is load-bearing: `tau : positive 'ratio` (dimensionless) used
+(* The dimension is load-bearing: `tau : positive dim 1` (dimensionless) used
    where a count is required (added to a population) is now a real dimension
    error (E302), not a silently-swallowed I300. *)
 let test_positive_ratio_misuse_is_caught () =
@@ -1250,7 +1248,7 @@ compartments { S, I, R }
 parameters {
   beta  : rate
   gamma : rate
-  tau   : positive 'ratio
+  tau   : positive dim 1
 }
 let N = S + I + R
 transitions {
@@ -1265,48 +1263,79 @@ transitions {
      fully determined by the annotation. *)
   Alcotest.(check bool) "dimensionless tau added to a population is E302"
     true (has "E302");
-  Alcotest.(check bool) "no I300: dimension is determined by the unit"
+  Alcotest.(check bool) "no I300: dimension is determined by the clause"
     false (has "I300")
 
-(* A unit literal on a kind whose dimension the keyword already fixes (e.g.
-   `rate`, `count`) is rejected with E281, naming the offending kind. *)
-let test_unit_on_rate_kind_rejected () =
-  let src = {camdl|
+let codes_of src =
+  List.map (fun (d : Diagnostics.diagnostic) -> d.code)
+    (Compiler.collect_diagnostics ~filename:"<dim-clause>" src)
+
+let one_param decl = Printf.sprintf {camdl|
 compartments { S, I, R }
 parameters {
-  beta  : rate 'ratio
+  beta  : rate
   gamma : rate
+  %s
 }
 let N = S + I + R
 transitions {
   infection : S --> I @ beta * S * I / N
   recovery  : I --> R @ gamma * I
 }
-|camdl} in
-  let diags = Compiler.collect_diagnostics ~filename:"<unit-on-rate>" src in
-  let has code =
-    List.exists (fun (d : Diagnostics.diagnostic) -> d.code = code) diags in
-  Alcotest.(check bool) "unit literal on 'rate' kind is E281" true (has "E281")
+|camdl} decl
 
-(* Giving both a unit literal and a bracket dimension annotation is E282. *)
-let test_unit_and_bracket_conflict_rejected () =
-  let src = {camdl|
-compartments { S, I, R }
-parameters {
-  beta  : rate
-  gamma : rate
-  tau   : positive 'ratio [1]
-}
-let N = S + I + R
-transitions {
-  infection : S --> I @ tau * beta * S * I / N
-  recovery  : I --> R @ gamma * I
-}
-|camdl} in
-  let diags = Compiler.collect_diagnostics ~filename:"<unit-and-bracket>" src in
-  let has code =
-    List.exists (fun (d : Diagnostics.diagnostic) -> d.code = code) diags in
-  Alcotest.(check bool) "unit + bracket annotation is E282" true (has "E282")
+(* A `dim` clause on a kind that fixes its dimension: E281, whether it agrees
+   (redundant) or not (contradictory). *)
+let test_dim_clause_on_fixed_kind_rejected () =
+  Alcotest.(check bool) "rate dim T^-1 is E281 (redundant)" true
+    (List.mem "E281" (codes_of (one_param "x : rate dim T^-1")));
+  Alcotest.(check bool) "rate dim 1 is E281 (contradictory)" true
+    (List.mem "E281" (codes_of (one_param "x : rate dim 1")))
+
+(* Every old annotation is refused, none reinterpreted: a dimension bracket is
+   E116, a unit literal E117, a bracket of 1 is E417 (a family needs two cells),
+   a larger size is E119 until families land, and two sizes are E417. *)
+let test_old_annotations_refused () =
+  List.iter (fun (decl, code) ->
+    Alcotest.(check bool) (decl ^ " is " ^ code) true
+      (List.mem code (codes_of (one_param decl))))
+    [ ("x : real [1/T]", "E116");
+      ("x : positive [P*T^-1]", "E116");
+      ("x : positive 'per_year", "E117");
+      ("x : rate 'per_day", "E117");
+      ("x : real [1]", "E417");
+      ("x : positive[1]", "E417");
+      ("x : real[6]", "E119");
+      ("x : real[6, 3]", "E417") ]
+
+(* Each refusal carries one machine-applicable fix-it; applying it yields a
+   model that compiles clean. *)
+let test_old_annotations_fixits_apply () =
+  List.iter (fun (decl, want) ->
+    let src = one_param decl in
+    let diags = Compiler.collect_diagnostics ~filename:"<fixit>" src in
+    let fixes = List.concat_map (fun (d : Diagnostics.diagnostic) -> d.fixes) diags in
+    match fixes with
+    | [ f ] ->
+      let lines = Array.of_list (String.split_on_char '\n' src) in
+      let l = f.fix_loc in
+      Alcotest.(check int) "single-line fix" l.line l.end_line;
+      let row = lines.(l.line - 1) in
+      lines.(l.line - 1) <-
+        String.sub row 0 (l.col - 1) ^ f.replacement
+        ^ String.sub row (l.end_col - 1) (String.length row - l.end_col + 1);
+      Alcotest.(check string) (decl ^ " rewrites") ("  " ^ want) lines.(l.line - 1);
+      let fixed = String.concat "\n" (Array.to_list lines) in
+      Alcotest.(check (list string)) (decl ^ " then compiles clean") []
+        (List.filter (fun c -> c.[0] = 'E') (codes_of fixed))
+    | fs -> Alcotest.failf "%s: expected one fix-it, got %d" decl (List.length fs))
+    [ ("x : real [1/T] in [-1, 1]", "x : real dim 1/T in [-1, 1]");
+      ("x : positive[P*T^-1]", "x : positive dim P/T");
+      ("x : positive 'per_year in [0.1, 10.0]", "x : positive dim 1/T in [0.1, 10.0]");
+      ("x : real [1]", "x : real dim 1");
+      ("x : positive 'ratio [1]", "x : positive dim 1");
+      ("x : rate 'per_day", "x : rate");
+      ("x : rate dim T^-1", "x : rate") ]
 
 (* The feature is purely additive: a bare `positive` (no unit) is unchanged —
    under-determined, still emits I300 when used in a dim-determined slot. *)
@@ -1589,13 +1618,14 @@ let () =
       Alcotest.test_case "no duplicate errors"         `Quick test_check_phase_no_duplicates;
       Alcotest.test_case "single error reported once"  `Quick test_check_phase_single_error;
     ];
-    "param_unit_literal", [
-      Alcotest.test_case "positive 'ratio is [1]"        `Quick test_positive_ratio_is_dimensionless;
-      Alcotest.test_case "real 'count is [P]"            `Quick test_real_count_is_population;
-      Alcotest.test_case "positive 'per_year is [T^-1]"  `Quick test_positive_per_year_is_rate;
+    "dim_clause", [
+      Alcotest.test_case "positive dim 1 is [1]"         `Quick test_positive_ratio_is_dimensionless;
+      Alcotest.test_case "real dim P is [P]"             `Quick test_real_count_is_population;
+      Alcotest.test_case "positive dim 1/T is [T^-1]"    `Quick test_positive_per_year_is_rate;
       Alcotest.test_case "ratio misuse is caught"        `Quick test_positive_ratio_misuse_is_caught;
-      Alcotest.test_case "unit on rate kind → E281"      `Quick test_unit_on_rate_kind_rejected;
-      Alcotest.test_case "unit + bracket → E282"         `Quick test_unit_and_bracket_conflict_rejected;
+      Alcotest.test_case "dim on fixed kind → E281"      `Quick test_dim_clause_on_fixed_kind_rejected;
+      Alcotest.test_case "old annotations refused"       `Quick test_old_annotations_refused;
+      Alcotest.test_case "old annotation fix-its apply"  `Quick test_old_annotations_fixits_apply;
       Alcotest.test_case "bare positive unchanged"       `Quick test_bare_positive_unchanged;
     ];
     "negative_golden", [

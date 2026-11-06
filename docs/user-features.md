@@ -57,13 +57,13 @@ A model is **anchored** if it declares `origin = date(...)`; otherwise
 see [`docs/dates.md`](dates.md) for the full reference.
 
 ```camdl
-# (a) Anchored: daily axis, per-month rate parameters
+# (a) Anchored: daily axis
 time_unit = 'days
 origin    = date("2020-02-24")
 
 parameters {
-  beta  : positive 'per_month     # compiler converts to per-day at compile time
-  gamma : positive 'per_month
+  beta  : rate                     # per day: a parameter is always in time_unit
+  gamma : rate
   tau   : instant in [date("2020-01-21"), date("2020-04-30")]
                                    # renders as a date in fit summary
 }
@@ -75,8 +75,8 @@ time_unit = 'months
 # no origin — t = 0 has no calendar meaning
 
 parameters {
-  beta  : positive 'per_month
-  gamma : positive 'per_month
+  beta  : rate                     # per month
+  gamma : rate
 }
 
 let latent = 1 'months              # affine 30.44 days as a length

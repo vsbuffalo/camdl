@@ -55,9 +55,9 @@ dimensions {
   knot     = [k0, k1, k2, k3, k4, k5]       # exists only to count
 }
 parameters {
-  mu_b : real     'ratio ~ normal(mu = -1.5, sigma = 1.0)
-  sd_b : positive 'ratio ~ half_normal(sigma = 1.0)
-  b[province, knot] : real 'ratio ~ normal(mu = mu_b, sigma = sd_b)
+  mu_b : real dim 1 ~ normal(mu = -1.5, sigma = 1.0)
+  sd_b : positive dim 1 ~ half_normal(sigma = 1.0)
+  b[province, knot] : real dim 1 ~ normal(mu = mu_b, sigma = sd_b)
 }
 forcing {
   beta_t[p in province] : bspline 'per_day {
@@ -117,7 +117,7 @@ that range and prior. Indexing counts from 0 (gh#990, closed: every user-facing
 index counts from 0; the language spec states no other base).
 
 Existing named-dimension families keep their syntax,
-`z[mode] : real 'ratio ~ ...`, and the two compose: `b[province] : real[6]`
+`z[mode] : real dim 1 ~ ...`, and the two compose: `b[province] : real[6]`
 declares six cells per province. In a declaration, bracketed names after the
 identifier are the dimensions the family is indexed by; the bracketed integer
 after the type is the number of anonymous cells (the sized axis). A family has
@@ -264,8 +264,8 @@ size `N` denotes the index set `0 .. N-1`:
 ```camdl
 parameters {
   mu_b : real[6] 'ratio ~ normal(mu = -1.5, sigma = 1.0)
-  sd_b : positive 'ratio ~ exponential(rate = 2)
-  b[p in province] : real[k in 6] 'ratio ~ normal(mu = mu_b[k], sigma = sd_b)
+  sd_b : positive dim 1 ~ exponential(rate = 2)
+  b[p in province] : real dim kin6 'ratio ~ normal(mu = mu_b[k], sigma = sd_b)
 }
 ```
 
@@ -363,7 +363,7 @@ the arithmetic in `coefs`, using the element-wise list arithmetic of section
 ```camdl
 parameters {
   mu_b : real[6] 'ratio ~ normal(mu = -1.5, sigma = 1.0)
-  sd_b : positive 'ratio ~ exponential(rate = 2)
+  sd_b : positive dim 1 ~ exponential(rate = 2)
   z[province] : real[6] 'ratio ~ normal(mu = 0.0, sigma = 1.0)
 }
 forcing {
@@ -630,7 +630,7 @@ every coefficient, at every position and in every province, shrinks toward
 curve is the constant `mu_b`; the prior carries no shared temporal shape.
 
 **Position-indexed hyperparameters pool toward a shared trajectory.**
-`b[p in province] : real[k in 6] ~ normal(mu = mu_b[k], sigma = sd_b)` with
+`b[p in province] : real dim kin6 ~ normal(mu = mu_b[k], sigma = sd_b)` with
 `mu_b : real[6]` writes each province curve as `f_p(t) = g(t) + d_p(t)`, where
 `g(t) = sum_k mu_b[k] B_k(t)` is the shared national curve and `d_p(t)` is a
 province deviation whose prior covariance, given `sd_b`, is
@@ -771,7 +771,7 @@ Explicit coefficients (`ocaml/golden/bspline_param_coefs.camdl`):
 ```camdl
 # before                                    # after
 parameters {                                parameters {
-  b1 : real 'ratio in [-6, 1]                 b : real[6] 'ratio in [-6, 1]
+  b1 : real dim 1 in [-6, 1]                 b : real[6] 'ratio in [-6, 1]
   ...six lines...                           }
 }                                           forcing {
 forcing {                                     beta_t : bspline 'per_day {
@@ -794,7 +794,7 @@ form, which PGAS accepts:
 dimensions { province = [kinshasa, nord_kivu, ituri] }
 parameters {
   mu_b : real[6]     'ratio ~ normal(mu = -1.5, sigma = 1.0)  # national curve
-  sd_b : positive    'ratio ~ exponential(rate = 2)           # deviation scale
+  sd_b : positive dim 1 ~ exponential(rate = 2)           # deviation scale
   z[province] : real[6] 'ratio ~ normal(mu = 0.0, sigma = 1.0) # standardised deviations
 }
 forcing {
@@ -820,8 +820,8 @@ The centred form of the same model, for PMMH or MH:
 ```camdl
 parameters {
   mu_b : real[6]  'ratio ~ normal(mu = -1.5, sigma = 1.0)
-  sd_b : positive 'ratio ~ exponential(rate = 2)
-  b[p in province] : real[k in 6] 'ratio ~ normal(mu = mu_b[k], sigma = sd_b)
+  sd_b : positive dim 1 ~ exponential(rate = 2)
+  b[p in province] : real dim kin6 'ratio ~ normal(mu = mu_b[k], sigma = sd_b)
 }
 ...
     coefs  = b[p]

@@ -98,6 +98,7 @@
       "rate",          RATE;
       "probability",   PROBABILITY;
       "positive",      POSITIVE;
+      "dim",           DIM;
       "count",         COUNT;
       "instant",       INSTANT;
       "duration",      DURATION;

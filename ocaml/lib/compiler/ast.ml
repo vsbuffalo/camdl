@@ -147,15 +147,12 @@ type prior_spec = {
   ps_pool_over: string option;              (** `| <dim>` pooling clause *)
 }
 
-(* [punit] is the optional tier-3 unit literal that `positive`/`real` kinds
-   may carry (gh#60): `tau : positive 'ratio`. The expander folds it into
-   [param_dim] via [unit_lit_to_dim], so it is an alternative spelling of the
-   [pdim] bracket annotation (the dimension half of the unit; a parameter's
-   scale is always the model time unit). A unit on any other kind, or together
-   with a bracket [pdim], is a semantic error (E281 / E282). *)
+(* [pdim] is the explicit dimension from a `dim` clause (`b : real dim T^-1`),
+   accepted only on `positive` and `real`; every other kind fixes its
+   dimension. *)
 type param_decl =
-  | PScalar  of { pname: string; pkind: param_type; pdim: dim_annotation option; punit: unit_lit option; pbounds: (expr * expr) option; pprior: prior_spec option; pdoc: doc option; ploc: loc }
-  | PIndexed of { pname: string; pdims: string list; pkind: param_type; pdim: dim_annotation option; punit: unit_lit option; pbounds: (expr * expr) option; pprior: prior_spec option; pdoc: doc option; ploc: loc }
+  | PScalar  of { pname: string; pkind: param_type; pdim: dim_annotation option; pbounds: (expr * expr) option; pprior: prior_spec option; pdoc: doc option; ploc: loc }
+  | PIndexed of { pname: string; pdims: string list; pkind: param_type; pdim: dim_annotation option; pbounds: (expr * expr) option; pprior: prior_spec option; pdoc: doc option; ploc: loc }
 
 (** Table dimension entry: bare dim name, or dim + unit *)
 type table_dim_entry =

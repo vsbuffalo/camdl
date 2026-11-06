@@ -264,8 +264,9 @@ Unit literals are distinguished from identifiers by the `'` prefix:
 Supported units: `'days`, `'weeks`, `'months`, `'years`, `'per_day`,
 `'per_week`, `'per_month`, `'per_year`, `'count`, `'ratio`. `'count` carries
 dimension P (population); `'ratio` is dimensionless. Both are used on table
-cells (§2.5) and on parameter declarations (§4.1.1) where the dim checker needs
-a tier-3 hint that doesn't fit the time-or-rate axis.
+cells (§2.5) and forcing declarations (§7) where a value's dimension does not
+fit the time-or-rate axis. A parameter's dimension is written with a `dim`
+clause instead (§4.1.1).
 
 Conversions: 1 'week = 7 'days, 1 'month = 365.2425/12 'days ≈ 30.4369, 1 'year
 = 365.2425 'days. Proleptic-Gregorian throughout; matches `rata_die` and
@@ -361,8 +362,8 @@ infection : S --> I @ beta * I / N
 ```
 
 Parameters with `kind = positive` or `kind = real` have unknown dimension — the
-checker infers it from context. If inference is ambiguous, use a `[dim]`
-annotation (see §4.1.1). If a parameter is used inconsistently across
+checker infers it from context. If its use does not determine it, write a `dim`
+clause (see §4.1.1). If a parameter is used inconsistently across
 transitions, the compiler emits E303.
 
 Additional checks:
@@ -374,6 +375,19 @@ Additional checks:
 - **E306**: ODE derivative must have dimension P·T⁻¹
 - **E308**: overdispersion σ² must be dimensionless
 - **E309**: forcing `lag` must be a duration (dimension T)
+- **E312**: a forcing argument that becomes part of the forcing's value
+  (sinusoid `amplitude` and `baseline`, `values`, Fourier harmonics,
+  identity-link spline `coefs`) has the forcing's declared dimension; a time
+  argument (`period`, `phase`, `breakpoints`, knots) is a duration
+- **E313**: an initial value is a count, as are an initial law's `rate`, `n`,
+  `mean` and `sd`; a law's `p` and `dispersion` are dimensionless. A literal in
+  an initial condition takes the dimension its context needs (`I = 10`)
+
+Inference treats every product, quotient and integer power as a linear equation
+over the exponents of P and T and solves them together, so a parameter whose
+dimension follows from several uses jointly (`a * b` in one rate, `a / b` in
+another) is resolved even when no single use fixes it (Kennedy, "Dimension
+types", ESOP 1994).
 
 Disable with `--no-dim-check` if a false positive is encountered (and file a
 bug).
@@ -528,16 +542,16 @@ specificity. Each tier carries strictly more information than the next, and each
 is the right tool for a distinct class of declaration. Understanding the
 hierarchy makes the rest of §2 and §4–7 fit together.
 
-| Tier                      | Syntax                                                                    | Carries                        | Use when                                                                                                         |
-| ------------------------- | ------------------------------------------------------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| 1. **Kind keyword**       | `rate`, `probability`, `count`, `positive`, `real`, `instant`, `duration` | Dimension (inferred from kind) | Common parameter cases (the 99% case). `instant`/`duration` are time-typed (`[T]`) — see [`dates.md`](dates.md). |
-| 2. **Bracket annotation** | `[T]`, `[T^-1]`, `[P]`, `[P/T]`, `[1]`                                    | Dimension only                 | Kind keyword is under-determined (`real`, `positive`).                                                           |
-| 3. **Unit literal**       | `'days`, `'years`, `'per_day`, `'per_year`, `'count`, `'ratio`            | Dimension **+ scale**          | Concrete numeric data with a known real-world scale.                                                             |
+| Tier                  | Syntax                                                                    | Carries                        | Use when                                                                                                          |
+| --------------------- | ------------------------------------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| 1. **Kind keyword**   | `rate`, `probability`, `count`, `positive`, `real`, `instant`, `duration` | Dimension (inferred from kind) | Common parameter cases (the 99% case). `instant`/`duration` are time-typed (`T`) — see [`dates.md`](dates.md).    |
+| 2. **`dim` clause**   | `dim T`, `dim T^-1`, `dim P`, `dim P/T`, `dim 1`                          | Dimension only                 | The kind is `real` or `positive` and the parameter's use does not determine its dimension (§4.1.1).              |
+| 3. **Unit literal**   | `'days`, `'years`, `'per_day`, `'per_year`, `'count`, `'ratio`            | Dimension **+ scale**          | Concrete numeric data with a known real-world scale. Never on a parameter declaration.                            |
 
 **The tiers are complementary, not redundant.** They answer different questions
 about a value:
 
-- **Bracket annotations** answer _"what dimension does this parameter have?"_ —
+- **`dim` clauses** answer _"what dimension does this parameter have?"_ —
   for values supplied later (at fit time via `--params`, from priors, from
   inference). The compiler type-checks dimensions without knowing scales. Scale
   is implicit: everything is in the model's `time_unit`.
@@ -547,32 +561,33 @@ about a value:
   like `5 'years`, table entries, data loaded via `read()`). The compiler
   type-checks dimensions AND normalises scale to the model's `time_unit`.
 
-You can't collapse tiers 2 and 3 into one syntax. Brackets can't carry scale:
-`[T]` says "time-dimension," not "days" vs. "years." A user supplying
+You can't collapse tiers 2 and 3 into one syntax. A `dim` clause can't carry
+scale: `dim T` says "time-dimension," not "days" vs. "years." A user supplying
 `beta = 0.3` via `--params` has agreed to provide it in model time units — the
-compiler doesn't need to convert. Unit literals can't be applied to unknowns:
-you can't write `beta :
-positive 'per_day` when `beta`'s value will be drawn
-from a prior, because the prior samples directly in model time units.
+compiler doesn't need to convert. Unit literals can't be applied to unknowns: a
+parameter's value is drawn from a prior or supplied at run time, always in model
+time units, so `beta : positive 'per_day` is refused (E117) with the fix
+`beta : positive dim 1/T` — a scale written there would have nothing to act
+on.
 
 **Subtyping.** Every unit literal decomposes to (dimension, scale). The
-dimension half plays the same type-checking role as a bracket; the scale half
-drives scale normalisation. A unit literal is strictly more informative than a
-bracket of the same dimension:
+dimension half plays the same type-checking role as a `dim` clause; the scale
+half drives scale normalisation. A unit literal is strictly more informative
+than a `dim` clause of the same dimension:
 
 ```
-'years       ⊂    [T]     ⊂   (any time-dimensioned value)
+'years       ⊂    dim T   ⊂   (any time-dimensioned value)
 (dim+scale)       (dim)         (unconstrained)
 ```
 
 **Kind keywords are a fourth, convenience layer on top** of the three tiers.
-They name common dimension patterns (`rate` ≡ `[T^-1]`, `probability` ≡ `[1]`
-with `[0,1]` domain, `count` ≡ `[P]`) so 99% of parameter declarations avoid
-bracket notation entirely. Use brackets only when the kind keyword is
-under-determined (`real`, `positive`); use unit literals only where concrete
-numeric values are attached. This section (§2.4, §6.1) shows tier-3 use on table
-values; §4.1.1 shows tier 2 on parameter declarations; §7 (Forcing) requires
-tier 3 on every forcing declaration.
+They name common dimension patterns (`rate` ≡ `dim T^-1`, `probability` ≡
+`dim 1` with `[0,1]` domain, `count` ≡ `dim P`) so 99% of parameter declarations
+need no `dim` clause. Write one only on `real` or `positive`, and only where the
+model's use of the parameter does not determine its dimension; use unit literals
+only where concrete numeric values are attached. This section (§2.4, §6.1) shows
+tier-3 use on table values; §4.1.1 shows tier 2 on parameter declarations; §7
+(Forcing) requires tier 3 on every forcing declaration.
 
 **`'ratio` vs `probability`**: both are dimensionless, but they're not synonyms.
 `'ratio` (tier 3) is the **unbounded** dimensionless case — a multiplier that
@@ -703,83 +718,64 @@ parameter's _bound_ is spelled in `'months` (e.g.
 compile-time-evaluable length, not a step-from-a- date, and never leaks
 `Calendar` to uses of the parameter.
 
-### 4.1.1 Dimension Annotations
+### 4.1.1 The `dim` clause
 
-When a parameter's type doesn't fully determine its dimension (e.g., `positive`
-could be a rate, a count, or dimensionless), you can add an explicit dimension
-annotation:
-
-```camdl
-parameters {
-  beta      : rate                    # dimension T⁻¹ (inferred from type)
-  gamma     : rate                    # T⁻¹
-  amplitude : real [1]                # explicitly dimensionless
-  mu        : positive [1/T]          # per-capita rate
-  coupling  : positive [P/T]          # population-level rate
-  R0        : positive [1]            # dimensionless
-}
-```
-
-The annotation goes in square brackets after the type, before optional bounds.
-Supported dimension literals:
-
-| Annotation | Dimension         | Domain name            |
-| ---------- | ----------------- | ---------------------- |
-| `[1]`      | dimensionless     | probability, ratio, R₀ |
-| `[P]`      | population        | count                  |
-| `[T]`      | time              | duration               |
-| `[1/T]`    | T⁻¹               | per-capita rate        |
-| `[T^-1]`   | T⁻¹ (alternate)   | per-capita rate        |
-| `[P/T]`    | P·T⁻¹             | population-level rate  |
-| `[P*T^-1]` | P·T⁻¹ (alternate) | population-level rate  |
-
-When present, the annotation overrides type-based inference. If the annotation
-conflicts with how the parameter is used in rate expressions, the compiler emits
-a dimension error.
-
-Annotations are optional. The compiler infers dimensions from context for most
-models — annotations are only needed when inference is ambiguous (reported as
-info I300).
-
-### 4.1.2 Unit literal on `positive` / `real`
-
-The dimension-under-determined kinds — `positive` and `real` — also accept an
-optional **tier-3 unit literal** (§2.4) in place of a bracket annotation:
+`positive` and `real` say nothing about a parameter's dimension. Usually the
+model's use of the parameter determines it: in `beta * S * I / N` the rate must
+be P·T⁻¹, so a `positive` `beta` is T⁻¹. When the use does not determine it, or
+when you want the dimension stated and checked, write a `dim` clause after the
+kind:
 
 ```camdl
 parameters {
-  tau    : positive 'ratio    in [0.001, 3.0]    # dimensionless CV (= positive [1])
-  iota   : positive 'count    in [0.0, 50.0]     # a count seed   (= positive [P])
-  importn: positive 'per_year in [1e-4, 0.1]     # per-time rate  (= positive [T^-1])
-  amp    : real 'ratio                            # signed multiplier
+  beta      : rate                      # dimension T⁻¹, fixed by the kind
+  amplitude : real dim 1                # dimensionless
+  mu        : positive dim 1/T          # per-capita rate
+  coupling  : positive dim P/T          # population-level rate
+  b         : real dim T^-1 in [-1, 1]  # a rate-scale spline coefficient, may be negative
+  lag       : positive dim T            # a duration
 }
 ```
 
-A unit literal here is read for its **dimension only** — the dimension half of
-the (dimension, scale) pair a unit literal carries (§2.4). The scale half plays
-no role on a parameter: a parameter's value is always supplied in the model's
-`time_unit`, so `'per_year` and `'per_day` set the same dimension (T⁻¹) on the
-declaration. The literal is therefore exact sugar for the corresponding bracket
-annotation: `positive 'ratio` ≡ `positive [1]`, `positive 'count` ≡
-`positive [P]`, `positive 'per_year` ≡ `positive [T^-1]`. The two notations are
-interchangeable; use whichever reads more naturally for the quantity.
+The order of a declaration is: name (and named axes), kind, `dim` clause,
+bounds, prior. A dimension is a product of powers of the two base dimensions,
+`P` (population) and `T` (time), written with `*`, `/` and integer exponents:
 
-The annotation fixes the parameter's dimension exactly as a bracket does — so it
-resolves the I300 a bare `positive`/`real` would emit in a dimension-determined
-slot, **and** turns a dimensional misuse into a hard error. A `tau : positive
-'ratio` added to a population (`I + tau`) is now an E302, not a swallowed I300;
-that is the point — a determined dimension catches the bug a `positive` would
-hide.
+| Clause                  | Dimension     | Domain name            |
+| ----------------------- | ------------- | ---------------------- |
+| `dim 1`                 | dimensionless | probability, ratio, R₀ |
+| `dim P`                 | population    | count                  |
+| `dim T`                 | time          | duration               |
+| `dim 1/T`, `dim T^-1`   | T⁻¹           | per-capita rate        |
+| `dim P/T`, `dim P*T^-1` | P·T⁻¹         | population-level rate  |
+| `dim P^2/T`, …          | P²·T⁻¹, …     | (any other product)    |
 
-Two restrictions keep the surface honest:
+The clause fixes the parameter's dimension: it resolves the I300 a bare
+`positive`/`real` would get where its use leaves the dimension open, and it
+turns a dimensional misuse into an error. A `tau : positive dim 1` added to a
+population (`I + tau`) is E302.
 
-- A unit literal is only meaningful on `positive` and `real`. On a kind whose
-  dimension the keyword already fixes (`rate`, `probability`, `count`,
-  `instant`, `duration`), it is rejected with **E281** — drop the literal; the
-  kind already carries the dimension.
-- A unit literal and a `[dim]` bracket annotation may not both appear on one
-  declaration (they would be redundant or contradictory): **E282**. Use one or
-  the other.
+A `dim` clause carries a dimension and no scale. A parameter's value — from a
+prior, `--params`, or a scenario's `set` — is always in the model's
+`time_unit`, so there is no scale for it to carry.
+
+Three rules keep the surface unambiguous:
+
+- **`dim` is only for `positive` and `real`.** Every other kind fixes its
+  dimension. A clause that repeats it (`rate dim T^-1`) or contradicts it
+  (`rate dim 1`) is **E281**.
+- **Brackets after a kind give a parameter family's size, never a dimension.**
+  A dimension in brackets (`real [1/T]`, `positive [P*T^-1]`) is **E116**, with
+  the fix `real dim 1/T`. A size below two (`real[1]`) is **E417**: a single
+  cell is a scalar, written `real`; if `[1]` was meant as a dimension, write
+  `real dim 1`. No old annotation compiles with a new meaning.
+- **A unit literal is never a parameter annotation.** `gamma : positive
+  'per_year` is **E117**, with the fix `positive dim 1/T`: a unit literal
+  carries a scale, and on a parameter that scale would be silently dropped.
+
+Under `--json-errors`, each of these refusals carries a machine-applicable
+fix-it (`"fixes": [{"loc": …, "replacement": …}]`), so an editor or agent can
+apply it without reading the hint.
 
 ### 4.2 External parameter values
 
@@ -1617,10 +1613,10 @@ dimensions { mode = [m1, m2, m3, m4, m5, m6, m7, m8, m9, m10] }
 compartments { S, I, R }
 parameters {
   gamma   : rate
-  a_b     : real 'ratio ~ normal(mu = -1.9, sigma = 0.6)
-  b_b     : real [1/T] ~ normal(mu = 0.0, sigma = 0.005)
-  tau_b   : positive 'ratio ~ exponential(rate = 5.99)
-  z[mode] : real 'ratio ~ normal(mu = 0.0, sigma = 1.0)
+  a_b     : real dim 1 ~ normal(mu = -1.9, sigma = 0.6)
+  b_b     : real dim 1/T ~ normal(mu = 0.0, sigma = 0.005)
+  tau_b   : positive dim 1 ~ exponential(rate = 5.99)
+  z[mode] : real dim 1 ~ normal(mu = 0.0, sigma = 1.0)
 }
 let N = S + I + R
 transitions {
