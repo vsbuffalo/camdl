@@ -220,3 +220,70 @@ fn an_unrenamed_store_has_the_same_hits_as_before() {
     assert_ok(&fx.simulate("sir.camdl", &[]), "second identical run");
     assert_eq!(fx.sim_leaves(), before, "an identical re-run adds and moves nothing");
 }
+
+/// How a run reaches its compiled IR: through the IR cache (an isolated cache
+/// directory, so the run does not depend on what another checkout cached) or
+/// with the cache switched off.
+#[derive(Clone, Copy, Debug)]
+enum IrCache {
+    On,
+    Off,
+}
+
+/// `simulate <model> … --output-dir <out>` under the given IR-cache mode,
+/// with every other input fixed.
+fn simulate_with_cache(fx: &Fixture, model: &str, out: &str, cache: IrCache) -> Output {
+    let mut cmd = Command::new(skip_if_missing_binary());
+    cmd.args([
+        "simulate", model, "--params", "p.toml", "--backend", "chain_binomial",
+        "--dt", "1", "--seed", "7", "--replicates", "2", "--output-dir", out,
+    ])
+    .current_dir(fx.dir.path())
+    .env("CAMDL_SKIP_VERSION_CHECK", "1")
+    .env_remove("CAMDL_NO_IR_CACHE")
+    .env("CAMDL_IR_CACHE_DIR", fx.path("ir-cache"));
+    if let IrCache::Off = cache {
+        cmd.env("CAMDL_NO_IR_CACHE", "1");
+    }
+    cmd.output().expect("spawn camdl")
+}
+
+/// The sorted `run_id`s of every `Sim` leaf under `<out>/sims`.
+fn run_ids_under(fx: &Fixture, out: &str) -> Vec<String> {
+    let mut ids: Vec<String> = run_leaves(&fx.path(out).join("sims"))
+        .into_iter()
+        .map(|dir| {
+            let rec: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(dir.join("run.json")).unwrap())
+                    .unwrap();
+            rec["run_id"].as_str().unwrap().to_string()
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// The model file's name is a label, not identity. Two byte-identical models
+/// under different file names are the same model, so their runs get the same
+/// `run_id`s — whether the second compile is served from the IR cache (which
+/// keys on content, not on the file name) or compiled afresh. When the model's
+/// name was hashed, the answer depended on the cache: a fresh compile of
+/// `b.camdl` named its model `b` and re-keyed, while a warm cache served
+/// `b.camdl` the IR compiled for `a.camdl` and with it `a`'s identity.
+#[test]
+fn identical_models_under_two_file_names_share_run_ids_with_cache_on_and_off() {
+    for cache in [IrCache::On, IrCache::Off] {
+        let fx = Fixture::new("a");
+        std::fs::copy(fx.path("a.camdl"), fx.path("b.camdl")).unwrap();
+        assert_ok(&simulate_with_cache(&fx, "a.camdl", "out_a", cache), "run over a.camdl");
+        assert_ok(&simulate_with_cache(&fx, "b.camdl", "out_b", cache), "run over b.camdl");
+        let a = run_ids_under(&fx, "out_a");
+        let b = run_ids_under(&fx, "out_b");
+        assert_eq!(a.len(), 2, "[{cache:?}] two replicates are two leaves");
+        assert_eq!(
+            a, b,
+            "[{cache:?}] identical models under different file names must get the same \
+             run_ids; the file name is a label, not identity"
+        );
+    }
+}

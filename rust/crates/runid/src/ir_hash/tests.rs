@@ -293,7 +293,9 @@ fn model_golden_hash() {
     // `constants` after `parameters`, unconditionally, so the representative
     // model's empty list adds a length prefix and the hash moves once — a
     // deliberate, version-bumped re-key.
-    const GOLDEN: &str = "bfb98bb4f7b4f495cfa43925e5cf9165fabce53be5e1d4c5d3fe87fcb6a62518";
+    // SV=4: the model's `name` (the source file's stem) is no longer hashed, and
+    // the SV header bumps 3→4. A deliberate, version-bumped re-key.
+    const GOLDEN: &str = "d621508d8a88e94ec7197244300a2cff35af6e3fb8899e882d4af87a01afdae7";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -412,9 +414,9 @@ fn presentation_fields_are_inert_in_the_model_digest() {
     assert_eq!(base, digest(&ts), "simulation.time_semantics must be inert");
 
     // Negative control: a structural edit is NOT inert.
-    let mut renamed = representative_model();
-    renamed.name = "different".into();
-    assert_ne!(base, digest(&renamed), "a model rename must move the model digest");
+    let mut longer = representative_model();
+    longer.simulation.t_end = 730.0;
+    assert_ne!(base, digest(&longer), "a different horizon must move the model digest");
 }
 
 /// Model identity is gradient-independent (proposal
@@ -1034,15 +1036,28 @@ fn preset_t_end_anchor_changes_run_id() {
         "a preset offset must re-key");
 }
 
+/// The model's `name` is the source file's stem, a label: two models that
+/// differ only in it are the same model and share a hash (SV = 4). Negative
+/// control: a structural edit beside it still re-keys, so the test cannot pass
+/// by the hash ignoring every field.
+#[test]
+fn the_model_name_is_inert_in_the_hash() {
+    let base = representative_model().content_hash();
+
+    let mut renamed = representative_model();
+    renamed.name = "different".into();
+    assert_eq!(base, renamed.content_hash(), "the model name (the file stem) must not re-key");
+
+    let mut renamed_and_longer = renamed.clone();
+    renamed_and_longer.simulation.t_end = 730.0;
+    assert_ne!(base, renamed_and_longer.content_hash(), "a structural edit must still re-key");
+}
+
 /// Negative control: a structurally different model must hash differently
 /// (guards against a hand impl that drops a field entirely).
 #[test]
 fn changing_a_field_changes_the_hash() {
     let base = representative_model().content_hash();
-
-    let mut m_name = representative_model();
-    m_name.name = "different".into();
-    assert_ne!(base, m_name.content_hash(), "name change must matter");
 
     let mut m_tend = representative_model();
     m_tend.simulation.t_end = 730.0;
@@ -1075,27 +1090,28 @@ fn projection_variant_hashes_are_pinned() {
     // the per-type `header` folds the SV, so bumping it re-keys every ir hash),
     // a deliberate, version-bumped re-key; the *relative* ordering/injectivity of
     // the variants is unchanged. They moved again at SV=3 (gh#583: every field
-    // hashed unconditionally), for the same header reason — no projection's own
-    // encoding changed.
+    // hashed unconditionally), and at SV=4 (the model name out of identity),
+    // each time for the same header reason — no projection's own encoding
+    // changed.
     assert_eq!(
         hex(Projection::CumulativeFlow("x".into())),
-        "c80a15d67e04b64fa2df334fd27984a7c651b6d4fc3a9f9b08413d0fc3689bee"
+        "d2ff40ab3232d8013d4e7f67319a761260fb5f4b02ccd6c0ede5c8154deb3ca4"
     );
     assert_eq!(
         hex(Projection::CurrentPop("x".into())),
-        "fedc999cc552acafa51d10ff43153b91dc9ecdea96211b67a9fd05a8c2c619cf"
+        "893941139a959565dfa2774b83dad26b21a89a9dbb4c4e9f37eb7256ba72625d"
     );
     assert_eq!(
         hex(Projection::CurrentPopSum(vec!["x".into()])),
-        "424190d6afaf6648a3572720d6a4f5f41dbec0ed4e8d51c80df13496e15a7a19"
+        "5c62be4c3eac98ebba00c891a6fe1b20c7c29840fa766030a5a650eb75aa02fa"
     );
     assert_eq!(
         hex(Projection::DerivedExpr(Expr::const_(1.0))),
-        "36ca3af511367e0c5d572c2281586001052539c939691adfcf33f425054470c0"
+        "74f1f5a20929c3dd3a5de227b054d457fae40c3f91c85898f5934a4dc8150c3a"
     );
     assert_eq!(
         hex(Projection::CumulativeFlowSum(vec!["x".into()])),
-        "ff6941eff3cd63e23aff57e77d393aed0554502ffda8d2275b0f3801e5770b29"
+        "e96379dd48fd165641cd397c61119446aab292fad946544d58a2df2a23eeecba"
     );
     // Proposal 2026-09-09 (proportion of flows over a window): appended at 5.
     // The five pins above are unchanged by the addition — that is the
@@ -1105,7 +1121,7 @@ fn projection_variant_hashes_are_pinned() {
             numerator: vec!["x".into()],
             denominator: vec!["x".into(), "y".into()],
         }),
-        "f1eb9493b6932227dec2e61de33f74faa286c163ffe031dcdb6e052c827f7032"
+        "d87d03ef62e463da577ace611147921b6553c9c062b4a2e70a008a7a25f0f271"
     );
     // The two sides are hashed in order, so swapping them is a different
     // projection — `a / (a + b)` and `(a + b) / a` must not share a run_id.

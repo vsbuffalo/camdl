@@ -103,7 +103,14 @@ use crate::hash::{CanonicalHasher, ContentAddressed};
 /// identity unnoticed on a code read. They now write their value (a variant
 /// tag, an `Option` presence byte, a length prefix) like every other field.
 /// Re-keys every model-bearing leaf.
-const SV: u16 = 3;
+///
+/// `SV = 4`: the model's `name` is no longer hashed. `camdlc` sets it to the
+/// source file's stem, so it is a label, not identity: two byte-identical
+/// models under different file names are the same model and must share a
+/// run_id. Hashing it also made identity depend on the IR cache, which keys on
+/// content, so a warm cache served one file the IR compiled for the other and
+/// with it the other's name. Re-keys every model-bearing leaf.
+const SV: u16 = 4;
 
 /// Write the per-type domain-separation header: tag + schema version.
 fn header(h: &mut CanonicalHasher, tag: &str) {
@@ -1488,7 +1495,11 @@ impl ContentAddressed for Model {
         // Exhaustive destructure: a new IR field must not silently escape the
         // model hash — add it below, or bind it `_` with the reason.
         let Model {
-            name, version, time_unit, description, origin, origin_rata_die,
+            // The model's name is the source file's stem (`camdlc` sets it from
+            // the path), a label like a leaf directory's label: renaming or
+            // copying the file must not re-key the model (SV = 4).
+            name: _,
+            version, time_unit, description, origin, origin_rata_die,
             compartments, transitions, ode_equations, time_functions, tables,
             interventions, observations, parameters, constants, bindings, per_eval_bindings,
             initial_conditions, ic_grad: _, output, simulation, presets,
@@ -1499,7 +1510,6 @@ impl ContentAddressed for Model {
             quantities: _, contrasts: _,
         } = self;
         header(h, "ir::model::Model");
-        h.write_str(name);
         h.write_str(version);
         h.write_str(time_unit);
         description.hash_into(h);
