@@ -188,6 +188,7 @@ type eq_kind =
 type eq_info = { site : Dim_sites.site option; code : string; kind : eq_kind }
 
 type state = {
+  constants : (string, float) Hashtbl.t;   (* typed constants' values *)
   used : (string, unit) Hashtbl.t;   (* parameters read by some model position *)
   mutable t_only : bool;   (* the site being generated is an [Equals_t] site *)
   t_only_eqs : (int, unit) Hashtbl.t;   (* equations that hold on T alone *)
@@ -311,6 +312,20 @@ let rec chain_add = function
   | [ t ] -> t
   | t :: rest -> BinOp { op = Add; left = t; right = chain_add rest }
 
+(* [x] as p/q in lowest terms with a small denominator, when it is one: a
+   compile-time exponent that is a simple fraction. *)
+let rational (x : float) : (int * int) option =
+  if not (Float.is_finite x) then None
+  else
+    let rec find q =
+      if q > 12 then None
+      else
+        let p = Float.round (x *. float_of_int q) in
+        if Float.abs (p /. float_of_int q -. x) < 1e-12 && Float.abs p < 1e6
+        then Some (int_of_float p, q) else find (q + 1)
+    in
+    find 1
+
 (* The binary-operator rules, shared by model expressions, derived quantities
    and contrasts. [exponent] is the power's exponent when it is a literal. *)
 let binop st ~site ~code ~what (op : bin_op) ?exponent ~fresh_div l r : value =
@@ -336,24 +351,32 @@ let binop st ~site ~code ~what (op : bin_op) ?exponent ~fresh_div l r : value =
   | Pow ->
     (* The exponent is a pure number. *)
     (match r with
-     | F e when e.vars = [] && not (dim_eq e.k dimensionless) ->
+     | F e when not (e.vars = [] && dim_eq e.k dimensionless) ->
        emit st Structure ~site ~code:"E301"
-         (Function_arg { fn = "the exponent of ^"; arg = e }) e dimensionless
+         (Function_arg { fn = Printf.sprintf "the exponent of ^ in %s" what; arg = e })
+         e dimensionless
      | Any | F _ -> ());
+    (* With an exponent known at compile time as p/q, q·dim(result) =
+       p·dim(base): an integer power scales the base's dimension, and a
+       rational one is infeasible unless the exponents divide. Otherwise the
+       result would be d^y with y real and changing during a fit, not a
+       dimension at all, so the base must be dimensionless (§5.4). *)
     (match l with
      | Any -> Any
-     | F b when b.vars = [] && dim_eq b.k dimensionless -> F (const_form dimensionless)
      | F b ->
-       (match exponent with
-        | Some n when Float.is_integer n -> F (form_scale (Float.to_int n) b)
-        | Some _ | None ->
-          if b.vars = [] then begin
-            (* A dimensioned base under a non-integer or variable exponent. *)
-            emit st Structure ~site ~code:"E301"
-              (Function_arg { fn = Printf.sprintf "a base under a non-integer exponent in %s" what;
-                              arg = b }) b dimensionless;
-            F (const_form dimensionless)
-          end else F (var_form (fresh st))))
+       match Option.bind exponent rational with
+       | Some (p, 1) -> F (form_scale p b)
+       | Some (p, q) ->
+         let x = fresh st in
+         emit st Structure ~site ~code:"E301" (Even_root b)
+           (form_sub (form_scale q (var_form x)) (form_scale p b)) dimensionless;
+         F (var_form x)
+       | None ->
+         if not (b.vars = [] && dim_eq b.k dimensionless) then
+           emit st Structure ~site ~code:"E301"
+             (Function_arg { fn = Printf.sprintf "a base under a non-constant exponent in %s" what;
+                             arg = b }) b dimensionless;
+         F (const_form dimensionless))
 
 let unop st ~site ~what (op : un_op) (a : value) : value =
   match op with
@@ -381,6 +404,23 @@ let unop st ~site ~what (op : un_op) (a : value) : value =
 
 (* [term]: [e] is an entire additive term of the site's expression, where a
    literal takes the position's dimension under [Whole_terms]. *)
+(* The value of an expression fixed at compile time: literals, typed
+   constants and arithmetic of them. *)
+let rec static_value st (e : expr) : float option =
+  let sv = static_value st in
+  match e with
+  | Const v -> Some v
+  | ConstRef c -> Hashtbl.find_opt st.constants c
+  | UnOp { op = Neg; arg } -> Option.map Float.neg (sv arg)
+  | BinOp { op; left; right } ->
+    (match sv left, sv right, op with
+     | Some a, Some b, Add -> Some (a +. b)
+     | Some a, Some b, Sub -> Some (a -. b)
+     | Some a, Some b, Mul -> Some (a *. b)
+     | Some a, Some b, Div -> Some (a /. b)
+     | _ -> None)
+  | _ -> None
+
 let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
   let what = site.role in
   let g = gen st ~site in
@@ -427,7 +467,7 @@ let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
     when reason = spline_log_shift_reason -> g left
   | BinOp b ->
     let l = g b.left and r = g b.right in
-    let exponent = match b.right with Const n -> Some n | _ -> None in
+    let exponent = static_value st b.right in
     let fresh_div =
       (* A ratio of two literals takes the dimension its context needs, until
          the literal rule of §5.2 lands. *)
@@ -618,8 +658,10 @@ let diagnostic_of_conflict st out (c : Dim_solve.conflict) : diagnostic =
     mk info.code (Printf.sprintf "%s must be dimensionless" fn)
       (Some (Printf.sprintf "it has dimension %s" (show out arg)))
   | Even_root f ->
-    mk info.code (Printf.sprintf "sqrt in %s requires even dimension exponents" (site_name info.site))
-      (Some (Printf.sprintf "argument has dimension %s" (show out f)))
+    mk info.code
+      (Printf.sprintf "a square root or fractional power in %s needs dimension exponents it divides"
+         (site_name info.site))
+      (Some (Printf.sprintf "its argument has dimension %s" (show out f)))
   | Definition { got } ->
     mk info.code (Printf.sprintf "%s has conflicting dimensions" (site_name info.site))
       (Some (Printf.sprintf "it has dimension %s here" (show out got)))
@@ -763,7 +805,9 @@ let check_priors (out : solved) st (priors : prior_source list) : diagnostic lis
 (* ── Main check ────────────────────────────────────────────────────────── *)
 
 let check_model ?prior_args (m : model) : result =
-  let st = { used = Hashtbl.create 64; t_only = false; t_only_eqs = Hashtbl.create 16; next_var = 0; keys = Hashtbl.create 256; declared = []; structure = [];
+  let constants = Hashtbl.create 16 in
+  List.iter (fun (c : constant) -> Hashtbl.replace constants c.c_name c.c_value) m.constants;
+  let st = { constants; used = Hashtbl.create 64; t_only = false; t_only_eqs = Hashtbl.create 16; next_var = 0; keys = Hashtbl.create 256; declared = []; structure = [];
              obligation = []; info = Hashtbl.create 1024; next_eq = 0;
              tf_dims = Hashtbl.create 16 } in
   declare_model st m;

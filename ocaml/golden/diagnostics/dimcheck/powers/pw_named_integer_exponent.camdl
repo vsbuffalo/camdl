@@ -1,0 +1,26 @@
+# invariant: a typed-constant integer exponent scales the base's dimension
+# spec: §5.4
+# expect: (none)
+time_unit = 'days
+
+compartments { S, I, R, V }
+
+parameters {
+  beta  : rate     in [0.01, 2.0]
+  gamma : rate     in [0.01, 1.0]
+
+}
+
+let N = S + I + R + V
+
+let k : real = 2
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+  mixing    : S --> V @ gamma * I ^ k / N ^ (k - 1)
+}
+
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 100 'days }

@@ -1,0 +1,26 @@
+# invariant: a base under a parameter exponent is dimensionless, so a rate there contradicts its use as a rate (reported at the rate, naming the power)
+# spec: §5.4
+# expect: E300 Error
+time_unit = 'days
+
+compartments { S, I, R, V }
+
+parameters {
+  beta  : rate     in [0.01, 2.0]
+  gamma : rate     in [0.01, 1.0]
+  kappa : positive
+  alpha : positive in [0.5, 1.5]
+}
+
+let N = S + I + R + V
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+  waning    : R --> S @ kappa * R
+  extra     : S --> V @ gamma * S * (kappa ^ alpha)
+}
+
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 100 'days }

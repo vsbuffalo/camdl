@@ -1,0 +1,26 @@
+# invariant: one product cannot be per capita in one rate and per head in another
+# spec: §4.4
+# expect: E300 Error, I300 Info
+time_unit = 'days
+
+compartments { S, I, R, V }
+
+parameters {
+  beta  : rate     in [0.01, 2.0]
+  gamma : rate     in [0.01, 1.0]
+  kappa : positive
+  w     : positive
+}
+
+let N = S + I + R + V
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+  coupling  : S --> V @ kappa * w * S * I / N
+  direct    : S --> V @ kappa * w * V * I
+}
+
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 100 'days }

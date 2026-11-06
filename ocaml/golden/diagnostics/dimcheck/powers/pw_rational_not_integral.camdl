@@ -1,0 +1,24 @@
+# invariant: a square root of a count has no integer dimension
+# spec: §5.4
+# expect: E301 Error
+time_unit = 'days
+
+compartments { S, I, R, V }
+
+parameters {
+  beta  : rate     in [0.01, 2.0]
+  gamma : rate     in [0.01, 1.0]
+
+}
+
+let N = S + I + R + V
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+  mixing    : S --> V @ gamma * S * I ^ 0.5 / N
+}
+
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 100 'days }
