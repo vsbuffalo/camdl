@@ -1028,6 +1028,36 @@ observations {
   Alcotest.(check bool) "probability column feeding poisson rate must E304"
     true (has_e304_in src)
 
+(* A strict likelihood argument is checked exactly even inside an observation,
+   so a product of two unknowns there is an equation: `rate = rho * X0 *
+   projected` with `rho : probability` and `projected` a count pins X0 to
+   dimensionless. *)
+let test_contract_arg_product_determines () =
+  let src = {camdl|
+compartments { S, I, R }
+parameters { beta : rate  gamma : rate  rho : probability  X0 : positive  s : positive }
+let N = S + I + R
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+observations {
+  counts {
+    columns       { time : time, k : count }
+    projected  = prevalence(I)
+    emit_schedule = every 7 'days
+    k ~ poisson(rate = rho * X0 * s * projected / s)
+  }
+}
+|camdl} in
+  let diags = Compiler.collect_diagnostics ~filename:"<contract>" src in
+  let i300_for name = List.exists (fun (d : Diagnostics.diagnostic) ->
+    let needle = "'" ^ name ^ "'" in
+    let n = String.length needle and m = String.length d.message in
+    let rec has i = i + n <= m && (String.sub d.message i n = needle || has (i + 1)) in
+    d.code = "I300" && has 0) diags in
+  Alcotest.(check bool) "X0 determined through the Poisson rate" false (i300_for "X0")
+
 (* ── NegBinomial / zero-inflated NegBinomial `mean` is a count ─────────── *)
 
 (* The NegBinomial `mean` is the same object as the Poisson `rate`: the expected
@@ -1302,8 +1332,66 @@ transitions {
 
 (* ── Test Registration ─────────────────────────────────────────────────── *)
 
+(* ── Complete inference: products of unknowns (Kennedy linear solve) ──── *)
+
+let param_dim_of name (r : Dimcheck.result) = List.assoc_opt name r.param_dims
+
+(* Each rate alone has two unknown factors, so neither transition pins either
+   parameter by itself: a·b = T^-1 and a/b = T^-1. Together they determine
+   a = T^-1 and b = 1. A heuristic that solves one unknown factor per product
+   leaves both undetermined; the linear solve must not. *)
+let test_two_products_jointly_determine () =
+  let m = empty_model
+    ~compartments:[mk_compartment "S"]
+    ~parameters:[mk_param ~kind:(Some Ir.Positive) "a";
+                 mk_param ~kind:(Some Ir.Positive) "b"]
+    ~transitions:[mk_transition "t1" (param "a" *. param "b" *. pop "S");
+                  mk_transition "t2" (param "a" /. param "b" *. pop "S")]
+    () in
+  let r = Dimcheck.check_model m in
+  Alcotest.(check bool) "no errors" true (no_errors r);
+  Alcotest.(check bool) "no I300" false (has_info "I300" r);
+  Alcotest.(check (option (array int))) "a = T^-1" (Some [| 0; -1 |]) (param_dim_of "a" r);
+  Alcotest.(check (option (array int))) "b = 1" (Some [| 0; 0 |]) (param_dim_of "b" r)
+
+(* A dimension pinned only through a product inside another product: the rate
+   (a·b)·(a/b)·S, where (a·b) and (a/b) are each unresolved sub-products. *)
+let test_nested_products_determine () =
+  let m = empty_model
+    ~compartments:[mk_compartment "S"]
+    ~parameters:[mk_param ~kind:(Some Ir.Positive) "a";
+                 mk_param ~kind:(Some Ir.Positive) "b";
+                 mk_param ~kind:(Some Ir.Rate) "g"]
+    ~transitions:[mk_transition "t1" ((param "a" *. param "b") *. pop "S");
+                  mk_transition "t2" (param "g" *. (param "a" /. param "b") *. pop "S")]
+    () in
+  let r = Dimcheck.check_model m in
+  Alcotest.(check bool) "no errors" true (no_errors r);
+  (* a·b = T^-1 and a/b = 1  ⇒  a = T^-1/2 — non-integral, so not bound. *)
+  Alcotest.(check bool) "fractional solution stays undetermined" true (has_info "I300" r);
+  Alcotest.(check (option (array int))) "a not bound" None (param_dim_of "a" r)
+
+(* A product of two unknowns equal to a known value is one equation in two
+   unknowns: genuinely free, so I300 must still be emitted. *)
+let test_single_product_still_free () =
+  let m = empty_model
+    ~compartments:[mk_compartment "S"]
+    ~parameters:[mk_param ~kind:(Some Ir.Positive) "a";
+                 mk_param ~kind:(Some Ir.Positive) "b"]
+    ~transitions:[mk_transition "t1" (param "a" *. param "b" *. pop "S")]
+    () in
+  let r = Dimcheck.check_model m in
+  Alcotest.(check bool) "I300 for a free pair" true (has_info "I300" r);
+  Alcotest.(check (option (array int))) "a not bound" None (param_dim_of "a" r)
+
 let () =
   Alcotest.run "dimcheck" [
+    "linear_solve", [
+      Alcotest.test_case "two products jointly determine" `Quick test_two_products_jointly_determine;
+      Alcotest.test_case "nested products, fractional"    `Quick test_nested_products_determine;
+      Alcotest.test_case "single product still free"      `Quick test_single_product_still_free;
+      Alcotest.test_case "contract arg product determines" `Quick test_contract_arg_product_determines;
+    ];
     "arithmetic", [
       Alcotest.test_case "add same dim"            `Quick test_add_same_dim;
       Alcotest.test_case "add mismatched dim"       `Quick test_add_mismatched_dim;

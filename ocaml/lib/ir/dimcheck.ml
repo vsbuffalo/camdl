@@ -3,9 +3,16 @@
    Base dimensions: P (population, index 0), T (time, index 1).
    A dimension is an int array of exponents: [| p_exp; t_exp |].
 
-   Two-pass approach:
-   1. Bottom-up: infer dimensions from leaves (known param kinds, Pop, Time)
-   2. Top-down: propagate expected dimensions (P*T^-1 for rates) to resolve unknowns
+   Inference:
+   1. Bottom-up: infer dimensions from leaves (known param kinds, Pop, Time),
+      unifying the operands of +, -, min, max and comparisons, and recording
+      a linear equation for every product, quotient, integer power or square
+      root with an unresolved operand.
+   2. Top-down: propagate expected dimensions (P*T^-1 for rates) into the
+      expression, and pin each rate's own dimension to its required value.
+   3. Solve the recorded equations together (Kennedy's dimension inference,
+      see [solve_equations]) and repeat 1-3 to a fixpoint. A parameter still
+      unresolved after that is not determined by how the model uses it.
 
    Tables and time functions get their dimensions inferred from their
    defining expressions, not hardcoded. *)
@@ -184,6 +191,19 @@ type state = {
      dimensionally-wrong column (a `real` feeding `n`) is a located E304. Cleared
      after each observation. (2026-06-10 observation data-entry §3.1.) *)
   obs_col_dims : (string, dim) Hashtbl.t;
+  (* Multiplicative constraints the unifier cannot express: each entry
+     [(r, terms)] states dim(r) = Σ c · dim(t) over exponent vectors, e.g.
+     [(r, [(1, l); (1, x)])] for [r = l * x] and [(r, [(2, a)])]-style
+     forms for powers. Collected by [infer] whenever a product, quotient,
+     power or square root has an unresolved operand, and solved together by
+     [solve_equations] (Kennedy's dimension inference: linear equations
+     over the integers, one unknown exponent vector per variable). *)
+  mutable equations : (dim * (int * int * dim) list) list;
+  (* Set while inferring a likelihood argument with a strict dimensional
+     contract (Poisson `rate`, Binomial `p`, a dispersion, ...). Those
+     arguments are checked exactly even inside an observation, so their
+     products are evidence and are recorded although [permissive_dim] is on. *)
+  mutable contract_arg : bool;
 }
 
 let create_state () = {
@@ -200,6 +220,8 @@ let create_state () = {
   subject = None;
   projected_dim = None;
   obs_col_dims = Hashtbl.create 8;
+  equations = [];
+  contract_arg = false;
 }
 
 let fresh_var st =
@@ -288,6 +310,162 @@ let constrain_known st ~code ~message d expected =
                    (dim_display expected) (dim_display v))
         ()
   | Unknown id -> bind st id expected
+
+(* ── Linear dimension equations (Kennedy 1994) ──────────────────────────── *)
+
+(* Dimensions form a free abelian group on the bases, so a product, quotient
+   or integer power is a linear equation over exponent vectors: [r = l * x]
+   is dim(r) − dim(l) − dim(x) = 0. The unifier above handles only equalities
+   (the operands of [+], [min], comparisons); a product of two unresolved
+   factors would otherwise be a fresh variable linked to neither, and the
+   constraint it carries would be lost. [record_equation] keeps it, and
+   [solve_equations] solves every recorded equation at once by Gauss–Jordan
+   elimination over the rationals, binding each variable the system fully
+   determines to an integer exponent vector. A variable left with a free
+   term on its right-hand side is genuinely undetermined by the model.
+
+   References: A. Kennedy, "Dimension types", ESOP 1994, LNCS 788,
+   pp. 348–362; A. Kennedy, Programming Languages and Dimensions, PhD thesis,
+   University of Cambridge, 1996 (UCAM-CL-TR-391), ch. 3.
+
+   Equations are not recorded in permissive-dim mode (observation mean / sd
+   positions, see [state.permissive_dim]): those expressions are known not to
+   be dimensionally homogeneous, so a product there is not evidence about a
+   parameter's dimension. The exception is a likelihood argument with a strict
+   contract ([infer_contract_arg]), which is checked exactly. *)
+
+let record_equation st (r : dim) (terms : (int * int * dim) list) =
+  if (not st.permissive_dim) || st.contract_arg then
+    st.equations <- (r, terms) :: st.equations
+
+(* Pin an expression's inferred dimension to the dimension its context
+   requires, when it is still unresolved. A known mismatch is left for the
+   read-only check phase (E300/E305/E306/E308), which owns those messages. *)
+let pin_expected st (d : dim) (expected : dim_vec) =
+  match resolve st d with
+  | Unknown id when id >= 0 -> bind st id expected
+  | _ -> ()
+
+(* Exact rationals on native ints, kept normalised (den > 0, gcd 1). Exponents
+   in a model are small integers, so overflow is not a practical concern. *)
+module Q = struct
+  type t = { n : int; d : int }
+  let rec gcd a b = if b = 0 then abs a else gcd b (a mod b)
+  let make n d =
+    if d = 0 then invalid_arg "Dimcheck.Q.make: zero denominator";
+    let g = gcd n d in
+    let g = if g = 0 then 1 else g in
+    let n, d = n / g, d / g in
+    if d < 0 then { n = -n; d = -d } else { n; d }
+  let zero = { n = 0; d = 1 }
+  let of_int n = { n; d = 1 }
+  let is_zero q = q.n = 0
+  let add a b = make (a.n * b.d + b.n * a.d) (a.d * b.d)
+  let neg a = { a with n = -a.n }
+  let mul a b = make (a.n * b.n) (a.d * b.d)
+  let div a b = make (a.n * b.d) (a.d * b.n)
+  let is_int q = q.d = 1
+end
+
+(* A linear form Σ c_v · x_v + k, with [k] a rational exponent vector. Terms
+   are kept sorted by variable id with no zero coefficients. *)
+type lin = { terms : (int * Q.t) list; const : Q.t array }
+
+let lin_const v = { terms = []; const = Array.map Q.of_int v }
+let lin_var id = { terms = [ (id, Q.of_int 1) ]; const = Array.make n_bases Q.zero }
+
+let lin_scale c (l : lin) =
+  if Q.is_zero c then { terms = []; const = Array.make n_bases Q.zero }
+  else { terms = List.map (fun (v, q) -> (v, Q.mul c q)) l.terms;
+         const = Array.map (Q.mul c) l.const }
+
+let lin_add (a : lin) (b : lin) =
+  let rec merge xs ys = match xs, ys with
+    | [], r | r, [] -> r
+    | (vx, qx) :: tx, (vy, qy) :: ty ->
+      if vx < vy then (vx, qx) :: merge tx ys
+      else if vy < vx then (vy, qy) :: merge xs ty
+      else
+        let q = Q.add qx qy in
+        if Q.is_zero q then merge tx ty else (vx, q) :: merge tx ty
+  in
+  { terms = merge a.terms b.terms; const = Array.map2 Q.add a.const b.const }
+
+(* The current value of a dimension as a linear form: a resolved variable is
+   its constant, an unresolved one its union-find root. [None] for [Any] (the
+   [Const 0.0] identity), which carries no constraint. *)
+let lin_of_dim st (d : dim) : lin option =
+  match resolve st d with
+  | Known v -> Some (lin_const v)
+  | Unknown id when id >= 0 -> Some (lin_var id)
+  | Unknown _ | Any -> None
+
+type solve_outcome = {
+  newly_bound : int;     (* variables bound by this solve *)
+  contradictions : int;  (* equations inconsistent with the rest *)
+  non_integral : int;    (* determined, but to a fractional exponent *)
+}
+
+(* Solve every recorded equation. Each variable the system determines is bound
+   (via [bind], so it resolves through union-find for every later reader).
+   Gauss–Jordan with a pivot table: [pivots] maps a pivot variable to the
+   linear form, over non-pivot variables only, that it equals. *)
+let solve_equations st : solve_outcome =
+  let pivots : (int, lin) Hashtbl.t = Hashtbl.create 64 in
+  (* Substitute every pivot variable occurring in [l]. *)
+  let reduce (l : lin) : lin =
+    List.fold_left (fun acc (v, q) ->
+      match Hashtbl.find_opt pivots v with
+      | Some rhs -> lin_add acc (lin_scale q rhs)
+      | None -> lin_add acc { terms = [ (v, q) ]; const = Array.make n_bases Q.zero })
+      { terms = []; const = l.const } l.terms
+  in
+  let contradictions = ref 0 in
+  List.iter (fun (r, terms) ->
+    (* Equation as a form that must equal zero: r − Σ c·t. *)
+    let parts =
+      (1, 1, r) :: List.map (fun (n, d, t) -> (-n, d, t)) terms in
+    let form = List.fold_left (fun acc (n, d, t) ->
+      match acc, lin_of_dim st t with
+      | Some acc, Some l -> Some (lin_add acc (lin_scale (Q.make n d) l))
+      | _ -> None)
+      (Some { terms = []; const = Array.make n_bases Q.zero }) parts in
+    match form with
+    | None -> ()
+    | Some form ->
+      let form = reduce form in
+      match form.terms with
+      | [] ->
+        if not (Array.for_all Q.is_zero form.const) then incr contradictions
+      | (p, cp) :: _ ->
+        (* x_p = −(1/cp) · (form − cp·x_p) *)
+        let rest = { form with terms = List.filter (fun (v, _) -> v <> p) form.terms } in
+        let rhs = lin_scale (Q.neg (Q.div (Q.of_int 1) cp)) rest in
+        (* Keep the table fully reduced: eliminate x_p from every other row. *)
+        Hashtbl.filter_map_inplace (fun _ (row : lin) ->
+          match List.assoc_opt p row.terms with
+          | None -> Some row
+          | Some q ->
+            let without = { row with terms = List.filter (fun (v, _) -> v <> p) row.terms } in
+            Some (lin_add without (lin_scale q rhs))) pivots;
+        Hashtbl.replace pivots p rhs
+  ) (List.rev st.equations);
+  let newly_bound = ref 0 and non_integral = ref 0 in
+  (* Bind in ascending id order so the result does not depend on hash order. *)
+  let rows = Hashtbl.fold (fun v l acc -> (v, l) :: acc) pivots [] in
+  List.iter (fun (v, (l : lin)) ->
+    if l.terms = [] then begin
+      if Array.for_all Q.is_int l.const then begin
+        let root = find_root st v in
+        if not (Hashtbl.mem st.resolved root) then begin
+          Hashtbl.replace st.resolved root (Array.map (fun (q : Q.t) -> q.n) l.const);
+          incr newly_bound
+        end
+      end else incr non_integral
+    end
+  ) (List.sort (fun (a, _) (b, _) -> compare a b) rows);
+  { newly_bound = !newly_bound; contradictions = !contradictions;
+    non_integral = !non_integral }
 
 (* ── Param dim from kind ────────────────────────────────────────────────── *)
 
@@ -407,7 +585,10 @@ and infer_binop st ~ctx (b : bin_op_expr) : dim =
     (match dl, dr with
      | Any, d | d, Any -> d
      | Known v1, Known v2 -> Known (dim_mul v1 v2)
-     | _ -> fresh_var st)
+     | _ ->
+       let r = fresh_var st in
+       record_equation st r [ (1, 1, dl); (1, 1, dr) ];
+       r)
   | Div ->
     (* Special case: Const/Const (e.g. 1/730) is dimensionally ambiguous.
        In epi models this commonly represents a rate (1/duration).
@@ -421,7 +602,10 @@ and infer_binop st ~ctx (b : bin_op_expr) : dim =
        | Any, _ -> Any
        | _, Any -> dl
        | Known v1, Known v2 -> Known (dim_div v1 v2)
-       | _ -> fresh_var st)
+       | _ ->
+         let r = fresh_var st in
+         record_equation st r [ (1, 1, dl); (-1, 1, dr) ];
+         r)
     end
   | Pow -> infer_pow st ~ctx b
   | Eq | Neq | Lt | Gt | Le | Ge ->
@@ -448,7 +632,13 @@ and infer_pow st ~ctx (b : bin_op_expr) : dim =
          ~message:(Printf.sprintf "non-constant exponent with dimensioned base in '%s'" ctx)
          ~detail:(Printf.sprintf "base has dimension %s" (dim_display v)) ();
        Known dimensionless)
-  | _ -> fresh_var st
+  | Unknown _ ->
+    let r = fresh_var st in
+    (match b.right with
+     | Const n when Float.is_integer n ->
+       record_equation st r [ (Float.to_int n, 1, dl) ]
+     | _ -> ());
+    r
 
 and infer_unop st ~ctx (u : un_op_expr) : dim =
   let da = infer st ~ctx u.arg in
@@ -472,7 +662,10 @@ and infer_unop st ~ctx (u : un_op_expr) : dim =
            ~detail:(Printf.sprintf "argument has dimension %s" (dim_display v)) ();
          Known dimensionless
        end
-     | Unknown _ -> fresh_var st)
+     | Unknown _ as da ->
+       let r = fresh_var st in
+       record_equation st r [ (1, 2, da) ];
+       r)
 
 and infer_cond st ~ctx (c : cond_expr) : dim =
   (* M18 in the 2026-04-19 review: the predicate can carry any
@@ -961,13 +1154,22 @@ let check_contrasts st (m : model)
    - [require_dimensionless]: the argument is a probability or shape parameter
      (Binomial/Bernoulli `p`, BetaBinomial `alpha`/`beta`) — its inferred dim
      must be dimensionless. *)
+(* Infer a likelihood argument whose dimension is a strict contract, so its
+   products are recorded as equations even in permissive mode. *)
+let infer_contract_arg st ~ctx arg =
+  let prev = st.contract_arg in
+  st.contract_arg <- true;
+  let d = infer st ~ctx arg in
+  st.contract_arg <- prev;
+  d
+
 let require_count st ~ctx ~msg arg =
   if not (is_bare_const arg) then
-    constrain_known st ~code:"E304" ~message:msg (infer st ~ctx arg) population
+    constrain_known st ~code:"E304" ~message:msg (infer_contract_arg st ~ctx arg) population
   else ignore (infer st ~ctx arg)
 
 let require_dimensionless st ~ctx ~msg arg =
-  constrain_known st ~code:"E304" ~message:msg (infer st ~ctx arg) dimensionless
+  constrain_known st ~code:"E304" ~message:msg (infer_contract_arg st ~ctx arg) dimensionless
 
 (* ── Main check ─────────────────────────────────────────────────────────── *)
 
@@ -1075,16 +1277,16 @@ let check_model (m : model) : result =
   (* We do multiple rounds to propagate resolved unknowns across transitions.
      Two rounds suffices for most models (first round resolves most params,
      second round picks up cross-transition effects). *)
-  for _round = 1 to 3 do
+  let run_round () =
     List.iter (fun (tr : transition) ->
       st.subject <- Some (STransition tr.name);
       let ctx = Printf.sprintf "transition '%s'" tr.name in
-      ignore (infer st ~ctx tr.rate);
+      pin_expected st (infer st ~ctx tr.rate) rate_total;
       propagate st ~ctx tr.rate rate_total;
       (* Overdispersion *)
       (match tr.draw_method with
        | DrawOverdispersed { sigma_sq; _ } ->
-         ignore (infer st ~ctx sigma_sq);
+         pin_expected st (infer st ~ctx sigma_sq) dimensionless;
          propagate st ~ctx sigma_sq dimensionless
        | _ -> ())
     ) m.transitions;
@@ -1094,7 +1296,7 @@ let check_model (m : model) : result =
      | Some bal ->
        st.subject <- None;
        let ctx = Printf.sprintf "balance '%s'" bal.balance_target in
-       ignore (infer st ~ctx bal.balance_expr);
+       pin_expected st (infer st ~ctx bal.balance_expr) population;
        propagate st ~ctx bal.balance_expr population
      | None -> ());
 
@@ -1102,7 +1304,7 @@ let check_model (m : model) : result =
     List.iter (fun (eq : ode_equation) ->
       st.subject <- Some (SOde eq.compartment);
       let ctx = Printf.sprintf "ODE d(%s)/dt" eq.compartment in
-      ignore (infer st ~ctx eq.derivative);
+      pin_expected st (infer st ~ctx eq.derivative) rate_total;
       propagate st ~ctx eq.derivative rate_total
     ) m.ode_equations;
 
@@ -1181,7 +1383,7 @@ let check_model (m : model) : result =
              "%s: NegBinomial `mean` must have the dimension of a count \
               (expected events over the reporting interval)" ctx)
            nb.mean.expr;
-         let disp_dim = infer st ~ctx nb.dispersion.expr in
+         let disp_dim = infer_contract_arg st ~ctx nb.dispersion.expr in
          (* Pre-existing constraint, kept for symmetry with the new
             checks below. propagate handles Unknown binding;
             constrain_known catches Known-mismatch. *)
@@ -1270,7 +1472,7 @@ let check_model (m : model) : result =
              "%s: zero-inflated NegBinomial `mean` must have the dimension of \
               a count (expected events over the reporting interval)" ctx)
            zi.mean.expr;
-         let disp_dim = infer st ~ctx zi.dispersion.expr in
+         let disp_dim = infer_contract_arg st ~ctx zi.dispersion.expr in
          propagate st ~ctx zi.dispersion.expr dimensionless;
          constrain_known st ~code:"E304"
            ~message:(Printf.sprintf
@@ -1285,7 +1487,20 @@ let check_model (m : model) : result =
       Hashtbl.reset st.obs_col_dims
     ) m.observations;
     st.permissive_dim <- prev_permissive
-  done;
+  in
+  for _round = 1 to 3 do run_round () done;
+  (* Solve the recorded product equations, then re-run the rounds so the newly
+     bound variables propagate; repeat to a fixpoint. Each iteration that
+     continues binds at least one variable, so this terminates; the bound is
+     a guard, not a tuning knob. *)
+  let rec fixpoint n =
+    let o = solve_equations st in
+    if o.newly_bound > 0 && n < 100 then (run_round (); fixpoint (n + 1)) else o
+  in
+  let solved = fixpoint 0 in
+  if Sys.getenv_opt "CAMDL_DIMCHECK_DEBUG" <> None then
+    Printf.eprintf "dimcheck-solver: equations=%d contradictions=%d non_integral=%d\n%!"
+      (List.length st.equations) solved.contradictions solved.non_integral;
 
   (* Cache inferred rate dims for use in the read-only check phase *)
   List.iter (fun (tr : transition) ->
