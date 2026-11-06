@@ -640,6 +640,7 @@ fn camdlc_identity() -> Option<String> {
 /// Jacobian it needs, so the two variants must not collide in this cache.
 pub(crate) fn ir_cache_key(
     content: &[u8],
+    model_name: &str,
     compiler_id: &str,
     ir_ver: &str,
     fold_disabled: bool,
@@ -650,6 +651,13 @@ pub(crate) fn ir_cache_key(
     let mut buf = Vec::with_capacity(content.len() + compiler_id.len() + ir_ver.len() + 8);
     buf.extend_from_slice(content);
     buf.push(0);
+    // camdlc names the model after the file's stem, so two byte-identical
+    // models under different file names emit different IR (`model.name`).
+    // The stem is a compiler input like the flags below; without it the
+    // second file is served IR carrying the first file's name.
+    // Length-prefixed, so no name's bytes can run into the next field.
+    buf.extend_from_slice(&(model_name.len() as u64).to_le_bytes());
+    buf.extend_from_slice(model_name.as_bytes());
     buf.extend_from_slice(compiler_id.as_bytes());
     buf.push(0);
     buf.extend_from_slice(ir_ver.as_bytes());
@@ -701,6 +709,14 @@ struct ReadDep {
 /// not-fresh (recompile) rather than mis-parsing — so a format change fails
 /// closed instead of silently serving a misread entry.
 const SIDECAR_SCHEMA: u32 = 1;
+
+/// The model name `camdlc` gives a source file: its basename without the last
+/// extension (`ocaml/bin/camdlc.ml`: `Filename.basename path |>
+/// Filename.remove_extension`).
+fn compiled_model_name(model_path: &str) -> String {
+    let p = std::path::Path::new(model_path);
+    p.file_stem().unwrap_or(p.as_os_str()).to_string_lossy().into_owned()
+}
 
 /// The on-disk cache sidecar: a schema-tagged wrapper around the read-closure,
 /// not a bare list, so future format changes are detectable and fail closed.
@@ -1161,7 +1177,7 @@ pub fn resolve_ir_path_with_quantities(
                 // change the IR camdlc emits, so both belong in the key — else
                 // flipping one serves the stale variant.
                 let fold_disabled = std::env::var_os("CAMDL_NO_CONSTANT_FOLD").is_some();
-                let key = ir_cache_key(&content, &compiler_id, ir::IR_VERSION.trim(), fold_disabled, licm_enabled(), needs_state_grad, quantities.map(|q| q.bytes.as_slice()));
+                let key = ir_cache_key(&content, &compiled_model_name(path), &compiler_id, ir::IR_VERSION.trim(), fold_disabled, licm_enabled(), needs_state_grad, quantities.map(|q| q.bytes.as_slice()));
                 Some((dir.join(format!("{}.ir.json", key)), key))
             }
             _ => None,
@@ -1972,35 +1988,37 @@ mod ir_cache_key_tests {
     fn key_is_stable_and_distinguishes_content_compiler_and_schema() {
         // Args: (content, compiler_id, ir_ver, fold_disabled, licm_enabled,
         //        state_grad_emitted). `a` = full IR (state-Jacobian emitted).
-        let a = ir_cache_key(b"model A", "git1", "0.7", false, false, true, None);
+        let a = ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, None);
         // Same inputs → same key (cache hit).
-        assert_eq!(a, ir_cache_key(b"model A", "git1", "0.7", false, false, true, None));
+        assert_eq!(a, ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, None));
         // Different model content → different key (an edit recompiles).
-        assert_ne!(a, ir_cache_key(b"model B", "git1", "0.7", false, false, true, None));
+        assert_ne!(a, ir_cache_key(b"model B", "m", "git1", "0.7", false, false, true, None));
+        // The file stem names the model in the emitted IR, so it keys.
+        assert_ne!(a, ir_cache_key(b"model A", "n", "git1", "0.7", false, false, true, None));
         // Different compiler version → different key (a camdlc upgrade recompiles).
-        assert_ne!(a, ir_cache_key(b"model A", "git2", "0.7", false, false, true, None));
+        assert_ne!(a, ir_cache_key(b"model A", "m", "git2", "0.7", false, false, true, None));
         // Different IR schema version → different key (a format change recompiles).
-        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.8", false, false, true, None));
+        assert_ne!(a, ir_cache_key(b"model A", "m", "git1", "0.8", false, false, true, None));
         // Flipping CAMDL_NO_CONSTANT_FOLD changes the emitted IR → different key
         // (must not serve the folded IR when the user asked for unfolded).
-        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", true, false, true, None));
+        assert_ne!(a, ir_cache_key(b"model A", "m", "git1", "0.7", true, false, true, None));
         // gh#272: LICM on vs off (default-on; `--no-licm` / `CAMDL_NO_LICM` forces
         // off) changes the emitted IR (hoisted vs inlined) → different key, so the
         // toggle recompiles rather than serving the stale variant through fit.
-        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", false, true, true, None));
+        assert_ne!(a, ir_cache_key(b"model A", "m", "git1", "0.7", false, true, true, None));
         // gh#439 A2: state-Jacobian emitted (full, nuts+ode) vs skipped (lean,
         // `--no-state-grad`) changes the emitted IR bytes → different key, so a
         // lean simulate/mh entry is never served to a nuts+ode fit that needs the
         // Jacobian (and vice-versa).
-        assert_ne!(a, ir_cache_key(b"model A", "git1", "0.7", false, false, false, None));
+        assert_ne!(a, ir_cache_key(b"model A", "m", "git1", "0.7", false, false, false, None));
         // The three switches are independent — none masks the others.
         assert_ne!(
-            ir_cache_key(b"model A", "git1", "0.7", true, false, true, None),
-            ir_cache_key(b"model A", "git1", "0.7", false, true, true, None)
+            ir_cache_key(b"model A", "m", "git1", "0.7", true, false, true, None),
+            ir_cache_key(b"model A", "m", "git1", "0.7", false, true, true, None)
         );
         assert_ne!(
-            ir_cache_key(b"model A", "git1", "0.7", false, false, false, None),
-            ir_cache_key(b"model A", "git1", "0.7", false, true, true, None)
+            ir_cache_key(b"model A", "m", "git1", "0.7", false, false, false, None),
+            ir_cache_key(b"model A", "m", "git1", "0.7", false, true, true, None)
         );
         // 64-hex sha256.
         assert_eq!(a.len(), 64);
@@ -2014,18 +2032,18 @@ mod ir_cache_key_tests {
     /// switches above.
     #[test]
     fn key_distinguishes_the_quantities_vocabulary() {
-        let none = ir_cache_key(b"model A", "git1", "0.7", false, false, true, None);
-        let va = ir_cache_key(b"model A", "git1", "0.7", false, false, true, Some(b"quantities { a = final(S) }"));
-        let vb = ir_cache_key(b"model A", "git1", "0.7", false, false, true, Some(b"quantities { b = final(R) }"));
+        let none = ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, None);
+        let va = ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, Some(b"quantities { a = final(S) }"));
+        let vb = ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, Some(b"quantities { b = final(R) }"));
         assert_ne!(none, va, "a vocabulary must not share the model's own key");
         assert_ne!(va, vb, "two vocabularies must not collide");
         assert_eq!(
             va,
-            ir_cache_key(b"model A", "git1", "0.7", false, false, true, Some(b"quantities { a = final(S) }")),
+            ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, Some(b"quantities { a = final(S) }")),
             "the same vocabulary is the same entry (a cache hit)"
         );
         // Length-prefixed, so an empty vocabulary is distinguishable from none.
-        assert_ne!(none, ir_cache_key(b"model A", "git1", "0.7", false, false, true, Some(b"")));
+        assert_ne!(none, ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, Some(b"")));
     }
 }
 
