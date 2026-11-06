@@ -1,0 +1,47 @@
+# invariant: a reactive transfer `fraction` is dimensionless
+# spec: §5.1, interventions
+# expect: E314 Error
+time_unit = 'days
+
+compartments { S, I, R, V }
+
+parameters {
+  beta    : rate        in [0.01, 2.0]
+  gamma   : rate        in [0.01, 1.0]
+  N0      : count       in [100, 100000]
+  I0      : count       in [1, 1000]
+  cov     : probability in [0, 1]
+  seed    : count       in [1, 10]
+  t_seed  : instant     in [0, 50]
+  thr     : count       in [1, 100]
+  rho     : probability in [0, 1]
+}
+
+let N = S + I + R + V
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ poisson(rate = rho * projected)
+  }
+}
+
+reactive_interventions {
+  sia : when sum_observed(weekly_cases, window = 28 'days) >= thr {
+    after  = 21 'days
+    action = transfer(fraction = gamma, from = S, to = V)
+    once   = true
+  }
+}
+
+init { S = N0 - I0  I = I0 }
+
+simulate { from = 0 'days  to = 100 'days }

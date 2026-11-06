@@ -64,6 +64,9 @@ type obligation =
 
 type literals =
   | Literals_dimensionless   (* a literal is dimensionless; 0 takes any *)
+  | Whole_terms              (* a literal that is an entire additive term of
+                                the expression takes the position's dimension:
+                                `count = 50`, `at [t_seed + 7]` (§5.2) *)
   | Literals_free            (* every literal takes the dimension its context
                                 needs: initial conditions, until the literal
                                 rule of §5.2 lands *)
@@ -116,7 +119,6 @@ let add acc ?(subject : subject option) ?(literals = Literals_dimensionless) ?(s
   acc.out <- s :: acc.out
 
 let pending step = Exempt (Pending step)
-let pending_interventions = pending "the interventions rule (§8 step 4)"
 let pending_quantities    = pending "the quantities rule (§8 step 4)"
 let pending_priors        = pending "the priors rule (§8 step 4)"
 let pending_normal        = pending "the count-noise rule (§8 step 4, §5.6)"
@@ -238,27 +240,37 @@ let table_sites acc (tbl : table) =
         if is_constant_expr e then Exempt Constant_argument else Equals (K_table name) in
       add acc ~role ~code:"E302" obligation (E e)) values
 
+(* A transfer moves a fraction of a compartment, or a number of people; an
+   assignment or an addition is a number of people. *)
 let action_sites acc ?subject ~role:what (a : action) =
   let role field = Printf.sprintf "%s `%s`" what field in
+  let count field e =
+    add acc ?subject ~role:(role field) ~code:"E314" ~literals:Whole_terms
+      (Has population) (E e) in
   match a with
   | FractionTransfer { src = _; dst = _; fraction } ->
-    add acc ?subject ~role:(role "fraction") ~code:"E314" pending_interventions (E fraction)
-  | AbsoluteTransfer { src = _; dst = _; count } ->
-    add acc ?subject ~role:(role "count") ~code:"E314" pending_interventions (E count)
-  | Set { compartment = _; value } ->
-    add acc ?subject ~role:(role "value") ~code:"E314" pending_interventions (E value)
-  | AddAction { add_compartment = _; add_count } ->
-    add acc ?subject ~role:(role "count") ~code:"E314" pending_interventions (E add_count)
+    add acc ?subject ~role:(role "fraction") ~code:"E314" (Has dimensionless) (E fraction)
+  | AbsoluteTransfer { src = _; dst = _; count = c } -> count "count" c
+  | Set { compartment = _; value } -> count "value" value
+  | AddAction { add_compartment = _; add_count } -> count "count" add_count
 
-let rec trigger_sites acc ?subject ~role (t : trigger_expr) =
+(* A threshold is compared with the observed values of a stream, so it has
+   the dimension of that stream's scored column; a literal threshold is read
+   in it. Summing or averaging observations keeps their dimension. *)
+let rec trigger_sites acc ~scored_of ?subject ~role (t : trigger_expr) =
   match t with
-  | TECmp (TQObserved { stream = _; window = _; reducer = _ }, _cmp, threshold) ->
+  | TECmp (TQObserved { stream; window = _; reducer = _ }, _cmp, threshold) ->
     let e = match threshold with TTConst v -> Const v | TTParam p -> Param p in
-    add acc ?subject ~role:(role ^ " threshold") ~code:"E315" pending_interventions (E e)
-  | TEAnd (a, b) | TEOr (a, b) -> trigger_sites acc ?subject ~role a; trigger_sites acc ?subject ~role b
-  | TENot a -> trigger_sites acc ?subject ~role a
+    let obligation = match scored_of stream with
+      | Some col -> Equals (K_column (stream, col))
+      | None -> Free in
+    add acc ?subject ~role:(Printf.sprintf "%s threshold on '%s'" role stream) ~code:"E315"
+      ~literals:Whole_terms obligation (E e)
+  | TEAnd (a, b) | TEOr (a, b) ->
+    trigger_sites acc ~scored_of ?subject ~role a; trigger_sites acc ~scored_of ?subject ~role b
+  | TENot a -> trigger_sites acc ~scored_of ?subject ~role a
 
-let intervention_sites acc (iv : intervention) =
+let intervention_sites acc ~scored_of (iv : intervention) =
   let { name; base_name = _; fire; actions; kind = _ } = iv in
   let subject = None in
   let role = Printf.sprintf "intervention '%s'" name in
@@ -268,9 +280,9 @@ let intervention_sites acc (iv : intervention) =
       | AtTimes _ | Recurring _ -> ()
       | AtTimesExpr es ->
         List.iter (fun e -> add acc ?subject ~role:(role ^ " time") ~code:"E315"
-                              pending_interventions (E e)) es)
+                              ~literals:Whole_terms (Has time) (E e)) es)
    | Reactive { when_; after = _; once = _; cooldown = _ } ->
-     trigger_sites acc ?subject ~role when_);
+     trigger_sites acc ~scored_of ?subject ~role when_);
   List.iter (action_sites acc ?subject ~role) actions
 
 let observation_sites acc (obs : observation_model) =
@@ -417,7 +429,10 @@ let sites (m : model) : site list =
   List.iter (ode_site acc) ode_equations;
   List.iter (forcing_sites acc) time_functions;
   List.iter (table_sites acc) tables;
-  List.iter (intervention_sites acc) interventions;
+  let scored_of stream =
+    List.find_map (fun (o : observation_model) ->
+      if o.name = stream then Some o.scored else None) observations in
+  List.iter (intervention_sites acc ~scored_of) interventions;
   List.iter (observation_sites acc) observations;
   List.iter (parameter_sites acc) parameters;
   List.iter (binding_site acc) bindings;

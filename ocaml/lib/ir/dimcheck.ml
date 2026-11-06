@@ -368,7 +368,9 @@ let unop st ~site ~what (op : un_op) (a : value) : value =
          (form_sub (form_scale 2 (var_form x)) f) dimensionless;
        F (var_form x))
 
-let rec gen st ~(site : Dim_sites.site) (e : expr) : value =
+(* [term]: [e] is an entire additive term of the site's expression, where a
+   literal takes the position's dimension under [Whole_terms]. *)
+let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
   let what = site.role in
   let g = gen st ~site in
   match e with
@@ -376,7 +378,14 @@ let rec gen st ~(site : Dim_sites.site) (e : expr) : value =
   | Const _ ->
     (match site.literals with
      | Dim_sites.Literals_free -> F (var_form (fresh st))
-     | Literals_dimensionless -> F (const_form dimensionless))
+     | Whole_terms when term -> Any
+     | Whole_terms | Literals_dimensionless -> F (const_form dimensionless))
+  | BinOp { op = (Add | Sub) as op; left; right }
+    when not (match right with UncheckedDim { reason; _ } -> reason = spline_log_shift_reason
+                               | _ -> false) ->
+    let l = g ~term left and r = g ~term right in
+    binop st ~site:(Some site) ~code:"E302" ~what op ~fresh_div:false l r
+  | UnOp { op = Neg; arg } -> g ~term arg
   | Param n | ConstRef n -> F (var_form (var_of st (Dim_sites.K_param n)))
   | Pop _ | PopSum _ -> F (const_form population)
   | Time | Dt | ObsAnchor _ -> F (const_form time_dim)
@@ -414,10 +423,10 @@ let rec gen st ~(site : Dim_sites.site) (e : expr) : value =
   | UnOp u -> unop st ~site:(Some site) ~what u.op (g u.arg)
   | Cond c ->
     ignore (g c.pred);
-    let t = g c.then_ and f = g c.else_ in
+    let t = g ~term c.then_ and f = g ~term c.else_ in
     equate st ~site:(Some site) ~code:"E302" ~op:(Printf.sprintf "the branches of a conditional in %s" what) t f;
     (match t with Any -> f | F _ -> t)
-  | Reduce terms -> g (chain_add terms)
+  | Reduce terms -> g ~term (chain_add terms)
   | BindingRef n -> F (var_form (var_of st (Dim_sites.K_binding n)))
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
@@ -457,7 +466,7 @@ let add_site st (s : Dim_sites.site) =
   | Dim_sites.Exempt _, _ | _, Dim_sites.Checked -> ()
   | (Has _ | Equals _ | Defines _ | Free), Binding ->
     let v = match s.expr with
-      | Dim_sites.E e -> gen st ~site:s e
+      | Dim_sites.E e -> gen st ~site:s ~term:true e
       | Scalar se -> gen_scalar st ~site:s se
       | Contrast ce -> gen_contrast st ~site:s ce
     in
