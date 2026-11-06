@@ -95,7 +95,7 @@ init { S = 990  I = 10  R = 0 }
 observations {
   prev {
     columns       { time : time, prev : count }
-    projected     = prevalence(I)
+    projected     = I
     prev ~ poisson(rate = projected)
   }
   inc {
