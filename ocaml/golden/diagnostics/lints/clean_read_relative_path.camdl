@@ -1,0 +1,43 @@
+# invariant: a relative read() path does not warn
+# spec: warning-catalog W104
+# expect: (none)
+# Control for W104 (gh#211): a RELATIVE read() path is portable and must NOT
+# warn. The data file resolves relative to this .camdl source dir, so the model
+# compiles with zero diagnostics.
+#
+time_unit = 'days
+
+dimensions {
+  patch = [north, south, east]
+}
+
+compartments { S, I, R }
+
+stratify(by = patch)
+
+tables {
+  N0 : patch = read("data/w104_n0.tsv")
+}
+
+parameters {
+  beta  : rate  in [0.001, 1.0]
+  gamma : rate  in [0.01,  1.0]
+  I0    : count in [1, 1000]
+}
+
+let N[p in patch] = S[p] + I[p] + R[p]
+
+transitions {
+  infection[p in patch]  : S[p] --> I[p]  @ beta * S[p] * I[p] / N[p]
+  recovery[p in patch]   : I[p] --> R[p]  @ gamma * I[p]
+}
+
+init {
+  S[p in patch] = N0[p] - I0
+  I[p in patch] = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 365 'days
+}

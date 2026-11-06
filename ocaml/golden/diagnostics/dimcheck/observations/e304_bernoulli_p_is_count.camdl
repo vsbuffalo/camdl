@@ -1,0 +1,52 @@
+# invariant: a Bernoulli p is dimensionless
+# spec: §5.1, position "Binomial and Bernoulli p"
+# expect: E304 Error
+# gh#116 follow-up coverage: pin the Bernoulli.p strict dim-check.
+#
+# `bernoulli(p = projected)` where projected is a count is the same
+# missing-`/N` bug class as the binomial case in
+# `e304_binomial_p_is_count.camdl`. Audit-flagged on 2026-05-27 as
+# unpinned coverage — same wiring as Binomial.p but no negative
+# golden until this file.
+#
+# Expected diagnostic AFTER fix: E304, "Bernoulli `p` must be
+# dimensionless (probability); a count here is almost certainly a
+# missing `/N`."
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate
+  gamma : rate
+}
+
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+}
+
+observations {
+  detection {
+    columns       { time : time, detection : count }
+    projected     = I
+    emit_schedule = every 14 'days
+    # BUG: bernoulli's `p` is a probability ∈ [0, 1]; a count there
+    # is wrong by dimension. Intent was almost certainly
+    # `p = projected / N` (a prevalence fraction).
+    detection ~ bernoulli(p = projected)
+  }
+}
+
+init {
+  S = 990
+  I = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}

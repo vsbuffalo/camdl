@@ -524,8 +524,8 @@ deaths, cases against six lab-run splits, all off one confirmation flow, each
 with its own reporting multiplier and its own dispersion. Not one group in that
 corpus repeated a scored name. A lint that fires on three models in five teaches
 people to ignore its code, so the predicate is the conjunction.
-`ocaml/test/lints/clean_cases_and_deaths_one_flow.camdl` pins that shape as
-emitting nothing.
+`ocaml/golden/diagnostics/lints/clean_cases_and_deaths_one_flow.camdl` pins that
+shape as emitting nothing.
 
 **Warning, never an error — and it still fires on some correct models.** Two
 streams sharing a projection _and_ a scored name can be legitimate: two
@@ -535,8 +535,8 @@ likelihood is right. What is wrong is the same _measurements_ entering twice —
 and camdl cannot know that from the model, because it is a fact about how the
 data files were produced. So the lint asks the question and leaves the answer to
 the modeler; it must never refuse.
-`ocaml/test/lints/l404_two_labs_one_scored_name.camdl` pins the legitimate case
-as compiling with the warning and no error.
+`ocaml/golden/diagnostics/lints/l404_two_labs_one_scored_name.camdl` pins the
+legitimate case as compiling with the warning and no error.
 
 **Resolved projections, not source text.** The check runs on the expanded IR,
 after stratification expansion, index resolution and binder substitution,

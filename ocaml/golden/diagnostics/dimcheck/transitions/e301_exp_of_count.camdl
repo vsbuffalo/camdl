@@ -1,0 +1,30 @@
+# invariant: the argument of exp is dimensionless
+# spec: §4.3, the `exp` rule
+# expect: E300 Error, E301 Error
+# E301: exp() applied to a compartment (population count)
+# exp(I) has a dimensioned argument — I has dimension P
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate
+  gamma : rate
+}
+
+transitions {
+  infection : S --> I  @ beta * S * exp(I) / N
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = 990
+  I = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}

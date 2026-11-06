@@ -733,37 +733,6 @@ let test_golden_no_dim_errors model_name () =
     end
   end
 
-(* ── Negative Golden Files ─────────────────────────────────────────────── *)
-
-let test_error_golden expected_code model_name () =
-  let errors_dir = Filename.concat golden_dir "errors" in
-  let camdl_path = Filename.concat errors_dir (model_name ^ ".camdl") in
-  if not (Sys.file_exists camdl_path) then
-    Alcotest.skip ()
-  else begin
-    let src = read_file camdl_path in
-    (* Disable dimcheck during compile so the model compiles to IR,
-       then run dimcheck separately to verify the expected error. *)
-    let saved = !Compiler.no_dim_check in
-    Compiler.no_dim_check := true;
-    let result = Compiler.compile ~name:model_name src in
-    Compiler.no_dim_check := saved;
-    match result with
-    | Error _e ->
-      Alcotest.failf "%s: compile failed before dimcheck: %s" model_name _e
-    | Ok ir ->
-      let r = Dimcheck.check_model ir in
-      if not (has_error expected_code r) then begin
-        let all_diags = List.map (fun (d : Dimcheck.diagnostic) ->
-          Printf.sprintf "  [%s] %s" d.code d.message
-        ) r.diagnostics in
-        Alcotest.failf "%s: expected error %s, got:\n%s"
-          model_name expected_code
-          (if all_diags = [] then "  (no diagnostics)"
-           else String.concat "\n" all_diags)
-      end
-  end
-
 (* ── Union-Find Linking ────────────────────────────────────────────────── *)
 
 let test_unknown_unknown_linking_conflict () =
@@ -1628,30 +1597,7 @@ let () =
       Alcotest.test_case "old annotation fix-its apply"  `Quick test_old_annotations_fixits_apply;
       Alcotest.test_case "bare positive unchanged"       `Quick test_bare_positive_unchanged;
     ];
-    "negative_golden", [
-      Alcotest.test_case "e300_missing_susceptible" `Quick
-        (test_error_golden "E300" "e300_missing_susceptible");
-      Alcotest.test_case "e300_rate_is_probability" `Quick
-        (test_error_golden "E300" "e300_rate_is_probability");
-      Alcotest.test_case "e301_exp_of_count"        `Quick
-        (test_error_golden "E301" "e301_exp_of_count");
-      Alcotest.test_case "e302_add_count_and_rate"  `Quick
-        (test_error_golden "E302" "e302_add_count_and_rate");
-      Alcotest.test_case "e302_iota_bare_const"     `Quick
-        (test_error_golden "E302" "e302_iota_bare_const");
-      Alcotest.test_case "e303_param_inconsistent"  `Quick
-        (test_error_golden "E303" "e303_param_inconsistent");
-      (* gh#116 / 2026-05-26 upstream OCaml-compiler review Critical #6 *)
-      Alcotest.test_case "e304_binomial_p_is_count"  `Quick
-        (test_error_golden "E304" "e304_binomial_p_is_count");
-      (* gh#116 follow-up coverage (2026-05-27 audit): pin every
-         distribution variant's strict dim-check independently. *)
-      Alcotest.test_case "e304_bernoulli_p_is_count"  `Quick
-        (test_error_golden "E304" "e304_bernoulli_p_is_count");
-      Alcotest.test_case "e304_beta_binomial_alpha_is_count"  `Quick
-        (test_error_golden "E304" "e304_beta_binomial_alpha_is_count");
-      Alcotest.test_case "e304_neg_binomial_dispersion_is_count"  `Quick
-        (test_error_golden "E304" "e304_neg_binomial_dispersion_is_count");
+    "observation_args", [
       Alcotest.test_case "e304_proportion_projection_ok"  `Quick
         test_e304_proportion_projection_ok;
       (* dimcheck-n fix (2026-06-10 obs data-entry §3.1) *)

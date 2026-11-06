@@ -1,0 +1,33 @@
+# invariant: rk4 takes no tolerances
+# spec: warning-catalog E106
+# expect: E106 Error
+# gh#166: rk4 takes no tolerances (atol/rtol are rk45-only) — located E106.
+#
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate  in [0.001, 2.0]
+  gamma : rate  in [0.001, 1.0]
+  N0    : count in [100, 100000]
+  I0    : count in [1, 1000]
+}
+
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+  integrator = rk4 { atol = 1e-8 }
+}

@@ -1,0 +1,34 @@
+# invariant: one parameter cannot take two dimensions across transitions
+# spec: §4.4, contradictions
+# expect: E300 Error, E302 Error, E303 Error
+# E303: parameter alpha used with inconsistent dimensions
+# In infection: alpha * S * I / N — alpha inferred as T^-1 (rate)
+# In waning:    alpha * R         — alpha also inferred as T^-1 (OK so far)
+# But add a third transition where alpha is used as a count:
+#   reinfection: R --> S @ gamma * (alpha + I)
+# Here alpha + I requires alpha to be P (count), conflicting with T^-1
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  alpha : positive
+  gamma : rate
+}
+
+transitions {
+  infection   : S --> I  @ alpha * S * I / N
+  waning      : R --> S  @ gamma * (alpha + I)
+}
+
+init {
+  S = 990
+  I = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}

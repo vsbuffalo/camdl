@@ -1,0 +1,55 @@
+# invariant: a scenario may enable only a declared intervention
+# spec: warning-catalog E267
+# expect: E267 Error
+# gh#115 / 2026-05-26 upstream OCaml-compiler review Critical #5:
+# scenario overrides and intervention enables are not validated.
+#
+# Negative golden — scenario declares `enable = ["sai"]` but the
+# real intervention name is `sia`. A typo in the enable list silently
+# disables nothing; the "high_coverage_sia" scenario then runs as
+# baseline. That is a direct wrong counterfactual when this scenario
+# is selected via `--scenario high_coverage_sia` at run time.
+#
+# Expected diagnostic AFTER fix: E267 (unknown intervention name in
+# scenario enable/disable list), pointing at the typo and naming the
+# declared intervention.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate
+  gamma : rate
+  cov   : probability
+}
+
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+}
+
+interventions {
+  sia : transfer(fraction = cov, from = S, to = R) at [30]
+}
+
+scenarios {
+  high_coverage_sia {
+    # BUG (silently accepted today): "sai" is a typo for "sia".
+    # The scenario activates nothing and runs as baseline.
+    enable = ["sai"]
+    set = { cov = 0.9 }
+  }
+}
+
+init {
+  S = 990
+  I = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 365 'days
+}

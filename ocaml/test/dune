@@ -131,16 +131,16 @@
  (libraries compiler ir alcotest yojson unix))
 
 ; Compiler-diagnostics harness (gh#168). Reads its `.camdl` fixtures from
-; `test/lints/` and the model corpora (`ocaml/golden`, `tests/*`) by
+; `golden/diagnostics/` and the model corpora (`ocaml/golden`, `tests/*`) by
 ; resolving the real repo root at runtime — the corpora outside the
 ; `ocaml/` dune root cannot be pulled in as `(deps ...)`. `(source_tree
-; lints)` makes the in-tree fixtures available; the runtime resolver reads
+; ../golden)` makes the in-tree fixtures available; the runtime resolver reads
 ; the originals.
 (test
  (name test_diagnostics)
  (modules test_diagnostics)
  (libraries compiler ir alcotest yojson)
- (deps (source_tree lints) (source_tree ../golden)))
+ (deps (source_tree ../golden)))
 
 
 ; SHA-256 conformance for the compiler's hand-written digest (sha256.ml), which

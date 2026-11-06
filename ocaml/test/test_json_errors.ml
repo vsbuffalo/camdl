@@ -71,7 +71,7 @@ let codes_of_array (j : Yojson.Safe.t) : (string * string) list =
 
 (* ── Source fixtures (inline, path-independent) ────────────────────────────
    A well-formed SIR that declares a dead compartment `D` — the same
-   shape as test/lints/l402_dead_compartment.camdl, inlined so the test
+   shape as ocaml/golden/diagnostics/lints/l402_dead_compartment.camdl, inlined so the test
    needs no repo-root resolution. The linter flags `D` (L402, Warning)
    and the compile SUCCEEDS. *)
 let l402_src = {camdl|

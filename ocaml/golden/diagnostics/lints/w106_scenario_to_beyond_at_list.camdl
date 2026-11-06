@@ -1,0 +1,49 @@
+# invariant: a scenario `to` that selects the same listed times is W106
+# spec: warning-catalog W106
+# expect: W106 Warning
+# gh#561: with an explicit `at = [...]` output list, emission is exactly the
+# listed times <= t_end. A scenario `to` is therefore INERT when it selects the
+# same entries the model horizon would — here nothing is listed between 80 and
+# 200, so `overshoot` records the same three snapshots (0, 30, 60) either way
+# and no `quantities {}` reduction moves. Well-defined, so a warning.
+#
+# Note the predicate is against the MODEL horizon, not against max(at): with the
+# same list and a model horizon of 40, a scenario `to = 200` WOULD pick up 60
+# and must not warn. The clean_scenario_to_selects_more_at_times.camdl fixture
+# pins that direction.
+#
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate  in [0.001, 2.0]
+  gamma : rate  in [0.001, 1.0]
+  N0    : count in [100, 100000]
+  I0    : count in [1, 1000]
+}
+
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}
+
+output { trajectories { at = [0 'days, 30 'days, 60 'days] } }
+
+scenarios {
+  overshoot {
+    simulate { to = 200 'days }
+  }
+}

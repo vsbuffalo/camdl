@@ -1,0 +1,30 @@
+# invariant: the operands of + have one dimension
+# spec: §4.3, the addition rule
+# expect: E300 Error, E302 Error
+# E302: adding a rate parameter and a population count
+# rate = beta + S has T^-1 + P — dimension mismatch
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate
+  gamma : rate
+}
+
+transitions {
+  infection : S --> I  @ (beta + S) * I / N
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = 990
+  I = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}

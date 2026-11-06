@@ -5,11 +5,14 @@
    dimcheck → lint → autodiff), which returns EVERY diagnostic — errors,
    warnings, and infos — without rendering or aborting:
 
-   1. Fixture-by-code driver: every `.camdl` under `test/lints/` is
-      annotated with the diagnostic codes (+severity) it must emit via an
-      inline `# expect:` comment, and the driver asserts the emitted
-      (code, severity) set EXACTLY matches — catching both misses and
-      spurious emissions, for warnings/lints and errors alike.
+   1. Fixture-by-code driver: every `.camdl` under `ocaml/golden/diagnostics/`
+      (recursively) opens with three header lines, `# invariant:` (the one
+      rule it tests), `# spec:` (where that rule is stated) and `# expect:`
+      (the diagnostic codes and severities it must emit). The driver refuses a
+      file missing any of them and asserts the emitted (code, severity) set
+      EXACTLY matches — catching both misses and spurious emissions, for
+      errors, warnings, lints and infos alike. `make diagnostics-invariants`
+      lists the invariants per area.
 
    2. Clean-corpus regression: every `.camdl` under the model corpora
       (`ocaml/golden/`, `tests/fixtures/`, `tests/recovery/`,
@@ -58,7 +61,7 @@ let read_file path =
    dune project root — so they cannot be pulled in as dune `(deps ...)`.
    Instead we locate the real repo root at runtime by walking up from the
    cwd looking for the `ir/VERSION` marker, then read the corpus files by
-   their true source paths. `ocaml/test/lints/` and `ocaml/golden/` live
+   their true source paths. `ocaml/golden/diagnostics/` and `ocaml/golden/` live
    inside the project and are also resolved this way for uniformity. *)
 let repo_root =
   let is_root dir =
@@ -90,8 +93,8 @@ let root_path rel = Filename.concat repo_root rel
 (* List every `*.camdl` under [dir], recursing into subdirectories so
    `tests/recovery/cases/<name>/model.camdl` is found. A subdirectory whose
    basename is in [skip_dirs] is pruned — used to skip
-   `ocaml/golden/errors/`, which holds DELIBERATELY broken models (the
-   `negative_golden` fixtures) that are not part of any clean corpus.
+   `ocaml/golden/diagnostics/`, whose models are checked against their own
+   `# expect:` lines and are not part of any clean corpus.
    Returns absolute paths, sorted; missing directory → []. *)
 let camdl_files_under ?(skip_dirs = []) dir : string list =
   let rec collect d acc =
@@ -148,23 +151,32 @@ let pairs_to_string ps =
   if ps = [] then "(none)"
   else String.concat ", " (List.map Pair.to_string ps)
 
+(* The text after `# <key>:` on the first comment line carrying that key, with
+   any spacing after the hash. *)
+let header_field ~key (src : string) : string option =
+  let prefix = key ^ ":" in
+  split_on '\n' src
+  |> List.find_map (fun line ->
+       let l = trim line in
+       if starts_with ~prefix:"#" l then
+         let body = trim (String.sub l 1 (String.length l - 1)) in
+         if starts_with ~prefix body then
+           Some (trim (String.sub body (String.length prefix)
+                         (String.length body - String.length prefix)))
+         else None
+       else None)
+
+let require_header ~fixture ~key src =
+  match header_field ~key src with
+  | Some v when v <> "" -> v
+  | _ -> Alcotest.failf "fixture %s has no `# %s:` header line" fixture key
+
 let parse_expectation ~fixture (src : string) : Pair.t list =
-  let lines = split_on '\n' src in
-  let annotation =
-    List.find_map (fun line ->
-      let l = trim line in
-      (* Accept `# expect:` with any spacing after the hash. *)
-      if starts_with ~prefix:"#" l then
-        let body = trim (String.sub l 1 (String.length l - 1)) in
-        if starts_with ~prefix:"expect:" body then
-          Some (trim (String.sub body 7 (String.length body - 7)))
-        else None
-      else None
-    ) lines
-  in
-  match annotation with
+  ignore (require_header ~fixture ~key:"invariant" src);
+  ignore (require_header ~fixture ~key:"spec" src);
+  match header_field ~key:"expect" src with
   | None ->
-    Alcotest.failf "fixture %s has no `# expect:` annotation" fixture
+    Alcotest.failf "fixture %s has no `# expect:` header line" fixture
   | Some rest ->
     let rest = trim rest in
     if rest = "(none)" || rest = "" then []
@@ -194,23 +206,31 @@ let emitted_pairs path : Pair.t list =
 
 (* ── Piece 2: fixture-by-code driver ─────────────────────────────────────── *)
 
-let lints_dir = root_path "ocaml/test/lints"
+let diagnostics_dir = root_path "ocaml/golden/diagnostics"
+
+(* A fixture's name in test output: its path under [diagnostics_dir], so the
+   area is visible (`dimcheck/observations/e304_binomial_p_is_count`). *)
+let fixture_name path =
+  let prefix = diagnostics_dir ^ Filename.dir_sep in
+  let pl = String.length prefix in
+  if starts_with ~prefix path then String.sub path pl (String.length path - pl)
+  else Filename.basename path
 
 let test_fixture path () =
   let src = read_file path in
-  let expected = parse_expectation ~fixture:(Filename.basename path) src in
+  let expected = parse_expectation ~fixture:(fixture_name path) src in
   let actual = emitted_pairs path in
   if expected <> actual then
     Alcotest.failf
       "diagnostic mismatch for %s\n  expected: %s\n  actual:   %s"
-      (Filename.basename path) (pairs_to_string expected) (pairs_to_string actual)
+      (fixture_name path) (pairs_to_string expected) (pairs_to_string actual)
 
 let fixture_cases () =
-  let files = camdl_files_under lints_dir in
+  let files = camdl_files_under ~skip_dirs:["data"] diagnostics_dir in
   if files = [] then
-    Alcotest.failf "no .camdl fixtures found under %s" lints_dir;
+    Alcotest.failf "no .camdl fixtures found under %s" diagnostics_dir;
   List.map (fun path ->
-    Alcotest.test_case (Filename.basename path) `Quick (test_fixture path)
+    Alcotest.test_case (fixture_name path) `Quick (test_fixture path)
   ) files
 
 (* ── Piece 3: clean-corpus regression ────────────────────────────────────── *)
@@ -233,12 +253,12 @@ let corpus_allowlist : (string * string) list = [
   ("polio_afp_es_2patch.camdl", "W105");
 ]
 
-(* The model corpora presumed clean. `ocaml/golden/errors/` is pruned: it
-   holds deliberately-broken negative fixtures (the dimcheck/semantic error
-   suite), not real models. `tests/fixtures/` and `tests/recovery/` carry real
+(* The model corpora presumed clean. `ocaml/golden/diagnostics/` is pruned:
+   its models are checked against their own `# expect:` lines, and many are
+   deliberately broken. `tests/fixtures/` and `tests/recovery/` carry real
    `.camdl` models (e.g. `polio_afp_es_2patch.camdl`), all scanned here. *)
 let corpus_dirs = [
-  ("ocaml/golden",   ["errors"; "data"]);
+  ("ocaml/golden",   ["diagnostics"; "data"]);
   ("tests/fixtures", []);
   ("tests/recovery", []);
 ]
@@ -605,7 +625,8 @@ let compile_error_codes ~filename src : string list =
    stratified incidence) must be rejected by BOTH pipelines with E507.
    Pre-fix, `check` accepted it (empty code set) while `compile` rejected
    (E507) — the divergence. *)
-let dangling_obs_fixture = Filename.concat lints_dir "e507_dangling_obs_transition.camdl"
+let dangling_obs_fixture =
+  Filename.concat diagnostics_dir "semantic/e507_dangling_obs_transition.camdl"
 
 let test_dangling_obs_parity () =
   let src = read_file dangling_obs_fixture in
@@ -623,16 +644,16 @@ let test_dangling_obs_parity () =
    is the meta-test that kills the whole Defect-B class — any future
    `run_check` reimplementation that drifts from `compile` fails here.
 
-   We exclude `ocaml/golden/errors/` (deliberately-broken dimcheck/semantic
-   negatives) by reusing the same `skip_dirs` the clean-corpus test uses;
-   they're still covered by the lints/ E5xx fixtures, and several are
-   crafted to trip a single pass in isolation. The lints/ dir IS included —
-   it carries the E507 fixture plus L402/clean models, exercising the
-   warning-vs-error boundary of the parity (a lint warns in both; it must
-   NOT show up as an error-code divergence). *)
+   We exclude `ocaml/golden/diagnostics/dimcheck/` (deliberately-broken
+   dimension negatives, several crafted to trip a single pass in isolation).
+   `diagnostics/lints/` and `diagnostics/semantic/` ARE included — they carry
+   the E507 fixture plus L402/clean models, exercising the warning-vs-error
+   boundary of the parity (a lint warns in both; it must NOT show up as an
+   error-code divergence). *)
 let parity_corpus_dirs = [
-  ("ocaml/test/lints", []);
-  ("ocaml/golden",     ["errors"; "data"]);
+  ("ocaml/golden/diagnostics/lints",    ["data"]);
+  ("ocaml/golden/diagnostics/semantic", []);
+  ("ocaml/golden",     ["diagnostics"; "data"]);
   ("tests/fixtures",   []);
   ("tests/recovery",   []);
 ]

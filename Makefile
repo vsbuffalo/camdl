@@ -163,6 +163,13 @@ test-fast: build-ocaml build-rust
 test-ocaml: build-ocaml
 	cd ocaml && dune runtest
 
+# List the invariant each diagnostic model tests, grouped by area
+# (ocaml/golden/README.md). Read-only.
+.PHONY: diagnostics-invariants
+diagnostics-invariants:
+	@cd ocaml/golden/diagnostics && find . -name '*.camdl' | sort | while read -r f; do \
+	  printf '%-62s %s\n' "$${f#./}" "$$(sed -n 's/^# invariant: //p' "$$f" | head -1)"; done
+
 # Resolve the freshly-built camdlc by putting it FIRST on PATH (not via the
 # CAMDLC env var): several tests (compile_once, ir_cache) inject their own
 # camdlc shim through PATH, and a CAMDLC env (find_camdlc priority 2) would

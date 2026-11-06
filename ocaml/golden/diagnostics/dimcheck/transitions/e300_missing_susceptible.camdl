@@ -1,0 +1,30 @@
+# invariant: a mass-action infection rate without its susceptible compartment is per-capita, not P·T⁻¹
+# spec: §5.1, position "transition rate"
+# expect: E300 Error
+# E300: infection rate missing susceptible compartment
+# rate = beta * I / N has dimension T^-1, not P*T^-1
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate
+  gamma : rate
+}
+
+transitions {
+  infection : S --> I  @ beta * I / N
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = 990
+  I = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}

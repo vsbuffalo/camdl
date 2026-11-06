@@ -868,7 +868,7 @@ outside `corpus_allowlist`. All 62 pass it on this branch; six emit only I300
 Info or allowlisted W105. Every IR golden is therefore already a positive test.
 Diagnostic models live in two other conventions: 11 error models in
 `ocaml/golden/errors/`, each registered by hand in `ocaml/test/test_dimcheck.ml`
-(`negative_golden`, from line 1631) and checking one code; and 21 lint fixtures
+(`negative_golden`, from line 1631) and checking one code; and 20 lint fixtures
 in `ocaml/test/lints/`, read by the `# expect:` driver in
 `ocaml/test/test_diagnostics.ml`.
 
@@ -888,8 +888,8 @@ ocaml/golden/
     dimcheck/
       interventions/  observations/  priors/  quantities/
       forcings/  literals/  powers/  solver/  transitions/
-    lints/               today's ocaml/test/lints/, moved
-    semantic/            the non-dimension cases of today's ocaml/golden/errors/
+    lints/               the W and L fixtures of today's ocaml/test/lints/
+    semantic/            the other E-code fixtures of both, and their controls
 ```
 
 The IR goldens are not moved. Moving them would change 147 path references,
@@ -1074,7 +1074,7 @@ across a commit boundary that lands.
 
 0. **The diagnostics tree.** `ocaml/golden/diagnostics/` with its header rules
    and recursive driver; `ocaml/golden/README.md`; the 11 error models and the
-   21 lint fixtures moved into it with `# expect:` lines; the hand-written
+   20 lint fixtures moved into it with `# expect:` lines; the hand-written
    `negative_golden` registrations deleted. No verdict changes and no IR golden
    moves, so every moved model passes as before.
 1. **Positive models and the fixes outside the checker.** The positive corpus
