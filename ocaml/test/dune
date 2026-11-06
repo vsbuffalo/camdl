@@ -104,6 +104,14 @@
  (modules test_model_date_literal)
  (libraries compiler ir alcotest))
 
+; Dim_solve, the integer solver behind dimension inference: hand-written
+; systems for each outcome, plus an exhaustive-search oracle and an
+; order-invariance property.
+(test
+ (name test_dim_solve)
+ (modules test_dim_solve)
+ (libraries ir alcotest qcheck-core qcheck-alcotest))
+
 (test
  (name test_dimcheck)
  (modules test_dimcheck)

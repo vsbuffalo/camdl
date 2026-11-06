@@ -1037,13 +1037,18 @@ keep the model, confirm the test fails.
 - Unique solution; underdetermined and consistent (with the relation reported);
   rational contradiction; integer infeasibility (2x + 2y = −T); a contradiction
   among non-unit rows.
-- Permutation invariance: the same system in shuffled order gives the same
-  determined values and the same set of conflicting equations.
-- An oracle: random small systems (up to 6 variables, coefficients in [−3, 3],
-  right-hand sides in [−3, 3]²), solved by exhaustive search over exponent
-  vectors in [−6, 6]². The oracle can only certify feasibility inside its box,
-  so generated systems are restricted to those whose solutions, when they exist,
-  lie in it (generated from a planted solution, plus planted infeasible ones).
+- Permutation invariance: a consistent system (right-hand sides computed from a
+  planted solution) in shuffled order gives the same determined values, each
+  equal to the planted one. Which equation of an inconsistent system is named as
+  the culprit depends on order by design, so the conflicting set is not
+  compared.
+- An oracle: random small systems (4 variables, coefficients in [−3, 3], one
+  base), solved by exhaustive search over [−4, 4]⁴. A box search can only
+  certify implications, and the test checks each one that holds for every
+  system: a solution in the box means the solver reports no conflict; every box
+  solution agrees with a value the solver calls determined; two box solutions
+  that differ in a variable mean the solver calls it free. It cannot certify
+  infeasibility, which the hand-written cases cover.
 - Overflow: a constructed system that would overflow native arithmetic raises
   the internal error, not a wrong answer.
 
