@@ -2712,6 +2712,141 @@ let test_indexed_family_indexed_endpoints_still_compile () =
         (Printf.sprintf "%s applies exactly one transfer" iv.Ir.name)
         1 (List.length iv.Ir.actions)) m.Ir.interventions
 
+(* gh#482: an indexed effect family whose instances resolve to the same actions
+   on the same schedule applies its action once per instance — `sia[r in round]`
+   with a body that never mentions `r` moved 2n, not n, and compiled clean. The
+   check compares instances after expansion, so a binder used only in the
+   schedule (distinct fire times) or a guard that leaves one instance stays
+   legal. *)
+let family482_src ?(dims = "round = [r1, r2]") ?(extra = "") ~block body =
+  Printf.sprintf {|
+    time_unit = 'days
+    dimensions { %s }
+    compartments { S, V }
+    parameters { n : count%s }
+    transitions { }
+    %s { %s }
+    init { S = 1000  V = 0 }
+    simulate { from = 0 'days to = 20 'days }
+  |} dims extra block body
+
+let test_family_unused_binder_transfer_rejected () =
+  compile_expect_error_code ~code:"E415" ~contains:"sia[r in round]"
+    (family482_src ~block:"interventions"
+       "sia[r in round] : transfer(count = n, from = S, to = V) at [10]")
+
+let test_family_unused_binder_event_add_rejected () =
+  compile_expect_error_code ~code:"E415" ~contains:"seed[r in round]"
+    (family482_src ~block:"events" "seed[r in round] : add(S, 5) at [1]")
+
+let test_family_unused_binder_set_rejected () =
+  compile_expect_error_code ~code:"E415" ~contains:"reset[r in round]"
+    (family482_src ~block:"interventions"
+       "reset[r in round] : { S = 0.5 * S  at = [1] }")
+
+let test_family_unused_binder_reactive_rejected () =
+  let src = {|
+    time_unit = 'days
+    dimensions { round = [r1, r2] }
+    compartments { S, I, V }
+    parameters { beta : rate }
+    transitions { infection : S --> I @ beta * S * I / (S + I + V) }
+    observations {
+      weekly {
+        columns       { time : time, weekly : count }
+        covers        = closing_at(time, 7 'days)
+        projected     = incidence(infection)
+        emit_schedule = every 7 'days
+        weekly        ~ poisson(rate = projected)
+      }
+    }
+    reactive_interventions {
+      surge[r in round] : when observed(weekly) >= 2 {
+        action = add(V, 5)
+      }
+    }
+    init { S = 1000  I = 1  V = 0 }
+    simulate { from = 0 'days to = 60 'days }
+  |} in
+  compile_expect_error_code ~code:"E415" ~contains:"surge[r in round]" src
+
+let test_family_partially_used_binders_name_the_idle_one () =
+  (* `a` distinguishes instances and `r` does not: the message must name `r`,
+     the binder that multiplies the action, and not blame `a`. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [child, adult]  round = [r1, r2] }
+    compartments { S, V }
+    stratify(by = age)
+    parameters { n : count }
+    transitions { }
+    events { seed[a in age, r in round] : add(S[a], 5) at [1] }
+    init { S[a in age] = 100  V[a in age] = 0 }
+    simulate { from = 0 'days to = 20 'days }
+  |} in
+  compile_expect_error_code ~code:"E415" ~contains:"binder 'r' does not" src;
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"e415_idle_binder" src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E415"
+  | Error e ->
+    Alcotest.(check bool) "does not blame the distinguishing binder 'a'" false
+      (contains_substring ~needle:"binder 'a'" e)
+
+let test_family_binder_in_schedule_compiles () =
+  (* The same action deliberately fired at a different time per round. *)
+  let m = compile_expect_ok
+    (family482_src ~block:"interventions" ~extra:"  t_round[round] : real"
+       "sia[r in round] : transfer(count = n, from = S, to = V) at [t_round[r]]") in
+  Alcotest.(check int) "two distinguishable instances" 2
+    (List.length m.Ir.interventions)
+
+let test_family_guard_leaving_one_instance_compiles () =
+  let m = compile_expect_ok
+    (family482_src ~block:"interventions"
+       "sia[r in round] : transfer(count = n, from = S, to = V) at [10] \
+        where r == r1") in
+  Alcotest.(check int) "guard leaves one instance" 1
+    (List.length m.Ir.interventions)
+
+let test_family_guard_leaving_two_identical_rejected () =
+  (* The binder appears in the guard but the guard keeps two members, which
+     are still identical: a "does the binder appear anywhere" rule would pass
+     this. *)
+  compile_expect_error_code ~code:"E415" ~contains:"sia_r2, sia_r3"
+    (family482_src ~dims:"round = [r1, r2, r3]" ~block:"interventions"
+       "sia[r in round] : transfer(count = n, from = S, to = V) at [10] \
+        where r != r1")
+
+let test_family_e239_does_not_also_report_e415 () =
+  (* E239 drops the bare-endpoint transfer, leaving every instance with no
+     actions — identical, but only because of the earlier error. One mistake
+     gets one diagnostic. *)
+  let src = {|
+    time_unit = 'days
+    dimensions { age = [child, adult] }
+    compartments { S, V }
+    stratify(by = age)
+    parameters { cov : probability }
+    transitions {}
+    interventions {
+      vacc[a in age] : transfer(fraction = cov, from = S, to = V) at [1]
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days to = 10 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"e239_no_e415" src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E239"
+  | Error e ->
+    Alcotest.(check bool) "E239 present" true
+      (contains_substring ~needle:"\"code\":\"E239\"" e);
+    Alcotest.(check bool) "no E415 cascade" false
+      (contains_substring ~needle:"\"code\":\"E415\"" e)
+
 let test_transfer_single_level_dimensions_rejected () =
   (* A family with exactly ONE cell resolves to `Ir.Pop`, not `Ir.PopSum`.
      Keying the shape on that constructor would give it no dimensions and let it
@@ -14732,6 +14867,24 @@ let () =
         `Quick test_bare_stratified_transfer_count_rejected;
       Alcotest.test_case "E239 bare endpoint inside an indexed family (gh#460)"
         `Quick test_indexed_family_bare_endpoint_rejected;
+      Alcotest.test_case "E415 family ignoring its binder: transfer (gh#482)"
+        `Quick test_family_unused_binder_transfer_rejected;
+      Alcotest.test_case "E415 family ignoring its binder: event add (gh#482)"
+        `Quick test_family_unused_binder_event_add_rejected;
+      Alcotest.test_case "E415 family ignoring its binder: set (gh#482)"
+        `Quick test_family_unused_binder_set_rejected;
+      Alcotest.test_case "E415 family ignoring its binder: reactive (gh#482)"
+        `Quick test_family_unused_binder_reactive_rejected;
+      Alcotest.test_case "E415 names only the idle binder (gh#482)"
+        `Quick test_family_partially_used_binders_name_the_idle_one;
+      Alcotest.test_case "family binder used only in schedule compiles (gh#482)"
+        `Quick test_family_binder_in_schedule_compiles;
+      Alcotest.test_case "family guard leaving one instance compiles (gh#482)"
+        `Quick test_family_guard_leaving_one_instance_compiles;
+      Alcotest.test_case "E415 guard leaving two identical members (gh#482)"
+        `Quick test_family_guard_leaving_two_identical_rejected;
+      Alcotest.test_case "E239 does not also report E415 (gh#482)"
+        `Quick test_family_e239_does_not_also_report_e415;
       Alcotest.test_case "E237 single-level dimensions still compared (gh#460)"
         `Quick test_transfer_single_level_dimensions_rejected;
       Alcotest.test_case "indexed cell into unstratified compiles (gh#460)"

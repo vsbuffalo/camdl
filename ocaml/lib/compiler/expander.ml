@@ -7887,6 +7887,76 @@ let resolve_intervention_action ctx env ~name ~family ~loc ~binders (action : ac
        check_action_target ctx ~name ~loc ~verb:"adds to" ~base ~concrete;
        [Ir.AddAction { Ir.add_compartment = concrete; Ir.add_count = resolve_expr ctx env expr }])
 
+let count_errors ctx =
+  List.length (List.filter (fun (d : Diagnostics.diagnostic) ->
+    d.Diagnostics.severity = Diagnostics.Error) ctx.diags.Diagnostics.diags)
+
+let render_index_binding = function
+  | IBind (v, d)       -> Printf.sprintf "%s in %s" v d
+  | IComp v            -> Printf.sprintf "%s in compartments" v
+  | IConsec (v, vn, d) -> Printf.sprintf "(%s, %s) in consecutive(%s)" v vn d
+
+(** gh#482: an indexed effect family (scheduled intervention, event, or reactive
+    policy) must expand to instances that differ from one another. Two instances
+    with the same actions and the same fire source both fire, so the action is
+    applied once per instance — `sia[r in round] : transfer(count = n, …)` whose
+    body never mentions `r` moves 2n from a model that reads as n.
+
+    Compared after expansion rather than by asking whether the binder appears in
+    the body: a binder used only in the schedule (`at [t_round[r]]`) gives
+    distinct fire times, and a `where` guard can leave a single instance, and
+    both are legal; conversely a binder mentioned only in the guard
+    (`where r != r1` over three rounds) still leaves duplicates. Equality is
+    [compare] on the resolved IR, so a NaN-baked end compares equal to itself.
+
+    Skipped when the family's expansion already reported an error: an action
+    that failed to resolve lowers to no actions, which would make every instance
+    look identical and add a second diagnostic for one mistake (E239's case). *)
+let check_family_instances_distinct ctx ~noun ~family ~loc ~indices
+    ~errors_before (instances : ((string * string) list * Ir.intervention) list) =
+  if indices <> [] && count_errors ctx = errors_before then begin
+    let key (iv : Ir.intervention) = (iv.Ir.fire, iv.Ir.actions) in
+    let same (_, a) (_, b) = compare (key a) (key b) = 0 in
+    let rec first_dup = function
+      | [] -> None
+      | x :: rest ->
+        (match List.find_opt (same x) rest with
+         | Some y -> Some (x, y)
+         | None   -> first_dup rest)
+    in
+    match first_dup instances with
+    | None -> ()
+    | Some (((env_a, _) as a), (env_b, _)) ->
+      let group = List.filter (same a) instances in
+      let names = List.map (fun (_, (iv : Ir.intervention)) -> iv.Ir.name) group in
+      (* The binders whose levels differ between two identical instances are
+         the ones that fail to distinguish them. *)
+      let idle = List.filter (fun v ->
+          List.assoc_opt v env_a <> List.assoc_opt v env_b)
+          (loop_vars_of_indices indices) in
+      let quoted = String.concat ", " (List.map (Printf.sprintf "'%s'") idle) in
+      let head = Printf.sprintf "%s[%s]" family
+          (String.concat ", " (List.map render_index_binding indices)) in
+      let v = match idle with v :: _ -> v | [] -> "_" in
+      Diagnostics.error ctx.diags ~code:"E415" ~loc
+        ~message:(Printf.sprintf
+          "%s family '%s' expands to %d instances (%s) with the same actions \
+           and the same schedule, so its action is applied %d times where it \
+           reads as once"
+          noun head (List.length group) (String.concat ", " names)
+          (List.length group))
+        ~hint:(Printf.sprintf
+          "%s not distinguish the instances: use %s in the action (index a \
+           compartment or parameter by it, e.g. `S[%s]`) or in the schedule \
+           (e.g. `at [t_start[%s]]` with a per-level parameter), or drop %s \
+           from the family's index list to apply the action once"
+          (if List.length idle > 1 then "binders " ^ quoted ^ " do"
+           else "binder " ^ quoted ^ " does")
+          (if List.length idle > 1 then "them" else "it") v v
+          (if List.length idle > 1 then "them" else "it"))
+        ()
+  end
+
 let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
   let t_start = match ctx.simulate with
     | None    -> 0.0
@@ -7906,9 +7976,10 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
       []
     end else begin
     let base_name = if iv.ivindices = [] then None else Some iv.ivname in
+    let errors_before = count_errors ctx in
     let combos =
       cartesian_product ~loc:(diag_loc_of_ast_ctx ctx iv.ivloc) iv.ivindices ctx in
-    List.filter_map (fun env ->
+    let instances = List.filter_map (fun env ->
       let pass_guard = match iv.ivguard with
         | None   -> true
         | Some g -> eval_guard ctx env g
@@ -8031,9 +8102,13 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
              ~loc:iv_loc ~binders:(loop_vars_of_indices iv.ivindices))
           iv.ivaction
       in
-      Some { Ir.name = iv_name; Ir.base_name; Ir.fire = Ir.Scheduled schedule;
-             Ir.actions; Ir.kind }
-    ) combos
+      Some (env, { Ir.name = iv_name; Ir.base_name;
+                   Ir.fire = Ir.Scheduled schedule; Ir.actions; Ir.kind })
+    ) combos in
+    let noun = match kind with Ir.Scenario -> "intervention" | Ir.Event -> "event" in
+    check_family_instances_distinct ctx ~noun ~family:iv.ivname ~loc:iv_loc
+      ~indices:iv.ivindices ~errors_before instances;
+    List.map snd instances
     end
   ) decls
 
@@ -8214,8 +8289,9 @@ let expand_reactive ctx decls =
                override it per run with `camdl simulate --to \"last_obs + 8 weeks\"`."
         ();
     let base_name = if rx.rxindices = [] then None else Some rx.rxname in
+    let errors_before = count_errors ctx in
     let combos = cartesian_product ~loc:rx_loc rx.rxindices ctx in
-    List.filter_map (fun env ->
+    let instances = List.filter_map (fun env ->
       let pass_guard = match rx.rxguard with
         | None   -> true
         | Some g -> eval_guard ctx env g
@@ -8277,9 +8353,14 @@ let expand_reactive ctx decls =
       let trigger : Ir.reactive_trigger =
         { Ir.when_; Ir.after; Ir.once; Ir.cooldown }
       in
-      Some { Ir.name = rx_name; Ir.base_name; Ir.fire = Ir.Reactive trigger;
-             Ir.actions; Ir.kind = Ir.Scenario }
-    ) combos
+      Some (env, { Ir.name = rx_name; Ir.base_name;
+                   Ir.fire = Ir.Reactive trigger; Ir.actions;
+                   Ir.kind = Ir.Scenario })
+    ) combos in
+    check_family_instances_distinct ctx ~noun:"reactive policy"
+      ~family:rx.rxname ~loc:rx_loc ~indices:rx.rxindices ~errors_before
+      instances;
+    List.map snd instances
   ) decls
 
 let expand_interventions ctx =

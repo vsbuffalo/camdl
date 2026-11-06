@@ -13,6 +13,26 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-05 — an indexed effect family whose members are identical is refused
+
+**What.** Every member of an indexed intervention, event or reactive family
+fires. A family whose binder neither its action nor its schedule uses expanded
+to identical members and applied the action once per member, with no diagnostic:
+`sia[r in round] : transfer(count = n, from = S, to = V) at [10]` moved `2n`. A
+family that expands to two members with the same actions and the same schedule
+is now **E415**, naming the binder that fails to distinguish them (gh#482).
+Models that used the binder in the action, the schedule, or a guard leaving one
+member are unaffected.
+
+**Migration.** Use the binder, or drop it.
+`sia[r in round] : transfer(count =
+n, from = S, to = V) at [10]` →
+`sia : transfer(count = n, from = S, to = V) at
+[10]` if one transfer was meant,
+or `sia[r in round] : transfer(…) at
+[t_start[r]]` if each round has its own
+date.
+
 ## 2026-10-29 — `bspline` forcing with estimable coefficients
 
 **What.** A new forcing kind, `bspline`: a clamped B-spline over a window, β(t)
