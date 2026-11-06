@@ -82,6 +82,7 @@ type subject = Dim_sites.subject =
   | SBinding     of string
   | SContrast    of string
   | SInit        of string
+  | SParameter   of string
 
 type diagnostic = {
   severity : severity;
@@ -90,6 +91,12 @@ type diagnostic = {
   detail   : string option;
   hint     : string option;
   subject  : subject option;
+}
+
+type prior_source = {
+  param  : string;
+  family : string;
+  args   : (string * expr) list;
 }
 
 type result = {
@@ -181,6 +188,7 @@ type eq_kind =
 type eq_info = { site : Dim_sites.site option; code : string; kind : eq_kind }
 
 type state = {
+  used : (string, unit) Hashtbl.t;   (* parameters read by some model position *)
   mutable t_only : bool;   (* the site being generated is an [Equals_t] site *)
   t_only_eqs : (int, unit) Hashtbl.t;   (* equations that hold on T alone *)
   mutable next_var : int;
@@ -389,7 +397,9 @@ let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
     let l = g ~term left and r = g ~term right in
     binop st ~site:(Some site) ~code:"E302" ~what op ~fresh_div:false l r
   | UnOp { op = Neg; arg } -> g ~term arg
-  | Param n | ConstRef n -> F (var_form (var_of st (Dim_sites.K_param n)))
+  | Param n | ConstRef n ->
+    Hashtbl.replace st.used n ();
+    F (var_form (var_of st (Dim_sites.K_param n)))
   | Pop _ | PopSum _ -> F (const_form population)
   | Time | Dt | ObsAnchor _ -> F (const_form time_dim)
   (* A basis function is a pure number (the basis sums to one). *)
@@ -437,7 +447,7 @@ let rec gen_scalar st ~(site : Dim_sites.site) (se : scalar_expr) : value =
   let g = gen_scalar st ~site in
   match se with
   | SConst _ -> Any
-  | SParam p -> F (var_form (var_of st (Dim_sites.K_param p)))
+  | SParam p -> Hashtbl.replace st.used p (); F (var_form (var_of st (Dim_sites.K_param p)))
   | SQRef q -> F (var_form (var_of st (Dim_sites.K_quantity q.qref_name)))
   | SUnOp { op; arg } -> unop st ~site:(Some site) ~what:site.role op (g arg)
   | SBinOp { op; left; right } ->
@@ -628,10 +638,132 @@ let render_relation names ((r : Dim_solve.relation), base) =
     Printf.sprintf "the %s exponent of %s is %d" (if b = 0 then "P" else "T")
       (String.concat " · " lhs) r.equals.(0)
 
+(* ── Priors ────────────────────────────────────────────────────────────── *)
+
+(* A prior is a measure on the number θ takes in model units; its family
+   neither establishes nor restricts θ's dimension, and nothing here emits an
+   equation (proposal §5.9). What is checked is an explicit unit literal: it is
+   converted to model units, and that conversion is right exactly when the
+   literal's dimension is the argument's conventional one. Inside an argument
+   a parameter is a number (a coordinate), so arithmetic on it is free. *)
+
+type prior_value =
+  | Bare                (* bare numbers only: a coordinate, no claim *)
+  | Units of dim_vec    (* determined by unit literals alone *)
+  | Coord               (* depends on a parameter or a function's value *)
+
+let is_unit_literal reason =
+  String.length reason >= 12 && String.sub reason 0 12 = "unit literal"
+
+(* [report a b]: explicit units [a] and [b] disagree inside one argument. *)
+let rec prior_value ~report (e : expr) : prior_value =
+  let pv = prior_value ~report in
+  match e with
+  | Const _ -> Bare
+  | UncheckedDim { inner = _; dim_p; dim_t; reason } when is_unit_literal reason ->
+    Units (make dim_p dim_t)
+  | BinOp { op = (Add | Sub | Min | Max); left; right } ->
+    (match pv left, pv right with
+     | Units a, Units b -> if dim_eq a b then Units a else (report a b; Coord)
+     | Bare, x | x, Bare -> x
+     | Coord, _ | _, Coord -> Coord)
+  | BinOp { op = (Mul | Div) as op; left; right } ->
+    let comb = if op = Mul then dim_mul else dim_div in
+    (match pv left, pv right with
+     | Units a, Units b -> Units (comb a b)
+     | Units a, Bare -> Units a
+     | Bare, Units b -> Units (comb dimensionless b)
+     | Bare, Bare -> Bare
+     | Coord, _ | _, Coord -> Coord)
+  | BinOp { op = Pow; left; right = Const n } when Float.is_integer n ->
+    (match pv left with
+     | Units a -> Units (Array.map (( * ) (Float.to_int n)) a)
+     | x -> x)
+  | UnOp { op = Neg; arg } -> pv arg
+  | BinOp { op = _; left; right } -> ignore (pv left); ignore (pv right); Coord
+  | UnOp { op = _; arg } -> ignore (pv arg); Coord
+  | Cond { pred; then_; else_ } -> ignore (pv pred); ignore (pv then_); ignore (pv else_); Coord
+  | Reduce ts -> List.iter (fun t -> ignore (pv t)) ts; Coord
+  | UncheckedDim _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
+  | TableLookup _ | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _
+  | ForcingBasis _ -> Coord
+
+(* The dimension an argument has in a unit-aware reading of the family. *)
+type convention = One | Theta | Inv_theta
+
+let convention family arg =
+  match family, arg with
+  | ("uniform" | "log_uniform"), ("lower" | "upper") -> Some Theta
+  | "normal", ("mu" | "sigma") -> Some Theta
+  | "truncated_normal", ("mean" | "sd") -> Some Theta
+  | "half_normal", "sigma" -> Some Theta
+  | "exponential", "rate" -> Some Inv_theta
+  | "gamma", "shape" -> Some One
+  | "gamma", "rate" -> Some Inv_theta
+  | "beta", ("alpha" | "beta") -> Some One
+  | "log_normal", ("mu" | "sigma") -> Some One
+  | _ -> None
+
+let check_priors (out : solved) st (priors : prior_source list) : diagnostic list =
+  let theta_dim p = out.value (var_of st (Dim_sites.K_param p)) in
+  List.concat_map (fun { param; family; args } ->
+    let subject = Some (SParameter param) in
+    List.concat_map (fun (arg, e) ->
+      let inner = ref [] in
+      let report a b =
+        inner := { severity = Error; code = "E316"; subject; hint = None;
+                   message = Printf.sprintf
+                     "prior of '%s': explicit units disagree inside `%s`" param arg;
+                   detail = Some (Printf.sprintf "%s is combined with %s"
+                                    (dim_display a) (dim_display b)) } :: !inner in
+      let v = prior_value ~report e in
+      let top = match v, convention family arg with
+        | Units d, Some conv ->
+          let expected = match conv with
+            | One -> Some dimensionless
+            | Theta -> theta_dim param
+            | Inv_theta -> Option.map (dim_div dimensionless) (theta_dim param) in
+          (match expected with
+           | Some x when not (dim_eq x d) ->
+             let log_scale = family = "log_normal" in
+             [ { severity = Error; code = "E316"; subject;
+                 message = Printf.sprintf
+                   "prior of '%s': `%s` has a unit literal of dimension %s, but a %s                     prior's `%s` is %s" param arg (dim_display d) family arg
+                   (dim_display x);
+                 detail = Some "a unit literal is converted to the model's units, and                                 that conversion is right only in the argument's own                                 dimension";
+                 hint = Some (if log_scale then
+                   "`mu` and `sigma` of a log-normal are the mean and sd of ln θ,                     numbers in model units. To give a median with a unit, write                     `mu = log(0.2 'per_day)`, which converts the value before taking                     its log; `sigma` is a plain number."
+                 else "write the argument in the parameter's own units, or as a bare                        number in model units") } ]
+           | Some _ | None -> [])
+        | (Units _ | Bare | Coord), _ -> []
+      in
+      (* One lint: a log-normal argument that is directly a parameter with a
+         dimension is probably a rate used where a log-coordinate belongs. *)
+      let lint = match family, arg, e with
+        | "log_normal", ("mu" | "sigma"), Param h ->
+          (match theta_dim h with
+           | Some d when not (dim_eq d dimensionless) ->
+             [ { severity = Info; code = "I316"; subject;
+                 message = Printf.sprintf
+                   "log-normal `%s` of '%s' is the parameter '%s', which has dimension %s"
+                   arg param h (dim_display d);
+                 detail = Some (Printf.sprintf
+                   "`%s` is a log-coordinate in model units: %s"
+                   arg (if arg = "mu"
+                        then Printf.sprintf "the prior's median is exp(%s) in %s's units" h param
+                        else "the sd of ln θ, a pure number"));
+                 hint = Some (Printf.sprintf
+                   "if '%s' is meant as a median %s, write `%s = log(%s)`; if it is                     meant as a log-coordinate, declare it `real dim 1`"
+                   h (display_dim d) arg h) } ]
+           | Some _ | None -> [])
+        | _ -> []
+      in
+      List.rev !inner @ top @ lint) args) priors
+
 (* ── Main check ────────────────────────────────────────────────────────── *)
 
-let check_model (m : model) : result =
-  let st = { t_only = false; t_only_eqs = Hashtbl.create 16; next_var = 0; keys = Hashtbl.create 256; declared = []; structure = [];
+let check_model ?prior_args (m : model) : result =
+  let st = { used = Hashtbl.create 64; t_only = false; t_only_eqs = Hashtbl.create 16; next_var = 0; keys = Hashtbl.create 256; declared = []; structure = [];
              obligation = []; info = Hashtbl.create 1024; next_eq = 0;
              tf_dims = Hashtbl.create 16 } in
   declare_model st m;
@@ -660,6 +792,9 @@ let check_model (m : model) : result =
       match out.value v with
       | Some d -> Left (n, d)
       | None -> Right (n, v)) named in
+  (* A parameter that no model position reads (one used only in priors, or not
+     at all) has no dimension that matters to anything. *)
+  let free = List.filter (fun (n, _) -> Hashtbl.mem st.used n) free in
   let relations = out.relations (List.map snd free) in
   let infos =
     List.map (fun (n, v) ->
@@ -678,4 +813,13 @@ let check_model (m : model) : result =
       match out.value (var_of st (Dim_sites.K_quantity q.q_name)) with
       | Some d -> Some ((q.q_name, q.q_stratum), d)
       | None -> None) m.quantities in
-  { diagnostics = errors @ infos; param_dims = resolved; quantity_dims }
+  let priors = match prior_args with
+    | Some ps -> ps
+    | None ->
+      List.filter_map (fun (p : parameter) ->
+        match p.value with
+        | Estimated { est_prior = Hierarchical h; _ } ->
+          Some { param = p.name; family = hierarchical_kind_name h.hkind; args = h.hargs }
+        | Estimated _ | Fixed _ | Required -> None) m.parameters in
+  let prior_diags = check_priors out st priors in
+  { diagnostics = errors @ prior_diags @ infos; param_dims = resolved; quantity_dims }

@@ -1,0 +1,20 @@
+# invariant: unit literals in a rate's normal prior are converted
+# spec: §5.9
+# expect: (none)
+time_unit = 'weeks
+
+compartments { S, I, R }
+
+parameters {
+  beta  : rate ~ normal(mu = 0.3, sigma = 0.1)
+  gamma : rate ~ normal(mu = 0.2 'per_day, sigma = 0.1 'per_day)
+}
+
+transitions {
+  infection : S --> I  @ beta * S * I / (S + I + R)
+  recovery  : I --> R  @ gamma * I
+}
+
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 100 'days }

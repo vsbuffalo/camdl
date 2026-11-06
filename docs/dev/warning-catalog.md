@@ -341,9 +341,10 @@ and hint text live in `ocaml/lib/compiler/expander.ml` (`warn_bare_numeric`) and
 
 ## Info
 
-| Code | Severity | Category    | Summary                                                                          |
-| ---- | -------- | ----------- | -------------------------------------------------------------------------------- |
-| I300 | Info     | dimensional | parameter dimension could not be determined (annotate with a more specific kind) |
+| Code | Severity | Category    | Summary                                                                                                                                                                                                                                                                                                                                |
+| ---- | -------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| I300 | Info     | dimensional | parameter dimension could not be determined (annotate with a more specific kind)                                                                                                                                                                                                                                                       |
+| I316 | Info     | dimensional | a log-normal `mu` or `sigma` is directly a parameter with a dimension (`mu = mu_r`, `mu_r : rate`): those arguments are log-coordinates in model units, so a rate's value there is probably meant as `log(mu_r)` or as a `real dim 1` log-coordinate. Advisory only; never constrains a dimension (2026-11-06 dimension checking §5.9) |
 
 ## Lints
 

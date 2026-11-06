@@ -228,6 +228,12 @@ gone by then. The expander already resolves each argument with `resolve_expr`
 before folding; it hands those expressions to the checker instead of discarding
 them. Nothing new is serialized, and the IR does not change.
 
+As implemented the priors are an optional argument rather than a record,
+`check_model : ?prior_args:prior_source list -> model -> result`, so the many
+callers that check a model built in a test need no change; without them the
+checker reads the hierarchical priors the IR keeps. The compiler always passes
+them.
+
 ### 4.2 `Dim_sites`: one function names every position and its obligation
 
 ```ocaml

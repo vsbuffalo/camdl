@@ -122,6 +122,11 @@ type context = {
      inlined rate exactly as before — it cannot see through a state-bearing
      BindingRef. The same let is still hoisted at its non-lineage use sites. *)
   mutable suppress_hoist  : bool;
+  (* Every prior's arguments as resolved IR expressions, before a constant
+     prior is folded to floats: the unit literal in `mu = -2 'per_day` is gone
+     from the IR, and the dimension checker needs it (proposal
+     2026-11-06-dimension-checking §5.9). Reversed. *)
+  mutable prior_sources   : Dimcheck.prior_source list;
   (* Declared value-column names of the observation stream currently being
      expanded (2026-06-10 observation data-entry §3). While set, an identifier
      in a likelihood expression matching one of these names resolves to
@@ -205,6 +210,7 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   hoisted_tbl          = Hashtbl.create 64;
   hoisted_rev          = [];
   suppress_hoist       = false;
+  prior_sources        = [];
   obs_aux_cols         = [];
   table_index          = Hashtbl.create 16;
   site_tallies         = [];
@@ -842,6 +848,8 @@ let transition_loc ctx name =
   find_decl_loc ctx ~decls:ctx.orig_transitions
     ~name_of:(fun (t : transition_decl) -> t.trname)
     ~loc_of:(fun t -> t.trloc) name
+
+let prior_sources ctx = List.rev ctx.prior_sources
 
 let param_loc ctx name =
   find_decl_loc ctx ~decls:ctx.param_decls
@@ -5767,8 +5775,14 @@ let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None)
     List.exists (fun (_, e) -> not (is_const_expr e)) ps.ps_args
   in
   let is_hierarchical = ps.ps_pool_over <> None || has_non_const_arg in
-  if not is_hierarchical then
-    `Plain (resolve_prior_spec ~loc ~bounds ctx ~pname ps)
+  if not is_hierarchical then begin
+    let plain = resolve_prior_spec ~loc ~bounds ctx ~pname ps in
+    ctx.prior_sources <-
+      { Dimcheck.param = pname; family = ps.ps_name;
+        args = List.map (fun (k, e) -> (k, normalize_expr (resolve_expr ctx [] e))) ps.ps_args }
+      :: ctx.prior_sources;
+    `Plain plain
+  end
   (* log_uniform and truncated_normal are constant-only distributions: they
      cannot reference hyperparameters or carry a `| dim` pooling clause.
      Without this guard they would reach [hierarchical_kind_of_name], which
@@ -5865,6 +5879,8 @@ let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None)
       | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
     in
     List.iter (fun (_, e) -> check_refs e) resolved_args;
+    ctx.prior_sources <-
+      { Dimcheck.param = pname; family = ps.ps_name; args = resolved_args } :: ctx.prior_sources;
     `Hierarchical {
       Ir.hkind      = Ir.hierarchical_kind_of_name ps.ps_name;
       Ir.hargs      = resolved_args;

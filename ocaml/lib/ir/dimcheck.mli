@@ -43,6 +43,7 @@ type subject = Dim_sites.subject =
   | SBinding     of string
   | SContrast    of string
   | SInit        of string
+  | SParameter   of string   (** a parameter, for a diagnostic about its prior *)
 
 type diagnostic = {
   severity : severity;
@@ -59,6 +60,17 @@ type result = {
   quantity_dims : ((string * (string * string) list) * dim_vec) list;
 }
 
+(** A prior as written, before the expander folds a constant prior's arguments
+    to floats: each argument resolved to an IR expression, unit literals intact
+    (as [UncheckedDim] nodes whose reason starts "unit literal"). *)
+type prior_source = {
+  param  : string;
+  family : string;                  (** "normal", "log_normal", ... *)
+  args   : (string * expr) list;
+}
+
 (** Dimensionally check an expanded model, returning every diagnostic plus the
-    resolved parameter and generated-quantity dimensions. *)
-val check_model : model -> result
+    resolved parameter and generated-quantity dimensions. [prior_args] are the
+    model's priors as written; without them only hierarchical priors, whose
+    arguments the IR keeps, are checked for explicit units. *)
+val check_model : ?prior_args:prior_source list -> model -> result

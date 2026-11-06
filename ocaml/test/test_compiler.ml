@@ -6509,6 +6509,33 @@ let test_prior_arg_log_function () =
     Alcotest.(check (float 1e-12)) "sigma" 0.5 sigma
   | _ -> Alcotest.fail "expected LogNormal prior"
 
+(* A unit literal in a prior argument is converted to model units, also
+   inside a function: under weeks, `log(0.2 'per_day)` is ln 1.4 (a median of
+   1.4 per week) and `0.2 'per_day` is 1.4 (proposal 2026-11-06 §5.9). *)
+let test_prior_unit_literal_converted () =
+  let src prior = Printf.sprintf {|
+    time_unit = 'weeks
+    parameters {
+      beta : rate ~ %s
+    }
+    compartments { S, I }
+    transitions { recovery : I --> S @ beta * I }
+    init { S = 1  I = 1 }
+    simulate { from = 0 'weeks  to = 1 'weeks }
+  |} prior in
+  (match Ir.param_prior_dist (find_param (compile_expect_ok
+           (src "log_normal(mu = log(0.2 'per_day), sigma = 0.5)")) "beta") with
+   | Some (Ir.LogNormal { mu; sigma }) ->
+     Alcotest.(check (float 1e-12)) "mu = ln 1.4" (log 1.4) mu;
+     Alcotest.(check (float 1e-12)) "sigma unchanged" 0.5 sigma
+   | _ -> Alcotest.fail "expected LogNormal prior");
+  match Ir.param_prior_dist (find_param (compile_expect_ok
+          (src "normal(mu = 0.2 'per_day, sigma = 0.1 'per_day)")) "beta") with
+  | Some (Ir.Normal_p { mean; sd }) ->
+    Alcotest.(check (float 1e-12)) "mean = 1.4 per week" 1.4 mean;
+    Alcotest.(check (float 1e-12)) "sd = 0.7 per week" 0.7 sd
+  | _ -> Alcotest.fail "expected Normal prior"
+
 let test_prior_arg_exp_and_sqrt () =
   (* Exercise exp() and sqrt() in const position — less common than log
      but same path through is_const_expr/eval_const_expr. *)
@@ -15577,6 +15604,7 @@ let () =
     "prior_const_args", [
       Alcotest.test_case "arithmetic of literals evaluates correctly"    `Quick test_prior_arg_arithmetic;
       Alcotest.test_case "log(0.3) is a const arg"                       `Quick test_prior_arg_log_function;
+      Alcotest.test_case "unit literal in a prior is converted"          `Quick test_prior_unit_literal_converted;
       Alcotest.test_case "exp() and sqrt() as const args"                `Quick test_prior_arg_exp_and_sqrt;
     ];
     "prior_validation", [

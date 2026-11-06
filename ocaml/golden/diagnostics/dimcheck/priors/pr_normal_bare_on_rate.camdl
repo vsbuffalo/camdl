@@ -1,0 +1,20 @@
+# invariant: bare numbers in a prior are coordinates in model units
+# spec: §5.9
+# expect: (none)
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  beta  : rate ~ normal(mu = 0.3, sigma = 0.1)
+  gamma : rate ~ normal(mu = 0.2, sigma = 0.1)
+}
+
+transitions {
+  infection : S --> I  @ beta * S * I / (S + I + R)
+  recovery  : I --> R  @ gamma * I
+}
+
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 100 'days }

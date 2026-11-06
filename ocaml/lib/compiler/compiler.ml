@@ -565,9 +565,10 @@ let run_dimcheck_full (d : compile_detail)
       | Some (Dimcheck.SObservation n) -> Expander.obs_loc         d.ctx n
       | Some (Dimcheck.SContrast n)    -> Expander.contrast_loc    d.ctx n
       | Some (Dimcheck.SInit c)        -> Expander.compartment_loc d.ctx c
+      | Some (Dimcheck.SParameter p)   -> Expander.param_loc       d.ctx p
       | Some (Dimcheck.SBinding _) | None -> Diagnostics.no_loc
     in
-    let result = Dimcheck.check_model d.model in
+    let result = Dimcheck.check_model ~prior_args:(Expander.prior_sources d.ctx) d.model in
     let diags =
       List.map (fun (dc : Dimcheck.diagnostic) ->
         let loc = loc_of_subject dc.subject in

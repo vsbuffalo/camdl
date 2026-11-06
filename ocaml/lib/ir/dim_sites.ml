@@ -34,6 +34,7 @@ type subject =
   | SBinding     of string
   | SContrast    of string
   | SInit        of string   (* compartment whose initial condition *)
+  | SParameter   of string   (* parameter whose prior *)
 
 (* Things whose dimension other positions refer to. *)
 type key =
@@ -123,7 +124,6 @@ let add acc ?(subject : subject option) ?(literals = Literals_dimensionless) ?(s
 
 let pending step = Exempt (Pending step)
 let pending_quantities    = pending "the quantities rule (§8 step 4)"
-let pending_priors        = pending "the priors rule (§8 step 4)"
 let pending_smooth        = pending "the smooth-spline rule (§8 step 4, §5.8)"
 
 let transition_sites acc (tr : transition) =
@@ -364,8 +364,10 @@ let parameter_sites acc (p : parameter) =
      | Flat | Dist _ -> ()
      | Hierarchical { hkind = _; hargs; hpool_over = _ } ->
        List.iter (fun (arg, e) ->
-         add acc ~strength:Checked ~code:"E316"
-           ~role:(Printf.sprintf "prior of '%s' `%s`" name arg) pending_priors (E e))
+         (* Checked after the solve by [Dimcheck]'s prior pass, from every
+            prior's arguments; never an equation (§5.9). *)
+         add acc ~subject:(SParameter name) ~strength:Checked ~code:"E316"
+           ~role:(Printf.sprintf "prior of '%s' `%s`" name arg) Free (E e))
          hargs)
 
 let binding_site acc ({ bname; bexpr } : binding) =
