@@ -14,6 +14,11 @@ let has_error code (result : Dimcheck.result) =
     d.severity = Dimcheck.Error && d.code = code
   ) result.diagnostics
 
+let contains s needle =
+  let n = String.length needle and m = String.length s in
+  let rec go i = i + n <= m && (String.sub s i n = needle || go (i + 1)) in
+  go 0
+
 let has_info code (result : Dimcheck.result) =
   List.exists (fun (d : Dimcheck.diagnostic) ->
     d.severity = Dimcheck.Info && d.code = code
@@ -776,10 +781,11 @@ let test_unknown_unknown_linking_catches_conflict () =
 
 (* ── E303 Cross-Transition Diagnostic ─────────────────────────────────── *)
 
-let test_e303_cross_transition () =
-  (* alpha used as rate (T^-1) in t1 via alpha * S,
-     but needs to be population (P) in t2 via gamma * (alpha + I).
-     Should produce E303 specifically. *)
+let test_param_two_dimensions () =
+  (* alpha used as a rate (T^-1) in `infection` via alpha * S * I / N, but as
+     a population (P) in `waning` via gamma * (alpha + I). One equation
+     system holds both uses, so this is a contradiction, reported at the
+     position where it surfaces with the other use named. *)
   let m = empty_model
     ~compartments:[mk_compartment "S"; mk_compartment "I"; mk_compartment "R";
                    mk_compartment "N"]
@@ -793,8 +799,16 @@ let test_e303_cross_transition () =
     ]
     () in
   let r = Dimcheck.check_model m in
-  Alcotest.(check bool) "E303 cross-transition conflict"
-    true (has_error "E303" r)
+  let names_both (d : Dimcheck.diagnostic) =
+    d.severity = Dimcheck.Error
+    && (match d.detail with
+        | Some s -> contains s "infection" && contains s "waning"
+        | None -> false)
+    || (d.severity = Dimcheck.Error && contains d.message "infection"
+        && (match d.detail with Some s -> contains s "waning" | None -> false))
+  in
+  Alcotest.(check bool) "a contradiction naming both transitions"
+    true (List.exists names_both r.diagnostics)
 
 (* ── Check Phase No Duplicate Errors ──────────────────────────────────── *)
 
@@ -1354,7 +1368,7 @@ let test_two_products_jointly_determine () =
 
 (* A dimension pinned only through a product inside another product: the rate
    (a·b)·(a/b)·S, where (a·b) and (a/b) are each unresolved sub-products. *)
-let test_nested_products_determine () =
+let test_nested_products_infeasible () =
   let m = empty_model
     ~compartments:[mk_compartment "S"]
     ~parameters:[mk_param ~kind:(Some Ir.Positive) "a";
@@ -1364,9 +1378,10 @@ let test_nested_products_determine () =
                   mk_transition "t2" (param "g" *. (param "a" /. param "b") *. pop "S")]
     () in
   let r = Dimcheck.check_model m in
-  Alcotest.(check bool) "no errors" true (no_errors r);
-  (* a·b = T^-1 and a/b = 1  ⇒  a = T^-1/2 — non-integral, so not bound. *)
-  Alcotest.(check bool) "fractional solution stays undetermined" true (has_info "I300" r);
+  (* a·b = T^-1 and a/b = 1  ⇒  2a = T^-1: rational solutions only. A model
+     whose dimensions need a fractional exponent is an error, not a free
+     parameter. *)
+  Alcotest.(check bool) "integer infeasibility is an error" false (no_errors r);
   Alcotest.(check (option (array int))) "a not bound" None (param_dim_of "a" r)
 
 (* A product of two unknowns equal to a known value is one equation in two
@@ -1472,7 +1487,7 @@ let () =
     ];
     "linear_solve", [
       Alcotest.test_case "two products jointly determine" `Quick test_two_products_jointly_determine;
-      Alcotest.test_case "nested products, fractional"    `Quick test_nested_products_determine;
+      Alcotest.test_case "nested products, fractional"    `Quick test_nested_products_infeasible;
       Alcotest.test_case "single product still free"      `Quick test_single_product_still_free;
       Alcotest.test_case "contract arg product determines" `Quick test_contract_arg_product_determines;
     ];
@@ -1573,8 +1588,8 @@ let () =
       Alcotest.test_case "linked unknowns consistent"  `Quick test_unknown_unknown_linking_conflict;
       Alcotest.test_case "linked unknowns conflict"    `Quick test_unknown_unknown_linking_catches_conflict;
     ];
-    "e303_diagnostic", [
-      Alcotest.test_case "E303 cross-transition"       `Quick test_e303_cross_transition;
+    "param_two_dimensions", [
+      Alcotest.test_case "contradiction across transitions" `Quick test_param_two_dimensions;
     ];
     "time_param_kinds", [
       Alcotest.test_case "instant is [T]"              `Quick test_instant_dim_is_time;

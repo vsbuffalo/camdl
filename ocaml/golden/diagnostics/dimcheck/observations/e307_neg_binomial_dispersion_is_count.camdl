@@ -1,6 +1,6 @@
 # invariant: a NegBinomial dispersion is dimensionless
 # spec: §5.1, position "dispersions"
-# expect: E304 Error, E307 Error
+# expect: E307 Error
 # gh#116 follow-up coverage: pin the NegBinomial.dispersion strict
 # dim-check.
 #

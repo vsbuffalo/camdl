@@ -1,47 +1,46 @@
-(* Dimensional analysis checker for camdl IR.
+(* Dimensional analysis of an expanded model, as one system of linear
+   equations over integer exponent vectors.
 
-   Base dimensions: P (population, index 0), T (time, index 1).
-   A dimension is an int array of exponents: [| p_exp; t_exp |].
+   Base dimensions: P (population, index 0), T (time, index 1). A dimension is
+   an int array of exponents. Dimensions form a free abelian group on the
+   bases, so every rule of inference is linear: a product's dimension is the
+   sum of its factors', a sum's equals each operand's, a static power [a^n] is
+   n times its base's (A. Kennedy, "Dimension types", ESOP 1994, LNCS 788,
+   pp. 348–362).
 
-   Inference:
-   1. Bottom-up: infer dimensions from leaves (known param kinds, Pop, Time),
-      unifying the operands of +, -, min, max and comparisons, and recording
-      a linear equation for every product, quotient, integer power or square
-      root with an unresolved operand.
-   2. Top-down: propagate expected dimensions (P*T^-1 for rates) into the
-      expression, and pin each rate's own dimension to its required value.
-   3. Solve the recorded equations together (Kennedy's dimension inference,
-      see [solve_equations]) and repeat 1-3 to a fixpoint. A parameter still
-      unresolved after that is not determined by how the model uses it.
+   Three pieces:
+   - [Dim_sites.sites] names every expression-bearing position of the model
+     with the dimension its expression must have (its obligation).
+   - [gen] turns each expression into a linear form over dimension variables
+     (one per parameter, table, binding, observation stream, column and
+     quantity), emitting an equation wherever two forms must agree (the
+     operands of +, a function's argument, a branch of a conditional).
+   - [Dim_solve] solves every equation at once, in the order declared facts,
+     then expression structure, then obligations, and reports every
+     contradiction and every integer infeasibility, which become located
+     diagnostics with the code of the position they surface at.
 
-   Tables and time functions get their dimensions inferred from their
-   defining expressions, not hardcoded. *)
+   An operator means the same thing at every position; the positions differ
+   only in their obligation (proposal
+   docs/dev/proposals/2026-11-06-dimension-checking-as-one-constraint-system.md). *)
 
 open Ir
 
-(* ── Base dimension registry ────────────────────────────────────────────── *)
+(* ── Dimensions ────────────────────────────────────────────────────────── *)
 
 let n_bases = 2
 
 type dim_vec = int array
 
-let make p t =
-  let d = Array.make n_bases 0 in
-  d.(0) <- p; d.(1) <- t; d
+let make p t = [| p; t |]
 
 let dimensionless = make 0 0
 let population    = make 1 0
-let rate_total    = make 1 (-1)  (* P*T^-1 *)
+let time_dim      = make 0 1
 
 let dim_mul a b = Array.init n_bases (fun i -> a.(i) + b.(i))
 let dim_div a b = Array.init n_bases (fun i -> a.(i) - b.(i))
-let dim_scale n a = Array.init n_bases (fun i -> n * a.(i))
-let dim_eq  a b = a = b  (* structural equality on int arrays *)
-let dim_is_zero a = Array.for_all (fun x -> x = 0) a
-let dim_is_even a = Array.for_all (fun x -> x mod 2 = 0) a
-let dim_half a = Array.init n_bases (fun i -> a.(i) / 2)
-
-(* ── Display ────────────────────────────────────────────────────────────── *)
+let dim_eq  a b = a = b
 
 let display_dim d =
   match (d.(0), d.(1)) with
@@ -67,60 +66,22 @@ let formal_dim d =
 
 let dim_display d = Printf.sprintf "%s (%s)" (formal_dim d) (display_dim d)
 
-(* Human-readable name for a unary operator, used in diagnostics and the
-   short-string expression printer. Exhaustive over [un_op] (satisfies -w @8). *)
 let un_op_name : un_op -> string = function
   | Neg -> "-" | Exp -> "exp" | Log -> "log" | Sqrt -> "sqrt"
   | Abs -> "abs" | Floor -> "floor" | Ceil -> "ceil"
   | Sin -> "sin" | Cos -> "cos" | Tanh -> "tanh"
 
-(* ── Dimension type with unknowns ───────────────────────────────────────── *)
-
-type dim =
-  | Known of dim_vec
-  | Unknown of int
-  | Any                 (* Const 0.0: universal additive identity *)
-
-(* Dimensional result of a binary op over two ALREADY-RESOLVED operand dims,
-   for the arms that agree across every phase that reads dimensions: [Mul]
-   multiplies, [Div] divides, [Any] absorbs (the [Const 0.0] identity), and a
-   comparison is dimensionless. When the result is not determined, it is the
-   [Unknown (-1)] sentinel. The Add-family and [Pow] arms carry phase-specific
-   unification / emit logic and stay with each caller — they return the same
-   sentinel here and are never routed through this helper. (The inference pass
-   [infer_binop] also keeps its own Mul/Div arms: their fallback allocates a
-   fresh unification variable rather than the dead [Unknown (-1)] sentinel, and
-   its comparison arm unifies the operands as a side effect.) *)
-let dim_binop_known (op : bin_op) (dl : dim) (dr : dim) : dim =
-  match op with
-  | Mul ->
-    (match dl, dr with
-     | Any, d | d, Any -> d
-     | Known v1, Known v2 -> Known (dim_mul v1 v2)
-     | _ -> Unknown (-1))
-  | Div ->
-    (match dl, dr with
-     | Any, _ -> Any
-     | _, Any -> dl
-     | Known v1, Known v2 -> Known (dim_div v1 v2)
-     | _ -> Unknown (-1))
-  | Eq | Neq | Lt | Gt | Le | Ge -> Known dimensionless
-  | Add | Sub | Min | Max | Mod | Pow -> Unknown (-1)
-
-(* ── Diagnostic results ─────────────────────────────────────────────────── *)
+(* ── Results ───────────────────────────────────────────────────────────── *)
 
 type severity = Error | Info
 
-(* The construct a diagnostic concerns. Dimcheck runs on the IR, which has no
-   source spans, so it records the subject and the compiler resolves it to the
-   declaration's loc (the same prefix-match the validate/autodiff paths use). *)
-type subject =
+type subject = Dim_sites.subject =
   | STransition  of string
-  | SOde         of string   (* compartment whose ODE derivative *)
+  | SOde         of string
   | SObservation of string
   | SBinding     of string
-  | SContrast    of string   (* contrast whose operand dimensions conflict *)
-  | SInit        of string   (* compartment whose initial condition *)
+  | SContrast    of string
+  | SInit        of string
 
 type diagnostic = {
   severity : severity;
@@ -132,880 +93,23 @@ type diagnostic = {
 }
 
 type result = {
-  diagnostics : diagnostic list;
-  param_dims  : (string * dim_vec) list;
-  (* Resolved dimension of each generated quantity, keyed by (name, stratum)
-     (prerequisite #5 of the counterfactual-contrasts proposal). Carries only
-     the dimensions that resolved to a concrete vector; the compiler writes
-     these onto the `Quantity` IR nodes so the Rust contrast reducer can check
-     operand-dimension agreement without re-deriving. *)
+  diagnostics   : diagnostic list;
+  param_dims    : (string * dim_vec) list;
   quantity_dims : ((string * (string * string) list) * dim_vec) list;
 }
 
-(* ── Checker state ──────────────────────────────────────────────────────── *)
-
-type param_dim_entry = {
-  stable_dim : dim;
-  mutable inferred : dim_vec option;
-}
-
-type state = {
-  mutable next_var : int;
-  resolved : (int, dim_vec) Hashtbl.t;
-  links : (int, int) Hashtbl.t;  (* union-find: child -> parent *)
-  mutable diags : diagnostic list;
-  (* The construct currently being checked, set at each top-level loop so the
-     emit helpers can tag diagnostics with their subject for loc resolution. *)
-  mutable subject : subject option;
-  (* Stable param dim map *)
-  param_map : (string, param_dim_entry) Hashtbl.t;
-  (* Pre-computed table dims *)
-  table_dims : (string, dim) Hashtbl.t;
-  (* Pre-computed time function dims *)
-  tf_dims : (string, dim) Hashtbl.t;
-  (* Cache of per-transition rate dims after inference rounds *)
-  rate_cache : (string, dim) Hashtbl.t;
-  (* Fix B: dim of each model-level shared binding (name → dim), precomputed
-     in topological order before the transition rounds so a `BindingRef` infers
-     the binding body's dim instead of an unconstrained fresh var — which would
-     hide dimension conflicts (e.g. E303) that the inlined form caught. *)
-  binding_dims : (string, dim) Hashtbl.t;
-  (* Permissive-dim mode: observation-likelihood expressions use
-     variance formulas (e.g. He et al. 2010 eq 6) that mix `1 +
-     overdispersion * count` within a single sqrt, so strictly
-     enforcing dimensional homogeneity there rejects standard
-     epidemiological forms. When this flag is set, Add/Sub-mismatches
-     and sqrt-of-odd-dim are silently absorbed (no E302/E304).
-     See gh #4. *)
-  mutable permissive_dim : bool;
-  (* Dimension of the projection expression of the observation currently
-     being checked. The `Projected` leaf in a likelihood stands for the
-     projection's value, so it must carry the projection's *inferred*
-     dimension — a count for `prevalence`/`incidence`, but dimensionless
-     for a `DerivedExpr` proportion like `I / N`. None outside an
-     observation, where it falls back to a population count. *)
-  mutable projected_dim : dim option;
-  (* Dimension of each per-observation aux column (`columns { tested : count }`),
-     keyed by column name; set per-observation before its likelihood check. An
-     [ObsColumnRef name] in a likelihood (e.g. binomial `n = tested`) infers this
-     dim, so a declared `count` feeding `n` is verified as a count and a
-     dimensionally-wrong column (a `real` feeding `n`) is a located E304. Cleared
-     after each observation. (2026-06-10 observation data-entry §3.1.) *)
-  obs_col_dims : (string, dim) Hashtbl.t;
-  (* Multiplicative constraints the unifier cannot express: each entry
-     [(r, terms)] states dim(r) = Σ c · dim(t) over exponent vectors, e.g.
-     [(r, [(1, l); (1, x)])] for [r = l * x] and [(r, [(2, a)])]-style
-     forms for powers. Collected by [infer] whenever a product, quotient,
-     power or square root has an unresolved operand, and solved together by
-     [solve_equations] (Kennedy's dimension inference: linear equations
-     over the integers, one unknown exponent vector per variable). *)
-  mutable equations : (dim * (int * int * dim) list) list;
-  (* Set while inferring a likelihood argument with a strict dimensional
-     contract (Poisson `rate`, Binomial `p`, a dispersion, ...). Those
-     arguments are checked exactly even inside an observation, so their
-     products are evidence and are recorded although [permissive_dim] is on. *)
-  mutable contract_arg : bool;
-  (* Equations are recorded during the first inference round only. Later
-     rounds re-infer the same expressions with fresh intermediate variables,
-     so their equations would be copies; the first round's already tie every
-     intermediate result to the shared parameter, table and forcing
-     variables. *)
-  mutable recording : bool;
-  (* Set while checking an initial condition, where a numeric literal has no
-     dimension of its own: `I = 10` is a count, `S = 0.06 * N0 - 50` mixes a
-     fraction and a count, and a `hyper_erlang` split of `I = 10` arrives as
-     `10 * cfr`. Each literal then infers a fresh variable, so it takes the
-     dimension its context requires, exactly as a literal ratio `1/730`
-     already does in a rate. *)
-  mutable literal_free : bool;
-}
-
-let create_state () = {
-  next_var = 0;
-  resolved = Hashtbl.create 32;
-  links = Hashtbl.create 32;
-  diags = [];
-  param_map = Hashtbl.create 32;
-  table_dims = Hashtbl.create 16;
-  tf_dims = Hashtbl.create 16;
-  rate_cache = Hashtbl.create 16;
-  binding_dims = Hashtbl.create 16;
-  permissive_dim = false;
-  subject = None;
-  projected_dim = None;
-  obs_col_dims = Hashtbl.create 8;
-  equations = [];
-  contract_arg = false;
-  recording = true;
-  literal_free = false;
-}
-
-let fresh_var st =
-  let id = st.next_var in
-  st.next_var <- id + 1;
-  Unknown id
-
-let emit_error st ~code ~message ?detail ?hint () =
-  st.diags <- { severity = Error; code; message; detail; hint; subject = st.subject } :: st.diags
-
-let emit_info st ~code ~message ?detail ?hint () =
-  st.diags <- { severity = Info; code; message; detail; hint; subject = st.subject } :: st.diags
-
-(* ── Resolution ─────────────────────────────────────────────────────────── *)
-
-(* Follow the union-find chain to the root variable *)
-let rec find_root st id =
-  match Hashtbl.find_opt st.links id with
-  | None -> id
-  | Some parent ->
-    let root = find_root st parent in
-    if root <> parent then Hashtbl.replace st.links id root;  (* path compression *)
-    root
-
-let resolve st = function
-  | Known v -> Known v
-  | Any -> Any
-  | Unknown id ->
-    let root = find_root st id in
-    match Hashtbl.find_opt st.resolved root with
-    | Some v -> Known v
-    | None -> Unknown root
-
-let bind st id v =
-  let root = find_root st id in
-  if not (Hashtbl.mem st.resolved root) then
-    Hashtbl.replace st.resolved root v
-
-(* Unify two dimensions. On mismatch with two Known values, emit E302. *)
-let unify st ~loc d1 d2 =
-  let d1 = resolve st d1 in
-  let d2 = resolve st d2 in
-  match d1, d2 with
-  | Any, d | d, Any -> d
-  | Known v1, Known v2 ->
-    if dim_eq v1 v2 then Known v1
-    else begin
-      (* When one side is population and the other dimensionless, hint about
-         typed let bindings — this is the iota / obs_floor pattern *)
-      let hint =
-        if (dim_eq v1 population && dim_eq v2 dimensionless)
-        || (dim_eq v1 dimensionless && dim_eq v2 population) then
-          Some "if a constant represents a small count (seeding term), declare it with a type:\n\
-          \        let iota : count = 1e-6\n\
-          \      then use: I + iota"
-        else None
-      in
-      if not st.permissive_dim then
-        emit_error st ~code:"E302"
-          ~message:(Printf.sprintf "dimension mismatch in %s" loc)
-          ~detail:(Printf.sprintf "left has dimension %s, right has dimension %s — cannot combine"
-                     (dim_display v1) (dim_display v2))
-          ?hint
-          ();
-      Known v1
-    end
-  | Known v, Unknown id | Unknown id, Known v ->
-    bind st id v; Known v
-  | Unknown id1, Unknown id2 ->
-    let r1 = find_root st id1 in
-    let r2 = find_root st id2 in
-    if r1 = r2 then Unknown r1
-    else begin
-      Hashtbl.replace st.links r2 r1;  (* link r2 -> r1 *)
-      Unknown r1
-    end
-
-let constrain_known st ~code ~message d expected =
-  let d = resolve st d in
-  match d with
-  | Any -> ()
-  | Known v ->
-    if not (dim_eq v expected) then
-      emit_error st ~code ~message
-        ~detail:(Printf.sprintf "expected dimension %s, got %s"
-                   (dim_display expected) (dim_display v))
-        ()
-  | Unknown id -> bind st id expected
-
-(* ── Linear dimension equations (Kennedy 1994) ──────────────────────────── *)
-
-(* Dimensions form a free abelian group on the bases, so a product, quotient
-   or integer power is a linear equation over exponent vectors: [r = l * x]
-   is dim(r) − dim(l) − dim(x) = 0. The unifier above handles only equalities
-   (the operands of [+], [min], comparisons); a product of two unresolved
-   factors would otherwise be a fresh variable linked to neither, and the
-   constraint it carries would be lost. [record_equation] keeps it, and
-   [solve_equations] solves every recorded equation at once by Gauss–Jordan
-   elimination over the rationals, binding each variable the system fully
-   determines to an integer exponent vector. A variable left with a free
-   term on its right-hand side is genuinely undetermined by the model.
-
-   References: A. Kennedy, "Dimension types", ESOP 1994, LNCS 788,
-   pp. 348–362; A. Kennedy, Programming Languages and Dimensions, PhD thesis,
-   University of Cambridge, 1996 (UCAM-CL-TR-391), ch. 3.
-
-   Equations are not recorded in permissive-dim mode (observation mean / sd
-   positions, see [state.permissive_dim]): those expressions are known not to
-   be dimensionally homogeneous, so a product there is not evidence about a
-   parameter's dimension. The exception is a likelihood argument with a strict
-   contract ([infer_contract_arg]), which is checked exactly. *)
-
-(* An expression with no leaf but literals: its value is fixed at compile time
-   and it carries no dimension of its own. *)
-let rec is_constant_expr (e : expr) : bool =
-  match e with
-  | Const _ -> true
-  | BinOp b -> is_constant_expr b.left && is_constant_expr b.right
-  | UnOp u -> is_constant_expr u.arg
-  | Cond c -> is_constant_expr c.pred && is_constant_expr c.then_ && is_constant_expr c.else_
-  | _ -> false
-
-let record_equation st (r : dim) (terms : (int * int * dim) list) =
-  if st.recording && ((not st.permissive_dim) || st.contract_arg) then
-    st.equations <- (r, terms) :: st.equations
-
-(* Pin an expression's inferred dimension to the dimension its context
-   requires, when it is still unresolved. A known mismatch is left for the
-   read-only check phase (E300/E305/E306/E308), which owns those messages. *)
-let pin_expected st (d : dim) (expected : dim_vec) =
-  match resolve st d with
-  | Unknown id when id >= 0 -> bind st id expected
-  | _ -> ()
-
-(* Exact rationals on native ints, kept normalised (den > 0, gcd 1). Exponents
-   in a model are small integers, so overflow is not a practical concern. *)
-module Q = struct
-  type t = { n : int; d : int }
-  let rec gcd a b = if b = 0 then abs a else gcd b (a mod b)
-  let make n d =
-    if d = 0 then invalid_arg "Dimcheck.Q.make: zero denominator";
-    let g = gcd n d in
-    let g = if g = 0 then 1 else g in
-    let n, d = n / g, d / g in
-    if d < 0 then { n = -n; d = -d } else { n; d }
-  let zero = { n = 0; d = 1 }
-  let of_int n = { n; d = 1 }
-  let is_zero q = q.n = 0
-  let add a b = make (a.n * b.d + b.n * a.d) (a.d * b.d)
-  let neg a = { a with n = -a.n }
-  let mul a b = make (a.n * b.n) (a.d * b.d)
-  let div a b = make (a.n * b.d) (a.d * b.n)
-  let is_int q = q.d = 1
-end
-
-(* A linear form Σ c_v · x_v + k, with [k] a rational exponent vector. Terms
-   are kept sorted by variable id with no zero coefficients. *)
-type lin = { terms : (int * Q.t) list; const : Q.t array }
-
-let lin_const v = { terms = []; const = Array.map Q.of_int v }
-let lin_var id = { terms = [ (id, Q.of_int 1) ]; const = Array.make n_bases Q.zero }
-
-let lin_scale c (l : lin) =
-  if Q.is_zero c then { terms = []; const = Array.make n_bases Q.zero }
-  else { terms = List.map (fun (v, q) -> (v, Q.mul c q)) l.terms;
-         const = Array.map (Q.mul c) l.const }
-
-let lin_add (a : lin) (b : lin) =
-  let rec merge xs ys = match xs, ys with
-    | [], r | r, [] -> r
-    | (vx, qx) :: tx, (vy, qy) :: ty ->
-      if vx < vy then (vx, qx) :: merge tx ys
-      else if vy < vx then (vy, qy) :: merge xs ty
-      else
-        let q = Q.add qx qy in
-        if Q.is_zero q then merge tx ty else (vx, q) :: merge tx ty
-  in
-  { terms = merge a.terms b.terms; const = Array.map2 Q.add a.const b.const }
-
-(* The current value of a dimension as a linear form: a resolved variable is
-   its constant, an unresolved one its union-find root. [None] for [Any] (the
-   [Const 0.0] identity), which carries no constraint. *)
-let lin_of_dim st (d : dim) : lin option =
-  match resolve st d with
-  | Known v -> Some (lin_const v)
-  | Unknown id when id >= 0 -> Some (lin_var id)
-  | Unknown _ | Any -> None
-
-type solve_outcome = {
-  newly_bound : int;     (* variables bound by this solve *)
-  contradictions : int;  (* equations inconsistent with the rest *)
-  non_integral : int;    (* determined, but to a fractional exponent *)
-}
-
-(* Solve every recorded equation. Each variable the system determines is bound
-   (via [bind], so it resolves through union-find for every later reader).
-   Gauss–Jordan with a pivot table: [pivots] maps a pivot variable to the
-   linear form, over non-pivot variables only, that it equals. *)
-let solve_equations st : solve_outcome =
-  let pivots : (int, lin) Hashtbl.t = Hashtbl.create 64 in
-  (* [occ v] is the set of pivot rows whose right-hand side mentions [v], so
-     eliminating a new pivot touches only the rows that contain it. *)
-  let occ : (int, (int, unit) Hashtbl.t) Hashtbl.t = Hashtbl.create 64 in
-  let occ_of v = match Hashtbl.find_opt occ v with
-    | Some h -> h
-    | None -> let h = Hashtbl.create 4 in Hashtbl.replace occ v h; h in
-  let register row (l : lin) =
-    List.iter (fun (v, _) -> Hashtbl.replace (occ_of v) row ()) l.terms in
-  (* Substitute every pivot variable occurring in [l]. *)
-  let reduce (l : lin) : lin =
-    List.fold_left (fun acc (v, q) ->
-      match Hashtbl.find_opt pivots v with
-      | Some rhs -> lin_add acc (lin_scale q rhs)
-      | None -> lin_add acc { terms = [ (v, q) ]; const = Array.make n_bases Q.zero })
-      { terms = []; const = l.const } l.terms
-  in
-  let contradictions = ref 0 in
-  List.iter (fun (r, terms) ->
-    (* Equation as a form that must equal zero: r − Σ c·t. *)
-    let parts =
-      (1, 1, r) :: List.map (fun (n, d, t) -> (-n, d, t)) terms in
-    let form = List.fold_left (fun acc (n, d, t) ->
-      match acc, lin_of_dim st t with
-      | Some acc, Some l -> Some (lin_add acc (lin_scale (Q.make n d) l))
-      | _ -> None)
-      (Some { terms = []; const = Array.make n_bases Q.zero }) parts in
-    match form with
-    | None -> ()
-    | Some form ->
-      let form = reduce form in
-      match List.rev form.terms with
-      | [] ->
-        if not (Array.for_all Q.is_zero form.const) then incr contradictions
-      | (p, cp) :: _ ->
-        (* Pivot on the newest variable: it is usually an intermediate result
-           mentioned by no other row, so nothing needs eliminating. Pivoting on
-           a shared parameter instead rewrites every row that mentions it.
-           x_p = −(1/cp) · (form − cp·x_p) *)
-        let rest = { form with terms = List.filter (fun (v, _) -> v <> p) form.terms } in
-        let rhs = lin_scale (Q.neg (Q.div (Q.of_int 1) cp)) rest in
-        (* Keep the table fully reduced: eliminate x_p from the rows that
-           mention it. *)
-        (match Hashtbl.find_opt occ p with
-         | None -> ()
-         | Some rows ->
-           Hashtbl.iter (fun row () ->
-             match Hashtbl.find_opt pivots row with
-             | None -> ()
-             | Some (l : lin) ->
-               match List.assoc_opt p l.terms with
-               | None -> ()
-               | Some q ->
-                 let without = { l with terms = List.filter (fun (v, _) -> v <> p) l.terms } in
-                 let l' = lin_add without (lin_scale q rhs) in
-                 Hashtbl.replace pivots row l';
-                 register row l') rows;
-           Hashtbl.remove occ p);
-        Hashtbl.replace pivots p rhs;
-        register p rhs
-  ) (List.rev st.equations);
-  let newly_bound = ref 0 and non_integral = ref 0 in
-  (* Bind in ascending id order so the result does not depend on hash order. *)
-  let rows = Hashtbl.fold (fun v l acc -> (v, l) :: acc) pivots [] in
-  List.iter (fun (v, (l : lin)) ->
-    if l.terms = [] then begin
-      if Array.for_all Q.is_int l.const then begin
-        let root = find_root st v in
-        if not (Hashtbl.mem st.resolved root) then begin
-          Hashtbl.replace st.resolved root (Array.map (fun (q : Q.t) -> q.n) l.const);
-          incr newly_bound
-        end
-      end else incr non_integral
-    end
-  ) (List.sort (fun (a, _) (b, _) -> compare a b) rows);
-  { newly_bound = !newly_bound; contradictions = !contradictions;
-    non_integral = !non_integral }
-
-(* ── Param dim from kind ────────────────────────────────────────────────── *)
-
-let param_dim_of_kind st (kind : param_kind option) =
-  match kind with
-  | Some Rate           -> Known (make 0 (-1))
-  | Some Probability    -> Known dimensionless
-  | Some Count          -> Known population
-  (* Both time kinds carry dimension [T] (2026-05-22 calendar-time §6.7):
-     `instant` (origin-relative point) and `duration` (relative span). This
-     gives the checker time coverage — `rate + instant` is an E302 dimension
-     mismatch, `rate * duration` is dimensionless. The instant/duration
-     distinction is for *rendering* (date vs span), not for checking. *)
-  | Some Instant        -> Known (make 0 1)
-  | Some Duration       -> Known (make 0 1)
-  (* Positive / Real / unannotated: no declared dimension — inferred. *)
-  | Some Positive | Some Real | None -> fresh_var st
-
-(* ── Initialize state from model ────────────────────────────────────────── *)
-
-let init_params st (params : parameter list) =
-  List.iter (fun (p : parameter) ->
-    (* Explicit [dim] annotation takes highest priority over kind-based inference *)
-    let d = match p.param_dim with
-      | Some (p_exp, t_exp) -> Known (make p_exp t_exp)
-      | None -> param_dim_of_kind st p.param_kind
-    in
-    Hashtbl.replace st.param_map p.name { stable_dim = d; inferred = None }
-  ) params
-
-(* A model constant's dimension comes from its declared kind, exactly as a
-   parameter's does. It shares [param_map] (a `let` and a parameter of the same
-   name are already E278), so every [Param] rule below applies to [ConstRef]. *)
-let init_constants st (constants : constant list) =
-  List.iter (fun (c : constant) ->
-    Hashtbl.replace st.param_map c.c_name
-      { stable_dim = param_dim_of_kind st (Some c.c_kind); inferred = None }
-  ) constants
-
-(* ── Bottom-up inference ────────────────────────────────────────────────── *)
-
-(* A `Reduce [t0; …; tn]` is dimensionally and for display exactly the Add chain
-   that `sum(...)` lowered to before Fix D. Desugar to that chain to reuse the
-   existing Add logic. The expander does not yet emit Reduce, so these arms are
-   currently unreached; they become live when ESum is switched in a later
-   increment (proposal 2026-05-29-shared-bindings-and-reduction). *)
-let rec reduce_add_chain : expr list -> expr = function
-  | []        -> Const 0.0
-  | [t]       -> t
-  | t :: rest -> BinOp { op = Add; left = t; right = reduce_add_chain rest }
-
-let rec infer st ~ctx (e : expr) : dim =
-  match e with
-  | Const 0.0 -> Any
-  | Const _ when st.literal_free -> fresh_var st
-  | Const _   -> Known dimensionless
-  | Param name | ConstRef name ->
-    (match Hashtbl.find_opt st.param_map name with
-     | Some entry -> resolve st entry.stable_dim
-     | None -> fresh_var st)
-  | Pop _ | PopSum _ -> Known population
-  | Time -> Known (make 0 1)
-  | Dt   -> Known (make 0 1)  (* gh#54: dt has dimension T, same as t *)
-  (* gh#616: an observation anchor resolves to a model TIME. *)
-  | ObsAnchor _ -> Known (make 0 1)
-  (* A basis function is a pure number (the basis sums to one). *)
-  | ForcingBasis _ -> Known dimensionless
-  | TimeFunc name ->
-    (match Hashtbl.find_opt st.tf_dims name with
-     | Some d -> resolve st d
-     | None -> fresh_var st)
-  | TableLookup (name, idx_exprs) ->
-    List.iter (fun ie -> ignore (infer st ~ctx ie)) idx_exprs;
-    (match Hashtbl.find_opt st.table_dims name with
-     | Some d -> resolve st d
-     | None -> fresh_var st)
-  | Projected ->
-    (match st.projected_dim with Some d -> resolve st d | None -> Known population)
-  | ObsColumnRef name ->
-    (* The aux column's declared dim (e.g. `tested : count` → population),
-       registered per-observation in [obs_col_dims]. An unregistered ref
-       (invalid model) floors to a fresh var so no spurious mismatch fires. *)
-    (match Hashtbl.find_opt st.obs_col_dims name with
-     | Some d -> resolve st d
-     | None -> fresh_var st)
-  | UncheckedDim u ->
-    (* Per-expression dimensional escape. The declared dim is
-       authoritative; we do NOT recurse into `u.inner` for unification
-       purposes. That's the whole point of the escape — the inner
-       expression is allowed to be dimensionally irregular, e.g.
-       `(I + ι)^α` in the He et al. 2010 measles formulation. *)
-    Known (make u.dim_p u.dim_t)
-  | BinOp b -> infer_binop st ~ctx b
-  | UnOp u -> infer_unop st ~ctx u
-  | Cond c -> infer_cond st ~ctx c
-  | Reduce terms -> infer st ~ctx (reduce_add_chain terms)
-  | BindingRef name ->
-    (* Fix B: a binding's dim is its body's dim, precomputed in check_model. *)
-    (match Hashtbl.find_opt st.binding_dims name with
-     | Some d -> resolve st d
-     | None -> fresh_var st)
-  | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
-
-and is_bare_const = function
-  | Const _ -> true
-  | UnOp { op = Neg; arg } -> is_bare_const arg
-  | _ -> false
-
-and infer_binop st ~ctx (b : bin_op_expr) : dim =
-  let dl = infer st ~ctx b.left in
-  let dr = infer st ~ctx b.right in
-  match b.op with
-  | Add | Sub | Min | Max | Mod ->
-    unify st ~loc:ctx dl dr
-  | Mul ->
-    let dl = resolve st dl in
-    let dr = resolve st dr in
-    (match dl, dr with
-     | Any, d | d, Any -> d
-     | Known v1, Known v2 -> Known (dim_mul v1 v2)
-     | _ ->
-       let r = fresh_var st in
-       record_equation st r [ (1, 1, dl); (1, 1, dr) ];
-       r)
-  | Div ->
-    (* Special case: Const/Const (e.g. 1/730) is dimensionally ambiguous.
-       In epi models this commonly represents a rate (1/duration).
-       Treat as unknown so the solver can infer from context. *)
-    if is_bare_const b.left && is_bare_const b.right then
-      fresh_var st
-    else begin
-      let dl = resolve st dl in
-      let dr = resolve st dr in
-      (match dl, dr with
-       | Any, _ -> Any
-       | _, Any -> dl
-       | Known v1, Known v2 -> Known (dim_div v1 v2)
-       | _ ->
-         let r = fresh_var st in
-         record_equation st r [ (1, 1, dl); (-1, 1, dr) ];
-         r)
-    end
-  | Pow -> infer_pow st ~ctx b
-  | Eq | Neq | Lt | Gt | Le | Ge ->
-    ignore (unify st ~loc:ctx dl dr);
-    Known dimensionless
-
-and infer_pow st ~ctx (b : bin_op_expr) : dim =
-  let dl = resolve st (infer st ~ctx b.left) in
-  let dr = resolve st (infer st ~ctx b.right) in
-  (match dr with
-   | Known v when not (dim_is_zero v) ->
-     emit_error st ~code:"E301"
-       ~message:(Printf.sprintf "exponent in '%s' has non-dimensionless dimension" ctx) ()
-   | _ -> ());
-  match dl with
-  | Any -> Any
-  | Known v when dim_is_zero v -> Known dimensionless
-  | Known v ->
-    (match b.right with
-     | Const n when Float.is_integer n ->
-       Known (dim_scale (Float.to_int n) v)
-     | _ ->
-       emit_error st ~code:"E301"
-         ~message:(Printf.sprintf "non-constant exponent with dimensioned base in '%s'" ctx)
-         ~detail:(Printf.sprintf "base has dimension %s" (dim_display v)) ();
-       Known dimensionless)
-  | Unknown _ ->
-    let r = fresh_var st in
-    (match b.right with
-     | Const n when Float.is_integer n ->
-       record_equation st r [ (Float.to_int n, 1, dl) ]
-     | _ -> ());
-    r
-
-and infer_unop st ~ctx (u : un_op_expr) : dim =
-  let da = infer st ~ctx u.arg in
-  match u.op with
-  | Neg | Abs | Floor | Ceil -> da
-  | Exp | Log | Sin | Cos | Tanh ->
-    constrain_known st ~code:"E301"
-      ~message:(Printf.sprintf "argument to %s in '%s' must be dimensionless"
-                  (un_op_name u.op) ctx)
-      da dimensionless;
-    Known dimensionless
-  | Sqrt ->
-    (match resolve st da with
-     | Any -> Any
-     | Known v ->
-       if dim_is_even v then Known (dim_half v)
-       else if st.permissive_dim then Any
-       else begin
-         emit_error st ~code:"E304"
-           ~message:(Printf.sprintf "sqrt in '%s' requires even dimension exponents" ctx)
-           ~detail:(Printf.sprintf "argument has dimension %s" (dim_display v)) ();
-         Known dimensionless
-       end
-     | Unknown _ as da ->
-       let r = fresh_var st in
-       record_equation st r [ (1, 2, da) ];
-       r)
-
-and infer_cond st ~ctx (c : cond_expr) : dim =
-  (* M18 in the 2026-04-19 review: the predicate can carry any
-     dimension. The IR spec's canonical guard form
-     `Cond(Pop("S"), beta * S * I / N, Const 0.0)` — prevent
-     division-by-zero by using the population-valued S as a "is S
-     empty?" guard — has dim(pred) = population, not dimensionless.
-     Previously this site forced pred to be dimensionless via E302,
-     producing a spurious false positive for that exact idiom.
-     `Cond` semantics is "predicate is truthy iff > 0", which works
-     for both population (positive ⇔ non-empty) and boolean (0/1).
-     Drop the predicate dim constraint; keep the branch unification
-     since then/else must still agree dimensionally. *)
-  let _ = infer st ~ctx c.pred in
-  let dt = infer st ~ctx c.then_ in
-  let de = infer st ~ctx c.else_ in
-  unify st ~loc:ctx dt de
-
-(* ── Top-down propagation ───────────────────────────────────────────────── *)
-
-let rec propagate st ~ctx (e : expr) (expected : dim_vec) : unit =
-  match e with
-  | Const _ -> ()
-  | Param name | ConstRef name ->
-    (match Hashtbl.find_opt st.param_map name with
-     | Some entry ->
-       (match resolve st entry.stable_dim with
-        | Unknown id -> bind st id expected
-        | _ -> ())
-     | None -> ())
-  | Pop _ | PopSum _ | Time | Dt | Projected | ObsColumnRef _ | ObsAnchor _ -> ()
-  | UncheckedDim _ ->
-    (* The escape stops dim-propagation at this boundary — the inner
-       is explicitly exempted from checker-driven dimensional
-       constraints. *)
-    ()
-  | ForcingBasis _ -> ()
-  | TimeFunc name ->
-    (* If the time function's dim is unknown, bind it *)
-    (match Hashtbl.find_opt st.tf_dims name with
-     | Some d ->
-       (match resolve st d with
-        | Unknown id -> bind st id expected
-        | _ -> ())
-     | None -> ())
-  | TableLookup (name, _) ->
-    (match Hashtbl.find_opt st.table_dims name with
-     | Some d ->
-       (match resolve st d with
-        | Unknown id -> bind st id expected
-        | _ -> ())
-     | None -> ())
-  | UnOp u ->
-    (match u.op with
-     | Neg | Abs | Floor | Ceil -> propagate st ~ctx u.arg expected
-     | Exp | Log | Sin | Cos | Tanh -> propagate st ~ctx u.arg dimensionless
-     | Sqrt -> propagate st ~ctx u.arg (dim_scale 2 expected))
-  | BinOp b ->
-    (match b.op with
-     | Add | Sub | Min | Max | Mod ->
-       propagate st ~ctx b.left expected;
-       propagate st ~ctx b.right expected
-     | Mul -> propagate_mul st ~ctx b.left b.right expected
-     | Div -> propagate_div st ~ctx b.left b.right expected
-     | Pow -> ()
-     | Eq | Neq | Lt | Gt | Le | Ge -> ())
-  | Cond c ->
-    propagate st ~ctx c.then_ expected;
-    propagate st ~ctx c.else_ expected
-  | Reduce terms -> propagate st ~ctx (reduce_add_chain terms) expected
-  | BindingRef _ -> ()   (* leaf; inc1b may propagate the expectation into the binding *)
-  | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
-
-(* Flatten a multiplicative chain into (numerator_factors, denominator_factors).
-   E.g. Div(Mul(Mul(a,b),c), d) → ([a;b;c], [d]) *)
-and collect_product_factors (e : expr) : expr list * expr list =
-  match e with
-  | BinOp { op = Mul; left; right; } ->
-    let (nl, dl) = collect_product_factors left in
-    let (nr, dr) = collect_product_factors right in
-    (nl @ nr, dl @ dr)
-  | BinOp { op = Div; left; right; } ->
-    let (nl, dl) = collect_product_factors left in
-    let (nr, dr) = collect_product_factors right in
-    (nl @ dr, dl @ nr)  (* right goes to denominator *)
-  | _ -> ([e], [])
-
-and propagate_mul st ~ctx left right expected =
-  (* Flatten the product chain and partition into known vs unknown factors *)
-  let all_expr = BinOp { op = Mul; left; right } in
-  propagate_product st ~ctx all_expr expected
-
-and propagate_div st ~ctx left right expected =
-  let all_expr = BinOp { op = Div; left; right } in
-  propagate_product st ~ctx all_expr expected
-
-and propagate_product st ~ctx e expected =
-  let (num, den) = collect_product_factors e in
-  (* Compute the aggregate known dimension from all factors *)
-  let known_dim = ref dimensionless in
-  let unknown_factors = ref [] in
-  List.iter (fun factor ->
-    let d = resolve st (infer st ~ctx factor) in
-    match d with
-    | Known v -> known_dim := dim_mul !known_dim v
-    | Any -> ()  (* 0 or dimensionless, skip *)
-    | Unknown _ -> unknown_factors := (factor, true) :: !unknown_factors
-  ) num;
-  List.iter (fun factor ->
-    let d = resolve st (infer st ~ctx factor) in
-    match d with
-    | Known v -> known_dim := dim_div !known_dim v
-    | Any -> ()
-    | Unknown _ -> unknown_factors := (factor, false) :: !unknown_factors
-  ) den;
-  let residual = dim_div expected !known_dim in
-  match !unknown_factors with
-  | [(factor, is_num)] ->
-    (* Single unknown factor: its dim is fully determined *)
-    let target = if is_num then residual else dim_scale (-1) residual in
-    propagate st ~ctx factor target
-  | _ ->
-    (* Multiple unknowns or none: try to propagate into each unknown factor
-       individually. We can't fully resolve, but propagation into each factor
-       with the residual may help on subsequent rounds when other constraints
-       resolve some of them. *)
-    ()
-
-(* ── Infer table dimensions from their values ──────────────────────────── *)
-
-let init_table_dims st (tables : table list) =
-  List.iter (fun (tbl : table) ->
-    let dim = match tbl.cell_kind with
-      | Some _ ->
-        (* gh#32: explicit cell-type annotation. Stamp the table with
-           the declared dim — exactly the way scalar parameters work.
-           [cell_kind] is still a free string (out of scope of the typed
-           param_kind enum); an unrecognised kind maps to [None] → a fresh
-           dim var, matching the prior catch-all behaviour. *)
-        param_dim_of_kind st (Option.bind tbl.cell_kind param_kind_of_name)
-      | None ->
-        match tbl.source with
-        | External _ -> fresh_var st  (* can't know *)
-        | Inline exprs ->
-          (* If all values are bare constants, the table dimension is ambiguous
-             (e.g. age durations in years, contact matrix entries). Treat as
-             unknown so the solver can infer from context. *)
-          let all_const = List.for_all (fun e ->
-            match e with Const _ -> true | _ -> false
-          ) exprs in
-          if all_const then
-            fresh_var st
-          else begin
-            st.subject <- None;
-            let ctx = Printf.sprintf "table '%s'" tbl.name in
-            let dims = List.map (fun e -> infer st ~ctx e) exprs in
-            (match dims with
-             | [] -> Known dimensionless
-             | d :: rest ->
-               List.fold_left (fun acc d2 -> unify st ~loc:ctx acc d2) d rest)
-          end
-    in
-    Hashtbl.replace st.table_dims tbl.name dim
-  ) tables
-
-(* ── Infer time function dimensions ─────────────────────────────────────── *)
-
-let init_tf_dims st (tfs : time_function list) =
-  (* GH #8: every forcing declaration carries a tier-3 unit literal
-     (e.g. `'per_day`, `'count`, `'ratio`) and the expander populates
-     `time_function.dim` from it. The dim-checker uses that as
-     authoritative — no value-based inference — because
-     value-based inference fails for `interpolated` (data-file values
-     are always EConst → dimensionless) and the declared dim is
-     strictly more informative for the other three kinds too. *)
-  List.iter (fun (tf : time_function) ->
-    let (p, t) = tf.dim in
-    Hashtbl.replace st.tf_dims tf.name (Known (make p t))
-  ) tfs
-
-(* ── Read-only dimension query (no fresh vars, no diagnostics) ─────────── *)
-
-(* Walk an expression and resolve its dimension from already-known state.
-   Returns None if any part is unresolved. Used in the check phase to avoid
-   side effects from re-running infer. *)
-let rec read_dim st (e : expr) : dim =
-  match e with
-  | Const 0.0 -> Any
-  | Const _   -> Known dimensionless
-  | Param name | ConstRef name ->
-    (match Hashtbl.find_opt st.param_map name with
-     | Some entry -> resolve st entry.stable_dim
-     | None -> Unknown (-1))  (* sentinel: unknown, but don't allocate *)
-  | Pop _ | PopSum _ -> Known population
-  | Time -> Known (make 0 1)
-  | Dt   -> Known (make 0 1)
-  | ObsAnchor _ -> Known (make 0 1)   (* gh#616: a model time *)
-  | ForcingBasis _ -> Known dimensionless
-  | TimeFunc name ->
-    (match Hashtbl.find_opt st.tf_dims name with
-     | Some d -> resolve st d
-     | None -> Unknown (-1))
-  | TableLookup (name, _) ->
-    (match Hashtbl.find_opt st.table_dims name with
-     | Some d -> resolve st d
-     | None -> Unknown (-1))
-  | Projected ->
-    (match st.projected_dim with Some d -> resolve st d | None -> Known population)
-  | ObsColumnRef name ->
-    (match Hashtbl.find_opt st.obs_col_dims name with
-     | Some d -> resolve st d
-     | None -> Unknown (-1))
-  | UncheckedDim u -> Known (make u.dim_p u.dim_t)
-  | BinOp b -> read_dim_binop st b
-  | UnOp u -> read_dim_unop st u
-  | Cond c ->
-    let dt = read_dim st c.then_ in
-    let _de = read_dim st c.else_ in
-    dt  (* branches already unified during inference *)
-  | Reduce terms -> read_dim st (reduce_add_chain terms)
-  | BindingRef name ->
-    (* Fix B: read-only twin of the infer arm — the binding's precomputed dim,
-       so the error-checking phase (E300/E303) sees through a BindingRef. *)
-    (match Hashtbl.find_opt st.binding_dims name with
-     | Some d -> resolve st d
-     | None -> Unknown (-1))
-  | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
-
-and read_dim_binop st (b : bin_op_expr) : dim =
-  let dl = read_dim st b.left in
-  let dr = read_dim st b.right in
-  match b.op with
-  | Add | Sub | Min | Max | Mod ->
-    (* Already unified; return whichever is known *)
-    (match dl, dr with
-     | Any, d | d, Any -> d
-     | Known _, _ -> dl
-     | _, Known _ -> dr
-     | _ -> dl)
-  | Mul -> dim_binop_known Mul (resolve st dl) (resolve st dr)
-  | Div ->
-    if is_bare_const b.left && is_bare_const b.right then
-      Unknown (-1)
-    else
-      dim_binop_known Div (resolve st dl) (resolve st dr)
-  | Pow ->
-    (* M19 in 2026-04-19 review: the inference phase correctly
-       emits E301 for Pow with a non-integer-literal exponent
-       when the base carries a non-zero dimension. The read-only
-       phase used to silently return `Known dimensionless` for the
-       same case, masking the error if `read_dim` was the first to
-       see this node (via implied_param_dim → read_dim calls during
-       the E303 cross-transition check). Return Unknown (-1) here so
-       no wrong dimension escapes the read phase; the dimension will
-       be inferred / errored on the main pass. *)
-    (match resolve st dl with
-     | Any -> Any
-     | Known v when dim_is_zero v -> Known dimensionless
-     | Known v ->
-       (match b.right with
-        | Const n when Float.is_integer n -> Known (dim_scale (Float.to_int n) v)
-        | _ -> Unknown (-1))
-     | _ -> Unknown (-1))
-  | Eq | Neq | Lt | Gt | Le | Ge -> dim_binop_known b.op dl dr
-
-and read_dim_unop st (u : un_op_expr) : dim =
-  let da = read_dim st u.arg in
-  match u.op with
-  | Neg | Abs | Floor | Ceil -> da
-  | Exp | Log | Sin | Cos | Tanh -> Known dimensionless
-  | Sqrt ->
-    (match resolve st da with
-     | Any -> Any
-     | Known v ->
-       if dim_is_even v then Known (dim_half v)
-       else Known dimensionless
-     | _ -> Unknown (-1))
-
-(* ── Expression printer (for error messages) ────────────────────────────── *)
+(* ── Expression printer (for messages) ─────────────────────────────────── *)
 
 let rec expr_to_short_string (e : expr) : string =
   match e with
   | Const f ->
-    if Float.is_integer f && Float.abs f < 1e9 then
-      string_of_int (Float.to_int f)
+    if Float.is_integer f && Float.abs f < 1e9 then string_of_int (Float.to_int f)
     else Printf.sprintf "%g" f
   | Param s | ConstRef s -> s
   | Pop s -> s
   | PopSum ss -> String.concat " + " ss
   | Time -> "t"
-  | Dt   -> "dt"
+  | Dt -> "dt"
   | TimeFunc s -> Printf.sprintf "%s(t)" s
   | ForcingBasis { forcing; index; space } ->
     Printf.sprintf "%s_%d(%s)"
@@ -1019,8 +123,7 @@ let rec expr_to_short_string (e : expr) : string =
     if a.offset = 0.0 then name
     else if a.offset > 0.0 then Printf.sprintf "%s + %g" name a.offset
     else Printf.sprintf "%s - %g" name (-. a.offset)
-  | UncheckedDim u ->
-    Printf.sprintf "unchecked_dim(%s)" (expr_to_short_string u.inner)
+  | UncheckedDim u -> Printf.sprintf "unchecked_dim(%s)" (expr_to_short_string u.inner)
   | BinOp b ->
     let op_str = match b.op with
       | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/"
@@ -1028,855 +131,490 @@ let rec expr_to_short_string (e : expr) : string =
       | Eq -> "==" | Neq -> "!=" | Lt -> "<" | Gt -> ">"
       | Le -> "<=" | Ge -> ">="
     in
-    Printf.sprintf "(%s %s %s)"
-      (expr_to_short_string b.left) op_str (expr_to_short_string b.right)
-  | UnOp u ->
-    Printf.sprintf "%s(%s)" (un_op_name u.op) (expr_to_short_string u.arg)
+    Printf.sprintf "(%s %s %s)" (expr_to_short_string b.left) op_str (expr_to_short_string b.right)
+  | UnOp u -> Printf.sprintf "%s(%s)" (un_op_name u.op) (expr_to_short_string u.arg)
   | Cond c ->
-    Printf.sprintf "if(%s, %s, %s)"
-      (expr_to_short_string c.pred)
-      (expr_to_short_string c.then_)
-      (expr_to_short_string c.else_)
-  | Reduce terms ->
-    "(" ^ String.concat " + " (List.map expr_to_short_string terms) ^ ")"
+    Printf.sprintf "if(%s, %s, %s)" (expr_to_short_string c.pred)
+      (expr_to_short_string c.then_) (expr_to_short_string c.else_)
+  | Reduce terms -> "(" ^ String.concat " + " (List.map expr_to_short_string terms) ^ ")"
   | BindingRef n -> n
-  | PerEvalRef n -> n   (* display helper: render the name, never crash in error formatting *)
+  | PerEvalRef n -> n
 
-(* ── Generated quantities + counterfactual contrasts ──────────────────────────
-   Run AFTER the transition/observation inference rounds (params resolved). Two
-   jobs: (a) compute each quantity's resolved dimension for the #5 stored field
-   (read-only — `read_dim` never emits or allocates fresh vars, so adding this
-   never surfaces a new error on an existing quantity-bearing model); and (b)
-   the contrast dimensional check — operands of `+`/`-` must agree. *)
+(* ── Linear forms ──────────────────────────────────────────────────────── *)
 
-(* The result dimension of a temporal reduction of a series of dimension
-   [series]. Final/Max/Min/Mean preserve it; CountAbove/CountBelow count snapshots
-   (dimensionless); a time reduction yields T; an integral multiplies by T; a bare
-   series keeps it. *)
-let reduced_value_dim (series : dim) (reduce : temporal_reduce option) : dim =
-  match reduce with
-  | None -> series
-  | Some (RValue (VFinal | VMax | VMin | VMean)) -> series
-  (* value_at reads the series at a time — the value keeps the series dim. *)
-  | Some (RValue (VValueAt _)) -> series
-  | Some (RValue (VCountAbove _ | VCountBelow _)) -> Known dimensionless
-  | Some (RTime _) -> Known (make 0 1)
-  | Some RIntegral ->
-    (match series with Known v -> Known (dim_mul v (make 0 1)) | d -> d)
+(* A dimension as Σ cᵥ·xᵥ + k: [vars] sorted by variable, no zero
+   coefficients. [Any] is the dimension of the literal 0, which takes any
+   dimension and constrains nothing. *)
+type form = { vars : (int * int) list; k : dim_vec }
+type value = Any | F of form
 
-(* The dimension of a declared observation stream — its projection's dimension
-   (population for incidence/prevalence; the inferred dim for a DerivedExpr).
-   Read-only. *)
-let obs_projection_dim st (m : model) (stream : string) : dim =
-  match List.find_opt (fun (o : observation_model) -> o.name = stream) m.observations with
-  | Some o ->
+let const_form v = { vars = []; k = v }
+let var_form x = { vars = [ (x, 1) ]; k = Array.make n_bases 0 }
+
+let rec merge f xs ys =
+  match xs, ys with
+  | [], r -> List.filter_map (fun (v, c) -> let c = f 0 c in if c = 0 then None else Some (v, c)) r
+  | r, [] -> List.filter_map (fun (v, c) -> let c = f c 0 in if c = 0 then None else Some (v, c)) r
+  | (vx, cx) :: tx, (vy, cy) :: ty ->
+    if vx < vy then (let c = f cx 0 in if c = 0 then merge f tx ys else (vx, c) :: merge f tx ys)
+    else if vy < vx then (let c = f 0 cy in if c = 0 then merge f xs ty else (vy, c) :: merge f xs ty)
+    else (let c = f cx cy in if c = 0 then merge f tx ty else (vx, c) :: merge f tx ty)
+
+let form_add a b = { vars = merge ( + ) a.vars b.vars; k = dim_mul a.k b.k }
+let form_sub a b = { vars = merge ( - ) a.vars b.vars; k = dim_div a.k b.k }
+let form_scale n a =
+  if n = 0 then const_form dimensionless
+  else { vars = List.map (fun (v, c) -> (v, n * c)) a.vars; k = Array.map (( * ) n) a.k }
+
+(* ── Checker state ─────────────────────────────────────────────────────── *)
+
+(* What a diagnostic needs to know about an equation that conflicts. *)
+type eq_kind =
+  | Declared_fact
+  | Operands of { op : string; left : form; right : form }   (* two forms must agree *)
+  | Function_arg of { fn : string; arg : form }              (* must be dimensionless *)
+  | Even_root of form                                        (* sqrt *)
+  | Obligation_of of { expected : dim_vec; got : form }       (* a site's obligation *)
+  | Definition of { got : form }                              (* Defines key *)
+  | Quantity_reduction
+
+type eq_info = { site : Dim_sites.site option; code : string; kind : eq_kind }
+
+type state = {
+  mutable next_var : int;
+  keys     : (Dim_sites.key, int) Hashtbl.t;
+  mutable declared  : Dim_solve.eqn list;   (* each list reversed *)
+  mutable structure : Dim_solve.eqn list;
+  mutable obligation : Dim_solve.eqn list;
+  info     : (int, eq_info) Hashtbl.t;
+  mutable next_eq : int;
+  tf_dims  : (string, dim_vec) Hashtbl.t;
+}
+
+let fresh st = let x = st.next_var in st.next_var <- x + 1; x
+
+let var_of st key =
+  match Hashtbl.find_opt st.keys key with
+  | Some x -> x
+  | None -> let x = fresh st in Hashtbl.replace st.keys key x; x
+
+(* Record [form = rhs] (rhs a constant), in [stage]. *)
+let emit st stage ~site ~code kind (f : form) (rhs : dim_vec) =
+  let id = st.next_eq in
+  st.next_eq <- id + 1;
+  Hashtbl.replace st.info id { site; code; kind };
+  let e = { Dim_solve.terms = f.vars; rhs = dim_div rhs f.k;
+            origin = { site = id; stage; what = code } } in
+  match stage with
+  | Dim_solve.Declared -> st.declared <- e :: st.declared
+  | Structure -> st.structure <- e :: st.structure
+  | Obligation -> st.obligation <- e :: st.obligation
+
+(* [a = b] as a structure equation; nothing when either is [Any], or when both
+   are the same constant. *)
+let equate st ~site ~code ~op a b =
+  match a, b with
+  | Any, _ | _, Any -> ()
+  | F l, F r ->
+    if l.vars = [] && r.vars = [] && dim_eq l.k r.k then ()
+    else
+      emit st Structure ~site ~code (Operands { op; left = l; right = r })
+        (form_sub l r) dimensionless
+
+let declare st key v =
+  emit st Declared ~site:None ~code:"E302" Declared_fact (var_form (var_of st key)) v
+
+(* ── Declared facts ────────────────────────────────────────────────────── *)
+
+let kind_dim : param_kind -> dim_vec option = function
+  | Rate -> Some (make 0 (-1))
+  | Probability -> Some dimensionless
+  | Count -> Some population
+  (* Both time kinds are [T] (2026-05-22 calendar-time §6.7); the
+     instant/duration distinction is for rendering, not checking. *)
+  | Instant | Duration -> Some time_dim
+  | Positive | Real -> None
+
+let declare_model st (m : model) =
+  List.iter (fun (p : parameter) ->
+    let key = Dim_sites.K_param p.name in
+    ignore (var_of st key);
+    match p.param_dim, Option.bind p.param_kind kind_dim with
+    | Some (dp, dt), _ -> declare st key (make dp dt)
+    | None, Some v -> declare st key v
+    | None, None -> ()) m.parameters;
+  List.iter (fun (c : constant) ->
+    let key = Dim_sites.K_param c.c_name in
+    ignore (var_of st key);
+    Option.iter (declare st key) (kind_dim c.c_kind)) m.constants;
+  List.iter (fun (t : table) ->
+    match Option.bind (Option.bind t.cell_kind param_kind_of_name) kind_dim with
+    | Some v -> declare st (Dim_sites.K_table t.name) v
+    | None -> ()) m.tables;
+  List.iter (fun (tf : time_function) ->
+    let (p, t) = tf.dim in Hashtbl.replace st.tf_dims tf.name (make p t)) m.time_functions;
+  List.iter (fun (o : observation_model) ->
     (match o.projection with
-     | DerivedExpr e -> read_dim st e
+     | DerivedExpr _ -> ()
      | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _ ->
-       Known population
+       declare st (Dim_sites.K_stream o.name) population
      (* A ratio of two accumulated counts is a fraction. *)
-     | FlowRatio _ -> Known dimensionless)
-  | None -> Unknown (-1)
+     | FlowRatio _ -> declare st (Dim_sites.K_stream o.name) dimensionless);
+    List.iter (fun (c : obs_column) ->
+      match c.col_role with
+      | RoleValue k ->
+        Option.iter (declare st (Dim_sites.K_column (o.name, c.col_name))) (kind_dim k)
+      | RoleTime | RoleWindowStart | RoleWindowStop | RoleDim _ -> ()) o.columns)
+    m.observations
 
-(* Build the (name, stratum) → resolved-dimension table for all quantities, in
-   declaration order so a Derived body's QRef reads an earlier leaf's dim. *)
-let compute_quantity_dim_table st (m : model)
-    : ((string * (string * string) list), dim) Hashtbl.t =
-  let resolved : ((string * (string * string) list), dim) Hashtbl.t = Hashtbl.create 16 in
-  let lookup_qref (name : string) (stratum : (string * string) list) : dim =
-    match Hashtbl.find_opt resolved (name, stratum) with
-    | Some d -> d
-    | None ->
-      (* fall back to any leaf of that name (dim is stratum-invariant) *)
-      Hashtbl.fold (fun (n, _) d acc ->
-        match acc with Some _ -> acc | None -> if n = name then Some d else None)
-        resolved None
-      |> (function Some d -> d | None -> Unknown (-1))
-  in
-  let rec scalar_dim (se : scalar_expr) : dim =
-    match se with
-    | SConst _ -> Any
-    | SParam p ->
-      (match Hashtbl.find_opt st.param_map p with
-       | Some entry -> resolve st entry.stable_dim
-       | None -> Unknown (-1))
-    | SQRef q -> lookup_qref q.qref_name q.qref_stratum
-    | SUnOp { op; arg } ->
-      let da = scalar_dim arg in
-      (match op with
-       | Neg | Abs | Floor | Ceil -> da
-       | Exp | Log | Sin | Cos | Tanh -> Known dimensionless
-       | Sqrt -> (match resolve st da with
-                  | Any -> Any
-                  | Known v when dim_is_even v -> Known (dim_half v)
-                  | Known _ -> Known dimensionless
-                  | _ -> Unknown (-1)))
-    | SBinOp { op; left; right } ->
-      let dl = scalar_dim left and dr = scalar_dim right in
-      (match op with
-       | Add | Sub | Min | Max | Mod ->
-         (match dl, dr with Any, d | d, Any -> d | Known _, _ -> dl | _, Known _ -> dr | _ -> dl)
-       | Mul -> dim_binop_known Mul (resolve st dl) (resolve st dr)
-       | Div -> dim_binop_known Div (resolve st dl) (resolve st dr)
-       | Pow -> Unknown (-1)
-       | Eq | Neq | Lt | Gt | Le | Ge -> dim_binop_known op dl dr)
-    | SCond { then_; _ } -> scalar_dim then_
-  in
+(* A quantity reports a reduction of its series: the value keeps the series'
+   dimension, a count of snapshots is a pure number, a time is T, an integral
+   multiplies by T. *)
+let declare_quantities st (m : model) =
   List.iter (fun (q : quantity) ->
-    let d = match q.q_body with
-      | QBReduced { source; reduce } ->
-        let sd = match source with
-          | QSState e -> read_dim st e
-          | QSObservation stream -> obs_projection_dim st m stream
-        in reduced_value_dim sd reduce
-      | QBDerived se -> scalar_dim se
-    in
-    Hashtbl.replace resolved (q.q_name, q.q_stratum) (resolve st d)
-  ) m.quantities;
-  resolved
+    match q.q_body with
+    | QBDerived _ -> ()
+    | QBReduced { source; reduce } ->
+      let series = match source with
+        | QSState _ -> var_of st (Dim_sites.K_series q.q_name)
+        | QSObservation s -> var_of st (Dim_sites.K_stream s)
+      in
+      let qv = var_form (var_of st (Dim_sites.K_quantity q.q_name)) in
+      let eq f rhs = emit st Structure ~site:None ~code:"E302" Quantity_reduction f rhs in
+      match reduce with
+      | None | Some (RValue (VFinal | VMax | VMin | VMean | VValueAt _)) ->
+        eq (form_sub qv (var_form series)) dimensionless
+      | Some (RValue (VCountAbove _ | VCountBelow _)) -> eq qv dimensionless
+      | Some (RTime _) -> eq qv time_dim
+      | Some RIntegral -> eq (form_sub qv (var_form series)) time_dim) m.quantities
 
-(* A short rendering of a contrast operand for diagnostics. *)
-let rec show_contrast_expr (ce : contrast_expr) : string =
+(* ── Expressions ───────────────────────────────────────────────────────── *)
+
+let rec is_bare_const = function
+  | Const _ -> true
+  | UnOp { op = Neg; arg } -> is_bare_const arg
+  | _ -> false
+
+let rec chain_add = function
+  | [] -> Const 0.0
+  | [ t ] -> t
+  | t :: rest -> BinOp { op = Add; left = t; right = chain_add rest }
+
+(* The binary-operator rules, shared by model expressions, derived quantities
+   and contrasts. [exponent] is the power's exponent when it is a literal. *)
+let binop st ~site ~code ~what (op : bin_op) ?exponent ~fresh_div l r : value =
+  let opname = match op with
+    | Add -> "+" | Sub -> "-" | Min -> "min" | Max -> "max" | Mod -> "%"
+    | Eq -> "==" | Neq -> "!=" | Lt -> "<" | Gt -> ">" | Le -> "<=" | Ge -> ">="
+    | Mul -> "*" | Div -> "/" | Pow -> "^" in
+  match op with
+  | Add | Sub | Min | Max | Mod ->
+    equate st ~site ~code ~op:(Printf.sprintf "%s in %s" opname what) l r;
+    (match l with Any -> r | F _ -> l)
+  | Eq | Neq | Lt | Gt | Le | Ge ->
+    equate st ~site ~code ~op:(Printf.sprintf "%s in %s" opname what) l r;
+    F (const_form dimensionless)
+  | Mul ->
+    (match l, r with Any, d | d, Any -> d | F a, F b -> F (form_add a b))
+  | Div ->
+    if fresh_div then F (var_form (fresh st))
+    else (match l, r with
+        | Any, _ -> Any
+        | _, Any -> l
+        | F a, F b -> F (form_sub a b))
+  | Pow ->
+    (* The exponent is a pure number. *)
+    (match r with
+     | F e when e.vars = [] && not (dim_eq e.k dimensionless) ->
+       emit st Structure ~site ~code:"E301"
+         (Function_arg { fn = "the exponent of ^"; arg = e }) e dimensionless
+     | Any | F _ -> ());
+    (match l with
+     | Any -> Any
+     | F b when b.vars = [] && dim_eq b.k dimensionless -> F (const_form dimensionless)
+     | F b ->
+       (match exponent with
+        | Some n when Float.is_integer n -> F (form_scale (Float.to_int n) b)
+        | Some _ | None ->
+          if b.vars = [] then begin
+            (* A dimensioned base under a non-integer or variable exponent. *)
+            emit st Structure ~site ~code:"E301"
+              (Function_arg { fn = Printf.sprintf "a base under a non-integer exponent in %s" what;
+                              arg = b }) b dimensionless;
+            F (const_form dimensionless)
+          end else F (var_form (fresh st))))
+
+let unop st ~site ~what (op : un_op) (a : value) : value =
+  match op with
+  | Neg | Abs | Floor | Ceil -> a
+  | Exp | Log | Sin | Cos | Tanh ->
+    (match a with
+     | Any -> ()
+     | F f ->
+       if not (f.vars = [] && dim_eq f.k dimensionless) then
+         emit st Structure ~site ~code:"E301"
+           (Function_arg { fn = Printf.sprintf "%s in %s" (un_op_name op) what; arg = f })
+           f dimensionless);
+    F (const_form dimensionless)
+  | Sqrt ->
+    (match a with
+     | Any -> Any
+     | F f when f.vars = [] && Array.for_all (fun x -> x mod 2 = 0) f.k ->
+       F (const_form (Array.map (fun x -> x / 2) f.k))
+     | F f ->
+       let x = fresh st in
+       (* 2x = a *)
+       emit st Structure ~site ~code:"E304" (Even_root f)
+         (form_sub (form_scale 2 (var_form x)) f) dimensionless;
+       F (var_form x))
+
+let rec gen st ~(site : Dim_sites.site) (e : expr) : value =
+  let what = site.role in
+  let g = gen st ~site in
+  match e with
+  | Const 0.0 -> Any
+  | Const _ ->
+    (match site.literals with
+     | Dim_sites.Literals_free -> F (var_form (fresh st))
+     | Literals_dimensionless -> F (const_form dimensionless))
+  | Param n | ConstRef n -> F (var_form (var_of st (Dim_sites.K_param n)))
+  | Pop _ | PopSum _ -> F (const_form population)
+  | Time | Dt | ObsAnchor _ -> F (const_form time_dim)
+  (* A basis function is a pure number (the basis sums to one). *)
+  | ForcingBasis _ -> F (const_form dimensionless)
+  | TimeFunc n ->
+    (match Hashtbl.find_opt st.tf_dims n with
+     | Some d -> F (const_form d)
+     | None -> F (var_form (fresh st)))
+  | TableLookup (n, idx) ->
+    List.iter (fun i -> ignore (g i)) idx;
+    F (var_form (var_of st (Dim_sites.K_table n)))
+  | Projected ->
+    (match site.stream with
+     | Some s -> F (var_form (var_of st (Dim_sites.K_stream s)))
+     | None -> F (const_form population))
+  | ObsColumnRef c ->
+    (match site.stream with
+     | Some s -> F (var_form (var_of st (Dim_sites.K_column (s, c))))
+     | None -> F (var_form (fresh st)))
+  | UncheckedDim u -> F (const_form (make u.dim_p u.dim_t))
+  (* Under `link = log` the expander adds ln s to a coefficient whose unit
+     has scale s, as a marked escape; the coefficient under it is what its
+     position constrains. *)
+  | BinOp { op = Add; left; right = UncheckedDim { reason; _ } }
+    when reason = spline_log_shift_reason -> g left
+  | BinOp b ->
+    let l = g b.left and r = g b.right in
+    let exponent = match b.right with Const n -> Some n | _ -> None in
+    let fresh_div =
+      (* A ratio of two literals takes the dimension its context needs, until
+         the literal rule of §5.2 lands. *)
+      b.op = Div && is_bare_const b.left && is_bare_const b.right in
+    binop st ~site:(Some site) ~code:"E302" ~what b.op ?exponent ~fresh_div l r
+  | UnOp u -> unop st ~site:(Some site) ~what u.op (g u.arg)
+  | Cond c ->
+    ignore (g c.pred);
+    let t = g c.then_ and f = g c.else_ in
+    equate st ~site:(Some site) ~code:"E302" ~op:(Printf.sprintf "the branches of a conditional in %s" what) t f;
+    (match t with Any -> f | F _ -> t)
+  | Reduce terms -> g (chain_add terms)
+  | BindingRef n -> F (var_form (var_of st (Dim_sites.K_binding n)))
+  | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
+
+let rec gen_scalar st ~(site : Dim_sites.site) (se : scalar_expr) : value =
+  let g = gen_scalar st ~site in
+  match se with
+  | SConst _ -> Any
+  | SParam p -> F (var_form (var_of st (Dim_sites.K_param p)))
+  | SQRef q -> F (var_form (var_of st (Dim_sites.K_quantity q.qref_name)))
+  | SUnOp { op; arg } -> unop st ~site:(Some site) ~what:site.role op (g arg)
+  | SBinOp { op; left; right } ->
+    let exponent = match right with SConst n -> Some n | _ -> None in
+    binop st ~site:(Some site) ~code:"E302" ~what:site.role op ?exponent ~fresh_div:false
+      (g left) (g right)
+  | SCond { pred; then_; else_ } ->
+    ignore (g pred);
+    let t = g then_ and f = g else_ in
+    equate st ~site:(Some site) ~code:"E302" ~op:"the branches of a conditional" t f;
+    (match t with Any -> f | F _ -> t)
+
+let rec gen_contrast st ~(site : Dim_sites.site) (ce : contrast_expr) : value =
   match ce with
-  | CRunMember { run; ns; member } ->
-    let nss = match ns with NsQuantities -> "quantities" | NsObservations -> "observations" in
-    Printf.sprintf "%s.%s.%s" run nss member
+  | CRunMember { run = _; ns = NsQuantities; member } ->
+    F (var_form (var_of st (Dim_sites.K_quantity member)))
+  | CRunMember { run = _; ns = NsObservations; member } ->
+    F (var_form (var_of st (Dim_sites.K_stream member)))
   | CBinOp { op; left; right } ->
-    let os = match op with
-      | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | _ -> "?" in
-    Printf.sprintf "(%s %s %s)" (show_contrast_expr left) os (show_contrast_expr right)
+    let l = gen_contrast st ~site left and r = gen_contrast st ~site right in
+    (match op with
+     | Add | Sub | Mul | Div ->
+       binop st ~site:(Some site) ~code:"E297" ~what:site.role op ~fresh_div:false l r
+     | Pow | Mod | Min | Max | Eq | Neq | Lt | Gt | Le | Ge -> F (var_form (fresh st)))
 
-(* The dimensional check on every `contrasts { }` entry: the operands of `+`/`-`
-   must agree (a `deaths - rate` contrast is meaningless). Permissive on
-   unresolved operands (fires only on a Known mismatch), mirroring the
-   observation-likelihood `constrain_known` policy. *)
-let check_contrasts st (m : model)
-    (qdims : ((string * (string * string) list), dim) Hashtbl.t) : unit =
-  let member_dim ns member : dim =
-    match ns with
-    | NsQuantities ->
-      Hashtbl.fold (fun (n, _) d acc ->
-        match acc with Some _ -> acc | None -> if n = member then Some d else None)
-        qdims None
-      |> (function Some d -> d | None -> Unknown (-1))
-    | NsObservations -> obs_projection_dim st m member
+(* One site: its expression's equations, then its obligation. *)
+let add_site st (s : Dim_sites.site) =
+  match s.obligation, s.strength with
+  | Dim_sites.Exempt _, _ | _, Dim_sites.Checked -> ()
+  | (Has _ | Equals _ | Defines _ | Free), Binding ->
+    let v = match s.expr with
+      | Dim_sites.E e -> gen st ~site:s e
+      | Scalar se -> gen_scalar st ~site:s se
+      | Contrast ce -> gen_contrast st ~site:s ce
+    in
+    match v, s.obligation with
+    | Any, _ | _, (Free | Exempt _) -> ()
+    | F f, Has d ->
+      emit st Obligation ~site:(Some s) ~code:s.code
+        (Obligation_of { expected = d; got = f }) f d
+    | F f, (Equals key | Defines key) ->
+      emit st Structure ~site:(Some s) ~code:s.code (Definition { got = f })
+        (form_sub f (var_form (var_of st key))) dimensionless
+
+(* ── Diagnostics ───────────────────────────────────────────────────────── *)
+
+(* A form's value under the solution, when every variable in it is determined. *)
+let form_value out (f : form) : dim_vec option =
+  List.fold_left (fun acc (v, c) ->
+    match acc, Dim_solve.value out v with
+    | Some k, Some d -> Some (Array.mapi (fun i ki -> ki + c * d.(i)) k)
+    | _ -> None) (Some (Array.copy f.k)) f.vars
+
+let show out f = match form_value out f with
+  | Some d -> dim_display d
+  | None -> "not determined by the model"
+
+let count_hint a b =
+  if (dim_eq a population && dim_eq b dimensionless)
+  || (dim_eq a dimensionless && dim_eq b population) then
+    Some "if a constant represents a small count (seeding term), declare it with a type:\n\
+         \        let iota : count = 1e-6\n\
+         \      then use: I + iota"
+  else None
+
+let site_name (s : Dim_sites.site option) = match s with Some s -> s.role | None -> "the model"
+
+let diagnostic_of_conflict st out (c : Dim_solve.conflict) : diagnostic =
+  let info = Hashtbl.find st.info c.culprit.origin.site in
+  let subject = Option.bind info.site (fun (s : Dim_sites.site) -> s.subject) in
+  (* The other positions the culprit was reduced against: where the
+     conflicting requirement comes from. *)
+  let notes =
+    List.filter_map (fun (o : Dim_solve.origin) ->
+      match Hashtbl.find_opt st.info o.site with
+      (* a use that requires a dimension, not a definition the value flows
+         through (a binding, a projection) *)
+      | Some { site = Some s; kind = (Operands _ | Function_arg _ | Even_root _
+                                     | Obligation_of _); _ }
+        when Some s <> info.site -> Some s.Dim_sites.role
+      | Some _ | None -> None) c.context
+    |> List.sort_uniq compare
+    |> (fun l -> List.filteri (fun i _ -> i < 3) l)
   in
-  let rec infer_ce (ce : contrast_expr) : dim =
-    match ce with
-    | CRunMember { ns; member; _ } -> resolve st (member_dim ns member)
-    | CBinOp { op; left; right } ->
-      let dl = infer_ce left and dr = infer_ce right in
-      (match op with
-       | Add | Sub ->
-         (match dl, dr with
-          | Known v1, Known v2 when not (dim_eq v1 v2) ->
-            emit_error st ~code:"E297"
-              ~message:(Printf.sprintf
-                "contrast operands have incompatible dimensions: \
-                 `%s` is %s but `%s` is %s"
-                (show_contrast_expr left)  (dim_display v1)
-                (show_contrast_expr right) (dim_display v2))
-              ~hint:"the two arms of a difference must report the same quantity \
-                     (same dimension); compare counts with counts, rates with rates"
-              ();
-            dl
-          | Any, d | d, Any -> d
-          | Known _, _ -> dl
-          | _ -> dr)
-       | Mul -> dim_binop_known Mul dl dr
-       | Div -> dim_binop_known Div dl dr
-       | _ -> Unknown (-1))
+  let with_notes d =
+    match notes, d with
+    | [], d -> d
+    | ns, d ->
+      let n = "the conflicting requirement comes from: " ^ String.concat "; " ns in
+      Some (match d with Some d -> d ^ "\n  " ^ n | None -> n)
   in
-  List.iter (fun (c : contrast) ->
-    st.subject <- Some (SContrast c.c_name);
-    ignore (infer_ce c.c_body)
-  ) m.contrasts;
-  st.subject <- None
+  let integrality = match c.kind with
+    | Dim_solve.Not_integral ->
+      Some "no integer dimension satisfies it: the model requires a fractional \
+            exponent (a square root or power of a dimensioned quantity)"
+    | Contradiction -> None in
+  let mk ?hint code message detail =
+    { severity = Error; code; message;
+      detail = with_notes (match integrality with Some i -> Some i | None -> detail);
+      hint; subject } in
+  match info.kind with
+  | Obligation_of { expected; got } ->
+    let s = Option.get info.site in
+    let got_s = show out got in
+    (match info.code, s.subject, s.expr with
+     | "E300", Some (STransition n), Dim_sites.E rate ->
+       mk "E300" (Printf.sprintf "transition '%s' rate has wrong dimension" n)
+         (Some (Printf.sprintf "rate = %s\n  expected dimension: %s\n  got dimension: %s"
+                  (expr_to_short_string rate) (dim_display expected) got_s))
+     | code, _, _ ->
+       let message =
+         if dim_eq expected dimensionless then Printf.sprintf "%s must be dimensionless" s.role
+         else Printf.sprintf "%s must have dimension %s" s.role (dim_display expected) in
+       mk ?hint:s.note code message
+         (Some (Printf.sprintf "expected dimension %s, got %s" (dim_display expected) got_s)))
+  | Operands { op; left; right } ->
+    let hint = match form_value out left, form_value out right with
+      | Some a, Some b -> count_hint a b | _ -> None in
+    mk ?hint info.code (Printf.sprintf "dimension mismatch: %s" op)
+      (Some (Printf.sprintf "left has dimension %s, right has dimension %s — cannot combine"
+               (show out left) (show out right)))
+  | Function_arg { fn; arg } ->
+    mk info.code (Printf.sprintf "%s must be dimensionless" fn)
+      (Some (Printf.sprintf "it has dimension %s" (show out arg)))
+  | Even_root f ->
+    mk info.code (Printf.sprintf "sqrt in %s requires even dimension exponents" (site_name info.site))
+      (Some (Printf.sprintf "argument has dimension %s" (show out f)))
+  | Definition { got } ->
+    mk info.code (Printf.sprintf "%s has conflicting dimensions" (site_name info.site))
+      (Some (Printf.sprintf "it has dimension %s here" (show out got)))
+  | Quantity_reduction ->
+    mk info.code "a quantity's reduction has conflicting dimensions" None
+  | Declared_fact ->
+    mk "E302" "two declarations give one name different dimensions" None
 
-(* Observation-likelihood argument checks (2026-06-10 §3.1). Two recurring
-   shapes, each emitting E304 with a per-argument [msg] (the messages differ, so
-   they are passed in):
-   - [require_count]: the argument is an external count denominator or expected
-     count (Binomial/BetaBinomial `n`, Poisson `rate`, NegBinomial `mean`,
-     zero-inflated NegBinomial `mean`). A bare numeric literal is a count by
-     context and exempt; otherwise its inferred dim must be a [population].
-   - [require_dimensionless]: the argument is a probability or shape parameter
-     (Binomial/Bernoulli `p`, BetaBinomial `alpha`/`beta`) — its inferred dim
-     must be dimensionless. *)
-(* Infer a likelihood argument whose dimension is a strict contract, so its
-   products are recorded as equations even in permissive mode. *)
-let infer_contract_arg st ~ctx arg =
-  let prev = st.contract_arg in
-  st.contract_arg <- true;
-  let d = infer st ~ctx arg in
-  st.contract_arg <- prev;
-  d
+let render_relation names (r : Dim_solve.relation) =
+  let lhs = List.map (fun (v, c) ->
+    let n = Option.value ~default:"?" (Hashtbl.find_opt names v) in
+    if c = 1 then n else Printf.sprintf "%s^%d" n c) r.coeffs in
+  Printf.sprintf "%s is %s" (String.concat " · " lhs) (formal_dim r.equals)
 
-let require_count st ~ctx ~msg arg =
-  if not (is_bare_const arg) then
-    constrain_known st ~code:"E304" ~message:msg (infer_contract_arg st ~ctx arg) population
-  else ignore (infer st ~ctx arg)
-
-let require_dimensionless st ~ctx ~msg arg =
-  constrain_known st ~code:"E304" ~message:msg (infer_contract_arg st ~ctx arg) dimensionless
-
-(* ── Main check ─────────────────────────────────────────────────────────── *)
+(* ── Main check ────────────────────────────────────────────────────────── *)
 
 let check_model (m : model) : result =
-  let st = create_state () in
-
-  (* Initialize parameter dims *)
-  init_params st m.parameters;
-  init_constants st m.constants;
-
-  (* Initialize table dims from their values *)
-  init_table_dims st m.tables;
-
-  (* Initialize time function dims *)
-  init_tf_dims st m.time_functions;
-
-  (* gh#314: a forcing's optional `lag` is a duration — it is SUBTRACTED from
-     the evaluation time (`t − lag`), so it must carry the time dimension [T].
-     A non-duration lag (a rate `'per_day`, a count, a dimensionless literal)
-     is a model bug: subtracting it from `t` is meaningless. Validate it the
-     same way `period`/`phase` are durations, with its own code (E309) so the
-     diagnostic points at the forcing, not at an arithmetic site. *)
-  List.iter (fun (tf : time_function) ->
-    match tf.lag with
-    | None -> ()
-    | Some lag_e ->
-      st.subject <- None;
-      let ctx = Printf.sprintf "forcing '%s' lag" tf.name in
-      let d = infer st ~ctx lag_e in
-      constrain_known st ~code:"E309"
-        ~message:(Printf.sprintf
-          "forcing '%s': `lag` must be a duration (dimension T); it is \
-           subtracted from the evaluation time. Use a duration literal \
-           (e.g. `lag = 10 'days`) or a parameter declared `: duration`."
-          tf.name)
-        d (make 0 1)
-  ) m.time_functions;
-
-  (* Proposal 2026-10-27-estimable-bsplines §4.4: under `link = log` a spline
-     is s·exp(Σ c_k B_k), so every coefficient is a log-value and must be
-     dimensionless — the same requirement, and the same code, as any `exp`
-     argument. The expander's ln s unit shift is a marked escape; the check
-     reads the coefficient under it. *)
-  List.iter (fun (tf : time_function) ->
-    let log_coefs = match tf.kind with
-      | PeriodicSpline { link = Link_log; coefs; _ } -> coefs
-      | BSpline { link = Link_log; coefs = Coefs_explicit cs; _ } -> cs
-      | _ -> []
-    in
-    (* §6.4: smooth's reference duration is a duration; under the log link its
-       level and scale are pure numbers and its slope a rate per unit time. *)
-    (match tf.kind with
-     | BSpline { coefs = Coefs_smooth { level; slope; scale; per; _ }; link; _ } ->
-       let need what e want code =
-         st.subject <- None;
-         let ctx = Printf.sprintf "forcing '%s' smooth %s" tf.name what in
-         constrain_known st ~code
-           ~message:(Printf.sprintf "forcing '%s': smooth `%s` must have dimension %s"
-                       tf.name what (dim_display want))
-           (infer st ~ctx e) want
-       in
-       need "per" per (make 0 1) "E301";
-       if link = Link_log then begin
-         let level = match level with
-           | BinOp { op = Add; left; right = UncheckedDim { reason; _ } }
-             when reason = spline_log_shift_reason -> left
-           | e -> e
-         in
-         need "level" level dimensionless "E301";
-         need "slope" slope (make 0 (-1)) "E301";
-         need "scale" scale dimensionless "E301"
-       end
-     | _ -> ());
-    List.iteri (fun k c ->
-      let c = match c with
-        | BinOp { op = Add; left; right = UncheckedDim { reason; _ } }
-          when reason = spline_log_shift_reason -> left
-        | c -> c
-      in
-      st.subject <- None;
-      let ctx = Printf.sprintf "forcing '%s' coefficient %d" tf.name (k + 1) in
-      let d = infer st ~ctx c in
-      constrain_known st ~code:"E301"
-        ~message:(Printf.sprintf
-          "forcing '%s': coefficient %d must be dimensionless — under `link = log` \
-           the coefficients are log-values, and the forcing takes its unit from \
-           its declaration. Declare the coefficient's parameter `'ratio`."
-          tf.name (k + 1))
-        d dimensionless
-    ) log_coefs
-  ) m.time_functions;
-
-  (* Fix B: precompute each shared binding's dim in declaration (topological)
-     order, so a BindingRef in a rate infers the body's dim. Bindings are
-     param-free, so their dim is fully determined here and stable across the
-     transition rounds below. *)
-  List.iter (fun (b : binding) ->
-    st.subject <- Some (SBinding b.bname);
-    let ctx = Printf.sprintf "binding '%s'" b.bname in
-    let d = infer st ~ctx b.bexpr in
-    Hashtbl.replace st.binding_dims b.bname d
-  ) m.bindings;
-
-  (* Pass 1: bottom-up inference + top-down propagation for each transition *)
-  (* We do multiple rounds to propagate resolved unknowns across transitions.
-     Two rounds suffices for most models (first round resolves most params,
-     second round picks up cross-transition effects). *)
-  let run_round () =
-    List.iter (fun (tr : transition) ->
-      st.subject <- Some (STransition tr.name);
-      let ctx = Printf.sprintf "transition '%s'" tr.name in
-      pin_expected st (infer st ~ctx tr.rate) rate_total;
-      propagate st ~ctx tr.rate rate_total;
-      (* Overdispersion *)
-      (match tr.draw_method with
-       | DrawOverdispersed { sigma_sq; _ } ->
-         pin_expected st (infer st ~ctx sigma_sq) dimensionless;
-         propagate st ~ctx sigma_sq dimensionless
-       | _ -> ())
-    ) m.transitions;
-
-    (* Balance *)
-    (match m.balance with
-     | Some bal ->
-       st.subject <- None;
-       let ctx = Printf.sprintf "balance '%s'" bal.balance_target in
-       pin_expected st (infer st ~ctx bal.balance_expr) population;
-       propagate st ~ctx bal.balance_expr population
-     | None -> ());
-
-    (* ODE *)
-    List.iter (fun (eq : ode_equation) ->
-      st.subject <- Some (SOde eq.compartment);
-      let ctx = Printf.sprintf "ODE d(%s)/dt" eq.compartment in
-      pin_expected st (infer st ~ctx eq.derivative) rate_total;
-      propagate st ~ctx eq.derivative rate_total
-    ) m.ode_equations;
-
-    (* Forcing arguments. A forcing's value carries its declared dimension
-       (the tier-3 unit on the declaration), so every argument that becomes
-       part of that value carries it too, and every argument read as a time
-       is a duration. From the runtime definitions in
-       rust/crates/sim/src/propensity.rs: a sinusoid is
-       baseline + amplitude * sin(2 pi (t - phase) / period); a periodic,
-       piecewise or interpolated forcing returns one of its values; a Fourier
-       series sums its harmonic coefficients; an identity-link spline sums
-       its coefficients times dimensionless basis functions. Log-link spline
-       coefficients are checked above. An argument that is constant
-       throughout (a literal, or a data value the expander wrote as unit-scaled
-       constant arithmetic) is read in the forcing's own unit and exempt; a
-       literal multiplying a parameter is a dimensionless factor. *)
-    List.iter (fun (tf : time_function) ->
-      st.subject <- None;
-      let (fp, ft) = tf.dim in
-      let value_dim = make fp ft and time_dim = make 0 1 in
-      let need what e want =
-        let ctx = Printf.sprintf "forcing '%s' %s" tf.name what in
-        if not (is_constant_expr e) then
-        constrain_known st ~code:"E312"
-            ~message:(Printf.sprintf
-              "forcing '%s': `%s` must have dimension %s" tf.name what
-              (if dim_eq want time_dim then "T (a duration)"
-               else formal_dim want ^ ", the forcing's declared dimension"))
-            (infer st ~ctx e) want
-      in
-      let need_all what es want = List.iteri (fun k e ->
-        need (Printf.sprintf "%s[%d]" what k) e want) es in
-      match tf.kind with
-      | Sinusoidal sn ->
-        need "amplitude" sn.amplitude value_dim;
-        need "baseline" sn.baseline value_dim;
-        need "period" sn.period time_dim;
-        need "phase" sn.phase time_dim
-      | Piecewise pw ->
-        need_all "breakpoints" pw.breakpoints time_dim;
-        need_all "values" pw.values value_dim
-      | Interpolated ip ->
-        need_all "times" ip.times time_dim;
-        need_all "values" ip.values value_dim
-      | Periodic pd ->
-        need "period" pd.period time_dim;
-        need_all "values" pd.values value_dim
-      | Fourier fo ->
-        need "period" fo.period time_dim;
-        List.iteri (fun k (a, b) ->
-          need (Printf.sprintf "harmonics[%d] cos" k) a value_dim;
-          need (Printf.sprintf "harmonics[%d] sin" k) b value_dim) fo.harmonics
-      | PeriodicSpline ps ->
-        need "period" ps.period time_dim;
-        if ps.link = Link_identity then need_all "coefs" ps.coefs value_dim
-      | BSpline bs ->
-        (match bs.knots with
-         | Knots_uniform { lower; upper; _ } ->
-           need "knot lower" lower time_dim; need "knot upper" upper time_dim
-         | Knots_explicit ks -> need_all "knots" ks time_dim);
-        (match bs.link, bs.coefs with
-         | Link_identity, Coefs_explicit cs -> need_all "coefs" cs value_dim
-         | _ -> ())
-    ) m.time_functions;
-
-    (* Initial conditions. Every compartment holds a population count, so a
-       deterministic initial value is a count, and so are the count-valued
-       arguments of an initial law; a law's probability and dispersion are
-       dimensionless, and a Normal law's spread has its mean's dimension.
-       Literals take the dimension their context requires ([literal_free]). *)
-    List.iter (fun ((comp, spec) : string * init_spec) ->
-      st.subject <- Some (SInit comp);
-      let ctx = Printf.sprintf "initial value of '%s'" comp in
-      let need what e want =
-        st.literal_free <- true;
-        let d = infer st ~ctx e in
-        st.literal_free <- false;
-        constrain_known st ~code:"E313"
-            ~message:(Printf.sprintf "%s: %s must have dimension %s"
-                        ctx what (dim_display want))
-            d want
-      in
-      match spec with
-      | Deterministic e -> need "the value" e population
-      | InitCount (InitPoisson l) -> need "Poisson `rate`" l.rate.expr population
-      | InitCount (InitBinomial l) ->
-        need "Binomial `n`" l.n population;
-        need "Binomial `p`" l.p.expr dimensionless
-      | InitCount (InitNegBinomial l) ->
-        need "NegBinomial `mean`" l.mean.expr population;
-        need "NegBinomial `dispersion`" l.dispersion.expr dimensionless
-      | InitReal (InitNormal l) ->
-        need "Normal `mean`" l.mean.expr population;
-        need "Normal `sd`" l.sd.expr population
-    ) m.initial_conditions;
-
-    (* Observations — permissive-dim covers the *mean / rate / sd*
-       positions because standard epi variance formulas (He et al.
-       2010 eq 6: sqrt(rho*m*(1 + rho*psi^2*m))) are not strictly
-       dim-homogeneous under the P-counting convention. Suppress
-       E302/E304 there; downstream likelihood evaluation treats
-       those expressions as pure floats regardless.
-
-       gh#116 (2026-05-26 upstream OCaml-compiler review Critical
-       #6): the blanket-permissive coverage was too wide — arguments
-       with KNOWN dimensional contracts (Binomial.p, Bernoulli.p,
-       BetaBinomial.alpha/beta, NegBinomial.dispersion) silently
-       accepted dimension-incompatible expressions. A common
-       missing-`/N` bug (`binomial(n = N, p = projected)` where
-       `projected` is a count) compiled and ran with no signal,
-       turning a prevalence likelihood into a count-valued
-       probability.
-
-       The fix: keep permissive-dim ON for variance-formula-bearing
-       positions (mean / rate / sd) but STRICTLY check the
-       known-contract arguments. `constrain_known` inspects the
-       *resolved* dim; it fires E304 only when the inferred
-       dimension is Known and ≠ expected — so it doesn't false-
-       positive on Unknown / Any expressions where the user
-       legitimately leaned on inference. *)
-    let prev_permissive = st.permissive_dim in
-    st.permissive_dim <- true;
-    List.iter (fun (obs : observation_model) ->
-      st.subject <- Some (SObservation obs.name);
-      let ctx = Printf.sprintf "observation '%s'" obs.name in
-      (* Register each declared value column's dim so an [ObsColumnRef name] in
-         this likelihood (e.g. binomial `n = tested`, Poisson `offset` folded
-         into the rate) infers its declared dimension. This is what makes the
-         dimcheck of `n`/rate below actually bite: declaring `tested : count`
-         registers it as a count, so a `real` column feeding `n` is an E304.
-         (2026-06-10 observation data-entry §3.1.) *)
-      Hashtbl.reset st.obs_col_dims;
-      List.iter (fun (c : obs_column) ->
-        match c.col_role with
-        | RoleValue k -> Hashtbl.replace st.obs_col_dims c.col_name (param_dim_of_kind st (Some k))
-        (* A window boundary carries a time, not an observed value, so it
-           contributes no observation-column dimension — same as RoleTime. *)
-        | RoleTime | RoleWindowStart | RoleWindowStop | RoleDim _ -> ()
-      ) obs.columns;
-      (* The Projected leaf in this likelihood stands for the projection's
-         value, so it carries the projection's dimension: a population count
-         for prevalence/incidence, the inferred dim for a DerivedExpr — e.g.
-         dimensionless for a proportion `I / N`. This is what lets a
-         legitimate proportion-as-probability pass while still catching the
-         missing-`/N` bug (a count used as `p`). *)
-      st.projected_dim <- Some (match obs.projection with
-        | DerivedExpr e -> infer st ~ctx e
-        | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _ ->
-          Known population
-        (* A ratio of two accumulated counts is dimensionless, which is what
-           lets it feed `binomial`'s `p`, `beta`'s `mean` and the
-           `beta_binomial` sugar, and what makes a count family (`poisson`,
-           `neg_binomial`) refuse it with the existing E304. *)
-        | FlowRatio _ -> Known dimensionless);
-      (match obs.likelihood with
-       | NegBinomial nb ->
-         (* The NegBinomial `mean` is the same object as the Poisson `rate`:
-            the expected COUNT of events over the reporting interval,
-            dimension [population] — not a per-time rate. Previously
-            inferred-and-discarded while `dispersion` right below it was
-            constrained, so a `projected` that is a transition rate
-            (`gamma * I`, [P·T^-1]) reached the likelihood undiagnosed; at a
-            one-day reporting step the wrong value is numerically close, at a
-            weekly step it is off by roughly the window length. A bare numeric
-            literal (`mean = 100`) is a count by context and exempt, as for the
-            Poisson rate. *)
-         require_count st ~ctx
-           ~msg:(Printf.sprintf
-             "%s: NegBinomial `mean` must have the dimension of a count \
-              (expected events over the reporting interval)" ctx)
-           nb.mean.expr;
-         let disp_dim = infer_contract_arg st ~ctx nb.dispersion.expr in
-         (* Pre-existing constraint, kept for symmetry with the new
-            checks below. propagate handles Unknown binding;
-            constrain_known catches Known-mismatch. *)
-         propagate st ~ctx nb.dispersion.expr dimensionless;
-         constrain_known st ~code:"E304"
-           ~message:(Printf.sprintf
-             "%s: NegBinomial `dispersion` must be dimensionless" ctx)
-           disp_dim dimensionless
-       | Poisson p ->
-         (* The Poisson `rate` is the expected COUNT of events over the
-            reporting interval — dimension [population], not a per-time rate.
-            A person-time offset is folded into this argument
-            (`rate = lambda * person_time`), which keeps the product a count.
-            Previously inferred-and-discarded (un-checked); now constrained so a
-            dimensionally-wrong rate is a located E304. A bare numeric literal
-            (`rate = 100`) carries no real dimension — it is a count by context,
-            like a seeding constant — so it is exempt. (2026-06-10 §3.1.) *)
-         require_count st ~ctx
-           ~msg:(Printf.sprintf
-             "%s: Poisson `rate` must have the dimension of a count \
-              (expected events over the reporting interval)" ctx)
-           p.rate.expr
-       | Normal n -> ignore (infer st ~ctx n.mean.expr); ignore (infer st ~ctx n.sd.expr)
-       | Binomial b ->
-         (* The binomial `n` is an external DENOMINATOR — a count (e.g. number
-            tested). Previously inferred-and-discarded; now constrained so a
-            declared `tested : count` is verified, and a `real`/probability
-            column feeding `n` is a located E304. A bare numeric literal
-            (`n = 100`) is a count by context and exempt. (2026-06-10 §3.1.) *)
-         require_count st ~ctx
-           ~msg:(Printf.sprintf
-             "%s: Binomial `n` must be a count (the trial denominator); \
-              declare the column feeding `n` as `count`." ctx)
-           b.n;
-         (* gh#116: `p` must be a probability (dimensionless on
-            [0, 1]). A count here is the textbook missing-`/N` bug. *)
-         require_dimensionless st ~ctx
-           ~msg:(Printf.sprintf
-             "%s: Binomial `p` must be dimensionless (probability); \
-              a count here is almost certainly a missing `/N`." ctx)
-           b.p.expr
-       | BetaBinomial bb ->
-         (* BetaBinomial `n` is the same external count denominator as the
-            Binomial; constrain it likewise (bare literal exempt). (§3.1.) *)
-         require_count st ~ctx
-           ~msg:(Printf.sprintf
-             "%s: BetaBinomial `n` must be a count (the trial denominator); \
-              declare the column feeding `n` as `count`." ctx)
-           bb.n;
-         (* gh#116: alpha/beta are shape parameters of a Beta
-            distribution — both dimensionless by definition. *)
-         require_dimensionless st ~ctx
-           ~msg:(Printf.sprintf
-             "%s: BetaBinomial `alpha` must be dimensionless" ctx)
-           bb.alpha.expr;
-         require_dimensionless st ~ctx
-           ~msg:(Printf.sprintf
-             "%s: BetaBinomial `beta` must be dimensionless" ctx)
-           bb.beta.expr
-       | Beta b ->
-         (* `mean` is a proportion (dimensionless on [0, 1]); `concentration` is
-            the Beta shape scale — dimensionless by definition. A count in `mean`
-            is the same missing-`/N` bug the Bernoulli/Binomial-p check catches. *)
-         require_dimensionless st ~ctx
-           ~msg:(Printf.sprintf
-             "%s: Beta `mean` must be dimensionless (a proportion on [0, 1]); \
-              a count here is almost certainly a missing `/N`." ctx)
-           b.mean.expr;
-         require_dimensionless st ~ctx
-           ~msg:(Printf.sprintf
-             "%s: Beta `concentration` must be dimensionless" ctx)
-           b.concentration.expr
-       | Bernoulli b ->
-         (* gh#116: same as Binomial.p — must be a probability. *)
-         require_dimensionless st ~ctx
-           ~msg:(Printf.sprintf
-             "%s: Bernoulli `p` must be dimensionless (probability); \
-              a count here is almost certainly a missing `/N`." ctx)
-           b.p.expr
-       | ZeroInflatedNegBinomial zi ->
-         (* Same contract as the NegBinomial base: `mean` is the expected count,
-            `dispersion` is dimensionless. Plus `pi` is the structural-zero
-            probability — dimensionless on [0, 1]. *)
-         require_count st ~ctx
-           ~msg:(Printf.sprintf
-             "%s: zero-inflated NegBinomial `mean` must have the dimension of \
-              a count (expected events over the reporting interval)" ctx)
-           zi.mean.expr;
-         let disp_dim = infer_contract_arg st ~ctx zi.dispersion.expr in
-         propagate st ~ctx zi.dispersion.expr dimensionless;
-         constrain_known st ~code:"E304"
-           ~message:(Printf.sprintf
-             "%s: zero-inflated NegBinomial `dispersion` must be dimensionless" ctx)
-           disp_dim dimensionless;
-         require_dimensionless st ~ctx
-           ~msg:(Printf.sprintf
-             "%s: zero-inflation `pi` must be dimensionless (a structural-zero \
-              probability on [0, 1])" ctx)
-           zi.pi.expr);
-      st.projected_dim <- None;
-      Hashtbl.reset st.obs_col_dims
-    ) m.observations;
-    st.permissive_dim <- prev_permissive
+  let st = { next_var = 0; keys = Hashtbl.create 256; declared = []; structure = [];
+             obligation = []; info = Hashtbl.create 1024; next_eq = 0;
+             tf_dims = Hashtbl.create 16 } in
+  declare_model st m;
+  declare_quantities st m;
+  let sites = Dim_sites.sites m in
+  List.iter (add_site st) sites;
+  let out = Dim_solve.solve ~nbases:n_bases
+      (List.rev st.declared @ List.rev st.structure @ List.rev st.obligation) in
+  let errors =
+    Dim_solve.conflicts out
+    |> List.map (diagnostic_of_conflict st out)
+    (* one diagnostic per position and code *)
+    |> List.fold_left (fun acc (d : diagnostic) ->
+         if List.exists (fun (x : diagnostic) -> x.code = d.code && x.subject = d.subject
+                                  && x.message = d.message) acc then acc else d :: acc) []
+    |> List.rev
   in
-  run_round ();
-  st.recording <- false;
-  for _round = 2 to 3 do run_round () done;
-  (* Solve the recorded product equations, then re-run the rounds so the newly
-     bound variables propagate; repeat to a fixpoint. Each iteration that
-     continues binds at least one variable, so this terminates; the bound is
-     a guard, not a tuning knob. *)
-  let rec fixpoint n =
-    let o = solve_equations st in
-    if o.newly_bound > 0 && n < 100 then (run_round (); fixpoint (n + 1)) else o
-  in
-  let solved = fixpoint 0 in
-  if Sys.getenv_opt "CAMDL_DIMCHECK_DEBUG" <> None then
-    Printf.eprintf "dimcheck-solver: equations=%d contradictions=%d non_integral=%d\n%!"
-      (List.length st.equations) solved.contradictions solved.non_integral;
-
-  (* Cache inferred rate dims for use in the read-only check phase *)
-  List.iter (fun (tr : transition) ->
-    let d = read_dim st tr.rate in
-    Hashtbl.replace st.rate_cache tr.name d
-  ) m.transitions;
-
-  (* Pass 2: check constraints and emit errors (read-only — no fresh vars) *)
-
-  (* Transition rates must be P*T^-1 *)
-  List.iter (fun (tr : transition) ->
-    st.subject <- Some (STransition tr.name);
-    let d = resolve st
-      (match Hashtbl.find_opt st.rate_cache tr.name with
-       | Some cached -> cached
-       | None -> read_dim st tr.rate) in
-    (match d with
-     | Known v when not (dim_eq v rate_total) ->
-       emit_error st ~code:"E300"
-         ~message:(Printf.sprintf "transition '%s' rate has wrong dimension" tr.name)
-         ~detail:(Printf.sprintf "rate = %s\n  expected dimension: %s\n  got dimension: %s"
-                    (expr_to_short_string tr.rate)
-                    (dim_display rate_total)
-                    (dim_display v))
-         ()
-     | _ -> ());
-    (* Overdispersion sigma^2 must be dimensionless *)
-    (match tr.draw_method with
-     | DrawOverdispersed { sigma_sq; _ } ->
-       let sd = resolve st (read_dim st sigma_sq) in
-       (match sd with
-        | Known v when not (dim_is_zero v) ->
-          emit_error st ~code:"E308"
-            ~message:(Printf.sprintf "overdispersion sigma^2 in '%s' must be dimensionless" tr.name)
-            ~detail:(Printf.sprintf "got dimension %s" (dim_display v)) ()
-        | _ -> ())
-     | _ -> ())
-  ) m.transitions;
-
-  (* Balance *)
-  (match m.balance with
-   | Some bal ->
-     st.subject <- None;
-     let d = resolve st (read_dim st bal.balance_expr) in
-     (match d with
-      | Known v when not (dim_eq v population) ->
-        emit_error st ~code:"E305"
-          ~message:(Printf.sprintf "balance expression for '%s' has wrong dimension" bal.balance_target)
-          ~detail:(Printf.sprintf "expected %s, got %s" (dim_display population) (dim_display v))
-          ()
-      | _ -> ())
-   | None -> ());
-
-  (* ODE *)
-  List.iter (fun (eq : ode_equation) ->
-    st.subject <- Some (SOde eq.compartment);
-    let d = resolve st (read_dim st eq.derivative) in
-    (match d with
-     | Known v when not (dim_eq v rate_total) ->
-       emit_error st ~code:"E306"
-         ~message:(Printf.sprintf "ODE derivative for '%s' has wrong dimension" eq.compartment)
-         ~detail:(Printf.sprintf "expected %s, got %s" (dim_display rate_total) (dim_display v))
-         ()
-     | _ -> ())
-  ) m.ode_equations;
-
-  (* Observation dispersion *)
-  List.iter (fun (obs : observation_model) ->
-    st.subject <- Some (SObservation obs.name);
-    (match obs.likelihood with
-     | NegBinomial nb ->
-       let dd = resolve st (read_dim st nb.dispersion.expr) in
-       (match dd with
-        | Known v when not (dim_is_zero v) ->
-          emit_error st ~code:"E307"
-            ~message:(Printf.sprintf "dispersion parameter in observation '%s' must be dimensionless" obs.name)
-            ~detail:(Printf.sprintf "got dimension %s" (dim_display v)) ()
-        | _ -> ())
-     | _ -> ())
-  ) m.observations;
-
-  (* E303: cross-transition parameter consistency.
-     For each parameter, determine what dimension each transition's rate
-     context implies, independently of global resolution. If a parameter
-     requires dim A in one transition and dim B in another, emit E303. *)
-  let param_transition_dims : (string, (string * dim_vec) list) Hashtbl.t = Hashtbl.create 16 in
-
-  (* Compute the implied dimension of a named parameter in an expression,
-     given that the overall expression must have dimension [target].
-     Uses read_dim for all sub-expressions except occurrences of [param_name],
-     which are treated as the single unknown.
-     Returns Some dim_vec if uniquely determined, None otherwise. *)
-  let rec implied_param_dim st param_name (e : expr) (target : dim_vec) : dim_vec option =
-    match e with
-    | (Param name | ConstRef name) when name = param_name -> Some target
-    | BinOp { op = Add; left; right; _ }
-    | BinOp { op = Sub; left; right; _ }
-    | BinOp { op = Min; left; right; _ }
-    | BinOp { op = Max; left; right; _ } ->
-      (* Both sides must match target *)
-      let from_l = implied_param_dim st param_name left target in
-      let from_r = implied_param_dim st param_name right target in
-      (match from_l, from_r with
-       | Some d, None | None, Some d -> Some d
-       | Some _, Some _ -> from_l  (* both paths give same answer *)
-       | None, None -> None)
-    | BinOp { op = Mul; _ } | BinOp { op = Div; _ } ->
-      (* Flatten product, find param as the single unknown, compute residual.
-         If the param is inside a non-leaf factor (e.g. Add), treat that factor
-         as the "unknown" and recurse into it with the residual dim. *)
-      let (num, den) = collect_product_factors e in
-      let known_dim = ref dimensionless in
-      let param_factors = ref [] in  (* (factor, is_num) for factors containing param *)
-      let other_unknown = ref 0 in
-      let classify_factor factor is_num =
-        let has_param = ref false in
-        let rec check = function
-          | (Param name | ConstRef name) when name = param_name -> has_param := true
-          | BinOp b -> check b.left; check b.right
-          | UnOp u -> check u.arg
-          | Cond c -> check c.pred; check c.then_; check c.else_
-          | _ -> ()
-        in
-        check factor;
-        if !has_param then
-          param_factors := (factor, is_num) :: !param_factors
-        else begin
-          let d = resolve st (read_dim st factor) in
-          match d with
-          | Known v ->
-            if is_num then known_dim := dim_mul !known_dim v
-            else known_dim := dim_div !known_dim v
-          | Any -> ()
-          | Unknown _ -> incr other_unknown
-        end
-      in
-      List.iter (fun f -> classify_factor f true) num;
-      List.iter (fun f -> classify_factor f false) den;
-      if List.length !param_factors = 1 && !other_unknown = 0 then begin
-        let (sub_expr, is_num) = List.hd !param_factors in
-        let residual = dim_div target !known_dim in
-        let sub_target = if is_num then residual else dim_scale (-1) residual in
-        (* If the sub_expr is the param itself, we're done *)
-        (match sub_expr with
-         | (Param name | ConstRef name) when name = param_name -> Some sub_target
-         | _ -> implied_param_dim st param_name sub_expr sub_target)
-      end else
-        None
-    | Cond { then_; else_; _ } ->
-      let from_t = implied_param_dim st param_name then_ target in
-      let from_e = implied_param_dim st param_name else_ target in
-      (match from_t, from_e with
-       | Some d, None | None, Some d -> Some d
-       | Some _, Some _ -> from_t
-       | None, None -> None)
-    | UnOp { op = Neg; arg; _ } | UnOp { op = Abs; arg; _ }
-    | UnOp { op = Floor; arg; _ } | UnOp { op = Ceil; arg; _ } ->
-      implied_param_dim st param_name arg target
-    | UnOp { op = Sqrt; arg; _ } ->
-      implied_param_dim st param_name arg (dim_scale 2 target)
-    | _ -> None
-  in
-
-  (* Collect param names used in each transition *)
-  let rec params_in (e : expr) acc =
-    match e with
-    | Param name | ConstRef name -> if List.mem name acc then acc else name :: acc
-    | BinOp b -> params_in b.left (params_in b.right acc)
-    | UnOp u -> params_in u.arg acc
-    | Cond c -> params_in c.pred (params_in c.then_ (params_in c.else_ acc))
-    | TableLookup (_, idxs) -> List.fold_left (fun a e -> params_in e a) acc idxs
-    | _ -> acc
-  in
-
-  List.iter (fun (tr : transition) ->
-    let pnames = params_in tr.rate [] in
-    List.iter (fun pname ->
-      match implied_param_dim st pname tr.rate rate_total with
-      | Some implied ->
-        let existing = match Hashtbl.find_opt param_transition_dims pname with
-          | Some l -> l | None -> [] in
-        if not (List.exists (fun (tn, _) -> tn = tr.name) existing) then
-          Hashtbl.replace param_transition_dims pname ((tr.name, implied) :: existing)
-      | None -> ()
-    ) pnames
-  ) m.transitions;
-
-  Hashtbl.iter (fun name entries ->
-    match entries with
-    | [] | [_] -> ()
-    | first :: rest ->
-      let (first_tr, first_dim) = first in
-      st.subject <- Some (STransition first_tr);
-      List.iter (fun (other_tr, other_dim) ->
-        if not (dim_eq first_dim other_dim) then
-          emit_error st ~code:"E303"
-            ~message:(Printf.sprintf "parameter '%s' has conflicting dimensions" name)
-            ~detail:(Printf.sprintf
-              "In transition '%s': inferred %s (%s)\n  In transition '%s': inferred %s (%s)"
-              first_tr (formal_dim first_dim) (display_dim first_dim)
-              other_tr (formal_dim other_dim) (display_dim other_dim))
-            ()
-      ) rest
-  ) param_transition_dims;
-
-  (* Collect resolved param dims; emit I300 for undetermined *)
-  st.subject <- None;
-  let param_dims = ref [] in
-  Hashtbl.iter (fun name entry ->
-    let d = resolve st entry.stable_dim in
-    match d with
-    | Known v ->
-      param_dims := (name, v) :: !param_dims;
-      entry.inferred <- Some v
-    | Unknown _ ->
-      emit_info st ~code:"I300"
-        ~message:(Printf.sprintf "dimension of parameter '%s' could not be determined" name)
-        ~hint:"annotate with a more specific kind (rate, probability, count)" ()
-    | Any -> ()
-  ) st.param_map;
-
-  (* Generated quantities (#5 stored dimension) + the contrast dimensional check.
-     Runs last, after all param/table/binding dims are resolved. The quantity
-     dims are read-only (`read_dim`); only the contrast check emits. *)
-  st.subject <- None;
-  let qdim_table = compute_quantity_dim_table st m in
-  check_contrasts st m qdim_table;
+  (* Parameters and typed constants. *)
+  let named = List.map (fun (p : parameter) -> p.name) m.parameters
+              @ List.map (fun (c : constant) -> c.c_name) m.constants in
+  let names = Hashtbl.create 64 in
+  List.iter (fun n -> Hashtbl.replace names (var_of st (Dim_sites.K_param n)) n) named;
+  let resolved, free =
+    List.partition_map (fun n ->
+      let v = var_of st (Dim_sites.K_param n) in
+      match Dim_solve.value out v with
+      | Some d -> Left (n, d)
+      | None -> Right (n, v)) named in
+  let relations = Dim_solve.relations out (List.map snd free) in
+  let infos =
+    List.map (fun (n, v) ->
+      let mine = List.filter (fun (r : Dim_solve.relation) -> List.mem_assoc v r.coeffs) relations in
+      { severity = Info; code = "I300";
+        message = Printf.sprintf "dimension of parameter '%s' could not be determined" n;
+        detail = (match mine with
+            | [] -> Some "nothing in the model determines it"
+            | rs -> Some ("only this is determined: "
+                          ^ String.concat "; " (List.map (render_relation names) rs)));
+        hint = Some "give it a dimension with a `dim` clause (`positive dim 1/T`) or a \
+                     more specific kind (rate, probability, count)";
+        subject = None }) free in
   let quantity_dims =
-    Hashtbl.fold (fun key d acc ->
-      match d with Known v -> (key, v) :: acc | _ -> acc)
-      qdim_table [] in
-
-  { diagnostics = List.rev st.diags;
-    param_dims = !param_dims;
-    quantity_dims }
+    List.filter_map (fun (q : quantity) ->
+      match Dim_solve.value out (var_of st (Dim_sites.K_quantity q.q_name)) with
+      | Some d -> Some ((q.q_name, q.q_stratum), d)
+      | None -> None) m.quantities in
+  { diagnostics = errors @ infos; param_dims = resolved; quantity_dims }

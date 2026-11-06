@@ -46,10 +46,12 @@ Every diagnostic should:
 - Suggest a fix when possible (hint text, corrected code)
 
 When two possible error codes could fire for the same root cause, prefer the one
-that points closest to the actual mistake. E.g., a parameter used inconsistently
-across transitions should produce E303 ("conflicting dimensions in transition A
-vs B") not E302 ("dimension mismatch in addition") — even though E302 is
-technically correct, E303 gives the user the cross-transition context they need.
+that points closest to the actual mistake, and name the other side of a
+conflict. E.g., a parameter used as a rate in one transition and as a count in
+another is one contradiction of the dimension equations: it is reported at the
+position where it surfaces, with the conflicting use named in the detail ("the
+conflicting requirement comes from: transition 'waning' rate"), so the user has
+both sides.
 
 **Never use `failwith` or `assert false` for user-facing errors.** These produce
 stack traces instead of diagnostics. Use the Diagnostics module with error

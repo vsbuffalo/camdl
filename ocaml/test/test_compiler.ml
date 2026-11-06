@@ -11378,10 +11378,10 @@ let test_smooth_dimensions_e301 () =
     (List.exists (contains_substring ~needle:"smooth `per` must have dimension") bad);
   let bad = errs (smooth_model ~smooth:"smooth(level = b_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks)" ()) in
   Alcotest.(check bool) "a level per unit time is E301" true
-    (List.exists (contains_substring ~needle:"smooth `level` must have dimension") bad);
+    (List.exists (contains_substring ~needle:"smooth `level` must be dimensionless") bad);
   let bad = errs (smooth_model ~smooth:"smooth(level = a_b, slope = b_b, scale = b_b, modes = z, per = 1 'weeks)" ()) in
   Alcotest.(check bool) "a scale per unit time is E301" true
-    (List.exists (contains_substring ~needle:"smooth `scale` must have dimension") bad)
+    (List.exists (contains_substring ~needle:"smooth `scale` must be dimensionless") bad)
 
 (* F36 regression: an indexed let-family reference in `projected`
    (`projected = m[v]` with `let m[v in village] = …`) must resolve as a

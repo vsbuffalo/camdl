@@ -1101,6 +1101,19 @@ across a commit boundary that lands.
    `dimcheck.ml`, switched over in one commit, with the old machinery deleted in
    the same commit. Every existing golden and error golden keeps its result or
    has its change listed. The coverage test and its three mutation checks.
+
+   As implemented, three points differ from the text above, each because the old
+   behaviour has no counterpart in one equation system. An expression's
+   dimension is a linear form over dimension variables rather than a fresh
+   variable per node, so products, quotients and integer powers need no equation
+   at all and only sums, function arguments, roots and obligations emit one (the
+   same mathematics as §4.3, with far fewer equations). Sums inside likelihood
+   arguments, derived projections and quantity series are strict from this
+   commit, since the old permissive and read-only modes cannot be expressed
+   without discarding a contradiction; across the repo and downstream corpora no
+   verdict changed. And the positions whose rule lands in step 4 are already
+   sites, marked `Exempt (Pending _)` with the step named, so the coverage test
+   holds from this commit on.
 4. **The rules that change verdicts.** One commit per rule family, each with its
    negative and positive models and its corpus measurement: interventions,
    events and reactive triggers; observations (§5.6 and strict sums); priors

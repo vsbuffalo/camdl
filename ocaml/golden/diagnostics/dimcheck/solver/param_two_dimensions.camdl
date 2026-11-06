@@ -1,0 +1,31 @@
+# invariant: one parameter cannot take two dimensions across transitions
+# spec: §4.4, contradictions
+# expect: E300 Error
+# `alpha` is used as a rate in `infection` (alpha * S * I / N must be P·T⁻¹)
+# and as a count in `waning` (alpha + I). The two uses are one contradiction,
+# reported at `infection` with `waning` named as the conflicting requirement.
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  alpha : positive
+  gamma : rate
+}
+
+transitions {
+  infection   : S --> I  @ alpha * S * I / N
+  waning      : R --> S  @ gamma * (alpha + I)
+}
+
+init {
+  S = 990
+  I = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}

@@ -1,11 +1,14 @@
 (** Dimensional analysis of an expanded IR model.
 
-    Runs Hindley–Milner-style unification over a two-base dimension algebra
-    (population, time) to check that every rate, ODE derivative, observation
-    argument, and contrast is dimensionally consistent, and to infer each
-    parameter's resolved dimension. The checker records a [subject] on every
-    diagnostic (the IR has no source spans); the compiler resolves that to a
-    declaration location. *)
+    Every expression-bearing position of the model ([Dim_sites.sites]) is
+    turned into linear equations over integer exponent vectors in two bases
+    (population, time), with one more equation for the dimension its position
+    requires, and the whole system is solved at once by [Dim_solve]. Every
+    contradiction and every integer infeasibility is a diagnostic at the
+    position it surfaces at; a parameter the system leaves free gets I300 with
+    whatever the model does determine about it. The checker records a
+    [subject] on every diagnostic (the IR has no source spans); the compiler
+    resolves that to a declaration location. *)
 
 open Ir
 
@@ -33,7 +36,7 @@ type severity = Error | Info
 
 (** The construct a diagnostic concerns; the compiler maps it to a source
     location. *)
-type subject =
+type subject = Dim_sites.subject =
   | STransition  of string
   | SOde         of string
   | SObservation of string
