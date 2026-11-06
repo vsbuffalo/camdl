@@ -1287,10 +1287,15 @@ concrete rows *before* the job exists, and the rows enter as
 
 `--draws prior` resolves priors through the same three-tier precedence chain
 `camdl fit run` uses — fit.toml `[estimate].prior` first, then the model IR's
-`~ <dist>` declarations, then a flat fallback. With no `--fit` it samples the
-model's own declared priors; a parameter with no usable prior in either tier is
-a hard error naming the remediation. Do **not** describe this source as
-requiring a fit config.
+`~ <dist>` declarations, then a flat fallback. With `--fit`, the sampled
+parameters are the fit's `[estimate]` names, and one of them with no usable
+prior in either tier is a hard error naming the remediation. With no `--fit` it
+samples the parameters that declare a `~ <dist>` prior in the model's
+`parameters {}` block; every other parameter is left out of the row and
+resolves per cell. Either way, a run that would sample no parameter at all (no
+`--fit` and no `~` prior in the model, or an empty `[estimate]`) is a hard
+error: every draw would be the same parameter vector. Do **not** describe this
+source as requiring a fit config.
 
 `--draws uniform` samples `lo + (hi - lo)·U` for each parameter that declares
 `in [lo, hi]` bounds. A parameter without bounds is not drawn: it resolves per

@@ -4720,6 +4720,18 @@ fn generate_prior_draws(
 
     let config = Problem::load(fit_path).map_err(|e| wrap_fit_load_error(fit_path, e))?;
     let fixed = config.fixed.resolve()?;
+    // The rows carry the [estimate] parameters only, so an empty [estimate]
+    // samples nothing and every cell runs at one parameter vector (run spec
+    // §3.4: no usable prior is a hard error).
+    if config.estimate.is_empty() {
+        return Err(format!(
+            "--draws prior: the fit config's [estimate] is empty, so there is nothing to \
+             sample and every draw would be the same parameter vector.\n  \
+             Fix: list each parameter to vary in [estimate] of `{fit_path}` with a \
+             `prior = {{ <dist> = {{ ... }} }}` (or declare it with `~ <dist>(...)` in the \
+             model's parameters {{}} block), or drop --fit to sample the model's own priors."
+        ));
+    }
 
     // Three-tier resolution: fit_toml > model_ir > flat. Walks every
     // estimated param in declaration order.
@@ -4869,6 +4881,20 @@ fn generate_prior_draws_from_ir(
         model.parameters.iter()
             .filter_map(|p| p.prior_dist().map(|pd| (p, pd)))
             .collect();
+    // Nothing to sample: every row would be empty and every cell would run at
+    // one parameter vector, which is not a draw from anything (run spec §3.4:
+    // no usable prior is a hard error).
+    if with_prior.is_empty() {
+        let example = model.parameters.first().map_or("beta", |p| p.name.as_str());
+        return Err(format!(
+            "--draws prior: no parameter of the model has a prior, so there is nothing to \
+             sample and every draw would be the same parameter vector.\n  \
+             Fix: declare a prior on each parameter to vary, after its type and bounds in \
+             the model's parameters {{}} block (e.g. `{example} : rate in [0.01, 1.0] ~ \
+             log_normal(mu = -1.0, sigma = 0.5)`), or pass --fit <fit.toml> whose \
+             [estimate] gives each parameter a `prior = {{ <dist> = {{ ... }} }}`."
+        ));
+    }
 
     let mut rng = sim::rng::StatefulRng::new(seed ^ SEED_MIX_PRIOR);
     let mut draws = Vec::with_capacity(n);
@@ -5708,18 +5734,35 @@ mod tests {
     }
 
     #[test]
-    fn prior_draws_from_ir_rows_carry_only_prior_parameters() {
-        // gh#949: sir_basic declares no priors, so every row is empty — the
-        // generator samples nothing and leaves every parameter to the per-cell
-        // tiers. Whether each cell then has a value is `run_simulate`'s
-        // pre-flight refusal (pinned at CLI level in
-        // tests/generated_draws_varying_only_gh949.rs), not the generator's.
+    fn prior_draws_from_ir_refuses_a_model_with_no_prior() {
+        // sir_basic declares no priors. Sampling nothing would hand back N
+        // empty rows, so N cells at one parameter vector reported as N prior
+        // draws (run spec §3.4: no usable prior is a hard error).
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let path = format!("{}/../../../ocaml/golden/sir_basic.ir.json", manifest);
-        let draws = generate_prior_draws_from_ir(&path, 3, 1).unwrap();
-        assert_eq!(draws.len(), 3, "the draw count is the -n asked for");
-        assert!(draws.iter().all(|row| row.is_empty()),
-            "no parameter has a prior, so no row may carry one: {:?}", draws);
+        let err = generate_prior_draws_from_ir(&path, 3, 1).unwrap_err();
+        assert!(err.starts_with("--draws prior: no parameter of the model has a prior"),
+            "unexpected error: {err}");
+        assert!(err.contains("parameters {}") && err.contains("~ log_normal("),
+            "the error must say where and how to declare a prior: {err}");
+        assert!(err.contains("[estimate]"), "the error must name the fit.toml route: {err}");
+    }
+
+    #[test]
+    fn prior_draws_from_fit_refuses_an_empty_estimate() {
+        // A fit config whose [estimate] is empty samples nothing: every row is
+        // empty and the cells all run at the [fixed] values.
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let ir = format!("{}/../../../ocaml/golden/sir_basic.ir.json", manifest);
+        let (model, _) = util::load_model(&ir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let fit = dir.path().join("empty.toml");
+        std::fs::write(&fit, format!(
+            "output_dir = \"res\"\n[model]\ncamdl = \"{ir}\"\n[estimate]\n[fixed]\n\
+             beta = 0.3\ngamma = 0.1\nN0 = 1000\nI0 = 10\n")).unwrap();
+        let err = generate_prior_draws(fit.to_str().unwrap(), 3, 1, &model).unwrap_err();
+        assert!(err.starts_with("--draws prior: the fit config's [estimate] is empty"),
+            "unexpected error: {err}");
     }
 
     /// Write a minimal IR JSON string to a tempfile and return its path.
