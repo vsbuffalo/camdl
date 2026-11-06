@@ -64,7 +64,7 @@ outside a preset.
 | --------------------- | ------------------------------------------- | -------------------------------------------------- |
 | Model structure       | `.camdl` only                               | never                                              |
 | Parameter names/types | `.camdl` only                               | never                                              |
-| Parameter values (M)  | `.camdl` default, params TOML, `[fixed]`    | draw/sweep point, scenario, `--param`/`--fixed`    |
+| Parameter values (M)  | params TOML, `[fixed]`, a scenario's `set`  | draw/sweep point, scenario, `--param`/`--fixed`    |
 | Scenarios (σ)         | `.camdl scenarios { }`                      | CLI `--enable`/`--disable`                         |
 | Interventions         | `.camdl` only                               | scenarios and `--enable`/`--disable` toggle them   |
 | Priors                | `.camdl` `~`, `fit.toml [estimate.p.prior]` | fit.toml wins over the model                       |
@@ -75,20 +75,21 @@ outside a preset.
 | Which method runs     | `fit.toml [method]`                         | never — a second method is a second file           |
 
 **The model file is self-contained for a single run** provided every parameter
-gets a value from somewhere: a `.camdl` default, a params TOML, a scenario, or a
-`--param`. A parameter with no value from any source is a hard error naming the
-parameter and the sources that were consulted.
+gets a value from somewhere: a params TOML, a scenario, or a `--param`. A
+`parameters {}` declaration never carries a value (names, kinds, bounds and
+priors only), so a parameter with no value from any source is a hard error
+naming the parameter and the sources that were consulted.
 
 ### 1.3 Precedence Chains
 
 Parameter resolution for the simulate-side commands (`simulate`, `pfilter`,
-`survey`, `profile`, `lineage`) is a single function,
-`params_resolver::resolve_parameters`, which is the only writer of
-`model.parameters[i].value` outside the IR layer. It layers six tiers, last
-wins:
+`survey`, `profile`, `eval`) is a single function,
+`params_resolver::resolve_parameters` (`fit run` calls it too), which is the
+only writer of `model.parameters[i].value` outside the IR layer. It layers six
+tiers, last wins:
 
 ```
-1.  model default            (`p.value` from the .camdl declaration)
+1.  compiled-in value        (`p.value` already in the IR; see below)
 2.  fit.toml [fixed]         (inference commands, and --fit on others)
 3.  --params / --fixed-file  (each file layered in order)
 3.5 draw row or sweep point  (automated M-layer variation)
@@ -96,6 +97,15 @@ wins:
                               or an inline ad-hoc `set`/`scale`)
 5.  --param / --fixed        (the user's explicit assertion; highest)
 ```
+
+Tier 1 is whatever value the compiled IR already holds for a parameter. A
+`.camdl` never writes one (`parameters {}` declares names, kinds, bounds and
+priors; `beta : rate in [0.001, 2.0] = 0.3` is a syntax error), and the compiler
+emits every declared parameter as `estimated` (bounds or a prior, no start) or
+`required` (neither), both without a number. Tier 1 is therefore empty for any
+model compiled from a `.camdl`, except where `camdlc --set NAME=V` pinned the
+parameter to a fixed constant at compile time (or the IR was written by hand).
+When it does supply a value, the provenance label is `model_default`.
 
 A generated draw row (`--draws prior|uniform`) carries only the parameters its
 measure varies — the parameters with a prior, or the bounded parameters a
@@ -111,9 +121,9 @@ so they are indistinguishable in the resolved value — only the recorded
 provenance label differs.
 
 **No replacement is silent.** Whenever a tier replaces, with a different value,
-a value that a tier other than the model default supplied, the run says so on
-stderr — one line per replacement, naming the parameter, both values and both
-sources — and records it in each leaf's `run.json`
+a value that a tier other than tier 1 supplied, the run says so on stderr — one
+line per replacement, naming the parameter, both values and both sources — and
+records it in each leaf's `run.json`
 (`inputs.parameters_provenance.<name>.overrides`, beside the lines themselves in
 `inputs.notices`; recorded, never hashed):
 
@@ -126,10 +136,10 @@ A replacement is a warning when the replaced value is a fit's estimate (it came
 from a params file carrying a fit `[provenance]` block): the run then simulates
 something other than what the fit estimated. Every other replacement is info —
 it is one the command's own flags asked for (a later `--params` file, a
-scenario, a sweep or draw, `--param`). Replacing the model default, and
-replacing a value with an equal one, are not reported. A multi-cell run reports
-each (parameter, replaced source, winning source) once, with the range of values
-when they differ by cell.
+scenario, a sweep or draw, `--param`). Replacing a tier-1 value, and replacing a
+value with an equal one, are not reported. A multi-cell run reports each
+(parameter, replaced source, winning source) once, with the range of values when
+they differ by cell.
 
 **Precedence orders values; it does not grant permission.** Where a scenario
 would discard a value the user wrote for the same parameter, the run is refused
@@ -176,10 +186,10 @@ and its value — while a draw/sweep value never kicks a parameter out of
 
 **Priors** resolve on their own three-tier chain (`fit.toml [estimate.p.prior]`
 → the model IR's `~` declaration → flat). For `camdl profile` the flat tier is a
-warned fallback; for `camdl fit run` it is reachable only by writing
-`prior = { flat = {} }` explicitly — an implicit fall-through to a flat prior is
-a hard validation error before the fit starts, and the resolved source per
-parameter is recorded in `fit.meta.json`.
+fallback that is recorded but not warned about; for `camdl fit run` it is
+reachable only by writing `prior = { flat = {} }` explicitly — an implicit
+fall-through to a flat prior is a hard validation error before the fit starts,
+and the resolved source per parameter is recorded in `fit.meta.json`.
 
 ### 1.4 Core Design Rules
 
@@ -191,14 +201,14 @@ writes per-cell store leaves plus a combined wide-format mirror. `SimulateJob`
 deliberately has no serde derive — the CLI parses its own surface (clap args)
 and lowers to the resolved struct, so there is no second wire schema to drift.
 
-**Every parameter choice is accounted for, but a model default is a legal
-source.** In `fit.toml` the rule is exhaustive and enforced: every model
-parameter must appear in exactly one of `[estimate]` or `[fixed]`; a parameter
-in both, in neither, or in neither-and-not-in-the-model is a hard error before
-the fit starts. On the simulate side the rule is weaker: the resolver walks the
-six tiers above and errors only if _no_ tier supplied a value. A `.camdl`
-parameter declared with a default therefore runs without a params file, and the
-recorded provenance says `model_default`. An `[estimate]` parameter the model
+**Every parameter choice is accounted for.** In `fit.toml` the rule is
+exhaustive and enforced: every model parameter must appear in exactly one of
+`[estimate]` or `[fixed]`; a parameter in both, in neither, or in
+neither-and-not-in-the-model is a hard error before the fit starts. On the
+simulate side the rule is weaker: the resolver walks the tiers above and errors
+only if _no_ tier supplied a value. Because a `.camdl` declaration carries no
+value, a simulate-side run needs a value for every parameter from a params file,
+a scenario, a draw or sweep, or `--param`. An `[estimate]` parameter the model
 gives no value is seeded with its `[estimate].start`, or a draw within its
 bounds when the entry has none, and recorded as `estimate_start` or
 `estimate_start_drawn`: a reference point, not any chain's start, which
@@ -272,8 +282,8 @@ by artifact kind:
 
 ```
 results/
-├── index.json            # rebuildable lookup cache (§2.7)
-├── .staging/             # atomic-commit scratch (§2.7)
+├── index.json            # rebuildable lookup cache (§2.6)
+├── .staging/             # atomic-commit scratch (§2.6)
 ├── sims/                 # one leaf per simulated cell
 ├── ensembles/            # combined wide-format TSV across a multi-cell simulate
 ├── fits/                 # fit segments, each holding its method leaves
@@ -450,13 +460,17 @@ directory its relative `[model]` / `[data]` paths resolve against when the
 config is recovered from the segment), `fit_toml_hash` (SHA-256 of the producing
 config's raw bytes — provenance, i.e. which exact bytes produced this fit; a
 `fit.toml` handle is NOT looked up by it, see below), `data_hashes`,
-`estimated`, `fixed`, `resolved_priors` (one `{param, source}` entry per
-estimated parameter, `source ∈ {fit_toml,
-model_ir, flat_explicit}`, emitted
-only when the method is a posterior sampler), `schema` (the
-observation/dimension schema below), and `docs` (the model's `#'` documentation
-dictionary, keyed by declaration name, so a consumer can label any output
-column).
+`estimated`, `fixed`, `partition` (the run's parameter roles, below),
+`resolved_priors` (one `{param, source}` entry per estimated parameter,
+`source ∈ {fit_toml, model_ir, flat_explicit}`, plus `overridden_model_prior`
+when the fit.toml's prior displaced a model `~` prior; the key is always present
+but the list is empty unless the method is a posterior sampler — an IF2 or NLopt
+fit reads no prior, so records none), `parameters_provenance` (per parameter:
+resolved value, the tier that supplied it, and its role), `training_window`
+(`{train_end}`, present only when a `[data]` holdout declaration was applied,
+§6.2), `schema` (the observation/dimension schema below), and `docs` (the
+model's `#'` documentation dictionary, keyed by declaration name, so a consumer
+can label any output column).
 
 Two caveats a consumer must know. `data_hashes` is built from the explicit
 `[data.observations]` map only, so a fit that uses the `[data] file = "..."`
@@ -465,7 +479,18 @@ expanded per-stream set — read the leaf's identity, not this field, to answer
 "which data". And `fixed` is projected from the base configuration, so under
 `fit run --sweep` every swept segment records the _unswept_ value of the swept
 parameter; the segment's fit-level hash, not this field, distinguishes the sweep
-points. `parameters_provenance` is reserved and always empty.
+points. `estimated`, `fixed`, `partition` and `parameters_provenance` are
+written per segment from that segment's own resolution; the fit-level record
+before any segment has run leaves them empty.
+
+`partition` is the authoritative record of the run's roles. Its `parameters` map
+holds, per parameter, `role` (`estimated` or `fixed`), `declared_by`
+(`fit_estimate` or `fit_fixed`), and for an estimated parameter its `support`,
+its `search` box, the `transform`, and the `prior` that resolved (`dist` and
+`from ∈ {fit_toml, model_ir, flat_explicit, flat_fallback}`). `estimated` and
+`fixed` are generated from it. An IF2 fit's `partition` records the flat prior
+as `flat_fallback` even though `resolved_priors` is empty: the method does not
+read it.
 
 A third thing to know, because it is the one field whose name invites the wrong
 inference. `fit_toml_hash` answers _provenance_ — which exact bytes produced
@@ -866,11 +891,13 @@ recomputes it today. The manifest is an exact set over the leaf's whole subtree,
 except reserved files and _declared children_: a declared child subdirectory
 (`obs/`) is a boundary, recognized and not recursed into.
 
-**Which commands skip on a cache hit.** `fit run` and `profile` consult `lookup`
-and skip the computation on a `Hit` (unless `--force`). A multi-cell
-`camdl simulate` skips a cell the store already holds under the exact rule of
-§4.4 and reads its `traj.tsv` back for the combined mirror; a lone `simulate`
-runs its cell and relies on the commit being idempotent.
+**Which commands skip on a cache hit.** `fit run` consults `lookup` and skips
+the computation on a `Hit` (unless `--force`); `profile` skips each start whose
+leaf is a `Hit` (reported as `N of M starts already cached`) and has no
+`--force`. A multi-cell `camdl simulate` skips a cell the store already holds
+under the exact rule of §4.4 and reads its `traj.tsv` back for the combined
+mirror; a lone `simulate` runs its cell and relies on the commit being
+idempotent.
 
 ### 2.4 Simulation Result Layout
 
@@ -895,7 +922,8 @@ digests of any `--table` files. **scenario** is the scenario's effective delta �
 the enabled and disabled intervention sets, the parameter patch (`set`), and the
 `scale` factors, each including whatever the scenario inherits through `compose`
 — so two presets that differ only in `scale` or only in what they compose cannot
-share a `run_id`. **seed** is the resolved `process_seed` and the base `--seed`.
+share a `run_id`. **seed** is the resolved `process_seed` (the only hashed field
+of the level).
 
 Segment labels: the model label is the model file's slugged stem; the config
 label is `{backend}-dt{dt}`; the params label is `base` when no per-cell
@@ -904,9 +932,12 @@ overrides apply, otherwise the sorted `name=value` pairs joined by `_`
 characters; the scenario label is the preset name, or for the implicit arm of a
 run without `--scenario` the label derived from its flags — `(none)` when it has
 none, which the path sanitizer renders `_none_` — and the seed label is
-`seed_{N}` with the base seed verbatim, unpadded. A label is provenance, never
-identity: a leaf written under another label for the same hashes (an earlier
-camdl wrote the implicit arm as `baseline`) is found by hash and reused.
+`seed_{N}`, unpadded, where N is the cell's `process_seed`: the `--seed` value
+itself for a lone run, for replicate 0 at point 0, and for each value of an
+explicit `--seeds` list, and otherwise the mixed value of §3.1 (for example
+`seed_5871781006564002452`). A label is provenance, never identity: a leaf
+written under another label for the same hashes (an earlier camdl wrote the
+implicit arm as `baseline`) is found by hash and reused.
 
 Because a level hash is a structural digest of typed values rather than of a
 string, the empty scenario is a **constant**: a scenario with no overrides, no
@@ -1014,11 +1045,27 @@ pub struct SimulateJob {
     pub source: ParamSource,
     /// σ layer — which scenarios to run. Empty ⇒ the single implicit arm, `(none)`.
     pub scenarios: Vec<ScenarioRef>,
+    /// The resolved `--to` horizon override (model time), applied to every cell
+    /// after the scenario horizon; `None` = no override.
+    pub t_end_override: Option<f64>,
+    /// Times every cell must record a snapshot at, beyond the model's own
+    /// output schedule (`fit predict` supplies its forecast rows' closing
+    /// boundaries; empty everywhere else).
+    pub required_output_times: Vec<f64>,
+    /// The loaded `--init-state` ensemble, shared by every cell; `None` = the
+    /// model's own `init {}`.
+    pub init_state: Option<std::sync::Arc<InitStateSource>>,
+    /// The run's resolved observation window, folded once for the whole job so a
+    /// sweep cannot resolve a different `last_obs` per cell.
+    pub obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
     /// S layer.
     pub seeds: Seeds,
     /// `--param NAME=VALUE` CLI overrides merged on top of every cell
     /// (M layer, highest precedence).
     pub cli_overrides: Vec<(String, f64)>,
+    /// A `--draws prior --fit FIT.toml` config's `[fixed]` block, resolved at
+    /// the `[fixed]` tier of every cell; empty for every other source.
+    pub fit_fixed: IndexMap<String, f64>,
     /// `--param-vec PREFIX=FILE` entries (CLI only).
     pub set_vec_entries: Vec<(String, String)>,
     /// `--table NAME=FILE` entries (CLI only).
@@ -1056,10 +1103,16 @@ perturbs a trajectory:
 ```text
 process_seed = if explicit --seeds { seeds[rep] }
                else if total_runs == 1 { base_seed }
-               else { base_seed ^ (point_idx * SEED_MIX_DRAW)
-                                ^ (rep       * SEED_MIX_REP) }
+               else { base_seed ^ (seed_point_idx * SEED_MIX_DRAW)
+                                ^ (rep            * SEED_MIX_REP) }
 obs_seed     = process_seed ^ SEED_MIX_OBS
 ```
+
+`seed_point_idx` is the point (draw-row) index for every parameter source except
+a sweep, and is always 0 for a `--sweep` / `--sweep-file` design: a sweep
+point is a value the user chose, not a sample, so every design point at a given
+replicate shares one random stream (paired differences across points, and
+inserting a point leaves the others' trajectories unchanged; §5.5).
 
 The scenario index is deliberately **absent** from the mix: paired scenarios at
 the same (point, replicate) share a seed, which is what makes their
@@ -1116,8 +1169,8 @@ concrete rows by the front end before the job is built.
 pub enum ParamSource {
     /// Single point: base params + CLI overrides, run `replicates` times.
     Point { replicates: usize },
-    /// Deterministic grid: Cartesian product of swept values.
-    Sweep { points: Vec<IndexMap<String, f64>>, replicates: usize },
+    /// Deterministic grid: the design points, each with the id it is written under.
+    Sweep { points: Vec<SweepPoint>, replicates: usize },
     /// Pre-resolved parameter draws (posterior file / prior / uniform).
     Draws {
         rows: Vec<IndexMap<String, f64>>,
@@ -1127,10 +1180,19 @@ pub enum ParamSource {
         explicit_file: Option<PathBuf>,
     },
 }
+
+/// One design point: the id it is written under (a sweep file's own column,
+/// else its 0-based position) and the parameter values it sets.
+pub struct SweepPoint {
+    pub point_id: usize,
+    pub overrides: IndexMap<String, f64>,
+}
 ```
 
-Two accessors: `param_points()` returns the ordered per-cell override maps (a
-single empty map for `Point`), and `replicates()` returns the replicate count.
+Accessors: `param_points()` returns the ordered per-cell override maps (a
+single empty map for `Point`), `point_id(i)` returns the id point `i` is written
+under (a sweep point's own `point_id`, else `i`), and `replicates()` returns the
+replicate count.
 Total cells are `|scenarios| × |param_points| × replicates`, except that an
 explicit seed list overrides the replicate count — see §3.5.
 
@@ -1213,7 +1275,7 @@ requiring a fit config.
 
 `--draws uniform` samples `lo + (hi - lo)·U` for each parameter that declares
 `in [lo, hi]` bounds. A parameter without bounds is not drawn: it resolves per
-cell from the model default, `--params`, the scenario, or `--param`, and the run
+cell from `--params`, the scenario, or `--param`, and the run
 is refused up front if none of them sets it. This is space-filling exploration
 for model debugging, not a prior.
 
@@ -1229,7 +1291,7 @@ than to a single point dressed up as a distribution
 parameter absent from the file's columns from the fit's `[fixed]` block, never
 overwriting a column the file provides — a raw posterior trace tail carries only
 the estimated columns, so this fills the fixed parameters from the fit rather
-than falling back to model defaults.
+than leaving them unset.
 
 `--draws-out PATH` writes the resolved rows back out in the same
 one-row-per-draw, one-column-per-parameter format `--draws PATH` reads, so a
@@ -1560,16 +1622,22 @@ camdl simulate seir_vaccine.camdl --params params.toml --scenario with_sia --par
 | -------------------------------------------------- | ----------------------------------------------- |
 | `--seed` × `--seeds`                                | one base seed vs an explicit seed list          |
 | `--seeds` × `--replicates`                          | explicit seeds vs derived seeds                 |
-| `--stdout` × `--seeds` / `--replicates` / `--draws` | `--stdout` is single-cell only                  |
+| `--stdout` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file` | `--stdout` is single-cell only |
 | `--stdout` × `-o` / `--obs*`                        | those mirror the store `--stdout` opts out of   |
-| `--event-log` × `--seeds` / `--replicates` / `--draws` | event-log recording is single-run only       |
-| `--draws-out`, `--fit` without `--draws`            | both are companions to `--draws`                |
+| `--event-log` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file` | event-log recording is single-run only |
+| `--draws-out` without `--draws`                     | it writes the rows `--draws` generated          |
+| `--obs` × `--obs-dir` / `--obs-only`; `--obs-dir` × `--obs-only`; `--obs-only` × `--obs-only-dir`; `--obs-only` / `--obs-only-dir` × `-o` | one observation output form at a time |
 
-`--obs-only` cannot be combined with `--obs`/`--obs-dir`, and `--obs-only-dir`
-cannot be combined with any of the three; those are checked after parsing and
-exit 1 with a one-line message.
+The `--obs*` combinations are clap conflicts like the rest (§3.1.1), rejected at
+parse time. Two checks need the compiled model and run after it, exiting 1 with
+a one-line message: `--fit` is legal without `--draws` only when something needs
+the fit's data rather than its posterior — an anchored `--to` or an anchored
+model — and is refused otherwise (`--fit requires --draws (or an anchored --to,
+or an anchored model)`). `--init-state fit` is a separate check: it needs
+`--draws posterior --fit <fit results dir>`.
 
-**Precedence of parameter sources (last wins).** Model defaults → `--params`
+**Precedence of parameter sources (last wins).** Compiled-in values (§1.3
+tier 1, normally none) → `--params`
 files in order → draw row or sweep point → scenario `set`/`scale` (preset or
 inline) → `--param`. A scenario that `set`s a parameter therefore overrides a
 value coming from generated `--draws`; only `--param` beats a scenario. A
@@ -1826,6 +1894,15 @@ sims
 with a separate `ensembles` block carrying `CELLS` instead of `SCENARIO`/`SEED`.
 `--limit` defaults to 50; `--all` removes the cap.
 
+**An ensemble row stands for its member leaves.** A multi-cell `simulate` stores
+one `sim` leaf per cell and one ensemble leaf that lists them as dependencies;
+in any view that includes ensembles, the per-cell `sim` leaves the listed
+ensembles reference are not printed as rows of their own (membership is decided
+over every ensemble in the store, before `--limit`/`--since` truncate). A
+`sims` block therefore shows lone runs and cells that belong to no stored
+ensemble. `--kind sim` excludes ensembles and so lists every per-cell leaf; the
+cells are always reachable by `camdl show` on their `run_id`.
+
 In `--format json` a fit row's `methods[]` holds one entry per run, each with
 its own `run_id`, `label` and `created_at`; the row-level `label` is a display
 string, every run's label joined with `", "`, and names no run (gh#896).
@@ -1914,11 +1991,11 @@ time	cases_urban	cases_rural
 ```
 
 Under `--replicates`/`--seeds`/`--draws` the table gains a leading `replicate`
-column:
+column (0-based, as in §10.2):
 
 ```
 replicate	time	cases_urban	cases_rural
-1	0	0	0
+0	7	2	3
 ```
 
 `--obs` refuses a model whose streams emit on different schedules, before
@@ -1932,7 +2009,7 @@ Use --obs-dir (one file per stream, keeps trajectory) or
 ```
 
 `--obs-dir` / `--obs-only-dir` write one file per stream under the columns the
-stream **declared**, so the file re-loads under its own model (gh#833, gh#830):
+stream **declared**, so the file re-loads under its own model (gh#833):
 the value under the scored column's name, the time under the `: time` column's
 name — or both boundaries under the `window_start`/`window_stop` names for a
 stream that declares its windows per row, each with a `date_*` twin under
@@ -1946,8 +2023,8 @@ win_start	win_stop	cases
 
 Each row is drawn over the period the stream's `covers` assigns to its label,
 and a row whose period falls outside the run is not written. Under
-`closing_at` with a schedule starting at `t_start` that drops the first emit
-time, whose period `[t_start − Δ, t_start)` was never simulated. A windowed
+`closing_at` with a schedule starting at `t_start`, the row labelled `t_start` is
+not written: its period `[t_start − Δ, t_start)` was never simulated. A windowed
 stream cannot go into the single wide `--obs` file, which has one `time`
 column; the error names `--obs-dir`.
 
@@ -2114,9 +2191,9 @@ camdl simulate sirv.camdl --params params.toml --sweep beta=lin(0.2,0.6,5) --see
 `[fixed]` block backfilling columns the file omits).
 
 `--draws prior` samples only the parameters that declare a prior. A parameter
-with no prior that nothing else sets — no model default, `--params`, scenario,
-or `--param` — is refused before any cell runs, naming the scenario that leaves
-it unset:
+with no prior that nothing else sets — no compiled-in value, `--params`,
+scenario, or `--param` — is refused before any cell runs, naming the scenario
+that leaves it unset:
 
 ```
 error: parameter 'c' has no prior and no default value, and nothing sets it for scenario 'other'.
@@ -2145,8 +2222,8 @@ Fix: drop the `mu` column from the draws file, or use a scenario that does not t
 ```
 
 The same collision with **generated** draws (`--draws prior|uniform|posterior`)
-is not an error: the scenario wins and every draw resolves to the same θ. See
-§5.4 — this is the one place where a wrong result looks like a correct one.
+is not an error: the scenario wins for that parameter, so every draw resolves to
+the same value of it, and the replacement is reported on stderr (§1.3, §5.4).
 
 ### 5.2 CLI ↔ Type Mapping
 
@@ -2165,8 +2242,13 @@ pub struct SimulateJob {
     pub integrator: Option<IntegratorArg>,   // --integrator rk4|rk45
     pub source: ParamSource,           // where parameter vectors come from
     pub scenarios: Vec<ScenarioRef>,   // σ layer; empty ⇒ the implicit `(none)` arm
+    pub t_end_override: Option<f64>,   // --to, resolved to model time
+    pub required_output_times: Vec<f64>, // extra snapshot times (fit predict)
+    pub init_state: Option<Arc<InitStateSource>>, // --init-state ensemble
+    pub obs_anchors: Option<ObsAnchorTimes>, // resolved first_obs/last_obs, once per job
     pub seeds: Seeds,                  // S layer
     pub cli_overrides: Vec<(String, f64)>,   // --param (highest M tier)
+    pub fit_fixed: IndexMap<String, f64>,    // --draws prior --fit: the [fixed] block
     pub set_vec_entries: Vec<(String, String)>, // --param-vec
     pub table_files: Vec<(String, String)>,  // --table
     pub obs: ObsOutput,
@@ -2177,7 +2259,7 @@ pub enum ParamSource {
     /// One point, run `replicates` times. `simulate` with no --draws.
     Point { replicates: usize },
     /// Design points: --sweep (name-sorted Cartesian product) or --sweep-file rows.
-    Sweep { points: Vec<IndexMap<String, f64>>, replicates: usize },
+    Sweep { points: Vec<SweepPoint>, replicates: usize },
     /// Pre-resolved draws. `explicit_file` is Some only for --draws <file.tsv>,
     /// which is what gates the scenario-collision error (§5.1).
     Draws {
@@ -2249,7 +2331,14 @@ sits at a higher precedence tier than the draw/sweep point (§4.2), so:
 This matters when a preset that pins parameters is selected — the implicit arm
 of a run with no `--scenario` applies no preset, but `--scenario baseline` on a
 model whose `baseline` preset sets parameters applies those values over every
-draw. The failure is silent and total:
+draw. The replacement is total for the parameter but reported (§1.3): one
+`info:` line per replaced parameter, with the range of discarded values.
+
+```
+info: scenario `lockdown` replaced I0 = 77.09 to 875.81 (from the draw or sweep point) with 3, across 3 cells
+```
+
+The effect on the output is easy to miss without that line:
 
 ```bash
 # sir_basic.camdl's `baseline` preset sets beta, gamma, N0, I0.
@@ -2430,14 +2519,14 @@ Three properties govern the whole surface:
   §6.9.
 - **Paths in the file anchor at the file.** `[model] camdl`, `output_dir`,
   `[data] file`, `[data.observations]`, and `[data.holdout]` are resolved
-  against the `fit.toml`'s own directory at load time
-  (`config_v2.rs:2361`–`2398`), so a config is relocatable as a unit and runs
-  the same from any working directory. Two path-bearing keys are **not** in that
-  set and anchor at the process working directory instead: `[fixed]
-  from_file`
-  and `[synthetic] true_params`.
-- **Absolute paths warn.** `absolute_path_warnings` (`config_v2.rs:2314`) emits
-  one stderr line per absolute reference in `[model] camdl`, `output_dir`,
+  against the `fit.toml`'s own directory at load time (`anchor_paths_at`,
+  `config_v2.rs`), so a config is relocatable as a unit and runs the same from
+  any working directory. Two path-bearing keys are **not** in that set and
+  anchor at the process working directory instead: `[fixed]
+  from_file` and
+  `[synthetic] true_params`.
+- **Absolute paths warn.** `absolute_path_warnings` (`config_v2.rs`) emits one
+  stderr line per absolute reference in `[model] camdl`, `output_dir`,
   `[data] file`, or `[data.observations]`, because an absolute path pins the
   config to one machine's layout. It is a warning, not an error.
 
@@ -2464,7 +2553,7 @@ with the serde list quoted in §6.9.
 | `ic_free`        | bool            | no        | `false`                | Condition the likelihood on `y₁` rather than on a committed initial state. Requires particles that differ in x₀: `if2` always, `pfilter`/`pmmh` only when the model's `init { }` declares a law (gh#732). Also requires a non-missing `y₁`, and — when the model's `init { }` is deterministic — a `perturb_only_at_t0 = true` parameter. `profile --fit`, `survey --fit` and `pfilter --fit` score the same conditional likelihood. |
 | `[provenance]`   | table           | no        | none                   | Lineage metadata. See §6.7.                                                                                                                                                                                                                                                                                                                                                                                                          |
 
-`[config]` (`FitBackendConfig`, `config_v2.rs:294`):
+`[config]` (`FitBackendConfig`, `config_v2.rs`):
 
 | key                      | type                  | default                      | meaning                                                                                                                                                                 |
 | ------------------------ | --------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -2475,25 +2564,44 @@ with the serde list quoted in §6.9.
 `[config] backend` was relocated to `[synthetic] backend` (gh#241) and is
 rejected with a migration message.
 
-`[data]` (`DataSpec`, `config_v2.rs:340`):
+`[data]` (`DataSpec`, `config_v2.rs`):
 
-| key             | type            | meaning                                                                                                    |
-| --------------- | --------------- | ---------------------------------------------------------------------------------------------------------- |
-| `file`          | string          | Single wide TSV holding one column per model-declared observation stream. Exclusive with `observations`.   |
-| `observations`  | map name → path | Per-stream file paths, keyed on the `observations { }` block names in the `.camdl`. Exclusive with `file`. |
-| `holdout_after` | float           | Accepted and mutually-exclusive-checked, but **no fit-path consumer reads it**. Exclusive with `holdout`.  |
-| `holdout`       | map name → path | Accepted; the files' bytes are digested into the fit `run_id`, but **no method withholds or scores them**. |
+| key             | type            | meaning                                                                                                                                                      |
+| --------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `file`          | string          | Single wide TSV holding one column per model-declared observation stream. Exclusive with `observations`.                                                     |
+| `observations`  | map name → path | Per-stream file paths, keyed on the `observations { }` block names in the `.camdl`. Exclusive with `file`.                                                   |
+| `holdout_after` | time spec       | Temporal split: observation rows at `t >` this value are removed from training (see below). Exclusive with `holdout`.                                        |
+| `holdout`       | map name → path | Explicit held-out files, tail-only; the training streams stay whole and the files' bytes are digested into the fit `run_id`. Exclusive with `holdout_after`. |
 
 Exactly one of `file` / `observations` must be set. The observation model
 (likelihood family) and projection (which flow or compartment is accumulated)
 are declared in the `.camdl`; `fit.toml` supplies only the file paths.
 
-Out-of-sample evaluation today is `camdl data split` (which writes separate
-train/holdout TSVs) followed by a second fit and `camdl compare`.
-`[data]
-holdout` / `holdout_after` do not perform it.
+A holdout declaration is applied when the fit loads its data
+(`apply_holdout_declaration`, `fit/runner.rs`), and only on the fit path:
+`pfilter`, `profile` and `compare`'s holdout scoring see the full series.
 
-`[synthetic]` (`SyntheticSpec`, `config_v2.rs:453`):
+- `holdout_after` is a bare model time, a date, or an observation-anchored
+  expression (`last_obs - 6 weeks`; anchors resolve over the union of the bound
+  streams). Every row with `t >` the resolved boundary is withheld from
+  training. The boundary must cut strictly inside the observed range — at or
+  before the first observation nothing would be left to train on, at or after
+  the last nothing would be withheld — and either is a hard error.
+- `[data.holdout]` names a stream and a file of rows strictly after that
+  stream's last training time. An interleaved holdout is refused; only tail
+  holdouts are supported.
+
+The fit prints one line stating the training window and how many rows were
+withheld (for example
+`holdout: training window [0, 15]; 5 observation
+row(s) at t > 15 withheld from training`),
+and records the applied window in `fit.meta.json`. `camdl compare` scores such a
+fit out of sample on the withheld rows (stamped `held-out tail`, with the sealed
+`train_end`); a fit without a holdout is scored in-sample. `camdl data split`,
+which writes separate train/holdout TSVs for a second fit, remains an
+alternative.
+
+`[synthetic]` (`SyntheticSpec`, `config_v2.rs`):
 
 | key           | type                               | required | default          | meaning                                                                              |
 | ------------- | ---------------------------------- | -------- | ---------------- | ------------------------------------------------------------------------------------ |
@@ -2510,29 +2618,28 @@ period opens where it says: the span from `t_start` to that opening is simulated
 and scored nowhere, and the first datum is scored against its own period. A
 first period opening before `t_start` is a load error naming both times. The
 former `condition_from` key (string or per-stream table) that hand-placed this
-boundary is removed; `detect_removed_condition_from` (`config_v2.rs:2133`)
-refuses it ahead of the strict `deny_unknown_fields` parse — at the top level or
-anywhere under `[data]` — with a message naming the replacement, so a stale
-config fails with a migration rather than a bare unknown-field error.
-`camdl pfilter`, `camdl profile` and `camdl fit predict` bind the same declared
-periods, so a fixed-θ loglik and a predictive row cover the window the fit
-scored.
+boundary is removed; `detect_removed_condition_from` (`config_v2.rs`) refuses it
+ahead of the strict `deny_unknown_fields` parse — at the top level or anywhere
+under `[data]` — with a message naming the replacement, so a stale config fails
+with a migration rather than a bare unknown-field error. `camdl pfilter`,
+`camdl profile` and `camdl fit predict` bind the same declared periods, so a
+fixed-θ loglik and a predictive row cover the window the fit scored.
 
 ### 6.3 `[estimate]` — free parameters
 
 Each entry is `[estimate.<param>]` (or an inline table under `[estimate]`).
-`EstimateSpecV2` (`config_v2.rs:607`):
+`EstimateSpecV2` (`config_v2.rs`):
 
-| key                  | type         | default                       | meaning                                                                                                                                                                                                                                                                                                                  |
-| -------------------- | ------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `bounds`             | `[lo, hi]`   | the model's `in [lo, hi]`     | Search box. May only **narrow** the model's declared range; loosening is an error.                                                                                                                                                                                                                                       |
-| `start`              | float        | model value, else bounds draw | The base point: where `starts = "single"` puts every chain, and where `uniform` puts chain 1; the other spread rules read it only at one chain, and the sourced rules not at all. Under `pmmh`/`mh` it is also the point of the pre-run likelihood check and of the initial proposal scale.                              |
-| `prior`              | inline table | the model's `~` declaration   | See the wire format below. Required in some form for `pgas`/`pmmh`/`mh`.                                                                                                                                                                                                                                                 |
-| `perturb_only_at_t0` | bool         | `false`                       | Perturb at t=0 only, not at every observation — the IF2 schedule for an initial-state parameter. Accepted only under `if2`: every other method refuses the config at load, since it would read the flag nowhere. Required by `ic_free` unless the model's `init { }` declares a law, which supplies the same t=0 spread. |
-| `rw_sd`              | float        | auto-scaled from bounds       | IF2 per-parameter random-walk SD, on the natural scale; `pmmh`/`mh` also read it for the initial proposal SD.                                                                                                                                                                                                            |
+| key                  | type         | default                     | meaning                                                                                                                                                                                                                                                                                                                  |
+| -------------------- | ------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bounds`             | `[lo, hi]`   | the model's `in [lo, hi]`   | Search box. May only **narrow** the model's declared range; loosening is an error.                                                                                                                                                                                                                                       |
+| `start`              | float        | a draw within the bounds    | The base point: where `starts = "single"` puts every chain, and where `uniform` puts chain 1; the other spread rules read it only at one chain, and the sourced rules not at all. Under `pmmh`/`mh` it is also the point of the pre-run likelihood check and of the initial proposal scale.                              |
+| `prior`              | inline table | the model's `~` declaration | See the wire format below. Required in some form for `pgas`/`pmmh`/`mh`.                                                                                                                                                                                                                                                 |
+| `perturb_only_at_t0` | bool         | `false`                     | Perturb at t=0 only, not at every observation — the IF2 schedule for an initial-state parameter. Accepted only under `if2`: every other method refuses the config at load, since it would read the flag nowhere. Required by `ic_free` unless the model's `init { }` declares a law, which supplies the same t=0 spread. |
+| `rw_sd`              | float        | auto-scaled from bounds     | IF2 per-parameter random-walk SD, on the natural scale; `pmmh`/`mh` also read it for the initial proposal SD.                                                                                                                                                                                                            |
 
 An entry with no fields at all (`beta = {}`) is legal: it means "estimate this,
-take everything from the model."
+take the bounds and the prior from the model."
 
 **Transforms** (`runner.rs`, `derive_transform_with_bounds`;
 `sim::inference::types::Transform::for_domain`) map the real line onto the
@@ -2556,7 +2663,7 @@ shows an unbounded `real` as `search: ["-inf", "inf"]`.
 
 **Prior wire format.** Externally tagged inline tables, matching what the OCaml
 compiler emits for in-model `~` priors (`PriorDist`,
-`rust/crates/ir/src/parameter.rs:32`). Field names are exact — `normal` takes
+`rust/crates/ir/src/parameter.rs`). Field names are exact — `normal` takes
 `mean`/`sd`, `log_normal` takes `mu`/`sigma`:
 
 ```toml
@@ -2580,13 +2687,13 @@ prior's support and the search box are one interval. `{ flat = {} }` has no DSL
 counterpart: it is the accountable opt-in to an improper-uniform prior, recorded
 in provenance as `flat_explicit`.
 
-**Prior precedence** (three tiers, `validate_priors_present`,
-`config_v2.rs:2809`): a `fit.toml` `prior` wins over the model's `~`
-declaration; an explicit `{ flat = {} }` counts as declared. A sampler method
-whose estimated parameter has none of the three is a **hard error** — `fit run`
-never falls back to flat silently, because downstream consumers treat the chain
-as the canonical posterior. (`camdl profile` warns instead of erroring; the bar
-there is lower.)
+**Prior precedence** (three tiers, `validate_priors_present`, `config_v2.rs`): a
+`fit.toml` `prior` wins over the model's `~` declaration; an explicit
+`{ flat = {} }` counts as declared. A sampler method whose estimated parameter
+has none of the three is a **hard error** — `fit run` never falls back to flat
+silently, because downstream consumers treat the chain as the canonical
+posterior. (`camdl profile` falls back to flat without a warning, recording
+`flat_fallback`; every profile cell is a maximization that reads no prior.)
 
 **Prior support** (`validate_prior_transform_compat`) is enforced before any
 fitting: the resolved bounds must lie within the prior family's support —
@@ -2598,8 +2705,8 @@ density is exact under every transform.
 
 ### 6.4 `[fixed]` — held-constant parameters
 
-`FixedParams` (`config_v2.rs:770`). Three sources, and the union of `[estimate]`
-and `[fixed]` must be exactly the model's parameter set:
+`FixedParams` (`config_v2.rs`). Three sources, and the union of `[estimate]` and
+`[fixed]` must be exactly the model's parameter set:
 
 | key             | type   | meaning                                                                                            |
 | --------------- | ------ | -------------------------------------------------------------------------------------------------- |
@@ -2625,9 +2732,9 @@ A file carries one `[method]`: one algorithm with its settings and the chains'
 hash (§6.8). The table is tagged by `algorithm` (`Method`, `config_v2.rs`,
 `Algorithm` with `#[serde(tag = "algorithm")]`) and carries an explicit
 `backend`. Each algorithm is valid on exactly one backend; the pair is checked
-at load against the `METHODS` registry
-(`rust/crates/cli/src/fit/methods.rs:68`), which is the single source of truth
-for `camdl fit methods`, the runtime banners, and the invalid-pair error.
+at load against the `METHODS` registry (`rust/crates/cli/src/fit/methods.rs`),
+which is the single source of truth for `camdl fit methods`, the runtime
+banners, and the invalid-pair error.
 
 | `algorithm` | `backend`        | status | category   | role                                                                                                  |
 | ----------- | ---------------- | ------ | ---------- | ----------------------------------------------------------------------------------------------------- |
@@ -2739,10 +2846,10 @@ reason and the θ rather than scoring the point badly and continuing — L-BFGS 
 no direction to search in there.
 
 **Observation alignment.** `[config] obs_alignment` is resolved per algorithm
-(`methods.rs:516`). `if2` and `pfilter` step exactly to observation times and
-reject `"snap"`. `pgas` uses a uniform grid and rejects `"exact"`. `pmmh` is
-exact. The ODE algorithms score on the integrator grid and reject the key
-entirely.
+(`resolve_obs_alignment`, `methods.rs`). `if2` and `pfilter` step exactly to
+observation times and reject `"snap"`. `pgas` uses a uniform grid and rejects
+`"exact"`. `pmmh` is exact. The ODE algorithms score on the integrator grid and
+reject the key entirely.
 
 **IC-free support.** `ic_free = true` is honored by `if2`, and by `pfilter` /
 `pmmh` on a model whose `init { }` declares a law
@@ -2889,9 +2996,9 @@ derived_from = "fits/01_all_free.toml"
 reason = "free the reporting fraction"
 ```
 
-Both fields are optional strings (`FitProvenance`, `config_v2.rs:2119`). No
-runner reads them; `camdl fit new` writes `derived_from` when deriving one
-config from another, and the block is otherwise for human navigation.
+Both fields are optional strings (`FitProvenance`, `config_v2.rs`). No runner
+reads them; `camdl fit new` writes `derived_from` when deriving one config from
+another, and the block is otherwise for human navigation.
 
 It is nonetheless **identity-bearing**: the fit-level hash covers the whole
 serialized config with only `method`, `fit_seeds`, and `output_dir` removed
@@ -2902,7 +3009,7 @@ new segment.
 
 Fits are content-addressed. There are no configured output paths beyond the root
 — the directory names are hashes of the inputs, and the layout is factored into
-three levels (`cas.rs:1`–`24`):
+three levels (`fit/cas.rs`, module comment):
 
 ```
 <root>/fits/<stem>-<h8>/                          fit level
@@ -2934,7 +3041,7 @@ rather than read with every chain shifted by one.
 
 - **`<root>`** is `output_dir` from the `fit.toml` (anchored at the `fit.toml`),
   else `$CAMDL_OUTPUT_DIR` (anchored at the working directory), else `results`
-  (`rust/crates/cli/src/run_paths.rs:48`). `fit run` has no `--output-dir` flag.
+  (`run_paths::DEFAULT_OUTPUT_ROOT`). `fit run` has no `--output-dir` flag.
 - **`<stem>`** is the `fit.toml`'s file stem; **`<h8>`** at the fit level is the
   first eight hex digits of the fit hash — the whole-IR model digest, the
   per-stream training and holdout data digests, the canonicalized config (less
@@ -2976,7 +3083,8 @@ it.
 the tag exists to prevent, so it is a version rather than a silent edit.
 
 A completed leaf is reused on a second identical invocation ("cache hit"); pass
-`--force` to re-run and overwrite.
+`--force` to re-run it: the old leaf is quarantined and the result stored
+afresh.
 
 Fits are addressed downstream by handle (`fit/handle.rs`, `FitRef`): `@label`, a
 `fit.toml` path, a leaf or problem-folder directory, or a hash prefix (a run's
@@ -3293,18 +3401,13 @@ Note the shapes. `--resume` carries a **base reference**, not a boolean;
 is a read-side view: `fit summary --exclude-chains`,
 `fit predict --exclude-chains`, `fit table --exclude-chains`).
 
-> **`--force` does not currently work on `fit run`.** On a fit whose method leaf
-> already exists it aborts rather than recomputing:
->
-> ```
-> $ camdl fit run fits/08_holdoutfiles.toml --seed 1 --force
-> ── method: if2 ──
-> error: claim fit stage …/if2-c3b8cbc0/seed_1-06cbd6b3: artifact already completed at …/if2-c3b8cbc0/seed_1-06cbd6b3
-> ```
->
-> Without the flag the same command reports a cache hit and exits 0. To force a
-> recompute today, delete the method leaf (or the whole fit segment) first. This
-> is the opposite of `camdl simulate --force`, which re-stores in place.
+`--force` on `fit run` recomputes a method leaf that already exists: the stored
+leaf is moved to `<root>/.quarantine/` (never deleted) and the fresh result is
+stored at the same address. Without the flag the same command reports a cache
+hit and exits 0. A leaf another live process is still writing is not displaced;
+the run stops with an in-progress error naming the pid. `simulate` and `survey`
+take `--force` with the same meaning (`WritePolicy::Force`,
+`resolve::check_reuse`); `pfilter` and `profile` have no `--force`.
 
 `--resume <BASE_REF>` extends a completed PGAS or PMMH run: the base leaf is
 read read-only and the longer chain is written to a new content-addressed leaf
@@ -4052,11 +4155,9 @@ the fitted trajectory forward into the held-out window rather than re-filtering
 it; reach for that when you want a predictive score rather than a filter
 log-likelihood.
 
-> **Current limitation.** `[data] holdout_after = <t>` and the `[data.holdout]`
-> file block are accepted by the parser and folded into the fit hash, but no
-> method reads them: a fit declaring `holdout_after` trains on the **full**
-> series, with the same θ̂ and the same log-likelihood as one that omits the key.
-> Split the file instead.
+A fit that declares `[data] holdout_after = <t>` or `[data.holdout]` trains on
+the rows up to the boundary only (§6.2), so the `camdl data split` step above is
+optional: `camdl compare` then scores the withheld rows out of sample.
 
 ### 8.5 Comparing and deriving configs
 
@@ -4155,7 +4256,7 @@ content hashes, and the leaf address is derived from that tuple:
 run_id = SHA256( HASH_VERSION:u16 ++ kind_tag:u32 ++ n_levels:u64 ++ level_hash[0..n] )
 ```
 
-(`runid::kind::run_id`, `rust/crates/runid/src/kind.rs:79`). `kind_tag` is the
+(`runid::kind::run_id`, `rust/crates/runid/src/kind.rs`). `kind_tag` is the
 `ArtifactKind` declaration index (`Sim`=0, `FitStage`=1, `Pfilter`=2,
 `Survey`=3, `ProfilePoint`=4, `Obs`=5, `Projection`=6, `SimEnsemble`=7), so two
 kinds with a coincidentally-equal level sequence cannot alias.
@@ -4222,13 +4323,13 @@ default-skipped field stays out of the hash.
 
 #### 9.2.3 The model digest
 
-`ModelDigest::from_model` (`rust/crates/runid/src/inputs.rs:194`) is the single
+`ModelDigest::from_model` (`rust/crates/runid/src/inputs.rs`) is the single
 constructor every identity path uses:
 
 | field        | value                                                |
 | ------------ | ---------------------------------------------------- |
 | `ir`         | `model_ir_hash(model)` — the whole canonical IR      |
-| `ir_version` | the `ir/VERSION` string (e.g. `"0.30"`)              |
+| `ir_version` | the `ir/VERSION` string (e.g. `"0.42"`)              |
 | `engine`     | `EngineVersion` = `"{CARGO_PKG_VERSION}+{git-hash}"` |
 
 `model_ir_hash` applies `normalize_for_hash`, which blanks the two
@@ -4237,16 +4338,22 @@ before hashing, so a rendering choice never re-keys a run. The normalization
 lives inside the constructor, not at any call site, so no artifact kind can opt
 out of it.
 
-The IR walk is hand-written (`rust/crates/runid/src/ir_hash.rs`, schema version
-`SV = 2`). `Model::hash_into` (`ir_hash.rs:1117`) folds, in order: `name`,
+The IR walk is hand-written (`rust/crates/runid/src/ir_hash.rs`, hashing-policy
+schema version `SV`, currently 4). `Model::hash_into` folds, in order:
 `version`, `time_unit`, `description`, `origin`, `origin_rata_die`,
 `compartments`, `transitions`, `ode_equations`, `time_functions`, `tables`,
-`interventions`, `observations`, `parameters`, `bindings`, `per_eval_bindings`,
+`interventions`, `observations`, `parameters`, `constants` (the typed `let`
+constants, whose values are identity), `bindings`, `per_eval_bindings`,
 `initial_conditions`, `output`, `simulation`, `presets`, `model_structure`,
-`balance`, `identity_tracked_compartments`.
+`balance`, `identity_tracked_compartments`. Every field is folded
+unconditionally: a value's presence or non-default status is never what is
+hashed, only the value.
 
-Three `ir::Model` fields are deliberately **not** hashed:
+The `ir::Model` fields below are deliberately **not** hashed:
 
+- `name` — `camdlc` sets it to the source file's stem, so it is a label. Two
+  byte-identical models under different file names are the same model and share
+  a `run_id`.
 - `ic_grad` and every compiler-derived gradient map (`rate_grad`,
   `rate_state_grad`, `sigma_sq_grad`, `projection_state_grad`, each obs
   `Diffable`'s `grad`/`proj_grad`) — deterministic autodiff of already-hashed
@@ -4255,21 +4362,22 @@ Three `ir::Model` fields are deliberately **not** hashed:
 - `quantities` and `contrasts` — reporting-only reductions written to a
   regenerated sidecar outside the leaf (§10.8), never to the leaf itself.
 
-One conditional inside `SimulationConfig::hash_into` (`ir_hash.rs:1046`): the
-integrator is folded **only when non-default**, i.e. only for
-`Integrator::Rk45 { atol, rtol }`. A model declaring the default RK4 hashes as
-if the field did not exist.
+Within `SimulationConfig::hash_into` the integrator is always folded: a variant
+tag, then for `Rk45` each tolerance as an `Option`, so RK4, RK45 at the runtime
+default tolerances, and each explicit tolerance hash distinctly. `--integrator`
+changes the resolved model's integrator, so the two settings key as two
+different models (the `model` level; `config` is unchanged).
 
 #### 9.2.4 The levels, per artifact kind
 
-| kind (`store_dir`)           | levels, in path order                     | resolver                         |
-| ---------------------------- | ----------------------------------------- | -------------------------------- |
-| `Sim` (`sims/`)              | model · config · params · scenario · seed | `cli/src/resolve.rs:179`         |
-| `SimEnsemble` (`ensembles/`) | model · config · params · grid            | `cli/src/sim_ensemble_cas.rs:88` |
-| `FitStage` (`fits/`)         | fit · method · seed                       | `cli/src/fit/cas.rs`             |
-| `Pfilter` (`pfilters/`)      | model · config · params · seed            | `cli/src/pfilter_cas.rs:65`      |
-| `Survey` (`surveys/`)        | model · config · box · seed               | `cli/src/survey_cas.rs:61`       |
-| `ProfilePoint` (`profiles/`) | profile · point · method · seed · start   | `cli/src/profile_cas.rs`         |
+| kind (`store_dir`)           | levels, in path order                     | resolver                      |
+| ---------------------------- | ----------------------------------------- | ----------------------------- |
+| `Sim` (`sims/`)              | model · config · params · scenario · seed | `cli/src/resolve.rs`          |
+| `SimEnsemble` (`ensembles/`) | model · config · params · grid            | `cli/src/sim_ensemble_cas.rs` |
+| `FitStage` (`fits/`)         | fit · method · seed                       | `cli/src/fit/cas.rs`          |
+| `Pfilter` (`pfilters/`)      | model · config · params · seed            | `cli/src/pfilter_cas.rs`      |
+| `Survey` (`surveys/`)        | model · config · box · seed               | `cli/src/survey_cas.rs`       |
+| `ProfilePoint` (`profiles/`) | profile · point · method · seed · start   | `cli/src/profile_cas.rs`      |
 
 **`Sim` levels** (`resolve::resolve_trajectory`; the level types are in
 `runid::inputs`):
@@ -4285,11 +4393,11 @@ if the field did not exist.
   (§10.1) and a key must not name bytes a recompute no longer reproduces. Label:
   `{backend}-dt{dt}`.
 - `params` — `ResolvedParams`: the resolved base parameter map
-  (`BTreeMap<ParamId, FiniteF64>`, i.e. model defaults overlaid by `--params`
-  then `--param`, plus any sweep point) and the SHA-256 **content** digests of
-  every `--table NAME=FILE` file, sorted by table name. Files are hashed by
-  bytes, never by path. Label: `base`, a `k=v` join of the sweep point, or
-  `draws` when a full draw vector would overflow the path component.
+  (`BTreeMap<ParamId, FiniteF64>`, i.e. compiled-in values overlaid by
+  `--params` then `--param`, plus any sweep point) and the SHA-256 **content**
+  digests of every `--table NAME=FILE` file, sorted by table name. Files are
+  hashed by bytes, never by path. Label: `base`, a `k=v` join of the sweep
+  point, or `draws` when a full draw vector would overflow the path component.
 - `scenario` — `ResolvedScenario`: the sorted `enable` and `disable`
   intervention-id sets and the parameter patch. Only the _delta_; renaming a
   scenario preserves the hash. Label: the scenario name.
@@ -4428,16 +4536,16 @@ recomputed on any read path today.
   the combined outputs instead.
 - A lone `camdl simulate` recomputes its cell. What the hit saves is the write:
   `commit_atomic` sees an `AlreadyCompleted` leaf and discards the freshly
-  staged bytes.
+  staged bytes (unless `--force`, below).
 
 Consequences of that second rule, which are load-bearing for anyone reasoning
 about the store:
 
 - On a hit the leaf keeps the **bytes of the first writer**. A second run whose
-  identity matches but whose bytes differ leaves no trace.
-- `simulate --force` re-runs the simulation but does **not** overwrite an
-  existing same-identity leaf. Replacing a leaf's contents requires deleting the
-  directory.
+  identity matches but whose bytes differ leaves no trace, unless it is forced.
+- `simulate --force` quarantines an existing same-identity leaf (moved to
+  `<root>/.quarantine/`, not deleted) and stores the recomputed bytes in its
+  place, so a forced run is the one way to replace a leaf's contents.
 - An artifact that only some invocations produce (`event_log.tsv`) cannot be
   added to a leaf that already exists without a fresh identity or a manual
   delete; call sites check for the file's existence rather than assuming it.
@@ -4464,8 +4572,8 @@ about the store:
 | `--emit-every`                        | no[^ee]  | obs child    |
 | `--label`                             | no       | provenance   |
 | `-o`, `--obs*`, `--draws-out`         | no       | mirrors only |
-| `--integrator`                        | **no**   | see §9.8     |
-| `--dates`                             | **no**   | see §9.8     |
+| `--integrator`                        | yes      | model        |
+| `--dates`                             | no       | mirrors only |
 
 [^oe]: `--output-every` re-keys through the _model_ level, not `config`:
     `util::rematerialize_with_output_every` rewrites the compiled IR to a temp
@@ -4525,10 +4633,10 @@ model IR).
 
 `run.json` is the API between camdl and everything that reads its output
 (`camdl list/show/cat`, viewers, notebooks). The on-disk schema is
-`runid::record::RunRecord` (`rust/crates/runid/src/record.rs:159`);
-`FORMAT_VERSION` is `1`. **The record itself is never hashed** — identity comes
-only from the levels — which is why declaring an `obs/` child cannot change the
-trajectory's `run_id`.
+`runid::record::RunRecord` (`rust/crates/runid/src/record.rs`); `FORMAT_VERSION`
+is `1`. **The record itself is never hashed** — identity comes only from the
+levels — which is why declaring an `obs/` child cannot change the trajectory's
+`run_id`.
 
 A real `sims/` leaf record (hashes and paths abbreviated):
 
@@ -4732,25 +4840,18 @@ flags and reports, per cell, whether the store already holds it.
 A multi-cell `simulate` additionally writes one `SimEnsemble` leaf holding the
 combined wide-format TSV, with a `deps` edge to each cell's `traj.tsv`.
 
-### 9.8 Known identity gaps
+### 9.8 Identity boundaries worth knowing
 
-Two resolved inputs change stored bytes without changing a `run_id`. Until they
-are fixed, a store that has seen both settings holds whichever landed first.
+Two flags are easy to misjudge, and neither is a gap.
 
-- **`--integrator rk4|rk45` (`Sim`).** The override is applied to the model
-  inside the execution path (`util::resolve_run_model` →
-  `apply_integrator_override`) but the identity path loads the raw IR
-  independently (`main.rs::build_simulate_cas_sink`), so `SimConfig` and the
-  model digest both key as if the flag were absent. The two integrators produce
-  different trajectories. `--force` does not repair it: the recomputed bytes are
-  discarded by `commit_atomic`. The fix is the `--output-every` pattern (§9.3) —
-  rematerialize the IR once so both paths load the same model — or a resolved
-  `integrator` field on `SimConfig`.
-- **`--dates` (`SimEnsemble`).** The flag adds a `date` column to the combined
-  TSV that becomes the ensemble artifact, but nothing in the ensemble's four
-  levels records it; the per-cell `Sim` leaves are unaffected because the leaf
-  trajectory writer never emits a date column. `--dates` belongs in the ensemble
-  `config` level.
+- **`--integrator rk4|rk45` (`Sim`)** changes the trajectory and re-keys the
+  `model` level: the override is part of the resolved model whose digest names
+  the leaf, and the integrator is always folded into that digest (§9.2.3). Two
+  integrators are two leaves.
+- **`--dates` (`SimEnsemble`)** changes only how the combined TSV is rendered.
+  The stored `ensemble.tsv` never carries date columns; they appear in the `-o`
+  and `--stdout` views only (§10.2). The flag is therefore not identity, and a
+  run with and without it is the same ensemble.
 
 Related but sound: `event_log.tsv` and `reactive_log.tsv` are identity-free
 extra artifacts, so a leaf committed without them cannot gain them later. Call
@@ -4785,9 +4886,9 @@ Columns, in this order (`util::TRAJ_TIME_HEADER`, then
    the previous row's. The initial-condition row has no interval before it and
    writes the empty `[t, t)`; its flows are zero. When the output schedule has
    no time at the run's start (an `at = [...]` list without it) there is no
-   initial row, and the first row's `t_start` is the run's start. A row carries both readings —
-   a state _at_ `t`, a flow _over_ the period — and names each boundary rather
-   than leaving the period to be inferred from the row above.
+   initial row, and the first row's `t_start` is the run's start. A row carries
+   both readings — a state _at_ `t`, a flow _over_ the period — and names each
+   boundary rather than leaving the period to be inferred from the row above.
 3. Integer compartments, in model declaration order, rendered `{}`.
 4. Real compartments, in model declaration order, rendered `{:.4}`.
 5. `flow_<transition>` for every transition, in model declaration order —
@@ -4805,15 +4906,16 @@ The leaf trajectory never carries a `date` column, regardless of `--dates`.
 ### 10.2 Combined trajectory views (`ensemble.tsv`, `-o`, `--stdout`)
 
 A multi-cell `simulate` (`--replicates` / `--seeds` / multiple `--scenario` /
-`--draws`) interleaves every cell into one wide TSV. The same buffer is the
-`ensemble.tsv` artifact of the `SimEnsemble` leaf, the `-o PATH` mirror, and the
-`--stdout` stream, so all three are byte-identical.
+`--draws`) interleaves every cell into one wide TSV. The same table is the
+`ensemble.tsv` artifact of the `SimEnsemble` leaf and the `-o PATH` mirror. The
+two are byte-identical except for the `date` columns below: `--dates` renders
+into the `-o` mirror only, and the stored `ensemble.tsv` never carries them.
 
 ```
 # 0.1.0+<git> (<build date>)
 replicate	t	t_start	t_stop	date	date_start	date_stop	S	I	R	V	flow_infection	flow_recovery
-1	0	0	0	2020-01-01	2020-01-01	2020-01-01	9990	10	0	0	0	0
-1	1	0	1	2020-01-02	2020-01-01	2020-01-02	9985	13	2	0	5	2
+0	0	0	0	2020-01-01	2020-01-01	2020-01-01	9990	10	0	0	0	0
+0	1	0	1	2020-01-02	2020-01-01	2020-01-02	9985	13	2	0	5	2
 ```
 
 - Line 1 is a `# {camdl version} ({build date})` comment — present here and
@@ -4821,9 +4923,10 @@ replicate	t	t_start	t_stop	date	date_start	date_stop	S	I	R	V	flow_infection	flow
 - Leading key columns appear only when the corresponding axis has more than one
   level: `replicate` when the run has more than one cell, `scenario` when more
   than one scenario, `draw` when more than one parameter draw.
-- `date`, `date_start`, `date_stop` appear only under `--dates`, which requires
-  the model to declare an `origin`; each is its numeric twin (`t`, `t_start`,
-  `t_stop`) rendered via `ir::caltime::internal_to_date_hires`.
+- `date`, `date_start`, `date_stop` appear only under `--dates` (in the `-o`
+  mirror, never in the stored `ensemble.tsv`), which requires the model to
+  declare an `origin`; each is its numeric twin (`t`, `t_start`, `t_stop`)
+  rendered via `ir::caltime::internal_to_date_hires`.
 - The data columns are identical to §10.1 and honour the same
   `--no-flows`/`--columns` filter.
 
@@ -5292,11 +5395,11 @@ hard error (`error: --draws prior requires -n N`).
 
 **Model-only form: every parameter needs a prior _or_ a value in every
 scenario.** The draws carry only the parameters with a prior; every other
-parameter resolves per cell from the model default, `--params`, that cell's
-scenario, or `--param`. `--scenario a,b` is two sets of cells, as on every other
-`simulate` path, and each resolves against its own scenario — a value one
-scenario sets never reaches the other. A parameter left unset in some scenario
-is refused before any cell runs, naming the scenario:
+parameter resolves per cell from `--params`, that cell's scenario, or `--param`.
+`--scenario a,b` is two sets of cells, as on every other `simulate` path, and
+each resolves against its own scenario — a value one scenario sets never reaches
+the other. A parameter left unset in some scenario is refused before any cell
+runs, naming the scenario:
 
 ```
 $ camdl simulate v2.camdl --draws prior -n 3 --scenario half,other
@@ -5452,10 +5555,12 @@ chains narrows an already-partial set (only path-saved draws are forkable); if
 the intersection is empty the run is refused by name, never emitted as an empty
 band.
 
-**`--quantities-out` refuses a multi-scenario run.** `quantities { }` bands are
-taken over draws × replicates × seeds; scenario is a partition of that grid, not
-part of the band. Pooling them would produce one ribbon describing neither arm,
-so the run errors and prints the per-scenario invocations to use instead.
+**`--quantities-out` bands each scenario separately.** `quantities { }` bands
+are taken over draws × replicates × seeds; scenario is a partition of that grid,
+not part of the band. A multi-scenario run therefore writes one band per
+scenario, never a pooled one: each `quantities/<name>.tsv` carries a leading
+`scenario` column (`scenario  n_draws  q05  q25  q50  q75  q95`, one row per
+scenario) and `quantities.json` lists one entry per quantity and scenario.
 
 ### 11.4 Uniform Exploration
 
@@ -5501,8 +5606,8 @@ Two honest limitations:
   dataset and asks whether the estimator recovers that one point.
 - The cross-cell roll-up — the parameter-recovery coverage and bias table — is
   **not built**. The run prints
-  `note: grid summary / coverage are derived views — rebuilt by the reindex in M4
-  (gh#150 / gh#154)`.
+  ``note: grid summary / coverage are derived views — owed by `fit recovery`
+  (gh#150 / gh#154)``.
   Until then the per-cell fits are there and the aggregation is the reader's to
   do (`camdl fit table <root> --format csv` is the starting point).
 
@@ -5534,9 +5639,8 @@ right.
 
 ### 12.1 Precedence
 
-Two chains, resolved by the same code (`rust/crates/cli/src/fit/runner.rs:2744`
-`resolve_prior`) but with a **different tier-3**. The difference is deliberate
-and load-bearing.
+Two chains, resolved by the same code (`resolve_prior` in `fit/runner.rs`) but
+with a **different tier-3**. The difference is deliberate and load-bearing.
 
 `camdl fit run`, sampler methods (`pgas`, `pmmh`, `mh`):
 
@@ -5579,8 +5683,11 @@ resolution is provenance only. It is written to the profile-base sidecar and
 keys the profile's base identity. `--starts from_prior` draws starting points
 from the resolved priors.
 
-Per-parameter provenance is written to `run.json` under `resolved_priors`, with
-sources `fit_toml`, `model_ir`, `flat_explicit`, `flat_fallback`.
+Per-parameter prior provenance is written to `fit.meta.json` under
+`resolved_priors` (sources `fit_toml`, `model_ir`, `flat_explicit`; present for
+sampler methods) and, for every method, under `partition.parameters.<p>.prior`
+(which also uses `flat_fallback`). A profile writes `resolved_priors` to its
+profile-base sidecar.
 
 ### 12.2 When priors are used at all
 
@@ -5592,8 +5699,8 @@ sources `fit_toml`, `model_ir`, `flat_explicit`, `flat_fallback`.
 | `pfilter`                           | No — likelihood evaluation only                                                      |
 
 `--draws prior` needs a proper prior on every _sampled_ parameter; every other
-parameter is left out of the draws and resolves per cell from the model default,
-the fit's `[fixed]`, `--params`, the scenario, or `--param` (§11.1).
+parameter is left out of the draws and resolves per cell from the fit's
+`[fixed]`, `--params`, the scenario, or `--param` (§11.1).
 
 ### 12.3 Supported distributions
 
@@ -5640,23 +5747,28 @@ Parameterization conventions (log-scale `log_normal`, rate-parameterized
 `gamma`, `truncated_normal` truncated at the declared `in [lo, hi]`) are in the
 language spec's priors section, which is the normative source for the surface.
 
-### 12.4 Prior–transform compatibility
+### 12.4 Prior support and the search box
 
-Each estimated parameter carries a transform (derived from its `param_kind`, or
-overridden by `transform` in `[estimate.<p>]`). A prior whose support does not
-match the transform is refused before the fit starts, because the mismatch would
-silently produce a _different_ prior than the one written — `log_normal` on an
-identity transform collapses to a normal on the natural scale.
+There is no `transform` key in `[estimate.<p>]` (a file carrying one is refused
+at load, naming the line to delete). The transform follows from the parameter's
+resolved bounds and declared type (§6.3), and every prior density reads the
+logarithms it needs from the transformed coordinate, so the prior is exact under
+whichever transform results. What is checked, before the fit starts, is that the
+prior puts mass over the whole search box: a prior that is zero on part of the
+box would be a wall by another route.
 
-| Prior family                          | Required transform |
-| ------------------------------------- | ------------------ |
-| `log_normal`                          | `Log`              |
-| `beta`                                | `Logit`            |
-| `half_normal`, `gamma`, `exponential` | `Log`              |
-| `uniform`, `normal`, `flat`           | any                |
+| Prior family                                        | The resolved search box must lie within |
+| --------------------------------------------------- | --------------------------------------- |
+| `log_normal`, `half_normal`, `gamma`, `exponential` | `[0, ∞)`                                |
+| `beta`                                              | `[0, 1]`                                |
+| `uniform(L, U)`, `log_uniform(L, U)`                | `[L, U]`                                |
+| `normal`, `flat`                                    | any box                                 |
+| `truncated_normal`                                  | equal to its truncation                 |
 
-The error names the parameter, both sides of the mismatch, and the resolved
-prior's source.
+The error names the parameter, the prior's support, the search box that reaches
+outside it, the two fixes (narrow `bounds` in `[estimate.<p>]`, or choose a
+prior whose support covers the box), and the resolved prior's source
+(`validate_prior_transform_compat`).
 
 ---
 
@@ -5720,9 +5832,12 @@ For an optimizer method `converged` is true exactly when `gate_verdict` is
 `pass`. A sampler row carries `gate_verdict = "n/a"`, and `converged` is its R̂
 verdict (reported, and below the threshold).
 
-A fit directory with no completed method leaf is reported as a warning line and
-skipped, not silently dropped; with `--quantity`, a fit whose result cannot be
-read is an error.
+`fit table` tabulates only completed method leaves whose method produces a
+tabulated result. A leaf that is still running or incomplete, and a `pfilter`
+leaf (a likelihood evaluation with no estimate to tabulate), get no row and no
+message. A completed leaf whose result cannot be read is reported as a
+`warning:` line and skipped; with `--quantity`, such a leaf is an error instead,
+because dropping it would answer for fewer runs than were asked about.
 
 To enumerate runs of any kind without the per-fit projection, use the generic
 run browser: `camdl list --kind fit`. For one fit's full interpretation, use
@@ -5877,7 +5992,7 @@ camdl docs --json             # machine-readable index (for agents)
 
 Topics: `agents`, `getting-started`, `language`, `language-changes`,
 `changelog`, `inference`, `diagnosing-fits`, `workflow`, `fit-toml`, `concepts`,
-`features`, `backends`, `data`, `dates`, `debugging`, `mre`.
+`features`, `backends`, `data`, `dates`, `debugging`, `mre`, `model-comparison`.
 
 ---
 
@@ -5890,8 +6005,8 @@ three facts that decide what a likelihood term actually means.
 
 ### 14.1 Projection kinds
 
-There are five IR projection variants (`rust/crates/ir/src/observation.rs:11`),
-classified into two temporal kinds (`observation.rs:47` `temporal_kind`). The
+There are five IR projection variants (`ir::observation::Projection`),
+classified into two temporal kinds (`Projection::temporal_kind`). The
 classification is **derived from the variant, never stored** — an
 independently-stored kind could only ever disagree.
 
@@ -5917,10 +6032,10 @@ projected = I[child] + I[adult]                    → derived_expr
 - **Interval (incidence)** — the sum of per-transition flow counters accumulated
   over the period the row is declared to cover, read at the period's stop and
   **reset afterwards** (`StreamProjection::resets_after_observation`,
-  `rust/crates/sim/src/inference/multi_stream_obs.rs:210`). The period is
-  `[start, stop)` from the stream's `covers` form or its window columns; the
-  accumulator also resets at the first period's start, so a warm-up before the
-  first row is never scored.
+  `sim/src/inference/multi_stream_obs.rs`). The period is `[start, stop)` from
+  the stream's `covers` form or its window columns; the accumulator also resets
+  at the first period's start, so a warm-up before the first row is never
+  scored.
 - **Instant (prevalence / derived)** — a function of the state vector read at
   the observation instant. No accumulation, **no reset**; each observation is
   independent of the previous one.
@@ -5970,9 +6085,9 @@ added as an ordinary expression; a flow has no expression leaf naming it, so
 flows are added term by term (`incidence(a) + incidence(b)`).
 
 `current_pop` / `current_pop_sum` resolve to **integer** compartments
-(`multi_stream_obs.rs:253`). A prevalence projection naming a real-valued
-compartment is refused with a message saying so; use a `derived_expr` (which
-reads both state kinds) instead.
+(`StreamProjection::from_ir`, `multi_stream_obs.rs`). A prevalence projection
+naming a real-valued compartment is refused with a message saying so; use a
+`derived_expr` (which reads both state kinds) instead.
 
 Only `derived_expr` carries a `projection_state_grad`
 (∂projection/∂compartment). The three selection variants are linear projections
@@ -5987,8 +6102,8 @@ Getting this wrong changes what your data means, so it is stated per-path rather
 than per-backend.
 
 **Inference (particle filter, IF2, PGAS, PMMH) — exact landing at `t`.** The
-filter builds an `Exact`-policy timeline
-(`rust/crates/sim/src/inference/particle_filter.rs:198`) whose substep is
+filter builds an `Exact`-policy timeline (`ExactInferenceTimeline::build`,
+`intervention.rs`, called from `particle_filter.rs`) whose substep is
 `dt.min(next_boundary − t)`, so the walk lands **exactly on the observation
 time** even when it is off the `dt` grid. There is no snapping to a step
 boundary. Scoring happens after the window walk completes, at the landed state.
@@ -5996,7 +6111,7 @@ A scheduled effect whose fire time is off the `dt` grid is refused loudly at
 timeline construction rather than being silently re-tiled.
 
 **ODE inference — the recorded output snapshot must land on the obs time.** The
-deterministic likelihood (`rust/crates/sim/src/inference/ode_loglik.rs:93`)
+deterministic likelihood (`compute_ode_loglik`, `inference/ode_loglik.rs`)
 matches each observation to a trajectory snapshot within `1e-9`. It is **not**
 dense-output interpolation. If the model's output schedule does not contain an
 observation time, the fit errors:
@@ -6009,20 +6124,23 @@ regular schedule's step divides obs intervals.
 ```
 
 The value path reads `snap.int_state.counts`, which the ODE backend produced by
-rounding (`x.max(0.0).round()`, `rust/crates/sim/src/ode.rs:762`). The gradient
+rounding (`x.max(0.0).round()` in `to_states`, `sim/src/ode.rs`). The gradient
 path (`nl-lbfgs`) reads the **unrounded** continuous state instead
-(`multi_stream_obs.rs:1424`). At small counts the two therefore score slightly
-different likelihood surfaces for the same model and data; at large `N` the
-difference is sub-nat.
+(`ode_loglik_and_grad`, `inference/multi_stream_obs.rs`). At small counts the
+two therefore score slightly different likelihood surfaces for the same model
+and data; at large `N` the difference is sub-nat.
 
 **Forward `simulate --obs` — the recorded trajectory output grid.** Synthetic
 observations are projected from the trajectory snapshots, not from the
-integrator: `snap_at` (`rust/crates/cli/src/main.rs:2395`) returns the **last
-snapshot at or before** the observation time, and incidence is the difference of
-cumulative flow between consecutive such snapshots.
+integrator: `snap_at` (`cli/src/main.rs`) returns the **last snapshot at or
+before** the observation time, and incidence is the difference of cumulative
+flow between consecutive such snapshots.
 
-**Consequence: the observation cadence is silently clipped to the trajectory
-output cadence.** With a weekly output grid and a daily `emit_schedule`:
+**Consequence: every observation time must be a recorded output time, and a run
+where one is not is refused (gh#589).** Reading the earlier snapshot would put a
+flow's whole interval on one boundary and zeros elsewhere, and a stock would
+step, while the file still carried the requested timestamps. So, with a weekly
+output grid and a daily `emit_schedule`:
 
 ```camdl
 output { trajectories { every = 7 'days } }
@@ -6032,26 +6150,21 @@ observations {
 }
 ```
 
+`simulate` stops before simulating, with an error of this form (the first
+off-grid time and its two neighbours are named):
+
 ```
-$ head -9 obs/inc.tsv        $ head -9 obs/prev.tsv
-time	inc                     time	prev
-0	0                       0	12
-1	0                       1	11
-2	0                       2	10
-3	0                       3	7
-4	0                       4	10
-5	0                       5	9
-6	0                       6	11
-7	77                      7	69
+error: observation stream 'inc' needs a value at t = 1, which is not a recorded output time (nearest recorded: 0 and 7).
+  Required: every observation time must also be an output time.
 ```
 
-Incidence puts the whole week's flow on day 7 and zero elsewhere; prevalence is
-a step function that changes only at output times. Nothing warns.
-`--output-every
-N` has the same effect, so a flag that reads as presentational
-silently changes the emitted data. **Set the trajectory output cadence at least
-as fine as the finest `emit_schedule`** before generating synthetic data from a
-model.
+`--output-every N` is subject to the same check, so a flag that reads as
+presentational still constrains the observation cadence. **Set the trajectory
+output cadence at least as fine as the finest `emit_schedule`** (or, when the
+times come from a data file, fine enough to include them; `fit predict` records
+snapshots at the data times, §2.2.2). The output schedule defaults to every 1.0
+days, independent of `dt`, so sub-unit observation times need an explicit
+`output { trajectories { every = … } }`.
 
 ### 14.3 Interaction with scheduled interventions
 
@@ -6082,8 +6195,8 @@ interventions twice per scheduled time; see
 
 ### 14.4 Likelihood families
 
-Eight families (`rust/crates/ir/src/observation.rs:146`): `poisson`,
-`neg_binomial`, `normal`, `binomial`, `beta_binomial`, `beta`, `bernoulli`,
+Eight families (`ir::observation::Likelihood`): `poisson`, `neg_binomial`,
+`normal`, `binomial`, `beta_binomial`, `beta`, `bernoulli`,
 `zero_inflated_neg_binomial`.
 
 Four facts about how they score that are not obvious from the names:
@@ -6091,20 +6204,23 @@ Four facts about how they score that are not obvious from the names:
 - **`normal(...)` is a discretized _count_ likelihood** (pomp / He et al.), not
   a continuous Normal PDF. It rounds the observation to the nearest non-negative
   integer and integrates the density over `[y − 0.5, y + 0.5]`. A clearly
-  fractional observation logs a one-time warning
-  (`rust/crates/sim/src/inference/obs_model.rs:93`). For a continuous outcome
-  this is the wrong family.
+  fractional observation logs a one-time warning (`eval_likelihood_resolved`,
+  `sim/src/inference/obs_model.rs`). For a continuous outcome this is the wrong
+  family.
 - **Every count family rounds the observation.** `poisson`, `neg_binomial`,
-  `binomial`, `beta_binomial` all apply `y.round().max(0.0)` before scoring
-  (`obs_loglik.rs:174`, `obs_model.rs:118`). A per-1000 rate or a scaled series
-  fed to a count likelihood is silently rounded — `0.4 cases` scores as `0`.
+  `binomial`, `beta_binomial` all apply `y.round().max(0.0)` before scoring (the
+  log-pmfs in `obs_loglik.rs`, e.g. `negbin_logpmf`). A per-1000 rate or a
+  scaled series fed to a count likelihood is silently rounded — `0.4 cases`
+  scores as `0`.
 - **`bernoulli(p = …)` thresholds at 0.5.** Any observed value `> 0.5` counts as
-  a success (`obs_model.rs:144`), so a count column accidentally bound to a
-  Bernoulli stream reads as "detected" for every non-trivial value.
+  a success (`eval_likelihood_resolved`, `obs_model.rs`), so a count column
+  accidentally bound to a Bernoulli stream reads as "detected" for every
+  non-trivial value.
 - **`beta(mean = …, concentration = …)` requires `x ∈ (0, 1)` strictly**
-  (`obs_loglik.rs:353`). An observed proportion of exactly 0 or 1 — a common
-  outcome for small denominators — scores `−∞` and takes the whole fit with it.
-  Use `beta_binomial` with the denominator as `n` when the data is `k` of `n`.
+  (`beta_logpdf`, `obs_loglik.rs`). An observed proportion of exactly 0 or 1 — a
+  common outcome for small denominators — scores `−∞` and takes the whole fit
+  with it. Use `beta_binomial` with the denominator as `n` when the data is `k`
+  of `n`.
 
 Pairing guidance:
 
@@ -6297,8 +6413,12 @@ Observation output
   --design-from FIT_TOML      simulate on the observation design that fit config
                               binds — its observed labels, each row's own period,
                               its NA holes — instead of on `emit_schedule`.
-                              Requires --obs-dir/--obs-only-dir; θ from --params
-                              or --draws (one ds_NN/ per draw)
+                              Requires --obs-dir, --obs-only-dir or --projected-out;
+                              θ from --params or --draws (one ds_NN/ per draw)
+  --projected-out DIR         with --design-from: write each stream's projected
+                              value (before observation noise) as one TSV per
+                              stream, in column `projected`; a sidecar outside run
+                              identity. Usable with or without --obs-dir
   --emit-every N | NAME=N     override `emit_schedule`, in model time units, for
                               every stream or one by its observation-block label
                               (repeatable; the two forms are exclusive). Only a
@@ -6308,7 +6428,11 @@ Observation output
 
 Other artifacts
   --quantities-out DIR        emit quantities { } as <dir>/quantities/<name>.tsv +
-                              quantities.json. Refuses a multi-scenario run
+                              quantities.json. A multi-scenario run writes one band per scenario
+  --quantities FILE           with --quantities-out: report with the `quantities { }`
+                              block in FILE (a .camdl file holding only that block)
+                              instead of the model's own; tables land in
+                              <dir>/quantities-<key>/, keyed by FILE's contents
   --event-log [FILE]          record the lineage event log into the run leaf; pass a
                               PATH to also mirror it. Single-run only
   --format parquet|tsv        event-log format (default parquet); --tsv is shorthand
@@ -6333,7 +6457,7 @@ sweeps a `[fixed]` parameter of a fit (§7.3).
   --seed N                    RNG seed (default 1)
   --parallel N                Rayon thread cap; bit-identical regardless of value
                               (default 0 = all cores; env CAMDL_PARALLEL)
-  --force                     re-run and overwrite stale cache
+  --force                     re-run; the existing leaf is quarantined
   --resume BASE_REF           extend a completed PGAS/PMMH run from a base run
                               (run_id prefix or leaf path); conflicts with --force
   --sweep NAME=SPEC           Cartesian sweep over a fixed parameter (repeatable).
@@ -6341,6 +6465,10 @@ sweeps a `[fixed]` parameter of a fit (§7.3).
   --label TEXT                the run's label; `@label` names this one run.
                               Refused if another run holds it or this
                               invocation writes several runs
+  --emit-every N | NAME=N     override a `[synthetic]` fit's observation emission
+                              cadence (same grammar as `simulate --emit-every`);
+                              refused on a fit with no `[synthetic]` block; the
+                              fit re-keys
 
 Chain starts
   --starts SPEC               uniform_unconstrained | lhs | uniform | from_prior | single
@@ -6366,6 +6494,10 @@ Per-algorithm overrides
   --n-trajectories N          posterior trajectories saved
   --diagonal-mass             dense_mass = false (one-way)
   --no-nuts                   use_nuts = false — MH-within-Gibbs for θ|X (one-way)
+  --no-ancestor-sampling      ancestor_sampling = false — plain particle Gibbs
+                              (one-way; the run stores under its own address)
+  --binomial btpe|btrs        PGAS chain-binomial sampler (default btpe); not
+                              bit-compatible across samplers, so it keys identity
   --no-adapt                  adapt = false — lock proposal SDs (one-way)
   --adapt-start N             step at which proposal-SD adaptation begins
   --record-ancestry           record ancestor indices for smoothing paths
@@ -6496,7 +6628,9 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 --data / --obs / --time-format / --seed / --parallel / --scenario /
 --enable / --disable / --table / --allow-degenerate-rates /
 --pf-max-substeps (if2 only)
--o, --output FILE           profile TSV (default stdout)
+-o, --output FILE           accepted, writes nothing: a profile run stores one leaf
+                            per grid cell under `profiles/` and prints no curve
+                            (the curve is a derived view, gh#154); a note says so
 --label TEXT
 ```
 
@@ -6686,7 +6820,7 @@ silent parse:
 
 ```
 $ camdl simulate model.camdl --params bad.toml     # gamma = "0.1 /day"
-error preparing CAS: bad.toml:gamma: expected a number or table section, got String("0.1 /day")
+error: schema mismatch in bad.toml: bad.toml:gamma: expected a number or table section, got String("0.1 /day")
 ```
 
 **A `[provenance]` table is skipped**, so the `mle_params.toml` a fit writes can
