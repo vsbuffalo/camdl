@@ -205,6 +205,12 @@ type state = {
      arguments are checked exactly even inside an observation, so their
      products are evidence and are recorded although [permissive_dim] is on. *)
   mutable contract_arg : bool;
+  (* Equations are recorded during the first inference round only. Later
+     rounds re-infer the same expressions with fresh intermediate variables,
+     so their equations would be copies; the first round's already tie every
+     intermediate result to the shared parameter, table and forcing
+     variables. *)
+  mutable recording : bool;
   (* Set while checking an initial condition, where a numeric literal has no
      dimension of its own: `I = 10` is a count, `S = 0.06 * N0 - 50` mixes a
      fraction and a count, and a `hyper_erlang` split of `I = 10` arrives as
@@ -230,6 +236,7 @@ let create_state () = {
   obs_col_dims = Hashtbl.create 8;
   equations = [];
   contract_arg = false;
+  recording = true;
   literal_free = false;
 }
 
@@ -354,7 +361,7 @@ let rec is_constant_expr (e : expr) : bool =
   | _ -> false
 
 let record_equation st (r : dim) (terms : (int * int * dim) list) =
-  if (not st.permissive_dim) || st.contract_arg then
+  if st.recording && ((not st.permissive_dim) || st.contract_arg) then
     st.equations <- (r, terms) :: st.equations
 
 (* Pin an expression's inferred dimension to the dimension its context
@@ -431,6 +438,14 @@ type solve_outcome = {
    linear form, over non-pivot variables only, that it equals. *)
 let solve_equations st : solve_outcome =
   let pivots : (int, lin) Hashtbl.t = Hashtbl.create 64 in
+  (* [occ v] is the set of pivot rows whose right-hand side mentions [v], so
+     eliminating a new pivot touches only the rows that contain it. *)
+  let occ : (int, (int, unit) Hashtbl.t) Hashtbl.t = Hashtbl.create 64 in
+  let occ_of v = match Hashtbl.find_opt occ v with
+    | Some h -> h
+    | None -> let h = Hashtbl.create 4 in Hashtbl.replace occ v h; h in
+  let register row (l : lin) =
+    List.iter (fun (v, _) -> Hashtbl.replace (occ_of v) row ()) l.terms in
   (* Substitute every pivot variable occurring in [l]. *)
   let reduce (l : lin) : lin =
     List.fold_left (fun acc (v, q) ->
@@ -453,21 +468,35 @@ let solve_equations st : solve_outcome =
     | None -> ()
     | Some form ->
       let form = reduce form in
-      match form.terms with
+      match List.rev form.terms with
       | [] ->
         if not (Array.for_all Q.is_zero form.const) then incr contradictions
       | (p, cp) :: _ ->
-        (* x_p = −(1/cp) · (form − cp·x_p) *)
+        (* Pivot on the newest variable: it is usually an intermediate result
+           mentioned by no other row, so nothing needs eliminating. Pivoting on
+           a shared parameter instead rewrites every row that mentions it.
+           x_p = −(1/cp) · (form − cp·x_p) *)
         let rest = { form with terms = List.filter (fun (v, _) -> v <> p) form.terms } in
         let rhs = lin_scale (Q.neg (Q.div (Q.of_int 1) cp)) rest in
-        (* Keep the table fully reduced: eliminate x_p from every other row. *)
-        Hashtbl.filter_map_inplace (fun _ (row : lin) ->
-          match List.assoc_opt p row.terms with
-          | None -> Some row
-          | Some q ->
-            let without = { row with terms = List.filter (fun (v, _) -> v <> p) row.terms } in
-            Some (lin_add without (lin_scale q rhs))) pivots;
-        Hashtbl.replace pivots p rhs
+        (* Keep the table fully reduced: eliminate x_p from the rows that
+           mention it. *)
+        (match Hashtbl.find_opt occ p with
+         | None -> ()
+         | Some rows ->
+           Hashtbl.iter (fun row () ->
+             match Hashtbl.find_opt pivots row with
+             | None -> ()
+             | Some (l : lin) ->
+               match List.assoc_opt p l.terms with
+               | None -> ()
+               | Some q ->
+                 let without = { l with terms = List.filter (fun (v, _) -> v <> p) l.terms } in
+                 let l' = lin_add without (lin_scale q rhs) in
+                 Hashtbl.replace pivots row l';
+                 register row l') rows;
+           Hashtbl.remove occ p);
+        Hashtbl.replace pivots p rhs;
+        register p rhs
   ) (List.rev st.equations);
   let newly_bound = ref 0 and non_integral = ref 0 in
   (* Bind in ascending id order so the result does not depend on hash order. *)
@@ -1601,7 +1630,9 @@ let check_model (m : model) : result =
     ) m.observations;
     st.permissive_dim <- prev_permissive
   in
-  for _round = 1 to 3 do run_round () done;
+  run_round ();
+  st.recording <- false;
+  for _round = 2 to 3 do run_round () done;
   (* Solve the recorded product equations, then re-run the rounds so the newly
      bound variables propagate; repeat to a fixpoint. Each iteration that
      continues binds at least one variable, so this terminates; the bound is
