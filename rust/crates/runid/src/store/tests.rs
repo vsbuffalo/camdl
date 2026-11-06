@@ -1722,22 +1722,11 @@ fn record_updates_and_augments_of_one_leaf_lose_nothing() {
                 .unwrap()
         }));
     }
-    // One augment: two concurrent augments race in `augment`'s own advisory
-    // pre-check, which is not what this test is about.
-    for i in 0..1 {
+    for i in 0..4 {
         let (store, dest) = (store.clone(), dest.clone());
         handles.push(std::thread::spawn(move || {
             let name = format!("log_{i}.tsv");
-            // An augment refuses a live holder; retry until it gets the lock.
-            loop {
-                match store.augment(&dest, &LeafIdentity::new(a), &name, b"x") {
-                    Ok(()) => break,
-                    Err(CasError::FitInProgress { .. }) => {
-                        std::thread::sleep(std::time::Duration::from_millis(5))
-                    }
-                    Err(e) => panic!("{e}"),
-                }
-            }
+            store.augment(&dest, &LeafIdentity::new(a), &name, b"x").unwrap()
         }));
     }
     for h in handles {
@@ -1746,7 +1735,7 @@ fn record_updates_and_augments_of_one_leaf_lose_nothing() {
     match store.lookup(&dest, &LeafIdentity::new(a)) {
         Lookup::Hit(r) => {
             assert_eq!(r.children["ids"].len(), 12, "every update survives");
-            assert_eq!(r.artifacts.len(), 2, "the augment survives: {:?}", r.artifacts.keys());
+            assert_eq!(r.artifacts.len(), 5, "every augment survives: {:?}", r.artifacts.keys());
         }
         other => panic!("the leaf stays a Hit, got {other:?}"),
     }
@@ -1797,6 +1786,184 @@ fn a_crashed_record_update_leaves_a_hit() {
     match store.lookup(&dest, &LeafIdentity::new(a)) {
         Lookup::Hit(r) => assert_eq!(r.provenance.label.as_deref(), Some("after")),
         other => panic!("{other:?}"),
+    }
+    cleanup(&root);
+}
+
+// ── concurrent writers of one leaf's run.json ───────────────────────────────
+
+/// Augment `names` onto `dest` from one thread each, released together, and
+/// return each call's outcome.
+fn augment_all_at_once(
+    root: &std::path::Path,
+    dest: &std::path::Path,
+    a: ContentHash,
+    names: &[String],
+) -> Vec<(String, Result<(), String>)> {
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(names.len()));
+    let handles: Vec<_> = names
+        .iter()
+        .map(|name| {
+            let (root, dest, barrier, name) =
+                (root.to_path_buf(), dest.to_path_buf(), barrier.clone(), name.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                let r = FsCasStore::new(&root)
+                    .augment(&dest, &LeafIdentity::new(a), &name, name.as_bytes())
+                    .map_err(|e| e.to_string());
+                (name, r)
+            })
+        })
+        .collect();
+    handles.into_iter().map(|h| h.join().unwrap()).collect()
+}
+
+/// Four augments of different names onto one completed leaf, released at once
+/// from four threads. Each must return `Ok` and the record must name all four:
+/// the leaf lock serializes them, and a caller that finds the lock held by a
+/// live peer waits its turn rather than refusing. Threads share a pid, so to
+/// the lock a peer thread is exactly a live foreign holder.
+///
+/// The assertion that matters most is the pairing: an augment that returned
+/// `Ok` must be in the record. A call that returns `Ok` without recording its
+/// file is a silent loss — the CLI exits 0 and the artifact is gone.
+#[test]
+fn concurrent_augments_of_different_names_all_land() {
+    let root = tmp_root("augmentfour");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"traj")).unwrap();
+
+    for round in 0..10 {
+        let names: Vec<String> = (0..4).map(|i| format!("r{round}_{i}.tsv")).collect();
+        let outcomes = augment_all_at_once(&root, &dest, a, &names);
+        let recorded = match store.lookup(&dest, &LeafIdentity::new(a)) {
+            Lookup::Hit(r) => r.artifacts,
+            other => panic!("round {round}: expected Hit after four augments, got {other:?}"),
+        };
+        let silent: Vec<&String> = outcomes
+            .iter()
+            .filter(|(n, r)| r.is_ok() && !recorded.contains_key(n))
+            .map(|(n, _)| n)
+            .collect();
+        assert!(silent.is_empty(), "round {round}: returned Ok but not recorded: {silent:?}");
+        let refused: Vec<_> = outcomes.iter().filter(|(_, r)| r.is_err()).collect();
+        assert!(refused.is_empty(), "round {round}: every concurrent augment must land: {refused:?}");
+        assert!(!dest.join(".lock").exists(), "the lock must be released");
+    }
+    cleanup(&root);
+}
+
+/// An augment and an `update_record` racing on one leaf: both must land,
+/// neither writing back a record that drops the other's change.
+#[test]
+fn concurrent_augment_and_update_record_both_land() {
+    let root = tmp_root("augmentupdate");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"traj")).unwrap();
+
+    for round in 0..10 {
+        let name = format!("log_{round}.tsv");
+        let label = format!("label_{round}");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let aug = {
+            let (root, dest, barrier, name) =
+                (root.clone(), dest.clone(), barrier.clone(), name.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                FsCasStore::new(&root)
+                    .augment(&dest, &LeafIdentity::new(a), &name, b"log")
+                    .map_err(|e| format!("augment: {e}"))
+            })
+        };
+        let upd = {
+            let (dest, barrier, label) = (dest.clone(), barrier.clone(), label.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                update_record(&dest, |rec| {
+                    rec.provenance.label = Some(label);
+                    Ok(true)
+                })
+                .map_err(|e| format!("update_record: {e}"))
+            })
+        };
+        for r in [aug.join().unwrap(), upd.join().unwrap()] {
+            assert!(r.is_ok(), "round {round}: {r:?}");
+        }
+        match store.lookup(&dest, &LeafIdentity::new(a)) {
+            Lookup::Hit(r) => {
+                assert!(r.artifacts.contains_key(&name), "round {round}: {name} dropped");
+                assert_eq!(
+                    r.provenance.label.as_deref(),
+                    Some(label.as_str()),
+                    "round {round}: label dropped"
+                );
+            }
+            other => panic!("round {round}: expected Hit, got {other:?}"),
+        }
+    }
+    cleanup(&root);
+}
+
+/// The silent half of the race, made deterministic. A peer augment midway
+/// holds the lock and has written its file but not yet the record naming
+/// it, so to anyone outside the lock the leaf reads `Stale(OrphanFiles)`.
+/// An augment arriving in that window must wait and record its file, not
+/// take the transient state for "nothing to augment" and return `Ok` having
+/// recorded nothing — which the CLI turns into exit 0 without the artifact.
+#[test]
+fn an_augment_arriving_mid_peer_write_waits_and_records() {
+    let root = tmp_root("augmentmidpeer");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"traj")).unwrap();
+
+    // The peer, frozen midway: lock held by a live pid (ours), file written,
+    // record not yet updated.
+    fs::write(dest.join(".lock"), std::process::id().to_string()).unwrap();
+    fs::write(dest.join("peer.tsv"), b"peer").unwrap();
+    assert!(matches!(
+        store.lookup(&dest, &LeafIdentity::new(a)),
+        Lookup::Stale(StaleReason::OrphanFiles)
+    ));
+
+    let ours = {
+        let (root, dest) = (root.clone(), dest.clone());
+        std::thread::spawn(move || {
+            FsCasStore::new(&root).augment(&dest, &LeafIdentity::new(a), "ours.tsv", b"ours")
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // The peer finishes: records its file, then releases the lock.
+    let ReadResult::Ok(mut rec) = read_record(&dest) else { panic!("record") };
+    let meta = fs::metadata(dest.join("peer.tsv")).unwrap();
+    rec.artifacts.insert(
+        "peer.tsv".into(),
+        FileChecksum {
+            bytes: 4,
+            mtime: fmt_mtime(meta.modified().unwrap()),
+            digest: ContentHash::digest_bytes(b"peer"),
+        },
+    );
+    write_record_atomic(&dest, &rec).unwrap();
+    fs::remove_file(dest.join(".lock")).unwrap();
+
+    ours.join().unwrap().expect("our augment must land after the peer");
+    match store.lookup(&dest, &LeafIdentity::new(a)) {
+        Lookup::Hit(r) => {
+            assert!(r.artifacts.contains_key("peer.tsv"));
+            assert!(
+                r.artifacts.contains_key("ours.tsv"),
+                "augment returned Ok without recording its file: {:?}",
+                r.artifacts.keys()
+            );
+        }
+        other => panic!("expected Hit, got {other:?}"),
     }
     cleanup(&root);
 }

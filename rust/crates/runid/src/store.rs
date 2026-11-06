@@ -292,7 +292,9 @@ impl FsCasStore {
     /// Contract:
     /// - the leaf must be `Completed` AND carry `expected`'s identity — a
     ///   different identity at this path is someone else's artifact;
-    /// - a live `.lock` holder blocks (someone is claiming/reclaiming);
+    /// - a live `.lock` holder is waited for, up to `RECORD_EDIT_WAIT`, then
+    ///   refused with [`CasError::FitInProgress`]; concurrent augments of
+    ///   different names onto one leaf therefore all land;
     /// - re-adding the SAME bytes is an idempotent no-op, so a rerun that
     ///   records the log again is harmless;
     /// - re-adding DIFFERENT bytes under one name is
@@ -314,57 +316,44 @@ impl FsCasStore {
         name: &str,
         bytes: &[u8],
     ) -> Result<(), CasError> {
-        // ADVISORY pre-check, deliberately outside the lock: it only decides
-        // whether there is anything here worth locking for. Every decision
-        // that matters — idempotent re-add, divergence, the manifest we write
-        // back — is re-made under the lock below, against a fresh read.
-        //
-        // This ordering is load-bearing. `augment` is the store's only
-        // read-modify-write of `run.json` (`commit_atomic` gets its atomicity
-        // from staging + rename instead), so checking a pre-lock snapshot and
-        // writing it back after locking loses concurrent work two ways: two
-        // augments of the SAME name with different bytes both pass the check
-        // and the second silently overwrites the first (defeating the very
-        // guarantee `DivergentRecompute` exists to make), and two augments of
-        // DIFFERENT names each write back a snapshot missing the other's
-        // entry, orphaning a file and staleing a completed leaf. `simulate`
-        // augments exactly such a pair (`event_log.tsv`, `reactive_log.tsv`).
-        match self.lookup(path, expected) {
-            Lookup::Hit(_) => {}
-            Lookup::Collision(_) => {
-                return Err(CasError::AlreadyCompleted { path: path.display().to_string() })
-            }
-            _ => {
-                // Not a completed leaf of this identity: nothing to augment.
-                // The caller's next run will write it from scratch.
-                return Ok(());
-            }
+        // No record at all: nothing to augment and no leaf to lock. The
+        // caller's next run will write it from scratch. A record's presence
+        // is the only thing read before the lock; every decision about its
+        // contents is made under it.
+        if !path.join("run.json").is_file() {
+            return Ok(());
         }
 
-        // TEST-ONLY: fire at the instant a caller has read the leaf but not
-        // yet locked it — the window in which the pre-fix code made its
-        // idempotency/divergence decision. A test drives a full competing
-        // augment through here and asserts this caller, on resume, sees the
-        // competitor's write under the lock instead of clobbering it.
+        // TEST-ONLY: fire at the instant a caller has seen the leaf but not
+        // yet locked it. A test drives a full competing augment through here
+        // and asserts this caller, on resume, sees the competitor's write
+        // under the lock instead of clobbering it.
         #[cfg(test)]
         augment_gap_hook(path);
 
-        // Take the leaf's lock. A `.lock` on a COMPLETED leaf is either a
-        // concurrent augment (refuse) or debris from a crashed one (take
-        // over) — the same question every other lock consumer in this file
-        // asks, so it routes through the same answer. A bare
-        // `AlreadyExists -> FitInProgress` here would report "fit in progress"
-        // under a dead pid and wedge the leaf until `--force`, which is the
-        // failure `reclaim_or_refuse`'s own comment warns about.
-        let _lock = LeafLock::acquire(path, LockWait::Refuse)?;
+        // Take the leaf's lock, waiting out a live holder. The holders an
+        // augment meets on a completed leaf are other augments and record
+        // updates, each a few fsyncs, so it waits its turn as
+        // `update_record` does: refusing instead made all but one of a
+        // burst of augments onto one leaf fail with `FitInProgress`. A dead
+        // holder's lock is taken over through `reclaim_or_refuse`.
+        let _lock = LeafLock::acquire(path, LockWait::Upto(RECORD_EDIT_WAIT))?;
 
-        // Re-read UNDER the lock: the snapshot above may be stale.
+        // Classify the leaf UNDER the lock, and only there. A lookup made
+        // before the lock is a snapshot of a leaf other writers may be midway
+        // through changing, and acting on it loses work. An augment writes its
+        // file before the record that names it, so between those two steps the
+        // leaf reads `Stale(OrphanFiles)` to anyone not holding the lock; a
+        // pre-lock lookup that took that for "not a completed leaf" returned
+        // `Ok` having recorded nothing, and the caller exited 0 without its
+        // artifact. Under the lock no augment or record update is midway, so
+        // what this sees is the leaf's settled state.
         let mut record = match self.lookup(path, expected) {
             Lookup::Hit(r) => r,
             Lookup::Collision(_) => {
                 return Err(CasError::AlreadyCompleted { path: path.display().to_string() })
             }
-            // The leaf went away (or was reclaimed) between the two reads.
+            // Not a completed leaf of this identity: nothing to augment.
             _ => return Ok(()),
         };
 
