@@ -20,7 +20,7 @@ parameters {
 }
 
 forcing {
-  f_id : bspline 'per_day {
+  f_id : bspline 'ratio {
     window  = [0 'days, 60 'days]
     n_basis = 6
     coefs   = [c1, c2, c3, c4, c5, c6]
@@ -36,7 +36,7 @@ forcing {
     breakpoints = [0 'days, 10 'days, 25 'days, 60 'days]
     coefs       = [c1, c2, c3, c4, c5, c6]
   }
-  f_con : bspline 'per_day {
+  f_con : bspline 'ratio {
     window  = [0 'days, 60 'days]
     n_basis = 4
     coefs   = [a, 2 * a, 0.1, -a]
@@ -50,10 +50,10 @@ forcing {
 }
 
 transitions {
-  t_id  : X --> D1 @ f_id * X
+  t_id  : X --> D1 @ f_id * 1.0 'per_day * X
   t_log : X --> D2 @ f_log * X
   t_exp : X --> D3 @ exp(f_exp) * 0.1 'per_day * X
-  t_con : X --> D4 @ f_con * X
+  t_con : X --> D4 @ f_con * 1.0 'per_day * X
   t_per : X --> D5 @ f_per * X
 }
 

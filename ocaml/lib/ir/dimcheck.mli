@@ -39,6 +39,7 @@ type subject =
   | SObservation of string
   | SBinding     of string
   | SContrast    of string
+  | SInit        of string
 
 type diagnostic = {
   severity : severity;

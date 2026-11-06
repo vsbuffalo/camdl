@@ -120,6 +120,7 @@ type subject =
   | SObservation of string
   | SBinding     of string
   | SContrast    of string   (* contrast whose operand dimensions conflict *)
+  | SInit        of string   (* compartment whose initial condition *)
 
 type diagnostic = {
   severity : severity;
@@ -204,6 +205,13 @@ type state = {
      arguments are checked exactly even inside an observation, so their
      products are evidence and are recorded although [permissive_dim] is on. *)
   mutable contract_arg : bool;
+  (* Set while checking an initial condition, where a numeric literal has no
+     dimension of its own: `I = 10` is a count, `S = 0.06 * N0 - 50` mixes a
+     fraction and a count, and a `hyper_erlang` split of `I = 10` arrives as
+     `10 * cfr`. Each literal then infers a fresh variable, so it takes the
+     dimension its context requires, exactly as a literal ratio `1/730`
+     already does in a rate. *)
+  mutable literal_free : bool;
 }
 
 let create_state () = {
@@ -222,6 +230,7 @@ let create_state () = {
   obs_col_dims = Hashtbl.create 8;
   equations = [];
   contract_arg = false;
+  literal_free = false;
 }
 
 let fresh_var st =
@@ -333,6 +342,16 @@ let constrain_known st ~code ~message d expected =
    be dimensionally homogeneous, so a product there is not evidence about a
    parameter's dimension. The exception is a likelihood argument with a strict
    contract ([infer_contract_arg]), which is checked exactly. *)
+
+(* An expression with no leaf but literals: its value is fixed at compile time
+   and it carries no dimension of its own. *)
+let rec is_constant_expr (e : expr) : bool =
+  match e with
+  | Const _ -> true
+  | BinOp b -> is_constant_expr b.left && is_constant_expr b.right
+  | UnOp u -> is_constant_expr u.arg
+  | Cond c -> is_constant_expr c.pred && is_constant_expr c.then_ && is_constant_expr c.else_
+  | _ -> false
 
 let record_equation st (r : dim) (terms : (int * int * dim) list) =
   if (not st.permissive_dim) || st.contract_arg then
@@ -520,6 +539,7 @@ let rec reduce_add_chain : expr list -> expr = function
 let rec infer st ~ctx (e : expr) : dim =
   match e with
   | Const 0.0 -> Any
+  | Const _ when st.literal_free -> fresh_var st
   | Const _   -> Known dimensionless
   | Param name | ConstRef name ->
     (match Hashtbl.find_opt st.param_map name with
@@ -1307,6 +1327,99 @@ let check_model (m : model) : result =
       pin_expected st (infer st ~ctx eq.derivative) rate_total;
       propagate st ~ctx eq.derivative rate_total
     ) m.ode_equations;
+
+    (* Forcing arguments. A forcing's value carries its declared dimension
+       (the tier-3 unit on the declaration), so every argument that becomes
+       part of that value carries it too, and every argument read as a time
+       is a duration. From the runtime definitions in
+       rust/crates/sim/src/propensity.rs: a sinusoid is
+       baseline + amplitude * sin(2 pi (t - phase) / period); a periodic,
+       piecewise or interpolated forcing returns one of its values; a Fourier
+       series sums its harmonic coefficients; an identity-link spline sums
+       its coefficients times dimensionless basis functions. Log-link spline
+       coefficients are checked above. An argument that is constant
+       throughout (a literal, or a data value the expander wrote as unit-scaled
+       constant arithmetic) is read in the forcing's own unit and exempt; a
+       literal multiplying a parameter is a dimensionless factor. *)
+    List.iter (fun (tf : time_function) ->
+      st.subject <- None;
+      let (fp, ft) = tf.dim in
+      let value_dim = make fp ft and time_dim = make 0 1 in
+      let need what e want =
+        let ctx = Printf.sprintf "forcing '%s' %s" tf.name what in
+        if not (is_constant_expr e) then
+        constrain_known st ~code:"E312"
+            ~message:(Printf.sprintf
+              "forcing '%s': `%s` must have dimension %s" tf.name what
+              (if dim_eq want time_dim then "T (a duration)"
+               else formal_dim want ^ ", the forcing's declared dimension"))
+            (infer st ~ctx e) want
+      in
+      let need_all what es want = List.iteri (fun k e ->
+        need (Printf.sprintf "%s[%d]" what k) e want) es in
+      match tf.kind with
+      | Sinusoidal sn ->
+        need "amplitude" sn.amplitude value_dim;
+        need "baseline" sn.baseline value_dim;
+        need "period" sn.period time_dim;
+        need "phase" sn.phase time_dim
+      | Piecewise pw ->
+        need_all "breakpoints" pw.breakpoints time_dim;
+        need_all "values" pw.values value_dim
+      | Interpolated ip ->
+        need_all "times" ip.times time_dim;
+        need_all "values" ip.values value_dim
+      | Periodic pd ->
+        need "period" pd.period time_dim;
+        need_all "values" pd.values value_dim
+      | Fourier fo ->
+        need "period" fo.period time_dim;
+        List.iteri (fun k (a, b) ->
+          need (Printf.sprintf "harmonics[%d] cos" k) a value_dim;
+          need (Printf.sprintf "harmonics[%d] sin" k) b value_dim) fo.harmonics
+      | PeriodicSpline ps ->
+        need "period" ps.period time_dim;
+        if ps.link = Link_identity then need_all "coefs" ps.coefs value_dim
+      | BSpline bs ->
+        (match bs.knots with
+         | Knots_uniform { lower; upper; _ } ->
+           need "knot lower" lower time_dim; need "knot upper" upper time_dim
+         | Knots_explicit ks -> need_all "knots" ks time_dim);
+        (match bs.link, bs.coefs with
+         | Link_identity, Coefs_explicit cs -> need_all "coefs" cs value_dim
+         | _ -> ())
+    ) m.time_functions;
+
+    (* Initial conditions. Every compartment holds a population count, so a
+       deterministic initial value is a count, and so are the count-valued
+       arguments of an initial law; a law's probability and dispersion are
+       dimensionless, and a Normal law's spread has its mean's dimension.
+       Literals take the dimension their context requires ([literal_free]). *)
+    List.iter (fun ((comp, spec) : string * init_spec) ->
+      st.subject <- Some (SInit comp);
+      let ctx = Printf.sprintf "initial value of '%s'" comp in
+      let need what e want =
+        st.literal_free <- true;
+        let d = infer st ~ctx e in
+        st.literal_free <- false;
+        constrain_known st ~code:"E313"
+            ~message:(Printf.sprintf "%s: %s must have dimension %s"
+                        ctx what (dim_display want))
+            d want
+      in
+      match spec with
+      | Deterministic e -> need "the value" e population
+      | InitCount (InitPoisson l) -> need "Poisson `rate`" l.rate.expr population
+      | InitCount (InitBinomial l) ->
+        need "Binomial `n`" l.n population;
+        need "Binomial `p`" l.p.expr dimensionless
+      | InitCount (InitNegBinomial l) ->
+        need "NegBinomial `mean`" l.mean.expr population;
+        need "NegBinomial `dispersion`" l.dispersion.expr dimensionless
+      | InitReal (InitNormal l) ->
+        need "Normal `mean`" l.mean.expr population;
+        need "Normal `sd`" l.sd.expr population
+    ) m.initial_conditions;
 
     (* Observations — permissive-dim covers the *mean / rate / sd*
        positions because standard epi variance formulas (He et al.

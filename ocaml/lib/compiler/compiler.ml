@@ -556,6 +556,7 @@ let run_dimcheck_full (d : compile_detail)
       | Some (Dimcheck.SOde c)         -> Expander.compartment_loc d.ctx c
       | Some (Dimcheck.SObservation n) -> Expander.obs_loc         d.ctx n
       | Some (Dimcheck.SContrast n)    -> Expander.contrast_loc    d.ctx n
+      | Some (Dimcheck.SInit c)        -> Expander.compartment_loc d.ctx c
       | Some (Dimcheck.SBinding _) | None -> Diagnostics.no_loc
     in
     let result = Dimcheck.check_model d.model in

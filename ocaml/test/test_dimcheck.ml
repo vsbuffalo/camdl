@@ -1384,8 +1384,94 @@ let test_single_product_still_free () =
   Alcotest.(check bool) "I300 for a free pair" true (has_info "I300" r);
   Alcotest.(check (option (array int))) "a not bound" None (param_dim_of "a" r)
 
+(* ── Forcing arguments and initial conditions are dimension-checked ───── *)
+
+let diags_of src = Compiler.collect_diagnostics ~filename:"<visit>" src
+let has_code code ds = List.exists (fun (d : Diagnostics.diagnostic) -> d.code = code) ds
+let i300_names ds = List.filter_map (fun (d : Diagnostics.diagnostic) ->
+  if d.code = "I300" then Some d.message else None) ds
+let mentions name msg =
+  let needle = "'" ^ name ^ "'" in
+  let n = String.length needle and m = String.length msg in
+  let rec has i = i + n <= m && (String.sub msg i n = needle || has (i + 1)) in
+  has 0
+
+let sir_with ~params ~forcing ~init ~rate = Printf.sprintf {camdl|
+compartments { S, I, R }
+parameters { gamma : rate  %s }
+%s
+transitions {
+  infection : S --> I @ %s
+  recovery  : I --> R @ gamma * I
+}
+init { %s }
+|camdl} params forcing rate init
+
+(* `E = k * I`-style: a deterministic initial value is a count, so a factor
+   multiplying a count there is dimensionless. *)
+let test_init_value_determines () =
+  let ds = diags_of (sir_with ~params:"beta : rate  k : positive" ~forcing:""
+      ~init:"S = 990  I = k * 10  R = 0" ~rate:"beta * S * I / (S + I + R)") in
+  Alcotest.(check bool) "no errors" false (has_code "E313" ds);
+  Alcotest.(check bool) "k undetermined: the literal 10 is free" true
+    (List.exists (mentions "k") (i300_names ds));
+  let ds = diags_of (sir_with ~params:"beta : rate  k : positive" ~forcing:""
+      ~init:"S = 990  I = k * S  R = 0" ~rate:"beta * S * I / (S + I + R)") in
+  Alcotest.(check bool) "k determined by `I = k * S`" false
+    (List.exists (mentions "k") (i300_names ds))
+
+(* An initial value that is not a count is an error. *)
+let test_init_value_wrong_dimension () =
+  let ds = diags_of (sir_with ~params:"beta : rate" ~forcing:""
+      ~init:"S = 990  I = beta * S  R = 0" ~rate:"beta * S * I / (S + I + R)") in
+  Alcotest.(check bool) "E313 for a rate times a count" true (has_code "E313" ds)
+
+(* Literals in an initial condition take the dimension the context needs. *)
+let test_init_literals_free () =
+  let ds = diags_of (sir_with ~params:"beta : rate" ~forcing:""
+      ~init:"S = 0.06 * 1000 - 50  I = 10  R = 0" ~rate:"beta * S * I / (S + I + R)") in
+  Alcotest.(check bool) "no E302/E313" false (has_code "E302" ds || has_code "E313" ds)
+
+(* A sinusoid is baseline + amplitude * sin(...): the amplitude has the
+   forcing's dimension, the phase is a duration. *)
+let seasonal amp_expr phase_expr = Printf.sprintf {camdl|
+forcing {
+  seasonal : sinusoidal 'ratio {
+    amplitude = %s
+    period    = 365.25 'days
+    phase     = %s
+    baseline  = 1.0
+  }
+}
+|camdl} amp_expr phase_expr
+
+let test_forcing_arguments_determine () =
+  let ds = diags_of (sir_with ~params:"beta : rate  amp : real  ph : real"
+      ~forcing:(seasonal "amp" "ph") ~init:"S = 990  I = 10  R = 0"
+      ~rate:"beta * seasonal * S * I / (S + I + R)") in
+  Alcotest.(check bool) "no E312" false (has_code "E312" ds);
+  Alcotest.(check bool) "amp determined" false (List.exists (mentions "amp") (i300_names ds));
+  Alcotest.(check bool) "ph determined" false (List.exists (mentions "ph") (i300_names ds))
+
+let test_forcing_argument_wrong_dimension () =
+  let ds = diags_of (sir_with ~params:"beta : rate  ph : rate"
+      ~forcing:(seasonal "0.2" "ph") ~init:"S = 990  I = 10  R = 0"
+      ~rate:"beta * seasonal * S * I / (S + I + R)") in
+  Alcotest.(check bool) "E312 for a rate as a phase" true (has_code "E312" ds);
+  let ds = diags_of (sir_with ~params:"beta : rate  a : rate"
+      ~forcing:(seasonal "2 * a" "0 'days") ~init:"S = 990  I = 10  R = 0"
+      ~rate:"beta * seasonal * S * I / (S + I + R)") in
+  Alcotest.(check bool) "E312: a literal factor does not absorb a rate" true (has_code "E312" ds)
+
 let () =
   Alcotest.run "dimcheck" [
+    "visited_positions", [
+      Alcotest.test_case "init value determines"     `Quick test_init_value_determines;
+      Alcotest.test_case "init value wrong dimension" `Quick test_init_value_wrong_dimension;
+      Alcotest.test_case "init literals free"        `Quick test_init_literals_free;
+      Alcotest.test_case "forcing args determine"    `Quick test_forcing_arguments_determine;
+      Alcotest.test_case "forcing arg wrong dim"     `Quick test_forcing_argument_wrong_dimension;
+    ];
     "linear_solve", [
       Alcotest.test_case "two products jointly determine" `Quick test_two_products_jointly_determine;
       Alcotest.test_case "nested products, fractional"    `Quick test_nested_products_determine;
