@@ -204,8 +204,15 @@ order. Every handle now names one run, or is refused with the runs listed.
   did not. The name is no longer hashed (`ir` hash policy version 3 → 4), so
   identical models share every `run_id` with the cache on or off, and renaming a
   model file never re-keys it. Every model-bearing leaf (simulate, fit, pfilter,
-  survey, profile, simulate ensembles) re-keys once; a re-run recomputes it.
-  Migration: none.
+  survey, profile, simulate ensembles) re-keys once; a re-run recomputes it. A
+  run that reuses stored results computed from a file of another name
+  (`simulate`, `fit run`, `survey`) says so once, naming both files; the stored
+  runs keep the first file's directory names. `camdl pfilter` and
+  `camdl profile` look a stored result up under the current file name only, so
+  under another file name they recompute it; the write then finds the stored
+  leaf, keeps it, and stores nothing twice, and `pfilter` reports it `cached`
+  under the current file name's path, which does not exist on disk. Neither
+  warns. Migration: none.
 
 - **One integration-step rule for every backend and command.** A model's
   declared `simulate { dt = … }` is the step every fit method (`if2`, `pgas`,

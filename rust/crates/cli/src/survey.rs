@@ -397,6 +397,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     match crate::resolve::check_reuse(&store, &output_root, &resolved_artifact, policy) {
         Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
             crate::status::step("cached", dir.display());
+            crate::resolve::note_leaf_from_another_model_file(&dir, &model_path_str);
             let html_path = dir.join("landscape.html");
             if a.render && !html_path.exists() {
                 eprintln!("  rendering --render HTML from cached landscape.tsv …");

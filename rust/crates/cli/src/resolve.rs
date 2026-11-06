@@ -405,6 +405,46 @@ pub fn check_reuse(
     })
 }
 
+/// Warn when a leaf found by its hashes ([`runid::find_leaf`]) was computed from
+/// a model file of another name than `model_path`.
+///
+/// A model's file name is a label, not identity, so a byte-identical model
+/// under another name has the same run identity and is served the leaf the
+/// other file stored — under that file's directory label, with that file in its
+/// `provenance.source_paths`. The answer is right; the warning says whose file
+/// it was computed from, so a renamed or copied model is not mistaken for a
+/// fresh run of the new name. Printed once per (stored, current) file-name pair
+/// per process, however many leaves the run reuses. Silent when the leaf
+/// records no source path or the same file name (a model moved between
+/// directories keeps its label).
+pub(crate) fn note_leaf_from_another_model_file(leaf: &Path, model_path: &str) {
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<std::collections::BTreeSet<(String, String)>>> = OnceLock::new();
+    let file_name = |p: &str| {
+        Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned())
+    };
+    let stored = std::fs::read_to_string(leaf.join("run.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|rec| rec["provenance"]["source_paths"][0].as_str().map(str::to_owned));
+    let (Some(stored), Some(current)) = (stored.as_deref().and_then(file_name), file_name(model_path))
+    else {
+        return;
+    };
+    if stored == current {
+        return;
+    }
+    let mut warned = WARNED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if warned.insert((stored.clone(), current.clone())) {
+        eprintln!(
+            "warning: reusing stored runs computed from `{stored}`: `{current}` is the same \
+             model under another file name (the file name is a label, not part of the run \
+             identity). The stored runs keep `{stored}`'s directory names; first: {}",
+            leaf.display()
+        );
+    }
+}
+
 /// The outcome of [`begin_resolved_write`].
 pub enum ResolvedWrite {
     /// Atomic: already committed; the destination path.

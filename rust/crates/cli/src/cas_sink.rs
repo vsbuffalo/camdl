@@ -371,8 +371,13 @@ impl CasSink {
         rt: &crate::resolve::ResolvedTrajectory,
     ) -> (std::path::PathBuf, String) {
         let root = self.root();
-        let dir = runid::find_leaf(&root, runid::ArtifactKind::Sim, &rt.levels)
-            .unwrap_or_else(|| runid::store_path(&root, runid::ArtifactKind::Sim, &rt.levels));
+        let dir = match runid::find_leaf(&root, runid::ArtifactKind::Sim, &rt.levels) {
+            Some(dir) => {
+                crate::resolve::note_leaf_from_another_model_file(&dir, &self.model_path);
+                dir
+            }
+            None => runid::store_path(&root, runid::ArtifactKind::Sim, &rt.levels),
+        };
         let rel = dir.strip_prefix(&root).unwrap_or(&dir).to_string_lossy().into_owned();
         (dir, rel)
     }
@@ -485,6 +490,7 @@ impl CasSink {
                 }
             }
         }
+        crate::resolve::note_leaf_from_another_model_file(&dir, &self.model_path);
         Ok(Some(dir))
     }
 }

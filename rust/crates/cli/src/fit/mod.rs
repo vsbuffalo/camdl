@@ -1508,6 +1508,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
                     eprintln!("  \x1b[33mcache hit — reusing {}\x1b[0m",
                         dir.strip_prefix(&cas_root).unwrap_or(&dir).display());
+                    crate::resolve::note_leaf_from_another_model_file(
+                        &dir, &sweep_config.model.camdl);
                     // This config now names the stored run too.
                     if let Some(id) = cell_config_identity {
                         if let Err(e) =

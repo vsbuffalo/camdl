@@ -287,3 +287,40 @@ fn identical_models_under_two_file_names_share_run_ids_with_cache_on_and_off() {
         );
     }
 }
+
+/// Reusing a leaf computed from a model file of another name says so, once.
+/// `b.camdl` is byte-identical to `a.camdl`, so its run reuses the two leaves
+/// `a.camdl` stored, under `a`'s directory label. The run is right; the warning
+/// names both files so the reuse is not mistaken for a fresh run of `b.camdl`,
+/// and it is printed once for the pair, not once per reused leaf. Negative
+/// controls: neither the first run nor a re-run of `a.camdl` itself warns.
+#[test]
+fn reusing_a_leaf_stored_under_another_file_name_warns_once() {
+    const WARNING: &str = "is the same model under another file name";
+    let fx = Fixture::new("a");
+    let first = fx.simulate("a.camdl", &[]);
+    assert_ok(&first, "run over a.camdl");
+    let before = fx.sim_leaves();
+    assert_eq!(before.len(), 2, "two replicates are two leaves");
+    assert!(!String::from_utf8_lossy(&first.stderr).contains(WARNING), "a fresh run must not warn");
+
+    let again = fx.simulate("a.camdl", &[]);
+    assert_ok(&again, "re-run over a.camdl");
+    assert!(
+        !String::from_utf8_lossy(&again.stderr).contains(WARNING),
+        "reusing a leaf of the same file name must not warn"
+    );
+
+    std::fs::copy(fx.path("a.camdl"), fx.path("b.camdl")).unwrap();
+    let copy = fx.simulate("b.camdl", &[]);
+    assert_ok(&copy, "run over b.camdl");
+    let stderr = String::from_utf8_lossy(&copy.stderr);
+    let warnings: Vec<&str> = stderr.lines().filter(|l| l.contains(WARNING)).collect();
+    assert_eq!(warnings.len(), 1, "one warning for the (a, b) pair, not one per leaf:\n{stderr}");
+    assert!(
+        warnings[0].contains("`a.camdl`") && warnings[0].contains("`b.camdl`"),
+        "the warning names the stored file and the current one: {}",
+        warnings[0]
+    );
+    assert_eq!(fx.sim_leaves(), before, "b.camdl's run reuses a.camdl's leaves");
+}
