@@ -4912,6 +4912,54 @@ let find_identical_members ctx ~indices ~errors_before ~key
       Some (group, idle)
   end
 
+(** gh#482: a transition family must expand to members that differ from one
+    another. Members with the same stoichiometry, rate and draw method are the
+    same flow emitted twice, so the total rate is N times what the declaration
+    reads as: `inf[r in round] : S --> I @ beta * S` on unstratified S, I runs at
+    2 beta S. A branching member is compared as its whole list of transitions.
+
+    The rate is compared as [expand_transitions_counted] resolves it, before
+    constant folding. A table entry is still a `table_lookup` with a per-member
+    index here, so `beta * w[r] * S` gives distinct members even when two entries
+    of `w` are equal — which keeps the check independent of the data. Moving it
+    after table folding would refuse such a model on some data files and not on
+    others; a regression test pins this. *)
+let check_transition_family_distinct ctx (tr : transition_decl) ~errors_before
+    (members : ((string * string) list * Ir.transition list) list) =
+  let key ((_, ts) : (string * string) list * Ir.transition list) =
+    List.map (fun (t : Ir.transition) ->
+      (t.Ir.stoichiometry, t.Ir.rate, t.Ir.draw_method)) ts in
+  let members =
+    List.filter_map (fun (env, ts) ->
+      if ts = [] then None else Some (env, (env, ts))) members in
+  match find_identical_members ctx ~indices:tr.trindices ~errors_before ~key
+          members with
+  | None -> ()
+  | Some (group, idle) ->
+    (* One name per member, before any branch suffix. *)
+    let names = List.map (fun (env, _) ->
+        String.concat "_" (tr.trname :: name_parts_from_bindings tr.trindices env))
+        group in
+    let n = List.length group in
+    let quoted = String.concat ", " (List.map (Printf.sprintf "'%s'") idle) in
+    let plural = List.length idle > 1 in
+    let v = match idle with v :: _ -> v | [] -> "_" in
+    Diagnostics.error ctx.diags ~code:"E422"
+      ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
+      ~message:(Printf.sprintf
+        "transition family '%s' expands to %d members (%s) with the same \
+         stoichiometry and the same rate, so the flow is emitted %d times and \
+         its total rate is %d× what the declaration reads as"
+        (family_head tr.trname tr.trindices) n (String.concat ", " names) n n)
+      ~hint:(Printf.sprintf
+        "%s not distinguish the members: index a compartment by %s (e.g. \
+         `S[%s] --> I[%s]`) or a parameter (e.g. `beta[%s]`), or drop %s from \
+         the family's index list to emit the flow once"
+        (if plural then "binders " ^ quoted ^ " do" else "binder " ^ quoted ^ " does")
+        (if plural then "them" else "it") v v v
+        (if plural then "them" else "it"))
+      ()
+
 (** Check every compile-time guard for E217 (non-evaluable idents).
 
     All four guard-carrying surfaces must be walked: [eval_guard] substitutes
@@ -5024,6 +5072,7 @@ let resolve_lineage (ctx : context) (tr : Ast.transition_decl)
 let expand_transitions_counted ctx =
   let filtered = ref 0 in
   let expanded = List.concat_map (fun tr ->
+    let errors_before = count_errors ctx in
     let combos =
       cartesian_product ~loc:(diag_loc_of_ast_ctx ctx tr.trloc) tr.trindices ctx in
     let tr_filtered = ref 0 in
@@ -5174,6 +5223,8 @@ let expand_transitions_counted ctx =
           ) branches
       end
     ) combos in
+    check_transition_family_distinct ctx tr ~errors_before
+      (List.combine combos results);
     let results = List.concat results in
     (* Warn if a where guard filtered ALL combinations to zero transitions *)
     (match tr.trguard with

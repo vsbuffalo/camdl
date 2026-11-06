@@ -2847,6 +2847,98 @@ let test_family_e239_does_not_also_report_e421 () =
     Alcotest.(check bool) "no E421 cascade" false
       (contains_substring ~needle:"\"code\":\"E421\"" e)
 
+(* gh#482, transitions: a transition family whose binder its body does not use
+   emits identical transitions, so the flow runs once per member —
+   `inf[r in round] : S --> I @ beta * S` on unstratified S, I has a total rate
+   of 2 beta S. The members are compared after expansion, as with E421. *)
+let tfam_src ?(dims = "round = [r1, r2]") ?(extra = "") ~compartments
+    ?(strat = "") ?(init = "S = 1000  I = 0") body =
+  Printf.sprintf {|
+    time_unit = 'days
+    dimensions { %s }
+    compartments { %s }
+    %s
+    parameters { beta : rate  p : probability }
+    %s
+    transitions { %s }
+    init { %s }
+    simulate { from = 0 'days to = 20 'days }
+  |} dims compartments strat extra body init
+
+let test_tfam_unused_binder_rejected () =
+  compile_expect_error_code ~code:"E422" ~contains:"inf[r in round]"
+    (tfam_src ~compartments:"S, I" "inf[r in round] : S --> I @ beta * S")
+
+let test_tfam_unused_binder_branches_rejected () =
+  compile_expect_error_code ~code:"E422" ~contains:"2 members (inf_r1, inf_r2)"
+    (tfam_src ~compartments:"S, I, R" ~init:"S = 1000  I = 0  R = 0"
+       "inf[r in round] : S --> { I : p, R : 1 - p } @ beta * S")
+
+let test_tfam_names_only_the_idle_binder () =
+  let src = tfam_src ~dims:"age = [child, adult]  round = [r1, r2]"
+      ~compartments:"S, I" ~strat:"stratify(by = age)"
+      ~init:"S[a in age] = 1000  I[a in age] = 0"
+      "inf[a in age, r in round] : S[a] --> I[a] @ beta * S[a]" in
+  compile_expect_error_code ~code:"E422" ~contains:"binder 'r' does not" src;
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"e422_idle_binder" src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E422"
+  | Error e ->
+    Alcotest.(check bool) "does not blame the distinguishing binder 'a'" false
+      (contains_substring ~needle:"binder 'a'" e)
+
+let test_tfam_guard_leaving_two_identical_rejected () =
+  compile_expect_error_code ~code:"E422" ~contains:"inf_r2, inf_r3"
+    (tfam_src ~dims:"round = [r1, r2, r3]" ~compartments:"S, I"
+       "inf[r in round] : S --> I @ beta * S where r != r1")
+
+let test_tfam_guard_leaving_one_compiles () =
+  let m = compile_expect_ok
+    (tfam_src ~compartments:"S, I"
+       "inf[r in round] : S --> I @ beta * S where r == r1") in
+  Alcotest.(check int) "one transition" 1 (List.length m.Ir.transitions)
+
+let test_tfam_binder_in_rate_coinciding_table_compiles () =
+  (* `w[r]` uses the binder and the two entries happen to be equal. The final
+     IR folds both rates to `beta * S`, but the check sees them before folding,
+     as lookups at different indices, so the model compiles exactly as it does
+     with w = [1.0, 1.1]. Fails if the check is moved after table folding, which
+     would make compilation depend on the data. *)
+  let m = compile_expect_ok
+    (tfam_src ~compartments:"S, I" ~extra:"tables { w : round = [1.0, 1.0] }"
+       "inf[r in round] : S --> I @ beta * w[r] * S") in
+  Alcotest.(check int) "two transitions" 2 (List.length m.Ir.transitions)
+
+let test_tfam_used_coinciding_and_unused_binder_rejected () =
+  (* `a` is used (through `w[a]`, whose entries coincide) and `r` is not. The
+     members differing in `a` are distinct; those differing only in `r` are
+     identical, and the message must name `r`. *)
+  compile_expect_error_code ~code:"E422" ~contains:"binder 'r' does not"
+    (tfam_src ~dims:"round = [r1, r2]  age = [child, adult]"
+       ~compartments:"S, I" ~extra:"tables { w : age = [1.0, 1.0] }"
+       "inf[r in round, a in age] : S --> I @ beta * w[a] * S")
+
+let test_tfam_binder_in_parameter_compiles () =
+  let m = compile_expect_ok
+    (tfam_src ~compartments:"S, I" ~extra:"parameters { b[round] : rate }"
+       "inf[r in round] : S --> I @ b[r] * S") in
+  Alcotest.(check int) "two transitions" 2 (List.length m.Ir.transitions)
+
+let test_tfam_earlier_error_no_e422 () =
+  (* An undeclared name in the rate is the mistake; E422 must not pile on. *)
+  let src = tfam_src ~compartments:"S, I"
+      "inf[r in round] : S --> I @ gamma_typo * S" in
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"e422_no_cascade" src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected an undeclared-name error"
+  | Error e ->
+    Alcotest.(check bool) "no E422 cascade" false
+      (contains_substring ~needle:"\"code\":\"E422\"" e)
+
 let test_transfer_single_level_dimensions_rejected () =
   (* A family with exactly ONE cell resolves to `Ir.Pop`, not `Ir.PopSum`.
      Keying the shape on that constructor would give it no dimensions and let it
@@ -14816,6 +14908,26 @@ let () =
         `Quick test_incidence_positional_and_named_produce_equal_projections;
       Alcotest.test_case "§14 consecutive(k) → k-1 adjacent pairs (P3.4)"
         `Quick test_consecutive_pair_count;
+    ];
+    "transition_families", [
+      Alcotest.test_case "E422 family ignoring its binder (gh#482)"
+        `Quick test_tfam_unused_binder_rejected;
+      Alcotest.test_case "E422 branching family ignoring its binder (gh#482)"
+        `Quick test_tfam_unused_binder_branches_rejected;
+      Alcotest.test_case "E422 names only the idle binder (gh#482)"
+        `Quick test_tfam_names_only_the_idle_binder;
+      Alcotest.test_case "E422 guard leaving two identical members (gh#482)"
+        `Quick test_tfam_guard_leaving_two_identical_rejected;
+      Alcotest.test_case "guard leaving one member compiles (gh#482)"
+        `Quick test_tfam_guard_leaving_one_compiles;
+      Alcotest.test_case "binder in rate, coinciding table entries (gh#482)"
+        `Quick test_tfam_binder_in_rate_coinciding_table_compiles;
+      Alcotest.test_case "E422 used binder plus unused binder (gh#482)"
+        `Quick test_tfam_used_coinciding_and_unused_binder_rejected;
+      Alcotest.test_case "binder in an indexed parameter compiles (gh#482)"
+        `Quick test_tfam_binder_in_parameter_compiles;
+      Alcotest.test_case "earlier error does not also report E422 (gh#482)"
+        `Quick test_tfam_earlier_error_no_e422;
     ];
     "interventions", [
       Alcotest.test_case "intervention expansion" `Quick test_intervention_expansion;

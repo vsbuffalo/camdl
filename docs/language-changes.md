@@ -13,6 +13,23 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-05 — an indexed transition family whose members are identical is refused
+
+**What.** Every member of an indexed transition family is its own flow. A family
+whose binder appears in neither its compartments nor its rate expanded to
+identical transitions and ran the flow once per member, with no diagnostic:
+`inf[r in round] : S --> I @ beta * S` on unstratified `S`, `I` ran at
+`2 beta S`. A transition family that expands to two members with the same
+stoichiometry and the same rate is now **E422**, naming the binder that fails to
+distinguish them (gh#482). Families that index a compartment or a parameter by
+the binder, look up a table by it, or use a guard leaving one member are
+unaffected.
+
+**Migration.** Use the binder, or drop it.
+`inf[r in round] : S --> I @ beta * S` → `inf : S --> I @ beta * S` if one flow
+was meant, or `inf[r in round] : S[r] --> I[r] @ beta * S[r]` with `S`, `I`
+stratified by `round` if each level has its own flow.
+
 ## 2026-11-05 — an indexed effect family whose members are identical is refused
 
 **What.** Every member of an indexed intervention, event or reactive family

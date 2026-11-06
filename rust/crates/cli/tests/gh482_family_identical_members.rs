@@ -4,6 +4,11 @@
 //! individuals (S = 900, V = 100 at t = 11 with n = 50). The compiler now
 //! refuses it with E421; this test pins the text a user sees through the CLI,
 //! and a positive control pins that the unindexed form still moves n.
+//!
+//! The transition analogue, `inf[r in round] : S --> I @ beta * S` on
+//! unstratified S, I, emitted two identical transitions and ran at 2 beta S
+//! (ODE, beta = 0.05: S(10) = 368 = 1000 e^-1.0, against 607 = 1000 e^-0.5
+//! unindexed). It is now E422, pinned the same way.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -113,4 +118,92 @@ fn unindexed_intervention_moves_n_once() {
         .expect("a row at t = 11");
     assert_eq!(row[s].parse::<f64>().unwrap(), 950.0, "S at t = 11");
     assert_eq!(row[v].parse::<f64>().unwrap(), 50.0, "V at t = 11");
+}
+
+fn transition_model(head: &str) -> String {
+    format!(
+        r#"
+dimensions {{ round = [r1, r2] }}
+compartments {{ S, I }}
+parameters {{ beta : rate }}
+transitions {{
+  {head} : S --> I @ beta * S
+}}
+init {{ S = 1000 I = 0 }}
+simulate {{ from = 0 'days to = 20 'days }}
+"#
+    )
+}
+
+fn simulate_ode(bin: &Path, model_path: &Path) -> std::process::Output {
+    Command::new(bin)
+        .args([
+            "simulate",
+            &model_path.to_string_lossy(),
+            "--param",
+            "beta=0.05",
+            "--stdout",
+            "--backend",
+            "ode",
+        ])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output()
+        .expect("spawn camdl simulate")
+}
+
+#[test]
+fn transition_family_ignoring_its_binder_is_refused_with_e422() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("t.camdl");
+    std::fs::write(&path, transition_model("inf[r in round]")).unwrap();
+
+    let out = simulate_ode(&bin, &path);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a transition family of identical members must be refused. stderr:\n{stderr}"
+    );
+    for needle in [
+        "E422",
+        "transition family 'inf[r in round]' expands to 2 members (inf_r1, inf_r2)",
+        "its total rate is 2× what the declaration reads as",
+        "binder 'r' does not distinguish the members",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "expected {needle:?} in the diagnostic, got:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn unindexed_transition_runs_at_beta() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("t.camdl");
+    std::fs::write(&path, transition_model("inf")).unwrap();
+
+    let out = simulate_ode(&bin, &path);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "simulate failed:\n{stderr}");
+
+    let mut lines = stdout.lines().filter(|l| !l.starts_with('#'));
+    let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
+    let col = |name: &str| {
+        header
+            .iter()
+            .position(|h| *h == name)
+            .unwrap_or_else(|| panic!("no column {name} in {header:?}"))
+    };
+    let (t, s) = (col("t"), col("S"));
+    let row: Vec<&str> = lines
+        .map(|l| l.split('\t').collect::<Vec<_>>())
+        .find(|r| r[t].parse::<f64>().unwrap() == 10.0)
+        .expect("a row at t = 10");
+    // 1000 e^(-0.05 * 10) = 606.53; the output is rounded to whole people.
+    // The doubled rate gives 368 (1000 e^-1.0), far outside this window.
+    let s10 = row[s].parse::<f64>().unwrap();
+    assert!((s10 - 606.53).abs() <= 1.0, "S at t = 10 was {s10}, want ~607");
 }

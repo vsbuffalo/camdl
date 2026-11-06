@@ -2329,6 +2329,18 @@ The `[i in dim]` clause binds index variables. The compiler generates one
 concrete IR transition per combination of index values. Dimensionality is known
 at compile time: `|dim1| × |dim2| × ...` transitions.
 
+**Every member must differ from the others.** Each generated transition is its
+own flow, so two members with the same stoichiometry and the same rate run the
+same flow twice. `inf[r in round] : S --> I @ beta * S` on unstratified `S` and
+`I` never mentions `r`, so it would emit `inf_r1` and `inf_r2` and run at
+`2 beta S` from a declaration that reads as `beta S`. A family whose expansion
+yields two such members is **E422**, which names the binder that fails to
+distinguish them. Index a compartment by it (`S[r] --> I[r]`) or a parameter
+(`beta[r]`), or drop it. The rule compares the expanded members: a `where` guard
+that leaves a single member is legal. A table lookup counts as using the binder
+even when two entries are equal, because the members are compared before table
+entries are folded to constants.
+
 ### 9.3 Guard Clauses (`where`)
 
 The `where` clause filters which index combinations generate transitions:
