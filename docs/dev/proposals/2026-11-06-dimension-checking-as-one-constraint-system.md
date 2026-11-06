@@ -2,7 +2,7 @@
 
 Date: 2026-11-06
 
-Status: proposed, for review before implementation
+Status: accepted 2026-11-06; implementation on `docs/size-brackets-dim-clause`
 
 Builds on: `docs/dev/proposals/2026-11-05-size-brackets-and-dim-clause.md` (§4,
 §5) and `docs/dev/notes/2026-11-05-dimension-inference-measurement.md`
@@ -16,7 +16,7 @@ about 650 lines of `check_model`. That list skips whole regions of the model:
 every intervention, event and reactive-trigger expression, every prior argument,
 quantity thresholds and times, smooth-spline modes, and (under a blanket
 permissive mode) the inside of every likelihood argument and every derived
-projection. Twenty-two minimal models written for this review compile cleanly on
+projection. Twenty-one minimal models written for this review compile cleanly on
 both `main` (`6bcffa45`) and this branch although each contains a dimension
 error, and four more valid models are refused (§2). Separately, the checker
 mixes two inference mechanisms, two passes, three rounds and a fixpoint, a
@@ -33,8 +33,9 @@ This proposal replaces all of it with one design:
    constructor does not compile until someone writes its rule.
 2. **One equation system.** Each expression contributes linear equations over
    integer exponent vectors (Kennedy, "Dimension types", ESOP 1994), each tagged
-   with the position it came from. Each obligation contributes one more
-   equation.
+   with the position it came from. Each obligation of a model position
+   contributes one more equation. Prior arguments are covered too, but are
+   checked after the solve and contribute none (§5.9).
 3. **One solver.** Exact integer elimination on unit pivots, then a Hermite
    normal form on the small remainder, distinguishes determined,
    underdetermined, contradictory and integer-infeasible systems. Every
@@ -42,10 +43,10 @@ This proposal replaces all of it with one design:
 
 It also fixes the semantic errors the review found: the overdispersion variance
 has dimension T, not 1 (E308 is wrong); `'count` literals lose their P during
-lowering; a typed constant silently overrides a unit literal; unit literals on
-log-scale prior arguments are converted multiplicatively; hierarchical prior
-arguments get no name checks and can produce a chain that never moves and exits
-0.
+lowering; a typed constant silently overrides a unit literal; a unit literal
+passed directly as a log-scale prior argument is converted multiplicatively;
+hierarchical prior arguments get no name checks and can produce a chain that
+never moves and exits 0.
 
 **Return on investment: high, and I recommend doing it before families Stage
 A.** Families multiplies the expression-bearing positions (indexed priors,
@@ -75,8 +76,6 @@ regression from this branch. "Clean" means exit 0 and no diagnostic.
 | schedule time expression                 | `... at [gamma]`                                                 | T                                                 |
 | reactive threshold                       | `when sum_observed(cases, ...) >= thr`, `thr : rate`             | the stream's dimension, P                         |
 | reactive action fraction                 | `sia_cov : rate` as `fraction`                                   | 1                                                 |
-| θ under a `beta` prior                   | `w : rate ~ beta(alpha = 2, beta = 2)`                           | θ = 1                                             |
-| hierarchical prior spread                | `w : rate ~ normal(mu = m, sigma = s)`, `s : probability`        | T⁻¹                                               |
 | log-scale prior argument with a unit     | `log_normal(mu = -2 'per_day, ...)` under weeks → IR μ = −14     | refused                                           |
 | dimensionless prior argument with a unit | `log_normal(..., sigma = 0.5 'days)` under weeks → IR σ = 0.0714 | refused                                           |
 | Normal likelihood mean                   | `normal(mean = gamma * projected, ...)` on a `count` column      | P                                                 |
@@ -159,8 +158,9 @@ dead `transform` field) out of this work.
 
 - _The count-noise exception._ Its scope should be exactly the `sd` of a
   `normal` likelihood whose scored column is declared `count`, not every Normal,
-  and not a `real` column that happens to hold a count-valued mean (§5.6).
-  Normal priors and the `normal` initial-value law stay strict.
+  and not a `real` column that happens to hold a count-valued mean (§5.6). The
+  `normal` initial-value law stays strict. Priors are not model positions at all
+  (§5.9).
 - _Deleting union-find._ Plain equalities are equations too, so the separate
   mechanism goes; whether a union-find fast path survives inside the solver is
   decided by the compile-time benchmark, not in advance (§6.5).
@@ -192,9 +192,10 @@ parameterization is the one in Stan's `lognormal(mu, sigma)` and R's
 `dlnorm(meanlog, sdlog)` (R Core Team, `stats` package documentation; Stan
 Development Team, _Stan Functions Reference_, "Lognormal distribution"; both
 from memory, sections not re-checked), and departing from it would cost every
-user to fix a problem only unit literals cause. The rule becomes: μ and σ are
-dimensionless; a hierarchical μ must be a dimensionless parameter; a unit
-literal in either is refused with a hint that names the additive conversion.
+user to fix a problem only unit literals cause. The rule becomes: a unit literal
+passed directly as μ or σ must be dimensionless, and one that is not is refused
+with a hint that names the additive conversion; `log(0.2 'per_day)` and a
+hierarchical μ of any declared dimension are accepted (§5.9).
 
 **Does the directive go too far anywhere?** In one place it risks it: "every
 expression-bearing position" includes the derivative maps autodiff writes into
@@ -264,6 +265,11 @@ type literals =
   | Whole_terms_take_obligation  (* a literal that is an entire additive term
                                     of this position takes its dimension *)
 
+type strength =
+  | Binding   (* a model position: its equations and obligation enter the solve *)
+  | Checked   (* a prior argument: evaluated after the solve by [Prior_units],
+                 parameter dimensions read only, no equation emitted (§5.9) *)
+
 type site = {
   id         : int;
   subject    : Dimcheck.subject;   (* where diagnostics point *)
@@ -273,6 +279,7 @@ type site = {
   obligation : obligation;
   literals   : literals;
   code       : string;             (* the error code a violation reports *)
+  strength   : strength;
 }
 
 val sites : Dimcheck.input -> site list
@@ -471,7 +478,9 @@ val solve : eqn list -> outcome
 5. **Underdetermination.** A variable that remains free is not an error. For
    each undetermined parameter, I300 (Info) reports the relations that _are_
    determined, eliminated down to parameter names: "only `kappa · w` is
-   determined: T⁻¹". No dimension is invented.
+   determined: T⁻¹". No dimension is invented. A parameter that appears in no
+   `Binding` site (one used only in prior arguments, or not at all) is not
+   reported: its dimension matters to nothing.
 
 ### 4.5 Diagnostics
 
@@ -498,44 +507,44 @@ Dimensions: P a population count, T time, D the enclosing forcing's declared
 unit, θ the parameter a prior is on. "Lit" marks positions where a literal that
 is an entire additive term takes the obligation (§5.2).
 
-| Position                                                                                                                                 | Obligation                                    | Code |
-| ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ---- |
-| transition rate                                                                                                                          | P·T⁻¹ (Lit)                                   | E300 |
-| overdispersion σ²                                                                                                                        | T (§5.7)                                      | E308 |
-| ODE derivative                                                                                                                           | P·T⁻¹ (Lit)                                   | E306 |
-| balance expression                                                                                                                       | P (Lit)                                       | E305 |
-| binding body                                                                                                                             | defines the binding's dimension               | E302 |
-| forcing `lag`                                                                                                                            | T                                             | E309 |
-| sinusoid baseline, amplitude; piecewise, interpolated, periodic values; Fourier coefficients; identity-link explicit spline coefficients | D (constant arguments exempt, as now)         | E312 |
-| periods, phases, breakpoints, interpolation times, knots                                                                                 | T                                             | E312 |
-| log-link spline coefficients                                                                                                             | 1                                             | E301 |
-| smooth `per`                                                                                                                             | T                                             | E312 |
-| smooth level, slope, scale, modes: log link                                                                                              | 1, T⁻¹, 1, 1 (§5.8)                           | E312 |
-| smooth level, slope, scale, modes: identity link                                                                                         | D, D·T⁻¹, D, 1 (§5.8)                         | E312 |
-| inline table values                                                                                                                      | the table's cell dimension                    | E302 |
-| table lookup index                                                                                                                       | 1                                             | E311 |
-| initial value; Poisson rate; Binomial n; NegBinomial mean                                                                                | P (Lit)                                       | E313 |
-| initial Binomial p; NegBinomial dispersion                                                                                               | 1                                             | E313 |
-| initial Normal mean, sd                                                                                                                  | P, P (Lit)                                    | E313 |
-| transfer fraction                                                                                                                        | 1                                             | E314 |
-| transfer count; assigned value; added count                                                                                              | P (Lit)                                       | E314 |
-| schedule time expression                                                                                                                 | T                                             | E315 |
-| reactive threshold parameter                                                                                                             | the stream's dimension                        | E315 |
-| projection `DerivedExpr`                                                                                                                 | defines the stream's dimension                | E302 |
-| Poisson rate; NegBinomial and zero-inflated mean                                                                                         | P (Lit)                                       | E304 |
-| Binomial and BetaBinomial n                                                                                                              | P (Lit)                                       | E304 |
-| Binomial and Bernoulli p; Beta mean; zero-inflation π                                                                                    | 1                                             | E304 |
-| dispersions; Beta concentration; BetaBinomial shapes                                                                                     | 1                                             | E304 |
-| Normal mean                                                                                                                              | the scored column's dimension (§5.6)          | E304 |
-| Normal sd                                                                                                                                | §5.6                                          | E304 |
-| prior arguments                                                                                                                          | per family (§5.9)                             | E316 |
-| quantity series                                                                                                                          | defines the series dimension                  | E302 |
-| quantity thresholds (`count_above`, `first_above`, ...)                                                                                  | the series dimension (Lit)                    | E317 |
-| `value_at` time                                                                                                                          | T                                             | E317 |
-| derived-quantity arithmetic; contrasts                                                                                                   | operator rules of §4.3                        | E297 |
-| derivative maps (`rate_grad`, `rate_state_grad`, `sigma_sq_grad`, `diffable.grad`, `proj_grad`, `ic_grad`, `projection_state_grad`)      | exempt: produced by autodiff                  | —    |
-| lineage parent-pool weights                                                                                                              | exempt: derived from the rate by the expander | —    |
-| per-eval bindings                                                                                                                        | exempt: created after dimcheck                | —    |
+| Position                                                                                                                                 | Obligation                                         | Code |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | ---- |
+| transition rate                                                                                                                          | P·T⁻¹ (Lit)                                        | E300 |
+| overdispersion σ²                                                                                                                        | T (§5.7)                                           | E308 |
+| ODE derivative                                                                                                                           | P·T⁻¹ (Lit)                                        | E306 |
+| balance expression                                                                                                                       | P (Lit)                                            | E305 |
+| binding body                                                                                                                             | defines the binding's dimension                    | E302 |
+| forcing `lag`                                                                                                                            | T                                                  | E309 |
+| sinusoid baseline, amplitude; piecewise, interpolated, periodic values; Fourier coefficients; identity-link explicit spline coefficients | D (constant arguments exempt, as now)              | E312 |
+| periods, phases, breakpoints, interpolation times, knots                                                                                 | T                                                  | E312 |
+| log-link spline coefficients                                                                                                             | 1                                                  | E301 |
+| smooth `per`                                                                                                                             | T                                                  | E312 |
+| smooth level, slope, scale, modes: log link                                                                                              | 1, T⁻¹, 1, 1 (§5.8)                                | E312 |
+| smooth level, slope, scale, modes: identity link                                                                                         | D, D·T⁻¹, D, 1 (§5.8)                              | E312 |
+| inline table values                                                                                                                      | the table's cell dimension                         | E302 |
+| table lookup index                                                                                                                       | 1                                                  | E311 |
+| initial value; Poisson rate; Binomial n; NegBinomial mean                                                                                | P (Lit)                                            | E313 |
+| initial Binomial p; NegBinomial dispersion                                                                                               | 1                                                  | E313 |
+| initial Normal mean, sd                                                                                                                  | P, P (Lit)                                         | E313 |
+| transfer fraction                                                                                                                        | 1                                                  | E314 |
+| transfer count; assigned value; added count                                                                                              | P (Lit)                                            | E314 |
+| schedule time expression                                                                                                                 | T                                                  | E315 |
+| reactive threshold parameter                                                                                                             | the stream's dimension                             | E315 |
+| projection `DerivedExpr`                                                                                                                 | defines the stream's dimension                     | E302 |
+| Poisson rate; NegBinomial and zero-inflated mean                                                                                         | P (Lit)                                            | E304 |
+| Binomial and BetaBinomial n                                                                                                              | P (Lit)                                            | E304 |
+| Binomial and Bernoulli p; Beta mean; zero-inflation π                                                                                    | 1                                                  | E304 |
+| dispersions; Beta concentration; BetaBinomial shapes                                                                                     | 1                                                  | E304 |
+| Normal mean                                                                                                                              | the scored column's dimension (§5.6)               | E304 |
+| Normal sd                                                                                                                                | §5.6                                               | E304 |
+| prior arguments                                                                                                                          | `Checked`, no equation: explicit units only (§5.9) | E316 |
+| quantity series                                                                                                                          | defines the series dimension                       | E302 |
+| quantity thresholds (`count_above`, `first_above`, ...)                                                                                  | the series dimension (Lit)                         | E317 |
+| `value_at` time                                                                                                                          | T                                                  | E317 |
+| derived-quantity arithmetic; contrasts                                                                                                   | operator rules of §4.3                             | E297 |
+| derivative maps (`rate_grad`, `rate_state_grad`, `sigma_sq_grad`, `diffable.grad`, `proj_grad`, `ic_grad`, `projection_state_grad`)      | exempt: produced by autodiff                       | —    |
+| lineage parent-pool weights                                                                                                              | exempt: derived from the rate by the expander      | —    |
+| per-eval bindings                                                                                                                        | exempt: created after dimcheck                     | —    |
 
 E311 and E314–E317 are unused codes; E303 is retired (§6.4).
 
@@ -578,8 +587,9 @@ the parameter grammar reused.
   refused: `let tau : rate = 30 'days` (today accepted as the number 30.0 of
   kind `rate`).
 - E107 does not fire when the unit literal is parenthesized: `I / (5 'days)`.
-- Unit literals are refused on log-scale and dimensionless prior arguments
-  (§5.9).
+- A unit literal whose dimension disagrees with its prior argument's
+  conventional dimension is refused, including one passed directly as a
+  log-normal argument (§5.9).
 
 ### 5.4 Powers
 
@@ -631,11 +641,11 @@ reporting error.
 
 Keeping only the T components is exact because the system decouples by base. A
 sum inside the sd whose terms differ in T, such as `projected + gamma`, is still
-an error. The exemption does not extend to Normal priors, to the initial
-`normal` law, or to a `real` column: there, sd and mean have the same dimension.
-Whether some existing model uses a `real` column for count data with a
-P-inhomogeneous sd is measured across the corpora before this rule lands; if one
-does, the right fix is to declare the column `count`.
+an error. The exemption does not extend to the initial `normal` law or to a
+`real` column: there, sd and mean have the same dimension. Whether some existing
+model uses a `real` column for count data with a P-inhomogeneous sd is measured
+across the corpora before this rule lands; if one does, the right fix is to
+declare the column `count`.
 
 ### 5.7 Overdispersion σ² has dimension T
 
@@ -666,45 +676,141 @@ it, and z is dimensionless. Under the log link w is dimensionless (1, T⁻¹, 1,
 the proposal's definitions, not a reading of the runtime; the implementation
 commit checks it against the Rust construction of M and κ.
 
-### 5.9 Priors: one set of rules for constant and hierarchical arguments
+### 5.9 Priors: numerical coordinates, with explicit units honoured
 
-Names, required arguments, domains and permitted expression forms are checked by
-one function in the expander, applied to both branches of
-`classify_and_resolve_prior_spec`. Hierarchical arguments may mention parameters
-and constants only: time, `dt`, compartments, projections and observation
-columns are refused. Dimensions are checked by the sites of §5.1 from
-`prior_args`, with θ of dimension d:
+Dimensional analysis has two jobs in camdl, and they are different in kind. In
+model dynamics it is a type system: a transition rate that is not P·T⁻¹, or a
+duration added to a rate, is wrong epidemic mathematics, and §5.1 refuses it. In
+prior specification it is closer to a modelling linter. A prior is a probability
+measure on the number θ takes in model units; the parameter's dimension comes
+from its declaration and its use in the model, never from the family chosen for
+its prior. `gamma : rate ~ beta(alpha = 2, beta = 2)` is a valid prior on a
+recovery rate whose numerical value lies in (0, 1) per `time_unit`. That a Beta
+family is not closed under a change of unit does not make it an invalid choice:
+the measure transforms with the Jacobian of the change of coordinates, and its
+density, which has units of 1/[θ], changes form.
 
-| Family           | Arguments           | θ     |
-| ---------------- | ------------------- | ----- |
-| uniform          | lower, upper: d     |       |
-| normal           | mu, sigma: d        |       |
-| truncated normal | mean, sd: d         |       |
-| half-normal      | sigma: d            |       |
-| exponential      | rate: d⁻¹           |       |
-| gamma            | shape: 1; rate: d⁻¹ |       |
-| beta             | alpha, beta: 1      | θ = 1 |
-| log-uniform      | lower, upper: d     |       |
-| log-normal       | mu, sigma: 1        |       |
+Three rules follow, and nothing else is checked.
 
-A unit literal is accepted where the argument has dimension d or d⁻¹, and is
-converted as now (`normal(mu = 0.2 'per_day)` under weeks gives 1.4, which is
-right). On a dimensionless argument it is refused. On log-normal μ the hint
-names the conversion: "μ is the mean of ln θ in model units; under
-`time_unit = 'weeks` a median of 0.135 per day is μ = ln(0.135 × 7) = −0.054".
+**Validity is a hard error.** One function in the expander, applied to both
+branches of `classify_and_resolve_prior_spec`, checks argument names, required
+arguments, the family, finite constant arguments and their domains (a negative
+Normal sigma), and the permitted expression forms: a hierarchical argument may
+mention parameters, constants and literals only; time, `dt`, compartments,
+projections and observation columns are refused. An argument whose domain
+depends on a parameter's value cannot be checked statically, and the runtime
+already handles it: `prior.rs:196–272` collapses a non-finite or out-of-domain
+argument to −∞, never NaN. PMMH refuses to start from a non-finite
+log-posterior, naming the term, as PGAS already does (`sim/src/error.rs:159`);
+this is a guard in `cli/src/fit/pmmh.rs`, not a change to any acceptance ratio.
 
-One fixture changes meaning under these rules:
-`docs/dev/proposals/fixtures/garki_post_proposal.camdl` declares
-`mu_r1 : rate ~ half_normal(sigma = 0.1)` and uses it as the μ of a log-normal
-prior on a per-day recovery rate. The half-normal forces μ ≥ 0, so the prior's
-median for that rate is at least 1 per day; I read that as unintended. It
-becomes E316, and the fixture is corrected to `mu_r1 : real dim 1` with a normal
-prior centred on the log of the intended median.
+**Explicit units are honoured, and only they are checked.** Inside a prior
+argument a parameter reference is a number in model units, and arithmetic on
+such numbers is permitted whatever the parameters' declared dimensions:
+`log_normal(mu = log(m_h), ...)` with `m_h : rate` takes the logarithm of the
+number `m_h` is, and is valid. A unit literal is the one thing in a prior
+argument that asserts a physical quantity, and it is converted to model units as
+everywhere else (`normal(mu = 0.2 'per_day)` under weeks gives 1.4;
+`log(0.2 'per_day)` under weeks gives ln 1.4). Its assertion is checked by a
+small evaluation over three values, not by equations and not by the solver:
 
-PMMH refuses to start from a non-finite log-posterior, with the parameter whose
-prior or likelihood term is non-finite, as PGAS already does
-(`sim/src/error.rs:159`). This is a guard in `cli/src/fit/pmmh.rs`, not a change
-to any acceptance ratio.
+```ocaml
+(* ocaml/lib/ir/prior_units.ml *)
+type value =
+  | Bare                     (* only bare numbers: a coordinate, no claim *)
+  | Units of Dimcheck.dim_vec  (* determined by unit literals alone *)
+  | Coord                    (* depends on a parameter or a function value *)
+```
+
+| Expression                      | Value                                                                                   |
+| ------------------------------- | --------------------------------------------------------------------------------------- |
+| bare literal                    | `Bare`                                                                                  |
+| unit literal of dimension d     | `Units d` (`'ratio` is `Units 1`; `'count` is `Units P`)                                |
+| parameter or constant reference | `Coord`                                                                                 |
+| `a + b`, `a - b`                | `Units a` with `Units b`: equal, or E316; `Bare` adopts the other; `Coord` absorbs      |
+| `a * b`, `a / b`                | `Units` with `Units`: the product or quotient; `Bare` is a factor of 1; `Coord` absorbs |
+| `-a`                            | `a`                                                                                     |
+| `a ^ n`, n a literal            | `Units (n·d)` from `Units d`; otherwise as the base                                     |
+| `log`, `exp`, any function      | the argument is evaluated (so a conflict inside it is found); the result is `Coord`     |
+
+At the top of an argument, `Bare` and `Coord` are accepted without comment.
+`Units d` is compared with the argument's conventional dimension:
+
+| Family           | Argument     | Conventional dimension |
+| ---------------- | ------------ | ---------------------- |
+| uniform          | lower, upper | dim θ                  |
+| normal           | mu, sigma    | dim θ                  |
+| truncated normal | mean, sd     | dim θ                  |
+| half-normal      | sigma        | dim θ                  |
+| log-uniform      | lower, upper | dim θ                  |
+| exponential      | rate         | (dim θ)⁻¹              |
+| gamma            | shape        | 1                      |
+| gamma            | rate         | (dim θ)⁻¹              |
+| beta             | alpha, beta  | 1                      |
+| log-normal       | mu, sigma    | 1                      |
+
+This table is exactly the condition under which converting a literal gives the
+right number: `normal(mu = 0.2 'per_day)` is converted correctly because μ is in
+θ's units, and `exponential(rate = 2 'days)` on a rate because that argument is
+in θ's inverse units. Where the literal's dimension differs from the convention,
+no conversion is right, so the mismatch is E316. Concretely:
+`log_normal(mu = -2 'per_day, ...)` is E316, since a rate is passed directly as
+a log-coordinate (under weeks it would silently become −14), while
+`log_normal(mu = log(0.2 'per_day), ...)` is valid, since the literal is
+converted and then its logarithm taken. `normal(mu = 0.2 'days, ...)` on a rate
+is E316. `0.5 'ratio` is accepted on a log-normal σ.
+
+θ's dimension is read from the solved model, never written. Where the solved
+model leaves θ undetermined, an argument whose convention depends on θ is
+converted by its literal's own unit and accepted without a check: a known
+mismatch is an error, an unknown dimension is not. Arguments whose convention is
+fixed (log-normal, gamma shape, beta) are checked regardless of θ.
+
+**Prior arguments never constrain the model.** Every prior argument is a site in
+`Dim_sites`, so the coverage test of §4.2 covers it, but its strength is
+`Checked`: it is evaluated after the solve and contributes no equation. A Beta
+prior does not make θ dimensionless, and a hierarchical Normal does not equate
+the dimension of its sigma with θ's. The same family names in a likelihood
+(`normal(mean = projected, sd = ...)`) and in an initial-value law
+(`I ~ poisson(rate = I0)`) are model positions and stay hard (§5.1, §5.6): their
+arguments are expressions over the model's state.
+
+**One informational lint.** I316 (Info) fires when a log-normal `mu` or `sigma`
+is exactly a reference to a parameter whose solved dimension is known and not 1,
+and only then:
+
+```
+info[I316]: log-normal `mu` of 'r1' is the parameter 'mu_r1', declared `rate`
+  = note: `mu` is the mean of ln θ, a log-coordinate in model units; a rate's
+    value used there sets the prior's median to exp(mu_r1) per day. If mu_r1 is
+    meant as a median rate, write `mu = log(mu_r1)`; if it is meant as a
+    log-coordinate, declare it `real dim 1`.
+```
+
+It does not fire on `log(m_h)`, on a Beta prior on a rate, on a Normal sigma
+taken from a probability, or on any other unconventional choice; one argument
+gives at most one I316. The model it was written for is
+`docs/dev/proposals/fixtures/garki_post_proposal.camdl`, whose
+`mu_r1 : rate ~ half_normal(sigma = 0.1)` supplies the μ of a log-normal prior
+on a per-day recovery rate; the half-normal forces μ ≥ 0, which puts that rate's
+prior median at 1 per day or more. The fixture is left as it is and gets the
+I316. If I316 fires on a model in the corpora where the use is clearly intended,
+the lint is removed rather than widened or tuned.
+
+**Hyperparameters need no dimension.** A parameter that appears only in prior
+arguments, or nowhere, has no dimension that matters to anything, so I300 does
+not report it (§4.4). I300 still reports a parameter that appears in model
+dynamics with an undetermined dimension, with the relation the solver did
+establish (`dim(kappa) + dim(w) = T⁻¹`).
+
+**Changing `time_unit` does not preserve an arbitrary prior.** A prior written
+with unit literals in conventional positions is converted and describes the same
+physical belief under either unit (§7.4 tests this). A bare number is a
+coordinate and is not converted: `normal(mu = 0.2, sigma = 0.1)` on a rate means
+0.2 per day under days and 0.2 per week under weeks. Moving a model to a new
+unit means rewriting such priors, and for a log-normal shifting μ by the log of
+the conversion factor (+ln 7 from days to weeks; σ is unchanged). The spec
+states this (§8, commit 5).
 
 ## 6. What is deleted
 
@@ -842,39 +948,39 @@ The models from this review go to these area directories by file-name prefix:
 
 Negative models (each lands with its fix):
 
-| File                        | Invariant                                                                 | Expect                          |
-| --------------------------- | ------------------------------------------------------------------------- | ------------------------------- |
-| `iv_fraction_rate`          | transfer fraction is 1                                                    | E314                            |
-| `iv_fraction_unit_literal`  | `0.1 'per_day` is not a fraction                                          | E314                            |
-| `iv_count_rate`             | transfer count is P                                                       | E314                            |
-| `iv_set_rate`               | an assigned compartment value is P                                        | E314                            |
-| `ev_add_rate`               | an event's added count is P                                               | E314                            |
-| `iv_at_rate`                | a schedule time is T                                                      | E315                            |
-| `rx_threshold_rate`         | a reactive threshold has the stream's dimension                           | E315                            |
-| `rx_fraction_rate`          | a reactive transfer fraction is 1                                         | E314                            |
-| `pr_beta_on_rate`           | θ under a beta prior is 1                                                 | E316                            |
-| `pr_hier_sigma_probability` | a normal prior's sigma has θ's dimension                                  | E316                            |
-| `pr_hier_mu_rate`           | a hierarchical log-normal μ is dimensionless                              | E316                            |
-| `pr_hier_wrong_names`       | hierarchical arguments are named as the family's                          | E2xx (the constant path's code) |
-| `pr_hier_time`              | a hierarchical argument cannot mention time                               | E2xx                            |
-| `pr_lognormal_mu_unit`      | no unit literal on log-normal μ                                           | E316                            |
-| `pr_lognormal_sigma_unit`   | no unit literal on log-normal σ                                           | E316                            |
-| `ob_normal_mean_rate`       | a Normal mean has the column's dimension                                  | E304                            |
-| `ob_normal_sd_rate`         | a count-noise sd has the mean's T exponent                                | E304                            |
-| `ob_binomial_p_sum`         | sums inside a strict argument agree                                       | E302                            |
-| `ob_projection_sum`         | sums inside a derived projection agree                                    | E302                            |
-| `q_threshold_rate`          | a `first_above` threshold has the series dimension                        | E317                            |
-| `q_count_above_rate`        | likewise for `count_above`                                                | E317                            |
-| `q_series_sum`              | sums inside a quantity series agree                                       | E302                            |
-| `q_value_at_count`          | a `value_at` time is T                                                    | E317                            |
-| `sm_identity_level`         | an identity-link smooth level has D                                       | E312                            |
-| `sm_modes_time`             | smooth modes are 1                                                        | E312                            |
-| `od_sigma_dimensionless`    | overdispersion σ² is T                                                    | E308                            |
-| `solve_contradiction`       | `kappa*w*S*I/N` with `kappa*w*V*I`                                        | E300                            |
-| `solve_not_integral`        | `(kappa*w)^2 * I` in a rate                                               | E300                            |
-| `lit_ratio_in_product`      | `(1/7) * I * I` is not a rate                                             | E300                            |
-| `tc_unit_conflict`          | `let tau : rate = 30 'days`                                               | E2xx                            |
-| `pw_variable_exponent_base` | `kappa^alpha` makes kappa dimensionless; `kappa` used elsewhere as a rate | E301                            |
+| File                         | Invariant                                                                 | Expect                          |
+| ---------------------------- | ------------------------------------------------------------------------- | ------------------------------- |
+| `iv_fraction_rate`           | transfer fraction is 1                                                    | E314                            |
+| `iv_fraction_unit_literal`   | `0.1 'per_day` is not a fraction                                          | E314                            |
+| `iv_count_rate`              | transfer count is P                                                       | E314                            |
+| `iv_set_rate`                | an assigned compartment value is P                                        | E314                            |
+| `ev_add_rate`                | an event's added count is P                                               | E314                            |
+| `iv_at_rate`                 | a schedule time is T                                                      | E315                            |
+| `rx_threshold_rate`          | a reactive threshold has the stream's dimension                           | E315                            |
+| `rx_fraction_rate`           | a reactive transfer fraction is 1                                         | E314                            |
+| `pr_hier_wrong_names`        | hierarchical arguments are named as the family's                          | E2xx (the constant path's code) |
+| `pr_hier_time`               | a hierarchical argument cannot mention time                               | E2xx                            |
+| `pr_hier_negative_sigma`     | a constant argument outside its domain, on the hierarchical path          | E2xx (the constant path's code) |
+| `pr_lognormal_mu_unit`       | `mu = -2 'per_day`: a rate passed directly as a log-coordinate            | E316                            |
+| `pr_lognormal_sigma_unit`    | `sigma = 0.5 'days`: a duration passed as a log-scale spread              | E316                            |
+| `pr_normal_duration_on_rate` | `normal(mu = 0.2 'days, ...)` on a rate                                   | E316                            |
+| `pr_literal_sum_conflict`    | `mu = 0.2 'per_day + 1 'days`: explicit units disagree inside an argument | E316                            |
+| `ob_normal_mean_rate`        | a Normal mean has the column's dimension                                  | E304                            |
+| `ob_normal_sd_rate`          | a count-noise sd has the mean's T exponent                                | E304                            |
+| `ob_binomial_p_sum`          | sums inside a strict argument agree                                       | E302                            |
+| `ob_projection_sum`          | sums inside a derived projection agree                                    | E302                            |
+| `q_threshold_rate`           | a `first_above` threshold has the series dimension                        | E317                            |
+| `q_count_above_rate`         | likewise for `count_above`                                                | E317                            |
+| `q_series_sum`               | sums inside a quantity series agree                                       | E302                            |
+| `q_value_at_count`           | a `value_at` time is T                                                    | E317                            |
+| `sm_identity_level`          | an identity-link smooth level has D                                       | E312                            |
+| `sm_modes_time`              | smooth modes are 1                                                        | E312                            |
+| `od_sigma_dimensionless`     | overdispersion σ² is T                                                    | E308                            |
+| `solve_contradiction`        | `kappa*w*S*I/N` with `kappa*w*V*I`                                        | E300                            |
+| `solve_not_integral`         | `(kappa*w)^2 * I` in a rate                                               | E300                            |
+| `lit_ratio_in_product`       | `(1/7) * I * I` is not a rate                                             | E300                            |
+| `tc_unit_conflict`           | `let tau : rate = 30 'days`                                               | E2xx                            |
+| `pw_variable_exponent_base`  | `kappa^alpha` makes kappa dimensionless; `kappa` used elsewhere as a rate | E301                            |
 
 Kept as they are (already errors, and correct): `pw_var_exp_count_base` (E301),
 `bad_typed_const` (E300), `count_plus_rate` (`gamma * I + 5 'count`, E302), the
@@ -883,26 +989,38 @@ B-spline fixture inconsistency and the `'ratio` forcing with a rate baseline
 
 Positive models (each `# expect: (none)`, or only the stated I300):
 
-| File                               | What it protects                                                                 |
-| ---------------------------------- | -------------------------------------------------------------------------------- |
-| `od_sigma_time`                    | `sigma_se : positive dim T` in `overdispersed`                                   |
-| `pw_named_integer_exponent`        | `I^k`, `let k : real = 2`                                                        |
-| `pw_static_rational_dimensionless` | `(I / N)^0.5`                                                                    |
-| `count_literal_rate`               | `gamma * 5 'count` is P·T⁻¹                                                      |
-| `unit_literal_parenthesized`       | `I / (5 'days)`                                                                  |
-| `unit_conversion_rate`             | `0.7 'per_week` under days                                                       |
-| `density_dependent_typed_const`    | `let b : positive dim P^-1*T^-1 = 0.0001`                                        |
-| `density_dependent_inferred`       | `beta : positive`, `beta * S * I`                                                |
-| `density_dependent_declared`       | `beta : positive dim P^-1*T^-1`                                                  |
-| `frequency_and_density_mixed`      | one model with both forms, separate parameters                                   |
-| `normal_count_noise_he2010`        | `sd = sqrt(rho*(1-rho)*projected + (rho*psi*projected)^2)`                       |
-| `normal_count_noise_squared`       | `sd = projected^2`                                                               |
-| `normal_real_column`               | a `real` column, mean and sd of one dimension                                    |
-| `jointly_undetermined`             | only `kappa * w` pinned; I300 Info names the relation, no error                  |
-| `hierarchical_prior_valid`         | normal and log-normal leaves under dimensionless and dimensioned hyperparameters |
-| `unchecked_dim_alpha_mixing`       | the He et al. (I + ι)^α term                                                     |
-| `importation_constant`             | `beta * S * I / N + 0.5` in a rate                                               |
-| `init_literals`                    | `S = N0 - 50`, `I = 10`, a hyper-Erlang split                                    |
+| File                               | What it protects                                                             |
+| ---------------------------------- | ---------------------------------------------------------------------------- |
+| `od_sigma_time`                    | `sigma_se : positive dim T` in `overdispersed`                               |
+| `pw_named_integer_exponent`        | `I^k`, `let k : real = 2`                                                    |
+| `pw_static_rational_dimensionless` | `(I / N)^0.5`                                                                |
+| `count_literal_rate`               | `gamma * 5 'count` is P·T⁻¹                                                  |
+| `unit_literal_parenthesized`       | `I / (5 'days)`                                                              |
+| `unit_conversion_rate`             | `0.7 'per_week` under days                                                   |
+| `density_dependent_typed_const`    | `let b : positive dim P^-1*T^-1 = 0.0001`                                    |
+| `density_dependent_inferred`       | `beta : positive`, `beta * S * I`                                            |
+| `density_dependent_declared`       | `beta : positive dim P^-1*T^-1`                                              |
+| `frequency_and_density_mixed`      | one model with both forms, separate parameters                               |
+| `normal_count_noise_he2010`        | `sd = sqrt(rho*(1-rho)*projected + (rho*psi*projected)^2)`                   |
+| `normal_count_noise_squared`       | `sd = projected^2`                                                           |
+| `normal_real_column`               | a `real` column, mean and sd of one dimension                                |
+| `jointly_undetermined`             | only `kappa * w` pinned; I300 Info names the relation, no error              |
+| `pr_beta_on_rate`                  | a Beta prior on a rate                                                       |
+| `pr_normal_bare_on_rate`           | `normal(mu = 0.2, sigma = 0.1)` on a rate: bare numbers are coordinates      |
+| `pr_normal_units_on_rate`          | `normal(mu = 0.2 'per_day, sigma = 0.1 'per_day)`, converted                 |
+| `pr_gamma_exponential_on_rate`     | `gamma(shape = 2, rate = 10)` and `exponential(rate = 2 'days)` on rates     |
+| `pr_hier_sigma_probability`        | `normal(mu = m, sigma = s)` on a rate, `s : probability`                     |
+| `pr_hier_mixed_arithmetic`         | `sigma = s_rate * s_prob + 0.1`: arithmetic over differently declared values |
+| `pr_hier_log_of_rate`              | `log_normal(mu = log(m_h), ...)`, `m_h : rate`                               |
+| `pr_hier_mu_rate`                  | `log_normal(mu = m_h, ...)`, `m_h : rate`: compiles, `# expect: I316 Info`   |
+| `pr_lognormal_hier_dimensionless`  | log-normal `mu`, `sigma` from `real dim 1` hyperparameters                   |
+| `pr_lognormal_log_of_unit`         | `mu = log(0.2 'per_day)` under weeks: IR μ = ln 1.4                          |
+| `pr_lognormal_ratio_sigma`         | `sigma = 0.5 'ratio`                                                         |
+| `pr_units_theta_undetermined`      | `normal(mu = 0.2 'per_day, ...)` on a `positive` θ of undetermined dimension |
+| `pr_hyperparameter_no_i300`        | prior-only hyperparameters of undeclared dimension: no I300                  |
+| `unchecked_dim_alpha_mixing`       | the He et al. (I + ι)^α term                                                 |
+| `importation_constant`             | `beta * S * I / N + 0.5` in a rate                                           |
+| `init_literals`                    | `S = N0 - 50`, `I = 10`, a hyper-Erlang split                                |
 
 Every negative model is mutation-checked once in its commit: revert the fix,
 keep the model, confirm the test fails.
@@ -931,10 +1049,15 @@ checks recorded in the commit that adds it.
 
 - **Unit invariance.** A pair of models identical except for `time_unit = 'days`
   versus `'weeks`, with every rate, duration and prior argument written with
-  unit literals (log-normal μ written per §5.9 with the additive conversion):
-  their IRs differ only by the conversion, and a fixed-θ `pfilter`
-  log-likelihood plus log-prior agree to round-off once θ is mapped between
-  units.
+  unit literals in conventional positions; a log-normal μ is written
+  `log(0.2 'per_day)`, which converts itself. Their IRs differ only by the
+  conversion, the fixed-θ `pfilter` log-likelihoods agree to round-off once θ is
+  mapped between units, and the log-priors differ by exactly the log Jacobian of
+  the map (−ln 7 per rate parameter, from days to weeks; +ln 7 per duration).
+  The test lists the priors it covers: a prior that is not closed under
+  rescaling (Beta on a rate, a bare-number Normal) is correctly not invariant
+  and is not in it. This test, and the prior validity tests, are kept apart from
+  the solver tests of §7.2.
 - **No stationary chains from invalid priors.** `pr_hier_wrong_names` fails
   compilation; a model whose start is −∞ makes PMMH exit non-zero with the
   offending term named.
@@ -958,9 +1081,7 @@ across a commit boundary that lands.
    that passes today; hierarchical prior name, form and time checks (one
    validation function for both branches); the PMMH non-finite start guard;
    `'count` lowering with P; the typed-constant unit conflict; E107 on
-   parenthesized literals; unit literals refused on dimensionless and log-scale
-   prior arguments (applied in the expander, where the literal is still
-   visible). Each with its negative model.
+   parenthesized literals. Each with its negative model.
 2. **The solver.** `dim_solve.ml` with its unit, permutation, oracle and
    overflow tests, unused by the checker yet. It is a self-contained module with
    its own tests, not a second checker.
@@ -971,47 +1092,58 @@ across a commit boundary that lands.
 4. **The rules that change verdicts.** One commit per rule family, each with its
    negative and positive models and its corpus measurement: interventions,
    events and reactive triggers; observations (§5.6 and strict sums); priors
-   (§5.9, including the garki fixture); quantities and contrasts; smooth
-   splines; powers; literals (§5.2); E308 (with the he2010 manifests).
+   (§5.9: `Prior_units`, I316 with the garki fixture as its case, the I300
+   exemption for parameters in no `Binding` site); quantities and contrasts;
+   smooth splines; powers; literals (§5.2); E308 (with the he2010 manifests).
 5. **The spec.** `docs/camdl-language-spec.md` §4 rewritten to state the
-   positions and their rules, P versus T, literals, unit conversion, prior
-   argument dimensions and the log-normal convention, the count-noise rule,
-   underdetermination and `unchecked_dim`, and what a successful compile does
-   and does not guarantee. Edited by hand: this file is never formatted by
-   dprint.
+   positions and their rules, P versus T, literals, unit conversion, the
+   count-noise rule, underdetermination and `unchecked_dim`, and what a
+   successful compile does and does not guarantee. A short subsection states the
+   boundary of §5.9 in the spec's own words: in model dynamics dimensional
+   analysis is a type system, in prior specification it is closer to a modelling
+   linter; dimensions come from declarations and use, priors are measures on
+   numerical coordinates and do not establish or restrict a parameter's
+   dimension; bare numbers are model-unit coordinates; unit literals are real
+   conversions; the conventional argument dimensions support diagnostics and
+   explicit-unit checks only; changing `time_unit` does not preserve an
+   arbitrary prior, and the user transforms it (for a log-normal, μ shifts by
+   the log of the factor). One paragraph on densities: the measure is
+   dimensionless and the density has units of 1/[θ], which is why a family's
+   form need not survive a change of unit; the Jeffreys prior for a scale
+   parameter, p(θ) ∝ 1/θ, is the form that does (Jeffreys, H. 1946, "An
+   invariant form for the prior probability in estimation problems", _Proc. R.
+   Soc. Lond. A_ 186:453–461), given as context, not a requirement. Edited by
+   hand: this file is never formatted by dprint.
 
 Commits 3 and 4 can be one series on a branch; splitting 4 by family keeps each
 verdict change reviewable on its own.
 
 ## 9. Decisions
 
+All settled; recorded here as the decision record.
+
 1. **Literal rule.** A literal is dimensionless except zero and a literal that
-   is a whole additive term of a dimensioned position (§5.2). The alternative is
-   today's rule, where a ratio of literals takes any dimension. The new rule
-   makes `0.0001 * S * I` and `(1/10000) * S * I` behave the same (both refused,
-   with a fix-it), stops `(1/7) * I * I` passing as a rate, and keeps every
-   initial-condition and importation idiom I found. It costs one repo model a
-   rewrite (`(1.0 / 730.0) * R[p]`) and an unknown number downstream, to be
-   measured before it lands. Recommendation: adopt it. Leaning.
-2. **`dim` on typed constants.** `let b : positive dim P^-1*T^-1 = 0.0001`. It
-   is the only way to write a literal coefficient with a compound dimension once
-   ratios stop being contextual, and it reuses the parameter syntax this branch
-   introduced rather than adding a unit vocabulary for compound units. The cost
-   is a grammar production and a tree-sitter regeneration. Recommendation:
-   adopt. Solid.
-3. **A unit-literal IR node.** Replace `UncheckedDim { inner = Const }` for unit
-   literals with a dedicated node, so `UncheckedDim` means only a user's escape.
-   It changes `ir/VERSION`, every golden containing a unit literal, and the Rust
-   evaluator, and correctness does not depend on it. Recommendation: do it
-   inside the IR bump families Stage A requires, not separately. Leaning.
-4. **Order relative to families.** Land this before families Stage A, so that
-   families' new positions are added to `Dim_sites` from the start rather than
-   retrofitted. The cost is that families waits for this work. Recommendation:
-   this first. Leaning.
+   is a whole additive term of a dimensioned position (§5.2). `0.0001 * S * I`
+   and `(1/10000) * S * I` behave the same, and `(1/7) * I * I` no longer passes
+   as a rate. One repo model is rewritten; downstream corpora are measured
+   before the rule lands.
+2. **`dim` on typed constants.** `let b : positive dim P^-1*T^-1 = 0.0001`, the
+   parameter grammar reused.
+3. **A unit-literal IR node.** Deferred to the IR bump families Stage A
+   requires; until then the checker reads `UncheckedDim { inner = Const _ }` as
+   a known dimension.
+4. **Order relative to families.** This work lands first.
 5. **Scope of the count-noise rule.** Only the sd of a `normal` likelihood on a
-   `count` column (§5.6). The wider alternative, any Normal sd whose mean has a
-   P component, would admit `real` columns holding counts but would also exempt
-   continuous data with a population dimension (a person-time density, say) from
-   a check that is right for it. Recommendation: the narrow scope, with the
-   corpus measurement deciding whether any model needs `count` declared.
-   Leaning.
+   `count` column (§5.6).
+6. **Prior arguments are numerical coordinates.** Arithmetic over parameters of
+   any declared dimension, `log(m_h)` included, is accepted; only explicit unit
+   literals are checked, by `Prior_units`, and nothing a prior says enters the
+   solve (§5.9).
+7. **One prior lint.** I316 (Info) for a log-normal argument that is directly a
+   dimensioned parameter; removed, not widened, if it misfires on real models.
+8. **I300 exemption.** Parameters in no `Binding` site (prior-only or unused)
+   get no I300. Whether I300 becomes an error (size-brackets proposal §5) is
+   decided with this distinction, and not by making every undetermined dimension
+   fatal.
+9. **A unit literal on a θ of undetermined dimension** is converted by its own
+   unit and accepted; θ gets no dimension from it.

@@ -1,6 +1,6 @@
 ---
 date: 2026-11-05
-status: proposed
+status: stages 1 and 2 implemented (ac278266, 8fb21df8, 952e9cf2) except §5; §4's solver is replaced and §5 is decided under 2026-11-06-dimension-checking-as-one-constraint-system.md (§4.4, §9 decision 8); stage 3 is families Stage A
 area: DSL parameter declarations, dimensional checking, parameter families
 related:
   - 2026-10-30-parameter-families-and-spline-coefficients.md (accepted; this proposal amends its section 2.1 and its E417 size rule)
