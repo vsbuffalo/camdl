@@ -324,3 +324,76 @@ fn reusing_a_leaf_stored_under_another_file_name_warns_once() {
     );
     assert_eq!(fx.sim_leaves(), before, "b.camdl's run reuses a.camdl's leaves");
 }
+
+/// `pfilter` over a byte-identical model under another file name finds the
+/// leaf the first name stored when it writes, and reports it `cached`. The
+/// path it reports must be that stored leaf, not the path the current file
+/// name would have used, which does not exist.
+#[test]
+fn pfilter_reports_the_stored_leaf_it_found_under_another_file_name() {
+    let bin = skip_if_missing_binary();
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let fixture = Path::new(&manifest).join("../sim/tests/fixtures/seed_timing.ir.json");
+    for stem in ["a", "b"] {
+        std::fs::copy(&fixture, dir.path().join(format!("{stem}.ir.json"))).unwrap();
+    }
+    let params = [
+        "--param", "beta=0.6", "--param", "gamma=0.2", "--param", "lambda=2.0",
+        "--param", "w=3.0", "--param", "N0=5000", "--param", "rho=0.5",
+        "--param", "k=20", "--param", "tau=30",
+    ];
+    let run = |args: &[&str]| -> Output {
+        Command::new(&bin)
+            .args(args)
+            .args(params)
+            .current_dir(dir.path())
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .output()
+            .expect("spawn camdl")
+    };
+    let sim = run(&[
+        "simulate", "a.ir.json", "--backend", "chain_binomial", "--dt", "1",
+        "--seed", "11", "--obs-only", "cases.tsv",
+    ]);
+    assert_ok(&sim, "synthetic data");
+    let pf = |model: &str| {
+        run(&[
+            "pfilter", model, "--particles", "100", "--dt", "1", "--seed", "5",
+            "--data", "cases.tsv",
+        ])
+    };
+    assert_ok(&pf("a.ir.json"), "pfilter a");
+    let second = pf("b.ir.json");
+    assert_ok(&second, "pfilter b");
+    let stderr = strip_ansi(&String::from_utf8_lossy(&second.stderr));
+    let reported = stderr
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("cached "))
+        .unwrap_or_else(|| panic!("the second pfilter must report a cache hit:\n{stderr}"))
+        .trim();
+    let reported = dir.path().join(reported);
+    assert!(
+        reported.join("run.json").is_file(),
+        "the reported leaf {} must exist; stderr:\n{stderr}",
+        reported.display()
+    );
+}
+
+/// `s` without ANSI escape sequences (the status lines are coloured).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for d in chars.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}

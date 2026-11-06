@@ -576,9 +576,12 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                 unreachable!("Streaming write mode never returns a committed path")
             }
             // The identical evaluation is already stored: this rerun recomputed
-            // it for nothing, which is a cache report, not a failure.
-            Err(runid::CasError::AlreadyCompleted { .. }) => {
-                crate::status::step("cached", cas_path.display());
+            // it for nothing, which is a cache report, not a failure. The
+            // stored leaf may sit under another model file name's labels
+            // (`begin_resolved_write` finds it by identity), so report the
+            // path the store names, not this run's `cas_path`.
+            Err(runid::CasError::AlreadyCompleted { path }) => {
+                crate::status::step("cached", path);
                 return;
             }
             // Another process is computing this same evaluation right now. The
