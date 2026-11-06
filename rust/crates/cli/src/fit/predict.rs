@@ -1040,6 +1040,14 @@ struct PredictiveSink {
     /// to this time. Equal to the trajectory's own end whenever nothing was
     /// extended, and then the cut is not taken at all.
     quantity_t_end: f64,
+    /// Snapshots predict asked for that the model's declared output schedule
+    /// does not record (`required_output_times` on the job). They exist so the
+    /// observation projection can read a row's boundaries; `quantities {}` is
+    /// reported on the declared output grid, so the evaluator reads the replay
+    /// with these removed (their interval flows folded into the next recorded
+    /// snapshot, which keeps every cumulative flow it reads unchanged). Empty
+    /// when nothing was added, and then no copy is taken.
+    extra_snapshot_times: Vec<f64>,
     /// Per leaf (in `model.observations` order): the times to emit at — the
     /// leaf's observation times, then (gh#696) the forecast times continuing
     /// its cadence to the model horizon. NOT the observed-data axis: `last_obs`
@@ -1242,11 +1250,20 @@ impl crate::engine::RunSink for PredictiveSink {
                     .iter()
                     .take_while(|s| s.t <= self.quantity_t_end + crate::OBS_SNAP_EPS)
                     .count();
-                (keep < cell.traj.snapshots.len()).then(|| {
-                    let mut cut = cell.traj.clone();
-                    cut.snapshots.truncate(keep);
-                    cut
-                })
+                let has_extra = cell.traj.snapshots[..keep].iter().any(|s| {
+                    self.extra_snapshot_times
+                        .iter()
+                        .any(|e| (e - s.t).abs() <= crate::OBS_SNAP_EPS)
+                });
+                if has_extra {
+                    Some(declared_grid_replay(&cell.traj, keep, &self.extra_snapshot_times))
+                } else {
+                    (keep < cell.traj.snapshots.len()).then(|| {
+                        let mut cut = cell.traj.clone();
+                        cut.snapshots.truncate(keep);
+                        cut
+                    })
+                }
             }
             None => None,
         };
@@ -1293,6 +1310,48 @@ impl crate::engine::RunSink for PredictiveSink {
         }
         Ok(())
     }
+}
+
+/// The first `keep` snapshots of `traj` with the snapshots at `extra` times
+/// removed, each removed snapshot's interval flows folded into the next
+/// retained snapshot. A snapshot carries the flow since the previous one, so
+/// this leaves every cumulative flow at a retained time exactly as it was; the
+/// state at a retained time is its own. A removed snapshot after the last
+/// retained one has no snapshot to fold into and is dropped (the run then ends
+/// at its last declared output time, as it would have without the extras).
+fn declared_grid_replay(
+    traj: &sim::Trajectory,
+    keep: usize,
+    extra: &[f64],
+) -> sim::Trajectory {
+    use sim::state::Flows;
+    let is_extra = |t: f64| extra.iter().any(|e| (e - t).abs() <= crate::OBS_SNAP_EPS);
+    let mut snapshots: Vec<sim::state::Snapshot> = Vec::new();
+    let mut pending: Option<Flows> = None;
+    for s in &traj.snapshots[..keep] {
+        let mut flows = s.flows.clone();
+        if let Some(p) = pending.take() {
+            match (&mut flows, &p) {
+                (Flows::Int(a), Flows::Int(b)) => {
+                    a.iter_mut().zip(b).for_each(|(x, y)| *x += *y)
+                }
+                (Flows::Real(a), Flows::Real(b)) => {
+                    a.iter_mut().zip(b).for_each(|(x, y)| *x += *y)
+                }
+                _ => unreachable!("one trajectory carries one flow kind"),
+            }
+        }
+        if is_extra(s.t) {
+            pending = Some(flows);
+        } else {
+            let mut kept = s.clone();
+            kept.flows = flows;
+            snapshots.push(kept);
+        }
+    }
+    let mut out = traj.clone();
+    out.snapshots = snapshots;
+    out
 }
 
 // ── The verb ───────────────────────────────────────────────────────────────
@@ -1912,24 +1971,39 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                 })
                 .collect();
 
-            // ── The closing boundary of the last forecast row ──────────────────
+            // ── The snapshots the projection reads ─────────────────────────────
             //
-            // A row's value is the difference of the recorded cumulative flow at
-            // its two boundaries, so both must be recorded output times
-            // (`project_coverages`). Every boundary inside the observed record is
-            // one already — the fit scored those rows. The one that can fall off
-            // the grid is the *close* of the last forecast row, because a uniform
-            // `covers` form with a closing offset puts it past the label:
-            // `ending_on(time, 7 'days)` closes the row labelled `t` at `t + 1`,
-            // and the last forecast label sits at the horizon, so the close sits
-            // one day beyond it, where nothing was integrated. Predict integrates
-            // its own trajectories per draw, so it is predict that decides where
-            // they stop: it asks for a snapshot at that close
-            // (`required_output_times` on the job) and reports the declared
-            // horizon everywhere else. Without that snapshot the only fix left to
-            // the modeller is to move `simulate { to }` by one day, which re-keys
-            // the model and orphans the fit
-            // (2026-09-08-workflow-first-fit-config §1.5, §3.5).
+            // A row's value is read off the recorded trajectory, not off
+            // integrator state: a stock at the row's label, or, for a flow, the
+            // difference of the recorded cumulative flow at the row's two
+            // boundaries (`project_coverages`). Each of those times must
+            // therefore be a recorded output time. The fit does not need that —
+            // the particle filter scores each row from integrator state at its
+            // data time — so a data time between output points (data every 2.5
+            // days against the default 1-day output) fits fine and would then
+            // fail here. Predict integrates its own trajectories per draw, so it
+            // decides what they record: it asks for a snapshot at every time its
+            // projection reads (`required_output_times` on the job), changing no
+            // stored fit and no run identity. Those extra snapshots are internal
+            // to the projection — `quantities/` is read off the trajectory cut
+            // back to the declared output grid (`PredictiveSink::extra_snapshot_times`).
+            //
+            // Two kinds of time:
+            //
+            // - Every label and every interval boundary of every row, observed
+            //   or forecast, that is not already on the declared grid and lies
+            //   inside the declared window. (Observed rows past the declared
+            //   horizon are left to `check_obs_times_on_snapshot_grid`, which
+            //   refuses them rather than silently extending the run.)
+            // - The *close* of the last forecast row, which can sit past the
+            //   horizon: a uniform `covers` form with a closing offset puts it
+            //   past the label — `ending_on(time, 7 'days)` closes the row
+            //   labelled `t` at `t + 1`, and the last forecast label sits at the
+            //   horizon, so the close sits one day beyond it, where nothing was
+            //   integrated. Without a snapshot there the only fix left to the
+            //   modeller is to move `simulate { to }` by one day, which re-keys
+            //   the model and orphans the fit
+            //   (2026-09-08-workflow-first-fit-config §1.5, §3.5).
             //
             // A windowed stream (`window_start`/`window_stop`) takes the contiguous
             // continuation `[previous stop, label)` in `leaf_row_coverages`, so its
@@ -1968,8 +2042,51 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                     );
                 }
             }
+            // Every other time the projection reads, inside the declared window.
+            let t_start_decl = model.simulation.t_start;
+            let t_end_decl = model.simulation.t_end;
+            let mut n_between_grid = 0_usize;
+            for rows in &leaf_coverages {
+                for &(label, cov) in rows {
+                    let reads: [Option<f64>; 2] = match cov {
+                        // `Unrecorded` is a prequential-trace artefact; a row built
+                        // here never carries it, and its label is the one time known.
+                        sim::inference::Coverage::Instant
+                        | sim::inference::Coverage::Unrecorded => [Some(label), None],
+                        sim::inference::Coverage::Interval { start, stop } => {
+                            [Some(start), Some(stop)]
+                        }
+                    };
+                    for t in reads.into_iter().flatten() {
+                        let inside = t.is_finite()
+                            && t > t_start_decl + crate::OBS_SNAP_EPS
+                            && t <= t_end_decl + crate::OBS_SNAP_EPS;
+                        let on_grid = horizon_output_times
+                            .iter()
+                            .any(|o| (o - t).abs() <= crate::OBS_SNAP_EPS);
+                        if inside && !on_grid {
+                            required_output_times.push(t);
+                            n_between_grid += 1;
+                        }
+                    }
+                }
+            }
+            if n_between_grid > 0 {
+                eprintln!(
+                    "fit predict: recording extra trajectory snapshots at the \
+                     observation and row-boundary times that fall between the \
+                     model's output times, so each row can be projected off the \
+                     trajectory the fit scored from integrator state. They are \
+                     internal to the projection: `quantities/` stays on the \
+                     declared output grid, and the fit is unchanged."
+                );
+            }
             required_output_times.sort_by(f64::total_cmp);
-            required_output_times.dedup();
+            required_output_times.dedup_by(|a, b| (*a - *b).abs() <= crate::OBS_SNAP_EPS);
+            // What a quantity must not see: every snapshot the declared grid
+            // did not record. (The closing boundary past the horizon is also
+            // cut by `quantity_t_end`.)
+            let extra_snapshot_times: Vec<f64> = required_output_times.clone();
 
             // The free-forward cells (one per sweep-point × scenario, engine canonical
             // order), plus the stacked quantity files — accumulated across the whole
@@ -2187,6 +2304,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                 let mut sink = PredictiveSink {
                     compiled: compiled.clone(),
                     quantity_t_end: model.simulation.t_end,
+                    extra_snapshot_times: extra_snapshot_times.clone(),
                     leaf_times: ff_emit_times.clone(),
                     leaf_aux: leaf_aux.clone(),
                     leaf_coverages: leaf_coverages.clone(),
@@ -5049,5 +5167,42 @@ mod tests {
         // Unknown stream falls back to the leaf dims.
         assert_eq!(index_dims_for(Some(&schema), "other", &["age".to_string()]), vec!["age".to_string()]);
         assert_eq!(index_dims_for(None, "onset", &["patch".to_string()]), vec!["patch".to_string()]);
+    }
+
+    /// gh#589: removing the snapshots predict added for the projection leaves
+    /// every retained snapshot's state as it was and folds the removed
+    /// intervals' flows forward, so the cumulative flow at a retained time is
+    /// the same with or without the extras.
+    #[test]
+    fn dropping_extra_snapshots_folds_their_flows_into_the_next_one() {
+        use sim::state::{Flows, FlowVec, IntState, RealState, Snapshot};
+        let snap = |t: f64, s: i64, f: u64| Snapshot {
+            t,
+            int_state: IntState::from_vec(vec![s]),
+            real_state: RealState::new(0),
+            flows: Flows::Int(FlowVec::from_vec(vec![f]).counts),
+        };
+        let mut traj = sim::Trajectory::new();
+        traj.snapshots = vec![
+            snap(0.0, 10, 0),
+            snap(1.0, 9, 1),
+            snap(2.0, 7, 2), // extra
+            snap(2.5, 6, 1), // extra
+            snap(3.0, 5, 1),
+            snap(4.0, 4, 1), // extra, after the last retained one within `keep`
+        ];
+        let out = declared_grid_replay(&traj, 6, &[2.0, 2.5, 4.0]);
+        let got: Vec<(f64, i64, u64)> = out
+            .snapshots
+            .iter()
+            .map(|s| (s.t, s.int_state.counts[0], s.flows.as_int()[0]))
+            .collect();
+        assert_eq!(got, vec![(0.0, 10, 0), (1.0, 9, 1), (3.0, 5, 4)]);
+        let cum = |tr: &sim::Trajectory, t: f64| -> u64 {
+            tr.snapshots.iter().take_while(|s| s.t <= t).map(|s| s.flows.as_int()[0]).sum()
+        };
+        for t in [0.0, 1.0, 3.0] {
+            assert_eq!(cum(&out, t), cum(&traj, t), "cumulative flow at t = {t}");
+        }
     }
 }

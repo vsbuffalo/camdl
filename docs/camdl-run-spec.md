@@ -530,6 +530,15 @@ different options are two artifacts, so neither overwrites the other, and
 `--exclude-chains` and `--quantities` key sub-addresses inside the directory
 (`predictive-excl3/`, `quantities-<key8>/`).
 
+The free-forward replay projects each row off its own recorded trajectories, so
+it records a snapshot at every time a row reads — each data time and each
+interval boundary — in addition to the model's output schedule. A data record
+whose times fall between output times (data every 2.5 days against the default
+1-day output) therefore needs no `output { trajectories { ... } }` line, which
+would re-key the model and orphan the fit. The extra snapshots are internal to
+the projection: they change no stored fit or run identity, and `quantities/`
+stays on the declared output grid.
+
 ```
 results/fits/<stem>-<hash8>/predict/<run_id12>/predictive/<stream>.tsv
   scenario | sweep:<param>… | time | <dims…> | horizon | treatment
