@@ -743,30 +743,15 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         let model_declared = model_pre.clone();
         let fixed_via = config.fixed.declarations(&model_pre);
 
-        // gh#92: [estimate].start fall-back for survey, matching the
-        // gh#34 pattern applied to `camdl profile` (commit 796bfbe)
-        // and `camdl fit run` (commit 19ae908). Survey's whole job is
-        // to LHS-sample parameters listed in [estimate], so requiring
-        // them to have a concrete value before LHS would be
-        // self-defeating. We seed `spec.start` into model_pre.value
-        // so the unified resolver's `UnsetRequired` check passes; LHS
-        // sampling then overrides per-point downstream.
-        //
-        // Without this, the canonical workflow `camdl survey --fit
-        // X.toml && camdl fit run X.toml --survey-path ...` errors at
-        // survey even though `fit run` accepts the same toml.
-        let mut seeded: HashMap<String, crate::params_resolver::ValueSource> = HashMap::new();
-        for (name, spec) in &config.estimate {
-            if let Some(p) = model_pre.parameters.iter_mut().find(|p| p.name == *name) {
-                if p.value.resolved_value().is_none() {
-                    if let Some(start) = spec.start {
-                        p.value = p.value.with_value(start);
-                        seeded.insert(name.clone(),
-                            crate::params_resolver::ValueSource::EstimateStart { drawn: false });
-                    }
-                }
-            }
-        }
+        // `[estimate]` start fall-back (gh#92). Survey LHS-samples the
+        // parameters listed in [estimate], but the resolver still wants every
+        // parameter to carry a value first; LHS then overrides per point.
+        // The same function `fit run` and `profile --fit` use, so an entry
+        // with no `start` (`beta = {}`) is drawn within its bounds here as
+        // it is there (run-spec §1.4).
+        let seeded = crate::fit::runner::seed_estimate_starts(
+            &mut model_pre, &config.estimate, a.seed,
+            &std::collections::HashSet::new());
 
         // Resolve fit.toml [fixed] block via the existing config-side
         // pre-processor (handles `from_file`, `from_scenario`, and

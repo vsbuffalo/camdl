@@ -595,28 +595,24 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         starts_values_from_init_method(&init_method)
             .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
 
-    // gh#34 [estimate].start fall-back. Apply BEFORE the resolver so
-    // that params listed in fit-toml `[estimate]` with an explicit
-    // `start = ...` carry that value past the resolver's
-    // `UnsetRequired` check, exactly the way `camdl fit run` does
-    // (see `fit/runner.rs:144-180`). Without this, a user writing
-    //   [estimate]
-    //   beta = { bounds = [0.01, 5.0], start = 0.5143 }
-    // and no DSL default for `beta` would hit the resolver's
-    // `UnsetRequired` error reading "no model default, no scenario,
-    // no --fit toml entry, ..." — the [estimate].start was silently
-    // ignored. Scope: explicit `spec.start` only (no
-    // bounds-uniform fallback for profile yet — the focal sweep
-    // overrides the focal param's value per-cell anyway, and the
-    // non-focal params are usually pinned via `--fixed`).
-    let mut seeded: HashMap<String, crate::params_resolver::ValueSource> = HashMap::new();
-    for (name, spec) in &fit_estimate {
-        if let Some(p) = model_pre.parameters.iter_mut().find(|p| p.name == *name) {
+    // The `[estimate]` start fall-back, by the function `fit run` uses
+    // (run-spec §1.4): an entry with a `start` carries it, one without
+    // (`beta = {}`) gets a draw within its bounds, recorded as
+    // `estimate_start_drawn`. Applied BEFORE the resolver, which refuses a
+    // parameter with no value. A swept parameter takes its value from the
+    // sweep at every point, so it needs no start of its own: it is never
+    // drawn from a prior, and a swept parameter still without a value
+    // afterwards is held at the first grid value, only so the resolver has
+    // one to carry.
+    let swept: std::collections::HashSet<String> =
+        a.sweep.iter().map(|s| s.name.clone()).collect();
+    let seeded = crate::fit::runner::seed_estimate_starts(
+        &mut model_pre, &fit_estimate, seed_base, &swept);
+    for sw in &a.sweep {
+        if let Some(p) = model_pre.parameters.iter_mut().find(|p| p.name == sw.name) {
             if p.value.resolved_value().is_none() {
-                if let Some(start) = spec.start {
-                    p.value = p.value.with_value(start);
-                    seeded.insert(name.clone(),
-                        crate::params_resolver::ValueSource::EstimateStart { drawn: false });
+                if let Some(&first) = sw.grid.expand().first() {
+                    p.value = p.value.with_value(first);
                 }
             }
         }

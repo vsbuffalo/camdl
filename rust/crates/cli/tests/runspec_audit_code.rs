@@ -126,3 +126,66 @@ dt_check = {{ enabled = false }}
     assert!(prov["ess_mean"].as_float().is_some_and(|v| v > 0.0),
         "the re-score's mean effective sample size is recorded: {text}");
 }
+
+// ─── B: survey and profile seed `beta = {}` the way fit run does ────────────
+
+/// Both parameters are estimated with no `start`; nothing else gives them a
+/// value.
+const BARE_ESTIMATE_FIT: &str = r#"
+[model]
+camdl = "sir.camdl"
+[data.observations]
+cases = "cases.tsv"
+[estimate]
+beta  = {}
+gamma = {}
+[fixed]
+N0 = 1000
+[method]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 1
+particles = 20
+iterations = 2
+cooling = 0.5
+loglik_eval = { n_particles = 20, n_replicates = 2 }
+dt_check = { enabled = false }
+"#;
+
+#[test]
+fn survey_fit_draws_a_start_for_a_bare_estimate_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fixture(dir);
+    std::fs::write(dir.join("fit.toml"), BARE_ESTIMATE_FIT).unwrap();
+    let out = camdl(dir, &["survey", "sir.camdl", "--fit", "fit.toml",
+                           "--n-points", "3", "--seed", "1"]);
+    let e = ok(&out, "survey --fit with `beta = {}`");
+    assert!(!e.contains("has no value"), "stderr: {e}");
+}
+
+#[test]
+fn profile_fit_needs_no_start_for_the_swept_or_the_nuisance_parameter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fixture(dir);
+    std::fs::write(dir.join("fit.toml"), BARE_ESTIMATE_FIT).unwrap();
+    // `beta` is swept (no start needed); `gamma` is a nuisance with no start
+    // (drawn within its bounds, as `fit run` would).
+    let out = camdl(dir, &["profile", "sir.camdl", "--fit", "fit.toml",
+                           "--sweep", "beta=lin(0.2,0.4,2)",
+                           "--particles", "20", "--iterations", "2", "--n-starts", "1",
+                           "--rw-sd", "auto", "--output", "p.tsv", "--seed", "1"]);
+    let e = ok(&out, "profile --fit with `beta = {}`, `gamma = {}`");
+    assert!(!e.contains("has no value"), "stderr: {e}");
+    let mut runs = Vec::new();
+    find_files(&dir.join("out"), "run.json", &mut runs);
+    let drawn: Vec<_> = runs.iter()
+        .filter_map(|p| serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(p).unwrap()).ok())
+        .filter(|v| v["inputs"]["provenance"]["parameters_provenance"]["gamma"]["source"]
+            == "estimate_start_drawn")
+        .collect();
+    assert!(!drawn.is_empty(),
+        "a drawn nuisance start is recorded as `estimate_start_drawn` in a point's run.json");
+}

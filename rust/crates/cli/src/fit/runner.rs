@@ -163,6 +163,72 @@ pub(crate) struct FitParameters {
     pub resolved: crate::params_resolver::ResolvedParameters,
 }
 
+/// Give every `[estimate]` parameter that has no value yet one, so the
+/// resolver does not refuse it as unset: its `start`, else a draw within its
+/// bounds, else (no finite box) a draw from its proper prior. One function
+/// for every command that reads a fit config's `[estimate]` (`fit run`,
+/// `survey --fit`, `profile --fit`), so a bare `beta = {}` entry means the
+/// same everywhere (run-spec §1.4). The draw is keyed by `(seed, name)`.
+///
+/// `no_prior_draw` names parameters that must not fall back to a prior draw
+/// (a profile's swept parameters: the caller seeds those from the sweep).
+/// Returns where each seeded value came from, for
+/// [`crate::params_resolver::ResolvedParameters::attribute_seeded_starts`].
+pub(crate) fn seed_estimate_starts(
+    model: &mut ir::Model,
+    estimate: &indexmap::IndexMap<String, super::config_v2::EstimateSpecV2>,
+    seed: u64,
+    no_prior_draw: &std::collections::HashSet<String>,
+) -> HashMap<String, crate::params_resolver::ValueSource> {
+    let mut seeded: HashMap<String, crate::params_resolver::ValueSource> = HashMap::new();
+    let start_priors: HashMap<String, Prior> = estimate.keys()
+        .map(|n| (n.clone(), resolve_prior(n, estimate, model).0))
+        .collect();
+    for (name, spec) in estimate {
+        if let Some(p) = model.parameters.iter_mut().find(|p| p.name == *name) {
+            if p.value.resolved_value().is_none() {
+                let bounds = spec.bounds.or_else(|| resolved_bounds(p));
+                // A parameter with no kind gets no seeded start; resolution
+                // refuses it below ([`estimated_kind`]).
+                let kind = p.param_kind;
+                let value = spec.start.or_else(|| bounds.zip(kind).map(|((lo, hi), kind)| {
+                    let log_scale = derive_transform_with_bounds(kind, (lo, hi))
+                        .is_ok_and(|t| t.log_spaced());
+                    super::init::draw_start_in_bounds(lo, hi, log_scale, seed, name)
+                })).or_else(|| {
+                    // No start and no finite box (an unbounded `real` or
+                    // `instant`, searched over (−∞, ∞)): a draw from the
+                    // parameter's proper prior, keyed by (seed, name) as the
+                    // box draw is. With no proper prior either, the resolver
+                    // below refuses the parameter as having no value.
+                    if no_prior_draw.contains(name) { return None; }
+                    let prior = &start_priors[name];
+                    if matches!(prior, Prior::Fixed(Density::Flat) | Prior::Hierarchical(_)) {
+                        return None;
+                    }
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    seed.hash(&mut h);
+                    name.hash(&mut h);
+                    let mut rng = sim::rng::StatefulRng::new(h.finish());
+                    Some(super::chain_starts::sample_prior_natural(prior, &mut rng, None))
+                });
+                if let Some(v) = value {
+                    // Fill the optimiser start without collapsing to a Fixed
+                    // constant — keeps the parameter estimated (bounds/prior
+                    // intact) so the resolver passes (gh#34) and `default_params`
+                    // gets the start.
+                    p.value = p.value.with_value(v);
+                    seeded.insert(name.clone(), crate::params_resolver::ValueSource::EstimateStart {
+                        drawn: spec.start.is_none(),
+                    });
+                }
+            }
+        }
+    }
+    seeded
+}
+
 /// Load `fit`'s model and resolve its parameter values ([`FitParameters`]).
 /// Pure of reporting: the caller emits the resolution's notices.
 ///
@@ -244,51 +310,8 @@ pub(crate) fn resolve_fit_parameters(
     // the model param has no value yet (no scenario default, no
     // model-declared `value`), fall back to a Transform-aware
     // uniform draw within bounds.
-    let mut seeded: HashMap<String, crate::params_resolver::ValueSource> = HashMap::new();
-    let start_priors: HashMap<String, Prior> = fit.estimate.keys()
-        .map(|n| (n.clone(), resolve_prior(n, &fit.estimate, &model_pre).0))
-        .collect();
-    for (name, spec) in &fit.estimate {
-        if let Some(p) = model_pre.parameters.iter_mut().find(|p| p.name == *name) {
-            if p.value.resolved_value().is_none() {
-                let bounds = spec.bounds.or_else(|| resolved_bounds(p));
-                // A parameter with no kind gets no seeded start; resolution
-                // refuses it below ([`estimated_kind`]).
-                let kind = p.param_kind;
-                let value = spec.start.or_else(|| bounds.zip(kind).map(|((lo, hi), kind)| {
-                    let log_scale = derive_transform_with_bounds(kind, (lo, hi))
-                        .is_ok_and(|t| t.log_spaced());
-                    super::init::draw_start_in_bounds(lo, hi, log_scale, seed, name)
-                })).or_else(|| {
-                    // No start and no finite box (an unbounded `real` or
-                    // `instant`, searched over (−∞, ∞)): a draw from the
-                    // parameter's proper prior, keyed by (seed, name) as the
-                    // box draw is. With no proper prior either, the resolver
-                    // below refuses the parameter as having no value.
-                    let prior = &start_priors[name];
-                    if matches!(prior, Prior::Fixed(Density::Flat) | Prior::Hierarchical(_)) {
-                        return None;
-                    }
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    seed.hash(&mut h);
-                    name.hash(&mut h);
-                    let mut rng = sim::rng::StatefulRng::new(h.finish());
-                    Some(super::chain_starts::sample_prior_natural(prior, &mut rng, None))
-                });
-                if let Some(v) = value {
-                    // Fill the optimiser start without collapsing to a Fixed
-                    // constant — keeps the parameter estimated (bounds/prior
-                    // intact) so the resolver passes (gh#34) and `default_params`
-                    // gets the start.
-                    p.value = p.value.with_value(v);
-                    seeded.insert(name.clone(), crate::params_resolver::ValueSource::EstimateStart {
-                        drawn: spec.start.is_none(),
-                    });
-                }
-            }
-        }
-    }
+    let seeded = seed_estimate_starts(
+        &mut model_pre, &fit.estimate, seed, &std::collections::HashSet::new());
 
     // Route value resolution through the unified resolver. fit.toml
     // has no CLI-level --fixed; the [fixed] block becomes

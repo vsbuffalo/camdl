@@ -202,7 +202,9 @@ recorded provenance says `model_default`. An `[estimate]` parameter the model
 gives no value is seeded with its `[estimate].start`, or a draw within its
 bounds when the entry has none, and recorded as `estimate_start` or
 `estimate_start_drawn`: a reference point, not any chain's start, which
-`init_provenance` records.
+`init_provenance` records. `fit run`, `survey --fit` and `profile --fit` seed
+through the same function, so `beta = {}` means the same in all three; a
+profile's swept parameter takes its value from the sweep and needs no start.
 
 **Sweeps are orthogonal to everything.** A sweep is "run this thing at multiple
 parameter values," and it works on both sides. `simulate --sweep NAME=GRID`
