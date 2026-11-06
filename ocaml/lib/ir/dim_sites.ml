@@ -130,8 +130,14 @@ let transition_sites acc (tr : transition) =
     ~literals:Whole_terms (Has rate_total) (E rate);
   (match draw_method with
    | DrawOverdispersed { sigma_sq; sigma_sq_grad = _ (* derivative map *) } ->
+     (* The runtime draws a unit-mean Gamma multiplier with shape dt/σ² and
+        scale σ²/dt (rng.rs), Bretó et al. (2009) gamma white noise: a shape
+        is a pure number, so σ² has the dimension of dt (§5.7). *)
      add acc ~subject ~role:(Printf.sprintf "overdispersion sigma^2 in '%s'" name)
-       ~code:"E308" (Has dimensionless) (E sigma_sq)
+       ~code:"E308"
+       ~note:"σ² is the variance of the integrated noise per unit time; with \
+              time_unit = 'days it is in days. Declare it `positive dim T`."
+       (Has time) (E sigma_sq)
    | DrawPoisson | DrawDeterministic -> ());
   match lineage with
   | None -> ()

@@ -1,0 +1,23 @@
+# invariant: overdispersion sigma^2 has dimension T, so a dimensionless one is refused
+# spec: §5.7
+# expect: E308 Error
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  beta     : rate             in [0.01, 2.0]
+  gamma    : rate             in [0.01, 1.0]
+  sigma_se : positive dim 1   in [0.001, 1.0]
+}
+
+let N = S + I + R
+
+transitions {
+  infection : S --> I @ overdispersed(beta * S * I / N, sigma_se)
+  recovery  : I --> R @ gamma * I
+}
+
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 100 'days }

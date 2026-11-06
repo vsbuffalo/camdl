@@ -22,7 +22,7 @@ parameters {
   mu        : rate        in [1e-6, 0.01]   # death rate (day^-1)
   alpha     : positive dim 1 in [0.5, 1.0]    # mixing exponent (dimensionless)
   iota      : count       in [0.01, 100.0]  # importation floor: enters FOI as (I + iota)^alpha — dimensionless count, NOT a rate. He et al. MLE: 2.9
-  sigma_se  : positive dim 1 in [0.001, 5.0]  # extra-demographic noise σ² (dimensionless)
+  sigma_se  : positive dim T in [0.001, 5.0]  # extra-demographic noise σ², per unit time (Gamma shape dt/σ²)
   amplitude : probability in [0.0001, 0.9999] # term-time forcing amplitude
   cohort    : probability in [0.0001, 0.9999] # fraction of births entering at school start
   rho       : probability in [0.0001, 0.9999] # reporting probability

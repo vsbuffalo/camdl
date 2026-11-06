@@ -1,5 +1,5 @@
 reference_sha = "184c65ff548850482fa425f3ffe850999bb5fa466c7367762626b164c0ddec23"
-case_sha = "cfe5fb4e0b94ed0c90d323180a1ca7e40105afffcaa459359235c4de1e946f42"
+case_sha = "cb9876b5c6874d9308bfb124f880f7df517206657eecb200c103557290604b24"
 harness_version = "0.1.0"
 fixture_sha = "589b92a6dcb8dce69e2dbdaf44b8a39c362da0d7a350c4058d38173558f6182c"
 pomp_version = "6.4"
