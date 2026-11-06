@@ -303,12 +303,15 @@ The compiler issues E-codes with source locations and fix-hints.
 | E300 | dim      | transition rate not P·T⁻¹                                                                                        |
 | E301 | dim      | non-dimensionless argument to `exp`/`log`                                                                        |
 | E302 | dim      | addition/subtraction of mismatched dimensions                                                                    |
-| E303 | dim      | parameter used with inconsistent dimensions                                                                      |
 | E304 | dim      | `sqrt` of odd-exponent dimension                                                                                 |
 | E305 | dim      | balance expression must have dimension P                                                                         |
 | E306 | dim      | ODE derivative must have dimension P·T⁻¹                                                                         |
-| E308 | dim      | overdispersion σ² must be dimensionless                                                                          |
+| E308 | dim      | overdispersion σ² must have dimension T (`positive dim T`)                                                       |
 | E309 | dim      | forcing `lag` must be a duration (dimension T)                                                                   |
+| E314 | dim      | intervention `fraction` not dimensionless, or `count`/assigned value not a count                                 |
+| E315 | dim      | intervention time not T, or trigger threshold not its stream's dimension                                         |
+| E316 | dim      | a prior argument's unit literal disagrees with the argument's dimension                                          |
+| E317 | dim      | quantity threshold not its series' dimension, or `value_at` time not T                                           |
 | E320 | time     | `time_unit = 'months/'years` with `origin` declared                                                              |
 | E321 | time     | `Instant ± Calendar`-duration (`date(...) + 6 'months`)                                                          |
 | E322 | time     | calendar cadence in anchored recurring schedule (`every = 1 'months`)                                            |

@@ -2,7 +2,7 @@
 
 Date: 2026-11-06
 
-Status: accepted 2026-11-06; implementation on `docs/size-brackets-dim-clause`
+Status: implemented on `docs/size-brackets-dim-clause` (6b19d107 … this branch's spec commit); deviations are recorded inline where they occur
 
 Builds on: `docs/dev/proposals/2026-11-05-size-brackets-and-dim-clause.md` (§4,
 §5) and `docs/dev/notes/2026-11-05-dimension-inference-measurement.md`

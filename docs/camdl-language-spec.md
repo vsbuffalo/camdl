@@ -330,7 +330,6 @@ Invalid operations:
 
 ```camdl
 5 'days + 0.1 'per_day    → ERROR: cannot add time and rate
-5 'days * 3 'days         → ERROR: time² has no meaning in this system
 ```
 
 Mixed-unit values in tables that aren't compatible are compile errors.
@@ -347,7 +346,7 @@ The checker infers dimensions from:
 - Compartment references (`Pop`, `PopSum`) → dimension **P**
 - `Time` → dimension **T**
 - Parameter types: `rate` → **T⁻¹**, `probability` → **1**, `count` → **P**
-- Unit literals: `'days` → **T**, `'per_day` → **T⁻¹**
+- Unit literals: `'days` → **T**, `'per_day` → **T⁻¹**, `'count` → **P**
 - Arithmetic rules: multiplication adds exponents, division subtracts
 
 ```camdl
@@ -361,33 +360,87 @@ infection : S --> I @ beta * I / N
 #     got:      T⁻¹ (per-capita rate)
 ```
 
-Parameters with `kind = positive` or `kind = real` have unknown dimension — the
-checker infers it from context. If its use does not determine it, write a `dim`
-clause (see §4.1.1). If a parameter is used inconsistently across
-transitions, the compiler emits E303.
+**How dimensions are inferred.** Every expression-bearing position of the
+model is part of one system of equations over the exponents of P and T: a
+product's dimension is the sum of its factors', the operands of `+`, `min` or a
+comparison have one dimension, the argument of `exp`, `log` or a trigonometric
+function is dimensionless, and each position contributes the dimension it
+requires. The system is solved at once (Kennedy, "Dimension types", ESOP 1994),
+so a parameter whose dimension follows from several uses jointly (`a * b` in
+one rate, `a / b` in another) is resolved even when no single use fixes it, and
+an operator means the same thing wherever it appears. Parameters of kind
+`positive` or `real` get their dimension this way; when the model leaves one
+free, write a `dim` clause (§4.1.1). A parameter used as a rate in one place and
+a count in another is a contradiction, reported where it surfaces with the
+conflicting use named. A system that has rational but no integer solution
+(`(kappa * w)^2 * I` as a rate needs `kappa · w = T^-1/2`) is an error, never a
+silent guess.
 
-Additional checks:
+**What each position requires.**
 
-- **E301**: argument to `exp()` / `log()` must be dimensionless
-- **E302**: addition/subtraction of mismatched dimensions
-- **E304**: `sqrt()` of odd-exponent dimension
-- **E305**: balance expression must have dimension P
-- **E306**: ODE derivative must have dimension P·T⁻¹
-- **E308**: overdispersion σ² must be dimensionless
-- **E309**: forcing `lag` must be a duration (dimension T)
-- **E312**: a forcing argument that becomes part of the forcing's value
-  (sinusoid `amplitude` and `baseline`, `values`, Fourier harmonics,
-  identity-link spline `coefs`) has the forcing's declared dimension; a time
-  argument (`period`, `phase`, `breakpoints`, knots) is a duration
-- **E313**: an initial value is a count, as are an initial law's `rate`, `n`,
-  `mean` and `sd`; a law's `p` and `dispersion` are dimensionless. A literal in
-  an initial condition takes the dimension its context needs (`I = 10`)
+| Position                                                                              | Dimension                                     | Code |
+| ------------------------------------------------------------------------------------- | --------------------------------------------- | ---- |
+| transition rate                                                                       | P·T⁻¹                                         | E300 |
+| overdispersion σ² in `overdispersed(rate, σ²)`                                        | T (the noise's Gamma shape is dt/σ²)          | E308 |
+| ODE derivative                                                                        | P·T⁻¹                                         | E306 |
+| balance expression                                                                    | P                                             | E305 |
+| forcing `lag`; periods, phases, breakpoints, knots; smooth `per`                      | T                                             | E309, E312 |
+| forcing values, amplitude, baseline, harmonics, identity-link spline coefficients     | the forcing's declared dimension D            | E312 |
+| log-link spline coefficients                                                          | 1                                             | E301 |
+| smooth level, slope, scale, modes                                                     | log link: 1, T⁻¹, 1, 1; identity link: D, D·T⁻¹, D, 1 | E301, E312 |
+| initial value; initial Poisson `rate`, Binomial `n`, NegBinomial `mean`, Normal `mean` and `sd` | P                                  | E313 |
+| initial Binomial `p`; NegBinomial `dispersion`                                        | 1                                             | E313 |
+| transfer `fraction`                                                                   | 1                                             | E314 |
+| transfer `count`; an assigned value; an added count                                   | P                                             | E314 |
+| an intervention's time expression                                                     | T                                             | E315 |
+| a reactive trigger's threshold                                                        | the observed stream's scored column           | E315 |
+| Poisson `rate`; NegBinomial and zero-inflated `mean`; Binomial and BetaBinomial `n`   | P                                             | E304 |
+| Binomial and Bernoulli `p`; Beta `mean`; zero-inflation `pi`; shapes and concentrations | 1                                           | E304 |
+| NegBinomial and zero-inflated `dispersion`                                            | 1                                             | E307 |
+| Normal `mean`                                                                         | the scored column's dimension                 | E304 |
+| Normal `sd`                                                                           | the mean's; on a `count` column only its T exponent (below) | E304 |
+| a quantity's threshold (`count_above`, `first_above`, …)                              | the series' dimension                         | E317 |
+| a `value_at` time                                                                     | T                                             | E317 |
+| the arms of a contrast difference                                                     | one dimension                                 | E297 |
+| prior arguments                                                                       | unit literals only (§2.2.3)                   | E316 |
 
-Inference treats every product, quotient and integer power as a linear equation
-over the exponents of P and T and solves them together, so a parameter whose
-dimension follows from several uses jointly (`a * b` in one rate, `a / b` in
-another) is resolved even when no single use fixes it (Kennedy, "Dimension
-types", ESOP 1994).
+Additional checks: a sum whose operands differ is **E302**; the argument of
+`exp()`/`log()`, a power's exponent, and a base under a non-constant exponent
+are dimensionless (**E301**); a square root needs even exponents (**E304**).
+
+**Literals.** A numeric literal is dimensionless, with two exceptions. Zero
+takes any dimension. A literal, or arithmetic of literals, that is an entire
+additive term of a rate, derivative, balance, initial value, count-valued
+likelihood argument, intervention count or quantity threshold takes that
+position's dimension: `I = 10`, `S = N0 - 50`, `S = 0.95 * 10000`, `rate =
+100`, a constant importation `beta * S * I / N + 0.5`. Inside a product a
+literal is a pure number, so `(1/730) * R` is not a rate: write
+`R / (730 'days)`, or a typed constant (§8.4). A literal coefficient that carries
+a dimension is a typed constant with a `dim` clause:
+`let b : positive dim P^-1*T^-1 = 0.0001`.
+
+**Powers.** `a^n` with `n` known at compile time as an integer (a literal, a
+typed constant, or arithmetic of them) has `n` times `a`'s dimension. A
+compile-time fraction `p/q` requires `q · dim(result) = p · dim(a)`, which has
+no integer solution unless the exponents divide (`(I / N)^0.5` is fine,
+`I^0.5` in a rate is not). Any other exponent makes the base dimensionless,
+since `d^y` with `y` changing during a fit is not a dimension; `unchecked_dim`
+(§2.2.2) is the escape for a deliberate exception.
+
+**Count noise.** The `sd` of a `normal` likelihood on a `count` column must
+match the mean's T exponent, but its P exponent is free: variance formulas for
+counts add a term in the count to one in its square (He et al. 2010,
+ρ(1−ρ)C + ρ²ψ²C²), which is consistent because a count is a number of
+individuals rather than a quantity whose unit can be rescaled. On a `real`
+column the `sd` has the mean's dimension exactly, and the column's dimension is
+inferred from the two.
+
+**What a compile guarantees.** Every expression that reaches the dynamics,
+observations, interventions, initial conditions and quantities has been
+dimension-checked against its position. A compile does not check what the
+compiler cannot see: the scale of a parameter value supplied at run time (always
+in `time_unit`), the inside of an `unchecked_dim`, or the physical meaning of a
+prior (§2.2.3).
 
 Disable with `--no-dim-check` if a false positive is encountered (and file a
 bug).
@@ -402,7 +455,8 @@ validated and widely used. These are legitimate modelling choices, not bugs.
 `unchecked_dim(expr, dim = NAME, reason = "…")` asserts that the wrapped
 expression has the named dimension without the dim-checker verifying the
 assertion. Surrounding rate expressions continue to dim-check normally — the
-escape is narrow and visible.
+escape is narrow and visible. The wrapped expression itself is not inferred:
+its point is a term, like `(I + ι)^α`, that the rules of §2.2.1 refuse.
 
 <!-- camdl-doctest-preamble: unchecked-dim
 compartments { S, E, I, R }
@@ -459,6 +513,62 @@ References for the canonical case:
   doi:10.1098/rsif.2009.0151.
 - Bretó, He, Ionides, & King (2009). _Annals of Applied Statistics_ 3(1):
   319–348. doi:10.1214/08-AOAS201.
+
+### 2.2.3 Dimensions and priors
+
+Dimensional analysis has two jobs in camdl. In model dynamics it is a type
+system: a transition rate that is not P·T⁻¹, or a duration added to a rate, is
+wrong epidemic mathematics and does not compile. In prior specification it is
+closer to a modelling linter.
+
+1. A parameter's dimension comes from its declaration and its use in the model.
+2. A prior is a probability distribution over the number the parameter takes
+   in the model's units. Choosing a prior family neither establishes nor
+   restricts the parameter's dimension: `gamma : rate ~ beta(alpha = 2, beta =
+   2)` is a valid prior on a recovery rate whose value lies in (0, 1) per
+   `time_unit`.
+3. A bare number in a prior is a number in model units: `normal(mu = 0.2,
+   sigma = 0.1)` on a rate means 0.2 per day under `'days` and 0.2 per week under
+   `'weeks`.
+4. A parameter inside a prior argument is a number too, so arithmetic on
+   hyperparameters is free: `log_normal(mu = log(m_h), ...)` with `m_h : rate`
+   takes the logarithm of `m_h`'s value.
+5. A unit literal is a request for a conversion, and the compiler honours it:
+   `normal(mu = 0.2 'per_day)` under weeks is 1.4, and `log_normal(mu =
+   log(0.2 'per_day))` under weeks converts the rate before taking its log. A
+   conversion is right only in the argument's own dimension, so a unit literal
+   whose dimension disagrees with the argument is **E316**:
+
+   | Family                        | Argument                    | Dimension |
+   | ----------------------------- | --------------------------- | --------- |
+   | normal, uniform, half-normal, log-uniform, truncated normal | location, scale, bounds | θ's |
+   | exponential; gamma            | `rate`                      | θ's inverse |
+   | gamma; beta                   | `shape`; `alpha`, `beta`    | 1 |
+   | log-normal                    | `mu`, `sigma`               | 1 (they are the mean and sd of ln θ) |
+
+   `log_normal(mu = -2 'per_day, ...)` passes a rate directly as a
+   log-coordinate and is E316; so is `normal(mu = 0.2 'days)` on a rate, and two
+   unit literals that disagree inside one argument. When θ's dimension is not
+   determined by the model, a literal is converted by its own unit and accepted.
+6. These conventional dimensions support that check and one lint, **I316**
+   (Info): a log-normal `mu` or `sigma` that is directly a parameter with a
+   dimension, probably a rate meant as `log(m)` or a log-coordinate that should
+   be declared `real dim 1`. They never constrain a parameter's dimension, and
+   a parameter used only in priors needs none (no I300).
+7. Changing `time_unit` does not preserve an arbitrary prior. A prior written
+   with unit literals in the positions of the table describes the same belief
+   under either unit; a bare-number prior does not, and moving a model to a new
+   unit means rewriting it. For a log-normal, μ shifts by the log of the
+   conversion factor (+ln 7 from days to weeks) and σ is unchanged.
+
+A prior is a measure on θ, which is dimensionless, while its density has units
+of 1/[θ]; under a change of unit the measure is carried by the Jacobian of the
+change of coordinates, and the density's functional form need not survive it.
+That is why a family's form is not a statement about θ's dimension. The Jeffreys
+prior for a scale parameter, p(θ) ∝ 1/θ, is the form that does survive
+rescaling (Jeffreys, H. 1946, "An invariant form for the prior probability in
+estimation problems", _Proc. R. Soc. Lond. A_ 186:453–461); camdl requires
+nothing of the kind.
 
 ### 2.3 Date Literals
 
@@ -2011,6 +2121,12 @@ let iota : count = 1e-6
 let obs_floor : count = 0.01
 let mu_annual : rate = 0.0002 'per_year
 ```
+
+A typed `let` takes the parameter's `dim` clause (§4.1.1), which is how a literal
+coefficient with a compound dimension is written:
+`let b : positive dim P^-1*T^-1 = 0.0001`. A unit literal in the body must agree
+with the declared kind or clause: `let tau : rate = 30 'days` is **E282** (write
+`let tau : duration = 30 'days`, or `let r : rate = 1 / (30 'days)`).
 
 When a typed `let` has a constant body (a literal, a unit literal, or
 arithmetic and pure math functions over them), the compiler evaluates it once
@@ -3954,7 +4070,7 @@ transitions {
 
 ```camdl preamble=events-demo
 events {
-  cohort_entry : add(S, cohort * birthrate(t) * pop(t))
+  cohort_entry : add(S, cohort * birthrate(t) * pop(t) * 365.25 'days)
     every 365.25 'days at_day 251
 
   importation : add(I, 10) at [30]
@@ -6084,7 +6200,7 @@ parameters {
   k          : positive
   I0         : count
   vacc_frac  : probability
-  import_rate : rate
+  import_rate : positive dim P/T   # importations per unit time
 }
 
 ## ── Tables ─────────────────────────────────────────────
@@ -6583,7 +6699,14 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E278 | Error   | Duplicate declaration (a name declared more than once / in multiple namespaces)            |
 | E300 | Error   | Transition rate has the wrong dimension                                                    |
 | E302 | Error   | Addition/subtraction of mismatched dimensions                                             |
-| E303 | Error   | Conflicting dimensions for a parameter across transitions                                 |
+| E304 | Error   | A likelihood argument has the wrong dimension, or a square root has odd exponents          |
+| E308 | Error   | Overdispersion σ² must have dimension T                                                    |
+| E313 | Error   | An initial condition has the wrong dimension                                               |
+| E314 | Error   | An intervention action's `fraction`, `count` or value has the wrong dimension              |
+| E315 | Error   | An intervention time is not T, or a trigger threshold is not its stream's dimension        |
+| E316 | Error   | A unit literal in a prior argument disagrees with the argument's dimension (§2.2.3)        |
+| E317 | Error   | A quantity threshold is not its series' dimension, or a `value_at` time is not T           |
+| I316 | Info    | A log-normal `mu` or `sigma` is directly a dimensioned parameter (§2.2.3)                  |
 | E347 | Error   | Observation stream declares its temporal columns twice or by half — `: time` plus window columns, half a pair, or `covers` with window columns (§12.1.1) |
 | E348 | Error   | `covers` or window columns on a stream whose `projected` reads state at an instant (§12.1.1) |
 | E350 | Error   | Incidence stream states no period — add `covers = …` or `window_start`/`window_stop` columns (§12.1.1) |
