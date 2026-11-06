@@ -4862,6 +4862,56 @@ let loop_vars_of_indices indices =
     | IComp v            -> [v]
   ) indices
 
+let count_errors ctx =
+  List.length (List.filter (fun (d : Diagnostics.diagnostic) ->
+    d.Diagnostics.severity = Diagnostics.Error) ctx.diags.Diagnostics.diags)
+
+let render_index_binding = function
+  | IBind (v, d)       -> Printf.sprintf "%s in %s" v d
+  | IComp v            -> Printf.sprintf "%s in compartments" v
+  | IConsec (v, vn, d) -> Printf.sprintf "(%s, %s) in consecutive(%s)" v vn d
+
+let family_head family indices =
+  Printf.sprintf "%s[%s]" family
+    (String.concat ", " (List.map render_index_binding indices))
+
+(** gh#482: the shared detection behind every "a family's members must differ"
+    check (E421 for effect families). [members] pairs each expanded member with
+    the binding environment that produced it; [key] projects the part of a
+    member that determines what it does, leaving out its name. Returns the first
+    group of two or more members with equal keys, and the binders whose levels
+    differ between two of them (the binders that fail to distinguish the
+    members), or [None].
+
+    Equality is [compare] on the resolved IR, so a NaN compares equal to
+    itself. Skipped for an unindexed declaration, and when the family's
+    expansion already reported an error ([errors_before] is the error count
+    before it began): a part that failed to resolve lowers to nothing, which
+    would make every member look identical and add a second diagnostic for one
+    mistake. Each caller keeps its own message, because what "the same" means
+    to the modeller differs by construct. *)
+let find_identical_members ctx ~indices ~errors_before ~key
+    (members : ((string * string) list * 'a) list) : ('a list * string list) option =
+  if indices = [] || count_errors ctx <> errors_before then None
+  else begin
+    let same (_, a) (_, b) = compare (key a) (key b) = 0 in
+    let rec first_dup = function
+      | [] -> None
+      | x :: rest ->
+        (match List.find_opt (same x) rest with
+         | Some y -> Some (x, y)
+         | None   -> first_dup rest)
+    in
+    match first_dup members with
+    | None -> None
+    | Some (((env_a, _) as a), (env_b, _)) ->
+      let group = List.map snd (List.filter (same a) members) in
+      let idle = List.filter (fun v ->
+          List.assoc_opt v env_a <> List.assoc_opt v env_b)
+          (loop_vars_of_indices indices) in
+      Some (group, idle)
+  end
+
 (** Check every compile-time guard for E217 (non-evaluable idents).
 
     All four guard-carrying surfaces must be walked: [eval_guard] substitutes
@@ -7887,15 +7937,6 @@ let resolve_intervention_action ctx env ~name ~family ~loc ~binders (action : ac
        check_action_target ctx ~name ~loc ~verb:"adds to" ~base ~concrete;
        [Ir.AddAction { Ir.add_compartment = concrete; Ir.add_count = resolve_expr ctx env expr }])
 
-let count_errors ctx =
-  List.length (List.filter (fun (d : Diagnostics.diagnostic) ->
-    d.Diagnostics.severity = Diagnostics.Error) ctx.diags.Diagnostics.diags)
-
-let render_index_binding = function
-  | IBind (v, d)       -> Printf.sprintf "%s in %s" v d
-  | IComp v            -> Printf.sprintf "%s in compartments" v
-  | IConsec (v, vn, d) -> Printf.sprintf "(%s, %s) in consecutive(%s)" v vn d
-
 (** gh#482: an indexed effect family (scheduled intervention, event, or reactive
     policy) must expand to instances that differ from one another. Two instances
     with the same actions and the same fire source both fire, so the action is
@@ -7914,29 +7955,15 @@ let render_index_binding = function
     look identical and add a second diagnostic for one mistake (E239's case). *)
 let check_family_instances_distinct ctx ~noun ~family ~loc ~indices
     ~errors_before (instances : ((string * string) list * Ir.intervention) list) =
-  if indices <> [] && count_errors ctx = errors_before then begin
-    let key (iv : Ir.intervention) = (iv.Ir.fire, iv.Ir.actions) in
-    let same (_, a) (_, b) = compare (key a) (key b) = 0 in
-    let rec first_dup = function
-      | [] -> None
-      | x :: rest ->
-        (match List.find_opt (same x) rest with
-         | Some y -> Some (x, y)
-         | None   -> first_dup rest)
-    in
-    match first_dup instances with
-    | None -> ()
-    | Some (((env_a, _) as a), (env_b, _)) ->
-      let group = List.filter (same a) instances in
-      let names = List.map (fun (_, (iv : Ir.intervention)) -> iv.Ir.name) group in
-      (* The binders whose levels differ between two identical instances are
-         the ones that fail to distinguish them. *)
-      let idle = List.filter (fun v ->
-          List.assoc_opt v env_a <> List.assoc_opt v env_b)
-          (loop_vars_of_indices indices) in
+  match find_identical_members ctx ~indices ~errors_before
+          ~key:(fun (iv : Ir.intervention) -> (iv.Ir.fire, iv.Ir.actions))
+          instances with
+  | None -> ()
+  | Some (group, idle) ->
+    begin
+      let names = List.map (fun (iv : Ir.intervention) -> iv.Ir.name) group in
       let quoted = String.concat ", " (List.map (Printf.sprintf "'%s'") idle) in
-      let head = Printf.sprintf "%s[%s]" family
-          (String.concat ", " (List.map render_index_binding indices)) in
+      let head = family_head family indices in
       let v = match idle with v :: _ -> v | [] -> "_" in
       Diagnostics.error ctx.diags ~code:"E421" ~loc
         ~message:(Printf.sprintf
@@ -7955,7 +7982,7 @@ let check_family_instances_distinct ctx ~noun ~family ~loc ~indices
           (if List.length idle > 1 then "them" else "it") v v
           (if List.length idle > 1 then "them" else "it"))
         ()
-  end
+    end
 
 let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
   let t_start = match ctx.simulate with
