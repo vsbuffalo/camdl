@@ -395,30 +395,37 @@ fn free_forward_first_bin_is_backend_independent() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-// ── A period boundary off the recorded output grid is refused, never guessed ─
+// ── A period boundary off the output grid is recorded, never guessed ────────
 
 #[test]
-fn a_period_boundary_off_the_output_grid_is_refused() {
+fn a_period_boundary_off_the_output_grid_is_recorded_not_snapped() {
     let bin = skip_if_missing_binary();
     // Under the 25-day declaration the row labelled 150 covers [125, 150).
     // t = 125 is on the dt = 1 grid the fit's filter walks, so the FIT is fine;
-    // it is not a recorded output time (`every = 50 'days`), so the projection
-    // has no cumulative flow to read there. Resolving it to the nearest earlier
-    // snapshot (t = 100) would put 25 days of warm-up back into the first bin
-    // and say nothing — exactly the silent-wrong gh#702 was about.
+    // it is not on the declared output grid (`every = 50 'days`). Predict
+    // records a snapshot there (gh#589) so the row's opening cumulative flow is
+    // read at 125. Resolving it to the nearest earlier snapshot (t = 100) would
+    // put 25 days of warm-up back into the first bin and say nothing — exactly
+    // the silent-wrong gh#702 was about — and would read ~4900 instead of ~2470.
     let tmp = setup_with_model("offgrid", &fit_toml("results"), CASES_OFF_GRID, &model_off_grid());
 
     let out = fit_then_predict(&bin, &tmp, &["--horizon", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
-        !out.status.success(),
-        "a period boundary that is not a recorded output time must be refused, \
-         not silently snapped to an earlier snapshot.\nstdout={}\nstderr={stderr}",
+        out.status.success(),
+        "predict must record a snapshot at the period boundary t = 125.\nstdout={}\nstderr={stderr}",
         String::from_utf8_lossy(&out.stdout)
     );
+
+    let cases_txt = std::fs::read_to_string(
+        find_artifact(&tmp.join("results"), "predictive", "cases").expect("predictive/cases.tsv"),
+    )
+    .unwrap();
+    let v = at(&q50_by_time(&cases_txt, "free_forward"), 150.0);
     assert!(
-        stderr.contains("125") && stderr.contains("recorded output time"),
-        "the refusal must name the boundary that is off the grid; stderr:\n{stderr}"
+        (1700.0..3300.0).contains(&v),
+        "the row labelled 150 covers [125, 150): one 25-day bin of flow (~2470), \
+         not the ~4900 a snap to the t = 100 snapshot would give. Got {v}.\n{cases_txt}"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
