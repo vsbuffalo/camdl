@@ -1,0 +1,38 @@
+# invariant: smooth modes are dimensionless
+# spec: §5.8
+# expect: E312 Error
+time_unit = 'days
+
+dimensions { mode = [m1, m2, m3, m4, m5, m6, m7, m8, m9, m10] }
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  gamma   : rate     in [0.001, 1.0]
+  a_b     : real dim 1 ~ normal(mu = -1.9, sigma = 0.6)
+  b_b     : real dim 1/T ~ normal(mu = 0.0, sigma = 0.005)
+  tau_b   : positive dim 1 ~ exponential(rate = 5.99)
+  z[mode] : real dim T ~ normal(mu = 0.0, sigma = 1.0)
+  N0      : count    in [100, 100000]
+  I0      : count    in [1, 1000]
+}
+
+forcing {
+  beta_t : bspline 'per_day {
+    window  = [0 'days, 168 'days]
+    n_basis = 12
+    link    = log
+    coefs   = smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks)
+  }
+}
+
+transitions {
+  infection : S --> I  @ beta_t * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+init { S = N0 - I0  I = I0 }
+
+simulate { from = 0 'days  to = 182 'days }

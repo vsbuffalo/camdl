@@ -11,8 +11,7 @@
    expression of some site, or lie under an exempt key.
 
    The rules are those of proposal 2026-11-06-dimension-checking-as-one-
-   constraint-system §5.1. Positions whose rule lands in a later commit of
-   that proposal carry [Exempt (Pending _)], naming the commit. *)
+   constraint-system §5.1. *)
 
 [@@@warning "@4@8@9"]
 (* 4: a [_] catch-all over a variant is an error, so a new constructor cannot
@@ -54,7 +53,6 @@ type site_expr =
 type exemption =
   | Constant_argument   (* a forcing argument fixed at compile time is read
                            in the forcing's own unit *)
-  | Pending of string   (* the rule lands in the named later commit *)
 
 type obligation =
   | Has     of dim_vec   (* a fixed dimension: P·T⁻¹, P, 1, T, ... *)
@@ -122,8 +120,6 @@ let add acc ?(subject : subject option) ?(literals = Literals_dimensionless) ?(s
   acc.next <- acc.next + 1;
   acc.out <- s :: acc.out
 
-let pending step = Exempt (Pending step)
-let pending_smooth        = pending "the smooth-spline rule (§8 step 4, §5.8)"
 
 let transition_sites acc (tr : transition) =
   let { name; stoichiometry = _; rate; metadata = _; draw_method;
@@ -221,12 +217,18 @@ let forcing_sites acc (tf : time_function) =
           add acc ?subject ~role:(role "slope") ~code:"E301" (Has per_time) (E slope);
           add acc ?subject ~role:(role "scale") ~code:"E301" (Has dimensionless) (E scale)
         | Link_identity ->
-          List.iter (fun (w, e) -> add acc ?subject ~role:(role w) ~code:"E312"
-                        pending_smooth (E e))
-            [ ("level", level); ("slope", slope); ("scale", scale) ]);
+          (* w = level + slope·(t − t_m) + (scale/κ)·M·z is the forcing's value:
+             the penalty Ω integrates B''² over t, so M (MᵀΩM = I) and
+             κ = √(K − 2)·per^{3/2} are both T^{3/2} and cancel (§5.8,
+             spline_penalty.rs, compiled_model.rs). *)
+          add acc ?subject ~role:(role "level") ~code:"E312" (Has value_dim) (E level);
+          add acc ?subject ~role:(role "slope") ~code:"E312"
+            (Has (Array.mapi (fun i x -> x + per_time.(i)) value_dim)) (E slope);
+          add acc ?subject ~role:(role "scale") ~code:"E312" (Has value_dim) (E scale));
+       (* the modes are standard normal draws: pure numbers, under either link *)
        List.iteri (fun k e ->
          add acc ?subject ~role:(role (Printf.sprintf "mode %d" k)) ~code:"E312"
-           pending_smooth (E e)) modes)
+           (Has dimensionless) (E e)) modes)
 
 let table_sites acc (tbl : table) =
   let { name; source; out_of_bounds = _; cell_kind = _ } = tbl in
