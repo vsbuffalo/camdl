@@ -421,6 +421,17 @@ pub fn run_stage(
             // PF call and (if the chain had already diverged into
             // a degenerate region during sampling) spuriously
             // mark a working chain as bad.
+            // A start where some prior has zero density cannot be repaired by
+            // the MH ratio when every proposal is also outside that prior's
+            // support (`-inf - -inf` is NaN, never accepted), and the
+            // likelihood-only backstop below (gh#226) does not see it. Refuse
+            // it here, naming the parameter, as PGAS does
+            // (`SimError::NonFiniteChainStart`).
+            if resume_states[chain_id].is_none() {
+                start_prior_is_finite(&config.estimated_params, &priors,
+                                      &config.param_names, &start_vec)
+                    .map_err(|e| format!("chain {}: {}", ChainIndex(chain_id), e))?;
+            }
             if resume_states[chain_id].is_none() && is_ode_mh {
                 // ODE-MH init-eval guard: no PF, so the PFDegenerate skip arm
                 // does not apply. Evaluate the
@@ -1141,6 +1152,34 @@ fn completion_line(
         stage_dir.display())
 }
 
+/// `Err` naming every estimated parameter whose prior log-density is not
+/// finite at `start` (a start outside the prior's support, or a hierarchical
+/// prior whose arguments evaluate out of their domain there).
+fn start_prior_is_finite(
+    specs: &[EstimatedParam],
+    priors: &[Prior],
+    names: &[String],
+    start: &[f64],
+) -> Result<(), String> {
+    let env = sim::inference::hierarchical::NamedParams { names, values: start };
+    let bad: Vec<String> = specs.iter().zip(priors.iter())
+        .filter_map(|(spec, prior)| {
+            let z = spec.to_transformed(start[spec.index]);
+            let lp = prior.log_density_env(&spec.prior_point(z), &env);
+            (!lp.is_finite()).then(|| format!("'{}' = {}", spec.name, start[spec.index]))
+        })
+        .collect();
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the start has zero prior density (log prior -inf) at {}: an MH chain \
+             started there cannot move. Give a start inside every prior's support, \
+             or check the hierarchical prior arguments evaluated at this start.",
+            bad.join(", ")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1160,5 +1199,31 @@ mod tests {
         let pmmh = completion_line("pmmh", false, 2.0, 2, 500, dir);
         assert!(pmmh.starts_with("pmmh complete in 2.0s"), "{pmmh}");
         assert!(pmmh.contains("1000 PF evaluations"), "{pmmh}");
+    }
+    /// A hierarchical prior whose argument is out of its domain at the start
+    /// (sigma = s_h with s_h = -1) has zero density there; the guard names the
+    /// parameter. The same prior at s_h = 0.5 passes.
+    #[test]
+    fn start_with_zero_prior_density_is_refused() {
+        use sim::inference::types::{Transform, EstimatedParam};
+        let expr = |j: &str| serde_json::from_str::<ir::expr::Expr>(j).unwrap();
+        let hp = ir::parameter::HierarchicalPrior {
+            kind: ir::parameter::HierarchicalKind::LogNormal,
+            args: [("mu".to_string(), expr(r#"{"const": -2.0}"#)),
+                   ("sigma".to_string(), expr(r#"{"param": "s_h"}"#))]
+                .into_iter().collect(),
+            pool_over: String::new(),
+        };
+        let priors = vec![Prior::from_hierarchical_ir(&hp)];
+        let specs = vec![EstimatedParam {
+            name: "gamma".into(), index: 0, initial: 0.15, rw_sd: 0.1,
+            transform: Transform::LowerBounded { lo: 0.0 },
+            rw_sd_auto: false, perturb_only_at_t0: false,
+        }];
+        let names = vec!["gamma".to_string(), "s_h".to_string()];
+        let err = start_prior_is_finite(&specs, &priors, &names, &[0.15, -1.0])
+            .expect_err("sigma = -1 gives zero density");
+        assert!(err.contains("'gamma' = 0.15"), "{err}");
+        assert!(start_prior_is_finite(&specs, &priors, &names, &[0.15, 0.5]).is_ok());
     }
 }

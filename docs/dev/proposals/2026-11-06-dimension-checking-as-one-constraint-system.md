@@ -700,9 +700,16 @@ mention parameters, constants and literals only; time, `dt`, compartments,
 projections and observation columns are refused. An argument whose domain
 depends on a parameter's value cannot be checked statically, and the runtime
 already handles it: `prior.rs:196–272` collapses a non-finite or out-of-domain
-argument to −∞, never NaN. PMMH refuses to start from a non-finite
-log-posterior, naming the term, as PGAS already does (`sim/src/error.rs:159`);
-this is a guard in `cli/src/fit/pmmh.rs`, not a change to any acceptance ratio.
+argument to −∞, never NaN. PMMH refuses to start where the log prior is
+non-finite, naming the parameter, as PGAS refuses a non-finite start
+(`sim/src/error.rs:159`); this is a guard in `cli/src/fit/pmmh.rs`, not a change
+to any acceptance ratio. It is narrower than refusing a non-finite
+log-posterior: a −∞ log-likelihood at the start stays the warning of gh#334,
+since a chain can still reach a finite-likelihood region from there, while a
+start of zero prior density under a prior that is −∞ near it (a hierarchical σ
+whose hyperparameter is negative) cannot, and the likelihood-only backstop of
+gh#226 does not see it. A start outside a constant prior's support is already
+refused earlier, by the bounds-versus-support check.
 
 **Explicit units are honoured, and only they are checked.** Inside a prior
 argument a parameter reference is a number in model units, and arithmetic on
