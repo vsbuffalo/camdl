@@ -58,7 +58,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::hash::{ContentHash, HASH_VERSION};
 use crate::kind::{run_id, ArtifactKind};
@@ -356,67 +356,52 @@ impl FsCasStore {
         // `AlreadyExists -> FitInProgress` here would report "fit in progress"
         // under a dead pid and wedge the leaf until `--force`, which is the
         // failure `reclaim_or_refuse`'s own comment warns about.
-        let lock = path.join(".lock");
-        match OpenOptions::new().write(true).create_new(true).open(&lock) {
-            Ok(mut f) => {
-                write!(f, "{}", std::process::id())?;
-                f.sync_all()?;
+        let _lock = LeafLock::acquire(path, LockWait::Refuse)?;
+
+        // Re-read UNDER the lock: the snapshot above may be stale.
+        let mut record = match self.lookup(path, expected) {
+            Lookup::Hit(r) => r,
+            Lookup::Collision(_) => {
+                return Err(CasError::AlreadyCompleted { path: path.display().to_string() })
             }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                reclaim_or_refuse(path, &lock)?;
+            // The leaf went away (or was reclaimed) between the two reads.
+            _ => return Ok(()),
+        };
+
+        let digest = ContentHash::digest_bytes(bytes);
+        if let Some(existing) = record.artifacts.get(name) {
+            if existing.digest == digest {
+                return Ok(());
             }
-            Err(e) => return Err(e.into()),
+            // Preserve the rejected bytes, as `DivergentRecompute`
+            // promises: the one signal the store emits for a suspected
+            // identity bug must not send the reader to an empty directory.
+            let kept = self.quarantine_bytes(path, name, bytes, &digest)?;
+            return Err(CasError::DivergentRecompute {
+                path: path.display().to_string(),
+                file: name.to_string(),
+                ours: format!("{} (kept at {})", digest.to_hex(), kept.display()),
+                theirs: existing.digest.to_hex(),
+            });
         }
 
-        let outcome = (|| -> Result<(), CasError> {
-            // Re-read UNDER the lock: the snapshot above may be stale.
-            let mut record = match self.lookup(path, expected) {
-                Lookup::Hit(r) => r,
-                Lookup::Collision(_) => {
-                    return Err(CasError::AlreadyCompleted { path: path.display().to_string() })
-                }
-                // The leaf went away (or was reclaimed) between the two reads.
-                _ => return Ok(()),
-            };
-
-            let digest = ContentHash::digest_bytes(bytes);
-            if let Some(existing) = record.artifacts.get(name) {
-                if existing.digest == digest {
-                    return Ok(());
-                }
-                // Preserve the rejected bytes, as `DivergentRecompute`
-                // promises: the one signal the store emits for a suspected
-                // identity bug must not send the reader to an empty directory.
-                let kept = self.quarantine_bytes(path, name, bytes, &digest)?;
-                return Err(CasError::DivergentRecompute {
-                    path: path.display().to_string(),
-                    file: name.to_string(),
-                    ours: format!("{} (kept at {})", digest.to_hex(), kept.display()),
-                    theirs: existing.digest.to_hex(),
-                });
-            }
-
-            let fp = path.join(name);
-            if let Some(parent) = fp.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            write_file_synced(&fp, bytes)?;
-            let meta = fs::metadata(&fp)?;
-            record.artifacts.insert(
-                name.to_string(),
-                FileChecksum {
-                    bytes: bytes.len() as u64,
-                    mtime: fmt_mtime(meta.modified()?),
-                    digest,
-                },
-            );
-            write_record_atomic(path, &record)?;
-            fsync_dir(path)?;
-            Ok(())
-        })();
-
-        fs::remove_file(&lock).ok();
-        outcome
+        let fp = path.join(name);
+        if let Some(parent) = fp.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_file_synced(&fp, bytes)?;
+        let meta = fs::metadata(&fp)?;
+        record.artifacts.insert(
+            name.to_string(),
+            FileChecksum {
+                bytes: bytes.len() as u64,
+                mtime: fmt_mtime(meta.modified()?),
+                digest,
+            },
+        );
+        write_record_atomic(path, &record)?;
+        fsync_dir(path)?;
+        Ok(())
     }
 
     /// Preserve bytes an `augment` refused, under `.quarantine/`, and return
@@ -629,17 +614,9 @@ impl FsCasStore {
         // whether the holder is a dead crash (reclaim, serialized through
         // `.reclaim`) or a live concurrent claim (refuse). A bare claimant
         // never removes a lock, so concurrent reclaimers can't double-enter.
-        let lock = dir.join(".lock");
-        match OpenOptions::new().write(true).create_new(true).open(&lock) {
-            Ok(mut f) => {
-                write!(f, "{}", std::process::id())?;
-                f.sync_all()?;
-            }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                reclaim_or_refuse(&dir, &lock)?;
-            }
-            Err(e) => return Err(e.into()),
-        }
+        // From here the claim owns the lock: an early return below drops it,
+        // and so does the `StreamClaim` built at the end.
+        let lock = LeafLock::acquire(&dir, LockWait::Refuse)?;
 
         // We now hold the exclusive lock. Defense-in-depth: a legitimate
         // reclaim only ever clears a crashed/incomplete leaf (`resolve_claim_dir`
@@ -671,7 +648,7 @@ impl FsCasStore {
         rec.artifacts = BTreeMap::new();
         write_record_atomic(&dir, &rec)?;
         fsync_dir(&dir)?;
-        Ok(StreamClaim { dir, finalized: false })
+        Ok(StreamClaim { dir, _lock: lock, finalized: false })
     }
 
     /// Walk the disambiguation candidates for `path`, classifying each by a
@@ -861,6 +838,10 @@ fn strip_disambiguator<'a>(name: &'a str, run_id: &ContentHash) -> &'a str {
 #[derive(Debug)]
 pub struct StreamClaim {
     dir: PathBuf,
+    /// The leaf's `.lock`, held for the claim's life. Fields drop after
+    /// [`Drop::drop`] runs, so an abandoned claim is marked `Failed` before
+    /// the lock is released, never after.
+    _lock: LeafLock,
     /// Set by [`finalize`](Self::finalize) once the leaf is `Completed`. While
     /// false, [`Drop`] treats the claim as abandoned and marks the leaf
     /// `Failed` — see the impl below.
@@ -884,7 +865,8 @@ impl StreamClaim {
 
     /// Commit `Running → Completed`: build the exact-set manifest from the
     /// streamed files, write `run.json.tmp → rename` over `run.json` (the
-    /// single-file rename is the commit point), fsync the dir, drop the lock.
+    /// single-file rename is the commit point), fsync the dir; the lock is
+    /// released as the claim drops on return.
     pub fn finalize(mut self, mut record: RunRecord) -> Result<PathBuf, CasError> {
         // Walk the whole streamed subtree (chains nest under `chain_N/`),
         // stopping at the declared children (`trajectories/`, `dt_check/`,
@@ -894,7 +876,6 @@ impl StreamClaim {
         record.status = RunStatus::Completed;
         write_record_atomic(&self.dir, &record)?;
         fsync_dir(&self.dir)?;
-        fs::remove_file(self.dir.join(".lock")).ok();
         // Only now is the leaf durably Completed; `Drop` must not touch it.
         // Set AFTER the commit point so a failure above still drops as Failed.
         self.finalized = true;
@@ -922,7 +903,7 @@ impl Drop for StreamClaim {
             record.status = RunStatus::Failed;
             write_record_atomic(&self.dir, &record).ok();
         }
-        fs::remove_file(self.dir.join(".lock")).ok();
+        // `_lock` is released when the fields drop, after this.
     }
 }
 
@@ -960,7 +941,7 @@ enum ExactSet {
 /// `edit` gets the record as it is under the lock and returns whether it
 /// changed it (`false` writes nothing), or a refusal, returned as
 /// [`CasError::EditRefused`] with the record untouched. A live holder of
-/// `.lock` is waited for (an update is short) up to 30 s; a dead one is
+/// `.lock` is waited for (an update is short) up to `RECORD_EDIT_WAIT`; a dead one is
 /// reclaimed through `reclaim_or_refuse`'s `.reclaim` protocol.
 ///
 /// Crash-safety: the record is written through the reserved
@@ -972,48 +953,20 @@ pub fn update_record(
     path: &Path,
     edit: impl FnOnce(&mut RunRecord) -> Result<bool, String>,
 ) -> Result<(), CasError> {
-    let lock = path.join(".lock");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        match OpenOptions::new().write(true).create_new(true).open(&lock) {
-            Ok(mut f) => {
-                write!(f, "{}", std::process::id())?;
-                f.sync_all()?;
-                break;
-            }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => match reclaim_or_refuse(path, &lock) {
-                Ok(()) => break,
-                Err(CasError::FitInProgress { .. })
-                    if std::time::Instant::now() < deadline =>
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(e) => return Err(e),
-            },
-            Err(e) => return Err(e.into()),
+    let _lock = LeafLock::acquire(path, LockWait::Upto(RECORD_EDIT_WAIT))?;
+    let mut record = match read_record(path) {
+        ReadResult::Ok(r) => *r,
+        _ => return Err(CasError::SchemaDrift { path: path.display().to_string() }),
+    };
+    match edit(&mut record) {
+        Ok(false) => Ok(()),
+        Ok(true) => {
+            write_record_atomic(path, &record)?;
+            fsync_dir(path)?;
+            Ok(())
         }
+        Err(reason) => Err(CasError::EditRefused { path: path.display().to_string(), reason }),
     }
-    let outcome = (|| -> Result<(), CasError> {
-        let mut record = match read_record(path) {
-            ReadResult::Ok(r) => *r,
-            _ => {
-                return Err(CasError::SchemaDrift { path: path.display().to_string() })
-            }
-        };
-        match edit(&mut record) {
-            Ok(false) => Ok(()),
-            Ok(true) => {
-                write_record_atomic(path, &record)?;
-                fsync_dir(path)?;
-                Ok(())
-            }
-            Err(reason) => {
-                Err(CasError::EditRefused { path: path.display().to_string(), reason })
-            }
-        }
-    })();
-    fs::remove_file(&lock).ok();
-    outcome
 }
 
 /// Files the exact-set check and manifest builder ignore: the record itself,
@@ -1236,6 +1189,81 @@ fn pid_is_alive(_pid: u32) -> bool {
 /// The PID recorded in a `.lock`, if present and parseable.
 fn read_lock_pid(lock: &Path) -> Option<u32> {
     fs::read_to_string(lock).ok().and_then(|s| s.trim().parse().ok())
+}
+
+/// How long a short read-modify-write of `run.json` waits for a live holder
+/// of the leaf's `.lock` before giving up with `FitInProgress`. The holders it
+/// waits behind are other record updates and augments, each a few fsyncs; a
+/// holder still there after this long is a streaming fit, which can run for
+/// hours and is not worth waiting for.
+const RECORD_EDIT_WAIT: Duration = Duration::from_secs(30);
+
+/// How often a waiting [`LeafLock::acquire`] retries a live-held lock.
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(20);
+
+/// What [`LeafLock::acquire`] does when the leaf's `.lock` is held by a live
+/// (or unverifiable) process.
+#[derive(Debug, Clone, Copy)]
+enum LockWait {
+    /// Refuse at once with `FitInProgress` — the claim paths, where a live
+    /// holder is a concurrent fit that will not finish soon.
+    Refuse,
+    /// Retry until the deadline, then refuse — the short record edits.
+    Upto(Duration),
+}
+
+/// The exclusive hold on a leaf's `.lock`, released when dropped.
+///
+/// Every taker of `.lock` in the store goes through [`LeafLock::acquire`], so
+/// the protocol is written once: `create_new` (`O_EXCL`), record our pid, fsync;
+/// an existing lock routes through [`reclaim_or_refuse`], which takes over a
+/// provably dead holder's lock and refuses a live one. Release is `Drop`, so no
+/// return path, `?` or unwind can leave the lock behind. A process that dies
+/// holding it (`kill -9`, `process::exit`) leaves its pid, which the next taker
+/// reclaims.
+#[derive(Debug)]
+struct LeafLock {
+    path: PathBuf,
+}
+
+impl LeafLock {
+    fn acquire(dir: &Path, wait: LockWait) -> Result<LeafLock, CasError> {
+        let path = dir.join(".lock");
+        let deadline = match wait {
+            LockWait::Refuse => None,
+            LockWait::Upto(d) => Some(Instant::now() + d),
+        };
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut f) => {
+                    // Hold the guard before anything fallible, so a failed
+                    // pid write still releases the lock we created.
+                    let lock = LeafLock { path };
+                    write!(f, "{}", std::process::id())?;
+                    f.sync_all()?;
+                    return Ok(lock);
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                    match reclaim_or_refuse(dir, &path) {
+                        Ok(()) => return Ok(LeafLock { path }),
+                        Err(CasError::FitInProgress { .. })
+                            if deadline.is_some_and(|d| Instant::now() < d) =>
+                        {
+                            std::thread::sleep(LOCK_RETRY_INTERVAL);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+}
+
+impl Drop for LeafLock {
+    fn drop(&mut self) {
+        fs::remove_file(&self.path).ok();
+    }
 }
 
 /// Whether `dir` is currently held by a live `.lock` holder — i.e. some
