@@ -699,15 +699,97 @@ struct ReadDep {
 
 /// Sidecar schema version. A sidecar tagged with any other value reads as
 /// not-fresh (recompile) rather than mis-parsing — so a format change fails
-/// closed instead of silently serving a misread entry.
-const SIDECAR_SCHEMA: u32 = 1;
+/// closed instead of silently serving a misread entry. Schema 2 added
+/// `compiled_as`; an entry written at schema 1 recompiles once.
+const SIDECAR_SCHEMA: u32 = 2;
 
 /// The on-disk cache sidecar: a schema-tagged wrapper around the read-closure,
 /// not a bare list, so future format changes are detectable and fail closed.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DepsSidecar {
     schema: u32,
+    /// The model name the cached IR carries: the stem of the file it was
+    /// compiled from (see [`compiled_model_name`]). The key folds the model's
+    /// bytes, not its path, so a byte-identical model under another file name
+    /// hits this entry; the name records whose IR it is, so the hit can be
+    /// served under the requesting file's own name.
+    compiled_as: String,
     reads: Vec<ReadDep>,
+}
+
+/// The model name `camdlc` gives a source file: its basename without the last
+/// extension (`camdlc.ml`: `Filename.basename path |> Filename.remove_extension`).
+fn compiled_model_name(model_path: &str) -> String {
+    let p = std::path::Path::new(model_path);
+    p.file_stem().unwrap_or(p.as_os_str()).to_string_lossy().into_owned()
+}
+
+/// The `compiled_as` recorded in a cache entry's sidecar, or `None` when the
+/// sidecar is missing, unparseable or from another schema.
+fn sidecar_compiled_as(cache_path: &std::path::Path) -> Option<String> {
+    let txt = std::fs::read_to_string(deps_sidecar_path(cache_path)).ok()?;
+    let sc = serde_json::from_str::<DepsSidecar>(&txt).ok()?;
+    (sc.schema == SIDECAR_SCHEMA).then_some(sc.compiled_as)
+}
+
+/// Serve a servable cache entry for `model_path`. When the entry was compiled
+/// from a file of the same name, the cache file itself is served (nothing to
+/// clean up). When it was compiled from a byte-identical model under another
+/// file name, the IR carries that file's name, so a per-process copy is written
+/// with the model's `name` set to this file's, and returned with its path for
+/// the caller to remove — the uncacheable-fallback shape.
+///
+/// The copy differs from the entry in the name's bytes only
+/// ([`rename_compiled_model`]). It is not re-serialized: the model's
+/// `initial_conditions` is an order-carrying map whose order enters the model
+/// hash, and a JSON-value round trip sorts object keys, so a re-serialized copy
+/// would re-key the model it was meant only to rename.
+///
+/// `Ok(None)` when the entry does not have the layout camdlc writes; the
+/// caller then treats it as a miss and recompiles, which republishes the entry
+/// under this file's name.
+fn serve_cache_entry(
+    cache_path: &std::path::Path,
+    model_path: &str,
+) -> Result<Option<(String, Option<std::path::PathBuf>)>, String> {
+    let want = compiled_model_name(model_path);
+    let Some(compiled_as) = sidecar_compiled_as(cache_path) else {
+        return Ok(None);
+    };
+    if compiled_as == want {
+        return Ok(Some((cache_path.to_string_lossy().into_owned(), None)));
+    }
+    let txt = std::fs::read_to_string(cache_path)
+        .map_err(|e| format!("cannot read cached IR {}: {e}", cache_path.display()))?;
+    let Some(json) = rename_compiled_model(&txt, &compiled_as, &want) else {
+        return Ok(None);
+    };
+    static SERVED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SERVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir()
+        .join(format!("camdl_{}_named_{n}.ir.json", std::process::id()));
+    std::fs::write(&tmp, json).map_err(|e| format!("error writing temp IR: {}", e))?;
+    Ok(Some((tmp.to_string_lossy().into_owned(), Some(tmp))))
+}
+
+/// `ir_json` with the model's `name` changed from `from` to `to` and every
+/// other byte unchanged. camdlc writes the envelope as `{"ir_version":…,
+/// "validated_by":…,"model":{"name":…` (`ocaml/lib/ir/serde.ml`), so the
+/// name is the first string after the first `"model":{"name":`; the
+/// envelope fields before it are version strings that cannot contain that
+/// text. `None` unless the decoded name there is exactly `from`, so a
+/// document of any other layout is never patched in the wrong place.
+fn rename_compiled_model(ir_json: &str, from: &str, to: &str) -> Option<String> {
+    const NEEDLE: &str = r#""model":{"name":"#;
+    let at = ir_json.find(NEEDLE)? + NEEDLE.len();
+    let mut values = serde_json::Deserializer::from_str(&ir_json[at..]).into_iter::<String>();
+    let name = values.next()?.ok()?;
+    if name != from {
+        return None;
+    }
+    let end = at + values.byte_offset();
+    let to_literal = serde_json::to_string(to).ok()?;
+    Some(format!("{}{}{}", &ir_json[..at], to_literal, &ir_json[end..]))
 }
 
 /// The subset of camdlc's `--emit-deps` JSON we consume.
@@ -833,9 +915,17 @@ fn build_read_deps(depfile: &std::path::Path) -> Result<Vec<ReadDep>, String> {
 }
 
 /// Atomically write the cache sidecar (tmp + rename), like the IR write.
-fn write_deps_sidecar(cache_path: &std::path::Path, deps: &[ReadDep]) -> std::io::Result<()> {
+fn write_deps_sidecar(
+    cache_path: &std::path::Path,
+    compiled_as: &str,
+    deps: &[ReadDep],
+) -> std::io::Result<()> {
     let sidecar = deps_sidecar_path(cache_path);
-    let payload = DepsSidecar { schema: SIDECAR_SCHEMA, reads: deps.to_vec() };
+    let payload = DepsSidecar {
+        schema: SIDECAR_SCHEMA,
+        compiled_as: compiled_as.to_string(),
+        reads: deps.to_vec(),
+    };
     let json = serde_json::to_vec(&payload)
         .map_err(std::io::Error::other)?;
     let mut staging = sidecar.clone().into_os_string();
@@ -861,7 +951,12 @@ fn write_deps_sidecar(cache_path: &std::path::Path, deps: &[ReadDep]) -> std::io
 ///
 /// If the sidecar write fails after the IR landed, the IR is removed so no
 /// reader can ever pair it with a stale sidecar.
-fn persist_cache_entry(cache_path: &std::path::Path, ir_json: &str, deps: &[ReadDep]) -> bool {
+fn persist_cache_entry(
+    cache_path: &std::path::Path,
+    ir_json: &str,
+    compiled_as: &str,
+    deps: &[ReadDep],
+) -> bool {
     if let Some(parent) = cache_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -873,7 +968,7 @@ fn persist_cache_entry(cache_path: &std::path::Path, ir_json: &str, deps: &[Read
         let _ = std::fs::remove_file(&ir_staging);
         return false;
     }
-    if write_deps_sidecar(cache_path, deps).is_ok() {
+    if write_deps_sidecar(cache_path, compiled_as, deps).is_ok() {
         return true;
     }
     // Sidecar failed: the IR on disk has no matching sidecar. Remove it (and any
@@ -1176,7 +1271,9 @@ pub fn resolve_ir_path_with_quantities(
         if cache_entry_servable(cache_path, path) {
             crate::status::step("cached",
                 format!("IR for {} ({})", crate::status::concise_path(path), &key[..8.min(key.len())]));
-            return Ok((cache_path.to_string_lossy().into_owned(), None));
+            if let Some(served) = serve_cache_entry(cache_path, path)? {
+                return Ok(served);
+            }
         }
     }
 
@@ -1193,7 +1290,11 @@ pub fn resolve_ir_path_with_quantities(
             single_flight::Lease::AlreadyCached => {
                 crate::status::step("cached",
                     format!("IR for {} ({})", crate::status::concise_path(path), &key[..8.min(key.len())]));
-                return Ok((cache_path.to_string_lossy().into_owned(), None));
+                // A peer published the entry; one this file cannot be served
+                // from falls through to an uncoordinated compile.
+                if let Some(served) = serve_cache_entry(cache_path, path)? {
+                    return Ok(served);
+                }
             }
             single_flight::Lease::Compile(guard) => _compile_lock = Some(guard),
             // Couldn't coordinate (unwritable lock dir, wedged holder, non-unix
@@ -1251,7 +1352,7 @@ pub fn resolve_ir_path_with_quantities(
     // forever — or, worse, pair with a foreign sidecar. A failure is non-fatal:
     // fall through to a per-pid temp.
     if let (Some((cache_path, _)), Some(deps)) = (&cache_target, &read_deps) {
-        if persist_cache_entry(cache_path, &json, deps) {
+        if persist_cache_entry(cache_path, &json, &compiled_model_name(path), deps) {
             return Ok((cache_path.to_string_lossy().into_owned(), None));
         }
     }
@@ -4458,7 +4559,7 @@ mod tests {
             as_written: "pop.tsv".into(),
             hash: crate::hashing::sha256_hex(b"old"),
         }];
-        assert!(persist_cache_entry(&cache, "IR-OLD", &deps_old));
+        assert!(persist_cache_entry(&cache, "IR-OLD", "m", &deps_old));
         assert!(cache.exists());
         assert!(read_deps_fresh(&cache, model.to_str().unwrap()),
             "fresh against the data it was built from");
@@ -4473,7 +4574,7 @@ mod tests {
             as_written: "pop.tsv".into(),
             hash: crate::hashing::sha256_hex(b"new"),
         }];
-        assert!(persist_cache_entry(&cache, "IR-NEW", &deps_new));
+        assert!(persist_cache_entry(&cache, "IR-NEW", "m", &deps_new));
         assert!(read_deps_fresh(&cache, model.to_str().unwrap()));
         assert_eq!(std::fs::read_to_string(&cache).unwrap(), "IR-NEW");
     }
@@ -4492,12 +4593,12 @@ mod tests {
 
         let at_current = format!(
             "{{\"ir_version\":\"{}\",\"model\":{{}}}}", ir::IR_VERSION.trim());
-        assert!(persist_cache_entry(&cache, &at_current, &[]));
+        assert!(persist_cache_entry(&cache, &at_current, "m", &[]));
         assert!(cache_entry_servable(&cache, model_path),
             "an entry at the current schema version, with no read() inputs, is servable");
 
         // Same key, same (empty) read-closure — only the declared version moves.
-        assert!(persist_cache_entry(&cache, "{\"ir_version\":\"0.0\",\"model\":{}}", &[]));
+        assert!(persist_cache_entry(&cache, "{\"ir_version\":\"0.0\",\"model\":{}}", "m", &[]));
         assert!(read_deps_fresh(&cache, model_path),
             "the sidecar is still valid: the version is the only defect");
         assert!(!cache_entry_servable(&cache, model_path),
@@ -4518,10 +4619,70 @@ mod tests {
         std::fs::write(sidecar.join("x"), b"_").unwrap();
 
         let deps = vec![ReadDep { as_written: "pop.tsv".into(), hash: "deadbeef".into() }];
-        let cached = persist_cache_entry(&cache, "IR", &deps);
+        let cached = persist_cache_entry(&cache, "IR", "m", &deps);
         assert!(!cached, "sidecar failure must report not-cached");
         assert!(!cache.exists(),
             "the IR must be removed when its sidecar can't be written (no stale-pairing)");
+    }
+
+    /// A cache hit carries the requesting file's model name. The key folds the
+    /// model's bytes, not its path, so `b.camdl`, byte-identical to `a.camdl`,
+    /// hits the entry `a.camdl` compiled; served as stored it would carry the
+    /// name `a`. `serve_cache_entry` is the one seam both hit branches (the
+    /// pre-lock check and the single-flight `AlreadyCached`) return through.
+    #[test]
+    fn a_cache_hit_under_another_file_name_carries_that_files_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.camdl");
+        let b = tmp.path().join("b.camdl");
+        let cache = tmp.path().join("e.ir.json");
+        // camdlc's layout, with an object whose keys are out of sorted order
+        // (as `initial_conditions` is, in declaration order): the copy must
+        // keep it, because that order is hashed.
+        let ir = format!(
+            r#"{{"ir_version":"{}","model":{{"name":"a","initial_conditions":{{"S":1,"I":2}}}},"docs":{{"params":{{"beta":"x"}}}}}}"#,
+            ir::IR_VERSION.trim()
+        );
+        assert!(persist_cache_entry(&cache, &ir, "a", &[]));
+
+        // Same name: the cache file itself, nothing to clean up.
+        let (served, cleanup) = serve_cache_entry(&cache, a.to_str().unwrap()).unwrap().unwrap();
+        assert_eq!(std::path::Path::new(&served), cache.as_path());
+        assert!(cleanup.is_none());
+
+        // Another name: a copy that differs from the entry in the name alone.
+        let (served, cleanup) = serve_cache_entry(&cache, b.to_str().unwrap()).unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&served).unwrap(),
+            ir.replacen(r#""name":"a""#, r#""name":"b""#, 1),
+            "the hit must carry b.camdl's name and every other byte as stored"
+        );
+        assert_eq!(cleanup.as_deref(), Some(std::path::Path::new(&served)),
+            "the renamed copy is the caller's to remove");
+        assert_eq!(std::fs::read_to_string(&cache).unwrap(), ir,
+            "the shared cache entry itself is untouched");
+        std::fs::remove_file(cleanup.unwrap()).unwrap();
+    }
+
+    /// The rename refuses any document whose name is not where camdlc writes
+    /// it, rather than patching some other `"name"`; the caller recompiles.
+    #[test]
+    fn rename_compiled_model_patches_only_the_model_name() {
+        assert_eq!(
+            rename_compiled_model(r#"{"model":{"name":"a\"q","x":"a"}}"#, "a\"q", "b").as_deref(),
+            Some(r#"{"model":{"name":"b","x":"a"}}"#)
+        );
+        assert_eq!(rename_compiled_model(r#"{"model":{"name":"c"}}"#, "a", "b"), None);
+        assert_eq!(rename_compiled_model(r#"{"model":{"version":"a","name":"a"}}"#, "a", "b"), None);
+    }
+
+    /// `compiled_model_name` agrees with camdlc's
+    /// `Filename.basename path |> Filename.remove_extension`.
+    #[test]
+    fn compiled_model_name_is_the_stem_camdlc_uses() {
+        assert_eq!(compiled_model_name("models/sir.camdl"), "sir");
+        assert_eq!(compiled_model_name("sir.v2.camdl"), "sir.v2");
+        assert_eq!(compiled_model_name("sir"), "sir");
     }
 
     /// A sidecar with an unknown schema fails closed (recompile), not mis-parse.
