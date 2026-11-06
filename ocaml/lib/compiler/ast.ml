@@ -396,7 +396,6 @@ type schedule_core =
 
 type obs_projection =
   | ProjIncidence  of string * index_item list
-  | ProjPrevalence of string * index_item list
   | ProjDerived    of expr
 
 (* A measurement-model statement: `<scored_col> ~ Dist(kw = ..., ...)`.

@@ -9300,14 +9300,6 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
         let concrete = if idx_vals = [] then name
           else String.concat "_" (name :: idx_vals) in
         Ir.CumulativeFlow concrete
-      | ProjPrevalence (name, idxs) ->
-        let idxs = resolve_index_order ctx ~loc:od_loc
-                     ~what:(Printf.sprintf "compartment '%s'" name)
-                     ~dims:(comp_dims ctx name) idxs in
-        let idx_vals = List.map (index_item_to_str env) idxs in
-        (* `ProjPrevalence` carries no loc of its own, so a partial index here
-           falls back to the observation declaration's. *)
-        prevalence_projection ~items:idxs name idx_vals
       | ProjDerived (EFuncCall ("incidence", args)) ->
         (* `incidence(...)` names exactly ONE flow. Reading its argument with
            `List.assoc_opt ""` returned the FIRST positional argument and threw
@@ -9335,7 +9327,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
               (String.concat ", " (List.map (index_item_to_str env) idxs))
           | _ -> "<expression>" in
         (* A named argument carries its own span; anything else falls back to
-           the observation declaration's, as `ProjPrevalence` does. *)
+           the observation declaration's. *)
         let arg_loc = function
           | EIdent (_, l) | EIndex (_, _, l) -> diag_loc_of_ast_ctx ctx l
           | _ -> od_loc in
@@ -10738,7 +10730,7 @@ let check_no_shadowing ctx =
     let seed = loop_vars_of_indices od.oindices in
     (match od.oprojection with
      | Some (ProjDerived e) -> walk decl seed e
-     | Some (ProjIncidence _) | Some (ProjPrevalence _) | None -> ());
+     | Some (ProjIncidence _) | None -> ());
     (match od.omeasurement with
      | Some om ->
        let kwargs = match om.om_lik with
