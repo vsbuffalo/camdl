@@ -44,6 +44,9 @@ forcing {
 let beta = R0 * gamma
 let seas = 1.0 - amplitude + amplitude * 2.0 * school(t)
 
+# Immunity wanes after two years on average.
+let waning_rate : rate = 1 / (730 'days)
+
 tables {
   # Gravity coupling weights — asymmetric, center-heavy
   W : patch × patch = [[0.00, 0.15, 0.05, 0.05, 0.20],
@@ -66,7 +69,7 @@ transitions {
 
   progression[p in patch] : E[p] --> I[p]  @ sigma * E[p]
   recovery[p in patch]    : I[p] --> R[p]  @ gamma * I[p]
-  waning[p in patch]      : R[p] --> S[p]  @ (1.0 / 730.0) * R[p]
+  waning[p in patch]      : R[p] --> S[p]  @ waning_rate * R[p]
 }
 
 init {
