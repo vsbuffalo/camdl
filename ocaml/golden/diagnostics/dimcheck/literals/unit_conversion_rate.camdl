@@ -1,0 +1,17 @@
+# invariant: a rate literal in another unit is converted and is a rate
+# spec: §5.3
+# expect: (none)
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+transitions {
+  infection : S --> I  @ 0.7 'per_week * S * I / N
+  recovery  : I --> R  @ I / (5 'days)
+}
+
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 100 'days }

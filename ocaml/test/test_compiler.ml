@@ -6536,6 +6536,59 @@ let test_prior_unit_literal_converted () =
     Alcotest.(check (float 1e-12)) "sd = 0.7 per week" 0.7 sd
   | _ -> Alcotest.fail "expected Normal prior"
 
+(* Unit invariance of priors (proposal 2026-11-06 §7.4). A prior written with
+   unit literals in conventional positions is one belief about the physical
+   quantity, whatever the time unit: compiled under days and under weeks, its
+   log-density at the same physical value differs by exactly the log Jacobian
+   of the change of coordinates, -ln 7 for a rate (θ_w = 7 θ_d) and +ln 7 for a
+   duration (θ_w = θ_d / 7). Densities here are closed forms written for the
+   test; the Gamma's log Γ(shape) cancels, the shape being unit-free. *)
+let test_prior_unit_invariance () =
+  let logpdf (d : Ir.prior_dist) x =
+    let pi = 4.0 *. atan 1.0 in
+    match d with
+    | Ir.Normal_p { mean; sd } ->
+      -. log sd -. 0.5 *. log (2.0 *. pi) -. 0.5 *. ((x -. mean) /. sd) ** 2.0
+    | Ir.LogNormal { mu; sigma } ->
+      -. log x -. log sigma -. 0.5 *. log (2.0 *. pi) -. 0.5 *. ((log x -. mu) /. sigma) ** 2.0
+    | Ir.Uniform { lower; upper } -> -. log (upper -. lower)
+    | Ir.HalfNormal { sigma } ->
+      log 2.0 -. log sigma -. 0.5 *. log (2.0 *. pi) -. 0.5 *. (x /. sigma) ** 2.0
+    | Ir.Gamma { shape; rate } -> shape *. log rate +. (shape -. 1.0) *. log x -. rate *. x
+    | Ir.Exponential { rate } -> log rate -. rate *. x
+    | Ir.LogUniform { lu_lower; lu_upper } -> -. log x -. log (log lu_upper -. log lu_lower)
+    | _ -> Alcotest.fail "family not covered by this test"
+  in
+  let compile unit_ prior kind =
+    let src = Printf.sprintf {|
+      time_unit = '%s
+      parameters { theta : %s ~ %s }
+      compartments { S, I }
+      transitions { recovery : I --> S @ %s }
+      init { S = 1  I = 1 }
+      simulate { from = 0 'days  to = 7 'days }
+    |} unit_ kind prior (if kind = "rate" then "theta * I" else "I / theta") in
+    match Ir.param_prior_dist (find_param (compile_expect_ok src) "theta") with
+    | Some d -> d
+    | None -> Alcotest.fail "expected a prior"
+  in
+  let check ?(kind = "rate") prior theta_days =
+    let d = compile "days" prior kind and w = compile "weeks" prior kind in
+    let theta_weeks, jacobian =
+      if kind = "rate" then (7.0 *. theta_days, -. log 7.0)
+      else (theta_days /. 7.0, log 7.0) in
+    Alcotest.(check (float 1e-9)) prior jacobian
+      (logpdf w theta_weeks -. logpdf d theta_days)
+  in
+  check "normal(mu = 0.2 'per_day, sigma = 0.05 'per_day)" 0.23;
+  check "uniform(lower = 0.1 'per_day, upper = 0.5 'per_day)" 0.3;
+  check "log_normal(mu = log(0.2 'per_day), sigma = 0.5)" 0.17;
+  check "half_normal(sigma = 0.1 'per_day)" 0.08;
+  check "gamma(shape = 2, rate = 10 'days)" 0.15;
+  check "exponential(rate = 5 'days)" 0.3;
+  check "log_uniform(lower = 0.01 'per_day, upper = 1 'per_day)" 0.2;
+  check ~kind:"duration" "normal(mu = 5 'days, sigma = 1 'days)" 4.2
+
 let test_prior_arg_exp_and_sqrt () =
   (* Exercise exp() and sqrt() in const position — less common than log
      but same path through is_const_expr/eval_const_expr. *)
@@ -15605,6 +15658,7 @@ let () =
       Alcotest.test_case "arithmetic of literals evaluates correctly"    `Quick test_prior_arg_arithmetic;
       Alcotest.test_case "log(0.3) is a const arg"                       `Quick test_prior_arg_log_function;
       Alcotest.test_case "unit literal in a prior is converted"          `Quick test_prior_unit_literal_converted;
+      Alcotest.test_case "priors with units are unit-invariant"          `Quick test_prior_unit_invariance;
       Alcotest.test_case "exp() and sqrt() as const args"                `Quick test_prior_arg_exp_and_sqrt;
     ];
     "prior_validation", [

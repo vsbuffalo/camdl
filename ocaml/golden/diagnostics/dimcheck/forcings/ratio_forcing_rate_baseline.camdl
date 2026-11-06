@@ -1,0 +1,32 @@
+# invariant: a forcing's value arguments have its declared dimension
+# spec: §5.1, forcing values
+# expect: E312 Error
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  beta  : rate in [0.01, 2.0]
+  gamma : rate in [0.01, 1.0]
+  base  : rate in [0.1, 2.0]
+}
+
+let N = S + I + R
+
+forcing {
+  seasonal : sinusoidal 'ratio {
+    amplitude = 0.2
+    period    = 365 'days
+    phase     = 0 'days
+    baseline  = base
+  }
+}
+
+transitions {
+  infection : S --> I  @ beta * seasonal * S * I / N
+  recovery  : I --> R  @ gamma * I
+}
+
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 100 'days }
