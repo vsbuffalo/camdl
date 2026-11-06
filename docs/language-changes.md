@@ -13,6 +13,39 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-06 — an observation may not pool a population stratum by a bare name
+
+**What.** Where a value is scored against data, pooling a stratum declared in
+`dimensions {}` must be stated. `projected = I` on an age-stratified `I`
+compiled and scored every row against `I_child + I_adult` — one reporting rate
+across age groups, asserted silently. It is now **E280**, the code
+`incidence(infection)` on a stratified family has had since 2026-06-10. The same
+holds for a bare name anywhere in the projection (`I / N_tot`,
+`prevalence(of = I, among = …)`, `sum(a in age, I[a] + R)`) and for a `let`
+whose body pools by a bare name: `let N = S + I + R` read by a projection is
+E280 at the use. Model dynamics are unchanged — a bare `I` in a rate, or a `let`
+read only by rates, is the total as before. Residence structure created by
+`via erlang` may still be omitted (`I` on a staged, otherwise unstratified
+compartment pools its stages); hand-rolled staging declared in `dimensions {}`
+is a population stratum and may not.
+
+**Migration — IR-identical.** State the pooling; the value is unchanged:
+
+- `projected = I` → `projected = sum(I)`, or `sum(a in age, I[a])`
+- `let N = S + I + R` read by a projection → `let N = sum(S + I + R)`, or
+  `sum(N)` at the use
+- on an indexed stream `prev[a in age]`, if each row is its own stratum,
+  `projected = I` was scoring every row against the total — index it,
+  `projected = I[a]` (a different, and usually the intended, model)
+
+**Diagnostic.**
+
+```text
+error[E280]: observation 'prev': the bare name `I` pools 'I' over age into the scored value without saying so
+  = hint: pooling a population stratum where a value meets data is a modelling decision, so state it:
+          write `sum(I)` for the total, or `sum(a in age, I[a])` to reduce each axis by name
+```
+
 ## 2026-11-06 — `prevalence(X)` is removed; `prevalence(of = …, among = …)` is a checked proportion
 
 **What.** `prevalence(X)` returned exactly `X` — the same projection, a count —
@@ -28,7 +61,8 @@ Plain division stays legal and unchecked. `prevalence` has no pooling argument:
 **Migration — mechanical, IR-identical.** Drop the call; the value and the IR
 are unchanged:
 
-- `projected = prevalence(I)` → `projected = I`
+- `projected = prevalence(I)` → `projected = I` (on a stratified `I`,
+  `projected = sum(I)` — see the entry above)
 - `projected = prevalence(I[child])` → `projected = I[child]`
 - `projected = prevalence(Y1, Y2)` → `projected = Y1 + Y2`
 

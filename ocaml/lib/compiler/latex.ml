@@ -159,6 +159,7 @@ and un_tex op a =
   | Sin -> Printf.sprintf "\\sin\\!\\left(%s\\right)" (tex a)
   | Cos -> Printf.sprintf "\\cos\\!\\left(%s\\right)" (tex a)
   | Tanh -> Printf.sprintf "\\tanh\\!\\left(%s\\right)" (tex a)
+  | Total -> Printf.sprintf "\\sum %s" (tex ~prec:7 a)
 
 (* ── Partial expansion (`--expand dim`) ─────────────────────────────────────── *)
 

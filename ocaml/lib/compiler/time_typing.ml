@@ -181,7 +181,7 @@ let rec classify env (e : expr) : tclass =
      | TExact, _ | _, TExact       -> TExact
      | _                            -> TOther)
   | EBinOp _ -> TOther
-  | EUnOp (Neg, a) -> classify env a
+  | EUnOp ((Neg | Total), a) -> classify env a
   | EUnOp _        -> TOther
   | ECond (_, a, b) -> lub_dur (classify env a) (classify env b)
   | ESum (_, _, _, body, _) -> classify env body

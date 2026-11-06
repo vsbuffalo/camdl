@@ -33,6 +33,13 @@ type bin_op =
 
 type un_op = Neg | Exp | Log | Sqrt | Abs | Floor | Ceil
            | Sin | Cos | Tanh                                  (* gh#58 *)
+           (* `sum(e)` with no binder: the value of [e], marked as an
+              explicit total. Under bare-name semantics `sum(I)` and `I`
+              are the same value, so this carries no arithmetic — it records
+              that the modeller STATED the pooling, which the observation
+              aggregation rule (E280) reads; every other reader treats it as
+              its body (aggregation-semantics proposal §5.4, §10). *)
+           | Total
 
 (* Relational operators usable in a `where` predicate (transition guards and
    restricted sums). A subset of bin_op's comparisons, kept as a separate type

@@ -6529,11 +6529,11 @@ let test_prior_arg_exp_and_sqrt () =
   | _ -> Alcotest.fail "expected Gamma prior"
 
 (* ── Observation projections on stratified compartments ────────────────────
-   `prevalence(E)` on an Erlang-stratified `E` (E_e1, E_e2, E_e3) should
-   expand to `CurrentPopSum [E_e1; E_e2; E_e3]`, following the same
-   "omitted dimension sums over it" rule that applies to rate expressions
-   (see `resolve_ident_name` and language spec §5.1). Previously emitted
-   `CurrentPop "E"` which the Rust runtime could not resolve.
+   `sum(E)` on a hand-staged `E` (E_e1, E_e2, E_e3) expands to
+   `CurrentPopSum [E_e1; E_e2; E_e3]`, the total across all strata, as the
+   bare name does in a rate expression (`resolve_ident_name`, language spec
+   §5.1). A bare `E` here is E280: hand-rolled staging declared in
+   `dimensions {}` is a population stratum (Increment E tests).
    See docs/dev/proposals/2026-04-17-state-snapshot-projections.md. *)
 let test_prevalence_on_stratified_compartment () =
   let src = {|
@@ -6557,7 +6557,7 @@ let test_prevalence_on_stratified_compartment () =
     observations {
       in_latent {
         columns       { time : time, in_latent : count }
-        projected  = E
+        projected  = sum(E)
         emit_schedule = every 1 'days
         in_latent ~ neg_binomial(mean = projected, r = k)
       }
@@ -6578,49 +6578,6 @@ let test_prevalence_on_stratified_compartment () =
          "expected CurrentPopSum over Erlang substages; got CurrentPop(%s)" name
      | _ ->
        Alcotest.fail "expected CurrentPopSum projection")
-  | _ -> Alcotest.fail "expected exactly one observation block"
-
-(* Same rule for `projected = E` (bare identifier form that resolves to a
-   stratified compartment). *)
-let test_projected_bare_stratified_compartment () =
-  let src = {|
-    time_unit = 'days
-    compartments { S, E, I, R }
-    dimensions { latent_stage = [e1, e2, e3] }
-    stratify(by = latent_stage, only = [E])
-    parameters {
-      beta  : rate in [0.001, 2.0]
-      sigma : rate in [0.01, 1.0]
-      gamma : rate in [0.01, 1.0]
-      k     : real in [1.0, 100.0]
-    }
-    transitions {
-      infection : S --> E[e1] @ beta * S * I / (S + E + I + R)
-      latent[(s, s_next) in consecutive(latent_stage)]
-        : E[s] --> E[s_next] @ 3 * sigma * E[s]
-      onset : E[e3] --> I @ 3 * sigma * E[e3]
-      recovery : I --> R @ gamma * I
-    }
-    observations {
-      latent_total {
-        columns       { time : time, latent_total : count }
-        projected  = E
-        emit_schedule = every 1 'days
-        latent_total ~ neg_binomial(mean = projected, r = k)
-      }
-    }
-    init { S = 990  E[e1] = 5  I = 5 }
-    simulate { from = 0 'days  to = 10 'days }
-  |} in
-  let m = compile_expect_ok src in
-  match m.observations with
-  | [obs] ->
-    (match obs.projection with
-     | Ir.CurrentPopSum names ->
-       Alcotest.(check (list string))
-         "bare E in projection expands to all Erlang substages"
-         ["E_e1"; "E_e2"; "E_e3"] names
-     | _ -> Alcotest.fail "expected CurrentPopSum projection for bare stratified compartment")
   | _ -> Alcotest.fail "expected exactly one observation block"
 
 (* Fully-indexed prevalence on a stratified compartment picks a specific
@@ -7204,6 +7161,203 @@ let test_d7_proportion_into_a_count_slot_is_e304 () =
          "prevalence(of = I[child], among = N_local[child])");
     ignore (prev_projection (prev_age_src
       "prevalence(of = I[child], among = N_local[child])")))
+
+(* ── Increment E (gh#478): the observation-boundary rule ─────────────────────
+   Proposal 2026-07-31-aggregation-semantics §3, §10. Where a value is scored
+   against data, pooling a declared population stratum by a bare name is E280
+   unless the pooling is stated (`sum(I)`, `sum(a in age, I[a])`). Residence
+   structure created by `via` may still be omitted; hand-rolled staging
+   declared in `dimensions {}` is a population stratum. The tag lives on the
+   `let` binding. Model dynamics are untouched. ── *)
+
+let e_lets = "let N = S + I + R\n    let N_tot = sum(S + I + R)"
+
+(* The coordinator's reproduction: `projected = I` on an age-stratified model
+   compiled clean and pooled both strata. *)
+let test_e_bare_compartment_is_e280 () =
+  compile_expect_error_code ~code:"E280"
+    ~contains:"the bare name `I` pools 'I' over age"
+    (prev_age_src ~lik:"poisson(rate = projected)" "I")
+
+let test_e_bare_inside_a_proportion_is_e280 () =
+  compile_expect_error_code ~code:"E280" ~contains:"`I` pools"
+    (prev_age_src ~lets:e_lets "prevalence(of = I, among = N_tot)")
+
+(* A bare name inside a BINDER sum is not stated: `sum(a in age, I[a] + R)`
+   pools `R` silently (and counts it once per level). *)
+let test_e_bare_inside_a_binder_sum_is_e280 () =
+  compile_expect_error_code ~code:"E280" ~contains:"`R` pools"
+    (prev_age_src ~lik:"poisson(rate = projected)" "sum(a in age, I[a] + R)")
+
+(* The tag lives on the binding: `let N = S + I + R` pools by bare names, so
+   reading it in a projection is E280 at the use, naming the binding. *)
+let test_e_bare_pooling_let_is_e280 () =
+  compile_expect_error_code ~code:"E280" ~contains:"`N` is a `let`"
+    (prev_age_src ~lets:e_lets "prevalence(of = sum(I), among = N)")
+
+(* The stated spellings compile, and `sum(I)` lowers exactly as the bare name
+   did: the marker carries no arithmetic. *)
+let test_e_stated_pooling_compiles_unchanged () =
+  (match fst (prev_projection
+                (prev_age_src ~lik:"poisson(rate = projected)" "sum(I)")) with
+   | Ir.CurrentPopSum cs ->
+     Alcotest.(check (list string)) "sum(I) is the total of I"
+       ["I_child"; "I_adult"] cs
+   | _ -> Alcotest.fail "expected CurrentPopSum, as bare I lowered");
+  ignore (prev_projection (prev_age_src ~lik:"poisson(rate = projected)"
+                             "sum(a in age, I[a])"));
+  ignore (prev_projection (prev_age_src ~lets:e_lets
+                             "prevalence(of = sum(I), among = N_tot)"));
+  ignore (prev_projection (prev_age_src ~lets:e_lets
+                             "prevalence(of = sum(I), among = sum(N))"))
+
+(* `let N_tot = sum(S + I + R)` is the same binding IR as the bare body — the
+   marker is gone before anything resolves. *)
+let test_e_total_marker_leaves_no_trace_in_the_ir () =
+  let m_bare = compile_expect_ok (prev_age_src ~lik:"poisson(rate = projected)"
+                                    "I[child]") in
+  let m_sum = compile_expect_ok (prev_age_src ~lik:"poisson(rate = projected)"
+                                   "sum(I[child])") in
+  Alcotest.(check bool) "sum(I[child]) lowers as I[child]" true
+    ((List.hd m_bare.Ir.observations).Ir.projection
+     = (List.hd m_sum.Ir.observations).Ir.projection)
+
+(* §10's positive control: an INDEXED stream whose projection pools the
+   stream's own axis by a bare name. The interim warning's predicate was built
+   for this case; E280 now refuses it, and the hint names the per-row form. *)
+let test_e_indexed_stream_positive_control () =
+  d_expect_all ~code:"E280"
+    ~contains:["is indexed by age, but `I` names no stratum of 'I'";
+               "`I[a]`"]
+    (prev_age_src ~lets:e_lets ~header:"[a in age]" ~cols:"age : dim, "
+       "prevalence(of = I, among = N)")
+
+(* Hand-rolled staging declared in `dimensions {}` is a population stratum:
+   public model structure is public (§3). *)
+let hand_staged_src projected = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, E, I, R }
+    dimensions { latent_stage = [e1, e2, e3] }
+    stratify(by = latent_stage, only = [E])
+    parameters { beta : rate  sigma : rate  gamma : rate  k : positive }
+    transitions {
+      infection : S --> E[e1] @ beta * S * I / (S + E + I + R)
+      latent[(s, s_next) in consecutive(latent_stage)]
+        : E[s] --> E[s_next] @ 3 * sigma * E[s]
+      onset : E[e3] --> I @ 3 * sigma * E[e3]
+      recovery : I --> R @ gamma * I
+    }
+    observations {
+      latent_total {
+        columns   { time : time, latent_total : count }
+        projected = %s
+        latent_total ~ neg_binomial(mean = projected, r = k)
+      }
+    }
+    init { S = 990  E[e1] = 5  I = 5 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} projected
+
+let test_e_hand_rolled_staging_is_a_population_stratum () =
+  compile_expect_error_code ~code:"E280" ~contains:"pools 'E' over latent_stage"
+    (hand_staged_src "E");
+  ignore (compile_expect_ok (hand_staged_src "sum(E)"))
+
+(* Residence structure created by `via` may be omitted: `I` on a staged,
+   otherwise unstratified compartment pools only its stages; `I[child]` on an
+   age-stratified staged one pools only that stratum's stages. A bare `I` on
+   the age-stratified one still pools a population stratum. *)
+let via_src ~strat projected = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I, R }
+    %s
+    parameters { beta : rate }
+    transitions {
+      infection%s : S%s --> I%s @ beta * S%s
+      recovery%s  : I%s --> R%s via erlang(stages = 3, mean = 5 'days)
+    }
+    observations {
+      prev {
+        columns   { time : time, prev : count }
+        projected = %s
+        prev ~ poisson(rate = projected)
+      }
+    }
+    init { S%s = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |}
+    (if strat then "dimensions { age = [child, adult] }\n    stratify(by = age)" else "")
+    (if strat then "[a in age]" else "") (if strat then "[a]" else "")
+    (if strat then "[a]" else "") (if strat then "[a]" else "")
+    (if strat then "[a in age]" else "") (if strat then "[a]" else "")
+    (if strat then "[a]" else "") projected
+    (if strat then "[a in age]" else "")
+
+let test_e_residence_structure_may_be_omitted () =
+  ignore (compile_expect_ok (via_src ~strat:false "I"));
+  ignore (compile_expect_ok (via_src ~strat:true "I[child]"));
+  ignore (compile_expect_ok (via_src ~strat:true "sum(I)"));
+  compile_expect_error_code ~code:"E280" ~contains:"pools 'I' over age"
+    (via_src ~strat:true "I")
+
+(* The hint's spellings compile. *)
+let test_e_hint_forms_compile () =
+  compile_expect_error_code ~code:"E280" ~contains:"`sum(a in age, I[a])`"
+    (prev_age_src ~lik:"poisson(rate = projected)" "I");
+  ignore (compile_expect_ok (prev_age_src ~lik:"poisson(rate = projected)"
+                               "sum(a in age, I[a])"))
+
+(* Model dynamics are untouched: the fixture's force of infection reads bare
+   names, and `let N = S + I + R` read only by a rate is not reported. *)
+let test_e_dynamics_untouched () =
+  ignore (compile_expect_ok (prev_age_src ~lets:e_lets
+    "prevalence(of = I[child], among = N_local[child])"))
+
+(* One diagnostic per bare site, decided per binding: a stream that states the
+   total of `N` is clean, a stream reading `N` bare is reported, and which one
+   comes first does not matter. *)
+let test_e_let_tag_is_per_binding_not_per_use () =
+  let src first second = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I, R }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    let N = S + I + R
+    parameters { beta : rate }
+    transitions { infection[a in age] : S[a] --> I[a] @ beta * S[a] * I / N }
+    observations {
+      one {
+        columns   { time : time, one : count }
+        projected = %s
+        one ~ poisson(rate = projected)
+      }
+      two {
+        columns   { time : time, two : count }
+        projected = %s
+        two ~ poisson(rate = projected)
+      }
+    }
+    init { S[a in age] = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} first second in
+  List.iter (fun (a, b) ->
+    Diagnostics.json_errors_mode := true;
+    let r = Compiler.compile ~name:"e_tag" (src a b) in
+    Diagnostics.json_errors_mode := false;
+    match r with
+    | Ok _ -> Alcotest.fail "expected E280 on the bare use"
+    | Error e ->
+      Alcotest.(check int) "exactly one E280, on the bare use" 1
+        (count_substring ~needle:"\"code\":\"E280\"" e))
+    [("sum(N)", "N"); ("N", "sum(N)")]
+
+(* The removed `prevalence(I)` on a stratified model: dropping the call would
+   be E280, so the migration names the stated total. *)
+let test_e_removed_prevalence_hint_states_the_pooling () =
+  d_expect_all ~code:"E356"
+    ~contains:["projected = sum(I)";
+               "prevalence(of = sum(I), among = <denominator>)"]
+    (prev_age_src ~lik:"poisson(rate = projected)" "prevalence(I)")
 
 (* The pooled-column form the gate directs the modeller to. It expands to the
    IDENTICAL CumulativeFlowSum the bare form used to produce — the reporting
@@ -15440,8 +15594,7 @@ let () =
       Alcotest.test_case "E235 half_normal(sigma=0)"                     `Quick test_e235_half_normal_zero_sigma;
     ];
     "observation_projections", [
-      Alcotest.test_case "bare E sums declared-stage strata"           `Quick test_prevalence_on_stratified_compartment;
-      Alcotest.test_case "bare E in projected sums Erlang substages"     `Quick test_projected_bare_stratified_compartment;
+      Alcotest.test_case "sum(E) totals declared-stage strata"           `Quick test_prevalence_on_stratified_compartment;
       Alcotest.test_case "E[e1] picks single stratum"        `Quick test_prevalence_fully_indexed_stratified;
       Alcotest.test_case "bare I unstratified is unchanged"       `Quick test_prevalence_unstratified;
       Alcotest.test_case "E280: bare incidence(infection) on stratified model rejected" `Quick test_incidence_unindexed_cross_strata_is_rejected;
@@ -15472,6 +15625,19 @@ let () =
       Alcotest.test_case "D: a missing denominator is E250" `Quick test_d_missing_denominator_is_e250;
       Alcotest.test_case "D: an unknown argument is E251" `Quick test_d_unknown_argument_is_e251;
       Alcotest.test_case "D7: a proportion into a count slot is E304" `Quick test_d7_proportion_into_a_count_slot_is_e304;
+      Alcotest.test_case "E: a bare stratified compartment is E280" `Quick test_e_bare_compartment_is_e280;
+      Alcotest.test_case "E: a bare name inside a proportion is E280" `Quick test_e_bare_inside_a_proportion_is_e280;
+      Alcotest.test_case "E: a bare name inside a binder sum is E280" `Quick test_e_bare_inside_a_binder_sum_is_e280;
+      Alcotest.test_case "E: a let pooling by a bare name is E280 at the use" `Quick test_e_bare_pooling_let_is_e280;
+      Alcotest.test_case "E: stated pooling compiles, sum(I) lowers as I did" `Quick test_e_stated_pooling_compiles_unchanged;
+      Alcotest.test_case "E: the Total marker leaves no trace in the IR" `Quick test_e_total_marker_leaves_no_trace_in_the_ir;
+      Alcotest.test_case "E: indexed-stream positive control (§10)" `Quick test_e_indexed_stream_positive_control;
+      Alcotest.test_case "E: hand-rolled staging is a population stratum" `Quick test_e_hand_rolled_staging_is_a_population_stratum;
+      Alcotest.test_case "E: via residence structure may be omitted" `Quick test_e_residence_structure_may_be_omitted;
+      Alcotest.test_case "E: the hint's forms compile" `Quick test_e_hint_forms_compile;
+      Alcotest.test_case "E: model dynamics untouched" `Quick test_e_dynamics_untouched;
+      Alcotest.test_case "E: the let tag is per binding, not per use" `Quick test_e_let_tag_is_per_binding_not_per_use;
+      Alcotest.test_case "E: the removed-prevalence hint states the pooling" `Quick test_e_removed_prevalence_hint_states_the_pooling;
       Alcotest.test_case "explicit sum(a in age, incidence(infection[a])) → flow sum" `Quick test_incidence_explicit_sum_compiles_to_flow_sum;
       Alcotest.test_case "B1a: incidence(a) + incidence(b) → flow sum" `Quick test_incidence_addition_lowers_to_flow_sum;
       Alcotest.test_case "B1a: sum(...) + incidence(...) flattens" `Quick test_incidence_addition_flattens_with_family_sum;

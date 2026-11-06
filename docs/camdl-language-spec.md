@@ -1012,6 +1012,9 @@ Two consequences worth stating:
   cells (`I__fatal__1`, …), so nothing keyed on a dimension can describe it.
   Those generated _compartment_ names are intentionally visible — they are
   trajectory columns and scenario-referenceable transition names.
+- **Where a value is scored against data, a bare name may pool residence
+  structure but not a population stratum** (`E280`, §12.1). In model dynamics
+  a bare `I` is the total across every axis, and that is unchanged.
 
 ### 5.1 Indexing Rules
 
@@ -3300,7 +3303,25 @@ silently; the diagnostic prints the explicit forms above, naming the family's
 actual dimensions. This holds on an **indexed** stream too: inside
 `cases[p in patch] { … }` a bare `incidence(infection)` would score every row
 against the pooled total, so E280 names the stream's own binder as the fix
-(`incidence(infection[p])`). Where you *do* fully index, prefer **named** indexing
+(`incidence(infection[p])`).
+
+**The same rule covers state.** In an observation's `projected`, a compartment
+written bare over a population stratum is also `E280`: `projected = I` on an
+age-stratified `I` asserts one reporting rate across age groups, and the
+alternative — a rate per stratum — is a different model with different
+posteriors. State the pooling: `sum(I)` for the total, `sum(a in age, I[a])` to
+reduce each axis by name, or index the stream and the reference
+(`prev[a in age] { … projected = I[a] … }`). A bare name inside a binder `sum`
+is not stated — `sum(a in age, I[a] + R)` still pools `R`. A `let` carries the
+same tag: `let N = S + I + R` read by a projection is `E280` at the use, and
+`let N = sum(S + I + R)` (or `sum(N)` at the use) states it. Residence
+structure is exempt: on a `via erlang` compartment `I` pools only its stages,
+and `I[child]` on an age-stratified staged `I` pools that stratum's stages;
+hand-rolled staging declared in `dimensions {}` is a population stratum and is
+not. Model dynamics are untouched — in a force of infection a bare `I` _is_ the
+definition, and no second reading exists.
+
+Where you *do* fully index, prefer **named** indexing
 (`infection[patch = north, age = child]`) over **positional**
 (`infection[north, child]`): named binding is order-independent and survives a
 later reordering of the dimension declarations, whereas positional binding

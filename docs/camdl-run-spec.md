@@ -5900,13 +5900,13 @@ independently-stored kind could only ever disagree.
 | `incidence(tr)` on an unstratified/one-cell transition, or `incidence(tr[a])`                                        | `cumulative_flow`     | Interval      |
 | `sum(a in dim, incidence(tr[a]))`                                                                                    | `cumulative_flow_sum` | Interval      |
 | `X[cell]`, or a bare `X` on an unstratified compartment                                                              | `current_pop`         | Instant       |
-| bare `X` on a **stratified** compartment                                                                             | `current_pop_sum`     | Instant       |
+| `sum(X)` on a **stratified** compartment (a bare `X` there is E280), or a bare `X` pooling only `via` stages         | `current_pop_sum`     | Instant       |
 | any expression over state — `X1 + X2`, `I / (S+I+R)`, `prevalence(of = I[a], among = N_local[a])`, a `let` reference | `derived_expr`        | Instant       |
 
 Verified against the compiler on a two-stratum (`age = [child, adult]`) SIR:
 
 ```
-projected = I                                      → current_pop_sum ['I_child', 'I_adult']
+projected = sum(I)                                 → current_pop_sum ['I_child', 'I_adult']
 projected = I[child]                               → current_pop     I_child
 projected = prevalence(of = I[child], among = N_local[child])
                                                    → derived_expr    pop I_child / binding_ref N_local_child
@@ -5944,9 +5944,12 @@ sum all 2 strata of 'infection' and apply reporting uniformly
 Pooling across strata is a modelling decision, so the compiler makes you state
 it — either `projected = sum(a in age, incidence(infection[a]))` with one
 reporting rate in the likelihood, or an indexed stream `cases[a in age] { … }`
-with `rho[a]`. A bare compartment name `X` over a stratified compartment is
-**not** gated the same way: it sums silently, matching how a bare stratified
-name expands to `PopSum` in a rate expression.
+with `rho[a]`. The same rule covers state: a compartment written bare over a
+population stratum (`projected = I` on an age-stratified `I`, or a `let` whose
+body does so) is also E280, and `sum(I)` or `sum(a in age, I[a])` states the
+pooling. Residence structure created by `via` may still be omitted — a bare `I`
+on a staged, otherwise unstratified compartment pools its stages and compiles.
+In model dynamics a bare stratified name is unchanged: it expands to `PopSum`.
 
 **A stock as a count needs no operator; a stock as a proportion is
 `prevalence(of = X, among = Y)`.** The proportion form is exactly `X / Y` — the

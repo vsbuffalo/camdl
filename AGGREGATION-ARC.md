@@ -121,7 +121,7 @@ Blast radius last time: 125 files. Expect the same shape.
   - [ ] 4e. `inc_<stream>` doc correction (B8); release-notes line (B7)
 - [x] **5. Increment D** — `prevalence(of =, among =)`, checks D2–D5, removals
       D6, dimension-change migration D7, language-changes entry.
-- [ ] **6. Increment E** — observation-boundary rule. Closes gh#478.
+- [x] **6. Increment E** — observation-boundary rule. Closes gh#478.
 
 ## Out of scope, tracked elsewhere
 

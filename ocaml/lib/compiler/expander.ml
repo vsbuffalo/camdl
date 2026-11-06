@@ -2570,6 +2570,10 @@ let ir_un_op = function
   | Ast.Sqrt  -> Ir.Sqrt | Ast.Abs   -> Ir.Abs  | Ast.Floor -> Ir.Floor
   | Ast.Ceil  -> Ir.Ceil
   | Ast.Sin   -> Ir.Sin  | Ast.Cos   -> Ir.Cos  | Ast.Tanh -> Ir.Tanh  (* gh#58 *)
+  (* `sum(e)` is the value of [e]; both callers ([resolve_expr] and the quantity
+     classifier's [build_scalar_expr]) resolve it to its body before reaching
+     here, so there is no IR operator for it to become. *)
+  | Ast.Total -> invalid_arg "ir_un_op: Total is resolved to its body by its callers"
 
 (* ── Indexed parameter helpers ────────────────────────────────────────────── *)
 
@@ -2848,6 +2852,7 @@ let rec try_eval_const_int (e : expr) : int option =
   match e with
   | EConst f when Float.is_integer f && Float.abs f < 1e15 ->
     Some (int_of_float f)
+  | EUnOp (Total, a) -> try_eval_const_int a
   | EUnOp (Neg, a) ->
     (match try_eval_const_int a with
      | Some i -> Some (-i)
@@ -4002,6 +4007,7 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     let ir_l = resolve_expr ctx env l in
     let ir_r = resolve_expr ctx env r in
     normalize_expr (Ir.BinOp { op = ir_bin_op op; left = ir_l; right = ir_r })
+  | EUnOp (Total, e) -> resolve_expr ctx env e
   | EUnOp (op, e) ->
     Ir.UnOp { op = ir_un_op op; arg = resolve_expr ctx env e }
   | ECond (p, a, b) ->
@@ -5345,6 +5351,7 @@ let rec eval_const_expr ctx = function
   | EConst f -> f
   | EUnit (f, u) -> unit_to_model_time ctx f u
   | EUnOp (Neg, e) -> -. (eval_const_expr ctx e)
+  | EUnOp (Total, e) -> eval_const_expr ctx e
   | EUnOp (Exp, e) -> exp (eval_const_expr ctx e)
   | EUnOp (Log, e) -> log (eval_const_expr ctx e)
   | EUnOp (Sqrt, e) -> sqrt (eval_const_expr ctx e)
@@ -5408,7 +5415,7 @@ let rec const_expr_dim (e : expr) : (int * int) option =
   match e with
   | EConst _       -> Some (0, 0)
   | EUnit (_, u)   -> Some (unit_lit_to_dim u)
-  | EUnOp (Neg, a) -> const_expr_dim a
+  | EUnOp ((Neg | Total), a) -> const_expr_dim a
   | EBinOp ((Add | Sub), a, b) ->
     (match const_expr_dim a, const_expr_dim b with
      | Some da, Some db when da = db -> Some da
@@ -8522,7 +8529,7 @@ let surface_src (e : expr) : string =
   let un_str = function
     | Neg -> "-" | Exp -> "exp" | Log -> "log" | Sqrt -> "sqrt" | Abs -> "abs"
     | Floor -> "floor" | Ceil -> "ceil" | Sin -> "sin" | Cos -> "cos"
-    | Tanh -> "tanh" in
+    | Tanh -> "tanh" | Total -> "sum" in
   let rec go ctx_prec e =
     let wrap p s = if p < ctx_prec then "(" ^ s ^ ")" else s in
     match e with
@@ -8659,6 +8666,89 @@ let collapsed_dims ctx (e : expr) : string list =
   in
   List.sort_uniq compare (go [] [] e)
 
+(* A bare name that pools a declared population stratum inside an observation's
+   `projected` (aggregation-semantics §10, E280): a compartment written bare, or
+   a `let` whose body pools one by a bare name. *)
+type bare_pool =
+  | Bare_compartment of { name : string; dims : string list; loc : loc }
+  | Bare_let of { name : string; via : string; dims : string list; loc : loc }
+
+(* The bare pools in [e], on the SURFACE AST, so the only axes a compartment has
+   are the strata declared in `dimensions {}` — residence structure created by
+   `via` does not exist yet and so can never be reported (§3: "you may omit
+   residence structure from an index; you may not omit a population stratum").
+   Hand-rolled staging declared in `dimensions {}` is a population stratum.
+
+   - `sum(e)` with no binder ([Total]) states the pooling: nothing under it is
+     reported.
+   - A binder `sum(a in age, …)` does not make a bare name inside it explicit:
+     `sum(a in age, I[a] + R)` still pools `R` silently, and counts it once per
+     level besides.
+   - `incidence(...)` is E280's own transition-side check, not this one.
+   - A `let` reference reports the binding's tag ([let_pools]). *)
+let rec bare_pools ctx memo visiting (e : expr) : bare_pool list =
+  let go = bare_pools ctx memo visiting in
+  match e with
+  | EUnOp (Total, _) -> []
+  | EFuncCall ("incidence", _) -> []
+  | EIdent (n, l) when List.exists (fun c -> c.cname = n) ctx.comp_decls ->
+    (match comp_dims ctx n with
+     | [] -> []
+     | dims -> [Bare_compartment { name = n; dims; loc = l }])
+  | (EIdent (n, l) | EIndex (n, _, l)) when find_let ctx n <> None ->
+    (match let_pools ctx memo visiting n with
+     | Some (via, dims) -> [Bare_let { name = n; via; dims; loc = l }]
+     | None -> [])
+  | EIdent _ | EIndex _ | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> []
+  | EUnOp (_, a) | ESum (_, _, _, a, _) -> go a
+  | EBinOp (_, l, r) | ERange (l, r) -> go l @ go r
+  | ECond (p, a, b) -> go p @ go a @ go b
+  | EFuncCall (_, args) -> List.concat_map (fun (_, a) -> go a) args
+  | EList es -> List.concat_map go es
+
+(* The tag on a `let` binding: the first compartment its body pools by a bare
+   name, directly or through a nested binding. Memoized per binding name in
+   [memo], so it is a property of the binding — computed from its body alone,
+   once — and never of whichever use site reached it first (§10: "the tag lives
+   on the binding, not the expression"). The visiting set stops a
+   self-referential `let`, which E201 reports later. *)
+and let_pools ctx memo visiting name : (string * string list) option =
+  match Hashtbl.find_opt memo name with
+  | Some r -> r
+  | None ->
+    let r =
+      if List.mem name visiting then None
+      else match find_let ctx name with
+        | None -> None
+        | Some lb ->
+          (match bare_pools ctx memo (name :: visiting) lb.lbody with
+           | Bare_compartment { name = c; dims; _ } :: _ -> Some (c, dims)
+           | Bare_let { via; dims; _ } :: _ -> Some (via, dims)
+           | [] -> None)
+    in
+    Hashtbl.replace memo name r;
+    r
+
+(* Drop every [Total] marker. Run on every expression container right after
+   the surface checks — the only readers of the marker — so everything
+   downstream sees exactly the AST it saw before the marker existed, and
+   `sum(I)` keeps lowering exactly as `I` does. *)
+let rec strip_totals (e : expr) : expr =
+  let item = function
+    | IPosn x -> IPosn (strip_totals x)
+    | INamed (k, x) -> INamed (k, strip_totals x) in
+  match e with
+  | EUnOp (Total, a) -> strip_totals a
+  | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> e
+  | EIndex (n, items, l) -> EIndex (n, List.map item items, l)
+  | EBinOp (op, l, r) -> EBinOp (op, strip_totals l, strip_totals r)
+  | EUnOp (op, a) -> EUnOp (op, strip_totals a)
+  | ESum (v, d, g, b, l) -> ESum (v, d, g, strip_totals b, l)
+  | ECond (p, a, b) -> ECond (strip_totals p, strip_totals a, strip_totals b)
+  | EFuncCall (f, args) -> EFuncCall (f, List.map (fun (k, a) -> (k, strip_totals a)) args)
+  | EList es -> EList (List.map strip_totals es)
+  | ERange (a, b) -> ERange (strip_totals a, strip_totals b)
+
 (* The source span of the first name an expression mentions — the nearest
    thing to the expression's own location, since `EFuncCall`, `EBinOp` and
    constants carry none. *)
@@ -8705,6 +8795,91 @@ let ir_cells ctx (e : Ir.expr) : string list =
    reader of the diagnostic can find the entry. *)
 let prevalence_change_date = "2026-11-06"
 
+(* E280 on the state side (aggregation-semantics §10): where a value is scored
+   against data, pooling a declared population stratum by a bare name must be
+   stated. The transition side (`incidence(tr)` on a stratified family) has been
+   E280 since the 2026-06-10 observation data-entry proposal; this is the same
+   rule, so the same code. Model dynamics are untouched: in a force of
+   infection a bare `I` IS the definition, while in an observation
+   `rho * (I_child + I_adult)` asserts one reporting rate across strata, and the
+   alternative is a different model. *)
+let check_bare_pooling ctx (od : obs_decl) (found : bare_pool list) =
+  let stream = List.filter_map (function
+      | IBind (v, d) | IConsec (v, _, d) -> Some (v, d)
+      | IComp _ -> None) od.oindices in
+  let taken = ref (List.map fst stream) in
+  (* A fresh binder per axis, from the axis's initial, avoiding the stream's
+     binders (E283) and each other. *)
+  let fresh d =
+    let base = String.make 1 d.[0] in
+    let rec pick v = if List.mem v !taken then pick (v ^ "2") else v in
+    let v = pick base in
+    taken := v :: !taken; v in
+  List.iter (fun bp ->
+    taken := List.map fst stream;
+    match bp with
+    | Bare_compartment { name; dims; loc } ->
+      let by_name =
+        let vs = List.map (fun d -> (fresh d, d)) dims in
+        Printf.sprintf "sum(%s, %s[%s])"
+          (String.concat ", " (List.map (fun (v, d) -> v ^ " in " ^ d) vs))
+          name (String.concat ", " (List.map fst vs)) in
+      let shared = List.filter (fun d -> List.mem_assoc d (List.map (fun (v, d) -> (d, v)) stream)) dims in
+      let per_row =
+        if shared = [] then None
+        else begin
+          taken := List.map fst stream;
+          let axes = List.map (fun d ->
+              match List.find_opt (fun (_, sd) -> sd = d) stream with
+              | Some (v, _) -> (v, d, false)
+              | None -> (fresh d, d, true)) dims in
+          let cell = Printf.sprintf "%s[%s]" name
+              (String.concat ", " (List.map (fun (v, _, _) -> v) axes)) in
+          let summed = List.filter (fun (_, _, s) -> s) axes in
+          Some (if summed = [] then cell
+                else Printf.sprintf "sum(%s, %s)"
+                    (String.concat ", "
+                       (List.map (fun (v, d, _) -> v ^ " in " ^ d) summed)) cell)
+        end in
+      let axes = String.concat ", " dims in
+      Diagnostics.error ctx.diags ~code:"E280" ~loc:(diag_loc_of_ast_ctx ctx loc)
+        ~message:(match per_row with
+          | Some _ ->
+            Printf.sprintf
+              "observation '%s' is indexed by %s, but `%s` names no stratum of \
+               '%s' — every row would be scored against its total over %s"
+              od.oname (String.concat ", " (List.map snd stream)) name name axes
+          | None ->
+            Printf.sprintf
+              "observation '%s': the bare name `%s` pools '%s' over %s into \
+               the scored value without saying so"
+              od.oname name name axes)
+        ~hint:(Printf.sprintf
+          "pooling a population stratum where a value meets data is a \
+           modelling decision, so state it: write `sum(%s)` for the total, or \
+           `%s` to reduce each axis by name%s. A bare name in the model's \
+           dynamics (a rate, or a `let` used only there) is unaffected"
+          name by_name
+          (match per_row with
+           | Some f ->
+             Printf.sprintf
+               "; for one row per stratum, index it by the stream's binder: `%s`" f
+           | None -> ""))
+        ()
+    | Bare_let { name; via; dims; loc } ->
+      Diagnostics.error ctx.diags ~code:"E280" ~loc:(diag_loc_of_ast_ctx ctx loc)
+        ~message:(Printf.sprintf
+          "observation '%s': `%s` is a `let` whose body pools '%s' over %s by \
+           a bare name, so the scored value pools strata without saying so"
+          od.oname name via (String.concat ", " dims))
+        ~hint:(Printf.sprintf
+          "state the total where the binding is defined — wrap the bare name \
+           in its body, as in `let N = sum(S + I + R)` — or at this use, \
+           `sum(%s)`. Model dynamics that read `%s` are unaffected either way"
+          name name)
+        ()
+  ) found
+
 (* Checks over what the modeller wrote in an observation's `projected`, run on
    the SURFACE AST: before `via` lowering, so the only structure that exists is
    declared structure and a stage sum the compiler would add cannot be mistaken
@@ -8715,8 +8890,11 @@ let prevalence_change_date = "2026-11-06"
 
    - D6: the removed one- and multi-argument forms, with the migration inline.
    - D4: a flow read in `of` or `among`.
-   - D3: the two sides collapse different dimensions. *)
+   - D3: the two sides collapse different dimensions.
+   - E (§10, E280): a bare name pooling a declared population stratum. *)
 let check_observation_surface ctx =
+  let memo = Hashtbl.create 16 in
+  let pools e = bare_pools ctx memo [] e in
   List.iter (fun (od : obs_decl) ->
     let od_loc = diag_loc_of_ast_ctx ctx od.oloc in
     let at e = match first_name_loc e with
@@ -8726,10 +8904,16 @@ let check_observation_surface ctx =
     | Some (ProjDerived (EFuncCall ("prevalence", args) as call)) ->
       (match classify_prevalence_call args with
        | Prev_removed operands ->
+         let summed =
+           List.fold_left (fun acc e -> EBinOp (Add, acc, e))
+             (List.hd operands) (List.tl operands) in
+         (* The migration must compile: where the operand pools a population
+            stratum by a bare name, `projected = X` is E280, so the hint
+            states the pooling (`sum(X)`) rather than handing the reader the
+            next error. *)
          let operand =
-           surface_src
-             (List.fold_left (fun acc e -> EBinOp (Add, acc, e))
-                (List.hd operands) (List.tl operands)) in
+           if pools summed = [] then surface_src summed
+           else surface_src (EUnOp (Total, summed)) in
          Diagnostics.error ctx.diags ~code:"E356" ~loc:(at call)
            ~message:(Printf.sprintf
              "observation '%s': `%s` was removed — it returned a count, not a \
@@ -8799,7 +8983,11 @@ let check_observation_surface ctx =
                        roughly the number of patches. Reduce the same axes on \
                        each side: `prevalence(of = sum(a in age, I[a, p]), \
                        among = sum(a in age, N[a, p]))`"
-                ()))
+                ()));
+      (match classify_prevalence_call args with
+       | Prev_removed _ -> ()   (* E356's hint already states the pooling *)
+       | _ -> check_bare_pooling ctx od (pools call))
+    | Some (ProjDerived e) -> check_bare_pooling ctx od (pools e)
     | _ -> ()
   ) ctx.obs_decls
 
@@ -10282,6 +10470,7 @@ let classify_quantity_body ctx env
        | Some sa, Some sb ->
          Some (Ir.SBinOp { op = ir_bin_op op; left = sa; right = sb })
        | _ -> None)
+    | EUnOp (Total, x) -> build_scalar_expr x
     | EUnOp (op, x) ->
       (match build_scalar_expr x with
        | Some sx -> Some (Ir.SUnOp { op = ir_un_op op; arg = sx })
@@ -12496,6 +12685,7 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
      these checks can see is declared structure, never a stage sum the
      compiler is about to add. *)
   check_observation_surface ctx;
+  apply_via_rewrite ctx strip_totals;
   lower_via_transitions ctx;
   (* M14 (gh#98): validate origin date up front, before origin_rata_die /
      date() conversion derives values from it. *)

@@ -274,11 +274,11 @@
        add multi-binder alongside   s/r=3  r/r=1
        this replacement             s/r=1  r/r=1   ← identical to baseline
 
-     A one-element list is `sum(I)`: no binder, so the fold returns the body
-     unchanged. That is the whole of the no-binder form — a bare family name
-     already means the total across all strata, so `sum(I)` is an explicit way
-     to say "I mean the total here" and needs no separate production and no new
-     semantics. *)
+     A one-element list is `sum(I)`: no binder. A bare family name already
+     means the total across all strata, so `sum(I)` has the body's value and
+     needs no separate production — but it is wrapped in [Total], because an
+     observation must be able to tell a total the modeller stated from a bare
+     name that pools silently (E280, aggregation-semantics §10). *)
   let build_sum ~sp ~ep (items : sum_item list) : expr =
     let rec go = function
       | [SBody e]                    -> Ok e
@@ -291,6 +291,9 @@
          binder — `sum(a in age)`, `sum(a in age, p in patch)`. *)
       | []                           -> Error `NoBody
     in
+    match items with
+    | [SBody e] -> EUnOp (Total, e)
+    | _ ->
     match go items with
     | Ok e -> e
     | Error reason ->
