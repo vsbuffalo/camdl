@@ -141,10 +141,11 @@ clause.
 
 **Migration.**
 
-| Old                   | New                                                           |
-| --------------------- | ------------------------------------------------------------- |
-| `@ (1/730) * R`       | `let waning : rate = 1 / (730 'days)`, then `@ waning * R`    |
-| `@ (1/10000) * S * I` | `let b : positive dim P^-1*T^-1 = 0.0001`, then `@ b * S * I` |
+| Old                        | New                                                           |
+| -------------------------- | ------------------------------------------------------------- |
+| `@ (1/730) * R`            | `let waning : rate = 1 / (730 'days)`, then `@ waning * R`    |
+| `@ (1/10000) * S * I`      | `let b : positive dim P^-1*T^-1 = 0.0001`, then `@ b * S * I` |
+| `final((1000 - S) / 1000)` | `final(1 - S / (1000 'count))`                                |
 
 **Diagnostics.** The rate, derivative or initial value reports its usual code
 (E300, E306, E313). A typed constant whose unit literals disagree with its `dim`
