@@ -126,6 +126,28 @@ or `sia[r in round] : transfer(…) at
 [t_start[r]]` if each round has its own
 date.
 
+## 2026-11-06 — Unit literals keep their meaning in constants and products
+
+**What.** Three fixes to how a unit literal is read. `'count` now has dimension
+P wherever it appears, so `gamma * 5 'count` is a population rate (it was a
+per-capita rate, refused as E300). A typed constant whose unit literals give it
+a dimension other than its kind's is refused: `let tau : rate = 30 'days` was
+accepted as the number 30.0 of kind rate, with the literal's dimension dropped.
+And a parenthesized unit literal after `/` is no longer E107: `I / (5 'days)` is
+unambiguous and compiles; `I / 5 'days` is still E107.
+
+**Migration.**
+
+| Old                          | New                                                                 |
+| ---------------------------- | ------------------------------------------------------------------- |
+| `let tau : rate = 30 'days`  | `let tau : duration = 30 'days`, or `let r : rate = 1 / (30 'days)` |
+| `let n : count = 5 'per_day` | the kind the value has                                              |
+
+**Diagnostics.** A typed constant whose unit literals disagree with its kind is
+E282.
+
+---
+
 ## 2026-11-05 — Brackets after a kind mean size; dimensions are a `dim` clause
 
 **What.** A parameter's dimension is written with a `dim` clause after the kind:

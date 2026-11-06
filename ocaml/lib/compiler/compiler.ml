@@ -110,6 +110,8 @@ let parse_unit (parse_diags : Diagnostics.t) ~(filename : string) (src : string)
     : (Ast.declaration list, unit) result =
   let lexbuf = Lexing.from_string src in
   Lexing.set_filename lexbuf filename;
+  (* Offsets are per unit; a stale entry from another unit could hide E107. *)
+  Hashtbl.reset Parser_errors.paren_starts;
   try Ok (Parser.file Lexer.token lexbuf)
   with
   | Lexer.LexError msg ->

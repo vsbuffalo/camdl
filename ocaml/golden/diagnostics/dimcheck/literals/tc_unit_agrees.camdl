@@ -1,0 +1,23 @@
+# invariant: a typed constant whose unit literals agree with its kind compiles
+# spec: §5.3
+# expect: (none)
+time_unit = 'days
+
+compartments { S, I, R }
+
+let tau : rate = 1 / (30 'days)
+let d : duration = 30 'days
+parameters {
+  beta  : rate ~ normal(mu = 0.3, sigma = 0.1)
+  gamma : rate ~ normal(mu = 0.1, sigma = 0.05)
+}
+
+transitions {
+  infection : S --> I  @ beta * S * I / (S + I + R)
+  recovery  : I --> R  @ tau * I * (d / d)
+
+}
+
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 100 'days }

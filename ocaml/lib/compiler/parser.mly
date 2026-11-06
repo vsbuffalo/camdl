@@ -1485,7 +1485,8 @@ expr:
          20 / 100_000 'per_year — does 'per_year bind to 100_000 or the whole expr?
          The parser binds it to 100_000, which is almost never what the user wants. *)
       (match e2 with
-       | EUnit _ ->
+       | EUnit _ when not (Hashtbl.mem Parser_errors.paren_starts
+                             $startpos(e2).Lexing.pos_cnum) ->
          Parser_errors.push_error ~sp:$startpos ~ep:$endpos
            ~code:"E107"
            ~msg:"ambiguous unit literal after '/': the unit suffix binds to the \
@@ -1543,7 +1544,8 @@ atom_expr:
      mode. *)
   | ORIGIN
       { EIdent ("origin", Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
-  | LPAREN e = expr RPAREN     { e }
+  | LPAREN e = expr RPAREN
+      { Hashtbl.replace Parser_errors.paren_starts $startpos.Lexing.pos_cnum (); e }
   | LPAREN e = expr RPAREN u = unit_lit
       (* (20 / 100_000) 'per_year — unit applies to the whole expression.
          For durations: multiply by days_per(u). For rates: divide by days_per(u).

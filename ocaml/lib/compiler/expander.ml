@@ -3816,15 +3816,16 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
   | EUnit (f, u) ->
     (* Preserve the unit's dimension on the IR so Dimcheck can see it.
        Duration units (`'days` etc.) wrap as UncheckedDim with dim = T;
-       rate units as UncheckedDim with dim = T⁻¹. The scalar is pre-
-       scaled into the model's time unit. For Count/Ratio we keep the
-       existing bare-Const behaviour since there is no time scale.
+       rate units as UncheckedDim with dim = T⁻¹; `'count` as dim = P. The
+       scalar is pre-scaled into the model's time unit. `'ratio` is a bare
+       Const: it is dimensionless and has no scale.
        Fixes GH #9: previously `1 'days` became a bare dimensionless
        Const, so `(gamma + mu) * 1 'days` type-checked as T⁻¹ and
-       `exp()` of it produced a spurious E301. *)
+       `exp()` of it produced a spurious E301. `'count` was a bare Const
+       too, so `gamma * 5 'count` was a per-capita rate. *)
     let scaled = unit_to_model_time ctx f u in
     (match u with
-     | Count | Ratio -> Ir.Const scaled
+     | Ratio -> Ir.Const scaled
      | _ ->
        let (p, t) = unit_lit_to_dim u in
        Ir.UncheckedDim {
@@ -6017,10 +6018,61 @@ let expand_parameters ctx =
 (* Typed constant `let`s → the IR's `constants` section, evaluated once here.
    The same predicate decides which carry their `#'` prose into the doc index
    — see [let_constant_kind]. *)
+(* The dimension a constant body's unit literals give it, when they alone
+   determine it: [`Units d]; [`Bare] for bare numbers only; [`Other] when
+   something else decides (a function, a sum of disagreeing units). *)
+let rec literal_units (e : expr) =
+  let combine f a b = match a, b with
+    | `Units x, `Units y -> `Units (f x y)
+    | `Bare, (`Units _ as u) | (`Units _ as u), `Bare -> u
+    | `Bare, `Bare -> `Bare
+    | _ -> `Other
+  in
+  match e with
+  | EUnit (_, u) -> `Units (unit_lit_to_dim u)
+  | EConst _ -> `Bare
+  | EUnOp (Neg, a) -> literal_units a
+  | EBinOp ((Add | Sub), a, b) ->
+    (match literal_units a, literal_units b with
+     | `Units x, `Units y when x <> y -> `Other
+     | x, y -> combine (fun x _ -> x) x y)
+  | EBinOp (Mul, a, b) ->
+    combine (fun (p1, t1) (p2, t2) -> (p1 + p2, t1 + t2)) (literal_units a) (literal_units b)
+  | EBinOp (Div, a, b) ->
+    (match literal_units a, literal_units b with
+     | `Bare, `Units (p, t) -> `Units (-p, -t)
+     | x, y -> combine (fun (p1, t1) (p2, t2) -> (p1 - p2, t1 - t2)) x y)
+  | EBinOp (Pow, a, EConst n) when Float.is_integer n ->
+    (match literal_units a with
+     | `Units (p, t) -> let k = int_of_float n in `Units (k * p, k * t)
+     | x -> x)
+  | _ -> `Other
+
+(* A typed constant whose unit literals give it a dimension other than its
+   kind's: `let tau : rate = 30 'days` would otherwise be the number 30.0 of
+   kind rate, the literal's dimension silently dropped (E282). *)
+let check_constant_units ctx (lb : let_binding) (pk : param_type) =
+  match Param_annot.kind_dim pk, literal_units lb.lbody with
+  | Some k, `Units d when d <> k ->
+    let show (p, t) = Dimcheck.display_dim (Dimcheck.make p t) in
+    Diagnostics.error ctx.diags
+      ~code:"E282" ~loc:Diagnostics.no_loc
+      ~message:(Printf.sprintf
+        "constant '%s' is declared `%s`, but its unit literals give it \
+         dimension %s, not %s"
+        lb.lname (Param_annot.kind_name pk) (show d) (show k))
+      ~hint:(Printf.sprintf
+        "Declare the kind the value has (a duration is `duration`), or write \
+         the value in units of a %s (for a rate, `1 / (30 'days)`)."
+        (Param_annot.kind_name pk))
+      ()
+  | _ -> ()
+
 let expand_constants ctx : Ir.constant list =
   List.filter_map (fun (lb : let_binding) ->
     match let_constant_kind lb with
     | Some pk ->
+      check_constant_units ctx lb pk;
       Some { Ir.c_name  = lb.lname;
              Ir.c_value = eval_const_expr ctx lb.lbody;
              Ir.c_kind  = ir_param_kind_of_ast pk; }

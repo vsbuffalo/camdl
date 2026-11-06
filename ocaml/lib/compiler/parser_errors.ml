@@ -17,6 +17,12 @@ let pending_errors
   : (Lexing.position * Lexing.position * string * string * string option * fix option) list ref
   = ref []
 
+(* Start offsets (pos_cnum) of every parenthesized expression parsed so far.
+   The AST keeps no node for parentheses, so the `/` rule reads this to tell
+   `I / (5 'days)`, which is unambiguous, from `I / 5 'days` (E107). Reset with
+   [pending_errors] before each parse. *)
+let paren_starts : (int, unit) Hashtbl.t = Hashtbl.create 64
+
 let push_error ~sp ~ep ~code ~msg =
   pending_errors := (sp, ep, code, msg, None, None) :: !pending_errors
 
