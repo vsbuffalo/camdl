@@ -195,6 +195,18 @@ order. Every handle now names one run, or is refused with the runs listed.
 
 ### Other breaking changes
 
+- **A model's file name is a label, not part of its identity.** `camdlc` names a
+  model after its source file's stem, and that name used to enter the model
+  hash, so two byte-identical models under different file names (`a.camdl`,
+  `b.camdl`) got different `run_id`s, and whether they did depended on the IR
+  cache: with a warm cache the second file was served the IR compiled for the
+  first, name included, and shared its identity; with `CAMDL_NO_IR_CACHE=1` it
+  did not. The name is no longer hashed (`ir` hash policy version 3 → 4), so
+  identical models share every `run_id` with the cache on or off, and renaming a
+  model file never re-keys it. Every model-bearing leaf (simulate, fit, pfilter,
+  survey, profile, simulate ensembles) re-keys once; a re-run recomputes it.
+  Migration: none.
+
 - **One integration-step rule for every backend and command.** A model's
   declared `simulate { dt = … }` is the step every fit method (`if2`, `pgas`,
   `pmmh`, `pfilter`, `mh`, `nl-*`), every `camdl profile` cell (IF2 and `nl-*`),

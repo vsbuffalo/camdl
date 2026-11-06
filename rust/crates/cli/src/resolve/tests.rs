@@ -148,9 +148,9 @@ fn presentation_fields_are_inert() {
         "output.format / time_semantics must not affect the model digest"
     );
 
-    // Negative control: a real structural change (a different name) does.
+    // Negative control: a real structural change (a different horizon) does.
     let mut m3 = tiny_model();
-    m3.name = "different".into();
+    m3.simulation.t_end = 200.0;
     assert_ne!(
         model_digest_hash(&m1),
         model_digest_hash(&m3)
@@ -412,7 +412,7 @@ fn differential_semantic_inputs_rekey_the_run_id() {
         ("process_seed",     Box::new(|i| i.process_seed = 2)),
         ("no_flows",         Box::new(|i| i.no_flows = true)),
         ("columns",          Box::new(|i| { i.columns.insert("S".into()); })),
-        ("model_structure",  Box::new(|i| i.model.name = "different".into())),
+        ("model_structure",  Box::new(|i| i.model.simulation.t_end = 200.0)),
         // gh#641: the forecast-origin state. Both components are semantic —
         // a different state FILE, and a different restored ROW of one file.
         ("init_state_file",  Box::new(|i| i.init_state = Some(init_state(1, 0)))),
@@ -433,6 +433,8 @@ fn differential_presentation_inputs_are_inert() {
     // the hash — `run_id` is built from level hashes only.)
     let cases: Vec<(&str, Box<dyn Fn(&mut SimInputs)>)> = vec![
         ("model_stem",     Box::new(|i: &mut SimInputs| i.model_stem = "renamed".into())),
+        // The IR's `name` is the file stem too (camdlc sets it from the path).
+        ("model_name",     Box::new(|i| i.model.name = "renamed".into())),
         ("param_label",    Box::new(|i| i.param_label = "p1".into())),
         ("scenario_label", Box::new(|i| i.scenario_label = "sc1".into())),
         ("base_seed",      Box::new(|i| i.base_seed = 99)), // process_seed held fixed
@@ -653,16 +655,27 @@ fn presentation_fields_are_inert_on_every_cas_kind() {
         }
     }
 
-    // Negative control: a genuinely structural edit MUST re-key every kind —
-    // otherwise the assertions above could pass vacuously (e.g. if the model
-    // stopped contributing to identity at all).
+    // The model's `name` is the source file's stem, a label: it is inert in
+    // every kind's identity, like the leaf directory label it also feeds.
     let mut renamed = tiny_model();
     renamed.name = "different".into();
     for ((k, lh_a, rid_a), (_, lh_b, rid_b)) in
         all_kind_identities(&tiny_model()).into_iter().zip(all_kind_identities(&renamed))
     {
-        assert_ne!(lh_a, lh_b, "[{k}] a model rename MUST move the model-bearing level");
-        assert_ne!(rid_a, rid_b, "[{k}] a model rename MUST re-key the run_id");
+        assert_eq!(lh_a, lh_b, "[{k}] the model name must not move the model-bearing level");
+        assert_eq!(rid_a, rid_b, "[{k}] the model name must not re-key the run_id");
+    }
+
+    // Negative control: a genuinely structural edit MUST re-key every kind —
+    // otherwise the assertions above could pass vacuously (e.g. if the model
+    // stopped contributing to identity at all).
+    let mut longer = tiny_model();
+    longer.simulation.t_end = 200.0;
+    for ((k, lh_a, rid_a), (_, lh_b, rid_b)) in
+        all_kind_identities(&tiny_model()).into_iter().zip(all_kind_identities(&longer))
+    {
+        assert_ne!(lh_a, lh_b, "[{k}] a structural edit MUST move the model-bearing level");
+        assert_ne!(rid_a, rid_b, "[{k}] a structural edit MUST re-key the run_id");
     }
 }
 
@@ -750,12 +763,16 @@ fn cas_identity_pins() {
         // moved `fit` only: the hashed fit config carried the field as
         // `"transform": null` on every estimate entry, and it is gone. Every
         // accepted override was redundant, so no stored output changes.
-        ("sim", "3dee14e9b5a1f616ea7a212da362411cfc6322c3563930f2fe51c3284251328d"),
-        ("fit", "2d856225901551de097324c30f543a4d9e9675c6ca2d91af62583e56016d0326"),
-        ("pfilter", "5fd865eeec440336717f28371ebf0ab7ba5683edaa2a9aa159b4c9fb9abd60da"),
-        ("survey", "ffd67c4afd54a278839b8db0bc1da82e4ccbdb7f76d48961f97f52c1f6d946ac"),
-        ("sim_ensemble", "13159a37074a633faa11b460b171acd4589bab177df512b8774d5811d818ccf5"),
-        ("profile", "76cb33c616e44597203aa3fa4794e54c9ab09ee53abeeebffada0e8a07d93af1"),
+        //
+        // The `ir` hash policy going to SV = 4 then moved EVERY kind: the
+        // model's `name` (the source file's stem) left `Model::hash_into`, and
+        // the SV header is folded into every kind's `model` level.
+        ("sim", "0cb90e9d50e5d13bdcdb36e828c0320af7ca10621f52ea29da79b7e448c06f27"),
+        ("fit", "c73bb2ca8ad5fcdab69e20e164190676bee92f932cd74165af272d9b8170b54e"),
+        ("pfilter", "102b4f4ef0dd5597fa47d76e00f08e4d39c44543cc624f5aea1795973269fb49"),
+        ("survey", "4eb4ef1dd2afee1d9caf470af7bc7007865a6e01e8e83ce69f59d0431897bf28"),
+        ("sim_ensemble", "cd676c8d39d167318e7985e9e65eafd9a463aee8449218e4e60e568913f1a4bb"),
+        ("profile", "5470055605e9e56d1991c503ec42724589bbba9f4df619f6570063e4438f67d6"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.
