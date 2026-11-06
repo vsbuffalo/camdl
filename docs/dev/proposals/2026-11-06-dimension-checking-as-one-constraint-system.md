@@ -2,7 +2,8 @@
 
 Date: 2026-11-06
 
-Status: implemented on `docs/size-brackets-dim-clause` (6b19d107 … this branch's spec commit); deviations are recorded inline where they occur
+Status: implemented on `docs/size-brackets-dim-clause`, 6b19d107..e6943201;
+deviations from the plan are recorded inline where they occur
 
 Builds on: `docs/dev/proposals/2026-11-05-size-brackets-and-dim-clause.md` (§4,
 §5) and `docs/dev/notes/2026-11-05-dimension-inference-measurement.md`
@@ -205,34 +206,46 @@ test of autodiff, not of the user's model. They are exempt with a stated reason
 
 ## 4. Design
 
-### 4.1 The public interface does not change shape
+Three modules, each depending only on the one before it:
+
+```
+Dim_solve   integer linear algebra; knows nothing about the IR
+Dim_sites   the list of positions; knows the IR, nothing about solving
+Dimcheck    turns sites into equations, solves them, writes diagnostics
+```
+
+### 4.1 The public interface
 
 ```ocaml
 (* ocaml/lib/ir/dimcheck.mli *)
-type input = {
-  model      : Ir.model;
-  prior_args : prior_source list;   (* every prior, before the expander folds it *)
-}
-and prior_source = {
+type prior_source = {
   param  : string;
   family : string;                  (* "normal", "log_normal", ... *)
   args   : (string * Ir.expr) list; (* resolved, unit literals intact *)
 }
 
-val check_model : input -> result   (* result type unchanged *)
+val check_model :
+  ?prior_args:prior_source list ->            (* every prior, before folding *)
+  ?constant_dims:(string * (int * int)) list ->  (* typed constants' `dim` clauses *)
+  Ir.model -> result                          (* result type unchanged *)
 ```
 
-`prior_args` exists because the expander folds a constant prior's arguments to
-floats before the IR is built, and the unit literal in `mu = -2 'per_day` is
-gone by then. The expander already resolves each argument with `resolve_expr`
-before folding; it hands those expressions to the checker instead of discarding
-them. Nothing new is serialized, and the IR does not change.
+Two inputs come from the expander beside the IR. `prior_args` exist because a
+constant prior's arguments are folded to floats before the IR is built, so the
+unit literal in `mu = -2 'per_day` is gone from it; the expander resolves each
+argument with `resolve_expr` and records the expression. `constant_dims` carry
+the `dim` clause of a typed constant, which the IR's constant record does not.
+Nothing new is serialized and the IR does not change. The compiler and
+`camdlc inspect` pass both. A model checked without them (an IR reloaded from
+JSON, a model built in a test) gets weaker results, never contradictory ones: a
+constant with a `dim` clause is inferred from its use rather than declared, and
+constant priors' unit literals go unchecked, since the IR no longer holds them;
+hierarchical priors are read from the IR. The next IR schema bump puts the
+clause on the constant record and closes the first gap.
 
-As implemented the priors are an optional argument rather than a record,
-`check_model : ?prior_args:prior_source list -> model -> result`, so the many
-callers that check a model built in a test need no change; without them the
-checker reads the hierarchical priors the IR keeps. The compiler always passes
-them.
+The checker runs where it always has: after validation and before autodiff,
+constant folding and LICM, so a table lookup still carries its declared cell
+dimension.
 
 ### 4.2 `Dim_sites`: one function names every position and its obligation
 
@@ -241,269 +254,216 @@ them.
 [@@@warning "@4@8@9"]
 (* 4: a `_` catch-all over a variant is an error, so a new constructor cannot
       fall into an existing arm.
-   8: a non-exhaustive match is an error (already `-w @8` in this library).
+   8: a non-exhaustive match is an error.
    9: a record pattern that omits a field is an error, so a new field cannot
       be skipped by not naming it. *)
 
 type key =                       (* things whose dimension other positions refer to *)
-  | K_param   of string
-  | K_forcing of string          (* the declared unit, D *)
-  | K_column  of { stream : string; column : string }
-  | K_stream  of string          (* an observation stream's projected dimension *)
-  | K_series  of string * (string * string) list   (* a quantity's source series *)
-  | K_site    of int             (* another site's expression *)
+  | K_param    of string         (* a parameter or a typed constant *)
+  | K_table    of string         (* a table's cell dimension *)
+  | K_binding  of string
+  | K_stream   of string         (* an observation stream's projected dimension *)
+  | K_column   of string * string   (* (stream, column) *)
+  | K_quantity of string         (* a quantity's reported dimension *)
+  | K_series   of string         (* the series a quantity reduces *)
 
 type obligation =
-  | Has      of Dimcheck.dim_vec   (* a fixed dimension: P·T⁻¹, P, 1, T, ... *)
-  | Equals   of key                (* the same dimension as [key] *)
-  | Equals_t of key                (* the same T exponent as [key]; P unconstrained *)
-  | Scaled   of key * Dimcheck.dim_vec   (* dim([key]) · v, e.g. an integral is series · T *)
-  | Defines  of key                (* this expression's dimension is [key]'s *)
+  | Has      of dim_vec          (* a fixed dimension: P·T⁻¹, P, 1, T, ... *)
+  | Equals   of key              (* the dimension of [key] *)
+  | Equals_t of key              (* [key]'s T exponent; P free (count noise, §5.6) *)
+  | Defines  of key              (* this expression's dimension is [key]'s *)
+  | Free                         (* operator rules only (contrasts, prior args) *)
   | Exempt   of exemption
+and exemption = Constant_argument   (* a literal forcing argument, read in the
+                                       forcing's own unit *)
 
-and exemption =
-  | Derivative_map        (* written by autodiff; dim = dim(f)/dim(θ) by construction *)
-  | Lineage_weight        (* derived from the rate by the expander *)
-  | After_dimcheck        (* per-eval bindings: created by LICM, which runs later *)
-
-type literals =
-  | Literals_dimensionless       (* the default (§5.2) *)
-  | Whole_terms_take_obligation  (* a literal that is an entire additive term
-                                    of this position takes its dimension *)
+type literals = Literals_dimensionless | Whole_terms   (* §5.2 *)
 
 type strength =
   | Binding   (* a model position: its equations and obligation enter the solve *)
-  | Checked   (* a prior argument: evaluated after the solve by [Prior_units],
-                 parameter dimensions read only, no equation emitted (§5.9) *)
+  | Checked   (* a prior argument: read after the solve, never an equation (§5.9) *)
 
 type site = {
-  id         : int;
-  subject    : Dimcheck.subject;   (* where diagnostics point *)
-  role       : string;             (* "transfer `fraction`", "Binomial `p`", ... *)
-  path       : string;             (* IR JSON path, for the coverage test *)
-  expr       : Ir.expr;
+  subject    : subject option;   (* where diagnostics point *)
+  role       : string;           (* "transition 'infection' rate", ... *)
+  expr       : site_expr;        (* E of Ir.expr | Scalar | Contrast *)
   obligation : obligation;
   literals   : literals;
-  code       : string;             (* the error code a violation reports *)
+  code       : string;           (* the code a violated obligation reports *)
   strength   : strength;
+  stream     : string option;    (* the observation a Projected leaf reads *)
+  note       : string option;    (* guidance the diagnostic carries *)
 }
 
-val sites : Dimcheck.input -> site list
+val sites : Ir.model -> site list
 ```
 
 The top of `sites`, to show what the closed pattern buys:
 
 ```ocaml
-let sites (input : Dimcheck.input) : site list =
-  let { model; prior_args } = input in
+let sites (m : model) : site list =
   let { name = _; version = _; time_unit = _; description = _; origin = _;
         origin_rata_die = _; compartments = _; doc_index = _;
         model_structure = _; identity_tracked_compartments = _;
-        output = _; simulation = _; presets = _;   (* no expressions: numbers
-                                                      already in time_unit *)
-        constants = _;                             (* declarations, read by
-                                                      [Dimcheck] as K_param *)
-        per_eval_bindings = _;                     (* After_dimcheck *)
-        ic_grad = _;                               (* Derivative_map *)
+        output = _; simulation = _; presets = _;  (* no expressions *)
+        constants = _;            (* declarations, read as K_param *)
+        per_eval_bindings = _;    (* created by LICM, after dimcheck *)
+        ic_grad = _;              (* derivative map *)
         transitions; ode_equations; time_functions; tables; interventions;
         observations; parameters; bindings; initial_conditions; balance;
-        quantities; contrasts } = model in
-  List.concat [
-    List.concat_map transition_sites transitions;
-    List.map ode_site ode_equations;
-    List.concat_map forcing_sites time_functions;
-    List.concat_map table_sites tables;
-    List.concat_map intervention_sites interventions;
-    List.concat_map observation_sites observations;
-    List.concat_map binding_site bindings;
-    List.concat_map init_sites initial_conditions;
-    Option.to_list (Option.map balance_site balance);
-    List.concat_map quantity_sites quantities;
-    List.concat_map contrast_sites contrasts;
-    List.concat_map prior_sites prior_args;
-  ]
+        quantities; contrasts } = m in
+  ...
+  List.iter (binding_site acc) bindings;          (* first: see below *)
+  List.iter (transition_sites acc) transitions;
+  ...
 ```
 
 and one nested function, to show the rules reading like the language spec:
 
 ```ocaml
-let action_sites ~subject (a : action) : site list =
+let action_sites acc ?subject ~role:what (a : action) =
+  let role field = Printf.sprintf "%s `%s`" what field in
+  let count field e =
+    add acc ?subject ~role:(role field) ~code:"E314" ~literals:Whole_terms
+      (Has population) (E e) in
   match a with
   | FractionTransfer { src = _; dst = _; fraction } ->
-    [ site ~subject ~role:"transfer `fraction`" fraction
-        ~obligation:(Has dimensionless) ~code:"E314" ]
-  | AbsoluteTransfer { src = _; dst = _; count } ->
-    [ site ~subject ~role:"transfer `count`" count
-        ~obligation:(Has population) ~literals:Whole_terms_take_obligation
-        ~code:"E314" ]
-  | Set { compartment = _; value } ->
-    [ site ~subject ~role:"assigned value" value
-        ~obligation:(Has population) ~literals:Whole_terms_take_obligation
-        ~code:"E314" ]
-  | AddAction { add_compartment = _; add_count } ->
-    [ site ~subject ~role:"added count" add_count
-        ~obligation:(Has population) ~literals:Whole_terms_take_obligation
-        ~code:"E314" ]
+    add acc ?subject ~role:(role "fraction") ~code:"E314" (Has dimensionless) (E fraction)
+  | AbsoluteTransfer { src = _; dst = _; count = c } -> count "count" c
+  | Set { compartment = _; value } -> count "value" value
+  | AddAction { add_compartment = _; add_count } -> count "count" add_count
 ```
 
-Compare today's version of this function: it does not exist, and nothing fails
-to compile when it is missing. That is the change.
+Derivative maps written by autodiff (`rate_grad`, `sigma_sq_grad`, `grad`,
+`proj_grad`, `ic_grad`, `projection_state_grad`), lineage weights and LICM's
+per-eval bindings are bound to `_` with a comment: they are not the user's
+expressions. Binding sites come first, because the solver blames the later of
+two disagreeing equations, and a definition must not be blamed for a mistake at
+one of its uses.
 
 **What the compiler guarantees.** Adding a field to `Ir.model`, `transition`,
 `action`, a likelihood record or any other record `sites` destructures is a
 compile error in `dim_sites.ml` (warning 9). Adding a constructor to `action`,
 `likelihood`, `init_spec`, `time_func_kind`, `spline_coefs`, `fire_source`,
 `trigger_expr`, `quantity_body`, `temporal_reduce` or any other variant it
-matches is a compile error (warnings 4 and 8). The decision is forced; the
-author of the new field writes its obligation or an exemption.
+matches is a compile error (warnings 4 and 8). The author of the new field
+writes its rule or binds it to `_` with a reason.
 
 **What the compiler cannot guarantee, and the test that does.** A field can
-still be bound to `_`. Warning 9 is satisfied by naming it, and the compiler
-cannot tell an expression-bearing field from a string. The coverage test closes
-this:
+still be bound to `_`. `ocaml/test/test_dim_sites.ml` closes this without
+depending on `Dim_sites`: it serializes every IR golden with `Serde`, collects
+every outermost expression node of the JSON (an object with one key naming an
+expression constructor), skips the exempt keys above, and requires the multiset
+of those nodes to be covered by the multiset of site expressions serialized the
+same way. An uncovered node is reported with its JSON path. The mutation checks:
+a new field `extra : expr` on `fraction_transfer` and a new constructor
+`Scale of expr` on `action` each fail to compile in `dim_sites.ml`; binding
+`fraction = _` makes the test name the uncovered
+`interventions[0].actions[0].fraction_transfer.fraction` of three goldens.
 
-- Serialize each corpus model with `Serde` (the IR writer, an independent code
-  path that must cover every field for the round-trip tests to pass).
-- Collect the JSON path of every expression node.
-- Assert that every path equals some site's `path` or lies under an exempt path
-  (`*.rate_grad`, `per_eval_bindings`, ...).
-
-This differs from counting visited expressions: a count says how many, not
-which, and cannot tell a skipped `fraction` from an extra visit elsewhere. The
-path-set comparison names the missing position. The serializer's own
-completeness is checked by the existing round-trip tests (parse ∘ serialize is
-the identity on every golden); the coverage test relies on that, and says so in
-its comment.
-
-The three mutation checks, each run once and recorded in the commit that adds
-the mechanism: add a field `extra : expr` to `fraction_transfer` (the build of
-`dim_sites.ml` fails); add a constructor `Scale of expr` to `action` (fails);
-bind `fraction = _` in `action_sites` (the coverage test fails on
-`interventions[0].actions[0].fraction`).
-
-### 4.3 Equations carry their origin
+### 4.3 Expressions are linear forms; equations carry their origin
 
 ```ocaml
-(* ocaml/lib/ir/dim_solve.ml *)
-type var = int
-type origin = {
-  site  : int;                      (* the site whose expression produced it *)
-  stage : stage;
-  what  : string;                   (* "operands of +", "obligation", "declared kind" *)
-}
-and stage = Declared | Structure | Obligation
-
-type eqn = {
-  terms  : (var * int) list;        (* Σ cᵢ·xᵢ, integer coefficients *)
-  rhs    : int array;               (* = an exponent vector, one entry per base *)
-  origin : origin;
-}
+(* ocaml/lib/ir/dimcheck.ml *)
+type form  = { vars : (int * int) list; k : dim_vec }   (* Σ cᵥ·xᵥ + k *)
+type value = Any | F of form   (* Any: the literal 0, or a whole-term literal *)
 ```
 
-Expression inference generates equations and returns the expression's variable.
-Today's `Mul` arm:
+`gen` turns an expression into a linear form over dimension variables, one per
+key. A product is the sum of its factors' forms, a quotient their difference,
+and a static power `a^n` is `n` times `a`'s form, so these need no equation. An
+equation is emitted wherever two forms must agree: the operands of `+`, `min` or
+a comparison, and the branches of a conditional (`l = r`); the argument of
+`exp`, `log` or a trigonometric function (`a = 0`); a square root or a static
+fractional power (`q·x = p·a` for a fresh `x`). Each site then adds one equation
+for its obligation. A known dimension (a `rate` parameter, a column declared
+`count`) is a `Declared` equation on its key's variable. The rule for an
+operator is the same at every site.
 
 ```ocaml
-| Mul ->
-  let dl = resolve st dl in
-  let dr = resolve st dr in
-  (match dl, dr with
-   | Any, d | d, Any -> d
-   | Known v1, Known v2 -> Known (dim_mul v1 v2)
-   | _ ->
-     let r = fresh_var st in
-     record_equation st r [ (1, 1, dl); (1, 1, dr) ];
-     r)
+(* ocaml/lib/ir/dim_solve.mli *)
+type stage  = Declared | Structure | Obligation
+type origin = { site : int; stage : stage; what : string }  (* site: an equation id *)
+type eqn    = { terms : (var * int) list; rhs : int array; origin : origin }
 ```
 
-has three cases because two mechanisms meet in it: known dimensions are computed
-directly, unknown ones become equations, and `record_equation` is silently a
-no-op in permissive mode or after round 1. The replacement has one:
-
-```ocaml
-| Mul ->
-  let l = gen b.left and r = gen b.right and x = fresh () in
-  emit { terms = [ (x, 1); (l, -1); (r, -1) ]; rhs = zero; origin = here "product" };
-  x
-```
-
-A known dimension (a `rate` parameter, a compartment) is a `Declared` equation
-on its variable, so the product rule needs no special case. Addition is `x = l`
-and `x = r`; `exp` is `l = 0` and `x = 0`; a static power `a^n` is `x = n·a`;
-`sqrt a` is `2x = a`. Every rule is one line, and the rule for an operator is
-the same at every site.
+The checker keeps, for each equation id, the site it came from, its code, and
+what kind of agreement it states, so a conflict can be reported in the site's
+own terms.
 
 ### 4.4 The solver distinguishes four outcomes
 
 The system decouples by base: an equation over exponent vectors holds separately
 for its P part and its T part, so the solver works on one coefficient matrix
-with two right-hand sides.
+with one right-hand side per base.
 
 ```ocaml
-type outcome = {
-  value        : var -> Dimcheck.dim_vec option;   (* Some when determined *)
-  conflicts    : conflict list;
-  undetermined : relation list;   (* among parameters, after intermediates are eliminated *)
-}
-and conflict = {
-  culprit : eqn;                  (* the equation that could not be added *)
-  kind    : [ `Contradiction of int array  (* the residual 0 = r, r ≠ 0 *)
-            | `Not_integral ];
-  context : origin list;          (* the earlier equations it conflicts with *)
-}
-and relation = { params : (string * int) list; equals : int array }
-(* e.g. kappa + w = T⁻¹: "only kappa·w is determined, as T⁻¹" *)
+type conflict_kind = Contradiction | Not_integral
+type conflict = { culprit : eqn; kind : conflict_kind; context : origin list }
 
-val solve : eqn list -> outcome
+val solve     : nbases:int -> eqn list -> outcome
+val conflicts : outcome -> conflict list            (* every one, in order *)
+val value     : outcome -> var -> int array option  (* Some when determined *)
+val relations : outcome -> var list -> relation list
+(* the integer relations among free variables: kappa + w = T⁻¹ *)
 ```
 
 1. **Order.** Equations are added `Declared`, then `Structure`, then
-   `Obligation`. A conflict is therefore found when an obligation is added, and
-   reported at that site with that site's code: the transition rate is blamed,
-   not the product node inside it.
+   `Obligation`, so a conflict is usually found when an obligation is added and
+   reported at that site with its code: the transition rate is blamed, not a
+   product inside it.
 2. **Exact elimination on unit pivots.** An equation is reduced against the
    accepted rows. If it reduces to 0 = 0 it is redundant. If it reduces to 0 = r
-   with r ≠ 0 it is a contradiction: reported, then dropped so it does not
-   cascade. Otherwise, if some coefficient is ±1, pivot on it (preferring the
-   newest variable, which keeps elimination local, as `952e9cf2` measured). A ±1
-   pivot is a unimodular operation, so it preserves the set of integer solutions
-   and keeps every coefficient an integer. Almost every equation qualifies:
-   products, quotients and sums have only ±1 coefficients.
-3. **The residual.** Rows with no ±1 coefficient come only from integer powers
-   and square roots. They are set aside and, at the end, put in Hermite normal
-   form; the system has an integer solution exactly when back-substitution in
-   that form divides evenly (Cohen, _A Course in Computational Algebraic Number
-   Theory_, 1993, §2.4; cited from memory). The residual is small (its size is
-   the number of non-unit powers in the model), so a dense method is adequate.
-   This is what catches `(kappa * w)^2 * I` in a rate: 2·κ + 2·w = −T has
-   rational solutions and no integer one.
-4. **Arithmetic.** Integers are native, with checked multiplication and
-   addition; an overflow is an internal compiler error with a message, never a
-   wrapped value. With ±1 pivots the coefficients grow additively, so this is a
-   guard, not an expected path. The rational module `Q` is deleted.
-5. **Underdetermination.** A variable that remains free is not an error. For
-   each undetermined parameter, I300 (Info) reports the relations that _are_
-   determined, eliminated down to parameter names: "only `kappa · w` is
-   determined: T⁻¹". No dimension is invented. A parameter that appears in no
-   `Binding` site (one used only in prior arguments, or not at all) is not
-   reported: its dimension matters to nothing.
+   with r ≠ 0 it is a contradiction: reported, with the origins it was reduced
+   against, then dropped so it does not cascade. Otherwise, if some coefficient
+   is ±1, it is pivoted on the newest such variable, which keeps elimination
+   local. A ±1 pivot is unimodular, so it preserves the integer solutions and
+   keeps every coefficient an integer.
+3. **The residual.** A row can reach the end of reduction with no ±1
+   coefficient: directly from a power or a root (`2x = a`), or by substitution
+   from products and quotients alone, as a·b = T⁻¹ with a/b = 1 reduces to 2a =
+   T⁻¹. Such rows are set aside and checked together by a column Hermite normal
+   form: the system has an integer solution exactly when forward substitution
+   divides evenly, and a rank comparison of [A] with [A | b] separates a
+   rational contradiction from integer infeasibility. This is what catches
+   `(kappa * w)^2 * I` in a rate: 2·κ + 2·w = −T has rational solutions and no
+   integer one.
+4. **Arithmetic.** Native integers, every addition and multiplication checked,
+   in the solver and in equation generation alike (forms, exponent vectors,
+   static powers); an overflow is E310, never a wrapped value.
+5. **Underdetermination.** A variable left free is not an error. Each
+   undetermined parameter that some model position reads gets I300 (Info) with
+   the relations that are determined among the undetermined parameters ("only
+   this is determined: kappa · w is T⁻¹"). No dimension is invented. A parameter
+   no model position reads (one used only in priors, or not at all) is not
+   reported.
+
+**One base at a time when needed.** A count-noise sd (§5.6) holds on T alone.
+When any such equation exists the checker solves P without them and T with every
+equation, as two one-base systems, which is exact because the bases decouple;
+otherwise it makes one two-base solve.
 
 ### 4.5 Diagnostics
 
 A conflict at an obligation reports the site's code, its role, the expected
-dimension and the dimension the rest of the system implies (the residual gives
-it), and the origins of the equations it conflicts with, as source locations:
+dimension and the dimension the rest of the system implies, and the uses it
+conflicts with:
 
 ```
-error[E300]: transition 'infection_v' rate has wrong dimension
-  expected P·T⁻¹ (population-level rate), got T⁻¹ (per-capita rate)
-  = note: `kappa * w` is T⁻¹ because of transition 'infection' (line 12)
+error[E300]: transition 'infection' rate has wrong dimension
+  = note: rate = (((alpha * S) * I) / N)
+  expected dimension: P*T^-1 (population-level rate)
+  got dimension: P^2 (P^2*T^0)
+  the conflicting requirement comes from: transition 'waning' rate
 ```
 
-A conflict found among `Structure` equations (an inconsistent sum inside an
-expression) reports E302 at the site, naming both operands. No minimal
-unsatisfiable core is computed: the earlier equations in the same row are the
-context, which is deterministic and enough to act on.
+A conflict among `Structure` equations (an inconsistent sum inside an
+expression) reports E302 at the site, naming both operands' dimensions. When one
+operand is a bare number, the diagnostic says so and its hint gives both fixes
+(§5.2). The notes name only uses that require a dimension (sums, function
+arguments, obligations), not definitions the value flows through. No minimal
+unsatisfiable core is computed: the equations the culprit was reduced against
+are the context, which is deterministic and enough to act on.
 
 ## 5. The rules
 
@@ -620,18 +580,13 @@ the parameter grammar reused.
 
 ### 5.5 `unchecked_dim` stays the only escape
 
-As implemented, the inner expression is not inferred, which departs from the
-next paragraph: the escape's motivating case, He et al.'s (I + ι)^α, is exactly
-a count under a parameter exponent, which the rule of §5.4 refuses, so inferring
-the inside would refuse the escape's own example. The escape stays opaque, as
-before this work.
-
-Its inner expression is still inferred (so a mistake inside it that is unrelated
-to the asserted dimension, such as `exp` of a count, is still found), but the
-inner result is not equated with the asserted dimension. Unit literals stop
+The wrapped expression is opaque: the checker reads only the asserted dimension,
+and does not infer the inside. The escape's motivating case, He et al.'s (I +
+ι)^α, is a count under a parameter exponent, which the rule of §5.4 refuses, so
+inferring the inside would refuse the escape's own example. Unit literals stop
 being represented as `UncheckedDim` when the IR bump of decision 3 lands; until
-then the checker treats `UncheckedDim { inner = Const _ }` as a known dimension,
-which is what it does now.
+then the checker reads `UncheckedDim { inner = Const _ }` with a "unit literal"
+reason as a known dimension, a checked typed constant rather than an escape.
 
 ### 5.6 Count-noise Normal likelihoods: P is free in the sd, T is not
 
@@ -658,7 +613,12 @@ reporting error.
 
 Keeping only the T components is exact because the system decouples by base. A
 sum inside the sd whose terms differ in T, such as `projected + gamma`, is still
-an error. The exemption does not extend to the initial `normal` law or to a
+an error. The P exemption covers the sd's sums, products, powers and roots, the
+operations a count variance formula is built from; the argument of `exp`, `log`
+or a trigonometric function stays dimensionless in every base, so
+`sd = exp(projected)` is E301. Nothing about counts being cardinal makes a
+transcendental function of a count meaningful, and it is almost always a
+mistake. The exemption does not extend to the initial `normal` law or to a
 `real` column: there, sd and mean have the same dimension. Whether some existing
 model uses a `real` column for count data with a P-inhomogeneous sd is measured
 across the corpora before this rule lands; if one does, the right fix is to
@@ -739,7 +699,7 @@ everywhere else (`normal(mu = 0.2 'per_day)` under weeks gives 1.4;
 small evaluation over three values, not by equations and not by the solver:
 
 ```ocaml
-(* ocaml/lib/ir/prior_units.ml *)
+(* in ocaml/lib/ir/dimcheck.ml *)
 type value =
   | Bare                     (* only bare numbers: a coordinate, no claim *)
   | Units of Dimcheck.dim_vec  (* determined by unit literals alone *)
@@ -757,8 +717,13 @@ type value =
 | `a ^ n`, n a literal            | `Units (n·d)` from `Units d`; otherwise as the base                                     |
 | `log`, `exp`, any function      | the argument is evaluated (so a conflict inside it is found); the result is `Coord`     |
 
-At the top of an argument, `Bare` and `Coord` are accepted without comment.
-`Units d` is compared with the argument's conventional dimension:
+Each whole additive term of an argument is evaluated on its own. A term that is
+`Bare` or `Coord` is accepted without comment; a term that is `Units d` is
+compared with the argument's conventional dimension, whatever the other terms
+are, so `normal(mu = m_h + 1 'days)` on a rate is E316: the literal asserts a
+duration where the argument is in θ's units, and `m_h` being a coordinate does
+not change what the literal says. Two `Units` terms that disagree are E316
+whatever θ is. The conventional dimensions:
 
 | Family           | Argument     | Conventional dimension |
 | ---------------- | ------------ | ---------------------- |
@@ -850,14 +815,14 @@ states this (§8, commit 5).
 | `scalar_dim` and `infer_ce` (1083–1205)                                    | derived-quantity and contrast expressions generate the same equations        |
 | module `Q` (rationals, 377–399)                                            | integer elimination with checked arithmetic                                  |
 
-The current file is 1,882 lines. I estimate the replacement at roughly 900 lines
-across `dim_sites.ml` (mostly mechanical patterns), `dim_solve.ml` and a smaller
-`dimcheck.ml`; that is a projection from the parts removed, not a measurement.
-The more meaningful comparison is what a reader must hold: today, the set of
-checked positions is implicit in 650 lines of control flow, four mode flags
-change what an operator means, and two mechanisms decide each product. After,
-the positions are one list, an operator means the same thing everywhere, and
-there is one solver.
+The old `dimcheck.ml` was 1,882 lines. The replacement is 1,749 lines:
+`dim_sites.ml` 468 (mostly mechanical patterns), `dim_solve.ml` 381 and
+`dimcheck.ml` 900, which also holds the prior checks and the diagnostics. The
+more meaningful comparison is what a reader must hold: today, the set of checked
+positions is implicit in 650 lines of control flow, four mode flags change what
+an operator means, and two mechanisms decide each product. After, the positions
+are one list, an operator means the same thing everywhere, and there is one
+solver.
 
 ### 6.4 E303 is retired
 
@@ -1134,9 +1099,10 @@ across a commit boundary that lands.
 4. **The rules that change verdicts.** One commit per rule family, each with its
    negative and positive models and its corpus measurement: interventions,
    events and reactive triggers; observations (§5.6 and strict sums); priors
-   (§5.9: `Prior_units`, I316 with the garki fixture as its case, the I300
-   exemption for parameters in no `Binding` site); quantities and contrasts;
-   smooth splines; powers; literals (§5.2); E308 (with the he2010 manifests).
+   (§5.9: the prior unit evaluation, I316 with the garki fixture as its case,
+   the I300 exemption for parameters in no `Binding` site); quantities and
+   contrasts; smooth splines; powers; literals (§5.2); E308 (with the he2010
+   manifests).
 5. **The spec.** `docs/camdl-language-spec.md` §4 rewritten to state the
    positions and their rules, P versus T, literals, unit conversion, the
    count-noise rule, underdetermination and `unchecked_dim`, and what a
@@ -1179,7 +1145,7 @@ All settled; recorded here as the decision record.
    `count` column (§5.6).
 6. **Prior arguments are numerical coordinates.** Arithmetic over parameters of
    any declared dimension, `log(m_h)` included, is accepted; only explicit unit
-   literals are checked, by `Prior_units`, and nothing a prior says enters the
+   literals are checked, after the solve, and nothing a prior says enters the
    solve (§5.9).
 7. **One prior lint.** I316 (Info) for a log-normal argument that is directly a
    dimensioned parameter; removed, not widened, if it misfires on real models.
