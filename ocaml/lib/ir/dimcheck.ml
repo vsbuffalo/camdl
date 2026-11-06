@@ -181,6 +181,8 @@ type eq_kind =
 type eq_info = { site : Dim_sites.site option; code : string; kind : eq_kind }
 
 type state = {
+  mutable t_only : bool;   (* the site being generated is an [Equals_t] site *)
+  t_only_eqs : (int, unit) Hashtbl.t;   (* equations that hold on T alone *)
   mutable next_var : int;
   keys     : (Dim_sites.key, int) Hashtbl.t;
   mutable declared  : Dim_solve.eqn list;   (* each list reversed *)
@@ -203,6 +205,7 @@ let emit st stage ~site ~code kind (f : form) (rhs : dim_vec) =
   let id = st.next_eq in
   st.next_eq <- id + 1;
   Hashtbl.replace st.info id { site; code; kind };
+  if st.t_only then Hashtbl.replace st.t_only_eqs id ();
   let e = { Dim_solve.terms = f.vars; rhs = dim_div rhs f.k;
             origin = { site = id; stage; what = code } } in
   match stage with
@@ -464,13 +467,14 @@ let rec gen_contrast st ~(site : Dim_sites.site) (ce : contrast_expr) : value =
 let add_site st (s : Dim_sites.site) =
   match s.obligation, s.strength with
   | Dim_sites.Exempt _, _ | _, Dim_sites.Checked -> ()
-  | (Has _ | Equals _ | Defines _ | Free), Binding ->
+  | (Has _ | Equals _ | Equals_t _ | Defines _ | Free), Binding ->
+    st.t_only <- (match s.obligation with Equals_t _ -> true | _ -> false);
     let v = match s.expr with
       | Dim_sites.E e -> gen st ~site:s ~term:true e
       | Scalar se -> gen_scalar st ~site:s se
       | Contrast ce -> gen_contrast st ~site:s ce
     in
-    match v, s.obligation with
+    (match v, s.obligation with
     | Any, _ | _, (Free | Exempt _) -> ()
     | F f, Has d ->
       emit st Obligation ~site:(Some s) ~code:s.code
@@ -478,13 +482,57 @@ let add_site st (s : Dim_sites.site) =
     | F f, (Equals key | Defines key) ->
       emit st Structure ~site:(Some s) ~code:s.code (Definition { got = f })
         (form_sub f (var_form (var_of st key))) dimensionless
+    | F f, Equals_t key ->
+      emit st Obligation ~site:(Some s) ~code:s.code (Definition { got = f })
+        (form_sub f (var_form (var_of st key))) dimensionless);
+    st.t_only <- false
+
+(* ── Solving ───────────────────────────────────────────────────────────── *)
+
+(* The system decouples by base, so an equation that holds on T alone (count
+   noise, §5.6) is honoured by solving each base on its own: P without those
+   equations, T with every equation. Without one, a single solve over both
+   bases gives the same answer. *)
+type solved = {
+  value     : int -> dim_vec option;
+  conflicts : Dim_solve.conflict list;
+  relations : int list -> (Dim_solve.relation * int option) list;
+  (* [Some b]: a relation on base b's exponents alone *)
+}
+
+let solve_all st (eqs : Dim_solve.eqn list) : solved =
+  if Hashtbl.length st.t_only_eqs = 0 then begin
+    let out = Dim_solve.solve ~nbases:n_bases eqs in
+    { value = Dim_solve.value out; conflicts = Dim_solve.conflicts out;
+      relations = (fun vs -> List.map (fun r -> (r, None)) (Dim_solve.relations out vs)) }
+  end else begin
+    let on_base b keep =
+      Dim_solve.solve ~nbases:1
+        (List.filter_map (fun (e : Dim_solve.eqn) ->
+           if keep e then Some { e with rhs = [| e.rhs.(b) |] } else None) eqs) in
+    let p = on_base 0 (fun e -> not (Hashtbl.mem st.t_only_eqs e.origin.site))
+    and t = on_base 1 (fun _ -> true) in
+    let value v = match Dim_solve.value p v, Dim_solve.value t v with
+      | Some a, Some b -> Some [| a.(0); b.(0) |]
+      | _ -> None in
+    let cp = Dim_solve.conflicts p in
+    let seen = List.map (fun (c : Dim_solve.conflict) -> c.culprit.origin.site) cp in
+    let ct = List.filter (fun (c : Dim_solve.conflict) ->
+      not (List.mem c.culprit.origin.site seen)) (Dim_solve.conflicts t) in
+    let conflicts = List.sort (fun (a : Dim_solve.conflict) b ->
+      compare a.culprit.origin.site b.culprit.origin.site) (cp @ ct) in
+    let relations vs =
+      List.map (fun r -> (r, Some 0)) (Dim_solve.relations p vs)
+      @ List.map (fun r -> (r, Some 1)) (Dim_solve.relations t vs) in
+    { value; conflicts; relations }
+  end
 
 (* ── Diagnostics ───────────────────────────────────────────────────────── *)
 
 (* A form's value under the solution, when every variable in it is determined. *)
 let form_value out (f : form) : dim_vec option =
   List.fold_left (fun acc (v, c) ->
-    match acc, Dim_solve.value out v with
+    match acc, out.value v with
     | Some k, Some d -> Some (Array.mapi (fun i ki -> ki + c * d.(i)) k)
     | _ -> None) (Some (Array.copy f.k)) f.vars
 
@@ -570,26 +618,30 @@ let diagnostic_of_conflict st out (c : Dim_solve.conflict) : diagnostic =
   | Declared_fact ->
     mk "E302" "two declarations give one name different dimensions" None
 
-let render_relation names (r : Dim_solve.relation) =
+let render_relation names ((r : Dim_solve.relation), base) =
   let lhs = List.map (fun (v, c) ->
     let n = Option.value ~default:"?" (Hashtbl.find_opt names v) in
     if c = 1 then n else Printf.sprintf "%s^%d" n c) r.coeffs in
-  Printf.sprintf "%s is %s" (String.concat " · " lhs) (formal_dim r.equals)
+  match base with
+  | None -> Printf.sprintf "%s is %s" (String.concat " · " lhs) (formal_dim r.equals)
+  | Some b ->
+    Printf.sprintf "the %s exponent of %s is %d" (if b = 0 then "P" else "T")
+      (String.concat " · " lhs) r.equals.(0)
 
 (* ── Main check ────────────────────────────────────────────────────────── *)
 
 let check_model (m : model) : result =
-  let st = { next_var = 0; keys = Hashtbl.create 256; declared = []; structure = [];
+  let st = { t_only = false; t_only_eqs = Hashtbl.create 16; next_var = 0; keys = Hashtbl.create 256; declared = []; structure = [];
              obligation = []; info = Hashtbl.create 1024; next_eq = 0;
              tf_dims = Hashtbl.create 16 } in
   declare_model st m;
   declare_quantities st m;
   let sites = Dim_sites.sites m in
   List.iter (add_site st) sites;
-  let out = Dim_solve.solve ~nbases:n_bases
+  let out = solve_all st
       (List.rev st.declared @ List.rev st.structure @ List.rev st.obligation) in
   let errors =
-    Dim_solve.conflicts out
+    out.conflicts
     |> List.map (diagnostic_of_conflict st out)
     (* one diagnostic per position and code *)
     |> List.fold_left (fun acc (d : diagnostic) ->
@@ -605,13 +657,13 @@ let check_model (m : model) : result =
   let resolved, free =
     List.partition_map (fun n ->
       let v = var_of st (Dim_sites.K_param n) in
-      match Dim_solve.value out v with
+      match out.value v with
       | Some d -> Left (n, d)
       | None -> Right (n, v)) named in
-  let relations = Dim_solve.relations out (List.map snd free) in
+  let relations = out.relations (List.map snd free) in
   let infos =
     List.map (fun (n, v) ->
-      let mine = List.filter (fun (r : Dim_solve.relation) -> List.mem_assoc v r.coeffs) relations in
+      let mine = List.filter (fun ((r : Dim_solve.relation), _) -> List.mem_assoc v r.coeffs) relations in
       { severity = Info; code = "I300";
         message = Printf.sprintf "dimension of parameter '%s' could not be determined" n;
         detail = (match mine with
@@ -623,7 +675,7 @@ let check_model (m : model) : result =
         subject = None }) free in
   let quantity_dims =
     List.filter_map (fun (q : quantity) ->
-      match Dim_solve.value out (var_of st (Dim_sites.K_quantity q.q_name)) with
+      match out.value (var_of st (Dim_sites.K_quantity q.q_name)) with
       | Some d -> Some ((q.q_name, q.q_stratum), d)
       | None -> None) m.quantities in
   { diagnostics = errors @ infos; param_dims = resolved; quantity_dims }

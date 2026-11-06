@@ -58,6 +58,9 @@ type exemption =
 type obligation =
   | Has     of dim_vec   (* a fixed dimension: P·T⁻¹, P, 1, T, ... *)
   | Equals  of key       (* the dimension of [key] *)
+  | Equals_t of key      (* the T exponent of [key]'s; P unconstrained, and
+                            only the T components of the expression's own
+                            equations hold (count noise, §5.6) *)
   | Defines of key       (* this expression's dimension is [key]'s *)
   | Free                 (* operator rules only; nothing required of the value *)
   | Exempt  of exemption (* not read *)
@@ -121,7 +124,6 @@ let add acc ?(subject : subject option) ?(literals = Literals_dimensionless) ?(s
 let pending step = Exempt (Pending step)
 let pending_quantities    = pending "the quantities rule (§8 step 4)"
 let pending_priors        = pending "the priors rule (§8 step 4)"
-let pending_normal        = pending "the count-noise rule (§8 step 4, §5.6)"
 let pending_smooth        = pending "the smooth-spline rule (§8 step 4, §5.8)"
 
 let transition_sites acc (tr : transition) =
@@ -286,7 +288,7 @@ let intervention_sites acc ~scored_of (iv : intervention) =
   List.iter (action_sites acc ?subject ~role) actions
 
 let observation_sites acc (obs : observation_model) =
-  let { name; obs_source = _; columns = _; scored = _; emit_schedule = _;
+  let { name; obs_source = _; columns; scored; emit_schedule = _;
         stratum = _; covers = _; projection;
         projection_state_grad = _;   (* derivative map *)
         likelihood } = obs in
@@ -321,8 +323,21 @@ let observation_sites acc (obs : observation_model) =
     count "NegBinomial `mean`" (dexpr mean);
     site ~code:"E307" "NegBinomial `dispersion`" (Has dimensionless) (dexpr dispersion)
   | Normal { mean; sd } ->
-    site "Normal `mean`" pending_normal (dexpr mean);
-    site "Normal `sd`" pending_normal (dexpr sd)
+    (* The mean has the scored column's dimension. On a `count` column the
+       sd's P exponent is free: count variance formulas add a term in the
+       count to one in its square (He et al. 2010), consistent only because a
+       count is a number of individuals. Its T exponent must still match. *)
+    let column = K_column (name, scored) in
+    let count_column = List.exists (fun ({ col_name; col_role } : obs_column) ->
+      col_name = scored && (match col_role with
+        | RoleValue Count -> true
+        | RoleValue (Rate | Probability | Positive | Real | Instant | Duration)
+        | RoleTime | RoleDim _ | RoleWindowStart | RoleWindowStop -> false)) columns in
+    let normal what obligation e =
+      add acc ~subject ~stream ~literals:Whole_terms ~code:"E304"
+        ~role:(Printf.sprintf "observation '%s': Normal `%s`" name what) obligation (E e) in
+    normal "mean" (Equals column) (dexpr mean);
+    normal "sd" (if count_column then Equals_t column else Equals column) (dexpr sd)
   | Binomial { n; p } ->
     count "Binomial `n`" n;
     prob "Binomial `p`" (dexpr p)
@@ -425,6 +440,10 @@ let sites (m : model) : site list =
         observations; parameters; bindings; initial_conditions; balance;
         quantities; contrasts } = m in
   let acc = { next = 0; out = [] } in
+  (* Bindings first: each defines a name other positions use, and the solver
+     blames the later of two disagreeing equations, so a definition must not
+     be the one blamed for a use's mistake. *)
+  List.iter (binding_site acc) bindings;
   List.iter (transition_sites acc) transitions;
   List.iter (ode_site acc) ode_equations;
   List.iter (forcing_sites acc) time_functions;
@@ -435,7 +454,6 @@ let sites (m : model) : site list =
   List.iter (intervention_sites acc ~scored_of) interventions;
   List.iter (observation_sites acc) observations;
   List.iter (parameter_sites acc) parameters;
-  List.iter (binding_site acc) bindings;
   List.iter (init_sites acc) initial_conditions;
   Option.iter (balance_site acc) balance;
   List.iter (quantity_sites acc) quantities;

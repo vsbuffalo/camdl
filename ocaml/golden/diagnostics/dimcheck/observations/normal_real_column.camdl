@@ -1,0 +1,34 @@
+# invariant: on a `real` column the mean and sd share one inferred dimension
+# spec: §5.6
+# expect: (none)
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  beta  : rate        in [0.01, 2.0]
+  gamma : rate        in [0.01, 1.0]
+  N0    : count       in [100, 100000]
+  I0    : count       in [1, 1000]
+  rho   : probability in [0, 1]
+  sd_y  : positive    in [0.01, 1]
+}
+
+let N = S + I + R
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+
+observations {
+  y {
+    columns { time : time, y : real }
+    projected = I / N
+    y ~ normal(mean = projected, sd = sd_y)
+  }
+}
+
+init { S = N0 - I0  I = I0 }
+
+simulate { from = 0 'days  to = 100 'days }
