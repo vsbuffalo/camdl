@@ -3789,6 +3789,18 @@ members whose `base_name` is `"sia"` — no need to enumerate them individually
 Individual members can still be addressed by their expanded name (`"sia_north"`)
 when fine-grained control is needed.
 
+**Every member must differ from the others.** Each member of a family fires, so
+two members with the same actions on the same schedule apply the action twice.
+`sia[r in round] : transfer(count = n, from = S, to = V) at [10]`, whose body
+never mentions `r`, would move `2n` individuals from a model that reads as `n`.
+A family whose expansion yields two such members is **E421**, which names the
+binder that fails to distinguish them. Use the binder in the action
+(`from = S[r]`) or in the schedule (`at [t_start[r]]`), or drop it. The rule
+compares the expanded members, not the source text: a binder used only in the
+schedule gives distinct fire times and is legal, as is a `where` guard that
+leaves a single member. It covers interventions, events (§13.5) and reactive
+families (§13.9), and every action.
+
 **Indexed `set` and `add` targets.** Inside a family the target of a `set`, and
 of an `add`, may be indexed by the family's binders. With a `c in compartments`
 binder, one family covers every compartment:
