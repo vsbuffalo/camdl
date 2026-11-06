@@ -748,23 +748,97 @@ measured at n = 30, 60 and 100 against `main`, best of three. The bound is 1.5×
 
 ### 7.1 An adversarial corpus, committed
 
-A new directory, `ocaml/test/dimcheck/`, scanned by the existing `# expect:`
-driver in `ocaml/test/test_diagnostics.ml`. Each file is one minimal model with
-one defect, a header stating the invariant it tests, and its expected
-diagnostics:
+**How `ocaml/golden/` is used today.** Its root holds 62 IR goldens, each a
+`.camdl` with its committed `.ir.json`, and each serves several tests at once:
+the byte comparison in `ocaml/test/test_compiler.ml` (`test_golden`); the
+OCaml-to-Rust run in `tests/test_ocaml_to_rust.sh`, which simulates every golden
+with its `*.params.toml`; the schema check in
+`rust/crates/ir/tests/schema_validates_goldens.rs`; about 40 Rust source and
+test files that load 26 of them as sample models (`sir_basic` 32 times); and
+`test_corpus_clean` in `ocaml/test/test_diagnostics.ml`, which compiles every
+`.camdl` under `ocaml/golden/` (pruning `errors/` and `data/`),
+`tests/fixtures/` and `tests/recovery/` and fails on any Error or Warning
+outside `corpus_allowlist`. All 62 pass it on this branch; six emit only I300
+Info or allowlisted W105. Every IR golden is therefore already a positive test.
+Diagnostic models live in two other conventions: 11 error models in
+`ocaml/golden/errors/`, each registered by hand in `ocaml/test/test_dimcheck.ml`
+(`negative_golden`, from line 1631) and checking one code; and 21 lint fixtures
+in `ocaml/test/lints/`, read by the `# expect:` driver in
+`ocaml/test/test_diagnostics.ml`.
+
+**One tree for diagnostic models; IR goldens stay where they are.** The split
+that matters is what a test asserts, because that sets its maintenance cost: an
+IR golden asserts bytes and is regenerated and reviewed on every IR change; a
+diagnostic model asserts only what the compiler reports and changes only when a
+verdict does. The layout becomes:
+
+```
+ocaml/golden/
+  *.camdl, *.ir.json     IR goldens (unchanged, at the root)
+  README.md              new: the root holds IR goldens; each subdirectory
+                         is named for its role
+  data/                  input files (unchanged)
+  diagnostics/           models whose expected diagnostics are the claim
+    dimcheck/
+      interventions/  observations/  priors/  quantities/
+      forcings/  literals/  powers/  solver/  transitions/
+    lints/               today's ocaml/test/lints/, moved
+    semantic/            the non-dimension cases of today's ocaml/golden/errors/
+```
+
+The IR goldens are not moved. Moving them would change 147 path references,
+mostly in the Rust tests that use goldens as sample models, which is churn
+unrelated to dimension checking; and IR goldens also live in `ir/golden/` (the
+frozen set, gh#384) and seven `tests/fixtures/*/ir/` directories, so moving one
+set would not make IR goldens consistent. Consolidating all eight is a separate
+cleanup, and that is when these would move.
+
+Within `diagnostics/`, the directory names the area of the language under test,
+and the expected outcome is stated inside the file. A model whose correct
+verdict changes (a false error fixed) changes one header line and stays beside
+its neighbours; an agent assigned an area owns one directory and sees what it
+already covers; valid and invalid models of one rule sit side by side. Errors
+and lints are not separate kinds of test: both assert "exactly these
+diagnostics", and differ only in severity.
+
+Each file is one minimal model testing one invariant, with three required header
+lines:
 
 ```camdl
-# Invariant: a transfer `fraction` is dimensionless (§5.1).
-# Violation: the fraction is a per-day rate.
+# invariant: a transfer `fraction` is dimensionless
+# spec: §5.1, position "transfer fraction"
 # expect: E314 Error
 time_unit = 'days
 ...
 interventions { campaign : transfer(fraction = gamma, from = S, to = V) at [10] }
 ```
 
-The expectation is the code and severity, plus the subject (the construct the
-diagnostic points at), not the full message, so that wording can improve without
-churning the corpus. Locations are asserted by the subject.
+A valid model is the same with `# expect: (none)`, which is stronger than the
+clean-corpus test because it also asserts the absence of I300 Info. The
+`# expect:` driver is extended to discover files recursively under
+`ocaml/golden/diagnostics/`, to refuse a file missing any of the three header
+lines, and to print the invariants per area on request: the list an author, or
+an agent, reads before adding a model, so the corpus does not fill with
+near-duplicates. `test_corpus_clean` prunes `diagnostics/` (in place of
+`errors/`), and the hand-written `negative_golden` registrations are deleted
+once their models carry `# expect:` lines. The expectation is the code and
+severity, plus the subject (the construct the diagnostic points at), not the
+full message, so that wording can improve without churning the corpus.
+
+**The structure is built for a later adversarial round.** After this lands, the
+intended next step is to assign agents one area each, with that area's rules
+from §5.1 as targets: break a rule, or get a valid model refused. Two rules make
+that safe at scale. A finding lands with its fix, never as a failing or ignored
+test on `main`; until then it lives in a GitHub issue with the model attached,
+reproduced by a run before it is filed. And hand-written models are paired with
+property tests (§7.4's unit invariance, and mutations of valid models that must
+be refused), which find a different class of defect.
+
+The models from this review go to these area directories by file-name prefix:
+`iv_`, `ev_`, `rx_` to `interventions/`; `pr_` to `priors/`; `ob_` to
+`observations/`; `q_` to `quantities/`; `sm_` to `forcings/`; `pw_` to
+`powers/`; `solve_` to `solver/`; `lit_`, `tc_`, `count_`, `unit_` to
+`literals/`; the rest to `transitions/`.
 
 Negative models (each lands with its fix):
 
@@ -875,6 +949,11 @@ checks recorded in the commit that adds it.
 Each commit passes `make test` on its own; old and new checkers never coexist
 across a commit boundary that lands.
 
+0. **The diagnostics tree.** `ocaml/golden/diagnostics/` with its header rules
+   and recursive driver; `ocaml/golden/README.md`; the 11 error models and the
+   21 lint fixtures moved into it with `# expect:` lines; the hand-written
+   `negative_golden` registrations deleted. No verdict changes and no IR golden
+   moves, so every moved model passes as before.
 1. **Positive models and the fixes outside the checker.** The positive corpus
    that passes today; hierarchical prior name, form and time checks (one
    validation function for both branches); the PMMH non-finite start guard;
