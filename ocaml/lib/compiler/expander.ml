@@ -1981,10 +1981,21 @@ let lower_via_transitions ctx =
             if ie.icomp = src && ie.ibindings = [] && ie.iindices = [] then
               match ie.ivalue with
               | IVExpr v ->
+                (* The user's `I = 10` reads 10 as a count because it is a whole
+                   term of the initial value (2026-11-06 dimension checking
+                   §5.2). Inside the split's product it would be a pure number,
+                   so the split states that: its whole-term literals become
+                   'count literals, the same value. *)
+                let rec counted = function
+                  | EConst c -> EUnit (c, Count)
+                  | EBinOp ((Add | Sub) as op, a, b) -> EBinOp (op, counted a, counted b)
+                  | EUnOp (Neg, a) -> EUnOp (Neg, counted a)
+                  | e -> e
+                in
                 List.map (fun b ->
                   { ie with
                     icomp   = List.hd (branch_cells b);
-                    ivalue  = IVExpr (EBinOp (Mul, v, weight_of_branch b)) })
+                    ivalue  = IVExpr (EBinOp (Mul, counted v, weight_of_branch b)) })
                   branches
               | IVLaw (l, lloc) ->
                 (* A DRAWN seed cannot be split by branch weight. Scaling a
