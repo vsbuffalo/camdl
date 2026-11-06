@@ -4,24 +4,38 @@ open Ast
 
 (* ── Context ─────────────────────────────────────────────────────────────── *)
 
-(* Per-source-site tally of restricted reductions whose `where` predicate
-   selected no levels (aggregation-semantics proposal §6, A3).
+(* Per-source-site tally of a check that is evaluated once per instantiation
+   but reported once per site (aggregation-semantics proposal §6 A3, §9 D5).
 
-   A reduction is resolved once per enclosing index combination, and emptiness
-   is a property of the instantiation, not of the site: an isolated patch
-   legitimately couples to nobody, so `sum(q in patch where dist[p,q] < 50, …)`
-   is empty for that one `p` and non-empty for every other. That is why the
-   diagnostic is a warning rather than an error, and why it is counted here and
-   emitted once — a per-instantiation diagnostic would print one line per
-   stratum for a single mistake. Keyed by the binder's source loc; drained by
-   [flush_empty_reductions] at the end of expansion. *)
-type empty_reduction = {
-  er_var           : string;                          (* the binder, `q` *)
-  er_dim           : string;                          (* the reduced axis, `patch` *)
-  mutable er_total : int;                             (* instantiations resolved *)
-  mutable er_empty : int;                             (* …of which selected nothing *)
-  mutable er_first : (string * string) list option;   (* env of the first empty one *)
+   A construct is resolved once per enclosing index combination — a reduction
+   once per outer binding, an observation projection once per stream row — so a
+   check run at resolution time sees the same source site many times. A
+   per-instantiation diagnostic would print one line per stratum for a single
+   mistake. The tally counts instantiations and hits per site and
+   [flush_site_tallies] emits one diagnostic per site at the end of expansion,
+   naming the first affected binding.
+
+   - [Empty_reduction] (A3, W202): a restricted reduction whose `where` selected
+     no levels. Emptiness is a property of the instantiation, not of the site —
+     an isolated patch legitimately couples to nobody — so it is a warning.
+   - [Proportion_outside] (D2, E357): a `prevalence(of = …, among = …)` whose
+     numerator reads a cell its denominator does not contain. *)
+type site_check =
+  | Empty_reduction of { var : string; dim : string }  (* the binder `q`, axis `patch` *)
+  | Proportion_outside of { stream : string }
+
+type site_tally = {
+  st_check         : site_check;
+  mutable st_total : int;                             (* instantiations resolved *)
+  mutable st_hits  : int;                             (* …of which the check fired *)
+  (* env of the first hit, innermost-first, and what it found (the cells
+     outside the denominator; empty for [Empty_reduction]). *)
+  mutable st_first : ((string * string) list * string list) option;
 }
+
+let site_check_code = function
+  | Empty_reduction _ -> "W202"
+  | Proportion_outside _ -> "E357"
 
 type context = {
   mutable time_unit       : unit_lit;
@@ -125,9 +139,10 @@ type context = {
      the same way [dim_registry] holds resolved dimensions. External
      (`--table`) tables are absent here (no compile-time values). *)
   mutable table_index    : (string, Ir.expr array * string list) Hashtbl.t;
-  (* A3: restricted reductions tallied per source site, most-recent site first.
-     Accumulated during [resolve_expr], drained by [flush_empty_reductions]. *)
-  mutable empty_reductions : (loc * empty_reduction) list;
+  (* A3/D5: per-site check tallies keyed by (source loc, code), most-recent
+     site first. Accumulated during resolution, drained by
+     [flush_site_tallies]. *)
+  mutable site_tallies : ((loc * string) * site_tally) list;
 }
 
 (* Stratification-name predicates. Expanded names are [base] itself or a leaf
@@ -192,7 +207,7 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   suppress_hoist       = false;
   obs_aux_cols         = [];
   table_index          = Hashtbl.create 16;
-  empty_reductions     = [];
+  site_tallies         = [];
 }
 
 (* ── Dimension registry accessor ─────────────────────────────────────────── *)
@@ -3536,21 +3551,24 @@ let rec eval_guard ctx env = function
    dimension is a different mistake with a different owner (gh#488), and folding
    the two into one counter is what made "unknown collection" and "known
    collection, zero survivors" share a representation in the first place. *)
-let note_restricted_reduction ctx ~loc ~var ~dim ~empty env =
-  let er =
-    match List.assoc_opt loc ctx.empty_reductions with
-    | Some er -> er
+let note_site_check ctx ~loc check ~hit ?(found = []) env =
+  let key = (loc, site_check_code check) in
+  let st =
+    match List.assoc_opt key ctx.site_tallies with
+    | Some st -> st
     | None ->
-      let er = { er_var = var; er_dim = dim;
-                 er_total = 0; er_empty = 0; er_first = None } in
-      ctx.empty_reductions <- (loc, er) :: ctx.empty_reductions;
-      er
+      let st = { st_check = check; st_total = 0; st_hits = 0; st_first = None } in
+      ctx.site_tallies <- (key, st) :: ctx.site_tallies;
+      st
   in
-  er.er_total <- er.er_total + 1;
-  if empty then begin
-    er.er_empty <- er.er_empty + 1;
-    if er.er_first = None then er.er_first <- Some env
+  st.st_total <- st.st_total + 1;
+  if hit then begin
+    st.st_hits <- st.st_hits + 1;
+    if st.st_first = None then st.st_first <- Some (env, found)
   end
+
+let note_restricted_reduction ctx ~loc ~var ~dim ~empty env =
+  note_site_check ctx ~loc (Empty_reduction { var; dim }) ~hit:empty env
 
 (* v1 generated-quantity temporal-reduction names (proposal 2026-06-25). These
    are NOT lexer keywords — they lex as IDENT and dispatch by name in the
@@ -3715,7 +3733,7 @@ let partial_index_hint ctx env ~base ~items ~dropped : string =
 
     NOT shared with the observation projection head, unlike
     [partial_index_error] below. There, an empty [items] is how a genuine BARE
-    name arrives (`projected = I`, `prevalence(I)`) — the brackets are absent
+    name arrives (`projected = I`) — the brackets are absent
     rather than empty, and the two are indistinguishable once the head has
     normalized to (base, items). Only the syntactic `EIndex (_, [], _)` on the
     read path proves the user typed `[]`, so the check lives there.
@@ -4072,7 +4090,7 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
         let kept = List.filter (fun vv -> eval_guard ctx ((v, vv) :: env) g) vals in
         (* A3: a predicate that keeps nothing leaves `Const 0.0`, which the
            enclosing arithmetic then folds away with no trace in the IR. Tally
-           the instantiation; [flush_empty_reductions] emits one aggregated
+           the instantiation; [flush_site_tallies] emits one aggregated
            W202 per source site at the end of expansion. A declared dimension
            with no levels reaches here as `Some []` and is NOT tallied — the
            guard never ran, so it is not guard-induced emptiness. *)
@@ -8482,6 +8500,309 @@ let validate_reactive_streams ctx (model : Ir.model) =
     | Ir.Scheduled _ -> ()
   ) model.Ir.interventions
 
+(* ── Observation surface checks ──────────────────────────────────────────── *)
+
+(* Render an expression as the modeller would write it, for hints that must
+   quote their own operand back (a migration a reader can paste). Precedence
+   follows the grammar: comparison < additive < multiplicative < power <
+   unary. Only used on the SURFACE AST — before `via` lowering adds stage sums
+   the modeller never wrote. *)
+let surface_src (e : expr) : string =
+  let num f =
+    if Float.is_integer f && Float.abs f < 1e15 then Printf.sprintf "%.0f" f
+    else Printf.sprintf "%g" f in
+  let prec_of = function
+    | Eq | Neq | Lt | Gt | Le | Ge -> 0
+    | Add | Sub -> 1
+    | Mul | Div -> 2
+    | Pow -> 3 in
+  let op_str = function
+    | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Pow -> "^"
+    | Eq -> "==" | Neq -> "!=" | Lt -> "<" | Gt -> ">" | Le -> "<=" | Ge -> ">=" in
+  let un_str = function
+    | Neg -> "-" | Exp -> "exp" | Log -> "log" | Sqrt -> "sqrt" | Abs -> "abs"
+    | Floor -> "floor" | Ceil -> "ceil" | Sin -> "sin" | Cos -> "cos"
+    | Tanh -> "tanh" in
+  let rec go ctx_prec e =
+    let wrap p s = if p < ctx_prec then "(" ^ s ^ ")" else s in
+    match e with
+    | EConst f -> num f
+    | EUnit (f, u) -> Printf.sprintf "%s '%s" (num f) (unit_lit_to_string u)
+    | EIdent (n, _) -> n
+    | EIndex (n, items, _) ->
+      Printf.sprintf "%s[%s]" n (String.concat ", " (List.map item items))
+    | EBinOp (op, l, r) ->
+      let p = prec_of op in
+      (* Left-associative: the right operand of a same-precedence operator
+         needs parentheses (`a - (b - c)`), the left does not. *)
+      wrap p (Printf.sprintf "%s %s %s" (go p l) (op_str op) (go (p + 1) r))
+    | EUnOp (Neg, a) -> wrap 4 ("-" ^ go 4 a)
+    | EUnOp (op, a) -> Printf.sprintf "%s(%s)" (un_str op) (go 0 a)
+    | ESum (v, d, g, body, _) ->
+      Printf.sprintf "sum(%s in %s%s, %s)" v d
+        (match g with None -> "" | Some g -> " where " ^ guard_to_string g)
+        (go 0 body)
+    | ECond (p, a, b) ->
+      wrap 0 (Printf.sprintf "if %s then %s else %s" (go 0 p) (go 0 a) (go 0 b))
+    | EFuncCall (f, args) ->
+      Printf.sprintf "%s(%s)" f
+        (String.concat ", "
+           (List.map (fun (k, a) ->
+              if k = "" then go 0 a else Printf.sprintf "%s = %s" k (go 0 a))
+              args))
+    | EList es -> "[" ^ String.concat ", " (List.map (go 0) es) ^ "]"
+    | ERange (a, b) -> go 4 a ^ ":" ^ go 4 b
+    | EObsAccess (s, _) -> "observations." ^ s
+    | ERunMember { run; ns; member; _ } ->
+      Printf.sprintf "%s.%s.%s" run
+        (match ns with NsQuantities -> "quantities" | NsObservations -> "observations")
+        member
+  and item = function
+    | IPosn e -> go 0 e
+    | INamed (n, e) -> Printf.sprintf "%s = %s" n (go 0 e)
+  in
+  go 0 e
+
+(* The shapes `projected = prevalence(...)` can take (proposal
+   2026-07-31-aggregation-semantics §9). One classifier, read by both the
+   surface pass that reports and the projection dispatch that lowers, so the two
+   cannot disagree about which calls were refused. *)
+type prevalence_call =
+  | Prev_proportion of { of_ : expr; among : expr }
+  (* `prevalence(X)` / `prevalence(X1, X2)`: removed (D6). *)
+  | Prev_removed of expr list
+  | Prev_malformed of { code : string; message : string; hint : string }
+
+let classify_prevalence_call (args : (string * expr) list) : prevalence_call =
+  let positional = List.filter_map (fun (k, e) -> if k = "" then Some e else None) args in
+  let named k = List.filter_map (fun (k', e) -> if k' = k then Some e else None) args in
+  let unknown =
+    List.filter (fun (k, _) -> k <> "" && k <> "of" && k <> "among") args in
+  let form = "`prevalence(of = <numerator>, among = <denominator>)`" in
+  match positional, unknown with
+  | _ :: _, _ -> Prev_removed positional
+  | [], (k, _) :: _ ->
+    Prev_malformed {
+      code = "E251";
+      message = Printf.sprintf "`prevalence(...)` has no argument '%s'" k;
+      hint = Printf.sprintf
+          "the form is %s — the count being reported and the population it \
+           is a proportion of" form }
+  | [], [] ->
+    (match named "of", named "among" with
+     | [of_], [among] -> Prev_proportion { of_; among }
+     | ofs, amongs when List.length ofs > 1 || List.length amongs > 1 ->
+       Prev_malformed {
+         code = "E251";
+         message = Printf.sprintf "`prevalence(...)` names '%s' twice"
+             (if List.length ofs > 1 then "of" else "among");
+         hint = Printf.sprintf "the form is %s, each argument once" form }
+     | ofs, _ ->
+       Prev_malformed {
+         code = "E250";
+         message = Printf.sprintf "`prevalence(...)` needs %s"
+             (match ofs with
+              | [] -> "a numerator (`of = ...`) and a denominator (`among = ...`)"
+              | _  -> "a denominator (`among = ...`)");
+         hint = Printf.sprintf
+             "the form is %s, e.g. `prevalence(of = I[a], among = N_local[a])`"
+             form })
+
+(* A `let` by name, read from the declaration list rather than [ctx.let_tbl]
+   so it serves both the surface pass (which runs before the lookup tables
+   exist) and the projection dispatch. *)
+let find_let ctx name =
+  List.find_opt (fun (lb : let_binding) -> lb.lname = name) ctx.let_bindings
+
+(* Does [e] read a flow — `incidence(...)` written directly, or inside a `let`
+   it references? The let walk carries a visiting set: a self-referential `let`
+   is E201, but that check runs later than the surface pass, which must
+   terminate on it anyway. *)
+let reads_flow ctx (e : expr) : bool =
+  let rec go visiting = function
+    | EFuncCall ("incidence", _) -> true
+    | EIdent (n, _) | EIndex (n, _, _) when not (List.mem n visiting) ->
+      (match find_let ctx n with
+       | Some lb -> go (n :: visiting) lb.lbody
+       | None -> false)
+    | EFuncCall (_, args) -> List.exists (fun (_, a) -> go visiting a) args
+    | EBinOp (_, l, r) | ERange (l, r) -> go visiting l || go visiting r
+    | EUnOp (_, a) | ESum (_, _, _, a, _) -> go visiting a
+    | ECond (p, a, b) -> go visiting p || go visiting a || go visiting b
+    | EList es -> List.exists (go visiting) es
+    | EConst _ | EUnit _ | EIdent _ | EIndex _ | EObsAccess _ | ERunMember _ ->
+      false
+  in
+  go [] e
+
+(* The dimensions an expression collapses (D3): the axis of every `sum(v in d,
+   ...)` it contains, plus every declared stratum a bare compartment name pools,
+   reached through `let` bodies (visiting set as above). A set, not a multiset:
+   two parallel sums over one axis (`sum(a in age, I[a]) + sum(a in age, R[a])`)
+   pool the same thing once, and counting them twice would refuse a correct
+   proportion. Index items are index tokens, not reads, and are not descended. *)
+let collapsed_dims ctx (e : expr) : string list =
+  let rec go visiting acc = function
+    | ESum (_, d, _, body, _) -> go visiting (d :: acc) body
+    | EIdent (n, _) when List.exists (fun c -> c.cname = n) ctx.comp_decls ->
+      comp_dims ctx n @ acc
+    | EIdent (n, _) | EIndex (n, _, _) when not (List.mem n visiting) ->
+      (match find_let ctx n with
+       | Some lb -> go (n :: visiting) acc lb.lbody
+       | None -> acc)
+    | EFuncCall (_, args) -> List.fold_left (fun a (_, x) -> go visiting a x) acc args
+    | EBinOp (_, l, r) | ERange (l, r) -> go visiting (go visiting acc l) r
+    | EUnOp (_, a) -> go visiting acc a
+    | ECond (p, a, b) -> go visiting (go visiting (go visiting acc p) a) b
+    | EList es -> List.fold_left (go visiting) acc es
+    | EConst _ | EUnit _ | EIdent _ | EIndex _ | EObsAccess _ | ERunMember _ -> acc
+  in
+  List.sort_uniq compare (go [] [] e)
+
+(* The source span of the first name an expression mentions — the nearest
+   thing to the expression's own location, since `EFuncCall`, `EBinOp` and
+   constants carry none. *)
+let rec first_name_loc (e : expr) : loc option =
+  let first = List.find_map first_name_loc in
+  match e with
+  | EIdent (_, l) | EIndex (_, _, l) when l.line > 0 -> Some l
+  | ESum (_, _, _, b, l) -> if l.line > 0 then Some l else first_name_loc b
+  | EBinOp (_, l, r) | ERange (l, r) -> first [l; r]
+  | EUnOp (_, a) -> first_name_loc a
+  | ECond (p, a, b) -> first [p; a; b]
+  | EFuncCall (_, args) -> first (List.map snd args)
+  | EList es -> first es
+  | EIdent _ | EIndex _ | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> None
+
+(* The compartment cells a resolved expression reads (D2): every `Pop` and
+   `PopSum` name, reached through hoisted `let` bindings ([BindingRef]) with a
+   visiting set, deduplicated in first-read order. *)
+let ir_cells ctx (e : Ir.expr) : string list =
+  let rec go visiting acc (e : Ir.expr) =
+    match e with
+    | Ir.Pop c -> c :: acc
+    | Ir.PopSum cs -> List.rev_append cs acc
+    | Ir.BindingRef b when not (List.mem b visiting) ->
+      (match List.assoc_opt b ctx.hoisted_rev with
+       | Some body -> go (b :: visiting) acc body
+       | None -> acc)
+    | Ir.BinOp { left; right; _ } -> go visiting (go visiting acc left) right
+    | Ir.UnOp { arg; _ } -> go visiting acc arg
+    | Ir.Cond { pred; then_; else_ } ->
+      go visiting (go visiting (go visiting acc pred) then_) else_
+    | Ir.Reduce es | Ir.TableLookup (_, es) -> List.fold_left (go visiting) acc es
+    | Ir.UncheckedDim { inner; _ } -> go visiting acc inner
+    | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Time | Ir.Dt | Ir.TimeFunc _
+    | Ir.BindingRef _ | Ir.PerEvalRef _ | Ir.Projected | Ir.ObsColumnRef _
+    | Ir.ObsAnchor _ | Ir.ForcingBasis _ -> acc
+  in
+  let seen = Hashtbl.create 8 in
+  List.filter (fun c ->
+    if Hashtbl.mem seen c then false else (Hashtbl.add seen c (); true))
+    (List.rev (go [] [] e))
+
+(* The date `docs/language-changes.md` keys the `prevalence` removal under, so a
+   reader of the diagnostic can find the entry. *)
+let prevalence_change_date = "2026-11-06"
+
+(* Checks over what the modeller wrote in an observation's `projected`, run on
+   the SURFACE AST: before `via` lowering, so the only structure that exists is
+   declared structure and a stage sum the compiler would add cannot be mistaken
+   for one the modeller wrote. Each is syntactic, so it runs once per stream —
+   one diagnostic per mistake, not one per stream row (§9, D5). The one
+   value-level check, the subset check (D2), needs resolved cells and runs in
+   the projection dispatch, tallied per site.
+
+   - D6: the removed one- and multi-argument forms, with the migration inline.
+   - D4: a flow read in `of` or `among`.
+   - D3: the two sides collapse different dimensions. *)
+let check_observation_surface ctx =
+  List.iter (fun (od : obs_decl) ->
+    let od_loc = diag_loc_of_ast_ctx ctx od.oloc in
+    let at e = match first_name_loc e with
+      | Some l -> diag_loc_of_ast_ctx ctx l
+      | None -> od_loc in
+    match od.oprojection with
+    | Some (ProjDerived (EFuncCall ("prevalence", args) as call)) ->
+      (match classify_prevalence_call args with
+       | Prev_removed operands ->
+         let operand =
+           surface_src
+             (List.fold_left (fun acc e -> EBinOp (Add, acc, e))
+                (List.hd operands) (List.tl operands)) in
+         Diagnostics.error ctx.diags ~code:"E356" ~loc:(at call)
+           ~message:(Printf.sprintf
+             "observation '%s': `%s` was removed — it returned a count, not a \
+              proportion"
+             od.oname (surface_src call))
+           ~detail:(Printf.sprintf
+             "`prevalence(X)` produced exactly the same projection as `X`; the \
+              name promised a proportion and returned a stock%s"
+             (if List.length operands > 1 then
+                ", and several arguments were added together" else ""))
+           ~hint:(Printf.sprintf
+             "for the same value, drop the call:\n\
+             \      projected = %s\n\
+             \  for an actual proportion, name the denominator:\n\
+             \      projected = prevalence(of = %s, among = <denominator>)\n\
+             \  a proportion is not a count: a `poisson` or `neg_binomial` \
+                likelihood keeps the first form, and the proportion belongs in \
+                a probability slot such as `binomial(n = tested, p = \
+                projected)`\n\
+             \  see `camdl docs language-changes` (%s)"
+             operand operand prevalence_change_date)
+           ()
+       | Prev_malformed { code; message; hint } ->
+         Diagnostics.error ctx.diags ~code ~loc:(at call)
+           ~message:(Printf.sprintf "observation '%s': %s" od.oname message)
+           ~hint ()
+       | Prev_proportion { of_; among } ->
+         let flow_side =
+           if reads_flow ctx of_ then Some ("of", of_)
+           else if reads_flow ctx among then Some ("among", among)
+           else None in
+         (match flow_side with
+          | Some (side, e) ->
+            Diagnostics.error ctx.diags ~code:"E359" ~loc:(at e)
+              ~message:(Printf.sprintf
+                "observation '%s': `prevalence(...)` reads a flow in `%s = %s` \
+                 — a proportion of a stock is read at the row's instant, and a \
+                 flow has no value at an instant"
+                od.oname side (surface_src e))
+              ~hint:"`incidence(...)` accumulates over the window since the \
+                     stream's last row, so it cannot sit inside a stock's \
+                     proportion. Report the pooled count and put the \
+                     denominator in the likelihood — `projected = \
+                     sum(a in age, incidence(infection[a]))` with \
+                     `cases ~ poisson(rate = rho * projected)` — or, for the \
+                     fraction of the window's events, divide two flow sums \
+                     directly: `projected = incidence(a) / (incidence(a) + \
+                     incidence(b))`"
+              ()
+          | None ->
+            let c_of = collapsed_dims ctx of_
+            and c_among = collapsed_dims ctx among in
+            if c_of <> c_among then
+              let show = function
+                | [] -> "nothing"
+                | ds -> "[" ^ String.concat ", " ds ^ "]" in
+              Diagnostics.error ctx.diags ~code:"E358" ~loc:(at call)
+                ~message:(Printf.sprintf
+                  "observation '%s': the numerator of `prevalence(...)` \
+                   collapses %s; the denominator collapses %s"
+                  od.oname (show c_of) (show c_among))
+                ~detail:(Printf.sprintf "of = %s\namong = %s"
+                  (surface_src of_) (surface_src among))
+                ~hint:"both sides of a proportion must pool the same \
+                       dimensions — a numerator pooled over age divided by a \
+                       denominator pooled over age and patch is wrong by \
+                       roughly the number of patches. Reduce the same axes on \
+                       each side: `prevalence(of = sum(a in age, I[a, p]), \
+                       among = sum(a in age, N[a, p]))`"
+                ()))
+    | _ -> ()
+  ) ctx.obs_decls
+
 (* ── Observation model expansion ─────────────────────────────────────────── *)
 
 (* Does this projection accumulate a flow over an interval, or read state at an
@@ -8679,7 +9000,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
           "observation '%s': missing required field '%s'" od.oname name)
         ~hint:(match name with
           | "columns" -> "add `columns { time : time, <value_col> : count }` — the explicit file schema"
-          | "projection" -> "add `projected = incidence(<transition>)` or `projected = prevalence(<compartment>)`"
+          | "projection" -> "add `projected = incidence(<transition>)` for a flow, `projected = <compartment>` for a count, or `projected = prevalence(of = <compartment>, among = <population>)` for a proportion"
           | "measurement" -> "add `<value_col> ~ poisson(rate = ...)`, `neg_binomial(mean = ..., r = ...)`, etc."
           | _ -> "required field")
         ()
@@ -8836,7 +9157,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
       | Some (SchedAt ts) ->
         Some (Ir.ObsAtTimes (List.map (resolve_float_expr ctx) ts))
     in
-    (* `prevalence(X)` projects a compartment snapshot at observation time.
+    (* `projected = X` reads a compartment snapshot at observation time.
        If X is Erlang- or otherwise-stratified, the bare name has no concrete
        expansion — the user means "sum over all strata," matching how the
        same bare name in a rate expression expands to PopSum (see
@@ -8869,7 +9190,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
     in
     (* `incidence(X)` with a bare (un-indexed) transition name. If X is a
        stratified transition family, the user means "sum over all strata,"
-       symmetric to bare `prevalence` over a stratified compartment (§25.4).
+       symmetric to a bare stratified compartment name (§25.4).
        Emit CumulativeFlowSum over the expanded transition names when the
        family has >1 member; CumulativeFlow for the single/unstratified case.
        An unknown name falls through to CumulativeFlow so post-expansion
@@ -9216,8 +9537,9 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
        [resolve_expr] before constant folding and LICM run. A match means the
        term IS a transition's rate, so there is no false positive; a rate
        written differently in the two places is not matched, which is the
-       documented residue. `prevalence(<expr>)` is the explicit instant
-       spelling and takes its own arm below, so it never reaches this check. *)
+       documented residue. `prevalence(of = <expr>, among = <expr>)` is the
+       explicit instant spelling and takes its own arm below, so it never
+       reaches this check. *)
     let rec additive_terms (e : Ir.expr) : Ir.expr list =
       match e with
       | Ir.BinOp { op = Ir.Add; left; right } ->
@@ -9280,8 +9602,9 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
                the flows and declare `covers`:\n\
               \      projected = %s / %s\n\
               \  if you mean the instantaneous ratio of hazards, say so:\n\
-              \      projected = prevalence(%s)%s"
-              (flows num) (flows den) (Pp_expr.to_string resolved) unmatched_note)
+              \      projected = prevalence(of = %s, among = %s)%s"
+              (flows num) (flows den) (Pp_expr.to_string left)
+              (Pp_expr.to_string right) unmatched_note)
             ()
         end
       | _ -> ()
@@ -9306,14 +9629,12 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
            the rest away, so `incidence(die_community, die_facility)` compiled
            clean — exit 0, no diagnostic — to `CumulativeFlow "die_community"`
            and the model fitted a likelihood against half its death stream
-           (gh#669). The mistake is reachable rather than theoretical: the
-           sibling head `prevalence(R, D)` legitimately sums its positional
-           arguments (2026-04-17 state-snapshot-projections proposal,
-           `docs/camdl-run-spec.md` §14.1), so learning the convention on one
-           head and applying it to the other used to buy silence.
+           (gh#669). The mistake was reachable rather than theoretical: the
+           sibling head `prevalence(R, D)` then summed its positional
+           arguments, so learning the convention on one head and applying it
+           to the other bought silence.
 
-           Collect every positional argument, the way the prevalence arm below
-           does, and accept exactly one. Whether several flows should sum is a
+           Collect every positional argument and accept exactly one. Whether several flows should sum is a
            DSL surface question still open on gh#669; until it is answered the
            multi-argument form is rejected, never reinterpreted. *)
         let positional =
@@ -9359,7 +9680,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
                         ~dims:(transition_dims ctx n) idxs in
            Ir.CumulativeFlow (String.concat "_" (n :: List.map (index_item_to_str env) idxs))
          | [] ->
-           (* Mirrors the prevalence arm's E250. Without it the projection kept
+           (* Without this E250 the projection kept
               the sentinel name `"?"` and surfaced downstream as
               `E507: unknown transition referenced in observation: '?'`, keyed
               to the `observations {` header — a diagnostic naming nothing the
@@ -9406,47 +9727,40 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
            Ir.DerivedExpr (Ir.Const 0.0)
          | _ -> Ir.CumulativeFlow "?")
       | ProjDerived (EFuncCall ("prevalence", args)) ->
-        (match List.filter_map (fun (k, e) -> if k = "" then Some e else None) args with
-         | [ EIdent (n, _) ]         -> prevalence_projection n []
-         | [ EIndex (n, idxs, l) ]   ->
-           let idxs = resolve_index_order ctx ~loc:(diag_loc_of_ast_ctx ctx l)
-                        ~what:(Printf.sprintf "compartment '%s'" n)
-                        ~dims:(comp_dims ctx n) idxs in
-           prevalence_projection ~items:idxs ~loc:(diag_loc_of_ast_ctx ctx l)
-             n (List.map (index_item_to_str env) idxs)
-         | [] ->
-           Diagnostics.error ctx.diags ~code:"E250" ~loc:od_loc
-             ~message:(Printf.sprintf
-               "observation '%s': `prevalence(...)` needs a compartment to project"
-               od.oname)
-             ~hint:"give it a compartment (`prevalence(I)`), a cell \
-                    (`prevalence(I[child])`), or an expression over \
-                    compartments (`prevalence(Y1 + Y2)`)"
-             ();
-           Ir.DerivedExpr (Ir.Const 0.0)
-         | positional ->
-           (* Every other argument shape is an ordinary expression over state,
-              and resolving it is the whole answer. Three shapes reach here and
-              all three are legitimate models, so the dispatch must NOT match on
-              shape — matching one leaves the others emitting the sentinel name
-              `"?"`, which surfaces to the user as `E503: unknown compartment
-              referenced: '?'`, naming nothing they wrote:
-
-                · `via erlang` rewrites the argument to `ESum` over the stage
-                  axis (`sum_staged_refs`);
-                · `via hyper_erlang` rewrites it to an `EBinOp` Add-chain over
-                  the branch-stage cells (`sum_hyper_refs`) — a DIFFERENT shape
-                  for the same reason, which is why gh#487 is this same bug;
-                · a user-written arithmetic argument, `prevalence(Y1 + Y2)`.
-
-              Several positional arguments desugar to their sum, as specified in
-              the 2026-04-17 state-snapshot-projections proposal and documented
-              at `docs/camdl-run-spec.md` §14.1. Reading only the first (the old
-              `List.assoc_opt ""`) silently discarded the rest. *)
-           let summed = List.fold_left
-               (fun acc e -> EBinOp (Add, acc, e))
-               (List.hd positional) (List.tl positional) in
-           Ir.DerivedExpr (resolve_expr ctx env summed))
+        (* `prevalence(of = X, among = Y)` IS `X / Y` — the same resolution,
+           so the same IR — plus the checks plain division does not get
+           (proposal 2026-07-31-aggregation-semantics §5.2, §9). Every refused
+           shape was reported by [check_observation_surface], which runs the
+           same classifier on the surface AST; here it only leaves the
+           placeholder, flagged so nothing downstream classifies the stream
+           from it. *)
+        let refused () = projection_refused := true; Ir.DerivedExpr (Ir.Const 0.0) in
+        (match classify_prevalence_call args with
+         | Prev_removed _ | Prev_malformed _ -> refused ()
+         | Prev_proportion { of_; among }
+           when reads_flow ctx of_ || reads_flow ctx among -> refused ()
+         | Prev_proportion { of_; among } ->
+           let resolved = resolve_expr ctx env (EBinOp (Div, of_, among)) in
+           (* D2, the subset check: every cell the numerator reads must be one
+              the denominator reads. Vacuous when the denominator reads no cell
+              — a parameter, a constant or a table is a legitimate
+              denominator. Set-based, so it does not bound the ratio by one
+              (`of = I[child] + I[child]` passes), and an explicit cell
+              enumeration in `among` defeats it (§13). Evaluated per stream
+              row, reported once per site. *)
+           (match resolved with
+            | Ir.BinOp { op = Ir.Div; left; right } ->
+              let num = ir_cells ctx left and den = ir_cells ctx right in
+              if den <> [] then begin
+                let outside = List.filter (fun c -> not (List.mem c den)) num in
+                let site = match first_name_loc of_ with
+                  | Some l -> l | None -> od.oloc in
+                note_site_check ctx ~loc:site
+                  (Proportion_outside { stream = od.oname })
+                  ~hit:(outside <> []) ~found:outside env
+              end
+            | _ -> ());
+           Ir.DerivedExpr resolved)
       | ProjDerived (EIdent (name, _) as e) ->
         (* Disambiguate: let-binding, compartment (prevalence), or
            transition (flow)? A let-bound bare identifier (e.g.
@@ -10528,36 +10842,66 @@ let check_origin ctx =
                 01..12 and a day valid for that month (leap-aware)"
          ())
 
-(** Drain the A3 tally: one W202 per source site whose `where` predicate
-    selected no levels at some instantiation. Runs after every [resolve_expr]
-    call in the phase, so the counts are final — a site that is empty for 37 of
-    400 instantiations reports both numbers, and a site that is never empty
-    reports nothing. *)
-let flush_empty_reductions ctx =
-  List.iter (fun (l, er) ->
-    if er.er_empty > 0 then begin
-      let first_binding = match er.er_first with
-        | Some ((_ :: _) as env) ->
+(** Drain the per-site tallies: one diagnostic per source site whose check fired
+    at some instantiation. Runs after every resolution in the phase, so the
+    counts are final — a site that fires for 37 of 400 instantiations reports
+    both numbers, and a site that never fires reports nothing. *)
+let flush_site_tallies ctx =
+  List.iter (fun ((l, _), st) ->
+    match st.st_first with
+    | None -> ()
+    | Some (env, found) ->
+      let first_binding = match env with
+        | _ :: _ ->
           (* [env] is innermost-first; render outermost-first, as written. *)
           Some (String.concat ", "
                   (List.rev_map (fun (k, lvl) -> Printf.sprintf "%s = %s" k lvl) env))
-        | _ -> None      (* an unindexed site: one instantiation, nothing to name *)
+        | [] -> None      (* an unindexed site: one instantiation, nothing to name *)
       in
-      Diagnostics.warning ctx.diags
-        ~code:"W202" ~loc:(diag_loc_of_ast_ctx ctx l)
-        ~message:(Printf.sprintf
-          "reduction guard selected no levels of '%s' for %d of %d instantiation%s"
-          er.er_dim er.er_empty er.er_total
-          (if er.er_total = 1 then "" else "s"))
-        ?detail:(Option.map (fun b -> "first affected binding: " ^ b) first_binding)
-        ~hint:(Printf.sprintf
-          "`sum(%s in %s where …, …)` contributes 0 there, so the enclosing term \
-           drops out of the rate entirely; check the predicate, or restrict the \
-           outer index to the strata it applies to"
-          er.er_var er.er_dim)
-        ()
-    end
-  ) (List.rev ctx.empty_reductions)
+      let loc = diag_loc_of_ast_ctx ctx l in
+      (match st.st_check with
+       | Empty_reduction { var; dim } ->
+         Diagnostics.warning ctx.diags
+           ~code:"W202" ~loc
+           ~message:(Printf.sprintf
+             "reduction guard selected no levels of '%s' for %d of %d instantiation%s"
+             dim st.st_hits st.st_total
+             (if st.st_total = 1 then "" else "s"))
+           ?detail:(Option.map (fun b -> "first affected binding: " ^ b) first_binding)
+           ~hint:(Printf.sprintf
+             "`sum(%s in %s where …, …)` contributes 0 there, so the enclosing term \
+              drops out of the rate entirely; check the predicate, or restrict the \
+              outer index to the strata it applies to"
+             var dim)
+           ()
+       | Proportion_outside { stream } ->
+         let shown =
+           let n = List.length found in
+           let first3 = List.filteri (fun i _ -> i < 3) found in
+           String.concat ", " (List.map (Printf.sprintf "'%s'") first3)
+           ^ (if n > 3 then Printf.sprintf " and %d more" (n - 3) else "") in
+         let rows =
+           if st.st_total = 1 then None
+           else Some (Printf.sprintf "on %d of %d stream rows%s" st.st_hits
+                        st.st_total
+                        (match first_binding with
+                         | Some b -> "; first affected binding: " ^ b
+                         | None -> "")) in
+         Diagnostics.error ctx.diags
+           ~code:"E357" ~loc
+           ~message:(Printf.sprintf
+             "observation '%s': the numerator of `prevalence(...)` counts %s, \
+              which the denominator does not contain — the result is not a \
+              proportion of `among`"
+             stream shown)
+           ?detail:rows
+           ~hint:"every cell counted in `of` must also be counted in `among`. \
+                  Index both sides by the same strata (`prevalence(of = \
+                  I[a], among = N_local[a])`), or, for a ratio of two \
+                  unrelated quantities, write the division directly \
+                  (`projected = X / Y`), which is not checked"
+           ())
+  ) (List.rev ctx.site_tallies)
 
 (** Emit W103 for any let binding whose name also appears as a stratum value. *)
 let check_shadowing ctx =
@@ -12147,6 +12491,11 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
      through the ordinary stratification + consecutive machinery unchanged. After
      this pass no `via` transition survives (the E243 placeholder in
      [expand_transitions_counted] is unreachable). *)
+  (* Checks over the observation projections as written (aggregation-semantics
+     proposal §9). Runs BEFORE the `via` lowering below, so the only structure
+     these checks can see is declared structure, never a stage sum the
+     compiler is about to add. *)
+  check_observation_surface ctx;
   lower_via_transitions ctx;
   (* M14 (gh#98): validate origin date up front, before origin_rata_die /
      date() conversion derives values from it. *)
@@ -12265,9 +12614,9 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
   (* gh#204: reject reactive triggers that read an undeclared observation stream
      (post-pass: both interventions and observations are now expanded). *)
   validate_reactive_streams ctx model;
-  (* A3: every resolve_expr in this phase has now run, so the per-site
-     restricted-reduction counts are final. Drain them into one W202 per site. *)
-  flush_empty_reductions ctx;
+  (* A3/D5: every resolution in this phase has now run, so the per-site check
+     counts are final. Drain them into one diagnostic per site. *)
+  flush_site_tallies ctx;
   let summary = {
     base_compartment_count     = List.length ctx.comp_decls;
     expanded_compartment_count = List.length expanded_comps;

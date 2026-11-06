@@ -101,7 +101,7 @@ observations {
   # large shedding prevalence of a near-deterministic large-population model.
   es[p in patch] {
     columns       { time : time, patch : dim, conc : count }
-    projected     = prevalence(I_shed[p])
+    projected     = I_shed[p]
     emit_schedule = every 14 'days
     conc          ~ neg_binomial(mean = lambda * projected, r = k_es)
   }

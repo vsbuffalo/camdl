@@ -2721,9 +2721,9 @@ pub fn print_observations_summary(model: &ir::Model) {
                 (format!("incidence({}) / incidence({})",
                          numerator.join(" + "), denominator.join(" + ")), false),
             ir::observation::Projection::CurrentPop(name) =>
-                (format!("prevalence({})", name), true),
+                (name.to_string(), true),
             ir::observation::Projection::CurrentPopSum(names) =>
-                (format!("prevalence({})", names.join(" + ")), true),
+                (names.join(" + "), true),
             ir::observation::Projection::DerivedExpr(_) =>
                 ("derived expression".to_string(), true),
         };

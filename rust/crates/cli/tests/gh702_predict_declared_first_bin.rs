@@ -179,7 +179,7 @@ observations {
   }
   stock {
     columns       { time : time, stock : count }
-    projected     = prevalence(B)
+    projected     = B
     emit_schedule = every 50 'days
     stock ~ poisson(rate = projected)
   }

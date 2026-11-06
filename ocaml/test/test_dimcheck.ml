@@ -932,7 +932,7 @@ let test_instant_vector_each_is_time () =
    false-fire E304. The `Projected` node must carry the projection
    expression's inferred dimension, not a hard-coded population count.
    Counterpart to the count-projection guard (e304_binomial_p_is_count, which
-   uses prevalence(I) — a count — and must still E304). *)
+   projects `I` — a count — and must still E304). *)
 let test_e304_proportion_projection_ok () =
   let src = {camdl|
 compartments { S, I, R }
@@ -982,7 +982,7 @@ transitions {
 observations {
   survey {
     columns       { time : time, pos : count, denom : %s }
-    projected  = prevalence(I)
+    projected  = I
     emit_schedule = every 7 'days
     pos ~ binomial(n = %s, p = projected / N)
   }
@@ -1019,7 +1019,7 @@ transitions {
 observations {
   counts {
     columns       { time : time, k : count, frac : probability }
-    projected  = prevalence(I)
+    projected  = I
     emit_schedule = every 7 'days
     k ~ poisson(rate = frac)
   }

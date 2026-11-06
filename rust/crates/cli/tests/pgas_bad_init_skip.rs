@@ -17,18 +17,18 @@
 //!
 //! The fixture seeds infection ONLY through an importation term `iota * S`
 //! (the `I` compartment starts empty), and observes `cases ~ poisson(rate =
-//! prevalence(I))`.
+//! projected)` with `projected = I`.
 //!
 //! - `iota = 0` ⇒ the infection rate is 0 at every substep FOR EVERY PARTICLE,
 //!   so `I` stays 0 on every trajectory the conditional SMC can draw,
-//!   `prevalence(I)` is 0 at every observation time, and `poisson_logpmf(k>0,
+//!   `I` is 0 at every observation time, and `poisson_logpmf(k>0,
 //!   λ=0)` is exactly `NEG_INFINITY` (`obs_loglik.rs`). No RNG dependence: the
 //!   chain-binomial draw is `Binomial(S, p)` with `p` clamped to
 //!   `BINOM_PROB_EPS`, so the trajectory is all-zero with probability
 //!   1 − O(1e-9), and the *transition* term stays finite (measured: 0.0000) —
 //!   the refusal is on the observation term, exactly the production case.
 //! - `iota = 0.2` ⇒ ~180 importations on day 1 against `S = 1000`, so
-//!   `prevalence(I) > 0` at every observation time and the Poisson term is
+//!   `I > 0` at every observation time and the Poisson term is
 //!   finite whatever the counts.
 //!
 //! Per-chain starts come from a two-row draws file named by
@@ -92,7 +92,7 @@ fn tempdir(tag: &str) -> Tmp {
 }
 
 /// SIR whose only route into `I` is the importation term `iota * S`, so
-/// `iota = 0` pins `prevalence(I)` at 0 for the whole window.
+/// `iota = 0` pins `I` at 0 for the whole window.
 fn write_fixture(dir: &Path, camdlc: &Path) -> (PathBuf, PathBuf) {
     let src = r#"
 time_unit = 'days
@@ -110,7 +110,7 @@ transitions {
 observations {
   cases {
     columns       { time : time, cases : count }
-    projected  = prevalence(I)
+    projected  = I
     emit_schedule = every 1 'days
     cases ~ poisson(rate = projected)
   }
@@ -126,7 +126,7 @@ simulate { from = 0 'days  to = 6 'days }
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
 
-    // Positive counts at every observation time: what makes `prevalence(I) = 0`
+    // Positive counts at every observation time: what makes `I = 0`
     // a probability-zero prediction rather than merely a poor one.
     let data_path = dir.join("cases.tsv");
     std::fs::write(&data_path,
@@ -137,7 +137,7 @@ simulate { from = 0 'days  to = 6 'days }
 
 /// A two-row draws file: each chain draws one row as its start.
 /// The impossible row's `iota`: 1e-300 importations per susceptible per day,
-/// which never produces an event, so `prevalence(I)` stays 0 as at `iota = 0`.
+/// which never produces an event, so `I` stays 0 as at `iota = 0`.
 /// Not 0 itself, which is `iota`'s lower bound: a start exactly on a bound is
 /// refused before the filter runs (support-keyed transforms proposal D3).
 const IMPOSSIBLE_IOTA: f64 = 1e-300;

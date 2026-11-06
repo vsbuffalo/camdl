@@ -1038,7 +1038,7 @@ let run_let ppf ctx name =
     (* Referenced by.
        M24 in the 2026-04-19 review: previously missed references
        inside EFuncCall / EList / ERange subtrees. A let referenced
-       only inside `incidence(N)` or `prevalence(N)` (both
+       only inside `incidence(N)` or `prevalence(of = N, …)` (both
        EFuncCall nodes) didn't show as a reference. Also cleans up
        a dead `rate_str` allocation (n12). *)
     let refs = List.filter_map (fun (orig_tr : transition_decl) ->

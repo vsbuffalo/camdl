@@ -638,7 +638,8 @@ comm_frac {
 The denominator the file supplies (`n_deaths`) is conditioned on; the model's
 own denominator enters through `projected`. A ratio of the two transitions'
 rates is the hazard share at one instant, not the week's fraction, and the
-compiler refuses it (E352) unless it is spelled `prevalence(...)`.
+compiler refuses it (E352) unless it is spelled
+`prevalence(of = mu_c * I, among = mu_c * I + mu_f * H)`.
 
 Observation-model parameters (`rho`, `k` here, and parameters inside a derived
 projection such as `qgam * prevalence`) are estimated by gradient-based NUTS on

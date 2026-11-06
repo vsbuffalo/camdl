@@ -600,9 +600,10 @@ in a week-starting file, and the week 2–8 July in a week-ending one. The same
 cell, three different spans. No rule gets all three right, so **an incidence
 stream states its period rather than having one inferred from row spacing.**
 
-A stream that reads an _instant_ — `prevalence(...)`, a compartment reading, a
-serosurvey — needs none of this. It has a time column and nothing else; there is
-no window to state, and declaring one is an error.
+A stream that reads an _instant_ — a compartment reading, a proportion
+`prevalence(of = …, among = …)`, a serosurvey — needs none of this. It has a
+time column and nothing else; there is no window to state, and declaring one is
+an error.
 
 ### Five ways to say it
 

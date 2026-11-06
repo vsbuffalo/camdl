@@ -458,7 +458,7 @@ init { S = 999  I = 1 }
 observations {
   survey {
     columns       { time : time, pos : count, tested : count }
-    projected     = prevalence(I)
+    projected     = I
     emit_schedule = every 2 'days
     pos ~ binomial(n = tested, p = projected / N0)
   }

@@ -2588,7 +2588,7 @@ bare staged compartment is **`E237`**, because the stage axis is synthesized per
 `via` transition and is private to it, so it never pairs cell-for-cell with the
 other endpoint's shape — name the explicit stage (`transfer(to = E_s1, …)`)
 instead, which is what the diagnostic's hint suggests. Reads are unaffected: a
-bare `E` or `prevalence(E)` still sums every stage (the bare-name rule, §5.1).
+bare `E` still sums every stage (the bare-name rule, §5.1).
 
 #### 9.4.2 Aging across a stratified model (canonical use case)
 
@@ -3095,7 +3095,7 @@ observations {
 
   detection {
     columns       { time : time, detection : count }
-    projected     = prevalence(I)
+    projected     = I
     emit_schedule = every 14 'days
     detection     ~ bernoulli(p = p_detect * projected / N)
   }
@@ -3117,8 +3117,9 @@ it (the data file's `time` column drives the fit).
 incidence(transition)                    flow accumulated over the period the row covers (§12.1.1)
 incidence(transition[north])             positional index, by declaration order
 incidence(transition[patch = north])     named index (order-independent)
-prevalence(compartment)                  current population
-prevalence(compartment[age = child])     named index on compartment
+compartment                              current population, as a count
+compartment[age = child]                 named index on compartment
+prevalence(of = I[a], among = N_local[a])  a proportion: of / among, checked
 ```
 
 An index on a projection **selects one cell of a stratified family; it never
@@ -3143,9 +3144,37 @@ row's period, all-state leaves are read at an instant, and mixing them is
 `E341`. So is weighting a term, subtracting one, dividing by a constant or a
 state, or dividing twice; a per-stream reporting rate belongs in the likelihood
 (`cases ~ poisson(rate = rho * projected)`). A side of a ratio whose `where`
-guard prunes every level is `E351`. `prevalence(...)` differs on arity: several
-arguments desugar to their sum (`prevalence(X1, X2)` is `prevalence(X1 + X2)`),
-because a compartment population is an expression leaf and a flow is not.
+guard prunes every level is `E351`.
+
+**A stock is a count by default; a proportion names its denominator.**
+`projected = I[child]` reports the number of infected children. For the share of
+children who are infected, write `prevalence(of = I[child], among =
+N_local[child])`. It is exactly `I[child] / N_local[child]` — the same value and
+the same IR — plus three checks that plain division, which stays legal and
+unchecked, does not get:
+
+- every compartment cell `of` reads must be one `among` reads (`E357`):
+  `of = I[child], among = S[child] + R[child]` and `of = I[child], among =
+  N_local[adult]` are refused. The check is vacuous when `among` reads no cell
+  (a parameter, a constant or a table, all legitimate denominators), it does not
+  bound the ratio by one (`of = I[child] + I[child]` passes), and it is defeated
+  by a denominator written as an explicit cell enumeration rather than an
+  indexed family;
+- both sides must collapse the same dimensions (`E358`): `of = sum(a in age,
+  I[a, p])` against `among = sum(a in age, sum(q in patch, N[a, q]))` pools age
+  on top and age and patch below, and is wrong by roughly the number of patches;
+- neither side may read a flow (`E359`): a proportion of a stock is read at the
+  row's instant, and `incidence(...)` accumulates over the window.
+
+`prevalence` has no collapsing argument of its own — `sum` does the pooling, on
+each side — and it is valid only as the whole of a `projected = …` right-hand
+side. A proportion nested in arithmetic is written as the division
+(`sum(a in age, w[a] * (I[a] / N_local[a]))`). The one-argument form
+`prevalence(X)` and the multi-argument form `prevalence(X1, X2)` are removed
+(`E356`): they returned the count `X` (or `X1 + X2`) under a name that promised
+a proportion. A proportion is dimensionless, so it belongs in a probability
+slot (`binomial(n = tested, p = projected)`) and a count family refuses it
+(`E304`).
 
 A ratio of two accumulated counts is dimensionless, so a `FlowRatio` stream
 pairs with `binomial`'s `p`, `beta_binomial`'s mean, `beta`'s `mean` and
@@ -3169,13 +3198,14 @@ fraction, worst at the peak, and nothing at fit time said so. A projection
 that divides an expression at least one of whose additive terms is
 structurally a lowered transition's rate is therefore `E352`, whose hint
 writes out both spellings: the flows, if the column is the fraction of the
-window's events, and `prevalence(<the expression>)` if the instantaneous
-hazard ratio is meant. The comparison is structural, so a rate written
+window's events, and `prevalence(of = <numerator>, among = <denominator>)` if
+the instantaneous hazard ratio is meant. The comparison is structural, so a rate written
 differently in the two places is not matched — the check has no false
 positives and a documented residue of false negatives.
 
-**Arithmetic projections** (the general form). Beyond `incidence()` and
-`prevalence()` sugar, `projected` accepts any expression over compartment state,
+**Arithmetic projections** (the general form). Beyond `incidence()` and the
+checked proportion `prevalence(of = …, among = …)`, `projected` accepts any
+expression over compartment state,
 parameters, and time. Pooled-group prevalence, prevalence-as-proportion, and
 arbitrary derived observables compose naturally:
 
@@ -3222,10 +3252,8 @@ Arithmetic projections emit `Ir::Projection::DerivedExpr`. Both the
 forward-simulation emission path (`camdl simulate --obs`) and the
 likelihood-scoring path (pfilter / PGAS / IF2) share a single evaluator
 (`sim::inference::multi_stream_obs::eval_stream_projection`), so they agree on
-semantics by construction. If you find yourself wanting a "multi-compartment
-prevalence" shortcut, write the sum directly: `projected = x + y` is the general
-form; `prevalence(x)` is kept as sugar only for the single-compartment case
-where the named function clarifies intent.
+semantics by construction. A count over several compartments is the sum written
+directly: `projected = x + y`.
 
 **A partial index does not marginalize; state cross-strata aggregation
 explicitly.** Dropping *some* of a stratified family's dimensions is an error,
@@ -3234,10 +3262,10 @@ family resolves to a single expanded transition and fails if none matches
 (there is no `infection_north` — only `infection_north_child`, …). To sum a
 projection across a dimension, write the sum out:
 
-`incidence(...)` and `prevalence(...)` are **head-position sugar**: they are
-valid as the whole of a `projected = …` right-hand side, under `sum(...)`, and
-as terms added together, but they are not expression functions and cannot be
-weighted or otherwise wrapped in arithmetic
+`incidence(...)` is **head-position sugar**: it is valid as the whole of a
+`projected = …` right-hand side, under `sum(...)`, and as terms added together,
+but it is not an expression function and cannot be weighted or otherwise
+wrapped in arithmetic
 (`rho * sum(p in patch, incidence(infection[p]))` is `E341`). The reporting rate
 therefore goes in the *likelihood*, not the projection:
 
@@ -3302,7 +3330,7 @@ rows covers.** A stream whose `projected` accumulates a flow — `incidence(...)
 (§12.1) — and declares neither `covers = …` nor `window_start`/`window_stop`
 columns is **E350**; there is no default. A stream whose `projected` reads
 state at an instant —
-`prevalence(...)`, a compartment expression — has no window to state, and
+a compartment expression, or `prevalence(of = …, among = …)` — has no window to state, and
 declaring one by either means is **E348**.
 
 **The five forms.** Four take the stream's own `: time` column and a rule; the
@@ -3442,7 +3470,7 @@ biology:
 observations {
   slide_positivity {
     columns          { time : time, slide_positivity : count }
-    projected        = prevalence(I)
+    projected        = I
     emit_schedule    = every 1 'weeks
     slide_positivity ~ diagnostic_test(
       base = binomial(n = N_tested, p = projected / N),
@@ -6321,7 +6349,7 @@ FlowRatio { numerator: ["die_comm"], denominator: ["die_comm", "die_fac"] }
 FlowRatio { numerator: ["infection_child"], denominator: ["infection_child", "infection_adult"] }
 
 # DSL:
-prevalence(R)                  # bare: global total
+R                              # bare: global total
 
 # IR:
 CurrentPopSum(["R_child", "R_adult"])
@@ -6517,7 +6545,11 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E348 | Error   | `covers` or window columns on a stream whose `projected` reads state at an instant (§12.1.1) |
 | E350 | Error   | Incidence stream states no period — add `covers = …` or `window_start`/`window_stop` columns (§12.1.1) |
 | E351 | Error   | A side of a ratio of flows names no flow after its `where` guard pruned every level (§12.1) |
-| E352 | Error   | A projection divides transition rates — an instant reading; write the flows or `prevalence(…)` (§12.1) |
+| E352 | Error   | A projection divides transition rates — an instant reading; write the flows or `prevalence(of = …, among = …)` (§12.1) |
+| E356 | Error   | `prevalence(X)` / `prevalence(X1, X2)` are removed — write `X` for the count, or `prevalence(of = X, among = N)` for a proportion (§12.1) |
+| E357 | Error   | `prevalence(of = …, among = …)`: the numerator reads a compartment cell the denominator does not (§12.1) |
+| E358 | Error   | `prevalence(of = …, among = …)`: the two sides collapse different dimensions (§12.1) |
+| E359 | Error   | `prevalence(of = …, among = …)` reads a flow on one side (§12.1) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 
 Diagnostics can be emitted as structured JSON by passing `--json-errors` to

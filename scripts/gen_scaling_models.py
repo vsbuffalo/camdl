@@ -181,7 +181,7 @@ def gen_camdl(P: int, A: int, coupling: str, grad: str, observe: bool = False,
 
     # Observation model (opt-in via --observe) — a single weekly stream over
     # *total* infectious prevalence. Bare `I` sums over all strata (spec §11
-    # "bare = sum over ALL strata"); we use `prevalence(I)` rather than
+    # "bare = sum over ALL strata"); we project the state `I` rather than
     # `incidence(infection)` because the latter currently fails to resolve a
     # base (pre-expansion) transition name in a stratified model (E507). For
     # inference *profiling* the observable is irrelevant — the particle filter
@@ -191,7 +191,7 @@ def gen_camdl(P: int, A: int, coupling: str, grad: str, observe: bool = False,
     if observe:
         L.append("observations {")
         L.append("  weekly_cases : {")
-        L.append("    projected  = prevalence(I)")
+        L.append("    projected  = I")
         L.append("    every      = 7 'days")
         L.append("    likelihood = neg_binomial(mean = 0.5 * projected, r = 5.0)")
         L.append("  }")

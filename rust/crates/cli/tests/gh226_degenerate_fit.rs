@@ -12,7 +12,7 @@
 //! ## The impossible-data mechanism
 //!
 //! `binom_logpmf` (obs_loglik.rs) returns `NEG_INFINITY` whenever the observed
-//! `k > n`. The model observes `cases ~ binomial(n = prevalence(I), p = 0.5)`,
+//! `k > n`. The model observes `cases ~ binomial(n = projected, p = 0.5)` with `projected = I`,
 //! so `n` is bounded by the reachable I compartment (≤ a few hundred for this
 //! tiny SIR). The data sets `cases = 1_000_000` at every observation time —
 //! far above any reachable count — so *every* particle at *every* θ scores
@@ -65,7 +65,7 @@ fn tempdir(tag: &str) -> Tmp {
     Tmp(base)
 }
 
-/// Tiny SIR whose `cases` stream is `binomial(n = prevalence(I), p = 0.5)`.
+/// Tiny SIR whose `cases` stream is `binomial(n = projected, p = 0.5)` with `projected = I`.
 /// `n` is bounded by the population, so an observed `cases` far above any
 /// reachable count scores `-inf` at every θ (obs_loglik `k > n` branch).
 fn write_model(dir: &Path, camdlc: &Path) -> PathBuf {
@@ -84,7 +84,7 @@ transitions {
 observations {
   cases {
     columns       { time : time, cases : count }
-    projected  = prevalence(I)
+    projected  = I
     emit_schedule = every 1 'days
     cases ~ binomial(n = projected, p = 0.5)
   }

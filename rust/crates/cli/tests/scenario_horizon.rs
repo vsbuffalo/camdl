@@ -541,7 +541,7 @@ fn a_composed_scenario_inherits_the_horizon_and_its_own_wins() {
 // ── The observation axis ────────────────────────────────────────────────────
 
 /// A model with an observation stream, so the horizon's SECOND time axis is
-/// exercised. `prevalence(I)` is the dangerous projection: past the end of the
+/// exercised. A state projection (`projected = I`) is the dangerous one: past the end of the
 /// trajectory every reader clamps to the last snapshot, so a fabricated tail is
 /// a frozen compartment wearing fresh observation noise — it reads as a
 /// perfectly plausible plateau rather than as obviously missing data.
@@ -567,7 +567,7 @@ transitions {
 observations {
   cases {
     columns       { time : time, cases : count }
-    projected     = prevalence(I)
+    projected     = I
     cases         ~ poisson(rate = rho * projected)
     emit_schedule = every 10 'days
   }

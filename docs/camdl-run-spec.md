@@ -2523,13 +2523,13 @@ scored.
 Each entry is `[estimate.<param>]` (or an inline table under `[estimate]`).
 `EstimateSpecV2` (`config_v2.rs:607`):
 
-| key                  | type                                 | default                                  | meaning                                                                                                                                                                                                                                                                                                                  |
-| -------------------- | ------------------------------------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `bounds`             | `[lo, hi]`                           | the model's `in [lo, hi]`                | Search box. May only **narrow** the model's declared range; loosening is an error.                                                                                                                                                                                                                                       |
-| `start`              | float                                | model value, else bounds draw            | The base point: where `starts = "single"` puts every chain, and where `uniform` puts chain 1; the other spread rules read it only at one chain, and the sourced rules not at all. Under `pmmh`/`mh` it is also the point of the pre-run likelihood check and of the initial proposal scale.                              |
-| `prior`              | inline table                         | the model's `~` declaration              | See the wire format below. Required in some form for `pgas`/`pmmh`/`mh`.                                                                                                                                                                                                                                                 |
-| `perturb_only_at_t0` | bool                                 | `false`                                  | Perturb at t=0 only, not at every observation — the IF2 schedule for an initial-state parameter. Accepted only under `if2`: every other method refuses the config at load, since it would read the flag nowhere. Required by `ic_free` unless the model's `init { }` declares a law, which supplies the same t=0 spread. |
-| `rw_sd`              | float                                | auto-scaled from bounds                  | IF2 per-parameter random-walk SD, on the natural scale; `pmmh`/`mh` also read it for the initial proposal SD.                                                                                                                                                                                                            |
+| key                  | type         | default                       | meaning                                                                                                                                                                                                                                                                                                                  |
+| -------------------- | ------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bounds`             | `[lo, hi]`   | the model's `in [lo, hi]`     | Search box. May only **narrow** the model's declared range; loosening is an error.                                                                                                                                                                                                                                       |
+| `start`              | float        | model value, else bounds draw | The base point: where `starts = "single"` puts every chain, and where `uniform` puts chain 1; the other spread rules read it only at one chain, and the sourced rules not at all. Under `pmmh`/`mh` it is also the point of the pre-run likelihood check and of the initial proposal scale.                              |
+| `prior`              | inline table | the model's `~` declaration   | See the wire format below. Required in some form for `pgas`/`pmmh`/`mh`.                                                                                                                                                                                                                                                 |
+| `perturb_only_at_t0` | bool         | `false`                       | Perturb at t=0 only, not at every observation — the IF2 schedule for an initial-state parameter. Accepted only under `if2`: every other method refuses the config at load, since it would read the flag nowhere. Required by `ic_free` unless the model's `init { }` declares a law, which supplies the same t=0 spread. |
+| `rw_sd`              | float        | auto-scaled from bounds       | IF2 per-parameter random-walk SD, on the natural scale; `pmmh`/`mh` also read it for the initial proposal SD.                                                                                                                                                                                                            |
 
 An entry with no fields at all (`beta = {}`) is legal: it means "estimate this,
 take everything from the model."
@@ -5895,19 +5895,21 @@ classified into two temporal kinds (`observation.rs:47` `temporal_kind`). The
 classification is **derived from the variant, never stored** — an
 independently-stored kind could only ever disagree.
 
-| DSL surface                                                                                             | IR variant            | Temporal kind |
-| ------------------------------------------------------------------------------------------------------- | --------------------- | ------------- |
-| `incidence(tr)` on an unstratified/one-cell transition, or `incidence(tr[a])`                           | `cumulative_flow`     | Interval      |
-| `sum(a in dim, incidence(tr[a]))`                                                                       | `cumulative_flow_sum` | Interval      |
-| `prevalence(X[cell])`, or a bare `prevalence(X)` on an unstratified compartment                         | `current_pop`         | Instant       |
-| bare `prevalence(X)` on a **stratified** compartment                                                    | `current_pop_sum`     | Instant       |
-| any expression over state — `X1 + X2`, `I / (S+I+R)`, a `let` reference, several `prevalence` arguments | `derived_expr`        | Instant       |
+| DSL surface                                                                                                          | IR variant            | Temporal kind |
+| -------------------------------------------------------------------------------------------------------------------- | --------------------- | ------------- |
+| `incidence(tr)` on an unstratified/one-cell transition, or `incidence(tr[a])`                                        | `cumulative_flow`     | Interval      |
+| `sum(a in dim, incidence(tr[a]))`                                                                                    | `cumulative_flow_sum` | Interval      |
+| `X[cell]`, or a bare `X` on an unstratified compartment                                                              | `current_pop`         | Instant       |
+| bare `X` on a **stratified** compartment                                                                             | `current_pop_sum`     | Instant       |
+| any expression over state — `X1 + X2`, `I / (S+I+R)`, `prevalence(of = I[a], among = N_local[a])`, a `let` reference | `derived_expr`        | Instant       |
 
 Verified against the compiler on a two-stratum (`age = [child, adult]`) SIR:
 
 ```
-projected = prevalence(I)                          → current_pop_sum ['I_child', 'I_adult']
-projected = prevalence(I[child])                   → current_pop     I_child
+projected = I                                      → current_pop_sum ['I_child', 'I_adult']
+projected = I[child]                               → current_pop     I_child
+projected = prevalence(of = I[child], among = N_local[child])
+                                                   → derived_expr    pop I_child / binding_ref N_local_child
 projected = sum(a in age, incidence(infection[a])) → cumulative_flow_sum ['infection_child', 'infection_adult']
 projected = I[child] + I[adult]                    → derived_expr
 ```
@@ -5942,21 +5944,27 @@ sum all 2 strata of 'infection' and apply reporting uniformly
 Pooling across strata is a modelling decision, so the compiler makes you state
 it — either `projected = sum(a in age, incidence(infection[a]))` with one
 reporting rate in the likelihood, or an indexed stream `cases[a in age] { … }`
-with `rho[a]`. Bare `prevalence(X)` over a stratified compartment is **not**
-gated the same way: it sums silently, matching how a bare stratified name
-expands to `PopSum` in a rate expression.
+with `rho[a]`. A bare compartment name `X` over a stratified compartment is
+**not** gated the same way: it sums silently, matching how a bare stratified
+name expands to `PopSum` in a rate expression.
 
-**Several `prevalence` arguments desugar to their sum** and lower as
-`derived_expr` — `prevalence(Y1 + Y2)`, `prevalence(X1, X2)`, and the compiler-
-generated forms for a `via erlang` (an `ESum` over the stage axis) or
-`via hyper_erlang` (an Add-chain over branch-stage cells) compartment all take
-this path.
+**A stock as a count needs no operator; a stock as a proportion is
+`prevalence(of = X, among = Y)`.** The proportion form is exactly `X / Y` — the
+same resolution and the same `derived_expr` — plus three checks plain division
+does not get: every cell `of` reads must be one `among` reads (E357; vacuous
+when `among` reads no cell, such as a parameter or a table), both sides must
+collapse the same dimensions (E358), and neither side may read a flow (E359).
+The one-argument `prevalence(X)` and the multi-argument `prevalence(X1, X2)` are
+removed (E356): they returned a count, exactly `X` or `X1 + X2`, under a name
+that promised a proportion. A state expression over several compartments is
+written as one — `projected = Y1 + Y2` — and the compiler-generated forms for a
+`via erlang` (an `ESum` over the stage axis) or `via hyper_erlang` (an Add-chain
+over branch-stage cells) compartment lower the same way.
 
-`incidence` does **not** follow that convention: it projects exactly one flow,
-several arguments is `E203`, and none is `E250` (gh#669). A compartment
-population is an expression leaf, so `prevalence` can sum its arguments as an
-ordinary expression; a flow has no expression leaf naming it, so there is
-nothing for `incidence` to sum into.
+`incidence` projects exactly one flow: several arguments is `E203`, and none is
+`E250` (gh#669). A compartment population is an expression leaf, so state can be
+added as an ordinary expression; a flow has no expression leaf naming it, so
+flows are added term by term (`incidence(a) + incidence(b)`).
 
 `current_pop` / `current_pop_sum` resolve to **integer** compartments
 (`multi_stream_obs.rs:253`). A prevalence projection naming a real-valued
@@ -6016,7 +6024,7 @@ output cadence.** With a weekly output grid and a daily `emit_schedule`:
 ```camdl
 output { trajectories { every = 7 'days } }
 observations {
-  prev { projected = prevalence(I)          emit_schedule = every 1 'days  … }
+  prev { projected = I                      emit_schedule = every 1 'days  … }
   inc  { projected = incidence(infection)   covers = closing_at(time, 1 'days)   emit_schedule = every 1 'days  … }
 }
 ```
@@ -6127,7 +6135,7 @@ and warn when a `neg_binomial` is paired with a snapshot projection:
   2 observation streams: detection, weekly_cases
   observations (2 streams):
     ✓ weekly_cases     incidence(infection)         NegBinomial
-    ✓ detection        prevalence(I)                Bernoulli
+    ✓ detection        I                            Bernoulli
 ```
 
 `camdl pfilter`, `if2`, `mh`, and the NLopt optimizers print only the

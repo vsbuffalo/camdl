@@ -374,7 +374,7 @@ let test_beta_likelihood_compiles () =
     observations {
       positivity {
         columns       { time : time, positivity : real }
-        projected     = prevalence(I)
+        projected     = I
         emit_schedule = every 7 'days
         positivity  ~ beta(mean = projected / N, concentration = phi)
       }
@@ -6557,7 +6557,7 @@ let test_prevalence_on_stratified_compartment () =
     observations {
       in_latent {
         columns       { time : time, in_latent : count }
-        projected  = prevalence(E)
+        projected  = E
         emit_schedule = every 1 'days
         in_latent ~ neg_binomial(mean = projected, r = k)
       }
@@ -6648,7 +6648,7 @@ let test_prevalence_fully_indexed_stratified () =
     observations {
       first_latent {
         columns       { time : time, first_latent : count }
-        projected  = prevalence(E[e1])
+        projected  = E[e1]
         emit_schedule = every 1 'days
         first_latent ~ neg_binomial(mean = projected, r = k)
       }
@@ -6682,7 +6682,7 @@ let test_prevalence_unstratified () =
     observations {
       prev {
         columns       { time : time, prev : count }
-        projected  = prevalence(I)
+        projected  = I
         emit_schedule = every 1 'days
         prev ~ neg_binomial(mean = projected, r = k)
       }
@@ -6853,7 +6853,7 @@ let prevalence_partial_index_src = {|
     observations {
       cases {
         columns       { time : time, cases : count }
-        projected     = prevalence(I[child])
+        projected     = I[child]
         emit_schedule = every 7 'days
         cases ~ neg_binomial(mean = rho * projected, r = k)
       }
@@ -6912,7 +6912,7 @@ let test_prevalence_full_index_still_compiles () =
     observations {
       cases {
         columns       { time : time, cases : count }
-        projected     = prevalence(I[child, north])
+        projected     = I[child, north]
         emit_schedule = every 7 'days
         cases ~ neg_binomial(mean = rho * projected, r = k)
       }
@@ -6938,7 +6938,7 @@ let test_prevalence_bare_unstratified_still_compiles () =
     observations {
       cases {
         columns       { time : time, cases : count }
-        projected     = prevalence(I)
+        projected     = I
         emit_schedule = every 7 'days
         cases ~ neg_binomial(mean = rho * projected, r = k)
       }
@@ -6969,7 +6969,7 @@ let test_prevalence_indexed_stream_still_compiles () =
     observations {
       prev[a in age] {
         columns       { time : time, age : dim, prev : count }
-        projected     = prevalence(I[a])
+        projected     = I[a]
         emit_schedule = every 7 'days
         prev ~ neg_binomial(mean = projected, r = k)
       }
@@ -6978,6 +6978,232 @@ let test_prevalence_indexed_stream_still_compiles () =
   match Compiler.compile ~name:"prev_indexed_stream" src with
   | Error e -> Alcotest.failf "indexed-stream prevalence should compile: %s" e
   | Ok _ -> ()
+
+(* ── Increment D (gh#478): `prevalence(of = …, among = …)` ───────────────────
+   Proposal 2026-07-31-aggregation-semantics §5.2, §9. `prevalence` is safe
+   sugar for a division — `of / among`, same IR — plus a subset check (D2), a
+   matched-collapse check (D3) and a refusal of flow reads (D4); the one- and
+   multi-argument forms are removed with the migration inline (D6). ── *)
+
+(* Every substring must appear in the payload of an error carrying [code]. *)
+let d_expect_all ~code ~contains src =
+  List.iter (fun c -> compile_expect_error_code ~code ~contains:c src) contains
+
+let prev_age_src ?(lets = "") ?(header = "") ?(cols = "") ?(lik = "binomial(n = 100, p = projected)") projected =
+  Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I, R }
+    dimensions { age = [child, adult] }
+    stratify(by = age)
+    let N_local[a in age] = S[a] + I[a] + R[a]
+    %s
+    parameters { beta : rate  gamma : rate }
+    transitions {
+      infection[a in age] : S[a] --> I[a] @ beta * S[a] * sum(b in age, I[b] / N_local[b])
+      recovery[a in age]  : I[a] --> R[a] @ gamma * I[a]
+    }
+    observations {
+      prev%s {
+        columns   { time : time, %sprev : count }
+        projected = %s
+        prev ~ %s
+      }
+    }
+    init { S[child] = 990  S[adult] = 990  I[child] = 10  I[adult] = 10 }
+    simulate { from = 0 'days  to = 30 'days }
+  |} lets header cols projected lik
+
+let prev_projection src =
+  let m = compile_expect_ok src in
+  ((List.hd m.Ir.observations).Ir.projection, m.Ir.bindings)
+
+(* D1: the same resolution as the division, so the same IR. *)
+let test_d1_prevalence_is_the_division () =
+  let p_prev = prev_projection
+      (prev_age_src "prevalence(of = I[child], among = N_local[child])")
+  and p_div = prev_projection (prev_age_src "I[child] / N_local[child]") in
+  Alcotest.(check bool) "prevalence(of, among) lowers exactly as of / among"
+    true (p_prev = p_div);
+  match fst p_prev with
+  | Ir.DerivedExpr (Ir.BinOp { op = Ir.Div; _ }) -> ()
+  | _ -> Alcotest.fail "expected a DerivedExpr division"
+
+(* D2: a numerator outside its denominator. *)
+let test_d2_numerator_outside_denominator_is_e357 () =
+  compile_expect_error_code ~code:"E357" ~contains:"I_child"
+    (prev_age_src "prevalence(of = I[child], among = S[child] + R[child])")
+
+(* D2: a pinned-level mismatch. *)
+let test_d2_pinned_level_mismatch_is_e357 () =
+  compile_expect_error_code ~code:"E357" ~contains:"I_child"
+    (prev_age_src "prevalence(of = I[child], among = N_local[adult])")
+
+(* D2 is vacuous for a denominator that reads no cell — a constant here, a
+   survey table or parameter in a real model (§5.2 "the limits, stated"). *)
+let test_d2_cell_free_denominator_is_not_checked () =
+  ignore (prev_projection (prev_age_src "prevalence(of = I[child], among = 1000.0)"))
+
+(* D5: the subset check runs once per stream row and reports once per site,
+   naming how many rows it fired on and the first. *)
+let test_d5_subset_reports_once_per_site () =
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile ~name:"d5"
+      (prev_age_src ~header:"[a in age]" ~cols:"age : dim, "
+         "prevalence(of = I[a], among = N_local[child])") in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Ok _ -> Alcotest.fail "expected E357"
+  | Error e ->
+    Alcotest.(check int) "one E357 for the one site, not one per row" 1
+      (count_substring ~needle:"\"code\":\"E357\"" e);
+    if not (contains_substring ~needle:"on 1 of 2 stream rows" e) then
+      Alcotest.failf "expected the row tally, got: %s" e;
+    if not (contains_substring ~needle:"a = adult" e) then
+      Alcotest.failf "expected the first affected binding, got: %s" e
+
+let prev_age_patch_src projected =
+  Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult]  patch = [north, south] }
+    stratify(by = age)
+    stratify(by = patch)
+    let N[a in age, p in patch] = S[a, p] + I[a, p]
+    parameters { beta : rate }
+    transitions {
+      infection[a in age, p in patch] : S[a, p] --> I[a, p] @ beta * S[a, p]
+    }
+    observations {
+      prev {
+        columns   { time : time, prev : count }
+        projected = %s
+        prev ~ binomial(n = 100, p = projected)
+      }
+    }
+    init { S[a in age, p in patch] = 100  I[a in age, p in patch] = 1 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} projected
+
+(* D3: §2.7's second motivating case — numerator pooled over age, denominator
+   over age AND patch. The subset check passes it (every numerator cell is in
+   the denominator), so only the collapse comparison catches it. *)
+let test_d3_mismatched_collapse_is_e358 () =
+  compile_expect_error_code ~code:"E358"
+    ~contains:"collapses [age]; the denominator collapses [age, patch]"
+    (prev_age_patch_src
+       "prevalence(of = sum(a in age, I[a, north]), \
+                   among = sum(a in age, sum(q in patch, N[a, q])))")
+
+let test_d3_matched_collapse_compiles () =
+  ignore (compile_expect_ok
+    (prev_age_patch_src
+       "prevalence(of = sum(a in age, I[a, north]), among = sum(a in age, N[a, north]))"))
+
+(* The collapse comparison is a SET: two parallel sums over one axis pool it
+   once. Counting them as a multiset would refuse this correct proportion. *)
+let test_d3_parallel_sums_over_one_axis_compile () =
+  ignore (prev_projection (prev_age_src
+    "prevalence(of = sum(a in age, I[a]) + sum(a in age, R[a]), \
+                among = sum(a in age, N_local[a]))"))
+
+(* The collapse is read through a `let`, so a pooled denominator held in a
+   binding is not a false mismatch. *)
+let test_d3_collapse_read_through_let () =
+  ignore (prev_projection (prev_age_src
+    ~lets:"let N_pool = sum(a in age, N_local[a])"
+    "prevalence(of = sum(a in age, I[a]), among = N_pool)"))
+
+(* D4: a flow read in `of`, directly and through a `let`. *)
+let test_d4_flow_in_numerator_is_e359 () =
+  compile_expect_error_code ~code:"E359" ~contains:"incidence(infection[child])"
+    (prev_age_src
+       "prevalence(of = incidence(infection[child]), among = N_local[child])")
+
+let test_d4_flow_through_let_is_e359 () =
+  compile_expect_error_code ~code:"E359" ~contains:"of = r"
+    (prev_age_src ~lets:"let r = incidence(infection[child])"
+       "prevalence(of = r, among = N_local[child])")
+
+(* D2's `let` walk must terminate on a self-referential `let` (§16 item 4);
+   E201 reports the cycle. *)
+let test_d_cyclic_let_terminates () =
+  match compile_bounded ~name:"d_cycle"
+          (prev_age_src ~lets:"let loopy = loopy + 1.0"
+             "prevalence(of = I[child], among = loopy)") with
+  | None -> Alcotest.fail "compile did not terminate"
+  | Some (Ok _) -> Alcotest.fail "expected E201"
+  | Some (Error _) -> ()
+
+(* D6: the removed forms carry the migration inline, spelled with the
+   modeller's own operand. *)
+let test_d6_single_argument_form_is_removed () =
+  d_expect_all ~code:"E356"
+    ~contains:["`prevalence(I[child])` was removed";
+               "projected = I[child]";
+               "prevalence(of = I[child], among = <denominator>)";
+               "camdl docs language-changes"]
+    (prev_age_src ~lik:"poisson(rate = projected)" "prevalence(I[child])")
+
+let test_d6_multi_argument_form_is_removed () =
+  d_expect_all ~code:"E356"
+    ~contains:["projected = I[child] + R[child]";
+               "prevalence(of = I[child] + R[child], among = <denominator>)"]
+    (prev_age_src ~lik:"poisson(rate = projected)"
+       "prevalence(I[child], R[child])")
+
+(* The hint quotes the operand AS WRITTEN: on a `via erlang` compartment the
+   lowering rewrites `E` to a sum over a generated stage axis, and that axis
+   must not leak into the migration. *)
+let test_d6_hint_quotes_the_surface_operand () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, E, I, R }
+    parameters { beta : rate }
+    transitions {
+      infection : S --> E @ beta * S * I / (S + E + I + R)
+      onset     : E --> I via erlang(stages = 3, mean = 4 'days)
+      recovery  : I --> R @ 0.1 * I
+    }
+    observations {
+      prev {
+        columns   { time : time, prev : count }
+        projected = prevalence(E)
+        prev ~ poisson(rate = projected)
+      }
+    }
+    init { S = 990  I = 10 }
+    simulate { from = 0 'days  to = 30 'days }
+  |} in
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile ~name:"d6_staged" src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Ok _ -> Alcotest.fail "expected E356"
+  | Error e ->
+    if not (contains_substring ~needle:"projected = E\\n" e) then
+      Alcotest.failf "expected the bare operand back, got: %s" e;
+    if contains_substring ~needle:"__" e then
+      Alcotest.failf "the hint leaked a generated stage axis: %s" e
+
+let test_d_missing_denominator_is_e250 () =
+  compile_expect_error_code ~code:"E250" ~contains:"among"
+    (prev_age_src "prevalence(of = I[child])")
+
+let test_d_unknown_argument_is_e251 () =
+  compile_expect_error_code ~code:"E251" ~contains:"'over'"
+    (prev_age_src "prevalence(of = I[child], over = N_local[child])")
+
+(* D7: the proportion is dimensionless, so a count-slot likelihood refuses it
+   (E304) and a probability slot accepts it — the dimension change the
+   language-changes entry calls out as a manual migration. *)
+let test_d7_proportion_into_a_count_slot_is_e304 () =
+  Compiler.no_dim_check := false;
+  Fun.protect ~finally:(fun () -> Compiler.no_dim_check := true) (fun () ->
+    compile_expect_error_code ~code:"E304" ~contains:"Poisson"
+      (prev_age_src ~lik:"poisson(rate = projected)"
+         "prevalence(of = I[child], among = N_local[child])");
+    ignore (prev_projection (prev_age_src
+      "prevalence(of = I[child], among = N_local[child])")))
 
 (* The pooled-column form the gate directs the modeller to. It expands to the
    IDENTICAL CumulativeFlowSum the bare form used to produce — the reporting
@@ -7720,38 +7946,6 @@ let test_gh669_no_argument_diagnostic_does_not_name_the_sentinel () =
       (Printf.sprintf "no diagnostic names the '?' sentinel, got: %s" e)
       false (contains_substring ~needle:"'?'" e)
 
-(* Negative control, the sibling head: several positional arguments to
-   `prevalence(...)` still desugar to their sum. The gh#669 fix tightens
-   `incidence` only; the two heads differ because a compartment population is
-   an expression leaf and a flow is not. *)
-let test_gh669_prevalence_several_compartments_still_sums () =
-  let src = {|
-    time_unit = 'days
-    compartments { S, I, R, D }
-    parameters { beta : rate  gamma : rate  mu : rate }
-    transitions {
-      infection : S --> I @ beta * S
-      recovery  : I --> R @ gamma * I
-      death     : I --> D @ mu * I
-    }
-    observations {
-      ever_left_I {
-        columns   { time : time, ever_left_I : count }
-        projected = prevalence(R, D)
-        ever_left_I ~ poisson(rate = projected)
-      }
-    }
-    init { S = 999  I = 1 }
-    simulate { from = 0 'days  to = 10 'days }
-  |} in
-  match Compiler.compile ~name:"gh669_prev_sum" src with
-  | Error e -> Alcotest.failf "prevalence(R, D) must still sum: %s" e
-  | Ok m ->
-    (match (List.hd m.Ir.observations).Ir.projection with
-     | Ir.DerivedExpr (Ir.PopSum names) ->
-       Alcotest.(check (list string)) "sums both compartments" ["R"; "D"] names
-     | _ -> Alcotest.fail "expected a DerivedExpr PopSum over R and D")
-
 (* A bare, un-indexed `incidence(tr)` naming a STRATIFIED family under an
    INDEXED stream reaches the single-positional arm and is expanded as a family
    — so it is diagnosed by the aggregation rule (E280, gh#677), not mistaken
@@ -7779,19 +7973,19 @@ let test_gh669_bare_incidence_on_family_reaches_the_aggregation_rule () =
   compile_expect_error_code ~code:"E280"
     ~contains:"would be scored against the sum of all 2 strata" src
 
-(* ── Projection dispatch: every argument shape must lower, or diagnose ──────
-   `prevalence(...)` / `incidence(...)` dispatch on the SHAPE of their argument
+(* ── Projection dispatch: every state shape must lower, or diagnose ────────
+   A state projection used to be dispatched on the SHAPE of its expression
    (`EIdent` / `EIndex`); every other shape fell to a catch-all that emitted the
    sentinel name `"?"`, which then failed the reference check as
    `E503: unknown compartment referenced: '?'` — a diagnostic that names nothing
-   the user wrote. Three distinct shapes reach it, and all three are legitimate
-   models:
+   the user wrote. Three distinct shapes reach a state projection, and all three
+   are legitimate models:
 
-     · `via erlang` rewrites the argument to `ESum` (sum_staged_refs)
+     · `via erlang` rewrites a reference to `ESum` (sum_staged_refs)
      · `via hyper_erlang` rewrites it to an `EBinOp` Add-chain (sum_hyper_refs)
-     · a user-written arithmetic argument, e.g. `prevalence(Y1[a] + Y2[a])`
+     · a user-written arithmetic projection, e.g. `projected = Y1[a] + Y2[a]`
 
-   The fix is shape-agnostic: resolve the argument as an ordinary expression.  *)
+   Each must resolve as an ordinary expression.  *)
 
 let staged_and_stratified_seir obs_block =
   (* `E` is BOTH user-stratified (age) and staged (`via erlang`), so its
@@ -7813,7 +8007,7 @@ let staged_and_stratified_seir obs_block =
     simulate { from = 0 'days  to = 50 'days }
   |} ^ obs_block
 
-(* gh#478: `prevalence(E[child])` on a compartment that is both user-stratified
+(* gh#478: `projected = E[child]` on a compartment that is both user-stratified
    AND staged. This is NOT a partial index — `[child]` names every REPORTABLE
    dimension; the staging pass has rewritten the argument to
    `sum(s in __onset_stage, E[child, s])`, an `ESum`. It must lower to the sum
@@ -7823,7 +8017,7 @@ let test_prevalence_indexed_cell_on_staged_stratified_compartment () =
     observations {
       child_prev {
         columns       { time : time, child_prev : count }
-        projected     = prevalence(E[child])
+        projected     = E[child]
         emit_schedule = every 7 'days
         child_prev ~ neg_binomial(mean = rho * projected, r = k)
       }
@@ -7831,7 +8025,7 @@ let test_prevalence_indexed_cell_on_staged_stratified_compartment () =
   |} in
   match Compiler.compile ~name:"prev_staged_cell" src with
   | Error e ->
-    Alcotest.failf "prevalence(E[child]) on a staged+stratified E should \
+    Alcotest.failf "projected = E[child] on a staged+stratified E should \
                     compile (stages pool); got: %s" e
   | Ok m ->
     let names = match (List.hd m.Ir.observations).Ir.projection with
@@ -7864,7 +8058,7 @@ let test_prevalence_bare_on_hyper_erlang_pools_branch_stages () =
     observations {
       prev {
         columns       { time : time, prev : count }
-        projected     = prevalence(I)
+        projected     = I
         emit_schedule = every 7 'days
         prev ~ neg_binomial(mean = rho * projected, r = k)
       }
@@ -7874,7 +8068,7 @@ let test_prevalence_bare_on_hyper_erlang_pools_branch_stages () =
   |} in
   match Compiler.compile ~name:"prev_hyper" src with
   | Error e ->
-    Alcotest.failf "gh#487: bare prevalence on a hyper_erlang-staged \
+    Alcotest.failf "gh#487: a bare state projection on a hyper_erlang-staged \
                     compartment must pool its branch stages, not E503 on '?'; \
                     got: %s" e
   | Ok m ->
@@ -7889,9 +8083,8 @@ let test_prevalence_bare_on_hyper_erlang_pools_branch_stages () =
           Alcotest.failf "expected branch-stage cell %s in projection: %s" cell json)
       ["I__fatal__1"; "I__fatal__3"; "I__recover__1"; "I__recover__3"]
 
-(* An arithmetic argument is the third shape reaching the catch-all. This is the
-   form the committed fixture `docs/dev/proposals/fixtures/garki_post_proposal.camdl`
-   uses, and it fails to compile today. *)
+(* An arithmetic projection is the third shape. It is the form the committed
+   fixture `docs/dev/proposals/fixtures/garki_post_proposal.camdl` uses. *)
 let test_prevalence_arithmetic_argument_resolves_as_expression () =
   let src = {|
     time_unit = 'days
@@ -7906,7 +8099,7 @@ let test_prevalence_arithmetic_argument_resolves_as_expression () =
     observations {
       prev {
         columns       { time : time, prev : count }
-        projected     = prevalence(Y1 + Y2)
+        projected     = Y1 + Y2
         emit_schedule = every 7 'days
         prev ~ neg_binomial(mean = rho * projected, r = k)
       }
@@ -7916,7 +8109,7 @@ let test_prevalence_arithmetic_argument_resolves_as_expression () =
   |} in
   match Compiler.compile ~name:"prev_arith" src with
   | Error e ->
-    Alcotest.failf "prevalence(Y1 + Y2) must resolve as an expression; got: %s" e
+    Alcotest.failf "projected = Y1 + Y2 must resolve as an expression; got: %s" e
   | Ok m ->
     let json = Yojson.Safe.to_string
         (Serde.projection_to_json (List.hd m.Ir.observations).Ir.projection) in
@@ -7926,43 +8119,6 @@ let test_prevalence_arithmetic_argument_resolves_as_expression () =
         if not (contains_substring ~needle:cell json) then
           Alcotest.failf "expected %s in projection: %s" cell json)
       ["Y1"; "Y2"]
-
-(* The multi-argument form is DOCUMENTED (`docs/camdl-run-spec.md` §14.1) and
-   was specified to desugar to the sum of its arguments, but the dispatch read
-   only the FIRST positional argument via `List.assoc_opt ""` and silently
-   discarded the rest — a documented syntax that fits against the wrong
-   quantity, with the dropped compartment absorbed into rho. *)
-let test_prevalence_multi_arg_sums_all_arguments () =
-  let src = {|
-    time_unit = 'days
-    compartments { S, Y1, Y2, R }
-    parameters { beta : rate  r1 : rate  r2 : rate
-                 rho : probability  k : positive }
-    transitions {
-      infection : S  --> Y1 @ beta * S * Y1 / 1000.0
-      prog      : Y1 --> Y2 @ r1 * Y1
-      clear     : Y2 --> R  @ r2 * Y2
-    }
-    observations {
-      prev {
-        columns       { time : time, prev : count }
-        projected     = prevalence(Y1, Y2)
-        emit_schedule = every 7 'days
-        prev ~ neg_binomial(mean = rho * projected, r = k)
-      }
-    }
-    init { S = 990  Y1 = 10 }
-    simulate { from = 0 'days  to = 50 'days }
-  |} in
-  match Compiler.compile ~name:"prev_multi" src with
-  | Error e -> Alcotest.failf "prevalence(Y1, Y2) should compile: %s" e
-  | Ok m ->
-    let json = Yojson.Safe.to_string
-        (Serde.projection_to_json (List.hd m.Ir.observations).Ir.projection) in
-    if not (contains_substring ~needle:"Y2" json) then
-      Alcotest.failf
-        "prevalence(Y1, Y2) silently dropped Y2 — the second argument must be \
-         summed, not discarded: %s" json
 
 (* Named-indexed incidence pins the named dimension, order-independent. *)
 let test_incidence_named_indexed_pins_one_stratum () =
@@ -8077,7 +8233,7 @@ let test_poisson_rate_kwarg_parses () =
     observations {
       in_bed {
         columns       { time : time, in_bed : count }
-        projected = prevalence(I)
+        projected = I
         emit_schedule = every 1 'days
         in_bed ~ poisson(rate = projected)
       }
@@ -8105,7 +8261,7 @@ let test_poisson_positional_errors () =
     observations {
       in_bed {
         columns       { time : time, in_bed : count }
-        projected = prevalence(I)
+        projected = I
         emit_schedule = every 1 'days
         in_bed ~ poisson(projected)
       }
@@ -8130,7 +8286,7 @@ let test_likelihood_unknown_kwarg_errors () =
     observations {
       in_bed {
         columns       { time : time, in_bed : count }
-        projected = prevalence(I)
+        projected = I
         emit_schedule = every 1 'days
         in_bed ~ poisson(lambda = projected)
       }
@@ -8162,7 +8318,7 @@ let survey_positivity_model lik =
     observations {
       survey {
         columns   { time : time, pos : count, tested : count }
-        projected = prevalence(I)
+        projected = I
         %s
       }
     }
@@ -9011,7 +9167,7 @@ let test_diagnostic_test_parses () =
     observations {
       slide_positivity {
         columns       { time : time, slide_positivity : count }
-        projected = prevalence(I)
+        projected = I
         emit_schedule = every 1 'weeks
         slide_positivity ~ diagnostic_test(
           base = binomial(n = N_tested, p = projected),
@@ -9049,7 +9205,7 @@ let test_diagnostic_test_equivalence () =
     observations {
       slide_positivity {
         columns       { time : time, slide_positivity : count }
-        projected = prevalence(I)
+        projected = I
         emit_schedule = every 1 'weeks
         slide_positivity ~ diagnostic_test(
           base = binomial(n = N_tested, p = projected),
@@ -9078,7 +9234,7 @@ let test_diagnostic_test_equivalence () =
     observations {
       slide_positivity {
         columns       { time : time, slide_positivity : count }
-        projected = prevalence(I)
+        projected = I
         emit_schedule = every 1 'weeks
         slide_positivity ~ binomial(
           n = N_tested,
@@ -9116,7 +9272,7 @@ let test_diagnostic_test_bernoulli () =
     observations {
       any_positive {
         columns       { time : time, any_positive : count }
-        projected = prevalence(I)
+        projected = I
         emit_schedule = every 1 'days
         any_positive ~ diagnostic_test(
           base = bernoulli(p = projected),
@@ -9145,7 +9301,7 @@ let test_diagnostic_test_bad_base () =
     observations {
       cases {
         columns       { time : time, cases : count }
-        projected = prevalence(I)
+        projected = I
         emit_schedule = every 1 'weeks
         cases ~ diagnostic_test(
           base = poisson(rate = projected),
@@ -9171,7 +9327,7 @@ let test_diagnostic_test_missing_kwargs () =
     observations {
       cases {
         columns       { time : time, cases : count }
-        projected = prevalence(I)
+        projected = I
         emit_schedule = every 1 'weeks
         cases ~ diagnostic_test(
           base = binomial(n = N_tested, p = projected),
@@ -14101,7 +14257,7 @@ let test_prevalence_stream_declares_nothing_and_compiles () =
      mirror image. *)
   let m = compile_expect_ok (covers_model_with {|  prev {
     columns       { time : time, prev : count }
-    projected     = prevalence(I)
+    projected     = I
     emit_schedule = every 1 'days
     prev          ~ poisson(rate = projected)
   }|}) in
@@ -14112,7 +14268,7 @@ let test_covers_on_a_prevalence_stream_is_rejected () =
     (covers_model_with {|  prev {
     columns   { time : time, prev : count }
     covers    = day(time)
-    projected = prevalence(I)
+    projected = I
     prev      ~ poisson(rate = projected)
   }|})
 
@@ -14120,7 +14276,7 @@ let test_window_columns_on_a_prevalence_stream_are_rejected () =
   compile_expect_error_code ~code:"E348" ~contains:"instant"
     (covers_model_with {|  prev {
     columns   { a : window_start, b : window_stop, prev : count }
-    projected = prevalence(I)
+    projected = I
     prev      ~ poisson(rate = projected)
   }|})
 
@@ -14130,7 +14286,7 @@ let test_window_columns_on_a_prevalence_stream_are_rejected () =
    `FlowRatio`, is interval-valued (so `covers` is required and E348 never
    fires), and is dimensionless (so it pairs with the proportion families and
    a count family refuses it). The instant spelling — a ratio of transition
-   rates — is E352 unless written `prevalence(...)`. *)
+   rates — is E352 unless written `prevalence(of = ..., among = ...)`. *)
 
 let sihd_with_obs ?(extra = "") obs_block =
   Printf.sprintf {|
@@ -14320,7 +14476,7 @@ let test_e352_names_the_window_spelling () =
     (sihd_with_obs (comm_frac_stream ~covers:"" rate_ratio))
 
 let test_e352_names_the_instant_spelling () =
-  compile_expect_error_code ~code:"E352" ~contains:"prevalence("
+  compile_expect_error_code ~code:"E352" ~contains:"prevalence(of = "
     (sihd_with_obs (comm_frac_stream ~covers:"" rate_ratio))
 
 let test_e352_names_the_transitions () =
@@ -14342,13 +14498,13 @@ let test_rate_ratio_through_a_let_is_e352 () =
     (sihd_with_obs ~extra:(Printf.sprintf "let frac = %s" rate_ratio)
        (comm_frac_stream ~covers:"" "frac"))
 
-(* `prevalence(<expr>)` is the explicit instant spelling and costs one word. *)
+(* `prevalence(of = ..., among = ...)` is the explicit instant spelling. *)
 let test_prevalence_of_a_rate_ratio_is_the_explicit_instant_form () =
   let m = compile_expect_ok (sihd_with_obs (comm_frac_stream ~covers:""
-    (Printf.sprintf "prevalence(%s)" rate_ratio))) in
+    "prevalence(of = mu_c * I, among = mu_c * I + mu_f * H)")) in
   match (List.hd m.observations).projection with
   | Ir.DerivedExpr _ -> ()
-  | _ -> Alcotest.fail "prevalence(<expr>) lowers to a derived instant reading"
+  | _ -> Alcotest.fail "prevalence(of, among) lowers to a derived instant reading"
 
 (* A ratio of two prevalences (`I / N`) mentions no transition rate and is
    the ordinary proportion projection; E352 has no false positive on it. *)
@@ -15284,10 +15440,10 @@ let () =
       Alcotest.test_case "E235 half_normal(sigma=0)"                     `Quick test_e235_half_normal_zero_sigma;
     ];
     "observation_projections", [
-      Alcotest.test_case "prevalence(E) sums Erlang substages"           `Quick test_prevalence_on_stratified_compartment;
+      Alcotest.test_case "bare E sums declared-stage strata"           `Quick test_prevalence_on_stratified_compartment;
       Alcotest.test_case "bare E in projected sums Erlang substages"     `Quick test_projected_bare_stratified_compartment;
-      Alcotest.test_case "prevalence(E[e1]) picks single stratum"        `Quick test_prevalence_fully_indexed_stratified;
-      Alcotest.test_case "prevalence(I) unstratified is unchanged"       `Quick test_prevalence_unstratified;
+      Alcotest.test_case "E[e1] picks single stratum"        `Quick test_prevalence_fully_indexed_stratified;
+      Alcotest.test_case "bare I unstratified is unchanged"       `Quick test_prevalence_unstratified;
       Alcotest.test_case "E280: bare incidence(infection) on stratified model rejected" `Quick test_incidence_unindexed_cross_strata_is_rejected;
       Alcotest.test_case "E280: bare family on an indexed stream rejected (gh#677)" `Quick test_gh677_indexed_stream_bare_family_is_rejected;
       Alcotest.test_case "E280: partially indexed stream hint sums the rest (gh#677)" `Quick test_gh677_partially_indexed_stream_hint_sums_the_rest;
@@ -15298,6 +15454,24 @@ let () =
       Alcotest.test_case "fully-indexed prevalence still compiles (gh#478)" `Quick test_prevalence_full_index_still_compiles;
       Alcotest.test_case "bare prevalence on unstratified still compiles (gh#478)" `Quick test_prevalence_bare_unstratified_still_compiles;
       Alcotest.test_case "indexed-stream prevalence still compiles (gh#478)" `Quick test_prevalence_indexed_stream_still_compiles;
+      Alcotest.test_case "D1: prevalence(of, among) lowers as of / among" `Quick test_d1_prevalence_is_the_division;
+      Alcotest.test_case "D2: numerator outside denominator is E357" `Quick test_d2_numerator_outside_denominator_is_e357;
+      Alcotest.test_case "D2: pinned-level mismatch is E357" `Quick test_d2_pinned_level_mismatch_is_e357;
+      Alcotest.test_case "D2: a cell-free denominator is not checked" `Quick test_d2_cell_free_denominator_is_not_checked;
+      Alcotest.test_case "D5: E357 reports once per site with a row tally" `Quick test_d5_subset_reports_once_per_site;
+      Alcotest.test_case "D3: mismatched collapse is E358" `Quick test_d3_mismatched_collapse_is_e358;
+      Alcotest.test_case "D3: matched collapse compiles" `Quick test_d3_matched_collapse_compiles;
+      Alcotest.test_case "D3: parallel sums over one axis compile" `Quick test_d3_parallel_sums_over_one_axis_compile;
+      Alcotest.test_case "D3: collapse read through a let" `Quick test_d3_collapse_read_through_let;
+      Alcotest.test_case "D4: a flow in of is E359" `Quick test_d4_flow_in_numerator_is_e359;
+      Alcotest.test_case "D4: a flow through a let is E359" `Quick test_d4_flow_through_let_is_e359;
+      Alcotest.test_case "D: a cyclic let reached from prevalence terminates" `Quick test_d_cyclic_let_terminates;
+      Alcotest.test_case "D6: prevalence(X) is removed, migration inline" `Quick test_d6_single_argument_form_is_removed;
+      Alcotest.test_case "D6: prevalence(X1, X2) is removed, migration inline" `Quick test_d6_multi_argument_form_is_removed;
+      Alcotest.test_case "D6: the hint quotes the surface operand" `Quick test_d6_hint_quotes_the_surface_operand;
+      Alcotest.test_case "D: a missing denominator is E250" `Quick test_d_missing_denominator_is_e250;
+      Alcotest.test_case "D: an unknown argument is E251" `Quick test_d_unknown_argument_is_e251;
+      Alcotest.test_case "D7: a proportion into a count slot is E304" `Quick test_d7_proportion_into_a_count_slot_is_e304;
       Alcotest.test_case "explicit sum(a in age, incidence(infection[a])) → flow sum" `Quick test_incidence_explicit_sum_compiles_to_flow_sum;
       Alcotest.test_case "B1a: incidence(a) + incidence(b) → flow sum" `Quick test_incidence_addition_lowers_to_flow_sum;
       Alcotest.test_case "B1a: sum(...) + incidence(...) flattens" `Quick test_incidence_addition_flattens_with_family_sum;
@@ -15339,7 +15513,6 @@ let () =
       Alcotest.test_case "gh#669: incidence() with no transition is rejected" `Quick test_gh669_incidence_with_no_argument_is_rejected;
       Alcotest.test_case "gh#669: incidence() rejects a keyword argument" `Quick test_gh669_incidence_keyword_argument_is_rejected;
       Alcotest.test_case "gh#669: no diagnostic names the '?' sentinel" `Quick test_gh669_no_argument_diagnostic_does_not_name_the_sentinel;
-      Alcotest.test_case "gh#669: prevalence(R, D) still sums" `Quick test_gh669_prevalence_several_compartments_still_sums;
       Alcotest.test_case "gh#669: bare incidence on a family reaches E280" `Quick test_gh669_bare_incidence_on_family_reaches_the_aggregation_rule;
       Alcotest.test_case "nested sum over 2 dims → flow sum (E280 pooled form)" `Quick test_incidence_nested_sum_over_two_dims_compiles_to_flow_sum;
       Alcotest.test_case "aggregation sum honours its where guard" `Quick test_incidence_sum_honours_where_guard;
@@ -15354,10 +15527,9 @@ let () =
       Alcotest.test_case "E263: unknown dimension in a PROJECTION sum (gh#488)" `Quick test_unknown_dimension_in_projection_sum_is_rejected;
       Alcotest.test_case "declared axis in a projection sum still lowers to the flow sum" `Quick test_declared_dimension_in_projection_sum_compiles;
       Alcotest.test_case "a where guard that empties the domain still compiles" `Quick test_empty_guard_domain_still_compiles;
-      Alcotest.test_case "prevalence(E[child]) on staged+stratified E pools that stratum's stages (gh#478)" `Quick test_prevalence_indexed_cell_on_staged_stratified_compartment;
-      Alcotest.test_case "prevalence(I) on hyper_erlang pools branch stages (gh#487)" `Quick test_prevalence_bare_on_hyper_erlang_pools_branch_stages;
-      Alcotest.test_case "prevalence(Y1 + Y2) resolves as an expression" `Quick test_prevalence_arithmetic_argument_resolves_as_expression;
-      Alcotest.test_case "prevalence(Y1, Y2) sums both args, drops none" `Quick test_prevalence_multi_arg_sums_all_arguments;
+      Alcotest.test_case "E[child] on staged+stratified E pools that stratum's stages (gh#478)" `Quick test_prevalence_indexed_cell_on_staged_stratified_compartment;
+      Alcotest.test_case "bare I on hyper_erlang pools branch stages (gh#487)" `Quick test_prevalence_bare_on_hyper_erlang_pools_branch_stages;
+      Alcotest.test_case "projected = Y1 + Y2 resolves as an expression" `Quick test_prevalence_arithmetic_argument_resolves_as_expression;
       Alcotest.test_case "incidence(infection[age=adult]) named index"   `Quick test_incidence_named_indexed_pins_one_stratum;
       Alcotest.test_case "incidence(infection) unstratified unchanged"   `Quick test_incidence_unstratified;
       Alcotest.test_case "let-bound projected inlines (not E507)"        `Quick test_let_bound_projection_inlines;

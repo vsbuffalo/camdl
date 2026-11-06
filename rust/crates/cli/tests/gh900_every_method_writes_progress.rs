@@ -122,7 +122,7 @@ transitions {
 observations {
   cases {
     columns       { time : time, cases : count }
-    projected     = prevalence(I)
+    projected     = I
     emit_schedule = every 1 'days
     cases ~ poisson(rate = projected)
   }
@@ -261,7 +261,7 @@ N0 = 1000
 
 // ── Claim 2: a failed PGAS stage says why ────────────────────────────────────
 
-/// The same SIR, observed as `binomial(n = prevalence(I), p = 0.5)`. `n` is
+/// The same SIR, observed as `binomial(n = projected, p = 0.5)` with `projected = I`. `n` is
 /// bounded by the reachable `I`, so an observed count far above the population
 /// scores `-inf` at every particle and every θ (`obs_loglik`'s `k > n` branch),
 /// and under `starts = "single"` — a point rule, which permits no redraw — the
@@ -282,7 +282,7 @@ transitions {
 observations {
   cases {
     columns       { time : time, cases : count }
-    projected     = prevalence(I)
+    projected     = I
     emit_schedule = every 1 'days
     cases ~ binomial(n = projected, p = 0.5)
   }

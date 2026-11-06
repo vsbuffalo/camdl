@@ -233,11 +233,11 @@ And the invariant worth memorising:
 A trajectory or observation row holds quantities of both kinds, and they refer
 to different things:
 
-| column                                          | what the row's time means                                                                                                    |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| compartment state (`S`, `I`), `prevalence(...)` | the value **at** that instant                                                                                                |
-| trajectory flow (`flow_*`)                      | the total over `[t_start, t_stop)`, which the row states beside `t` — `t_stop` is `t`, `t_start` the previous row's          |
-| observation `incidence(...)`                    | the total over the period the stream's `covers` assigns to the label — `[D−Δ, D)` under `closing_at`, `[D, D+1)` under `day` |
+| column                                                        | what the row's time means                                                                                                    |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| compartment state (`S`, `I`), `prevalence(of = …, among = …)` | the value **at** that instant                                                                                                |
+| trajectory flow (`flow_*`)                                    | the total over `[t_start, t_stop)`, which the row states beside `t` — `t_stop` is `t`, `t_start` the previous row's          |
+| observation `incidence(...)`                                  | the total over the period the stream's `covers` assigns to the label — `[D−Δ, D)` under `closing_at`, `[D, D+1)` under `day` |
 
 ```
 t  t_start  t_stop  date        date_start  date_stop   S      I    flow_infection

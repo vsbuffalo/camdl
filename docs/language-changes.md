@@ -13,6 +13,48 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-06 — `prevalence(X)` is removed; `prevalence(of = …, among = …)` is a checked proportion
+
+**What.** `prevalence(X)` returned exactly `X` — the same projection, a count —
+under a name that promised a proportion, and `prevalence(X1, X2)` returned
+`X1 + X2`. Both forms are removed (**E356**). `prevalence` now takes two keyword
+arguments and means the proportion: `prevalence(of = X, among = Y)` is `X / Y`,
+the same value and IR, plus three checks plain division does not get — every
+cell `of` reads must be one `among` reads (**E357**), both sides must collapse
+the same dimensions (**E358**), and neither side may read a flow (**E359**).
+Plain division stays legal and unchecked. `prevalence` has no pooling argument:
+`sum` pools, on each side.
+
+**Migration — mechanical, IR-identical.** Drop the call; the value and the IR
+are unchanged:
+
+- `projected = prevalence(I)` → `projected = I`
+- `projected = prevalence(I[child])` → `projected = I[child]`
+- `projected = prevalence(Y1, Y2)` → `projected = Y1 + Y2`
+
+**Migration — the proportion form changes the projection's dimension, and is a
+modelling decision.** Rewriting `prevalence(I)` as
+`prevalence(of = I, among = N)` is not the same stream: a count becomes a
+dimensionless fraction, so every likelihood argument that reads `projected` must
+be rechecked. A proportion into a count family (`poisson(rate = …)`,
+`neg_binomial(mean = …)`) is **E304**; it belongs in a probability slot —
+`binomial(n = tested, p = projected)`, `beta_binomial`, `beta(mean = …)` or
+`bernoulli(p = …)` — and the `n` the data supplies is the number tested, not the
+model's population. Which likelihood the stream should have is a judgment about
+the surveillance system, so this cannot be applied mechanically: keep the count
+form when the data are counts, and move to the proportion only when the column
+is a proportion (or a positives-out-of-tested count).
+
+**Diagnostic.**
+
+```text
+error[E356]: observation 'prev': `prevalence(I)` was removed — it returned a count, not a proportion
+  = hint: for the same value, drop the call:
+              projected = I
+          for an actual proportion, name the denominator:
+              projected = prevalence(of = I, among = <denominator>)
+```
+
 ## 2026-11-05 — an indexed transition family whose members are identical is refused
 
 **What.** Every member of an indexed transition family is its own flow. A family

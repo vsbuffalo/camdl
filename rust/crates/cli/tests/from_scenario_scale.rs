@@ -43,7 +43,7 @@ transitions {
 observations {
   prev {
     columns   { time : time, prev : count }
-    projected = prevalence(I)
+    projected = I
     prev      ~ neg_binomial(mean = projected, r = k)
   }
 }

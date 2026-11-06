@@ -57,7 +57,7 @@ const BURN_IN: usize = 400;
 
 /// SIR with a weakly-informative `~` prior on beta; gamma + N0 fixed. R0 ≈ 2.7
 /// over 60 days gives a clear epidemic, so the observations identify beta well.
-/// `projected` selects the observation projection (`prevalence(I)` or
+/// `projected` selects the observation projection (the state `I` or
 /// `incidence(infection)`), which is the only thing the two recovery tests
 /// differ in. Returns the compiled IR path.
 fn write_model_proj(dir: &Path, camdl: &Path, projected: &str, integ: &str) -> PathBuf {
@@ -231,7 +231,7 @@ burn_in = {burn_in}
 
 #[test]
 fn mh_ode_recovers_known_beta() {
-    let Some((mean, out, _tmp, stderr)) = recover_beta("recovery", "prevalence(I)") else { return };
+    let Some((mean, out, _tmp, stderr)) = recover_beta("recovery", "I") else { return };
 
     assert!(mean.is_finite() && (0.05..=5.0).contains(&mean),
         "posterior beta mean {mean} not finite/in-bounds");
@@ -317,7 +317,7 @@ fn mh_ode_recovers_known_beta_from_incidence() {
 fn mh_ode_recovers_known_beta_rk45() {
     let Some((mean, _out, _tmp, _)) = recover_beta_integ(
         "recovery_rk45",
-        "prevalence(I)",
+        "I",
         "integrator = rk45 { atol = 1e-8  rtol = 1e-6 }",
     ) else { return };
 

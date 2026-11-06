@@ -109,7 +109,7 @@ observations {
   }
   confirmations {
     columns       { time : time, confirmations : count }
-    projected     = prevalence(I)
+    projected     = I
     emit_schedule = every 1 'days
     confirmations ~ poisson(rate = projected)
   }
@@ -134,7 +134,7 @@ transitions {
 observations {
   confirmations {
     columns       { time : time, confirmations : count }
-    projected     = prevalence(I)
+    projected     = I
     emit_schedule = every 1 'days
     confirmations ~ poisson(rate = projected)
   }

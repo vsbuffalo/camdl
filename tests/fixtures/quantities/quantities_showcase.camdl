@@ -43,7 +43,7 @@ init {
 observations {
   cases {
     columns       { time : time, cases : count }
-    projected     = prevalence(I[a])
+    projected     = I[a]
     emit_schedule = every 14 'days
     cases         ~ neg_binomial(mean = rho * projected, r = k)
   }

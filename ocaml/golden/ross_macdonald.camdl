@@ -94,7 +94,7 @@ observations {
   # handled by the compiler (wave 1 / malaria #4).
   slide_positivity {
     columns       { time : time, slide_positivity : count }
-    projected     = prevalence(I_h)
+    projected     = I_h
     emit_schedule = every 1 'weeks
     slide_positivity ~ diagnostic_test(
       base = binomial(n = N_tested, p = projected / H),

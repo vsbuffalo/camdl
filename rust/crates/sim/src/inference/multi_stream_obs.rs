@@ -533,7 +533,7 @@ mod real_state_projection_tests {
         assert!(err.contains("'W'") && err.contains("gh#681"), "{err}");
     }
 
-    /// A Poisson observation of `prevalence(I)` whose `rate` is `rate_expr`.
+    /// A Poisson observation of the state `I` whose `rate` is `rate_expr`.
     fn poisson_obs(rate_expr: Expr) -> ir::observation::ObservationModel {
         use ir::observation::{ColumnRole, Likelihood, ObsColumn, PoissonLikelihood};
         ir::observation::ObservationModel {
@@ -1420,7 +1420,7 @@ impl Period {
 
 /// When a stream's observations happen (gh#833). The variant is fixed by the
 /// stream's projection: an accumulating projection (`incidence(...)`,
-/// `FlowSum`) reads an interval, a state read (`prevalence(...)`) reads an
+/// `FlowSum`) reads an interval, a state read (`projected = I`) reads an
 /// instant. `bind` rejects a variant that disagrees with the projection.
 ///
 /// There is no variant for an interval stream that has not said what its rows

@@ -311,8 +311,9 @@ Two traps that follow:
   (`mu_c * I / (mu_c * I + mu_f * H)`) is a different quantity — the hazard
   share at one instant, which sat 7–27 % below the window fraction on a
   simulated epidemic — and the compiler refuses it (E352) unless it is spelled
-  `prevalence(...)`. A weekly ratio and a weekly count over its denominator are
-  two streams and two pieces of evidence, not a double count.
+  `prevalence(of = mu_c * I, among = mu_c * I + mu_f * H)`. A weekly ratio and a
+  weekly count over its denominator are two streams and two pieces of evidence,
+  not a double count.
 - **`NA` is not a null token in every tool.** polars does not parse it as null
   by default, so one `NA` turns a numeric column into a string column, and a
   plotting library will then draw those strings at the axis baseline — holes

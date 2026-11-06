@@ -44,7 +44,7 @@ transitions {
 observations {
   cases {
     columns       { time : time, cases : count }
-    projected     = prevalence(I)
+    projected     = I
     emit_schedule = every 1 'days
     cases ~ binomial(n = projected, p = 0.5)
   }

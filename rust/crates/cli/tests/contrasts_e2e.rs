@@ -543,7 +543,7 @@ scenarios {
 observations {
   prevalence {
     columns       { time : time, prevalence : count }
-    projected     = prevalence(I)
+    projected     = I
     emit_schedule = every 4 'days
     prevalence    ~ poisson(rate = projected)
   }

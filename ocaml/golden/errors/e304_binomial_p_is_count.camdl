@@ -2,7 +2,7 @@
 # observation likelihood arguments are dimensionally unchecked.
 #
 # Negative golden — `binomial(n = N, p = projected)` where
-# `projected = prevalence(I)` is a count. The `p` argument MUST be a
+# `projected = I` is a count. The `p` argument MUST be a
 # probability (dimensionless on [0, 1]); a count for `p` is a textbook
 # missing-`/N` bug — turns a prevalence likelihood into a count-valued
 # probability. Without the fix, the blanket `permissive_dim <- true`
@@ -31,7 +31,7 @@ transitions {
 observations {
   prevalence_signal {
     columns       { time : time, prevalence_signal : count }
-    projected     = prevalence(I)
+    projected     = I
     emit_schedule = every 7 'days
     # BUG (silently accepted today): p must be a probability,
     # but `projected` is a count. The intent was almost certainly

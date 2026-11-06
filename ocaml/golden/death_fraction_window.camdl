@@ -34,9 +34,10 @@
 #   comm_frac_instant — the same ratio written as a ratio of the two
 #     transitions' rates, read at the row's time label. This is a different
 #     quantity: the instantaneous hazard ratio at one moment, not the share of
-#     the week's events. It is spelled `prevalence(...)` because that is the
-#     only spelling the compiler admits for it — the bare rate ratio is refused
-#     (E352) precisely because it is so easily mistaken for the stream above.
+#     the week's events. It is spelled `prevalence(of = ..., among = ...)`
+#     because that is the only spelling the compiler admits for it — the
+#     bare rate ratio is refused (E352) precisely because it is so easily
+#     mistaken for the stream above.
 #     Kept here as the documented contrast; a model fitting a weekly fraction
 #     wants `comm_frac`.
 
@@ -94,7 +95,7 @@ observations {
 
   comm_frac_instant {
     columns           { time : time, comm_frac_instant : probability }
-    projected         = prevalence(mu_c * I / (mu_c * I + mu_f * H))
+    projected         = prevalence(of = mu_c * I, among = mu_c * I + mu_f * H)
     emit_schedule     = every 7 'days
     comm_frac_instant ~ beta(mean = projected, concentration = phi)
   }

@@ -99,7 +99,7 @@ fn build_parametric_derived_proj_block(scale_param: &str) -> ir::observation::Ob
     // projection is identically zero. That made `Poisson(rate = 0)` score
     // `-inf` against every positive observation: the fit this fixture claims
     // to run never had a finite likelihood. It is also IR the compiler cannot
-    // emit — `projected = scale * prevalence(I)` inlines the compartment,
+    // emit — `projected = scale * I` inlines the compartment,
     // which is what this now mirrors.
     let projection_expr = Expr::BinOp(BinOpWrap {
         bin_op: BinOpExpr {

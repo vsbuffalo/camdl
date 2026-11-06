@@ -873,7 +873,7 @@ mod tests {
     // own finite-difference oracle uses
     // (`sim::inference::ode_grad::tests::det_grad_matches_finite_difference_*`):
     // emitted `rate_state_grad`, a native `neg_binomial(mean = rho·incidence)`
-    // incidence stream, a `prevalence(I)` stream, and an explicit (constant)
+    // incidence stream, a state (`projected = I`) stream, and an explicit (constant)
     // initial condition so `∂init/∂θ = 0`. That oracle establishes the
     // gradient is RIGHT; the tests here establish it is the gradient that
     // reaches NLopt.

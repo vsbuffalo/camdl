@@ -1243,7 +1243,8 @@ mod tests {
     /// community-death fraction: `comm_frac`, the ratio of the two death flows
     /// accumulated over each week (a `FlowRatio`), and `comm_frac_instant`, the
     /// ratio of the two transitions' rates read at the week's closing label
-    /// (`prevalence(...)`, the only spelling the compiler admits for it). On
+    /// (`prevalence(of = ..., among = ...)`, the only spelling the compiler admits
+    /// for it). On
     /// the deterministic backend the window stream must equal, to floating
     /// point, the ratio of the run's own `flow_die_comm` and `flow_die_fac`
     /// sums over each window; the instant stream is a different quantity, and

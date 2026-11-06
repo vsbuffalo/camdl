@@ -119,7 +119,7 @@ Blast radius last time: 125 files. Expect the same shape.
         `gradient_capability.rs:442` gate to the new variant
   - [ ] 4d. delete `explicit_incidence_sum` (B5); scope check from step 2
   - [ ] 4e. `inc_<stream>` doc correction (B8); release-notes line (B7)
-- [ ] **5. Increment D** — `prevalence(of =, among =)`, checks D2–D5, removals
+- [x] **5. Increment D** — `prevalence(of =, among =)`, checks D2–D5, removals
       D6, dimension-change migration D7, language-changes entry.
 - [ ] **6. Increment E** — observation-boundary rule. Closes gh#478.
 

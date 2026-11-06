@@ -32,7 +32,7 @@ init { X = 1 }
 observations {
   y {
     columns   { time : time, y : count }
-    projected = prevalence(X)
+    projected = X
     y ~ poisson(rate = rho * X0 * projected)
   }
 }

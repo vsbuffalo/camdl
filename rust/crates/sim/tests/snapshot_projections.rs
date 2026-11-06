@@ -122,7 +122,7 @@ fn build_obs_model(compiled: &Arc<CompiledModel>, projection: StreamProjection, 
 }
 
 /// `CurrentPopSum(["E_e1", "E_e2", "E_e3"])` — the IR shape the compiler
-/// emits for `prevalence(E)` on an Erlang-stratified `E` — resolves
+/// emits for `projected = E` on an Erlang-stratified `E` — resolves
 /// through `StreamProjection::from_ir` to an `IntCompSum` whose sum
 /// matches the declared-order local indices. Guards the compiler↔runtime
 /// contract for the Erlang-substage prevalence case.

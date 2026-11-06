@@ -53,7 +53,7 @@ observations {
   }
   prevalent {
     columns       { time : time, prevalent : count }
-    projected     = prevalence(I)
+    projected     = I
     emit_schedule = every 1 'days
     prevalent     ~ poisson(rate = projected)
   }
@@ -83,7 +83,7 @@ init { S = 990  I = 10  R = 0 }
 observations {
   cases {
     columns       { time : time, cases : count }
-    projected     = prevalence(I)
+    projected     = I
     emit_schedule = at [0 'days, 7 'days, 14 'days, 21 'days]
     cases         ~ poisson(rate = projected)
   }

@@ -37,7 +37,7 @@ init { S = 990  I = 10  R = 0 }
 observations {
   reports {
     columns       { time : time, n : count }
-    projected     = prevalence(I)
+    projected     = I
     emit_schedule = every 7 'days
     n             ~ poisson(rate = rho * projected)
   }

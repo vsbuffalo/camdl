@@ -1380,9 +1380,10 @@ Incidence data (event counts accumulated over the period each row is declared to
 cover — `covers = …`, or `window_start`/`window_stop` columns; see
 `camdl-data-spec.md`, "What a row covers") and prevalence data (point-in-time
 compartment counts) project the simulator state differently. Both are
-first-class: the observation block's projection (`incidence(X)`,
-`prevalence(X)`, or a derived expression like `B1 + B2`) selects the mode. See
-`camdl-run-spec.md` §14 for the snapshot-timing and intervention-ordering rules.
+first-class: the observation block's projection (`incidence(X)`, a state such as
+`X` or `B1 + B2`, or a proportion `prevalence(of = X, among = N)`) selects the
+mode. See `camdl-run-spec.md` §14 for the snapshot-timing and
+intervention-ordering rules.
 
 Prevalence and incidence carry different Fisher information about the parameters
 — prevalence is more informative about the recovery rate γ (decay shape),
