@@ -956,6 +956,7 @@ pub fn run_ode(
     };
 
     let mut traj = Trajectory::new();
+    traj.flow_origin = Some(cfg.t_start);
     // The ODE flow is genuinely real-valued; recorded as `Flows::Real` WITHOUT
     // rounding, so a sub-unit flow (a slow transition such as TB reactivation)
     // survives into the likelihood instead of quantizing to 0 → `-∞`.

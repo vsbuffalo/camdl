@@ -252,7 +252,8 @@ the row says so: `flow_infection = 52.8828` on the row dated 7 July is the flow
 over `[6 July, 7 July)` — the infections of **6 July** — and `date_start` /
 `date_stop` state exactly that, so a reader never has to infer it from the row
 above. The initial-condition row, having no interval before it, writes the empty
-`[t, t)` and zero flows.
+`[t, t)` and zero flows. If the output schedule omits the run's start there is
+no such row, and the first row's `t_start` is the run's start.
 
 ### What a data row means is not `date()`'s job
 

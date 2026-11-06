@@ -178,3 +178,110 @@ fn ode_path_reconciles_flow_with_s_depletion() {
     let traj = OdeSim.run(&c, &params, 0, &cfg).unwrap();
     assert_reconciles("ode", &traj, t_start, s_idx, inf_idx, 1.0);
 }
+
+// ── An output schedule that omits t_start ─────────────────────────────────────
+//
+// With `at = [...]` not containing t_start no initial row is recorded, and the
+// first row's flows cover [run start, its t). The row's `t_start` label must be
+// the run start, not the row's own time, and the flows over all rows must still
+// reconcile with the depletion of S from the *initial* state — which, with no
+// initial row, is the model's initial S.
+
+/// `sir_basic` with its output recorded only at `at` (none of them t_start).
+fn load_seeded_sir_at(at: &[f64]) -> CompiledModel {
+    let contents = std::fs::read_to_string(golden_path("sir_basic")).unwrap();
+    let mut model: ir::Model = ir::from_str(&contents).unwrap();
+    if let Some(preset) = model.presets.first().cloned() {
+        for p in &mut model.parameters {
+            if let Some(&v) = preset.params.get(&p.name) {
+                p.value = p.value.with_value(v);
+            }
+        }
+    }
+    model.output.times = ir::model::OutputSchedule::AtTimes(at.to_vec());
+    CompiledModel::new(model).unwrap()
+}
+
+fn assert_first_period_starts_at_run_start(
+    label: &str,
+    c: &CompiledModel,
+    traj: &sim::state::Trajectory,
+    t_start: f64,
+    tol: f64,
+) {
+    let snaps = &traj.snapshots;
+    assert!(snaps.len() >= 2, "{label}: expected the at-list rows");
+    assert!(
+        snaps[0].t > t_start + 1e-9,
+        "{label}: precondition — no output at t_start, so no initial row"
+    );
+    let periods: Vec<(f64, f64)> = traj.flow_periods().collect();
+    assert_eq!(
+        periods[0],
+        (t_start, snaps[0].t),
+        "{label}: the first row's flows accumulated from the run start"
+    );
+    for w in periods.windows(2) {
+        assert_eq!(w[1].0, w[0].1, "{label}: periods tile the run");
+    }
+    // Σ flow_infection over every row == S₀ − S_final, with S₀ the model's
+    // initial S (there is no initial row to read it from).
+    let (s_idx, inf_idx) = (s_local_idx(c), infection_tr_idx(c));
+    let s0 = c.initial_state_mean(&c.default_params).unwrap().0.counts[s_idx] as f64;
+    let s_final = snaps.last().unwrap().int_state.counts[s_idx] as f64;
+    let sum_inf: f64 = snaps.iter().map(|sn| sn.flows.value(inf_idx)).sum();
+    assert!(
+        (sum_inf - (s0 - s_final)).abs() <= tol,
+        "{label}: Σ flow_infection ({sum_inf}) must equal S₀−S_final ({}) within {tol}",
+        s0 - s_final
+    );
+}
+
+#[test]
+fn chain_binomial_at_list_without_t_start_labels_first_period_from_run_start() {
+    let c = load_seeded_sir_at(&[20.0, 40.0, 60.0]);
+    let t_start = c.model.simulation.t_start;
+    let params = c.default_params.clone();
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end: 60.0, dt: 1.0 });
+    for seed in 0..5u64 {
+        let traj = ChainBinomialSim.run(&c, &params, seed, &cfg).unwrap();
+        assert_first_period_starts_at_run_start(
+            &format!("chain_binomial seed={seed}"), &c, &traj, t_start, 0.0);
+    }
+}
+
+#[test]
+fn gillespie_at_list_without_t_start_labels_first_period_from_run_start() {
+    let c = load_seeded_sir_at(&[20.0, 40.0, 60.0]);
+    let t_start = c.model.simulation.t_start;
+    let params = c.default_params.clone();
+    let cfg = SimConfig::Gillespie(GillespieConfig { t_start, t_end: 60.0, output_dt: Some(1.0) });
+    for seed in 0..5u64 {
+        let traj = GillespieSim.run(&c, &params, seed, &cfg).unwrap();
+        assert_first_period_starts_at_run_start(
+            &format!("gillespie seed={seed}"), &c, &traj, t_start, 0.0);
+    }
+}
+
+#[test]
+fn ode_at_list_without_t_start_labels_first_period_from_run_start() {
+    let c = load_seeded_sir_at(&[20.0, 40.0, 60.0]);
+    let t_start = c.model.simulation.t_start;
+    let params = c.default_params.clone();
+    let cfg = SimConfig::Ode(OdeConfig { t_start, t_end: 60.0, dt: 1.0 });
+    let traj = OdeSim.run(&c, &params, 0, &cfg).unwrap();
+    assert_first_period_starts_at_run_start("ode", &c, &traj, t_start, 1.0);
+}
+
+/// A run that begins away from the model's own t_start (the origin a restart
+/// or a contrast arm's fork hands the backend): the first period starts at that
+/// origin. (A resume proper must start on an output time, so there the initial
+/// row exists; this pins the labelling for the origin the backend is given.)
+#[test]
+fn chain_binomial_first_period_starts_at_the_config_origin() {
+    let c = load_seeded_sir_at(&[30.0, 60.0]);
+    let params = c.default_params.clone();
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 10.0, t_end: 60.0, dt: 1.0 });
+    let traj = ChainBinomialSim.run(&c, &params, 3, &cfg).unwrap();
+    assert_eq!(traj.flow_periods().next(), Some((10.0, 30.0)));
+}

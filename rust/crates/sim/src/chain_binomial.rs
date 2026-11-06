@@ -355,6 +355,7 @@ pub fn run_chain_binomial_with_observer(
     )?;
 
     let mut traj = Trajectory::new();
+    traj.flow_origin = Some(cfg.t_start);
     let mut current_flows = FlowVec::new(n_transitions);
     let mut t = cfg.t_start;
     // Robust substep clock: rate/forcing is evaluated at t_start + s*dt (s*dt,

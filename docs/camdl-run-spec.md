@@ -4783,7 +4783,9 @@ Columns, in this order (`util::TRAJ_TIME_HEADER`, then
 2. `t_start`, `t_stop` — the half-open period `[t_start, t_stop)` the row's
    `flow_*` columns were accumulated over: `t_stop` is the row's `t`, `t_start`
    the previous row's. The initial-condition row has no interval before it and
-   writes the empty `[t, t)`; its flows are zero. A row carries both readings —
+   writes the empty `[t, t)`; its flows are zero. When the output schedule has
+   no time at the run's start (an `at = [...]` list without it) there is no
+   initial row, and the first row's `t_start` is the run's start. A row carries both readings —
    a state _at_ `t`, a flow _over_ the period — and names each boundary rather
    than leaving the period to be inferred from the row above.
 3. Integer compartments, in model declaration order, rendered `{}`.

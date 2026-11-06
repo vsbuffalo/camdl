@@ -238,6 +238,7 @@ pub fn run_gillespie_with_observer(
 
     let mut t = cfg.t_start;
     let mut traj = Trajectory::new();
+    traj.flow_origin = Some(cfg.t_start);
     let mut current_flows = FlowVec::new(n_transitions);
 
     // Record initial state. Initial-row convention (see `Trajectory` docs):

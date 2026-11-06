@@ -233,7 +233,8 @@ pub type DateOrigin<'a> = Option<(&'a str, &'a str)>;
 /// `t_start`/`t_stop` are the half-open period the row's `flow_*` and `inc_*`
 /// values were accumulated over ([`Trajectory::flow_periods`], gh#833): the
 /// previous snapshot of the same draw up to this one, and for a draw's first
-/// row the empty `[time, time)`. `time` itself is the instant the compartment
+/// row the empty `[time, time)` when it is the initial row (otherwise the run's
+/// start up to it). `time` itself is the instant the compartment
 /// columns are read at.
 ///
 /// `columns` describes the data-column layout (built once from the model);

@@ -183,9 +183,20 @@ pub struct Snapshot {
 /// silent-wrong bug (gh#270): the per-step delta still reconciles, but the
 /// aggregate is off by exactly the first interval's flow — invisible to a
 /// per-step check, caught by `tests/trajectory_flow_reconciliation.rs`.
+///
+/// When no output is due at the run's start (an `at = [...]` schedule that
+/// omits `t_start`), the initial row is not recorded, and the first row's flows
+/// cover `[run start, its t)`. The backends record that start in
+/// [`Trajectory::flow_origin`] so the period is never inferred from the row.
 #[derive(Debug, Clone)]
 pub struct Trajectory {
     pub snapshots: Vec<Snapshot>,
+    /// The time the first row's flows began accumulating: the run's `t_start`,
+    /// a restart origin (`--init-state`), or a contrast arm's fork time. Set by
+    /// the forward backends; `None` for a trajectory assembled from rows alone
+    /// (the PGAS smoother and the saved-path reader always carry the initial
+    /// row, so for them the first row's own time is the start).
+    pub flow_origin: Option<f64>,
     /// Per-transition firing diagnostics (populated by Gillespie; empty for chain-binomial).
     pub transition_diagnostics: Vec<crate::transition_diagnostics::TransitionDiagnostics>,
     /// Reactive-policy firings (gh#204) — the source of `reactive_log.tsv`.
@@ -207,6 +218,7 @@ impl Trajectory {
     pub fn new() -> Self {
         Trajectory {
             snapshots: Vec::new(),
+            flow_origin: None,
             transition_diagnostics: Vec::new(),
             reactive_log: None,
         }
@@ -216,15 +228,23 @@ impl Trajectory {
         self.snapshots.push(snap);
     }
 
+    /// The time the run began: where the first row's flows started
+    /// accumulating. `flow_origin` when a backend recorded it, else the first
+    /// row's own time (a trajectory whose first row is the initial row).
+    pub fn run_start(&self) -> Option<f64> {
+        self.flow_origin.or_else(|| self.snapshots.first().map(|s| s.t))
+    }
+
     /// The half-open period each snapshot's `flows` were accumulated over,
-    /// one per snapshot in order: `[previous snapshot's t, this t)`, and for
-    /// the initial-condition row — no interval precedes it — the empty
+    /// one per snapshot in order: `[previous snapshot's t, this t)`; the first
+    /// row's period starts at [`Trajectory::run_start`] — for the
+    /// initial-condition row, which no interval precedes, that is the empty
     /// `[t, t)`, whose flows are zero by the convention above. This is the
     /// one statement of what a flow column's row covers, and every trajectory
     /// writer names it as `t_start`/`t_stop` beside `t` (gh#833), so a flow is
     /// never labelled by one boundary alone.
     pub fn flow_periods(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
-        let mut prev: Option<f64> = None;
+        let mut prev: Option<f64> = self.run_start();
         self.snapshots.iter().map(move |s| {
             let start = prev.unwrap_or(s.t);
             prev = Some(s.t);

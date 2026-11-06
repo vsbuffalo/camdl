@@ -4269,11 +4269,12 @@ fn check_obs_times_on_snapshot_grid(
     ))
 }
 
-/// The time the recorded trajectory begins — `t_start`, or the restart origin
-/// of an `--init-state` cell. The initial row is always recorded, with zeroed
-/// flows, so the first snapshot IS the run's start (`sim::state::Trajectory`).
+/// The time the run began — `t_start`, or the restart origin of an
+/// `--init-state` cell — as the trajectory recorded it
+/// ([`sim::Trajectory::run_start`]). Not the first row's time: an `at = [...]`
+/// schedule without `t_start` records no initial row.
 pub(crate) fn run_start_of(traj: &sim::Trajectory, model: &ir::Model) -> f64 {
-    traj.snapshots.first().map(|s| s.t).unwrap_or(model.simulation.t_start)
+    traj.run_start().unwrap_or(model.simulation.t_start)
 }
 
 /// Project a stream's observed quantity for each row — the state at an
