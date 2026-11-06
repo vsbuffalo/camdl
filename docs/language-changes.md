@@ -141,15 +141,21 @@ clause.
 
 **Migration.**
 
-| Old                        | New                                                           |
-| -------------------------- | ------------------------------------------------------------- |
-| `@ (1/730) * R`            | `let waning : rate = 1 / (730 'days)`, then `@ waning * R`    |
-| `@ (1/10000) * S * I`      | `let b : positive dim P^-1*T^-1 = 0.0001`, then `@ b * S * I` |
-| `final((1000 - S) / 1000)` | `final(1 - S / (1000 'count))`                                |
+| Old                        | New                                                                                     |
+| -------------------------- | --------------------------------------------------------------------------------------- |
+| `@ (1/730) * R`            | `let waning : rate = 1 / (730 'days)`, then `@ waning * R`                              |
+| `@ (1/10000) * S * I`      | `let b : positive dim P^-1*T^-1 = 0.0001`, then `@ b * S * I`                           |
+| `final((1000 - S) / 1000)` | `let N0 : count = 1000`, then `final((N0 - S) / N0)`; or `final(1 - S / (1000 'count))` |
+
+A number's dimension comes from where it stands, never from what it is combined
+with: guessing it from a neighbour would also accept `I + 1e-6` in a rate, a
+constant added to a count by mistake. Prefer a typed constant for a named
+quantity, written once; a unit literal suits a one-off value.
 
 **Diagnostics.** The rate, derivative or initial value reports its usual code
-(E300, E306, E313). A typed constant whose unit literals disagree with its `dim`
-clause is E282.
+(E300, E306, E313); a bare number combined with a dimensioned operand is E302,
+whose hint names both forms. A typed constant whose unit literals disagree with
+its `dim` clause is E282.
 
 ---
 

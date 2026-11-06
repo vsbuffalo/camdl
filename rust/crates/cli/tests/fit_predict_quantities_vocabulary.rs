@@ -133,7 +133,7 @@ thin = 1
 "#;
 
 /// Vocabulary A: an attack rate plus `R0`, the inlined `let`.
-const VOCAB_A: &str = "quantities {\n  attack_rate = final(1 - S / (10000 'count))\n  r_zero      = final(R0)\n}\n";
+const VOCAB_A: &str = "quantities {\n  attack_rate = final((N0 - S) / N0)\n  r_zero      = final(R0)\n}\n";
 
 /// Vocabulary B: a different reporting question over the same fit.
 const VOCAB_B: &str = "quantities {\n  peak_time = time_of_max(I)\n}\n";
@@ -335,7 +335,7 @@ fn an_in_place_edit_of_the_vocabulary_rekeys_the_table() {
     let before = f.addresses();
 
     // Correct a formula in place — the workflow the whole feature exists for.
-    std::fs::write(&v, "quantities {\n  attack_rate = final(1 - S / (9990 'count))\n}\n").unwrap();
+    std::fs::write(&v, "quantities {\n  attack_rate = final((N0 - S) / N)\n}\n").unwrap();
     assert_ok(&f.predict(Some(v.to_str().unwrap())), "predict after the edit");
     let after = f.addresses();
 

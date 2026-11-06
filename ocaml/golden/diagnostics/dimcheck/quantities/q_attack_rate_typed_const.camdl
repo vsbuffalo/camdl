@@ -1,4 +1,4 @@
-# invariant: an attack rate over a literal population written with 'count compiles
+# invariant: an attack rate over a population size declared as a typed constant compiles
 # spec: §5.2
 # expect: (none)
 time_unit = 'days
@@ -11,6 +11,7 @@ parameters {
 }
 
 let N = S + I + R
+let N0 : count = 1000
 
 transitions {
   infection : S --> I @ beta * S * I / N
@@ -20,7 +21,7 @@ transitions {
 init { S = 990  I = 10 }
 
 quantities {
-  attack_rate = final(1 - S / (1000 'count))
+  attack_rate = final((N0 - S) / N0)
 }
 
 simulate { from = 0 'days  to = 100 'days }

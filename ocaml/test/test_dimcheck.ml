@@ -305,7 +305,7 @@ let test_untyped_const_rejected () =
   Alcotest.(check bool) "untyped const E302" true (has_error "E302" r)
 
 let test_e302_hint_for_pop_plus_const () =
-  (* E302 on P + dimensionless should include hint about typed let bindings *)
+  (* E302 on a count plus a bare number names the typed-constant fix *)
   let m = empty_model
     ~compartments:[mk_compartment "S"; mk_compartment "I";
                    mk_compartment "N"]
@@ -316,7 +316,7 @@ let test_e302_hint_for_pop_plus_const () =
   let r = Dimcheck.check_model m in
   let has_iota_hint = List.exists (fun (d : Dimcheck.diagnostic) ->
     d.code = "E302" && match d.hint with
-    | Some h -> let sub = "let iota : count" in
+    | Some h -> let sub = "let <name> : count = 1e-06" in
       let sl = String.length sub in
       let hl = String.length h in
       sl <= hl && (let found = ref false in

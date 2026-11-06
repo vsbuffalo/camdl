@@ -40,6 +40,7 @@ parameters {
 }
 
 let N  = S + I + R
+let N0 : count = 1000
 let R0 = beta / gamma
 
 transitions {
@@ -67,7 +68,7 @@ scenarios {
 /// it appears nowhere in the compiled IR. Reporting it here pins that the
 /// vocabulary is resolved against the model SOURCE's symbols: resolved against
 /// the IR it would be rejected as an undeclared name.
-const VOCAB_A: &str = "quantities {\n  attack_rate = final(1 - S / (1000 'count))\n  r_zero      = final(R0)\n}\n";
+const VOCAB_A: &str = "quantities {\n  attack_rate = final((N0 - S) / N0)\n  r_zero      = final(R0)\n}\n";
 
 /// Vocabulary B — a different reporting question over the same model.
 const VOCAB_B: &str = "quantities {\n  peak_time = time_of_max(I)\n}\n";
@@ -297,7 +298,7 @@ fn an_in_place_edit_of_the_vocabulary_rekeys_the_artifact() {
     let before = quantity_addresses(&out);
 
     // Correct a formula in place. Same path, different bytes.
-    std::fs::write(&v, "quantities {\n  attack_rate = final(1 - S / (990 'count))\n}\n").unwrap();
+    std::fs::write(&v, "quantities {\n  attack_rate = final((N0 - S) / N)\n}\n").unwrap();
     assert_ok(&f.simulate(&out, Some(&v), &store), "simulate after the edit");
     let after = quantity_addresses(&out);
 

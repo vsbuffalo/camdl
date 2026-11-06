@@ -44,6 +44,8 @@ type subject = Dim_sites.subject =
   | SContrast    of string
   | SInit        of string
   | SParameter   of string   (** a parameter, for a diagnostic about its prior *)
+  | SQuantity    of string
+  | SIntervention of string  (** an intervention, event or reactive trigger *)
 
 type diagnostic = {
   severity : severity;

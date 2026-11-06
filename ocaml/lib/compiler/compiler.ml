@@ -566,6 +566,8 @@ let run_dimcheck_full (d : compile_detail)
       | Some (Dimcheck.SContrast n)    -> Expander.contrast_loc    d.ctx n
       | Some (Dimcheck.SInit c)        -> Expander.compartment_loc d.ctx c
       | Some (Dimcheck.SParameter p)   -> Expander.param_loc       d.ctx p
+      | Some (Dimcheck.SQuantity q)    -> Expander.quantity_loc    d.ctx q
+      | Some (Dimcheck.SIntervention i) -> Expander.interv_loc     d.ctx i
       | Some (Dimcheck.SBinding _) | None -> Diagnostics.no_loc
     in
     let result =

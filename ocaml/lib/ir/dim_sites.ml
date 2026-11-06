@@ -34,6 +34,8 @@ type subject =
   | SContrast    of string
   | SInit        of string   (* compartment whose initial condition *)
   | SParameter   of string   (* parameter whose prior *)
+  | SQuantity    of string
+  | SIntervention of string   (* intervention, event or reactive trigger *)
 
 (* Things whose dimension other positions refer to. *)
 type key =
@@ -280,7 +282,7 @@ let rec trigger_sites acc ~scored_of ?subject ~role (t : trigger_expr) =
 
 let intervention_sites acc ~scored_of (iv : intervention) =
   let { name; base_name = _; fire; actions; kind = _ } = iv in
-  let subject = None in
+  let subject = Some (SIntervention name) in
   let role = Printf.sprintf "intervention '%s'" name in
   (match fire with
    | Scheduled sched ->
@@ -399,7 +401,7 @@ let balance_site acc ({ balance_target; balance_expr } : balance_spec) =
 
 let quantity_sites acc (q : quantity) =
   let { q_name; q_stratum = _; q_body; q_dimension = _ (* written by the checker *) } = q in
-  let subject = None in
+  let subject = Some (SQuantity q_name) in
   let role what = Printf.sprintf "quantity '%s' %s" q_name what in
   match q_body with
   | QBDerived se ->

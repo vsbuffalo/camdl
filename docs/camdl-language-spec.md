@@ -413,11 +413,27 @@ takes any dimension. A literal, or arithmetic of literals, that is an entire
 additive term of a rate, derivative, balance, initial value, count-valued
 likelihood argument, intervention count or quantity threshold takes that
 position's dimension: `I = 10`, `S = N0 - 50`, `S = 0.95 * 10000`, `rate =
-100`, a constant importation `beta * S * I / N + 0.5`. Inside a product a
-literal is a pure number, so `(1/730) * R` is not a rate: write
-`R / (730 'days)`, or a typed constant (§8.4). A literal coefficient that carries
-a dimension is a typed constant with a `dim` clause:
-`let b : positive dim P^-1*T^-1 = 0.0001`.
+100`, a constant importation `beta * S * I / N + 0.5`. Inside a product, a
+quotient or a function a literal is a pure number, so `(1/730) * R` is not a
+rate, and in `(1000 - S) / 1000` the 1000 is not a count (E302).
+
+A number's dimension comes from where it stands, never from what it is
+combined with. Guessing it from a neighbour would make `(1000 - S) / 1000`
+compile, but the same guess would also accept `I + 1e-6` in a rate, a
+dimensionless constant added to a count by mistake, and could not say
+whether the second 1000 counts people too. So a number that is a quantity is
+said to be one, in one of two ways:
+
+- **A typed constant**, for a quantity with a name, written once and reused:
+  `let N0 : count = 1000`, then `final((N0 - S) / N0)`;
+  `let waning : rate = 1 / (730 'days)`, then `waning * R`. This is the form
+  to prefer: it keeps the scientific formulation and states the value once.
+- **A unit literal**, for a one-off value: `final(1 - S / (1000 'count))`,
+  `R / (730 'days)`.
+
+A literal coefficient whose dimension has no unit literal is a typed constant
+with a `dim` clause: `let b : positive dim P^-1*T^-1 = 0.0001`. The E302 hint for
+a bare number names both forms with the right kind and unit.
 
 **Powers.** `a^n` with `n` known at compile time as an integer (a literal, a
 typed constant, or arithmetic of them) has `n` times `a`'s dimension. A

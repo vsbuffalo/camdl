@@ -83,6 +83,8 @@ type subject = Dim_sites.subject =
   | SContrast    of string
   | SInit        of string
   | SParameter   of string
+  | SQuantity    of string
+  | SIntervention of string
 
 type diagnostic = {
   severity : severity;
@@ -178,7 +180,9 @@ let form_scale n a =
 (* What a diagnostic needs to know about an equation that conflicts. *)
 type eq_kind =
   | Declared_fact
-  | Operands of { op : string; left : form; right : form }   (* two forms must agree *)
+  | Operands of { op : string; left : form; right : form;
+                  literals : string option * string option }
+  (* two forms must agree; [literals]: an operand written as a bare number *)
   | Function_arg of { fn : string; arg : form }              (* must be dimensionless *)
   | Even_root of form                                        (* sqrt *)
   | Obligation_of of { expected : dim_vec; got : form }       (* a site's obligation *)
@@ -224,13 +228,13 @@ let emit st stage ~site ~code kind (f : form) (rhs : dim_vec) =
 
 (* [a = b] as a structure equation; nothing when either is [Any], or when both
    are the same constant. *)
-let equate st ~site ~code ~op a b =
+let equate st ~site ~code ~op ?(literals = (None, None)) a b =
   match a, b with
   | Any, _ | _, Any -> ()
   | F l, F r ->
     if l.vars = [] && r.vars = [] && dim_eq l.k r.k then ()
     else
-      emit st Structure ~site ~code (Operands { op; left = l; right = r })
+      emit st Structure ~site ~code (Operands { op; left = l; right = r; literals })
         (form_sub l r) dimensionless
 
 let declare st key v =
@@ -325,17 +329,17 @@ let rational (x : float) : (int * int) option =
 
 (* The binary-operator rules, shared by model expressions, derived quantities
    and contrasts. [exponent] is the power's exponent when it is a literal. *)
-let binop st ~site ~code ~what (op : bin_op) ?exponent l r : value =
+let binop st ~site ~code ~what (op : bin_op) ?exponent ?literals l r : value =
   let opname = match op with
     | Add -> "+" | Sub -> "-" | Min -> "min" | Max -> "max" | Mod -> "%"
     | Eq -> "==" | Neq -> "!=" | Lt -> "<" | Gt -> ">" | Le -> "<=" | Ge -> ">="
     | Mul -> "*" | Div -> "/" | Pow -> "^" in
   match op with
   | Add | Sub | Min | Max | Mod ->
-    equate st ~site ~code ~op:(Printf.sprintf "%s in %s" opname what) l r;
+    equate st ~site ~code ~op:(Printf.sprintf "%s in %s" opname what) ?literals l r;
     (match l with Any -> r | F _ -> l)
   | Eq | Neq | Lt | Gt | Le | Ge ->
-    equate st ~site ~code ~op:(Printf.sprintf "%s in %s" opname what) l r;
+    equate st ~site ~code ~op:(Printf.sprintf "%s in %s" opname what) ?literals l r;
     F (const_form dimensionless)
   | Mul ->
     (match l, r with Any, d | d, Any -> d | F a, F b -> F (form_add a b))
@@ -417,6 +421,10 @@ let rec static_value st (e : expr) : float option =
      | _ -> None)
   | _ -> None
 
+(* The text of an operand written as a bare number, for the diagnostic. *)
+let literal_text (e : expr) =
+  if Dim_sites.is_constant_expr e then Some (expr_to_short_string e) else None
+
 let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
   let what = site.role in
   let g = gen st ~site in
@@ -434,7 +442,8 @@ let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
     when not (match right with UncheckedDim { reason; _ } -> reason = spline_log_shift_reason
                                | _ -> false) ->
     let l = g ~term left and r = g ~term right in
-    binop st ~site:(Some site) ~code:"E302" ~what op l r
+    binop st ~site:(Some site) ~code:"E302" ~what op
+      ~literals:(literal_text left, literal_text right) l r
   | UnOp { op = Neg; arg } -> g ~term arg
   | Param n | ConstRef n ->
     Hashtbl.replace st.used n ();
@@ -467,7 +476,8 @@ let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
   | BinOp b ->
     let l = g b.left and r = g b.right in
     let exponent = static_value st b.right in
-    binop st ~site:(Some site) ~code:"E302" ~what b.op ?exponent l r
+    binop st ~site:(Some site) ~code:"E302" ~what b.op ?exponent
+      ~literals:(literal_text b.left, literal_text b.right) l r
   | UnOp u -> unop st ~site:(Some site) ~what u.op (g u.arg)
   | Cond c ->
     ignore (g c.pred);
@@ -584,13 +594,29 @@ let show out f = match form_value out f with
   | Some d -> dim_display d
   | None -> "not determined by the model"
 
-let count_hint a b =
-  if (dim_eq a population && dim_eq b dimensionless)
-  || (dim_eq a dimensionless && dim_eq b population) then
-    Some "if a constant represents a small count (seeding term), declare it with a type:\n\
-         \        let iota : count = 1e-6\n\
-         \      then use: I + iota"
-  else None
+(* Why a bare number combined with a dimensioned operand is refused, and the
+   two ways to say what the number is: a typed constant (a named quantity,
+   written once) or a unit literal (a one-off value). *)
+let literal_hint (v : string) (d : dim_vec) =
+  let kind, unit_ = match d.(0), d.(1) with
+    | 1, 0 -> ("count", Some "'count")
+    | 0, 1 -> ("duration", Some "'days")
+    | 0, -1 -> ("rate", Some "'per_day")
+    | _ -> (Printf.sprintf "positive dim %s" (formal_dim d), None) in
+  let named = Printf.sprintf "let <name> : %s = %s" kind v in
+  let pad s = s ^ String.make (String.length named + 3 - String.length s) ' ' in
+  Printf.sprintf
+    "a bare number in camdl gets a dimension only from where it stands: as a \
+     whole term of a rate, an initial value or a count it takes that \
+     position's dimension (`I = 10`, `beta * S * I / N + 0.5`); inside a \
+     product, a quotient or a function it is a pure number. The compiler does \
+     not guess what `%s` measures from what it is added to, because the same \
+     guess would silently accept a constant in the wrong place. Say what `%s` \
+     is:\n        %sa named quantity, written once; then use <name>%s"
+    v v (pad named)
+    (match unit_ with
+     | Some u -> Printf.sprintf "\n        %sa one-off value" (pad (v ^ " " ^ u))
+     | None -> "")
 
 let site_name (s : Dim_sites.site option) = match s with Some s -> s.role | None -> "the model"
 
@@ -642,12 +668,23 @@ let diagnostic_of_conflict st out (c : Dim_solve.conflict) : diagnostic =
          else Printf.sprintf "%s must have dimension %s" s.role (dim_display expected) in
        mk ?hint:s.note code message
          (Some (Printf.sprintf "expected dimension %s, got %s" (dim_display expected) got_s)))
-  | Operands { op; left; right } ->
-    let hint = match form_value out left, form_value out right with
-      | Some a, Some b -> count_hint a b | _ -> None in
-    mk ?hint info.code (Printf.sprintf "dimension mismatch: %s" op)
-      (Some (Printf.sprintf "left has dimension %s, right has dimension %s — cannot combine"
-               (show out left) (show out right)))
+  | Operands { op; left; right; literals } ->
+    let lv = form_value out left and rv = form_value out right in
+    let literal_case = match literals, lv, rv with
+      | (Some v, None), _, Some d | (None, Some v), Some d, _
+        when not (dim_eq d dimensionless) -> Some (v, d)
+      | _ -> None in
+    (match literal_case with
+     | Some (v, d) ->
+       mk ~hint:(literal_hint v d) info.code (Printf.sprintf "dimension mismatch: %s" op)
+         (Some (Printf.sprintf
+                  "`%s` is a bare number here, so a pure number, and the other operand \
+                   has dimension %s; camdl cannot tell what `%s` measures"
+                  v (dim_display d) v))
+     | None ->
+       mk info.code (Printf.sprintf "dimension mismatch: %s" op)
+         (Some (Printf.sprintf "left has dimension %s, right has dimension %s — cannot combine"
+                  (show out left) (show out right))))
   | Function_arg { fn; arg } ->
     mk info.code (Printf.sprintf "%s must be dimensionless" fn)
       (Some (Printf.sprintf "it has dimension %s" (show out arg)))

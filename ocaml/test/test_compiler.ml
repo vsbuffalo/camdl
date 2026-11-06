@@ -6589,6 +6589,48 @@ let test_prior_unit_invariance () =
   check "log_uniform(lower = 0.01 'per_day, upper = 1 'per_day)" 0.2;
   check ~kind:"duration" "normal(mu = 5 'days, sigma = 1 'days)" 4.2
 
+(* An attack rate over a literal population size (proposal 2026-11-06 §5.2).
+   Declared as a typed constant, or as a one-off 'count, it compiles and its
+   reported dimension is a pure number, (0, 0) on the quantity node; the
+   compiler is checked to infer that, not only to accept the model. Written
+   with bare numbers, `(1000 - S) / 1000` is E302, and the diagnostic names
+   both fixes and says why, without calling the arithmetic invalid. *)
+let test_attack_rate_literal_population () =
+  with_dim_check_enabled @@ fun () ->
+  let src ?(lets = "") body = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate }
+    let N = S + I + R
+    %s
+    transitions {
+      infection : S --> I @ beta * S * I / N
+      recovery  : I --> R @ gamma * I
+    }
+    init { S = 990  I = 10 }
+    quantities { attack_rate = final(%s) }
+    simulate { from = 0 'days  to = 10 'days }
+  |} lets body in
+  let dim_of m =
+    match List.find_opt (fun (q : Ir.quantity) -> q.q_name = "attack_rate") m.Ir.quantities with
+    | Some q -> q.q_dimension
+    | None -> Alcotest.fail "no attack_rate quantity" in
+  Alcotest.(check (option (pair int int))) "typed constant: dimensionless"
+    (Some (0, 0))
+    (dim_of (compile_expect_ok (src ~lets:"let N0 : count = 1000" "(N0 - S) / N0")));
+  Alcotest.(check (option (pair int int))) "'count literal: dimensionless"
+    (Some (0, 0)) (dim_of (compile_expect_ok (src "1 - S / (1000 'count)")));
+  let diags = Compiler.collect_diagnostics ~name:"attack" (src "(1000 - S) / 1000") in
+  match List.find_opt (fun (d : Diagnostics.diagnostic) -> d.code = "E302") diags with
+  | None -> Alcotest.fail "expected E302 for bare-number population"
+  | Some d ->
+    let has s = contains_substring ~needle:s
+        (d.message ^ " " ^ Option.value ~default:"" d.detail ^ " " ^ Option.value ~default:"" d.hint) in
+    Alcotest.(check bool) "names the typed-constant fix" true (has "let <name> : count = 1000");
+    Alcotest.(check bool) "names the unit-literal fix" true (has "1000 'count");
+    Alcotest.(check bool) "explains why" true (has "gets a dimension only from where it stands");
+    Alcotest.(check bool) "does not call it invalid" false (has "invalid" || has "meaningless")
+
 let test_prior_arg_exp_and_sqrt () =
   (* Exercise exp() and sqrt() in const position — less common than log
      but same path through is_const_expr/eval_const_expr. *)
@@ -15659,6 +15701,7 @@ let () =
       Alcotest.test_case "log(0.3) is a const arg"                       `Quick test_prior_arg_log_function;
       Alcotest.test_case "unit literal in a prior is converted"          `Quick test_prior_unit_literal_converted;
       Alcotest.test_case "priors with units are unit-invariant"          `Quick test_prior_unit_invariance;
+      Alcotest.test_case "attack rate over a literal population"         `Quick test_attack_rate_literal_population;
       Alcotest.test_case "exp() and sqrt() as const args"                `Quick test_prior_arg_exp_and_sqrt;
     ];
     "prior_validation", [

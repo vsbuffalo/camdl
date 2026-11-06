@@ -871,6 +871,11 @@ let interv_loc ctx name =
 (* Resolve a contrast name back to its declaration loc — used by the dimcheck
    contrast-dimension diagnostic (which runs on the IR and has no source spans).
    Exact-name match (contrasts are never stratified/expanded). *)
+let quantity_loc ctx name =
+  find_decl_loc ctx ~decls:ctx.quantity_decls
+    ~name_of:(fun (q : Ast.quantity_decl) -> q.qd_name)
+    ~loc_of:(fun q -> q.qd_loc) name
+
 let contrast_loc ctx name =
   match List.find_opt (fun (c : contrast_decl) -> c.cd_name = name) ctx.contrast_decls with
   | Some c -> diag_loc_of_ast_ctx ctx c.cd_loc
