@@ -417,12 +417,16 @@ numeric values only, at 12-decimal precision, so editing a provenance field does
 not invalidate it), `fit_hash`, `backend`, `dt`, `model`, `model_identity`,
 per-stream `[provenance.data]` path+hash entries, `seed`, `method`, `chain`
 (counted from 0, §2), `log_likelihood`, `loglik_sd`, `n_particles`, and optional
-`ess_mean`/`ess_min`. `camdl simulate --params` reads `backend`/`dt` back to
-warn when a downstream simulation would run under different dynamics than the
-fit, and refuses the file when its parameter values no longer hash to
-`content_hash` (they were edited after the fit), naming the file: re-run the
-fit, or remove the `[provenance]` block to run the edited values as a plain
-params file.
+`ess_mean`/`ess_min`. For IF2, `log_likelihood` is the loglik-eval re-score of
+the winning chain, so `loglik_sd` is that re-score's Monte Carlo standard error
+(the `±` on the stderr line), `n_particles` its particles per replicate (not the
+IF2 swarm's size), and `ess_mean`/`ess_min` its effective sample size; an
+ODE-backend NLopt fit has no particle filter and records `loglik_sd = 0` and
+`n_particles = 0`. `camdl simulate --params` reads `backend`/`dt` back to warn
+when a downstream simulation would run under different dynamics than the fit,
+and refuses the file when its parameter values no longer hash to `content_hash`
+(they were edited after the fit), naming the file: re-run the fit, or remove the
+`[provenance]` block to run the edited values as a plain params file.
 
 #### 2.2.1 `fit.meta.json` — fit-level sidecar
 

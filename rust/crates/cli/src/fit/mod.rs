@@ -1829,6 +1829,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         (format!("{} ({})", name, path), hash)
                     })
                     .collect();
+                let rescore = &chain_results.loglik_eval.per_chain
+                    [chain_results.loglik_eval.overall_winner_idx];
                 let metadata = provenance::MleMetadata {
                     // Full fit-level hash — lets a reader locate the
                     // originating fit dir from just the mle_params.toml.
@@ -1847,10 +1849,20 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // is a valid `ForwardBackend` (total `From`).
                     backend: method.algorithm.backend().into(),
                     dt: sweep_config.config.dt,
+                    // The recorded log-likelihood is the loglik-eval re-score
+                    // of the winning chain, so its uncertainty is that
+                    // re-score's: the Monte Carlo standard error of the
+                    // combined estimate, the particles of each replicate, and
+                    // the filter's effective sample size at the estimate. The
+                    // IF2 swarm's own size (`particles`) is not the precision
+                    // of this number.
                     loglik: chain_results.best_loglik,
-                    loglik_sd: 0.0,
-                    n_particles: *particles,
-                    ess_at_mle: None,
+                    loglik_sd: rescore.se,
+                    n_particles: effective_loglik_eval.n_particles,
+                    ess_at_mle: (rescore.filter_stats.ess_mean.is_finite()
+                        && rescore.filter_stats.ess_min.is_finite())
+                        .then_some((rescore.filter_stats.ess_mean,
+                                    rescore.filter_stats.ess_min)),
                     timestamp: fit_state.timestamp.clone(),
                 };
                 provenance::write_mle_params(&mle_path, &all_params, &metadata)

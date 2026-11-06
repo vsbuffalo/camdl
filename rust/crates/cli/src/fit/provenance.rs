@@ -64,7 +64,12 @@ pub struct MleProvenance {
     /// directory and of `fit_state.toml`'s `best_chain` (gh#990).
     pub chain: ChainIndex,
     pub log_likelihood: f64,
+    /// Monte Carlo standard error of `log_likelihood`: that of the re-score
+    /// that produced it (IF2), `0.0` for a deterministic likelihood (NLopt on
+    /// the ODE backend).
     pub loglik_sd: f64,
+    /// Particles per filter replicate of that re-score; `0` when no particle
+    /// filter scored it.
     pub n_particles: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ess_mean: Option<f64>,
@@ -256,7 +261,9 @@ pub struct MleMetadata {
     /// Timestep used by the fit. Paired with `backend`.
     pub dt: f64,
     pub loglik: f64,
+    /// See [`MleProvenance::loglik_sd`].
     pub loglik_sd: f64,
+    /// See [`MleProvenance::n_particles`].
     pub n_particles: usize,
     pub ess_at_mle: Option<(f64, f64)>,
     pub timestamp: String,
