@@ -204,7 +204,10 @@ bounds when the entry has none, and recorded as `estimate_start` or
 `estimate_start_drawn`: a reference point, not any chain's start, which
 `init_provenance` records. `fit run`, `survey --fit` and `profile --fit` seed
 through the same function, so `beta = {}` means the same in all three; a
-profile's swept parameter takes its value from the sweep and needs no start.
+profile's swept parameter takes its value from the sweep and needs no start. A
+refusal names the flags the command has (`--params`/`--param` on `simulate`,
+`pfilter` and `eval`; `--fixed-file`/`--fixed` on `fit`, `profile` and
+`survey`).
 
 **Sweeps are orthogonal to everything.** A sweep is "run this thing at multiple
 parameter values," and it works on both sides. `simulate --sweep NAME=GRID`

@@ -4543,7 +4543,7 @@ fn refuse_unresolvable_generated_cells(
         let arm = named_scenarios.then(|| scenario.name().to_string());
         match util::resolve_run_parameters_typed(base, &run) {
             Ok(_) => {}
-            Err(RunParamError::Resolve(ResolveError::UnsetRequired { name })) => {
+            Err(RunParamError::Resolve(ResolveError::UnsetRequired { name, .. })) => {
                 refusals.push(unset_generated_parameter_message(
                     &name, measure, arm.as_deref(), fit_given,
                 ));

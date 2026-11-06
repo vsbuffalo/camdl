@@ -3519,7 +3519,9 @@ pub fn resolve_run_parameters_typed(
             fit_toml_estimate: &fte,
             table_files: &table_files,
         }
-    ).map_err(RunParamError::Resolve)
+    ).map_err(|e| RunParamError::Resolve(
+        // `simulate` and `lineage` take `--params` / `--param`.
+        e.with_flags(crate::params_resolver::FlagStyle::Params)))
 }
 
 /// Report the parameter notices of a run's cells once, over all of them

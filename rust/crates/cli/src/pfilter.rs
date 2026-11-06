@@ -252,7 +252,10 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         fit_toml_fixed: &ftf,
         fit_toml_estimate: &fte,
         table_files: &table_files,
-    }).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    }).unwrap_or_else(|e| {
+        eprintln!("error: {}", e.with_flags(crate::params_resolver::FlagStyle::Params));
+        std::process::exit(1);
+    });
     emit_notices(&[&resolved]);
     let model = resolved.model.clone();
 

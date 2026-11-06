@@ -189,3 +189,59 @@ fn profile_fit_needs_no_start_for_the_swept_or_the_nuisance_parameter() {
     assert!(!drawn.is_empty(),
         "a drawn nuisance start is recorded as `estimate_start_drawn` in a point's run.json");
 }
+
+// ─── C: the resolver's refusals name real flags and fixes ───────────────────
+
+#[test]
+fn an_unset_parameter_is_not_told_to_declare_a_default_in_the_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fixture(dir);
+    let out = camdl(dir, &["simulate", "sir.camdl", "--seed", "1"]);
+    assert!(!out.status.success());
+    let e = stderr(&out);
+    assert!(e.contains("has no value"), "stderr: {e}");
+    assert!(!e.contains("declare a default"),
+        "the DSL never writes a parameter value, so that fix does not exist: {e}");
+    for fix in ["--params", "--param", "scenario"] {
+        assert!(e.contains(fix), "the hint names {fix}: {e}");
+    }
+}
+
+#[test]
+fn an_unknown_name_in_a_params_file_names_params_not_fixed_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fixture(dir);
+    std::fs::write(dir.join("typo.toml"), "bta = 0.3\n").unwrap();
+    let out = camdl(dir, &["simulate", "sir.camdl", "--params", "typo.toml", "--seed", "1"]);
+    assert!(!out.status.success());
+    let e = stderr(&out);
+    assert!(e.contains("unknown parameter 'bta' from --params typo.toml"), "stderr: {e}");
+    assert!(!e.contains("--fixed"), "simulate has no --fixed flag: {e}");
+}
+
+#[test]
+fn an_unknown_name_given_to_param_names_param_not_fixed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fixture(dir);
+    let out = camdl(dir, &["simulate", "sir.camdl", "--param", "bta=0.3", "--seed", "1"]);
+    assert!(!out.status.success());
+    let e = stderr(&out);
+    assert!(e.contains("unknown parameter 'bta' from --param"), "stderr: {e}");
+    assert!(!e.contains("--fixed"), "simulate has no --fixed flag: {e}");
+}
+
+#[test]
+fn an_inference_command_still_names_fixed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fixture(dir);
+    std::fs::write(dir.join("fit.toml"), BARE_ESTIMATE_FIT).unwrap();
+    let out = camdl(dir, &["survey", "sir.camdl", "--fit", "fit.toml", "--n-points", "2",
+                           "--fixed", "bta=0.3", "--seed", "1"]);
+    assert!(!out.status.success());
+    let e = stderr(&out);
+    assert!(e.contains("unknown parameter 'bta' from --fixed"), "stderr: {e}");
+}

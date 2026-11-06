@@ -403,15 +403,67 @@ impl PinnedOverEstimate {
     }
 }
 
+/// Which flags the command that hit a [`ResolveError`] actually has, so a
+/// refusal names the flag the user passed. `simulate`, `pfilter` and `eval`
+/// take `--params FILE` and `--param NAME=VALUE`; `fit`, `profile` and
+/// `survey` take `--fixed-file` and `--fixed`. The resolver does not know
+/// which command called it: it reports [`FlagStyle::Fixed`] and a caller on
+/// the other surface relabels with [`ResolveError::with_flags`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlagStyle {
+    /// `--fixed NAME=VALUE`, `--fixed-file FILE`.
+    Fixed,
+    /// `--param NAME=VALUE`, `--params FILE`.
+    Params,
+}
+
+impl FlagStyle {
+    fn value_flag(self) -> &'static str {
+        match self { FlagStyle::Fixed => "--fixed", FlagStyle::Params => "--param" }
+    }
+    fn file_flag(self) -> &'static str {
+        match self { FlagStyle::Fixed => "--fixed-file", FlagStyle::Params => "--params" }
+    }
+    /// The ways to give a parameter a value, as this command spells them. A
+    /// model never writes a value in `parameters {}`, so none of them is
+    /// "edit the model".
+    fn unset_fix(self, name: &str) -> String {
+        match self {
+            FlagStyle::Params => format!(
+                "pass `--param {name}=<value>`, list it in a `--params FILE.toml`, \
+                 or set it in a scenario (`set = {{ {name} = <value> }}`)."),
+            FlagStyle::Fixed => format!(
+                "pass `--fixed {name}=<value>`, list it in a `--fixed-file FILE.toml`, \
+                 set it in a scenario (`set = {{ {name} = <value> }}`), or give it a \
+                 `[fixed]` or `[estimate]` entry in the fit.toml."),
+        }
+    }
+}
+
+impl ResolveError {
+    /// This error as the command with `flags` reports it.
+    pub fn with_flags(self, flags: FlagStyle) -> Self {
+        match self {
+            ResolveError::UnknownParameter { name, source, candidates, constant_hint, .. } =>
+                ResolveError::UnknownParameter { name, source, candidates, constant_hint, flags },
+            ResolveError::UnsetRequired { name, .. } =>
+                ResolveError::UnsetRequired { name, flags },
+            ResolveError::MultipleViolations(errs) => ResolveError::MultipleViolations(
+                errs.into_iter().map(|e| e.with_flags(flags)).collect()),
+            other => other,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ResolveError {
     /// `constant_hint`: set when `name` is a model constant
     /// ([`ir::Model::constant_hint`]) — a typed `let`, which is not a
     /// parameter; the message then says how to make it configurable.
     UnknownParameter     { name: String, source: ValueSource, candidates: Vec<String>,
-                           constant_hint: Option<String> },
+                           constant_hint: Option<String>, flags: FlagStyle },
     NonFiniteValue       { name: String, value: f64, source: ValueSource },
-    UnsetRequired        { name: String },
+    UnsetRequired        { name: String, flags: FlagStyle },
     SchemaMismatch       { path: PathBuf, msg: String },
     ScenarioNotFound     { name: String, available: Vec<String> },
     ExternalTableMissing { table: String },
@@ -443,11 +495,11 @@ impl std::fmt::Display for ResolveError {
             // Resolver diagnostics follow the same convention so a
             // user can grep stderr without worrying about quoting
             // style varying between code paths.
-            ResolveError::UnknownParameter { name, source, candidates, constant_hint } => {
+            ResolveError::UnknownParameter { name, source, candidates, constant_hint, flags } => {
                 let src_label = match source {
-                    ValueSource::FixedCli => "--fixed".to_string(),
+                    ValueSource::FixedCli => flags.value_flag().to_string(),
                     ValueSource::FixedFile { path } =>
-                        format!("--fixed-file {}", path.display()),
+                        format!("{} {}", flags.file_flag(), path.display()),
                     ValueSource::FitTomlFixed => "fit.toml [fixed]".to_string(),
                     other => format!("{:?}", other),
                 };
@@ -474,13 +526,12 @@ impl std::fmt::Display for ResolveError {
                      --fixed-file, or the scenario block.",
                     source.tag())
             }
-            ResolveError::UnsetRequired { name } => {
+            ResolveError::UnsetRequired { name, flags } => {
                 write!(f,
-                    "parameter '{name}' has no value: no model default, no \
-                     scenario, no --fit toml entry, no --fixed-file, no \
-                     --fixed.\n  \
-                     Fix: declare a default in the .camdl model, or pin via \
-                     `--fixed {name}=<value>`.")
+                    "parameter '{name}' has no value: no scenario sets it and \
+                     nothing supplies it.\n  \
+                     Fix: {}",
+                    flags.unset_fix(name))
             }
             ResolveError::SchemaMismatch { path, msg } =>
                 write!(f, "schema mismatch in {}: {}", path.display(), msg),
@@ -1584,6 +1635,7 @@ pub fn resolve_parameters_with_starts<'a>(
                 source: ValueSource::FitTomlFixed,
                 candidates: model_param_names.clone(),
                 constant_hint: model.constant_hint(name),
+                flags: FlagStyle::Fixed,
             });
         }
         for p in &mut model.parameters {
@@ -1606,6 +1658,7 @@ pub fn resolve_parameters_with_starts<'a>(
                     source: ValueSource::FixedFile { path: path.clone() },
                     candidates: model_param_names.clone(),
                     constant_hint: model.constant_hint(name),
+                flags: FlagStyle::Fixed,
                 });
             }
         }
@@ -1635,6 +1688,7 @@ pub fn resolve_parameters_with_starts<'a>(
                 source: ValueSource::SweepPoint,
                 candidates: model_param_names.clone(),
                 constant_hint: model.constant_hint(name),
+                flags: FlagStyle::Fixed,
             });
         }
         for p in &mut model.parameters {
@@ -1686,6 +1740,7 @@ pub fn resolve_parameters_with_starts<'a>(
                 source: ValueSource::FixedCli,
                 candidates: model_param_names.clone(),
                 constant_hint: model.constant_hint(name),
+                flags: FlagStyle::Fixed,
             });
         }
         tier5.insert(name.clone(), *v);
@@ -1772,7 +1827,7 @@ pub fn resolve_parameters_with_starts<'a>(
     let mut violations: Vec<ResolveError> = Vec::new();
     for p in &model.parameters {
         let Some(value) = p.value.resolved_value() else {
-            return Err(ResolveError::UnsetRequired { name: p.name.clone() });
+            return Err(ResolveError::UnsetRequired { name: p.name.clone(), flags: FlagStyle::Fixed });
         };
         if !value.is_finite() {
             let source = layers.source.get(&p.name)
@@ -2432,7 +2487,7 @@ mod tests {
         let fte = IndexSet::new();
         let err = resolve_parameters(empty_inputs(&model, &fcli, &ffiles, &ftf, &fte))
             .unwrap_err();
-        assert!(matches!(err, ResolveError::UnsetRequired { ref name } if name == "beta"));
+        assert!(matches!(err, ResolveError::UnsetRequired { ref name, .. } if name == "beta"));
     }
 
     // ── Tier 2: scenario ────────────────────────────────────────────────
