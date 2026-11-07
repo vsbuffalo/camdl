@@ -109,15 +109,15 @@ I0 = { perturb_only_at_t0 = true }
 # gamma = { bounds = [0.05, 0.15] }
 
 # ── Fixed parameters ──────────────────────────────────
-# Every parameter here is held constant at its model default.
-# The user MUST explicitly assign every model parameter to
-# either [estimate] or [fixed]. Missing parameters are an error.
+# Every parameter here is held constant at the value written here (a model
+# never carries a parameter value). The user MUST explicitly assign every model
+# parameter to either [estimate] or [fixed]. Missing parameters are an error.
 [fixed]
-N0 = true
-mu = true
-k = true
-psi = true
-cohort = true
+N0 = 1000000
+mu = 0.0002
+k = 10.0
+psi = 0.5
+cohort = 1.0
 ```
 
 ### 3.2 Search Bounds
@@ -256,7 +256,7 @@ if estimated ∪ fixed ≠ model_params:
        Every model parameter must appear in [estimate] or [fixed].
        
        Add to [estimate]:  {p} = {{}}
-       Add to [fixed]:     {p} = true"
+       Add to [fixed]:     {p} = <value>"
        
 if estimated ∩ fixed ≠ ∅:
     overlap = estimated ∩ fixed

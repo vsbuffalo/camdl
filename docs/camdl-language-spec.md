@@ -5643,7 +5643,8 @@ on `camdl profile` and `camdl survey`; in a `fit.toml` the equivalent is the
 **Pinning many params (the replacement for the removed name-only `--fixed`).**
 
 The pre-2026-05-25 surface accepted a name-only comma list: `--fixed "N0,mu,k"`
-meaning "freeze these three at their model defaults." That form is **removed**.
+meaning "freeze these three at their model defaults." That form is **removed**
+(a model carries no parameter values, so there was no default to freeze at).
 The two replacements are:
 
 - `--fixed NAME=VALUE` (repeated): explicit values, one per flag. Preferred for
@@ -5652,12 +5653,11 @@ The two replacements are:
   names, values are the pin values; repeatable, later files override earlier
   ones. Preferred for many-params vignettes (extract the values once, commit the
   TOML, point the invocation at it).
-- For the original "pin at the model default" intent — i.e. when the user didn't
-  want to type any values at all — the equivalent under the new surface is to
-  simply **not list the parameter in `--fixed`/`--fixed-file`**. The model
-  default flows through the precedence chain unchanged. The previous spelling
-  expressed "freeze at default" as an explicit gesture; the new spelling
-  expresses it as the absence of one. See `docs/camdl-run-spec.md §1.3` for the
+- For the original "pin without typing a value" intent, the equivalent under the
+  new surface is to **not list the parameter in `--fixed`/`--fixed-file`**: the
+  value then comes from the next tier down (a `[fixed]` or `--params` value, or
+  the compiled-in value a `camdlc --set` pinned, if any). A parameter with no
+  value from any tier is an error, not a default. See `docs/camdl-run-spec.md §1.3` for the
   full precedence chain and
   `docs/dev/proposals/archive/post-alpha/2026-05-25-cli-init-and-params-ux.md` §"`--fixed`
   semantics, defined once" for the rationale.

@@ -825,9 +825,12 @@ list and
 §"Precedence (last wins)" for the design rationale). Each tier overrides the
 tier above it:
 
-1. **Model parameter default.** The value declared in the `.camdl` source.
+1. **Compiled-in value.** The value already in the compiled IR. A `.camdl` never
+   writes one (`parameters {}` declares names, kinds, bounds and priors), so
+   this tier is empty unless `camdlc --set NAME=V` pinned the parameter at
+   compile time.
 2. **`fit.toml` `[fixed]` block.** When `--fit` is in scope, every key in
-   `[fixed]` overrides the model default.
+   `[fixed]` overrides the compiled-in value.
 3. **`--fixed-file <toml>`** (repeatable). A flat parameter TOML; top-level keys
    are parameter names. Layered in declaration order — later files override
    earlier ones.
