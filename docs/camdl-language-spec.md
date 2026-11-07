@@ -46,10 +46,11 @@ values live elsewhere: a `params.toml` / `[fixed]` block, a CLI override
 forward simulation and `docs/inference.md` for inference), and it is **not** a
 blanket "external beats in-file": an in-file scenario's `set`/`scale` overrides
 the external `params.toml` base and any sweep point, and only an explicit CLI
-`--param` / `--fixed` outranks the scenario. For a simulation's parameters,
-highest precedence first: `--param` CLI flags, then scenario `set = { ... }`,
-then sweep points, then the `params.toml` base values. The seed is always a CLI
-argument.
+`--param` / `--fixed` outranks the scenario — on parameters the scenario does
+not set or scale; a `--param` / `--fixed` on a parameter a selected scenario
+sets or scales is refused. For a simulation's parameters, highest precedence
+first: `--param` CLI flags, then scenario `set = { ... }`, then sweep points,
+then the `params.toml` base values. The seed is always a CLI argument.
 
 What this design preserves — and what the IR's hash discipline enforces — is
 that _structural_ model identity (compartments, transitions, observation

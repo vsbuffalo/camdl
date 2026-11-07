@@ -837,7 +837,12 @@ tier above it:
    params files by design — choosing a scenario is choosing the model author's
    documented bundle._
 5. **`--fixed NAME=VALUE`** (repeatable, highest). The per-invocation override;
-   always wins. Use this for "I want to change one value for this one run."
+   wins over every value the scenario does not set or scale. Use this for "I
+   want to change one value for this one run." A `--fixed` on a parameter the
+   scenario sets or scales is refused (gh#571): it would replace the scenario's
+   value while the run is still labelled with the scenario. Put the value in the
+   model's `scenarios {}` block, or, for a scale, in a `--fixed-file` the scale
+   applies over.
 
 The legacy `--params` and `--param` flags on inference subcommands (profile,
 if2, fit run, survey) were removed in the same revision. Their replacements are:

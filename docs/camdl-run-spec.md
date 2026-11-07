@@ -95,7 +95,9 @@ tiers, last wins:
 3.5 draw row or sweep point  (automated M-layer variation)
 4.  scenario                 (preset `params` + multiplicative `scale`,
                               or an inline ad-hoc `set`/`scale`)
-5.  --param / --fixed        (the user's explicit assertion; highest)
+5.  --param / --fixed        (the user's explicit assertion; highest: overrides
+                              every value a selected scenario does not set or
+                              scale; a collision with a scenario is refused)
 ```
 
 Tier 1 is whatever value the compiled IR already holds for a parameter. A
@@ -115,10 +117,11 @@ so `--params` and each cell's own scenario reach it (gh#949).
 The structural distinction between 3.5 and 5: a draw or sweep value is
 _automated_ M-layer variation and is counterfactual-modifiable, so a scenario
 patch (tier 4) overrides it. A `--param`/`--fixed` value is the user's explicit
-assertion about this specific run and overrides everything, scenario included. A
-named preset and an equivalent inline ad-hoc scenario resolve at the same tier,
-so they are indistinguishable in the resolved value — only the recorded
-provenance label differs.
+assertion about this specific run and overrides every value a selected scenario
+does not set or scale; a collision with a scenario is refused (below). A named
+preset and an equivalent inline ad-hoc scenario resolve at the same tier, so
+they are indistinguishable in the resolved value — only the recorded provenance
+label differs.
 
 **No replacement is silent.** Whenever a tier replaces, with a different value,
 a value that a tier other than tier 1 supplied, the run says so on stderr — one
@@ -142,8 +145,24 @@ value with an equal one, are not reported. A multi-cell run reports each
 they differ by cell.
 
 **Precedence orders values; it does not grant permission.** Where a scenario
-would discard a value the user wrote for the same parameter, the run is refused
-before anything is written, rather than resolved:
+would discard a value the user wrote for the same parameter, or a value the user
+wrote would discard a scenario's, the run is refused before anything is written,
+rather than resolved:
+
+- a `--param NAME=VALUE` (`simulate`) or `--fixed NAME=VALUE` (`survey`,
+  `profile`) on a parameter a selected scenario `set`s or `scale`s, directly or
+  through a preset it composes (gh#571). Tier 5 would replace the scenario's
+  value in every cell, so differently labelled scenarios would all run the
+  flag's value. The error names the flag, every colliding scenario and what it
+  does, and where the value belongs instead: in the model's `scenarios {}` block
+  (a `set` in the scenario that needs it, or a variant that `compose`s the
+  colliding scenario), in a `--params` / `--fixed-file` file for a `scale` (a
+  scale multiplies the file's value), or dropped. A scenario whose only action
+  is a `set` to the flag's own value is not a collision and runs, as is a
+  scenario that touches neither. A `--params` / `--fixed-file` file is tier 3,
+  below the scenario, and is not checked: a scenario overriding a parameter file
+  is the intended layering. `pfilter` refuses `--scenario` with `--param` at
+  parse time (gh#194); `fit predict` and `fit run` take no tier-5 flag;
 
 - a scenario that `set`s or `scale`s a parameter a `--sweep`/`--sweep-file` grid
   or a `--draws <file>` varies (`simulate`, `fit predict`, `fit run --sweep`;
@@ -1557,7 +1576,8 @@ camdl simulate seir_vaccine.camdl --params params.toml --enable sia_round_1 --se
 # Parameter override (M layer)
 camdl simulate seir_vaccine.camdl --params params.toml --param beta=0.5 --seed 42
 
-# Scenario + parameter override (σ layer + M layer — both valid)
+# Scenario + parameter override (σ layer + M layer); valid because `with_sia`
+# sets no parameter — a `--param` on a parameter the scenario sets is refused
 camdl simulate seir_vaccine.camdl --params params.toml --scenario with_sia --param beta=0.5 --seed 42
 
 # Resolve everything and print the plan without simulating
@@ -1609,7 +1629,9 @@ For more information, try '--help'.
 To combine a preset with an extra toggle, define a composed scenario in the
 model file.
 
-**`--param` is always valid (M layer, independent of σ layer):**
+**`--param` composes with a scenario that does not set or scale the same
+parameter** (M layer beside σ layer); on a parameter a selected scenario sets or
+scales it is refused (§1.3, gh#571):
 
 ```bash
 camdl simulate seir_vaccine.camdl --params params.toml --param beta=0.5 --seed 42
@@ -1640,9 +1662,11 @@ or an anchored model)`). `--init-state fit` is a separate check: it needs
 tier 1, normally none) → `--params`
 files in order → draw row or sweep point → scenario `set`/`scale` (preset or
 inline) → `--param`. A scenario that `set`s a parameter therefore overrides a
-value coming from generated `--draws`; only `--param` beats a scenario. A
-scenario touching a parameter that a `--draws <file>` column or a `--sweep`
-varies is refused rather than resolved (§3.2). See §5.4.
+value coming from generated `--draws`. `--param` outranks a scenario only on
+parameters the scenario leaves alone; a `--param` on a parameter a selected
+scenario sets or scales is refused (§1.3). A scenario touching a parameter that
+a `--draws <file>` column or a `--sweep` varies is refused rather than resolved
+(§3.2). See §5.4.
 
 ### 4.3 Parameter and Model Inputs
 
