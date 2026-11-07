@@ -290,6 +290,35 @@ fn profile_refuses_a_name_in_both_fixed_and_estimate() {
     ], &dir.join("both").join("results"));
 }
 
+/// `profile --fit` refuses a scenario (`--scenario` or the fit config's own)
+/// that sets or scales a nuisance parameter `[estimate]` lists, as `fit run`
+/// does. Before, the scenario only moved the estimate's starting value and
+/// run.json recorded the parameter as estimated with `source: scenario`.
+#[test]
+fn profile_refuses_a_scenario_that_sets_an_estimated_parameter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    setup(dir);
+    fit_toml(dir, "pf_sv", "", BETA, "N0 = 1000");
+    fit_toml(dir, "pf_sv_hi", "scenario = \"hi\"", BETA, "N0 = 1000");
+    for (what, cwd, fit, extra) in [
+        ("profile config scenario", "pf_cfg", "pf_sv_hi.toml", &["--rw-sd", "beta=0.02"][..]),
+        ("profile --scenario", "pf_cli", "pf_sv.toml",
+         &["--rw-sd", "beta=0.02", "--scenario", "hi"][..]),
+    ] {
+        let out = profile(dir, cwd, fit, extra);
+        assert_refused(what, &out, &[
+            "error: parameter `beta` is both estimated and set by scenario `hi`",
+            "  [estimate]:  beta    (in `",
+        ], &dir.join(cwd).join("results"));
+    }
+    fit_toml(dir, "pf_sv_half", "scenario = \"half\"", BETA, "N0 = 1000");
+    let out = profile(dir, "pf_half", "pf_sv_half.toml", &["--rw-sd", "beta=0.02"]);
+    assert_refused("profile scaling scenario", &out, &[
+        "error: parameter `beta` is both estimated and scaled by scenario `half`",
+    ], &dir.join("pf_half").join("results"));
+}
+
 // ─── survey ───────────────────────────────────────────────────────────────────
 
 fn survey(dir: &Path, root: &str, args: &[&str]) -> Output {

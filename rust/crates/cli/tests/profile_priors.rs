@@ -221,12 +221,6 @@ fn run_profile(
     let out_tsv = out_root.join("profile.tsv");
     let mut args: Vec<String> = vec![
         "profile".into(), ir.to_string_lossy().into_owned(),
-        // Pulls defaults for beta/gamma/N0 from the baseline preset
-        // so the validate_parameter_values step doesn't reject the
-        // run with "no value for 'beta'". This is the same way
-        // `camdl profile` is invoked everywhere else in the test
-        // suite.
-        "--scenario".into(), "baseline".into(),
         "--data".into(), data.to_string_lossy().into_owned(),
         "--obs".into(), "cases".into(),
         "--sweep".into(), "beta=lin(0.2,0.4,2)".into(),
@@ -238,6 +232,15 @@ fn run_profile(
         "--output".into(), out_tsv.to_string_lossy().into_owned(),
         "--seed".into(), "1".into(),
     ];
+    // Without --fit, the baseline preset gives beta/gamma/N0 their values
+    // (nothing is estimated from a fit config, so nothing collides). With
+    // --fit, the config supplies them ([estimate].start, [fixed]); the
+    // preset would set `gamma`, which the config estimates, and profile
+    // refuses that as `fit run` does.
+    if !extra_args.contains(&"--fit") {
+        args.push("--scenario".into());
+        args.push("baseline".into());
+    }
     for a in extra_args { args.push((*a).into()); }
     Command::new(bin)
         .env("CAMDL_OUTPUT_DIR", out_root)

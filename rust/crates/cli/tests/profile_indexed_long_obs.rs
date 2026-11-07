@@ -177,7 +177,9 @@ cooling    = 0.5
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "profile", &long_obs_model().to_string_lossy(),
-            "--scenario", "baseline",
+            // No `--scenario baseline`: it sets `gamma`, which this fit
+            // estimates, and profile refuses that as `fit run` does. The
+            // fit config supplies every value (gamma's start, [fixed]).
             "--fit", &toml.to_string_lossy(),
             "--sweep", "beta=lin(0.04,0.06,2)",
             "--particles", "100", "--iterations", "1", "--n-starts", "1",

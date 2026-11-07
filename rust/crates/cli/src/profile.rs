@@ -565,18 +565,31 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             disable: &fit_scenario.2,
         },
     ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
-    // The rule `fit run` applies to the same file: a scenario (from the fit
-    // config or `--scenario`) that moves a [fixed] parameter to another value
-    // is refused, not resolved.
+    // The rules `fit run` applies to the same file: a scenario (from the fit
+    // config or `--scenario`) that sets or scales an estimated parameter, or
+    // moves a [fixed] parameter to another value, is refused, not resolved.
+    // The profiled (swept) parameters are left out of the estimated set: the
+    // grid replaces a scenario's value for them, which is reported at info
+    // further down, not refused.
     if let (Some(scenario), Some(fit_path)) = (scenario_name.as_deref(), a.fit.as_ref()) {
-        match crate::params_resolver::scenario_fixed_collision(
-            &model_pre, scenario, &fit_toml_fixed_indexmap, &fit_path.to_string_lossy(),
-        ) {
-            Ok(None) => {}
-            Ok(Some(msg)) | Err(msg) => {
-                eprintln!("error: {msg}");
-                std::process::exit(1);
-            }
+        let fit_path_str = fit_path.to_string_lossy();
+        let estimated: Vec<&str> = fit_estimate.keys()
+            .map(|k| k.as_str())
+            .filter(|k| !a.sweep.iter().any(|s| s.name == *k))
+            .collect();
+        let refusals: Vec<String> = [
+            crate::params_resolver::scenario_estimate_collision(
+                &model_pre, scenario, &estimated, &fit_path_str,
+            ),
+            crate::params_resolver::scenario_fixed_collision(
+                &model_pre, scenario, &fit_toml_fixed_indexmap, &fit_path_str,
+            ),
+        ].into_iter()
+            .filter_map(|r| r.unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); }))
+            .collect();
+        if !refusals.is_empty() {
+            eprintln!("error: {}", refusals.join("\n\nerror: "));
+            std::process::exit(1);
         }
     }
 
