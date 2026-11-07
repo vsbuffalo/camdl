@@ -1698,6 +1698,11 @@ fn run_simulate(a: &args::SimulateArgs) {
                     // gh#949: the config's [fixed] block resolves at its own
                     // tier (below --params and the scenario), not in the rows.
                     base_sim_run.fit_fixed = fixed;
+                    base_sim_run.fit_base = fit_base_for_draws(fit_path, "prior")
+                        .unwrap_or_else(|e| {
+                            eprintln!("error: --fit {fit_path}: {e}");
+                            std::process::exit(1);
+                        });
                     rows
                 }
                 None => {
@@ -1839,6 +1844,11 @@ fn run_simulate(a: &args::SimulateArgs) {
                         lacking.len(), fit_ref, lacking.join(", "));
                 }
                 base_sim_run.fit_fixed = fixed.into_iter().collect();
+                base_sim_run.fit_base = fit_base_for_draws(fit_ref, "file")
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: --fit {fit_ref}: {e}");
+                        std::process::exit(1);
+                    });
             }
             loaded
         }
@@ -4781,6 +4791,29 @@ fn wrap_fit_load_error(fit_path: &str, err: String) -> String {
 /// into the rows (gh#949): a row resolves at the draw tier, above `--params`,
 /// while `[fixed]` belongs at the `fit.toml [fixed]` tier below it. The
 /// caller routes them there via `SimRun::fit_fixed`.
+/// The fit's own intervention selection, for `simulate --draws prior|<file>
+/// --fit`: the same [`util::FitBase`] the posterior path reads, so every arm
+/// replays on the fit's `scenario` / `enable` / `disable` and a flag applies
+/// on top of it. `--fit` here is a fit config or any stored-fit handle.
+fn fit_base_for_draws(fit_ref: &str, source: &str) -> Result<util::FitBase, String> {
+    let base = if std::path::Path::new(fit_ref).is_file() {
+        let problem = fit::config_v2::Problem::load(fit_ref)
+            .map_err(|e| wrap_fit_load_error(fit_ref, e))?;
+        util::FitBase::of(&problem)?
+    } else {
+        let resolved = crate::fit::handle::resolve_fit(fit_ref).map_err(|e| e.to_string())?;
+        util::FitBase::of(&resolved.config.problem)?
+    };
+    if !base.is_empty() {
+        eprintln!(
+            "draws: {source} — every arm runs the fit's own {}; a scenario \
+             applies its changes on top of it",
+            base.describe()
+        );
+    }
+    Ok(base)
+}
+
 fn generate_prior_draws(
     fit_path: &str,
     n: usize,

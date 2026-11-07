@@ -296,6 +296,48 @@ fn simulate_posterior_replays_the_fits_selection() {
         "`--disable vax` switches off the fitted vax and must differ");
 }
 
+#[test]
+fn simulate_prior_and_file_draws_replay_the_fits_selection() {
+    // `--draws prior --fit` and `--draws <file> --fit` read the fit config for
+    // priors / `[fixed]`; they must also run its `enable`, as `--draws
+    // posterior --fit` does. `f0` is the same fit with no selection: its
+    // cells are the as-written model and run first into the same store, so a
+    // selection missing from the cell identity would be served its cells.
+    let tmp = tempdir("simulate_other_draws");
+    let ir = compile(tmp.path(), "m", &format!("{HEAD}{TAIL_BOTH}"));
+    let fit = fit_config(tmp.path(), "f", &ir, r#"enable = ["vax"]"#, PMMH);
+    let f0 = fit_config(tmp.path(), "f0", &ir, "", PMMH);
+    ok(run(tmp.path(), &["fit", "run", &fit.to_string_lossy()]), "fit run");
+    let leaf = draws_leaf(&tmp.path().join("res_f"));
+    std::fs::copy(leaf.join("draws.tsv"), tmp.path().join("d.tsv")).unwrap();
+    let sim = |out: &str, mode: &[&str], fit: &Path, extra: &[&str]| {
+        let mut args = vec!["simulate", ir.to_str().unwrap()];
+        args.extend_from_slice(mode);
+        args.extend_from_slice(&["--fit", fit.to_str().unwrap(), "--seed", "3", "-o", out]);
+        args.extend_from_slice(extra);
+        ok(run(tmp.path(), &args), "simulate");
+        std::fs::read_to_string(tmp.path().join(out)).unwrap()
+            .lines().filter(|l| !l.starts_with('#'))
+            .map(|l| l.split('\t').filter(|c| !c.starts_with("(none)")).collect::<Vec<_>>().join("\t"))
+            .collect::<Vec<_>>()
+    };
+    for (tag, mode) in [("prior", vec!["--draws", "prior", "-n", "4"]),
+                        ("file", vec!["--draws", "d.tsv"])] {
+        let o = |n: &str| format!("{tag}_{n}.tsv");
+        let as_written = sim(&o("f0"), &mode, &f0, &[]);
+        let implicit = sim(&o("implicit"), &mode, &fit, &[]);
+        assert_ne!(implicit, as_written,
+            "--draws {tag} --fit: the fit's selection (enable vax) is ignored — the \
+             implicit arm is the as-written model");
+        assert_eq!(implicit, sim(&o("vax"), &mode, &fit, &["--enable", "vax"]),
+            "--draws {tag} --fit: the implicit arm must be the fitted model, the \
+             same trajectories as `--enable vax`");
+        assert_ne!(implicit, sim(&o("novax"), &mode, &fit, &["--disable", "vax"]),
+            "--draws {tag} --fit: `--disable vax` switches off the fitted vax and \
+             must differ");
+    }
+}
+
 fn loglik(out: &Output) -> f64 {
     String::from_utf8_lossy(&out.stdout).lines()
         .find_map(|l| l.trim().parse::<f64>().ok())
