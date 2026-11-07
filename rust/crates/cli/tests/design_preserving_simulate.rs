@@ -614,6 +614,42 @@ fn design_from_refuses_a_covariate_stream_by_name_and_writes_nothing() {
         "nothing is written for a stream that cannot be drawn honestly");
 }
 
+/// `--design-from` writes one dataset from `--params`/`--param` or one per
+/// `--draws` row; it applies no scenario. A `--scenario` beside it was dropped
+/// silently — the dataset was the unscenario'd model's, under a command line
+/// that named the scenario — so the combination is refused at parse time, like
+/// the other flags the dataset path does not honour, and nothing is written.
+#[test]
+fn design_from_refuses_a_scenario_and_writes_nothing() {
+    if camdlc().is_none() { return; }
+    let tmp = tempdir("design_scenario");
+    let src = format!("{WINDOWED_MODEL}\nscenarios {{\n  fast {{ set = {{ beta = 2.0 }} }}\n}}\n");
+    let ir = compile(tmp.path(), "windowed", &src);
+    let data = tmp.path().join("cases.tsv");
+    std::fs::write(&data, IRREGULAR_DATA).unwrap();
+    let truth = truth_toml(tmp.path());
+    let fit_toml = tmp.path().join("fit.toml");
+    std::fs::write(&fit_toml, format!(
+        "[model]\ncamdl = \"{}\"\n\n[data.observations]\ncases = \"{}\"\n{}",
+        ir.display(), data.display(), STAGES)).unwrap();
+
+    let out_dir = tmp.path().join("synth");
+    let output = run(&[
+        "simulate", ir.to_str().unwrap(),
+        "--params", truth.to_str().unwrap(),
+        "--design-from", fit_toml.to_str().unwrap(),
+        "--projected-out", out_dir.to_str().unwrap(),
+        "--scenario", "fast",
+        "--backend", "chain_binomial", "--dt", "1", "--seed", "11",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(),
+        "--design-from with --scenario must be refused, not run without it:\n{stderr}");
+    assert!(stderr.contains("'--design-from <FIT_TOML>' cannot be used with '--scenario"),
+        "the refusal names both flags:\n{stderr}");
+    assert!(!out_dir.exists(), "nothing is written:\n{stderr}");
+}
+
 /// Every `.tsv` under `root`, recursively.
 fn tsv_files_under(root: &Path) -> Vec<PathBuf> {
     let mut written: Vec<PathBuf> = Vec::new();

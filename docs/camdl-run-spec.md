@@ -2105,7 +2105,10 @@ a run**: no trajectory and no store leaf are written, with `--obs-dir` as with
 `--obs-only-dir`. It conflicts with the flags the store-backed trajectory
 pipeline owns (`--obs`, `--obs-only`, `-o`, `--stdout`, `--seeds`,
 `--replicates`, `--emit-every`, `--dates`, `--init-state`, `--quantities-out`,
-`--event-log`), so nothing passed is silently dropped.
+`--event-log`), and with `--scenario`, since the dataset is written from the
+parameter vector alone with no scenario applied; so nothing passed is silently
+dropped. To simulate a dataset under a scenario's parameter values, give the
+values through `--params`.
 
 A stream whose likelihood reads a data column — a binomial denominator
 `n = tested`, a person-time offset — is refused by name: there is no data file
