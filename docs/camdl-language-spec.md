@@ -5257,12 +5257,14 @@ scenarios {
 parent's resolved `beta`. There's no default-at-declaration path in camdl; the
 name must resolve to a concrete upstream value or the compiler errors.
 
-::: {.callout-warning} **`enable`/`disable`/`compose` append parent's list to
+::: {.callout-warning}
+**`enable`/`disable`/`compose` append parent's list to
 the child's.** A child writing `enable = [masking]` under a parent with
 `enable = [vaccination]` gets `[vaccination, masking]`, **not** just
 `[masking]`. To remove a parent's intervention in a child, use `disable`. The
 compiler emits **W310** whenever this merge actually changes the child's
-declared list, so the surprise is observable rather than silent. :::
+declared list, so the surprise is observable rather than silent.
+:::
 
 **Diagnostics:**
 

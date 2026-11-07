@@ -1133,6 +1133,7 @@ aspirational.
 by a crash are inert debris; they are never read.
 
 ---
+
 ## 3. Core Types
 
 A run is a point in three axes — **M** (parameter values), **σ** (scenario), and
