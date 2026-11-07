@@ -220,6 +220,20 @@ order of traversal.
 
 ## 5. When a dimension is required
 
+**Decided (2026-11-06): I300 stays an Info, with no strict mode.** Under the
+complete solver of `2026-11-06-dimension-checking-as-one-constraint-system.md`
+five repo models of about 150 keep an I300, and none of them is a mistake: the
+model fixes only a pair (`R0 / N` in `sir_two_patch`, `tau · z` in
+`prior_only_all`, `kappa · W` in `seir_spatial_5_inference`), or the count-noise
+rule leaves the P exponent free by design (`sigma_rel` in
+`surveillance_likelihoods`). An undetermined dimension satisfies the model's
+equations whatever it is, so an error, or an opt-in mode forcing a `dim` clause,
+would demand an arbitrary choice of representative for a pair and an unchecked
+declaration for count noise, and would catch no error in practice. Parameters
+used only in priors, or not at all, get no I300. A user who wants a dimension
+stated writes a `dim` clause, which is then checked. The text below is the
+original plan.
+
 `dim` is optional, and the compiler requires it exactly when the complete solver
 of section 4 leaves a parameter's dimension free. I300 becomes an error
 ("dimension of parameter 'lead_days' is not determined by its use; add
