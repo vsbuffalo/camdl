@@ -1,0 +1,9 @@
+patch	age	pop
+north	child	28000
+north	adult	92000
+south	child	20000
+south	adult	65000
+east	child	11000
+east	adult	34000
+west	child	48000
+west	adult	152000

@@ -84,3 +84,7 @@ web/src/lib/wasm/pkg/
 web/.env.local
 review-zips/
 target/book/
+
+# Quarto documentation website (make docs-site)
+docs/_site/
+docs/.quarto/

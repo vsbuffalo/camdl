@@ -1,0 +1,46 @@
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+dimensions {
+  patch = read("data/patch_features.tsv", column = "patch")
+}
+
+stratify(by = patch)
+
+parameters {
+  beta  : rate in [0.001, 1.0]
+  sigma : rate in [0.01,  1.0]
+  gamma : rate in [0.01,  1.0]
+}
+
+let N[p in patch] = S[p] + E[p] + I[p] + R[p]
+
+tables {
+  pop : patch         = read("data/patch_pop.tsv")
+  adj : patch × patch = read("data/spatial_adj.tsv", default = 0.0)
+}
+
+transitions {
+  infection[p in patch] : S[p] --> E[p]
+    @ beta * S[p] * sum(q in patch, adj[p, q] * I[q] / N[q])
+
+  progression[p in patch] : E[p] --> I[p]  @ sigma * E[p]
+  recovery[p in patch]    : I[p] --> R[p]  @ gamma * I[p]
+}
+
+init {
+  S[p in patch] = pop[p]
+  I[north]      = 5
+}
+
+simulate {
+  from = 0 'days
+  to   = 180 'days
+}
+
+scenarios {
+  baseline {
+    set = { beta = 0.3  sigma = 0.2  gamma = 0.1 }
+  }
+}

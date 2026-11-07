@@ -624,6 +624,28 @@ install-nvim-ts:
 	install -m 644 $(TS_DIR)/queries/locals.scm     $(NVIM_QUERIES)/locals.scm
 	@echo "Done. Restart Neovim and open a .camdl file."
 
+# ── Documentation website ─────────────────────────────────────────────────────
+#
+# Renders docs/*.md (the same files `camdl docs` embeds) plus the tutorial
+# pages docs/guide/*.qmd to docs/_site/ with Quarto; config in
+# docs/_quarto.yml. The reference pages execute nothing (their examples are
+# gated by test-docs / test-cli-docs / test-data-spec). The tutorial pages run
+# their `camdl` commands at render time (docs/_web/camdl-run.lua) against this
+# checkout's own build, so the output shown is the output of the code being
+# documented. Deployed to GitHub Pages by .github/workflows/docs-site.yml.
+# Requires `quarto` on PATH.
+
+.PHONY: docs-site docs-site-preview
+
+DOCS_SITE_PORT ?= 4321
+DOCS_SITE_ENV  := PATH="$(CURDIR)/rust/target/release:$$PATH" CAMDLC="$(CURDIR)/$(CAMDLC)"
+
+docs-site: build
+	cd docs && $(DOCS_SITE_ENV) quarto render
+
+docs-site-preview: build
+	cd docs && $(DOCS_SITE_ENV) quarto preview --port $(DOCS_SITE_PORT) --host 0.0.0.0 --no-browser
+
 # ── Housekeeping ──────────────────────────────────────────────────────────────
 
 .PHONY: clean

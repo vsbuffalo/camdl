@@ -1,0 +1,80 @@
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+dimensions {
+  patch = read("data/patch_features.tsv", column = "patch")
+  age   = [child, adult, elder]
+}
+
+stratify(by = patch)
+stratify(by = age)
+
+parameters {
+  beta_local  : rate in [0.001, 0.5]
+  beta_travel : rate in [1e-5, 0.05]
+  sigma       : rate in [0.01, 1.0]
+  gamma       : rate in [0.01, 1.0]
+  mu          : rate in [1e-6, 0.005]
+}
+
+let N[p in patch, a in age] = S[p,a] + E[p,a] + I[p,a] + R[p,a]
+let N_total[p in patch]     = sum(a in age, N[p, a])
+let I_total[p in patch]     = sum(a in age, I[p, a])
+
+tables {
+  pop_pa  : patch × age   = read("data/patch_age_pop3.tsv")
+  adj     : patch × patch = read("data/spatial_adj.tsv", default = 0.0)
+
+  age_dur : age = [5475, 16425, 36500]   # days: ~15yr child, ~45yr adult, 100yr elder
+
+  C : age × age = [[18.0,  6.0, 1.0],   # child mixes heavily with children
+                   [ 6.0, 12.0, 2.0],   # adults: moderate mixing across groups
+                   [ 1.0,  2.0, 5.0]]   # elders: mostly with other elders
+}
+
+transitions {
+  # Age-structured local + spatial force of infection combined
+  infection[p in patch, a in age] : S[p, a] --> E[p, a]
+    @ S[p, a] * (
+        beta_local  * sum(b in age, C[a, b] * I[p, b] / N_total[p])
+      + beta_travel * sum(q in patch, adj[p, q] * I_total[q] / N_total[q])
+      )
+
+  progression[p in patch, a in age] : E[p, a] --> I[p, a]  @ sigma * E[p, a]
+  recovery[p in patch, a in age]    : I[p, a] --> R[p, a]  @ gamma * I[p, a]
+
+  # Aging through ordered age groups — consecutive generates (child,adult),(adult,elder)
+  aging[c in compartments, p in patch, (a, a_next) in consecutive(age)] : c[p, a] --> c[p, a_next]
+    @ (1 / age_dur[a]) * c[p, a]
+
+  # Background mortality across all compartments, patches, and ages
+  death[c in compartments, p in patch, a in age] : c[p, a] -->
+    @ mu * c[p, a]
+
+  # Births replenish youngest age class proportionally per patch
+  birth[p in patch] : --> S[p, child]
+    @ mu * N_total[p]
+}
+
+init {
+  S[p in patch, a in age] = pop_pa[p, a]
+  I[north, child]         = 5
+}
+
+simulate {
+  from = 0 'days
+  to   = 365 'days
+}
+
+scenarios {
+  baseline {
+    set = {
+      beta_local  = 0.04
+      beta_travel = 0.001
+      sigma       = 0.2
+      gamma       = 0.1
+      mu          = 0.000027
+    }
+  }
+}

@@ -1,0 +1,85 @@
+# Polio-like: 5-patch SEIR+V with gravity importation
+# Demonstrates: spatial stratification, indexed parameters, where clause,
+#               inline coupling matrix
+time_unit = 'days
+
+compartments { S, E, I, R, V }
+
+dimensions {
+  patch = [north, south, east, west, center]
+}
+
+stratify(by = patch)
+
+let N[p in patch] = S[p] + E[p] + I[p] + R[p] + V[p]
+
+parameters {
+  sigma     : rate        in [0.01,  1.0]
+  gamma     : rate        in [0.01,  1.0]
+  kappa     : rate        in [0.0,   0.5]   # importation coupling strength
+  R0[patch] : positive    in [0.5,   10.0]
+  N0[patch] : count       in [100, 1000000]
+  I0        : count       in [1,     1000]
+}
+
+let beta[p in patch] = R0[p] * gamma
+
+tables {
+  # Gravity coupling weights: row p, col q = coupling from q into p.
+  # Center connects to all; edges connect to neighbors.
+  W : patch × patch = [[0.00, 0.10, 0.05, 0.05, 0.15],
+                        [0.10, 0.00, 0.10, 0.05, 0.10],
+                        [0.05, 0.10, 0.00, 0.10, 0.10],
+                        [0.05, 0.05, 0.10, 0.00, 0.15],
+                        [0.15, 0.10, 0.10, 0.15, 0.00]]
+}
+
+transitions {
+  # Local transmission
+  infection[p in patch] : S[p] --> E[p]
+    @ beta[p] * S[p] * I[p] / N[p]
+
+  # Importation from every other patch, summed into one transition per patch
+  # (`where p != q` excludes the patch itself)
+  importation[p in patch] : S[p] --> E[p]
+    @ kappa * S[p] * sum(q in patch where p != q, W[p, q] * I[q] / N[q])
+
+  progression[p in patch] : E[p] --> I[p]  @ sigma * E[p]
+  recovery[p in patch]    : I[p] --> R[p]  @ gamma * I[p]
+}
+
+init {
+  S[north]  = N0[north]  - I0
+  S[south]  = N0[south]
+  S[east]   = N0[east]
+  S[west]   = N0[west]
+  S[center] = N0[center]
+  I[north]  = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 365 'days
+}
+
+scenarios {
+  baseline {
+    label = "weak coupling"
+    set = {
+      sigma        = 0.2
+      gamma        = 0.1
+      kappa        = 0.01
+      R0[north]    = 2.5
+      R0[south]    = 2.2
+      R0[east]     = 1.9
+      R0[west]     = 2.0
+      R0[center]   = 3.0
+      N0[north]    = 150000
+      N0[south]    = 200000
+      N0[east]     = 120000
+      N0[west]     = 100000
+      N0[center]   = 500000
+      I0           = 5
+    }
+  }
+}

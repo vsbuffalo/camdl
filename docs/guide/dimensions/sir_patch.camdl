@@ -1,0 +1,46 @@
+time_unit = 'days
+
+compartments { S, I, R }
+
+dimensions {
+  patch = read("data/patch_features.tsv", column = "patch")
+}
+
+stratify(by = patch)
+
+parameters {
+  beta  : rate in [0.001, 1.0]
+  gamma : rate in [0.01,  1.0]
+  mu    : rate in [1e-6,  0.01]
+}
+
+let N[p in patch] = S[p] + I[p] + R[p]
+
+tables {
+  pop, area_km2, density : patch = read("data/patch_features.tsv")
+}
+
+transitions {
+  infection[p in patch] : S[p] --> I[p]
+    @ beta * density[p] * S[p] * I[p] / N[p]
+
+  recovery[p in patch]  : I[p] --> R[p]  @ gamma * I[p]
+
+  death[p in patch]     : S[p] -->        @ mu * S[p]
+}
+
+init {
+  S[p in patch] = pop[p]
+  I[north]      = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 180 'days
+}
+
+scenarios {
+  baseline {
+    set = { beta = 0.3  gamma = 0.1  mu = 0.000027 }
+  }
+}

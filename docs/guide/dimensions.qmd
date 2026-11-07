@@ -1,0 +1,756 @@
+---
+title: "Dimensions and stratification"
+description: "Named axes of population structure — age, place, sex, disease stage — and how the compiler expands them."
+---
+
+An SIR model treats everyone as identical: one pool of susceptibles, one
+pool of infecteds, one recovery rate. Real populations are structured.
+Children and adults mix differently. Cities seed epidemics into rural
+areas. Vaccination history determines who is still at risk. The
+epidemiological questions almost always live in the structure — *which*
+age group drives transmission, *which* patch re-seeds after a campaign,
+*whether* partial immunity matters for dynamics.
+
+camdl's answer to this is **dimensions**: named axes of population
+heterogeneity that the compiler uses to expand a compact model
+specification into the full set of stratified compartments, transitions,
+and bookkeeping. You write the model once, declare which axes matter, and
+the compiler generates the expanded system — checked for dimensional
+consistency at every step.
+
+This chapter introduces the abstractions, shows how they connect to
+external data, and works through a series of examples drawn from
+measles, polio, STI, and malaria modeling. Every model shown is a file
+in [`docs/guide/dimensions/`](https://github.com/vsbuffalo/camdl/tree/main/docs/guide/dimensions),
+and every command's output on this page was produced by running it when
+the page was built.
+
+## The core abstraction
+
+A **dimension** is a finite set of named levels:
+
+```camdl
+dimensions {
+  age   = [child, adult]
+  patch = [north, south, east, west, center]
+}
+```
+
+A **stratification** applies a dimension to compartments:
+
+```camdl
+stratify(by = age)
+stratify(by = patch)
+```
+
+By default, `stratify(by = age)` applies to **all** compartments — S, I,
+and R each gain an age index. This is the right default because in most
+models, every disease state needs to track every dimension of population
+heterogeneity (you need to know how many susceptible *children* there
+are, not just how many susceptibles).
+
+When a dimension only applies to some compartments, use **partial
+stratification** with the `only` clause:
+
+```camdl
+stratify(by = immunity, only = [R, V])
+```
+
+Here S, E, and I keep their existing dimensions, but R and V gain an
+extra `immunity` axis. The compiler then requires explicit routing into
+partially-stratified compartments — you must say `I --> R[natural]`, not
+just `I --> R`. This is covered in detail in
+[Partial stratification](#partial-stratification) below.
+
+Each `stratify()` call adds one dimension. You cannot write
+`stratify(by = [age, patch])` — it's a syntax error. This is deliberate:
+each dimension is added in a separate statement, and the order of
+`stratify()` calls determines the positional index order. After
+`stratify(by = age)` then `stratify(by = patch)`, the first index is
+age and the second is patch: `S[child, north]`.
+
+After both stratifications, `S` has shape `age × patch` — ten concrete
+compartments for a two-age, five-patch model. The key rule:
+
+> **A reference names one cell, or everything.** Think of a stratified
+> compartment as a joint table over its dimensions. Bare `S` — no
+> indices — is the sum over every stratum: the total count. `S[child,
+> north]` is fully specified: one cell. A reference that names only
+> *some* of the dimensions, such as `S[child]` on a compartment
+> stratified by age and patch, is a compile error (E287): it neither
+> picks a cell nor states a sum. To sum over one dimension while fixing
+> another, write the sum: `sum(p in patch, S[child, p])`. The compiler
+> never guesses which stratum you meant.
+
+<!-- figure: stratify-expand -->
+
+Here is the compiler refusing a partial index, `S[r]`, used as a
+denominator where `sum(a in age, S[r, a])` was meant:
+
+```{.camdl-run expect="fail"}
+camdl check dimensions/partial_index.camdl
+```
+
+This is the **no-auto-localization** principle, and it prevents a large
+class of silent bugs in stratified models. In frameworks where bare `S`
+implicitly means "the current stratum's S," a misplaced variable quietly
+produces wrong rates. In camdl, you must be explicit — and the compiler
+checks that every index has the right type.
+
+::: {.callout-important}
+## How other frameworks handle this
+
+In a stratified model, every compartment reference is ambiguous: does
+`S` mean the current stratum's susceptibles, the global total, or a
+specific stratum? Most frameworks resolve this through implicit context
+or untyped integer indexing. When the modeler's intent doesn't match
+the resolution rule, the model runs without error and produces
+quantitatively wrong output.
+
+In **pomp**[^pomp], multi-patch models require manually expanding
+compartments to `S1`, `S2`, `S3` and writing C snippets that reference
+each by name — the modeler manages all indexing by hand, and a typo
+between two valid expanded names (`S2` for `S3`) silently produces the
+wrong rate.[^pomp-issue] The **spatPomp** extension[^spatpomp] adds
+implicit unit-scoping for measurement components (bare `C` resolves to
+the current unit's value), but this doesn't extend to the process
+model, which still requires explicit `S[u]` indexing — two different
+resolution regimes in the same framework.
+
+In **odin**[^odin], stratified compartments are integer-indexed arrays.
+Bare `S` without an index is caught by the parser (error
+E2022[^odin-e2022]), so the silent-substitution failure mode doesn't
+apply. But all indices are untyped integers: `S[age_idx]` and
+`S[patch_idx]` are the same operation to the language. Swapping them
+parses cleanly and only gets caught if the dimensions happen to differ
+in size (a bounds error at runtime, not a type error at compile
+time).[^odin-index] Similarly, `sum(S)` vs. `sum(S[i, ])` — global
+total vs. row-specific sum — is a semantic distinction the modeler
+manages by hand; the compiler can check rank but not intent.
+
+The common thread: these frameworks catch *syntactic* errors (missing
+brackets, wrong rank) but not *semantic* errors (wrong dimension,
+swapped indices, incorrect aggregation level). camdl's approach — bare
+names are always global sums, indices carry named dimension types, and
+the compiler rejects mismatches — catches both.
+:::
+
+## Rates are total propensity — the compiler checks
+
+A related design choice: in camdl, the `@` rate on every transition is
+the **total propensity** — the absolute event rate in units of
+population per time (P·T⁻¹). The compiler checks this dimensionally.
+There is no hidden per-capita multiplication.
+
+If you write a per-capita rate where a total propensity is needed, the
+compiler catches it. The correct form and the common mistake:
+
+```camdl
+# ✓ Correct: beta:T⁻¹ × S:P × I:P / N:P = P·T⁻¹
+infection : S --> I @ beta * S * I / N
+
+# ✗ Wrong: beta:T⁻¹ × I:P / N:P = T⁻¹ (missing the × S)
+infection : S --> I @ beta * I / N
+```
+
+The second form is a per-capita rate (dimension T⁻¹) rather than a
+total propensity (dimension P·T⁻¹). The compiler's dimensional checker
+infers types from parameter declarations (`rate` → T⁻¹, `count` → P,
+`probability` → dimensionless), propagates them through arithmetic, and
+rejects the mismatch at compile time with error E300.
+
+This is the single most common modeling bug. In most other frameworks,
+it compiles without complaint and produces trajectories where infection
+happens at the wrong rate. The checker also verifies that arguments to
+`exp()` and `log()` are dimensionless, that additions don't mix
+dimensions, and that table unit annotations are consistent.
+
+Here is what the compiler produces for a typo — `Q` where `I` was meant,
+in the recovery rate of an otherwise correct SIR model:
+
+```{.camdl include="dimensions/error_test.camdl" lines="16-19"}
+```
+
+```{.camdl-run expect="fail"}
+camdl check dimensions/error_test.camdl
+```
+
+The error names the root cause — an undeclared name — and points to the
+exact file, line, and column, with a caret under the offending token and
+a hint saying where a declaration would go. `camdl check` runs the full
+compiler pipeline (parsing, name resolution, and the dimensional
+checker) without simulating anything, so it is the cheap first step
+after every edit.
+
+## Tables: dimensionally-typed data
+
+The bridge between dimensions and data is the **table**. A table
+declaration carries a type signature that says which dimensions index it:
+
+```camdl
+tables {
+  C_age : age × age      = [[12.0, 4.0], [4.0, 8.0]]
+  pop   : patch           = read("data/pop.tsv")
+  W     : patch × patch   = read("data/gravity.tsv", default = 0.0)
+}
+```
+
+The annotation `: age × age` is not documentation — it is a type the
+compiler enforces. `C_age[a, b]` requires both `a` and `b` to be bound
+to the `age` dimension. Writing `C_age[a, p]` where `p` is a `patch`
+variable is a compile-time error. This catches a category of bug that
+in array-indexed frameworks (pomp, odin) only surfaces as wrong numbers
+at runtime.
+
+### Inline vs. file-based tables
+
+Small tables — contact matrices, duration vectors — are written inline.
+Large tables — spatial kernels, patch populations, district-level
+demographics — are loaded from TSV/CSV files:
+
+```{.camdl include="dimensions/seir_spatial_data.camdl" lines="23-26"}
+```
+
+::: {.callout-note}
+## File paths are relative to the model file
+
+Paths in `read()` resolve relative to the `.camdl` file's own
+directory, not the shell's working directory. Running
+`camdl check models/mymodel.camdl` from the repo root resolves
+`read("data/contact.tsv")` to `models/data/contact.tsv`. The file's
+location is the anchor, so models work regardless of where you invoke
+the compiler from.
+:::
+
+The file is **long-format**: index columns followed by value columns.
+The number of index columns is determined by the type signature — one
+column per dimension in the `×`-separated type. Here are the two files
+the declarations above read:
+
+```{.tsv include="dimensions/data/demographics.tsv"}
+```
+
+The type signature `pop, init_sus : patch` tells the compiler: one index
+column (`patch`), two value columns (`pop` and `init_sus`). Multiple
+value columns loaded from the same file create separate tables sharing
+the same index.
+
+For a two-dimensional table like the adjacency matrix:
+
+```{.tsv include="dimensions/data/adjacency.tsv"}
+```
+
+The type signature `adj : patch × patch` means two index columns (both
+`patch`), one value column. Each row is a (source, destination, weight)
+triple. The compiler validates that every index value is a declared
+level of its dimension — a typo like `nroth` for `north` is a compile
+error (E207) naming the file, the column, and the unrecognised level.
+
+`default = 0.0` marks a **sparse table** — index combinations missing
+from the file get the default value rather than raising an error. Without
+`default`, the compiler checks that every combination is present (a
+dense check). For a 774-patch spatial model, a dense gravity matrix
+would need 774² ≈ 600,000 rows; `default = 0.0` lets you list only
+the nonzero entries.
+
+### Verifying tables with `camdl inspect`
+
+After compilation, `camdl inspect --tables` shows exactly what the
+compiler loaded — values, dimensions, and source file. This is the
+primary way to verify that external data parsed correctly before running
+simulation or inference:
+
+```{.camdl-run}
+camdl inspect dimensions/seir_spatial_data.camdl --tables
+```
+
+The `pop, init_sus` multi-value declaration produced two separate tables
+from the same file. The adjacency matrix — loaded sparse with
+`default = 0.0` — is rendered as a full matrix with zeros filled in,
+making the connectivity pattern immediately visible. The `loaded:` and
+`inline` annotations tell you whether values came from a file or from
+the DSL source.
+
+### Data-derived dimensions
+
+For models with many patches (Nigerian LGAs, London boroughs), you don't
+want to type out hundreds of level names. Derive them from the data:
+
+```camdl
+dimensions {
+  patch = read("data/lga_pop.tsv", column = "patch")
+}
+```
+
+The compiler reads the named column, collects unique values in
+first-occurrence order, and those become the dimension levels. Every
+table and transition referencing `patch` is validated against these
+levels. Change the data file, and the model's spatial resolution changes
+with it — no code edits needed.
+
+## Contact mixing patterns
+
+The structure of a dimension's mixing is encoded in its coupling table.
+Different diseases demand different patterns, and camdl handles them all
+through the same mechanism: a table indexed by `dim × dim`, used inside
+a `sum()` in the force of infection.
+
+### Dense symmetric: childhood infections
+
+For measles or pertussis, age-structured contact drives dynamics.
+Children contact each other far more than they contact adults, but
+cross-group mixing still matters:
+
+```{.camdl include="dimensions/seir_age_measles.camdl"}
+```
+
+The `sum(b in age, C_age[a, b] * I[b] / N[b])` computes the
+age-weighted force of infection: for each age group `a`, sum over all
+groups `b` the contact rate times the prevalence in `b`. The WAIFW
+(who-acquires-infection-from-whom) matrix here is symmetric — contacts
+are reciprocal — but it need not be.
+
+`camdl inspect` confirms the expansion — 3 age groups × 4 compartments
+= 12 expanded compartments, and the inline contact matrix:
+
+```{.camdl-run}
+camdl inspect dimensions/seir_age_measles.camdl
+```
+
+The `--dims` flag shows the dimensional analysis the compiler inferred
+for each parameter — useful for verifying that rate expressions have
+the right units:
+
+```{.camdl-run}
+camdl inspect dimensions/seir_age_measles.camdl --dims
+```
+
+### Off-diagonal: sexually transmitted infections
+
+The simplest STI models partition the population by sex and restrict
+transmission to cross-sex contacts — the contact matrix has zeros on
+the diagonal. This is a pedagogical simplification, not an
+epidemiological claim: gonorrhea and syphilis are transmitted within
+MSM populations, and realistic models would use an activity-level
+stratification (high/low risk) with a dense contact matrix rather
+than a strict male/female partition. But the off-diagonal pattern
+illustrates a general DSL feature — parameterized table entries with
+structural zeros:
+
+```{.camdl include="dimensions/sis_sex_gonorrhea.camdl"}
+```
+
+The table entries are *parameter references*, not floats —
+`beta_fm` and `beta_mf` are resolved at runtime. This lets the
+off-diagonal rates be estimated independently. The same mechanism —
+parameterized table entries — works for any contact matrix where you
+want to infer the mixing rates.
+
+### Spatial gravity coupling: polio, measles metapopulations
+
+For patch-structured models, transmission is local plus importation from
+other patches. The coupling strength depends on distance or connectivity
+— a gravity kernel:
+
+```{.camdl include="dimensions/seir_spatial_polio.camdl"}
+```
+
+Two things to note. First, `R0[patch]` is an **indexed parameter** —
+one scalar per patch, estimated independently. The compiler names
+`R0[north]` as `R0_north` in the IR; you supply per-patch values with
+`--param-vec`. Second, importation is **one transition per patch** whose
+rate sums over the other patches. The `where p != q` inside the `sum`
+drops the patch itself, so the gravity matrix's zero diagonal is
+enforced structurally, not just by convention.
+
+Writing importation instead as one transition per *pair* of patches
+(`importation[p in patch, q in patch]`) describes the same process —
+competing transitions that make the same move add up to one transition
+with the summed rate — but generates P² transitions instead of P. The
+compiler warns about that form (W105) and suggests the summed one.
+
+For real deployments, the coupling matrix comes from data:
+
+```camdl
+dimensions {
+  patch = read("data/lga_pop.tsv", column = "patch")
+}
+
+tables {
+  W : patch × patch = read("data/gravity_kernel.tsv", default = 0.0)
+}
+```
+
+Change the data file from 5 patches to 774 Nigerian LGAs, and the model
+scales without editing a single line of camdl.
+
+### Within-stratum only: independent patches
+
+The simplest spatial structure is no coupling at all — each patch
+evolves independently. This is the identity matrix case. You don't need
+a coupling table; just stratify and write per-patch transitions:
+
+```camdl
+dimensions {
+  patch = [urban, rural]
+}
+
+stratify(by = patch)
+
+transitions {
+  infection[p in patch] : S[p] --> I[p]
+    @ beta * S[p] * I[p] / N[p]
+}
+```
+
+No `sum()`, no coupling table. Each patch gets its own copy of the
+transition, and `I[p] / N[p]` is local prevalence. Useful as a baseline
+before adding spatial coupling.
+
+## Partial stratification
+
+Not every dimension applies to every compartment. Vaccination history
+matters for where recovered individuals go, but you don't need to track
+vaccination status through the S → E → I progression. camdl handles this
+with the `only` clause:
+
+```camdl
+# Polio-like: immunity type only on R and V
+dimensions {
+  immunity = [natural, vaccine]
+}
+
+stratify(by = immunity, only = [R, V])
+```
+
+After this, S, E, and I have their existing dimensions (say, `age ×
+patch`), but R and V gain an extra `immunity` axis. The compiler then
+**requires** explicit routing in any transition that enters R or V — you
+must say where recovered individuals go:
+
+```camdl
+transitions {
+  recovery[a in age, p in patch] : I[a, p] --> R[a, p, natural]
+    @ gamma * I[a, p]
+
+  vaccination[a in age, p in patch] : S[a, p] --> V[a, p, vaccine]
+    @ vacc_rate * S[a, p]
+}
+```
+
+::: {.callout-warning}
+## Stoichiometry requires all dimensions
+
+Writing `I[a, p] --> R[a, p]` without the immunity index is a
+compile-time error — the destination R has dimensions `[age, patch,
+immunity]` but only `[age, patch]` were specified. You must write
+`R[a, p, natural]` to tell the compiler exactly which stratum receives
+the individual. This rule applies to all transitions into
+partially-stratified compartments, and the same rule holds on the
+right of `@`: a reference names every dimension, or none (the bare
+name, which sums over all of them).
+:::
+
+### Disease stages: state the dwell-time law
+
+A compartment with an exponential dwell time lets some individuals leave
+almost immediately and others linger for a very long time. A latent or
+infectious period is usually more regular than that, and the standard
+fix is an **Erlang** dwell time: pass through several stages in series,
+each exponential. camdl lets you state the law and builds the stages for
+you:
+
+```{.camdl include="dimensions/seir_erlang_via.camdl" lines="15-19"}
+```
+
+`via erlang(stages = 3, rate = sigma)` replaces the `@` rate: a
+transition has **either** an `@` rate **or** a `via` law. The compiler
+turns `E` into three sub-stages, chains them, and gives each stage the
+rate `3 * sigma`, so the mean latent period stays `1 / sigma` and only
+the *shape* of the dwell time changes. A bare `E` elsewhere in the model
+still means all of `E`, summed over its stages:
+
+```{.camdl-run}
+camdl inspect dimensions/seir_erlang_via.camdl
+```
+
+The stage arithmetic — `k / mean` per stage, not `1 / mean` — is exactly
+the part that goes wrong silently when stages are written by hand, which
+is why `via` is the form to reach for. `stages` must be a literal,
+because it decides how many compartments exist: it is model structure,
+not a parameter you can fit. (`via hyper_erlang` states a mixture of
+such laws, one branch per route out; see the language specification.)
+
+### Disease stages as partial dimensions
+
+You can also build the stages yourself, with a dimension on `E` only.
+Two things differ from `via`. The stages become a *population stratum*:
+you can index them (`E[e2]`) and data can be keyed by them. And each
+stage can have its own rate:
+
+```{.camdl include="dimensions/seir_erlang.camdl" lines="7-37"}
+```
+
+`consecutive(latent_stage)` yields pairs `(e1, e2), (e2, e3)`. The
+two-line `latent` declaration above is equivalent to writing each
+transition by hand:
+
+```camdl
+  latent_e1 : E[e1] --> E[e2]  @ sigma_stage[e1] * E[e1]
+  latent_e2 : E[e2] --> E[e3]  @ sigma_stage[e2] * E[e2]
+```
+
+For an Erlang-3 the saving is modest; for an Erlang-10 it eliminates
+nine lines of boilerplate that differ only in the index. The compiler
+generates one transition per consecutive pair, and `--transitions`
+shows exactly what was produced (see below).
+
+Infection enters at `E[e1]`, progression walks through stages, and
+onset exits from the last stage. S, I, and R are unstratified — which
+`camdl inspect` confirms:
+
+```{.camdl-run}
+camdl inspect dimensions/seir_erlang.camdl
+```
+
+The summary reads "4 base × 3 latent_stage = 6 expanded" — not 12,
+because only E was stratified. `--compartments` makes the mixed arities
+visible — S, I, and R have no index (`[]`), while E has `[latent_stage]`:
+
+```{.camdl-run}
+camdl inspect dimensions/seir_erlang.camdl --compartments
+```
+
+And `--transitions` shows how the compiler expanded the `consecutive()`
+chain and routed infection into `E[e1]`:
+
+```{.camdl-run}
+camdl inspect dimensions/seir_erlang.camdl --transitions
+```
+
+## Aging and demography
+
+Fine-grained age structure requires more than a contact matrix — it
+needs aging transitions that move individuals through age groups over
+time, plus births and deaths. camdl uses the same `consecutive()`
+mechanism:
+
+```{.camdl include="dimensions/sir_age_demography.camdl" lines="7-44"}
+```
+
+The `[c in compartments]` quantifier iterates over all compartments —
+every compartment gets aging and death transitions. `age_dur` is a
+dimensioned table with a unit annotation (`'years`), giving the duration
+spent in each age class. The combinatorial expansion is substantial:
+
+```{.camdl-run}
+camdl inspect dimensions/sir_age_demography.camdl
+```
+
+5 transition templates expand to 38 concrete transitions: `aging`
+generates 3 compartments × 4 consecutive pairs = 12, `death` generates
+3 × 5 = 15, plus `infection` (5), `recovery` (5), and `birth` (1).
+
+A `[c in compartments]` quantifier writes the same index pattern for
+every compartment, so here it works because S, I and R all carry exactly
+`[age]`. If one compartment carries an extra axis (say R is also
+stratified by immunity), `c[a]` is a partial index for that compartment
+and the compiler refuses it (E287); give that compartment its own
+transitions with every axis indexed.
+
+## Guard clauses
+
+A `where` clause filters index combinations, and it appears in two
+places. Inside a `sum`, as in the polio importation above, it drops
+terms from the sum. On a transition, it is a **guard clause** — a
+compile-time filter on which index combinations generate transitions at
+all:
+
+```camdl
+# Migration: exclude self-loops
+migrate[c in compartments, a in age, src in patch, dst in patch]
+  : c[a, src] --> c[a, dst]
+  @ mig[dst, src] * c[a, src]
+  where src != dst
+
+# Only adults reproduce
+birth[a in age, p in patch] : --> S[child, p]
+  @ fertility[a] * N_local[a, p]
+  where a != child
+
+# Compound guard
+transfer[a in age, src in patch, dst in patch] : S[a, src] --> S[a, dst]
+  @ rate * S[a, src]
+  where src != dst and a == adult
+```
+
+Migration genuinely needs one transition per (source, destination)
+pair, because each pair moves individuals to a *different* place. That
+is the difference from importation, where every pair made the same move.
+
+Guards are evaluated at compile time — the compiler instantiates all
+index combinations, evaluates the guard for each, and emits IR
+transitions only for those that pass. The runtime never sees the guard;
+it just gets the filtered set of transitions (`camdl inspect` reports
+how many were filtered). Guards compose with all iteration forms:
+`[i in dim]`, `consecutive()`, and `[c in compartments]`.
+
+## Multiple dimensions: putting it together
+
+Real models combine several dimensions. A spatial age-structured measles
+model might have `age × patch` with a contact matrix over age and a
+gravity kernel over patches. The force of infection nests both sums:
+
+```camdl
+dimensions {
+  age   = [child, adult]
+  patch = read("data/pop.tsv", column = "patch")
+}
+
+stratify(by = age)
+stratify(by = patch)
+
+tables {
+  C_age : age × age     = [[12.0, 4.0], [4.0, 8.0]]
+  W     : patch × patch  = read("data/gravity.tsv", default = 0.0)
+  pop   : patch           = read("data/pop.tsv")
+}
+
+let N[a in age, p in patch] = S[a, p] + E[a, p] + I[a, p] + R[a, p]
+
+transitions {
+  infection[a in age, p in patch] : S[a, p] --> E[a, p]
+    @ beta * S[a, p]
+      * sum(b in age, sum(q in patch,
+          C_age[a, b] * W[p, q] * I[b, q] / N[b, q]
+        ))
+}
+```
+
+Each dimension contributes one `sum()`. The compiler expands the nested
+iteration at compile time — for 2 age groups and 50 patches, the
+infection rate for each `(a, p)` stratum becomes a sum of 100 terms,
+all type-checked against the declared dimensions of `C_age` and `W`.
+
+[`seir_cross_dim.camdl`](https://github.com/vsbuffalo/camdl/blob/main/docs/guide/dimensions/seir_cross_dim.camdl)
+puts all of these features together — patch × age stratification,
+contact matrix, spatial adjacency, demography — and `camdl inspect`
+shows the full expansion:
+
+```{.camdl-run}
+camdl inspect dimensions/seir_cross_dim.camdl
+```
+
+```{.camdl-run}
+camdl inspect dimensions/seir_cross_dim.camdl --tables
+```
+
+6 transition templates expand to 120 transitions across 48 compartments.
+The tables show both file-loaded data (`loaded:`) and inline values
+(`inline`), with 2D tables rendered as matrices for immediate
+verification.
+
+## Feature inventory: which diseases need what
+
+The table below maps common modeling patterns to the camdl features
+that support them. Each row is a pattern seen in practice; the examples
+show which diseases motivate it.
+
+| Pattern | camdl feature | Disease examples |
+|---------|---------------|------------------|
+| Age-structured contact | `dim × dim` table + `sum()` | Measles, pertussis, COVID-19 |
+| Directed (cross-group only) | Off-diagonal contact matrix | Gonorrhea, syphilis, HIV |
+| Spatial metapopulation | `patch × patch` gravity kernel | Polio, measles, cholera |
+| Data-derived patches | `read("file", column = ...)` | Any sub-national model |
+| Indexed reproduction number | `R0[patch] : positive` | Polio, malaria (heterogeneous transmission) |
+| Consecutive aging | `consecutive(age)` + `age_dur` table | Any age-structured endemic model |
+| Erlang-distributed stages | `stratify(by = stage, only = [E])` | Measles (latent), malaria (liver stages) |
+| Vaccination as partial dim | `stratify(by = immunity, only = [R, V])` | Polio (OPV/IPV), COVID-19 |
+| Seasonal forcing | Time-dependent rate expression | Measles (school terms), cholera (monsoon) |
+| Campaign interventions on strata | `transfer(from = S[patch], to = V[patch])` | Polio SIAs, MDA for malaria |
+| Sparse coupling matrix | `read("file", default = 0.0)` | Any large spatial model |
+| Parameterized mixing rates | Table entries as parameter refs | STIs (sex-specific β), flu (age-specific) |
+
+## Design philosophy
+
+camdl's dimension system reflects a few deliberate choices:
+
+**Dimensions are type-level, not value-level.** The levels of a
+dimension are known at compile time (either declared inline or read from
+a file during compilation). This means the compiler can expand all
+indexed transitions, check all table lookups, and verify population
+accounting *before* any simulation runs. There is no runtime dimension
+discovery.
+
+**Tables are the interface between data and model.** External data
+enters the model through dimensionally-typed tables, not through
+untyped arrays or global variables. The dimension annotation on a table
+is a contract: it says what the rows and columns mean, and the compiler
+enforces it. This makes the data pipeline part of the model's type
+system, catching mismatches (wrong number of patches, misspelled level
+names) at compile time rather than producing silently wrong simulation
+output.
+
+**Explicit over implicit.** You write `sum(b in age, C[a,b] * I[b] / N[b])`
+rather than declaring a mixing mode. This is more verbose than a
+`coupling = "frequency_dependent"` flag, but it means the rate
+expression is always readable as math — no hidden multiplication, no
+framework magic. The transition rate *is* the equation.
+
+**Partial stratification forces explicit routing.** When a dimension
+applies to some compartments but not others, every transition into a
+partially-stratified compartment must specify which stratum the
+population flows to. This is annoying for the modeler and essential for
+correctness — it prevents the framework from silently distributing
+individuals across strata by some default rule.
+
+These choices trade convenience for safety. For a 3-compartment teaching
+model, the overhead is negligible. For a 774-patch, 5-age-group,
+multi-intervention polio model, the compiler's checking is the
+difference between a model that works and one that silently computes
+the wrong force of infection for six months before anyone notices.
+
+The normative statement of these rules is §1 and §5 of the
+[language specification](../camdl-language-spec.md).
+
+[^pomp]: King AA, Nguyen D, Ionides EL (2016). "Statistical inference
+    for partially observed Markov processes via the R package pomp."
+    *Journal of Statistical Software*, 69(12), 1–43.
+    doi:[10.18637/jss.v069.i12](https://doi.org/10.18637/jss.v069.i12).
+
+[^pomp-issue]: The manual expansion pattern is documented in the pomp
+    FAQ and discussed in
+    [kingaa/pomp#11](https://github.com/kingaa/pomp/issues/11), where a
+    user asks whether vector-valued state is supported. The canonical
+    workaround uses C pointer arithmetic over `statenames=sprintf("X%d",1:n)`.
+    A typo between two valid expanded names (e.g. `S2` for `S3`) compiles
+    without error because both are declared `statenames`; the silent
+    failure requires both names to exist, which is exactly the situation
+    in any stratified model with more than one stratum.
+
+[^spatpomp]: Asfaw K, Ionides EL et al. (2024). spatPomp: Statistical
+    Inference for Spatiotemporal Partially Observed Markov Processes.
+    CRAN package. The `dunit_measure` C snippet receives a predefined
+    integer `u` (current unit index, 0 to U−1) and bare `unit_statenames`
+    resolve to unit `u`'s values. The `rprocess` snippet does not — it
+    requires explicit `S[u]`, `E[u]` indexing. See the spatPomp tutorial
+    vignette, §3 (unit-level measurement models).
+
+[^odin]: FitzJohn R et al. (2024). odin2: an R package for generating
+    dynamical models. CRAN package odin2. See also dust2 (FitzJohn R et
+    al., 2024) for the compiled simulation backend.
+
+[^odin-e2022]: odin2 error E2022: "Trying to access an array without
+    using square bracket indexes." Documented at
+    [mrc-ide.github.io/odin2/articles/errors.html#e2022](https://mrc-ide.github.io/odin2/articles/errors.html#e2022).
+    The same error exists in odin1 (tested in
+    [test-parse2-general.R](https://github.com/mrc-ide/odin/blob/master/tests/testthat/test-parse2-general.R),
+    `"Array 'x' used without array index"`).
+
+[^odin-index]: The untyped-index hazard: if `dim(S) <- c(n_age, n_patch)`
+    and you write `S[j, i]` instead of `S[i, j]`, it parses cleanly.
+    When `n_age == n_patch` it runs with transposed values; when they
+    differ, you get a runtime bounds error rather than a compile-time
+    type error. The same issue affects reduction operations — `sum(S)` vs.
+    `sum(S[i, ])` are semantically different (global total vs. row sum)
+    but the compiler cannot distinguish intent from syntax.

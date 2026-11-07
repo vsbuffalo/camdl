@@ -1,0 +1,223 @@
+/*-- scss:defaults --*/
+
+// Reading-first typography: a humanist sans for prose, a programming mono for
+// code. Sized for long reading on a tablet as much as a desktop.
+$web-font-path: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap";
+$font-family-sans-serif: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+$font-family-monospace: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+$font-size-root: 17px;
+$line-height-base: 1.65;
+$headings-font-weight: 650;
+
+$primary: #2f6f8f;
+$link-color: $primary;
+$code-color: #a43c62;
+
+// Navbar in the page colour, not Cosmo's default primary-filled bar.
+// In the dark build dark.scss is listed first, and the first layer wins.
+$navbar-bg: #ffffff;
+$navbar-fg: #343a40;
+$navbar-hl: $primary;
+
+/*-- scss:rules --*/
+
+// Prose measure: keep body text near 75 characters per line, tables and code
+// may use the full column.
+main.content {
+  > p, > ul, > ol, > blockquote, > dl {
+    max-width: 46rem;
+  }
+}
+
+.navbar { border-bottom: 1px solid rgba(127, 127, 127, 0.18); }
+.navbar-title { font-weight: 700; letter-spacing: -0.01em; }
+
+h1, h2, h3 { letter-spacing: -0.012em; }
+h2 {
+  margin-top: 2.4rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.18);
+}
+h3 { margin-top: 1.8rem; }
+
+// Show code exactly as typed: no ligatures. JetBrains Mono would otherwise
+// draw `-->` as a single arrow glyph, which a reader could copy as a character
+// the compiler does not accept.
+code, pre, kbd, samp {
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+}
+
+// Code: slightly smaller than prose, rounded, never wider than the column.
+pre.sourceCode, div.sourceCode {
+  border-radius: 8px;
+  font-size: 0.86em;
+  line-height: 1.5;
+}
+div.sourceCode { border: 1px solid rgba(127, 127, 127, 0.16); }
+code:not(.sourceCode) {
+  font-size: 0.88em;
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  background-color: rgba(127, 127, 127, 0.1);
+}
+
+// Wide reference tables scroll inside themselves instead of the page.
+main.content table {
+  display: block;
+  overflow-x: auto;
+  font-size: 0.92em;
+}
+main.content table th { font-weight: 600; }
+
+// Tablet: larger tap targets in the sidebar and table of contents.
+@media (max-width: 1199.98px) {
+  .sidebar-item a, #TOC a { padding-top: 0.3rem; padding-bottom: 0.3rem; }
+}
+
+// Landing page cards.
+.camdl-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0 2rem;
+}
+.camdl-cards a {
+  display: block;
+  padding: 1rem 1.15rem;
+  border: 1px solid rgba(127, 127, 127, 0.22);
+  border-radius: 10px;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.15s, transform 0.15s;
+}
+.camdl-cards a:hover { border-color: $primary; transform: translateY(-1px); }
+.camdl-cards strong { display: block; color: $primary; margin-bottom: 0.25rem; }
+.camdl-cards span { font-size: 0.92em; opacity: 0.8; }
+
+// Executed examples (docs/_web/camdl-run.lua): the command and its real
+// output read as one unit — a prompt line above a quieter output panel.
+.camdl-run {
+  margin: 1rem 0 1.4rem;
+  div.sourceCode { margin: 0; }
+  .camdl-run-cmd { border-radius: 8px 8px 0 0; }
+  .camdl-run-cmd code::before { content: "$ "; opacity: 0.45; }
+  > div.sourceCode:first-child, > pre.camdl-run-cmd {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  pre.camdl-run-out {
+    margin: 0;
+    padding: 0.75rem 1rem;
+    border: 1px solid rgba(127, 127, 127, 0.16);
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    background: rgba(127, 127, 127, 0.06);
+    font-size: 0.8em;
+    line-height: 1.45;
+    overflow-x: auto;
+  }
+}
+
+// Page subtitle (a page's `description`): larger, muted, and separated from
+// the first paragraph instead of running into it.
+#title-block-header {
+  margin-bottom: 1.75rem;
+  .description {
+    font-size: 1.15em;
+    line-height: 1.5;
+    opacity: 0.72;
+    margin-top: 0.4rem;
+  }
+}
+
+// The header margin above is overridden by Quarto; put the gap on the
+// description itself.
+div.description { margin-bottom: 1.6rem; }
+
+// File-name strip above included files: a quiet tint in both themes rather
+// than Quarto's fixed light-grey bar.
+div.code-with-filename-file {
+  background-color: rgba(127, 127, 127, 0.12) !important;
+  border: 1px solid rgba(127, 127, 127, 0.16);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  pre { background: transparent !important; color: inherit; font-size: 0.8em; }
+}
+.code-with-filename div.sourceCode { border-top-left-radius: 0; border-top-right-radius: 0; }
+
+// Figures (docs/figures/*.svg, placed by _web/figures.lua). The SVGs carry
+// only class names; every colour comes from these variables, so one drawing
+// serves both themes.
+.camdl-fig {
+  --fig-ink: var(--bs-body-color);
+  --fig-muted: rgba(var(--bs-body-color-rgb), 0.62);
+  --fig-line: rgba(var(--bs-body-color-rgb), 0.22);
+  --fig-panel: rgba(var(--bs-body-color-rgb), 0.045);
+  --fig-card: var(--bs-body-bg);
+  --fig-code-bg: rgba(var(--bs-body-color-rgb), 0.06);
+  --fig-accent: #2f6f8f;
+  --fig-accent-soft: rgba(47, 111, 143, 0.10);
+  --fig-warm: #a8680f;
+  --fig-bad: #b8433a;
+  // Arrows are solid: a translucent head drawn over its own line shows the overlap.
+  --fig-arrow: #868e96;
+  margin: 1.6rem 0 2rem;
+  max-width: 46rem;
+  // A #fig-<name> link (printed by `camdl docs`) lands below the fixed navbar.
+  scroll-margin-top: 5rem;
+  svg { width: 100%; height: auto; display: block; overflow: visible; }
+  text { font-family: var(--bs-body-font-family); }
+  .t-mono, .t-code, .t-code-small { font-family: var(--bs-font-monospace); font-variant-ligatures: none; }
+  .t-code { font-size: 22px; }
+  .t-code-small { font-size: 13px; }
+  .t-small { font-size: 14px; }
+  .t-label { font-size: 16px; }
+  .t-mono-label { font-family: var(--bs-font-monospace); font-size: 15px; font-variant-ligatures: none; }
+  .t-code-label, .t-code-label text { font-family: var(--bs-font-monospace); font-size: 14.5px; font-variant-ligatures: none; white-space: pre; }
+  .t-code-cell { font-family: var(--bs-font-monospace); font-size: 12px; font-variant-ligatures: none; }
+  .t-cap { font-size: 12px; font-weight: 700; letter-spacing: 0.12em; }
+  .t-b { font-weight: 650; }
+  .fig-ink, .fig-ink text { fill: var(--fig-ink); }
+  .fig-muted { fill: var(--fig-muted); }
+  .fig-accent { fill: var(--fig-accent); }
+  .fig-warm { fill: var(--fig-warm); }
+  .fig-bad { fill: var(--fig-bad); }
+  .fig-panel { fill: var(--fig-panel); }
+  .fig-accent-soft { fill: var(--fig-accent-soft); }
+  .fig-card { fill: var(--fig-card); }
+  .fig-code-bg { fill: var(--fig-code-bg); }
+  .fig-ink-box { fill: var(--fig-ink); }
+  .fig-inverse { fill: var(--bs-body-bg); }
+  .fig-inverse-muted { fill: rgba(var(--bs-body-bg-rgb), 0.72); }
+  .s-line { stroke: var(--fig-line); stroke-width: 1.2; }
+  .s-muted { stroke: var(--fig-muted); stroke-width: 1.4; fill: none; }
+  .s-accent { stroke: var(--fig-accent); stroke-width: 1.6; }
+  path.s-accent, line.s-accent { fill: none; }
+  .s-warm { stroke: var(--fig-warm); }
+  .fig-arrow { fill: var(--fig-arrow); }
+  .s-arrow { stroke: var(--fig-arrow); stroke-width: 1.4; fill: none; }
+  figcaption { margin-top: 0.7rem; font-size: 0.88rem; line-height: 1.5; color: rgba(var(--bs-body-color-rgb), 0.72); }
+}
+.camdl-fig {
+  // Code tokens: the same colours the site's code blocks use
+  // (highlight-style github / github-dark in _quarto.yml), on the token
+  // classes the camdl highlighter assigns (kw block keyword, pp directive,
+  // cf control word, fu transition label, op operator, dv number, bu builtin).
+  .tk-kw, .tk-pp, .tk-cf, .tk-bu, .tk-dt { fill: #d73a49; }
+  .tk-fu { fill: #6f42c1; }
+  .tk-op { fill: #24292e; }
+  .tk-dv { fill: #005cc5; }
+}
+.quarto-dark .camdl-fig {
+  .tk-kw, .tk-pp, .tk-cf, .tk-bu, .tk-dt { fill: #f97583; }
+  .tk-fu { fill: #b392f0; }
+  .tk-op { fill: #e1e4e8; }
+  .tk-dv { fill: #79b8ff; }
+
+  --fig-accent: #7cc0de;
+  --fig-accent-soft: rgba(124, 192, 222, 0.12);
+  --fig-warm: #e2b25e;
+  --fig-bad: #ef8a7e;
+  --fig-arrow: #8b929a;
+}

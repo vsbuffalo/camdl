@@ -1,0 +1,19 @@
+# Intentionally refused: S has [region, age], and S[r] names only one of them
+time_unit = 'days
+
+compartments { S, I }
+
+dimensions {
+  region = [north, south]
+  age    = [child, adult]
+}
+
+stratify(by = region)
+stratify(by = age)
+
+parameters { beta : rate }
+
+transitions {
+  infection[r in region, a in age] : S[r, a] --> I[r, a]
+    @ beta * S[r, a] * I[r, a] / S[r]
+}

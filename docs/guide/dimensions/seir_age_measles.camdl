@@ -1,0 +1,54 @@
+# Measles-like: age-structured SEIR with WAIFW contact matrix
+# Demonstrates: dense symmetric contact matrix, sum() over age dimension
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+dimensions {
+  age = [under5, school_age, adult]
+}
+
+stratify(by = age)
+
+parameters {
+  beta     : rate         in [0.01, 1.0]
+  sigma    : rate         in [0.05, 1.0]
+  gamma    : rate         in [0.01, 0.5]
+}
+
+tables {
+  # WAIFW matrix (who-acquires-infection-from-whom)
+  # School-age children drive transmission; adults less so.
+  C_age : age × age = [[4.0,  8.0,  1.5],
+                        [8.0, 14.0,  3.0],
+                        [1.5,  3.0,  5.0]]
+}
+
+let N[a in age] = S[a] + E[a] + I[a] + R[a]
+
+transitions {
+  infection[a in age] : S[a] --> E[a]
+    @ beta * S[a] * sum(b in age, C_age[a, b] * I[b] / N[b])
+
+  progression[a in age] : E[a] --> I[a]  @ sigma * E[a]
+  recovery[a in age]    : I[a] --> R[a]  @ gamma * I[a]
+}
+
+init {
+  S[under5]     = 2000
+  S[school_age] = 3000
+  S[adult]      = 5000
+  I[school_age] = 5
+}
+
+simulate {
+  from = 0 'days
+  to   = 120 'days
+}
+
+scenarios {
+  baseline {
+    label = "default (school-age driven)"
+    set = { beta = 0.04  sigma = 0.2  gamma = 0.1 }
+  }
+}

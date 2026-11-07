@@ -108,6 +108,8 @@ init {
 Read each transition as: "from [source] to [destination] at total rate
 [propensity]."
 
+<!-- figure: transition-anatomy -->
+
 | Transition | Per-capita rate | × Who's at risk | = Propensity  |
 | ---------- | --------------- | --------------- | ------------- |
 | infection  | β × I / N       | S               | β × S × I / N |

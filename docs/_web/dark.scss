@@ -1,0 +1,19 @@
+/*-- scss:defaults --*/
+
+$body-bg: #15181c;
+$body-color: #d9dde2;
+$primary: #7cc0de;
+$link-color: $primary;
+$code-color: #f0a0bd;
+$navbar-bg: $body-bg;
+$navbar-fg: $body-color;
+$navbar-hl: $primary;
+
+/*-- scss:rules --*/
+
+div.sourceCode { border-color: rgba(255, 255, 255, 0.08); }
+code:not(.sourceCode) { background-color: rgba(255, 255, 255, 0.08); }
+
+// Native scrollbars and form controls in dark style (otherwise a white
+// scrollbar track appears under wide code blocks).
+:root { color-scheme: dark; }

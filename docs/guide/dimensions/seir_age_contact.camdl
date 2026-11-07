@@ -1,0 +1,46 @@
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+dimensions {
+  age = [child, adult]
+}
+
+stratify(by = age)
+
+parameters {
+  beta  : rate in [0.001, 0.5]
+  sigma : rate in [0.01,  1.0]
+  gamma : rate in [0.01,  1.0]
+}
+
+let N[a in age] = S[a] + E[a] + I[a] + R[a]
+
+tables {
+  C : age × age = read("data/age_contact.tsv")
+}
+
+transitions {
+  infection[a in age] : S[a] --> E[a]
+    @ beta * S[a] * sum(b in age, C[a, b] * I[b] / N[b])
+
+  progression[a in age] : E[a] --> I[a]  @ sigma * E[a]
+  recovery[a in age]    : I[a] --> R[a]  @ gamma * I[a]
+}
+
+init {
+  S[child] = 4990
+  S[adult] = 5000
+  I[child] = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 120 'days
+}
+
+scenarios {
+  baseline {
+    set = { beta = 0.04  sigma = 0.2  gamma = 0.1 }
+  }
+}

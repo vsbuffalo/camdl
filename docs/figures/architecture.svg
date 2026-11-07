@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 374" role="img" aria-labelledby="t d">
+  <title id="t">How camdl runs a model</title>
+  <desc id="d">The modeler writes the model. The compiler checks its units, dimensions and names and expands its strata into a flat intermediate representation (IR), from which the runtime performs simulation and inference. The modeler is responsible for the model structure, a scientific hypothesis, for the priors and their sources, and for choosing the right model for the question at hand: all science, no implementation. camdl is responsible for compiling the model correctly to the IR, faithful simulation of the declared model, correct inference, and an efficient runtime: all implementation, no science.</desc>
+  <defs>
+    <marker id="arch-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
+    </marker>
+  </defs>
+
+  <!-- responsibility columns -->
+  <rect x="2" y="2" width="234" height="370" rx="5" class="fig-accent-soft"/>
+  <rect x="244" y="2" width="394" height="370" rx="5" class="fig-panel"/>
+  <text x="16" y="28" class="t-cap fig-accent">MODELER</text>
+  <text x="258" y="28" class="t-cap fig-muted">CAMDL</text>
+
+  <!-- model -->
+  <rect x="16" y="44" width="204" height="140" rx="4" class="fig-card s-line"/>
+  <text x="28" y="70" class="t-label t-b fig-ink">Model</text>
+  <text x="28" y="92" class="t-mono-label fig-muted">model.camdl</text>
+  <text x="28" y="120" class="t-small fig-muted">compartments</text>
+  <text x="28" y="138" class="t-small fig-muted">transitions</text>
+  <text x="28" y="156" class="t-small fig-muted">observations</text>
+  <text x="28" y="174" class="t-small fig-muted">priors</text>
+
+  <!-- compiler -->
+  <rect x="258" y="44" width="146" height="140" rx="4" class="fig-ink-box"/>
+  <text x="270" y="70" class="t-label t-b fig-inverse">Compiler</text>
+  <text x="270" y="92" class="t-mono-label fig-inverse-muted">camdlc</text>
+  <text x="270" y="120" class="t-small fig-inverse-muted">checks units,</text>
+  <text x="270" y="138" class="t-small fig-inverse-muted">dimensions, names</text>
+  <text x="270" y="156" class="t-small fig-inverse-muted">expands strata</text>
+
+  <!-- runtime -->
+  <rect x="434" y="44" width="190" height="140" rx="4" class="fig-card s-line"/>
+  <text x="446" y="70" class="t-label t-b fig-ink">Runtime</text>
+  <rect x="446" y="86" width="80" height="84" rx="3" class="fig-panel s-line"/>
+  <text x="486" y="133" class="t-small fig-ink" text-anchor="middle">simulation</text>
+  <rect x="532" y="86" width="80" height="84" rx="3" class="fig-panel s-line"/>
+  <text x="572" y="133" class="t-small fig-ink" text-anchor="middle">inference</text>
+
+  <line x1="222" y1="114" x2="254" y2="114" class="s-arrow" marker-end="url(#arch-arrow)"/>
+  <line x1="406" y1="114" x2="430" y2="114" class="s-arrow" marker-end="url(#arch-arrow)"/>
+  <text x="418" y="106" class="t-cap fig-warm" text-anchor="middle">IR</text>
+
+
+  <!-- responsibilities -->
+  <line x1="16" y1="206" x2="220" y2="206" class="s-line"/>
+  <line x1="258" y1="206" x2="624" y2="206" class="s-line"/>
+
+  <text x="16" y="232" class="t-small t-b fig-accent">Responsible for</text>
+  <g class="t-small fig-ink">
+    <text x="16" y="256">•</text><text x="28" y="256">model structure, a</text>
+    <text x="28" y="274">scientific hypothesis</text>
+    <text x="16" y="292">•</text><text x="28" y="292">priors and their sources</text>
+    <text x="16" y="310">•</text><text x="28" y="310">the right model for the</text>
+    <text x="28" y="328">question at hand</text>
+  </g>
+  <text x="16" y="356" class="t-small t-b fig-accent" font-style="italic">All science, no implementation.</text>
+
+  <text x="258" y="232" class="t-small t-b fig-ink">Responsible for</text>
+  <g class="t-small fig-ink">
+    <text x="258" y="256">•</text><text x="270" y="256">compiling the model correctly to the</text>
+    <text x="270" y="274">intermediate representation (IR)</text>
+    <text x="258" y="292">•</text><text x="270" y="292">faithful simulation of the declared model</text>
+    <text x="258" y="310">•</text><text x="270" y="310">correct inference</text>
+    <text x="258" y="328">•</text><text x="270" y="328">an efficient runtime</text>
+  </g>
+  <text x="258" y="356" class="t-small t-b fig-ink" font-style="italic">All implementation, no science.</text>
+</svg>

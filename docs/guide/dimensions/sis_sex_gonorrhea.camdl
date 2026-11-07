@@ -1,0 +1,55 @@
+# Gonorrhea-like: sex-structured SIS with directed transmission
+# Demonstrates: off-diagonal contact matrix, parameterized table entries
+time_unit = 'days
+
+compartments { S, I }
+
+dimensions {
+  sex = [female, male]
+}
+
+stratify(by = sex)
+
+parameters {
+  beta_fm : rate  in [0.01, 0.5]    # female-to-male transmission
+  beta_mf : rate  in [0.01, 0.5]    # male-to-female transmission
+  gamma   : rate  in [0.01, 0.5]
+}
+
+tables {
+  # Off-diagonal only: no within-sex transmission.
+  B_sex : sex × sex = [[0.0,     beta_mf],
+                        [beta_fm, 0.0    ]]
+}
+
+let N[s in sex] = S[s] + I[s]
+
+transitions {
+  infection[s in sex] : S[s] --> I[s]
+    @ S[s] * sum(r in sex, B_sex[s, r] * I[r] / N[r])
+
+  recovery[s in sex] : I[s] --> S[s]  @ gamma * I[s]
+}
+
+init {
+  S[female] = 4950
+  S[male]   = 4950
+  I[female] = 25
+  I[male]   = 25
+}
+
+simulate {
+  from = 0 'days
+  to   = 365 'days
+}
+
+scenarios {
+  baseline {
+    label = "symmetric transmission"
+    set = { beta_fm = 0.15  beta_mf = 0.15  gamma = 0.1 }
+  }
+  asymmetric {
+    label = "higher male-to-female"
+    set = { beta_fm = 0.10  beta_mf = 0.20  gamma = 0.1 }
+  }
+}

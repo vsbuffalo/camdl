@@ -1,0 +1,162 @@
+# The camdl documentation website.
+#
+# The pages are the same markdown files `camdl docs` embeds into the binary
+# (rust/crates/cli/src/docs.rs). Nothing is copied: Quarto renders docs/*.md in
+# place, so the CLI text and the website cannot drift apart.
+#
+#   make docs-site          # render to docs/_site/
+#   make docs-site-preview  # live-reloading local preview
+#
+# Only files named in `render:` are published. docs/dev/ (proposals, incidents,
+# reviews) is deliberately absent. Deployed to GitHub Pages by
+# .github/workflows/docs-site.yml.
+
+project:
+  type: website
+  output-dir: _site
+  render: &published
+    - index.qmd
+    # Get started (tutorials)
+    - intro.md
+    - guide/dimensions.qmd
+    - workflow.md
+    # Guides (how-to)
+    - dates.md
+    - camdl-data-spec.md
+    - diagnosing-fits.md
+    - debugging.md
+    - methods/model-comparison.md
+    - mre.md
+    # Concepts (explanation)
+    - concepts.md
+    - inference.md
+    - runtimes.md
+    # Reference
+    - camdl-language-spec.md
+    - dsl-cheatsheet.md
+    - user-features.md
+    - fit-toml.md
+    - camdl-run-spec.md
+    - language-changes.md
+    - agents.md
+
+website:
+  title: "camdl"
+  site-url: https://vsbuffalo.github.io/camdl/
+  repo-url: https://github.com/vsbuffalo/camdl
+  repo-subdir: docs
+  repo-actions: [source, issue]
+  page-navigation: true
+  reader-mode: true
+  search:
+    location: navbar
+    type: overlay
+  navbar:
+    left:
+      - text: "Get started"
+        href: intro.md
+      - text: "Guides"
+        href: dates.md
+      - text: "Concepts"
+        href: concepts.md
+      - text: "Reference"
+        href: camdl-language-spec.md
+    right:
+      - icon: github
+        href: https://github.com/vsbuffalo/camdl
+        aria-label: camdl on GitHub
+  # Four kinds of page, after the Diataxis framework (diataxis.fr): tutorials
+  # to learn by doing, guides to finish a task, concepts to understand why,
+  # reference to look things up.
+  sidebar:
+    style: floating
+    collapse-level: 1
+    contents:
+      - index.qmd
+      - section: "Get started"
+        contents:
+          - text: "A tour of the language"
+            href: intro.md
+          - text: "Dimensions and stratification"
+            href: guide/dimensions.qmd
+          - text: "Your first fit"
+            href: workflow.md
+      - section: "Guides"
+        contents:
+          - text: "Dates and calendar time"
+            href: dates.md
+          - text: "Getting data into a model"
+            href: camdl-data-spec.md
+          - text: "Diagnosing a fit"
+            href: diagnosing-fits.md
+          - text: "Debugging and inspection"
+            href: debugging.md
+          - text: "Comparing models"
+            href: methods/model-comparison.md
+          - text: "Minimal reproducible examples"
+            href: mre.md
+      - section: "Concepts"
+        contents:
+          - text: "The reasoning behind the fit workflow"
+            href: concepts.md
+          - text: "Inference in camdl"
+            href: inference.md
+          - text: "Simulation backends"
+            href: runtimes.md
+      - section: "Reference"
+        contents:
+          - text: "Language specification"
+            href: camdl-language-spec.md
+          - text: "Cheatsheet"
+            href: dsl-cheatsheet.md
+          - text: "Feature catalogue"
+            href: user-features.md
+          - text: "fit.toml reference"
+            href: fit-toml.md
+          - text: "Run system specification"
+            href: camdl-run-spec.md
+          - text: "Language changes"
+            href: language-changes.md
+          - text: "Guide for AI agents"
+            href: agents.md
+  page-footer:
+    left: "© 2026 Vince Buffalo. Supported by the Institute for Disease Modeling, Bill & Melinda Gates Foundation."
+    right: "Also offline and version-matched: `camdl docs`"
+
+# Read by _web/unpublished-links.lua: a link to any other docs/ markdown file
+# is sent to GitHub instead of being copied into the site as raw markdown.
+camdl-published: *published
+
+# Ours run before Quarto's own filters (the `quarto` entry), so a filename
+# that camdl-run.lua attaches to an included file still gets Quarto's
+# filename header, and the spec banner's callout is rendered by Quarto.
+filters:
+  - _web/unpublished-links.lua
+  - _web/page-title.lua
+  - _web/spec-banner.lua
+  - _web/camdl-run.lua
+  - _web/figures.lua
+  - quarto
+
+format:
+  html:
+    theme:
+      light: [cosmo, _web/theme.scss]
+      dark: [darkly, _web/dark.scss, _web/theme.scss]
+    respect-user-color-scheme: true
+    syntax-definitions:
+      - _web/camdl.xml
+    highlight-style:
+      light: github
+      dark: github-dark
+    code-copy: true
+    code-overflow: scroll
+    toc: true
+    toc-depth: 3
+    toc-expand: 1
+    toc-title: "On this page"
+    anchor-sections: true
+    smooth-scroll: true
+    link-external-newwindow: true
+    html-math-method: katex
+    from: commonmark_x
