@@ -1358,6 +1358,9 @@ fn run_simulate(a: &args::SimulateArgs) {
         scenario_inline_name: None,
         scenario_inline_set: Vec::new(),
         scenario_inline_scale: Vec::new(),
+        // Set below only by `--draws posterior --fit` (the fit's own
+        // scenario / enable / disable).
+        fit_base: util::FitBase::default(),
         backend,
         dt,
         seed, // overridden per-replicate below
@@ -1735,6 +1738,34 @@ fn run_simulate(a: &args::SimulateArgs) {
                 }
                 leaf.dir.to_string_lossy().into_owned()
             };
+            // The posterior is the fitted model's, so every arm replays on the
+            // fit's own intervention selection (its `scenario` / `enable` /
+            // `disable`): the implicit arm is the model that was fitted, and a
+            // `--scenario` / `--enable` / `--disable` applies on top of it.
+            match crate::fit::handle::resolve_fit(fit_ref) {
+                Ok(resolved) => {
+                    base_sim_run.fit_base = util::FitBase::of(&resolved.config.problem)
+                        .unwrap_or_else(|e| {
+                            eprintln!("error: --fit {fit_handle}: {e}");
+                            std::process::exit(1);
+                        });
+                    if !base_sim_run.fit_base.is_empty() {
+                        eprintln!(
+                            "draws: posterior — every arm runs the fit's own {}; a \
+                             scenario applies its changes on top of it",
+                            base_sim_run.fit_base.describe()
+                        );
+                    }
+                }
+                // A bare directory holding a `draws.tsv` outside any fit
+                // carries no fit config, so there is no selection to apply.
+                // Said rather than assumed, since a fitted selection may be
+                // what is missing.
+                Err(e) => eprintln!(
+                    "draws: {fit_ref} is not a stored fit run ({e}); no fit \
+                     scenario/enable/disable is applied, the model runs as written"
+                ),
+            }
             if matches!(init_state_arg, Some(InitStateSourceArg::Fit)) {
                 let (rows, source) = resolve_paired_posterior(
                     fit_ref, &ir_path_compiled, a.n_draws,
@@ -1939,6 +1970,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         seeds: job_seeds,
         cli_overrides: base_sim_run.overrides.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         fit_fixed: base_sim_run.fit_fixed.clone(),
+        fit_base: base_sim_run.fit_base.clone(),
         set_vec_entries: base_sim_run.set_vec_entries.clone(),
         table_files: base_sim_run.table_files.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         obs: obs_mode,
@@ -2998,6 +3030,21 @@ fn build_simulate_cas_sink(
             // authority the preset route applies (gh#573).
             crate::cas_sink::ResolvedEntry::from_preset(&base_model, name, t_end)
         }).collect::<Result<Vec<_>, String>>()?
+    };
+    // A replayed fit's intervention selection is part of what each arm runs
+    // (`util::FitBase::overlay`), so it is part of what each arm is keyed on:
+    // its lists lead each arm's, in the order the overlay applies them. An
+    // empty base leaves every entry, and so every `run_id`, unchanged.
+    let resolved_scenarios = if run.fit_base.is_empty() {
+        resolved_scenarios
+    } else {
+        let (base_enable, base_disable) =
+            run.fit_base.lists(&base_model).map_err(|e| e.to_string())?;
+        resolved_scenarios.into_iter().map(|mut e| {
+            e.enable = base_enable.iter().cloned().chain(e.enable).collect();
+            e.disable = base_disable.iter().cloned().chain(e.disable).collect();
+            e
+        }).collect()
     };
 
     // Display prefix + provenance source path come from the ORIGINAL model

@@ -1622,6 +1622,20 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             return Err(reason.clone());
         }
     }
+    // The fitted model is the model the fit ran: its own `scenario` /
+    // `enable` / `disable` (from the archived config) is the base of every
+    // arm — the `fitted` row replays exactly it, a `--scenario` /
+    // `--enable` / `--disable` arm applies its own changes on top, and the
+    // one-step filter runs it. Said once, so a reader of the bands knows
+    // which interventions the `fitted` row carries.
+    let fit_base = crate::util::FitBase::of(&config)?;
+    if !fit_base.is_empty() {
+        eprintln!(
+            "fit predict: the fitted model runs the fit's own {}; every scenario \
+             arm applies its changes on top of it",
+            fit_base.describe()
+        );
+    }
     // Layer 1 supports param-overlay scenarios cleanly; an intervention-toggling
     // scenario (enable/disable) replays correctly through the engine — the engine
     // recompiles the model per cell with the scenario's intervention set applied
@@ -1722,6 +1736,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             }
         }
     }
+    let model_for_one_step = model_for_obs.clone();
     let compiled = std::sync::Arc::new(
         sim::CompiledModel::new(model_for_obs)
             .map_err(|e| format!("compiling model for prediction: {e:?}"))?,
@@ -2379,6 +2394,8 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                         // The posterior rows carry the fit's [fixed] columns
                         // themselves; no separate tier-2 block.
                         fit_fixed: indexmap::IndexMap::new(),
+                        // Every arm runs on the fit's own intervention selection.
+                        fit_base: fit_base.clone(),
                         set_vec_entries: vec![],
                         table_files: vec![],
                         obs: crate::sim_job::ObsOutput::None,
@@ -2500,7 +2517,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     let n_draws_cap = args.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS);
     let one_step: Option<OneStepBands> = match &one_step_fit {
         Some(fit) => Some(one_step_bands(
-            compiled.clone(),
+            // The fitted model — the fit's intervention selection applied —
+            // not `compiled`, which carries every declared intervention so
+            // the free-forward sink can read any arm's trajectory.
+            fitted_compiled(&model_for_one_step, &fit_base)?,
             &model,
             &config,
             // gh#708: the step the fit's likelihood walked (the one dt rule).
@@ -2835,6 +2855,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             None,
             selection.as_ref(),
             &model,
+            &fit_base,
             posterior.backend,
             seed,
             quantity_obs_anchors,
@@ -3665,6 +3686,23 @@ fn pool_one_step_draws(
 fn predict_step_grids(model_dt: Option<f64>, config_dt: f64) -> (f64, f64) {
     let fitted = crate::dt_rule::resolved_dt(model_dt, config_dt);
     (fitted, fitted)
+}
+
+/// The fitted model compiled for the one-step filter: `model` (parameters
+/// already seeded) with the fit's intervention selection applied. The filter
+/// re-scores the observed series, so it must run the interventions the fit's
+/// likelihood ran — no more (every declared toggleable intervention, which an
+/// unfiltered compile would keep) and no fewer.
+fn fitted_compiled(
+    model: &ir::Model,
+    fit_base: &crate::util::FitBase,
+) -> Result<std::sync::Arc<sim::CompiledModel>, String> {
+    let mut fitted = model.clone();
+    fit_base.filter(&mut fitted)?;
+    Ok(std::sync::Arc::new(
+        sim::CompiledModel::new(fitted)
+            .map_err(|e| format!("compiling the fitted model for the one-step filter: {e:?}"))?,
+    ))
 }
 
 fn one_step_bands(

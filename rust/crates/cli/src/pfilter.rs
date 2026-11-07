@@ -77,9 +77,6 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         .map(|p| (a.n_paths, p.to_string_lossy().into_owned()));
     let save_prequential: Option<String> = a.save_prequential.clone();
     let save_samples: bool = !a.no_save_samples;
-    let scenario_name = a.scenario.scenario.clone();
-    let adhoc_enable = a.scenario.enable.clone();
-    let adhoc_disable = a.scenario.disable.clone();
     let obs_name = a.stream.obs.clone();
 
     // gh#686: the replicate path reports the spread of the log-likelihood
@@ -95,22 +92,77 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // (`ic_free`), read through the function `fit run` uses, so a pfilter at
     // the fit's MLE reports the number the fit maximised. Without `--fit`
     // there is no `ic_free` key and every observation is scored.
-    let objective = match a.fit.as_ref() {
-        Some(fit_path) => {
-            let path_str = fit_path.to_string_lossy();
-            crate::fit::config_v2::Problem::load(&path_str)
-                .unwrap_or_else(|e| {
-                    eprintln!("error: failed to load --fit toml '{}': {}", path_str, e);
-                    std::process::exit(1);
-                })
-                .likelihood_objective()
+    let fit_problem: Option<crate::fit::config_v2::Problem> = a.fit.as_ref().map(|fit_path| {
+        let path_str = fit_path.to_string_lossy();
+        crate::fit::config_v2::Problem::load(&path_str).unwrap_or_else(|e| {
+            eprintln!("error: failed to load --fit toml '{}': {}", path_str, e);
+            std::process::exit(1);
+        })
+    });
+    let objective = fit_problem
+        .as_ref()
+        .map(|p| p.likelihood_objective())
+        .unwrap_or(crate::fit::config_v2::LikelihoodObjective::Full);
+
+    // The interventions this run scores under. With `--fit` it is the fit's
+    // own problem, so the fit config's `scenario` / `enable` / `disable` is
+    // applied, as `fit run` applied it — combined with the flags by the rule
+    // `survey --fit` and `profile --fit` use: either side alone selects, and
+    // two selections that differ are refused rather than one winning.
+    //
+    // A selection taken from the fit config contributes its intervention
+    // lists only ([`crate::util::FitBase`]): its parameter effect is already
+    // the fit's `[fixed]` value, and applying a named scenario's `set` at
+    // tier 4 here would override `--params` — the silent-wrong-θ hazard
+    // gh#194 refuses `--scenario` beside `--params` for. A `--scenario` flag
+    // keeps its full meaning, and that gh#194 refusal.
+    let flag_given = a.scenario.scenario.is_some()
+        || !a.scenario.enable.is_empty()
+        || !a.scenario.disable.is_empty();
+    let fit_base: Option<crate::util::FitBase> = fit_problem.as_ref().map(|p| {
+        crate::util::FitBase::of(p).unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        })
+    });
+    if let Some(base) = &fit_base {
+        let flag = crate::util::ScenarioChoice {
+            scenario: a.scenario.scenario.as_deref(),
+            enable: &a.scenario.enable,
+            disable: &a.scenario.disable,
+        };
+        let config = crate::util::ScenarioChoice {
+            scenario: base.selection.scenario.as_deref(),
+            enable: &base.selection.enable,
+            disable: &base.selection.disable,
+        };
+        if let Err(e) = crate::util::combine_fit_scenario(flag, config) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
         }
-        None => crate::fit::config_v2::LikelihoodObjective::Full,
-    };
+    }
+    // Scored under the fit's selection exactly when the flags select nothing
+    // and the fit config does; its lists are resolved once the model is
+    // loaded. Otherwise the flags are the selection (a flag naming the fit's
+    // own scenario is the one agreement `combine_fit_scenario` admits).
+    let scored_fit_base: Option<crate::util::FitBase> =
+        fit_base.filter(|b| !flag_given && !b.is_empty());
+    let scenario_name: Option<String> = a.scenario.scenario.clone();
+    let mut adhoc_enable: Vec<String> = a.scenario.enable.clone();
+    let mut adhoc_disable: Vec<String> = a.scenario.disable.clone();
 
     // Load model (supports .camdl via camdlc)
     let (mut model_in, _model_json) = crate::util::load_model(&ir_path)
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    if let Some(base) = &scored_fit_base {
+        let (enable, disable) = base.lists(&model_in).unwrap_or_else(|e| {
+            eprintln!("error: --fit: {e}");
+            std::process::exit(1);
+        });
+        eprintln!("pfilter: scoring under the fit's own {} (from --fit)", base.describe());
+        adhoc_enable = enable;
+        adhoc_disable = disable;
+    }
     // The one dt rule (`crate::dt_rule`): the model's declared step; a
     // `--dt` or `--fit` `[config] dt` that differs is refused; 1.0 when
     // nothing declares one.

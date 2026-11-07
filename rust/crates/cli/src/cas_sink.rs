@@ -1489,6 +1489,9 @@ mod tests {
             // scenario level: the `ResolvedEntry` enable / disable delta.
             adhoc_enable: _,
             adhoc_disable: _,
+            // scenario level: its lists lead every `ResolvedEntry`'s
+            // enable / disable (`build_simulate_cas_sink`).
+            fit_base: _,
             // provenance: the scenario label only; its values are above.
             scenario_inline_name: _,
             // config level: `SimConfig::t_end` via `ResolvedEntry::t_end`.

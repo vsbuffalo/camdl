@@ -551,6 +551,7 @@ pub fn build_cell_sim_run(
         scenario_inline_name,
         scenario_inline_set,
         scenario_inline_scale: Vec::new(),
+        fit_base: job.fit_base.clone(),
         backend: job.backend,
         dt: job.dt,
         seed: process_seed,

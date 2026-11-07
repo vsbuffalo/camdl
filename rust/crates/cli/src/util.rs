@@ -2818,6 +2818,11 @@ pub struct SimRun {
     pub scenario_inline_name: Option<String>,
     pub scenario_inline_set: Vec<(String, f64)>,
     pub scenario_inline_scale: Vec<(String, f64)>,
+    /// The intervention selection of the fit this cell replays, when the run
+    /// replays one (`fit predict`, `simulate --draws posterior --fit`): the
+    /// base the cell's own scenario is overlaid on ([`FitBase::overlay`]).
+    /// Empty everywhere else, and then a no-op.
+    pub fit_base: FitBase,
     pub backend: crate::args::types::ForwardBackend,
     pub dt: f64,
     pub seed: u64,
@@ -3268,7 +3273,7 @@ impl ScenarioChoice<'_> {
 
 /// The scenario selection a run resolves under, once the fit config's and the
 /// CLI's have been combined by [`combine_fit_scenario`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScenarioSelection {
     pub scenario: Option<String>,
     pub enable: Vec<String>,
@@ -3308,6 +3313,146 @@ pub fn combine_fit_scenario(
              Fix: drop the flag to run under the fit config's selection, or \
              edit the fit config's `scenario`/`enable`/`disable` keys.",
             flag.describe(), config.describe())),
+    }
+}
+
+/// The intervention selection a fit ran under — the fit config's top-level
+/// `scenario` or `enable`/`disable` — as the base every replay of "the fitted
+/// model" starts from: `fit predict`'s arms and its one-step filter, the
+/// contrast arms, `simulate --draws posterior --fit`, and `pfilter --fit`.
+///
+/// Only the intervention lists are carried. A fit's named scenario can also
+/// `set`/`scale` parameters, but `fit run` refuses one that moves a `[fixed]`
+/// value or touches an `[estimate]` parameter (spec §1.3), and every parameter
+/// is one or the other — so in a fit that ran, the scenario's parameter effect
+/// is already the `[fixed]` value the draws carry. Re-applying it would be a
+/// no-op at best and a double scale at worst.
+///
+/// The selection is read from the fit config — for a stored fit, the archived
+/// `fit.toml.original` — and the fit level's identity hashes that config's
+/// problem half whole (`fit::cas`), so it is already part of the fit's
+/// `run_id`; nothing new needs recording on the leaf.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FitBase {
+    /// The selection as the fit config wrote it.
+    pub selection: ScenarioSelection,
+}
+
+/// One arm's scenario inputs to the resolver: a named preset, or an ad-hoc
+/// patch (`enable`/`disable`, and an inline scenario's `set`/`scale` under
+/// `inline_name`). What [`FitBase::overlay`] takes and returns.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ArmSelection {
+    pub scenario: Option<String>,
+    pub enable: Vec<String>,
+    pub disable: Vec<String>,
+    pub inline_name: Option<String>,
+    pub inline_set: Vec<(String, f64)>,
+    pub inline_scale: Vec<(String, f64)>,
+}
+
+impl FitBase {
+    /// The base a fit config describes. A config naming both a `scenario` and
+    /// toggles is refused, as `fit run` refuses it.
+    pub fn of(problem: &crate::fit::config_v2::Problem) -> Result<Self, String> {
+        if problem.scenario.is_some()
+            && (!problem.enable.is_empty() || !problem.disable.is_empty())
+        {
+            return Err("fit.toml: `scenario` is mutually exclusive with \
+                        `enable`/`disable`. Use one approach."
+                .into());
+        }
+        Ok(FitBase {
+            selection: ScenarioSelection {
+                scenario: problem.scenario.clone(),
+                enable: problem.enable.clone(),
+                disable: problem.disable.clone(),
+            },
+        })
+    }
+
+    /// The fit selected nothing: its model is the model as written, every
+    /// toggleable intervention off.
+    pub fn is_empty(&self) -> bool {
+        self.selection.scenario.is_none()
+            && self.selection.enable.is_empty()
+            && self.selection.disable.is_empty()
+    }
+
+    /// The fit's selection in a sentence fragment, for notices.
+    pub fn describe(&self) -> String {
+        match &self.selection.scenario {
+            Some(s) => format!("scenario `{s}`"),
+            None => format!(
+                "enable {:?} / disable {:?}",
+                self.selection.enable, self.selection.disable
+            ),
+        }
+    }
+
+    /// The `(enable, disable)` lists the base resolves to over `model`: a named
+    /// scenario's composed lists (the authority the resolver applies), else
+    /// the toggles as written.
+    pub fn lists(
+        &self,
+        model: &ir::Model,
+    ) -> Result<(Vec<String>, Vec<String>), crate::params_resolver::ResolveError> {
+        match &self.selection.scenario {
+            Some(name) => {
+                let d = crate::params_resolver::resolve_preset_delta(model, name)?;
+                Ok((d.enable, d.disable))
+            }
+            None => Ok((self.selection.enable.clone(), self.selection.disable.clone())),
+        }
+    }
+
+    /// Filter `model`'s interventions to the fitted model's: what runs with no
+    /// overlay at all. Applied even for an empty base, because the filter is
+    /// what turns every toggleable intervention off (spec §14.4).
+    pub fn filter(&self, model: &mut ir::Model) -> Result<(), String> {
+        let (enable, disable) = self.lists(model).map_err(|e| e.to_string())?;
+        apply_scenario_filter(model, &enable, &disable)
+    }
+
+    /// One arm, on top of this base: the arm runs the fitted model with its
+    /// own changes applied, composed the way a scenario `compose`s a
+    /// sub-scenario — the base's `enable`/`disable` first, the arm's after,
+    /// so the arm can switch on an intervention the fit did not run and
+    /// switch off one it did (an explicit disable wins). A named arm's
+    /// `set`/`scale` resolve at the same scenario tier through the inline
+    /// route (identical to the preset route, spec §1.3), under its own name.
+    ///
+    /// An empty base returns the arm unchanged, so a fit that selected
+    /// nothing replays exactly as before.
+    pub fn overlay(
+        &self,
+        model: &ir::Model,
+        arm: ArmSelection,
+    ) -> Result<ArmSelection, crate::params_resolver::ResolveError> {
+        if self.is_empty() {
+            return Ok(arm);
+        }
+        let (mut enable, mut disable) = self.lists(model)?;
+        match arm.scenario {
+            Some(name) => {
+                let d = crate::params_resolver::resolve_preset_delta(model, &name)?;
+                enable.extend(d.enable);
+                disable.extend(d.disable);
+                Ok(ArmSelection {
+                    scenario: None,
+                    enable,
+                    disable,
+                    inline_name: Some(name),
+                    inline_set: d.params.into_iter().collect(),
+                    inline_scale: d.scale,
+                })
+            }
+            None => {
+                enable.extend(arm.enable);
+                disable.extend(arm.disable);
+                Ok(ArmSelection { scenario: None, enable, disable, ..arm })
+            }
+        }
     }
 }
 
@@ -3367,6 +3512,7 @@ impl Default for SimRun {
             scenario_inline_name: None,
             scenario_inline_set: Vec::new(),
             scenario_inline_scale: Vec::new(),
+            fit_base: FitBase::default(),
             backend: crate::args::types::ForwardBackend::ChainBinomial,
             dt: 1.0,
             seed: 1,
@@ -3503,15 +3649,28 @@ pub fn resolve_run_parameters_typed(
         .map(|(k, v)| (k.clone(), std::path::PathBuf::from(v))).collect();
     let fte: indexmap::IndexSet<String> = indexmap::IndexSet::new();
 
+    // The cell's scenario on top of the replayed fit's selection (a no-op
+    // when the run replays no fit). The horizon is NOT read from here: it
+    // stays on `run.scenario_name` (`resolve_run_model`), which this leaves
+    // alone.
+    let arm = run.fit_base.overlay(model, ArmSelection {
+        scenario: run.scenario_name.clone(),
+        enable: run.adhoc_enable.clone(),
+        disable: run.adhoc_disable.clone(),
+        inline_name: run.scenario_inline_name.clone(),
+        inline_set: run.scenario_inline_set.clone(),
+        inline_scale: run.scenario_inline_scale.clone(),
+    }).map_err(RunParamError::Resolve)?;
+
     crate::params_resolver::resolve_parameters(
         crate::params_resolver::ParameterInputs {
             model,
-            scenario: run.scenario_name.as_deref(),
-            adhoc_enable: &run.adhoc_enable,
-            adhoc_disable: &run.adhoc_disable,
-            scenario_inline_name: run.scenario_inline_name.as_deref(),
-            scenario_inline_set: &run.scenario_inline_set,
-            scenario_inline_scale: &run.scenario_inline_scale,
+            scenario: arm.scenario.as_deref(),
+            adhoc_enable: &arm.enable,
+            adhoc_disable: &arm.disable,
+            scenario_inline_name: arm.inline_name.as_deref(),
+            scenario_inline_set: &arm.inline_set,
+            scenario_inline_scale: &arm.inline_scale,
             point_overrides: &point_overrides,
             fixed_cli: &fixed_cli,
             fixed_files: &fixed_files,

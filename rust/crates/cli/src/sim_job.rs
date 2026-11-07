@@ -71,6 +71,11 @@ pub struct SimulateJob {
     /// every cell's `SimRun::fit_fixed` and resolved at the `fit.toml [fixed]`
     /// tier (gh#949). Empty for every other source.
     pub fit_fixed: IndexMap<String, f64>,
+    /// The intervention selection of the fit this job replays (`fit predict`,
+    /// `simulate --draws posterior --fit`), copied to every cell's
+    /// `SimRun::fit_base`: each scenario arm is overlaid on it. Empty for a
+    /// job that replays no fit.
+    pub fit_base: crate::util::FitBase,
     /// `--param-vec PREFIX=FILE` entries (CLI only).
     pub set_vec_entries: Vec<(String, String)>,
     /// `--table NAME=FILE` entries (CLI only).

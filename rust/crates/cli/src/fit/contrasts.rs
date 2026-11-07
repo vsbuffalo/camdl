@@ -157,6 +157,7 @@ pub fn emit_contrasts(
     stage: Option<&str>,
     selection: Option<&ChainSelection>,
     model: &ir::Model,
+    fit_base: &crate::util::FitBase,
     backend: ForwardBackend,
     seed: u64,
     obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
@@ -341,7 +342,7 @@ pub fn emit_contrasts(
     let mut arms: HashMap<String, Arm> = HashMap::new();
     for run in &runs_union {
         if !arms.contains_key(run) {
-            arms.insert(run.clone(), Arm::build(model, run, &placeholder, obs_anchors)?);
+            arms.insert(run.clone(), Arm::build(model, fit_base, run, &placeholder, obs_anchors)?);
         }
     }
 
@@ -356,7 +357,7 @@ pub fn emit_contrasts(
             for (params_i, _, _) in &forkable {
                 let overrides: Vec<(String, f64)> =
                     params_i.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                parts.push(resolve_arm(model, run, &overrides)?.into_notice_parts());
+                parts.push(resolve_arm(model, fit_base, run, &overrides)?.into_notice_parts());
             }
         }
         crate::params_resolver::emit_notices_from_parts(&parts);
@@ -562,6 +563,9 @@ struct Arm {
     /// data, so every arm carries the same pair and the two arms of a contrast
     /// read at the same instant.
     obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
+    /// The fit's own intervention selection: the base this arm's scenario is
+    /// overlaid on, per draw as at build.
+    fit_base: crate::util::FitBase,
 }
 
 impl Arm {
@@ -576,18 +580,19 @@ impl Arm {
     /// any draw serves; per-draw we rebuild the parameter vector below.
     fn build(
         model: &ir::Model,
+        fit_base: &crate::util::FitBase,
         run: &str,
         placeholder: &[(String, f64)],
         obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
     ) -> Result<Arm, String> {
-        let resolved = resolve_arm(model, run, placeholder)?;
+        let resolved = resolve_arm(model, fit_base, run, placeholder)?;
         let compiled = std::sync::Arc::new(
             sim::CompiledModel::new(resolved.model)
                 .map_err(|e| format!("contrast arm '{run}': compiling model: {e:?}"))?,
         );
         let quant_eval = QuantityEvaluator::new(&model.quantities, compiled.as_ref())
             .map_err(|e| format!("contrast arm '{run}': building quantity evaluator: {e}"))?;
-        Ok(Arm { compiled, quant_eval, obs_anchors })
+        Ok(Arm { compiled, quant_eval, obs_anchors, fit_base: fit_base.clone() })
     }
 
     /// Replay this arm for one draw from the derived fork: resolve the draw's θ
@@ -614,7 +619,7 @@ impl Arm {
         // θ_i at tier 3.5 (draw row), scenario `set`/`scale` at tier 4.
         let overrides: Vec<(String, f64)> =
             params_i.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        let resolved = resolve_arm(model, run, &overrides)?;
+        let resolved = resolve_arm(model, &self.fit_base, run, &overrides)?;
         let mut pvec = self.compiled.default_params.clone();
         for rp in &resolved.params {
             if let Some(&idx) = self.compiled.param_index.get(rp.name.as_str()) {
@@ -670,25 +675,30 @@ impl Arm {
 }
 
 /// Resolve one arm's parameters: the draw overlay at tier 3.5, the scenario
-/// `set`/`scale`/`enable`/`disable` at tier 4 (`fitted` ⇒ no scenario). Returns the
+/// `set`/`scale`/`enable`/`disable` at tier 4, overlaid on the fit's own
+/// intervention selection (`fitted` ⇒ that selection alone). Returns the
 /// filtered, valued model + the per-parameter resolution.
 fn resolve_arm(
     model: &ir::Model,
+    fit_base: &crate::util::FitBase,
     run: &str,
     overrides: &[(String, f64)],
 ) -> Result<crate::params_resolver::ResolvedParameters, String> {
     let empty_tables: HashMap<String, PathBuf> = HashMap::new();
     let empty_fixed: IndexMap<String, f64> = IndexMap::new();
     let empty_estimate: IndexSet<String> = IndexSet::new();
-    let scenario = if run == crate::args::FITTED { None } else { Some(run) };
+    let scenario = if run == crate::args::FITTED { None } else { Some(run.to_string()) };
+    let arm = fit_base
+        .overlay(model, crate::util::ArmSelection { scenario, ..Default::default() })
+        .map_err(|e| format!("contrast arm '{run}': {e}"))?;
     let inputs = ParameterInputs {
         model,
-        scenario,
-        adhoc_enable: &[],
-        adhoc_disable: &[],
-        scenario_inline_name: None,
-        scenario_inline_set: &[],
-        scenario_inline_scale: &[],
+        scenario: arm.scenario.as_deref(),
+        adhoc_enable: &arm.enable,
+        adhoc_disable: &arm.disable,
+        scenario_inline_name: arm.inline_name.as_deref(),
+        scenario_inline_set: &arm.inline_set,
+        scenario_inline_scale: &arm.inline_scale,
         point_overrides: overrides,
         fixed_cli: &[],
         fixed_files: &[],

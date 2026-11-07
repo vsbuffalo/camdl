@@ -1107,6 +1107,19 @@ fn derive_prequential(
         PathBuf::from(&config.model.camdl)
     };
 
+    // The fit's own intervention selection: the filter scores the fitted
+    // model, so it runs the interventions `fit run` ran. Passed as the
+    // resolved `--enable`/`--disable` lists rather than `--scenario`, which
+    // `pfilter` refuses beside the `--params` θ̂ (gh#194); the lists are the
+    // whole of a fit scenario's effect (`util::FitBase`).
+    let fit_base = crate::util::FitBase::of(config)?;
+    let (base_enable, base_disable): (Vec<String>, Vec<String>) = if fit_base.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let (m, _) = crate::util::load_model(&model_path.to_string_lossy())?;
+        fit_base.lists(&m).map_err(|e| e.to_string())?
+    };
+
     // (c) data — stream → absolute path. The config's data paths were made
     // absolute (relative to the original fit.toml) at load, so they pass to the
     // child unchanged.
@@ -1190,6 +1203,12 @@ fn derive_prequential(
             .env("CAMDL_SKIP_VERSION_CHECK", "1");
         for (name, abs_path) in &streams {
             cmd.arg("--data").arg(format!("{name}={abs_path}"));
+        }
+        for name in &base_enable {
+            cmd.arg("--enable").arg(name);
+        }
+        for name in &base_disable {
+            cmd.arg("--disable").arg(name);
         }
         // gh#585 (Stage 3.4): score only past the sealed training boundary.
         if let Some(h) = &holdout {
