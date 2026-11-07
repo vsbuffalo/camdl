@@ -89,43 +89,6 @@ error[E356]: observation 'prev': `prevalence(I)` was removed — it returned a c
               projected = prevalence(of = I, among = <denominator>)
 ```
 
-## 2026-11-05 — an indexed transition family whose members are identical is refused
-
-**What.** Every member of an indexed transition family is its own flow. A family
-whose binder appears in neither its compartments nor its rate expanded to
-identical transitions and ran the flow once per member, with no diagnostic:
-`inf[r in round] : S --> I @ beta * S` on unstratified `S`, `I` ran at
-`2 beta S`. A transition family that expands to two members with the same
-stoichiometry and the same rate is now **E422**, naming the binder that fails to
-distinguish them (gh#482). Families that index a compartment or a parameter by
-the binder, look up a table by it, or use a guard leaving one member are
-unaffected.
-
-**Migration.** Use the binder, or drop it.
-`inf[r in round] : S --> I @ beta * S` → `inf : S --> I @ beta * S` if one flow
-was meant, or `inf[r in round] : S[r] --> I[r] @ beta * S[r]` with `S`, `I`
-stratified by `round` if each level has its own flow.
-
-## 2026-11-05 — an indexed effect family whose members are identical is refused
-
-**What.** Every member of an indexed intervention, event or reactive family
-fires. A family whose binder neither its action nor its schedule uses expanded
-to identical members and applied the action once per member, with no diagnostic:
-`sia[r in round] : transfer(count = n, from = S, to = V) at [10]` moved `2n`. A
-family that expands to two members with the same actions and the same schedule
-is now **E421**, naming the binder that fails to distinguish them (gh#482).
-Models that used the binder in the action, the schedule, or a guard leaving one
-member are unaffected.
-
-**Migration.** Use the binder, or drop it.
-`sia[r in round] : transfer(count =
-n, from = S, to = V) at [10]` →
-`sia : transfer(count = n, from = S, to = V) at
-[10]` if one transfer was meant,
-or `sia[r in round] : transfer(…) at
-[t_start[r]]` if each round has its own
-date.
-
 ## 2026-11-06 — A typed `let` is held to its annotation
 
 **What.** The kind or `dim` clause on a `let` whose body is not a constant
@@ -195,6 +158,43 @@ unambiguous and compiles; `I / 5 'days` is still E107.
 E282.
 
 ---
+
+## 2026-11-05 — an indexed transition family whose members are identical is refused
+
+**What.** Every member of an indexed transition family is its own flow. A family
+whose binder appears in neither its compartments nor its rate expanded to
+identical transitions and ran the flow once per member, with no diagnostic:
+`inf[r in round] : S --> I @ beta * S` on unstratified `S`, `I` ran at
+`2 beta S`. A transition family that expands to two members with the same
+stoichiometry and the same rate is now **E422**, naming the binder that fails to
+distinguish them (gh#482). Families that index a compartment or a parameter by
+the binder, look up a table by it, or use a guard leaving one member are
+unaffected.
+
+**Migration.** Use the binder, or drop it.
+`inf[r in round] : S --> I @ beta * S` → `inf : S --> I @ beta * S` if one flow
+was meant, or `inf[r in round] : S[r] --> I[r] @ beta * S[r]` with `S`, `I`
+stratified by `round` if each level has its own flow.
+
+## 2026-11-05 — an indexed effect family whose members are identical is refused
+
+**What.** Every member of an indexed intervention, event or reactive family
+fires. A family whose binder neither its action nor its schedule uses expanded
+to identical members and applied the action once per member, with no diagnostic:
+`sia[r in round] : transfer(count = n, from = S, to = V) at [10]` moved `2n`. A
+family that expands to two members with the same actions and the same schedule
+is now **E421**, naming the binder that fails to distinguish them (gh#482).
+Models that used the binder in the action, the schedule, or a guard leaving one
+member are unaffected.
+
+**Migration.** Use the binder, or drop it.
+`sia[r in round] : transfer(count =
+n, from = S, to = V) at [10]` →
+`sia : transfer(count = n, from = S, to = V) at
+[10]` if one transfer was meant,
+or `sia[r in round] : transfer(…) at
+[t_start[r]]` if each round has its own
+date.
 
 ## 2026-11-05 — Brackets after a kind mean size; dimensions are a `dim` clause
 
