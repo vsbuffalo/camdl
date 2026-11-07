@@ -311,7 +311,7 @@ fn an_arm_with_no_value_for_an_unsampled_parameter_is_refused_up_front() {
     assert!(!out.status.success(), "must refuse:\n{stderr}");
     assert!(
         stderr.contains(
-            "parameter 'c' has no prior and no default value, and nothing sets it for scenario 'other'"
+            "parameter 'c' has no prior, and nothing gives it a value for scenario 'other'"
         ),
         "must name the parameter and the arm:\n{stderr}"
     );

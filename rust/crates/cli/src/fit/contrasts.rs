@@ -293,7 +293,8 @@ pub fn emit_contrasts(
         return Err(format!(
             "contrasts: the posterior draws are missing {} model parameter(s): {}. A \
              contrast forks each arm on the full parameter vector; a draws.tsv lacking \
-             columns would silently fall back to model defaults, diverging from the fit.",
+             columns would leave those parameters to whatever else sets them (or to \
+             nothing), diverging from the fit.",
             missing.len(),
             missing.join(", "),
         ));

@@ -522,12 +522,15 @@ impl std::fmt::Display for ResolveError {
                 // integration tests
                 // (`parameter_bounds_validation::param_positive_infinity_errors`)
                 // and the user's mental model both stay green.
+                // The fix names the source the value came from, not a
+                // flag list: a value from a scenario's `set` or a params
+                // file is corrected there, and `--fixed` is not a flag of
+                // every command that reaches this.
                 write!(f,
-                    "parameter '{name}' = {value} is not finite (NaN or ±∞), \
-                     resolved from {}.\n  \
-                     Fix: supply a finite numeric value via --fixed, \
-                     --fixed-file, or the scenario block.",
-                    source.tag())
+                    "parameter '{name}' = {value} is not finite (NaN or ±∞); \
+                     it came from {}.\n  \
+                     Fix: give it a finite value there.",
+                    subject_phrase(source))
             }
             ResolveError::UnsetRequired { name, flags } => {
                 write!(f,
@@ -2268,7 +2271,9 @@ pub(crate) fn carries_fit_provenance(path: &std::path::Path) -> bool {
 /// How a notice names `src` as the origin of a replaced value.
 fn origin_phrase(src: &ValueSource, ctx: &ResolveContext) -> String {
     match src {
-        ValueSource::ModelDefault => "the model default".to_string(),
+        // Tier 1 (run spec §1.3): a value already in the IR, which only
+        // `camdlc --set` or a hand-written IR puts there.
+        ValueSource::ModelDefault => "the value compiled into the IR".to_string(),
         ValueSource::Scenario(n) => format!("scenario `{n}`"),
         ValueSource::FitTomlFixed => "fit.toml [fixed]".to_string(),
         ValueSource::FixedFile { path } if ctx.fit_estimate_files.contains(path) =>
@@ -3109,6 +3114,30 @@ mod tests {
         let err = resolve_parameters(empty_inputs(&model, &fcli, &ffiles, &ftf, &fte))
             .unwrap_err();
         assert!(matches!(err, ResolveError::NonFiniteValue { ref name, .. } if name == "beta"));
+    }
+
+    /// The non-finite refusal names where the value came from, not a list of
+    /// `--fixed` flags that may not exist on the command and may not be where
+    /// the value was written.
+    #[test]
+    fn non_finite_value_names_its_source() {
+        let err = ResolveError::NonFiniteValue {
+            name: "beta".into(), value: f64::INFINITY,
+            source: ValueSource::Scenario("surge".into()),
+        };
+        assert_eq!(err.to_string(),
+            "parameter 'beta' = inf is not finite (NaN or ±∞); it came from scenario \
+             `surge`.\n  Fix: give it a finite value there.");
+        let err = ResolveError::NonFiniteValue {
+            name: "beta".into(), value: f64::NAN,
+            source: ValueSource::FixedFile { path: "p.toml".into() },
+        };
+        assert!(err.to_string().contains("it came from params file p.toml"), "{err}");
+        let err = ResolveError::NonFiniteValue {
+            name: "beta".into(), value: f64::NAN, source: ValueSource::ModelDefault,
+        };
+        assert!(err.to_string().contains("it came from the value compiled into the IR")
+            && !err.to_string().contains("model default"), "{err}");
     }
 
     // ── Provenance round-trip ───────────────────────────────────────────

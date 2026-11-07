@@ -43,7 +43,7 @@ ON INFERENCE SUBCOMMANDS (if2, profile, fit run)
 
 PRECEDENCE (last wins, per docs/camdl-run-spec.md §1.3)
 
-  1. Model parameter default in the .camdl source
+  1. A value compiled into the IR (`camdlc --set`; a .camdl never writes one)
   2. fit.toml [fixed] block (if --fit is in scope)
   3. --fixed-file <toml> (layered in declared order)
   4. Scenario preset (--scenario NAME)

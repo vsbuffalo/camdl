@@ -2225,9 +2225,9 @@ scenario, or `--param` — is refused before any cell runs, naming the scenario
 that leaves it unset:
 
 ```
-error: parameter 'c' has no prior and no default value, and nothing sets it for scenario 'other'.
-  --draws prior samples only the parameters that have a prior; every other parameter takes its value from the model default, --params FILE, the scenario, or --param NAME=VALUE.
-  Fix options: add `~ prior(...)` to the model, supply `--fit FIT.toml`, set it with --params FILE or --param c=VALUE, or set it in scenario 'other'.
+error: parameter 'c' has no prior, and nothing gives it a value for scenario 'other'.
+  --draws prior samples only the parameters that have a prior; every other parameter takes its value from --params FILE, the scenario's `set`, or --param NAME=VALUE.
+  Fix options: declare a prior on 'c' in the model's parameters {} block (`c : <type> in [lo, hi] ~ <dist>(...)`), supply `--fit FIT.toml`, set it with --params FILE or --param c=VALUE, or set it in scenario 'other'.
 ```
 
 A prior whose mass falls partly outside the declared bounds is rejection-sampled
@@ -2235,7 +2235,7 @@ and reported:
 
 ```
 warning: prior for 'gamma' placed 16.7% mass outside declared bounds (1 rejected / 5 accepted). Consider widening bounds or tightening the prior.
-generated 5 prior draws from model IR (7 sampled params; 0 other parameter(s) resolve per cell from the model default, --params, the scenario or --param)
+generated 5 prior draws from model IR (7 sampled params; 0 other parameter(s) resolve per cell from --params, the scenario's set or --param)
 ```
 
 Combining an explicit draws **file** with a scenario that sets or scales one of
@@ -5445,9 +5445,9 @@ runs, naming the scenario:
 
 ```
 $ camdl simulate v2.camdl --draws prior -n 3 --scenario half,other
-error: parameter 'c' has no prior and no default value, and nothing sets it for scenario 'other'.
-  --draws prior samples only the parameters that have a prior; every other parameter takes its value from the model default, --params FILE, the scenario, or --param NAME=VALUE.
-  Fix options: add `~ prior(...)` to the model, supply `--fit FIT.toml`, set it with --params FILE or --param c=VALUE, or set it in scenario 'other'.
+error: parameter 'c' has no prior, and nothing gives it a value for scenario 'other'.
+  --draws prior samples only the parameters that have a prior; every other parameter takes its value from --params FILE, the scenario's `set`, or --param NAME=VALUE.
+  Fix options: declare a prior on 'c' in the model's parameters {} block (`c : <type> in [lo, hi] ~ <dist>(...)`), supply `--fit FIT.toml`, set it with --params FILE or --param c=VALUE, or set it in scenario 'other'.
 ```
 
 **`--fit` form: every estimated parameter needs a proper prior.** Flat is

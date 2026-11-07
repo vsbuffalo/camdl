@@ -4583,7 +4583,8 @@ fn unset_generated_parameter_message(
                 format!("give '{name}' a prior in the fit config's [estimate] or a \
                          value in its [fixed]")
             } else {
-                "add `~ prior(...)` to the model, supply `--fit FIT.toml`".to_string()
+                format!("declare a prior on '{name}' in the model's parameters {{}} block \
+                         (`{name} : <type> in [lo, hi] ~ <dist>(...)`), supply `--fit FIT.toml`")
             },
         ),
         GeneratedMeasure::Uniform => (
@@ -4596,10 +4597,14 @@ fn unset_generated_parameter_message(
         Some(arm) => (format!(" for scenario '{arm}'"), format!("set it in scenario '{arm}'")),
         None => (String::new(), "set it in a scenario (`--scenario NAME`)".to_string()),
     };
+    // A model never writes a parameter's value (parameters {} declares names,
+    // types, bounds and priors), so the sources named here are the ones a run
+    // can actually take a value from.
+    let fit_source = if fit_given { ", the fit config's [fixed]" } else { "" };
     format!(
-        "parameter '{name}' has {lacks} and no default value, and nothing sets it{where_}.\n  \
-         {varies}; every other parameter takes its value from the model default, \
-         --params FILE, the scenario, or --param NAME=VALUE.\n  \
+        "parameter '{name}' has {lacks}, and nothing gives it a value{where_}.\n  \
+         {varies}; every other parameter takes its value from --params FILE{fit_source}, \
+         the scenario's `set`, or --param NAME=VALUE.\n  \
          Fix options: {own_fix}, set it with --params FILE or --param {name}=VALUE, \
          or {scenario_fix}."
     )
@@ -4638,8 +4643,7 @@ fn generate_uniform_draws(
         draws.push(row);
     }
     eprintln!("generated {} uniform draws over {} bounded parameter(s); {} other \
-               parameter(s) resolve per cell from the model default, --params, the \
-               scenario or --param",
+               parameter(s) resolve per cell from --params, the scenario's set or --param",
         n, bounded.len(), model.parameters.len() - bounded.len());
     Ok(draws)
 }
@@ -4938,8 +4942,7 @@ fn generate_prior_draws_from_ir(
     }
 
     eprintln!("generated {} prior draws from model IR ({} sampled params; {} other \
-               parameter(s) resolve per cell from the model default, --params, the \
-               scenario or --param)",
+               parameter(s) resolve per cell from --params, the scenario's set or --param)",
         n, with_prior.len(), model.parameters.len() - with_prior.len());
     Ok(draws)
 }
@@ -5289,11 +5292,12 @@ fn print_dry_run(
                 }
                 let mut provs: std::collections::BTreeMap<String, ParamProv> = std::collections::BTreeMap::new();
 
-                // Model defaults
+                // Values compiled into the IR (`camdlc --set`; a .camdl
+                // never writes one).
                 for p in &model.parameters {
                     if let Some(v) = p.value.resolved_value() {
                         provs.insert(p.name.clone(), ParamProv {
-                            value: v, source: "model default".to_string(), overrides: vec![],
+                            value: v, source: "compiled-in value".to_string(), overrides: vec![],
                         });
                     }
                 }
