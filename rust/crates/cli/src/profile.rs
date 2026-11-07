@@ -579,7 +579,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             .collect();
         let refusals: Vec<String> = [
             crate::params_resolver::scenario_estimate_collision(
-                &model_pre, scenario, &estimated, &fit_path_str,
+                &model_pre, scenario, &estimated,
+                crate::params_resolver::EstimatedBy::FitToml(&fit_path_str),
             ),
             crate::params_resolver::scenario_fixed_collision(
                 &model_pre, scenario, &fit_toml_fixed_indexmap, &fit_path_str,
@@ -992,13 +993,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     for k in fit_toml_fixed.keys() {
         fixed_names.insert(k.clone());
     }
-    let from_fixed_file = |s: &crate::params_resolver::ValueSource|
-        matches!(s, crate::params_resolver::ValueSource::FixedFile { .. });
-    for rp in &resolved.params {
-        let named_by_file = from_fixed_file(&rp.source)
-            || rp.overrides.iter().any(|o| from_fixed_file(&o.replaced.0));
-        if named_by_file && !focal_names.contains(&rp.name) {
-            fixed_names.insert(rp.name.clone());
+    // Every name a file carries is pinned, read from the files rather than from
+    // the resolver's override records: a later tier (a scenario) that re-valued
+    // the name to an equal value leaves no record, and the name would be
+    // estimated and then refused as a scenario-set estimated parameter.
+    for path in &fixed_files_vec {
+        let Ok(values) = crate::util::load_params_toml(&path.to_string_lossy()) else { continue };
+        for name in values.keys().filter(|n| !focal_names.contains(*n)) {
+            fixed_names.insert(name.clone());
         }
     }
 
@@ -1043,6 +1045,23 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             .cloned()
             .collect()
     };
+
+    // The scenario × estimate rule, on the set this profile estimates. The
+    // check at the top of the function reads the fit config's `[estimate]`;
+    // the estimated set is what `--rw-sd` selects (every parameter that is not
+    // swept or pinned under `auto`), which a fit config need not list, and
+    // which exists without `--fit` (run spec §1.3).
+    if let Some(scenario) = scenario_name.as_deref() {
+        let estimated: Vec<&str> = param_names_to_estimate.iter().map(|n| n.as_str()).collect();
+        let clash = crate::params_resolver::scenario_estimate_collision(
+            &model_pre, scenario, &estimated,
+            crate::params_resolver::EstimatedBy::RwSd { auto: rw_sd_auto },
+        ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+        if let Some(msg) = clash {
+            eprintln!("error: {msg}");
+            std::process::exit(1);
+        }
+    }
 
     // The profile's partition: today's selection, translated into role
     // declarations by the one adapter that reads it. Recorded, not acted on.

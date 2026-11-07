@@ -792,7 +792,8 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             let estimated: Vec<&str> = config.estimate.keys().map(|k| k.as_str()).collect();
             let refusals: Vec<String> = [
                 crate::params_resolver::scenario_estimate_collision(
-                    &model_pre, scenario, &estimated, &fit_path_str,
+                    &model_pre, scenario, &estimated,
+                    crate::params_resolver::EstimatedBy::FitToml(&fit_path_str),
                 )?,
                 crate::params_resolver::scenario_fixed_collision(
                     &model_pre, scenario, &fixed_resolved_indexmap, &fit_path_str,

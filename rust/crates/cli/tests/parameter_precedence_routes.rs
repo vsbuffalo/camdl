@@ -427,6 +427,7 @@ observations {
 }
 scenarios {
   base { set = { beta = 0.3  gamma = 0.1  N0 = 1000 } }
+  gonly { set = { gamma = 0.1 } }
 }
 init { S = 999  I = 1 }
 simulate { from = 0 'days  to = 6 'days }
@@ -436,7 +437,9 @@ fn profile_fixture(dir: &Path) {
     std::fs::write(dir.join("sir.camdl"), PROFILE_MODEL).unwrap();
     std::fs::write(dir.join("cases.tsv"), "time\tcases\n1\t2\n2\t4\n3\t8\n4\t6\n5\t4\n6\t2\n")
         .unwrap();
-    std::fs::write(dir.join("ff.toml"), "gamma = 0.12\n").unwrap();
+    // N0 is held beside gamma: the scenario `base` sets both, and a parameter
+    // a scenario sets cannot be one the profile estimates (`--rw-sd auto`).
+    std::fs::write(dir.join("ff.toml"), "gamma = 0.12\nN0 = 1000\n").unwrap();
 }
 
 #[test]
@@ -530,9 +533,17 @@ cooling = 0.5
 /// Run `profile` on the profile fixture with `extra` flags; returns stderr and
 /// every profile-point leaf's `parameters_provenance`.
 fn profile_run(dir: &Path, store: &str, extra: &[&str]) -> (String, Vec<serde_json::Value>) {
+    profile_run_rw(dir, store, "auto", extra)
+}
+
+/// `profile_run` with `--rw-sd` given: `auto`, or `NAME=SD` to estimate only
+/// NAME and hold every other non-swept parameter.
+fn profile_run_rw(dir: &Path, store: &str, rw_sd: &str, extra: &[&str])
+    -> (String, Vec<serde_json::Value>)
+{
     let mut argv = vec!["profile", "sir.camdl", "--data", "cases.tsv", "--obs", "cases",
         "--sweep", "beta=lin(0.2,0.4,2)", "--particles", "30", "--iterations", "3",
-        "--n-starts", "1", "--rw-sd", "auto", "--output", "p.tsv", "--seed", "1"];
+        "--n-starts", "1", "--rw-sd", rw_sd, "--output", "p.tsv", "--seed", "1"];
     argv.extend_from_slice(extra);
     let out = Command::new(binary()).args(&argv).current_dir(dir)
         .env("CAMDL_OUTPUT_DIR", dir.join(store)).output().expect("spawn");
@@ -567,12 +578,13 @@ fn profile_scenario_over_a_starts_file_is_reported_and_recorded() {
     let dir = tmp.path();
     profile_fixture(dir);
     std::fs::write(dir.join("start.toml"), "beta = 0.3\ngamma = 0.2\nN0 = 1000\n").unwrap();
-    let (stderr, provs) = profile_run(dir, "out",
-        &["--starts", "from_params=start.toml", "--scenario", "base"]);
-    // `base` sets gamma 0.1 over the file's 0.2, and beta and N0 to the
-    // file's own 0.3 and 1000 (equal values, not replacements).
+    // Only N0 is estimated, so gamma is held at the file's value; `gonly` sets
+    // gamma 0.1 over the file's 0.2. (A scenario that sets a parameter the
+    // profile estimates is refused, so the scenario must leave N0 alone.)
+    let (stderr, provs) = profile_run_rw(dir, "out", "N0=10",
+        &["--starts", "from_params=start.toml", "--scenario", "gonly"]);
     assert_eq!(override_lines(&stderr), vec![
-        "info: scenario `base` replaced gamma = 0.2 (from --starts from_params=start.toml) \
+        "info: scenario `gonly` replaced gamma = 0.2 (from --starts from_params=start.toml) \
          with 0.1",
     ]);
     for prov in provs {
@@ -580,9 +592,9 @@ fn profile_scenario_over_a_starts_file_is_reported_and_recorded() {
         assert_eq!(prov["gamma"]["source"], "scenario");
         assert_eq!(prov["gamma"]["overrides"], serde_json::json!([
             { "replaced": { "source": "starts_from_params", "value": 0.2, "path": "start.toml" },
-              "by": { "source": "scenario", "value": 0.1, "scenario": "base" } },
+              "by": { "source": "scenario", "value": 0.1, "scenario": "gonly" } },
         ]));
-        assert_eq!(prov["N0"]["source"], "scenario");
+        assert_eq!(prov["N0"]["source"], "starts_from_params");
         assert!(prov["N0"].get("overrides").is_none(), "{}", prov["N0"]);
     }
 }

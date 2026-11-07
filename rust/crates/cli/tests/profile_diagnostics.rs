@@ -83,15 +83,6 @@ observations {
     cases ~ poisson(rate = projected)
   }
 }
-scenarios {
-  baseline {
-    set = {
-      beta  = 0.3
-      gamma = 0.1
-      N0    = 1000
-    }
-  }
-}
 init { S = 999  I = 1 }
 simulate { from = 0 'days  to = 6 'days }
 "#;
@@ -107,7 +98,16 @@ simulate { from = 0 'days  to = 6 'days }
     std::fs::write(&data_path,
         "time\tcases\n1\t2\n2\t4\n3\t8\n4\t6\n5\t4\n6\t2\n").unwrap();
 
+    // The base point the estimated parameters start from. A scenario that
+    // set them would be refused: a parameter is estimated or given a value.
+    std::fs::write(dir.join("start.toml"), "beta = 0.3\ngamma = 0.1\nN0 = 1000\n").unwrap();
+
     (ir_path, data_path)
+}
+
+/// `--starts from_params=<start.toml>` beside the fixture's model.
+fn starts_arg(ir: &Path) -> String {
+    format!("from_params={}", ir.with_file_name("start.toml").to_string_lossy())
 }
 
 /// Parse the umbrella `summary.tsv` written under `<out_root>/profiles/`.
@@ -164,7 +164,7 @@ fn run_profile_if2(
     let out_tsv = out_root.join("profile.tsv");
     let args: Vec<String> = vec![
         "profile".into(), ir.to_string_lossy().into_owned(),
-        "--scenario".into(), "baseline".into(),
+        "--starts".into(), starts_arg(ir),
         "--data".into(), data.to_string_lossy().into_owned(),
         "--obs".into(), "cases".into(),
         "--sweep".into(), "beta=lin(0.2,0.4,2)".into(),
@@ -354,7 +354,7 @@ fn profile_starts_n_completed_reflects_diverged_chains() {
     let out_tsv = out_root.join("profile.tsv");
     let args: Vec<String> = vec![
         "profile".into(), ir.to_string_lossy().into_owned(),
-        "--scenario".into(), "baseline".into(),
+        "--starts".into(), starts_arg(&ir),
         "--data".into(), data.to_string_lossy().into_owned(),
         "--obs".into(), "cases".into(),
         "--sweep".into(), "beta=lin(2.5,4.5,2)".into(),

@@ -319,6 +319,79 @@ fn profile_refuses_a_scenario_that_sets_an_estimated_parameter() {
     ], &dir.join("pf_half").join("results"));
 }
 
+/// `camdl profile` with the given arguments, in `dir/cwd`, no `--fit`.
+fn profile_plain(dir: &Path, cwd: &str, args: &[&str]) -> Output {
+    let cwd = dir.join(cwd);
+    std::fs::create_dir_all(&cwd).unwrap();
+    Command::new(camdl_bin())
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .current_dir(&cwd)
+        .args(["profile", &dir.join("m.ir.json").to_string_lossy(),
+               "--data", &dir.join("cases.tsv").to_string_lossy()])
+        .args(["--particles", "30", "--iterations", "2", "--n-starts", "1", "--seed", "1"])
+        .args(args)
+        .output()
+        .expect("spawn camdl profile")
+}
+
+/// The parameters a profile estimates are the ones `--rw-sd` selects (`auto`:
+/// every parameter not swept or pinned), whether or not a fit config is given.
+/// A scenario that sets or scales one of them is refused, as it is when the
+/// fit config's `[estimate]` lists it. Before, `--rw-sd auto` under a scenario
+/// that set `gamma` estimated `gamma` anyway: the run exited 0 and run.json
+/// recorded `gamma: {role: estimated, source: scenario}`.
+#[test]
+fn profile_refuses_a_scenario_that_sets_a_parameter_rw_sd_estimates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    setup(dir);
+    fit_toml(dir, "pf_nuis", "", BETA, "N0 = 1000");
+    let fit = dir.join("pf_nuis.toml").to_string_lossy().into_owned();
+    let sweep = ["--sweep", "beta=0.2,0.4", "--scenario", "fastg"];
+    let cases: [(&str, &str, Vec<&str>, &str); 3] = [
+        ("auto, no fit config", "pn_auto",
+         [&sweep[..], &["--fixed", "N0=1000", "--rw-sd", "auto"]].concat(),
+         "  estimated by: `--rw-sd auto`"),
+        ("explicit, no fit config", "pn_map",
+         [&sweep[..], &["--fixed", "N0=1000", "--rw-sd", "gamma=0.02"]].concat(),
+         "  estimated by: `--rw-sd gamma=...`"),
+        ("auto, with a fit config that does not list it", "pn_fit",
+         [&sweep[..], &["--fit", fit.as_str(), "--rw-sd", "auto"]].concat(),
+         "  estimated by: `--rw-sd auto`"),
+    ];
+    for (what, cwd, args, by) in cases {
+        let out = profile_plain(dir, cwd, &args);
+        assert_refused(what, &out, &[
+            "error: parameter `gamma` is both estimated and set by scenario `fastg`",
+            by,
+            "  scenario:    gamma = 0.9    (set gamma = 0.9)",
+        ], &dir.join(cwd).join("results"));
+    }
+}
+
+/// The refusal is about the estimated set: pinning the scenario's parameter
+/// out of it (`--fixed-file` holds `gamma`; the scenario's value is the one
+/// used) lets the profile run. (A scenario that sets only the profiled
+/// parameter stays an info notice: `profile_scenario_setting_the_focal_...`.)
+#[test]
+fn profile_accepts_a_scenario_whose_parameters_are_pinned() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    setup(dir);
+    std::fs::write(dir.join("g.toml"), "gamma = 0.5\n").unwrap();
+    let g = dir.join("g.toml").to_string_lossy().into_owned();
+    let out = profile_plain(dir, "pn_pinned", &["--sweep", "beta=0.2,0.4", "--scenario", "fastg",
+        "--fixed", "N0=1000", "--fixed-file", g.as_str(), "--rw-sd", "auto"]);
+    assert!(out.status.success(), "pinned by --fixed-file: {}", stderr(&out));
+    // A file value equal to the scenario's leaves no replacement on record,
+    // and still pins: the name is read from the file.
+    std::fs::write(dir.join("g_eq.toml"), "gamma = 0.9\n").unwrap();
+    let g_eq = dir.join("g_eq.toml").to_string_lossy().into_owned();
+    let out = profile_plain(dir, "pn_pinned_eq", &["--sweep", "beta=0.2,0.4", "--scenario",
+        "fastg", "--fixed", "N0=1000", "--fixed-file", g_eq.as_str(), "--rw-sd", "auto"]);
+    assert!(out.status.success(), "pinned at the scenario's own value: {}", stderr(&out));
+}
+
 // ─── survey ───────────────────────────────────────────────────────────────────
 
 fn survey(dir: &Path, root: &str, args: &[&str]) -> Output {

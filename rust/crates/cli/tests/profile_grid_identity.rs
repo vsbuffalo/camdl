@@ -68,9 +68,6 @@ observations {
     cases ~ poisson(rate = projected)
   }
 }
-scenarios {
-  baseline { set = { beta = 0.3  gamma = 0.1  N0 = 1000 } }
-}
 init { S = 999  I = 1 }
 simulate { from = 0 'days  to = 6 'days }
 "#;
@@ -85,7 +82,15 @@ simulate { from = 0 'days  to = 6 'days }
     let data_path = dir.join("cases.tsv");
     std::fs::write(&data_path,
         "time\tcases\n1\t2\n2\t4\n3\t8\n4\t6\n5\t4\n6\t2\n").unwrap();
+    // The base point the estimated parameters start from. A scenario that
+    // set them would be refused: a parameter is estimated or given a value.
+    std::fs::write(dir.join("start.toml"), "beta = 0.3\ngamma = 0.1\nN0 = 1000\n").unwrap();
     (ir_path, data_path)
+}
+
+/// `--starts from_params=<start.toml>` beside the fixture's model.
+fn starts_arg(ir: &Path) -> String {
+    format!("from_params={}", ir.with_file_name("start.toml").to_string_lossy())
 }
 
 /// Run a profile with the given sweep specs into `root` (`CAMDL_OUTPUT_DIR`).
@@ -102,7 +107,7 @@ fn run_profile_with(
         .env("CAMDL_OUTPUT_DIR", root)
         .args([
             "profile", &ir.to_string_lossy(),
-            "--scenario", "baseline",
+            "--starts", &starts_arg(ir),
             "--data", &data.to_string_lossy(),
             "--obs", "cases",
             "--sweep", beta,

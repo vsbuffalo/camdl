@@ -684,7 +684,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let mut refusals: Vec<String> = Vec::new();
         let estimated: Vec<&str> = config.problem.estimate.keys().map(|k| k.as_str()).collect();
         let estimate_clash = crate::params_resolver::scenario_estimate_collision(
-            &model, scenario, &estimated, &fit_path,
+            &model, scenario, &estimated,
+            crate::params_resolver::EstimatedBy::FitToml(&fit_path),
         )
         .unwrap_or_else(|e| {
             eprintln!("error: {}", e);

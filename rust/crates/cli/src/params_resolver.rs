@@ -1603,10 +1603,83 @@ fn clash_words(rows: &[EstimateClash<'_>]) -> ClashWords {
     ClashWords { names: names.join(", "), verb, noun, is, them }
 }
 
-/// Refuse a fit whose scenario sets or scales a parameter its `[estimate]`
-/// block estimates. `Ok(None)` when the scenario touches none of `estimated`;
-/// `Ok(Some(message))` names every colliding parameter, what the scenario does
-/// to it, the fit.toml and the fix.
+/// Where a command's set of estimated parameters was written, so a refusal
+/// names the place the user can change it.
+#[derive(Debug, Clone, Copy)]
+pub enum EstimatedBy<'a> {
+    /// A fit config's `[estimate]` block (`fit run`, `--fit`).
+    FitToml(&'a str),
+    /// `profile`'s `--rw-sd`: `auto` estimates every parameter that is not
+    /// swept or pinned, a map estimates the names it lists.
+    RwSd { auto: bool },
+}
+
+impl EstimatedBy<'_> {
+    /// The line naming where `param` is declared estimated.
+    fn line(&self, param: &str) -> String {
+        match self {
+            EstimatedBy::FitToml(f) => format!("\n  [estimate]:  {param}    (in `{f}`)"),
+            // One statement for the whole set, in `header`.
+            EstimatedBy::RwSd { auto: true } => String::new(),
+            EstimatedBy::RwSd { auto: false } => {
+                format!("\n  estimated by: `--rw-sd {param}=...`")
+            }
+        }
+    }
+
+    /// A line before the per-parameter ones, when every parameter shares one
+    /// reason for being estimated.
+    fn header(&self) -> &'static str {
+        match self {
+            EstimatedBy::RwSd { auto: true } => {
+                "\n  estimated by: `--rw-sd auto` (every parameter that is not swept or pinned)"
+            }
+            _ => "",
+        }
+    }
+
+    /// What `scenario_estimate_collision` says about why this cannot be
+    /// resolved.
+    fn why(&self) -> &'static str {
+        match self {
+            EstimatedBy::FitToml(_) => {
+                "\nAn estimated parameter takes its values from the estimation, which would \
+                 discard the scenario's value, so which one is meant cannot be read from the \
+                 fit config."
+            }
+            EstimatedBy::RwSd { .. } => {
+                "\nAn estimated parameter takes its values from the estimation, which would \
+                 discard the scenario's value, so which one is meant cannot be read from the \
+                 command line."
+            }
+        }
+    }
+
+    /// The fix that keeps the scenario's value: take the parameter out of the
+    /// estimated set. `names` are the colliding parameters, backticked.
+    fn hold_at_scenario(&self, names: &str, them: &str, values: &str) -> String {
+        match self {
+            EstimatedBy::FitToml(f) => format!(
+                "drop {names} from [estimate] in `{f}` to fit under the scenario's value \
+                 (give [fixed] the scenario's value: {values})"
+            ),
+            EstimatedBy::RwSd { auto: true } => format!(
+                "list {names} in a `--fixed-file` to hold {them} out of the estimated set \
+                 (the scenario's value, {values}, is still the one used; `--fixed NAME=VALUE` \
+                 is refused on a parameter the scenario sets)"
+            ),
+            EstimatedBy::RwSd { auto: false } => format!(
+                "drop {names} from `--rw-sd` to hold {them} at the scenario's value ({values})"
+            ),
+        }
+    }
+}
+
+/// Refuse a run whose scenario sets or scales a parameter it estimates:
+/// `[estimate]` for a fit config, `--rw-sd` for `profile`
+/// ([`EstimatedBy`]). `Ok(None)` when the scenario touches none
+/// of `estimated`; `Ok(Some(message))` names every colliding parameter, what
+/// the scenario does to it, where it is declared estimated and the fix.
 ///
 /// A parameter is either estimated or given a value, never both. Left to
 /// precedence, the estimate would overwrite whatever the scenario set, which
@@ -1620,7 +1693,7 @@ pub fn scenario_estimate_collision(
     model: &ir::Model,
     scenario: &str,
     estimated: &[&str],
-    fit_toml: &str,
+    by: EstimatedBy<'_>,
 ) -> Result<Option<String>, String> {
     let rows = estimate_clashes(model, scenario, estimated)?;
     if rows.is_empty() {
@@ -1628,18 +1701,16 @@ pub fn scenario_estimate_collision(
     }
     let ClashWords { names, verb, noun, is, them } = clash_words(&rows);
     let mut msg = format!("{noun} {names} {is} both estimated and {verb} by scenario `{scenario}`");
+    msg.push_str(by.header());
     for r in &rows {
-        msg.push_str(&format!("\n  [estimate]:  {}    (in `{fit_toml}`)", r.param));
+        msg.push_str(&by.line(r.param));
         msg.push_str(&r.scenario_line(scenario));
     }
-    msg.push_str(
-        "\nAn estimated parameter takes its values from the estimation, which would discard \
-         the scenario's value, so which one is meant cannot be read from the fit config.",
-    );
-    // The values a scenario `set` lands on, for the "fit under it" fix. A
-    // parameter the scenario only scales has no such value: held in [fixed],
-    // the scenario would rescale it off that value, which the [fixed]
-    // collision refuses.
+    msg.push_str(by.why());
+    // The values a scenario `set` lands on, for the "hold it at the scenario's
+    // value" fix. A parameter the scenario only scales has no such value: held
+    // in [fixed], the scenario would rescale it off that value, which the
+    // [fixed] collision refuses.
     let pinned: Vec<String> = rows
         .iter()
         .filter(|r| r.sets())
@@ -1647,16 +1718,14 @@ pub fn scenario_estimate_collision(
         .collect();
     let other = format!("name a scenario that does not touch {them}");
     msg.push_str(&if pinned.is_empty() {
-        format!(
-            "\nFix: {other}. A scaled parameter cannot be held at a value of its own: the \
-             scenario would rescale that value too."
-        )
+        let scaled = match by {
+            EstimatedBy::FitToml(_) => " A scaled parameter cannot be held at a value of its \
+                own: the scenario would rescale that value too.",
+            EstimatedBy::RwSd { .. } => "",
+        };
+        format!("\nFix: {other}.{scaled}")
     } else {
-        format!(
-            "\nFix: drop {names} from [estimate] in `{fit_toml}` to fit under the scenario's \
-             value (give [fixed] the scenario's value: {}), or {other}.",
-            pinned.join(", ")
-        )
+        format!("\nFix: {}, or {other}.", by.hold_at_scenario(&names, them, &pinned.join(", ")))
     });
     Ok(Some(msg))
 }

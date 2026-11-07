@@ -61,12 +61,11 @@ fn tempdir(tag: &str) -> Tmp {
 /// case fires when `--fit` is absent.
 fn write_fixture(dir: &Path) -> (PathBuf, PathBuf) {
     let camdlc = camdlc_bin().expect("camdlc.exe present");
-    // Defaults supplied via a `baseline` preset block so the
-    // `no --fit / no --params` test path has values to start from
-    // (the simulator validates that every parameter has a value).
-    // The `--fit toml` path overrides via [estimate].start; the
-    // resolver's prior-source assertion is what each test cares
-    // about, not the starting value.
+    // Values for the `no --fit` test path come from a `start.toml` written
+    // below (the simulator validates that every parameter has a value). The
+    // `--fit toml` path takes them from [estimate].start; the resolver's
+    // prior-source assertion is what each test cares about, not the starting
+    // value.
     let src = r#"
 time_unit = 'days
 compartments { S, I, R }
@@ -87,15 +86,6 @@ observations {
     cases ~ poisson(rate = projected)
   }
 }
-scenarios {
-  baseline {
-    set = {
-      beta  = 0.3
-      gamma = 0.1
-      N0    = 1000
-    }
-  }
-}
 init { S = 999  I = 1 }
 simulate { from = 0 'days  to = 6 'days }
 "#;
@@ -110,6 +100,7 @@ simulate { from = 0 'days  to = 6 'days }
     let data_path = dir.join("cases.tsv");
     std::fs::write(&data_path,
         "time\tcases\n1\t2\n2\t4\n3\t8\n4\t6\n5\t4\n6\t2\n").unwrap();
+    std::fs::write(dir.join("start.toml"), "beta = 0.3\ngamma = 0.1\nN0 = 1000\n").unwrap();
 
     (ir_path, data_path)
 }
@@ -232,14 +223,13 @@ fn run_profile(
         "--output".into(), out_tsv.to_string_lossy().into_owned(),
         "--seed".into(), "1".into(),
     ];
-    // Without --fit, the baseline preset gives beta/gamma/N0 their values
-    // (nothing is estimated from a fit config, so nothing collides). With
-    // --fit, the config supplies them ([estimate].start, [fixed]); the
-    // preset would set `gamma`, which the config estimates, and profile
-    // refuses that as `fit run` does.
+    // Without --fit, start.toml gives beta/gamma/N0 their values and the
+    // estimated parameters start there (a scenario that set them would be
+    // refused: a parameter is estimated or given a value). With --fit, the
+    // config supplies them ([estimate].start, [fixed]).
     if !extra_args.contains(&"--fit") {
-        args.push("--scenario".into());
-        args.push("baseline".into());
+        args.push("--starts".into());
+        args.push(format!("from_params={}", ir.with_file_name("start.toml").to_string_lossy()));
     }
     for a in extra_args { args.push((*a).into()); }
     Command::new(bin)
@@ -453,7 +443,7 @@ fn first_leaf_run_id(base: &Path) -> String {
 /// P1 provenance discipline (write → read → visible): the audit data the old
 /// per-run `ProfileMeta` carried must be *surfaced by the new reader*, not just
 /// present on disk. A profile run with no `--fit` (flat-prior fallback) and
-/// `--starts from_prior` (per-chain init provenance) populates both
+/// `--starts from_params` (per-chain init provenance) populates both
 /// provenance kinds; this asserts each is
 /// visible through `camdl show`/`list`/`cat`. The fit migration once dropped
 /// provenance silently — the round-trip is what catches that.
@@ -467,7 +457,6 @@ fn provenance_round_trips_through_reader() {
 
     let output = run_profile(&bin, &out_root, &ir, &data, &[
         "--fixed", "N0=1000",
-        "--starts", "from_prior",
         "--label", "round-trip prov",
     ]);
     assert!(output.status.success(),
@@ -500,7 +489,7 @@ fn provenance_round_trips_through_reader() {
         .is_some_and(|o| !o.is_empty()),
         "parameters_provenance (gh#83/85) must be recorded per leaf");
     assert!(prov.get("init_provenance").map(|v| !v.is_null()).unwrap_or(false),
-        "init_provenance must be non-null with --starts from_prior. Got: {}", prov);
+        "init_provenance must be non-null with --starts from_params. Got: {}", prov);
     assert_eq!(read_sidecar(&base).get("label").and_then(|l| l.as_str()),
         Some("round-trip prov"),
         "label must live on the base sidecar (its single authoritative home)");

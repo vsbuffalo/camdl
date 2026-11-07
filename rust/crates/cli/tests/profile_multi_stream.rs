@@ -66,7 +66,23 @@ fn synth_obs_tsv(bin: &Path, tmp: &Path) -> PathBuf {
         .expect("spawn camdl simulate");
     assert!(status.success(), "synthetic obs generation failed");
     assert!(obs_path.exists(), "obs TSV not written");
+    // The `true_params` values of the parameters the profile estimates, as the
+    // base point they start from. A scenario that set them would be refused:
+    // a parameter is estimated or given a value.
+    std::fs::write(
+        start_file(&obs_path),
+        "N0_p1 = 100000\nN0_p2 = 80000\nN0_p3 = 60000\nN0_p4 = 50000\nN0_p5 = 150000\n",
+    ).unwrap();
     obs_path
+}
+
+/// `--starts from_params=<start.toml>` beside the observations TSV.
+fn starts_arg(data_path: &Path) -> String {
+    format!("from_params={}", start_file(data_path).to_string_lossy())
+}
+
+fn start_file(data_path: &Path) -> PathBuf {
+    data_path.with_file_name("start.toml")
 }
 
 /// Collect the per-grid-point best loglik from the new-format
@@ -114,12 +130,12 @@ fn run_profile(
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "profile", &seir_spatial_5_inference().to_string_lossy(),
-            "--scenario", "true_params",
+            "--starts", &starts_arg(data_path),
             "--data", &data_path.to_string_lossy(),
             "--obs", obs_arg,
             "--sweep", "R0=lin(15,25,2)",
-            // 500, not 100. The sweep straddles the truth (the `true_params`
-            // scenario has R0 = 20), so the R0 = 15 cell is scored well off the
+            // 500, not 100. The sweep straddles the truth (R0 = 20 in the
+            // `true_params` scenario that generated the data), so the R0 = 15 cell is scored well off the
             // optimum, and a 100-particle bootstrap filter on this 5-patch
             // spatial SEIR loses the whole swarm there and returns −inf. That
             // serialises as `"best_loglik": null` (JSON has no −inf), so the
@@ -218,7 +234,7 @@ fn profile_multi_stream_model_requires_explicit_obs() {
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "profile", &seir_spatial_5_inference().to_string_lossy(),
-            "--scenario", "true_params",
+            "--starts", &starts_arg(&data_path),
             "--data", &data_path.to_string_lossy(),
             "--sweep", "R0=lin(15,25,2)",
             "--particles", "100", "--iterations", "1", "--n-starts", "1",

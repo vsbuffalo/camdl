@@ -184,6 +184,17 @@ rather than resolved:
   parameter, what the scenario does to it and the fit.toml, and the fix: move
   the parameter from `[estimate]` to `[fixed]` with the scenario's value to fit
   under it, or name a scenario that does not touch it;
+- a scenario that `set`s or `scale`s a parameter `profile` estimates, with or
+  without `--fit`. The estimated set is what `--rw-sd` selects: under
+  `--rw-sd auto`, every parameter that is not swept, `--fixed`, in a
+  `--fixed-file` or in the fit.toml's `[fixed]`; under `--rw-sd NAME=SD`, the
+  names listed. A fit.toml's `[estimate]` need not list them. The error names
+  the parameter, what the scenario does to it and `--rw-sd`, and the fix: list
+  the parameter in a `--fixed-file` (held out of the estimated set; the
+  scenario's value is still the one used, since `--fixed` on a scenario's
+  parameter is refused), drop it from `--rw-sd NAME=SD`, or name a scenario that
+  does not touch it. A scenario setting the swept parameter is not refused: the
+  grid replaces it, reported at info;
 - `[fixed] from_scenario` naming a scenario that `set`s or `scale`s a parameter
   `[estimate]` lists, directly or through a preset it composes: on every command
   that reads the fit.toml (`fit run`, `profile --fit`, `survey --fit`). The
