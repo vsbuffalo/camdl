@@ -261,12 +261,6 @@ type fourier = { period: expr; harmonics: (expr * expr) list }
    2026-10-27-estimable-bsplines §4.4. Serialized only when log. *)
 type spline_link = Link_identity | Link_log
 
-(* The [UncheckedDim.reason] of the ln s shift the expander adds to each
-   coefficient of a log-link spline whose unit has scale s ≠ 1. The dimension
-   checker recognises exactly this node, so the coefficient under it is still
-   required to be dimensionless. *)
-let spline_log_shift_reason = "log-link unit scale"
-
 type periodic_spline = {
   period:  expr;
   n_basis: int;

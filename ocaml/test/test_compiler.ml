@@ -11236,9 +11236,8 @@ let test_bspline_log_link_shifts_coefficients () =
   Alcotest.(check bool) "link log" true (b.link = Ir.Link_log);
   match b.coefs with
   | Ir.Coefs_explicit (Ir.BinOp { op = Ir.Add; left = Ir.Const 0.7;
-                                  right = Ir.UncheckedDim { inner = Ir.Const ls; reason; _ } } :: _) ->
-    Alcotest.(check (float 1e-15)) "ln(1/7)" (Float.log (1.0 /. 7.0)) ls;
-    Alcotest.(check string) "marked shift" Ir.spline_log_shift_reason reason
+                                  right = Ir.Const ls } :: _) ->
+    Alcotest.(check (float 1e-15)) "ln(1/7)" (Float.log (1.0 /. 7.0)) ls
   | _ -> Alcotest.fail "a log-link coefficient must be c + ln s"
 
 let test_bspline_both_knot_forms_e408 () =

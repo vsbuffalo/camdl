@@ -7782,16 +7782,13 @@ let expand_time_function_one ctx fname (env : (string * string) list)
   (* A spline's unit scale s goes through its coefficients. Identity link:
      each coefficient times s (as every value-carrying kind). Log link
      (proposal §4.4): each coefficient plus ln s, so by the partition of unity
-     the value is s·exp(g) exactly. The shift is a dimensionless escape whose
-     reason names it, so the dimension checker can see past it to the
-     user's coefficient, which must itself be dimensionless (E301). *)
+     the value is s·exp(g) exactly. The shift ln s is a plain number: a
+     literal that is a whole term of the sum, so the coefficient beside it is
+     what the position constrains, and it must be dimensionless (E301). *)
   let spline_scale link e = match link with
     | Ir.Link_identity -> scale_expr e
     | Ir.Link_log ->
-      Ir.BinOp { op = Add; left = e;
-                 right = Ir.UncheckedDim { inner = Ir.Const (Float.log scale);
-                                           dim_p = 0; dim_t = 0;
-                                           reason = Ir.spline_log_shift_reason } }
+      Ir.BinOp { op = Add; left = e; right = Ir.Const (Float.log scale) }
   in
   let kind = if scale = 1.0 then kind else
     match kind with

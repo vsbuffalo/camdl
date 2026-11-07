@@ -458,9 +458,7 @@ let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
     (match site.literals with
      | Dim_sites.Whole_terms when term -> Any
      | Whole_terms | Literals_dimensionless -> F (const_form dimensionless))
-  | BinOp { op = (Add | Sub) as op; left; right }
-    when not (match right with UncheckedDim { reason; _ } -> reason = spline_log_shift_reason
-                               | _ -> false) ->
+  | BinOp { op = (Add | Sub) as op; left; right } ->
     let l = g ~term left and r = g ~term right in
     binop st ~site:(Some site) ~code:"E302" ~what op
       ~literals:(literal_text left, literal_text right) l r
@@ -497,11 +495,6 @@ let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
      | None -> F (var_form (fresh st)))
   | UncheckedDim u -> F (const_form (make u.dim_p u.dim_t))
   | UnitLiteral u -> F (const_form (make u.dim_p u.dim_t))
-  (* Under `link = log` the expander adds ln s to a coefficient whose unit
-     has scale s, as a marked escape; the coefficient under it is what its
-     position constrains. *)
-  | BinOp { op = Add; left; right = UncheckedDim { reason; _ } }
-    when reason = spline_log_shift_reason -> g left
   | BinOp b ->
     let l = g b.left and r = g b.right in
     let exponent = static_value st b.right in
