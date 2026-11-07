@@ -260,17 +260,10 @@ pub(crate) fn resolve_fit_parameters(
     // through `run_fit` — same window, same function, so resolving again is
     // idempotent rather than a second opinion.
     if crate::obs_anchor::model_is_anchored(&model_pre) {
-        // The anchor reader loads the data at the step the fit integrates at
-        // (it refuses times that are not multiples of it): the one dt rule.
-        let dt0 = crate::dt_rule::resolved_dt(model_pre.simulation.dt, fit.config.dt);
-        let (first, last) = crate::obs_anchors_from_config(&model_pre, fit, dt0)
-            .map_err(|e| {
-                format!("resolving this model's observation anchors from [data]: {e}")
-            })?;
-        let moved = crate::obs_anchor::substitute(
-            &mut model_pre,
-            ir::anchor::ObsAnchorTimes { first, last },
-        )?;
+        let window = crate::obs_anchor::fit_window(&model_pre, fit).map_err(|e| {
+            format!("resolving this model's observation anchors from [data]: {e}")
+        })?;
+        let moved = crate::obs_anchor::substitute(&mut model_pre, window)?;
         crate::obs_anchor::report(&moved, &model_pre);
     }
     // Keep a copy of the unfiltered model so the startup diagnostic

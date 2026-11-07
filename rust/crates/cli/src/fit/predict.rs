@@ -1545,14 +1545,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     // allowed, which is the existing no-op precedent.
     let resolved_obs_anchors: Option<ir::anchor::ObsAnchorTimes> =
         if crate::obs_anchor::model_is_anchored(&model) {
-            // The step the fit ran at (the one dt rule), as the anchor reader's
-            // alignment check needs.
-            let dt0 = crate::dt_rule::resolved_dt(model.simulation.dt, config.config.dt);
-            let (first, last) =
-                crate::obs_anchors_from_config(&model, &config, dt0).map_err(|e| {
-                    format!("resolving this model's observation anchors from the fit's data: {e}")
-                })?;
-            let w = ir::anchor::ObsAnchorTimes { first, last };
+            // The window the fit itself resolved, read the same way.
+            let w = crate::obs_anchor::fit_window(&model, &config).map_err(|e| {
+                format!("resolving this model's observation anchors from the fit's data: {e}")
+            })?;
             let moved = crate::obs_anchor::substitute(&mut model, w)?;
             crate::obs_anchor::report(&moved, &model);
             crate::obs_anchor::spline_hold_notices(&model, &moved, model.simulation.t_end)

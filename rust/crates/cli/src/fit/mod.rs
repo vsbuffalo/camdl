@@ -29,15 +29,9 @@ fn resolve_anchors_into_temp_ir(
             .emit_stderr();
         return Ok(ir_path.to_string());
     }
-    // The anchor reader loads the data at the step the fit integrates at
-    // (it refuses times that are not multiples of it): the one dt rule.
-    let dt0 = crate::dt_rule::resolved_dt(env.model.simulation.dt, config.config.dt);
-    let (first, last) = crate::obs_anchors_from_config(&env.model, config, dt0)
+    let window = crate::obs_anchor::fit_window(&env.model, config)
         .map_err(|e| format!("resolving this model's observation anchors from [data]: {e}"))?;
-    let moved = crate::obs_anchor::substitute(
-        &mut env.model,
-        ir::anchor::ObsAnchorTimes { first, last },
-    )?;
+    let moved = crate::obs_anchor::substitute(&mut env.model, window)?;
     crate::obs_anchor::report(&moved, &env.model);
     crate::obs_anchor::spline_hold_notices(&env.model, &moved, env.model.simulation.t_end)
         .emit_stderr();

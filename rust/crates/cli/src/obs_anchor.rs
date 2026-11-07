@@ -103,6 +103,26 @@ pub fn resolve_from_config(
     resolve_with(model, |m| crate::obs_anchors_from_config(m, config, dt))
 }
 
+/// The observed window a FIT anchors `model` to: the fold over the fit
+/// config's `[data.observations]`, loaded at the step the fit integrates at
+/// (the anchor reader refuses times that are not multiples of it), by the one
+/// dt rule.
+///
+/// `fit run` resolves the model it fits — and archives — through this, and
+/// every later command that has to reproduce that resolution for a stored fit
+/// (`fit predict`, the replay model check) calls it with the fit's config, so
+/// the window is computed one way rather than re-derived at each site. It reads
+/// the data as it is NOW: a stored fit records the substituted model, not the
+/// window, so data changed since the fit yields a different window.
+pub fn fit_window(
+    model: &ir::Model,
+    config: &crate::fit::config_v2::Problem,
+) -> Result<ObsAnchorTimes, String> {
+    let dt0 = crate::dt_rule::resolved_dt(model.simulation.dt, config.config.dt);
+    let (first, last) = crate::obs_anchors_from_config(model, config, dt0)?;
+    Ok(ObsAnchorTimes { first, last })
+}
+
 /// Also prints the `spline-held-past-window` notice against the model's
 /// resolved horizon, anchored or not, so the three commands that resolve
 /// through here (`pfilter`, `profile`, `survey`) report a hold exactly as
