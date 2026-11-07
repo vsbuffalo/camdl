@@ -131,6 +131,24 @@ When a drawing replaces a text diagram, the two must say the same thing: the
 text diagram is the only version terminal and GitHub readers see. Change both in
 the same commit.
 
+### What counts as a marker
+
+The website (`_web/figures.lua`) and `camdl docs` (`marker` in
+`rust/crates/cli/src/docs.rs`) read markers by the same rule, and a change to
+one must be made to the other:
+
+- A marker is a whole line: `<!--`, optional space, `figure:`, a name of
+  letters, digits, `-` and `_`, then anything up to a `-->` that ends the line.
+  `<!--figure: a-->` is a marker; `<!-- figure: a --> note` is not, and both
+  readers leave it alone.
+- The closing marker is `<!--`, `/figure` and `-->`, with optional space
+  between.
+- An opening marker may run over several lines (a long caption) until its `-->`.
+- A line inside fenced code is never a marker, so a page can show the syntax, as
+  this one does.
+- Markers do not nest, and a closing marker must be in the same block as its
+  opening one: a figure opened inside a list item must close inside it.
+
 ### Drawing a figure
 
 The SVG carries class names, never colours; the colours come from variables in
@@ -147,8 +165,12 @@ styles reach it. The classes are:
 - **Stroke:** `s-line`, `s-muted`, `s-accent`, `s-warm`, and `s-arrow` with an
   arrowhead marker filled `fig-arrow`. Arrows are a solid colour, so a head
   drawn over its own line does not show the overlap.
-- **Code tokens:** `tk-kw`, `tk-pp`, `tk-cf`, `tk-fu`, `tk-op`, `tk-dv` on
-  `<tspan>`s give code in a figure the colours the site's code blocks use.
+- **Code tokens:** `tk-kw` (keyword), `tk-pp` (directive), `tk-cf` (control
+  word), `tk-fu` (transition label), `tk-op` (operator), `tk-dv` (number),
+  `tk-bu` (builtin) and `tk-dt` (type) on `<tspan>`s give code in a figure the
+  colours the site's code blocks use. The colours are copied from the
+  `github`/`github-dark` highlight styles in `_quarto.yml`; a change of
+  highlight style must update them in `theme.scss` too.
 
 Draw at 640 units wide. The figure scales to the text column, so at that width
 16px text stays readable on a tablet. Give the SVG a `<title id="t">` and a
@@ -175,8 +197,14 @@ camdl inspect dimensions/seir_erlang_via.camdl --transitions
 The first shows the model file itself, so the model on the page is the one the
 commands run. The second runs the command when the site is built and shows its
 output. A non-zero exit fails the render; a block written to show an error is
-marked `expect="fail"`, and then a zero exit fails it instead. Model files live
-next to the page, in `docs/guide/<page>/`.
+marked `expect="fail"`, and then a zero exit fails it instead. A block runs
+under `bash -e -o pipefail`, so a failure anywhere in a multi-line block or a
+pipeline counts, and every command's error output is shown. A command that
+cannot run at all (not found, exit 127) fails the render even under
+`expect="fail"`, because that is a broken build, not the error the block means
+to show. An `include` whose `lines` range runs past the end of the file fails
+too, since the excerpt no longer matches what it was written against. Model
+files live next to the page, in `docs/guide/<page>/`.
 
 Because the output is regenerated on every build, a tutorial cannot show output
 the current code no longer produces. The prose around it can still drift: when a
@@ -184,13 +212,13 @@ command's output changes, reread the paragraph that describes it.
 
 ## Doc tests check the examples against the code
 
-| Target                | What it checks                                                                                | Docs                             | CI workflow     |
-| --------------------- | --------------------------------------------------------------------------------------------- | -------------------------------- | --------------- |
-| `make test-docs`      | every `` ```camdl `` block compiles, or is classified as a fragment (`camdlc doctest --gate`) | `DOCTEST_DOCS` in the `Makefile` | `doctest.yml`   |
-| `make test-cli-docs`  | every documented `camdl …` command parses against the real CLI                                | `CLI_DOCS` in the `Makefile`     | `cli-docs.yml`  |
-| `make test-data-spec` | every observation-file example loads through the reader `fit run` uses                        | `camdl-data-spec.md`             | `data-spec.yml` |
-| `make test-rust`      | the embedded topics exist, have unique names, and their figure links name published pages     | every embedded topic             | `ci.yml`        |
-| `make docs-site`      | every tutorial command exits as marked, and every figure marker names an SVG                  | the published pages              | `docs-site.yml` |
+| Target                                 | What it checks                                                                                                                          | Docs                             | CI workflow                                      |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------ |
+| `make test-docs`                       | every `` ```camdl `` block compiles, or is classified as a fragment (`camdlc doctest --gate`)                                           | `DOCTEST_DOCS` in the `Makefile` | `doctest.yml`                                    |
+| `make test-cli-docs`                   | every documented `camdl …` command parses against the real CLI                                                                          | `CLI_DOCS` in the `Makefile`     | `cli-docs.yml`                                   |
+| `make test-data-spec`                  | every observation-file example loads through the reader `fit run` uses                                                                  | `camdl-data-spec.md`             | `data-spec.yml`                                  |
+| `cargo test -p cli --bin camdl docs::` | the embedded topics exist and have unique names; each topic's page is the embedded file and is published; figure markers print as links | every embedded topic             | `docs-site.yml` (and `ci.yml` when code changes) |
+| `make docs-site`                       | every tutorial command exits as marked, and every figure marker names an SVG                                                            | the published pages              | `docs-site.yml`                                  |
 
 A `` ```camdl `` example that only makes sense after declarations elsewhere in
 the section borrows them from a hidden preamble, itself an HTML comment:

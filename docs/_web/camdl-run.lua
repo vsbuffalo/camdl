@@ -45,6 +45,10 @@ local function line_range(text, spec)
       table.insert(out, line)
     end
   end
+  -- A range the file no longer reaches means the excerpt drifted from it.
+  if first < 1 or last < first or last > n then
+    error("camdl-run: lines=" .. spec .. " but the file has " .. n .. " lines")
+  end
   return table.concat(out, "\n")
 end
 
@@ -56,9 +60,13 @@ local function shell_quote(s)
   return "'" .. s:gsub("'", "'\\''") .. "'"
 end
 
+-- Runs the block under bash with -e and pipefail, so a failure anywhere in a
+-- multi-line block or a pipeline is its exit status, and with stderr folded
+-- into the shown output for every command, not only the last.
 local function run(cmd)
-  local full = "cd " .. shell_quote(page_dir())
-    .. " && NO_COLOR=1 CLICOLOR=0 TERM=dumb " .. cmd
+  local script = "set -eo pipefail\nexport NO_COLOR=1 CLICOLOR=0 TERM=dumb\n"
+    .. "cd " .. shell_quote(page_dir()) .. " || exit 125\n" .. cmd
+  local full = "bash -c " .. shell_quote(script)
     .. " 2>&1; printf '\\n__camdl_run_exit=%s' $?"
   local handle = io.popen(full)
   local out = handle:read("*a")
@@ -94,7 +102,11 @@ function CodeBlock(block)
     local cmd = block.text:gsub("%s+$", "")
     local output, code = run(cmd)
     local expect_fail = block.attributes["expect"] == "fail"
-    if expect_fail and code == 0 then
+    -- 125: cd failed; 126/127: not executable / not found. These are a broken
+    -- build environment, never the failure a block means to show.
+    if code == 125 or code == 126 or code == 127 then
+      error("camdl-run: `" .. cmd .. "` could not run (exit " .. code .. "):\n" .. output)
+    elseif expect_fail and code == 0 then
       error("camdl-run: expected a failure but `" .. cmd .. "` succeeded")
     elseif not expect_fail and code ~= 0 then
       error("camdl-run: `" .. cmd .. "` exited " .. code .. ":\n" .. output)
