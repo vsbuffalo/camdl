@@ -6103,7 +6103,7 @@ dimensions { age = [age_0_5, age_5_15, age_15_50, age_50_65, age_65p] }
 stratify(by = age)
 
 parameters {
-  beta  : rate
+  beta  : probability   # per contact; C_age carries the per-day contact rate
   gamma : rate
   mu    : rate
 }
