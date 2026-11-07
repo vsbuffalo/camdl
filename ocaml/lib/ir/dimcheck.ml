@@ -141,6 +141,9 @@ let rec expr_to_short_string (e : expr) : string =
     else if a.offset > 0.0 then Printf.sprintf "%s + %g" name a.offset
     else Printf.sprintf "%s - %g" name (-. a.offset)
   | UncheckedDim u -> Printf.sprintf "unchecked_dim(%s)" (expr_to_short_string u.inner)
+  (* [value] is in the model's time unit, not the literal's, so the unit name
+     would misread it; the number alone is what the expression holds. *)
+  | UnitLiteral u -> expr_to_short_string (Const u.value)
   | BinOp b ->
     let op_str = match b.op with
       | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/"
@@ -488,6 +491,7 @@ let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
      | Some s -> F (var_form (var_of st (Dim_sites.K_column (s, c))))
      | None -> F (var_form (fresh st)))
   | UncheckedDim u -> F (const_form (make u.dim_p u.dim_t))
+  | UnitLiteral u -> F (const_form (make u.dim_p u.dim_t))
   (* Under `link = log` the expander adds ln s to a coefficient whose unit
      has scale s, as a marked escape; the coefficient under it is what its
      position constrains. *)
@@ -746,16 +750,12 @@ type prior_value =
   | Units of dim_vec    (* determined by unit literals alone *)
   | Coord               (* depends on a parameter or a function's value *)
 
-let is_unit_literal reason =
-  String.length reason >= 12 && String.sub reason 0 12 = "unit literal"
-
 (* [report a b]: explicit units [a] and [b] disagree inside one argument. *)
 let rec prior_value ~report (e : expr) : prior_value =
   let pv = prior_value ~report in
   match e with
   | Const _ -> Bare
-  | UncheckedDim { inner = _; dim_p; dim_t; reason } when is_unit_literal reason ->
-    Units (make dim_p dim_t)
+  | UnitLiteral { value = _; dim_p; dim_t; unit = _ } -> Units (make dim_p dim_t)
   | BinOp { op = (Add | Sub | Min | Max); left; right } ->
     (match pv left, pv right with
      | Units a, Units b -> if dim_eq a b then Units a else (report a b; Coord)

@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.42",
-  "validated_by": "ocaml-compiler-v0.42",
+  "ir_version": "0.43",
+  "validated_by": "ocaml-compiler-v0.43",
   "model": {
     "name": "bimolecular",
     "version": "0.3",
@@ -98,9 +98,9 @@
     "interventions": [],
     "observations": [],
     "parameters": [
-      {"name": "k", "value": {"mode": "estimated", "bounds": [0.0001, 1.0], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null},
-      {"name": "A0", "value": {"mode": "estimated", "bounds": [1.0, 10000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null},
-      {"name": "B0", "value": {"mode": "estimated", "bounds": [1.0, 10000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null}
+      {"name": "k", "value": {"mode": "estimated", "bounds": [0.0001, 1.0], "prior": "flat"}, "param_kind": "rate", "param_dim": null},
+      {"name": "A0", "value": {"mode": "estimated", "bounds": [1.0, 10000.0], "prior": "flat"}, "param_kind": "count", "param_dim": null},
+      {"name": "B0", "value": {"mode": "estimated", "bounds": [1.0, 10000.0], "prior": "flat"}, "param_kind": "count", "param_dim": null}
     ],
     "initial_conditions": {
       "A": { "deterministic": { "param": "A0" } },

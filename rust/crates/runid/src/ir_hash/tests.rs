@@ -17,7 +17,7 @@ use ir::observation::{
     Likelihood, ObservationModel, ObservationSchedule, PoissonLikelihood, Projection, RegularSchedule,
 };
 use ir::ode_equation::OdeEquation;
-use ir::parameter::{Parameter, PriorDist, Transform, UniformPrior};
+use ir::parameter::{Parameter, PriorDist, UniformPrior};
 use ir::table::{OobPolicy, Table, TableSource};
 use ir::time_func::{Sinusoidal, TimeFuncKind, TimeFunction};
 use ir::transition::{DrawMethod, StoichiometryEntry, Transition, TransitionMetadata};
@@ -152,7 +152,7 @@ fn representative_model() -> Model {
                 )),
             }),
         }],
-        parameters: vec![Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.5), bounds: Some((0.0, 2.0)), prior: ir::parameter::PriorSpec::Dist(PriorDist::Uniform(UniformPrior { lower: 0.0, upper: 2.0 })), transform: Transform::Log }, param_kind: Some(ir::parameter::ParamKind::Rate), param_dim: Some((0, -1)) }],
+        parameters: vec![Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.5), bounds: Some((0.0, 2.0)), prior: ir::parameter::PriorSpec::Dist(PriorDist::Uniform(UniformPrior { lower: 0.0, upper: 2.0 })) }, param_kind: Some(ir::parameter::ParamKind::Rate), param_dim: Some((0, -1)) }],
         constants: vec![],
         bindings: vec![Binding {
             name: "N".into(),
@@ -295,7 +295,10 @@ fn model_golden_hash() {
     // deliberate, version-bumped re-key.
     // SV=4: the model's `name` (the source file's stem) is no longer hashed, and
     // the SV header bumps 3→4. A deliberate, version-bumped re-key.
-    const GOLDEN: &str = "d621508d8a88e94ec7197244300a2cff35af6e3fb8899e882d4af87a01afdae7";
+    // IR 0.43: an estimated parameter no longer carries a `transform`, so the
+    // representative model's `beta` loses that field's bytes — a deliberate,
+    // version-bumped re-key.
+    const GOLDEN: &str = "972503a3580a1ed5b4786024df455e9d98d9736caa23f8f62bcbaac4023c8184";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }

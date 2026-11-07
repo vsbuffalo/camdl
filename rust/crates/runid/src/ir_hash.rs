@@ -40,7 +40,8 @@ use ir::expr::{
     BasisSpace, ForcingBasisRef, ForcingBasisWrap,
     ObsAnchorWrap, ObsColumnRefExpr, ParamExpr, PerEvalRefWrap, PopExpr, PopSumExpr,
     ProjectedExpr, ReduceWrap, TableLookupExpr, TableLookupWrap, TimeExpr, TimeFuncRef,
-    TimeFuncWrap, UnOp, UnOpExpr, UnOpWrap, UncheckedDimExpr, UncheckedDimWrap,
+    TimeFuncWrap, UnOp, UnOpExpr, UnOpWrap, UncheckedDimExpr, UncheckedDimWrap, UnitLiteralExpr,
+    UnitLiteralWrap,
 };
 use ir::intervention::{
     AbsoluteTransfer, Action, AddAction, CmpOp, FractionTransfer, SetAction, FireSource, Intervention, InterventionKind,
@@ -63,7 +64,6 @@ use ir::ode_equation::OdeEquation;
 use ir::parameter::{
     BetaPrior, ExponentialPrior, GammaPrior, HalfNormalPrior, LogNormalPrior, LogUniformPrior,
     Constant, NormalPrior, TruncatedNormalPrior, UniformPrior, HierarchicalKind, HierarchicalPrior, ParamKind, ParamValue, Parameter, PriorDist, PriorSpec,
-    Transform,
 };
 use ir::table::{OobPolicy, Table, TableSource};
 use ir::time_func::{
@@ -324,6 +324,16 @@ impl ContentAddressed for Expr {
                     BasisSpace::Linear => 2,
                 });
             }
+            // IR 0.43: a unit literal, fresh index 20 so every earlier variant
+            // keeps its tag. The unit name enters with the value, as the
+            // former escape's reason string did: `7 'days` and `1 'weeks`
+            // are written differently and stay different content.
+            Expr::UnitLiteral(UnitLiteralWrap { unit_literal: UnitLiteralExpr { value, dim, unit } }) => {
+                h.write_u32(20);
+                h.write_f64_bits(*value);
+                dim.hash_into(h);
+                h.write_str(unit);
+            }
         }
     }
 }
@@ -497,18 +507,6 @@ impl ContentAddressed for HierarchicalPrior {
     }
 }
 
-impl ContentAddressed for Transform {
-    fn hash_into(&self, h: &mut CanonicalHasher) {
-        header(h, "ir::parameter::Transform");
-        let idx: u32 = match self {
-            Transform::Log => 0,
-            Transform::Logit => 1,
-            Transform::Identity => 2,
-        };
-        h.write_u32(idx);
-    }
-}
-
 impl ContentAddressed for ParamKind {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::parameter::ParamKind");
@@ -553,7 +551,7 @@ impl ContentAddressed for ParamValue {
                 h.write_u32(0);
                 h.write_f64_bits(*value);
             }
-            ParamValue::Estimated { init, bounds, prior, transform } => {
+            ParamValue::Estimated { init, bounds, prior } => {
                 h.write_u32(1);
                 hash_opt_f64(h, init);
                 // bounds: Option<(f64, f64)> — structural floats, inlined.
@@ -566,7 +564,6 @@ impl ContentAddressed for ParamValue {
                     }
                 }
                 prior.hash_into(h);
-                transform.hash_into(h);
             }
             ParamValue::Required => h.write_u32(2),
         }

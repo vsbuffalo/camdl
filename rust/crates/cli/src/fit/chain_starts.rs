@@ -1433,7 +1433,6 @@ mod tests {
                     Some(pd) => ir::parameter::PriorSpec::Dist(pd),
                     None => ir::parameter::PriorSpec::Flat,
                 },
-                transform: ir::parameter::Transform::Identity,
             }
         } else {
             ir::parameter::ParamValue::Fixed { value }

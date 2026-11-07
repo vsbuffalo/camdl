@@ -1,4 +1,4 @@
-{"ir_version":"0.42","validated_by":"ocaml-compiler-v0.42","model":{"name":"sir_pow_zero_base","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.43","validated_by":"ocaml-compiler-v0.43","model":{"name":"sir_pow_zero_base","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}
@@ -8,7 +8,7 @@
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[],"observations":[],"parameters":[
 {"name":"beta","value":{"mode":"required"},"param_kind":"rate","param_dim":null},
 {"name":"gamma","value":{"mode":"required"},"param_kind":"rate","param_dim":null},
-{"name":"alpha","value":{"mode":"estimated","bounds":[1.0,2.0],"prior":"flat","transform":"identity"},"param_kind":"positive","param_dim":[0,0]}
+{"name":"alpha","value":{"mode":"estimated","bounds":[1.0,2.0],"prior":"flat"},"param_kind":"positive","param_dim":[0,0]}
 ],"initial_conditions":{"S":{"deterministic":{"const":990.0}},"I":{"deterministic":{"const":10.0}},"R":{"deterministic":{"const":0.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":30.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["R","I"]},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","I","R"]}}
 ]}}

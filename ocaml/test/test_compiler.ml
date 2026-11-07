@@ -262,7 +262,7 @@ let rec max_reduce_terms (e : Ir.expr) : int =
   | TableLookup (_, idxs) ->
     List.fold_left (fun acc i -> max acc (max_reduce_terms i)) 0 idxs
   | UncheckedDim { inner; _ } -> max_reduce_terms inner
-  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _
+  | Const _ | UnitLiteral _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _
   | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> 0
 
 let max_foi_reduce_terms (m : Ir.model) : int =
@@ -1778,7 +1778,7 @@ let test_table_cell_type_ir_round_trips_through_serde () =
 
 (** Walk an Ir.expr and collect all Pop compartment names. *)
 let rec collect_pops = function
-  | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _
+  | Ir.Const _ | Ir.UnitLiteral _ | Ir.Param _ | Ir.ConstRef _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _
   | Ir.ObsAnchor _ -> []
   | Ir.Pop name -> [name]
   | Ir.PopSum names -> names
@@ -2297,9 +2297,9 @@ let test_anchored_breakpoints () =
     \        values      = [1.0, 0.8, 0.6, 0.4]") in
   let tf = List.hd m.Ir.time_functions in
   match tf.Ir.kind with
-  (* The literal knot keeps its usual lowering (a unit literal wraps in the
-     dimensional escape); only the anchored entries become `ObsAnchor`. *)
-  | Ir.Piecewise { breakpoints = [ Ir.UncheckedDim { inner = Ir.Const 30.0; _ };
+  (* The literal knot keeps its usual lowering (a unit literal); only the
+     anchored entries become `ObsAnchor`. *)
+  | Ir.Piecewise { breakpoints = [ Ir.UnitLiteral { value = 30.0; _ };
                                    Ir.ObsAnchor { anchor = Ir.AnchorLast; offset = o0 };
                                    Ir.ObsAnchor { anchor = Ir.AnchorLast; offset = o1 } ]; _ } ->
     Alcotest.(check (float 1e-12)) "bare last_obs has zero offset" 0.0 o0;
@@ -3753,7 +3753,7 @@ let test_l401_no_fire_when_dt_used () =
       | Ir.Reduce terms -> List.exists contains_dt terms
       | Ir.BindingRef _ -> false
       | Ir.PerEvalRef _ -> false
-      | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _ | Ir.ObsAnchor _
+      | Ir.Const _ | Ir.UnitLiteral _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _ | Ir.ObsAnchor _
       | Ir.Time | Ir.Projected | Ir.ObsColumnRef _ | Ir.TimeFunc _ | Ir.ForcingBasis _ -> false
     in
     let any_tr_uses_dt = List.exists (fun (t : Ir.transition) ->
@@ -4289,7 +4289,8 @@ let test_trig_pi_resolves_to_const () =
   | Error e -> Alcotest.failf "should compile: %s" e
   | Ok d ->
     let rec find_pi_const = function
-      | Ir.Const c when Float.abs (c -. Float.pi) < 1e-9 -> true
+      | Ir.Const c | Ir.UnitLiteral { value = c; _ }
+        when Float.abs (c -. Float.pi) < 1e-9 -> true
       | Ir.BinOp { left; right; _ } -> find_pi_const left || find_pi_const right
       | Ir.UnOp { arg; _ } -> find_pi_const arg
       | Ir.Cond { pred; then_; else_ } ->
@@ -4556,7 +4557,7 @@ let test_rate_state_grad_through_binding () =
 let rec eval_like_runtime pops params (e : Ir.expr) : float =
   let ev = eval_like_runtime pops params in
   match e with
-  | Ir.Const c -> c
+  | Ir.Const c | Ir.UnitLiteral { value = c; _ } -> c
   | Ir.Pop n -> List.assoc n pops
   | Ir.Param n -> List.assoc n params
   | Ir.UncheckedDim u -> ev u.inner
@@ -4985,8 +4986,8 @@ let test_forcing_without_lag_is_none () =
 
 (* gh#314: `lag = 10 'days` lands `Some (duration in model time_unit)` on the
    time_function record. The literal is unit-scaled exactly like `period`, so
-   with time_unit = 'days it is Const 10.0 (wrapped in UncheckedDim for the
-   time dimension). *)
+   with time_unit = 'days it is a unit literal of value 10.0 and dimension
+   T. *)
 let test_forcing_with_literal_lag () =
   let src = {|
     compartments { S, I, R }
@@ -5014,10 +5015,9 @@ let test_forcing_with_literal_lag () =
   let m = compile_expect_ok src in
   let tf = List.hd m.Ir.time_functions in
   (* lag is a time-dimensioned duration; the scalar is in model time units. *)
-  let rec const_of = function
-    | Ir.Const v -> v
-    | Ir.UncheckedDim u -> const_of u.Ir.inner
-    | _ -> Alcotest.fail "expected a constant (possibly UncheckedDim-wrapped) lag"
+  let const_of = function
+    | Ir.Const v | Ir.UnitLiteral { value = v; _ } -> v
+    | _ -> Alcotest.fail "expected a constant (or unit-literal) lag"
   in
   (match tf.Ir.lag with
    | Some e -> Alcotest.(check (float 1e-9)) "lag = 10 days" 10.0 (const_of e)
@@ -11464,7 +11464,7 @@ let test_smooth_compiles () =
       (List.hd modes = Ir.Param "z_m1" && List.nth modes 9 = Ir.Param "z_m10");
     Alcotest.(check bool) "level is the parameter (unit scale 1)" true (level = Ir.Param "a_b");
     (match per with
-     | Ir.UncheckedDim { inner = Ir.Const 7.0; _ } -> ()
+     | Ir.UnitLiteral { value = 7.0; _ } -> ()
      | _ -> Alcotest.fail "per = 1 'weeks is 7 days")
   | _ -> Alcotest.fail "expected a log-link bspline with smooth coefs"
 

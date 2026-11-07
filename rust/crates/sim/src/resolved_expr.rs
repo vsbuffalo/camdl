@@ -257,6 +257,9 @@ pub struct ResolveCtx<'a> {
 pub fn resolve_expr(expr: &Expr, ctx: &ResolveCtx<'_>) -> Result<ResolvedExpr, SimError> {
     match expr {
         Expr::Const(c) => Ok(ResolvedExpr::Const(c.value)),
+        // A unit literal is a constant; its dimension was consumed by the
+        // compiler's dimension checker.
+        Expr::UnitLiteral(w) => Ok(ResolvedExpr::Const(w.unit_literal.value)),
 
         Expr::ConstRef(c) => {
             let v = *ctx.const_values.get(c.const_ref.as_str())

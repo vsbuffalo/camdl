@@ -54,7 +54,7 @@ fn count_nodes(e: &Expr, nodes: &mut u64, probes: &mut u64) {
                 count_nodes(t, nodes, probes);
             }
         }
-        Expr::Const(_) | Expr::Time(_) | Expr::Dt(_) | Expr::Projected(_) => {}
+        Expr::Const(_) | Expr::UnitLiteral(_) | Expr::Time(_) | Expr::Dt(_) | Expr::Projected(_) => {}
     }
 }
 

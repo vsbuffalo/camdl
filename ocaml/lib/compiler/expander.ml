@@ -3877,8 +3877,8 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
   | EConst f     -> Ir.Const f
   | EUnit (f, u) ->
     (* Preserve the unit's dimension on the IR so Dimcheck can see it.
-       Duration units (`'days` etc.) wrap as UncheckedDim with dim = T;
-       rate units as UncheckedDim with dim = T⁻¹; `'count` as dim = P. The
+       Duration units (`'days` etc.) become a UnitLiteral with dim = T;
+       rate units a UnitLiteral with dim = T⁻¹; `'count` dim = P. The
        scalar is pre-scaled into the model's time unit. `'ratio` is a bare
        Const: it is dimensionless and has no scale.
        Fixes GH #9: previously `1 'days` became a bare dimensionless
@@ -3889,13 +3889,8 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     (match u with
      | Ratio -> Ir.Const scaled
      | _ ->
-       let (p, t) = unit_lit_to_dim u in
-       Ir.UncheckedDim {
-         inner  = Ir.Const scaled;
-         dim_p  = p;
-         dim_t  = t;
-         reason = Printf.sprintf "unit literal '%s" (unit_lit_to_string u);
-       })
+       let (dim_p, dim_t) = unit_lit_to_dim u in
+       Ir.UnitLiteral { value = scaled; dim_p; dim_t; unit = unit_lit_to_string u })
   | EIdent (name, l) -> (
     let loc = diag_loc_of_ast_ctx ctx l in
     match List.assoc_opt name env with
@@ -5914,7 +5909,7 @@ let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None)
                    typed `let` is a model constant, not a parameter."
           ~hint:"Write the value inline, or declare it in `parameters { }`."
           ()
-      | Ir.Param _ | Ir.Const _ -> ()
+      | Ir.Param _ | Ir.Const _ | Ir.UnitLiteral _ -> ()
       | Ir.BinOp b -> check_refs b.left; check_refs b.right
       | Ir.UnOp  u -> check_refs u.arg
       | Ir.Cond  c -> check_refs c.pred; check_refs c.then_; check_refs c.else_
@@ -5957,8 +5952,7 @@ let mk_estimated_or_required ~bounds ~prior ~hierarchical : Ir.param_value =
       | _, Some h      -> Ir.Hierarchical h
       | None, None     -> Ir.Flat
     in
-    Ir.Estimated { est_init = None; est_bounds = bounds; est_prior;
-                   est_transform = Ir.Identity }
+    Ir.Estimated { est_init = None; est_bounds = bounds; est_prior }
 
 (* Convert an AST `#'` doc block into its IR mirror (presentation metadata). *)
 let ir_doc_of_ast (d : Ast.doc option) : Ir.doc option =
@@ -6773,6 +6767,7 @@ let resolve_comp_name ctx env e =
       | Ir.BinOp _    -> "an arithmetic expression"
       | Ir.UnOp _     -> "a unary expression"
       | Ir.Const _    -> "a constant"
+      | Ir.UnitLiteral _ -> "a unit literal"
       | Ir.Cond _     -> "a conditional"
       | Ir.TimeFunc _ -> "a time-function reference"
       | Ir.ForcingBasis _ -> "a forcing basis function"
@@ -6971,7 +6966,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
   let spline_int_const kind expr label default =
     let ir = resolve_expr ctx env expr in
     let unwrap = function
-      | Ir.Const f -> Some f
+      | Ir.Const f | Ir.UnitLiteral { value = f; _ } -> Some f
       | Ir.UncheckedDim { inner = Ir.Const f; _ } -> Some f
       | _ -> None
     in
@@ -7044,7 +7039,8 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                  fam (List.length cells) n_basis n_modes)
                "Index the family by a dimension with n_basis - 2 levels.";
            let const_of e = match resolve_expr ctx env e with
-             | Ir.Const v | Ir.UncheckedDim { inner = Ir.Const v; _ } -> Some v
+             | Ir.Const v | Ir.UnitLiteral { value = v; _ }
+             | Ir.UncheckedDim { inner = Ir.Const v; _ } -> Some v
              | Ir.UnOp { op = Ir.Neg; arg = Ir.Const v } -> Some (-. v)
              | _ -> None
            in
@@ -7468,7 +7464,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
               Ir.Const 1.0
           in
           let unwrap_const = function
-            | Ir.Const f -> Some f
+            | Ir.Const f | Ir.UnitLiteral { value = f; _ } -> Some f
             | Ir.UncheckedDim { inner = Ir.Const f; _ } -> Some f
             | _ -> None
           in
@@ -8915,6 +8911,7 @@ let ir_cells ctx (e : Ir.expr) : string list =
       go visiting (go visiting (go visiting acc pred) then_) else_
     | Ir.Reduce es | Ir.TableLookup (_, es) -> List.fold_left (go visiting) acc es
     | Ir.UncheckedDim { inner; _ } -> go visiting acc inner
+    | Ir.UnitLiteral _ -> acc
     | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Time | Ir.Dt | Ir.TimeFunc _
     | Ir.BindingRef _ | Ir.PerEvalRef _ | Ir.Projected | Ir.ObsColumnRef _
     | Ir.ObsAnchor _ | Ir.ForcingBasis _ -> acc
@@ -12366,7 +12363,7 @@ let build_model_structure ctx expanded_trs =
         c.else_
     | Ir.TableLookup (_, args) ->
       List.fold_left collect_numerator_pops acc args
-    | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Time | Ir.Dt | Ir.Projected
+    | Ir.Const _ | Ir.UnitLiteral _ | Ir.Param _ | Ir.ConstRef _ | Ir.Time | Ir.Dt | Ir.Projected
     | Ir.ObsColumnRef _ | Ir.ObsAnchor _ | Ir.TimeFunc _ | Ir.ForcingBasis _ -> acc
     | Ir.UncheckedDim u -> collect_numerator_pops acc u.inner
     (* Every term of a sum is a numerator contribution (like Add). *)
@@ -12427,13 +12424,13 @@ let rec expr_contains_param_or_pop = function
   | Ir.Reduce terms -> List.exists expr_contains_param_or_pop terms
   | Ir.BindingRef _ -> false
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
-  | Ir.Const _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _
+  | Ir.Const _ | Ir.UnitLiteral _ | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _
   | Ir.ObsAnchor _ | Ir.TimeFunc _ | Ir.ForcingBasis _ -> false
 
-(* Treat `UncheckedDim { inner = Const c; ... }` (the IR form of unit
-   literals like `1 'days`) as a constant for L401 matching. *)
+(* A unit literal (`1 'days`) and an `unchecked_dim` around a literal are
+   constants for L401 matching. *)
 let as_const = function
-  | Ir.Const c -> Some c
+  | Ir.Const c | Ir.UnitLiteral { value = c; _ } -> Some c
   | Ir.UncheckedDim { inner = Ir.Const c; _ } -> Some c
   | _ -> None
 
@@ -12445,7 +12442,7 @@ let strip_neg = function
 (* Detect `exp(arg)` where arg = -(RATE * Const) under some normalization:
      - UnOp Neg around a Mul of RATE and Const
      - Mul where one operand is `-RATE` (Neg around param-bearing) and the
-       other is a Const (or UncheckedDim Const).
+       other is a Const (or a unit literal).
    RATE must contain a Param or Pop (i.e. not be purely constant). *)
 let exp_arg_matches_neg_rate_times_const arg =
   let try_mul l r =
@@ -12497,7 +12494,7 @@ let rec walk_expr_for_l401 ~on_match e =
   | Ir.Reduce terms -> List.iter (walk_expr_for_l401 ~on_match) terms
   | Ir.BindingRef _ -> ()
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
-  | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
+  | Ir.Const _ | Ir.UnitLiteral _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
   | Ir.TimeFunc _ | Ir.ForcingBasis _ -> ()
 
@@ -12554,7 +12551,7 @@ let lint_l401 ctx (expanded_trs : Ir.transition list) =
 
    Shape matched (post-expansion, per transition rate / hoisted binding body):
      - `Div` whose DENOMINATOR is a BARE `Const` c (NOT a unit literal —
-       `UncheckedDim` wraps `1 'years` / `365 'days`, and writing the divisor
+       `1 'years` / `365 'days` is a UnitLiteral, and writing the divisor
        as a unit literal is exactly the recommended fix, so it must NOT fire)
        with c ≈ m for the rate forcing referenced in the NUMERATOR subtree;
      - `Mul` by the RECIPROCAL of m — a bare `Const c` with c ≈ 1/m = s, or an
@@ -12575,10 +12572,10 @@ let lint_l401 ctx (expanded_trs : Ir.transition list) =
    error once that lands. See docs/dev/warning-catalog.md §L403. *)
 
 (* Bare numeric constant ONLY. A unit-annotated divisor (`1 'years`,
-   `365 'days`) wraps in `UncheckedDim` and IS the recommended fix, so it must
-   not match. (`'ratio` / `'count` literals lower to a bare `Const` and are
-   correctly indistinguishable from a bare number here.) Distinct from L401's
-   `as_const`, which deliberately also unwraps `UncheckedDim`. *)
+   `365 'days`) is a `UnitLiteral` and IS the recommended fix, so it must
+   not match. (`'ratio` literals lower to a bare `Const` and are correctly
+   indistinguishable from a bare number here.) Distinct from L401's
+   `as_const`, which deliberately also reads unit literals. *)
 let as_bare_const = function
   | Ir.Const c -> Some c
   | _ -> None
@@ -12627,7 +12624,7 @@ let rec l403_rate_forcing_in is_rate_forcing = function
   | Ir.TableLookup (_, args) ->
     List.find_map (l403_rate_forcing_in is_rate_forcing) args
   | Ir.Reduce terms -> List.find_map (l403_rate_forcing_in is_rate_forcing) terms
-  | Ir.TimeFunc _ | Ir.ForcingBasis _ | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
+  | Ir.TimeFunc _ | Ir.ForcingBasis _ | Ir.Const _ | Ir.UnitLiteral _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
   | Ir.BindingRef _ -> None
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
@@ -12679,7 +12676,7 @@ let rec walk_expr_for_l403 mags ~on_match e =
     List.iter (walk_expr_for_l403 mags ~on_match) args
   | Ir.Reduce terms ->
     List.iter (walk_expr_for_l403 mags ~on_match) terms
-  | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
+  | Ir.Const _ | Ir.UnitLiteral _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
   | Ir.TimeFunc _ | Ir.ForcingBasis _ | Ir.BindingRef _ -> ()
   | Ir.PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"

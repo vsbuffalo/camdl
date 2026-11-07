@@ -103,6 +103,13 @@ and expr =
      evaluates `inner` and returns its value. See
      docs/dev/proposals/notes/unchecked-dim-escape.md. *)
   | UncheckedDim of unchecked_dim_expr
+  (* A unit literal such as `0.2 'per_day`: a known constant of dimension
+     `(dim_p, dim_t)` whose numeric [value] is already scaled into the
+     model's `time_unit`. [unit] is the literal's unit name ("per_day"),
+     kept for diagnostics and audit. Unlike [UncheckedDim] the dimension is
+     not an assertion: the checker reads it as a fact. Runtime: evaluates to
+     [value]; derivative 0. `'ratio` lowers to a bare [Const] instead. *)
+  | UnitLiteral of { value : float; dim_p : int; dim_t : int; unit : string }
 
 (* Which function a [ForcingBasis] evaluates (proposal §6.4): the k-th
    B-spline; a smooth forcing's k-th whitened mode divided by kappa (kappa is
@@ -698,8 +705,6 @@ type prior_dist =
   | TruncatedNormal of truncated_normal_prior
   | Fixed       of float
 
-type transform = Log | Logit | Identity
-
 (** Distribution family for a hierarchical (pooled) prior leaf.
     Mirrors [prior_dist] variants but excludes Fixed (no meaning for
     a hierarchically-parameterised prior). Serialises to/from the same
@@ -760,10 +765,11 @@ type prior_spec =
   | Hierarchical of hierarchical_prior
 
 (** The three real meanings the former [value: float option] conflated
-    (gh#191). Inference config ([est_init]/[est_bounds]/[est_prior]/
-    [est_transform]) exists *only* on [Estimated]. JSON: internally tagged on
-    ["mode"] — [{"mode":"fixed","value":_}],
-    [{"mode":"estimated","bounds":_,"prior":_,"transform":_}],
+    (gh#191). Inference config ([est_init]/[est_bounds]/[est_prior]) exists
+    *only* on [Estimated]. A sampler's change of variables is not part of the
+    IR: each derives it from the parameter's domain. JSON: internally tagged
+    on ["mode"] — [{"mode":"fixed","value":_}],
+    [{"mode":"estimated","bounds":_,"prior":_}],
     [{"mode":"required"}]. *)
 type param_value =
   | Fixed     of float
@@ -771,7 +777,6 @@ type param_value =
       est_init:      float option;
       est_bounds:    (float * float) option;
       est_prior:     prior_spec;
-      est_transform: transform;
     }
   | Required
 
@@ -842,9 +847,6 @@ let param_bounds (p : parameter) : (float * float) option =
 
 let param_initial_value (p : parameter) : float option =
   match p.value with Estimated e -> e.est_init | _ -> None
-
-let param_transform (p : parameter) : transform option =
-  match p.value with Estimated e -> Some e.est_transform | _ -> None
 
 let param_prior_dist (p : parameter) : prior_dist option =
   match p.value with Estimated { est_prior = Dist d; _ } -> Some d | _ -> None

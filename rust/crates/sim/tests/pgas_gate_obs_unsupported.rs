@@ -82,7 +82,6 @@ fn estimated_param(name: &str, init: f64) -> ir::parameter::Parameter {
             init: Some(init),
             bounds: Some((0.01, 100.0)),
             prior: ir::parameter::PriorSpec::Flat,
-            transform: ir::parameter::Transform::Identity,
         },
         param_kind: Some(ir::parameter::ParamKind::Positive),
         param_dim: None,

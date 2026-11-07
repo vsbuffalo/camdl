@@ -263,8 +263,8 @@ let test_ebola_mixture_means () =
   let m = compile_ok ebola_src in
   (* Find a fatal chain step and a recover chain step; their rate's constant
      coefficient is k/τ. The mean is reported in DAYS; 8 'days folds to 8.0. *)
-  (* A unit literal `8 'days` lowers to UncheckedDim(Const 8.0, ...); peel it. *)
-  let rec peel = function Ir.UncheckedDim u -> peel u.Ir.inner | e -> e in
+  (* A unit literal `8 'days` lowers to UnitLiteral { value = 8.0; ... }; peel it. *)
+  let peel = function Ir.UnitLiteral { value; _ } -> Ir.Const value | e -> e in
   let rec leading_const = function
     (* (k/τ) * Pop  →  fold to extract the constant ratio when τ is a literal. *)
     | Ir.BinOp { Ir.op = Ir.Mul; left; _ } -> leading_const left

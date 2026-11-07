@@ -107,16 +107,6 @@ pub struct HierarchicalPrior {
     pub pool_over: String,
 }
 
-// ── Parameter transform ───────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Transform {
-    Log,
-    Logit,
-    Identity,
-}
-
 // ── Parameter kind ──────────────────────────────────────────────────────────
 
 /// DSL parameter-type keyword (the `param_kind` production in
@@ -185,14 +175,14 @@ pub enum PriorSpec {
 // ── Parameter value ─────────────────────────────────────────────────────────
 
 /// The three real meanings the former `value: Option<f64>` conflated
-/// (gh#191). Inference configuration (`init`/`bounds`/`prior`/`transform`)
-/// exists *only* on `Estimated`, so attaching a prior or bounds to a fixed
+/// (gh#191). Inference configuration (`init`/`bounds`/`prior`) exists *only*
+/// on `Estimated`, so attaching a prior or bounds to a fixed
 /// constant — or shipping a value-less parameter that no one will supply — is
 /// unrepresentable.
 ///
 /// JSON: internally tagged on `mode` —
 /// `{"mode":"fixed","value":0.3}`,
-/// `{"mode":"estimated","bounds":[0.01,2.0],"prior":"flat","transform":"log"}`,
+/// `{"mode":"estimated","bounds":[0.01,2.0],"prior":"flat"}`,
 /// `{"mode":"required"}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -202,14 +192,15 @@ pub enum ParamValue {
     /// config.
     Fixed { value: f64 },
     /// Inference draws this. The optimiser's starting point (`init`), search
-    /// box (`bounds`), `prior`, and `transform` live here and nowhere else.
+    /// box (`bounds`) and `prior` live here and nowhere else. A sampler's
+    /// change of variables is not IR: each derives it from the parameter's
+    /// domain (`sim::inference::types::Transform::for_domain`).
     Estimated {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         init: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bounds: Option<(f64, f64)>,
         prior: PriorSpec,
-        transform: Transform,
     },
     /// Must be supplied at runtime (`--params`/`--set`); no default in the IR.
     /// This is the *only* state for which "parameter has no value" is correct.
@@ -234,18 +225,17 @@ impl ParamValue {
     /// value: `--params`/`--set`/`[fixed]`/scenario overrides, the fit start
     /// fall-back, and the gh#191 capability gate.
     ///
-    /// An `Estimated` parameter KEEPS its bounds/prior/transform (the number
+    /// An `Estimated` parameter KEEPS its bounds/prior (the number
     /// lands in `init`), so a supplied value is still bounds-checked against
     /// the author's declared range — collapsing it to a bare `Fixed` would
     /// drop the bounds and silently accept an out-of-range value. `Fixed` is
     /// replaced; `Required` becomes `Fixed` (it has no bounds to preserve).
     pub fn with_value(&self, v: f64) -> ParamValue {
         match self {
-            ParamValue::Estimated { bounds, prior, transform, .. } => ParamValue::Estimated {
+            ParamValue::Estimated { bounds, prior, .. } => ParamValue::Estimated {
                 init: Some(v),
                 bounds: *bounds,
                 prior: prior.clone(),
-                transform: transform.clone(),
             },
             ParamValue::Fixed { .. } | ParamValue::Required => ParamValue::Fixed { value: v },
         }
@@ -261,13 +251,6 @@ impl ParamValue {
     pub fn init(&self) -> Option<f64> {
         match self {
             ParamValue::Estimated { init, .. } => *init,
-            _ => None,
-        }
-    }
-    /// The transform, if `Estimated`.
-    pub fn transform(&self) -> Option<Transform> {
-        match self {
-            ParamValue::Estimated { transform, .. } => Some(transform.clone()),
             _ => None,
         }
     }
@@ -319,7 +302,7 @@ pub struct Constant {
 pub struct Parameter {
     pub name:          String,
     /// What kind of value this parameter has — see [`ParamValue`]. Inference
-    /// config (bounds/prior/transform/init) lives inside `Estimated`.
+    /// config (bounds/prior/init) lives inside `Estimated`.
     pub value:         ParamValue,
     /// DSL parameter-type keyword (typed enum; see [`ParamKind`]).
     /// Used by inference to choose the default transform. `None` = no
@@ -361,10 +344,6 @@ impl Parameter {
     /// The optimiser's starting point (former `initial_value` field).
     pub fn initial_value(&self) -> Option<f64> {
         self.value.init()
-    }
-    /// The transform (former `transform` field), if `Estimated`.
-    pub fn transform(&self) -> Option<Transform> {
-        self.value.transform()
     }
 }
 

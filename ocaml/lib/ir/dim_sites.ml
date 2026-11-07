@@ -108,7 +108,7 @@ let rec is_constant_expr (e : expr) : bool =
     is_constant_expr pred && is_constant_expr then_ && is_constant_expr else_
   | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _
   | TableLookup _ | Reduce _ | BindingRef _ | PerEvalRef _ | Projected
-  | ObsColumnRef _ | ObsAnchor _ | ForcingBasis _ | UncheckedDim _ -> false
+  | ObsColumnRef _ | ObsAnchor _ | ForcingBasis _ | UncheckedDim _ | UnitLiteral _ -> false
 
 (* ── Building sites ────────────────────────────────────────────────────── *)
 
@@ -358,7 +358,7 @@ let parameter_sites acc (p : parameter) =
   let { name; value; param_kind = _; param_dim = _ } = p in
   match value with
   | Fixed _ | Required -> ()
-  | Estimated { est_init = _; est_bounds = _; est_prior; est_transform = _ } ->
+  | Estimated { est_init = _; est_bounds = _; est_prior } ->
     (match est_prior with
      | Flat | Dist _ -> ()
      | Hierarchical { hkind = _; hargs; hpool_over = _ } ->

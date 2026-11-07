@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.42",
-  "validated_by": "ocaml-compiler-v0.42",
+  "ir_version": "0.43",
+  "validated_by": "ocaml-compiler-v0.43",
   "model": {
     "name": "sir_coalescent",
     "version": "0.3",

@@ -1,4 +1,4 @@
-{"ir_version":"0.42","validated_by":"ocaml-compiler-v0.42","model":{"name":"sir_dim_annotated","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.43","validated_by":"ocaml-compiler-v0.43","model":{"name":"sir_dim_annotated","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}
@@ -9,7 +9,7 @@
 {"name":"loss","stoichiometry":[["S",-1]],"rate":{"bin_op":{"op":"mul","left":{"bin_op":{"op":"mul","left":{"param":"coupling"},"right":{"param":"beta"}}},"right":{"pop":"S"}}},"metadata":{"origin_kind":"outflow","source_compartment":"S","dest_compartment":null},"rate_grad":{"beta":{"grad":{"bin_op":{"op":"mul","left":{"param":"coupling"},"right":{"pop":"S"}}}},"coupling":{"grad":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"pop":"S"}}}}},"rate_state_grad":{"S":{"grad":{"bin_op":{"op":"mul","left":{"param":"coupling"},"right":{"param":"beta"}}}}}}
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[],"observations":[],"parameters":[
 {"name":"beta","value":{"mode":"required"},"param_kind":"rate","param_dim":null},
-{"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
+{"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat"},"param_kind":"rate","param_dim":null},
 {"name":"amplitude","value":{"mode":"required"},"param_kind":"real","param_dim":[0,0]},
 {"name":"mu","value":{"mode":"required"},"param_kind":"positive","param_dim":[1,-1]},
 {"name":"coupling","value":{"mode":"required"},"param_kind":"positive","param_dim":[0,0]}

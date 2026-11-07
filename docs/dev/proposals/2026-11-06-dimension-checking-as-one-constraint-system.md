@@ -2,7 +2,7 @@
 
 Date: 2026-11-06
 
-Status: implemented on `docs/size-brackets-dim-clause`, 6b19d107..e6943201;
+Status: implemented, with the unit-literal IR node in `ir/VERSION` 0.43;
 deviations from the plan are recorded inline where they occur
 
 Builds on: `docs/dev/proposals/2026-11-05-size-brackets-and-dim-clause.md` (§4,
@@ -119,9 +119,9 @@ Traced by reading (a subagent's trace, spot-checked):
   (`pgas.rs:4360-4369`) all use log-likelihood + log p(θ) + log|J|, with the
   sampler's change of variables chosen from the parameter's domain
   (`types.rs:129-140`). IF2 and the NLopt optimizers use no prior.
-- The IR's `transform` field is always `Identity` (`expander.ml:5714`) and no
-  sampler reads it; only run identity hashes it. It is dead, and its removal
-  re-keys runs, so it is tracked separately and not part of this work.
+- The IR's `transform` field was always `Identity` and no sampler read it; only
+  run identity hashed it. It is removed in the same `ir/VERSION` 0.43 bump that
+  adds the unit-literal node (decision 3).
 
 Three defects, outside the checker:
 
@@ -165,12 +165,9 @@ dead `transform` field) out of this work.
 - _Deleting union-find._ Plain equalities are equations too, so the separate
   mechanism goes; whether a union-find fast path survives inside the solver is
   decided by the compile-time benchmark, not in advance (§6.5).
-- _Unit literals as `UncheckedDim`._ Conceptually right: a unit literal is a
-  typed constant, not an escape. But the fix is a new IR node, which bumps
-  `ir/VERSION` and touches the Rust evaluator. The checker already treats
-  `UncheckedDim { inner = Const _ }` as a known dimension, so correctness does
-  not depend on it. I propose to make this change inside the IR bump families
-  Stage A already requires (decision 3), not as a separate bump.
+- _Unit literals as `UncheckedDim`._ Right: a unit literal is a typed constant,
+  not an escape. It gets its own IR node, `unit_literal`, in `ir/VERSION` 0.43
+  (decision 3).
 
 **Disagree on ordering.** The directive's first commit "captures existing bugs
 as committed regression tests". This repository does not land red tests ahead of
@@ -583,10 +580,11 @@ the parameter grammar reused.
 The wrapped expression is opaque: the checker reads only the asserted dimension,
 and does not infer the inside. The escape's motivating case, He et al.'s (I +
 ι)^α, is a count under a parameter exponent, which the rule of §5.4 refuses, so
-inferring the inside would refuse the escape's own example. Unit literals stop
-being represented as `UncheckedDim` when the IR bump of decision 3 lands; until
-then the checker reads `UncheckedDim { inner = Const _ }` with a "unit literal"
-reason as a known dimension, a checked typed constant rather than an escape.
+inferring the inside would refuse the escape's own example. A unit literal is
+not an escape: it lowers to its own IR node,
+`unit_literal { value, dim, unit }`, whose dimension the checker reads as a
+fact. The one compiler-generated `UncheckedDim` left is the log-link spline
+shift.
 
 ### 5.6 Count-noise Normal likelihoods: P is free in the sd, T is not
 
@@ -1137,9 +1135,9 @@ All settled; recorded here as the decision record.
    before the rule lands.
 2. **`dim` on typed constants.** `let b : positive dim P^-1*T^-1 = 0.0001`, the
    parameter grammar reused.
-3. **A unit-literal IR node.** Deferred to the IR bump families Stage A
-   requires; until then the checker reads `UncheckedDim { inner = Const _ }` as
-   a known dimension.
+3. **A unit-literal IR node.** `unit_literal { value, dim, unit }`, in
+   `ir/VERSION` 0.43, together with removing the dead `transform` field of an
+   estimated parameter.
 4. **Order relative to families.** This work lands first.
 5. **Scope of the count-noise rule.** Only the sd of a `normal` likelihood on a
    `count` column (§5.6).

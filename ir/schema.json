@@ -311,7 +311,7 @@
           "additionalProperties": false
         },
         {
-          "comment": "The dimensional escape: `inner` is taken to have dimension `dim` = [P exponent, T exponent] without checking, for the stated `reason` (e.g. a unit literal).",
+          "comment": "The user's dimensional escape `unchecked_dim(...)`: `inner` is taken to have dimension `dim` = [P exponent, T exponent] without checking, for the stated `reason`.",
           "required": ["unchecked_dim"],
           "properties": {
             "unchecked_dim": {
@@ -321,6 +321,23 @@
                 "inner": { "$ref": "#/definitions/expr" },
                 "dim": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
                 "reason": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "comment": "A unit literal such as `0.2 'per_day`: a known constant of dimension `dim` = [P exponent, T exponent], whose `value` is already scaled into the model's time_unit. `unit` is the literal's unit name (e.g. \"per_day\"). Evaluates to `value`; derivative zero. A 'ratio literal is a bare const instead.",
+          "required": ["unit_literal"],
+          "properties": {
+            "unit_literal": {
+              "type": "object",
+              "required": ["value", "dim", "unit"],
+              "properties": {
+                "value": { "type": "number" },
+                "dim": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
+                "unit": { "type": "string" }
               },
               "additionalProperties": false
             }
@@ -1571,13 +1588,12 @@
           "additionalProperties": false
         },
         {
-          "required": ["mode", "prior", "transform"],
+          "required": ["mode", "prior"],
           "properties": {
             "mode": { "const": "estimated" },
             "init": { "type": "number" },
             "bounds": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
-            "prior": { "$ref": "#/definitions/prior_spec" },
-            "transform": { "type": "string", "enum": ["log", "logit", "identity"] }
+            "prior": { "$ref": "#/definitions/prior_spec" }
           },
           "additionalProperties": false
         },

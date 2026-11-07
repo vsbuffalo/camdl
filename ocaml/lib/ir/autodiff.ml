@@ -88,6 +88,7 @@ let rec mentions (param : string) (e : expr) : bool =
   | TimeFunc _ | ForcingBasis _ -> false
   | TableLookup (_, args) -> List.exists (mentions param) args
   | UncheckedDim u -> mentions param u.inner
+  | UnitLiteral _ -> false
   | Reduce terms -> List.exists (mentions param) terms
   | BindingRef _ -> false   (* hoisted bindings are param-free (state-only) *)
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
@@ -108,6 +109,7 @@ let rec mentions_projected (e : expr) : bool =
   | TimeFunc _ | ForcingBasis _ -> false
   | TableLookup (_, args) -> List.exists mentions_projected args
   | UncheckedDim u -> mentions_projected u.inner
+  | UnitLiteral _ -> false
   | Reduce terms -> List.exists mentions_projected terms
   | BindingRef _ -> false
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
@@ -157,6 +159,7 @@ let rec mentions_pop (bindings : binding list) (c : string) (e : expr) : bool =
     || mentions_pop bindings c cc.else_
   | Reduce terms -> List.exists (mentions_pop bindings c) terms
   | UncheckedDim u -> mentions_pop bindings c u.inner
+  | UnitLiteral _ -> false
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
 (** Coefficient expressions of a forcing kind — used to decide whether an
@@ -357,6 +360,9 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
 
     (* Dimensional escape: differentiate the inner, drop the wrapper. *)
     | UncheckedDim u -> d u.inner
+
+    (* A unit literal is a known constant. *)
+    | UnitLiteral _ -> Known (Const 0.0)
 
     (* State. Constant in the θ|X step (WrtParam) and w.r.t. the projection output
        (WrtProjected); a Kronecker delta w.r.t. the target compartment (WrtPop) —
@@ -1013,6 +1019,7 @@ let rec inline_projected (proj : expr) (e : expr) : expr =
            else_ = inline_projected proj c.else_ }
   | TableLookup (name, args) -> TableLookup (name, List.map (inline_projected proj) args)
   | UncheckedDim u -> UncheckedDim { u with inner = inline_projected proj u.inner }
+  | UnitLiteral _ -> e
   | Reduce terms -> Reduce (List.map (inline_projected proj) terms)
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 

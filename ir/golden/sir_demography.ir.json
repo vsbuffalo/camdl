@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.42",
-  "validated_by": "ocaml-compiler-v0.42",
+  "ir_version": "0.43",
+  "validated_by": "ocaml-compiler-v0.43",
   "model": {
     "name": "sir_demography",
     "version": "0.3",
@@ -159,11 +159,11 @@
     "interventions": [],
     "observations": [],
     "parameters": [
-      {"name": "beta", "value": {"mode": "estimated", "bounds": [0.001, 2.0], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null},
-      {"name": "gamma", "value": {"mode": "estimated", "bounds": [0.001, 1.0], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null},
-      {"name": "mu", "value": {"mode": "estimated", "bounds": [1e-06, 0.01], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null},
-      {"name": "N0", "value": {"mode": "estimated", "bounds": [100.0, 1000000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null},
-      {"name": "I0", "value": {"mode": "estimated", "bounds": [1.0, 10000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null}
+      {"name": "beta", "value": {"mode": "estimated", "bounds": [0.001, 2.0], "prior": "flat"}, "param_kind": "rate", "param_dim": null},
+      {"name": "gamma", "value": {"mode": "estimated", "bounds": [0.001, 1.0], "prior": "flat"}, "param_kind": "rate", "param_dim": null},
+      {"name": "mu", "value": {"mode": "estimated", "bounds": [1e-06, 0.01], "prior": "flat"}, "param_kind": "rate", "param_dim": null},
+      {"name": "N0", "value": {"mode": "estimated", "bounds": [100.0, 1000000.0], "prior": "flat"}, "param_kind": "count", "param_dim": null},
+      {"name": "I0", "value": {"mode": "estimated", "bounds": [1.0, 10000.0], "prior": "flat"}, "param_kind": "count", "param_dim": null}
     ],
     "initial_conditions": {
       "S": {

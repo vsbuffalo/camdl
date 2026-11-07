@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.42",
-  "validated_by": "ocaml-compiler-v0.42",
+  "ir_version": "0.43",
+  "validated_by": "ocaml-compiler-v0.43",
   "model": {
     "name": "sirv_anchored_calendar",
     "version": "0.3",
@@ -521,12 +521,12 @@
     ],
     "observations": [],
     "parameters": [
-      {"name": "beta", "value": {"mode": "estimated", "bounds": [0.1, 2.0], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null},
-      {"name": "gamma", "value": {"mode": "estimated", "bounds": [0.05, 0.5], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null},
-      {"name": "vacc_cov", "value": {"mode": "estimated", "bounds": [0.0, 1.0], "prior": "flat", "transform": "identity"}, "param_kind": "probability", "param_dim": null},
-      {"name": "boost_cov", "value": {"mode": "estimated", "bounds": [0.0, 1.0], "prior": "flat", "transform": "identity"}, "param_kind": "probability", "param_dim": null},
-      {"name": "N0", "value": {"mode": "estimated", "bounds": [1000.0, 1000000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null},
-      {"name": "I0", "value": {"mode": "estimated", "bounds": [1.0, 1000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null}
+      {"name": "beta", "value": {"mode": "estimated", "bounds": [0.1, 2.0], "prior": "flat"}, "param_kind": "rate", "param_dim": null},
+      {"name": "gamma", "value": {"mode": "estimated", "bounds": [0.05, 0.5], "prior": "flat"}, "param_kind": "rate", "param_dim": null},
+      {"name": "vacc_cov", "value": {"mode": "estimated", "bounds": [0.0, 1.0], "prior": "flat"}, "param_kind": "probability", "param_dim": null},
+      {"name": "boost_cov", "value": {"mode": "estimated", "bounds": [0.0, 1.0], "prior": "flat"}, "param_kind": "probability", "param_dim": null},
+      {"name": "N0", "value": {"mode": "estimated", "bounds": [1000.0, 1000000.0], "prior": "flat"}, "param_kind": "count", "param_dim": null},
+      {"name": "I0", "value": {"mode": "estimated", "bounds": [1.0, 1000.0], "prior": "flat"}, "param_kind": "count", "param_dim": null}
     ],
     "initial_conditions": {
       "S": {

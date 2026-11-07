@@ -65,7 +65,7 @@ type result = {
 
 (** A prior as written, before the expander folds a constant prior's arguments
     to floats: each argument resolved to an IR expression, unit literals intact
-    (as [UncheckedDim] nodes whose reason starts "unit literal"). *)
+    (as [UnitLiteral] nodes). *)
 type prior_source = {
   param  : string;
   family : string;                  (** "normal", "log_normal", ... *)

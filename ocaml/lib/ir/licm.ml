@@ -51,7 +51,7 @@ open Ir
 let is_invariant (tbls : (string, table) Hashtbl.t) (e : expr) : bool =
   let rec go visited (e : expr) : bool =
     match e with
-    | Const _ | Param _ | ConstRef _ -> true
+    | Const _ | UnitLiteral _ | Param _ | ConstRef _ -> true
     | PerEvalRef _ -> true   (* its body is invariant; never present in LICM input *)
     | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _ | BindingRef _
     | Projected | ObsColumnRef _ -> false
@@ -95,7 +95,7 @@ let rec contains_expensive (e : expr) : bool =
     contains_expensive pred || contains_expensive then_ || contains_expensive else_
   | TableLookup (_, idxs) -> List.exists contains_expensive idxs
   | UncheckedDim u -> contains_expensive u.inner
-  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _
+  | Const _ | UnitLiteral _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _
   | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> false
 
 let binop_tag = function
@@ -138,6 +138,7 @@ let rec canon (e : expr) : string =
   | Cond { pred; then_; else_ } -> Printf.sprintf "?(%s,%s,%s)" (canon pred) (canon then_) (canon else_)
   | Reduce ts -> "R(" ^ String.concat "," (List.map canon ts) ^ ")"
   | UncheckedDim u -> "D(" ^ canon u.inner ^ ")"
+  | UnitLiteral u -> Printf.sprintf "L%Ld,%d,%d;" (Int64.bits_of_float u.value) u.dim_p u.dim_t
 
 type ctx = {
   mutable counter      : int;
@@ -187,7 +188,7 @@ let rec rw ctx (e : expr) : expr =
     (* Variant leaves (the invariant leaves Const/Param/PerEvalRef are handled in
        the `is_invariant` branch above and never reach here). *)
     | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _ | BindingRef _ | PerEvalRef _
-    | Projected | ObsColumnRef _ | ObsAnchor _ | Const _ | Param _ | ConstRef _ -> e
+    | Projected | ObsColumnRef _ | ObsAnchor _ | Const _ | UnitLiteral _ | Param _ | ConstRef _ -> e
 
 (* Hoist invariant subexpressions out of the dynamics surfaces. Folding a subset
    is sound (each rewritten expr keeps its value). The per-eval bindings produced

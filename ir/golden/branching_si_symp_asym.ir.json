@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.42",
-  "validated_by": "ocaml-compiler-v0.42",
+  "ir_version": "0.43",
+  "validated_by": "ocaml-compiler-v0.43",
   "model": {
     "name": "branching_si_symp_asym",
     "version": "0.3",
@@ -305,10 +305,10 @@
     "interventions": [],
     "observations": [],
     "parameters": [
-      {"name": "beta", "value": {"mode": "estimated", "bounds": [0.01, 10.0], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null},
-      {"name": "p_symp", "value": {"mode": "estimated", "bounds": [0.01, 0.99], "prior": "flat", "transform": "identity"}, "param_kind": "probability", "param_dim": null},
-      {"name": "N0", "value": {"mode": "estimated", "bounds": [100.0, 10000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null},
-      {"name": "I0", "value": {"mode": "estimated", "bounds": [1.0, 1000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null}
+      {"name": "beta", "value": {"mode": "estimated", "bounds": [0.01, 10.0], "prior": "flat"}, "param_kind": "rate", "param_dim": null},
+      {"name": "p_symp", "value": {"mode": "estimated", "bounds": [0.01, 0.99], "prior": "flat"}, "param_kind": "probability", "param_dim": null},
+      {"name": "N0", "value": {"mode": "estimated", "bounds": [100.0, 10000.0], "prior": "flat"}, "param_kind": "count", "param_dim": null},
+      {"name": "I0", "value": {"mode": "estimated", "bounds": [1.0, 1000.0], "prior": "flat"}, "param_kind": "count", "param_dim": null}
     ],
     "initial_conditions": {
       "S": {

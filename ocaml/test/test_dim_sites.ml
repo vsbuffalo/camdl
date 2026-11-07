@@ -20,7 +20,7 @@ let expr_keys = [
   "const"; "param"; "const_ref"; "pop"; "pop_sum"; "reduce"; "binding_ref";
   "per_eval_ref"; "time"; "dt"; "projected"; "obs_column_ref"; "obs_anchor";
   "forcing_basis"; "bin_op"; "un_op"; "cond"; "time_func"; "table_lookup";
-  "unchecked_dim";
+  "unchecked_dim"; "unit_literal";
 ]
 
 let exempt_keys = [

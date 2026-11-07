@@ -1,4 +1,4 @@
-{"ir_version":"0.42","validated_by":"ocaml-compiler-v0.42","model":{"name":"seir_k12_truth","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.43","validated_by":"ocaml-compiler-v0.43","model":{"name":"seir_k12_truth","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"E","kind":"integer"},
 {"name":"I","kind":"integer"},
@@ -12,13 +12,13 @@
 ],"tables":[],"interventions":[],"observations":[
 {"name":"onsets","source":"onsets","columns":[{"name":"time","role":"time"},{"name":"onsets","role":{"value":"count"}}],"scored":"onsets","emit_schedule":{"regular":{"start":0.0,"step":1.0,"end":182.0}},"covers":{"kind":"until","offset":0.0,"span":1.0},"projection":{"cumulative_flow":"progression"},"likelihood":{"neg_binomial":{"mean":{"expr":{"bin_op":{"op":"mul","left":{"param":"rho"},"right":{"projected":null}}},"grad":{"rho":{"grad":{"projected":null}}},"proj_grad":{"grad":{"param":"rho"}}},"dispersion":{"expr":{"param":"k"},"grad":{"k":{"grad":{"const":1.0}}}}}}}
 ],"parameters":[
-{"name":"sigma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
-{"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
-{"name":"rho","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null},
-{"name":"k","value":{"mode":"estimated","bounds":[0.1,1000.0],"prior":"flat","transform":"identity"},"param_kind":"positive","param_dim":null},
-{"name":"N0","value":{"mode":"estimated","bounds":[100.0,10000000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null},
-{"name":"E0","value":{"mode":"estimated","bounds":[0.0,1000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null},
-{"name":"I0","value":{"mode":"estimated","bounds":[0.0,1000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null}
+{"name":"sigma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat"},"param_kind":"rate","param_dim":null},
+{"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat"},"param_kind":"rate","param_dim":null},
+{"name":"rho","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat"},"param_kind":"probability","param_dim":null},
+{"name":"k","value":{"mode":"estimated","bounds":[0.1,1000.0],"prior":"flat"},"param_kind":"positive","param_dim":null},
+{"name":"N0","value":{"mode":"estimated","bounds":[100.0,10000000.0],"prior":"flat"},"param_kind":"count","param_dim":null},
+{"name":"E0","value":{"mode":"estimated","bounds":[0.0,1000.0],"prior":"flat"},"param_kind":"count","param_dim":null},
+{"name":"I0","value":{"mode":"estimated","bounds":[0.0,1000.0],"prior":"flat"},"param_kind":"count","param_dim":null}
 ],"initial_conditions":{"S":{"deterministic":{"bin_op":{"op":"sub","left":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"param":"E0"}}},"right":{"param":"I0"}}}},"E":{"deterministic":{"param":"E0"}},"I":{"deterministic":{"param":"I0"}}},"ic_grad":{"S":{"N0":{"grad":{"const":1.0}},"E0":{"grad":{"const":-1.0}},"I0":{"grad":{"const":-1.0}}},"E":{"E0":{"grad":{"const":1.0}}},"I":{"I0":{"grad":{"const":1.0}}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":182.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"E":[],"I":[],"R":[]},"base_compartments":["S","E","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","E","I","R"]}}
 ]}}

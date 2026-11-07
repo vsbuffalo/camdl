@@ -65,6 +65,7 @@ fn collect(e: &Expr, out: &mut HashSet<String>) {
         // Leaves / non-param nodes. A `BindingRef` body is state-only
         // (param-free, enforced at `CompiledModel::new`), so it adds no refs.
         Expr::Const(_)
+        | Expr::UnitLiteral(_)
         | Expr::ConstRef(_)
         | Expr::Pop(_)
         | Expr::PopSum(_)
@@ -205,6 +206,7 @@ fn collect_forcing_table_refs(e: &Expr, forcings: &mut HashSet<String>, tables: 
         }
         Expr::UncheckedDim(w) => collect_forcing_table_refs(&w.unchecked_dim.inner, forcings, tables),
         Expr::Const(_)
+        | Expr::UnitLiteral(_)
         | Expr::ConstRef(_)
         | Expr::Param(_)
         | Expr::Pop(_)

@@ -69,7 +69,9 @@ let rec fold tbls (e : expr) : expr =
   (* A model constant stays a reference, not its literal: folding it would let
      `2 * omega` and `omega * beta` re-associate with neighbouring literals and
      move the arithmetic, and would drop the name every display shows. *)
-  | Const _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _ | BindingRef _
+  (* A unit literal stays a leaf, as it did when it was a wrapped Const: folding
+     it into neighbouring literals would re-associate the arithmetic. *)
+  | Const _ | UnitLiteral _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _ | BindingRef _
   | Projected | ObsColumnRef _ | ObsAnchor _ ->
       e
   (* LICM runs after constant_fold, so a PerEvalRef cannot appear here. *)

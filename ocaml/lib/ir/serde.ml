@@ -195,6 +195,12 @@ let rec expr_to_json (e : expr) : Yojson.Safe.t =
       ("dim",    arr [int u.dim_p; int u.dim_t]);
       ("reason", str u.reason);
     ])]
+  | UnitLiteral u ->
+    obj [("unit_literal", obj [
+      ("value", flt u.value);
+      ("dim",   arr [int u.dim_p; int u.dim_t]);
+      ("unit",  str u.unit);
+    ])]
 
 let bin_op_of_str = function
   | "add" -> Add | "sub" -> Sub | "mul" -> Mul
@@ -278,6 +284,17 @@ let rec expr_of_json (j : Yojson.Safe.t) : expr =
            reason = as_string (member "reason" u);
          }
        | _ -> fail "unchecked_dim.dim must be [P, T] pair")
+    | ["unit_literal"] ->
+      let u = List.assoc "unit_literal" kvs in
+      (match as_list (member "dim" u) with
+       | [p; t] ->
+         UnitLiteral {
+           value = as_float (member "value" u);
+           dim_p = as_int p;
+           dim_t = as_int t;
+           unit  = as_string (member "unit" u);
+         }
+       | _ -> fail "unit_literal.dim must be [P, T] pair")
     | _ ->
       fail "unrecognised expr object with keys [%s]" (String.concat ", " keys)
     )
@@ -1464,16 +1481,6 @@ let prior_dist_of_json j =
   )
   | _ -> fail "prior_dist must be a single-key object"
 
-let transform_to_json = function
-  | Log      -> str "log"
-  | Logit    -> str "logit"
-  | Identity -> str "identity"
-
-let transform_of_json j =
-  match as_string j with
-  | "log" -> Log | "logit" -> Logit | "identity" -> Identity
-  | s -> fail "unknown transform '%s'" s
-
 let hierarchical_prior_to_json (h : hierarchical_prior) : Yojson.Safe.t =
   obj [
     ("kind",       str (hierarchical_kind_name h.hkind));
@@ -1516,8 +1523,7 @@ let param_value_to_json (v : param_value) : Yojson.Safe.t =
       [("mode", str "estimated")]
       @ (match e.est_init   with None -> [] | Some v -> [("init", flt v)])
       @ (match e.est_bounds with None -> [] | Some (lo, hi) -> [("bounds", arr [flt lo; flt hi])])
-      @ [ ("prior",     prior_spec_to_json e.est_prior);
-          ("transform", transform_to_json  e.est_transform); ]
+      @ [ ("prior", prior_spec_to_json e.est_prior) ]
     )
 
 let param_value_of_json j : param_value =
@@ -1532,7 +1538,6 @@ let param_value_of_json j : param_value =
         | Some (`List [lo; hi]) -> Some (as_float lo, as_float hi)
         | _ -> fail "bounds must be a two-element array [lo, hi]");
       est_prior     = prior_spec_of_json (member "prior" j);
-      est_transform = transform_of_json  (member "transform" j);
     }
   | _ -> fail "parameter value: \"mode\" must be \"fixed\", \"estimated\", or \"required\""
 

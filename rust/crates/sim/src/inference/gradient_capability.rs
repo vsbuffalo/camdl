@@ -44,7 +44,7 @@ pub fn collect_param_refs(e: &Expr, out: &mut HashSet<String>) {
             collect_param_refs(&w.cond.then, out);
             collect_param_refs(&w.cond.else_, out);
         }
-        Expr::PopSum(_) | Expr::Pop(_) | Expr::Const(_) | Expr::ConstRef(_) | Expr::Time(_)
+        Expr::PopSum(_) | Expr::Pop(_) | Expr::Const(_) | Expr::UnitLiteral(_) | Expr::ConstRef(_) | Expr::Time(_)
         | Expr::Dt(_)
         // gh#616: an anchor carries no parameter reference (its value comes from
         // the data), so it contributes nothing to a gradient's param set.
@@ -110,7 +110,7 @@ pub(crate) fn collect_n_param_refs(
                 collect_n_param_refs(t, projection, out);
             }
         }
-        Expr::PopSum(_) | Expr::Pop(_) | Expr::Const(_) | Expr::ConstRef(_) | Expr::Time(_)
+        Expr::PopSum(_) | Expr::Pop(_) | Expr::Const(_) | Expr::UnitLiteral(_) | Expr::ConstRef(_) | Expr::Time(_)
         | Expr::Dt(_) | Expr::ObsAnchor(_)
         | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::ObsColumnRef(_) | Expr::BindingRef(_) => {}
         Expr::PerEvalRef(_) => {

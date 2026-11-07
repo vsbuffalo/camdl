@@ -278,6 +278,24 @@ pub struct UncheckedDimWrap {
     pub unchecked_dim: UncheckedDimExpr,
 }
 
+/// A unit literal such as `0.2 'per_day`: a known constant of dimension
+/// `dim = (P exponent, T exponent)` whose `value` the compiler has already
+/// scaled into the model's `time_unit`. `unit` is the literal's unit name
+/// (`"per_day"`), kept for audit. Unlike [`UncheckedDimExpr`] the dimension is
+/// a checked fact, not an assertion. Runtime semantics: evaluates to `value`;
+/// its derivative is zero.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnitLiteralExpr {
+    pub value: f64,
+    pub dim:   (i32, i32),
+    pub unit:  String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnitLiteralWrap {
+    pub unit_literal: UnitLiteralExpr,
+}
+
 // ── Expression ────────────────────────────────────────────────────────────────
 
 /// Pure, total, first-order expression language.  Each variant serialises to
@@ -313,6 +331,7 @@ pub enum Expr {
     TableLookup(TableLookupWrap),
     Projected(ProjectedExpr),
     UncheckedDim(UncheckedDimWrap),
+    UnitLiteral(UnitLiteralWrap),
     Reduce(ReduceWrap),
     BindingRef(BindingRefWrap),
     PerEvalRef(PerEvalRefWrap),
@@ -450,6 +469,9 @@ impl<'de> Deserialize<'de> for Expr {
                     "unchecked_dim" => {
                         Expr::UncheckedDim(UncheckedDimWrap { unchecked_dim: map.next_value()? })
                     }
+                    "unit_literal" => {
+                        Expr::UnitLiteral(UnitLiteralWrap { unit_literal: map.next_value()? })
+                    }
                     "reduce" => Expr::Reduce(ReduceWrap { reduce: map.next_value()? }),
                     "binding_ref" => Expr::BindingRef(BindingRefWrap { binding_ref: map.next_value()? }),
                     "per_eval_ref" => Expr::PerEvalRef(PerEvalRefWrap { per_eval_ref: map.next_value()? }),
@@ -466,7 +488,7 @@ impl<'de> Deserialize<'de> for Expr {
                         return Err(de::Error::custom(format!(
                             "unknown expression node kind '{other}' (expected one of: const, \
                              param, const_ref, pop, pop_sum, time, dt, bin_op, un_op, cond, time_func, \
-                             table_lookup, projected, unchecked_dim, reduce, binding_ref, \
+                             table_lookup, projected, unchecked_dim, unit_literal, reduce, binding_ref, \
                              per_eval_ref, obs_column_ref, obs_anchor, forcing_basis)"
                         )))
                     }
@@ -553,7 +575,10 @@ mod deserialize_tests {
                 reason: "test".into(),
             },
         });
-        let tree = Expr::bin_op(BinOp::Add, cond, escaped);
+        let lit = Expr::UnitLiteral(UnitLiteralWrap {
+            unit_literal: UnitLiteralExpr { value: 7.0, dim: (0, 1), unit: "weeks".into() },
+        });
+        let tree = Expr::bin_op(BinOp::Add, Expr::bin_op(BinOp::Mul, cond, lit), escaped);
         roundtrip(&tree);
     }
 
@@ -565,6 +590,13 @@ mod deserialize_tests {
             Expr::const_(2.5)
         );
         assert_eq!(serde_json::from_str::<Expr>(r#"{"time": null}"#).unwrap(), Expr::time());
+        assert_eq!(
+            serde_json::from_str::<Expr>(r#"{"unit_literal":{"value":0.2,"dim":[0,-1],"unit":"per_day"}}"#)
+                .unwrap(),
+            Expr::UnitLiteral(UnitLiteralWrap {
+                unit_literal: UnitLiteralExpr { value: 0.2, dim: (0, -1), unit: "per_day".into() },
+            })
+        );
         assert_eq!(
             serde_json::from_str::<Expr>(r#"{"bin_op":{"op":"mul","left":{"param":"R0"},"right":{"pop":"S"}}}"#).unwrap(),
             Expr::bin_op(BinOp::Mul, Expr::param("R0"), Expr::pop("S"))

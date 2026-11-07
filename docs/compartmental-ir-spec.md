@@ -280,6 +280,10 @@ expr :=
                                    --   pred is any expr; truthy iff > 0, falsy iff ≤ 0
   | TimeFunc(string)                -- named time-varying function (see 3.3)
   | TableLookup(string, expr list)  -- named table, multi-index (see 3.4)
+  | UnitLiteral(float, dim, string) -- a unit literal: value scaled to time_unit,
+                                   --   its dimension [P, T], and its unit name
+  | UncheckedDim(expr, dim, string) -- the user's escape: asserts a dimension
+                                   --   for expr without checking it
 
 op  := Add | Sub | Mul | Div | Pow | Mod | Min | Max
      | Eq | Neq | Lt | Gt | Le | Ge          -- comparison; result used as Cond predicate
@@ -610,7 +614,6 @@ parameter: {
   value: float | null,                -- null = must be supplied at runtime via --param/--params
   bounds: [float, float] | null,      -- optional [lo, hi] constraint for inference/validation
   prior: prior_dist | null,           -- v0.2+: prior for inference (null in v0.1)
-  transform: transform | null,        -- v0.2+: for unconstrained MCMC proposals
   initial_value: float | null,        -- v0.2+: hint for optimization
   param_kind: string | null,          -- DSL type: "rate", "probability", "positive", "count", "real"
   param_dim: [int, int] | null        -- explicit dimension as [P_exponent, T_exponent]
@@ -625,16 +628,11 @@ prior_dist :=
   | Gamma(shape: float, rate: float)
   | Exponential(rate: float)
   | Fixed(value: float)
-
-transform :=
-  | Log          -- (0, ∞) → (-∞, ∞)
-  | Logit        -- (0, 1) → (-∞, ∞)
-  | Identity
 ```
 
-In v0.1, the runtime uses `value` directly. The `prior` and `transform` fields
-are present in the schema but nullable — the runtime ignores them during forward
-simulation.
+The runtime uses `value` directly in forward simulation and ignores `prior`. A
+parameter carries no transform: each sampler chooses its change of variables
+from the parameter's domain (its bounds and kind).
 
 ### 6.2 Hierarchical Priors `[v0.3, design sketch only]`
 
@@ -1035,8 +1033,7 @@ objects, `bin_op` expression nodes, parameterized initial conditions,
       "value": {
         "mode": "estimated",
         "bounds": [0.001, 2.0],
-        "prior": "flat",
-        "transform": "identity"
+        "prior": "flat"
       }
     },
     {
@@ -1044,8 +1041,7 @@ objects, `bin_op` expression nodes, parameterized initial conditions,
       "value": {
         "mode": "estimated",
         "bounds": [0.001, 1.0],
-        "prior": "flat",
-        "transform": "identity"
+        "prior": "flat"
       }
     },
     {
@@ -1053,8 +1049,7 @@ objects, `bin_op` expression nodes, parameterized initial conditions,
       "value": {
         "mode": "estimated",
         "bounds": [100.0, 100000.0],
-        "prior": "flat",
-        "transform": "identity"
+        "prior": "flat"
       }
     },
     {
@@ -1062,8 +1057,7 @@ objects, `bin_op` expression nodes, parameterized initial conditions,
       "value": {
         "mode": "estimated",
         "bounds": [1.0, 1000.0],
-        "prior": "flat",
-        "transform": "identity"
+        "prior": "flat"
       }
     }
   ],
@@ -1235,8 +1229,7 @@ one transition shown for brevity — the full file has eight.
       "value": {
         "mode": "estimated",
         "bounds": [0.001, 0.5],
-        "prior": "flat",
-        "transform": "identity"
+        "prior": "flat"
       }
     },
     {
@@ -1244,8 +1237,7 @@ one transition shown for brevity — the full file has eight.
       "value": {
         "mode": "estimated",
         "bounds": [0.01, 1.0],
-        "prior": "flat",
-        "transform": "identity"
+        "prior": "flat"
       }
     },
     {
@@ -1253,8 +1245,7 @@ one transition shown for brevity — the full file has eight.
       "value": {
         "mode": "estimated",
         "bounds": [0.01, 1.0],
-        "prior": "flat",
-        "transform": "identity"
+        "prior": "flat"
       }
     }
   ],

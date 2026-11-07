@@ -21,7 +21,7 @@ stoichiometry and a rate expression), observation models, parameters, and
 initial conditions.
 
 The expression language (`expr`) is a pure, total, first-order AST over
-`Const | Param | Pop | PopSum | Time | Dt | BinOp | UnOp | Cond | TimeFunc | TableLookup | Projected | UncheckedDim | Reduce | BindingRef`.
+`Const | Param | Pop | PopSum | Time | Dt | BinOp | UnOp | Cond | TimeFunc | TableLookup | Projected | UnitLiteral | UncheckedDim | Reduce | BindingRef`.
 No recursion, no lexical binding — propensities evaluate in bounded time.
 
 - `Cond` guards against division-by-zero in Gillespie.
@@ -29,7 +29,9 @@ No recursion, no lexical binding — propensities evaluate in bounded time.
   rates).
 - `Dt` exposes the runtime integrator step (gh#54).
 - `Projected` is the observation-projection value (in likelihoods).
-- `UncheckedDim` is the dimensional escape.
+- `UnitLiteral` is a unit literal (`0.2 'per_day`): a constant already scaled to
+  the model's `time_unit`, carrying its checked dimension and unit name.
+- `UncheckedDim` is the user's dimensional escape, `unchecked_dim(...)`.
 - `Reduce` is an n-ary sum (left-fold, matching the OCaml Add-chain order).
 - `BindingRef` references a hoisted model-level binding (a shared subexpression
   resolved by slot).

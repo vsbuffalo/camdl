@@ -1092,7 +1092,6 @@ mod tests {
                     init: None,
                     bounds: Some(b),
                     prior: PriorSpec::Dist(PriorDist::HalfNormal(ir::parameter::HalfNormalPrior { sigma: 10.0 })),
-                    transform: ir::parameter::Transform::Identity,
                 },
                 None => ParamValue::Required,
             },

@@ -276,7 +276,7 @@ fn substitute_expr(
             }
         }
         Expr::UncheckedDim(w) => substitute_expr(&mut w.unchecked_dim.inner, anchors, site, out),
-        Expr::Const(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
+        Expr::Const(_) | Expr::UnitLiteral(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
         | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_)
         | Expr::ObsColumnRef(_) | Expr::BindingRef(_) | Expr::PerEvalRef(_) => {}
     }
@@ -391,8 +391,8 @@ fn const_value(e: &Expr) -> Option<f64> {
     use ir::expr::{BinOp, UnOp};
     match e {
         Expr::Const(c) => Some(c.value),
-        // Unit literals (`60 'days`) lower to a dimensional escape around a
-        // constant; see through it, as every other analysis does.
+        Expr::UnitLiteral(w) => Some(w.unit_literal.value),
+        // A user's dimensional escape around a constant is that constant.
         Expr::UncheckedDim(w) => const_value(&w.unchecked_dim.inner),
         Expr::UnOp(w) if w.un_op.op == UnOp::Neg => const_value(&w.un_op.arg).map(|v| -v),
         Expr::BinOp(w) => {
@@ -422,7 +422,7 @@ fn expr_has_anchor(e: &Expr) -> bool {
         Expr::TableLookup(w) => w.table_lookup.indices.iter().any(expr_has_anchor),
         Expr::Reduce(w) => w.reduce.iter().any(expr_has_anchor),
         Expr::UncheckedDim(w) => expr_has_anchor(&w.unchecked_dim.inner),
-        Expr::Const(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
+        Expr::Const(_) | Expr::UnitLiteral(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
         | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_)
         | Expr::ObsColumnRef(_) | Expr::BindingRef(_) | Expr::PerEvalRef(_) => false,
     }

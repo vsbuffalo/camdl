@@ -102,7 +102,6 @@ fn count_ivp_model() -> CompiledModel {
                     init: Some(0.4),
                     bounds: Some((0.01, 2.0)),
                     prior: ir::parameter::PriorSpec::Flat,
-                    transform: ir::parameter::Transform::Identity,
                 },
                 param_kind: None,
                 param_dim: None,
@@ -113,7 +112,6 @@ fn count_ivp_model() -> CompiledModel {
                     init: Some(550.0),
                     bounds: Some((I0_LOWER, I0_UPPER)),
                     prior: ir::parameter::PriorSpec::Flat,
-                    transform: ir::parameter::Transform::Identity,
                 },
                 // As the downstream model declares it: `I0 : count`.
                 param_kind: Some(ir::parameter::ParamKind::Count),
@@ -308,7 +306,6 @@ fn fraction_ivp_model() -> CompiledModel {
             init: Some(0.00003),
             bounds: Some((0.0005, 0.05)),
             prior: ir::parameter::PriorSpec::Flat,
-            transform: ir::parameter::Transform::Identity,
         },
         param_kind: Some(ir::parameter::ParamKind::Probability),
         param_dim: None,

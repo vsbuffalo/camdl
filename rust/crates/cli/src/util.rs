@@ -5383,7 +5383,6 @@ mod tests {
                     (v, Some(b)) => ir::parameter::ParamValue::Estimated {
                         init: v, bounds: Some(b),
                         prior: ir::parameter::PriorSpec::Flat,
-                        transform: ir::parameter::Transform::Identity,
                     },
                     (Some(v), None) => ir::parameter::ParamValue::Fixed { value: v },
                     (None, None) => ir::parameter::ParamValue::Required,

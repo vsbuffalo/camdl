@@ -47,6 +47,7 @@ let deps ~(bindings : Ir.binding list) (e : Ir.expr) : string list =
     | Ir.Cond c -> go c.pred; go c.then_; go c.else_
     | Ir.TableLookup (_, idxs) -> List.iter go idxs
     | Ir.UncheckedDim u -> go u.inner
+    | Ir.UnitLiteral _ -> ()
     | Ir.Reduce terms -> List.iter go terms
     | Ir.PerEvalRef _ ->
       (* LICM (`licm.ml`) rewrites transition rates and observation arguments;
@@ -170,6 +171,7 @@ let closed (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
         Ir.Cond { pred = subst c.pred; then_ = subst c.then_; else_ = subst c.else_ }
       | Ir.TableLookup (t, idxs) -> Ir.TableLookup (t, List.map subst idxs)
       | Ir.UncheckedDim u -> Ir.UncheckedDim { u with inner = subst u.inner }
+      | Ir.UnitLiteral _ -> e
       | Ir.Reduce terms -> Ir.Reduce (List.map subst terms)
       | Ir.PerEvalRef _ ->
         failwith "PerEvalRef in an initial condition (gh#272 compiler invariant)"

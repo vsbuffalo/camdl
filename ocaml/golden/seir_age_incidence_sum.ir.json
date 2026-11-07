@@ -1,4 +1,4 @@
-{"ir_version":"0.42","validated_by":"ocaml-compiler-v0.42","model":{"name":"seir_age_incidence_sum","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.43","validated_by":"ocaml-compiler-v0.43","model":{"name":"seir_age_incidence_sum","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_child","kind":"integer"},
 {"name":"S_adult","kind":"integer"},
 {"name":"E_child","kind":"integer"},
@@ -19,11 +19,11 @@
 ],"interventions":[],"observations":[
 {"name":"weekly_cases","source":"weekly_cases","columns":[{"name":"time","role":"time"},{"name":"weekly_cases","role":{"value":"count"}}],"scored":"weekly_cases","emit_schedule":{"regular":{"start":0.0,"step":7.0,"end":100.0}},"covers":{"kind":"until","offset":0.0,"span":7.0},"projection":{"cumulative_flow_sum":["infection_child","infection_adult"]},"likelihood":{"neg_binomial":{"mean":{"expr":{"bin_op":{"op":"mul","left":{"param":"rho"},"right":{"projected":null}}},"grad":{"rho":{"grad":{"projected":null}}},"proj_grad":{"grad":{"param":"rho"}}},"dispersion":{"expr":{"param":"k"},"grad":{"k":{"grad":{"const":1.0}}}}}}}
 ],"parameters":[
-{"name":"beta","value":{"mode":"estimated","bounds":[0.001,0.5],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
-{"name":"sigma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
-{"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
-{"name":"rho","value":{"mode":"estimated","bounds":[0.0,1.0],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null},
-{"name":"k","value":{"mode":"estimated","bounds":[0.1,100.0],"prior":"flat","transform":"identity"},"param_kind":"real","param_dim":null}
+{"name":"beta","value":{"mode":"estimated","bounds":[0.001,0.5],"prior":"flat"},"param_kind":"rate","param_dim":null},
+{"name":"sigma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat"},"param_kind":"rate","param_dim":null},
+{"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat"},"param_kind":"rate","param_dim":null},
+{"name":"rho","value":{"mode":"estimated","bounds":[0.0,1.0],"prior":"flat"},"param_kind":"probability","param_dim":null},
+{"name":"k","value":{"mode":"estimated","bounds":[0.1,100.0],"prior":"flat"},"param_kind":"real","param_dim":null}
 ],"initial_conditions":{"S_child":{"deterministic":{"const":4990.0}},"S_adult":{"deterministic":{"const":5000.0}},"I_child":{"deterministic":{"const":10.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":100.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"default","params":{"beta":0.05,"sigma":0.2,"gamma":0.1,"rho":0.6,"k":5.0},"enable":[],"disable":[],"t_end":100.0}
 ],"model_structure":{"dimensions":[{"name":"age","values":["child","adult"]}],"compartment_dims":{"S":["age"],"E":["age"],"I":["age"],"R":["age"]},"base_compartments":["S","E","I","R"],"transmission_transitions":[],"infectious_compartments":[]},"bindings":[

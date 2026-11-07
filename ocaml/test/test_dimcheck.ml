@@ -509,12 +509,11 @@ let test_lag_duration_param_ok () =
   Alcotest.(check bool) "duration lag param ok" true (no_errors r)
 
 let test_lag_literal_duration_ok () =
-  (* lag = 10 'days, expander-lowered to UncheckedDim{dim_t=1} → dimension T *)
+  (* lag = 10 'days, expander-lowered to a unit literal of dimension T *)
   let m = empty_model
     ~compartments:[mk_compartment "S"]
     ~time_functions:[lag_forcing
-      (Some (UncheckedDim { inner = const 10.0; dim_p = 0; dim_t = 1;
-                            reason = "unit literal 'days" }))]
+      (Some (UnitLiteral { value = 10.0; dim_p = 0; dim_t = 1; unit = "days" }))]
     () in
   let r = Dimcheck.check_model m in
   Alcotest.(check bool) "literal duration lag ok" true (no_errors r)

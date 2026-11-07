@@ -47,6 +47,7 @@ fn walk<'a>(
     };
     match expr {
         Expr::Const(_)
+        | Expr::UnitLiteral(_)
         | Expr::Param(_)
         | Expr::ConstRef(_)
         | Expr::Time(_)

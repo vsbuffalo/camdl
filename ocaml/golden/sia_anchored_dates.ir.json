@@ -1,4 +1,4 @@
-{"ir_version":"0.42","validated_by":"ocaml-compiler-v0.42","model":{"name":"sia_anchored_dates","version":"0.3","time_unit":"days","description":null,"origin":"2013-01-01","origin_rata_die":41272,"compartments":[
+{"ir_version":"0.43","validated_by":"ocaml-compiler-v0.43","model":{"name":"sia_anchored_dates","version":"0.3","time_unit":"days","description":null,"origin":"2013-01-01","origin_rata_die":41272,"compartments":[
 {"name":"S_north","kind":"integer"},
 {"name":"S_south","kind":"integer"},
 {"name":"I_north","kind":"integer"},
@@ -22,11 +22,11 @@
 {"name":"sia_south_r1","base_name":"sia","fire":{"scheduled":{"at_times_expr":[{"table_lookup":{"table":"sia_time","indices":[{"const":4.0}]}}]}},"actions":[{"fraction_transfer":{"src":"S_south","dst":"V_south","fraction":{"param":"vacc_cov"}}}]},
 {"name":"sia_south_r2","base_name":"sia","fire":{"scheduled":{"at_times_expr":[{"table_lookup":{"table":"sia_time","indices":[{"const":5.0}]}}]}},"actions":[{"fraction_transfer":{"src":"S_south","dst":"V_south","fraction":{"param":"vacc_cov"}}}]}
 ],"observations":[],"parameters":[
-{"name":"beta","value":{"mode":"estimated","bounds":[0.001,2.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
-{"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
-{"name":"vacc_cov","value":{"mode":"estimated","bounds":[0.0,1.0],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null},
-{"name":"I0","value":{"mode":"estimated","bounds":[1.0,1000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null},
-{"name":"N0","value":{"mode":"estimated","bounds":[1000.0,1000000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null}
+{"name":"beta","value":{"mode":"estimated","bounds":[0.001,2.0],"prior":"flat"},"param_kind":"rate","param_dim":null},
+{"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat"},"param_kind":"rate","param_dim":null},
+{"name":"vacc_cov","value":{"mode":"estimated","bounds":[0.0,1.0],"prior":"flat"},"param_kind":"probability","param_dim":null},
+{"name":"I0","value":{"mode":"estimated","bounds":[1.0,1000.0],"prior":"flat"},"param_kind":"count","param_dim":null},
+{"name":"N0","value":{"mode":"estimated","bounds":[1000.0,1000000.0],"prior":"flat"},"param_kind":"count","param_dim":null}
 ],"initial_conditions":{"S_north":{"deterministic":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"param":"I0"}}}},"S_south":{"deterministic":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"param":"I0"}}}},"I_north":{"deterministic":{"param":"I0"}},"I_south":{"deterministic":{"param":"I0"}}},"ic_grad":{"S_north":{"I0":{"grad":{"const":-1.0}},"N0":{"grad":{"const":1.0}}},"S_south":{"I0":{"grad":{"const":-1.0}},"N0":{"grad":{"const":1.0}}},"I_north":{"I0":{"grad":{"const":1.0}}},"I_south":{"I0":{"grad":{"const":1.0}}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":730.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"no campaigns","params":{"beta":0.11,"gamma":0.1,"vacc_cov":0.0,"I0":10.0,"N0":10000.0},"enable":[],"disable":[],"t_end":null},
 {"name":"campaigns","label":"SIA at calendar dates","params":{"beta":0.11,"gamma":0.1,"vacc_cov":0.5,"I0":10.0,"N0":10000.0},"enable":["sia"],"disable":[],"t_end":null}

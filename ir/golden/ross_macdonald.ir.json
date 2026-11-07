@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.42",
-  "validated_by": "ocaml-compiler-v0.42",
+  "ir_version": "0.43",
+  "validated_by": "ocaml-compiler-v0.43",
   "model": {
     "name": "ross_macdonald",
     "version": "0.3",
@@ -499,18 +499,18 @@
       }
     ],
     "parameters": [
-      {"name": "a", "value": {"mode": "estimated", "bounds": [0.1, 1.0], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null},
-      {"name": "b_h", "value": {"mode": "estimated", "bounds": [0.05, 0.8], "prior": "flat", "transform": "identity"}, "param_kind": "probability", "param_dim": null},
-      {"name": "b_v", "value": {"mode": "estimated", "bounds": [0.05, 0.5], "prior": "flat", "transform": "identity"}, "param_kind": "probability", "param_dim": null},
-      {"name": "r", "value": {"mode": "estimated", "bounds": [0.005, 0.5], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null},
-      {"name": "sigma_v", "value": {"mode": "estimated", "bounds": [0.05, 0.5], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null},
-      {"name": "mu_v", "value": {"mode": "estimated", "bounds": [0.01, 0.3], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null},
-      {"name": "rho_sens", "value": {"mode": "estimated", "bounds": [0.5, 1.0], "prior": "flat", "transform": "identity"}, "param_kind": "probability", "param_dim": null},
-      {"name": "rho_spec", "value": {"mode": "estimated", "bounds": [0.5, 1.0], "prior": "flat", "transform": "identity"}, "param_kind": "probability", "param_dim": null},
-      {"name": "H0", "value": {"mode": "estimated", "bounds": [100.0, 100000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null},
-      {"name": "M0", "value": {"mode": "estimated", "bounds": [100.0, 1000000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null},
-      {"name": "I_h0", "value": {"mode": "estimated", "bounds": [1.0, 10000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null},
-      {"name": "N_tested", "value": {"mode": "estimated", "bounds": [10.0, 10000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null}
+      {"name": "a", "value": {"mode": "estimated", "bounds": [0.1, 1.0], "prior": "flat"}, "param_kind": "rate", "param_dim": null},
+      {"name": "b_h", "value": {"mode": "estimated", "bounds": [0.05, 0.8], "prior": "flat"}, "param_kind": "probability", "param_dim": null},
+      {"name": "b_v", "value": {"mode": "estimated", "bounds": [0.05, 0.5], "prior": "flat"}, "param_kind": "probability", "param_dim": null},
+      {"name": "r", "value": {"mode": "estimated", "bounds": [0.005, 0.5], "prior": "flat"}, "param_kind": "rate", "param_dim": null},
+      {"name": "sigma_v", "value": {"mode": "estimated", "bounds": [0.05, 0.5], "prior": "flat"}, "param_kind": "rate", "param_dim": null},
+      {"name": "mu_v", "value": {"mode": "estimated", "bounds": [0.01, 0.3], "prior": "flat"}, "param_kind": "rate", "param_dim": null},
+      {"name": "rho_sens", "value": {"mode": "estimated", "bounds": [0.5, 1.0], "prior": "flat"}, "param_kind": "probability", "param_dim": null},
+      {"name": "rho_spec", "value": {"mode": "estimated", "bounds": [0.5, 1.0], "prior": "flat"}, "param_kind": "probability", "param_dim": null},
+      {"name": "H0", "value": {"mode": "estimated", "bounds": [100.0, 100000.0], "prior": "flat"}, "param_kind": "count", "param_dim": null},
+      {"name": "M0", "value": {"mode": "estimated", "bounds": [100.0, 1000000.0], "prior": "flat"}, "param_kind": "count", "param_dim": null},
+      {"name": "I_h0", "value": {"mode": "estimated", "bounds": [1.0, 10000.0], "prior": "flat"}, "param_kind": "count", "param_dim": null},
+      {"name": "N_tested", "value": {"mode": "estimated", "bounds": [10.0, 10000.0], "prior": "flat"}, "param_kind": "count", "param_dim": null}
     ],
     "initial_conditions": {
       "S_h": {

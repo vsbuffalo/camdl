@@ -96,6 +96,7 @@ let dep_of_expr ~binding_dep (e : Ir.expr) : dep =
     | Ir.Cond c  -> join (go c.pred) (join (go c.then_) (go c.else_))
     | Ir.Reduce terms -> join_list (List.map go terms)
     | Ir.UncheckedDim u -> go u.inner
+    | Ir.UnitLiteral _ -> Const
   in
   go e
 

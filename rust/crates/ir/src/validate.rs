@@ -621,7 +621,7 @@ fn check_quantity_legal<'a>(
         // `value_at(…, last_obs)`, which is a `TimeAnchor`, not this node.
         Expr::ObsAnchor(_) => forbid(errors, quantity, "obs_anchor"),
         Expr::ForcingBasis(_) => forbid(errors, quantity, "forcing_basis"),
-        Expr::Const(_) | Expr::Time(_) | Expr::Param(_) | Expr::ConstRef(_) | Expr::Pop(_)
+        Expr::Const(_) | Expr::UnitLiteral(_) | Expr::Time(_) | Expr::Param(_) | Expr::ConstRef(_) | Expr::Pop(_)
         | Expr::PopSum(_) | Expr::TimeFunc(_) => {}
         Expr::BinOp(w) => {
             check_quantity_legal(&w.bin_op.left, bindings, quantity, errors, seen);
@@ -738,7 +738,7 @@ fn basis_nodes<'a>(e: &'a Expr, out: &mut Vec<&'a crate::expr::ForcingBasisRef>)
         Expr::TableLookup(w) => w.table_lookup.indices.iter().for_each(|i| basis_nodes(i, out)),
         Expr::UncheckedDim(w) => basis_nodes(&w.unchecked_dim.inner, out),
         Expr::Reduce(w) => w.reduce.iter().for_each(|t| basis_nodes(t, out)),
-        Expr::Const(_) | Expr::Param(_) | Expr::ConstRef(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
+        Expr::Const(_) | Expr::UnitLiteral(_) | Expr::Param(_) | Expr::ConstRef(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
         | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::BindingRef(_)
         | Expr::PerEvalRef(_) | Expr::ObsColumnRef(_) | Expr::ObsAnchor(_) => {}
     }
@@ -886,7 +886,7 @@ fn check_gradient_forcing_basis(model: &Model, errors: &mut Vec<ValidationError>
             Expr::TableLookup(w) => w.table_lookup.indices.iter().for_each(|i| walk(i, counts, errors)),
             Expr::UncheckedDim(w) => walk(&w.unchecked_dim.inner, counts, errors),
             Expr::Reduce(w) => w.reduce.iter().for_each(|t| walk(t, counts, errors)),
-            Expr::Const(_) | Expr::Param(_) | Expr::ConstRef(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
+            Expr::Const(_) | Expr::UnitLiteral(_) | Expr::Param(_) | Expr::ConstRef(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
             | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::Projected(_) | Expr::BindingRef(_)
             | Expr::PerEvalRef(_) | Expr::ObsColumnRef(_) | Expr::ObsAnchor(_) => {}
         }
@@ -930,7 +930,7 @@ struct RefCtx<'a> {
 
 fn check_expr(expr: &Expr, ctx: &RefCtx<'_>, allow_projected: bool, errors: &mut Vec<ValidationError>) {
     match expr {
-        Expr::Const(_) | Expr::Time(_) | Expr::Dt(_) => {}
+        Expr::Const(_) | Expr::UnitLiteral(_) | Expr::Time(_) | Expr::Dt(_) => {}
         Expr::Projected(_) => {
             // Allow in likelihood context; validate at call-site via allow_projected
             // (we pass allow_projected=true from check_likelihood_exprs)
@@ -1106,7 +1106,7 @@ fn check_likelihood_exprs(
 mod tests {
     use super::*;
     use crate::parameter::{
-        ParamValue, Parameter, PriorDist, NormalPrior, PriorSpec, Transform,
+        ParamValue, Parameter, PriorDist, NormalPrior, PriorSpec,
         HierarchicalKind, HierarchicalPrior,
     };
 
@@ -1117,7 +1117,7 @@ mod tests {
         Parameter {
             name: name.into(),
             value: ParamValue::Estimated {
-                init: None, bounds: None, prior, transform: Transform::Identity,
+                init: None, bounds: None, prior,
             },
             param_kind: None,
             param_dim:  None,

@@ -602,7 +602,7 @@ fn first_obs_anchor(e: &Expr) -> Option<&ir::anchor::AnchoredTime> {
         Expr::TableLookup(w) => w.table_lookup.indices.iter().find_map(first_obs_anchor),
         Expr::Reduce(w) => w.reduce.iter().find_map(first_obs_anchor),
         Expr::UncheckedDim(w) => first_obs_anchor(&w.unchecked_dim.inner),
-        Expr::Const(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
+        Expr::Const(_) | Expr::UnitLiteral(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
         | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_)
         | Expr::ObsColumnRef(_) | Expr::BindingRef(_) | Expr::PerEvalRef(_) => None,
     }
@@ -627,6 +627,7 @@ fn expr_refs_param(expr: &Expr) -> bool {
         // (which never contain a PerEvalRef), so the value is moot; grouped with
         // BindingRef for consistency.
         Expr::Const(_)
+        | Expr::UnitLiteral(_)
         | Expr::ConstRef(_)
         | Expr::Pop(_)
         | Expr::PopSum(_)
@@ -718,6 +719,7 @@ fn eval_table_expr(
             Ok(if !r.is_finite() { 0.0 } else { r })
         }
         Expr::UncheckedDim(w) => eval_table_expr(&w.unchecked_dim.inner, param_index, consts, params),
+        Expr::UnitLiteral(w) => Ok(w.unit_literal.value),
         _ => Err(SimError::Validation(
             "unsupported expression type in table values (only Const and Param are valid)".to_string()
         )),
@@ -846,6 +848,7 @@ fn resolve_coeff(
         Expr::UncheckedDim(w) => Ok(ResolvedExpr::UncheckedDim {
             inner: Box::new(resolve_coeff(&w.unchecked_dim.inner, param_index, consts)?),
         }),
+        Expr::UnitLiteral(w) => Ok(ResolvedExpr::Const(w.unit_literal.value)),
         _ => Err(SimError::Validation(
             "unsupported expression in forcing coefficient (only constants, \
              parameters, and arithmetic over them are allowed — a coefficient \
@@ -873,7 +876,7 @@ fn collect_param_names(expr: &Expr, out: &mut Vec<String>) {
         Expr::TableLookup(w) => w.table_lookup.indices.iter().for_each(|e| collect_param_names(e, out)),
         Expr::Reduce(w) => w.reduce.iter().for_each(|e| collect_param_names(e, out)),
         Expr::UncheckedDim(w) => collect_param_names(&w.unchecked_dim.inner, out),
-        Expr::Const(_) | Expr::ConstRef(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
+        Expr::Const(_) | Expr::UnitLiteral(_) | Expr::ConstRef(_) | Expr::Pop(_) | Expr::PopSum(_) | Expr::Time(_)
         | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_) | Expr::ObsColumnRef(_)
         | Expr::ObsAnchor(_)
         | Expr::BindingRef(_) | Expr::PerEvalRef(_) => {}
@@ -915,7 +918,7 @@ fn collect_binding_refs(expr: &Expr, out: &mut Vec<String>) {
         Expr::TableLookup(w) => w.table_lookup.indices.iter().for_each(|e| collect_binding_refs(e, out)),
         Expr::Reduce(w) => w.reduce.iter().for_each(|e| collect_binding_refs(e, out)),
         Expr::UncheckedDim(w) => collect_binding_refs(&w.unchecked_dim.inner, out),
-        Expr::Const(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
+        Expr::Const(_) | Expr::UnitLiteral(_) | Expr::ConstRef(_) | Expr::Param(_) | Expr::Pop(_) | Expr::PopSum(_)
         | Expr::Time(_) | Expr::Dt(_) | Expr::TimeFunc(_) | Expr::ForcingBasis(_) | Expr::Projected(_)
         | Expr::ObsColumnRef(_) | Expr::ObsAnchor(_) | Expr::PerEvalRef(_) => {}
     }
@@ -926,6 +929,7 @@ fn collect_binding_refs(expr: &Expr, out: &mut Vec<String>) {
 fn render_expr(expr: &Expr) -> String {
     match expr {
         Expr::Const(c) => format!("{}", c.value),
+        Expr::UnitLiteral(w) => format!("{}", w.unit_literal.value),
         Expr::Param(p) => p.param.clone(),
         Expr::Pop(p) => p.pop.clone(),
         Expr::BindingRef(w) => w.binding_ref.clone(),
@@ -1225,6 +1229,7 @@ fn expr_contains_dt_memo(e: &Expr, bindings: &HashMap<&str, &Expr>, memo: &mut H
     match e {
         Expr::Dt(_) => true,
         Expr::Const(_)
+        | Expr::UnitLiteral(_)
         | Expr::ConstRef(_)
         | Expr::Param(_)
         | Expr::Pop(_)

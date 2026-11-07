@@ -24,7 +24,7 @@ let prec_binop = function
   | Ir.Eq | Ir.Neq | Ir.Lt | Ir.Gt | Ir.Le | Ir.Ge -> 4
 
 let prec_expr : Ir.expr -> int = function
-  | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
+  | Ir.Const _ | Ir.UnitLiteral _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.TimeFunc _ | Ir.ForcingBasis _ | Ir.TableLookup _ | Ir.Projected
   | Ir.ObsColumnRef _ -> 10
   | Ir.ObsAnchor _ -> 10      (* a name (± a number), atomic *)
@@ -167,6 +167,9 @@ and pp_inner ~mode ~split ~ascii ppf = function
     pp ~mode ~split ~ascii ppf then_;
     Fmt.pf ppf " else ";
     pp ~mode ~split ~ascii ppf else_
+  (* The value is already in the model's time unit, so it prints as the number
+     it is; the literal's own unit name would misread it. *)
+  | Ir.UnitLiteral u -> pp_inner ~mode ~split ~ascii ppf (Ir.Const u.value)
   | Ir.UncheckedDim u ->
     Fmt.pf ppf "unchecked_dim(";
     pp ~mode ~split ~ascii ppf u.inner;

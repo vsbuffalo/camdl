@@ -82,7 +82,7 @@ let first_param (e : expr) : string option =
   let rec go = function
     | Param p -> Some p
     | Const _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _ | BindingRef _
-    | Projected | ObsColumnRef _ | ObsAnchor _ -> None
+    | Projected | ObsColumnRef _ | ObsAnchor _ | UnitLiteral _ -> None
     | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
     | BinOp b -> (match go b.left with Some _ as r -> r | None -> go b.right)
     | UnOp u  -> go u.arg
@@ -111,7 +111,7 @@ let uniq_check name_of xs constructor errors =
 
 let check_expr_refs ~site ~comps ~params ~constants ~tables ~tfs errors e =
   let rec go = function
-    | Const _ | Time | Dt | Projected | ObsColumnRef _ | ObsAnchor _ -> ()
+    | Const _ | UnitLiteral _ | Time | Dt | Projected | ObsColumnRef _ | ObsAnchor _ -> ()
     | Param p -> if not (SS.mem p params) then errors := UnknownParameter (p, site) :: !errors
     | ConstRef c -> if not (SS.mem c constants) then errors := UnknownConstant (c, site) :: !errors
     | Pop   c -> if not (SS.mem c comps)  then errors := UnknownCompartment (c, site) :: !errors

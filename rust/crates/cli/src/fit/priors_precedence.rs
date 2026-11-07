@@ -285,7 +285,6 @@ mod tests {
                     Some(pd) => ir::parameter::PriorSpec::Dist(pd),
                     None => ir::parameter::PriorSpec::Flat,
                 },
-                transform: ir::parameter::Transform::Identity,
             },
             param_kind: None,
             param_dim: None,

@@ -937,12 +937,13 @@ fn intervention_earliest_fire(iv: &Intervention) -> FireTime {
 
 /// Const-fold an `Expr` to a model-time float, or `None` if it references any
 /// non-constant leaf (a parameter, population, time, …). Mirrors the OCaml
-/// instant-evaluation: `Const`, `+ - * /`, unary `Neg`, and the dimensional escape
-/// `UncheckedDim` (a unit literal like `20 'weeks` lowers to
-/// `0 + UncheckedDim{140}`). Anything else is non-constant.
+/// instant-evaluation: `Const`, a unit literal (`20 'weeks` lowers to
+/// `0 + UnitLiteral{140}`), `+ - * /`, unary `Neg`, and the dimensional escape
+/// `UncheckedDim` around any of these. Anything else is non-constant.
 fn const_eval_expr(e: &Expr) -> Option<f64> {
     match e {
         Expr::Const(c) => Some(c.value),
+        Expr::UnitLiteral(w) => Some(w.unit_literal.value),
         Expr::UncheckedDim(w) => const_eval_expr(&w.unchecked_dim.inner),
         Expr::UnOp(w) => {
             let v = const_eval_expr(&w.un_op.arg)?;
@@ -1761,7 +1762,7 @@ mod tests {
     // ── Derived fork ─────────────────────────────────────────────────────────
 
     use ir::expr::{BinOpExpr, BinOpWrap, ConstExpr, ParamExpr, UnOpExpr, UnOpWrap,
-                   UncheckedDimExpr, UncheckedDimWrap};
+                   UnitLiteralExpr, UnitLiteralWrap};
     use ir::intervention::{Action, FireSource, InterventionSchedule, RecurringSchedule};
 
     fn set(names: &[&str]) -> HashSet<String> {
@@ -1823,17 +1824,13 @@ mod tests {
 
     #[test]
     fn const_eval_folds_unit_literal_instants_and_rejects_parameters() {
-        // `20 'weeks` lowers to `0 + UncheckedDim{140}`.
+        // `20 'weeks` lowers to `0 + UnitLiteral{140}`.
         let unit_140 = Expr::BinOp(BinOpWrap {
             bin_op: BinOpExpr {
                 op: BinOp::Add,
                 left: Box::new(Expr::Const(ConstExpr { value: 0.0 })),
-                right: Box::new(Expr::UncheckedDim(UncheckedDimWrap {
-                    unchecked_dim: UncheckedDimExpr {
-                        inner: Box::new(Expr::Const(ConstExpr { value: 140.0 })),
-                        dim: (0, 1),
-                        reason: "unit literal 'weeks".into(),
-                    },
+                right: Box::new(Expr::UnitLiteral(UnitLiteralWrap {
+                    unit_literal: UnitLiteralExpr { value: 140.0, dim: (0, 1), unit: "weeks".into() },
                 })),
             },
         });
@@ -1862,12 +1859,8 @@ mod tests {
             _ => panic!("AtTimes must be a constant fire time"),
         }
         // AtTimesExpr with a constant unit literal → folds.
-        let const_expr = Expr::UncheckedDim(UncheckedDimWrap {
-            unchecked_dim: UncheckedDimExpr {
-                inner: Box::new(Expr::Const(ConstExpr { value: 28.0 })),
-                dim: (0, 1),
-                reason: "unit literal 'days".into(),
-            },
+        let const_expr = Expr::UnitLiteral(UnitLiteralWrap {
+            unit_literal: UnitLiteralExpr { value: 28.0, dim: (0, 1), unit: "days".into() },
         });
         match intervention_earliest_fire(&scheduled("a", InterventionSchedule::AtTimesExpr(vec![const_expr]))) {
             FireTime::Const(t) => assert_eq!(t, 28.0),

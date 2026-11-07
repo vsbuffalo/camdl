@@ -75,6 +75,7 @@ pub struct EvalCtx<'a> {
 pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
     match expr {
         Expr::Const(c) => Ok(c.value),
+        Expr::UnitLiteral(w) => Ok(w.unit_literal.value),
 
         Expr::ConstRef(c) => ctx.model.const_values.get(c.const_ref.as_str())
             .copied()
