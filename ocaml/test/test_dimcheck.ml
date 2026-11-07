@@ -1028,7 +1028,7 @@ transitions {
 observations {
   counts {
     columns       { time : time, k : count }
-    projected  = prevalence(I)
+    projected  = I
     emit_schedule = every 7 'days
     k ~ poisson(rate = rho * X0 * s * projected / s)
   }

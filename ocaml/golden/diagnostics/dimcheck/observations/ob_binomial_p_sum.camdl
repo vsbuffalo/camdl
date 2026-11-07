@@ -23,7 +23,7 @@ transitions {
 observations {
   y {
     columns { time : time, y : count }
-    projected = prevalence(I)
+    projected = I
     y ~ binomial(n = 100, p = projected / N0 + gamma)
   }
 }
