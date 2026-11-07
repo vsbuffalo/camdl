@@ -7,6 +7,7 @@ related:
   - 2026-10-26-parameter-roles.md (Stage 2; ResolvedProblem)
   - 2026-10-29-method-scoped-settings.md (resolved fit identity)
   - 2026-07-17-ordered-dimensions.md (proposed, not landed; on branch docs/date-interval-semantics)
+  - 2026-11-05-size-brackets-and-dim-clause.md (amends section 2.1 and the E417 size rule; examples use `dim 1`)
 ---
 
 # Parameter families and spline coefficients
@@ -108,11 +109,11 @@ A size is written on the type:
 
 ```camdl
 parameters {
-  b : real[6] 'ratio in [-6, 1] ~ normal(mu = -1.5, sigma = 1.0)
+  b : real[6] dim 1 in [-6, 1] ~ normal(mu = -1.5, sigma = 1.0)
 }
 ```
 
-declares a family of six cells, `b[0]` through `b[5]`, each `real 'ratio` with
+declares a family of six cells, `b[0]` through `b[5]`, each `real dim 1` with
 that range and prior. Indexing counts from 0 (gh#990, closed: every user-facing
 index counts from 0; the language spec states no other base).
 
@@ -173,12 +174,13 @@ may write).
 New and reused diagnostics (codes E415 to E420 verified free: the catalog and
 `ocaml/lib` stop at E414):
 
-- **E417**, invalid size. The size must be a positive integer literal.
+- **E417**, invalid size. The size must be an integer literal of at least 2.
   `real[0]`, `real[-3]`, `real[2.5]` and a size given by an expression are
   refused with "the size of a parameter family must be a positive integer
-  literal". A size of 1 is legal (a family with one cell, indexed `b[0]`); it is
-  not collapsed to a scalar, so a model can be written uniformly and later
-  resized.
+  literal". A size of 1 is refused too: a single cell is a scalar, written
+  `real`, and `[1]` is the one size that collides with the bracket dimension
+  annotation it replaced
+  (`docs/dev/proposals/2026-11-05-size-brackets-and-dim-clause.md` §3.4).
 - **E278** (existing), name collision. `check_declaration_names` already
   registers every expanded name of every declaration, not only base names
   (`expander.ml`, the doc comment above `check_declaration_names`, around line
@@ -263,9 +265,9 @@ size `N` denotes the index set `0 .. N-1`:
 
 ```camdl
 parameters {
-  mu_b : real[6] 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  mu_b : real[6] dim 1 ~ normal(mu = -1.5, sigma = 1.0)
   sd_b : positive dim 1 ~ exponential(rate = 2)
-  b[p in province] : real[k in 6] 'ratio ~ normal(mu = mu_b[k], sigma = sd_b)
+  b[p in province] : real[k in 6] dim 1 ~ normal(mu = mu_b[k], sigma = sd_b)
 }
 ```
 
@@ -362,9 +364,9 @@ the arithmetic in `coefs`, using the element-wise list arithmetic of section
 
 ```camdl
 parameters {
-  mu_b : real[6] 'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  mu_b : real[6] dim 1 ~ normal(mu = -1.5, sigma = 1.0)
   sd_b : positive dim 1 ~ exponential(rate = 2)
-  z[province] : real[6] 'ratio ~ normal(mu = 0.0, sigma = 1.0)
+  z[province] : real[6] dim 1 ~ normal(mu = 0.0, sigma = 1.0)
 }
 forcing {
   beta_t[p in province] : bspline 'per_day {
@@ -437,7 +439,7 @@ not families. Binder names are source syntax and are not recorded.
 Everything computational is unchanged: the evaluator, the particle filter, PGAS,
 and the gradient code read scalar parameters exactly as before. The family list
 is metadata for the fit config, the CLI, summaries, traces and the viewer. It
-adds an IR field, so `ir/VERSION` bumps (0.42 to 0.43) and every golden and the
+adds an IR field, so `ir/VERSION` bumps (0.43 to 0.44) and every golden and the
 Rust deserializer change atomically with it (CLAUDE.md, "Goldens and
 `ir/VERSION` are a human-loop change"). The bump re-keys cached runs; pre-1.0
 that is the cost of the better representation and is accepted.
@@ -688,7 +690,7 @@ modes family keeps its meaning and its refusal:
 
 ```camdl
 parameters {
-  z : real[10] 'ratio ~ normal(mu = 0.0, sigma = 1.0)
+  z : real[10] dim 1 ~ normal(mu = 0.0, sigma = 1.0)
 }
 ...
 coefs = smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks)
@@ -771,7 +773,7 @@ Explicit coefficients (`ocaml/golden/bspline_param_coefs.camdl`):
 ```camdl
 # before                                    # after
 parameters {                                parameters {
-  b1 : real dim 1 in [-6, 1]                 b : real[6] 'ratio in [-6, 1]
+  b1 : real dim 1 in [-6, 1]                 b : real[6] dim 1 in [-6, 1]
   ...six lines...                           }
 }                                           forcing {
 forcing {                                     beta_t : bspline 'per_day {
@@ -793,9 +795,9 @@ form, which PGAS accepts:
 ```camdl
 dimensions { province = [kinshasa, nord_kivu, ituri] }
 parameters {
-  mu_b : real[6]     'ratio ~ normal(mu = -1.5, sigma = 1.0)  # national curve
+  mu_b : real[6] dim 1 ~ normal(mu = -1.5, sigma = 1.0)  # national curve
   sd_b : positive dim 1 ~ exponential(rate = 2)           # deviation scale
-  z[province] : real[6] 'ratio ~ normal(mu = 0.0, sigma = 1.0) # standardised deviations
+  z[province] : real[6] dim 1 ~ normal(mu = 0.0, sigma = 1.0) # standardised deviations
 }
 forcing {
   beta_t[p in province] : bspline 'per_day {
@@ -819,9 +821,9 @@ The centred form of the same model, for PMMH or MH:
 
 ```camdl
 parameters {
-  mu_b : real[6]  'ratio ~ normal(mu = -1.5, sigma = 1.0)
+  mu_b : real[6] dim 1 ~ normal(mu = -1.5, sigma = 1.0)
   sd_b : positive dim 1 ~ exponential(rate = 2)
-  b[p in province] : real[k in 6] 'ratio ~ normal(mu = mu_b[k], sigma = sd_b)
+  b[p in province] : real[k in 6] dim 1 ~ normal(mu = mu_b[k], sigma = sd_b)
 }
 ...
     coefs  = b[p]
@@ -883,7 +885,7 @@ form (section 2.5).
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Parser (`parser.mly`): `real[N]` and `real[k in N]` kind suffix on the scalar and indexed `param_decl` shapes (factor the bounds/prior tail first); optional `p in dim` binders on declaration axes; full and partial index forms in expressions; E417                                                                                                                                                                                                                  | medium, 1.5 days                                                                                                                                                                                                                                                                                                                                       |
 | AST and expander: sized axis and binders in `PIndexed`/`PScalar`; name producer; per-cell prior resolution with a binder environment; indexed-reference resolution in `resolve_expr`; E230 against lowered names; E236 mapping indexed references to families; binder substitution in `coefs`; element-wise slice arithmetic in `coefs`, expanded to per-element scalar expressions; E415, E416, E418, E419, E420; `n_basis` table; the separate `periodic_spline` path | Stage A: large, 3 days. Stage B (binders, indexed prior references, per-cell resolution, new expression shapes in `coefs`, unit and divisor checks, cycle detection over families): large, 5 days, plus focused review. The compiler lists every `param_decl`, prior and index match to extend, and the prior-consumer audit of 2.5 crosses into Rust. |
-| IR: `parameter_families` in `ir.ml` and `serde.ml`; `ir/VERSION` 0.43; Rust `ir` crate; bound and skipped in `ir_hash.rs`; every golden regenerated (human reviewed)                                                                                                                                                                                                                                                                                                    | medium, 1.5 days, plus golden review                                                                                                                                                                                                                                                                                                                   |
+| IR: `parameter_families` in `ir.ml` and `serde.ml`; `ir/VERSION` 0.44; Rust `ir` crate; bound and skipped in `ir_hash.rs`; every golden regenerated (human reviewed)                                                                                                                                                                                                                                                                                                    | medium, 1.5 days, plus golden review                                                                                                                                                                                                                                                                                                                   |
 | Tree-sitter: `grammar.js` (`real[N]`, `real[k in N]`, declaration binders, index forms), regenerate the committed `src/parser.c`, `grammar.json`, `node-types.json` with the pinned `npx -y tree-sitter-cli@0.22.6 generate`; corpus tests                                                                                                                                                                                                                              | small, 0.5 day, plus review of a large generated diff                                                                                                                                                                                                                                                                                                  |
 | Language spec: sections 4.3, 7 (bspline, smooth, periodic_spline), the new error codes; edited by hand, never `dprint fmt` on `docs/camdl-language-spec.md`; also the warning catalog, cheatsheet, user-features, and a `language-changes.md` entry for the E413-to-E415 renumbering                                                                                                                                                                                    | small, 1 day                                                                                                                                                                                                                                                                                                                                           |
 | Rust fit config and CLI: `[estimate]` family expansion through the IR metadata; indexed and lowered names in fit-config keys, scenario `set`, `--fixed`, `--param`; refusal of mixed settings, slice keys and duplicates; scalar partition keyed in the resolved problem (parameter-roles Stage 2); summaries group by the current model's families                                                                                                                     | medium to large, 3 days                                                                                                                                                                                                                                                                                                                                |
@@ -953,10 +955,11 @@ Each test is mutation-checked (revert the source, keep the test, confirm red).
    arithmetic: `mu_b + sd_b * z[p]` expands per element as stated;
    `mu_b - z[p]`, `-z[p]` and `z[p] / 2` likewise; operands of lengths 6 and 4
    are E420 naming both; a 2-D operand is E420; `mu_b[0] + sd_b` (no slice) as
-   `coefs` is E420; `mu_b + 1` used in a rate is E420. Units: adding a
-   `'per_day` scalar to a `'ratio` slice is refused by the existing dimensional
-   check; under `link = log` a dimensioned result is E301; a parameter-valued
-   divisor (`z[p] / sd_b`) is E420; a constant zero divisor is refused.
+   `coefs` is E420; `mu_b + 1` used in a rate is E420. Units: adding a rate
+   scalar to a dimensionless (`dim 1`) slice is refused by the existing
+   dimensional check; under `link = log` a dimensioned result is E301; a
+   parameter-valued divisor (`z[p] / sd_b`) is E420; a constant zero divisor is
+   refused.
 7. **Round-trip names.** Names, order and membership of a family are identical
    through compile, fit config expansion, outputs (summaries, traces) and
    reload, for `b : real[6]` and `b[province] : real[6]`. Summaries group a

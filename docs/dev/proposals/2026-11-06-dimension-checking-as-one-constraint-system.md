@@ -583,8 +583,8 @@ and does not infer the inside. The escape's motivating case, He et al.'s (I +
 inferring the inside would refuse the escape's own example. A unit literal is
 not an escape: it lowers to its own IR node,
 `unit_literal { value, dim, unit }`, whose dimension the checker reads as a
-fact. The one compiler-generated `UncheckedDim` left is the log-link spline
-shift.
+fact. The log-link spline shift ln s is a plain constant, so the compiler
+generates no `UncheckedDim` of its own.
 
 ### 5.6 Count-noise Normal likelihoods: P is free in the sd, T is not
 
