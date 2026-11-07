@@ -1866,6 +1866,62 @@ mod tests {
         assert_eq!(one.gate_verdict(), "not_assessed");
     }
 
+    /// A run that started several chains and lost all but one has the same
+    /// stored Â (none) as a one-chain run, but it is `incomplete`, not
+    /// `not_assessed`, and a warm start refuses it, naming the loss. With two
+    /// survivors whose Â passes it is still incomplete; with a failing Â it
+    /// is the failure.
+    #[test]
+    fn an_if2_fit_that_lost_started_chains_is_incomplete() {
+        let tmp = tempdir("if2_lost_chains");
+        let dir = tmp.path();
+        write_stage_run(dir, crate::run_meta::FitAlgorithm::If2, 4,
+            serde_json::json!({"method": "if2", "iterations": 50}));
+        let mut state = synthetic_if2_state();
+        state.method = "if2".into();
+        state.n_chains = 4;
+        state.n_good_chains = Some(1);
+        state.tail_chain_agreement.clear();
+        state.chain_eval_logliks = vec![-3804.9];
+        state.chain_eval_ses = vec![1.0];
+        state.save(&dir.to_string_lossy()).unwrap();
+        let r = If2StageResult::load(dir).unwrap();
+        assert_eq!(r.gate_verdict, GateVerdict::Incomplete);
+        let err = crate::fit::gating::check_source_converged(dir, "@lossy", false)
+            .expect_err("a source that lost 3 of 4 chains is refused");
+        assert!(err.starts_with("starts source @lossy: its convergence verdict is incomplete: \
+            3 of its 4 IF2 chains were lost"), "{err}");
+        assert!(err.contains("--allow-nonconverged-source"), "{err}");
+        crate::fit::gating::check_source_converged(dir, "@lossy", true)
+            .expect("--allow-nonconverged-source starts from it anyway");
+
+        // Two survivors that agree: still incomplete.
+        state.n_good_chains = Some(2);
+        state.tail_chain_agreement =
+            [("beta".to_string(), 1.001), ("gamma".to_string(), 1.002)].into();
+        state.chain_eval_logliks = vec![-3804.9, -3805.0];
+        state.chain_eval_ses = vec![1.0, 1.0];
+        state.save(&dir.to_string_lossy()).unwrap();
+        assert_eq!(If2StageResult::load(dir).unwrap().gate_verdict, GateVerdict::Incomplete);
+
+        // Two survivors that disagree: the failure is the verdict, and the
+        // refusal also names the loss.
+        state.tail_chain_agreement =
+            [("beta".to_string(), 1.5), ("gamma".to_string(), 1.002)].into();
+        state.save(&dir.to_string_lossy()).unwrap();
+        assert_eq!(If2StageResult::load(dir).unwrap().gate_verdict, GateVerdict::FailA);
+        let err = crate::fit::gating::check_source_converged(dir, "@lossy", false).unwrap_err();
+        assert!(err.contains("it did not converge") && err.contains("2 of its 4 IF2 chains were lost"),
+            "{err}");
+
+        // Every chain finished: n_good_chains = n_chains is a pass as before.
+        state.n_good_chains = Some(4);
+        state.tail_chain_agreement =
+            [("beta".to_string(), 1.001), ("gamma".to_string(), 1.002)].into();
+        state.save(&dir.to_string_lossy()).unwrap();
+        assert_eq!(If2StageResult::load(dir).unwrap().gate_verdict, GateVerdict::Pass);
+    }
+
     /// With fewer than two converged nl-* chains the chain-agreement leg is
     /// not computed: the stored range is a placeholder 0.0, which must not
     /// surface as a measured agreement.

@@ -157,6 +157,11 @@ pub struct DrawnStarts {
     pub rejected: Vec<RejectedStart>,
     /// Chains whose last attempt was refused too — they did not run.
     pub refused: Vec<usize>,
+    /// `(chain, reason)` for chains that started from their accepted start
+    /// and were skipped before the end (IF2's particle-filter degeneracy
+    /// watchdog), so the fit's results do not include them. Empty until the
+    /// run reports them ([`DrawnStarts::with_skipped`]).
+    pub skipped: Vec<(usize, String)>,
 }
 
 /// Does a rule admit a fresh draw for one chain? A point rule does not (the
@@ -217,7 +222,14 @@ impl ChainStart {
 impl DrawnStarts {
     /// The starts as first drawn, with no retry yet.
     pub fn fresh(starts: Vec<ChainStart>, rule: ChainStarts) -> Self {
-        DrawnStarts { starts, rule, rejected: Vec::new(), refused: Vec::new() }
+        DrawnStarts { starts, rule, rejected: Vec::new(), refused: Vec::new(), skipped: Vec::new() }
+    }
+
+    /// Record the chains the run skipped after they started, so
+    /// `chain_starts.tsv` marks each `skipped` instead of `accepted`.
+    pub fn with_skipped(mut self, skipped: Vec<(usize, String)>) -> Self {
+        self.skipped = skipped;
+        self
     }
 
     /// Fold a retry's outcome in: `accepted[c]` replaces chain `c`'s start
@@ -1236,8 +1248,10 @@ pub struct ChainStartRecord {
     /// 0-based attempt index within the chain's bounded retry (gh#887).
     pub attempt: usize,
     /// `accepted` (the start the chain ran from), `rejected` (a draw the
-    /// filter could not score; a redraw followed), or `refused` (the last
-    /// attempt, also unscoreable; the chain did not run).
+    /// filter could not score; a redraw followed), `refused` (the last
+    /// attempt, also unscoreable; the chain did not run), or `skipped` (the
+    /// chain ran from this start and was dropped before the end, so the fit's
+    /// results do not include it).
     pub status: &'static str,
     /// The `source` column: the rule's tag, with `:chain-<id>` appended only
     /// when that chain got a point of its own (gh#871).
@@ -1253,7 +1267,7 @@ pub struct ChainStartRecord {
 impl DrawnStarts {
     /// The rows the writer records, in (chain, attempt) order and
     /// `base_specs` order within a row: every rejected attempt, then the
-    /// chain's final start as `accepted` or `refused`.
+    /// chain's final start as `accepted`, `refused` or `skipped`.
     pub fn records(&self, base_specs: &[EstimatedParam]) -> Vec<ChainStartRecord> {
         let per_chain = self.to_estimated_params(base_specs);
         let mut rows = Vec::new();
@@ -1273,14 +1287,20 @@ impl DrawnStarts {
                 });
             }
             let refused = self.refused.contains(&chain_id);
+            let skipped = self.skipped.iter().find(|(c, _)| *c == chain_id);
+            let (status, reason) = match (refused, skipped) {
+                (true, _) => ("refused", String::new()),
+                (false, Some((_, why))) => ("skipped", why.clone()),
+                (false, None) => ("accepted", String::new()),
+            };
             rows.push(ChainStartRecord {
                 chain_id: ChainIndex(chain_id),
                 attempt: self.attempts_before(chain_id),
-                status: if refused { "refused" } else { "accepted" },
+                status,
                 source: source_label(&self.rule, ChainIndex(chain_id)),
                 values: specs.iter().map(|s| s.initial).collect(),
                 ess: None,
-                reason: String::new(),
+                reason,
             });
         }
         rows
@@ -1351,8 +1371,12 @@ pub fn write_chain_starts_tsv(
             rejected = a draw the filter")?;
         writeln!(f, "# could not score, so a fresh one was drawn (gh#887); \
             refused = the last attempt,")?;
-        writeln!(f, "# also unscoreable, so the chain did not run. ess is \
-            the filter's ESS at refusal.")?;
+        writeln!(f, "# also unscoreable, so the chain did not run; skipped = \
+            the chain ran from this start")?;
+        writeln!(f, "# and was dropped before the end (its filter \
+            degenerated), so the fit's results")?;
+        writeln!(f, "# do not include it. ess is the filter's ESS at \
+            refusal.")?;
         // Header row.
         let mut cols = vec![
             "chain_id".to_string(), "attempt".to_string(), "status".to_string(),
@@ -1796,6 +1820,16 @@ mod tests {
         let refused = drawn.clone().with_retry_outcome(vec![None, None], vec![], vec![1]);
         let rows = refused.records(&base_specs);
         assert_eq!(rows.iter().find(|r| r.chain_id == ChainIndex(1)).unwrap().status, "refused");
+
+        // A chain the run dropped after it started is `skipped`, with the
+        // reason; the rejected attempts before it are unchanged.
+        let skipped = drawn.clone().with_skipped(vec![(1, "PF degenerate: EssCollapsed".into())]);
+        let rows = skipped.records(&base_specs);
+        let shape: Vec<(ChainIndex, usize, &str)> = rows.iter().map(|r| (r.chain_id, r.attempt, r.status)).collect();
+        assert_eq!(shape, vec![
+            (ChainIndex(0), 0, "accepted"), (ChainIndex(1), 0, "rejected"), (ChainIndex(1), 1, "skipped"),
+        ]);
+        assert_eq!(rows[2].reason, "PF degenerate: EssCollapsed");
     }
 
     #[test]

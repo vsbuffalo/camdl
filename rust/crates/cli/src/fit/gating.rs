@@ -143,8 +143,9 @@ pub enum ScoutGateVerdict {
     /// No Â failed, but these parameters' Â is not finite (their
     /// within-chain variance collapsed), so the Â leg is incomplete. The
     /// decibans leg does not stand in for it: chains spread along a ridge can
-    /// agree in log-likelihood while disagreeing in θ. Not a pass.
-    Incomplete { params: Vec<String> },
+    /// agree in log-likelihood while disagreeing in θ. Or the run lost
+    /// started chains, so both legs judged the survivors only. Not a pass.
+    Incomplete { params: Vec<String>, lost_chains: Option<LostChains> },
 }
 
 /// The per-chain clean-eval logliks behind a `DecibansSpread` refusal.
@@ -195,6 +196,46 @@ pub struct If2Assessment {
     /// The decibans leg, when the leaf carries clean-eval logliks and SEs for
     /// at least two chains; `None` otherwise (the leg is not run).
     pub spread: Option<DecibansLeg>,
+    /// Started chains the run lost (skipped mid-run when their particle
+    /// filter degenerated), when there were any. Both legs above were then
+    /// measured on the survivors only, so the verdict is incomplete, never a
+    /// pass and never "not assessed": a fit that asked for several chains and
+    /// finished with one has not shown that they agree.
+    pub lost_chains: Option<LostChains>,
+}
+
+/// How many of the chains an IF2 run started reached the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LostChains {
+    pub started: usize,
+    pub finished: usize,
+}
+
+impl LostChains {
+    /// From `fit_state.toml`'s `n_chains` and `n_good_chains`: `Some` only
+    /// when fewer finished than started. A leaf that records no
+    /// `n_good_chains` (written before IF2 recorded it) reads as none lost.
+    pub fn from_state(state: &FitState) -> Option<Self> {
+        let finished = state.n_good_chains?;
+        (finished < state.n_chains).then_some(LostChains { started: state.n_chains, finished })
+    }
+
+    pub fn lost(&self) -> usize {
+        self.started - self.finished
+    }
+
+    /// The sentence every refusal of such a source carries.
+    pub fn describe(&self) -> String {
+        let consequence = if self.finished == 1 {
+            "one chain is left, and there is nothing to compare it with".to_string()
+        } else {
+            format!("chain agreement was judged on the {} survivors only", self.finished)
+        };
+        format!(
+            "{} of its {} IF2 chains were lost (skipped mid-run when their particle filter \
+             degenerated; `chain_starts.tsv` marks them `skipped`), so {consequence}",
+            self.lost(), self.started)
+    }
 }
 
 /// The inter-chain clean-eval spread against its SE-aware floor.
@@ -233,27 +274,30 @@ impl If2Assessment {
         all
     }
 
-    /// Nothing was assessed: no Â of any kind (the run had one chain, or the
-    /// leaf predates Â) and no decibans leg. Not a pass; a starts-source
-    /// check still accepts it, having no verdict to contradict.
+    /// Nothing was assessed: no Â of any kind (the run asked for one chain,
+    /// or the leaf predates Â), no decibans leg, and no started chain lost.
+    /// Not a pass; a starts-source check still accepts it, having no verdict
+    /// to contradict.
     pub fn is_not_assessed(&self) -> bool {
         self.structural.is_empty()
             && self.perturb_only_at_t0.is_empty()
             && self.unavailable.is_empty()
             && self.spread.is_none()
+            && self.lost_chains.is_none()
     }
 
-    /// No finite Â failed, but some required Â is unavailable: the verdict
-    /// is incomplete, which is not a pass.
+    /// No finite Â failed, but some required Â is unavailable, or the run
+    /// lost started chains: the verdict is incomplete, which is not a pass.
     pub fn is_incomplete(&self) -> bool {
-        self.a_passes() && !self.unavailable.is_empty()
+        self.a_passes() && (!self.unavailable.is_empty() || self.lost_chains.is_some())
     }
 
-    /// The compound verdict: every required Â is available and passes, and
-    /// the decibans leg passes where it was run. A leaf without clean-eval
-    /// data is judged on Â alone.
+    /// The compound verdict: every started chain finished, every required Â
+    /// is available and passes, and the decibans leg passes where it was
+    /// run. A leaf without clean-eval data is judged on Â alone.
     pub fn passes(&self) -> bool {
         !self.is_not_assessed()
+            && self.lost_chains.is_none()
             && self.a_passes()
             && self.unavailable.is_empty()
             && self.spread.is_none_or(|leg| leg.passes())
@@ -303,7 +347,10 @@ pub fn assess_if2(state: &FitState, gate: &GateConfig) -> If2Assessment {
             sigma_max,
         }
     });
-    If2Assessment { structural, unavailable, perturb_only_at_t0, a_band, spread }
+    If2Assessment {
+        structural, unavailable, perturb_only_at_t0, a_band, spread,
+        lost_chains: LostChains::from_state(state),
+    }
 }
 
 /// Check an IF2 leaf's convergence, for the warm-start source check.
@@ -322,14 +369,20 @@ pub fn assess_if2(state: &FitState, gate: &GateConfig) -> If2Assessment {
 ///    Failure → `DecibansSpread`, naming chains only when
 ///    `chain_eval_ids` matches the logliks ([`SpreadChains`]).
 ///
-/// Legacy fit_state files (no `tail_chain_agreement`) return `Ok` —
-/// the caller is expected to warn and proceed. Same fall-through for
-/// missing `chain_clean_*` (the decibans check simply isn't run).
+/// A run that lost started chains is `Incomplete` unless a leg failed
+/// outright, Â or not: the survivors are all either leg saw.
+///
+/// No `tail_chain_agreement` and no lost chain — a run that asked for one
+/// chain, or a leaf written before Â was recorded — returns `Ok`: there is
+/// no verdict to contradict, and nothing is printed. Missing
+/// `chain_eval_*` only skips the decibans leg.
 pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGateVerdict {
-    // Absent tail_chain_agreement means legacy fit_state — can't gate.
-    // Caller handles the warn-and-proceed branch.
+    let lost_chains = LostChains::from_state(scout);
     if scout.tail_chain_agreement.is_empty() {
-        return ScoutGateVerdict::Ok;
+        return match lost_chains {
+            None => ScoutGateVerdict::Ok,
+            Some(_) => ScoutGateVerdict::Incomplete { params: Vec::new(), lost_chains },
+        };
     }
     let assessed = assess_if2(scout, gate);
 
@@ -383,7 +436,10 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
     }
 
     if assessed.is_incomplete() {
-        return ScoutGateVerdict::Incomplete { params: assessed.unavailable };
+        return ScoutGateVerdict::Incomplete {
+            params: assessed.unavailable,
+            lost_chains: assessed.lost_chains,
+        };
     }
 
     // Only a source the assessment passes gets the soft-band warning; every
@@ -586,6 +642,13 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
             || (super::methods::parse_algorithm(&state.method).is_none()
                 && !state.tail_chain_agreement.is_empty()) => {
             let gate = state.resolved_gate.clone().unwrap_or_default();
+            // A failed leg is refused for itself; when the run also lost
+            // chains, the refusal says so, since the failure was measured on
+            // the survivors only.
+            let lost_note = |msg: String| match LostChains::from_state(state) {
+                Some(lost) => format!("{msg}\n\n  Also: {}.", lost.describe()),
+                None => msg,
+            };
             match check_scout_convergence(state, &gate) {
                 ScoutGateVerdict::Ok => None,
                 ScoutGateVerdict::SoftWarn { param_agreement } => {
@@ -604,21 +667,40 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
                 }
                 ScoutGateVerdict::Hard {
                     failing, all_structural, perturb_only_at_t0, loglik_spread,
-                } => Some(format_hard_verdict(
+                } => Some(lost_note(format_hard_verdict(
                     &gate, &failing, &all_structural, &perturb_only_at_t0,
                     loglik_spread, state.best_loglik, None,
-                )),
+                ))),
                 ScoutGateVerdict::DecibansSpread {
                     delta_db, threshold_db, sigma_max, chain_logliks,
-                } => Some(format_decibans_spread_verdict(
+                } => Some(lost_note(format_decibans_spread_verdict(
                     delta_db, threshold_db, sigma_max, &chain_logliks,
-                )),
-                ScoutGateVerdict::Incomplete { params } => Some(format!(
-                    "its convergence verdict is incomplete: chain agreement Â is \
-                     unavailable (not finite; within-chain variance collapsed) for {}. \
-                     The decibans leg does not stand in for it: chains spread along a \
-                     ridge can agree in log-likelihood while disagreeing in θ.",
-                    params.join(", "))),
+                ))),
+                ScoutGateVerdict::Incomplete { params, lost_chains } => {
+                    let mut why: Vec<String> = Vec::new();
+                    if let Some(lost) = lost_chains {
+                        why.push(lost.describe());
+                    }
+                    if !params.is_empty() {
+                        why.push(format!(
+                            "chain agreement Â is unavailable (not finite; within-chain \
+                             variance collapsed) for {}. The decibans leg does not stand in \
+                             for it: chains spread along a ridge can agree in log-likelihood \
+                             while disagreeing in θ",
+                            params.join(", ")));
+                    }
+                    let mut msg = format!(
+                        "its convergence verdict is incomplete: {}.", why.join("; and "));
+                    if lost_chains.is_some() {
+                        msg.push_str(
+                            "\n\n  Re-run the source fit so that every chain finishes (more \
+                             particles, or narrower bounds that keep the starts where the \
+                             filter can follow the data).\n\n  \
+                             To start from it anyway:  camdl fit run fit.toml \
+                             --allow-nonconverged-source");
+                    }
+                    Some(msg)
+                }
             }
         }
         state if matches!(

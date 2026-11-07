@@ -1693,6 +1693,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     Some(stage_dir_str.as_ref()), &heartbeat)
                     .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
                 let elapsed = t0.elapsed();
+                // A chain skipped mid-run started from an accepted start, so
+                // the file written before the run calls it `accepted`. Write
+                // it again marking each such chain `skipped`: the file is the
+                // record of what every chain did.
+                if !chain_results.skipped.is_empty() {
+                    let drawn = drawn.clone().with_skipped(chain_results.skipped.clone());
+                    runner::record_chain_starts(&stage_dir, &run_config, &drawn);
+                }
 
                 // Write outputs
                 let param_names: Vec<String> = model.parameters.iter().map(|p| p.name.clone()).collect();
@@ -1767,7 +1775,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     initial_loglik: f64::NEG_INFINITY,
                     best_chain: chain_results.best_chain,
                     n_chains: *chains,
-                    n_good_chains: None,
+                    // The chains that reached the end. Fewer than `n_chains`
+                    // makes the gate verdict `incomplete` (`gating::assess_if2`).
+                    n_good_chains: Some(chain_results.results.len()),
                     start_values,
                     loglik_type: Some(loglik::LoglikType::If2),
                     acceptance_rate: None,

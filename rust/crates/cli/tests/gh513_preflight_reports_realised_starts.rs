@@ -59,7 +59,8 @@ fn strip_ansi(s: &str) -> String {
 }
 
 /// chain 0's `beta` from the run's `chain_starts.tsv` — the row the chain ran
-/// from (`status = accepted`; a start the pre-flight filter refused is on the
+/// from (`status = accepted`, or `skipped` if the chain was dropped after it
+/// started; a start the pre-flight filter refused is on the
 /// record ahead of it as `rejected`, gh#887).
 fn first_chain_beta(root: &Path) -> f64 {
     let mut stack = vec![root.to_path_buf()];
@@ -84,8 +85,10 @@ fn first_chain_beta(root: &Path) -> f64 {
     let (beta, id, status) = (col("beta"), col("chain_id"), col("status"));
     let row: Vec<&str> = lines
         .map(|l| l.split('\t').collect::<Vec<_>>())
-        .find(|r| r[id] == "0" && r[status] == "accepted")
-        .expect("chain 0's accepted row");
+        // `skipped` when the chain ran from this start and was then dropped
+        // by the degeneracy watchdog: still the start it ran from.
+        .find(|r| r[id] == "0" && (r[status] == "accepted" || r[status] == "skipped"))
+        .expect("chain 0's accepted or skipped row");
     row[beta].parse().unwrap_or_else(|_| panic!("non-numeric beta {:?}", row[beta]))
 }
 

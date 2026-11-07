@@ -2989,12 +2989,19 @@ Its columns are `chain_id` (the number of the `chain_N/` directory beside it and
 the number every stderr refusal and `bad_init` record uses), `attempt`
 (0-based), `status` (`accepted` — the start the chain ran from; `rejected` — a
 draw the filter could not score, a redraw followed; `refused` — the last
-attempt, also unscoreable, the chain did not run), `source`, one column per
-estimated parameter, then `ess` (the filter's ESS at refusal, blank otherwise)
-and `reason` (blank for an accepted row); one row per attempt in (chain,
-attempt) order, so a healthy run has one `accepted` row per chain at attempt 0.
-That file, not the config, is the authority on what a run did. `fit_state.toml`
-carries the same rule as `chain_init_source` beside
+attempt, also unscoreable, the chain did not run; `skipped` — the chain ran from
+this start and was dropped before the end, so the fit's results do not include
+it), `source`, one column per estimated parameter, then `ess` (the filter's ESS
+at refusal, blank otherwise) and `reason` (blank for an accepted row; for a
+skipped row, why the chain was dropped); one row per attempt in (chain, attempt)
+order, so a healthy run has one `accepted` row per chain at attempt 0. The file
+is written before the sampler runs and, when IF2 skips a chain mid-run (its
+particle-filter degeneracy watchdog fired), written again with that chain's row
+marked `skipped`. That file, not the config, is the authority on what a run did.
+`fit_state.toml` records the count as `n_chains` (started) and `n_good_chains`
+(reached the end); an IF2 run whose `n_good_chains` is below `n_chains` has the
+gate verdict `incomplete` (§13.1), not `not_assessed`, even when one chain is
+left. `fit_state.toml` carries the same rule as `chain_init_source` beside
 `chain_starts_kind = "spread" | "point"`, and `fit summary` prints both under
 the leaf's identity line, with the run id the handle resolved to when the run
 started (run.json `inputs.starts_source.run_id`):
@@ -3615,7 +3622,13 @@ Every estimated parameter's Â is judged, initial-state (`perturb_only_at_t0`)
 parameters included, and an Â that is not finite (within-chain variance
 collapsed) makes the verdict incomplete, which is refused like a failure: the
 decibans leg does not stand in for it, since chains spread along a ridge can
-agree in log-likelihood while disagreeing in θ.
+agree in log-likelihood while disagreeing in θ. An IF2 source that lost started
+chains (`n_good_chains < n_chains`) is incomplete too, and refused with a
+message naming the count (`5 of its 6 IF2 chains were lost …`), what that leaves
+to judge, the remedy (re-run the source so every chain finishes) and the
+`--allow-nonconverged-source` override. When such a source also fails a leg, the
+failure is the verdict and the refusal adds the lost-chain count. A source that
+asked for one chain is accepted, as before.
 
 `--allow-nonconverged-source` downgrades the refusal to a warning that repeats
 the verdict and says `starting from it anyway`. A source between the soft and
@@ -5846,16 +5859,16 @@ stale, stale_reason
 `gate_verdict` is the method's convergence verdict, the one `fit summary` and a
 `from_mle` / `from_posterior` source check read:
 
-| value                  | method    | meaning                                                                                                                                                                                                                                                 |
-| ---------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pass`                 | if2, nl-* | every leg passes                                                                                                                                                                                                                                        |
-| `fail_a`               | if2       | some estimated parameter's tail chain agreement Â (initial-state ones included) is at or above the threshold                                                                                                                                            |
-| `fail_db`              | if2, nl-* | the chains' log-likelihoods spread past the decibans floor                                                                                                                                                                                              |
-| `fail_both`            | if2, nl-* | both                                                                                                                                                                                                                                                    |
-| `incomplete`           | if2       | no Â failed, but some Â is not finite (within-chain variance collapsed): not a pass, and the decibans leg does not stand in for it                                                                                                                      |
-| `fail_chain_agreement` | nl-*      | the converged chains' estimates disagree                                                                                                                                                                                                                |
-| `fail_status`          | nl-*      | a chain ran out of evaluations or failed                                                                                                                                                                                                                |
-| `not_assessed`         | if2, nl-* | nothing was assessed: one chain (one converged nl-* chain), so there is nothing to compare between chains; or an nl-* leaf that predates the recorded optimizer verdict (re-run it with `--force`). Not a pass, though a starts-source check accepts it |
+| value                  | method    | meaning                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pass`                 | if2, nl-* | every leg passes                                                                                                                                                                                                                                                                                                                               |
+| `fail_a`               | if2       | some estimated parameter's tail chain agreement Â (initial-state ones included) is at or above the threshold                                                                                                                                                                                                                                   |
+| `fail_db`              | if2, nl-* | the chains' log-likelihoods spread past the decibans floor                                                                                                                                                                                                                                                                                     |
+| `fail_both`            | if2, nl-* | both                                                                                                                                                                                                                                                                                                                                           |
+| `incomplete`           | if2       | no leg failed, but some Â is not finite (within-chain variance collapsed), or the run lost started chains (`n_good_chains < n_chains`; `chain_starts.tsv` marks them `skipped`), so the legs judged the survivors only: not a pass, and a starts-source check refuses it                                                                       |
+| `fail_chain_agreement` | nl-*      | the converged chains' estimates disagree                                                                                                                                                                                                                                                                                                       |
+| `fail_status`          | nl-*      | a chain ran out of evaluations or failed                                                                                                                                                                                                                                                                                                       |
+| `not_assessed`         | if2, nl-* | nothing was assessed: the run asked for one chain (one converged nl-* chain), so there is nothing to compare between chains; or an nl-* leaf that predates the recorded optimizer verdict (re-run it with `--force`). Not a pass, though a starts-source check accepts it. A multi-chain IF2 run left with one chain is `incomplete`, not this |
 
 For an optimizer method `converged` is true exactly when `gate_verdict` is
 `pass`. A sampler row carries `gate_verdict = "n/a"`, and `converged` is its R̂

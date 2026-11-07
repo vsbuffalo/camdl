@@ -143,6 +143,10 @@ pub struct FitRunConfig {
 pub struct ChainResults {
     /// `(chain index, result)` for every chain that ran, in chain order.
     pub results: Vec<(usize, IF2Result)>,
+    /// `(chain index, reason)` for every chain that started and was skipped
+    /// before the end because its particle filter degenerated. Together with
+    /// `results` it covers every chain the run started.
+    pub skipped: Vec<(usize, String)>,
     /// The winner — the same number `fit_state.toml`, `run.json`, the
     /// `chain_N/` directory and the stderr lines carry (gh#912, gh#990).
     pub best_chain: ChainIndex,
@@ -2358,12 +2362,13 @@ pub fn run_chains_with_per_chain_params(
 
     // At most one chain per worker, so a started chain is never displaced by
     // another (gh#821, `chain_fanout`).
-    let results: Vec<(usize, IF2Result)> = super::chain_fanout::run_chains(config.n_chains, |chain_id| {
+    let outcomes: Vec<Result<(usize, IF2Result), (usize, String)>> =
+        super::chain_fanout::run_chains(config.n_chains, |chain_id| {
             let per_chain = per_chain_params.map(|pcp| &pcp[chain_id][..]);
             match run_one_chain(
                 chain_id, config, per_chain, Some(&bars[chain_id]), stage_dir, heartbeat,
             ) {
-                Ok(result) => Some((chain_id, result)),
+                Ok(result) => Ok((chain_id, result)),
                 // gh#110 (IF2 follow-up): a chain whose IF2 search wandered
                 // into the PF-degenerate region is skipped with a BadInit
                 // diagnostic and omitted from downstream R̂/agreement/winner
@@ -2414,8 +2419,10 @@ pub fn run_chains_with_per_chain_params(
                     eprintln!("  chain {}: \x1b[31m✗ skipped\x1b[0m — {} ({})",
                         ChainIndex(chain_id), label, reason);
                     // The bar is cleared in the post-loop finish; the skip
-                    // is already loud on stderr above.
-                    None
+                    // is already loud on stderr above. The chain and its
+                    // reason are kept, so the fit's record can say which
+                    // started chains it lost.
+                    Err((chain_id, format!("{label}: {reason}")))
                 }
                 // Any non-degeneracy error is structural (config bug,
                 // unknown compartment, …) — every chain would hit it, so
@@ -2425,10 +2432,10 @@ pub fn run_chains_with_per_chain_params(
                     format!("chain {} error: {:?}", ChainIndex(chain_id), other),
                 ),
             }
-        })
-        .into_iter()
-        .flatten()
-        .collect();
+        });
+    let (results, skipped): (Vec<_>, Vec<_>) = outcomes.into_iter().partition(Result::is_ok);
+    let results: Vec<(usize, IF2Result)> = results.into_iter().flatten().collect();
+    let skipped: Vec<(usize, String)> = skipped.into_iter().filter_map(Result::err).collect();
 
     // Clear all chain bars now that the parallel phase is done (`Task::finish`
     // consumes, so it can't run on the per-chain borrow inside the loop). The
@@ -2683,6 +2690,7 @@ pub fn run_chains_with_per_chain_params(
 
     Ok(ChainResults {
         results,
+        skipped,
         best_chain,
         best_loglik,
         chain_agreement,
@@ -4223,6 +4231,7 @@ mod tests {
         chain_agreement.insert("gamma".to_string(), 1.06);
         let cr = ChainResults {
             results: vec![(0, if2_chain0), (1, if2_chain1)],
+            skipped: Vec::new(),
             best_chain: ChainIndex(1),
             best_loglik: -49.0,
             chain_agreement,
@@ -4263,6 +4272,7 @@ mod tests {
         };
         let cr = ChainResults {
             results: vec![],
+            skipped: vec![(1, "PF degenerate".into())],
             best_chain: ChainIndex(2),
             best_loglik: -40.0,
             chain_agreement: HashMap::new(),

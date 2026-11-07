@@ -321,7 +321,11 @@ fn a_label_names_one_run_and_never_moves() {
 
     // `@scout` names the first run; the dependent run records its run id.
     p.config("post.toml", &pgas_from("{ from_mle = \"@scout\" }"));
-    p.ok(&["fit", "run", "post.toml", "--seed", "1"]);
+    // The 10-particle scout loses one of its two chains to the filter's
+    // degeneracy watchdog, so its verdict is `incomplete` and a warm start
+    // refuses it. This test is about which run `@scout` names, so it starts
+    // from it anyway.
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--allow-nonconverged-source"]);
     let post: Vec<PathBuf> = p
         .leaves()
         .into_iter()

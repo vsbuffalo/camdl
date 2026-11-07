@@ -1606,6 +1606,10 @@ impl Formatter {
         }
         let overall = if assessed.is_not_assessed() {
             self.warn("— NOT ASSESSED (one chain: nothing to compare between chains)")
+        } else if let (true, Some(lost)) = (assessed.is_incomplete(), assessed.lost_chains) {
+            self.warn(&format!(
+                "— INCOMPLETE ({} of {} chains lost mid-run; not a pass)",
+                lost.lost(), lost.started))
         } else if assessed.is_incomplete() {
             self.warn("— INCOMPLETE (not a pass)")
         } else if assessed.passes() {
@@ -3713,7 +3717,8 @@ impl RefusedChains {
         }
         if ran + n_refused != n_chains {
             text.push_str(&format!(
-                " ({} chain(s) not accounted for by a refusal record in diagnostics.json)",
+                " ({} chain(s) not accounted for by a refusal record in diagnostics.json; \
+                 chain_starts.tsv gives each chain's status)",
                 n_chains.abs_diff(ran + n_refused)
             ));
         }
