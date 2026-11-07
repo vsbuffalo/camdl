@@ -1,6 +1,6 @@
 # invariant: a square root of a count has no integer dimension
 # spec: §5.4
-# expect: E301 Error
+# expect: E304 Error
 time_unit = 'days
 
 compartments { S, I, R, V }

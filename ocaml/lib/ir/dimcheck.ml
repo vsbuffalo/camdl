@@ -388,7 +388,7 @@ let binop st ~site ~code ~what (op : bin_op) ?exponent ?literals l r : value =
        | Some (p, 1) -> F (form_scale p b)
        | Some (p, q) ->
          let x = fresh st in
-         emit st Structure ~site ~code:"E301" (Even_root b)
+         emit st Structure ~site ~code:"E304" (Even_root b)
            (form_sub (form_scale q (var_form x)) (form_scale p b)) dimensionless;
          F (var_form x)
        | None ->

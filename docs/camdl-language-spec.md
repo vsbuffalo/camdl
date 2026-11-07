@@ -409,15 +409,18 @@ silent guess.
 
 Additional checks: a sum whose operands differ is **E302**; the argument of
 `exp()`/`log()`, a power's exponent, and a base under a non-constant exponent
-are dimensionless (**E301**); a square root needs even exponents (**E304**).
+are dimensionless (**E301**); a square root, or a power `x^(p/q)`, needs
+dimension exponents that 2, or q, divides (**E304**).
 
 **Literals.** A numeric literal is dimensionless, with two exceptions. Zero
-takes any dimension. A literal, or arithmetic of literals, that is an entire
+takes any dimension. A literal, or a constant expression of literals
+(arithmetic, `min`/`max`, `sqrt`, and the other functions of numbers), that is an entire
 additive term of a rate, derivative, balance, initial value, count-valued
 likelihood argument, intervention count or quantity threshold takes that
 position's dimension: `I = 10`, `S = N0 - 50`, `S = 0.95 * 10000`, `rate =
 100`, a constant importation `beta * S * I / N + 0.5`. Inside a product, a
-quotient or a function a literal is a pure number, so `(1/730) * R` is not a
+quotient, or a function of something that is not a constant, a literal is a
+pure number, so `(1/730) * R` is not a
 rate, and in `(1000 - S) / 1000` the 1000 is not a count (E302).
 
 A number's dimension comes from where it stands, never from what it is

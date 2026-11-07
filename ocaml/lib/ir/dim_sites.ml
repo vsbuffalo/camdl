@@ -214,7 +214,7 @@ let forcing_sites acc (tf : time_function) =
        List.iteri (fun k c -> need_log (Printf.sprintf "coefficient %d" (k + 1)) c) cs
      | Coefs_smooth { level; slope; scale; modes; per }, link ->
        let role what = Printf.sprintf "forcing '%s': smooth `%s`" name what in
-       add acc ?subject ~role:(role "per") ~code:"E301" (Has time) (E per);
+       add acc ?subject ~role:(role "per") ~code:"E312" (Has time) (E per);
        (match link with
         | Link_log ->
           add acc ?subject ~role:(role "level") ~code:"E301" (Has dimensionless)

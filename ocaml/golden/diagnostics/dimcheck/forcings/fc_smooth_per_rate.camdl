@@ -1,0 +1,36 @@
+# invariant: a smooth spline's `per` is a time
+# spec: §5.8
+# expect: E312 Error
+time_unit = 'days
+
+compartments { S, I, R }
+
+dimensions { mode = [m1, m2, m3, m4] }
+
+parameters {
+  gamma    : rate in [0.01, 1.0]
+  za       : real dim 1   ~ normal(mu = 0.0, sigma = 1.0)
+  zb       : real dim 1/T ~ normal(mu = 0.0, sigma = 1.0)
+  zs       : positive dim 1 ~ exponential(rate = 1.0)
+  zm[mode] : real dim 1   ~ normal(mu = 0.0, sigma = 1.0)
+}
+
+forcing {
+  beta_t : bspline 'per_day {
+    window  = [0 'days, 100 'days]
+    n_basis = 6
+    link    = log
+    coefs   = smooth(level = za, slope = zb, scale = zs, modes = zm, per = 1 'per_day)
+  }
+}
+
+let N = S + I + R
+
+transitions {
+  infection : S --> I @ beta_t * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 100 'days }
