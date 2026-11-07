@@ -688,7 +688,10 @@ the pooled artifact.
 
 `n_draws` is the cloud size behind each band. The `scenario` column is `fitted`
 for the one-step rows, which are scenario- and sweep-agnostic by construction:
-filtering _observed_ data through a counterfactual model is ill-defined.
+filtering _observed_ data through a counterfactual model is ill-defined. The
+one-step filter runs the fitted model — the fit's own `scenario` / `enable` /
+`disable` applied (§11.3) — so it fires exactly the interventions the fit's
+likelihood fired.
 
 `observed/<stream>.tsv` is the recorded value per `(time, stratum)` in the same
 tidy keys. A hole — a scheduled but unobserved cell — renders as an empty
@@ -5565,9 +5568,40 @@ camdl simulate models/sir.camdl \
 ```
 
 `--scenario a,b` is a **partition of the cell grid**: each scenario is its own
-set of runs, not a layering. For each (draw, seed) pair both scenarios are
-simulated with the same seed, giving paired comparisons that propagate posterior
-uncertainty.
+set of runs, not a layering of one scenario on another. For each (draw, seed)
+pair both scenarios are simulated with the same seed, giving paired comparisons
+that propagate posterior uncertainty.
+
+**Every arm starts from the model that was fitted.** A fit config's top-level
+`scenario` or `enable`/`disable` (§6.2) is part of the problem the posterior
+describes: `fit run` estimated under it. Every command that replays a fit
+applies it — `simulate --draws posterior --fit`, `fit predict` (the `fitted`
+arm, every `--scenario` arm, the one-step filter), the contrast arms,
+`pfilter
+--fit` and the prequential `compare` derives. For a stored fit the
+selection is read from its archived `fit.toml.original`; the fit's `run_id`
+already hashes it, as part of the config's problem half.
+
+On the replaying commands each arm's own changes apply **on top of** the fit's
+selection, the way a scenario `compose`s a sub-scenario: the fit's
+`enable`/`disable` lists first, the arm's after, and an explicit disable wins.
+So on a fit with `enable = ["lockdown"]`, `fitted` runs `lockdown`, an arm
+`with_sia { enable = [sia] }` runs `lockdown` and `sia`, and an arm
+`no_lockdown { disable = [lockdown] }` runs neither; an arm that toggles nothing
+is the fitted model. The command says so on stderr when the fit selected
+anything:
+
+```
+fit predict: the fitted model runs the fit's own enable ["lockdown"] / disable []; every scenario arm applies its changes on top of it
+```
+
+Only the fit's intervention lists form the base. A fit scenario's `set`/`scale`
+is already in the draws: `fit run` refuses a scenario that moves a `[fixed]`
+value or touches an `[estimate]` parameter (§1.3), so applying it again could
+only re-apply a value the draws carry. On `simulate` the base enters each cell's
+`scenario` identity level (its lists lead the arm's), so a cell replayed under a
+fit's selection never shares a `run_id` with the same draw and seed replayed
+without it.
 
 **The coupling is paired-seed CRN, not event-keyed RNG.** The runtime uses a
 stateful ChaCha8 PRNG, so two arms agree only while they consume draws in the
@@ -6585,9 +6619,12 @@ camdl fit methods             list (algorithm, backend) pairs with stability tie
 camdl fit predict [FIT]
   --fit FIT                   same handle grammar as `fit summary`
   --stream NAME               one logical stream, or an expanded leaf name
-  --scenario NAMES            prospective scenario overlay (repeatable). `fitted` is
-                              reserved for the no-overlay row
-  --enable / --disable NAME   ad-hoc overlay; conflicts with --scenario
+  --scenario NAMES            prospective scenario overlay (repeatable), applied on
+                              top of the fit's own scenario/enable/disable (§11.3).
+                              `fitted` is reserved for the no-overlay row: the
+                              fitted model, the fit's own selection applied
+  --enable / --disable NAME   ad-hoc overlay on the `fitted` row, on top of the
+                              fit's selection; conflicts with --scenario
   --sweep PARAM=GRID          vary a parameter across the posterior (repeatable).
                               GRID = list | lin(min,max,n) | log10(min,max,n).
                               Free-forward only; same param in a scenario is an error
@@ -6635,10 +6672,17 @@ camdl fit predict [FIT]
 `$CAMDL_OUTPUT_DIR` (there is no `--output-dir` flag; `--output` is the TSV
 mirror).
 
-With `--fit`, `pfilter` scores the likelihood that fit config defines: under
-`ic_free = true` it weights and resamples at `y₁` but leaves `y₁`'s term out, so
-at the fit's MLE it reports the number `fit run` maximised (inference spec
-§3.8). It prints the objective it scored, for example
+With `--fit`, `pfilter` scores the likelihood that fit config defines: under the
+config's own `scenario` / `enable` / `disable` (the interventions `fit run`
+fired), and under `ic_free = true` it weights and resamples at `y₁` but leaves
+`y₁`'s term out, so at the fit's MLE it reports the number `fit run` maximised
+(inference spec §3.8). The config's selection and the `--scenario` / `--enable`
+/ `--disable` flags combine as on `survey --fit` and `profile --fit`: either
+alone selects, the same scenario named by both is one selection, and any other
+pair is refused — a run scores one problem. A selection taken from the config
+applies its intervention lists only (§11.3), so `--params` at the MLE is not
+overridden by a fit scenario's `set`; `--scenario` beside `--params` stays
+refused (gh#194). It prints the objective it scored, for example
 `pfilter: objective: conditional on the first observation (ic_free = true in
 fit.toml); omit --fit and pass --data for the full likelihood`,
 and refuses an `ic_free` fit whose model has a deterministic `init { }`, as
