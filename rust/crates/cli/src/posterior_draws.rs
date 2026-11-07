@@ -303,7 +303,13 @@ fn fit_algorithm_label(m: FitAlgorithm) -> &'static str {
 /// raw posterior trace tail carries only the estimated columns, so without this
 /// a `simulate --draws tail.tsv` run would fall back to model defaults for the
 /// fixed parameters — silently diverging from the fit.
-pub fn resolve_fixed_for_backfill(fit_ref: &str) -> Result<Vec<(String, f64)>, String> {
+///
+/// `model` resolves a config's `[fixed] from_scenario = "name"`, which names
+/// one of the model's scenarios; a stored fit's sidecar is already resolved.
+pub fn resolve_fixed_for_backfill(
+    fit_ref: &str,
+    model: &ir::Model,
+) -> Result<Vec<(String, f64)>, String> {
     let path = Path::new(fit_ref);
     if path.is_dir() {
         let side = crate::run_meta::read_fit_sidecar(path).ok_or_else(|| {
@@ -317,7 +323,7 @@ pub fn resolve_fixed_for_backfill(fit_ref: &str) -> Result<Vec<(String, f64)>, S
         .map_err(|e| format!("failed to load --fit config '{fit_ref}': {e}"))?;
     let fixed = cfg
         .fixed
-        .resolve()
+        .resolve_with_model(model)
         .map_err(|e| format!("resolving [fixed] from '{fit_ref}': {e}"))?;
     Ok(fixed.into_iter().collect())
 }
@@ -530,7 +536,8 @@ mod tests {
             ..Default::default()
         };
         crate::run_meta::write_fit_sidecar(&tmp, Path::new("nonexistent.toml"), &sidecar).unwrap();
-        let mut got = resolve_fixed_for_backfill(tmp.to_str().unwrap()).expect("reads sidecar");
+        let mut got = resolve_fixed_for_backfill(tmp.to_str().unwrap(), &crate::test_support::tiny_model())
+            .expect("reads sidecar");
         got.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(got, vec![("N0".to_string(), 1000.0), ("sigma".to_string(), 0.11)]);
         fs::remove_dir_all(&tmp).ok();

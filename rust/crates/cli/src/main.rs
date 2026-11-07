@@ -1846,7 +1846,11 @@ fn run_simulate(a: &args::SimulateArgs) {
             });
             if let Some(fit_ref) = fit_path_for_draws.as_ref() {
                 report_replay_check(check_replay_model(fit_ref, &ir_path_given, &ir_path));
-                let fixed = posterior_draws::resolve_fixed_for_backfill(fit_ref)
+                let (fixed_model, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+                let fixed = posterior_draws::resolve_fixed_for_backfill(fit_ref, &fixed_model)
                     .unwrap_or_else(|e| {
                         eprintln!("error: --fit [fixed]: {}", e);
                         std::process::exit(1);
@@ -4882,7 +4886,8 @@ fn generate_prior_draws(
     };
 
     let config = Problem::load(fit_path).map_err(|e| wrap_fit_load_error(fit_path, e))?;
-    let fixed = config.fixed.resolve()?;
+    // Model-aware: `[fixed] from_scenario` names a model scenario.
+    let fixed = config.fixed.resolve_with_model(model)?;
     // The rows carry the [estimate] parameters only, so an empty [estimate]
     // samples nothing and every cell runs at one parameter vector (run spec
     // §3.4: no usable prior is a hard error).
