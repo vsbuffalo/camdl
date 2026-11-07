@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 232" role="img" aria-labelledby="t d">
+  <title id="t">An instant on a boundary</title>
+  <desc id="d">An intervention at date("2026-07-04"), internal time 3, falls on the boundary between two buckets. The bucket at 3, covering (2, 3], has already accumulated when it fires; the bucket at 4, covering (3, 4], is the first one it affects.</desc>
+
+  <!-- internal t = k sits at x = 175 + 100k -->
+  <text x="140" y="34" class="t-label fig-muted" text-anchor="end">internal t</text>
+  <text x="175" y="34" class="t-mono-label fig-ink" text-anchor="middle">0</text>
+  <text x="275" y="34" class="t-mono-label fig-ink" text-anchor="middle">1</text>
+  <text x="375" y="34" class="t-mono-label fig-ink" text-anchor="middle">2</text>
+  <text x="475" y="34" class="t-mono-label fig-ink" text-anchor="middle">3</text>
+  <text x="575" y="34" class="t-mono-label fig-ink" text-anchor="middle">4</text>
+  <line x1="162" y1="56" x2="588" y2="56" class="s-muted"/>
+  <line x1="175" y1="49" x2="175" y2="63" class="s-muted"/>
+  <line x1="275" y1="49" x2="275" y2="63" class="s-muted"/>
+  <line x1="375" y1="49" x2="375" y2="63" class="s-muted"/>
+  <line x1="475" y1="49" x2="475" y2="63" class="s-muted"/>
+  <line x1="575" y1="49" x2="575" y2="63" class="s-muted"/>
+  <line x1="475" y1="64" x2="475" y2="196" class="s-warm" stroke-width="1.6" stroke-dasharray="4 4"/>
+  <path d="M475,48 L483,56 L475,64 L467,56 z" class="fig-warm"/>
+  <text x="140" y="99" class="t-label fig-muted" text-anchor="end">bucket at 3</text>
+  <rect x="375" y="80" width="99" height="28" class="fig-panel"/>
+  <line x1="474" y1="80" x2="474" y2="108" class="s-muted"/>
+  <text x="425" y="99" class="t-mono-label fig-muted" text-anchor="middle">(2, 3]</text>
+  <text x="467" y="128" class="t-small fig-muted" text-anchor="end">already accumulated</text>
+  <text x="140" y="163" class="t-label fig-muted" text-anchor="end">bucket at 4</text>
+  <rect x="476" y="144" width="99" height="28" class="fig-accent-soft"/>
+  <line x1="575" y1="144" x2="575" y2="172" class="s-accent"/>
+  <text x="525" y="163" class="t-mono-label fig-ink" text-anchor="middle">(3, 4]</text>
+  <text x="483" y="192" class="t-small fig-accent" text-anchor="start">first one affected</text>
+  <text x="475" y="222" class="t-code-label fig-ink" text-anchor="middle"><tspan class="tk-kw">at</tspan> [date("2026-07-04")] = 3</text>
+</svg>

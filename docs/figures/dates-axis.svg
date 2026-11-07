@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 124" role="img" aria-labelledby="t d">
+  <title id="t">Dates on the internal time axis</title>
+  <desc id="d">With origin set to 1 July 2026 and a time unit of days, internal time 0 is the boundary at which 1 July begins, 1 is the start of 2 July, and so on to 4 at the start of 5 July. Each date is a point on the line, not a span.</desc>
+
+  <!-- internal t = k sits at x = 175 + 100k -->
+  <text x="140" y="34" class="t-label fig-muted" text-anchor="end">internal t</text>
+  <text x="175" y="34" class="t-mono-label fig-ink" text-anchor="middle">0</text>
+  <text x="275" y="34" class="t-mono-label fig-ink" text-anchor="middle">1</text>
+  <text x="375" y="34" class="t-mono-label fig-ink" text-anchor="middle">2</text>
+  <text x="475" y="34" class="t-mono-label fig-ink" text-anchor="middle">3</text>
+  <text x="575" y="34" class="t-mono-label fig-ink" text-anchor="middle">4</text>
+  <line x1="162" y1="56" x2="588" y2="56" class="s-muted"/>
+  <line x1="175" y1="49" x2="175" y2="63" class="s-muted"/>
+  <line x1="275" y1="49" x2="275" y2="63" class="s-muted"/>
+  <line x1="375" y1="49" x2="375" y2="63" class="s-muted"/>
+  <line x1="475" y1="49" x2="475" y2="63" class="s-muted"/>
+  <line x1="575" y1="49" x2="575" y2="63" class="s-muted"/>
+  <circle cx="175" cy="56" r="4.5" class="fig-accent"/>
+  <circle cx="275" cy="56" r="4.5" class="fig-accent"/>
+  <circle cx="375" cy="56" r="4.5" class="fig-accent"/>
+  <circle cx="475" cy="56" r="4.5" class="fig-accent"/>
+  <circle cx="575" cy="56" r="4.5" class="fig-accent"/>
+  <text x="140" y="90" class="t-label fig-muted" text-anchor="end">date()</text>
+  <text x="175" y="90" class="t-mono-label fig-ink" text-anchor="middle">07-01</text>
+  <text x="275" y="90" class="t-mono-label fig-ink" text-anchor="middle">07-02</text>
+  <text x="375" y="90" class="t-mono-label fig-ink" text-anchor="middle">07-03</text>
+  <text x="475" y="90" class="t-mono-label fig-ink" text-anchor="middle">07-04</text>
+  <text x="575" y="90" class="t-mono-label fig-ink" text-anchor="middle">07-05</text>
+  <text x="175" y="114" class="t-small fig-accent" text-anchor="middle">origin</text>
+</svg>

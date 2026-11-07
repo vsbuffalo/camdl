@@ -53,16 +53,22 @@ always consecutive integers, with no exceptions for month lengths or leap years:
 **`origin` fixes which day-number is internal zero.** With
 `origin = date("2026-07-01")` and `time_unit = 'days`:
 
+<!-- figure: dates-axis -->
+
 ```
 internal t     0         1         2         3         4
                |---------|---------|---------|---------|
 date()       07-01     07-02     07-03     07-04     07-05
 ```
 
+<!-- /figure -->
+
 **`date()` returns a boundary, not a day.** Each label above marks a _point_ on
 the line — the instant at which that civil day begins. It has zero width.
 
 **A civil day is the interval between two boundaries:**
+
+<!-- figure: dates-civil-days -->
 
 ```
 internal t     0         1         2         3         4
@@ -71,10 +77,14 @@ civil day    [ 1 Jul   )[ 2 Jul   )[ 3 Jul  )[ 4 Jul  )
              [0,1)      [1,2)      [2,3)     [3,4)
 ```
 
+<!-- /figure -->
+
 So `1 July` is `[date("2026-07-01"), date("2026-07-02"))`. Two instants make a
 period; one instant is not a period.
 
 **The engine accumulates flow between boundaries**, closed on the right:
+
+<!-- figure: dates-flow-buckets -->
 
 ```
 internal t     0         1         2         3         4
@@ -84,11 +94,15 @@ bucket at 2              (---------]                    = (1,2]
 bucket at 3                        (---------]          = (2,3]
 ```
 
+<!-- /figure -->
+
 `(0,1]` and `[0,1)` span the same 24 hours, so the bucket closing at `1` holds
 the flow of `1 Jul`. That correspondence is the hinge of everything below.
 
 **An instant scheduled on a boundary belongs to the period that boundary
 opens**, because the period it closes is already complete:
+
+<!-- figure: dates-instant-on-boundary -->
 
 ```
 internal t     0         1         2         3         4
@@ -97,6 +111,8 @@ internal t     0         1         2         3         4
 bucket at 3                        (---------]     already accumulated
 bucket at 4                                  (---------]  first one affected
 ```
+
+<!-- /figure -->
 
 Four terms, then, and they are not interchangeable: a **day-number** (an
 integer), an **instant** (a point, what `date()` returns), a **civil day** (an
