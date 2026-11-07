@@ -642,12 +642,33 @@ fn design_from_refuses_a_scenario_and_writes_nothing() {
         "--scenario", "fast",
         "--backend", "chain_binomial", "--dt", "1", "--seed", "11",
     ]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // clap colours its messages when CI sets CLICOLOR_FORCE; compare the text.
+    let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
     assert!(!output.status.success(),
         "--design-from with --scenario must be refused, not run without it:\n{stderr}");
     assert!(stderr.contains("'--design-from <FIT_TOML>' cannot be used with '--scenario"),
         "the refusal names both flags:\n{stderr}");
     assert!(!out_dir.exists(), "nothing is written:\n{stderr}");
+}
+
+/// Remove ANSI SGR escape sequences (`ESC [ … m`) so a coloured and an
+/// uncoloured rendering of the same message compare equal.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for d in chars.by_ref() {
+                if d == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Every `.tsv` under `root`, recursively.
