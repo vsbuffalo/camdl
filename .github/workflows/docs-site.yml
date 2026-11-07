@@ -35,9 +35,11 @@ on:
 permissions:
   contents: read
 
+# A newer push supersedes a pull request's render, but a run on main is never
+# cancelled mid-deploy.
 concurrency:
   group: docs-site-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   render:
@@ -64,6 +66,12 @@ jobs:
       - name: Build camdl and render site
         run: opam exec -- make docs-site
 
+      - name: Check camdl docs against the site
+        # ci.yml skips its tests when only docs/ changed, but these hold the
+        # embedded topics to the site: each topic's page is the embedded file
+        # and is published, and figure markers print as links, not raw HTML.
+        run: cd rust && cargo test --release -p cli --bin camdl docs::
+
       - name: Refuse unpublished files in the site
         # Only rendered pages and Quarto's own assets belong in _site/. A raw
         # .md here means a page linked a docs/ file that is not published and
@@ -75,12 +83,12 @@ jobs:
           fi
 
       - uses: actions/upload-pages-artifact@v3
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         with:
           path: docs/_site
 
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: render
     runs-on: ubuntu-latest
     permissions:
