@@ -416,8 +416,9 @@ pub struct SimulateArgs {
     /// draws from, by handle (`@label`, a leaf or results directory, a run-id
     /// prefix, a fit.toml); a results directory holding several runs is
     /// refused with them listed (gh#896). With `--draws <file.tsv>`, a fit.toml (or results
-    /// dir) whose `[fixed]` block backfills parameters absent from the file's
-    /// columns — never overwriting a column the file provides (#273).
+    /// dir) whose `[fixed]` block gives the parameters absent from the file's
+    /// columns their value, at the fit.toml `[fixed]` tier: `--params` and the
+    /// scenario outrank it, and a column the file provides outranks it (#273).
     /// Also consulted (without --draws) by an anchored `--to`: the fit's
     /// [data.observations] supplies the observed times the anchor resolves
     /// against — a manual check requires --fit to come with --draws and/or

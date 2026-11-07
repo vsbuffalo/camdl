@@ -1811,26 +1811,33 @@ fn run_simulate(a: &args::SimulateArgs) {
             loaded
             }
         } else {
-            // File path. #273: when --fit is supplied, backfill any parameter
-            // absent from the draws columns from the fit's [fixed] block, never
-            // overwriting a column the file provides (a raw posterior trace tail
-            // carries only the estimated columns).
-            let mut loaded = load_draws_tsv(source).unwrap_or_else(|e| {
+            // File path. #273: when --fit is supplied, the fit's [fixed] block
+            // supplies every parameter the draws columns lack (a raw posterior
+            // trace tail carries only the estimated columns). It resolves at
+            // its own tier (2, below --params and the scenario), as on the
+            // `--draws prior --fit` path, not in the rows: a row is tier 3.5
+            // and would discard --params (run spec §1.3). A column the file
+            // carries is a row value and outranks it.
+            let loaded = load_draws_tsv(source).unwrap_or_else(|e| {
                 eprintln!("error loading draws: {}", e);
                 std::process::exit(1);
             });
             if let Some(fit_ref) = fit_path_for_draws.as_ref() {
                 let fixed = posterior_draws::resolve_fixed_for_backfill(fit_ref)
                     .unwrap_or_else(|e| {
-                        eprintln!("error: --fit [fixed] backfill: {}", e);
+                        eprintln!("error: --fit [fixed]: {}", e);
                         std::process::exit(1);
                     });
-                let filled = posterior_draws::backfill_fixed(&mut loaded, &fixed);
-                if !filled.is_empty() {
-                    let names: Vec<&str> = filled.iter().map(|s| s.as_str()).collect();
-                    eprintln!("draws: backfilled {} fixed parameter(s) from {}: {}",
-                        filled.len(), fit_ref, names.join(", "));
+                let lacking: Vec<&str> = fixed.iter()
+                    .map(|(name, _)| name.as_str())
+                    .filter(|name| loaded.iter().any(|row| !row.contains_key(*name)))
+                    .collect();
+                if !lacking.is_empty() {
+                    eprintln!("draws: {} fixed parameter(s) the draws file lacks take the \
+                               fit's [fixed] value from {} (below --params): {}",
+                        lacking.len(), fit_ref, lacking.join(", "));
                 }
+                base_sim_run.fit_fixed = fixed.into_iter().collect();
             }
             loaded
         }

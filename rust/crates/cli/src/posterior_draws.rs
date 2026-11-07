@@ -13,7 +13,7 @@
 //! (IF2 / NLopt) wrote none, so it resolves to an error, not a silent single
 //! point dressed up as a distribution.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::chain_selection::{ChainSelection, SubsetInfo};
@@ -322,27 +322,6 @@ pub fn resolve_fixed_for_backfill(fit_ref: &str) -> Result<Vec<(String, f64)>, S
     Ok(fixed.into_iter().collect())
 }
 
-/// #273 backfill: insert each `(name, value)` from `fixed` into every draw row
-/// that lacks that column, **never** overwriting a column the row provides.
-/// Returns the set of names actually filled (for the user-facing report). The
-/// "never overwrite" rule is what keeps a posterior draw winning over a value
-/// the fit merely held fixed.
-pub fn backfill_fixed(
-    draws: &mut [HashMap<String, f64>],
-    fixed: &[(String, f64)],
-) -> BTreeSet<String> {
-    let mut filled = BTreeSet::new();
-    for row in draws.iter_mut() {
-        for (name, value) in fixed {
-            if !row.contains_key(name) {
-                row.insert(name.clone(), *value);
-                filled.insert(name.clone());
-            }
-        }
-    }
-    filled
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,23 +519,7 @@ mod tests {
         assert!(err.contains("not a fit results directory"), "got: {err}");
     }
 
-    // ─── #273: [fixed] backfill ───────────────────────────────────────────
-
-    #[test]
-    fn backfill_fills_absent_never_overwrites_present() {
-        let mut draws = vec![
-            HashMap::from([("beta".to_string(), 0.5)]),  // gamma absent
-            HashMap::from([("beta".to_string(), 0.6), ("gamma".to_string(), 0.2)]), // both present
-        ];
-        let fixed = vec![("beta".to_string(), 9.9), ("gamma".to_string(), 0.1)];
-        let filled = backfill_fixed(&mut draws, &fixed);
-        // beta is present in both rows → never overwritten; only gamma in row 0 fills.
-        assert_eq!(draws[0]["beta"], 0.5, "a present column wins over [fixed]");
-        assert_eq!(draws[0]["gamma"], 0.1, "an absent column is backfilled");
-        assert_eq!(draws[1]["beta"], 0.6);
-        assert_eq!(draws[1]["gamma"], 0.2, "row 1 already had gamma — untouched");
-        assert_eq!(filled.into_iter().collect::<Vec<_>>(), vec!["gamma".to_string()]);
-    }
+    // ─── #273: reading a fit's [fixed] ────────────────────────────────────
 
     #[test]
     fn resolve_fixed_reads_sidecar_fixed_from_dir() {

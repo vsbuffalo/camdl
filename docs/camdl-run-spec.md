@@ -1102,8 +1102,9 @@ pub struct SimulateJob {
     /// `--param NAME=VALUE` CLI overrides merged on top of every cell
     /// (M layer, highest precedence).
     pub cli_overrides: Vec<(String, f64)>,
-    /// A `--draws prior --fit FIT.toml` config's `[fixed]` block, resolved at
-    /// the `[fixed]` tier of every cell; empty for every other source.
+    /// A `--draws prior|<file> --fit FIT.toml` config's `[fixed]` block,
+    /// resolved at the `[fixed]` tier of every cell; empty for every other
+    /// source.
     pub fit_fixed: IndexMap<String, f64>,
     /// `--param-vec PREFIX=FILE` entries (CLI only).
     pub set_vec_entries: Vec<(String, String)>,
@@ -1334,11 +1335,14 @@ artifact, not by method name: a leaf has a posterior iff it wrote a
 than to a single point dressed up as a distribution
 (`rust/crates/cli/src/posterior_draws.rs`).
 
-`--draws <file.tsv> --fit <config-or-run>` additionally **backfills** any
-parameter absent from the file's columns from the fit's `[fixed]` block, never
-overwriting a column the file provides — a raw posterior trace tail carries only
-the estimated columns, so this fills the fixed parameters from the fit rather
-than leaving them unset.
+`--draws <file.tsv> --fit <config-or-run>` additionally supplies the fit's
+`[fixed]` block to every parameter the file's columns lack — a raw posterior
+trace tail carries only the estimated columns, so this fills the fixed
+parameters from the fit rather than leaving them unset. The block resolves at
+its own tier (2 of §1.3), as on `--draws prior --fit`: `--params` and the
+scenario outrank it, and a column the file carries (a row value, tier 3.5)
+outranks it. The values are not copied into the rows, so `--draws-out` writes
+only the file's own columns.
 
 `--draws-out PATH` writes the resolved rows back out in the same
 one-row-per-draw, one-column-per-parameter format `--draws PATH` reads, so a
@@ -2243,7 +2247,7 @@ camdl simulate sirv.camdl --params params.toml --sweep beta=lin(0.2,0.6,5) --see
 `-n` / `--n-draws` sets the draw count for `--draws prior|uniform` (there is no
 `--n`). `--fit` is required for `--draws posterior`, optional for
 `--draws prior` (a `fit.toml` supplying priors) and for `--draws <file>` (a
-`[fixed]` block backfilling columns the file omits).
+`[fixed]` block supplying the parameters the file's columns omit).
 
 `--draws prior` samples only the parameters that declare a prior. A parameter
 with no prior that nothing else sets — no compiled-in value, `--params`,
@@ -2303,7 +2307,7 @@ pub struct SimulateJob {
     pub obs_anchors: Option<ObsAnchorTimes>, // resolved first_obs/last_obs, once per job
     pub seeds: Seeds,                  // S layer
     pub cli_overrides: Vec<(String, f64)>,   // --param (highest M tier)
-    pub fit_fixed: IndexMap<String, f64>,    // --draws prior --fit: the [fixed] block
+    pub fit_fixed: IndexMap<String, f64>,    // --draws prior|<file> --fit: the [fixed] block
     pub set_vec_entries: Vec<(String, String)>, // --param-vec
     pub table_files: Vec<(String, String)>,  // --table
     pub obs: ObsOutput,

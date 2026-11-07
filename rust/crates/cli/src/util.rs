@@ -2767,7 +2767,8 @@ pub struct SimRun {
     /// overrides a draw/sweep value, while genuine `--param` still wins.
     pub point_overrides: HashMap<String, f64>,
     /// A fit config's `[fixed]` block, when `simulate --draws prior --fit
-    /// FIT.toml` samples from that config's priors (gh#949). Routed into the
+    /// FIT.toml` samples from that config's priors (gh#949), or `--draws FILE
+    /// --fit FIT` supplies the parameters the file's columns lack. Routed into the
     /// resolver's `fit.toml [fixed]` tier (tier 2, spec §1.3) — below
     /// `--params`, the scenario and `--param` — rather than written into each
     /// draw row, where the draw/sweep tier would let it override `--params`.
