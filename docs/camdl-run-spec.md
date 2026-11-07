@@ -184,6 +184,11 @@ rather than resolved:
   parameter, what the scenario does to it and the fit.toml, and the fix: move
   the parameter from `[estimate]` to `[fixed]` with the scenario's value to fit
   under it, or name a scenario that does not touch it;
+- a scenario that `set`s or `scale`s a parameter an inline survey samples with
+  `--estimate`. The box would discard the scenario's value. The error names the
+  parameter, what the scenario does to it and `--estimate`, and the fix: drop
+  the parameter from `--estimate` to hold it at the scenario's value, or name a
+  scenario that does not touch it;
 - a scenario that `set`s or `scale`s a parameter `profile` estimates, with or
   without `--fit`. The estimated set is what `--rw-sd` selects: under
   `--rw-sd auto`, every parameter that is not swept, `--fixed`, in a

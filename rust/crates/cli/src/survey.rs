@@ -1063,6 +1063,18 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         // A `--fixed` the scenario sets or scales is refused (gh#571).
         crate::params_resolver::refuse_fixed_flag_over_scenario(
             &model_pre, a.scenario.as_deref(), &fixed_cli_vec)?;
+        // ...and so is a scenario that sets or scales a parameter `--estimate`
+        // samples: the box would discard the scenario's value, as `--fit`
+        // mode's `[estimate]` does (run spec §1.3).
+        if let Some(scenario) = a.scenario.as_deref() {
+            let estimated: Vec<&str> = a.estimate.iter().map(|e| e.name.as_str()).collect();
+            if let Some(msg) = crate::params_resolver::scenario_estimate_collision(
+                &model_declared, scenario, &estimated,
+                crate::params_resolver::EstimatedBy::EstimateFlag,
+            )? {
+                return Err(msg);
+            }
+        }
         let fixed_files: Vec<std::path::PathBuf> = Vec::new();
         let ftf: IndexMap<String, f64> = IndexMap::new();
         let fte: IndexSet<String> = IndexSet::new();
@@ -1209,8 +1221,8 @@ struct SurveyRoleDecls<'a> {
     simplex_groups: &'a [crate::fit::config_v2::SimplexGroup],
     cli_estimate: Vec<crate::roles::EstimateDecl>,
     cli_fixed: &'a [String],
-    /// The fit config's scenario (the inline mode's is a value source over
-    /// the sampled parameters too, as today, and is not checked).
+    /// The fit config's scenario. The inline mode passes none: a scenario
+    /// touching a sampled parameter is refused before roles are resolved.
     scenario: Option<&'a str>,
 }
 

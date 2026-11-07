@@ -424,6 +424,39 @@ fn survey_refuses_a_scenario_that_sets_an_estimated_parameter() {
     }
 }
 
+/// Inline `survey --estimate NAME=LO:HI` samples NAME over its box, so a
+/// scenario that sets or scales NAME is refused as `survey --fit` refuses it.
+/// Before, the scenario's value was discarded without a notice and run.json
+/// recorded `beta: {role: fixed, source: scenario}` for a parameter that was
+/// sampled.
+#[test]
+fn survey_inline_refuses_a_scenario_that_sets_an_estimated_parameter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    setup(dir);
+    let common = ["--data", "cases.tsv", "--estimate", "beta=0.01:1.0",
+                  "--fixed", "gamma=0.1", "--fixed", "N0=1000"];
+    for (scenario, lines) in [
+        ("hi", &[
+            "error: parameter `beta` is both estimated and set by scenario `hi`",
+            "  estimated by: `--estimate beta=LO:HI`",
+            "  scenario:    beta = 0.8    (set beta = 0.8)",
+        ][..]),
+        ("half", &[
+            "error: parameter `beta` is both estimated and scaled by scenario `half`",
+            "  scenario:    scale beta \u{d7} 0.5",
+        ][..]),
+    ] {
+        let root = format!("inline_{scenario}");
+        let out = survey(dir, &root, &[&common[..], &["--scenario", scenario]].concat());
+        assert_refused(scenario, &out, lines, &dir.join(&root));
+    }
+    // A scenario that touches only parameters the survey does not sample runs.
+    let out = survey(dir, "inline_ok", &["--data", "cases.tsv", "--estimate", "beta=0.01:1.0",
+        "--fixed", "N0=1000", "--scenario", "fastg"]);
+    assert!(out.status.success(), "disjoint scenario: {}", stderr(&out));
+}
+
 #[test]
 fn survey_refuses_a_name_in_both_fixed_and_estimate() {
     let tmp = tempfile::tempdir().unwrap();

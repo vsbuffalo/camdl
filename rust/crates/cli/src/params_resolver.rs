@@ -1612,6 +1612,8 @@ pub enum EstimatedBy<'a> {
     /// `profile`'s `--rw-sd`: `auto` estimates every parameter that is not
     /// swept or pinned, a map estimates the names it lists.
     RwSd { auto: bool },
+    /// `survey`'s inline `--estimate NAME=LO:HI` boxes.
+    EstimateFlag,
 }
 
 impl EstimatedBy<'_> {
@@ -1624,6 +1626,7 @@ impl EstimatedBy<'_> {
             EstimatedBy::RwSd { auto: false } => {
                 format!("\n  estimated by: `--rw-sd {param}=...`")
             }
+            EstimatedBy::EstimateFlag => format!("\n  estimated by: `--estimate {param}=LO:HI`"),
         }
     }
 
@@ -1647,7 +1650,7 @@ impl EstimatedBy<'_> {
                  discard the scenario's value, so which one is meant cannot be read from the \
                  fit config."
             }
-            EstimatedBy::RwSd { .. } => {
+            EstimatedBy::RwSd { .. } | EstimatedBy::EstimateFlag => {
                 "\nAn estimated parameter takes its values from the estimation, which would \
                  discard the scenario's value, so which one is meant cannot be read from the \
                  command line."
@@ -1671,13 +1674,16 @@ impl EstimatedBy<'_> {
             EstimatedBy::RwSd { auto: false } => format!(
                 "drop {names} from `--rw-sd` to hold {them} at the scenario's value ({values})"
             ),
+            EstimatedBy::EstimateFlag => format!(
+                "drop {names} from `--estimate` to hold {them} at the scenario's value ({values})"
+            ),
         }
     }
 }
 
 /// Refuse a run whose scenario sets or scales a parameter it estimates:
-/// `[estimate]` for a fit config, `--rw-sd` for `profile`
-/// ([`EstimatedBy`]). `Ok(None)` when the scenario touches none
+/// `[estimate]` for a fit config, `--rw-sd` for `profile`, `--estimate` for an
+/// inline `survey` ([`EstimatedBy`]). `Ok(None)` when the scenario touches none
 /// of `estimated`; `Ok(Some(message))` names every colliding parameter, what
 /// the scenario does to it, where it is declared estimated and the fix.
 ///
@@ -1721,7 +1727,7 @@ pub fn scenario_estimate_collision(
         let scaled = match by {
             EstimatedBy::FitToml(_) => " A scaled parameter cannot be held at a value of its \
                 own: the scenario would rescale that value too.",
-            EstimatedBy::RwSd { .. } => "",
+            EstimatedBy::RwSd { .. } | EstimatedBy::EstimateFlag => "",
         };
         format!("\nFix: {other}.{scaled}")
     } else {
