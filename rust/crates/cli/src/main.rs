@@ -4785,12 +4785,6 @@ fn wrap_fit_load_error(fit_path: &str, err: String) -> String {
         err, fit_path)
 }
 
-///
-/// Returns the draw rows — the `[estimate]` parameters only — and, separately,
-/// the config's resolved `[fixed]` block. The fixed values are not written
-/// into the rows (gh#949): a row resolves at the draw tier, above `--params`,
-/// while `[fixed]` belongs at the `fit.toml [fixed]` tier below it. The
-/// caller routes them there via `SimRun::fit_fixed`.
 /// The fit's own intervention selection, for `simulate --draws prior|<file>
 /// --fit`: the same [`util::FitBase`] the posterior path reads, so every arm
 /// replays on the fit's `scenario` / `enable` / `disable` and a flag applies
@@ -4814,6 +4808,12 @@ fn fit_base_for_draws(fit_ref: &str, source: &str) -> Result<util::FitBase, Stri
     Ok(base)
 }
 
+///
+/// Returns the draw rows — the `[estimate]` parameters only — and, separately,
+/// the config's resolved `[fixed]` block. The fixed values are not written
+/// into the rows (gh#949): a row resolves at the draw tier, above `--params`,
+/// while `[fixed]` belongs at the `fit.toml [fixed]` tier below it. The
+/// caller routes them there via `SimRun::fit_fixed`.
 fn generate_prior_draws(
     fit_path: &str,
     n: usize,
