@@ -132,13 +132,72 @@ type diff_target =
   | WrtPop of string
   | WrtProjected
 
+module SS = Set.Make (String)
+
+(* Name lookups. A model can carry thousands of forcings and hundreds of
+   bindings, and differentiation looks a name up at every reference, once per
+   (rate, compartment) pair, so a linear [List.find_opt] dominated compile time
+   on large models (tb_india_baseline_flux: 87% of a 56 s compile). Each list is
+   indexed once and the index is reused while the same list (physically) is
+   passed again; every list here is immutable, so the index is exact. The first
+   entry of a name wins, as with [List.find_opt]. *)
+let memo_on_list (build : 'a list -> 'b) : 'a list -> 'b =
+  let last = ref None in
+  fun l ->
+    match !last with
+    | Some (l', v) when l' == l -> v
+    | _ -> let v = build l in last := Some (l, v); v
+
+let index_by (name : 'a -> string) (l : 'a list) : (string, 'a) Hashtbl.t =
+  let h = Hashtbl.create (List.length l) in
+  List.iter (fun x -> if not (Hashtbl.mem h (name x)) then Hashtbl.add h (name x) x) l;
+  h
+
+let binding_index = memo_on_list (index_by (fun (b : binding) -> b.bname))
+let tf_index = memo_on_list (index_by (fun (tf : time_function) -> tf.name))
+let table_index = memo_on_list (index_by (fun (t : table) -> t.name))
+
+let find_binding bindings name = Hashtbl.find_opt (binding_index bindings) name
+let find_tf tfs name = Hashtbl.find_opt (tf_index tfs) name
+let find_table tbls name = Hashtbl.find_opt (table_index tbls) name
+
+(* The compartments a binding's body reaches, directly or through other
+   bindings, computed once per binding. Bindings are acyclic by construction
+   (topo-ordered; enforced at validate/dimcheck), so the recursion terminates. *)
+let binding_reach : binding list -> string -> SS.t =
+  memo_on_list (fun bindings ->
+    let memo = Hashtbl.create 64 in
+    let rec reach name =
+      match Hashtbl.find_opt memo name with
+      | Some r -> r
+      | None ->
+        let r = match find_binding bindings name with
+          | Some b -> pops SS.empty b.bexpr
+          | None -> SS.empty
+        in
+        Hashtbl.add memo name r; r
+    and pops acc (e : expr) =
+      match e with
+      | Pop n -> SS.add n acc
+      | PopSum members -> List.fold_left (fun a m -> SS.add m a) acc members
+      | Param _ | ConstRef _ | Const _ | Time | Dt | Projected | ObsColumnRef _
+      | ObsAnchor _ | TimeFunc _ | ForcingBasis _ | UnitLiteral _ -> acc
+      | BindingRef name -> SS.union (reach name) acc
+      | TableLookup (_, args) | Reduce args -> List.fold_left pops acc args
+      | BinOp b -> pops (pops acc b.left) b.right
+      | UnOp u -> pops acc u.arg
+      | Cond cc -> pops (pops (pops acc cc.pred) cc.then_) cc.else_
+      | UncheckedDim u -> pops acc u.inner
+      | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
+    in
+    reach)
+
 (** Does compartment [c]'s state reach [e] — directly ([Pop c] or a [PopSum]
     containing [c]) or through a hoisted binding's body? The [WrtPop] analogue of
     [mentions]: forcings and const-indexed table cells are state-free, so a
     non-mention proves ∂e/∂Pop(c) = 0, and a mention inside a nonsmooth op
-    (Mod/Floor/Ceil/Abs/Min/Max) is the [WrtPop] refusal trigger. Bindings are
-    acyclic by construction (topo-ordered; enforced at validate/dimcheck), so the
-    binding recursion terminates. *)
+    (Mod/Floor/Ceil/Abs/Min/Max) is the [WrtPop] refusal trigger. A binding is
+    answered from its precomputed reach set. *)
 let rec mentions_pop (bindings : binding list) (c : string) (e : expr) : bool =
   match e with
   | Pop n -> n = c
@@ -146,10 +205,7 @@ let rec mentions_pop (bindings : binding list) (c : string) (e : expr) : bool =
   | Param _ | ConstRef _ | Const _ | Time | Dt | Projected | ObsColumnRef _
   | ObsAnchor _ -> false
   | TimeFunc _ | ForcingBasis _ -> false   (* forcings are state-free *)
-  | BindingRef name ->
-    (match List.find_opt (fun (b : binding) -> b.bname = name) bindings with
-     | Some b -> mentions_pop bindings c b.bexpr
-     | None -> false)
+  | BindingRef name -> SS.mem c (binding_reach bindings name)
   | TableLookup (_, args) -> List.exists (mentions_pop bindings c) args
   | BinOp b -> mentions_pop bindings c b.left || mentions_pop bindings c b.right
   | UnOp u -> mentions_pop bindings c u.arg
@@ -254,12 +310,12 @@ let fourier_closed ?lag (f : fourier) : expr =
 let differentiate ?(bindings = []) (top : expr) (target : diff_target)
     (tfs : time_function list) (tbls : table list) : deriv =
   let forcing_mentions param fname =
-    match List.find_opt (fun (tf : time_function) -> tf.name = fname) tfs with
+    match find_tf tfs fname with
     | Some tf -> List.exists (mentions param) (forcing_coeff_exprs tf.kind)
     | None -> false
   in
   let table_value_mentions param name =
-    match List.find_opt (fun (t : table) -> t.name = name) tbls with
+    match find_table tbls name with
     | Some { source = Inline vals; _ } -> List.exists (mentions param) vals
     | _ -> false
   in
@@ -420,7 +476,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
           (∂forcing/∂projected = 0). *)
        | WrtPop _ | WrtProjected -> Known (Const 0.0)
        | WrtParam param ->
-      (match List.find_opt (fun (tf : time_function) -> tf.name = fname) tfs with
+      (match find_tf tfs fname with
        | Some tf when lag_mentions param tf ->
          Omitted
            { code = URLag;
@@ -482,7 +538,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
       (match target with
        | WrtPop _ | WrtProjected -> Known (Const 0.0)
        | WrtParam param ->
-         (match List.find_opt (fun (tf : time_function) -> tf.name = forcing) tfs with
+         (match find_tf tfs forcing with
           | Some tf when lag_mentions param tf ->
             Omitted
               { code = URLag;
@@ -500,7 +556,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
        param-dependent) index selects a cell we cannot identify symbolically →
        Unsupported when the param is involved (gh#215), else a genuine zero. *)
     | TableLookup (name, [ Const fi ]) ->
-      (match List.find_opt (fun (t : table) -> t.name = name) tbls with
+      (match find_table tbls name with
        | Some { source = Inline vals; _ } ->
          let i = int_of_float (Float.floor fi) in
          (match List.nth_opt vals i with
@@ -801,7 +857,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
           carry the observation-only [Projected] node under WrtProjected. *)
        | WrtParam _ | WrtProjected -> Known (Const 0.0)
        | WrtPop _ ->
-         (match List.find_opt (fun (b : binding) -> b.bname = name) bindings with
+         (match find_binding bindings name with
           | Some b -> d b.bexpr
           | None -> Known (Const 0.0)))
     | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
