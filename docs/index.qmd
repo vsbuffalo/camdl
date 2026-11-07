@@ -9,7 +9,7 @@ compartments are, how individuals move between them and how fast; the compiler
 expands it to a flat intermediate representation that a Rust runtime simulates
 and fits to data.
 
-The guides and reference pages here are the same text the binary carries:
+Most guides and reference pages here are the same text the binary carries:
 `camdl docs <topic>` prints them offline, matched to the installed version.
 The tutorials are website-only, because they show the real output of each
 command, regenerated from the current code every time the site is built.

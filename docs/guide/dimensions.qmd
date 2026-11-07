@@ -107,7 +107,7 @@ or untyped integer indexing. When the modeler's intent doesn't match
 the resolution rule, the model runs without error and produces
 quantitatively wrong output.
 
-In **pomp**[^pomp], multi-patch models require manually expanding
+In **pomp**[^pomp], stratified models (by patch or by age) require manually expanding
 compartments to `S1`, `S2`, `S3` and writing C snippets that reference
 each by name — the modeler manages all indexing by hand, and a typo
 between two valid expanded names (`S2` for `S3`) silently produces the
@@ -129,10 +129,12 @@ total vs. row-specific sum — is a semantic distinction the modeler
 manages by hand; the compiler can check rank but not intent.
 
 The common thread: these frameworks catch *syntactic* errors (missing
-brackets, wrong rank) but not *semantic* errors (wrong dimension,
-swapped indices, incorrect aggregation level). camdl's approach — bare
-names are always global sums, indices carry named dimension types, and
-the compiler rejects mismatches — catches both.
+brackets, wrong rank) but not *semantic* ones (wrong dimension, wrong
+aggregation level). In camdl, bare names are always global sums and
+indices carry named dimension types, so the compiler turns those
+semantic errors into compile errors too. It cannot catch two indices of
+the *same* dimension swapped — `W[p, q]` written for `W[q, p]` — which
+stays the modeler's to check.
 :::
 
 ## Rates are total propensity — the compiler checks
@@ -159,9 +161,9 @@ infers types from parameter declarations (`rate` → T⁻¹, `count` → P,
 `probability` → dimensionless), propagates them through arithmetic, and
 rejects the mismatch at compile time with error E300.
 
-This is the single most common modeling bug. In most other frameworks,
-it compiles without complaint and produces trajectories where infection
-happens at the wrong rate. The checker also verifies that arguments to
+The mistake is easy to make, and a framework that does not track units
+has no way to notice it: the model runs, and infection happens at the
+wrong rate. The checker also verifies that arguments to
 `exp()` and `log()` are dimensionless, that additions don't mix
 dimensions, and that table unit annotations are consistent.
 
@@ -492,7 +494,7 @@ stage can have its own rate:
 ```
 
 `consecutive(latent_stage)` yields pairs `(e1, e2), (e2, e3)`. The
-two-line `latent` declaration above is equivalent to writing each
+three-line `latent` declaration above is equivalent to writing each
 transition by hand:
 
 ```camdl
@@ -579,8 +581,8 @@ birth[a in age, p in patch] : --> S[child, p]
   where a != child
 
 # Compound guard
-transfer[a in age, src in patch, dst in patch] : S[a, src] --> S[a, dst]
-  @ rate * S[a, src]
+relocate[a in age, src in patch, dst in patch] : S[a, src] --> S[a, dst]
+  @ move_rate * S[a, src]
   where src != dst and a == adult
 ```
 
@@ -664,10 +666,10 @@ show which diseases motivate it.
 | Data-derived patches | `read("file", column = ...)` | Any sub-national model |
 | Indexed reproduction number | `R0[patch] : positive` | Polio, malaria (heterogeneous transmission) |
 | Consecutive aging | `consecutive(age)` + `age_dur` table | Any age-structured endemic model |
-| Erlang-distributed stages | `stratify(by = stage, only = [E])` | Measles (latent), malaria (liver stages) |
+| Erlang-distributed stages | `via erlang(stages = k, rate = sigma)` | Measles (latent), malaria (liver stages) |
 | Vaccination as partial dim | `stratify(by = immunity, only = [R, V])` | Polio (OPV/IPV), COVID-19 |
 | Seasonal forcing | Time-dependent rate expression | Measles (school terms), cholera (monsoon) |
-| Campaign interventions on strata | `transfer(from = S[patch], to = V[patch])` | Polio SIAs, MDA for malaria |
+| Campaign interventions on strata | `sia[p in patch] : transfer(fraction = f, from = S[p], to = V[p]) at [...]` | Polio SIAs, MDA for malaria |
 | Sparse coupling matrix | `read("file", default = 0.0)` | Any large spatial model |
 | Parameterized mixing rates | Table entries as parameter refs | STIs (sex-specific β), flu (age-specific) |
 
