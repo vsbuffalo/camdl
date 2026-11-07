@@ -1,4 +1,9 @@
-//! Is the model a command was given the model a fit ran on?
+//! Is the model a command was given the model a fit ran on — and which
+//! simulator did the fit run it on?
+//!
+//! The second question has one reader, [`stored_fit_simulator`] (with
+//! [`fit_config_simulator`] for a fit config), and one rule for the flags over
+//! it, [`replay_simulator`]; see the section near the end of this file.
 //!
 //! A stored fit's parameters — its posterior draws, its `[fixed]` block — mean
 //! something only under the model they were estimated with. A command that
@@ -277,5 +282,269 @@ pub fn check_fit_config(
             short(&fitted),
             short(&given_h),
         )),
+    }
+}
+
+// ── The simulator a fit ran on ──────────────────────────────────────────────
+//
+// The model is half of what a fit's parameters were estimated under; the
+// simulator is the other half — the forward backend, its integration step, and
+// (ODE) the integrator. A replay of the parameters (`simulate --draws
+// posterior|prior|<file> --fit`) runs on that simulator by default, as it runs
+// on the fitted model, and an explicit flag that differs runs with a notice.
+
+use crate::args::types::{ForwardBackend, IntegratorArg};
+use ir::model::Integrator;
+
+/// The simulator a fit's parameters were estimated on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FittedSimulator {
+    /// The forward backend. `None` for a fit config with no `[method]` (one
+    /// read only for its priors and `[fixed]`): it names no simulator.
+    pub backend: Option<ForwardBackend>,
+    /// The integration step (`crate::dt_rule`).
+    pub dt: f64,
+    /// The ODE integrator the model declares; what the ODE backend uses.
+    pub integrator: Integrator,
+}
+
+fn integrator_name(i: &Integrator) -> &'static str {
+    match i {
+        Integrator::Rk4 => "rk4",
+        Integrator::Rk45 { .. } => "rk45",
+    }
+}
+
+/// `backend` at `dt`, with the integrator on ODE, for messages.
+fn describe_simulator(backend: Option<ForwardBackend>, dt: f64, integrator: &Integrator) -> String {
+    match backend {
+        Some(ForwardBackend::Ode) => format!("ode ({}) at dt = {dt}", integrator_name(integrator)),
+        Some(b) => format!("{} at dt = {dt}", b.as_str()),
+        None => format!("dt = {dt}"),
+    }
+}
+
+impl FittedSimulator {
+    pub fn describe(&self) -> String {
+        describe_simulator(self.backend, self.dt, &self.integrator)
+    }
+}
+
+/// The simulator of a stored fit — the one reader.
+///
+/// - **backend**: the named run's own record (its stage's `backend` in
+///   `run.json`, as `fit predict` and `compare` read it); for a problem-folder
+///   handle, the config's `[method]`.
+/// - **dt**: `fit.meta.json`'s recorded step; for a fit recorded before the
+///   step was, the dt rule over the archived model's `simulate { dt }` and the
+///   archived config's `[config] dt` — the two inputs `fit run` resolved it
+///   from.
+/// - **integrator**: `fit.meta.json`'s, else the archived model's.
+///
+/// Read by every replay of a stored fit on a simulator the replaying command
+/// chooses: `simulate --draws … --fit` and `compare`'s derived filter.
+/// `fit predict` and the contrasts read the same two dt inputs through
+/// `dt_rule::resolved_dt` and the run's recorded backend.
+pub fn stored_fit_simulator(
+    resolved: &crate::fit::handle::ResolvedFit,
+) -> Result<FittedSimulator, String> {
+    // The model the fit ran on: its archive, else (a fit that archived none)
+    // the source its config names, as `compare` reads it.
+    let archive = resolved.segment.join("model.ir.json");
+    let model_src = if archive.is_file() {
+        archive.to_string_lossy().into_owned()
+    } else {
+        resolved.config.problem.model.camdl.clone()
+    };
+    let (model, _) = crate::util::load_model(&model_src)
+        .map_err(|e| format!("reading the model the fit ran on, {model_src}: {e}"))?;
+    let sidecar = crate::run_meta::read_fit_sidecar(&resolved.segment);
+    let backend = resolved
+        .leaf
+        .as_ref()
+        .and_then(|leaf| crate::fit::fit_view::FitView::read(leaf))
+        .and_then(|v| v.stages.first().map(|s| ForwardBackend::from(s.backend)))
+        .or_else(|| {
+            resolved.config.inference.method.as_ref().map(|m| ForwardBackend::from(m.algorithm.backend()))
+        });
+    let dt = sidecar.as_ref().and_then(|s| s.dt).unwrap_or_else(|| {
+        crate::dt_rule::resolved_dt(model.simulation.dt, resolved.config.problem.config.dt)
+    });
+    let integrator = sidecar
+        .and_then(|s| s.integrator)
+        .unwrap_or_else(|| model.simulation.integrator.clone());
+    Ok(FittedSimulator { backend, dt, integrator })
+}
+
+/// The simulator a fit CONFIG describes, for a replay of its priors or
+/// `[fixed]` beside `model` (checked to be the model its `[model]` names,
+/// [`check_fit_config`]): its `[method]` backend, the dt rule over the model's
+/// step and the config's written `[config] dt` (a disagreeing one is refused,
+/// as `fit run` refuses it), and the model's integrator.
+pub fn fit_config_simulator(fit_toml: &str, model: &ir::Model) -> Result<FittedSimulator, String> {
+    let config = crate::fit::config_v2::FitConfig::load(fit_toml)?;
+    let raw = std::fs::read_to_string(fit_toml).map_err(|e| format!("cannot read {fit_toml}: {e}"))?;
+    let written = crate::fit::config_v2::table_declares_key(&raw, "config", "dt")
+        .then_some(config.problem.config.dt);
+    let dt = crate::dt_rule::effective_dt(model.simulation.dt, written)
+        .map_err(|m| format!("{fit_toml}: {}", m.message("[config] dt")))?;
+    Ok(FittedSimulator {
+        backend: config.inference.method.as_ref().map(|m| ForwardBackend::from(m.algorithm.backend())),
+        dt,
+        integrator: model.simulation.integrator.clone(),
+    })
+}
+
+/// The simulator flags a replay was given (`None` = not passed).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SimulatorFlags {
+    pub backend: Option<ForwardBackend>,
+    pub dt: Option<f64>,
+    pub integrator: Option<IntegratorArg>,
+}
+
+/// What a replay runs on: the fit's simulator, with each explicit flag applied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplaySimulator {
+    pub backend: ForwardBackend,
+    pub dt: f64,
+    /// The `--integrator` override to apply; `None` runs the model's own,
+    /// which is the fit's (the model was checked to be the fitted one).
+    pub integrator: Option<IntegratorArg>,
+    /// The one notice when a flag moved the replay off the fit's simulator.
+    pub notice: Option<String>,
+}
+
+/// Resolve the simulator a replay of `fit`'s parameters runs on.
+///
+/// `fallback_backend` is what the command runs without a fit (its default,
+/// or a backend matched from a params file's provenance), used only when the
+/// fit names no backend. Each flag replaces its own setting and nothing else:
+/// dt is a `[config]` setting every backend integrates at, so it carries
+/// across a `--backend` change. The setting that belongs to one backend is the
+/// integrator, so `--integrator` on a backend other than ODE is refused — it
+/// would select nothing, yet change the run's identity. The fit's own
+/// integrator lives in the model and is inert off ODE.
+pub fn replay_simulator(
+    fit_name: &str,
+    fit: &FittedSimulator,
+    flags: SimulatorFlags,
+    fallback_backend: ForwardBackend,
+) -> Result<ReplaySimulator, String> {
+    let backend = flags.backend.or(fit.backend).unwrap_or(fallback_backend);
+    if flags.integrator.is_some() && backend != ForwardBackend::Ode {
+        return Err(format!(
+            "--integrator selects the ODE integrator, but this replay of {fit_name} runs on \
+             {}, which has none.\n  Fix: drop --integrator, or pass --backend ode.",
+            backend.as_str()
+        ));
+    }
+    let dt = flags.dt.unwrap_or(fit.dt);
+    let used_integrator = match flags.integrator {
+        Some(m) => crate::util::overridden_integrator(&fit.integrator, m),
+        None => fit.integrator.clone(),
+    };
+    let backend_moved = fit.backend.is_some_and(|b| b != backend);
+    let dt_moved = dt != fit.dt;
+    let integrator_moved = fit.backend == Some(ForwardBackend::Ode)
+        && backend == ForwardBackend::Ode
+        && used_integrator != fit.integrator;
+    let moved: Vec<&str> = [(backend_moved, "--backend"), (dt_moved, "--dt"), (integrator_moved, "--integrator")]
+        .iter()
+        .filter_map(|(on, flag)| on.then_some(*flag))
+        .collect();
+    let notice = (!moved.is_empty()).then(|| {
+        format!(
+            "note: {fit_name} was fitted on {}; this replay runs on {} ({} as given), so the \
+             parameters drive a different simulator from the one they were estimated on",
+            fit.describe(),
+            describe_simulator(Some(backend), dt, &used_integrator),
+            moved.join(", ")
+        )
+    });
+    Ok(ReplaySimulator { backend, dt, integrator: flags.integrator, notice })
+}
+
+#[cfg(test)]
+mod simulator_tests {
+    use super::*;
+
+    fn cb(dt: f64) -> FittedSimulator {
+        FittedSimulator { backend: Some(ForwardBackend::ChainBinomial), dt, integrator: Integrator::Rk4 }
+    }
+
+    fn ode() -> FittedSimulator {
+        FittedSimulator { backend: Some(ForwardBackend::Ode), ..cb(1.0) }
+    }
+
+    #[test]
+    fn no_flag_replays_on_the_fit_simulator_silently() {
+        let r = replay_simulator("F", &cb(0.5), SimulatorFlags::default(), ForwardBackend::Gillespie)
+            .unwrap();
+        assert_eq!(
+            (r.backend, r.dt, r.integrator, r.notice),
+            (ForwardBackend::ChainBinomial, 0.5, None, None)
+        );
+        let r = replay_simulator("F", &ode(), SimulatorFlags::default(), ForwardBackend::ChainBinomial)
+            .unwrap();
+        assert_eq!((r.backend, r.notice), (ForwardBackend::Ode, None));
+    }
+
+    #[test]
+    fn a_flag_equal_to_the_fit_is_silent() {
+        let flags = SimulatorFlags {
+            backend: Some(ForwardBackend::ChainBinomial),
+            dt: Some(0.5),
+            integrator: None,
+        };
+        let r = replay_simulator("F", &cb(0.5), flags, ForwardBackend::ChainBinomial).unwrap();
+        assert!(r.notice.is_none());
+        let flags = SimulatorFlags { integrator: Some(IntegratorArg::Rk4), ..Default::default() };
+        assert!(replay_simulator("F", &ode(), flags, ForwardBackend::ChainBinomial).unwrap().notice.is_none());
+    }
+
+    #[test]
+    fn a_differing_flag_runs_with_one_notice_naming_both_simulators() {
+        let flags = SimulatorFlags { backend: Some(ForwardBackend::Ode), ..Default::default() };
+        let r = replay_simulator("F", &cb(0.5), flags, ForwardBackend::ChainBinomial).unwrap();
+        assert_eq!((r.backend, r.dt), (ForwardBackend::Ode, 0.5));
+        let n = r.notice.unwrap();
+        assert!(
+            n.contains("fitted on chain_binomial at dt = 0.5")
+                && n.contains("runs on ode (rk4) at dt = 0.5")
+                && n.contains("--backend")
+                && !n.contains("--dt"),
+            "{n}"
+        );
+        let flags = SimulatorFlags { dt: Some(1.0), ..Default::default() };
+        let n = replay_simulator("F", &cb(0.5), flags, ForwardBackend::ChainBinomial)
+            .unwrap()
+            .notice
+            .unwrap();
+        assert!(n.contains("--dt") && n.contains("runs on chain_binomial at dt = 1"), "{n}");
+    }
+
+    #[test]
+    fn an_integrator_off_the_ode_backend_is_refused() {
+        let flags = SimulatorFlags {
+            backend: Some(ForwardBackend::ChainBinomial),
+            integrator: Some(IntegratorArg::Rk45),
+            ..Default::default()
+        };
+        assert!(replay_simulator("F", &ode(), flags, ForwardBackend::ChainBinomial).is_err());
+        let flags = SimulatorFlags { integrator: Some(IntegratorArg::Rk45), ..Default::default() };
+        assert!(replay_simulator("F", &cb(1.0), flags, ForwardBackend::ChainBinomial).is_err());
+        let n = replay_simulator("F", &ode(), flags, ForwardBackend::ChainBinomial)
+            .unwrap()
+            .notice
+            .unwrap();
+        assert!(n.contains("runs on ode (rk45)") && n.contains("--integrator"), "{n}");
+    }
+
+    #[test]
+    fn a_config_without_a_method_takes_the_fallback_backend() {
+        let none = FittedSimulator { backend: None, ..cb(0.25) };
+        let r = replay_simulator("F", &none, SimulatorFlags::default(), ForwardBackend::Gillespie).unwrap();
+        assert_eq!((r.backend, r.dt, r.notice), (ForwardBackend::Gillespie, 0.25, None));
     }
 }

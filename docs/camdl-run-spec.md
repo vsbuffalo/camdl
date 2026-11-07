@@ -512,7 +512,13 @@ but the list is empty unless the method is a posterior sampler — an IF2 or NLo
 fit reads no prior, so records none), `parameters_provenance` (per parameter:
 resolved value, the tier that supplied it, and its role), `training_window`
 (`{train_end}`, present only when a `[data]` holdout declaration was applied,
-§6.2), `schema` (the observation/dimension schema below), and `docs` (the
+§6.2), `dt` (the integration step every run in the segment ran at — the model's
+declared `simulate { dt }`, else the config's `[config] dt`, else 1.0) and
+`integrator` (the ODE integrator the model declares, `{"method": "rk4"}` when it
+declares none — what an ODE-backend run integrated with), which a replay of the
+fit's parameters runs on by default (§3.4; a sidecar written before these were
+recorded lacks them, and a replay recovers them from the archived config and
+model), `schema` (the observation/dimension schema below), and `docs` (the
 model's `#'` documentation dictionary, keyed by declaration name, so a consumer
 can label any output column).
 
@@ -1392,6 +1398,45 @@ saying so: the source is byte-identical to the fit's archived copy
 (`model.camdl.original`), and the message names the horizon each side runs to.
 A refusal calls the source "edited since" only when its bytes differ from that
 archived copy.
+
+**A replay runs on the simulator the parameters were estimated on.** The same
+`--fit` forms also fix the simulator: the fit's forward backend, its integration
+step, and, on ODE, its integrator. Without a flag, every arm of
+`--draws posterior|prior|<file> --fit` (and `--init-state fit`) runs on them:
+
+- **backend** — a stored run's own record (its stage's `backend` in `run.json`);
+  for a problem-folder handle or a fit config, the config's `[method] backend`.
+  A fit config with no `[method]` names no backend, and the command's default
+  applies.
+- **dt** — a stored fit's recorded `fit.meta.json` `dt` (§2.2.1), else the dt
+  rule over the archived model's step and the archived config's `[config] dt`;
+  for a fit config, the same rule over the command-line model and the config,
+  which refuses a `[config] dt` that disagrees with the model's declared step as
+  `fit run` does.
+- **integrator** — the model's own, which is the fit's: the model check above
+  makes the command-line model the fitted one, and the integrator is part of
+  that identity.
+
+A `--backend`, `--dt` or `--integrator` that differs from the fit's still runs,
+with one stderr line naming both simulators:
+
+```
+note: results/fits/cb-3e073494/pmmh-b7a0a81d/seed_1-06cbd6b3 was fitted on chain_binomial at dt = 0.5; this replay runs on chain_binomial at dt = 1 (--dt as given), so the parameters drive a different simulator from the one they were estimated on
+```
+
+Each flag replaces its own setting and nothing else. `dt` is a `[config]`
+setting every backend integrates at, so a `--backend` change keeps the fit's
+step. The integrator is the one setting that belongs to a single backend:
+`--integrator` on a replay whose backend is not ODE is refused, since it would
+select nothing yet change the run's identity. A bare directory holding a
+`draws.tsv` outside any fit has no record of a simulator, and runs on the
+command's own (said on stderr, with the backend and step it used).
+
+The store path names the simulator a cell ran on (`<backend>-dt<dt>-…`), so a
+replay lands under the fit's backend and step. A cell stored at another backend
+or step keeps its own key and stays valid there; passing that `--backend` /
+`--dt` explicitly finds it again. `compare` derives a fit's prequential on the
+same reading: its filter runs at the fit's dt.
 
 `--draws-out PATH` writes the resolved rows back out in the same
 one-row-per-draw, one-column-per-parameter format `--draws PATH` reads, so a
@@ -6856,6 +6901,8 @@ PATHS                       ≥2 when --config is absent. Each is a prequential.
                             holdout; stamped in_sample, with the optimism caveat
 --particles N               for derived prequentials (default 1000, applied uniformly)
 --seed N                    for derived prequentials (default 1)
+                            (a derived prequential filters at the fit's own dt,
+                            read as `simulate --draws posterior --fit` reads it, §3.4)
 --exclude-chains [@FIT:]IDS per-fit (`@a:4`) or cohort-wide (`3,4`); mixing the two
                             forms is rejected. Always warns
 --pointwise PATH            write the per-observation Δelpd vector as a TSV

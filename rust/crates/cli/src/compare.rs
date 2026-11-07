@@ -1113,6 +1113,10 @@ fn derive_prequential(
     // `pfilter` refuses beside the `--params` θ̂ (gh#194); the lists are the
     // whole of a fit scenario's effect (`util::FitBase`).
     let fit_base = crate::util::FitBase::of(config)?;
+    // The step the fit ran at: the filter re-scores the data through the
+    // fitted process, so it integrates at the fit's dt — not the model's
+    // declared step or 1.0, which is all `pfilter` would see without it.
+    let fitted_dt = crate::fit::fitted_model::stored_fit_simulator(resolved)?.dt;
     let (base_enable, base_disable): (Vec<String>, Vec<String>) = if fit_base.is_empty() {
         (Vec::new(), Vec::new())
     } else {
@@ -1200,6 +1204,7 @@ fn derive_prequential(
             .arg("--save-prequential").arg(&preq_stem)
             .arg("--particles").arg(derive.particles.to_string())
             .arg("--seed").arg(seed.to_string())
+            .arg("--dt").arg(fitted_dt.to_string())
             .env("CAMDL_SKIP_VERSION_CHECK", "1");
         for (name, abs_path) in &streams {
             cmd.arg("--data").arg(format!("{name}={abs_path}"));

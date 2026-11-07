@@ -2938,18 +2938,27 @@ pub fn apply_integrator_override(
     model: &mut ir::Model,
     method: Option<crate::args::types::IntegratorArg>,
 ) {
+    if let Some(m) = method {
+        model.simulation.integrator = overridden_integrator(&model.simulation.integrator, m);
+    }
+}
+
+/// The integrator `--integrator method` selects over a model declaring
+/// `declared`: the method, keeping the model's rk45 tolerances.
+pub fn overridden_integrator(
+    declared: &ir::model::Integrator,
+    method: crate::args::types::IntegratorArg,
+) -> ir::model::Integrator {
     use crate::args::types::IntegratorArg;
     use ir::model::Integrator;
-    if let Some(m) = method {
-        model.simulation.integrator = match (m, &model.simulation.integrator) {
-            (IntegratorArg::Rk4, _) => Integrator::Rk4,
-            (IntegratorArg::Rk45, Integrator::Rk45 { atol, rtol }) => {
-                Integrator::Rk45 { atol: *atol, rtol: *rtol } // preserve model tolerances
-            }
-            (IntegratorArg::Rk45, Integrator::Rk4) => {
-                Integrator::Rk45 { atol: None, rtol: None } // runtime defaults
-            }
-        };
+    match (method, declared) {
+        (IntegratorArg::Rk4, _) => Integrator::Rk4,
+        (IntegratorArg::Rk45, Integrator::Rk45 { atol, rtol }) => {
+            Integrator::Rk45 { atol: *atol, rtol: *rtol } // preserve model tolerances
+        }
+        (IntegratorArg::Rk45, Integrator::Rk4) => {
+            Integrator::Rk45 { atol: None, rtol: None } // runtime defaults
+        }
     }
 }
 

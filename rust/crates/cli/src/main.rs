@@ -1335,6 +1335,97 @@ fn run_simulate(a: &args::SimulateArgs) {
         break;
     }
 
+    // ── The fit's simulator ─────────────────────────────────────────────────
+    //
+    // A replay of a fit's parameters (`--draws posterior|prior|<file> --fit`)
+    // runs on the simulator they were estimated on — the fit's backend, dt and
+    // ODE integrator (`fit::fitted_model::stored_fit_simulator`, or
+    // `fit_config_simulator` for a fit config) — as it runs on the fitted
+    // model. A `--backend` / `--dt` / `--integrator` that differs runs, with
+    // one notice. Resolved here, before anything reads `backend` / `dt`, so
+    // the run, its store key and the `--init-state` checks all see one answer.
+    //
+    // `--draws posterior` names a run; its handle is resolved once, here.
+    let posterior_fit_ref: Option<String> = match (draws_path.as_deref(), fit_path_for_draws.as_ref()) {
+        (Some("posterior"), Some(fit_handle)) => {
+            // gh#896: the draws are one run's. `--fit` is a fit handle
+            // (`@label`, a leaf or problem-folder directory, a run-id prefix,
+            // a fit.toml) resolved to the run it names; a folder holding
+            // several runs with posterior draws is refused with them listed
+            // rather than one picked by directory order; runs without draws
+            // (an optimizer beside a sampler) are no rival. A bare directory
+            // holding a draws.tsv is taken as named.
+            Some(if std::path::Path::new(fit_handle).join("draws.tsv").is_file() {
+                fit_handle.clone()
+            } else {
+                let (leaf, note) = crate::fit::handle::resolve_run_with_draws(fit_handle)
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: --fit {fit_handle}: {e}");
+                        std::process::exit(1);
+                    });
+                if let Some(note) = note {
+                    eprintln!("draws: {note}");
+                }
+                leaf.dir.to_string_lossy().into_owned()
+            })
+        }
+        _ => None,
+    };
+    let fitted_simulator: Option<(String, crate::fit::fitted_model::FittedSimulator)> =
+        match (draws_path.as_deref(), fit_path_for_draws.as_ref()) {
+            (Some("posterior"), Some(fit_handle)) => {
+                // A bare directory holding a `draws.tsv` outside any fit has no
+                // fit record, so no simulator to replay on (said in the arm).
+                crate::fit::handle::resolve_fit(posterior_fit_ref.as_deref().unwrap_or_default())
+                    .ok()
+                    .map(|r| crate::fit::fitted_model::stored_fit_simulator(&r))
+                    .transpose()
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: --fit {fit_handle}: {e}");
+                        std::process::exit(1);
+                    })
+                    .map(|s| (fit_handle.clone(), s))
+            }
+            (Some(source), Some(fit_ref)) if source != "uniform" => {
+                let sim = if std::path::Path::new(fit_ref).is_file() {
+                    util::load_model(&ir_path_compiled).and_then(|(m, _)| {
+                        crate::fit::fitted_model::fit_config_simulator(fit_ref, &m)
+                    })
+                } else {
+                    crate::fit::handle::resolve_fit(fit_ref)
+                        .map_err(|e| e.to_string())
+                        .and_then(|r| crate::fit::fitted_model::stored_fit_simulator(&r))
+                };
+                Some((
+                    fit_ref.clone(),
+                    sim.unwrap_or_else(|e| {
+                        eprintln!("error: --fit {fit_ref}: {e}");
+                        std::process::exit(1);
+                    }),
+                ))
+            }
+            _ => None,
+        };
+    let mut integrator = a.backend.integrator;
+    if let Some((fit_name, fitted)) = &fitted_simulator {
+        let flags = crate::fit::fitted_model::SimulatorFlags {
+            backend: a.backend.backend,
+            dt: a.backend.dt,
+            integrator: a.backend.integrator,
+        };
+        let replay = crate::fit::fitted_model::replay_simulator(fit_name, fitted, flags, backend)
+            .unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+        if let Some(notice) = &replay.notice {
+            eprintln!("{notice}");
+        }
+        backend = replay.backend;
+        dt = replay.dt;
+        integrator = replay.integrator;
+    }
+
     let mut base_sim_run = util::SimRun {
         // The already-compiled IR: every engine cell loads this directly, so
         // `resolve_ir_path` short-circuits (no per-cell camdlc).
@@ -1369,7 +1460,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         backend,
         dt,
         seed, // overridden per-replicate below
-        integrator: a.backend.integrator, // gh#166: CLI --integrator override
+        integrator, // gh#166: --integrator, checked against the replayed fit above
     };
 
     // ── `--init-state`: the forecast-origin ensemble ────────────────────────
@@ -1729,26 +1820,8 @@ fn run_simulate(a: &args::SimulateArgs) {
                     (the directory `camdl fit run` printed)");
                 std::process::exit(1);
             });
-            // gh#896: the draws are one run's. `--fit` is a fit handle
-            // (`@label`, a leaf or problem-folder directory, a run-id prefix,
-            // a fit.toml) resolved to the run it names; a folder holding
-            // several runs with posterior draws is refused with them listed
-            // rather than one picked by directory order; runs without draws
-            // (an optimizer beside a sampler) are no rival. A bare directory
-            // holding a draws.tsv is taken as named.
-            let fit_ref: &String = &if std::path::Path::new(fit_handle).join("draws.tsv").is_file() {
-                fit_handle.clone()
-            } else {
-                let (leaf, note) = crate::fit::handle::resolve_run_with_draws(fit_handle)
-                    .unwrap_or_else(|e| {
-                        eprintln!("error: --fit {fit_handle}: {e}");
-                        std::process::exit(1);
-                    });
-                if let Some(note) = note {
-                    eprintln!("draws: {note}");
-                }
-                leaf.dir.to_string_lossy().into_owned()
-            };
+            // The run the handle names, resolved with the fit's simulator above.
+            let fit_ref: &String = posterior_fit_ref.as_ref().expect("resolved with --fit");
             // The posterior is the fitted model's, so every arm replays on the
             // fit's own intervention selection (its `scenario` / `enable` /
             // `disable`): the implicit arm is the model that was fitted, and a
@@ -1785,7 +1858,10 @@ fn run_simulate(a: &args::SimulateArgs) {
                 // what is missing.
                 Err(e) => eprintln!(
                     "draws: {fit_ref} is not a stored fit run ({e}); no fit \
-                     scenario/enable/disable is applied, the model runs as written"
+                     scenario/enable/disable is applied, the model runs as written, \
+                     on {} at dt = {}",
+                    backend.as_str(),
+                    dt
                 ),
             }
             if matches!(init_state_arg, Some(InitStateSourceArg::Fit)) {
@@ -1999,7 +2075,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         params_files: base_sim_run.params_files.clone(),
         backend,
         dt,
-        integrator: a.backend.integrator, // gh#166: CLI --integrator override
+        integrator, // gh#166: --integrator, checked against the replayed fit above
         source,
         scenarios,
         t_end_override,
