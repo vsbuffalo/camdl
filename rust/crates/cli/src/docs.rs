@@ -185,10 +185,13 @@ pub(crate) fn topic_body(name: &str) -> Option<String> {
 /// instructions to the site build, so the terminal never sees them: an
 /// opening marker becomes one line pointing at the figure's anchor on the
 /// website, and a closing marker is dropped. A text diagram between the two is
-/// kept, since it is the terminal's version of the figure. A marker may span
-/// lines (a long caption). For a doc the site does not publish, an opening
-/// marker is dropped together with the blank line after it. Every other
+/// kept, since it is the terminal's version of the figure. For a doc the site
+/// does not publish, an opening marker is dropped together with the blank line
+/// after it. Lines inside fenced code are never markers, and every other
 /// comment, the doc-test preamble markers among them, is printed unchanged.
+///
+/// `marker` accepts exactly what `figures.lua` does, so the website and the
+/// terminal agree on which lines are markers.
 ///
 /// The website follows the latest main, so the drawing a link reaches may be
 /// newer than this binary.
@@ -196,25 +199,41 @@ fn terminal_text(topic: &Topic) -> String {
     let (body, page) = (topic.body, topic.page);
     let mut out = String::with_capacity(body.len());
     let mut lines = body.lines();
+    // The open fence's character and length: a fence closes only on a run of
+    // the same character at least as long (CommonMark), so a ```` fence can
+    // show a ``` one inside it.
+    let mut fence: Option<(char, usize)> = None;
     let mut drop_blank = false;
     while let Some(line) = lines.next() {
         let t = line.trim();
-        let opens = t.starts_with("<!-- figure:");
-        if opens || t == "<!-- /figure -->" {
-            if !t.ends_with("-->") {
-                // Skip the rest of a multi-line marker.
-                for rest in lines.by_ref() {
-                    if rest.trim_end().ends_with("-->") {
-                        break;
-                    }
-                }
+        let run = |c: char| t.chars().take_while(|&x| x == c).count();
+        if let Some((c, n)) = fence {
+            if run(c) >= n && t.trim_start_matches(c).trim().is_empty() {
+                fence = None;
             }
-            match (opens, figure_url(page, t)) {
-                (true, Some(url)) => {
-                    out.push_str(&format!("[Figure on the website: {url}]\n"));
+        } else if let Some(c) = ['`', '~'].into_iter().find(|&c| run(c) >= 3) {
+            fence = Some((c, run(c)));
+        } else if let Some(m) = marker(t) {
+            let name = match m {
+                Marker::Open(name) => Some(name),
+                Marker::OpenContinues(name) => {
+                    // The marker's caption runs on; its end is the first line
+                    // that closes the comment.
+                    for rest in lines.by_ref() {
+                        if rest.contains("-->") {
+                            break;
+                        }
+                    }
+                    Some(name)
                 }
-                (true, None) => drop_blank = true,
-                (false, _) => {}
+                Marker::Close => None,
+            };
+            match (name, page) {
+                (Some(name), Some(page)) => {
+                    out.push_str(&format!("[Figure on the website: {}]\n", figure_url(page, name)));
+                }
+                (Some(_), None) => drop_blank = true,
+                (None, _) => {}
             }
             continue;
         }
@@ -232,19 +251,47 @@ fn terminal_text(topic: &Topic) -> String {
     out
 }
 
-/// The website address of the figure an opening marker places:
-/// `<site>/<page>.html#fig-<name>`, the anchor `figures.lua` gives the
-/// `<figure>` element.
-fn figure_url(page: Option<&str>, marker: &str) -> Option<String> {
-    let page = page?;
-    let name = marker
-        .strip_prefix("<!-- figure:")?
-        .trim_start()
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-        .next()
-        .filter(|n| !n.is_empty())?;
+#[derive(Debug, PartialEq)]
+enum Marker<'a> {
+    /// `<!-- figure: name … -->` on one line.
+    Open(&'a str),
+    /// `<!-- figure: name …` whose `-->` is on a later line.
+    OpenContinues(&'a str),
+    /// `<!-- /figure -->`.
+    Close,
+}
+
+/// Whether a trimmed line is a figure marker, by the grammar `figures.lua`
+/// uses: `<!--`, optional space, `figure:` and a name of letters, digits, `-`
+/// or `_`, anything, then `-->` ending the line; or `<!--`, `/figure`, `-->`
+/// with optional space between. A line with text after its `-->` is not a
+/// marker (Pandoc reads it as raw HTML, and the site leaves it alone).
+fn marker(t: &str) -> Option<Marker<'_>> {
+    let inner = t.strip_prefix("<!--")?.trim_start();
+    let (inner, closed) = match inner.find("-->") {
+        Some(i) if inner[i..].trim_end() == "-->" => (&inner[..i], true),
+        Some(_) => return None,
+        None => (inner, false),
+    };
+    if closed && inner.trim() == "/figure" {
+        return Some(Marker::Close);
+    }
+    let rest = inner.strip_prefix("figure:")?.trim_start();
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .unwrap_or(rest.len());
+    let name = &rest[..end];
+    if name.is_empty() {
+        return None;
+    }
+    Some(if closed { Marker::Open(name) } else { Marker::OpenContinues(name) })
+}
+
+/// The website address of a figure: `<site>/<page>.html#fig-<name>`, the
+/// anchor `figures.lua` gives the `<figure>` element.
+fn figure_url(page: &str, name: &str) -> String {
     let html = page.strip_suffix(".md").unwrap_or(page);
-    Some(format!("{SITE_URL}{html}.html#fig-{name}"))
+    format!("{SITE_URL}{html}.html#fig-{name}")
 }
 
 fn print_index(out: &crate::out::Out) {
@@ -413,6 +460,33 @@ mod tests {
     }
 
     #[test]
+    fn marker_grammar_matches_the_site_filter() {
+        // Spacing figures.lua accepts.
+        assert_eq!(marker("<!--figure: a-->"), Some(Marker::Open("a")));
+        assert_eq!(marker("<!-- figure:a, caption: x -->"), Some(Marker::Open("a")));
+        assert_eq!(marker("<!--/figure-->"), Some(Marker::Close));
+        assert_eq!(marker("<!--  /figure  -->"), Some(Marker::Close));
+        assert_eq!(marker("<!-- figure: a, caption: long"), Some(Marker::OpenContinues("a")));
+        // Not markers: text after the comment, no name, another comment.
+        assert_eq!(marker("<!-- figure: a --> note"), None);
+        assert_eq!(marker("<!-- figure: -->"), None);
+        assert_eq!(marker("<!-- camdl-doctest-preamble: sir"), None);
+        assert_eq!(marker("<!-- /figure --> x"), None);
+    }
+
+    #[test]
+    fn a_marker_with_trailing_text_is_left_alone() {
+        let doc = "<!-- figure: a --> note\nNext line.\n";
+        assert_eq!(terminal_text(&topic(doc, Some("p.md"))), doc);
+    }
+
+    #[test]
+    fn markers_inside_fenced_code_are_left_alone() {
+        let doc = "Write:\n\n```markdown\n<!-- figure: a -->\n<!-- /figure -->\n```\n\n~~~\n<!-- figure: b -->\n~~~\n\n````markdown\n```\n<!-- figure: c -->\n```\n<!-- /figure -->\n````\n";
+        assert_eq!(terminal_text(&topic(doc, Some("p.md"))), doc);
+    }
+
+    #[test]
     fn other_comments_are_printed_unchanged() {
         // The doc-test preamble markers are read by agents through `camdl docs`.
         let doc = "<!-- camdl-doctest-preamble -->\n```camdl\nx\n```\n";
@@ -439,11 +513,23 @@ mod tests {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let quarto = std::fs::read_to_string(repo.join("docs/_quarto.yml")).expect("read docs/_quarto.yml");
         assert!(quarto.contains(&format!("site-url: {SITE_URL}")), "SITE_URL disagrees with site-url in docs/_quarto.yml");
+        // The render list: the `- path` items under the line that defines the
+        // `&published` anchor (comment lines between them are section labels),
+        // up to the first line that is neither.
+        let published: Vec<&str> = quarto
+            .lines()
+            .skip_while(|l| !l.contains("&published"))
+            .skip(1)
+            .map(str::trim)
+            .take_while(|l| l.starts_with("- ") || l.starts_with('#'))
+            .filter_map(|l| l.strip_prefix("- ").map(str::trim))
+            .collect();
+        assert!(published.contains(&"intro.md"), "could not read the render list from docs/_quarto.yml");
         for t in TOPICS {
             let Some(page) = t.page else { continue };
             let on_disk = std::fs::read_to_string(repo.join("docs").join(page)).expect("read page");
             assert_eq!(on_disk, t.body, "topic {}: page {} is not the embedded file", t.slug, page);
-            assert!(quarto.contains(&format!("- {page}\n")), "topic {}: {} is not in the site's render list", t.slug, page);
+            assert!(published.contains(&page), "topic {}: {} is not in the site's render list", t.slug, page);
         }
     }
 
