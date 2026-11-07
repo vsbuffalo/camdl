@@ -1,6 +1,6 @@
 ---
 date: 2026-11-05
-status: stages 1 and 2 implemented (ac278266, 8fb21df8, 952e9cf2) except §5; §4's solver is replaced and §5 is decided under 2026-11-06-dimension-checking-as-one-constraint-system.md (§4.4, §9 decision 8); stage 3 is families Stage A
+status: stages 1 and 2 implemented (367d1739, a0a765e3, f7ec25e3) except §5; §4's solver is replaced and §5 is decided under 2026-11-06-dimension-checking-as-one-constraint-system.md (§4.4, §9 decision 8); stage 3 is families Stage A
 area: DSL parameter declarations, dimensional checking, parameter families
 related:
   - 2026-10-30-parameter-families-and-spline-coefficients.md (accepted; this proposal amends its section 2.1 and its E417 size rule)
@@ -289,9 +289,10 @@ file in Stage 2, not assumed.
 
 The IR is unchanged by sections 3.2 to 3.4 (`dim` lowers to `param_dim`).
 Section 4 can resolve dimensions that are undetermined today, and resolved
-dimensions are written to the IR, so Stage 1 can move goldens; it is landed in
-the same IR version bump as families Stage A (IR 0.43) so stored runs re-key
-once.
+dimensions are written to the IR, so Stage 1 could move goldens. As landed no
+golden moved because a dimension resolved, and no IR version bump was needed;
+`ir/VERSION` 0.43 went to the unit-literal node of the constraint-system
+proposal, so families Stage A bumps to 0.44.
 
 ## 7. Stages
 
@@ -304,7 +305,7 @@ once.
    Closes gh#1006.
 3. **Families Stage A** with `kind[n]` as in the families proposal, size ≥ 2.
 
-Stages 1 and 3 share one IR version bump.
+Stage 1 needed no IR version bump; Stage 3 makes its own (0.44).
 
 ## 8. Alternatives considered
 

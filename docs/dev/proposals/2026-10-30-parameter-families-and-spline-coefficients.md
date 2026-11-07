@@ -265,7 +265,7 @@ size `N` denotes the index set `0 .. N-1`:
 parameters {
   mu_b : real[6] 'ratio ~ normal(mu = -1.5, sigma = 1.0)
   sd_b : positive dim 1 ~ exponential(rate = 2)
-  b[p in province] : real dim kin6 'ratio ~ normal(mu = mu_b[k], sigma = sd_b)
+  b[p in province] : real[k in 6] 'ratio ~ normal(mu = mu_b[k], sigma = sd_b)
 }
 ```
 
@@ -630,7 +630,7 @@ every coefficient, at every position and in every province, shrinks toward
 curve is the constant `mu_b`; the prior carries no shared temporal shape.
 
 **Position-indexed hyperparameters pool toward a shared trajectory.**
-`b[p in province] : real dim kin6 ~ normal(mu = mu_b[k], sigma = sd_b)` with
+`b[p in province] : real[k in 6] ~ normal(mu = mu_b[k], sigma = sd_b)` with
 `mu_b : real[6]` writes each province curve as `f_p(t) = g(t) + d_p(t)`, where
 `g(t) = sum_k mu_b[k] B_k(t)` is the shared national curve and `d_p(t)` is a
 province deviation whose prior covariance, given `sd_b`, is
@@ -821,7 +821,7 @@ The centred form of the same model, for PMMH or MH:
 parameters {
   mu_b : real[6]  'ratio ~ normal(mu = -1.5, sigma = 1.0)
   sd_b : positive dim 1 ~ exponential(rate = 2)
-  b[p in province] : real dim kin6 'ratio ~ normal(mu = mu_b[k], sigma = sd_b)
+  b[p in province] : real[k in 6] 'ratio ~ normal(mu = mu_b[k], sigma = sd_b)
 }
 ...
     coefs  = b[p]

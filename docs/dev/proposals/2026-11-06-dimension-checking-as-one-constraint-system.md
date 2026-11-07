@@ -832,7 +832,7 @@ with the message reviewed.
 
 ### 6.5 Compile time is a gate, not an afterthought
 
-The generated n-patch model from `952e9cf2` (n² − n coupling transitions) is
+The generated n-patch model from `f7ec25e3` (n² − n coupling transitions) is
 measured at n = 30, 60 and 100 against `main`, best of three. The bound is 1.5×
 `main` at n = 100. If removing union-find breaks it, a union-find layer for
 `x = y` equations returns, inside the solver and invisible to rules.

@@ -15,9 +15,9 @@ on the evidence.
 
 ## What changed in the checker
 
-Two commits on `docs/size-brackets-dim-clause`:
+Two commits, on main:
 
-1. `ac278266` — every product, quotient, integer power and square root with an
+1. `367d1739` — every product, quotient, integer power and square root with an
    unresolved operand records a linear equation over exponent vectors; each
    transition rate, ODE derivative, balance expression and overdispersion term
    is pinned to its required dimension; the equations are solved together by
@@ -26,7 +26,7 @@ Two commits on `docs/size-brackets-dim-clause`:
    bound only to an integer exponent vector. Strict likelihood arguments
    (Poisson `rate`, Binomial `p`, dispersions, beta-binomial shapes) record
    equations; permissive ones (Normal `mean`/`sd`) do not.
-2. `93d8188d` — two positions with a defined dimension are now visited: forcing
+2. `33f24bf6` — two positions with a defined dimension are now visited: forcing
    arguments (E312; definitions from `rust/crates/sim/src/propensity.rs`) and
    initial conditions (E313; literals there take the dimension their context
    needs).
