@@ -580,6 +580,15 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         }
     }
 
+    // A `--fixed` the scenario sets or scales would override it in every cell:
+    // refused, not resolved (gh#571).
+    if let Err(msg) = crate::params_resolver::refuse_fixed_flag_over_scenario(
+        &model_pre, scenario_name.as_deref(), &fixed_cli_vec,
+    ) {
+        eprintln!("error: {msg}");
+        std::process::exit(1);
+    }
+
     // A single-point starts rule (`--starts from_params=<toml>`,
     // `--starts from_mle=<fit>`) loads one parameter point. Its values are
     // the base value of every parameter they name — so a parameter the

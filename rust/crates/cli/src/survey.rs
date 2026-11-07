@@ -808,6 +808,10 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         // info, as `profile` does).
         let fixed_cli: Vec<(String, f64)> = a.fixed.iter()
             .map(|p| (p.name.clone(), p.value)).collect();
+        // ...but not over the scenario: a `--fixed` the scenario sets or
+        // scales is refused (gh#571).
+        crate::params_resolver::refuse_fixed_flag_over_scenario(
+            &model_pre, scenario_opt.as_deref(), &fixed_cli)?;
         let fixed_files: Vec<std::path::PathBuf> = Vec::new();
         let fit_toml_estimate: IndexSet<String> = config.estimate.keys().cloned().collect();
         let table_files: HashMap<String, std::path::PathBuf> = HashMap::new();
@@ -1055,6 +1059,9 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         // in inline mode.
         let fixed_cli_vec: Vec<(String, f64)> = a.fixed.iter()
             .map(|p| (p.name.clone(), p.value)).collect();
+        // A `--fixed` the scenario sets or scales is refused (gh#571).
+        crate::params_resolver::refuse_fixed_flag_over_scenario(
+            &model_pre, a.scenario.as_deref(), &fixed_cli_vec)?;
         let fixed_files: Vec<std::path::PathBuf> = Vec::new();
         let ftf: IndexMap<String, f64> = IndexMap::new();
         let fte: IndexSet<String> = IndexSet::new();

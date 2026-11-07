@@ -384,12 +384,30 @@ pub(crate) fn effective_scenarios(job: &SimulateJob) -> Vec<ScenarioRef> {
 /// (`--draws posterior|prior|uniform`, `explicit_file: None`) are not checked:
 /// a scenario over generated draws is the counterfactual those runs exist for.
 ///
-/// Called by [`run_job`], the one execution entry point, and by
-/// `simulate --dry-run`, which plans cells without executing, so a dry run
-/// refuses the same grid the run does.
+/// The same guard refuses a `--param` (`job.cli_overrides`, tier 5) on a
+/// parameter a selected scenario sets or scales
+/// ([`crate::params_resolver::scenario_param_flag_collision`], gh#571): the
+/// flag would override the scenario in every cell, so differently labelled
+/// arms would run the same value. `simulate` is the only command that fills
+/// `cli_overrides`, so the flag is named `--param`.
+///
+/// Called by [`run_job`], the one execution entry point, and by `simulate`
+/// once its job is built, before any branch (`--dry-run`, `--event-log`)
+/// that does not reach [`run_job`], so every path refuses the same grid.
 pub fn check_scenario_coordinate_collision(job: &SimulateJob) -> Result<(), String> {
-    use crate::params_resolver::{coordinate_values, scenario_coordinate_collision, UserCoordinate};
+    use crate::params_resolver::{
+        coordinate_values, scenario_coordinate_collision, scenario_param_flag_collision,
+        UserCoordinate,
+    };
     use crate::sim_job::ParamSource;
+    if !job.cli_overrides.is_empty() && !job.scenarios.is_empty() {
+        let (model, _) = crate::util::load_model(&job.model)?;
+        if let Some(msg) = scenario_param_flag_collision(
+            &model, &job.scenarios, "--param", "--params", &job.cli_overrides,
+        )? {
+            return Err(msg);
+        }
+    }
     let (coordinate, varied) = match &job.source {
         ParamSource::Sweep { points, .. } => (
             UserCoordinate::Sweep,

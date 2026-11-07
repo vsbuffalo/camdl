@@ -60,7 +60,10 @@
 //! value is *automated M-layer variation* and is counterfactual-
 //! modifiable, so a scenario `set`/`scale` (a counterfactual on M)
 //! overrides it. A `--fixed` value is the user's *explicit assertion*
-//! about a specific run and overrides everything, scenario included.
+//! about a specific run and overrides everything else. On a parameter a
+//! selected scenario sets or scales the combination is refused before the
+//! resolver runs ([`scenario_param_flag_collision`], gh#571), so tier 5
+//! over tier 4 is reached only for parameters the scenario leaves alone.
 //!
 //! Precedence orders values; it does not grant permission. A scenario
 //! that touches a parameter a *user-authored* coordinate varies — a
@@ -1081,6 +1084,253 @@ pub fn scenario_coordinate_collision(
     Ok(Some(msg))
 }
 
+// ─── Scenario × tier-5 `--param` / `--fixed` collisions ───────────────────────
+
+/// Refuse a `--param NAME=VALUE` / `--fixed NAME=VALUE` (tier 5) on a
+/// parameter a selected scenario `set`s or `scale`s. `Ok(None)` when no
+/// selected scenario touches a flagged parameter; `Ok(Some(message))` names,
+/// per flagged parameter, every colliding scenario and what it does, why the
+/// combination is refused, and where the value belongs instead (gh#571).
+///
+/// Precedence puts tier 5 above the scenario (spec §1.3), so the flag would
+/// replace the scenario's value in every cell: a multi-scenario run comes out
+/// as arms that all ran the flag's value, each still labelled as a different
+/// scenario. Like a `--draws` column or a sweep
+/// ([`scenario_coordinate_collision`]), the user wrote a value the scenario
+/// also decides, so the run is refused rather than resolved. Which parameters
+/// a scenario touches is [`scenario_param_footprint`] and how it touches them
+/// is [`scenario_param_actions`] — the same seam as the coordinate guard. A
+/// scenario whose only action is a `set` to the flag's own value is not a
+/// collision: the two agree (the rule [`scenario_fixed_collision`] applies to
+/// `[fixed]`).
+///
+/// `flag` is the flag the user typed (`--param` on `simulate`, `--fixed` on
+/// `survey` / `profile`); `file_flag` the tier-3 file flag beside it
+/// (`--params` / `--fixed-file`), named in the hint for a scale, which applies
+/// over a file value. `values` are the flag's pairs, last occurrence winning.
+pub fn scenario_param_flag_collision(
+    model: &ir::Model,
+    scenarios: &[crate::sim_job::ScenarioRef],
+    flag: &str,
+    file_flag: &str,
+    values: &[(String, f64)],
+) -> Result<Option<String>, String> {
+    let mut by_name: IndexMap<&str, f64> = IndexMap::new();
+    for (k, v) in values {
+        by_name.insert(k.as_str(), *v);
+    }
+    let footprints: Vec<std::collections::BTreeSet<String>> = scenarios
+        .iter()
+        .map(|s| scenario_param_footprint(model, s))
+        .collect::<Result<_, _>>()?;
+
+    let mut blocks: Vec<String> = Vec::new();
+    for (&param, &value) in &by_name {
+        let mut colliding: Vec<(&crate::sim_job::ScenarioRef, Vec<ScenarioParamAction>)> =
+            Vec::new();
+        for (scenario, footprint) in scenarios.iter().zip(&footprints) {
+            if !footprint.contains(param) {
+                continue;
+            }
+            let actions = scenario_param_actions(model, scenario, param)?;
+            let agrees = matches!(actions.as_slice(),
+                [ScenarioParamAction::Set { value: v, .. }] if v.to_bits() == value.to_bits());
+            if !agrees {
+                colliding.push((scenario, actions));
+            }
+        }
+        if colliding.is_empty() {
+            continue;
+        }
+        blocks.push(param_flag_collision_message(
+            model, scenarios, &footprints, flag, file_flag, param, value, &colliding,
+        ));
+    }
+    Ok(if blocks.is_empty() { None } else { Some(blocks.join("\n\nerror: ")) })
+}
+
+/// [`scenario_param_flag_collision`] for the inference-side commands
+/// (`survey`, `profile`), whose tier-5 flag is `--fixed` and which run one
+/// scenario (from `--scenario` or the fit config): `Err(message)` on a
+/// collision, `Ok(())` otherwise or with no scenario.
+pub fn refuse_fixed_flag_over_scenario(
+    model: &ir::Model,
+    scenario: Option<&str>,
+    fixed: &[(String, f64)],
+) -> Result<(), String> {
+    let Some(name) = scenario else { return Ok(()) };
+    let selected = [crate::sim_job::ScenarioRef::Named(name.to_string())];
+    match scenario_param_flag_collision(model, &selected, "--fixed", "--fixed-file", fixed)? {
+        None => Ok(()),
+        Some(msg) => Err(msg),
+    }
+}
+
+/// The diagnostic for one flagged parameter: the headline, one line per
+/// colliding scenario, the explanation, and the hint. Split from
+/// [`scenario_param_flag_collision`] only to keep the decision readable.
+fn param_flag_collision_message(
+    model: &ir::Model,
+    scenarios: &[crate::sim_job::ScenarioRef],
+    footprints: &[std::collections::BTreeSet<String>],
+    flag: &str,
+    file_flag: &str,
+    param: &str,
+    value: f64,
+    colliding: &[(&crate::sim_job::ScenarioRef, Vec<ScenarioParamAction>)],
+) -> String {
+    use crate::sim_job::ScenarioRef;
+    // `{:?}` keeps a trailing `.0` (`1.0`, not `1`), so the value reads as the
+    // number the user typed rather than as a count.
+    let v = format!("{value:?}");
+    let single = colliding.len() == 1;
+    let any_set = colliding
+        .iter()
+        .any(|(_, a)| a.iter().any(|x| matches!(x, ScenarioParamAction::Set { .. })));
+    let any_scale = colliding
+        .iter()
+        .any(|(_, a)| a.iter().any(|x| matches!(x, ScenarioParamAction::Scale { .. })));
+    let verb = match (any_set, any_scale, single) {
+        (true, false, true) => "sets",
+        (true, false, false) => "set",
+        (false, _, true) => "scales",
+        (false, _, false) => "scale",
+        (true, true, true) => "sets or scales",
+        (true, true, false) => "set or scale",
+    };
+    let who = if single {
+        format!("scenario '{}'", colliding[0].0.name())
+    } else {
+        format!("{} selected scenarios", count_word(colliding.len()))
+    };
+    let mut msg = format!("{flag} {param}={v} would replace the value {who} {verb}");
+
+    for (scenario, actions) in colliding {
+        let name = scenario.name();
+        let parts: Vec<String> = actions
+            .iter()
+            .map(|a| {
+                let (text, preset) = match a {
+                    ScenarioParamAction::Set { value, preset } => {
+                        (format!("sets {param} = {value:?}"), preset)
+                    }
+                    ScenarioParamAction::Scale { factor, preset } => {
+                        (format!("scales {param} by {factor:?}"), preset)
+                    }
+                };
+                if preset.as_str() == name {
+                    text
+                } else {
+                    format!("{text} (through composed scenario '{preset}')")
+                }
+            })
+            .collect();
+        msg.push_str(&format!("\n  scenario '{name}' {}", parts.join(", then ")));
+    }
+
+    let why = if single {
+        let name = colliding[0].0.name();
+        format!(
+            "A {flag} value overrides every scenario, so scenario '{name}' would run with \
+             {param} = {v} instead of its own value. The output would still label it as \
+             scenario '{name}', with nothing to show the override."
+        )
+    } else {
+        format!(
+            "A {flag} value overrides every scenario, so these scenarios would all run with \
+             {param} = {v} instead of their own values. The output would still label them \
+             as different scenarios, with nothing to show the override."
+        )
+    };
+    msg.push('\n');
+    msg.push_str(&wrap_indented(&why, "  ", 78));
+
+    if any_set {
+        msg.push_str("\nhint: put the value in the model's scenarios {} block instead:");
+        // A selected scenario that does not touch the parameter is the one
+        // that needs the flag's value; name the first.
+        if let Some(free) = scenarios
+            .iter()
+            .zip(footprints)
+            .find(|(_, fp)| !fp.contains(param))
+            .map(|(s, _)| s.name())
+        {
+            msg.push_str(&format!(
+                "\n  - if only the scenario that doesn't set it needs it (here '{free}'):\
+                 \n        {free} {{ set = {{ {param} = {v} }} }}"
+            ));
+        }
+        // A variant composes the colliding scenario. Compose is one level
+        // deep, so a scenario that itself composes cannot be the base.
+        // The variant's own `set` replaces the base's, so only a base that
+        // sets (never scales) the parameter lands the variant on the value.
+        let base = colliding.iter().find_map(|(s, a)| match s {
+            ScenarioRef::Named(n)
+                if a.iter().all(|x| matches!(x, ScenarioParamAction::Set { .. }))
+                    && model.presets.iter().any(|p| p.name == *n && p.compose.is_empty()) =>
+            {
+                Some(n.as_str())
+            }
+            _ => None,
+        });
+        if let Some(base) = base {
+            msg.push_str(&format!(
+                "\n  - if you want a variant of '{base}' with {param} = {v}:\
+                 \n        {base}_variant {{ compose = [{base}], set = {{ {param} = {v} }} }}"
+            ));
+        }
+        if any_scale {
+            msg.push_str(&format!(
+                "\n  - for a scenario that scales it, put the value in a {file_flag} file, \
+                 which the scale applies over:\n        {param} = {v}"
+            ));
+        }
+    } else {
+        // A scale multiplies the value beneath it, so a file value (tier 3) is
+        // what the scenario scales.
+        msg.push_str(&format!(
+            "\nhint: put the value in a {file_flag} file instead; a scenario scales a \
+             file's value\n  rather than being overridden by it:\n        {param} = {v}"
+        ));
+    }
+    if single {
+        msg.push_str(&format!(
+            "\n  or drop {flag} {param} to run scenario '{}' with its own value.",
+            colliding[0].0.name()
+        ));
+    } else {
+        msg.push_str(&format!(
+            "\n  or drop {flag} {param} to run each scenario with its own value."
+        ));
+    }
+    msg
+}
+
+/// `2` → `"two"`, up to ten; digits beyond.
+fn count_word(n: usize) -> String {
+    const WORDS: [&str; 11] =
+        ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+    WORDS.get(n).map_or_else(|| n.to_string(), |w| (*w).to_string())
+}
+
+/// Greedy word wrap of `text` to `width` columns, every line prefixed by
+/// `indent`.
+fn wrap_indented(text: &str, indent: &str, width: usize) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::from(indent);
+    for word in text.split_whitespace() {
+        if line.len() > indent.len() && line.len() + 1 + word.len() > width {
+            lines.push(std::mem::replace(&mut line, String::from(indent)));
+        }
+        if line.len() > indent.len() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    lines.push(line);
+    lines.join("\n")
+}
+
 /// A scenario's net value for each parameter it touches: its `set` replaces
 /// the value beneath it, then each `scale` factor multiplies, in application
 /// order. `below(name)` is the value the scenario lands on — the lower tiers'
@@ -1468,7 +1718,7 @@ pub fn scenario_focal_notices(
             .map(|a| {
                 let (text, preset) = match a {
                     ScenarioParamAction::Set { value, preset } => {
-                        (format!("sets {param} = {value}"), preset)
+                        (format!("sets {param} = {value:?}"), preset)
                     }
                     ScenarioParamAction::Scale { factor, preset } => {
                         (format!("scales {param} \u{d7} {factor}"), preset)

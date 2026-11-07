@@ -144,20 +144,16 @@ fn a_later_params_file_over_an_earlier_one_is_reported() {
     assert_eq!(override_lines(&run.stderr), vec![line.as_str()], "stderr: {}", run.stderr);
 }
 
+/// A `--param` over a scenario's value is refused rather than reported
+/// (gh#571, `param_flag_over_scenario_gh571.rs`); over a params file it is a
+/// replacement like any other.
 #[test]
-fn param_over_a_scenario_is_reported() {
+fn param_over_a_params_file_is_reported() {
     let tmp = tempfile::tempdir().unwrap();
-    let p = write(tmp.path(), "p.toml", "beta = 0.3\n");
-    let run = simulate(
-        tmp.path(),
-        &["--params", &p.to_string_lossy(), "--scenario", "lockdown", "--param", "I0=7"],
-    );
-    assert_eq!(
-        override_lines(&run.stderr),
-        vec!["info: --param/--fixed replaced I0 = 3 (from scenario `lockdown`) with 7"],
-        "stderr: {}",
-        run.stderr
-    );
+    let p = write(tmp.path(), "p.toml", "beta = 0.3\nI0 = 5\n");
+    let run = simulate(tmp.path(), &["--params", &p.to_string_lossy(), "--param", "I0=7"]);
+    let line = format!("info: --param/--fixed replaced I0 = 5 (from {}) with 7", p.display());
+    assert_eq!(override_lines(&run.stderr), vec![line.as_str()], "stderr: {}", run.stderr);
 }
 
 /// The tamper hash a fit writes into `[provenance] content_hash`

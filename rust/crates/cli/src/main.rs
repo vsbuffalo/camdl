@@ -1949,6 +1949,15 @@ fn run_simulate(a: &args::SimulateArgs) {
         parallel,
     };
 
+    // Refuse what the run would refuse — a scenario touching a `--draws <file>`
+    // column or a sweep (gh#572), or a `--param` it sets or scales (gh#571) —
+    // before any branch: `--dry-run` and `--event-log` do not reach
+    // `engine::run_job`, which checks again.
+    engine::check_scenario_coordinate_collision(&job).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
+
     // ── Pre-flight: every generated-draws cell has a value for every parameter
     //
     // gh#949. Generated `prior` / `uniform` rows carry only the parameters the
@@ -1981,10 +1990,6 @@ fn run_simulate(a: &args::SimulateArgs) {
 
     // ── Dry run ─────────────────────────────────────────────────────────────
     if dry_run {
-        engine::check_scenario_coordinate_collision(&job).unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        });
         print_dry_run(
             &ir_path, &ir_path_compiled, base_sim_run.backend, dt, seed,
             &base_sim_run.params_files, &base_sim_run.overrides,

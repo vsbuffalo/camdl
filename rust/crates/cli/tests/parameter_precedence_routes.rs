@@ -441,58 +441,85 @@ fn profile_fixture(dir: &Path) {
 
 #[test]
 fn profile_reports_and_records_each_replacement_of_a_fixed_value() {
-    // --fixed-file sets gamma 0.12, the scenario replaces it with 0.1, --fixed
-    // replaces that with 0.15: two replacements, in tier order.
+    // --fixed-file sets gamma 0.12 and the scenario replaces it with 0.1; in a
+    // second run without the scenario, --fixed replaces the file's 0.12 with
+    // 0.15. A --fixed over the scenario's own gamma is refused (gh#571,
+    // `param_flag_over_scenario_gh571.rs`), so the two tier-crossings are two
+    // runs.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     profile_fixture(dir);
-    let out = Command::new(binary())
-        .args(["profile", "sir.camdl", "--data", "cases.tsv", "--obs", "cases",
-               "--sweep", "beta=lin(0.2,0.4,2)", "--particles", "30", "--iterations", "3",
-               "--n-starts", "1", "--rw-sd", "auto", "--output", "p.tsv", "--seed", "1",
-               "--scenario", "base",
-               "--fixed-file", "ff.toml", "--fixed", "gamma=0.15"])
-        .current_dir(dir).env("CAMDL_OUTPUT_DIR", dir.join("out")).output().expect("spawn");
-    let stderr = ok(&out, "profile");
-    assert_eq!(override_lines(&stderr), vec![
-        "info: scenario `base` replaced gamma = 0.12 (from ff.toml) with 0.1",
-        "info: --param/--fixed replaced gamma = 0.1 (from scenario `base`) with 0.15",
-    ]);
-    let leaves = run_jsons(&dir.join("out"));
-    let leaves: Vec<&serde_json::Value> = leaves.iter()
-        .filter(|l| l["inputs"]["provenance"].is_object()).collect();
-    assert!(!leaves.is_empty(), "no profile-point leaves");
-    for leaf in leaves {
-        let gamma = &leaf["inputs"]["provenance"]["parameters_provenance"]["gamma"];
+
+    let (stderr, provs) =
+        profile_run(dir, "out-scenario", &["--scenario", "base", "--fixed-file", "ff.toml"]);
+    assert_eq!(override_lines(&stderr),
+        vec!["info: scenario `base` replaced gamma = 0.12 (from ff.toml) with 0.1"]);
+    for prov in provs {
+        let gamma = &prov["gamma"];
+        assert_eq!(gamma["value"], 0.1);
+        assert_eq!(gamma["source"], "scenario");
+        assert_eq!(gamma["overrides"], serde_json::json!([
+            { "replaced": { "source": "fixed_file", "value": 0.12, "path": "ff.toml" },
+              "by": { "source": "scenario", "value": 0.1, "scenario": "base" } },
+        ]));
+    }
+
+    let (stderr, provs) = profile_run(dir, "out-fixed",
+        &["--fixed-file", "ff.toml", "--fixed", "gamma=0.15", "--fixed", "N0=1000"]);
+    assert_eq!(override_lines(&stderr),
+        vec!["info: --param/--fixed replaced gamma = 0.12 (from ff.toml) with 0.15"]);
+    for prov in provs {
+        let gamma = &prov["gamma"];
         assert_eq!(gamma["value"], 0.15);
         assert_eq!(gamma["source"], "fixed_cli");
         assert_eq!(gamma["overrides"], serde_json::json!([
             { "replaced": { "source": "fixed_file", "value": 0.12, "path": "ff.toml" },
-              "by": { "source": "scenario", "value": 0.1, "scenario": "base" } },
-            { "replaced": { "source": "scenario", "value": 0.1, "scenario": "base" },
               "by": { "source": "fixed_cli", "value": 0.15 } },
         ]));
     }
 }
 
+/// `survey --fit`: `--fixed` replaces the fit config's `[fixed]` value. (A
+/// `--fixed` over a scenario's value is refused, gh#571.)
 #[test]
-fn survey_reports_fixed_over_a_scenario_and_fixes_the_winner() {
+fn survey_reports_fixed_over_the_fit_config_and_fixes_the_winner() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     profile_fixture(dir);
-    let out = camdl(dir, &["survey", "sir.camdl", "--data", "cases.tsv",
-        "--estimate", "beta=0.001:5.0", "--scenario", "base", "--fixed", "gamma=0.15",
+    std::fs::write(dir.join("fit.toml"), "\
+[model]
+camdl = \"sir.camdl\"
+
+[data.observations]
+cases = \"cases.tsv\"
+
+[estimate]
+beta = { bounds = [0.001, 5.0] }
+
+[fixed]
+gamma = 0.1
+N0 = 1000
+
+[method]
+algorithm = \"if2\"
+backend = \"chain_binomial\"
+chains = 1
+particles = 30
+iterations = 3
+cooling = 0.5
+").unwrap();
+    let out = camdl(dir, &["survey", "sir.camdl", "--fit", "fit.toml", "--fixed", "gamma=0.15",
         "--eval", "simulate", "--n-points", "4", "--seed", "1", "--output", "sv"]);
     let stderr = ok(&out, "survey");
     assert_eq!(override_lines(&stderr),
-        vec!["info: --param/--fixed replaced gamma = 0.1 (from scenario `base`) with 0.15"]);
+        vec!["info: --param/--fixed replaced gamma = 0.1 (from fit.toml [fixed]) with 0.15"]);
     let leaf = one_leaf(&dir.join("sv"));
     assert_eq!(leaf["inputs"]["fixed"]["gamma"], 0.15);
     let gamma = &leaf["inputs"]["parameters_provenance"]["gamma"];
     assert_eq!(gamma["value"], 0.15);
     assert_eq!(gamma["source"], "fixed_cli");
     assert_eq!(gamma["overrides"], serde_json::json!([
-        { "replaced": { "source": "scenario", "value": 0.1, "scenario": "base" },
+        { "replaced": { "source": "fit_toml_fixed", "value": 0.1 },
           "by": { "source": "fixed_cli", "value": 0.15 } },
     ]));
     assert_eq!(leaf["inputs"]["notices"].as_array().map(Vec::len), Some(1));

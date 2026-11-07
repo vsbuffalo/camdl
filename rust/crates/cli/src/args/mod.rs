@@ -47,7 +47,8 @@ PRECEDENCE (last wins, per docs/camdl-run-spec.md §1.3)
   2. fit.toml [fixed] block (if --fit is in scope)
   3. --fixed-file <toml> (layered in declared order)
   4. Scenario preset (--scenario NAME)
-  5. --fixed NAME=VALUE   (highest)";
+  5. --fixed NAME=VALUE   (highest; a --fixed on a parameter the scenario
+                          sets or scales is refused)";
 
 // ─── Shared flat arg groups ───────────────────────────────────────────────────
 
