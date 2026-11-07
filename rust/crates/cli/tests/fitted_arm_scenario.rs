@@ -366,6 +366,13 @@ fn pfilter_fit_scores_under_the_fits_selection() {
          --enable vax scores {with_vax}, no intervention scores {bare}");
     assert_ne!(with_fit, bare, "precondition: vax must move the likelihood");
 
+    // The same selection restated on the command line is the same problem
+    // (the fit config already has enable = [\"vax\"]), not a conflict.
+    let restated = loglik(&ok(pf(&["--fit", fit.to_str().unwrap(), "--enable", "vax"]),
+        "pfilter --fit with the fit's own --enable"));
+    assert_eq!(restated, with_fit,
+        "--enable vax beside a fit config that enables vax scores the fit's model");
+
     // A flag naming a different selection from the fit's is refused, as on
     // `survey --fit` / `profile --fit`: a run scores one problem.
     let out = pf(&["--fit", fit.to_str().unwrap(), "--disable", "vax"]);

@@ -77,6 +77,9 @@ observations {
 }
 init { S = 990  I = 10 }
 simulate { from = 0 'days  to = 6 'days }
+interventions {
+  vax : transfer(fraction = 0.9, from = S, to = R) at [2]
+}
 scenarios {
   Z { set = { N0 = 5000 } }
   W { set = { N0 = 2000 } }
@@ -206,6 +209,23 @@ fn flag_agreeing_with_the_config_scenario_runs() {
     ok(profile(&tmp.path().join("both"), &ir, &with_z, &["--scenario", "Z"]));
     assert_eq!(n0_and_loglik(&tmp.path().join("cfg")),
                n0_and_loglik(&tmp.path().join("both")));
+}
+
+/// The same toggles on the flag and in the config select the same problem,
+/// as the same scenario name does; a different toggle is still refused.
+#[test]
+fn flag_repeating_the_config_toggles_runs() {
+    let tmp = tempdir("same_toggles");
+    let (ir, fit) = setup(tmp.path(), "fit_vax", Some(1000.0), "enable = [\"vax\"]");
+    ok(profile(&tmp.path().join("cfg"), &ir, &fit, &[]));
+    ok(profile(&tmp.path().join("both"), &ir, &fit, &["--enable", "vax"]));
+    assert_eq!(n0_and_loglik(&tmp.path().join("cfg")),
+               n0_and_loglik(&tmp.path().join("both")),
+        "a flag restating the config's toggles must profile as the config alone");
+    let cwd = tmp.path().join("conflict");
+    let out = profile(&cwd, &ir, &fit, &["--disable", "vax"]);
+    assert!(!out.status.success(), "config enable vax with --disable vax must be refused");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("neither silently wins"));
 }
 
 #[test]

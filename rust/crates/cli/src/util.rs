@@ -3286,15 +3286,24 @@ pub struct ScenarioSelection {
     pub disable: Vec<String>,
 }
 
+/// Whether two toggle lists name the same set of interventions, regardless of
+/// order or repeats.
+fn same_toggles(a: &[String], b: &[String]) -> bool {
+    let (a, b): (std::collections::BTreeSet<&str>, std::collections::BTreeSet<&str>) =
+        (a.iter().map(String::as_str).collect(), b.iter().map(String::as_str).collect());
+    a == b
+}
+
 /// Combine a fit config's top-level `scenario` / `enable` / `disable` with the
 /// CLI's `--scenario` / `--enable` / `--disable`, for a verb that reads both
 /// (`survey --fit`, `profile --fit`).
 ///
 /// Either side alone selects the scenario. When both select one they must be
-/// the same named scenario: the fit config describes the problem a fit was run
-/// on, so a flag naming a different scenario (or toggles beside a scenario, or
-/// toggles beside toggles) is a contradiction about which problem the run
-/// scores, and neither side silently wins. A config carrying both `scenario`
+/// the same named scenario, or the same sets of enabled and disabled toggles
+/// (order aside): the fit config describes the problem a fit was run on, so a
+/// flag naming a different scenario (or toggles beside a scenario, or
+/// different toggles) is a contradiction about which problem the run scores,
+/// and neither side silently wins. A config carrying both `scenario`
 /// and toggles is refused, as `fit run` refuses it. Whether the name is
 /// declared is decided later, by `resolve_parameters`.
 pub fn combine_fit_scenario(
@@ -3313,6 +3322,9 @@ pub fn combine_fit_scenario(
     }
     match (flag.scenario, config.scenario) {
         (Some(f), Some(c)) if f == c => Ok(flag.owned()),
+        // The same toggles, in either order, select the same problem.
+        (None, None) if same_toggles(flag.enable, config.enable)
+            && same_toggles(flag.disable, config.disable) => Ok(flag.owned()),
         _ => Err(format!(
             "the command line selects {} but the fit config selects {}; a run \
              scores one scenario, so neither silently wins.\n  \
