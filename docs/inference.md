@@ -95,13 +95,13 @@ from the full joint posterior $p(\theta, X | y)$.
 
 This is the fundamental design choice:
 
-|                   | PMMH                      | PGAS                                                                |
-| ----------------- | ------------------------- | ------------------------------------------------------------------- |
-| **Trajectories**  | Marginalized out by PF    | Conditioned on, explicitly sampled                                  |
-| **Likelihood**    | Estimated (noisy)         | Exact (no PF variance)                                              |
-| **Process model** | Any (plug-and-play)       | Chain-binomial only (needs transition density)                      |
-| **Output**        | Posterior $p(\theta       | y)$ (trajectories available but low-quality due to path degeneracy) |
-| **Bottleneck**    | PF variance → slow mixing | Trajectory convergence → slow on long series                        |
+|                   | PMMH                                                                                         | PGAS                                                                               |
+| ----------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **Trajectories**  | Marginalized out by PF                                                                       | Conditioned on, explicitly sampled                                                 |
+| **Likelihood**    | Estimated (noisy)                                                                            | Exact (no PF variance)                                                             |
+| **Process model** | Any (plug-and-play)                                                                          | Chain-binomial only (needs transition density)                                     |
+| **Output**        | Posterior $p(\theta \mid y)$ (trajectories available but low-quality due to path degeneracy) | Posterior $p(\theta, X \mid y)$ jointly (high-quality trajectory samples via CSMC) |
+| **Bottleneck**    | PF variance → slow mixing                                                                    | Trajectory convergence → slow on long series                                       |
 
 PMMH is more general (works with any simulator) but pays for it with noisy
 likelihood estimates. PGAS is more efficient (exact likelihood) but requires the
