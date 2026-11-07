@@ -1,0 +1,14 @@
+# invariant: a bound's unit literal is in the parameter's dimension
+# spec: §5.9
+# expect: E316 Error
+time_unit = 'days
+
+compartments { S, I }
+
+parameters { g : rate in [0.05 'days, 1 'per_week] }
+
+transitions { r : I --> S @ g * I }
+
+init { I = 1 }
+
+simulate { from = 0 'days  to = 10 'days }

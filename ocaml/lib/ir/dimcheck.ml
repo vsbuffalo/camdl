@@ -266,7 +266,7 @@ let kind_dim : param_kind -> dim_vec option = function
   | Instant | Duration -> Some time_dim
   | Positive | Real -> None
 
-let declare_model st ~constant_dims (m : model) =
+let declare_model st ~constant_dims ~table_dims (m : model) =
   List.iter (fun (p : parameter) ->
     let key = Dim_sites.K_param p.name in
     ignore (var_of st key);
@@ -281,8 +281,13 @@ let declare_model st ~constant_dims (m : model) =
     | Some (dp, dt) -> declare st key (make dp dt)
     | None -> Option.iter (declare st key) (kind_dim c.c_kind)) m.constants;
   List.iter (fun (t : table) ->
-    match Option.bind (Option.bind t.cell_kind param_kind_of_name) kind_dim with
-    | Some v -> declare st (Dim_sites.K_table t.name) v
+    (match Option.bind (Option.bind t.cell_kind param_kind_of_name) kind_dim with
+     | Some v -> declare st (Dim_sites.K_table t.name) v
+     | None -> ());
+    (* A table's unit annotation (`mu : age 'per_day = [...]`) declares its
+       cells' dimension; the IR keeps only the scaled values. *)
+    match List.assoc_opt t.name table_dims with
+    | Some (dp, dt) -> declare st (Dim_sites.K_table t.name) (make dp dt)
     | None -> ()) m.tables;
   List.iter (fun (tf : time_function) ->
     let (p, t) = tf.dim in Hashtbl.replace st.tf_dims tf.name (make p t)) m.time_functions;
@@ -787,7 +792,7 @@ type convention = One | Theta | Inv_theta
 
 let convention family arg =
   match family, arg with
-  | ("uniform" | "log_uniform"), ("lower" | "upper") -> Some Theta
+  | ("uniform" | "log_uniform" | "bounds"), ("lower" | "upper") -> Some Theta
   | "normal", ("mu" | "sigma") -> Some Theta
   | "truncated_normal", ("mean" | "sd") -> Some Theta
   | "half_normal", "sigma" -> Some Theta
@@ -806,8 +811,10 @@ let check_priors (out : solved) st (priors : prior_source list) : diagnostic lis
       let inner = ref [] in
       let report a b =
         inner := { severity = Error; code = "E316"; subject; hint = None;
-                   message = Printf.sprintf
-                     "prior of '%s': explicit units disagree inside `%s`" param arg;
+                   message = (if family = "bounds" then
+                     Printf.sprintf "the `%s` bound of '%s': explicit units disagree" arg param
+                   else Printf.sprintf
+                     "prior of '%s': explicit units disagree inside `%s`" param arg);
                    detail = Some (Printf.sprintf "%s is combined with %s"
                                     (dim_display a) (dim_display b)) } :: !inner in
       (* Each whole additive term of the argument is read on its own: a unit
@@ -839,9 +846,12 @@ let check_priors (out : solved) st (priors : prior_source list) : diagnostic lis
            | Some x when not (dim_eq x d) ->
              let log_scale = family = "log_normal" in
              [ { severity = Error; code = "E316"; subject;
-                 message = Printf.sprintf
+                 message = (if family = "bounds" then
+                   Printf.sprintf "the `%s` bound of '%s' has a unit literal of dimension %s, but '%s' is %s"
+                     arg param (dim_display d) param (dim_display x)
+                 else Printf.sprintf
                    "prior of '%s': `%s` has a unit literal of dimension %s, but a %s prior's `%s` is %s" param arg (dim_display d) family arg
-                   (dim_display x);
+                   (dim_display x));
                  detail = Some "a unit literal is converted to the model's units, and that conversion is right only in the argument's own dimension";
                  hint = Some (if log_scale then
                    "`mu` and `sigma` of a log-normal are the mean and sd of ln θ, numbers in model units. To give a median with a unit, write `mu = log(0.2 'per_day)`, which converts the value before taking its log; `sigma` is a plain number."
@@ -874,13 +884,13 @@ let check_priors (out : solved) st (priors : prior_source list) : diagnostic lis
 
 (* ── Main check ────────────────────────────────────────────────────────── *)
 
-let check_model_exn ?prior_args ~constant_dims ~typed_lets (m : model) : result =
+let check_model_exn ?prior_args ~constant_dims ~table_dims ~typed_lets (m : model) : result =
   let constants = Hashtbl.create 16 in
   List.iter (fun (c : constant) -> Hashtbl.replace constants c.c_name c.c_value) m.constants;
   let st = { constants; used = Hashtbl.create 64; t_only = false; t_only_eqs = Hashtbl.create 16; next_var = 0; keys = Hashtbl.create 256; declared = []; structure = [];
              obligation = []; info = Hashtbl.create 1024; next_eq = 0;
              tf_dims = Hashtbl.create 16 } in
-  declare_model st ~constant_dims m;
+  declare_model st ~constant_dims ~table_dims m;
   declare_quantities st m;
   let sites = Dim_sites.sites m in
   (* A typed `let`'s annotation, at each of its expanded bodies. *)
@@ -950,8 +960,8 @@ let check_model_exn ?prior_args ~constant_dims ~typed_lets (m : model) : result 
 (* An exponent too large for a native integer (a power of a power of a power,
    ...) is reported, never wrapped: the guarantee the solver keeps holds through
    equation generation too. *)
-let check_model ?prior_args ?(constant_dims = []) ?(typed_lets = []) (m : model) : result =
-  try check_model_exn ?prior_args ~constant_dims ~typed_lets m
+let check_model ?prior_args ?(constant_dims = []) ?(table_dims = []) ?(typed_lets = []) (m : model) : result =
+  try check_model_exn ?prior_args ~constant_dims ~table_dims ~typed_lets m
   with Dim_solve.Overflow msg ->
     { diagnostics = [ { severity = Error; code = "E310"; subject = None;
                         message = "a dimension exponent in this model is too large to represent";

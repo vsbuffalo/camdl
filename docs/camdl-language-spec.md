@@ -393,6 +393,7 @@ silent guess.
 | transfer `fraction`                                                                   | 1                                             | E314 |
 | transfer `count`; an assigned value; an added count                                   | P                                             | E314 |
 | an intervention's time expression                                                     | T                                             | E315 |
+| a time read as a number: schedule `every`/`from`/`to`/`at_day`, a trigger `window`, `after`, `cooldown`, `simulate` and output times | T | E315 |
 | a reactive trigger's threshold                                                        | the observed stream's scored column           | E315 |
 | Poisson `rate`; NegBinomial and zero-inflated `mean`; Binomial and BetaBinomial `n`   | P                                             | E304 |
 | Binomial and Bernoulli `p`; Beta `mean`; zero-inflation `pi`; shapes and concentrations | 1                                           | E304 |
@@ -403,6 +404,8 @@ silent guess.
 | a `value_at` time                                                                     | T                                             | E317 |
 | the arms of a contrast difference                                                     | one dimension                                 | E297 |
 | prior arguments                                                                       | unit literals only (§2.2.3)                   | E316 |
+| parameter bounds `in [lo, hi]`                                                        | unit literals only, in θ's dimension          | E316 |
+| a table value, in a table with a unit annotation (`mu : age 'per_day = [...]`)        | the annotation's dimension                    | E302 |
 
 Additional checks: a sum whose operands differ is **E302**; the argument of
 `exp()`/`log()`, a power's exponent, and a base under a non-constant exponent
@@ -6727,8 +6730,8 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E308 | Error   | Overdispersion σ² must have dimension T                                                    |
 | E313 | Error   | An initial condition has the wrong dimension                                               |
 | E314 | Error   | An intervention action's `fraction`, `count` or value has the wrong dimension              |
-| E315 | Error   | An intervention time is not T, or a trigger threshold is not its stream's dimension        |
-| E316 | Error   | A unit literal in a prior argument disagrees with the argument's dimension (§2.2.3)        |
+| E315 | Error   | An intervention or schedule time is not T, or a trigger threshold is not its stream's dimension |
+| E316 | Error   | A unit literal in a prior argument or a bound disagrees with its dimension (§2.2.3)        |
 | E317 | Error   | A quantity threshold is not its series' dimension, or a `value_at` time is not T           |
 | E318 | Error   | A typed `let`'s body does not have its declared kind or `dim` clause (§8.4)                 |
 | I316 | Info    | A log-normal `mu` or `sigma` is directly a dimensioned parameter (§2.2.3)                  |

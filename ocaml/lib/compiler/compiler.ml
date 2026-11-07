@@ -574,6 +574,7 @@ let run_dimcheck_full (d : compile_detail)
     let result =
       Dimcheck.check_model ~prior_args:(Expander.prior_sources d.ctx)
         ~constant_dims:(Expander.constant_dims d.ctx)
+        ~table_dims:(Expander.table_unit_dims d.ctx)
         ~typed_lets:(Expander.typed_let_uses d.ctx) d.model in
     let diags =
       List.map (fun (dc : Dimcheck.diagnostic) ->

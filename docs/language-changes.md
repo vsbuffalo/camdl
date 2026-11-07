@@ -89,6 +89,27 @@ error[E356]: observation 'prev': `prevalence(I)` was removed — it returned a c
               projected = prevalence(of = I, among = <denominator>)
 ```
 
+## 2026-11-07 — Units in bounds, tables and times are checked
+
+**What.** Three places held a unit literal or a unit annotation that the
+dimension check never saw, so a value in the wrong dimension was read as a bare
+number. A parameter bound (`g : rate in [0.05 'days, 1]` gave a lower bound of
+0.05 per day). A table's unit annotation (`mu : age 'per_day = [cov, cov]` let
+its cells take whatever dimension their use implied). And every time the
+compiler reads as a number: a schedule's `every`, `from`, `to` and `at_day`, a
+trigger `window`, a reactive intervention's `after` and `cooldown`, and the
+`simulate` and output times (`after = 21 'per_day` was 21 days). Each is now
+checked; a time or a bound in another unit of the right dimension is converted
+as before.
+
+**Migration.** Write the value in its own dimension (`after = 3 'weeks`,
+`in [0.05 'per_day, 1 'per_week]`), or as a bare number in model units; give a
+unit-annotated table cells of the annotation's dimension.
+
+**Diagnostics.** E316 for a bound, E302 at the table value, E315 for a time.
+
+---
+
 ## 2026-11-06 — A typed `let` is held to its annotation
 
 **What.** The kind or `dim` clause on a `let` whose body is not a constant

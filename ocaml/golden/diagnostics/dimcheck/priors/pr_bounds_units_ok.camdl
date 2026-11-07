@@ -1,0 +1,17 @@
+# invariant: bounds written in the parameter's dimension, in any unit, are converted
+# spec: §5.9
+# expect: (none)
+time_unit = 'days
+
+compartments { S, I }
+
+parameters {
+  g   : rate     in [0.05 'per_day, 1 'per_week]
+  lag : duration in [1 'days, 4 'weeks]
+}
+
+transitions { r : I --> S @ g * I + 0 * I / lag }
+
+init { I = 1 }
+
+simulate { from = 0 'days  to = 10 'days }

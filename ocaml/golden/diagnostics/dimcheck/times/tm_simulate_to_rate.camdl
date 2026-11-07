@@ -1,0 +1,14 @@
+# invariant: a simulation horizon is a time
+# spec: §5.1, times read as numbers
+# expect: E315 Error
+time_unit = 'days
+
+compartments { S, I }
+
+parameters { g : rate in [0.01, 1.0] }
+
+transitions { r : I --> S @ g * I }
+
+init { I = 1 }
+
+simulate { from = 0 'days  to = 10 'per_day }

@@ -132,6 +132,7 @@ type context = {
      inlined (or hoisted) at each use, so the IR keeps no node for the
      annotation, and the dimension checker enforces it from these (E318). *)
   mutable typed_let_uses  : (string * (int * int) * Ir.expr) list;
+  mutable table_unit_dims : (string * (int * int)) list;
   typed_let_seen          : (string * Ir.expr, unit) Hashtbl.t;
   (* Declared value-column names of the observation stream currently being
      expanded (2026-06-10 observation data-entry §3). While set, an identifier
@@ -218,6 +219,7 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   suppress_hoist       = false;
   prior_sources        = [];
   typed_let_uses       = [];
+  table_unit_dims      = [];
   typed_let_seen       = Hashtbl.create 16;
   obs_aux_cols         = [];
   table_index          = Hashtbl.create 16;
@@ -860,6 +862,10 @@ let transition_loc ctx name =
 let prior_sources ctx = List.rev ctx.prior_sources
 
 let typed_let_uses ctx = List.rev ctx.typed_let_uses
+
+(* The cell dimension each unit-annotated table declares, for the dimension
+   checker (the IR keeps only the scaled values). *)
+let table_unit_dims ctx = List.rev ctx.table_unit_dims
 
 let let_loc ctx name =
   match List.find_opt (fun (lb : let_binding) -> lb.lname = name) ctx.let_bindings with
@@ -5395,6 +5401,60 @@ let rec eval_const_expr ctx = function
      | _       -> 0.0 (* unreachable — is_const_func filters these *))
   | _ -> 0.0  (* unreachable — guarded by is_const_expr *)
 
+(* The dimension a constant body's unit literals give it: [`Units d] when
+   they alone determine it; [`Bare] for bare numbers only; [`Conflict (a, b)]
+   when two explicit units disagree in a sum, which no reading of the body
+   can rescue; [`Other] when something else decides (a function). *)
+let rec literal_units (e : expr) =
+  let combine f a b = match a, b with
+    | (`Conflict _ as c), _ | _, (`Conflict _ as c) -> c
+    | `Units x, `Units y -> `Units (f x y)
+    | `Bare, (`Units _ as u) | (`Units _ as u), `Bare -> u
+    | `Bare, `Bare -> `Bare
+    | _ -> `Other
+  in
+  match e with
+  | EUnit (_, u) -> `Units (unit_lit_to_dim u)
+  | EConst _ -> `Bare
+  | EUnOp (Neg, a) -> literal_units a
+  | EBinOp ((Add | Sub), a, b) ->
+    (match literal_units a, literal_units b with
+     | `Units x, `Units y when x <> y -> `Conflict (x, y)
+     | x, y -> combine (fun x _ -> x) x y)
+  | EBinOp (Mul, a, b) ->
+    combine (fun (p1, t1) (p2, t2) -> (p1 + p2, t1 + t2)) (literal_units a) (literal_units b)
+  | EBinOp (Div, a, b) ->
+    (match literal_units a, literal_units b with
+     | `Bare, `Units (p, t) -> `Units (-p, -t)
+     | x, y -> combine (fun (p1, t1) (p2, t2) -> (p1 - p2, t1 - t2)) x y)
+  | EBinOp (Pow, a, EConst n) when Float.is_integer n ->
+    (match literal_units a with
+     | `Units (p, t) -> let k = int_of_float n in `Units (k * p, k * t)
+     | x -> x)
+  | _ -> `Other
+
+(* A position that holds a time (a schedule, a window, a delay, a horizon) is
+   evaluated to a number in the model's time unit here, before the dimension
+   checker runs, so its unit literals are checked here: `after = 21 'per_day`
+   would otherwise be read as 21 days. A bare number is a time in model units;
+   anything else that is not a unit literal is left to the checks of its
+   position. *)
+let check_time_units ctx ~what (e : expr) =
+  let show (p, t) = Dimcheck.display_dim (Dimcheck.make p t) in
+  match literal_units e with
+  | `Units (0, 1) | `Bare | `Other -> ()
+  | `Units d ->
+    Diagnostics.error ctx.diags ~code:"E315" ~loc:Diagnostics.no_loc
+      ~message:(Printf.sprintf "%s must be a time, but its unit literal has dimension %s"
+                  what (show d))
+      ~hint:"write it with a time unit ('days, 'weeks, ...) or as a bare number in the model's time unit"
+      ()
+  | `Conflict (a, b) ->
+    Diagnostics.error ctx.diags ~code:"E315" ~loc:Diagnostics.no_loc
+      ~message:(Printf.sprintf "%s: its unit literals disagree, %s combined with %s"
+                  what (show a) (show b))
+      ()
+
 (* Full resolve_float_expr: tries AST const-eval first, then IR reduction.
    Errors if neither produces a constant. *)
 let resolve_float_expr ctx e =
@@ -5413,6 +5473,10 @@ let resolve_float_expr ctx e =
         ~hint:"Use a numeric literal or arithmetic of literals."
         ();
       0.0
+
+let resolve_time_expr ctx ~what e =
+  check_time_units ctx ~what e;
+  resolve_float_expr ctx e
 
 (* ── Constant-expression dimension ───────────────────────────────────────── *)
 
@@ -5580,7 +5644,7 @@ let sim_t_end_baked ctx =
   | None -> 100.0
   | Some sd ->
     if mentions_obs_anchor sd.sim_to then Float.nan
-    else resolve_float_expr ctx sd.sim_to
+    else resolve_time_expr ctx ~what:"`simulate.to`" sd.sim_to
 
 (* Resolve a bound expression to a float. Bounds are compile-time constants —
    a numeric literal or arithmetic of literals, possibly **negative** (e.g. a
@@ -5599,6 +5663,19 @@ let resolve_bounds ctx pbounds =
   | None -> None
   | Some (lo_e, hi_e) ->
     Some (resolve_float_expr_simple ctx lo_e, resolve_float_expr_simple ctx hi_e)
+
+(* A parameter's bounds are values of θ, so their unit literals are checked
+   against θ's dimension after the solve, by the same pass as prior arguments
+   (family "bounds", both arguments in θ's units): `g : rate in [0.05 'days, 1]`
+   would otherwise be the number 0.05. *)
+let note_bounds ctx ~pname pbounds =
+  match pbounds with
+  | None -> ()
+  | Some (lo_e, hi_e) ->
+    let ir e = normalize_expr (resolve_expr ctx [] e) in
+    ctx.prior_sources <-
+      { Dimcheck.param = pname; family = "bounds";
+        args = [ ("lower", ir lo_e); ("upper", ir hi_e) ] } :: ctx.prior_sources
 
 (* ── Prior distribution resolution ─────────────────────────────────────── *)
 
@@ -6000,6 +6077,7 @@ let expand_parameters ctx =
     match pd with
     | PScalar { pname; pbounds; pkind; pdim; pprior; ploc; _ } ->
       let bounds = resolve_bounds ctx pbounds in
+      note_bounds ctx ~pname pbounds;
       let pk = Some (ir_param_kind_of_ast pkind) in
       let loc = diag_loc_of_ast_ctx ctx ploc in
       let dim = pdim in
@@ -6060,6 +6138,7 @@ let expand_parameters ctx =
       if has_dup || !bad_dim then []
       else begin
         let bounds = resolve_bounds ctx pbounds in
+        note_bounds ctx ~pname pbounds;
         let pk = Some (ir_param_kind_of_ast pkind) in
         let resolved_dim = pdim_ann in
         let (prior, hierarchical) = match pprior with
@@ -6082,38 +6161,6 @@ let expand_parameters ctx =
 (* Typed constant `let`s → the IR's `constants` section, evaluated once here.
    The same predicate decides which carry their `#'` prose into the doc index
    — see [let_constant_kind]. *)
-(* The dimension a constant body's unit literals give it: [`Units d] when
-   they alone determine it; [`Bare] for bare numbers only; [`Conflict (a, b)]
-   when two explicit units disagree in a sum, which no reading of the body
-   can rescue; [`Other] when something else decides (a function). *)
-let rec literal_units (e : expr) =
-  let combine f a b = match a, b with
-    | (`Conflict _ as c), _ | _, (`Conflict _ as c) -> c
-    | `Units x, `Units y -> `Units (f x y)
-    | `Bare, (`Units _ as u) | (`Units _ as u), `Bare -> u
-    | `Bare, `Bare -> `Bare
-    | _ -> `Other
-  in
-  match e with
-  | EUnit (_, u) -> `Units (unit_lit_to_dim u)
-  | EConst _ -> `Bare
-  | EUnOp (Neg, a) -> literal_units a
-  | EBinOp ((Add | Sub), a, b) ->
-    (match literal_units a, literal_units b with
-     | `Units x, `Units y when x <> y -> `Conflict (x, y)
-     | x, y -> combine (fun x _ -> x) x y)
-  | EBinOp (Mul, a, b) ->
-    combine (fun (p1, t1) (p2, t2) -> (p1 + p2, t1 + t2)) (literal_units a) (literal_units b)
-  | EBinOp (Div, a, b) ->
-    (match literal_units a, literal_units b with
-     | `Bare, `Units (p, t) -> `Units (-p, -t)
-     | x, y -> combine (fun (p1, t1) (p2, t2) -> (p1 - p2, t1 - t2)) x y)
-  | EBinOp (Pow, a, EConst n) when Float.is_integer n ->
-    (match literal_units a with
-     | `Units (p, t) -> let k = int_of_float n in `Units (k * p, k * t)
-     | x -> x)
-  | _ -> `Other
-
 (* A typed constant whose unit literals give it a dimension other than its
    kind's: `let tau : rate = 30 'days` would otherwise be the number 30.0 of
    kind rate, the literal's dimension silently dropped (E282). *)
@@ -6252,6 +6299,10 @@ let expand_tables ctx =
     let dim_entries = td.tdims in
     let primary_name = List.hd td.tnames in
     let table_unit = extract_table_unit ctx ~table_name:primary_name dim_entries in
+    Option.iter (fun u ->
+      List.iter (fun n ->
+        ctx.table_unit_dims <- (n, unit_lit_to_dim u) :: ctx.table_unit_dims) td.tnames)
+      table_unit;
     let cell_kind = Option.map param_kind_to_string td.tcell_kind in
     match td.tvalue with
     | EFuncCall ("read", _) when dim_entries = [] ->
@@ -6605,7 +6656,7 @@ let expand_simulate ctx =
       Ir.time_semantics = "continuous"; Ir.dt = None; Ir.rng_seed = None;
       Ir.integrator = Ir.Rk4; Ir.t_end_anchor = None }
   | Some sd ->
-    let t_start = resolve_float_expr ctx sd.sim_from in
+    let t_start = resolve_time_expr ctx ~what:"`simulate.from`" sd.sim_from in
     (* gh#616: `to = last_obs + 4 'weeks`. The anchor field carries the horizon
        and `t_end` is baked NaN — NOT a placeholder number. Two placeholders
        would compare EQUAL, which silently defeats every equality-based horizon
@@ -6624,7 +6675,7 @@ let expand_simulate ctx =
     let t_end =
       match t_end_anchor with
       | Some _ -> Float.nan
-      | None   -> resolve_float_expr ctx sd.sim_to
+      | None   -> resolve_time_expr ctx ~what:"`simulate.to`" sd.sim_to
     in
     (* gh#453: the horizon must be a forward interval. An empty or reversed
        one gives an empty output grid, so every backend's loop never runs and
@@ -6658,7 +6709,7 @@ let expand_simulate ctx =
        `dt = 0.05 'months` resolves through resolve_float_expr (EUnit →
        model time units). None when omitted, so the CLI default / --dt
        override applies. *)
-    let dt = Option.map (resolve_float_expr ctx) sd.sim_dt in
+    let dt = Option.map (resolve_time_expr ctx ~what:"`simulate.dt`") sd.sim_dt in
     (* gh#166: build the tagged integrator. atol/rtol are DIMENSIONLESS adaptive
        tolerances (ratios, not times). dimcheck does not visit the simulate
        block, so the dimension is checked here by computing the expression's NET
@@ -6734,8 +6785,8 @@ let expand_output ctx =
   let times = match ctx.output_decl with
     | Some { out_trajectories = Some ot; _ } ->
       (match ot.otschedule with
-       | SchedEvery e -> Ir.OutRegular { Ir.start; Ir.step = resolve_float_expr ctx e }
-       | SchedAt ts   -> Ir.OutAtTimes (List.map (resolve_float_expr ctx) ts))
+       | SchedEvery e -> Ir.OutRegular { Ir.start; Ir.step = resolve_time_expr ctx ~what:"an output schedule's `every`" e }
+       | SchedAt ts   -> Ir.OutAtTimes (List.map (resolve_time_expr ctx ~what:"an output time") ts))
     | _ -> Ir.OutRegular { Ir.start; Ir.step = 1.0 }
   in
   { Ir.times;
@@ -8262,9 +8313,9 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
           else
             Ir.AtTimesExpr resolved
         | SRecurring (every, from_opt, until_opt) ->
-          let period = resolve_float_expr ctx every in
+          let period = resolve_time_expr ctx ~what:"a schedule's `every`" every in
           let start  = match from_opt with
-            | Some e -> resolve_float_expr ctx e
+            | Some e -> resolve_time_expr ctx ~what:"a schedule's `from`" e
             | None   -> t_start
           in
           (* gh#616: a recurring schedule with no explicit `to` DEFAULTS its end
@@ -8287,7 +8338,7 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
                      180 'days`, or state the model horizon as a literal."
               ();
           let end_   = match until_opt with
-            | Some e -> resolve_float_expr ctx e
+            | Some e -> resolve_time_expr ctx ~what:"a schedule's `to`" e
             | None   -> t_end
           in
           if period <= 0.0 then
@@ -8332,8 +8383,8 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
               ~hint:"State the model horizon as a literal `simulate { to = … }`, \
                      or write the schedule as `every = … from = … to = …`."
               ();
-          let period = resolve_float_expr ctx every in
-          let at_day = resolve_float_expr ctx day in
+          let period = resolve_time_expr ctx ~what:"a schedule's `every`" every in
+          let at_day = resolve_time_expr ctx ~what:"a schedule's `at_day`" day in
           Ir.Recurring { Ir.start = t_start; Ir.period; Ir.end_ = t_end; Ir.at_day = Some at_day }
       in
       let actions =
@@ -8422,7 +8473,7 @@ let lower_obs_quantity ctx env ~name ~loc (e : expr) : Ir.trigger_quantity =
      | "sum_observed" ->
        let window = match window_arg with
          | Some w ->
-           let wv = resolve_float_expr ctx w in
+           let wv = resolve_time_expr ctx ~what:"a trigger's `window`" w in
            if wv < 0.0 || not (Float.is_finite wv) then
              Diagnostics.error ctx.diags ~code:"E274" ~loc
                ~message:(Printf.sprintf
@@ -8558,11 +8609,11 @@ let expand_reactive ctx decls =
       in
       let after = match rx.rxafter with
         | None -> 0.0
-        | Some e -> let a = resolve_float_expr ctx e in check_duration "after" a; a
+        | Some e -> let a = resolve_time_expr ctx ~what:(Printf.sprintf "`after` of '%s'" rx_name) e in check_duration "after" a; a
       in
       let cooldown = match rx.rxcooldown with
         | None -> None
-        | Some e -> let c = resolve_float_expr ctx e in check_duration "cooldown" c; Some c
+        | Some e -> let c = resolve_time_expr ctx ~what:(Printf.sprintf "`cooldown` of '%s'" rx_name) e in check_duration "cooldown" c; Some c
       in
       let once = match rx.rxonce with
         | None -> true
@@ -9470,10 +9521,10 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
     let emit_schedule = match sched_v with
       | None -> None
       | Some (SchedEvery every) ->
-        let step = resolve_float_expr ctx every in
+        let step = resolve_time_expr ctx ~what:"an emit schedule's `every`" every in
         Some (Ir.ObsRegular { Ir.start = t_start; Ir.step; Ir.end_ = t_end })
       | Some (SchedAt ts) ->
-        Some (Ir.ObsAtTimes (List.map (resolve_float_expr ctx) ts))
+        Some (Ir.ObsAtTimes (List.map (resolve_time_expr ctx ~what:"an emit time") ts))
     in
     (* `projected = X` reads a compartment snapshot at observation time.
        If X is Erlang- or otherwise-stratified, the bare name has no concrete
@@ -12144,7 +12195,7 @@ let expand_scenarios ctx : Ir.preset list =
     match ctx.output_decl with
     | Some { out_trajectories = Some ot; _ } ->
       (match ot.otschedule with
-       | SchedAt (_ :: _ as ts) -> Some (List.map (resolve_float_expr ctx) ts)
+       | SchedAt (_ :: _ as ts) -> Some (List.map (resolve_time_expr ctx ~what:"a scenario time") ts)
        | _ -> None)
     | _ -> None
   in
@@ -12215,7 +12266,7 @@ let expand_scenarios ctx : Ir.preset list =
     let t_end_val =
       match t_end_anchor_val with
       | Some _ -> Some Float.nan
-      | None   -> Option.map (resolve_float_expr ctx) resolved.rs_t_end
+      | None   -> Option.map (resolve_time_expr ctx ~what:"a scenario's `to`") resolved.rs_t_end
     in
     (* W106: under an explicit `at = [...]` output list, `output_times` emits
        exactly the listed times `<= t_end`. So a scenario's `to` is a NO-OP

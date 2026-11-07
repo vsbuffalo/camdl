@@ -1,0 +1,28 @@
+# invariant: a unit-annotated table with constant cells, used in its own dimension, is accepted
+# spec: §5.1, table values
+# expect: (none)
+time_unit = 'days
+
+compartments { S, I, R }
+
+dimensions { age = [young, old] }
+
+parameters {
+  beta  : rate        in [0.01, 2.0]
+  gamma : rate        in [0.01, 1.0]
+  cov   : probability in [0, 1]
+}
+
+tables { mu : age 'per_day = [0.01, 0.02] }
+
+let N = S + I + R
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+  waning    : R --> S @ mu[young] * R
+}
+
+init { S = 990  I = 10 }
+
+simulate { from = 0 'days  to = 100 'days }

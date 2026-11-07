@@ -1,0 +1,44 @@
+# invariant: a reactive intervention's `after` delay is a time
+# spec: §5.1, interventions
+# expect: E315 Error
+time_unit = 'days
+
+compartments { S, I, R, V }
+
+parameters {
+  beta : rate        in [0.01, 2.0]
+  gamma : rate       in [0.01, 1.0]
+  N0   : count       in [100, 100000]
+  I0   : count       in [1, 1000]
+  cov  : probability in [0, 1]
+  k    : count       in [1, 10]
+}
+
+let N = S + I + R + V
+
+observations {
+  wk {
+    columns { time : time, wk : count }
+    covers = closing_at(time, 7 'days)
+    projected = incidence(infection)
+    emit_schedule = every 7 'days
+    wk ~ poisson(rate = 0.5 * projected)
+  }
+}
+
+reactive_interventions {
+  sia : when sum_observed(wk, window = 28 'days) >= k {
+    after  = 21 'per_day
+    action = transfer(fraction = cov, from = S, to = V)
+    once   = true
+  }
+}
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+
+init { S = N0 - I0  I = I0 }
+
+simulate { from = 0 'days  to = 100 'days }
