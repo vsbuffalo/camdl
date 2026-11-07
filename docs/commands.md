@@ -200,10 +200,13 @@ differences across points are low-variance and adding a point leaves the others
 unchanged (for independent noise per point, run one invocation per point with
 its own `--seed`). The combined table and the observation tables carry
 `point_id`, one `sweep:<param>` column per swept parameter, and `seed` — the
-pairing key across points. A scenario that sets or scales a swept parameter, or
-a `--param` on one, is refused. A second run of the same grid reads every cell
-the store holds back instead of re-simulating it; `--force` recomputes. The arm
-of an ad-hoc run is labelled from its flags (`(none)` for no flags,
+pairing key across points, and across scenarios. Do not pair scenarios on
+`replicate`: it numbers the cells of the whole run, so it runs on from one
+scenario to the next and a join on it matches nothing; with `--draws`, pair on
+`draw` (run spec §10.2). A scenario that sets or scales a swept parameter, or a
+`--param` on one, is refused. A second run of the same grid reads every cell the
+store holds back instead of re-simulating it; `--force` recomputes. The arm of
+an ad-hoc run is labelled from its flags (`(none)` for no flags,
 `(none)+school_closure` for `--enable school_closure`, `(none);beta=0.3` for
 `--param beta=0.3`).
 

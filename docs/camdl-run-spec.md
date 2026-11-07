@@ -4969,6 +4969,16 @@ replicate	t	t_start	t_stop	date	date_start	date_stop	S	I	R	V	flow_infection	flow
 - Leading key columns appear only when the corresponding axis has more than one
   level: `replicate` when the run has more than one cell, `scenario` when more
   than one scenario, `draw` when more than one parameter draw.
+- `replicate` numbers the cells of the whole run, 0-based in canonical order
+  (scenario, then draw or design point, then replicate), so it runs on across
+  scenarios: with 2 draws × 2 replicates, the first scenario's rows carry
+  `replicate` 0–3 and the second's 4–7. It is not a key for pairing scenarios; a
+  join on it matches nothing across scenarios. Cells of different scenarios at
+  the same draw and the same replicate within that draw share a process seed
+  (§3.1, the scenario index is absent from the mix), and those are the pairs to
+  difference: join on `draw` (or, for a sweep, `point_id` and `seed`) and `t`,
+  plus, when there is more than one replicate per draw, the replicate's position
+  within its scenario, `replicate mod (draws × replicates)`.
 - `date`, `date_start`, `date_stop` appear only under `--dates` (in the `-o`
   mirror, never in the stored `ensemble.tsv`), which requires the model to
   declare an `origin`; each is its numeric twin (`t`, `t_start`, `t_stop`)
