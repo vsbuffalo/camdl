@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 150" role="img" aria-labelledby="t d">
+  <title id="t">Civil days as half-open intervals</title>
+  <desc id="d">Each civil day is the interval between two date boundaries, closed at its start and open at its end: 1 July is [0, 1), 2 July is [1, 2), 3 July is [2, 3) and 4 July is [3, 4).</desc>
+
+  <!-- internal t = k sits at x = 175 + 100k -->
+  <text x="140" y="34" class="t-label fig-muted" text-anchor="end">internal t</text>
+  <text x="175" y="34" class="t-mono-label fig-ink" text-anchor="middle">0</text>
+  <text x="275" y="34" class="t-mono-label fig-ink" text-anchor="middle">1</text>
+  <text x="375" y="34" class="t-mono-label fig-ink" text-anchor="middle">2</text>
+  <text x="475" y="34" class="t-mono-label fig-ink" text-anchor="middle">3</text>
+  <text x="575" y="34" class="t-mono-label fig-ink" text-anchor="middle">4</text>
+  <line x1="162" y1="56" x2="588" y2="56" class="s-muted"/>
+  <line x1="175" y1="49" x2="175" y2="63" class="s-muted"/>
+  <line x1="275" y1="49" x2="275" y2="63" class="s-muted"/>
+  <line x1="375" y1="49" x2="375" y2="63" class="s-muted"/>
+  <line x1="475" y1="49" x2="475" y2="63" class="s-muted"/>
+  <line x1="575" y1="49" x2="575" y2="63" class="s-muted"/>
+  <text x="140" y="100" class="t-label fig-muted" text-anchor="end">civil day</text>
+  <rect x="176" y="80" width="98" height="30" class="fig-accent-soft"/>
+  <line x1="176" y1="80" x2="176" y2="110" class="s-accent"/>
+  <text x="225" y="100" class="t-label fig-ink" text-anchor="middle">1 Jul</text>
+  <text x="225" y="136" class="t-mono-label fig-muted" text-anchor="middle">[0, 1)</text>
+  <rect x="276" y="80" width="98" height="30" class="fig-accent-soft"/>
+  <line x1="276" y1="80" x2="276" y2="110" class="s-accent"/>
+  <text x="325" y="100" class="t-label fig-ink" text-anchor="middle">2 Jul</text>
+  <text x="325" y="136" class="t-mono-label fig-muted" text-anchor="middle">[1, 2)</text>
+  <rect x="376" y="80" width="98" height="30" class="fig-accent-soft"/>
+  <line x1="376" y1="80" x2="376" y2="110" class="s-accent"/>
+  <text x="425" y="100" class="t-label fig-ink" text-anchor="middle">3 Jul</text>
+  <text x="425" y="136" class="t-mono-label fig-muted" text-anchor="middle">[2, 3)</text>
+  <rect x="476" y="80" width="98" height="30" class="fig-accent-soft"/>
+  <line x1="476" y1="80" x2="476" y2="110" class="s-accent"/>
+  <text x="525" y="100" class="t-label fig-ink" text-anchor="middle">4 Jul</text>
+  <text x="525" y="136" class="t-mono-label fig-muted" text-anchor="middle">[3, 4)</text>
+</svg>
