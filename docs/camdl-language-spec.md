@@ -4898,6 +4898,28 @@ Results are banded over the forkable draws into `contrasts/<name>.tsv`. A
 contrast whose two arms differ only in a parameter — no intervention is toggled
 — has no fork point, and is skipped with a note rather than silently reported.
 
+**Division by zero is censoring, not an error.** A stochastic arm can
+legitimately end a draw with a zero count, so a ratio such as
+`(baseline.x - vaccinate.x) / baseline.x` has a zero denominator in some
+posterior draws. A finite numerator over a zero denominator (`/`, and likewise
+`%`) is *undefined for that draw*: the draw is censored, by the same mechanism
+as a `time_of_max` that never fired. For a scalar contrast the draw drops out of
+the band; for a series contrast only the affected time cells drop out, so the
+other snapshots of that draw still count. The band's `n_used` column reports,
+per cell, how many draws it was computed over. Censoring propagates through
+further arithmetic (a result touching a censored operand is censored). For each
+contrast with at least one such draw, `fit predict` prints one line on stderr:
+
+```text
+fit predict: contrast 'rel': 3 of 200 draws undefined (denominator 0); excluded from the band, see n_used
+```
+
+The count is of draws with at least one undefined cell. If every draw is
+undefined the band cells are empty and `n_used` is 0. This applies only to a
+zero denominator: any other non-finite per-draw value (an overflow, or a
+non-finite operand) is still a hard error, because it indicates a defect rather
+than a property of the draw.
+
 **Diagnostics.**
 
 - **E292** — a run-rooted reference used outside `contrasts {}`. It is a

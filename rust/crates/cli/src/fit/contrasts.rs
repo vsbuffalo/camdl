@@ -92,10 +92,11 @@ struct LeafValue {
 
 #[derive(Clone, Debug)]
 enum LeafPayload {
-    /// One f64 per snapshot time (parallel to [`ShapedValue::times`]).
-    Series(Vec<f64>),
+    /// One value per snapshot time (parallel to [`ShapedValue::times`]); a cell
+    /// is censored when a division by zero left it undefined.
+    Series(Vec<QuantityDrawValue>),
     /// A single scalar (possibly right-censored — e.g. a `time_of_max` that never
-    /// fired). Censoring propagates through arithmetic.
+    /// fired, or an undefined `x / 0`). Censoring propagates through arithmetic.
     Scalar(QuantityDrawValue),
 }
 
@@ -109,6 +110,11 @@ struct ShapedValue {
     times: Vec<f64>,
     /// Resolved dimension `(P exponent, T exponent)`, or `None` when undetermined.
     dim: Option<(i32, i32)>,
+    /// True when some cell of this value was censored because an arithmetic
+    /// op had a zero denominator (`x / 0`, `x % 0`) — so the reducer can say
+    /// how many draws were undefined for that reason, as opposed to censored
+    /// upstream (a `time_of_max` that never fired). Propagates through `combine`.
+    div0: bool,
 }
 
 // ── One arm's evaluated quantities for one draw ─────────────────────────────────
@@ -476,6 +482,18 @@ pub fn emit_contrasts(
                 draw_results.insert(run.clone(), res);
             }
             shaped.push(eval_body(&c.body, model, &draw_results, &c.name)?);
+        }
+
+        // A zero denominator censors the draw (see `apply_checked`); say how
+        // many draws that took, so a smaller `n_used` is not a mystery.
+        let undefined = shaped.iter().filter(|sv| sv.div0).count();
+        if undefined > 0 {
+            eprintln!(
+                "fit predict: contrast '{}': {undefined} of {} draws undefined \
+                 (denominator 0); excluded from the band, see n_used",
+                c.name,
+                shaped.len(),
+            );
         }
 
         let content = band_and_render(&c.name, &shaped)?;
@@ -1139,13 +1157,15 @@ fn run_member_value(
         let dims: Vec<String> = q.stratum.iter().map(|s| s.dim.clone()).collect();
         let levels: Vec<String> = q.stratum.iter().map(|s| s.level.clone()).collect();
         let payload = match &dr.quant[i] {
-            QuantityResult::Series(s) => LeafPayload::Series(s.clone()),
+            QuantityResult::Series(s) => {
+                LeafPayload::Series(s.iter().map(|&x| QuantityDrawValue::Value(x)).collect())
+            }
             QuantityResult::Scalar(v) => LeafPayload::Scalar(*v),
         };
         leaves.push(LeafValue { key, dims, levels, payload });
     }
     let times = if shape == Shape::Series { dr.times.clone() } else { Vec::new() };
-    Ok(ShapedValue { shape, leaves, times, dim })
+    Ok(ShapedValue { shape, leaves, times, dim, div0: false })
 }
 
 /// Combine two operands elementwise, preserving shape — the shape-agreement and
@@ -1203,6 +1223,7 @@ fn combine(op: &BinOp, l: ShapedValue, r: ShapedValue, cname: &str) -> Result<Sh
     }
 
     let mut leaves = Vec::with_capacity(l.leaves.len());
+    let mut div0 = false;
     for lf in &l.leaves {
         let rf = right_by_key.get(&lf.key).ok_or_else(|| {
             format!(
@@ -1211,7 +1232,8 @@ fn combine(op: &BinOp, l: ShapedValue, r: ShapedValue, cname: &str) -> Result<Sh
                 lf.key
             )
         })?;
-        let payload = combine_payload(op, &lf.payload, &rf.payload, cname)?;
+        let (payload, undefined) = combine_payload(op, &lf.payload, &rf.payload, cname)?;
+        div0 |= undefined;
         leaves.push(LeafValue {
             key: lf.key.clone(),
             dims: lf.dims.clone(),
@@ -1219,7 +1241,13 @@ fn combine(op: &BinOp, l: ShapedValue, r: ShapedValue, cname: &str) -> Result<Sh
             payload,
         });
     }
-    Ok(ShapedValue { shape: l.shape, leaves, times: l.times, dim })
+    Ok(ShapedValue {
+        shape: l.shape,
+        leaves,
+        times: l.times,
+        dim,
+        div0: l.div0 || r.div0 || div0,
+    })
 }
 
 /// Dimension agreement: `Add`/`Sub` require equal dimensions (a `deaths - rate`
@@ -1251,14 +1279,16 @@ fn combine_dim(
     }
 }
 
-/// Combine two leaf payloads elementwise. Series fold time-by-time; scalars
-/// propagate censoring (a difference touching a censored endpoint is censored).
+/// Combine two leaf payloads elementwise. Series fold time-by-time; both shapes
+/// propagate censoring (a result touching a censored operand is censored). The
+/// returned flag is true when some cell was censored *here* because the op had a
+/// zero denominator ([`apply_checked`]), not because an operand already was.
 fn combine_payload(
     op: &BinOp,
     l: &LeafPayload,
     r: &LeafPayload,
     cname: &str,
-) -> Result<LeafPayload, String> {
+) -> Result<(LeafPayload, bool), String> {
     match (l, r) {
         (LeafPayload::Series(a), LeafPayload::Series(b)) => {
             if a.len() != b.len() {
@@ -1268,21 +1298,52 @@ fn combine_payload(
                     b.len()
                 ));
             }
-            Ok(LeafPayload::Series(
-                a.iter().zip(b).map(|(x, y)| apply_bin(op, *x, *y)).collect(),
-            ))
+            let mut undefined = false;
+            let cells = a
+                .iter()
+                .zip(b)
+                .map(|(x, y)| {
+                    let (v, u) = combine_value(op, *x, *y);
+                    undefined |= u;
+                    v
+                })
+                .collect();
+            Ok((LeafPayload::Series(cells), undefined))
         }
         (LeafPayload::Scalar(a), LeafPayload::Scalar(b)) => {
-            use QuantityDrawValue::*;
-            let v = match (a, b) {
-                (Censored, _) | (_, Censored) => Censored,
-                (Value(x), Value(y)) => Value(apply_bin(op, *x, *y)),
-            };
-            Ok(LeafPayload::Scalar(v))
+            let (v, undefined) = combine_value(op, *a, *b);
+            Ok((LeafPayload::Scalar(v), undefined))
         }
         // shape agreement above guarantees matching variants.
         _ => Err(format!("contrast '{cname}': internal payload shape mismatch")),
     }
+}
+
+/// One cell: a censored operand censors the result (not counted as a zero
+/// denominator); two values go through [`apply_checked`].
+fn combine_value(
+    op: &BinOp,
+    a: QuantityDrawValue,
+    b: QuantityDrawValue,
+) -> (QuantityDrawValue, bool) {
+    use QuantityDrawValue::*;
+    match (a, b) {
+        (Censored, _) | (_, Censored) => (Censored, false),
+        (Value(x), Value(y)) => apply_checked(op, x, y),
+    }
+}
+
+/// `apply_bin`, except that a finite numerator over a zero denominator (`Div`,
+/// `Mod`) is *undefined for this draw*, which is censoring, not a value: a
+/// stochastic arm can legitimately have a zero count, so `x / 0` is a property of
+/// the draw. Returns `(Censored, true)` there. Every other non-finite result
+/// (including any from an already non-finite operand, or an overflow) is left as
+/// `Value(non-finite)` for [`band`] to reject as an upstream bug.
+fn apply_checked(op: &BinOp, a: f64, b: f64) -> (QuantityDrawValue, bool) {
+    if matches!(op, BinOp::Div | BinOp::Mod) && b == 0.0 && a.is_finite() {
+        return (QuantityDrawValue::Censored, true);
+    }
+    (QuantityDrawValue::Value(apply_bin(op, a, b)), false)
 }
 
 fn apply_bin(op: &BinOp, a: f64, b: f64) -> f64 {
@@ -1373,7 +1434,10 @@ fn band_and_render(name: &str, draws: &[ShapedValue]) -> Result<String, String> 
                     let col: Vec<f64> = draws
                         .iter()
                         .filter_map(|sv| match &sv.leaves[li].payload {
-                            LeafPayload::Series(s) => Some(s[ti]),
+                            LeafPayload::Series(s) => match s[ti] {
+                                QuantityDrawValue::Value(x) => Some(x),
+                                QuantityDrawValue::Censored => None,
+                            },
                             LeafPayload::Scalar(_) => None,
                         })
                         .collect();
@@ -1411,7 +1475,9 @@ fn band_and_render(name: &str, draws: &[ShapedValue]) -> Result<String, String> 
 /// The band/value cells for one cell's per-draw finite values:
 /// `q05 q25 q50 q75 q95 mean n_used`. An empty column (every draw censored)
 /// renders empty quantile + mean cells and `n_used = 0` — never a fabricated
-/// band. A non-finite value is rejected by [`band`] (an upstream bug).
+/// band. A non-finite value reaching here is rejected by [`band`] (an upstream
+/// bug): a zero denominator never gets this far, it is censored in
+/// [`apply_checked`].
 fn band_cells(col: &[f64]) -> Result<Vec<String>, String> {
     let mut cells: Vec<String> = Vec::with_capacity(QUANTILE_LEVELS.len() + 2);
     if col.is_empty() {
@@ -1448,7 +1514,9 @@ mod tests {
             key: vec![],
             dims: vec![],
             levels: vec![],
-            payload: LeafPayload::Series(xs.to_vec()),
+            payload: LeafPayload::Series(
+                xs.iter().map(|&x| QuantityDrawValue::Value(x)).collect(),
+            ),
         }
     }
 
@@ -1464,8 +1532,8 @@ mod tests {
 
     #[test]
     fn combine_scalar_subtracts_and_keeps_dimension() {
-        let l = ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(10.0)], times: vec![], dim: Some((1, 0)) };
-        let r = ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(3.0)], times: vec![], dim: Some((1, 0)) };
+        let l = ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(10.0)], times: vec![], dim: Some((1, 0)), div0: false };
+        let r = ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(3.0)], times: vec![], dim: Some((1, 0)), div0: false };
         let out = combine(&BinOp::Sub, l, r, "averted").unwrap();
         assert_eq!(out.dim, Some((1, 0)));
         match &out.leaves[0].payload {
@@ -1476,19 +1544,22 @@ mod tests {
 
     #[test]
     fn combine_series_subtracts_elementwise() {
-        let l = ShapedValue { shape: Shape::Series, leaves: vec![series_leaf(&[5.0, 6.0, 7.0])], times: vec![0.0, 1.0, 2.0], dim: Some((1, 0)) };
-        let r = ShapedValue { shape: Shape::Series, leaves: vec![series_leaf(&[1.0, 2.0, 3.0])], times: vec![0.0, 1.0, 2.0], dim: Some((1, 0)) };
+        let l = ShapedValue { shape: Shape::Series, leaves: vec![series_leaf(&[5.0, 6.0, 7.0])], times: vec![0.0, 1.0, 2.0], dim: Some((1, 0)), div0: false };
+        let r = ShapedValue { shape: Shape::Series, leaves: vec![series_leaf(&[1.0, 2.0, 3.0])], times: vec![0.0, 1.0, 2.0], dim: Some((1, 0)), div0: false };
         let out = combine(&BinOp::Sub, l, r, "curve").unwrap();
         match &out.leaves[0].payload {
-            LeafPayload::Series(s) => assert_eq!(s, &[4.0, 4.0, 4.0]),
+            LeafPayload::Series(s) => assert_eq!(
+                s,
+                &[4.0, 4.0, 4.0].map(QuantityDrawValue::Value)
+            ),
             other => panic!("expected series, got {other:?}"),
         }
     }
 
     #[test]
     fn shape_mismatch_is_a_located_error() {
-        let series = ShapedValue { shape: Shape::Series, leaves: vec![series_leaf(&[1.0, 2.0])], times: vec![0.0, 1.0], dim: Some((1, 0)) };
-        let scalar = ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(3.0)], times: vec![], dim: Some((1, 0)) };
+        let series = ShapedValue { shape: Shape::Series, leaves: vec![series_leaf(&[1.0, 2.0])], times: vec![0.0, 1.0], dim: Some((1, 0)), div0: false };
+        let scalar = ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(3.0)], times: vec![], dim: Some((1, 0)), div0: false };
         let err = combine(&BinOp::Sub, series, scalar, "bad").unwrap_err();
         assert!(err.contains("shape mismatch"), "got: {err}");
         assert!(err.contains("'bad'"), "names the contrast: {err}");
@@ -1498,8 +1569,8 @@ mod tests {
     #[test]
     fn dimension_mismatch_is_a_located_error() {
         // deaths (count, P^1 T^0) − rate (P^0 T^-1) → rejected.
-        let deaths = ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(10.0)], times: vec![], dim: Some((1, 0)) };
-        let rate = ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(0.1)], times: vec![], dim: Some((0, -1)) };
+        let deaths = ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(10.0)], times: vec![], dim: Some((1, 0)), div0: false };
+        let rate = ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(0.1)], times: vec![], dim: Some((0, -1)), div0: false };
         let err = combine(&BinOp::Sub, deaths, rate, "deaths_minus_rate").unwrap_err();
         assert!(err.contains("dimension mismatch"), "got: {err}");
         assert!(err.contains("P^1 T^0") && err.contains("P^0 T^-1"), "names both dims: {err}");
@@ -1523,12 +1594,14 @@ mod tests {
             leaves: vec![keyed_leaf("patch", "a", 10.0), keyed_leaf("patch", "b", 4.0)],
             times: vec![],
             dim: Some((1, 0)),
+            div0: false,
         };
         let unstrat = ShapedValue {
             shape: Shape::Scalar,
             leaves: vec![scalar_leaf(3.0)],
             times: vec![],
             dim: Some((1, 0)),
+            div0: false,
         };
         let err = combine(&BinOp::Sub, strat, unstrat, "by_patch").unwrap_err();
         assert!(err.contains("stratification mismatch"), "got: {err}");
@@ -1545,12 +1618,14 @@ mod tests {
             leaves: vec![series_leaf(&[5.0, 6.0])],
             times: vec![7.0, 14.0],
             dim: Some((1, 0)),
+            div0: false,
         };
         let r = ShapedValue {
             shape: Shape::Series,
             leaves: vec![series_leaf(&[1.0, 2.0])],
             times: vec![7.0, 21.0],
             dim: Some((1, 0)),
+            div0: false,
         };
         let err = combine(&BinOp::Sub, l, r, "curve").unwrap_err();
         assert!(err.contains("snapshot time 1"), "names the offending index: {err}");
@@ -1562,7 +1637,7 @@ mod tests {
         // Per-draw averted values: median 30, mean 30, n_used 5.
         let draws: Vec<ShapedValue> = [10.0, 20.0, 30.0, 40.0, 50.0]
             .iter()
-            .map(|&x| ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(x)], times: vec![], dim: Some((1, 0)) })
+            .map(|&x| ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(x)], times: vec![], dim: Some((1, 0)), div0: false })
             .collect();
         let tsv = band_and_render("averted", &draws).unwrap();
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
@@ -1578,7 +1653,7 @@ mod tests {
     fn series_band_has_time_column_per_snapshot() {
         let draws: Vec<ShapedValue> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
             .iter()
-            .map(|xs| ShapedValue { shape: Shape::Series, leaves: vec![series_leaf(xs)], times: vec![7.0, 14.0], dim: Some((1, 0)) })
+            .map(|xs| ShapedValue { shape: Shape::Series, leaves: vec![series_leaf(xs)], times: vec![7.0, 14.0], dim: Some((1, 0)), div0: false })
             .collect();
         let tsv = band_and_render("curve", &draws).unwrap();
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
@@ -1597,14 +1672,79 @@ mod tests {
     fn censored_scalar_is_excluded_from_the_band() {
         // Two finite, one censored → banded over the 2 finite, n_used = 2.
         let draws = vec![
-            ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(4.0)], times: vec![], dim: None },
-            ShapedValue { shape: Shape::Scalar, leaves: vec![LeafValue { key: vec![], dims: vec![], levels: vec![], payload: LeafPayload::Scalar(QuantityDrawValue::Censored) }], times: vec![], dim: None },
-            ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(8.0)], times: vec![], dim: None },
+            ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(4.0)], times: vec![], dim: None, div0: false },
+            ShapedValue { shape: Shape::Scalar, leaves: vec![LeafValue { key: vec![], dims: vec![], levels: vec![], payload: LeafPayload::Scalar(QuantityDrawValue::Censored) }], times: vec![], dim: None, div0: false },
+            ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(8.0)], times: vec![], dim: None, div0: false },
         ];
         let tsv = band_and_render("c", &draws).unwrap();
         let cells: Vec<&str> = tsv.trim_end().lines().nth(1).unwrap().split('\t').collect();
         assert_eq!(cells[5], "6", "mean of the 2 finite values");
         assert_eq!(cells[6], "2", "n_used counts only finite draws");
+    }
+
+    fn scalar_value(x: f64) -> ShapedValue {
+        ShapedValue { shape: Shape::Scalar, leaves: vec![scalar_leaf(x)], times: vec![], dim: Some((1, 0)), div0: false }
+    }
+
+    #[test]
+    fn scalar_zero_denominator_is_censored_and_flagged() {
+        let out = combine(&BinOp::Div, scalar_value(6.0), scalar_value(0.0), "rel").unwrap();
+        assert!(out.div0, "a zero denominator must be flagged");
+        match &out.leaves[0].payload {
+            LeafPayload::Scalar(v) => assert_eq!(*v, QuantityDrawValue::Censored),
+            _ => panic!("scalar payload"),
+        }
+        // 0/0 is the same case, not a NaN reaching the band.
+        let out = combine(&BinOp::Div, scalar_value(0.0), scalar_value(0.0), "rel").unwrap();
+        assert!(out.div0);
+        // An ordinary quotient is a value and is not flagged.
+        let out = combine(&BinOp::Div, scalar_value(6.0), scalar_value(2.0), "rel").unwrap();
+        assert!(!out.div0);
+    }
+
+    #[test]
+    fn series_zero_denominator_censors_only_that_cell() {
+        let mk = |xs: &[f64]| ShapedValue { shape: Shape::Series, leaves: vec![series_leaf(xs)], times: vec![0.0, 1.0, 2.0], dim: Some((1, 0)), div0: false };
+        let out = combine(&BinOp::Div, mk(&[4.0, 0.0, 9.0]), mk(&[2.0, 0.0, 3.0]), "rel").unwrap();
+        assert!(out.div0);
+        match &out.leaves[0].payload {
+            LeafPayload::Series(s) => assert_eq!(
+                s,
+                &[
+                    QuantityDrawValue::Value(2.0),
+                    QuantityDrawValue::Censored,
+                    QuantityDrawValue::Value(3.0)
+                ]
+            ),
+            _ => panic!("series payload"),
+        }
+        // Banding excludes the censored cell and reports it in n_used.
+        let draws = vec![
+            combine(&BinOp::Div, mk(&[4.0, 1.0, 9.0]), mk(&[2.0, 1.0, 3.0]), "rel").unwrap(),
+            out,
+        ];
+        let tsv = band_and_render("rel", &draws).unwrap();
+        let n_used: Vec<&str> = tsv.lines().skip(1).map(|l| l.rsplit('\t').next().unwrap()).collect();
+        assert_eq!(n_used, vec!["2", "1", "2"], "n_used per snapshot");
+    }
+
+    #[test]
+    fn censoring_from_an_operand_is_not_counted_as_a_zero_denominator() {
+        let cens = ShapedValue { shape: Shape::Scalar, leaves: vec![LeafValue { key: vec![], dims: vec![], levels: vec![], payload: LeafPayload::Scalar(QuantityDrawValue::Censored) }], times: vec![], dim: Some((1, 0)), div0: false };
+        let out = combine(&BinOp::Div, scalar_value(1.0), cens, "rel").unwrap();
+        assert!(!out.div0);
+    }
+
+    #[test]
+    fn other_non_finite_values_still_reach_the_band_and_are_rejected() {
+        // A non-finite numerator over zero is an upstream bug, not censoring.
+        let out = combine(&BinOp::Div, scalar_value(f64::NAN), scalar_value(0.0), "rel").unwrap();
+        assert!(!out.div0);
+        assert!(band_and_render("rel", &[out]).is_err());
+        // So is an overflow with a nonzero denominator.
+        let out = combine(&BinOp::Div, scalar_value(f64::MAX), scalar_value(1e-300), "rel").unwrap();
+        assert!(!out.div0);
+        assert!(band_and_render("rel", &[out]).is_err());
     }
 
     // ── Derived fork ─────────────────────────────────────────────────────────

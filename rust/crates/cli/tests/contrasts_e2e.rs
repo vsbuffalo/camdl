@@ -1503,3 +1503,83 @@ fn an_anchor_before_the_fork_censors_with_a_located_note() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// A ratio contrast whose denominator is zero in some posterior draws. Deaths are
+/// rare (`mu = 0.0002`), so the smoothed `D` at the fork is zero in a few draws
+/// and `no_sia.dead` is 0 there: `(no_sia - with_sia) / no_sia` is 0/0 in those
+/// draws at the early snapshots. `vacc = final(V)` is 0 in every `no_sia` draw
+/// (nobody is vaccinated without the SIA), so the scalar ratio is `x/0` in all of
+/// them.
+#[test]
+fn ratio_contrast_with_a_zero_denominator_censors_those_draws() {
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_contrasts_div0_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let model = MODEL.replace(
+        "quantities {\n  total = final(D)\n}\ncontrasts {\n  averted  = no_sia.quantities.total - with_sia.quantities.total\n  crn_zero = null_a.quantities.total - null_b.quantities.total\n}",
+        "quantities {\n  total = final(D)\n  vacc  = final(V)\n  dead  = D\n}\ncontrasts {\n  \
+         rel_series = (no_sia.quantities.dead - with_sia.quantities.dead) / no_sia.quantities.dead\n  \
+         rel_vacc   = (with_sia.quantities.vacc - no_sia.quantities.vacc) / no_sia.quantities.vacc\n}",
+    );
+    assert_ne!(model, MODEL, "the contrasts block must have been replaced");
+    std::fs::write(tmp.join("model.camdl"), model).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS).replace("mu  = 0.05", "mu  = 0.0002"))
+        .unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
+
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "a zero denominator in some draws censors them, it does not fail the command; \
+         stderr:\n{stderr}"
+    );
+
+    let results = tmp.join("results");
+
+    // Series-shaped: the zero-denominator cells are excluded, the rest banded.
+    let series = find_artifact(&results, "contrasts", "rel_series")
+        .expect("contrasts/rel_series.tsv must be written");
+    let txt = std::fs::read_to_string(&series).unwrap();
+    let n_used: Vec<usize> = txt
+        .lines()
+        .skip(1)
+        .map(|l| l.rsplit('\t').next().unwrap().parse().unwrap())
+        .collect();
+    let max = *n_used.iter().max().unwrap();
+    assert!(max > 0, "some draws have a nonzero denominator: {n_used:?}");
+    assert!(
+        n_used.iter().any(|&n| n < max),
+        "some draws must be excluded by a zero denominator (n_used below {max}): {n_used:?}"
+    );
+    let undefined_line = stderr
+        .lines()
+        .find(|l| l.contains("contrast 'rel_series':"))
+        .unwrap_or_else(|| panic!("a per-contrast note is required; stderr:\n{stderr}"));
+    assert!(
+        undefined_line.contains("draws undefined (denominator 0); excluded from the band, see n_used"),
+        "got: {undefined_line}"
+    );
+
+    // Scalar-shaped: every draw is undefined, so the band is empty (n_used = 0)
+    // rather than the command failing or a band being fabricated.
+    let scalar = find_artifact(&results, "contrasts", "rel_vacc")
+        .expect("contrasts/rel_vacc.tsv must be written");
+    let txt = std::fs::read_to_string(&scalar).unwrap();
+    let row: Vec<&str> = txt.lines().nth(1).unwrap().split('\t').collect();
+    let n: usize = row.last().unwrap().parse().unwrap();
+    assert_eq!(n, 0, "every draw has a zero denominator → n_used = 0");
+    let line = stderr
+        .lines()
+        .find(|l| l.contains("contrast 'rel_vacc':"))
+        .unwrap_or_else(|| panic!("a per-contrast note is required; stderr:\n{stderr}"));
+    let toks: Vec<&str> = line.split("contrast 'rel_vacc': ").nth(1).unwrap().split_whitespace().collect();
+    assert_eq!(toks[0], toks[2], "all draws undefined: {line}");
+    assert!(line.contains("draws undefined (denominator 0)"), "got: {line}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
