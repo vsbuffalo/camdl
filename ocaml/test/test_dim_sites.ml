@@ -47,9 +47,11 @@ let expr_nodes (j : Yojson.Safe.t) =
         List.iter (fun (k, v) ->
           if not (List.mem k exempt_keys) then walk (path ^ "." ^ k) v) kvs
       | `List vs -> List.iteri (fun i v -> walk (Printf.sprintf "%s[%d]" path i) v) vs
-      | `Tuple vs -> List.iteri (fun i v -> walk (Printf.sprintf "%s(%d)" path i) v) vs
-      | `Variant (_, Some v) -> walk path v
-      | `Variant (_, None) | `Null | `Bool _ | `Int _ | `Intlit _ | `Float _ | `String _ -> ()
+      (* Scalars. A catch-all, not a list of constructors: yojson 3 removed
+         `Tuple and `Variant, which the IR never writes, and a match naming
+         them does not compile there (CI), while one omitting them is
+         non-exhaustive under yojson 2. *)
+      | _ -> ()
   in
   walk "" j;
   List.rev !out
