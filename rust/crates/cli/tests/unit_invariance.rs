@@ -3,7 +3,9 @@
 //! §7.4): one model written with unit literals, compiled under
 //! `time_unit = 'days` and under `'weeks`, is the same epidemic. Simulated
 //! deterministically (ODE backend) with the same physical step, the flows over
-//! each week agree to the precision the TSV prints.
+//! each week agree to the precision the TSV prints; and with a weekly
+//! reported-case stream, the particle filter at a fixed seed gives the same
+//! log-likelihood under both.
 //!
 //! A unit literal whose scale were dropped (gh#1006: a `'per_month` parameter
 //! read per `time_unit`) makes the weeks model a different epidemic, and this
@@ -113,4 +115,93 @@ fn days_and_weeks_are_one_epidemic() {
             );
         }
     }
+}
+
+/// The same SIR with a weekly reported-case stream, under `'days` and
+/// `'weeks`, for the particle-filter half of §7.4: the observation window
+/// (`covers`) and the likelihood see the unit change too.
+fn observed_model(time_unit: &str) -> String {
+    format!(
+        r#"time_unit = '{time_unit}
+
+compartments {{ S, I, R }}
+
+let N = S + I + R
+let beta  : rate = 0.4 'per_day
+let gamma : rate = 1 / (5 'days)
+let rho   : probability = 0.5
+
+transitions {{
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+}}
+
+observations {{
+  cases {{
+    columns {{ time : time, y : count }}
+    covers = closing_at(time, 7 'days)
+    projected = incidence(infection)
+    y ~ poisson(rate = rho * projected)
+  }}
+}}
+
+init {{ S = 990  I = 10 }}
+
+simulate {{ from = 0 'days  to = 70 'days }}
+"#
+    )
+}
+
+const WEEKLY_CASES: [u32; 10] = [9, 17, 30, 45, 52, 40, 25, 14, 7, 3];
+
+/// The log-likelihood `camdl pfilter` prints, at a fixed seed.
+fn pfilter_loglik(dir: &Path, time_unit: &str, week: u32, dt: &str) -> f64 {
+    let src = dir.join(format!("obs_{time_unit}.camdl"));
+    std::fs::write(&src, observed_model(time_unit)).unwrap();
+    let data = dir.join(format!("cases_{time_unit}.tsv"));
+    let rows: String = WEEKLY_CASES
+        .iter()
+        .enumerate()
+        .map(|(k, y)| format!("{}\t{y}\n", (k as u32 + 1) * week))
+        .collect();
+    std::fs::write(&data, format!("time\ty\n{rows}")).unwrap();
+    let o = Command::new(binary())
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_OUTPUT_DIR", dir.join("cas"))
+        .args([
+            "pfilter",
+            src.to_str().unwrap(),
+            "--data", data.to_str().unwrap(),
+            "--particles", "200",
+            "--dt", dt,
+            "--seed", "3",
+            "--no-progress",
+        ])
+        .output()
+        .expect("spawn pfilter");
+    assert!(
+        o.status.success(),
+        "pfilter under {time_unit} must succeed:\n{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let out = String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr);
+    out.lines()
+        .find_map(|l| l.trim().parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("no log-likelihood line in pfilter output:\n{out}"))
+}
+
+#[test]
+fn days_and_weeks_give_one_likelihood() {
+    let tmp = tempfile::tempdir().unwrap();
+    // One step of one day in both: 1 under days, 1/7 under weeks. The same
+    // seed and the same number of steps draw the same random numbers, so the
+    // two filters agree to round-off unless a unit is dropped somewhere.
+    let days = pfilter_loglik(tmp.path(), "days", 7, "1");
+    let weeks = pfilter_loglik(tmp.path(), "weeks", 1, "0.14285714285714285");
+    assert!(days.is_finite() && days < 0.0, "a log-likelihood ({days})");
+    // pfilter prints four decimals.
+    assert!(
+        (days - weeks).abs() <= 2e-4,
+        "log-likelihood {days} under days, {weeks} under weeks"
+    );
 }
