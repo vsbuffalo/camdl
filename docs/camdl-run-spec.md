@@ -1320,8 +1320,11 @@ source as requiring a fit config.
 `--draws uniform` samples `lo + (hi - lo)·U` for each parameter that declares
 `in [lo, hi]` bounds. A parameter without bounds is not drawn: it resolves per
 cell from `--params`, the scenario, or `--param`, and the run
-is refused up front if none of them sets it. This is space-filling exploration
-for model debugging, not a prior.
+is refused up front if none of them sets it. A model in which no parameter
+declares bounds is a hard error: every draw would be the same parameter vector.
+The error says what is sampled (each parameter's declared bounds) and where to
+declare them (`name : <type> in [lo, hi]` in `parameters {}`). This is
+space-filling exploration for model debugging, not a prior.
 
 `--draws posterior --fit <fit results dir>` reads the draws the fit's sampler
 (PGAS / PMMH / MH) wrote — the method leaf's `draws.tsv`, which is

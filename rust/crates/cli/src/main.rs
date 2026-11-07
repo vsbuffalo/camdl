@@ -4681,6 +4681,21 @@ fn generate_uniform_draws(
     let bounded: Vec<(&str, f64, f64)> = model.parameters.iter()
         .filter_map(|p| p.bounds().map(|(lo, hi)| (p.name.as_str(), lo, hi)))
         .collect();
+    // Nothing to sample: every row would be empty and every cell would run at
+    // one parameter vector, which is not a draw from anything.
+    if bounded.is_empty() {
+        let example = model.parameters.first().map_or("beta", |p| p.name.as_str());
+        return Err(format!(
+            "--draws uniform: no parameter of the model declares bounds, so there is nothing \
+             to sample and every draw would be the same parameter vector.\n  \
+             --draws uniform samples `lo + (hi - lo)\u{b7}U`, with U uniform on [0, 1), for \
+             each parameter's declared bounds `in [lo, hi]`; a parameter without bounds is \
+             not drawn.\n  \
+             Fix: declare bounds on each parameter to vary, after its type in the model's \
+             parameters {{}} block (e.g. `{example} : <type> in [lo, hi]`), or use \
+             --draws prior with `~ <dist>(...)` priors, or pass --draws a file of rows."
+        ));
+    }
 
     let mut draws = Vec::with_capacity(n);
     for _ in 0..n {
@@ -5797,6 +5812,22 @@ mod tests {
         assert!(err.contains("parameters {}") && err.contains("~ log_normal("),
             "the error must say where and how to declare a prior: {err}");
         assert!(err.contains("[estimate]"), "the error must name the fit.toml route: {err}");
+    }
+
+    #[test]
+    fn uniform_draws_refuse_a_model_with_no_bounded_parameter() {
+        // No parameter of death_fraction_window declares `in [lo, hi]`.
+        // Sampling nothing would hand back N empty rows, so N cells at one
+        // parameter vector reported as N uniform draws.
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = format!("{}/../../../ocaml/golden/death_fraction_window.ir.json", manifest);
+        let err = generate_uniform_draws(&path, 3, 1).unwrap_err();
+        assert!(err.starts_with("--draws uniform: no parameter of the model declares bounds"),
+            "unexpected error: {err}");
+        assert!(err.contains("`lo + (hi - lo)\u{b7}U`") && err.contains("declared bounds"),
+            "the error must say what uniform samples: {err}");
+        assert!(err.contains("parameters {}") && err.contains(" : <type> in [lo, hi]"),
+            "the error must say how to give bounds: {err}");
     }
 
     #[test]
