@@ -128,6 +128,9 @@ fn synthetic_sim_run(
     Ok(SimRun {
         ir_path: model_path.to_string(),
         overrides: truth_overrides,
+        // The truth is tier 5 (spec §1.3), so it replaces what the scenario
+        // sets; a notice says whose values did.
+        overrides_label: Some(format!("[synthetic] true_params {}", spec.true_params)),
         scenario_name: spec.scenario.clone(),
         // Synthetic-data generation runs the model forward before any
         // data exists, so an anchored model has nothing to anchor TO;

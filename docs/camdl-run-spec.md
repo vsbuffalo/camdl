@@ -135,6 +135,14 @@ info: scenario `lockdown` replaced I0 = 5 (from p.toml) with 3
 warning: scenario `lockdown` replaced I0 = 5 (from mle_params.toml, a fit's estimate) with 3
 ```
 
+A fit config's `[synthetic] true_params` file is tier 5 for the forward run that
+draws the synthetic dataset, so it replaces a value the `[synthetic] scenario`
+sets. That notice names the file, not a flag:
+
+```
+info: [synthetic] true_params truth.toml replaced beta = 0.8 (from scenario `hi`) with 0.3
+```
+
 A replacement is a warning when the replaced value is a fit's estimate (it came
 from a params file carrying a fit `[provenance]` block): the run then simulates
 something other than what the fit estimated. Every other replacement is info —

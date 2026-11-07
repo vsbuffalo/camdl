@@ -2761,6 +2761,11 @@ pub struct SimRun {
     /// (`fixed_cli`, spec §1.3). NOT draw/sweep points: those carry
     /// separately on `point_overrides` so a scenario can win over them.
     pub overrides: HashMap<String, f64>,
+    /// Where `overrides` came from when it is not `--param`: a notice that one
+    /// of them replaced a value names this source (`[synthetic] true_params
+    /// FILE`) rather than `--param/--fixed`, flags that run never had. `None`
+    /// for a run whose overrides are `--param`.
+    pub overrides_label: Option<String>,
     /// A draw row / sweep point's per-parameter overrides (automated
     /// M-layer variation). Routed into the resolver's draw/sweep tier,
     /// which sits BELOW scenario (spec §1.3) — so a scenario `set`/`scale`
@@ -3499,6 +3504,7 @@ impl Default for SimRun {
             ir_path: String::new(),
             params_files: Vec::new(),
             overrides: HashMap::new(),
+            overrides_label: None,
             point_overrides: HashMap::new(),
             fit_fixed: indexmap::IndexMap::new(),
             set_vec_entries: Vec::new(),
@@ -3679,7 +3685,12 @@ pub fn resolve_run_parameters_typed(
             fit_toml_estimate: &fte,
             table_files: &table_files,
         }
-    ).map_err(|e| RunParamError::Resolve(
+    )
+    .map(|mut resolved| {
+        resolved.context.fixed_cli_label = run.overrides_label.clone();
+        resolved
+    })
+    .map_err(|e| RunParamError::Resolve(
         // `simulate` and `lineage` take `--params` / `--param`.
         e.with_flags(crate::params_resolver::FlagStyle::Params)))
 }

@@ -1337,6 +1337,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         ir_path: ir_path_compiled.clone(),
         params_files,
         overrides,
+        overrides_label: None,
         // Draw/sweep + inline-scenario tiers are assigned per cell by
         // `engine::build_cell_sim_run`; the base run carries none.
         point_overrides: std::collections::HashMap::new(),

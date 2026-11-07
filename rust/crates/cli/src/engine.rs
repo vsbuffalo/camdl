@@ -533,6 +533,7 @@ pub fn build_cell_sim_run(
         ir_path: job.model.clone(),
         params_files: job.params_files.clone(),
         overrides,
+        overrides_label: None,
         point_overrides: point_overrides_map,
         fit_fixed: job.fit_fixed.clone(),
         set_vec_entries: job.set_vec_entries.clone(),

@@ -313,6 +313,11 @@ pub struct ResolveContext {
     /// because the file is a verified fit artifact written before typed
     /// constants left the IR's parameters (see [`load_fixed_file`]).
     pub legacy_constant_entries: std::collections::BTreeMap<PathBuf, Vec<String>>,
+    /// What the tier-5 values (`fixed_cli`) really are when they did not come
+    /// from `--param` / `--fixed`: a `[synthetic] true_params` file, for the
+    /// forward run that draws a synthetic dataset. A notice names this source
+    /// instead of a flag the user never gave.
+    pub fixed_cli_label: Option<String>,
 }
 
 /// How loudly to report `o`.
@@ -530,7 +535,7 @@ impl std::fmt::Display for ResolveError {
                     "parameter '{name}' = {value} is not finite (NaN or ±∞); \
                      it came from {}.\n  \
                      Fix: give it a finite value there.",
-                    subject_phrase(source))
+                    subject_phrase(source, &ResolveContext::default()))
             }
             ResolveError::UnsetRequired { name, flags } => {
                 write!(f,
@@ -2415,7 +2420,8 @@ fn origin_phrase(src: &ValueSource, ctx: &ResolveContext) -> String {
             format!("{}, a fit's estimate", path.display()),
         ValueSource::FixedFile { path } => path.display().to_string(),
         ValueSource::SweepPoint => "the draw or sweep point".to_string(),
-        ValueSource::FixedCli => "--param/--fixed".to_string(),
+        ValueSource::FixedCli => ctx.fixed_cli_label.clone()
+            .unwrap_or_else(|| "--param/--fixed".to_string()),
         ValueSource::Starts(StartsOrigin::Params { path }) =>
             format!("--starts from_params={}", path.display()),
         ValueSource::Starts(StartsOrigin::Mle { fit }) =>
@@ -2427,10 +2433,10 @@ fn origin_phrase(src: &ValueSource, ctx: &ResolveContext) -> String {
 }
 
 /// How a notice names `src` as the subject that replaced a value.
-fn subject_phrase(src: &ValueSource) -> String {
+fn subject_phrase(src: &ValueSource, ctx: &ResolveContext) -> String {
     match src {
         ValueSource::FixedFile { path } => format!("params file {}", path.display()),
-        other => origin_phrase(other, &ResolveContext::default()),
+        other => origin_phrase(other, ctx),
     }
 }
 
@@ -2509,6 +2515,7 @@ fn override_notices(resolved: &[PartsRef<'_>]) -> Vec<(OverrideKey, Notice)> {
         cells:    usize,
         severity: Severity,
         origin:   String,
+        subject:  String,
     }
     let mut agg: IndexMap<OverrideKey, Agg> = IndexMap::new();
     for r in resolved {
@@ -2524,6 +2531,7 @@ fn override_notices(resolved: &[PartsRef<'_>]) -> Vec<(OverrideKey, Notice)> {
                     cells:    0,
                     severity: sev,
                     origin:   origin_phrase(&o.replaced.0, r.context),
+                    subject:  subject_phrase(&o.by.0, r.context),
                 });
                 e.replaced.push(o.replaced.1);
                 e.by.push(o.by.1);
@@ -2535,7 +2543,7 @@ fn override_notices(resolved: &[PartsRef<'_>]) -> Vec<(OverrideKey, Notice)> {
         }
     }
     agg.into_iter().map(|(key, a)| {
-        let (name, _, by_src) = &key;
+        let (name, _, _) = &key;
         let replaced = value_span(&a.replaced);
         let by = value_span(&a.by);
         let across = if replaced.contains(" to ") || by.contains(" to ") {
@@ -2545,7 +2553,7 @@ fn override_notices(resolved: &[PartsRef<'_>]) -> Vec<(OverrideKey, Notice)> {
         };
         let message = format!(
             "{} replaced {name} = {replaced} (from {}) with {by}{across}",
-            subject_phrase(by_src), a.origin);
+            a.subject, a.origin);
         let notice = Notice { severity: a.severity, code: "param-override", message };
         (key, notice)
     }).collect()

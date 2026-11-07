@@ -1494,6 +1494,9 @@ mod tests {
             fit_base: _,
             // provenance: the scenario label only; its values are above.
             scenario_inline_name: _,
+            // provenance: names the source of `overrides` in a notice only;
+            // the values are above.
+            overrides_label: _,
             // config level: `SimConfig::t_end` via `ResolvedEntry::t_end`.
             t_end_override: _,
             // config level: `SimConfig::t_start` and the `init_state` digest.
