@@ -74,6 +74,31 @@ scenarios {
 }
 "#;
 
+/// A transmission rate spelled like a cell of an indexed family, `rho_north`,
+/// so a `--param-vec rho=FILE` row `north` sets it. `low_rho` sets it,
+/// `half_rho` scales it, `slow` touches only `gamma`.
+const VEC_MODEL: &str = r#"
+time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R
+parameters {
+  rho_north : rate in [0.01, 5.0]
+  gamma     : rate in [0.01, 5.0]
+}
+transitions {
+  infection : S --> I @ rho_north * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+init { S = 990  I = 10 }
+simulate { from = 0 'days  to = 10 'days }
+scenarios {
+  baseline { label = "as is" }
+  low_rho  { set = { rho_north = 0.2 } }
+  half_rho { scale = { rho_north = 0.5 } }
+  slow     { set = { gamma = 0.3 } }
+}
+"#;
+
 struct Fixture {
     dir: tempfile::TempDir,
 }
@@ -106,6 +131,27 @@ impl Fixture {
     fn simulate(&self, params: &str, scenarios: &str, flags: &[&str]) -> Output {
         let mut args = vec![
             "simulate", "m.camdl", "--params", params, "--backend", "ode", "--stdout",
+            "--scenario", scenarios,
+        ];
+        args.extend_from_slice(flags);
+        self.camdl(&args)
+    }
+
+    /// Write [`VEC_MODEL`] as `v.camdl`, its params `vp.toml`, and `rho.tsv`,
+    /// a `--param-vec rho=rho.tsv` file whose one row `north` sets
+    /// `rho_north = 0.4`.
+    fn vec_fixture(&self) {
+        let p = self.dir.path();
+        std::fs::write(p.join("v.camdl"), VEC_MODEL).unwrap();
+        std::fs::write(p.join("vp.toml"), "rho_north = 0.3\ngamma = 0.2\n").unwrap();
+        std::fs::write(p.join("rho.tsv"), "north\t0.4\n").unwrap();
+    }
+
+    /// `simulate v.camdl --params vp.toml --backend ode --stdout --scenario
+    /// <scenarios> <flags…>`.
+    fn simulate_vec(&self, scenarios: &str, flags: &[&str]) -> Output {
+        let mut args = vec![
+            "simulate", "v.camdl", "--params", "vp.toml", "--backend", "ode", "--stdout",
             "--scenario", scenarios,
         ];
         args.extend_from_slice(flags);
@@ -179,8 +225,8 @@ error: --param ce=1.0 would replace the value scenario 'halve' scales
   A --param value overrides every scenario, so scenario 'halve' would run with
   ce = 1.0 instead of its own value. The output would still label it as
   scenario 'halve', with nothing to show the override.
-hint: put the value in a --params file instead; a scenario scales a file's value
-  rather than being overridden by it:
+hint: pass the value in a parameter file (--params FILE) instead; a scenario
+  scales a file's value rather than being overridden by it:
         ce = 1.0
   or drop --param ce to run scenario 'halve' with its own value.
 ");
@@ -258,5 +304,50 @@ fn profile_fixed_over_a_scaling_scenario_is_refused() {
     assert_refused_with(&out, "profile --fixed", "\
 error: --fixed ce=1.0 would replace the value scenario 'halve' scales
   scenario 'halve' scales ce by 0.5");
-    assert!(stderr(&out).contains("put the value in a --fixed-file file instead"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("pass the value in a parameter file (--fixed-file FILE) instead"),
+        "{}", stderr(&out));
+}
+
+// ─── --param-vec PREFIX=FILE: `--param`'s bulk form, the same tier ──────────
+
+/// A `--param-vec` row on a parameter a scenario sets: refused naming the file
+/// and the row, and the fix is to remove the row.
+#[test]
+fn param_vec_row_over_a_setting_scenario_is_refused() {
+    let f = Fixture::new();
+    f.vec_fixture();
+    let out = f.simulate_vec("baseline,low_rho", &["--param-vec", "rho=rho.tsv"]);
+    assert_refused_with(&out, "--param-vec over a set", "\
+error: --param-vec rho=rho.tsv (row `north` sets rho_north = 0.4) would replace the value scenario 'low_rho' sets
+  scenario 'low_rho' sets rho_north = 0.2
+  A --param-vec value overrides every scenario, so scenario 'low_rho' would
+  run with rho_north = 0.4 instead of its own value. The output would still
+  label it as scenario 'low_rho', with nothing to show the override.
+hint: put the value in the model's scenarios {} block instead:
+  - if only the scenario that doesn't set it needs it (here 'baseline'):
+        baseline { set = { rho_north = 0.4 } }
+  - if you want a variant of 'low_rho' with rho_north = 0.4:
+        low_rho_variant { compose = [low_rho], set = { rho_north = 0.4 } }
+  or remove the `north` row from rho.tsv (or drop --param-vec rho=rho.tsv) to
+  run scenario 'low_rho' with its own value.
+");
+}
+
+#[test]
+fn param_vec_row_over_a_scaling_scenario_is_refused() {
+    let f = Fixture::new();
+    f.vec_fixture();
+    let out = f.simulate_vec("half_rho", &["--param-vec", "rho=rho.tsv"]);
+    assert_refused_with(&out, "--param-vec over a scale", "\
+error: --param-vec rho=rho.tsv (row `north` sets rho_north = 0.4) would replace the value scenario 'half_rho' scales
+  scenario 'half_rho' scales rho_north by 0.5");
+}
+
+/// A `--param-vec` beside scenarios that leave its parameters alone runs.
+#[test]
+fn param_vec_row_no_scenario_touches_runs() {
+    let f = Fixture::new();
+    f.vec_fixture();
+    assert_runs(&f.simulate_vec("baseline,slow", &["--param-vec", "rho=rho.tsv"]),
+        "--param-vec untouched");
 }

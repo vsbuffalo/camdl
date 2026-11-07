@@ -1087,9 +1087,71 @@ pub fn scenario_coordinate_collision(
     Ok(Some(msg))
 }
 
-// ─── Scenario × tier-5 `--param` / `--fixed` collisions ───────────────────────
+// ─── Scenario × tier-5 `--param` / `--fixed` / `--param-vec` collisions ──────
 
-/// Refuse a `--param NAME=VALUE` / `--fixed NAME=VALUE` (tier 5) on a
+/// The tier-5 flag a value came from, as the user typed it: what the
+/// diagnostic names, and how the user takes the value back out.
+#[derive(Debug, Clone, Copy)]
+pub enum TierFiveFlag<'a> {
+    /// `simulate --param NAME=VALUE`.
+    Param,
+    /// `survey` / `profile` `--fixed NAME=VALUE`.
+    Fixed,
+    /// `simulate --param-vec PREFIX=FILE`: each `key<TAB>value` row of
+    /// `file` sets `PREFIX_key` (`util::param_vec_name`).
+    ParamVec { prefix: &'a str, file: &'a str },
+}
+
+impl TierFiveFlag<'_> {
+    fn flag(self) -> &'static str {
+        match self {
+            TierFiveFlag::Param => "--param",
+            TierFiveFlag::Fixed => "--fixed",
+            TierFiveFlag::ParamVec { .. } => "--param-vec",
+        }
+    }
+
+    /// The tier-3 file flag beside it, whose value a scenario's scale applies
+    /// over.
+    fn file_flag(self) -> &'static str {
+        match self {
+            TierFiveFlag::Param | TierFiveFlag::ParamVec { .. } => "--params",
+            TierFiveFlag::Fixed => "--fixed-file",
+        }
+    }
+
+    /// The `param = v` assertion as the user wrote it: `--param ce=1.0`, or the
+    /// file and row a `--param-vec` value came from.
+    fn assertion(self, param: &str, v: &str) -> String {
+        match self {
+            TierFiveFlag::ParamVec { prefix, file } => format!(
+                "--param-vec {prefix}={file} (row `{}` sets {param} = {v})",
+                row_key(prefix, param)
+            ),
+            _ => format!("{} {param}={v}", self.flag()),
+        }
+    }
+
+    /// How the user takes the value back out.
+    fn drop_phrase(self, param: &str) -> String {
+        match self {
+            TierFiveFlag::ParamVec { prefix, file } => format!(
+                "remove the `{}` row from {file} (or drop --param-vec {prefix}={file})",
+                row_key(prefix, param)
+            ),
+            _ => format!("drop {} {param}", self.flag()),
+        }
+    }
+}
+
+/// The `--param-vec` row key that names `param`: `param` without the
+/// `PREFIX_` that `util::param_vec_name` prepends.
+fn row_key<'p>(prefix: &str, param: &'p str) -> &'p str {
+    param.strip_prefix(prefix).and_then(|r| r.strip_prefix('_')).unwrap_or(param)
+}
+
+/// Refuse a `--param NAME=VALUE` / `--fixed NAME=VALUE` / `--param-vec` row
+/// (tier 5) on a
 /// parameter a selected scenario `set`s or `scale`s. `Ok(None)` when no
 /// selected scenario touches a flagged parameter; `Ok(Some(message))` names,
 /// per flagged parameter, every colliding scenario and what it does, why the
@@ -1107,15 +1169,13 @@ pub fn scenario_coordinate_collision(
 /// collision: the two agree (the rule [`scenario_fixed_collision`] applies to
 /// `[fixed]`).
 ///
-/// `flag` is the flag the user typed (`--param` on `simulate`, `--fixed` on
-/// `survey` / `profile`); `file_flag` the tier-3 file flag beside it
-/// (`--params` / `--fixed-file`), named in the hint for a scale, which applies
-/// over a file value. `values` are the flag's pairs, last occurrence winning.
+/// `flag` is the flag the user typed (`--param` / `--param-vec` on
+/// `simulate`, `--fixed` on `survey` / `profile`); `values` are its
+/// `(parameter, value)` pairs, last occurrence winning.
 pub fn scenario_param_flag_collision(
     model: &ir::Model,
     scenarios: &[crate::sim_job::ScenarioRef],
-    flag: &str,
-    file_flag: &str,
+    flag: TierFiveFlag<'_>,
     values: &[(String, f64)],
 ) -> Result<Option<String>, String> {
     let mut by_name: IndexMap<&str, f64> = IndexMap::new();
@@ -1146,7 +1206,7 @@ pub fn scenario_param_flag_collision(
             continue;
         }
         blocks.push(param_flag_collision_message(
-            model, scenarios, &footprints, flag, file_flag, param, value, &colliding,
+            model, scenarios, &footprints, flag, param, value, &colliding,
         ));
     }
     Ok(if blocks.is_empty() { None } else { Some(blocks.join("\n\nerror: ")) })
@@ -1163,7 +1223,7 @@ pub fn refuse_fixed_flag_over_scenario(
 ) -> Result<(), String> {
     let Some(name) = scenario else { return Ok(()) };
     let selected = [crate::sim_job::ScenarioRef::Named(name.to_string())];
-    match scenario_param_flag_collision(model, &selected, "--fixed", "--fixed-file", fixed)? {
+    match scenario_param_flag_collision(model, &selected, TierFiveFlag::Fixed, fixed)? {
         None => Ok(()),
         Some(msg) => Err(msg),
     }
@@ -1176,8 +1236,7 @@ fn param_flag_collision_message(
     model: &ir::Model,
     scenarios: &[crate::sim_job::ScenarioRef],
     footprints: &[std::collections::BTreeSet<String>],
-    flag: &str,
-    file_flag: &str,
+    flag: TierFiveFlag<'_>,
     param: &str,
     value: f64,
     colliding: &[(&crate::sim_job::ScenarioRef, Vec<ScenarioParamAction>)],
@@ -1206,7 +1265,10 @@ fn param_flag_collision_message(
     } else {
         format!("{} selected scenarios", count_word(colliding.len()))
     };
-    let mut msg = format!("{flag} {param}={v} would replace the value {who} {verb}");
+    let file_flag = flag.file_flag();
+    let drop = flag.drop_phrase(param);
+    let mut msg = format!("{} would replace the value {who} {verb}", flag.assertion(param, &v));
+    let flag = flag.flag();
 
     for (scenario, actions) in colliding {
         let name = scenario.name();
@@ -1284,28 +1346,26 @@ fn param_flag_collision_message(
         }
         if any_scale {
             msg.push_str(&format!(
-                "\n  - for a scenario that scales it, put the value in a {file_flag} file, \
-                 which the scale applies over:\n        {param} = {v}"
+                "\n  - for a scenario that scales it, pass the value in a parameter file \
+                 ({file_flag} FILE),\n    which the scale applies over:\n        {param} = {v}"
             ));
         }
     } else {
         // A scale multiplies the value beneath it, so a file value (tier 3) is
         // what the scenario scales.
         msg.push_str(&format!(
-            "\nhint: put the value in a {file_flag} file instead; a scenario scales a \
-             file's value\n  rather than being overridden by it:\n        {param} = {v}"
+            "\nhint: pass the value in a parameter file ({file_flag} FILE) instead; a \
+             scenario\n  scales a file's value rather than being overridden by it:\
+             \n        {param} = {v}"
         ));
     }
-    if single {
-        msg.push_str(&format!(
-            "\n  or drop {flag} {param} to run scenario '{}' with its own value.",
-            colliding[0].0.name()
-        ));
+    let or_drop = if single {
+        format!("or {drop} to run scenario '{}' with its own value.", colliding[0].0.name())
     } else {
-        msg.push_str(&format!(
-            "\n  or drop {flag} {param} to run each scenario with its own value."
-        ));
-    }
+        format!("or {drop} to run each scenario with its own value.")
+    };
+    msg.push('\n');
+    msg.push_str(&wrap_indented(&or_drop, "  ", 78));
     msg
 }
 

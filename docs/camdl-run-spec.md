@@ -149,11 +149,12 @@ would discard a value the user wrote for the same parameter, or a value the user
 wrote would discard a scenario's, the run is refused before anything is written,
 rather than resolved:
 
-- a `--param NAME=VALUE` (`simulate`) or `--fixed NAME=VALUE` (`survey`,
-  `profile`) on a parameter a selected scenario `set`s or `scale`s, directly or
-  through a preset it composes (gh#571). Tier 5 would replace the scenario's
-  value in every cell, so differently labelled scenarios would all run the
-  flag's value. The error names the flag, every colliding scenario and what it
+- a `--param NAME=VALUE` or a `--param-vec PREFIX=FILE` row (`simulate`), or a
+  `--fixed NAME=VALUE` (`survey`, `profile`), on a parameter a selected scenario
+  `set`s or `scale`s, directly or through a preset it composes (gh#571). Tier 5
+  would replace the scenario's value in every cell, so differently labelled
+  scenarios would all run the flag's value. The error names the flag (for
+  `--param-vec`, the file and the row), every colliding scenario and what it
   does, and where the value belongs instead: in the model's `scenarios {}` block
   (a `set` in the scenario that needs it, or a variant that `compose`s the
   colliding scenario), in a `--params` / `--fixed-file` file for a `scale` (a
@@ -6922,8 +6923,9 @@ Matching is by name; row order is irrelevant, and a file may cover any subset of
 the family's cells.
 
 **Precedence.** `--param-vec` shares tier 5 with `--param` — the top of the
-resolution chain — so a scenario's `set`/`scale` does **not** override it. (This
-is the sibling-of-`--param` rule, and it differs from the pre-resolver behaviour
-where scenarios won.) The `--param-vec` unknown-name check runs during full
-parameter resolution, which `--dry-run` short-circuits: a `--dry-run` invocation
-will not report a bad key.
+resolution chain — and the same refusal (§1.3, gh#571): a row naming a parameter
+a selected scenario `set`s or `scale`s is refused before anything runs, naming
+the file and the row, since the row would replace the scenario's value in every
+cell. On every other parameter the row wins over the lower tiers. The
+`--param-vec` unknown-name check runs during full parameter resolution, which
+`--dry-run` short-circuits: a `--dry-run` invocation will not report a bad key.

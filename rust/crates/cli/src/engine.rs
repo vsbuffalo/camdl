@@ -384,12 +384,13 @@ pub(crate) fn effective_scenarios(job: &SimulateJob) -> Vec<ScenarioRef> {
 /// (`--draws posterior|prior|uniform`, `explicit_file: None`) are not checked:
 /// a scenario over generated draws is the counterfactual those runs exist for.
 ///
-/// The same guard refuses a `--param` (`job.cli_overrides`, tier 5) on a
-/// parameter a selected scenario sets or scales
+/// The same guard refuses a `--param` (`job.cli_overrides`) or a
+/// `--param-vec` row (`job.set_vec_entries`), both tier 5, on a parameter a
+/// selected scenario sets or scales
 /// ([`crate::params_resolver::scenario_param_flag_collision`], gh#571): the
-/// flag would override the scenario in every cell, so differently labelled
+/// value would override the scenario in every cell, so differently labelled
 /// arms would run the same value. `simulate` is the only command that fills
-/// `cli_overrides`, so the flag is named `--param`.
+/// either, so the flags are named as `simulate` spells them.
 ///
 /// Called by [`run_job`], the one execution entry point, and by `simulate`
 /// once its job is built, before any branch (`--dry-run`, `--event-log`)
@@ -397,15 +398,33 @@ pub(crate) fn effective_scenarios(job: &SimulateJob) -> Vec<ScenarioRef> {
 pub fn check_scenario_coordinate_collision(job: &SimulateJob) -> Result<(), String> {
     use crate::params_resolver::{
         coordinate_values, scenario_coordinate_collision, scenario_param_flag_collision,
-        UserCoordinate,
+        TierFiveFlag, UserCoordinate,
     };
     use crate::sim_job::ParamSource;
-    if !job.cli_overrides.is_empty() && !job.scenarios.is_empty() {
+    if (!job.cli_overrides.is_empty() || !job.set_vec_entries.is_empty())
+        && !job.scenarios.is_empty()
+    {
         let (model, _) = crate::util::load_model(&job.model)?;
-        if let Some(msg) = scenario_param_flag_collision(
-            &model, &job.scenarios, "--param", "--params", &job.cli_overrides,
-        )? {
-            return Err(msg);
+        let mut refusals: Vec<String> = Vec::new();
+        refusals.extend(scenario_param_flag_collision(
+            &model, &job.scenarios, TierFiveFlag::Param, &job.cli_overrides,
+        )?);
+        // `--param-vec PREFIX=FILE` shares `--param`'s tier; checked one file
+        // at a time so the diagnostic names the file and row. Read with the
+        // engine's own reader, so an unreadable file fails here as it would at
+        // resolution.
+        for (prefix, file) in &job.set_vec_entries {
+            let rows: Vec<(String, f64)> = crate::util::load_keyed_tsv(file)
+                .map_err(|e| format!("--param-vec {prefix}: {e}"))?
+                .into_iter()
+                .map(|(key, v)| (crate::util::param_vec_name(prefix, &key), v))
+                .collect();
+            refusals.extend(scenario_param_flag_collision(
+                &model, &job.scenarios, TierFiveFlag::ParamVec { prefix, file }, &rows,
+            )?);
+        }
+        if !refusals.is_empty() {
+            return Err(refusals.join("\n\nerror: "));
         }
     }
     let (coordinate, varied) = match &job.source {
