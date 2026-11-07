@@ -2900,8 +2900,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
 /// IR to transplant onto `archived` — refusing unless the source is still the
 /// same model the fit ran on.
 ///
-/// The equality test is `runid::inputs::model_ir_hash`, which excludes
-/// `quantities` (and `contrasts`). That is what makes it the right test rather
+/// The equality test is [`crate::fit::fitted_model::compare_to_fitted`] —
+/// `runid::inputs::model_ir_hash`, which excludes `quantities` (and
+/// `contrasts`), the comparison every replay of a fit through a given model
+/// shares. That is what makes it the right test rather
 /// than merely a convenient one: it asks "is this the same model apart from its
 /// reporting layer?", which is exactly the question a reporting-layer swap has
 /// to answer yes to. It is also gradient-independent (runid SV=2), so the lean
@@ -2932,17 +2934,18 @@ fn quantities_from_vocabulary(
     let (ir_path, _tmp) = crate::util::resolve_ir_path_with_quantities(
         model_source, false, Some(vocabulary))?;
     let (recompiled, _) = crate::util::load_model(&ir_path)?;
-    let archived_h = runid::inputs::model_ir_hash(archived);
-    let recompiled_h = runid::inputs::model_ir_hash(&recompiled);
-    if archived_h != recompiled_h {
+    use crate::fit::fitted_model::{compare_to_fitted, short, ModelAgreement};
+    if let ModelAgreement::Differs { fitted: archived_h, given: recompiled_h } =
+        compare_to_fitted(archived, &recompiled)
+    {
         return Err(format!(
             "this fit's model source `{model_source}` is no longer the model the fit ran on, \
              so a reporting vocabulary cannot be checked against it (archived {}, source {}). \
              Quantities are excluded from that hash, so this difference is a real change to \
              the dynamics, observations, or parameters — not the vocabulary. Re-run the fit \
              against the current source, or check out the source the fit used.",
-            &archived_h.to_hex()[..8],
-            &recompiled_h.to_hex()[..8],
+            short(&archived_h),
+            short(&recompiled_h),
         ));
     }
     Ok(recompiled.quantities)

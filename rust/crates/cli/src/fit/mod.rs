@@ -100,6 +100,7 @@ pub mod loglik_eval;
 pub mod methods;
 #[cfg(feature = "ode")]
 pub mod nlopt_stage;
+pub mod fitted_model; // is the given model the one a fit ran on (the replay check)
 pub mod handle;   // gh#322: fit handles (@label / hash / run-dir / fit.toml) → segment
 pub mod joint;    // gh#322: keyed-joint (θ, X) read — LatentPath classifier + join
 pub mod failures; // the deterministic-failure record a predictive run writes as report.json

@@ -841,7 +841,11 @@ fn run_simulate(a: &args::SimulateArgs) {
                 std::process::exit(1);
             }
         };
-    let (ir_path_compiled, _ir_tmp) =
+    // `ir_path_given` is the model as named, before any run-time rewrite: a
+    // replay of a stored fit compares THIS against the fit's archived model,
+    // since `--output-every` below changes the output schedule the model
+    // identity hashes, and is a property of this run, not of the model.
+    let (ir_path_given, _ir_tmp) =
         util::resolve_ir_path_with_quantities(&ir_path, false, quantities_override.as_ref())
             .unwrap_or_else(|e| {
                 eprintln!("error: {}", e);
@@ -852,7 +856,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     // also loaded from this path) see the overridden cadence. `_every_tmp`
     // holds the rewritten temp alive for the function scope.
     let (ir_path_compiled, _every_tmp) =
-        util::rematerialize_with_output_every(&ir_path_compiled, a.output_view.every)
+        util::rematerialize_with_output_every(&ir_path_given, a.output_view.every)
             .unwrap_or_else(|e| {
                 eprintln!("error: {}", e);
                 std::process::exit(1);
@@ -1681,6 +1685,7 @@ fn run_simulate(a: &args::SimulateArgs) {
             });
             match fit_path_for_draws.as_ref() {
                 Some(fit_path) => {
+                    report_replay_check(check_replay_model(fit_path, &ir_path_given, &ir_path));
                     // fit.toml prior source (overrides or supplements
                     // model priors). gh#86: the model IR is the
                     // tier-2 fallback when the fit toml omits a prior
@@ -1750,6 +1755,17 @@ fn run_simulate(a: &args::SimulateArgs) {
             // `--scenario` / `--enable` / `--disable` applies on top of it.
             match crate::fit::handle::resolve_fit(fit_ref) {
                 Ok(resolved) => {
+                    // The draws are this fit's model's: refuse a different
+                    // model before anything runs.
+                    report_replay_check(util::load_model(&ir_path_given).and_then(|(given, _)| {
+                        crate::fit::fitted_model::check_stored_fit(
+                            fit_handle,
+                            &resolved.segment,
+                            Some(&resolved.config.problem.model.camdl),
+                            &given,
+                            &ir_path,
+                        )
+                    }));
                     base_sim_run.fit_base = util::FitBase::of(&resolved.config.problem)
                         .unwrap_or_else(|e| {
                             eprintln!("error: --fit {fit_handle}: {e}");
@@ -1829,6 +1845,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 std::process::exit(1);
             });
             if let Some(fit_ref) = fit_path_for_draws.as_ref() {
+                report_replay_check(check_replay_model(fit_ref, &ir_path_given, &ir_path));
                 let fixed = posterior_draws::resolve_fixed_for_backfill(fit_ref)
                     .unwrap_or_else(|e| {
                         eprintln!("error: --fit [fixed]: {}", e);
@@ -4783,6 +4800,45 @@ fn wrap_fit_load_error(fit_path: &str, err: String) -> String {
          See `camdl docs fit-toml` for the full schema. \
          (file: {})",
         err, fit_path)
+}
+
+/// `simulate --draws prior|<file> --fit FIT`: is the model on the command line
+/// the one FIT's parameters belong to? A fit config (a file) is checked against
+/// the model its `[model]` names; any other handle is a stored fit, checked
+/// against the model it archived ([`crate::fit::fitted_model`]).
+fn check_replay_model(
+    fit_ref: &str,
+    ir_path_given: &str,
+    model_path: &str,
+) -> Result<Option<String>, String> {
+    let (given, _) = util::load_model(ir_path_given)?;
+    if std::path::Path::new(fit_ref).is_file() {
+        let problem = fit::config_v2::Problem::load(fit_ref)
+            .map_err(|e| wrap_fit_load_error(fit_ref, e))?;
+        crate::fit::fitted_model::check_fit_config(fit_ref, &problem.model.camdl, &given, model_path)
+    } else {
+        let resolved = crate::fit::handle::resolve_fit(fit_ref).map_err(|e| e.to_string())?;
+        crate::fit::fitted_model::check_stored_fit(
+            fit_ref,
+            &resolved.segment,
+            Some(&resolved.config.problem.model.camdl),
+            &given,
+            model_path,
+        )
+    }
+}
+
+/// Act on a replay model check: a refusal exits before anything runs; a
+/// reporting-only difference is said on stderr and the run proceeds.
+fn report_replay_check(outcome: Result<Option<String>, String>) {
+    match outcome {
+        Ok(None) => {}
+        Ok(Some(notice)) => eprintln!("{notice}"),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// The fit's own intervention selection, for `simulate --draws prior|<file>

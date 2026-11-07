@@ -1352,6 +1352,36 @@ scenario outrank it, and a column the file carries (a row value, tier 3.5)
 outranks it. The values are not copied into the rows, so `--draws-out` writes
 only the file's own columns.
 
+**The model on the command line must be the model the parameters belong to.**
+Every `--fit` form above replays a fit's parameters — its posterior draws, its
+`[fixed]` block, its priors — through the model named on the command line, and
+those parameters mean something only under the model they were written or
+estimated for. So before anything runs, `simulate` compares the two:
+
+- a **stored fit** (a run or problem-folder directory, `@label`, run-id prefix,
+  or a `fit.toml` naming its run under `--draws posterior`) is compared with the
+  model the fit archived, `<fit-dir>/model.ir.json`;
+- a **fit config** (`--draws prior|<file> --fit fit.toml`) is compared with the
+  model its `[model]` names, compiled now.
+
+The comparison is the one `fit predict --quantities` uses
+(`rust/crates/cli/src/fit/fitted_model.rs`, `compare_to_fitted`): the
+presentation-normalized model identity, which excludes `quantities {}` and
+`contrasts {}`, the model's file name, and `--output-every` (a property of this
+run, applied after the check). A model that differs is refused, naming the
+fit, both identities, and the fix:
+
+```
+error: --fit results/fits/mh-8d0c7e80: edited.camdl is not the model this fit ran on (fitted model 9bca0399, edited.camdl e905ea63), so its parameters would be replayed through different dynamics. Quantities and contrasts are excluded from this comparison: the difference is in the dynamics, observations, parameters or simulation settings.
+  Fix: run with the fitted model, results/fits/mh-8d0c7e80/model.ir.json (the fit's archived IR), or refit edited.camdl. The fit was run from model.camdl (use it only if it still compiles to model 9bca0399).
+```
+
+The archived IR is itself a valid model argument, so the fitted model can
+always be replayed. A model that differs only in its quantities or contrasts
+runs, and says on stderr that the command line's quantities and contrasts
+apply. A bare directory holding a `draws.tsv` outside any fit has no archived
+model and is not checked (it is said to run "as written").
+
 `--draws-out PATH` writes the resolved rows back out in the same
 one-row-per-draw, one-column-per-parameter format `--draws PATH` reads, so a
 generated cloud round-trips.
