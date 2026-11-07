@@ -716,6 +716,22 @@ pub struct FitSidecar {
     /// and a rerun that skips the load (all-cache-hit) must not erase it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_window: Option<TrainingWindow>,
+    /// The integration step every run in this segment ran at: the one dt
+    /// rule's answer (`crate::dt_rule`) over the model's declared
+    /// `simulate { dt }` and the config's `[config] dt`. A replay of the fit's
+    /// parameters runs at this step by default
+    /// ([`crate::fit::fitted_model::stored_fit_simulator`]). `None` in a
+    /// sidecar written without a model in hand or before the step was
+    /// recorded; the reader then recovers it from the archived config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dt: Option<f64>,
+    /// The ODE integrator the fit's model declares (`simulate { integrator }`,
+    /// rk4 when it declares none): what an ODE-backend run in this segment
+    /// integrated with. A fit has no integrator override, so this is the
+    /// archived model's own; recorded so the fit states it without its IR
+    /// being read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrator: Option<ir::model::Integrator>,
     /// The model's `#'` documentation dictionary ([`ir::ModelDocs`]): the
     /// model's own header block (`docs.model`, gh#750) plus params /
     /// compartments / transitions / observations / dimensions / quantities →

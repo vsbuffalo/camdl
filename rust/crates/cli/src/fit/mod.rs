@@ -2647,6 +2647,11 @@ fn build_fit_sidecar(
         // must come from the code path that applied the declaration); sticky
         // across cache-hit reruns in `write_fit_sidecar`.
         training_window: None,
+        // The simulator the segment's runs integrate on. `config.dt` is the
+        // step the dt rule resolved before this is built (`cmd_fit_run_v2`);
+        // `resolved_dt` gives the same answer for a config read without it.
+        dt: model.map(|m| crate::dt_rule::resolved_dt(m.simulation.dt, problem.config.dt)),
+        integrator: model.map(|m| m.simulation.integrator.clone()),
         // The `#'` doc dictionary (presentation metadata), loaded from the same
         // compiled IR. Empty when the model documents nothing.
         docs: crate::util::load_model_docs(model_src).unwrap_or_default(),

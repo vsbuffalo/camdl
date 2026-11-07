@@ -442,6 +442,8 @@ mod tests {
             schema: None,
             docs: Default::default(),
             training_window: None,
+            dt: None,
+            integrator: None,
         };
         // No fit.toml on disk → archive step is skipped; the sidecar still writes.
         write_fit_sidecar(seg, Path::new("nonexistent.toml"), &sidecar).unwrap();
