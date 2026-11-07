@@ -1761,7 +1761,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                         crate::fit::fitted_model::check_stored_fit(
                             fit_handle,
                             &resolved.segment,
-                            Some(&resolved.config.problem.model.camdl),
+                            &resolved.config.problem,
                             &given,
                             &ir_path,
                         )
@@ -4825,7 +4825,7 @@ fn check_replay_model(
         crate::fit::fitted_model::check_stored_fit(
             fit_ref,
             &resolved.segment,
-            Some(&resolved.config.problem.model.camdl),
+            &resolved.config.problem,
             &given,
             model_path,
         )

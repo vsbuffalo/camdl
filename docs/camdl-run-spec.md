@@ -1382,6 +1382,17 @@ runs, and says on stderr that the command line's quantities and contrasts
 apply. A bare directory holding a `draws.tsv` outside any fit has no archived
 model and is not checked (it is said to run "as written").
 
+A model anchored to observed data (`simulate { to = last_obs + 2 'weeks }`, a
+scenario's `to`, a forcing's `breakpoints`) is archived by `fit run` with its
+anchors resolved against the fit's `[data]`, so before the comparison the
+command-line model is resolved the same way, against the fit's data as it reads
+now. The fit's own source therefore replays. If that data has changed since the
+fit, the anchors resolve to a different horizon and the replay is refused,
+saying so: the source is byte-identical to the fit's archived copy
+(`model.camdl.original`), and the message names the horizon each side runs to.
+A refusal calls the source "edited since" only when its bytes differ from that
+archived copy.
+
 `--draws-out PATH` writes the resolved rows back out in the same
 one-row-per-draw, one-column-per-parameter format `--draws PATH` reads, so a
 generated cloud round-trips.

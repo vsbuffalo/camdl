@@ -1528,7 +1528,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     let vocabulary: Option<crate::quantities_file::QuantitiesOverride> =
         args.quantities.as_deref().map(crate::quantities_file::QuantitiesOverride::load).transpose()?;
     if let Some(v) = &vocabulary {
-        model.quantities = quantities_from_vocabulary(&model, &config.model.camdl, v)?;
+        model.quantities = quantities_from_vocabulary(&model, &config, v)?;
     }
 
     // gh#616: `fit predict` HAS the fit's data, so it resolves the model's
@@ -2906,9 +2906,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
 /// recompile here and a full-Jacobian fit compile still agree.
 fn quantities_from_vocabulary(
     archived: &ir::Model,
-    model_source: &str,
+    config: &crate::fit::config_v2::Problem,
     vocabulary: &crate::quantities_file::QuantitiesOverride,
 ) -> Result<Vec<ir::quantity::Quantity>, String> {
+    let model_source: &str = &config.model.camdl;
     if !crate::util::model_is_camdl_source(model_source) {
         return Err(format!(
             "--quantities needs this fit's model SOURCE, but the fit records `{model_source}`, \
@@ -2930,9 +2931,24 @@ fn quantities_from_vocabulary(
     let (ir_path, _tmp) = crate::util::resolve_ir_path_with_quantities(
         model_source, false, Some(vocabulary))?;
     let (recompiled, _) = crate::util::load_model(&ir_path)?;
-    use crate::fit::fitted_model::{compare_to_fitted, short, ModelAgreement};
+    use crate::fit::fitted_model::{as_fitted, compare_to_fitted, short, ModelAgreement};
+    // The archived IR is the model AFTER `fit run` resolved its observation
+    // anchors; the recompiled source still carries them. Both go through the
+    // fit's own resolution before the comparison — a no-op on the archived IR,
+    // and on the pre-archive fallback (`archived` recompiled from source) it
+    // resolves both sides alike. The quantities transplanted are the
+    // recompiled model's, which the substitution does not touch.
+    let resolve = |m: &ir::Model| {
+        as_fitted(m, config).map(|(m, _)| m).map_err(|e| {
+            format!(
+                "--quantities: resolving the observation anchors of this fit's model \
+                 against its [data], to compare the source with the model the fit ran on, \
+                 failed: {e}"
+            )
+        })
+    };
     if let ModelAgreement::Differs { fitted: archived_h, given: recompiled_h } =
-        compare_to_fitted(archived, &recompiled)
+        compare_to_fitted(&resolve(archived)?, &resolve(&recompiled)?)
     {
         return Err(format!(
             "this fit's model source `{model_source}` is no longer the model the fit ran on, \

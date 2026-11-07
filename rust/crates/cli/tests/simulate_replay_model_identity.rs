@@ -89,20 +89,24 @@ struct Fixture {
 }
 
 fn fixture(tag: &str) -> Fixture {
+    fixture_of(tag, MODEL)
+}
+
+fn fixture_of(tag: &str, model: &str) -> Fixture {
     let bin = binary();
     assert!(bin.exists(), "release camdl binary missing: {} — run `make build-rust`", bin.display());
     let dir = std::env::temp_dir().join(format!("camdl_replay_model_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("model.camdl"), MODEL).unwrap();
+    std::fs::write(dir.join("model.camdl"), model).unwrap();
     // The recovery rate tripled: different dynamics, same parameters.
     std::fs::write(
         dir.join("edited.camdl"),
-        MODEL.replace("@ gamma * I", "@ 3 * gamma * I"),
+        model.replace("@ gamma * I", "@ 3 * gamma * I"),
     )
     .unwrap();
     // A reporting-only edit: a quantities block, nothing else.
-    std::fs::write(dir.join("quant.camdl"), format!("{MODEL}\nquantities {{\n  peak_I = max(I)\n}}\n"))
+    std::fs::write(dir.join("quant.camdl"), format!("{model}\nquantities {{\n  peak_I = max(I)\n}}\n"))
         .unwrap();
     std::fs::write(dir.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(dir.join("fit.toml"), FIT_TOML).unwrap();
@@ -189,6 +193,67 @@ fn a_replay_through_another_model_is_refused_and_the_fitted_one_runs() {
         let (ok, err) = simulate(&f, "model.camdl", &rest);
         assert!(ok, "{draws:?}: the config's own model must run:\n{err}");
     }
+
+    let _ = std::fs::remove_dir_all(&f.dir);
+}
+
+/// An observation-anchored model (`simulate { to = last_obs + 2 'weeks }`).
+/// `fit run` resolves the anchor against its `[data]` and archives the
+/// SUBSTITUTED model — horizon 70, the marker cleared — so the command-line
+/// source, which still carries the marker, has to go through the same
+/// substitution before it can be compared. Without it the fit's own,
+/// untouched source was refused as "edited since".
+#[test]
+fn an_anchored_fit_replays_through_its_own_source() {
+    let anchored = MODEL.replace("to = 80 'days", "to = last_obs + 2 'weeks");
+    assert_ne!(anchored, MODEL);
+    let f = fixture_of("anchored", &anchored);
+    let seg = f.segment.as_str();
+
+    // The fit's own source, unchanged, on both stored-fit `--draws` forms and
+    // through a fit.toml handle naming the stored run.
+    for rest in [
+        &["--draws", "posterior", "--fit", seg, "--n-draws", "2"][..],
+        &["--draws", "posterior", "--fit", "fit.toml", "--n-draws", "2"][..],
+        &["--draws", "d.tsv", "--fit", seg][..],
+    ] {
+        let (ok, err) = simulate(&f, "model.camdl", rest);
+        assert!(ok, "{rest:?}: the fit's own anchored source must replay:\n{err}");
+        assert!(!err.contains("is not the model this fit ran on"), "{rest:?}:\n{err}");
+    }
+
+    // `fit predict --quantities` compiles a vocabulary against the same
+    // source and compares it with the archived model the same way.
+    std::fs::write(f.dir.join("vocab.camdl"), "quantities {\n  peak_I = max(I)\n}\n").unwrap();
+    let out = run(&f.dir, &["fit", "predict", seg, "--horizon", "free_forward", "--quantities", "vocab.camdl"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "fit predict --quantities on an anchored fit:\n{err}");
+
+    // A different anchored model is still refused, and is not called an
+    // edit of the fit's source.
+    let (ok, err) = simulate(&f, "edited.camdl", &["--draws", "posterior", "--fit", seg, "--n-draws", "2"]);
+    assert!(!ok && err.contains("edited.camdl is not the model this fit ran on"), "{err}");
+    assert!(!err.contains("edited since"), "{err}");
+
+    // The data growing after the fit moves `last_obs`, so the source,
+    // byte-identical to the archived copy, now resolves to a later horizon
+    // than the fit ran to. Refused, and the message says it is the data.
+    let data = f.dir.join("weekly_cases.tsv");
+    std::fs::write(&data, format!("{DATA}63\t30\n")).unwrap();
+    let (ok, err) = simulate(&f, "model.camdl", &["--draws", "posterior", "--fit", seg, "--n-draws", "2"]);
+    assert!(!ok, "a horizon moved by new data is not the fitted model:\n{err}");
+    assert!(err.contains("byte-identical to the source this fit archived"), "{err}");
+    assert!(err.contains("observation data has changed since the fit ran"), "{err}");
+    assert!(err.contains("runs to t = 77 where the fitted model ran to t = 70"), "{err}");
+    assert!(!err.contains("edited since"), "{err}");
+    std::fs::write(&data, DATA).unwrap();
+
+    // The fit's own source, edited in place after the fit: refused, and named
+    // as edited since — its bytes differ from the archived copy.
+    std::fs::write(f.dir.join("model.camdl"), anchored.replace("@ gamma * I", "@ 2 * gamma * I")).unwrap();
+    let (ok, err) = simulate(&f, "model.camdl", &["--draws", "posterior", "--fit", seg, "--n-draws", "2"]);
+    assert!(!ok && err.contains("model.camdl is not the model this fit ran on"), "{err}");
+    assert!(err.contains("edited since"), "{err}");
 
     let _ = std::fs::remove_dir_all(&f.dir);
 }
