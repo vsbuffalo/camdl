@@ -1,0 +1,47 @@
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+dimensions {
+  patch = read("data/patch_features.tsv", column = "patch")
+  age   = [child, adult]
+}
+
+stratify(by = patch)
+stratify(by = age)
+
+parameters {
+  beta  : rate in [0.001, 0.5]
+  sigma : rate in [0.01,  1.0]
+  gamma : rate in [0.01,  1.0]
+}
+
+let N[p in patch, a in age] = S[p, a] + E[p, a] + I[p, a] + R[p, a]
+
+tables {
+  pop_pa : patch × age = read("data/patch_age_pop.tsv")
+}
+
+transitions {
+  infection[p in patch, a in age] : S[p, a] --> E[p, a]
+    @ beta * S[p, a] * sum(b in age, I[p, b] / N[p, b])
+
+  progression[p in patch, a in age] : E[p, a] --> I[p, a]  @ sigma * E[p, a]
+  recovery[p in patch, a in age]    : I[p, a] --> R[p, a]  @ gamma * I[p, a]
+}
+
+init {
+  S[p in patch, a in age] = pop_pa[p, a]
+  I[north, child]         = 5
+}
+
+simulate {
+  from = 0 'days
+  to   = 180 'days
+}
+
+scenarios {
+  baseline {
+    set = { beta = 0.04  sigma = 0.2  gamma = 0.1 }
+  }
+}

@@ -1,0 +1,29 @@
+# Intentionally broken model: 'Q' is not declared
+# Used to demonstrate camdl's error reporting
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  beta  : rate  in [0.05, 1.0]
+  gamma : rate  in [0.01, 0.5]
+  N0    : count
+  I0    : count
+}
+
+let N = S + I + R
+
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * Q
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}

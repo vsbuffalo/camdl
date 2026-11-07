@@ -1,0 +1,61 @@
+# SEIR with Erlang-3 latent period via partial stratification
+# Demonstrates: stratify(only = [E]), consecutive(), parameterized table
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+dimensions {
+  latent_stage = [e1, e2, e3]
+}
+
+stratify(by = latent_stage, only = [E])
+
+parameters {
+  beta     : rate in [0.001, 2.0]
+  gamma    : rate in [0.01, 1.0]
+  sigma_e1 : rate in [0.01, 2.0]
+  sigma_e2 : rate in [0.01, 2.0]
+  sigma_e3 : rate in [0.01, 2.0]
+}
+
+tables {
+  sigma_stage : latent_stage = [sigma_e1, sigma_e2, sigma_e3]
+}
+
+let N = S + E + I + R
+
+transitions {
+  infection : S --> E[e1]
+    @ beta * S * I / N
+
+  latent[(s, s_next) in consecutive(latent_stage)]
+    : E[s] --> E[s_next]
+    @ sigma_stage[s] * E[s]
+
+  onset    : E[e3] --> I  @ sigma_stage[e3] * E[e3]
+  recovery : I     --> R  @ gamma * I
+}
+
+init {
+  S    = 990
+  E[e1] = 5
+  I    = 5
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}
+
+scenarios {
+  baseline {
+    label = "Erlang-3 latent (σ = 0.6 per stage)"
+    set = {
+      beta     = 0.3
+      gamma    = 0.1
+      sigma_e1 = 0.6
+      sigma_e2 = 0.6
+      sigma_e3 = 0.6
+    }
+  }
+}

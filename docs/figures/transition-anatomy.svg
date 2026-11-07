@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 330" role="img" aria-labelledby="t d">
+  <title id="t">Anatomy of a transition</title>
+  <desc id="d">The line infection : S --> I @ beta * S * I / N names a transition, moves one person from S to I each time it fires, and gives its rate as a total propensity whose dimension, people per time, the compiler checks. Dimensional analysis catches the common mistake beta * I / N, a per-capita rate missing × S, which is refused with E300.</desc>
+
+  <!-- 38 characters at a 13.2-unit advance from x=69; char k spans 69+13.2k .. +13.2 -->
+  <text x="128" y="40" class="t-label t-b fig-ink" text-anchor="middle">name</text>
+  <text x="128" y="62" class="t-label fig-muted" text-anchor="middle">its label</text>
+  <path d="M69,104 L69,96 L188,96 L188,104" class="s-muted"/>
+  <line x1="128" y1="78" x2="128" y2="96" class="s-muted"/>
+
+  <text x="274" y="40" class="t-label t-b fig-ink" text-anchor="middle">from → to</text>
+  <text x="274" y="62" class="t-label fig-muted" text-anchor="middle">moves one person</text>
+  <path d="M227,104 L227,96 L320,96 L320,104" class="s-muted"/>
+  <line x1="274" y1="78" x2="274" y2="96" class="s-muted"/>
+
+  <text x="470" y="40" class="t-label t-b fig-accent" text-anchor="middle">rate: total propensity</text>
+  <text x="470" y="62" class="t-label fig-muted" text-anchor="middle">events per time, all of S</text>
+  <path d="M333,104 L333,96 L571,96 L571,104" class="s-accent"/>
+  <line x1="452" y1="78" x2="452" y2="96" class="s-accent"/>
+
+  <rect x="45" y="108" width="550" height="56" rx="4" class="fig-code-bg"/>
+  <text x="69" y="144" class="t-code fig-ink" textLength="501.6" lengthAdjust="spacingAndGlyphs"><tspan class="tk-fu">infection</tspan> : S <tspan class="tk-op">--&gt;</tspan> I <tspan class="tk-op">@</tspan> beta * S * I / N</text>
+
+  <!-- dimension of each factor -->
+  <path d="M359,176 L359,182 L412,182 L412,176" class="s-muted"/>
+  <text x="386" y="206" class="t-label fig-ink" text-anchor="middle">T⁻¹</text>
+  <path d="M452,176 L452,182 L465,182 L465,176" class="s-muted"/>
+  <text x="458" y="206" class="t-label fig-ink" text-anchor="middle">P</text>
+  <path d="M504,176 L504,182 L571,182 L571,176" class="s-muted"/>
+  <text x="537" y="206" class="t-label fig-ink" text-anchor="middle">P / P</text>
+  <text x="452" y="240" class="t-label t-b fig-accent" text-anchor="middle">= P · T⁻¹, people per time ✓</text>
+
+  <!-- the common mistake -->
+  <line x1="45" y1="262" x2="595" y2="262" class="s-line"/>
+  <text x="45" y="292" class="t-label fig-muted">Dimensional analysis catches the common mistakes: <tspan class="t-code-label fig-bad">beta * I / N</tspan></text>
+  <text x="45" y="316" class="t-label fig-muted">is a per-capita rate (T⁻¹) missing × S, and is refused with <tspan class="t-code-label fig-bad">E300</tspan>.</text>
+</svg>

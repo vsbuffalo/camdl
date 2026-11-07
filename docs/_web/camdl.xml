@@ -1,0 +1,284 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE language SYSTEM "language.dtd">
+<!--
+  Kate/Pandoc syntax highlighting for camdl (Compartmental Model Description Language).
+  Used by Quarto via _extension.yml + syntax-definitions.
+
+  Keyword surface is reconciled against the camdl tree-sitter grammar
+  (../camdl/tree-sitter: grammar.js + queries/highlights.scm), the authoritative
+  reference for what the DSL currently parses and how it is highlighted.
+
+  Semantic tiers:
+    Block      (dsKeyword, bold)   : top-level structure
+    Directive  (dsPreprocessor)    : compile-time (let, stratify, time_unit, origin)
+    Control    (dsControlFlow)     : iteration/filtering/conditionals
+    Action     (dsKeyword)         : scenario/intervention verbs
+    Type       (dsDataType)        : parameter types
+    Builtin    (dsBuiltIn)         : functions / distributions / forcing constructors
+    Label      (dsFunction)        : transition/table/obs names before ':'
+    Operator, Number, String, Unit, Comment : standard
+
+  Context-sensitive labels:
+    The label regex (identifier before ':') only fires inside blocks where
+    names are semantically meaningful: transitions, observations, interventions,
+    tables, scenarios, events, functions, reactive_interventions. Inside
+    parameters, dimensions, quantities, etc., identifiers before ':' are just
+    declarations and get no special color.
+
+  Format limitation (vs tree-sitter):
+    skylighting matches keywords lexically, not by grammar position, so a builtin
+    that is also a plausible identifier is colored everywhere. tree-sitter only
+    colors these in call position. Consequence: `beta` and `gamma` are deliberately
+    OMITTED from the distribution list — in compartmental models they are near-
+    universally parameter names (transmission / recovery rate: `beta : rate ~
+    log_normal(...)`), and coloring them as the beta/gamma distributions would be
+    wrong far more often than right. The compound forms `beta_binomial` /
+    `neg_binomial` carry no such collision and are included.
+-->
+<language name="camdl" section="Scientific" extensions="*.camdl" mimetype="text/x-camdl" version="4" kateversion="5.0">
+  <highlighting>
+    <!-- Blocks where name: means a label (transition, obs, intervention, ...) -->
+    <list name="labelBlocks">
+      <item>transitions</item>
+      <item>observations</item>
+      <item>interventions</item>
+      <item>reactive_interventions</item>
+      <item>tables</item>
+      <item>scenarios</item>
+      <item>events</item>
+      <item>functions</item>
+    </list>
+    <!-- Blocks where name: is just a declaration (parameter, dimension, ...) -->
+    <list name="plainBlocks">
+      <item>compartments</item>
+      <item>parameters</item>
+      <item>forcing</item>
+      <item>quantities</item>
+      <item>contrasts</item>
+      <item>ode</item>
+      <item>output</item>
+      <item>simulate</item>
+      <item>init</item>
+      <item>timepoints</item>
+      <item>dimensions</item>
+      <item>balance</item>
+    </list>
+    <list name="directives">
+      <item>let</item>
+      <item>stratify</item>
+      <item>time_unit</item>
+      <item>origin</item>
+      <item>description</item>
+    </list>
+    <list name="control">
+      <item>if</item>
+      <item>then</item>
+      <item>else</item>
+      <item>when</item>
+      <item>where</item>
+      <item>in</item>
+      <item>by</item>
+      <item>only</item>
+      <item>every</item>
+      <item>at</item>
+      <item>at_day</item>
+      <item>from</item>
+      <item>to</item>
+      <item>until</item>
+      <item>values</item>
+      <item>and</item>
+      <item>or</item>
+      <item>not</item>
+    </list>
+    <list name="actions">
+      <item>enable</item>
+      <item>disable</item>
+      <item>set</item>
+      <item>scale</item>
+      <item>compose</item>
+      <item>transfer</item>
+      <item>add</item>
+      <item>label</item>
+      <item>tag</item>
+      <item>via</item>
+      <item>action</item>
+      <item>columns</item>
+      <item>emit_schedule</item>
+      <item>extends</item>
+      <item>null</item>
+    </list>
+    <list name="types">
+      <item>rate</item>
+      <item>probability</item>
+      <item>positive</item>
+      <item>count</item>
+      <item>real</item>
+      <item>integer</item>
+    </list>
+    <!-- Functions / distributions / forcing constructors / reductions.
+         Sourced from highlights.scm's function.builtin match sets and the IR
+         PriorDist / Likelihood enums + language-spec forcing section. -->
+    <list name="builtins">
+      <!-- prior distributions (IR PriorDist) -->
+      <item>uniform</item>
+      <item>normal</item>
+      <item>log_normal</item>
+      <item>half_normal</item>
+      <item>truncated_normal</item>
+      <item>log_uniform</item>
+      <item>exponential</item>
+      <!-- likelihoods (IR Likelihood) -->
+      <item>poisson</item>
+      <item>neg_binomial</item>
+      <item>binomial</item>
+      <item>beta_binomial</item>
+      <item>bernoulli</item>
+      <item>diagnostic_test</item>
+      <!-- forcing constructors (spec: forcing) -->
+      <item>sinusoidal</item>
+      <item>periodic</item>
+      <item>periodic_spline</item>
+      <item>piecewise</item>
+      <item>interpolated</item>
+      <!-- date / data helpers -->
+      <item>date</item>
+      <item>date_range</item>
+      <item>add_calendar_days</item>
+      <item>add_calendar_weeks</item>
+      <item>add_calendar_months</item>
+      <item>add_calendar_years</item>
+      <item>read</item>
+      <item>read_levels</item>
+      <item>read_long</item>
+      <item>defines</item>
+      <!-- observation / series constructors -->
+      <item>incidence</item>
+      <item>prevalence</item>
+      <item>cumulative</item>
+      <item>overdispersed</item>
+      <item>deterministic</item>
+      <!-- math -->
+      <item>exp</item>
+      <item>log</item>
+      <item>min</item>
+      <item>max</item>
+      <item>mod</item>
+      <item>abs</item>
+      <item>sqrt</item>
+      <item>floor</item>
+      <item>ceil</item>
+      <item>round</item>
+      <!-- generated-quantity reductions -->
+      <item>sum</item>
+      <item>consecutive</item>
+      <item>final</item>
+      <item>mean</item>
+      <item>integral</item>
+      <item>count_above</item>
+      <item>count_below</item>
+      <item>time_of_max</item>
+      <item>time_of_min</item>
+      <item>first_above</item>
+      <item>last_above</item>
+      <item>first_below</item>
+      <item>last_below</item>
+      <item>observed</item>
+      <item>sum_observed</item>
+      <!-- dwell-law helpers -->
+      <item>erlang</item>
+      <item>hyper_erlang</item>
+      <item>branch</item>
+    </list>
+    <contexts>
+      <!-- Shared rules included by all block-body contexts -->
+      <context name="SharedRules" attribute="Normal Text" lineEndContext="#stay">
+        <DetectChar char="#" attribute="Comment" context="Comment"/>
+        <DetectChar char="&quot;" attribute="String" context="String"/>
+        <RegExpr String="'[a-z_]+" attribute="Unit"/>
+        <StringDetect String="--&gt;" attribute="Operator"/>
+        <DetectChar char="@" attribute="Operator"/>
+        <!-- Numbers with optional underscore separators (100_000, 1_000.5) -->
+        <RegExpr String="\b\d[\d_]*\.[\d_]*([eE][+-]?\d+)?\b" attribute="Number"/>
+        <RegExpr String="\b\d[\d_]*([eE][+-]?\d+)?\b" attribute="Number"/>
+        <keyword String="labelBlocks" attribute="Block" context="WaitBraceLB"/>
+        <keyword String="plainBlocks" attribute="Block" context="WaitBracePB"/>
+        <keyword String="directives" attribute="Directive"/>
+        <keyword String="control" attribute="Control"/>
+        <keyword String="builtins" attribute="Builtin"/>
+        <keyword String="types" attribute="Type"/>
+        <keyword String="actions" attribute="Action"/>
+      </context>
+
+      <!-- Top-level context -->
+      <context name="Normal" attribute="Normal Text" lineEndContext="#stay">
+        <IncludeRules context="SharedRules"/>
+      </context>
+
+      <!-- After a label-block keyword, wait for '{' -->
+      <context name="WaitBraceLB" attribute="Normal Text" lineEndContext="#stay">
+        <DetectChar char="{" attribute="Normal Text" context="LabelBody"/>
+        <DetectChar char="#" attribute="Comment" context="Comment"/>
+      </context>
+
+      <!-- After a plain-block keyword, wait for '{' -->
+      <context name="WaitBracePB" attribute="Normal Text" lineEndContext="#stay">
+        <DetectChar char="{" attribute="Normal Text" context="PlainBody"/>
+        <DetectChar char="#" attribute="Comment" context="Comment"/>
+      </context>
+
+      <!-- Body of transitions, observations, interventions, tables, scenarios, events -->
+      <!-- Labels (identifier before ':') are highlighted here -->
+      <context name="LabelBody" attribute="Normal Text" lineEndContext="#stay">
+        <DetectChar char="}" attribute="Normal Text" context="#pop#pop"/>
+        <!-- Label: identifier (with optional index) before colon -->
+        <RegExpr String="\b[a-z_]\w*(\[[^\]]*\])?\s*(?=:)" attribute="Label" minimal="true"/>
+        <!-- Nested braces (e.g. observations { weekly_cases : { ... } }) -->
+        <DetectChar char="{" attribute="Normal Text" context="NestedBrace"/>
+        <IncludeRules context="SharedRules"/>
+      </context>
+
+      <!-- Body of parameters, dimensions, compartments, etc. -->
+      <!-- No label highlighting; identifiers before ':' are plain text -->
+      <context name="PlainBody" attribute="Normal Text" lineEndContext="#stay">
+        <DetectChar char="}" attribute="Normal Text" context="#pop#pop"/>
+        <DetectChar char="{" attribute="Normal Text" context="NestedBrace"/>
+        <IncludeRules context="SharedRules"/>
+      </context>
+
+      <!-- Nested braces inside any block body -->
+      <context name="NestedBrace" attribute="Normal Text" lineEndContext="#stay">
+        <DetectChar char="}" attribute="Normal Text" context="#pop"/>
+        <DetectChar char="{" attribute="Normal Text" context="NestedBrace"/>
+        <IncludeRules context="SharedRules"/>
+      </context>
+
+      <context name="Comment" attribute="Comment" lineEndContext="#pop">
+      </context>
+      <context name="String" attribute="String" lineEndContext="#pop">
+        <DetectChar char="&quot;" attribute="String" context="#pop"/>
+        <RegExpr String="\\." attribute="String"/>
+      </context>
+    </contexts>
+    <itemDatas>
+      <itemData name="Normal Text" defStyleNum="dsNormal"/>
+      <itemData name="Block"       defStyleNum="dsKeyword" bold="true"/>
+      <itemData name="Directive"   defStyleNum="dsPreprocessor"/>
+      <itemData name="Control"     defStyleNum="dsControlFlow"/>
+      <itemData name="Action"      defStyleNum="dsKeyword"/>
+      <itemData name="Type"        defStyleNum="dsDataType"/>
+      <itemData name="Builtin"     defStyleNum="dsBuiltIn"/>
+      <itemData name="Label"       defStyleNum="dsFunction"/>
+      <itemData name="Operator"    defStyleNum="dsOperator"/>
+      <itemData name="Number"      defStyleNum="dsDecVal"/>
+      <itemData name="String"      defStyleNum="dsString"/>
+      <itemData name="Unit"        defStyleNum="dsSpecialString"/>
+      <itemData name="Comment"     defStyleNum="dsComment"/>
+    </itemDatas>
+  </highlighting>
+  <general>
+    <comments>
+      <comment name="singleLine" start="#"/>
+    </comments>
+    <keywords casesensitive="1"/>
+  </general>
+</language>

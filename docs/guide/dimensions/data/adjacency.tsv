@@ -1,0 +1,7 @@
+patch	patch	weight
+north	south	0.10
+north	east	0.05
+south	north	0.10
+south	east	0.08
+east	north	0.05
+east	south	0.08

@@ -1,0 +1,37 @@
+# SEIR with an Erlang-3 latent period, stated as a dwell-time law
+# Demonstrates: via erlang(...), the compiler-generated stages
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+parameters {
+  beta  : rate in [0.001, 2.0]
+  sigma : rate in [0.01, 2.0]
+  gamma : rate in [0.01, 1.0]
+}
+
+let N = S + E + I + R
+
+transitions {
+  infection : S --> E  @ beta * S * I / N
+  onset     : E --> I  via erlang(stages = 3, rate = sigma)
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = 990
+  E = 5
+  I = 5
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}
+
+scenarios {
+  baseline {
+    label = "Erlang-3 latent period, mean 1/sigma = 5 days"
+    set = { beta = 0.3  sigma = 0.2  gamma = 0.1 }
+  }
+}

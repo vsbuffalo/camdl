@@ -1,0 +1,9 @@
+patch	patch	rate
+north	south	0.008
+north	east	0.003
+south	north	0.008
+south	east	0.005
+south	west	0.012
+east	north	0.003
+east	south	0.005
+west	south	0.012

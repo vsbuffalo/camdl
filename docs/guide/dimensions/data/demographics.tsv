@@ -1,0 +1,4 @@
+patch	pop	init_sus
+north	50000	0.90
+south	30000	0.85
+east	20000	0.80

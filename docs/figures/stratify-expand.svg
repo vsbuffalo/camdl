@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 556" role="img" aria-labelledby="t d">
+  <title id="t">Stratification: written once, expanded by the compiler</title>
+  <desc id="d">Two dimensions, region and age, stratify the model. The compiler expands S into four flat compartments, S_north_child through S_south_adult, and one indexed transition into four. A full index picks one cell, the bare name sums over everything, a row is summed with an explicit sum, and a partial index such as S[north] is refused with E287.</desc>
+  <defs>
+    <marker id="strat-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
+    </marker>
+  </defs>
+
+  <!-- what you write -->
+  <text x="4" y="22" class="t-cap fig-muted">YOU WRITE</text>
+  <rect x="4" y="34" width="290" height="222" rx="4" class="fig-code-bg"/>
+  <g class="t-code-label fig-ink">
+    <text x="18" y="62"><tspan class="tk-kw">dimensions</tspan> {</text>
+    <text x="18" y="84">  region = [north, south]</text>
+    <text x="18" y="106">  age    = [child, adult]</text>
+    <text x="18" y="128">}</text>
+    <text x="18" y="156"><tspan class="tk-pp">stratify</tspan>(<tspan class="tk-cf">by</tspan> = region)</text>
+    <text x="18" y="178"><tspan class="tk-pp">stratify</tspan>(<tspan class="tk-cf">by</tspan> = age)</text>
+    <text x="18" y="206"><tspan class="tk-fu">infection[r in region,</tspan></text>
+    <text x="18" y="228"><tspan class="tk-fu">          a in age]</tspan> : …</text>
+  </g>
+
+  <line x1="302" y1="146" x2="338" y2="146" class="s-arrow" marker-end="url(#strat-arrow)"/>
+
+  <!-- what the compiler makes -->
+  <text x="352" y="22" class="t-cap fig-muted">THE COMPILER MAKES</text>
+  <text x="451" y="58" class="t-label fig-muted" text-anchor="middle">child</text>
+  <text x="575" y="58" class="t-label fig-muted" text-anchor="middle">adult</text>
+  <text x="386" y="104" class="t-label fig-muted" text-anchor="end">north</text>
+  <text x="386" y="162" class="t-label fig-muted" text-anchor="end">south</text>
+
+  <rect x="390" y="68" width="246" height="124" rx="4" class="fig-panel"/>
+  <rect x="394" y="72" width="238" height="56" rx="4" class="fig-accent-soft"/>
+  <rect x="397" y="75" width="108" height="50" rx="4" class="fig-card s-accent" stroke-width="2"/>
+  <text x="451" y="105" class="t-code-cell fig-ink" text-anchor="middle">S_north_child</text>
+  <rect x="521" y="75" width="108" height="50" rx="4" class="fig-card s-line"/>
+  <text x="575" y="105" class="t-code-cell fig-ink" text-anchor="middle">S_north_adult</text>
+  <rect x="397" y="135" width="108" height="50" rx="4" class="fig-card s-line"/>
+  <text x="451" y="165" class="t-code-cell fig-ink" text-anchor="middle">S_south_child</text>
+  <rect x="521" y="135" width="108" height="50" rx="4" class="fig-card s-line"/>
+  <text x="575" y="165" class="t-code-cell fig-ink" text-anchor="middle">S_south_adult</text>
+
+  <!-- legend: what a reference means -->
+  <rect x="352" y="210" width="22" height="16" rx="4" class="fig-card s-accent" stroke-width="2"/>
+  <text x="384" y="223" class="t-code-label t-b fig-accent">S[north, child]</text>
+  <text x="530" y="223" class="t-label fig-muted">one cell</text>
+  <rect x="352" y="236" width="22" height="16" rx="3" class="fig-accent-soft"/>
+  <text x="384" y="249" class="t-code-label t-b fig-ink">sum(a in age, S[north, a])</text>
+  <text x="384" y="268" class="t-label fig-muted">one row, summed explicitly</text>
+  <rect x="352" y="282" width="22" height="16" rx="3" class="fig-panel s-line"/>
+  <text x="384" y="295" class="t-code-label t-b fig-ink">S</text>
+  <text x="404" y="295" class="t-label fig-muted">bare name: sum over all</text>
+  <text x="352" y="322" class="t-code-label fig-bad">S[north]</text>
+  <text x="432" y="322" class="t-label fig-muted">partial index, E287</text>
+
+  <!-- one transition becomes four -->
+  <line x1="4" y1="342" x2="636" y2="342" class="s-line"/>
+  <text x="4" y="374" class="t-label fig-muted">One indexed transition becomes four flat ones:</text>
+  <g class="t-code-label fig-ink">
+    <text x="4" y="406"><tspan class="tk-fu">infection_north_child</tspan> : S_north_child <tspan class="tk-op">→</tspan> I_north_child</text>
+    <text x="4" y="430"><tspan class="tk-fu">infection_north_adult</tspan> : S_north_adult <tspan class="tk-op">→</tspan> I_north_adult</text>
+    <text x="4" y="454"><tspan class="tk-fu">infection_south_child</tspan> : S_south_child <tspan class="tk-op">→</tspan> I_south_child</text>
+    <text x="4" y="478"><tspan class="tk-fu">infection_south_adult</tspan> : S_south_adult <tspan class="tk-op">→</tspan> I_south_adult</text>
+  </g>
+  <text x="4" y="518" class="t-label fig-muted">Parameters indexed the same way expand too (beta_north_child, …):</text>
+  <text x="4" y="542" class="t-label fig-muted">the runtime only ever sees flat names, never indices.</text>
+</svg>

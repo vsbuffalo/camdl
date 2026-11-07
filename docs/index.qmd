@@ -1,0 +1,26 @@
+---
+title: "camdl"
+subtitle: "Compartmental Model Description Language"
+toc: false
+---
+
+camdl describes stochastic compartmental models. A `.camdl` file says what the
+compartments are, how individuals move between them and how fast; the compiler
+expands it to a flat intermediate representation that a Rust runtime simulates
+and fits to data.
+
+The guides and reference pages here are the same text the binary carries:
+`camdl docs <topic>` prints them offline, matched to the installed version.
+The tutorials are website-only, because they show the real output of each
+command, regenerated from the current code every time the site is built.
+
+<!-- figure: architecture, caption: camdl's architecture reshapes how responsibility is split between the modeler and camdl's developers. A researcher needs only to define the model's structure and prior assumptions, not its implementation or inference; camdl's responsibility is to execute the declared model faithfully and exactly. A trajectory inconsistent with the declared semantics is therefore a bug report against camdl, never the researcher's fault, and implementation risk moves from many privately maintained code bases to one audited, tested, externally validated one. -->
+
+::: {.camdl-cards}
+[**camdl by example**<span>The language, one construct at a time.</span>](intro.md)
+[**Cheatsheet**<span>Every DSL form on one page.</span>](dsl-cheatsheet.md)
+[**The fit workflow**<span>From a model and data to a checked posterior.</span>](workflow.md)
+[**Language specification**<span>The normative reference for the DSL.</span>](camdl-language-spec.md)
+[**Dimensions and stratification**<span>Age, place and disease stage, expanded by the compiler.</span>](guide/dimensions.qmd)
+[**Diagnosing a fit**<span>What to do when a fit will not behave.</span>](diagnosing-fits.md)
+:::

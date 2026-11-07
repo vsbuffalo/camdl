@@ -1,0 +1,50 @@
+# Data-driven spatial SEIR: dimensions and tables loaded from TSV files
+# Demonstrates: data-derived dimensions, file-based tables, sparse default
+time_unit = 'days
+
+dimensions {
+  patch = read("data/demographics.tsv", column = "patch")
+}
+
+compartments { S, E, I, R }
+
+stratify(by = patch)
+
+parameters {
+  beta  : rate  in [0.001, 1.0]
+  sigma : rate  in [0.001, 1.0]
+  gamma : rate  in [0.001, 1.0]
+  kappa : rate  in [0.0,   0.5]
+  I0    : count in [1, 1000]
+}
+
+let N[p in patch] = S[p] + E[p] + I[p] + R[p]
+
+tables {
+  pop, init_sus : patch          = read("data/demographics.tsv")
+  adj           : patch × patch  = read("data/adjacency.tsv", default = 0.0)
+}
+
+transitions {
+  infection[p in patch] : S[p] --> E[p]
+    @ beta * S[p] * I[p] / N[p]
+
+  importation[p in patch] : S[p] --> E[p]
+    @ kappa * S[p] * sum(q in patch where p != q, adj[p, q] * I[q] / N[q])
+
+  progression[p in patch] : E[p] --> I[p]  @ sigma * E[p]
+  recovery[p in patch]    : I[p] --> R[p]  @ gamma * I[p]
+}
+
+init {
+  S[p in patch] = pop[p] * init_sus[p]
+  I[north] = I0
+}
+
+simulate { from = 0 'days  to = 90 'days }
+
+scenarios {
+  baseline {
+    set = { beta = 0.3  sigma = 0.2  gamma = 0.1  kappa = 0.05  I0 = 10 }
+  }
+}

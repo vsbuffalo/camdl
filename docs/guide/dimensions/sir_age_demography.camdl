@@ -1,0 +1,65 @@
+# SIR with 5 age groups, consecutive aging, birth, and death
+# Demonstrates: consecutive(age), c in compartments, age_dur table
+time_unit = 'days
+
+compartments { S, I, R }
+
+dimensions {
+  age = [age_0_5, age_5_15, age_15_50, age_50_65, age_65p]
+}
+
+stratify(by = age)
+
+let N_local[a in age] = S[a] + I[a] + R[a]
+
+parameters {
+  beta  : rate in [0.001, 2.0]
+  gamma : rate in [0.01, 1.0]
+  mu    : rate in [1e-6, 0.01]
+}
+
+tables {
+  age_dur : age 'years = [5, 10, 35, 15, 20]
+}
+
+transitions {
+  infection[a in age] : S[a] --> I[a]
+    @ beta * S[a] * sum(b in age, I[b] / N_local[b])
+
+  recovery[a in age] : I[a] --> R[a]
+    @ gamma * I[a]
+
+  # Aging: consecutive pairs across all compartments
+  aging[c in compartments, (a, a_next) in consecutive(age)]
+    : c[a] --> c[a_next]
+    @ (1 / age_dur[a]) * c[a]
+
+  # Death: age-specific, all compartments
+  death[c in compartments, a in age] : c[a] -->
+    @ mu * c[a]
+
+  # Birth: into youngest age group
+  birth : --> S[age_0_5]
+    @ mu * sum(a in age, N_local[a])
+}
+
+init {
+  S[age_0_5]   = 1000
+  S[age_5_15]  = 2000
+  S[age_15_50] = 5000
+  S[age_50_65] = 2000
+  S[age_65p]   = 1000
+  I[age_0_5]   = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 365 'days
+}
+
+scenarios {
+  baseline {
+    label = "default"
+    set = { beta = 0.3  gamma = 0.1  mu = 0.000027 }
+  }
+}

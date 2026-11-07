@@ -1,0 +1,94 @@
+name: Docs site
+
+# Renders the documentation website (docs/_quarto.yml, `make docs-site`) and,
+# on main, publishes it to GitHub Pages. Pull requests render only, so a page
+# that fails to build is caught before merge, not after deploy.
+#
+# The tutorial pages (docs/guide/*.qmd) run their `camdl` commands at render
+# time, so this job builds camdl first and a command that fails, or a model
+# that no longer compiles, fails the render. That is also why code changes
+# (ocaml/, rust/) trigger it: they can change or break a tutorial's output.
+# The reference pages execute nothing; their examples are checked by the
+# existing doc gates — Doctest, CLI docs and Data spec.
+#
+# One-time setup: Settings → Pages → Source: "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "ocaml/**"
+      - "rust/**"
+      - "Makefile"
+      - ".github/workflows/docs-site.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "ocaml/**"
+      - "rust/**"
+      - "Makefile"
+      - ".github/workflows/docs-site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.2"
+          dune-cache: true
+
+      - name: Install OCaml dependencies
+        run: |
+          cd ocaml
+          opam install . --deps-only --yes
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: quarto-dev/quarto-actions/setup@v2
+        with:
+          version: 1.9.38
+
+      - name: Build camdl and render site
+        run: opam exec -- make docs-site
+
+      - name: Refuse unpublished files in the site
+        # Only rendered pages and Quarto's own assets belong in _site/. A raw
+        # .md here means a page linked a docs/ file that is not published and
+        # the link filter (docs/_web/unpublished-links.lua) did not rewrite it.
+        run: |
+          stray=$(find docs/_site -name '*.md' -print)
+          if [ -n "$stray" ]; then
+            echo "unpublished markdown copied into the site:"; echo "$stray"; exit 1
+          fi
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+        with:
+          path: docs/_site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: render
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

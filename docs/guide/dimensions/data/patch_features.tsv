@@ -1,0 +1,5 @@
+patch	pop	area_km2	density
+north	120000	4500.0	26.7
+south	85000	2100.0	40.5
+east	45000	800.0	56.3
+west	200000	6200.0	32.3

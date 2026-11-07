@@ -1,0 +1,5 @@
+age	age	rate
+child	child	12.0
+child	adult	3.0
+adult	child	3.0
+adult	adult	8.0
