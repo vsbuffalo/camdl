@@ -492,6 +492,7 @@ pub(crate) fn run_camdlc_compile(
     if let Some(q) = quantities {
         cmd.arg("--quantities").arg(&q.path);
     }
+    pass_stderr_color_policy(&mut cmd);
     let output = cmd.output();
 
     spinner.finish_and_clear();
@@ -517,16 +518,27 @@ pub(crate) fn camdlc_emit_deps(
     deps_out: &std::path::Path,
 ) -> Result<(), String> {
     let camdlc = find_camdlc()?;
-    let output = std::process::Command::new(&camdlc)
-        .arg(camdl_path)
-        .arg("--emit-deps")
-        .arg(deps_out)
-        .output()
+    let mut cmd = std::process::Command::new(&camdlc);
+    cmd.arg(camdl_path).arg("--emit-deps").arg(deps_out);
+    pass_stderr_color_policy(&mut cmd);
+    let output = cmd.output()
         .map_err(|e| format!("cannot run {}: {}", camdlc.display(), e))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
     }
     Ok(())
+}
+
+/// camdlc's stderr is captured and printed by camdl, so camdlc's own terminal
+/// check sees a pipe and would never colour. Hand it camdl's stderr decision
+/// instead, through the two variables the shared policy reads, so a compile
+/// error is coloured exactly when camdl's own stderr is.
+fn pass_stderr_color_policy(cmd: &mut std::process::Command) {
+    if crate::style::enabled() {
+        cmd.env("CLICOLOR_FORCE", "1");
+    } else {
+        cmd.env("NO_COLOR", "1");
+    }
 }
 
 // ─── IR path resolver ────────────────────────────────────────────────────────

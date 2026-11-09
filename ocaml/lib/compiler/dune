@@ -6,7 +6,7 @@
  ; new likelihood variant is a compile error until its arguments are wired for
  ; differentiation (gh#180).
  (flags (:standard -w @8))
- (libraries ir yojson fmt))
+ (libraries ir yojson fmt unix))
 
 (ocamllex (modules lexer))
 

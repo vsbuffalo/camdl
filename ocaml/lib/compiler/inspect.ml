@@ -1377,13 +1377,8 @@ type inspect_opts = {
 let run_inspect path opts =
   let name = Filename.basename path |> Filename.remove_extension in
   let src  = Compiler.read_file path in
-  if opts.no_color then (
-    Fmt.set_style_renderer Fmt.stdout `None;
-    Fmt.set_style_renderer Fmt.stderr `None
-  ) else (
-    Fmt.set_style_renderer Fmt.stdout `Ansi_tty;
-    Fmt.set_style_renderer Fmt.stderr `Ansi_tty
-  );
+  if opts.no_color then Term_style.no_color_flag := true;
+  Term_style.apply_policy ();
   match Compiler.compile_detail_result ~name ~filename:path src with
   | Error e when e = "compilation failed"
               || (String.length e > 0 && e.[0] = '[') -> exit 1
@@ -1434,8 +1429,7 @@ let run_inspect path opts =
 let run_check path =
   let name = Filename.basename path |> Filename.remove_extension in
   let src  = Compiler.read_file path in
-  Fmt.set_style_renderer Fmt.stdout `Ansi_tty;
-  Fmt.set_style_renderer Fmt.stderr `Ansi_tty;
+  Term_style.apply_policy ();
   let (detail, diags, source) = Compiler.collect_detail ~name ~filename:path src in
   match detail with
   | None ->

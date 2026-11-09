@@ -229,7 +229,7 @@ let render t cache : string =
     Printf.eprintf "%s\n" msg;
     msg
   ) else (
-    Fmt.set_style_renderer Fmt.stderr `Ansi_tty;
+    Fmt.set_style_renderer Fmt.stderr (Term_style.renderer `Stderr);
     render_all t cache Fmt.stderr;
     "compilation failed"
   )
