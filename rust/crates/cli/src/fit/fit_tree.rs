@@ -1,10 +1,10 @@
 //! Canonical fit-directory walker.
 //!
 //! One module, two functions, used by every consumer that needs to
-//! enumerate fit-stage runs:
+//! enumerate fit-method runs:
 //!
 //! - [`walk_fit_dir`] — given one fit_dir (`results/fits/<stem>-<hash>/`)
-//!   returns one [`MethodNode`] per `FitStage` `runid::RunRecord` leaf found
+//!   returns one [`MethodNode`] per `FitMethod` `runid::RunRecord` leaf found
 //!   underneath, each carrying the leaf's [`FitMethodView`] (method, seed,
 //!   best_loglik, …) and its path-derived axes.
 //! - [`walk_fits_root`] — given the top-level `results/fits/` returns one
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use crate::fit::fit_view::{FitMethodView, FitView};
 
-/// One discovered fit-stage run inside a fit_dir.
+/// One discovered fit-method run inside a fit_dir.
 ///
 /// `axes` (on the method view) carries the (data_kind, fit_seed, sweep_slug)
 /// triple extracted from the path relative to the enclosing fit_dir. When the
@@ -66,7 +66,7 @@ pub struct FitDirEntry {
     pub view: FitView,
 }
 
-/// Walk one fit directory and return every `FitStage` leaf found underneath,
+/// Walk one fit directory and return every `FitMethod` leaf found underneath,
 /// each as a [`MethodNode`]. Filesystem layout is intentionally not constrained
 /// beyond "every method writes a `runid::RunRecord` leaf": this walker works on
 /// real-data fits, synthetic-replicate fits, sweep cells, any combination, and
@@ -98,7 +98,7 @@ pub fn walk_fit_dir(fit_dir: &Path) -> io::Result<Vec<MethodNode>> {
 }
 
 /// Walk `results/fits/` (or whatever root the caller passes) and return one
-/// entry per fit segment. A child dir is a fit segment iff it holds `FitStage`
+/// entry per fit segment. A child dir is a fit segment iff it holds `FitMethod`
 /// leaves and a provenance sidecar ([`FitView::read`]); other dirs are skipped.
 ///
 /// Returns entries in lexicographic order on `fit_dir`.
@@ -112,10 +112,10 @@ pub fn walk_fits_root(root: &Path) -> io::Result<Vec<FitDirEntry>> {
     }
     // gh#147: a CAS fit is a segment dir `fits/{stem}-{h8}/` holding its
     // method-leaf subdirs (`{method}-{h8}/seed_N-{h8}/run.json`, kind
-    // FitStage) plus the fit-level sidecar. `FitView::read` derives ONE
+    // FitMethod) plus the fit-level sidecar. `FitView::read` derives ONE
     // fit-level view per segment from those leaves — the same projection
     // `table_row::build_row` consumes, so the table row and its source entry
-    // agree. A dir with no FitStage leaves is not a fit segment and is skipped.
+    // agree. A dir with no FitMethod leaves is not a fit segment and is skipped.
     let entries = std::fs::read_dir(root)?;
     for e in entries.flatten() {
         let p = e.path();
@@ -251,19 +251,19 @@ mod tests {
         .unwrap();
     }
 
-    /// Place a `FitStage` `runid::RunRecord` leaf at `<fit_dir>/<rel>/run.json`.
+    /// Place a `FitMethod` `runid::RunRecord` leaf at `<fit_dir>/<rel>/run.json`.
     /// `ord` seeds a valid-hex run_id; `method`/`method`/`seed` go in `inputs`.
     fn place_method(fit_dir: &Path, rel: &str, ord: u32, name: &str, method: &str, seed: u64) {
         let dir = fit_dir.join(rel);
         std::fs::create_dir_all(&dir).unwrap();
         let run_id = format!("{:0<64}", format!("ae{ord:06x}"));
         let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"deadbeef00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"method","label":"{name}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_{seed}","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":{seed},"n_chains":2,"best_loglik":-100.0,"best_chain":1}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
+            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"deadbeef00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"method","label":"{name}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_{seed}","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":{seed},"n_chains":2,"best_loglik":-100.0,"best_chain":1}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
         );
         std::fs::write(dir.join("run.json"), rec).unwrap();
     }
 
-    /// gh#147: write a CAS fit segment at `seg` — one FitStage leaf
+    /// gh#147: write a CAS fit segment at `seg` — one FitMethod leaf
     /// (`if2-<h8>/seed_1-<h8>/run.json`) plus the fit-level sidecar — the
     /// shape `walk_fits_root` reads. `fit_h8` (8 hex) seeds the shared
     /// `fit`-level hash so each segment gets a distinct fit hash.
@@ -273,7 +273,7 @@ mod tests {
         let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
         let run_id = format!("{:0<64}", format!("{fit_h8}01"));
         let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"if2","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
+            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"if2","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
         );
         std::fs::write(leaf.join("run.json"), rec).unwrap();
         std::fs::write(
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn surfaces_non_canonical_layout_with_axes_none() {
-        // A user might park a fit-stage leaf under a one-off path (e.g. for a
+        // A user might park a fit-method leaf under a one-off path (e.g. for a
         // debugging copy). The walker should still surface it — `axes` is None
         // signals "not in canonical layout."
         let tmp = tempdir("noncanon");
@@ -412,12 +412,12 @@ mod tests {
         let dirs = ["fit_a-11111111", "fit_b-22222222"];
         for name in dirs.iter() {
             let d = fits_root.join(name);
-            // gh#147: a CAS fit segment (one FitStage leaf + the fit-level
+            // gh#147: a CAS fit segment (one FitMethod leaf + the fit-level
             // sidecar) — the shape `walk_fits_root`/`FitView::read` reads.
             let h8 = name.split('-').next_back().unwrap();
             write_cas_fit_seg(&d, h8);
         }
-        // A dir with no FitStage leaves (and no sidecar) — should be skipped.
+        // A dir with no FitMethod leaves (and no sidecar) — should be skipped.
         let intruder = fits_root.join("not_a_fit");
         std::fs::create_dir_all(&intruder).unwrap();
         std::fs::write(intruder.join("README"), b"not a fit").unwrap();

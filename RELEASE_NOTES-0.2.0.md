@@ -195,6 +195,15 @@ order. Every handle now names one run, or is refused with the runs listed.
 
 ### Other breaking changes
 
+- **A fit leaf's `run.json` says `"kind": "fit_method"`, not `"fit_stage"`.**
+  The kind was the last stored spelling of the `[stages]` era; a script that
+  selects fit leaves by `kind` must match the new string. A store written before
+  this change is not read: `camdl list`, `show`, `fit summary` and `fit table`
+  skip each old fit leaf with a warning that names the old kind and says to
+  re-run. `format_version` stays 1, since no other kind's record changed.
+  Migration: delete old fit leaves and re-run the fits (every fit re-keys in
+  this release anyway; see _Run identity_).
+
 - **`fit summary` no longer compares a method with the one listed before it.**
   The `vs <previous>: Δ = … nats ✓/✗` line (text and Markdown) and the
   `method_progression` field (`--format json`) compared successive stages of the

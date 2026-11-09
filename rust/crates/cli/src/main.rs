@@ -1744,7 +1744,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                         .unwrap_or_else(|| pf.clone());
                     vec![runid::inputs::ArtifactRef {
                         run_id,
-                        kind: runid::ArtifactKind::FitStage,
+                        kind: runid::ArtifactKind::FitMethod,
                         artifact,
                         digest,
                     }]

@@ -27,7 +27,7 @@
 //!     {fit_stem}-{h8}/                        # FitDigest (model + data + fit-wide config)
 //!       {algorithm}-{h8}/                     # e.g. pgas-{h8}, if2-{h8}
 //!         seed_{n}-{h8}/
-//!           run.json                          # RunRecord (kind = fit_stage)
+//!           run.json                          # RunRecord (kind = fit_method)
 //! ```
 //!
 //! Browsed uniformly by `camdl list / show / cat`, which read `run.json`

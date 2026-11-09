@@ -54,7 +54,7 @@ fn resolve_anchors_into_temp_ir(
     Ok(out.to_string_lossy().into_owned())
 }
 
-pub mod cas;  // gh#147 M3.2: fit-stage CAS identity (resolve_fit_method)
+pub mod cas;  // gh#147 M3.2: fit-method CAS identity (resolve_fit_method)
 pub mod coeff_guard;  // gh#342 P4: NUTS guard — param reaching a coefficient only via an init
 pub mod config_v2;
 pub mod loglik;  // gh#280: LoglikType — the single typed source for loglik class
@@ -1331,7 +1331,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 eprintln!("error: fit-method resume key: {}", e);
                 std::process::exit(1);
             });
-        let cas_path = runid::store_path(&cas_root, runid::ArtifactKind::FitStage, &resolved.levels);
+        let cas_path = runid::store_path(&cas_root, runid::ArtifactKind::FitMethod, &resolved.levels);
         // gh#147 (M3.2): write the fit-level sidecar once per fit segment
         // (`cas_path`'s grandparent: `.../fits/{stem}-{h8}/`). Done before the
         // cache-hit short-circuit below so the label/archive stay current even
@@ -1459,7 +1459,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // is a post-run result); the final inputs are supplied to `finalize`.
         // The upstream lineage deps ride in `RecordMeta`.
         let resolved_artifact = crate::resolve::ResolvedArtifact {
-            kind: runid::ArtifactKind::FitStage,
+            kind: runid::ArtifactKind::FitMethod,
             levels: resolved.levels.clone(),
             run_id: resolved.run_id,
             display_inputs: serde_json::Value::Null,
@@ -2943,7 +2943,7 @@ pub fn validate_label(raw: &str) -> Result<String, String> {
 }
 
 /// Set or update the user-display label on any run kind (sim, fit,
-/// profile, replicate-set, fit-stage).
+/// profile, replicate-set, fit-method).
 ///
 /// Resolves the hash prefix by walking `<root>/{sims,fits,profiles}/**`
 /// for `run.json` files whose `run_id` starts with the prefix. The label is

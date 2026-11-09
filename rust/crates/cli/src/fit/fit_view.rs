@@ -2,7 +2,7 @@
 //! per-method views every fit consumer needs.
 //!
 //! A content-addressed fit is a segment directory `fits/{stem}-{h8}/` holding
-//! one `FitStage` `runid::RunRecord` leaf per (cell × method) plus a single
+//! one `FitMethod` `runid::RunRecord` leaf per (cell × method) plus a single
 //! fit-level provenance sidecar (`fit.meta.json`). There is no fit-wide
 //! `run.json`: the fit-level identity is the `fit`-level hash shared by every
 //! leaf, and the fit-wide attributes the leaves don't carry (user `--label`,
@@ -25,7 +25,7 @@ use crate::chain_index::ChainIndex;
 use crate::fit::fit_tree::{derive_axes, MethodAxes};
 use crate::run_meta::{InferenceBackend, FitAlgorithm, ParameterProvenance, ResolvedPriorEntry};
 
-/// One fit-stage leaf, projected to the headline numbers the fit consumers
+/// One fit-method leaf, projected to the headline numbers the fit consumers
 /// read directly from the leaf's `RunRecord` (`inputs` + path-derived `axes`).
 #[derive(Debug, Clone)]
 pub struct FitMethodView {
@@ -136,14 +136,14 @@ fn skipped_leaf_line(dir: &Path, why: &str) -> String {
     format!("warning: skipping fit leaf {}: {why}", dir.display())
 }
 
-/// Build a [`FitMethodView`] from a fit-stage leaf record + its directory.
-/// Errs, with the reason, when the record is not a `FitStage` or its `inputs`
+/// Build a [`FitMethodView`] from a fit-method leaf record + its directory.
+/// Errs, with the reason, when the record is not a `FitMethod` or its `inputs`
 /// lacks a `method` this camdl knows — a leaf written by a removed algorithm
 /// (`nuts` on the ODE backend) is the case that matters. The caller says so
 /// on stderr ([`skipped_leaf_line`]) rather than dropping the leaf silently.
 fn method_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<FitMethodView, String> {
-    if rec.kind != ArtifactKind::FitStage {
-        return Err("not a fit-stage record".into());
+    if rec.kind != ArtifactKind::FitMethod {
+        return Err("not a fit-method record".into());
     }
     let inputs = rec
         .inputs
@@ -188,11 +188,11 @@ fn method_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<Fi
 }
 
 /// The segment a fit leaf directory sits in (`<seg>/<algorithm>-<h8>/seed_<n>-<h8>`),
-/// or `None` when `dir` is not a fit leaf (holds no `FitStage` `run.json`).
+/// or `None` when `dir` is not a fit leaf (holds no `FitMethod` `run.json`).
 pub fn leaf_segment(dir: &Path) -> Option<PathBuf> {
     let bytes = std::fs::read(dir.join("run.json")).ok()?;
     let rec: RunRecord = serde_json::from_slice(&bytes).ok()?;
-    if rec.kind != ArtifactKind::FitStage {
+    if rec.kind != ArtifactKind::FitMethod {
         return None;
     }
     let lexical = dir.parent().and_then(Path::parent).filter(|p| !p.as_os_str().is_empty());
@@ -223,7 +223,7 @@ pub fn predictions_dir(segment: &Path, run_id: &str, options_key: Option<&str>) 
 pub fn leaf_run_id(dir: &Path) -> Option<String> {
     let bytes = std::fs::read(dir.join("run.json")).ok()?;
     let rec: RunRecord = serde_json::from_slice(&bytes).ok()?;
-    (rec.kind == ArtifactKind::FitStage).then(|| rec.run_id.to_hex())
+    (rec.kind == ArtifactKind::FitMethod).then(|| rec.run_id.to_hex())
 }
 
 /// Whether two paths name one directory, lexically or after resolving links.
@@ -245,14 +245,14 @@ impl FitView {
     }
 
     /// Project a CAS fit segment (`fits/{stem}-{h8}/`) into a fit-level view.
-    /// Collects its `FitStage` leaves, sorts by method label then seed, reads
+    /// Collects its `FitMethod` leaves, sorts by method label then seed, reads
     /// the fit-level sidecar, and folds them.
     ///
     /// Provenance integrity (gh#147): a segment with method leaves but no
     /// sidecar is malformed — skipped with a loud error rather than surfaced
     /// with empty provenance. For a Bayesian fit (`pgas`/`pmmh` leaf), an empty
     /// `resolved_priors` is a dropped-provenance bug signal (gh#75) and is
-    /// flagged. Returns `None` when `seg` holds no `FitStage` leaves.
+    /// flagged. Returns `None` when `seg` holds no `FitMethod` leaves.
     ///
     /// A leaf directory reads as the view of that one run (gh#896): the
     /// problem's provenance from the segment the leaf sits in, and `methods`
@@ -266,7 +266,7 @@ impl FitView {
         let seg = seg.as_path();
         let mut leaves: Vec<(PathBuf, RunRecord)> = crate::cas_read::walk_records(seg)
             .into_iter()
-            .filter(|(_, r)| r.kind == ArtifactKind::FitStage)
+            .filter(|(_, r)| r.kind == ArtifactKind::FitMethod)
             .filter(|(d, _)| only.is_none_or(|o| same_dir(d, o)))
             .collect();
         if leaves.is_empty() {
@@ -386,7 +386,7 @@ mod tests {
         let leaf = dir.join("nuts-1fb03eee").join("seed_1-06cbd6b3");
         std::fs::create_dir_all(&leaf).unwrap();
         let rec: RunRecord = serde_json::from_str(&format!(
-            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"method","label":"nuts","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"nuts","backend":"ode","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-07-07T00:00:00Z","argv":["camdl","fit","run"]}}}}"#,
+            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"method","label":"nuts","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"nuts","backend":"ode","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-07-07T00:00:00Z","argv":["camdl","fit","run"]}}}}"#,
             run_id = "ab".repeat(32),
         ))
         .unwrap();
@@ -403,7 +403,7 @@ mod tests {
 
     /// Write a realistic two-method CAS fit segment under `seg` — the shape
     /// two files with one problem half produce:
-    /// `{if2,pgas}-<h8>/seed_1-<h8>/run.json` `FitStage` leaves plus the
+    /// `{if2,pgas}-<h8>/seed_1-<h8>/run.json` `FitMethod` leaves plus the
     /// fit-level `fit.meta.json` sidecar. Mirrors the on-disk shape the
     /// runner writes. `fit_h8` seeds the shared `fit`-level hash.
     fn write_two_method_fit(seg: &Path, fit_h8: &str) {
@@ -419,7 +419,7 @@ mod tests {
             // run_id must be valid 64-char hex (ContentHash rejects non-hex).
             let run_id = format!("{:0<64}", format!("{fit_h8}0{ord}"));
             let rec = format!(
-                r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":{best_ll},"best_chain":{best_chain}}},"provenance":{{"created_at":"{created_at}","argv":["camdl","fit","run"]}}}}"#
+                r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":{best_ll},"best_chain":{best_chain}}},"provenance":{{"created_at":"{created_at}","argv":["camdl","fit","run"]}}}}"#
             );
             std::fs::write(leaf.join("run.json"), rec).unwrap();
         }

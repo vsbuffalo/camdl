@@ -185,7 +185,7 @@ fn trace_of_post_leaf(out: &Path) -> String {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(
                 &std::fs::read_to_string(&rj).unwrap_or_default(),
             ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
+                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
                     return std::fs::read_to_string(d.join("chain_0/trace.tsv"))
                         .expect("read chain_0/trace.tsv");
                 }
@@ -195,7 +195,7 @@ fn trace_of_post_leaf(out: &Path) -> String {
             for e in es.flatten() { if e.path().is_dir() { stack.push(e.path()); } }
         }
     }
-    panic!("no fit_stage leaf under {}", out.join("fits").display());
+    panic!("no fit_method leaf under {}", out.join("fits").display());
 }
 
 fn run_fit(bin: &Path, fit: &Path) {

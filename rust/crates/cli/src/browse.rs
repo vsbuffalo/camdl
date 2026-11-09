@@ -433,13 +433,13 @@ fn show_sim_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     println!("  {}", rec.provenance.argv.join(" "));
 }
 
-/// Render a `RunRecord` fit-stage leaf: the factored levels, the run_id
+/// Render a `RunRecord` fit-method leaf: the factored levels, the run_id
 /// address, the `deps` (lineage), and the recorded `inputs` (display-only).
 /// Mirrors `show_sim_record` for the CAS fit path.
 fn show_fit_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     let rec = &leaf.record;
     println!("{}", "path".bright_black()); println!("  {}", rel_path.cyan());
-    println!("{}", "kind".bright_black()); println!("  fit_stage");
+    println!("{}", "kind".bright_black()); println!("  fit_method");
     println!("{}", "fit".bright_black()); println!("  {}", leaf.level_label("fit"));
     println!("{}", "method".bright_black()); println!("  {}", leaf.level_label("method"));
     println!("{}", "seed".bright_black()); println!("  {}", leaf.level_label("seed"));
@@ -1253,7 +1253,7 @@ fn discover_fits(root: &str) -> Result<Vec<FitEntry>, String> {
 #[derive(Debug)]
 enum Resolved {
     Sim { leaf: cas_read::Leaf, rel_path: String, created: SystemTime },
-    /// `FitStage` leaf under `fits/`.
+    /// `FitMethod` leaf under `fits/`.
     Fit { leaf: cas_read::Leaf, rel_path: String, created: SystemTime },
     /// `ProfilePoint` leaf under `profiles/`.
     Profile { leaf: cas_read::Leaf, rel_path: String, created: SystemTime },
@@ -1317,7 +1317,7 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
                 let created = leaf_created(&leaf);
                 let rel_path = pathdiff_str(as_path, &cwd);
                 return Ok(match kind {
-                    runid::ArtifactKind::FitStage => Resolved::Fit { leaf, rel_path, created },
+                    runid::ArtifactKind::FitMethod => Resolved::Fit { leaf, rel_path, created },
                     runid::ArtifactKind::ProfilePoint => Resolved::Profile { leaf, rel_path, created },
                     runid::ArtifactKind::Pfilter => Resolved::Pfilter { leaf, rel_path, created },
                     runid::ArtifactKind::Survey => Resolved::Survey { leaf, rel_path, created },
@@ -1326,7 +1326,12 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
                 });
             }
         }
-        return Err(format!("could not read run.json at {}", as_path.display()));
+        let why = std::fs::read(as_path.join("run.json"))
+            .ok()
+            .and_then(|b| runid::renamed_kind(&b))
+            .map(|w| format!(": {w}"))
+            .unwrap_or_default();
+        return Err(format!("could not read run.json at {}{why}", as_path.display()));
     }
 
     // Hash-prefix form.
@@ -1439,7 +1444,7 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
                 msg.push_str(&format!("  {:<14} {}\n", "sim", rel));
             }
             for (_, rel, _) in &fit_matches {
-                msg.push_str(&format!("  {:<14} {}\n", "fit_stage", rel));
+                msg.push_str(&format!("  {:<14} {}\n", "fit_method", rel));
             }
             for (_, rel, _) in &profile_matches {
                 msg.push_str(&format!("  {:<14} {}\n", "profile_point", rel));

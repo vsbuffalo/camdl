@@ -2,7 +2,7 @@
 //!
 //! A generic, Layout-driven walk: the presence of a parseable `RunRecord`
 //! `run.json` is the only discovery signal — no hardcoded level depth. Every
-//! run kind (sim / fit-stage / profile-point / pfilter / survey) is discovered
+//! run kind (sim / fit-method / profile-point / pfilter / survey) is discovered
 //! here; the per-kind projections live in `browse` and `fit::fit_view`.
 
 use std::collections::HashSet;
@@ -167,6 +167,24 @@ impl LeafGate<'_> {
     }
 }
 
+/// Say once per path, on stderr, that a skipped `run.json` was written by an
+/// older camdl under a since-renamed `kind` ([`runid::renamed_kind`]). Any
+/// other unreadable record is skipped silently, as before.
+fn warn_if_renamed_kind(run_json: &Path, bytes: &[u8]) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let Some(why) = runid::renamed_kind(bytes) else { return };
+    let first = WARNED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut seen| seen.insert(run_json.to_path_buf()))
+        .unwrap_or(true);
+    if first {
+        eprintln!("warning: skipping {}: {why}.", run_json.display());
+    }
+}
+
 /// Recursively collect every `(dir, RunRecord)` under `subtree` whose dir holds
 /// a parseable `RunRecord` `run.json` **that `gate` admits**. Hidden dirs
 /// (`.staging`, `.quarantine`) are skipped. Descends through leaves too, but a
@@ -202,13 +220,20 @@ fn walk_gated(subtree: &Path, gate: &LeafGate) -> Vec<(PathBuf, RunRecord)> {
         // A header that does not read could not have parsed as a full
         // `RunRecord` either, so treating it as not-admitted drops exactly
         // what the full parse dropped.
-        let admitted =
-            !gate.is_selective() || run_header(&bytes).is_some_and(|h| gate.admits(&h));
+        let header = gate.is_selective().then(|| run_header(&bytes));
+        let admitted = match &header {
+            None => true,
+            Some(h) => h.as_ref().is_some_and(|h| gate.admits(h)),
+        };
+        if matches!(header, Some(None)) {
+            warn_if_renamed_kind(&rj, &bytes);
+        }
         if admitted {
             #[cfg(test)]
             FULL_PARSES.with(|n| n.set(n.get() + 1));
-            if let Ok(rec) = serde_json::from_slice::<RunRecord>(&bytes) {
-                out.push((dir, rec));
+            match serde_json::from_slice::<RunRecord>(&bytes) {
+                Ok(rec) => out.push((dir, rec)),
+                Err(_) => warn_if_renamed_kind(&rj, &bytes),
             }
         }
     }
@@ -357,15 +382,15 @@ pub fn resolve_sim_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
     resolve_prefix_indexed(root, ArtifactKind::Sim, prefix, walk_sim_leaves)
 }
 
-/// All `fits/` leaves of kind `FitStage` (new-format fit-stage runs, M3.2).
+/// All `fits/` leaves of kind `FitMethod` (new-format fit-method runs, M3.2).
 pub fn walk_fit_leaves(root: &Path) -> Vec<Leaf> {
-    walk_kind(root, ArtifactKind::FitStage, Bounds::default())
+    walk_kind(root, ArtifactKind::FitMethod, Bounds::default())
 }
 
 /// New-format fit methods whose `run_id` hex matches `prefix` (for `show`/`cat`
 /// prefix resolution alongside `resolve_sim_prefix`).
 pub fn resolve_fit_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
-    resolve_prefix_indexed(root, ArtifactKind::FitStage, prefix, walk_fit_leaves)
+    resolve_prefix_indexed(root, ArtifactKind::FitMethod, prefix, walk_fit_leaves)
 }
 
 /// All `profiles/` leaves of kind `ProfilePoint` (new-format profile-point

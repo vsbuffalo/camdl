@@ -1183,12 +1183,12 @@ fn write_obs_into_cas(
 
 #[cfg(test)]
 mod tests {
-    /// A leaf directory holding a minimal fit-stage `run.json` with `label`.
+    /// A leaf directory holding a minimal fit-method `run.json` with `label`.
     fn record_leaf(tag: &str, label: Option<&str>) -> std::path::PathBuf {
         let leaf = crate::test_support::unique_temp_dir(tag).join("if2-00000000").join("seed_1-00000000");
         std::fs::create_dir_all(&leaf).unwrap();
         let mut rec = serde_json::json!({
-            "format_version": 1, "kind": "fit_stage", "run_id": "ab".repeat(32),
+            "format_version": 1, "kind": "fit_method", "run_id": "ab".repeat(32),
             "hash_version": 1, "ir_version": "0.7", "engine_version": "0.1.0+test",
             "levels": [], "status": "completed", "artifacts": {}, "inputs": {"method": "if2"},
             "provenance": {},

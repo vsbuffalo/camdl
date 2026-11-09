@@ -541,7 +541,7 @@ pub fn fit_level_hash(
 /// right. Pass the hash from [`fit_level_hash`] (the `fit`-level
 /// `ContentHash`).
 pub fn fit_segment_dir(root: &Path, stem: &str, fit_hash: &ContentHash) -> std::path::PathBuf {
-    root.join(ArtifactKind::FitStage.store_dir())
+    root.join(ArtifactKind::FitMethod.store_dir())
         .join(format!("{}-{}", runid::path_label(stem), fit_hash.short8()))
 }
 
@@ -576,7 +576,7 @@ fn resolved_obs_alignment(algorithm: &Algorithm, problem: &Problem) -> ResolvedO
 pub fn resolve_fit_method(ctx: &FitMethodCtx) -> Result<ResolvedFitMethod, String> {
     let levels = fit_method_levels(ctx, ctx.method.algorithm.cas_target_length())?;
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
-    let rid = run_id(ArtifactKind::FitStage, &level_hashes);
+    let rid = run_id(ArtifactKind::FitMethod, &level_hashes);
 
     Ok(ResolvedFitMethod { levels, run_id: rid })
 }
@@ -603,7 +603,7 @@ pub fn resolve_fit_method(ctx: &FitMethodCtx) -> Result<ResolvedFitMethod, Strin
 pub fn resume_guard(ctx: &FitMethodCtx) -> Result<String, String> {
     let levels = fit_method_levels(ctx, 0)?;
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
-    Ok(run_id(ArtifactKind::FitStage, &level_hashes).to_hex())
+    Ok(run_id(ArtifactKind::FitMethod, &level_hashes).to_hex())
 }
 
 /// The three factored levels of a fit-method leaf (fit / method / seed), with
@@ -665,7 +665,7 @@ pub fn cas_leaf_file_dep(leaf: &Path, artifact: &str) -> Option<ArtifactRef> {
         .unwrap_or(digest);
     Some(ArtifactRef {
         run_id,
-        kind: ArtifactKind::FitStage,
+        kind: ArtifactKind::FitMethod,
         artifact: artifact.to_string(),
         digest,
     })
@@ -687,7 +687,7 @@ pub fn cas_file_dep(path: &Path, artifact: &str) -> Option<ArtifactRef> {
     let digest = ContentHash::digest_bytes(&bytes);
     Some(ArtifactRef {
         run_id: digest,
-        kind: ArtifactKind::FitStage,
+        kind: ArtifactKind::FitMethod,
         artifact: artifact.to_string(),
         digest,
     })
@@ -868,7 +868,7 @@ mod tests {
             "explicit allow_degenerate_rates=false must match the default (no re-key)");
     }
 
-    /// gh#241 PR F: input-surface differential for the fit-stage identity path.
+    /// gh#241 PR F: input-surface differential for the fit-method identity path.
     /// The identity guarantee made executable, complementing the per-field
     /// sensitivity tests above with the PRESENTATION-inert half: a semantic
     /// fit-config input re-keys the fit blob; a provenance field does not.

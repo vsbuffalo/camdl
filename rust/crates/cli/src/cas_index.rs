@@ -427,7 +427,7 @@ mod tests {
     }
 
     // The index never claims a leaf the live walk would not: a kind filter is
-    // honoured (a Sim prefix does not match a FitStage leaf of the same id).
+    // honoured (a Sim prefix does not match a FitMethod leaf of the same id).
     #[test]
     fn kind_filter_is_honoured() {
         let tmp = tempfile::tempdir().unwrap();
@@ -435,9 +435,9 @@ mod tests {
         // Two leaves sharing the SAME run_id hex but different kinds, so the
         // exact-id query exercises the kind filter (not the id alone).
         plant_leaf(root, "sims/a", &id("c0ffee"), "sim");
-        plant_leaf(root, "fits/b", &id("c0ffee"), "fit_stage");
+        plant_leaf(root, "fits/b", &id("c0ffee"), "fit_method");
         rebuild(root).unwrap();
-        // Querying the Sim kind must not return the fit_stage leaf even though
+        // Querying the Sim kind must not return the fit_method leaf even though
         // its run_id is identical.
         let sims = resolve_prefix(root, ArtifactKind::Sim, &id("c0ffee")).unwrap();
         assert_eq!(sims.len(), 1);

@@ -1,6 +1,6 @@
-//! gh#147 (M3.2) — content-addressed fit-stage acceptance gates.
+//! gh#147 (M3.2) — content-addressed fit-method acceptance gates.
 //!
-//! Two properties the fit-stage CAS migration must guarantee, exercised
+//! Two properties the fit-method CAS migration must guarantee, exercised
 //! end-to-end against the release `camdl` binary:
 //!
 //! 1. **Chained-method reuse** — a second file that warm-starts from the
@@ -133,8 +133,8 @@ fn run_fit_parallel(bin: &Path, fit_toml: &Path, parallel: usize) -> std::proces
         .expect("camdl fit run must spawn")
 }
 
-/// Every CAS fit-stage leaf under `out/fits/`: (leaf dir, run_id), read from
-/// each `run.json` (kind = `fit_stage`).
+/// Every CAS fit-method leaf under `out/fits/`: (leaf dir, run_id), read from
+/// each `run.json` (kind = `fit_method`).
 fn method_leaves(out: &Path) -> Vec<(PathBuf, String)> {
     let mut found = Vec::new();
     let mut stack = vec![out.join("fits")];
@@ -147,7 +147,7 @@ fn method_leaves(out: &Path) -> Vec<(PathBuf, String)> {
             } else if p.file_name().is_some_and(|n| n == "run.json") {
                 let Ok(txt) = std::fs::read_to_string(&p) else { continue };
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
-                if v.get("kind").and_then(|k| k.as_str()) != Some("fit_stage") {
+                if v.get("kind").and_then(|k| k.as_str()) != Some("fit_method") {
                     continue;
                 }
                 let run_id = v["run_id"].as_str().unwrap_or("").to_string();
@@ -255,7 +255,7 @@ fn chained_method_reuse_only_rekeys_the_downstream() {
 /// either. Two-sided: `method` is the algorithm the fit declared, and `method`
 /// is gone from `inputs` rather than kept beside it.
 ///
-/// The `kind` string stays `fit_stage`: it is read back from every store on
+/// The `kind` string stays `fit_method`: it is read back from every store on
 /// disk, and renaming it would orphan them for a word that no consumer
 /// interprets as a workflow method.
 #[test]
@@ -283,7 +283,7 @@ fn a_method_leaf_names_its_algorithm_once() {
     assert_eq!(names, vec!["fit", "method", "seed"], "level names:\n{text}");
 
     // Deliberately kept: the artifact-kind string.
-    assert_eq!(rec["kind"].as_str(), Some("fit_stage"),
+    assert_eq!(rec["kind"].as_str(), Some("fit_method"),
         "the kind string is read back from every existing store and is not \
          renamed by gh#901:\n{text}");
 }
@@ -386,7 +386,7 @@ fn fit_run_announces_the_real_leaf_directory() {
         announced.display(),
     );
 
-    // Locate the actual method leaf (the dir holding a fit_stage run.json) and
+    // Locate the actual method leaf (the dir holding a fit_method run.json) and
     // confirm the announced dir is its grandparent — the fit segment that
     // `store_path` factors as fits/{fit}/{method}/{seed}/.
     let leaf_dir = {
@@ -395,7 +395,7 @@ fn fit_run_announces_the_real_leaf_directory() {
         while let Some(d) = stack.pop() {
             if d.join("run.json").exists() {
                 let txt = std::fs::read_to_string(d.join("run.json")).unwrap_or_default();
-                if txt.contains("\"fit_stage\"") {
+                if txt.contains("\"fit_method\"") {
                     hit = Some(d.clone());
                     break;
                 }
@@ -408,7 +408,7 @@ fn fit_run_announces_the_real_leaf_directory() {
                 }
             }
         }
-        hit.unwrap_or_else(|| panic!("no fit_stage leaf under {}", out.join("fits").display()))
+        hit.unwrap_or_else(|| panic!("no fit_method leaf under {}", out.join("fits").display()))
     };
 
     // Leaf factoring: fits/{fit}/{method}/{seed}/run.json — so the fit

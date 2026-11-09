@@ -144,7 +144,7 @@ fn run_id_kind_tag_prevents_aliasing() {
     let levels = [fake_hash(1), fake_hash(2)];
     assert_ne!(
         run_id(ArtifactKind::Sim, &levels),
-        run_id(ArtifactKind::FitStage, &levels),
+        run_id(ArtifactKind::FitMethod, &levels),
         "kind tag must disambiguate equal level sequences"
     );
 }

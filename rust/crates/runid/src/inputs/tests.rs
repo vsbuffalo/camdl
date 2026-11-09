@@ -86,7 +86,7 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         ("FitDigest", fit.content_hash()),
         ("StageConfig", method.content_hash()),
         ("run_id(Sim)", crate::run_id(ArtifactKind::Sim, &sim_levels)),
-        ("run_id(FitStage)", crate::run_id(ArtifactKind::FitStage, &fit_levels)),
+        ("run_id(FitMethod)", crate::run_id(ArtifactKind::FitMethod, &fit_levels)),
     ]
 }
 
@@ -113,7 +113,7 @@ fn canonical_encoding_is_pinned() {
         ("FitDigest", "a87aad94ad68c799fd558a872ebeb7de8507c3da867c6553ad198af38882d7e7"),
         ("StageConfig", "f6eb2654d2393f1365ba8610b3a80a5a5772e752b54179dc208f82b995f067df"),
         ("run_id(Sim)", "54093e502e4b5bcafed3d24360b1ea0750ab1749ab8d47cef286342490cf9bfb"),
-        ("run_id(FitStage)", "882fceab6e6120667091cc2f4c02a8a035645e46f4d81b86643ea591ee101836"),
+        ("run_id(FitMethod)", "882fceab6e6120667091cc2f4c02a8a035645e46f4d81b86643ea591ee101836"),
     ];
     let actual = golden_fixtures();
     assert_eq!(actual.len(), expected.len(), "fixture/expected count drift");
@@ -192,7 +192,7 @@ fn artifact_ref_kind_is_provenance_digest_is_semantic() {
     let mut a = artifact_ref(1, 10);
     let mut b = artifact_ref(1, 10);
     a.kind = ArtifactKind::Sim;
-    b.kind = ArtifactKind::FitStage;
+    b.kind = ArtifactKind::FitMethod;
     assert_eq!(a.content_hash(), b.content_hash(), "ArtifactRef.kind is provenance");
 
     let c = artifact_ref(1, 99);

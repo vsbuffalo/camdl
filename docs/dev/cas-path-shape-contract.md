@@ -13,7 +13,7 @@ authoritative fields:
 
 - `run_id` — the 64-hex canonical address of the run.
 - `kind` —
-  `"sim" | "fit_stage" | "pfilter" | "survey" | "profile_point" |
+  `"sim" | "fit_method" | "pfilter" | "survey" | "profile_point" |
   "sim_ensemble"`
   (plus `"obs"` and `"projection"`, which are reserved — their store partitions
   and run-id tags are pinned but no leaf is emitted yet).
@@ -56,7 +56,7 @@ results/<kind_dir>/<seg>/<seg>/…/run.json
 | kind            | `kind_dir`  | levels (in order)                         |
 | --------------- | ----------- | ----------------------------------------- |
 | `sim`           | `sims`      | model · config · params · scenario · seed |
-| `fit_stage`     | `fits`      | fit · method · seed                       |
+| `fit_method`    | `fits`      | fit · method · seed                       |
 | `pfilter`       | `pfilters`  | model · config · params · seed            |
 | `survey`        | `surveys`   | model · config · box · seed               |
 | `profile_point` | `profiles`  | profile · point · method · seed · start   |
@@ -64,7 +64,7 @@ results/<kind_dir>/<seg>/<seg>/…/run.json
 
 A **fit** is the `fits/<stem>-<hash8>/` segment: it has no `run.json` of its own
 — it carries a `fit.meta.json` sidecar (fit-wide provenance: label, model/data
-hashes, estimated/fixed, resolved priors) and one `fit_stage` leaf per (cell ×
+hashes, estimated/fixed, resolved priors) and one `fit_method` leaf per (cell ×
 seed) underneath, labelled by the method that ran (`if2-<h8>`, `pgas-<h8>`). The
 fit level hashes the problem alone, so two `fit.toml` files that share a problem
 half and differ in `[method]` share the hash; they sit in sibling segments named

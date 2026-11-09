@@ -193,7 +193,7 @@ impl From<FitAlgorithm> for LoglikType {
     }
 }
 
-/// The same map keyed on the typed fit-stage result (fit-summary / fit-table
+/// The same map keyed on the typed fit-method result (fit-summary / fit-table
 /// consumers, which hold a `MethodResult`).
 impl From<&MethodResult> for LoglikType {
     fn from(r: &MethodResult) -> Self {

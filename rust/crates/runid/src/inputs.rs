@@ -393,7 +393,7 @@ pub struct RunProvenance {
 // Each leaf composes the shared per-level digests plus its command-specific
 // fields; the provenance field is excluded from the hash. The forward-sim
 // leaves (Trajectory, SyntheticObs) are wired in M2; the inference leaves
-// (FitStage, PfilterEval, Survey, Projection) in M3.
+// (FitMethod, PfilterEval, Survey, Projection) in M3.
 
 /// `simulate` leaf: the latent dynamics — NOT the obs model. (M2
 /// interim: `model` is the whole-IR [`ModelDigest`]; M2.5 swaps in the

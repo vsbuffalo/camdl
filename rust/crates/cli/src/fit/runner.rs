@@ -3584,7 +3584,7 @@ pub fn resolve_prior(
 /// Every density reads the logarithms of θ it needs from the transform's
 /// coordinate, so any map is exact inside the support.
 ///
-/// Call from every fit-stage entry point *before* building IF2
+/// Call from every fit-method entry point *before* building IF2
 /// params so the user sees a clean error, not a miscalibrated
 /// posterior.
 pub fn validate_prior_transform_compat(

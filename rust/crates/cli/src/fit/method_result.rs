@@ -1,11 +1,11 @@
-//! Typed loaded interpretation of a completed fit-stage.
+//! Typed loaded interpretation of a completed fit-method.
 //!
 //! One variant per inference method: each carries the typed payload its
 //! method produces, so consumers pattern-match instead of stringly-dispatching
 //! on the method leaf's `inputs.method` tag.
 //!
 //! Three variants — pfilter is excluded by design (it's a CLI
-//! evaluator on already-fixed parameters, never a fit-stage). See
+//! evaluator on already-fixed parameters, never a fit-method). See
 //! `docs/dev/proposals/2026-04-28-fit-experiment-management.md` §2.
 //!
 //! Map fields use [`BTreeMap<String, _>`] end-to-end (never `HashMap`)
@@ -854,7 +854,7 @@ impl std::fmt::Display for MethodResultError {
         match self {
             MethodResultError::UnknownMethod { method, method_dir } => write!(
                 f,
-                "unknown fit-stage method `{}` at {} (expected if2, pgas, \
+                "unknown fit method `{}` at {} (expected if2, pgas, \
                  pmmh, mh, nl-sbplx, nl-bobyqa, or nl-lbfgs)",
                 method,
                 method_dir.display()
@@ -897,7 +897,7 @@ impl MethodResult {
             // runner and writes the same posterior artifacts (`fit_state.toml`,
             // `draws.tsv`, acceptance + R̂), so it loads as a Pmmh result. Without
             // this arm an `mh` fit was dropped from `fit table` / `fit summary`
-            // entirely ("unknown fit-stage method `mh`") — a per-method allowlist
+            // entirely ("unknown fit method `mh`") — a per-method allowlist
             // that excluded a method the rest of the system supports.
             "pmmh" | "mh" => {
                 // mh writes its OWN `mh_summary.json` (not `pmmh_summary.json`)
@@ -923,8 +923,8 @@ impl MethodResult {
 /// Read the method leaf's `inputs` map from its `run.json` (`runid::RunRecord`).
 /// Convenience for loaders that need method-level metadata (`n_chains`,
 /// `algorithm`) recorded alongside the leaf. Errors with a typed
-/// [`MethodResultError::Io`] on a missing / malformed file or a non-`FitStage`
-/// record — the contract is "every fit-stage writes a `RunRecord` leaf whose
+/// [`MethodResultError::Io`] on a missing / malformed file or a non-`FitMethod`
+/// record — the contract is "every fit-method writes a `RunRecord` leaf whose
 /// `inputs` carries its config".
 fn read_method_inputs(method_dir: &Path) -> Result<serde_json::Value, MethodResultError> {
     let bytes = std::fs::read(method_dir.join("run.json")).map_err(|e| MethodResultError::Io {
@@ -935,10 +935,10 @@ fn read_method_inputs(method_dir: &Path) -> Result<serde_json::Value, MethodResu
         method_dir: method_dir.to_owned(),
         message: format!("run.json: {}", e),
     })?;
-    if rec.kind != runid::ArtifactKind::FitStage {
+    if rec.kind != runid::ArtifactKind::FitMethod {
         return Err(MethodResultError::Io {
             method_dir: method_dir.to_owned(),
-            message: "run.json is not a fit-stage".into(),
+            message: "run.json is not a fit-method record".into(),
         });
     }
     Ok(rec.inputs)
@@ -1649,13 +1649,13 @@ mod tests {
         TempDir(p)
     }
 
-    /// Write a `FitStage` `runid::RunRecord` leaf at `dir` carrying the
+    /// Write a `FitMethod` `runid::RunRecord` leaf at `dir` carrying the
     /// `inputs` the loaders read (`method`, `n_chains`, `algorithm`).
     fn write_method_run(dir: &Path, method: crate::run_meta::FitAlgorithm, n_chains: usize, algorithm: serde_json::Value) {
         std::fs::create_dir_all(dir).unwrap();
         let rec = serde_json::json!({
             "format_version": 1,
-            "kind": "fit_stage",
+            "kind": "fit_method",
             "run_id": "deadbeef".repeat(8),
             "hash_version": 1,
             "ir_version": "0.7",

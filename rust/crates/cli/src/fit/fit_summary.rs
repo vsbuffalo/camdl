@@ -157,7 +157,7 @@ fn chain_selection_advisory(
 }
 
 /// Top-level entry point. Resolves `args.fit` (the fit handle) to its segment
-/// directory, walks every completed fit-stage run, and dispatches to the right
+/// directory, walks every completed fit-method run, and dispatches to the right
 /// formatter based on `--format` and `--params-only`.
 ///
 /// Exits with code 1 when the handle does not resolve; when `--strict` is set
@@ -388,7 +388,7 @@ fn load_model_docs_for_fit(fit_dir: &Path) -> (ir::ModelDocs, Vec<ir::parameter:
         .unwrap_or_default()
 }
 
-/// One resolved fit-stage to render: stage name, on-disk directory,
+/// One resolved fit-method leaf to render: its name, on-disk directory,
 /// and method (so consumers can pattern-match on `MethodResult` once
 /// the typed payload is loaded).
 #[derive(Debug, Clone)]
@@ -5718,7 +5718,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Write a `FitStage` `runid::RunRecord` leaf for `method` under `method_dir`.
+    /// Write a `FitMethod` `runid::RunRecord` leaf for `method` under `method_dir`.
     /// `parent_hash` seeds the shared `fit`-level hash; the `inputs` carry the
     /// per-leaf numbers (`method`, `n_chains`, `best_loglik`, …) the views
     /// project. The `method` LEVEL label is the leaf's name, and it is the
@@ -5740,7 +5740,7 @@ mod tests {
         });
         let rec = serde_json::json!({
             "format_version": 1,
-            "kind": "fit_stage",
+            "kind": "fit_method",
             "run_id": run_id,
             "hash_version": 1,
             "ir_version": "0.7",

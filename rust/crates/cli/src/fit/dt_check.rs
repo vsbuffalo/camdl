@@ -96,9 +96,9 @@ pub struct DtCheckResult {
 /// InferenceBackend-specific default thresholds. See proposal §"InferenceBackend-specific
 /// τ defaults" for the convergence-order rationale.
 ///
-/// All fit-stage backends have a dt parameter — the fit-stage `InferenceBackend`
+/// All fit-method backends have a dt parameter — the fit-method `InferenceBackend`
 /// enum only carries `ChainBinomial` and `Ode` (Gillespie is a
-/// forward-sim backend, not a fit-stage backend). The threshold differs
+/// forward-sim backend, not a fit-method backend). The threshold differs
 /// by convergence order:
 ///
 /// - **`ChainBinomial`** is O(dt) weak-convergent (Euler-multinomial /

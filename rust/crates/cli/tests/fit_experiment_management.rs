@@ -235,7 +235,7 @@ fn fit_level_hash(fit_dir: &Path) -> String {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(
                 &std::fs::read_to_string(&rj).unwrap_or_default(),
             ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
+                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
                     if let Some(h) = v["levels"]
                         .as_array()
                         .into_iter()
@@ -256,7 +256,7 @@ fn fit_level_hash(fit_dir: &Path) -> String {
             }
         }
     }
-    panic!("no fit_stage leaf with a `fit` level under {}", fit_dir.display());
+    panic!("no fit_method leaf with a `fit` level under {}", fit_dir.display());
 }
 
 /// The one fit run under `fit_dir`: its leaf `run.json` as JSON. A fit's
@@ -287,7 +287,7 @@ fn run_label(fit_dir: &Path) -> Option<String> {
 
 /// gh#147 (M3.2): a method leaf for `method_substr` exists under `fit_dir` at the
 /// CAS shape `<fit_dir>/<method>-<h8>/seed_<N>-<h8>/run.json` (kind
-/// `fit_stage`). Returns the leaf dir. Replaces the pre-M3.2 hard-coded
+/// `fit_method`). Returns the leaf dir. Replaces the pre-M3.2 hard-coded
 /// `<fit_dir>/real/fit_<seed>/<method>` probe.
 fn cas_method_leaf(fit_dir: &Path, method_substr: &str) -> Option<PathBuf> {
     let mut stack = vec![fit_dir.to_path_buf()];
@@ -297,7 +297,7 @@ fn cas_method_leaf(fit_dir: &Path, method_substr: &str) -> Option<PathBuf> {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(
                 &std::fs::read_to_string(&rj).unwrap_or_default(),
             ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
+                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
                     let method = v["levels"]
                         .as_array()
                         .into_iter()
@@ -366,7 +366,7 @@ fn fit_summary_walks_real_fit_run_v2_output() {
 
     // Spot-check: the canonical CAS method leaf is on disk where the runner
     // promises — `<fit_dir>/<method>-<h8>/seed_<N>-<h8>/run.json` (gh#147
-    // M3.2). Hashes aren't predictable, so assert the *shape*: a `fit_stage`
+    // M3.2). Hashes aren't predictable, so assert the *shape*: a `fit_method`
     // leaf whose `method` level is "if2". Locks the CAS layout into the test
     // surface so a future runner change can't silently break the walker.
     let leaf = cas_method_leaf(&fit_dir, "if2").unwrap_or_else(|| {

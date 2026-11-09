@@ -48,7 +48,7 @@ impl ArtifactKind {
     pub fn store_dir(self) -> &'static str {
         match self {
             ArtifactKind::Sim => "sims",
-            ArtifactKind::FitStage => "fits",
+            ArtifactKind::FitMethod => "fits",
             ArtifactKind::Pfilter => "pfilters",
             ArtifactKind::Survey => "surveys",
             ArtifactKind::ProfilePoint => "profiles",

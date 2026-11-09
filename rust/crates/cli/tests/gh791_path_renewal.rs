@@ -161,7 +161,7 @@ fn method_leaf(out: &Path) -> PathBuf {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(
                 &std::fs::read_to_string(&rj).unwrap_or_default(),
             ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
+                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
                     return d;
                 }
             }
@@ -170,7 +170,7 @@ fn method_leaf(out: &Path) -> PathBuf {
             for e in es.flatten() { if e.path().is_dir() { stack.push(e.path()); } }
         }
     }
-    panic!("no fit_stage leaf under {}", out.join("fits").display());
+    panic!("no fit_method leaf under {}", out.join("fits").display());
 }
 
 /// One chain's `trace.tsv` as a header plus one row of fields per sweep.

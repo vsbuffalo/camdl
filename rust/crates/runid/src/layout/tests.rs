@@ -147,7 +147,7 @@ fn path_label_preserves_compound_labels() {
 #[test]
 fn kind_store_dirs() {
     assert_eq!(ArtifactKind::Sim.store_dir(), "sims");
-    assert_eq!(ArtifactKind::FitStage.store_dir(), "fits");
+    assert_eq!(ArtifactKind::FitMethod.store_dir(), "fits");
     assert_eq!(ArtifactKind::Pfilter.store_dir(), "pfilters");
     assert_eq!(ArtifactKind::Survey.store_dir(), "surveys");
     assert_eq!(ArtifactKind::ProfilePoint.store_dir(), "profiles");

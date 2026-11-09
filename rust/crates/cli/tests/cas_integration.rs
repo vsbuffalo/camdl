@@ -559,11 +559,11 @@ fn starts_from_resolves_short_hash() {
     let method = results.join("fits").join("demo-abc12345")
         .join("if2-1fb03eee").join("seed_1-06cbd6b3");
     std::fs::create_dir_all(&method).unwrap();
-    // gh#147: the resolver matches a `FitStage` `runid::RunRecord` leaf on its
+    // gh#147: the resolver matches a `FitMethod` `runid::RunRecord` leaf on its
     // `run_id` hex prefix. Plant a leaf whose `run_id` starts `deadbeef`.
     let target_hash = "deadbeefc0ffee00000000000000000000000000000000000000000000000000";
     let run_json = format!(r#"{{
-        "format_version":1,"kind":"fit_stage","run_id":"{}","hash_version":1,
+        "format_version":1,"kind":"fit_method","run_id":"{}","hash_version":1,
         "ir_version":"0.7","engine_version":"0.1.0+test",
         "levels":[
             {{"name":"fit","label":"demo","hash":"abc1234500000000000000000000000000000000000000000000000000000000","schema_version":1}},
@@ -802,7 +802,7 @@ fn show_resolves_fit_by_hash_prefix() {
     assert!(out.status.success(), "show by run_id prefix should resolve: stderr={}",
         String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("fit_stage"), "should render a fit-stage: {stdout}");
+    assert!(stdout.contains("fit_method"), "should render a fit-method: {stdout}");
     assert!(stdout.contains("if2"), "method label missing: {stdout}");
 }
 
@@ -999,10 +999,10 @@ fn show_prints_metadata() {
     assert!(stdout.contains("chain_binomial"), "should show backend (config level)");
 }
 
-/// Test (4a from review): `camdl show <fit-stage-hash>` resolves and
-/// renders the FitStage payload. Pre-show-coverage-collapse, this
+/// Test (4a from review): `camdl show <fit-method-hash>` resolves and
+/// renders the FitMethod payload. Pre-show-coverage-collapse, this
 /// returned "unrecognised kind".
-/// A content-addressed fit-stage leaf (`runid::RunRecord`, M3.2) at
+/// A content-addressed fit-method leaf (`runid::RunRecord`, M3.2) at
 /// `fits/{fit}/{method}/{seed}/run.json`, addressable by `run_id` prefix.
 fn write_cas_fit_method(output: &Path, run_id: &str, fit_label: &str) -> PathBuf {
     let leaf = output.join("fits")
@@ -1012,7 +1012,7 @@ fn write_cas_fit_method(output: &Path, run_id: &str, fit_label: &str) -> PathBuf
     std::fs::create_dir_all(&leaf).unwrap();
     let rec = format!(r#"{{
         "format_version": 1,
-        "kind": "fit_stage",
+        "kind": "fit_method",
         "run_id": "{run_id}",
         "hash_version": 1,
         "ir_version": "0.7",
@@ -1031,8 +1031,37 @@ fn write_cas_fit_method(output: &Path, run_id: &str, fit_label: &str) -> PathBuf
     leaf
 }
 
+/// A store written before the run.json kind `fit_stage` became `fit_method`
+/// is not read, and the readers say so. Before, `list` printed "(no cached
+/// runs)" and `show` "could not read run.json", so a user holding an old store
+/// could not tell it from an empty one.
+#[test]
+fn a_leaf_under_the_old_fit_kind_is_named_by_list_and_show() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let output = tmp.path().join("output");
+    let leaf = write_cas_fit_method(&output, &"ab".repeat(32), "old");
+    let rj = leaf.join("run.json");
+    let text = std::fs::read_to_string(&rj).unwrap();
+    std::fs::write(&rj, text.replace(r#""kind": "fit_method""#, r#""kind": "fit_stage""#)).unwrap();
+
+    let out = Command::new(&bin).args(["list", &output.to_string_lossy()]).output().expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("fit_stage") && stderr.contains("fit_method")
+            && stderr.contains("run the fit again"),
+        "list must name the renamed kind and the remedy: stderr={stderr}");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("old-5ca1ab1e"),
+        "the old leaf is not listed as a run");
+
+    let out = Command::new(&bin).args(["show", &leaf.to_string_lossy()]).output().expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "show must refuse the old record");
+    assert!(stderr.contains("fit_stage") && stderr.contains("fit_method"),
+        "show must name the renamed kind: stderr={stderr}");
+}
+
 /// Write a content-addressed fit segment `fits/<label>-<fit_h8>/` with one
-/// `FitStage` leaf per method (`<method>-<h8>/seed_1-<h8>/run.json`) plus the
+/// `FitMethod` leaf per method (`<method>-<h8>/seed_1-<h8>/run.json`) plus the
 /// fit-level sidecar (`fit.meta.json` — the label + model-identity home). This is
 /// the shape `read_fit_segment` derives a single fit-level entry from, so
 /// `list` / `fit table` see one fit with `methods_declared` taken from the
@@ -1052,7 +1081,7 @@ fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, methods: &[&str], mod
         let run_id = format!("{:0<64}", format!("abc{nn}"));
         let rec = format!(r#"{{
             "format_version": 1,
-            "kind": "fit_stage",
+            "kind": "fit_method",
             "run_id": "{run_id}",
             "hash_version": 1,
             "ir_version": "0.7",
@@ -1097,7 +1126,7 @@ fn write_two_leaves_of_one_method(output: &Path, method: &str) -> (PathBuf, [Str
         let run_id = format!("{:0<64}", format!("beef{}", i + 1));
         let rec = format!(r#"{{
             "format_version": 1,
-            "kind": "fit_stage",
+            "kind": "fit_method",
             "run_id": "{run_id}",
             "hash_version": 1,
             "ir_version": "0.7",
@@ -1185,8 +1214,8 @@ fn fit_list_json_names_methods_and_can_tell_two_leaves_apart() {
     }
 }
 
-/// gh#147 (M3.2): `camdl show <fit-stage path | run_id prefix>` renders the
-/// CAS fit-stage `RunRecord` — factored levels + the recorded method metadata.
+/// gh#147 (M3.2): `camdl show <fit-method path | run_id prefix>` renders the
+/// CAS fit-method `RunRecord` — factored levels + the recorded method metadata.
 #[test]
 fn show_renders_fit_method_metadata() {
     let bin = skip_if_missing_binary();
@@ -1199,10 +1228,10 @@ fn show_renders_fit_method_metadata() {
     let out = Command::new(&bin)
         .args(["show", &leaf.to_string_lossy()])
         .output().expect("spawn");
-    assert!(out.status.success(), "show fit-stage failed: stderr={}",
+    assert!(out.status.success(), "show fit-method failed: stderr={}",
         String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("fit_stage"), "kind label missing: {}", s);
+    assert!(s.contains("fit_method"), "kind label missing: {}", s);
     assert!(s.contains("if2"),       "method name missing: {}", s);
     assert!(s.contains("if2"),       "method missing: {}", s);
     assert!(s.contains("-123.45"),   "best_loglik missing: {}", s);

@@ -769,7 +769,7 @@ fn a_synthetic_fit_refuses_an_emit_every_that_contradicts_the_declared_window() 
         "the refusal must name the stream, its declaration and the declaration that would emit weekly: {err}");
 }
 
-/// Fit bases holding at least one `fit_stage` leaf — the cell fits, as opposed
+/// Fit bases holding at least one `fit_method` leaf — the cell fits, as opposed
 /// to the dataset-generation container (which carries no method leaf).
 fn cell_fit_bases(out: &Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(out.join("fits"))
@@ -791,7 +791,7 @@ fn has_method_leaf(base: &Path) -> bool {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(
             &std::fs::read_to_string(d.join("run.json")).unwrap_or_default(),
         ) {
-            if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
+            if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
                 return true;
             }
         }

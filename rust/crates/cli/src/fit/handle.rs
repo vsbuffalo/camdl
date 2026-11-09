@@ -201,7 +201,7 @@ fn completed_leaves(segment: &Path) -> Vec<crate::cas_read::Leaf> {
     let mut leaves: Vec<crate::cas_read::Leaf> = crate::cas_read::walk_records(segment)
         .into_iter()
         .filter(|(_, r)| {
-            r.kind == runid::ArtifactKind::FitStage && r.status == runid::RunStatus::Completed
+            r.kind == runid::ArtifactKind::FitMethod && r.status == runid::RunStatus::Completed
         })
         .map(|(dir, record)| crate::cas_read::Leaf { dir, record })
         .collect();
@@ -213,7 +213,7 @@ fn completed_leaves(segment: &Path) -> Vec<crate::cas_read::Leaf> {
 fn leaf_at(dir: &Path) -> Option<crate::cas_read::Leaf> {
     let bytes = std::fs::read(dir.join("run.json")).ok()?;
     let record: runid::RunRecord = serde_json::from_slice(&bytes).ok()?;
-    (record.kind == runid::ArtifactKind::FitStage)
+    (record.kind == runid::ArtifactKind::FitMethod)
         .then(|| crate::cas_read::Leaf { dir: dir.to_path_buf(), record })
 }
 
@@ -765,7 +765,7 @@ cooling = 0.7
             None => serde_json::json!({ "method": "if2" }),
         };
         let rec = serde_json::json!({
-            "format_version": 1, "kind": "fit_stage", "run_id": "ab".repeat(32),
+            "format_version": 1, "kind": "fit_method", "run_id": "ab".repeat(32),
             "hash_version": 1, "ir_version": "0.7", "engine_version": crate::version::VERSION_SHORT,
             "levels": [], "status": "completed", "artifacts": {}, "inputs": inputs,
         });
@@ -941,7 +941,7 @@ cooling    = 0.70
     fn leaf_with(method: char, seed: char, dir: &str) -> crate::cas_read::Leaf {
         let h = |c: char| c.to_string().repeat(64);
         let record: runid::RunRecord = serde_json::from_str(&format!(
-            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit}","schema_version":1}},{{"name":"method","label":"if2","hash":"{m}","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"{s}","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"if2","n_chains":2}},"provenance":{{}}}}"#,
+            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit}","schema_version":1}},{{"name":"method","label":"if2","hash":"{m}","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"{s}","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"if2","n_chains":2}},"provenance":{{}}}}"#,
             run = format!("{method}{seed}").repeat(32),
             fit = h('0'),
             m = h(method),
@@ -990,7 +990,7 @@ cooling    = 0.70
         crate::run_meta::write_fit_sidecar(
             &seg, Path::new("nonexistent.toml"), &crate::run_meta::FitSidecar::default()).unwrap();
         let rec = serde_json::json!({
-            "format_version": 1, "kind": "fit_stage", "run_id": format!("abcd9{}", "0".repeat(59)),
+            "format_version": 1, "kind": "fit_method", "run_id": format!("abcd9{}", "0".repeat(59)),
             "hash_version": 1, "ir_version": "0.7", "engine_version": "0.1.0+test",
             "levels": [
                 {"name": "fit", "label": "demo", "hash": format!("abcd0{}", "0".repeat(59)), "schema_version": 1},

@@ -19,6 +19,29 @@ use crate::kind::ArtifactKind;
 /// there is no backward-compatible deserialization path.
 pub const FORMAT_VERSION: u16 = 1;
 
+/// `kind` strings an older camdl wrote, each with the name it now has. A record
+/// carrying one does not deserialize; this table only lets a reader say why.
+const RENAMED_KINDS: &[(&str, &str)] = &[("fit_stage", "fit_method")];
+
+/// Why a `run.json` that fails to deserialize was written by an older camdl,
+/// when the cause is a renamed `kind`; `None` for any other failure.
+///
+/// Readers skip a record they cannot parse. Without this, a store written
+/// before a kind was renamed reads as empty: `fit summary` reports no method
+/// leaf, `list` reports no runs, and nothing names the cause. The record is
+/// still refused; the sentence tells the user to re-run.
+pub fn renamed_kind(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let kind = value.get("kind")?.as_str()?;
+    RENAMED_KINDS.iter().find(|(old, _)| *old == kind).map(|(old, new)| {
+        format!(
+            "its run.json has `kind = \"{old}\"`, which camdl now calls `{new}`; \
+             it was written by an older camdl and is not read. Delete it (or its \
+             fit directory) and run the fit again"
+        )
+    })
+}
+
 /// Run lifecycle state. Wire form is the snake-case string
 /// (`"running"`/`"completed"`/`"failed"`), matching the `run.json` example.
 /// A cache hit requires `Completed`; `Running` is an in-flight (or crashed)
@@ -256,5 +279,42 @@ mod output_schema_tests {
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(!json.contains("output_schema"), "empty schema must be omitted: {json}");
+    }
+
+    /// A `run.json` written before `fit_stage` became `fit_method` is refused,
+    /// not read: there is no fallback. `renamed_kind` only says why, naming
+    /// both spellings, and says nothing about a record that fails for any
+    /// other reason.
+    #[test]
+    fn a_record_under_a_renamed_kind_is_refused_and_says_why() {
+        let current = RunRecord {
+            format_version: FORMAT_VERSION,
+            kind: ArtifactKind::FitMethod,
+            run_id: ContentHash::digest_bytes(b"x"),
+            hash_version: 1,
+            ir_version: "0.0".to_string(),
+            engine_version: "test".to_string(),
+            levels: vec![],
+            deps: vec![],
+            status: RunStatus::Completed,
+            artifacts: BTreeMap::new(),
+            output_schema: BTreeMap::new(),
+            children: BTreeMap::new(),
+            inputs: serde_json::Value::Null,
+            provenance: Provenance::default(),
+        };
+        let json = serde_json::to_string(&current).unwrap();
+        assert!(json.contains(r#""kind":"fit_method""#), "{json}");
+        assert!(renamed_kind(json.as_bytes()).is_none(), "a current record is not flagged");
+
+        let old = json.replace(r#""kind":"fit_method""#, r#""kind":"fit_stage""#);
+        assert!(serde_json::from_str::<RunRecord>(&old).is_err(),
+            "the old kind must not deserialize: no compatibility path");
+        let why = renamed_kind(old.as_bytes()).expect("the old kind is named");
+        assert!(why.contains("fit_stage") && why.contains("fit_method"), "{why}");
+
+        let unknown = json.replace(r#""kind":"fit_method""#, r#""kind":"no_such_kind""#);
+        assert!(renamed_kind(unknown.as_bytes()).is_none(), "only a renamed kind is explained");
+        assert!(renamed_kind(b"not json").is_none());
     }
 }

@@ -201,7 +201,7 @@ fn cas_method_leaf(fits_root: &Path, method_substr: &str) -> Option<PathBuf> {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(
                 &std::fs::read_to_string(d.join("run.json")).unwrap_or_default(),
             ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
+                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
                     let method = v["levels"].as_array().into_iter().flatten()
                         .find(|l| l["name"].as_str() == Some("method"))
                         .and_then(|l| l["label"].as_str()).unwrap_or("");

@@ -134,7 +134,7 @@ fn run_fit(config: &Path, out_root: &Path) -> String {
     stderr
 }
 
-/// The single `fit_stage` leaf under `<out_root>/fits/`.
+/// The single `fit_method` leaf under `<out_root>/fits/`.
 fn method_leaf(out_root: &Path) -> PathBuf {
     let mut stack = vec![out_root.join("fits")];
     while let Some(d) = stack.pop() {
@@ -143,7 +143,7 @@ fn method_leaf(out_root: &Path) -> PathBuf {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(
                 &std::fs::read_to_string(&rj).unwrap_or_default())
             {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
+                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
                     return d;
                 }
             }
@@ -154,7 +154,7 @@ fn method_leaf(out_root: &Path) -> PathBuf {
             }
         }
     }
-    panic!("no fit_stage leaf under {}", out_root.join("fits").display());
+    panic!("no fit_method leaf under {}", out_root.join("fits").display());
 }
 
 fn fit_state_best_chain(leaf: &Path) -> i64 {

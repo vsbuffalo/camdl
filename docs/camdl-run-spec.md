@@ -362,7 +362,7 @@ The levels per kind:
 | --------------- | ----------- | ----------------------------------------- |
 | `sim`           | `sims`      | model · config · params · scenario · seed |
 | `sim_ensemble`  | `ensembles` | model · config · params · grid            |
-| `fit_stage`     | `fits`      | fit · method · seed                       |
+| `fit_method`    | `fits`      | fit · method · seed                       |
 | `pfilter`       | `pfilters`  | model · config · params · seed            |
 | `survey`        | `surveys`   | model · config · box · seed               |
 | `profile_point` | `profiles`  | profile · point · method · seed · start   |
@@ -4134,9 +4134,9 @@ fitted	7	free_forward	posterior	2.0652
 `q05…q95` band.)
 
 > **Current limitation.** A `pfilter` leaf is dropped from `camdl fit table`
-> with a `unknown fit-stage method 'pfilter'` warning, and
-> `fit summary --format json` emits an empty `table_row` for it. The text
-> `fit summary` still renders the IF2 and PGAS leaves correctly.
+> with a `unknown fit method 'pfilter'` warning, and `fit summary --format json`
+> emits an empty `table_row` for it. The text `fit summary` still renders the
+> IF2 and PGAS leaves correctly.
 
 ### 8.3 Deterministic ODE backend
 
@@ -4423,7 +4423,7 @@ run_id = SHA256( HASH_VERSION:u16 ++ kind_tag:u32 ++ n_levels:u64 ++ level_hash[
 ```
 
 (`runid::kind::run_id`, `rust/crates/runid/src/kind.rs`). `kind_tag` is the
-`ArtifactKind` declaration index (`Sim`=0, `FitStage`=1, `Pfilter`=2,
+`ArtifactKind` declaration index (`Sim`=0, `FitMethod`=1, `Pfilter`=2,
 `Survey`=3, `ProfilePoint`=4, `Obs`=5, `Projection`=6, `SimEnsemble`=7), so two
 kinds with a coincidentally-equal level sequence cannot alias.
 
@@ -4540,7 +4540,7 @@ different models (the `model` level; `config` is unchanged).
 | ---------------------------- | ----------------------------------------- | ----------------------------- |
 | `Sim` (`sims/`)              | model · config · params · scenario · seed | `cli/src/resolve.rs`          |
 | `SimEnsemble` (`ensembles/`) | model · config · params · grid            | `cli/src/sim_ensemble_cas.rs` |
-| `FitStage` (`fits/`)         | fit · method · seed                       | `cli/src/fit/cas.rs`          |
+| `FitMethod` (`fits/`)        | fit · method · seed                       | `cli/src/fit/cas.rs`          |
 | `Pfilter` (`pfilters/`)      | model · config · params · seed            | `cli/src/pfilter_cas.rs`      |
 | `Survey` (`surveys/`)        | model · config · box · seed               | `cli/src/survey_cas.rs`       |
 | `ProfilePoint` (`profiles/`) | profile · point · method · seed · start   | `cli/src/profile_cas.rs`      |
@@ -4573,7 +4573,7 @@ different models (the `model` level; `config` is unchanged).
   Label: `seed_{n}` — note this renders the _process_ seed, so a multi-replicate
   run shows segments like `seed_5871781006564002452`.
 
-**`FitStage` levels** (`fit::cas::resolve_fit_method`):
+**`FitMethod` levels** (`fit::cas::resolve_fit_method`):
 
 - `fit` — `FitDigest`: the `ModelDigest`; the content digest of each resolved
   _training_ stream; the content digest of each `[data.holdout]` stream; the
@@ -4663,7 +4663,7 @@ done by `FiniteF64`'s constructor.
       model.render.json
       {method}-{h8}/
         seed_{n}-{h8}/
-          run.json                 # RunRecord, kind = fit_stage
+          run.json                 # RunRecord, kind = fit_method
           … method artifacts (§10.6)
   pfilters/ surveys/ profiles/     # same {label}-{h8} factoring per §9.2.4
 ```
@@ -4935,26 +4935,26 @@ replicates rather than competing chains (`pfilter`). `camdl show` and
 
 **Fields.**
 
-| field            | type                                       | meaning                                                                                       |
-| ---------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------- |
-| `format_version` | u16                                        | `run.json` schema version; a mismatch is `Stale(SchemaDrift)`                                 |
-| `kind`           | snake-case `ArtifactKind`                  | `sim`, `fit_stage`, `pfilter`, `survey`, `profile_point`, `obs`, `projection`, `sim_ensemble` |
-| `run_id`         | 64-hex                                     | the leaf address; the identity gate on every lookup                                           |
-| `hash_version`   | u16                                        | `HASH_VERSION` of the encoding that produced the hashes                                       |
-| `ir_version`     | string                                     | `ir/VERSION` at write time (e.g. `"0.30"`)                                                    |
-| `engine_version` | string                                     | `"{pkg_version}+{git-hash}"`                                                                  |
-| `levels`         | `[{name, label, hash, schema_version}]`    | the factored identity in path order                                                           |
-| `deps`           | `[{run_id, kind, artifact, digest}]`       | consumed upstreams; omitted when empty                                                        |
-| `status`         | `"running"` \| `"completed"` \| `"failed"` | a plain string, not an object                                                                 |
-| `artifacts`      | map path → `{bytes, mtime, digest}`        | EXACT SET over the leaf's own files; `mtime` is `"{secs}.{nanos:09}"`                         |
-| `output_schema`  | map path → `{role, columns}`               | declared column roles (§10.9); omitted when empty                                             |
-| `children`       | map namespace → `[hash]`                   | declared child sub-artifact dirs (`obs`); omitted when empty                                  |
-| `inputs`         | arbitrary JSON                             | display/audit summary, **never hashed**; omitted when null                                    |
-| `provenance`     | object                                     | `argv`, `label`, `created_at`, `camdl_version`, `source_paths` — all recorded, never hashed   |
+| field            | type                                       | meaning                                                                                        |
+| ---------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| `format_version` | u16                                        | `run.json` schema version; a mismatch is `Stale(SchemaDrift)`                                  |
+| `kind`           | snake-case `ArtifactKind`                  | `sim`, `fit_method`, `pfilter`, `survey`, `profile_point`, `obs`, `projection`, `sim_ensemble` |
+| `run_id`         | 64-hex                                     | the leaf address; the identity gate on every lookup                                            |
+| `hash_version`   | u16                                        | `HASH_VERSION` of the encoding that produced the hashes                                        |
+| `ir_version`     | string                                     | `ir/VERSION` at write time (e.g. `"0.30"`)                                                     |
+| `engine_version` | string                                     | `"{pkg_version}+{git-hash}"`                                                                   |
+| `levels`         | `[{name, label, hash, schema_version}]`    | the factored identity in path order                                                            |
+| `deps`           | `[{run_id, kind, artifact, digest}]`       | consumed upstreams; omitted when empty                                                         |
+| `status`         | `"running"` \| `"completed"` \| `"failed"` | a plain string, not an object                                                                  |
+| `artifacts`      | map path → `{bytes, mtime, digest}`        | EXACT SET over the leaf's own files; `mtime` is `"{secs}.{nanos:09}"`                          |
+| `output_schema`  | map path → `{role, columns}`               | declared column roles (§10.9); omitted when empty                                              |
+| `children`       | map namespace → `[hash]`                   | declared child sub-artifact dirs (`obs`); omitted when empty                                   |
+| `inputs`         | arbitrary JSON                             | display/audit summary, **never hashed**; omitted when null                                     |
+| `provenance`     | object                                     | `argv`, `label`, `created_at`, `camdl_version`, `source_paths` — all recorded, never hashed    |
 
 `status` transitions depend on the write mode. `sim` and `sim_ensemble` commit
 **atomically**: the leaf appears only once complete, and there is no
-discoverable in-flight record. `fit_stage`, `pfilter`, `survey` and
+discoverable in-flight record. `fit_method`, `pfilter`, `survey` and
 `profile_point` **stream**: they claim the directory, write a `"running"` record
 and an exclusive `.lock`, stream output in, then finalize to `"completed"` with
 the exact-set manifest and the post-run `inputs`. A stale `.lock` whose PID is

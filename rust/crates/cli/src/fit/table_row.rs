@@ -213,7 +213,7 @@ pub fn build_row(
 ) -> Result<TableRow, TableRowError> {
     let view = FitView::read(fit_dir).ok_or_else(|| TableRowError::TopLevelRun {
         fit_dir: fit_dir.to_path_buf(),
-        message: "not a fit segment (no FitStage leaves + sidecar)".into(),
+        message: "not a fit segment (no FitMethod leaves + sidecar)".into(),
     })?;
 
     let nodes = fit_tree::walk_fit_dir(fit_dir).map_err(|e| TableRowError::TopLevelRun {

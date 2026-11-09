@@ -129,7 +129,7 @@ fn run_fit(bin: &Path, fit_toml: &Path) {
 }
 
 /// gh#147 (M3.2): the CAS method leaf for `method_substr` under `fit_dir` —
-/// `<fit_dir>/<method>-<h8>/seed_<N>-<h8>/` (the dir holding a `fit_stage`
+/// `<fit_dir>/<method>-<h8>/seed_<N>-<h8>/` (the dir holding a `fit_method`
 /// run.json whose `method` level contains `method_substr`). Replaces the pre-M3.2
 /// `real/fit_<seed>/<method>` / `synthetic/ds_NN/fit_<seed>/<method>` probe.
 fn cas_method_leaf(fit_dir: &Path, method_substr: &str) -> PathBuf {
@@ -140,7 +140,7 @@ fn cas_method_leaf(fit_dir: &Path, method_substr: &str) -> PathBuf {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(
                 &std::fs::read_to_string(&rj).unwrap_or_default(),
             ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
+                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
                     let method = v["levels"]
                         .as_array()
                         .into_iter()
@@ -165,7 +165,7 @@ fn cas_method_leaf(fit_dir: &Path, method_substr: &str) -> PathBuf {
     panic!("no CAS '{}' method leaf under {}", method_substr, fit_dir.display());
 }
 
-/// Every CAS fit-stage leaf dir under `root` whose `stage` level contains
+/// Every CAS fit-method leaf dir under `root` whose `method` level contains
 /// `method_substr` — the multi-cell analog of `cas_method_leaf` (one entry per
 /// `seed_<S>` leaf, across one or more fit-bases).
 fn all_method_leaves(root: &Path, method_substr: &str) -> Vec<PathBuf> {
@@ -175,7 +175,7 @@ fn all_method_leaves(root: &Path, method_substr: &str) -> Vec<PathBuf> {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(
             &std::fs::read_to_string(d.join("run.json")).unwrap_or_default(),
         ) {
-            if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
+            if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
                 let method = v["levels"].as_array().into_iter().flatten()
                     .find(|l| l["name"].as_str() == Some("method"))
                     .and_then(|l| l["label"].as_str()).unwrap_or("");
@@ -189,7 +189,7 @@ fn all_method_leaves(root: &Path, method_substr: &str) -> Vec<PathBuf> {
     out
 }
 
-/// The `seed` level (`seed_<N>`) of a CAS fit-stage leaf, parsed to `N`.
+/// The `seed` level (`seed_<N>`) of a CAS fit-method leaf, parsed to `N`.
 fn seed_of(leaf: &Path) -> u64 {
     let v: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();

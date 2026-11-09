@@ -170,7 +170,7 @@ starts         = {{ from_posterior = "{draws}" }}
 }
 
 /// The CAS method leaf for `method_substr` under `fits_root` —
-/// `<fit>/<method>-<h8>/seed_<N>-<h8>/` holding a `fit_stage` run.json.
+/// `<fit>/<method>-<h8>/seed_<N>-<h8>/` holding a `fit_method` run.json.
 fn cas_method_leaf(fits_root: &Path, method_substr: &str) -> PathBuf {
     let mut stack = vec![fits_root.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -178,7 +178,7 @@ fn cas_method_leaf(fits_root: &Path, method_substr: &str) -> PathBuf {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(
                 &std::fs::read_to_string(d.join("run.json")).unwrap_or_default(),
             ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
+                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
                     let method = v["levels"].as_array().into_iter().flatten()
                         .find(|l| l["name"].as_str() == Some("method"))
                         .and_then(|l| l["label"].as_str()).unwrap_or("");

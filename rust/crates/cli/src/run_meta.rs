@@ -69,7 +69,7 @@ pub fn check_fit_summary_schema(v: &serde_json::Value, filename: &str) -> Result
 }
 
 /// Inference algorithm tag — discriminator enum naming the algorithm
-/// independent of the simulation backend. Recorded in a fit-stage leaf's
+/// independent of the simulation backend. Recorded in a fit-method leaf's
 /// `inputs` alongside `Backend` to capture the (algorithm, backend) pair the
 /// method ran. Wire format matches the lowercased / kebab-cased name
 /// the user writes in fit.toml (`algorithm = "if2"`, `algorithm =
@@ -88,7 +88,7 @@ pub enum FitAlgorithm {
 
 impl FitAlgorithm {
     /// Wire-format string. Matches the `algorithm = "..."` value in fit.toml
-    /// and the `inputs.method` serialized form on a fit-stage leaf.
+    /// and the `inputs.method` serialized form on a fit-method leaf.
     pub fn as_str(self) -> &'static str {
         match self {
             FitAlgorithm::If2      => "if2",
@@ -998,8 +998,8 @@ mod tests {
 
     /// Zero-re-key guarantee for gh#241 PR C: renaming `MethodKind` ->
     /// `FitAlgorithm` must not change the serialized wire spelling — it is
-    /// stored in a fit-stage leaf's `inputs.method`, part of the factored
-    /// fit-stage identity. Pins serialize, deserialize, and `as_str` together.
+    /// stored in a fit-method leaf's `inputs.method`, part of the factored
+    /// fit-method identity. Pins serialize, deserialize, and `as_str` together.
     #[test]
     fn fit_algorithm_serde_spelling_is_pinned() {
         let cases = [
@@ -1305,7 +1305,7 @@ mod tests {
         // sidecar to carry resolved_priors.
         std::fs::write(
             leaf.join("run.json"),
-            r#"{"format_version":1,"kind":"fit_stage","run_id":"abc1234500000000000000000000000000000000000000000000000000000000","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{"name":"fit","label":"demo","hash":"abc123450000000000000000000000000000000000000000000000000000000a","schema_version":1},{"name":"method","label":"pgas","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1},{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}],"status":"completed","artifacts":{},"inputs":{"method":"pgas","backend":"chain_binomial","seed":1,"n_chains":2},"provenance":{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}"#,
+            r#"{"format_version":1,"kind":"fit_method","run_id":"abc1234500000000000000000000000000000000000000000000000000000000","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{"name":"fit","label":"demo","hash":"abc123450000000000000000000000000000000000000000000000000000000a","schema_version":1},{"name":"method","label":"pgas","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1},{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}],"status":"completed","artifacts":{},"inputs":{"method":"pgas","backend":"chain_binomial","seed":1,"n_chains":2},"provenance":{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}"#,
         )
         .unwrap();
 

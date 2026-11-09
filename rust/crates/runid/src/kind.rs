@@ -18,8 +18,8 @@ use crate::hash::{CanonicalHasher, ContentAddressed, ContentHash, HASH_VERSION};
 pub enum ArtifactKind {
     /// A forward-simulation trajectory (`simulate`).
     Sim,
-    /// One method of a fit pipeline (`fit`/`if2`-desugared).
-    FitStage,
+    /// One `fit run` of a fit.toml's `[method]` (`fits/`).
+    FitMethod,
     /// A particle-filter loglik evaluation at fixed params (`pfilter`).
     Pfilter,
     /// A likelihood-landscape diagnostic (`survey`).
@@ -49,7 +49,7 @@ impl ArtifactKind {
     pub fn tag_index(self) -> u32 {
         match self {
             ArtifactKind::Sim => 0,
-            ArtifactKind::FitStage => 1,
+            ArtifactKind::FitMethod => 1,
             ArtifactKind::Pfilter => 2,
             ArtifactKind::Survey => 3,
             ArtifactKind::ProfilePoint => 4,

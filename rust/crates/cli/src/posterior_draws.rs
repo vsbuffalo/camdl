@@ -333,7 +333,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Write one realistic `FitStage` leaf into a segment, mirroring the on-disk
+    /// Write one realistic `FitMethod` leaf into a segment, mirroring the on-disk
     /// shape the runner writes: `<seg>/<label>-<h8>/seed_1-<h8>/run.json`.
     /// Returns the leaf dir (where `draws.tsv` would live). `method` is the
     /// inference algorithm tag; `draws` writes a `draws.tsv` iff `Some`.
@@ -351,7 +351,7 @@ mod tests {
         let ord_hex: String = method_label.bytes().map(|b| format!("{b:02x}")).collect();
         let run_id = format!("{:0<64}", format!("{ord_hex}abcdef"));
         let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"toy","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{method_label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":-12.3,"best_chain":1}},"provenance":{{"created_at":"2026-06-22T00:00:0{ord}Z","argv":["camdl","fit","run"]}}}}"#,
+            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"toy","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{method_label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":-12.3,"best_chain":1}},"provenance":{{"created_at":"2026-06-22T00:00:0{ord}Z","argv":["camdl","fit","run"]}}}}"#,
             ord = method_label.len() % 10,
         );
         fs::write(leaf.join("run.json"), rec).unwrap();

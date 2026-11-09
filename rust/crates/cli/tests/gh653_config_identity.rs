@@ -251,7 +251,7 @@ reason = "{reason}"
 "#)
 }
 
-/// Every committed fit-stage leaf (a `run.json`) under `<dir>/results/fits`.
+/// Every committed fit-method leaf (a `run.json`) under `<dir>/results/fits`.
 fn fit_leaves(dir: &Path) -> Vec<PathBuf> {
     let mut leaves = Vec::new();
     let mut stack = vec![dir.join("results").join("fits")];

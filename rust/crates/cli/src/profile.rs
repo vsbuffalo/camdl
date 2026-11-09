@@ -1524,7 +1524,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // The base fit's `starts_from` lineage would fold into the base as
     // a dep (guardrail 3-base). `camdl profile` does not currently
     // thread a base-fit lineage, so the dep list is empty; when it
-    // does, push the resolved `FitStage` ArtifactRef here.
+    // does, push the resolved `FitMethod` ArtifactRef here.
     // 2026-08-23 audit: fold the chain-start file's content into the identity,
     // the same treatment `fit run` got in gh#541. The resolved `init` in the
     // method blob names which source; the dep digests what is in it, so
