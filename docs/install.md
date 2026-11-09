@@ -77,12 +77,12 @@ install builds the browser interface from source, so Node.js (which provides
 uv tool install git+https://github.com/vsbuffalo/camdl-scope
 ```
 
-The command it installs is `camdl-watch`. Run it from the project directory —
-the one holding `results/` — and open the address it prints:
+It installs the `camdl-scope` command. Run it from the project directory — the
+one holding `results/` — and open the address it prints:
 
 ```sh
-camdl-watch --port 8800                  # http://127.0.0.1:8800
-camdl-watch --port 8800 --host 0.0.0.0   # reachable from other devices on your network
+camdl-scope --port 8800                  # http://127.0.0.1:8800
+camdl-scope --port 8800 --host 0.0.0.0   # reachable from other devices on your network
 ```
 
 The viewer only reads the store, so it is safe to leave running while fits write

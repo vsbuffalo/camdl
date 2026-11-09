@@ -640,7 +640,7 @@ It is read-only on the store, auto-discovers concurrent runs, and refreshes a
 run that is still sampling — so diagnostics are readable _during_ a long fit
 rather than only after it.
 
-It is a separate package; install its `camdl-watch` command with `uv`. The
+It is a separate package; install its `camdl-scope` command with `uv`. The
 install builds the browser UI from source, so Node.js (for `npm`) must be on the
 PATH alongside `uv` — without it the install fails rather than leaving a server
 with no UI:
@@ -648,7 +648,7 @@ with no UI:
 ```sh
 uv tool install git+https://github.com/vsbuffalo/camdl-scope
 # or, without installing:
-uvx --from git+https://github.com/vsbuffalo/camdl-scope camdl-watch --port 8800
+uvx --from git+https://github.com/vsbuffalo/camdl-scope camdl-scope --port 8800
 ```
 
 Run it from the project root. `--store` defaults to `results/fits` under the
@@ -656,8 +656,8 @@ current directory — which is precisely why the layout above needs no
 configuration:
 
 ```sh
-camdl-watch --port 8800                  # http://127.0.0.1:8800
-camdl-watch --port 8800 --host 0.0.0.0   # reachable from a phone over the LAN
+camdl-scope --port 8800                  # http://127.0.0.1:8800
+camdl-scope --port 8800 --host 0.0.0.0   # reachable from a phone over the LAN
 ```
 
 Hand the human the URL and let them read the plots. Agent vision on scatter and
