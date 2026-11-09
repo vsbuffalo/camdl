@@ -297,6 +297,35 @@ pub struct CompleteDataMeans {
 /// warm-up, so the mean is noisier but still honest. This never contaminates a
 /// well-formed fit.
 pub fn read_chain_mean_logliks(method_dir: &Path, kind: LoglikType) -> Option<ChainLoglikMeans> {
+    read_chain_loglik_series(method_dir, kind).map(|s| chain_mean_logliks(&s))
+}
+
+/// One chain's retained log-likelihood series, by column: `None` where its
+/// trace is unreadable or lacks the column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChainSeries {
+    pub chain: ChainIndex,
+    pub scored: Option<Vec<f64>>,
+    pub complete: Option<Vec<f64>>,
+    pub transition: Option<Vec<f64>>,
+}
+
+/// Every chain's retained log-likelihood series, as the traces store them —
+/// the data the per-chain means and the outlier scores are computed from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChainLoglikSeries {
+    pub scored_column: &'static str,
+    pub chains: Vec<ChainSeries>,
+    /// PGAS's complete-data split is carried ([`CompleteDataMeans`]).
+    pub wants_split: bool,
+    /// A readable trace exists and none names the scored column.
+    pub scored_column_absent: bool,
+}
+
+/// Read every `chain_*/trace.tsv` under `method_dir`, keeping each chain's
+/// post-burn-in tail (the "Post-burn-in selection" of
+/// [`read_chain_mean_logliks`]). `None` when no chain trace exists.
+pub fn read_chain_loglik_series(method_dir: &Path, kind: LoglikType) -> Option<ChainLoglikSeries> {
     let chain_dirs = discover_chain_dirs(method_dir);
     if chain_dirs.is_empty() {
         return None;
@@ -322,17 +351,13 @@ pub fn read_chain_mean_logliks(method_dir: &Path, kind: LoglikType) -> Option<Ch
         vec![scored_column]
     };
 
-    let mut chain_ids = Vec::with_capacity(chain_dirs.len());
-    let mut scored = Vec::with_capacity(chain_dirs.len());
-    let mut complete = Vec::with_capacity(chain_dirs.len());
-    let mut transition = Vec::with_capacity(chain_dirs.len());
     // "Absent" means a readable trace exists and none of them names the scored
     // column — distinct from "no readable trace at all", which surfaces as NaN
     // means. Starts `false` so an unreadable method never claims the column is
     // missing.
     let mut any_header_read = false;
     let mut any_scored_column = false;
-
+    let mut chains = Vec::with_capacity(chain_dirs.len());
     for (chain, dir) in &chain_dirs {
         let cols = read_trace_cols(&dir.join("trace.tsv"), &names);
         if let Some(cols) = cols.as_ref() {
@@ -342,38 +367,54 @@ pub fn read_chain_mean_logliks(method_dir: &Path, kind: LoglikType) -> Option<Ch
             }
         }
         let k = draw_counts.get(chain).copied();
-        let mean_of = |slot: usize| -> f64 {
-            let Some(Some(all)) = cols.as_ref().map(|c| &c[slot]) else {
-                return f64::NAN;
-            };
-            retained_mean(all, k)
+        let tail = |slot: usize| -> Option<Vec<f64>> {
+            let all = cols.as_ref()?.get(slot)?.as_ref()?;
+            Some(retained(all, k).to_vec())
         };
-        chain_ids.push(*chain);
-        scored.push(mean_of(0));
-        if wants_split {
-            complete.push(mean_of(1));
-            transition.push(mean_of(2));
-        }
+        chains.push(ChainSeries {
+            chain: *chain,
+            scored: tail(0),
+            complete: if wants_split { tail(1) } else { None },
+            transition: if wants_split { tail(2) } else { None },
+        });
     }
-
-    Some(ChainLoglikMeans {
+    Some(ChainLoglikSeries {
         scored_column,
-        chain_ids,
-        scored,
+        chains,
+        wants_split,
         scored_column_absent: any_header_read && !any_scored_column,
-        complete_data: wants_split.then_some(CompleteDataMeans { complete, transition }),
     })
 }
 
-/// Mean of the retained tail of one chain's column: the last `k` rows when
+/// The per-chain means of [`ChainLoglikSeries`], ordered by chain number.
+/// The run and `fit summary` both call this, on the values as the traces
+/// store them.
+pub fn chain_mean_logliks(series: &ChainLoglikSeries) -> ChainLoglikMeans {
+    let mean = |v: &Option<Vec<f64>>| v.as_deref().map_or(f64::NAN, mean_or_nan);
+    ChainLoglikMeans {
+        scored_column: series.scored_column,
+        chain_ids: series.chains.iter().map(|c| c.chain).collect(),
+        scored: series.chains.iter().map(|c| mean(&c.scored)).collect(),
+        scored_column_absent: series.scored_column_absent,
+        complete_data: series.wants_split.then(|| CompleteDataMeans {
+            complete: series.chains.iter().map(|c| mean(&c.complete)).collect(),
+            transition: series.chains.iter().map(|c| mean(&c.transition)).collect(),
+        }),
+    }
+}
+
+/// The retained tail of one chain's column: the last `k` rows when
 /// `draws.tsv` gave a count that fits, else the whole trace (no manifest means
-/// we cannot strip warm-up, so the mean is noisier but still honest). `NaN`
-/// for an empty selection — never silently 0.
-fn retained_mean(all: &[f64], k: Option<usize>) -> f64 {
-    let selected: &[f64] = match k {
+/// we cannot strip warm-up, so the mean is noisier but still honest).
+fn retained(all: &[f64], k: Option<usize>) -> &[f64] {
+    match k {
         Some(k) if k > 0 && k <= all.len() => &all[all.len() - k..],
         _ => all,
-    };
+    }
+}
+
+/// The mean, or `NaN` for an empty selection — never silently 0.
+fn mean_or_nan(selected: &[f64]) -> f64 {
     if selected.is_empty() {
         f64::NAN
     } else {

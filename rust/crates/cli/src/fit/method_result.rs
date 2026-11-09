@@ -1296,7 +1296,7 @@ impl PgasRun {
         // a fit report none at all.
         let est_names: Vec<String> = conv.param_names();
         let (n_samples, posterior_mean, posterior_q025, posterior_q975) =
-            posterior_summaries(method_dir, &est_names);
+            { let (n, cols) = read_draw_columns(method_dir, &est_names); posterior_summaries(n, cols) };
 
         // Acceptance per param: pgas writes acceptance_rates as
         // Vec<Vec<f64>> (n_chains × n_estimated). Aggregate to per-
@@ -1369,7 +1369,7 @@ impl PmmhRun {
         // a fit report none at all.
         let est_names: Vec<String> = conv.param_names();
         let (n_samples, posterior_mean, _q025, _q975) =
-            posterior_summaries(method_dir, &est_names);
+            { let (n, cols) = read_draw_columns(method_dir, &est_names); posterior_summaries(n, cols) };
 
         // PMMH writes acceptance_rate as Vec<f64> (one per chain). The
         // table-row scalar is the mean across chains.
@@ -1616,31 +1616,22 @@ fn read_summary_json(
     Ok(value)
 }
 
-/// Read `<method>/draws.tsv` and compute (n_samples, mean, q025, q975)
-/// for each param in `est_names`. `draws.tsv` is the canonical
-/// posterior-sample table written by both PGAS and PMMH (post-
-/// burn-in, thinned, all params).
-fn posterior_summaries(
+/// The posterior draws of the parameters in `est_names`, as `draws.tsv`
+/// stores them, and the number of draw rows. `draws.tsv` is the canonical
+/// posterior-sample table written by both PGAS and PMMH (post-burn-in,
+/// thinned, all params). An absent or empty file is no draws.
+pub(crate) fn read_draw_columns(
     method_dir: &Path,
     est_names: &[String],
-) -> (
-    usize,
-    BTreeMap<String, f64>,
-    BTreeMap<String, f64>,
-    BTreeMap<String, f64>,
-) {
-    let path = method_dir.join("draws.tsv");
-    let mut mean = BTreeMap::new();
-    let mut q025 = BTreeMap::new();
-    let mut q975 = BTreeMap::new();
-    let contents = match std::fs::read_to_string(&path) {
+) -> (usize, Vec<(String, Vec<f64>)>) {
+    let contents = match std::fs::read_to_string(method_dir.join("draws.tsv")) {
         Ok(s) => s,
-        Err(_) => return (0, mean, q025, q975),
+        Err(_) => return (0, Vec::new()),
     };
     let mut lines = contents.lines();
     let header = match lines.next() {
         Some(h) => h,
-        None => return (0, mean, q025, q975),
+        None => return (0, Vec::new()),
     };
     let cols: Vec<&str> = header.split('\t').collect();
     // Build column indices for the estimated-param subset.
@@ -1666,8 +1657,27 @@ fn posterior_summaries(
         }
         n += 1;
     }
-    for (k, (name, _)) in col_idx.iter().enumerate() {
-        let v = &mut samples[k];
+    (n, col_idx.into_iter().map(|(name, _)| name).zip(samples).collect())
+}
+
+/// (n_samples, mean, q025, q975) per parameter, from the draws as
+/// [`read_draw_columns`] gives them. The run and `fit summary` both call
+/// this on the values as `draws.tsv` holds them, so the two agree.
+pub(crate) fn posterior_summaries(
+    n: usize,
+    columns: Vec<(String, Vec<f64>)>,
+) -> (
+    usize,
+    BTreeMap<String, f64>,
+    BTreeMap<String, f64>,
+    BTreeMap<String, f64>,
+) {
+    let mut mean = BTreeMap::new();
+    let mut q025 = BTreeMap::new();
+    let mut q975 = BTreeMap::new();
+    for (name, mut v) in columns {
+        let name = &name;
+        let v = &mut v;
         if v.is_empty() {
             continue;
         }
