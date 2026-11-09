@@ -68,7 +68,7 @@ pub(crate) fn render_md_method(method: &MethodReport) -> String {
 
     // IF2 gate verdict (only when populated).
     if let Some(gate) = &method.gate {
-        s.push_str("### Compound scout-convergence gate\n\n");
+        s.push_str("### Compound convergence gate\n\n");
         s.push_str("| leg | value | threshold | pass? |\n|---|---|---|---|\n");
         let glyph = |b| if b { "✓" } else { "✗" };
         s.push_str(&format!("| Â (max over params{}) | {:.3} | {:.2} | {} |\n",

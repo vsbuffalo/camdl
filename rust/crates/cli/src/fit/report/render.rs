@@ -721,11 +721,11 @@ fn pass_glyph(passes: bool) -> Span {
     if passes { Span::styled("✓", Style::Ok) } else { Span::styled("✗", Style::Err) }
 }
 
-/// The compound scout-convergence gate: the Â leg, the decibans leg and the
+/// The compound convergence gate: the Â leg, the decibans leg and the
 /// overall verdict, from the one measurement the source check and `fit
 /// table` read (`gating::assess_if2`), so the three cannot disagree.
 pub(crate) fn if2_gate_section(state: &If2Record) -> Vec<Line> {
-    let mut out = vec![indented("  ", "compound scout-convergence gate", Style::Bold)];
+    let mut out = vec![indented("  ", "compound convergence gate", Style::Bold)];
     let (gate, resolved) = resolve_gate(state);
     let assessed = crate::fit::gating::assess_if2(state, &gate);
 

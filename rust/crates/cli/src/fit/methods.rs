@@ -73,7 +73,7 @@ pub const METHODS: &[InferenceMethod] = &[
         category: MethodCategory::Inference,
         status: MethodStatus::Stable,
         one_liner: "Iterated filtering MLE — perturbation-and-filter loop.",
-        use_for: "scout/refine pipelines on stochastic models.",
+        use_for: "maximum-likelihood point estimates on stochastic models, and starts for a sampler (`from_mle`).",
         status_note: "",
     },
     InferenceMethod {
@@ -902,6 +902,18 @@ pub fn render_matrix() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// `camdl fit methods` describes each method without the retired staged
+    /// pipeline's stage names.
+    #[test]
+    fn the_registry_names_no_retired_stage() {
+        for m in METHODS {
+            for text in [m.one_liner, m.use_for, m.status_note] {
+                assert!(!text.to_lowercase().contains("scout") && !text.contains("refine"),
+                    "{:?}: {text}", m.algorithm);
+            }
+        }
+    }
     use super::*;
 
     /// gh#122: a source that mixes a `deterministic(...)` exit with another exit

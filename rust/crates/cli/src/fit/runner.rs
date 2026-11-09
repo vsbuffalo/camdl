@@ -119,7 +119,7 @@ pub struct FitRunConfig {
     /// over the `[method]` table; the `Default` is 4000 × 8, logmeanexp).
     /// Consumed by Step 5.
     pub loglik_eval: super::config_v2::LoglikEvalConfig,
-    /// Compound scout-convergence gate config (Step 4 plumbing for
+    /// Compound convergence gate config (Step 4 plumbing for
     /// §Proposal 3). Same per-method override semantics as `loglik_eval`.
     /// Consumed by Step 8.
     pub gate: super::config_v2::GateConfig,
@@ -2701,7 +2701,7 @@ pub fn run_chains_with_per_chain_params(
 impl ChainResults {
     /// Per-chain clean-eval log-likelihoods in chain-id order. Used by
     /// scout/refine/validate to populate `FitState.chain_eval_logliks`
-    /// for the compound scout-convergence gate.
+    /// for the compound convergence gate.
     pub fn chain_eval_logliks(&self) -> Vec<f64> {
         let mut v: Vec<(ChainIndex, f64)> = self.loglik_eval.per_chain.iter()
             .map(|s| (s.chain_id, s.loglik)).collect();

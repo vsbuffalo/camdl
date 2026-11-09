@@ -1782,8 +1782,8 @@ fn emit_start_rank_report(
             "note: closest LHS draw to your [estimate].start values \
              ranks {} of {} (top {:.0}%) — outside the top half of \
              the survey. The basin LHS found may be a better starting \
-             point for refine; consider passing scout's MLE via \
-             starts_from instead of a hardcoded start.",
+             point; consider starting from an IF2 fit's estimate \
+             (`starts = {{ from_mle = \"@label\" }}`) instead of a hardcoded start.",
             best_rank + 1, n, pct);
     }
 }

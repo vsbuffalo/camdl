@@ -3889,7 +3889,7 @@ results/fits/01_mle-2030ba2b/
   best loglik:  -58.4 (if2)  (loglik-eval, max across chains)
   chains:       4
 
-  compound scout-convergence gate
+  compound convergence gate
     Â leg:           max Â = 1.145 (gamma)  ✗  (threshold 1.01)
     decibans leg:    Δ = 0.9 dB / threshold 30.0 dB  ✓  (σ_max=0.02)
     overall:         ✗ FAIL

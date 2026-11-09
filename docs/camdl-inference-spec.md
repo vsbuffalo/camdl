@@ -569,7 +569,7 @@ gamma = 1.07
 
 # Per-chain CLEAN-EVAL log-likelihoods + standard errors (in
 # chain-id order), produced by the Step-7 loglik-eval re-scoring.
-# The compound scout-convergence gate combines these with
+# The compound convergence gate combines these with
 # tail_chain_agreement to compute an SE-aware decibans-spread
 # threshold (see §6.1.1).
 chain_eval_logliks = [
@@ -1025,9 +1025,9 @@ camdl fit summary fit/he2010
 Reads each MLE method leaf's `fit_state.toml` + `final_params.toml` +
 `mle_params.toml` and renders a per-method interpretation block:
 
-- compound scout-convergence gate verdict (Â + decibans-spread, rendered against
-  the _resolved_ gate config persisted in `fit_state.toml` — i.e. the threshold
-  the run was actually judged by, not whatever `fit.toml` says at summary-time)
+- compound convergence gate verdict (Â + decibans-spread, rendered against the
+  _resolved_ gate config persisted in `fit_state.toml` — i.e. the threshold the
+  run was actually judged by, not whatever `fit.toml` says at summary-time)
 - parameter table: estimated params with Â glyph, IVP marker
 - per-chain loglik-eval table with winner row marked
 - provenance cross-check — `final_params.toml ↔ mle_params.toml` and

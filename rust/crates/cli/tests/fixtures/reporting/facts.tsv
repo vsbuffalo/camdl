@@ -278,7 +278,7 @@ pgas.explain	stdout	block	`frozen-disagree`: cells where every chain sits consta
 if2.summary	stdout	line	if2 · if2	4 chains
 if2.summary	stdout	line	seeded from:	from_prior (one independent draw per chain)
 if2.summary	stdout	line	best loglik:	-44.2 (if2)  (loglik-eval, max across chains)
-if2.summary	stdout	block	compound scout-convergence gate	Â leg:           max Â = 1.171 (beta)  ✗  (threshold 1.01)
+if2.summary	stdout	block	compound convergence gate	Â leg:           max Â = 1.171 (beta)  ✗  (threshold 1.01)
 if2.summary	stdout	line	decibans leg:	Δ = 0.4 dB / threshold 30.0 dB  ✓  (σ_max=0.02)
 if2.summary	stdout	line	overall:	✗ FAIL
 if2.summary	stdout	line	parameter estimates (loglik-eval, selected chain θ̂)	Â threshold 1.01
