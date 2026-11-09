@@ -269,6 +269,13 @@ impl Out {
         stdout_written(written);
     }
 
+    /// Text of a report command's report, on stdout, written as given: a
+    /// rendered table or page that ends in its own newline.
+    pub fn report_raw(&self, text: impl std::fmt::Display) {
+        let written = write!(std::io::stdout().lock(), "{text}");
+        stdout_written(written);
+    }
+
     /// The writer a command's data goes to: stdout, unpainted.
     pub fn data(&self) -> Data {
         Data(std::io::stdout().lock())

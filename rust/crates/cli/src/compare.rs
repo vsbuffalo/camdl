@@ -242,6 +242,9 @@ fn positional_model_names(paths: &[String]) -> Vec<String> {
 }
 
 pub fn cmd_compare(a: &crate::args::CompareArgs) {
+    // compare has no `--no-color`: its painters follow the environment and
+    // whether each stream is a terminal.
+    let out = crate::out::Out::new(false);
     // `--explain` serves the methods page the footer points at, and exits.
     // It is answered before any input is resolved: the reader who needs the
     // definitions is usually the one who has not assembled a comparison yet,
@@ -249,8 +252,8 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     // pointer exists to remove. Given alongside model paths it still only
     // prints — one contract, no mode where the guide and a table interleave.
     if a.explain {
-        print!("{}", crate::docs::topic_body("model-comparison")
-            .expect("the model-comparison docs topic is compiled into the binary"));
+        out.report_raw(format_args!("{}", crate::docs::topic_body("model-comparison")
+            .expect("the model-comparison docs topic is compiled into the binary")));
         return;
     }
 
@@ -272,20 +275,17 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         "md"    => Format::Md,
         "json"  => Format::Json,
         other   => {
-            eprintln!("error: --format must be table|md|json (got '{}')", other);
-            std::process::exit(1);
+            out.fail(format!("error: --format must be table|md|json (got '{}')", other));
         }
     };
 
     // Resolve model list: CLI positional > compare.toml
     let (models, cfg_baseline, cfg_metrics, cfg_format) = if let Some(path) = config_path {
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            eprintln!("error: cannot read {}: {}", path, e);
-            std::process::exit(1);
+            out.fail(format!("error: cannot read {}: {}", path, e));
         });
         let cfg: CompareToml = toml::from_str(&text).unwrap_or_else(|e| {
-            eprintln!("error: parsing {}: {}", path, e);
-            std::process::exit(1);
+            out.fail(format!("error: parsing {}: {}", path, e));
         });
         let fmt = cfg.format.as_deref().and_then(|f| match f {
             "table" => Some(Format::Table),
@@ -302,13 +302,11 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         }).collect();
         (models, None, None, None)
     } else {
-        eprintln!("error: compare requires either --config FILE or ≥2 fit leaf paths");
-        std::process::exit(1);
+        out.fail("error: compare requires either --config FILE or ≥2 fit leaf paths");
     };
 
     if models.len() < 2 {
-        eprintln!("error: compare needs ≥2 models; got {}", models.len());
-        std::process::exit(1);
+        out.fail(format!("error: compare needs ≥2 models; got {}", models.len()));
     }
 
     // gh#417/gh#418: chain exclusion resolved PER FIT, bound to each model's
@@ -318,17 +316,15 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     // nothing to filter, so the selection is inert there.
     let model_names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
     let cohort = parse_cohort_exclude(&a.exclude_chains, &model_names).unwrap_or_else(|e| {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+        out.fail(format!("error: {e}"));
     });
     cohort.warn();
 
     // Load traces, each filtered by its own fit's selection (if any).
     let rows: Vec<Row> = models.into_iter().map(|m| {
         let selection = cohort.for_fit(&m.name);
-        let (trace, data, mc_se) = load_trace(&m.path, derive, selection).unwrap_or_else(|e| {
-            eprintln!("error loading trace for '{}' at '{}': {}", m.name, m.path, e);
-            std::process::exit(1);
+        let (trace, data, mc_se) = load_trace(&out, &m.path, derive, selection).unwrap_or_else(|e| {
+            out.fail(format!("error loading trace for '{}' at '{}': {}", m.name, m.path, e));
         });
         Row { name: m.name, path: m.path, trace, data, mc_se }
     }).collect();
@@ -345,7 +341,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
             discriminant(&w[0].trace.conditioning)
                 != discriminant(&w[1].trace.conditioning));
         if mixed {
-            eprintln!("error: the compared traces mix conditioning modes:");
+            let mut message = "error: the compared traces mix conditioning modes:".to_string();
             for r in &rows {
                 let kind = match &r.trace.conditioning {
                     Conditioning::InSample =>
@@ -353,11 +349,11 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
                     Conditioning::HoldOutTail { train_end, .. } =>
                         format!("hold_out_tail (θ sealed at t = {train_end})"),
                 };
-                eprintln!("       {}: {}", r.name, kind);
+                message.push_str(&format!("\n       {}: {}", r.name, kind));
             }
-            eprintln!("       Declare the same holdout in every compared fit, or pass \
+            message.push_str("\n       Declare the same holdout in every compared fit, or pass \
                        --in-sample to score all of them in-sample.");
-            std::process::exit(2);
+            refuse(&out, message);
         }
         // All held-out: the sealed boundaries must also agree, or the rows
         // score different windows (the axis check would refuse anyway, but
@@ -367,12 +363,10 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
             _ => None,
         }).collect();
         if ends.windows(2).any(|w| w[0] != w[1]) {
-            eprintln!("error: the compared fits seal training at different \
-                       boundaries: {ends:?}");
-            eprintln!("       Held-out scores over different windows are not \
+            refuse(&out, format!("error: the compared fits seal training at different \
+                       boundaries: {ends:?}\n       Held-out scores over different windows are not \
                        commensurable; declare the same holdout_after in every \
-                       compared fit.");
-            std::process::exit(2);
+                       compared fit."));
         }
     }
 
@@ -388,21 +382,20 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
             discriminant(&w[0].trace.provenance)
                 != discriminant(&w[1].trace.provenance));
         if mixed && !a.allow_mixed_provenance {
-            eprintln!("error: the compared traces mix provenance kinds:");
+            let mut message = "error: the compared traces mix provenance kinds:".to_string();
             for r in &rows {
                 let kind = match &r.trace.provenance {
                     Provenance::PlugIn => "plug_in (a single θ)".to_string(),
                     Provenance::Posterior { n_draws } =>
                         format!("posterior (mixture over {n_draws} draws)"),
                 };
-                eprintln!("       {}: {}", r.name, kind);
+                message.push_str(&format!("\n       {}: {}", r.name, kind));
             }
-            eprintln!("       A plug-in predictive is under-dispersed relative to a \
+            message.push_str("\n       A plug-in predictive is under-dispersed relative to a \
                        posterior mixture, so the Δ confounds model difference with \
-                       dispersion treatment.");
-            eprintln!("       Pass --draws 1 to score every fit plug-in, or \
+                       dispersion treatment.\n       Pass --draws 1 to score every fit plug-in, or \
                        --allow-mixed-provenance to render anyway.");
-            std::process::exit(2);
+            refuse(&out, message);
         }
     }
 
@@ -411,10 +404,9 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     let t_ref = t_scores[0];
     let t_mismatch = t_scores.iter().any(|&t| t != t_ref);
     if t_mismatch && !allow_mismatched_horizon {
-        eprintln!("error: T_score differs across models: {:?}", t_scores);
-        eprintln!("       Δelpd and Δcrps are not commensurable.");
-        eprintln!("       Pass --allow-mismatched-horizon to render (uncomparable Δ columns → '—').");
-        std::process::exit(2);
+        refuse(&out, format!("error: T_score differs across models: {:?}\n       \
+            Δelpd and Δcrps are not commensurable.\n       \
+            Pass --allow-mismatched-horizon to render (uncomparable Δ columns → '—').", t_scores));
     }
 
     // Fairness, part two: equal T_score is not an equal observation AXIS.
@@ -427,8 +419,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     // that is meaningless however it is displayed.
     if !t_mismatch {
         if let Err(e) = check_shared_observation_axis(&rows) {
-            eprintln!("error: {e}");
-            std::process::exit(2);
+            refuse(&out, format!("error: {e}"));
         }
     }
 
@@ -445,8 +436,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         rows.iter().map(|r| (r.name.as_str(), &r.data)).collect();
     if let Err(e) = check_shared_data(&data_entries) {
         if !a.allow_data_mismatch {
-            eprintln!("error: {e}");
-            std::process::exit(2);
+            refuse(&out, format!("error: {e}"));
         }
     }
 
@@ -465,10 +455,9 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     });
     let base_idx = rows.iter().position(|r| r.name == baseline_name)
         .unwrap_or_else(|| {
-            eprintln!("error: baseline '{}' not found among models: {:?}",
+            out.fail(format!("error: baseline '{}' not found among models: {:?}",
                 baseline_name,
-                rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>());
-            std::process::exit(1);
+                rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()));
         });
 
     let metrics_chosen = metrics_cli.or(cfg_metrics)
@@ -477,20 +466,25 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
 
     if let Some(path) = &a.pointwise {
         match write_pointwise(&rows, base_idx, path) {
-            Ok(n) => eprintln!("wrote {n} pointwise rows to {}", path.display()),
+            Ok(n) => out.say(format_args!("wrote {n} pointwise rows to {}", path.display())),
             Err(e) => {
-                eprintln!("error: {e}");
-                std::process::exit(1);
+                out.fail(format!("error: {e}"));
             }
         }
     }
 
-    let out = match fmt_final {
+    let rendered = match fmt_final {
         Format::Json  => render_json(&rows, base_idx, &metrics_chosen),
         Format::Md    => render_md(&rows, base_idx, &metrics_chosen, t_mismatch),
         Format::Table => render_table(&rows, base_idx, &metrics_chosen, t_mismatch),
     };
-    print!("{out}");
+    out.report_raw(rendered);
+}
+
+/// A comparison refused because its rows are not commensurable: exit 2, as
+/// every such refusal always has, distinct from the 1 of an input error.
+fn refuse(out: &crate::out::Out, message: String) -> ! {
+    out.error(crate::out::CommandError { code: crate::out::ExitCode(2), message, hint: None }).exit()
 }
 
 // ── the pointwise Δelpd vector (gh#706) ──────────────────────────────────
@@ -869,6 +863,7 @@ fn write_pointwise(rows: &[Row], base_idx: usize, path: &Path) -> Result<usize, 
 ///    the fit's sealed θ̂ — never by reimplementing the filter (the obs-model
 ///    assembly is already triplicated; a fourth copy is forbidden).
 fn load_trace(
+    out: &crate::out::Out,
     path: &str,
     derive: DeriveSettings,
     selection: Option<&ChainSelection>,
@@ -885,7 +880,7 @@ fn load_trace(
     match crate::fit::handle::resolve_fit_run(path) {
         Ok(resolved) => {
             let data = fit_data_identity(&resolved);
-            derive_prequential(&resolved, derive, selection)
+            derive_prequential(out, &resolved, derive, selection)
                 .map(|(t, mc)| (t, data, mc))
         }
         Err(resolve_err) => Err(format!(
@@ -1054,6 +1049,7 @@ fn try_load_explicit_prequential(path: &str) -> Result<Option<PrequentialTrace>,
 /// --save-prequential` to a temp stem; (e) read back the `{stem}.json` trace.
 /// All temp files live in the system temp dir and are best-effort cleaned up.
 fn derive_prequential(
+    out: &crate::out::Out,
     resolved: &ResolvedFit,
     derive: DeriveSettings,
     selection: Option<&ChainSelection>,
@@ -1248,11 +1244,11 @@ fn derive_prequential(
 
     let n_theta = theta_tomls.len();
     if is_mixture || derive.replicates >= 2 {
-        eprintln!(
+        out.say(format_args!(
             "compare: {}: {} filter passes ({} draw(s) × {} replicate(s), \
              {} particles each; --draws 1 / --replicates 1 for the cheap modes)",
             seg_slug, n_theta * derive.replicates, n_theta, derive.replicates,
-            derive.particles);
+            derive.particles));
     }
     let mut replicate_traces: Vec<PrequentialTrace> =
         Vec::with_capacity(derive.replicates);
