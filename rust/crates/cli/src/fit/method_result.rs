@@ -900,6 +900,16 @@ pub struct PgasRun {
     pub posterior_q025: BTreeMap<String, f64>,
     pub posterior_q975: BTreeMap<String, f64>,
     pub acceptance_per_param: BTreeMap<String, f64>,
+    /// Each chain's acceptance per parameter, keyed by the chain's number.
+    /// Empty for a summary written before the chains were recorded beside
+    /// their rates (`acceptance_chains`), when a row's position is not known
+    /// to be its chain.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub acceptance_per_chain: BTreeMap<usize, BTreeMap<String, f64>>,
+    /// The parameter move the rates belong to, which sets their healthy band;
+    /// `None` for a summary written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_kernel: Option<sim::inference::diagnostic::AcceptanceKernel>,
 }
 
 /// Default thinning factor (1 = unthinned) for older runs whose summary JSON
@@ -956,6 +966,14 @@ pub struct PmmhRun {
     #[serde(default)]
     pub acceptance_per_chain: BTreeMap<usize, f64>,
     pub map_loglik: f64,
+    /// The chain whose draw `map_loglik` belongs to (`fit_state.toml`
+    /// `best_chain`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_chain: Option<ChainIndex>,
+    /// What sampling cost (`<method>_summary.json` `cost`); `None` for a
+    /// summary written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<crate::fit::report::SamplingCost>,
     /// The pre-run noise check (`fit_state.toml` `pf_noise`); `None` on the
     /// deterministic `mh` path and when the check had no spread to measure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1402,6 +1420,26 @@ impl PgasRun {
             }
         };
 
+        // The same rows, each under the chain it belongs to, when the summary
+        // records which chain that is.
+        let chain_ids: Vec<usize> = summary.get("acceptance_chains").and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_u64().map(|c| c as usize)).collect())
+            .unwrap_or_default();
+        let rows: Vec<Vec<f64>> = summary.get("acceptance_rates").and_then(|v| v.as_array())
+            .map(|a| a.iter().map(|row| row.as_array()
+                .map(|r| r.iter().filter_map(|x| x.as_f64()).collect())
+                .unwrap_or_default()).collect())
+            .unwrap_or_default();
+        let acceptance_per_chain: BTreeMap<usize, BTreeMap<String, f64>> = if chain_ids.len() == rows.len() {
+            chain_ids.into_iter().zip(rows)
+                .map(|(c, row)| (c, est_names.iter().cloned().zip(row).collect()))
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
+        let acceptance_kernel = summary.get("acceptance_kernel")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
         Ok(PgasRun {
             diagnostics: posterior_diagnostics(
                 method_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
@@ -1410,6 +1448,8 @@ impl PgasRun {
             posterior_q025,
             posterior_q975,
             acceptance_per_param,
+            acceptance_per_chain,
+            acceptance_kernel,
         })
     }
 }
@@ -1465,10 +1505,15 @@ impl PmmhRun {
         } else {
             BTreeMap::new()
         };
-        let pf_noise = FitState::load(&method_dir.to_string_lossy()).ok().and_then(|s| s.pf_noise);
+        let state = FitState::load(&method_dir.to_string_lossy()).ok();
+        let pf_noise = state.as_ref().and_then(|s| s.pf_noise);
+        let map_chain = state.as_ref().map(|s| s.best_chain);
+        let cost = summary.get("cost").and_then(|v| serde_json::from_value(v.clone()).ok());
 
         Ok(PmmhRun {
             acceptance_per_chain,
+            map_chain,
+            cost,
             pf_noise,
             diagnostics: posterior_diagnostics(
                 method_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,

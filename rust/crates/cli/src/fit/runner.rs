@@ -15,7 +15,7 @@ use sim::{
         particle_filter::Observation,
         pmmh::Prior,
         prior::Density,
-        diagnostic::{DiagnosticCollector, DiagnosticKind, HintContext},
+        diagnostic::{DiagnosticCollector, DiagnosticKind},
     },
     rng::StatefulRng,
 };
@@ -2435,7 +2435,7 @@ pub fn run_chains_with_per_chain_params(
                 // Any non-degeneracy error is structural (config bug,
                 // unknown compartment, …) — every chain would hit it, so
                 // there is no survivor to fall back to. Fail loudly.
-                Err(other) => super::abandon_method(
+                Err(other) => super::abandon_method_on(
                     heartbeat,
                     format!("chain {} error: {:?}", ChainIndex(chain_id), other),
                 ),
@@ -2461,7 +2461,7 @@ pub fn run_chains_with_per_chain_params(
         // though the bounds were the lever; they are, but only in the
         // direction the shared sentence names, and the cause is the start the
         // filter cannot score.
-        super::abandon_method(
+        super::abandon_method_on(
             heartbeat,
             format!(
                 "error: all {} IF2 chain(s) bailed via the PF degeneracy watchdog — no usable \
@@ -2521,7 +2521,7 @@ pub fn run_chains_with_per_chain_params(
         results.len(), config.loglik_eval.n_replicates, config.loglik_eval.n_particles);
     let loglik_eval_outcome = loglik_eval::run_loglik_eval(
         config, &results, &config.loglik_eval, config.seed,
-    ).unwrap_or_else(|e| super::abandon_method(
+    ).unwrap_or_else(|e| super::abandon_method_on(
         heartbeat, format!("error: loglik-eval failed: {e}")));
 
     let (best_chain, best_loglik, best_se) =
@@ -2549,7 +2549,6 @@ pub fn run_chains_with_per_chain_params(
             collector.push(DiagnosticKind::PerturbedSwarmInfeasible {
                 start_loglik, steps: steps.clone(),
             });
-            super::report::findings::print(collector, HintContext { chains_completed: Some(results.len()) });
             return Err(fail_recording_findings(collector, method_dir, format!(
                 "if2: every chain's final estimate has log-likelihood -inf (best = {best_loglik}), \
                  but a chain's start scores {start_loglik:.1}: the start is feasible and the \
@@ -2558,7 +2557,6 @@ pub fn run_chains_with_per_chain_params(
                  (`rw_sd = …` in its [estimate] entry).", steps.join(", "))));
         }
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        super::report::findings::print(collector, HintContext { chains_completed: Some(results.len()) });
         return Err(fail_recording_findings(collector, method_dir, format!(
             "if2: all {} surviving chain(s) reached no finite log-likelihood \
              (best = {}). The likelihood surface is `-inf` at every evaluated \
@@ -3193,6 +3191,8 @@ impl MethodConvergence {
     /// the end of the same run said a thing the summary of that run declines
     /// to say. The ESS is unaffected by how the chains were started and is
     /// reported either way.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the run's R̂ table is drawn from the report \
+        now (`report::render::rhat_run_table`); deleted in its own commit"))]
     pub fn report(
         &self,
         rhat_threshold: f64,

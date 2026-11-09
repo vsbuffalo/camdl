@@ -136,6 +136,8 @@ fn text_lines(text: &str) -> Vec<Line> {
 pub enum View {
     /// `fit summary`'s text.
     Summary(SummaryView),
+    /// The block `fit run` ends a method with, on stderr.
+    RunEnd,
 }
 
 /// The choices `fit summary`'s text makes per method.
@@ -163,7 +165,194 @@ pub fn render_report(outcome: &MethodOutcome, view: View) -> Vec<Line> {
         (View::Summary(v), MethodOutcome::Failed { header, findings, error, .. }) => {
             failed_block(v.version_lead, header, findings, error)
         }
+        (View::RunEnd, MethodOutcome::Completed(report)) => run_end_block(report),
+        // The run's opening block is on screen already and the error is the
+        // command's to print (`Out::error`): what is left is the findings the
+        // run recorded before it stopped.
+        (View::RunEnd, MethodOutcome::Failed { findings, .. }) => super::findings::render(
+            findings,
+            sim::inference::diagnostic::HintContext { chains_completed: None },
+        ),
     }
+}
+
+// ─── The end of `fit run` ─────────────────────────────────────────────────────
+
+/// What `fit run` prints when a method completes: for a Bayesian method the
+/// verdict as `fit summary` gives it, the R̂ legend, the acceptance table and
+/// the R̂ table; for every method its findings; for PMMH and `mh` the cost of
+/// sampling and the highest-posterior draw's log-likelihood. The `stored`
+/// milestone follows it (`Out::milestone`).
+fn run_end_block(report: &MethodReport) -> Vec<Line> {
+    use sim::inference::diagnostic::HintContext;
+    let default_detail = ChainDetail::default();
+    let detail = report.chain_detail.as_ref().unwrap_or(&default_detail);
+    let refused = RefusedChains::from_findings(&report.findings, &report.findings_unreadable);
+    let mut out = Vec::new();
+    let completed = match &report.method_result {
+        Some(MethodResult::Pmmh(r)) => {
+            out.extend(verdict_section(&r.diagnostics, detail));
+            out.extend(rhat_legend());
+            out.extend(acceptance_table(&r.acceptance_per_chain, &report.warmup, AcceptanceKernel::RandomWalk));
+            if r.diagnostics.n_chains > 1 {
+                out.extend(rhat_run_table(&r.diagnostics));
+            }
+            r.diagnostics.n_chains.saturating_sub(refused.records.len())
+        }
+        Some(MethodResult::Pgas(r)) => {
+            out.extend(verdict_section(&r.diagnostics, detail));
+            out.extend(rhat_legend());
+            out.extend(pgas_acceptance_table(r));
+            if r.diagnostics.n_chains > 1 {
+                out.extend(rhat_run_table(&r.diagnostics));
+            }
+            r.diagnostics.n_chains.saturating_sub(refused.records.len())
+        }
+        Some(MethodResult::If2(r)) => r.record.n_good_chains.unwrap_or(r.record.n_chains),
+        Some(MethodResult::Nlopt(r)) => r.n_chains,
+        Some(MethodResult::Pfilter(_)) | None => 0,
+    };
+    out.extend(super::findings::render(&report.findings, HintContext { chains_completed: Some(completed) }));
+    if let Some(MethodResult::Pmmh(r)) = &report.method_result {
+        if let Some(cost) = &r.cost {
+            out.push(Line::default());
+            out.push(plain(crate::fit::pmmh::completion_line(&report.method, report.method == "mh", cost)));
+        }
+        if let Some(chain) = r.map_chain {
+            out.push(plain(format!(
+                "  loglik at the highest log-posterior draw (natural-scale prior, no Jacobian): {:.1} (chain {})",
+                r.map_loglik, chain)));
+        }
+    }
+    out
+}
+
+/// What the four R̂ thresholds mean, said once under the verdict, so the
+/// `threshold 1.05` above the tables and the `threshold 1.100` in the findings
+/// read as two bars with two jobs rather than as a contradiction.
+pub(crate) fn rhat_legend() -> Vec<Line> {
+    use crate::fit::method_result::RHAT_CONVERGED_THRESHOLD;
+    use crate::fit::runner::RHAT_REPORT_THRESHOLD;
+    use sim::inference::diagnostic::CONVERGENCE_ERROR_SEVERITY;
+    vec![
+        plain(format!(
+            "  R̂: below {RHAT_CONVERGED_THRESHOLD} counts as converged; above {RHAT_REPORT_THRESHOLD} \
+             draws a finding, a warning up to {CONVERGENCE_ERROR_SEVERITY}")),
+        plain("  and an error above it."),
+    ]
+}
+
+/// A statistic as the run's R̂ table prints it: `∞` as `inf`, an undefined
+/// value as `NaN`.
+fn stat_f64(s: Stat) -> f64 {
+    match s {
+        Stat::Value(v) => v,
+        Stat::Infinite => f64::INFINITY,
+        Stat::Undefined => f64::NAN,
+    }
+}
+
+/// The R̂ table at the end of a run: one row per parameter with its R̂, the
+/// certification glyph and its ESS against the draws; under any parameter not
+/// certified converged, the two halves of its R̂ and each chain's ESS.
+///
+/// The glyph is the certification band `fit summary` uses (`RhatBand`), never
+/// greener than the finding `RHAT_REPORT_THRESHOLD` draws. When the run's
+/// shape withholds R̂ — every chain started at one point (gh#890) — the table
+/// says so and shows the ESS alone: no number, no glyph, no decomposition.
+pub(crate) fn rhat_run_table(diag: &PosteriorDiagnostics) -> Vec<Line> {
+    use crate::fit::method_result::{ParamConvergence, RhatBand, RHAT_CONVERGED_THRESHOLD};
+    use crate::fit::runner::RHAT_REPORT_THRESHOLD;
+    let withheld = diag.per_param.values().find_map(|p| match p {
+        ParamConvergence::Scored { rhat_withheld: Some(e), .. } => Some(e),
+        _ => None,
+    });
+    let mut out = vec![Line::default(), plain(match withheld {
+        Some(why) => format!("R̂ — not assessed: {why}. ESS:"),
+        None => format!(
+            "R̂ (rank-normalized split, Vehtari et al. 2021) / ESS — R̂ threshold {RHAT_CONVERGED_THRESHOLD}:"),
+    })];
+    for (name, p) in &diag.per_param {
+        let ParamConvergence::Scored { rhat, ess_bulk, ess_tail, rhat_withheld, .. } = p else {
+            let why = p.why_no_rhat().unwrap_or_default();
+            out.push(plain(format!("  {:12} not reported — {}", name, why)));
+            continue;
+        };
+        let ess = stat_f64(*ess_bulk);
+        let tail = match ess_tail.finite() {
+            Some(t) => format!("{t:.0}"),
+            None => "—".to_string(),
+        };
+        let share = if diag.n_samples == 0 { 0.0 } else { ess / diag.n_samples as f64 };
+        let ess_text = format!("ESS bulk={:.0} tail={} ({:.1}% of {} draws)",
+            ess, tail, 100.0 * share, diag.n_samples);
+        if rhat_withheld.is_some() {
+            out.push(plain(format!("  {:12} {}", name, ess_text)));
+            continue;
+        }
+        let r = stat_f64(*rhat);
+        let drew_finding = r > RHAT_REPORT_THRESHOLD;
+        let band = RhatBand::of(r);
+        let glyph = match band.glyph_with_finding(drew_finding) {
+            "✓" => Span::styled("✓", Style::Ok),
+            "~" => Span::styled("~", Style::Warn),
+            "✗" => Span::styled("✗", Style::Err),
+            other => Span::plain(other),
+        };
+        out.push(Line(vec![
+            Span::plain(format!("  {:12} Rhat={:.3} ", name, r)),
+            glyph,
+            Span::plain(format!(" {ess_text}")),
+        ]));
+        // The decomposition follows the glyph, not the finding: it is the
+        // "so what do I do" line for anything not certified converged.
+        if band != RhatBand::Converged || drew_finding {
+            if let Some(driver) = p.rhat_driver() {
+                out.push(plain(format!(
+                    "  {:12}   R̂ = max(bulk {:.3}, folded {:.3}), classic {}; \
+                     the {} half is larger — {}",
+                    "", stat_f64(p.rhat_bulk()), stat_f64(p.rhat_folded()),
+                    p.rhat_classic().cell(3, "—"), driver.half(), driver.describe())));
+            }
+            // Whether each chain mixes inside its own mode, which no
+            // cross-chain statistic can say.
+            let per_chain = p.ess_per_chain();
+            if per_chain.len() >= 2 {
+                let cells: Vec<String> = per_chain.iter()
+                    .map(|e| if e.is_finite() { format!("{e:.0}") } else { "—".into() })
+                    .collect();
+                out.push(plain(format!("  {:12}   per-chain ESS [{}]", "", cells.join(", "))));
+            }
+        }
+    }
+    out
+}
+
+/// PGAS's acceptance table: each chain's acceptance per parameter, against
+/// the kernel's healthy band. A leaf written before the chains were recorded
+/// beside their rates has no table.
+fn pgas_acceptance_table(r: &crate::fit::method_result::PgasRun) -> Vec<Line> {
+    if r.acceptance_per_chain.is_empty() {
+        return Vec::new();
+    }
+    let kernel = r.acceptance_kernel.unwrap_or(AcceptanceKernel::RandomWalk);
+    let (lo, hi) = kernel.healthy_band();
+    let nuts = kernel == AcceptanceKernel::Nuts;
+    let mut out = vec![Line::default(), plain(format!(
+        "acceptance rates{}:", if nuts { " (NUTS block; ~80% is the target)" } else { "" }))];
+    for (chain, rates) in &r.acceptance_per_chain {
+        let mut spans = vec![Span::plain(format!("  chain {}: ", chain))];
+        for (i, (name, &rate)) in rates.iter().enumerate() {
+            let style = if rate < lo { Style::Err } else if rate > hi { Style::Warn } else { Style::Ok };
+            if i > 0 {
+                spans.push(Span::plain(" "));
+            }
+            spans.push(Span::plain(format!("  {name}=")));
+            spans.push(Span::styled(format!("{:.0}%", rate * 100.0), style));
+        }
+        out.push(Line(spans));
+    }
+    out
 }
 
 /// An NLopt method's block: a point estimate with no IF2 gate, so a compact
@@ -1798,15 +1987,17 @@ mod tests {
             estimate: vec!["beta".into(), "gamma".into()], fixed: vec!["rho".into()],
             starts: "single (every chain at one point)".into(), output: "results/fits/fail-1".into(),
         };
-        let checks = vec![super::super::Check::Starts {
-            mode: "single".into(), params: vec!["beta".into()], note: "n".into(),
-        }];
         let outcome = MethodOutcome::Failed {
-            header, checks: checks.clone(), findings: c.snapshot(),
+            header, findings: c.snapshot(),
             error: "all 2 chains failed init-eval with PFDegenerate".into(),
         };
-        let MethodOutcome::Failed { checks: carried, .. } = &outcome else { unreachable!() };
-        assert_eq!(carried, &checks);
+        // At the end of `fit run` the header is on screen already and the
+        // error is `Out::error`'s: the block is the findings alone.
+        let run_end: Vec<String> = render_report(&outcome, View::RunEnd)
+            .iter().map(Line::text).collect();
+        assert!(run_end.iter().any(|l| l.starts_with("── diagnostics")), "{run_end:#?}");
+        assert!(!run_end.iter().any(|l| l.contains("fit: fail.toml") || l.contains("error: all 2")),
+            "{run_end:#?}");
         let text: Vec<String> = render_report(&outcome, View::Summary(SummaryView::default()))
             .iter().map(Line::text).collect();
         let at = |needle: &str| text.iter().position(|l| l.contains(needle))
