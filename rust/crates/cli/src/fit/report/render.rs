@@ -180,8 +180,9 @@ pub fn render_report(outcome: &MethodOutcome, view: View) -> Vec<Line> {
 
 /// What `fit run` prints when a method completes: for a Bayesian method the
 /// verdict as `fit summary` gives it, the R̂ legend, the acceptance table and
-/// the R̂ table; for every method its findings; for PMMH and `mh` the cost of
-/// sampling and the highest-posterior draw's log-likelihood. The `stored`
+/// the R̂ table; for PGAS then its path-renewal, filter-ESS, latent-path and
+/// cross-chain blocks; for every method its findings; for PMMH, `mh` and PGAS
+/// the cost of sampling and the best draw's log-likelihood. The `stored`
 /// milestone follows it (`Out::milestone`).
 fn run_end_block(report: &MethodReport) -> Vec<Line> {
     use sim::inference::diagnostic::HintContext;
@@ -206,6 +207,7 @@ fn run_end_block(report: &MethodReport) -> Vec<Line> {
             if r.diagnostics.n_chains > 1 {
                 out.extend(rhat_run_table(&r.diagnostics));
             }
+            out.extend(pgas_run_blocks(detail));
             r.diagnostics.n_chains.saturating_sub(refused.records.len())
         }
         Some(MethodResult::If2(r)) => r.record.n_good_chains.unwrap_or(r.record.n_chains),
@@ -223,6 +225,45 @@ fn run_end_block(report: &MethodReport) -> Vec<Line> {
                 "  loglik at the highest log-posterior draw (natural-scale prior, no Jacobian): {:.1} (chain {})",
                 r.map_loglik, chain)));
         }
+    }
+    if let Some(MethodResult::Pgas(r)) = &report.method_result {
+        if let Some(secs) = r.sampling_seconds {
+            out.push(Line::default());
+            out.push(plain(format!("{} complete in {:.1}s", report.method, secs)));
+        }
+        if let (Some(chain), Some(ll)) = (r.best_chain, r.best_loglik) {
+            out.push(plain(format!("  best complete-data ll: {:.1} (chain {})", ll, chain)));
+        }
+    }
+    out
+}
+
+/// PGAS's blocks between its R̂ table and its findings, each from the record
+/// the run wrote: trajectory renewal by tenth of the series and the filter's
+/// ESS (`pgas_summary.json`), latent-path convergence over the saved paths
+/// (`chain_*/trajectories.tsv`), and the cross-chain compatibility numbers
+/// (`cross_chain_compat.json`). A block whose record is absent is not drawn;
+/// latent-path convergence that could not be computed says why.
+fn pgas_run_blocks(detail: &ChainDetail) -> Vec<Line> {
+    let mut out = Vec::new();
+    if let Some(pr) = &detail.path_renewal {
+        out.extend(text_lines(&pr.report()));
+    }
+    if let Some(fe) = &detail.filter_ess {
+        out.extend(text_lines(&fe.report()));
+    }
+    let not_computed = |e: &dyn std::fmt::Display| plain(format!("  latent-path convergence not computed: {e}"));
+    match &detail.latent {
+        Some(Ok(lc)) => out.extend(text_lines(&lc.report())),
+        Some(Err(e)) => out.push(not_computed(e)),
+        // No chain saved a path: the reason the computation over none gives.
+        None => match crate::fit::latent_convergence::latent_convergence(&[], &[]) {
+            Err(e) => out.push(not_computed(&e)),
+            Ok(lc) => out.extend(text_lines(&lc.report())),
+        },
+    }
+    if let Some(cc) = &detail.cross_chain {
+        out.extend(text_lines(&cc.report()));
     }
     out
 }

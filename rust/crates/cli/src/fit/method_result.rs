@@ -910,6 +910,19 @@ pub struct PgasRun {
     /// `None` for a summary written before it was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance_kernel: Option<sim::inference::diagnostic::AcceptanceKernel>,
+    /// Wall time of the chains, start of the first to end of the last
+    /// (`pgas_summary.json` `cost.sampling_seconds`); `None` for a summary
+    /// written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_seconds: Option<f64>,
+    /// The chain whose sweep has the highest complete-data log-likelihood
+    /// (`fit_state.toml` `best_chain`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_chain: Option<ChainIndex>,
+    /// That sweep's complete-data log-likelihood (`fit_state.toml`
+    /// `best_loglik`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_loglik: Option<f64>,
 }
 
 /// Default thinning factor (1 = unthinned) for older runs whose summary JSON
@@ -1439,8 +1452,15 @@ impl PgasRun {
         };
         let acceptance_kernel = summary.get("acceptance_kernel")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let sampling_seconds = summary.get("cost")
+            .and_then(|c| c.get("sampling_seconds"))
+            .and_then(|v| v.as_f64());
+        let state = FitState::load(&method_dir.to_string_lossy()).ok();
 
         Ok(PgasRun {
+            sampling_seconds,
+            best_chain: state.as_ref().map(|s| s.best_chain),
+            best_loglik: state.as_ref().map(|s| s.best_loglik),
             diagnostics: posterior_diagnostics(
                 method_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
             )?,
