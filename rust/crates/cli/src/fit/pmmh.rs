@@ -390,8 +390,8 @@ pub fn run_method(
     // stack. The Reporter honors --progress (Pretty=bars, Plain=throttled
     // `chain N pos/len ll=… acc=…%` log lines, None=silent), so the callback
     // no longer branches on mode.
-    let reporter = crate::progress::Reporter::new();
-    let bars: Vec<crate::progress::Task> = (0..n_chains)
+    let reporter = crate::out::progress::Reporter::new();
+    let bars: Vec<crate::out::progress::Task> = (0..n_chains)
         .map(|chain_id| reporter.task(n_steps as u64, format!("chain {}", ChainIndex(chain_id)), "it"))
         .collect();
 
@@ -710,7 +710,7 @@ pub fn run_method(
                 // so `inc(1)` tracks position = step+1 exactly. `Task` handles
                 // Pretty (redraw) / Plain (throttled `chain N pos/len ll=… acc=…%`
                 // line) / None (no-op) — no mode branching here.
-                task.set(crate::progress::mcmc(loglik, acc));
+                task.set(crate::out::progress::mcmc(loglik, acc));
                 task.inc(1);
 
                 // gh#900: and to the run's heartbeat, whose step is one MCMC
@@ -735,7 +735,7 @@ pub fn run_method(
             // it after the fan-out (`Task::finish` consumes, so it can't run
             // on the borrowed Task here). The `acceptance rates:` report below
             // carries the per-chain summary.
-            task.set(crate::progress::mcmc(result.map_loglik, result.acceptance_rate));
+            task.set(crate::out::progress::mcmc(result.map_loglik, result.acceptance_rate));
 
             // Save resume state for future --resume
             let resume_path = chain_dir.join("resume_state.bin");

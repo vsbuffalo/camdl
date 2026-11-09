@@ -446,7 +446,7 @@ pub(crate) fn run_camdlc_compile(
     // this line must actually reach the user off-TTY (the motivating fix).
     // stderr keeps it off stdout (the IR JSON), and a plain line with no
     // carriage returns is safe under `tee`/CI.
-    if crate::progress::is_plain() {
+    if crate::out::progress::is_plain() {
         eprintln!("compiling {model_name}...");
     }
 
@@ -454,7 +454,7 @@ pub(crate) fn run_camdlc_compile(
     // the same spinner object is safe to construct unconditionally — nothing
     // renders unless the mode is Pretty.
     let spinner =
-        indicatif::ProgressBar::with_draw_target(None, crate::progress::draw_target());
+        indicatif::ProgressBar::with_draw_target(None, crate::out::progress::draw_target());
     spinner.set_style(
         indicatif::ProgressStyle::with_template("{spinner:.green} {msg}")
             .unwrap_or_else(|_| indicatif::ProgressStyle::default_spinner()),
@@ -832,12 +832,12 @@ fn note_version_mismatched_entry(cache_path: &std::path::Path, model_path: &str)
     if !cache_path.exists() || entry_ir_version_matches(cache_path) {
         return;
     }
-    crate::status::step(
+    crate::out::status::step(
         "ir-cache",
         format!(
             "entry for {} was compiled at a different IR schema version than {} — \
              recompiling and replacing it",
-            crate::status::concise_path(model_path),
+            crate::out::status::concise_path(model_path),
             ir::IR_VERSION.trim(),
         ),
     );
@@ -1203,8 +1203,8 @@ pub fn resolve_ir_path_with_quantities(
     if let Some((cache_path, key)) = &cache_target {
         note_version_mismatched_entry(cache_path, path);
         if cache_entry_servable(cache_path, path) {
-            crate::status::step("cached",
-                format!("IR for {} ({})", crate::status::concise_path(path), &key[..8.min(key.len())]));
+            crate::out::status::step("cached",
+                format!("IR for {} ({})", crate::out::status::concise_path(path), &key[..8.min(key.len())]));
             return Ok((cache_path.to_string_lossy().into_owned(), None));
         }
     }
@@ -1220,8 +1220,8 @@ pub fn resolve_ir_path_with_quantities(
         let is_cached = || cache_entry_servable(cache_path, path);
         match single_flight::acquire(cache_path, &is_cached) {
             single_flight::Lease::AlreadyCached => {
-                crate::status::step("cached",
-                    format!("IR for {} ({})", crate::status::concise_path(path), &key[..8.min(key.len())]));
+                crate::out::status::step("cached",
+                    format!("IR for {} ({})", crate::out::status::concise_path(path), &key[..8.min(key.len())]));
                 return Ok((cache_path.to_string_lossy().into_owned(), None));
             }
             single_flight::Lease::Compile(guard) => _compile_lock = Some(guard),
@@ -1252,7 +1252,7 @@ pub fn resolve_ir_path_with_quantities(
                     // Should not happen after a successful compile (camdlc writes
                     // the depfile before the IR); surface it so a "why is my IR
                     // cache always missing?" is diagnosable rather than silent.
-                    crate::status::step("ir-cache",
+                    crate::out::status::step("ir-cache",
                         format!("read()-dependency capture failed ({e}); not caching this compile"));
                     None
                 }
@@ -1266,12 +1266,12 @@ pub fn resolve_ir_path_with_quantities(
     // for stratified models; ~JSON-verbosity for tiny ones). Source size via
     // metadata (cheap, no read).
     let src_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    crate::status::step("compiled", format!(
+    crate::out::status::step("compiled", format!(
         "{}   {} IR in {:.1}s{}",
-        crate::status::concise_path(path),
-        crate::status::human_bytes(json.len() as u64),
+        crate::out::status::concise_path(path),
+        crate::out::status::human_bytes(json.len() as u64),
         elapsed.as_secs_f64(),
-        crate::status::expansion(json.len() as u64, src_bytes),
+        crate::out::status::expansion(json.len() as u64, src_bytes),
     ));
 
     // Persist to the cache (IR + sidecar together, atomically) when enabled AND

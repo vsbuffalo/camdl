@@ -279,7 +279,7 @@ fn run_one_cell(spec: CellSpec) -> Result<CellResult, String> {
 
 /// Run a lone cell with a per-timestep `t/t_end` + ETA progress bar on stderr.
 ///
-/// Respects the `--progress` mode via `crate::progress`:
+/// Respects the `--progress` mode via `crate::out::progress`:
 ///   - Pretty (TTY): a live steady-tick bar
 ///     `simulate · <backend>  ████░░ ETA 11s`, positioned by an RNG-free tick
 ///     (so the trajectory is byte-identical to the bar-less path), cleared on
@@ -291,7 +291,7 @@ fn run_one_cell(spec: CellSpec) -> Result<CellResult, String> {
 fn run_one_cell_with_progress(spec: CellSpec) -> Result<CellResult, String> {
     use crate::args::types::ForwardBackend;
 
-    if crate::progress::is_none() {
+    if crate::out::progress::is_none() {
         return run_one_cell(spec);
     }
 
@@ -315,7 +315,7 @@ fn run_one_cell_with_progress(spec: CellSpec) -> Result<CellResult, String> {
     // `util::simulate_compiled`. Hidden in plain/none modes.
     let pb = indicatif::ProgressBar::with_draw_target(
         Some(1000),
-        crate::progress::draw_target(),
+        crate::out::progress::draw_target(),
     );
     // indicatif 0.17's `{bar}` element already renders a trailing percentage,
     // so the template deliberately omits a separate `{percent}` (a `{percent}`
@@ -333,7 +333,7 @@ fn run_one_cell_with_progress(spec: CellSpec) -> Result<CellResult, String> {
     // calls. A no-op against a hidden draw target (plain/none).
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    if crate::progress::is_plain() {
+    if crate::out::progress::is_plain() {
         // One up-front line; the live bar is invisible off-TTY (hidden target).
         log::info!("simulate \u{b7} {backend}: running \u{2026}");
     }

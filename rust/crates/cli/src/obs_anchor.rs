@@ -511,7 +511,7 @@ pub fn spline_hold_notices(
     model: &ir::Model,
     anchors: &[ResolvedAnchor],
     horizon: f64,
-) -> crate::notice::Notices {
+) -> crate::out::notice::Notices {
     let cal = |t: f64| {
         model
             .origin
@@ -541,7 +541,7 @@ pub fn spline_hold_notices(
                 .find(|a| a.site == site && a.resolved == end)
                 .map(|a| format!("; its window ends at {}", a.anchor))
                 .unwrap_or_default();
-            Some(crate::notice::Notice::info(
+            Some(crate::out::notice::Notice::info(
                 SPLINE_HELD_PAST_WINDOW,
                 format!(
                     "forcing `{}` is held at its value at t = {end}{} from t = {from}{} to the \

@@ -794,7 +794,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // The grid writes each focal value straight over the parameter, so a
     // scenario's value for a focal parameter is replaced at every point: said
     // once here, for the run, not per grid point.
-    let focal_notices: crate::notice::Notices = match scenario_name.as_deref() {
+    let focal_notices: crate::out::notice::Notices = match scenario_name.as_deref() {
         Some(scenario) => {
             let focal: Vec<&str> = focal_names.iter().map(|s| s.as_str()).collect();
             crate::params_resolver::scenario_focal_notices(&model_pre, scenario, &focal)
@@ -802,7 +802,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 .into_iter()
                 .collect()
         }
-        None => crate::notice::Notices::default(),
+        None => crate::out::notice::Notices::default(),
     };
     focal_notices.emit_stderr();
     let model = resolved.model.clone();
@@ -1423,7 +1423,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 crate::params_resolver::notices(&[&resolved]).iter()
                     .chain(focal_notices.iter())
                     .cloned()
-                    .collect::<crate::notice::Notices>())
+                    .collect::<crate::out::notice::Notices>())
                 .unwrap_or(serde_json::Value::Null),
         "init_provenance":
             serde_json::to_value(&init_provenance).unwrap_or(serde_json::Value::Null),
@@ -1572,7 +1572,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // No per-tick metric: a best profile-loglik isn't tracked here (each cell
     // computes its own `final_loglik`; surfacing a global best would mean a
     // shared accumulator that the bar deliberately avoids).
-    let bar = crate::progress::Reporter::new().task(total_jobs as u64, "profile", "jobs");
+    let bar = crate::out::progress::Reporter::new().task(total_jobs as u64, "profile", "jobs");
 
     // ── gh#147 (M3.3): pre-resolve every job's CAS identity ──────────
     // Job tuple (seed_idx, grid_idx, start_idx). The grid lives in the
@@ -1938,7 +1938,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             if let Ok(mut b) = best.lock() {
                 if final_loglik > b.0 {
                     *b = (final_loglik, Some(grid_idx));
-                    bar.set(crate::progress::best_ll(final_loglik));
+                    bar.set(crate::out::progress::best_ll(final_loglik));
                 }
             }
         }
