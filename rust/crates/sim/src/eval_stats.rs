@@ -12,7 +12,6 @@
 //! isolation should snapshot at start and diff at end.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::OnceLock;
 
 pub static DIV_BY_ZERO:       AtomicU64 = AtomicU64::new(0);
 pub static POW_NAN_INF:       AtomicU64 = AtomicU64::new(0);
@@ -48,39 +47,6 @@ pub fn allow_degenerate_rates() -> bool {
 #[inline]
 pub fn set_allow_degenerate_rates(allow: bool) {
     ALLOW_DEGENERATE_RATES.store(allow, Ordering::Relaxed);
-}
-
-/// Bench / differential-validation switch: route the propensity hot path
-/// through the slow string-keyed `eval_expr` instead of the pre-resolved
-/// `eval_resolved`. Enabled by setting the env var `CAMDL_EVAL_UNRESOLVED`
-/// (any value). Read once and cached, so it costs an atomic load — hoisted
-/// out of the per-transition loop in `eval_propensities`, so the default
-/// (off) path is unchanged.
-///
-/// Two uses:
-///  - **benching**: time a `pfilter`/`fit` run with the var off vs on to
-///    measure end-to-end what pre-resolution buys (`T_on / T_off`);
-///  - **validation**: run any sim/inference under both evaluators and assert
-///    byte-identical output — a differential-testing oracle for the resolver,
-///    which is inference-critical.
-///
-/// `eval_resolved` and `eval_expr` are required to agree (see
-/// `tests/resolved_expr.rs`); this switch makes that agreement observable on
-/// real models at full scale, not just hand-built expressions.
-static EVAL_UNRESOLVED: OnceLock<bool> = OnceLock::new();
-
-#[inline]
-pub fn eval_unresolved() -> bool {
-    *EVAL_UNRESOLVED.get_or_init(|| {
-        let on = std::env::var_os("CAMDL_EVAL_UNRESOLVED").is_some();
-        if on {
-            eprintln!(
-                "[camdl] CAMDL_EVAL_UNRESOLVED set — propensity eval routed through \
-                 the slow string-keyed eval_expr (bench/validation mode)"
-            );
-        }
-        on
-    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
