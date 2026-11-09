@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 294" role="img" aria-labelledby="t d">
+  <title id="t">Changing origin does not move the period</title>
+  <desc id="d">With origin 07-01, 06-30 or 06-25, the row labelled "07-02" under closing_at is scored over (0, 1], (1, 2] or (6, 7]. The internal numbers shift with origin, but each is the same civil day, 1 July.</desc>
+  <defs>
+    <marker id="dates-origin-shift-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
+    </marker>
+  </defs>
+  <text x="150" y="30" class="t-label fig-muted" text-anchor="end">date</text>
+  <text x="190" y="30" class="t-code-cell fig-ink" text-anchor="middle">06-25</text>
+  <text x="250" y="30" class="t-code-cell fig-ink" text-anchor="middle">06-26</text>
+  <text x="310" y="30" class="t-code-cell fig-ink" text-anchor="middle">06-27</text>
+  <text x="370" y="30" class="t-code-cell fig-ink" text-anchor="middle">06-28</text>
+  <text x="430" y="30" class="t-code-cell fig-ink" text-anchor="middle">06-29</text>
+  <text x="490" y="30" class="t-code-cell fig-ink" text-anchor="middle">06-30</text>
+  <text x="550" y="30" class="t-code-cell fig-ink" text-anchor="middle">07-01</text>
+  <text x="610" y="30" class="t-code-cell fig-ink" text-anchor="middle">07-02</text>
+  <line x1="180" y1="46" x2="620" y2="46" class="s-muted"/>
+  <line x1="190" y1="40" x2="190" y2="52" class="s-muted"/>
+  <line x1="250" y1="40" x2="250" y2="52" class="s-muted"/>
+  <line x1="310" y1="40" x2="310" y2="52" class="s-muted"/>
+  <line x1="370" y1="40" x2="370" y2="52" class="s-muted"/>
+  <line x1="430" y1="40" x2="430" y2="52" class="s-muted"/>
+  <line x1="490" y1="40" x2="490" y2="52" class="s-muted"/>
+  <line x1="550" y1="40" x2="550" y2="52" class="s-muted"/>
+  <line x1="610" y1="40" x2="610" y2="52" class="s-muted"/>
+  <text x="150" y="98" class="t-small fig-muted" text-anchor="end">origin <tspan class="t-code-label">07-01</tspan></text>
+  <text x="190" y="86" class="t-code-cell fig-muted" text-anchor="middle">-6</text>
+  <text x="250" y="86" class="t-code-cell fig-muted" text-anchor="middle">-5</text>
+  <text x="310" y="86" class="t-code-cell fig-muted" text-anchor="middle">-4</text>
+  <text x="370" y="86" class="t-code-cell fig-muted" text-anchor="middle">-3</text>
+  <text x="430" y="86" class="t-code-cell fig-muted" text-anchor="middle">-2</text>
+  <text x="490" y="86" class="t-code-cell fig-muted" text-anchor="middle">-1</text>
+  <text x="550" y="86" class="t-code-cell fig-muted" text-anchor="middle">0</text>
+  <text x="610" y="86" class="t-code-cell fig-muted" text-anchor="middle">1</text>
+  <rect x="551" y="94" width="58" height="24" class="fig-accent-soft"/>
+  <text x="580" y="110" class="t-code-cell t-b fig-accent" text-anchor="middle">(0, 1]</text>
+  <text x="150" y="162" class="t-small fig-muted" text-anchor="end">origin <tspan class="t-code-label">06-30</tspan></text>
+  <text x="190" y="150" class="t-code-cell fig-muted" text-anchor="middle">-5</text>
+  <text x="250" y="150" class="t-code-cell fig-muted" text-anchor="middle">-4</text>
+  <text x="310" y="150" class="t-code-cell fig-muted" text-anchor="middle">-3</text>
+  <text x="370" y="150" class="t-code-cell fig-muted" text-anchor="middle">-2</text>
+  <text x="430" y="150" class="t-code-cell fig-muted" text-anchor="middle">-1</text>
+  <text x="490" y="150" class="t-code-cell fig-muted" text-anchor="middle">0</text>
+  <text x="550" y="150" class="t-code-cell fig-muted" text-anchor="middle">1</text>
+  <text x="610" y="150" class="t-code-cell fig-muted" text-anchor="middle">2</text>
+  <rect x="551" y="158" width="58" height="24" class="fig-accent-soft"/>
+  <text x="580" y="174" class="t-code-cell t-b fig-accent" text-anchor="middle">(1, 2]</text>
+  <text x="150" y="226" class="t-small fig-muted" text-anchor="end">origin <tspan class="t-code-label">06-25</tspan></text>
+  <text x="190" y="214" class="t-code-cell fig-muted" text-anchor="middle">0</text>
+  <text x="250" y="214" class="t-code-cell fig-muted" text-anchor="middle">1</text>
+  <text x="310" y="214" class="t-code-cell fig-muted" text-anchor="middle">2</text>
+  <text x="370" y="214" class="t-code-cell fig-muted" text-anchor="middle">3</text>
+  <text x="430" y="214" class="t-code-cell fig-muted" text-anchor="middle">4</text>
+  <text x="490" y="214" class="t-code-cell fig-muted" text-anchor="middle">5</text>
+  <text x="550" y="214" class="t-code-cell fig-muted" text-anchor="middle">6</text>
+  <text x="610" y="214" class="t-code-cell fig-muted" text-anchor="middle">7</text>
+  <rect x="551" y="222" width="58" height="24" class="fig-accent-soft"/>
+  <text x="580" y="238" class="t-code-cell t-b fig-accent" text-anchor="middle">(6, 7]</text>
+  <text x="150" y="58" class="t-small fig-muted" text-anchor="end">internal t:</text>
+  <text x="580" y="282" class="t-small t-b fig-accent" text-anchor="middle">1 Jul</text>
+  <text x="540" y="282" class="t-small fig-muted" text-anchor="end">row "07-02" under closing_at, every origin:</text>
+</svg>

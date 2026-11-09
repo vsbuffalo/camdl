@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 424" role="img" aria-labelledby="t d">
+  <title id="t">Calendar time and internal time</title>
+  <desc id="d">Two descriptions of the same line. Above, calendar time, which a model and its data are written in: date("2026-07-03") is an instant, a point at the start of 3 July, and interval(start, stop) is a period, here [07-02, 07-04), closed at its start and open at its end. One translation, made when the model is compiled and when data is loaded, turns each date T into internal time t = (day(T) - day(origin)) / days per time_unit; with origin 2026-07-01 and a time unit of days, 1 July is 0 and 5 July is 4. Below, internal time, all the engine uses: state X_t is a value at each t, flow is summed over (t_prev, t], and an effect scheduled at t acts from t onward.</desc>
+  <defs>
+    <marker id="dates-overview-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
+    </marker>
+  </defs>
+  <!-- boundaries k = 0..4 sit at x = 210 + 88k in both panels -->
+
+  <!-- calendar time -->
+  <rect x="2" y="2" width="636" height="152" rx="5" class="fig-accent-soft"/>
+  <text x="16" y="26" class="t-cap fig-accent">CALENDAR TIME: WHAT YOU WRITE</text>
+  <line x1="210" y1="58" x2="210" y2="142" class="s-line" stroke-dasharray="3 3"/>
+  <text x="210" y="50" class="t-code-cell fig-ink" text-anchor="middle">07-01</text>
+  <line x1="298" y1="58" x2="298" y2="142" class="s-line" stroke-dasharray="3 3"/>
+  <text x="298" y="50" class="t-code-cell fig-ink" text-anchor="middle">07-02</text>
+  <line x1="386" y1="58" x2="386" y2="142" class="s-line" stroke-dasharray="3 3"/>
+  <text x="386" y="50" class="t-code-cell fig-ink" text-anchor="middle">07-03</text>
+  <line x1="474" y1="58" x2="474" y2="142" class="s-line" stroke-dasharray="3 3"/>
+  <text x="474" y="50" class="t-code-cell fig-ink" text-anchor="middle">07-04</text>
+  <line x1="562" y1="58" x2="562" y2="142" class="s-line" stroke-dasharray="3 3"/>
+  <text x="562" y="50" class="t-code-cell fig-ink" text-anchor="middle">07-05</text>
+  <line x1="198" y1="80" x2="574" y2="80" class="s-muted"/>
+  <circle cx="386" cy="80" r="5" class="fig-accent"/>
+  <text x="16" y="76" class="t-small t-b fig-ink">an instant</text>
+  <text x="16" y="94" class="t-code-cell fig-muted">date("2026-07-03")</text>
+
+  <rect x="298" y="110" width="176" height="26" class="fig-card"/>
+  <line x1="298" y1="110" x2="298" y2="136" class="s-accent"/>
+  <text x="386" y="128" class="t-code-cell fig-ink" text-anchor="middle">[07-02, 07-04)</text>
+  <text x="16" y="120" class="t-small t-b fig-ink">a period</text>
+  <text x="16" y="138" class="t-code-cell fig-muted">interval(start, stop)</text>
+
+  <!-- the translation -->
+  <line x1="40" y1="160" x2="40" y2="226" class="s-arrow" marker-end="url(#dates-overview-arrow)"/>
+  <text x="58" y="180" class="t-small fig-muted">one translation, when the model is compiled and when data is loaded:</text>
+  <text x="58" y="202" class="t-code-label fig-ink">t = (day(T) − day(origin)) / days per time_unit</text>
+  <text x="58" y="222" class="t-small fig-muted">here origin = 2026-07-01 and time_unit = days, so 1 July is 0</text>
+
+  <!-- internal time -->
+  <rect x="2" y="234" width="636" height="186" rx="5" class="fig-panel"/>
+  <text x="16" y="258" class="t-cap fig-muted">INTERNAL TIME: ALL THE ENGINE USES</text>
+  <line x1="210" y1="290" x2="210" y2="410" class="s-line" stroke-dasharray="3 3"/>
+  <text x="210" y="282" class="t-mono-label fig-ink" text-anchor="middle">0</text>
+  <line x1="298" y1="290" x2="298" y2="410" class="s-line" stroke-dasharray="3 3"/>
+  <text x="298" y="282" class="t-mono-label fig-ink" text-anchor="middle">1</text>
+  <line x1="386" y1="290" x2="386" y2="410" class="s-line" stroke-dasharray="3 3"/>
+  <text x="386" y="282" class="t-mono-label fig-ink" text-anchor="middle">2</text>
+  <line x1="474" y1="290" x2="474" y2="410" class="s-line" stroke-dasharray="3 3"/>
+  <text x="474" y="282" class="t-mono-label fig-ink" text-anchor="middle">3</text>
+  <line x1="562" y1="290" x2="562" y2="410" class="s-line" stroke-dasharray="3 3"/>
+  <text x="562" y="282" class="t-mono-label fig-ink" text-anchor="middle">4</text>
+  <line x1="198" y1="310" x2="574" y2="310" class="s-muted"/>
+  <circle cx="210" cy="310" r="4" class="fig-accent"/>
+  <circle cx="298" cy="310" r="4" class="fig-accent"/>
+  <circle cx="386" cy="310" r="4" class="fig-accent"/>
+  <circle cx="474" cy="310" r="4" class="fig-accent"/>
+  <circle cx="562" cy="310" r="4" class="fig-accent"/>
+  <text x="16" y="306" class="t-small t-b fig-ink">state <tspan class="t-code-label">X_t</tspan></text>
+  <text x="16" y="324" class="t-small fig-muted">a value at each t</text>
+  <rect x="211" y="336" width="87" height="24" class="fig-card"/>
+  <line x1="298" y1="336" x2="298" y2="360" class="s-accent"/>
+  <text x="254" y="352" class="t-code-cell fig-ink" text-anchor="middle">(0, 1]</text>
+  <rect x="299" y="336" width="87" height="24" class="fig-card"/>
+  <line x1="386" y1="336" x2="386" y2="360" class="s-accent"/>
+  <text x="342" y="352" class="t-code-cell fig-ink" text-anchor="middle">(1, 2]</text>
+  <rect x="387" y="336" width="87" height="24" class="fig-card"/>
+  <line x1="474" y1="336" x2="474" y2="360" class="s-accent"/>
+  <text x="430" y="352" class="t-code-cell fig-ink" text-anchor="middle">(2, 3]</text>
+  <rect x="475" y="336" width="87" height="24" class="fig-card"/>
+  <line x1="562" y1="336" x2="562" y2="360" class="s-accent"/>
+  <text x="518" y="352" class="t-code-cell fig-ink" text-anchor="middle">(3, 4]</text>
+  <text x="16" y="346" class="t-small t-b fig-ink">flow</text>
+  <text x="16" y="364" class="t-small fig-muted">summed over (t_prev, t]</text>
+  <path d="M474,380 L482,388 L474,396 L466,388 z" class="fig-warm"/>
+  <text x="16" y="392" class="t-small t-b fig-ink">an effect at t</text>
+  <text x="16" y="410" class="t-small fig-muted">acts from t onward</text>
+</svg>

@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 244" role="img" aria-labelledby="t d">
+  <title id="t">closing_at against a day-labelled file</title>
+  <desc id="d">Under closing_at, the rows labelled "07-02", "07-03" and "07-04" score the buckets (0, 1], (1, 2] and (2, 3], which are 1, 2 and 3 July. A file labelled by the day each count describes means "07-02" to be [1, 2), 2 July. The two readings of the same row are one unit apart.</desc>
+  <defs>
+    <marker id="dates-closing-at-offset-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
+    </marker>
+  </defs>
+  <text x="140" y="34" class="t-label fig-muted" text-anchor="end">internal t</text>
+  <text x="175" y="34" class="t-mono-label fig-ink" text-anchor="middle">0</text>
+  <text x="275" y="34" class="t-mono-label fig-ink" text-anchor="middle">1</text>
+  <text x="375" y="34" class="t-mono-label fig-ink" text-anchor="middle">2</text>
+  <text x="475" y="34" class="t-mono-label fig-ink" text-anchor="middle">3</text>
+  <text x="575" y="34" class="t-mono-label fig-ink" text-anchor="middle">4</text>
+  <line x1="162" y1="56" x2="588" y2="56" class="s-muted"/>
+  <line x1="175" y1="49" x2="175" y2="63" class="s-muted"/>
+  <line x1="275" y1="49" x2="275" y2="63" class="s-muted"/>
+  <line x1="375" y1="49" x2="375" y2="63" class="s-muted"/>
+  <line x1="475" y1="49" x2="475" y2="63" class="s-muted"/>
+  <line x1="575" y1="49" x2="575" y2="63" class="s-muted"/>
+  <text x="140" y="99" class="t-mono-label fig-muted" text-anchor="end">closing_at</text>
+  <rect x="175" y="80" width="99" height="28" class="fig-accent-soft"/>
+  <line x1="274" y1="80" x2="274" y2="108" class="s-accent"/>
+  <text x="225" y="99" class="t-mono-label fig-ink" text-anchor="middle">"07-02"</text>
+  <text x="225" y="128" class="t-small fig-muted" text-anchor="middle">1 Jul</text>
+  <rect x="275" y="80" width="99" height="28" class="fig-panel"/>
+  <line x1="374" y1="80" x2="374" y2="108" class="s-muted"/>
+  <text x="325" y="99" class="t-mono-label fig-ink" text-anchor="middle">"07-03"</text>
+  <text x="325" y="128" class="t-small fig-muted" text-anchor="middle">2 Jul</text>
+  <rect x="375" y="80" width="99" height="28" class="fig-panel"/>
+  <line x1="474" y1="80" x2="474" y2="108" class="s-muted"/>
+  <text x="425" y="99" class="t-mono-label fig-ink" text-anchor="middle">"07-04"</text>
+  <text x="425" y="128" class="t-small fig-muted" text-anchor="middle">3 Jul</text>
+  <text x="140" y="199" class="t-label fig-muted" text-anchor="end">day-labelled</text>
+  <rect x="276" y="180" width="99" height="28" class="fig-accent-soft"/>
+  <line x1="276" y1="180" x2="276" y2="208" class="s-warm" stroke-width="1.6"/>
+  <text x="325" y="199" class="t-mono-label fig-ink" text-anchor="middle">"07-02"</text>
+  <text x="325" y="228" class="t-small fig-warm" text-anchor="middle">2 Jul</text>
+  <line x1="225" y1="152" x2="325" y2="152" class="s-arrow" marker-start="url(#dates-closing-at-offset-arrow)" marker-end="url(#dates-closing-at-offset-arrow)"/>
+  <text x="339" y="157" class="t-small t-b fig-warm">one unit apart</text>
+  <text x="389" y="198" class="t-small fig-muted">"07-02" as <tspan class="t-code-label">[1, 2)</tspan>, the day it names</text>
+</svg>
