@@ -549,7 +549,7 @@ fn pgas_nuts_without_a_likelihood_draws_the_prior() {
         for p in &est {
             base[p.index] = p.initial;
         }
-        let r = run_pgas(&model, &est, &priors, &base, &config, &observations, &obs, seed, None, None,
+        let r = run_pgas(&model, &est, &priors, &base, &config, &observations, &obs, seed, None, None, None,
             "nuts-validity-prior-only".into()).expect("PGAS run");
         assert!(r.sweeps.iter().any(|s| s.nuts.n_leapfrog > 0), "the θ-step did not run NUTS");
         chains.push(r.sweeps.iter().map(|s| vec![s.params[TAU_IDX], s.params[Z_IDX]]).collect());
@@ -723,7 +723,7 @@ fn pgas_nuts_without_a_likelihood_draws_the_truncated_priors() {
         for p in &est {
             base[p.index] = p.initial;
         }
-        let r = run_pgas(&model, &est, &priors, &base, &config, &observations, &obs, seed, None, None,
+        let r = run_pgas(&model, &est, &priors, &base, &config, &observations, &obs, seed, None, None, None,
             "nuts-validity-truncated".into()).expect("PGAS run");
         assert!(r.sweeps.iter().any(|s| s.nuts.n_leapfrog > 0), "the θ-step did not run NUTS");
         chains.push(r.sweeps.iter().map(|s| est.iter().map(|p| s.params[p.index]).collect()).collect());
@@ -814,7 +814,7 @@ fn pgas_mh_within_gibbs_starts_at_the_sampler_default_not_rw_sd() {
         step_policy: sim::schedule::StepPolicy::Snap,
     };
     let r = run_pgas(&model, &[tau], &[Prior::Fixed(Density::Exponential { rate: LAMBDA })], &base,
-        &config, &observations, &obs, 1, None, None, "mh-scale".into()).expect("PGAS run");
+        &config, &observations, &obs, 1, None, None, None, "mh-scale".into()).expect("PGAS run");
     assert_eq!(r.resume_state.log_proposal_sd, vec![sim::inference::types::PGAS_MWG_DEFAULT_STEP.ln()],
         "the initial MH-within-Gibbs scale is the sampler default, not 5 x rw_sd");
 }

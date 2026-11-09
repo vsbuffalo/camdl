@@ -260,7 +260,7 @@ fn pgas_nuts_admits_spline_coefficients() {
         step_policy: sim::schedule::StepPolicy::Snap,
     };
     let result = run_pgas(&model, &est, &priors, &model.default_params, &config, &observations,
-                          &obs_model, 3, None, None, "bspline-nuts".into())
+                          &obs_model, 3, None, None, None, "bspline-nuts".into())
         .expect("PGAS-NUTS must admit spline coefficients");
     assert!(!result.sweeps.is_empty());
     for s in &result.sweeps {

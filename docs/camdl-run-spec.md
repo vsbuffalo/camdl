@@ -4029,12 +4029,12 @@ conditioned trajectory:
 ```
   starts source: …/02_scout-77595169/if2-fee126b1/seed_1-06cbd6b3 (fit_state.toml)
 ── method: pgas ──
-  NUTS enabled (gradient expressions found in IR)
-  dense mass matrix estimated (sweep 35):
+  chain 0: NUTS enabled (gradient expressions found in IR)
+  chain 0: dense mass matrix estimated (sweep 35):
     beta         sd=0.017766
     gamma        sd=0.052177
     correlations: bet-gam=0.42
-  NUTS fully adapted (sweep 50):
+  chain 0: NUTS fully adapted (sweep 50):
     final step_size: 0.172352
   chain 0 done: 2.7s, acceptance: [beta=92%, gamma=92%]
   chain 1 done: 2.7s, acceptance: [beta=90%, gamma=90%]

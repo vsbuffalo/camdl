@@ -3647,6 +3647,74 @@ pub fn refuse_unscored_parameters(
     Ok(())
 }
 
+/// What a PGAS chain says about itself while it runs, beside its sweeps.
+///
+/// `run_pgas` prints none of these: it hands each to the caller's `on_event`
+/// as it happens, and the caller decides how it is shown and labels it with
+/// its chain (proposal `docs/dev/proposals/2026-11-08-cli-reporting.md`: the
+/// library returns values and records findings). They arrive in the order the
+/// chain reaches them, on the chain's own thread, and carry no number the
+/// sampler does not already hold — emitting one consumes no randomness.
+#[derive(Debug, Clone)]
+pub enum PgasEvent {
+    /// A fresh chain begins drawing its reference trajectory `X₀` by an
+    /// unconditional SMC pass with `n_particles` particles.
+    ReferenceStarting { n_particles: usize },
+    /// `X₀` is drawn: its substep count, the first compartment's initial
+    /// count, where it came from, and the wall time the draw took.
+    ReferenceDrawn { n_substeps: usize, initial_first: i64, source: InitSource, seconds: f64 },
+    /// A fresh `X₀`'s complete-data density at its own `θ₀`. `params` is every
+    /// model parameter that has a slot, in declaration order, as the chain
+    /// starts with it, for reading a non-finite density.
+    ReferenceDensity { components: LogLikComponents, params: Vec<(String, f64)> },
+    /// The chain's starting complete-data log-likelihood (fresh or resumed),
+    /// with the model's transition and source-group counts for reading a
+    /// non-finite one.
+    InitialLoglik { components: LogLikComponents, n_transitions: usize, n_source_groups: usize },
+    /// The `θ | X` move is NUTS, because the IR carries gradient expressions.
+    NutsEnabled,
+    /// `sweeps` CSMC-only sweeps run before the first parameter update.
+    TrajectoryWarmupStarting { sweeps: usize },
+    /// Every tenth trajectory warm-up sweep, numbered from 0.
+    TrajectoryWarmupProgress { sweep: usize, of: usize, log_lik: f64 },
+    /// The trajectory warm-up ended at this complete-data log-likelihood.
+    TrajectoryWarmupDone { log_lik: f64 },
+    /// NUTS estimated its mass matrix at `sweep`: each parameter's standard
+    /// deviation on the transformed scale, and for a dense matrix the
+    /// correlation of every pair `(i, j)` with `i < j`, in that order.
+    MassMatrix { sweep: usize, sds: Vec<(String, f64)>, correlations: Option<Vec<(String, String, f64)>> },
+    /// NUTS's step-size adaptation ended at `sweep` with this step size.
+    NutsAdapted { sweep: usize, step_size: f64 },
+    /// A chain that started at zero posterior density reached a finite one on
+    /// its first trajectory update.
+    RecoveredStart { log_lik: f64 },
+    /// The last burn-in sweep: each parameter's adapted MH proposal SD and its
+    /// acceptance over the sweeps so far, the sweep's trajectory renewal, and
+    /// under NUTS the burn-in's tree-depth and divergence counts.
+    BurnInEnd { proposals: Vec<ProposalAdapted>, trajectory_renewal: f64, nuts: Option<NutsBurnIn> },
+}
+
+/// One parameter's MH proposal at the end of burn-in ([`PgasEvent::BurnInEnd`]).
+#[derive(Debug, Clone)]
+pub struct ProposalAdapted {
+    pub name: String,
+    /// The proposal standard deviation on the transformed scale.
+    pub sd: f64,
+    /// Accepted moves over the sweeps run so far.
+    pub acceptance: f64,
+}
+
+/// NUTS's burn-in counts ([`PgasEvent::BurnInEnd`]).
+#[derive(Debug, Clone)]
+pub struct NutsBurnIn {
+    /// Sweeps whose tree reached `max_tree_depth`, of `sweeps`.
+    pub n_max_treedepth: usize,
+    pub sweeps: usize,
+    pub max_tree_depth: usize,
+    /// Divergent trajectories over the same sweeps.
+    pub n_divergent: usize,
+}
+
 /// Run the PGAS Gibbs sampler.
 ///
 /// Alternates between:
@@ -3676,9 +3744,11 @@ pub fn run_pgas(
     obs_model: &super::multi_stream_obs::MultiStreamObsModel,
     seed: u64,
     on_sweep: Option<&dyn Fn(usize, &PGASSweep, &PGASTrajectory)>,
+    on_event: Option<&dyn Fn(PgasEvent)>,
     resume_from: Option<ChainResumeState>,
     config_hash: String,
 ) -> Result<PGASResult, SimError> {
+    let say = |e: PgasEvent| if let Some(f) = on_event { f(e) };
     let d = if2_params.len();
     assert_eq!(d, priors.len(), "priors must match if2_params length");
 
@@ -3750,7 +3820,6 @@ pub fn run_pgas(
     ));
 
     if let Some(state) = resume_from {
-        eprintln!("  resuming from sweep {}...", state.completed_sweeps);
         current_params.copy_from_slice(&state.params);
         trajectory = state.trajectory;
         start_sweep = state.completed_sweeps;
@@ -3787,8 +3856,7 @@ pub fn run_pgas(
         // before it gets here (support-keyed transforms proposal D3).
         debug_assert!(!if2_params.iter().any(|p| p.transform.on_an_end(current_params[p.index])),
             "a PGAS chain started exactly on a bound");
-        eprintln!("  initializing reference trajectory (unconditional SMC pass, \
-                   {} particles)...", config.n_particles);
+        say(PgasEvent::ReferenceStarting { n_particles: config.n_particles });
         let init_t0 = std::time::Instant::now();
         let (init_traj, source) = super::pgas_init::initial_reference_trajectory(
             model, &current_params, &grid.steps, config.n_particles, config.dt,
@@ -3796,10 +3864,12 @@ pub fn run_pgas(
         )?;
         trajectory = init_traj;
         let init_secs = init_t0.elapsed().as_secs_f64();
-        eprintln!("  reference: {} substeps, initial S={} — {} ({:.1}s)",
-            trajectory.substeps.len(),
-            trajectory.initial_counts.first().copied().unwrap_or(0),
-            source, init_secs);
+        say(PgasEvent::ReferenceDrawn {
+            n_substeps: trajectory.substeps.len(),
+            initial_first: trajectory.initial_counts.first().copied().unwrap_or(0),
+            source: source.clone(),
+            seconds: init_secs,
+        });
         init_source = Some(source);
         current_transformed = if2_params.iter()
             .map(|p| p.to_transformed(current_params[p.index]))
@@ -3825,42 +3895,11 @@ pub fn run_pgas(
             model, &trajectory, &current_params, observations,
             config.dt, obs_model, &obs_at_substep,
         )?;
-        if !sanity.total.is_finite() {
-            let trans_inf = !sanity.transition.is_finite();
-            let obs_inf   = !sanity.observation.is_finite();
-            if trans_inf {
-                eprintln!("  BUG: simulate_reference trajectory has non-finite \
-                          *transition* log-density at own params (transition_ll = {}).",
-                          sanity.transition);
-                eprintln!("  This indicates a mismatch between step_one and \
-                           log_transition_density_substep.");
-                eprintln!("  Run with CAMDL_TRACE_STEPS=1 for detailed per-substep \
-                           diagnostics.");
-            }
-            if obs_inf {
-                eprintln!("  WARNING: simulate_reference predicts observed data with \
-                          probability 0 (observation_ll = {}).", sanity.observation);
-                eprintln!("  This is the data-vs-model side, NOT a step_one bug — the \
-                           predicted trajectory at these starting parameters cannot \
-                           explain the observed values.");
-                eprintln!("  Common cause: a discrete-event parameter (e.g. `tau`) is \
-                           outside the simulation window, so the seeding mechanism \
-                           never fires and predicted incidence is 0 while real data has \
-                           cases. Adjust starting bounds, or rely on NUTS / MH to \
-                           propose into a feasible region.");
-            }
-            eprintln!("  params used:");
-            for p in &model.model.parameters {
-                if let Some(&idx) = model.param_index.get(p.name.as_str()) {
-                    eprintln!("    {} = {}", p.name, current_params[idx]);
-                }
-            }
-            eprintln!("  components: transition={:.1}, observation={:.1}, \
-                       initial_state={:.1}",
-                sanity.transition, sanity.observation, sanity.initial_state);
-        } else {
-            eprintln!("  simulate_reference LL sanity check: {:.1} (finite ✓)", sanity.total);
-        }
+        let params: Vec<(String, f64)> = model.model.parameters.iter()
+            .filter_map(|p| model.param_index.get(p.name.as_str())
+                .map(|&idx| (p.name.clone(), current_params[idx])))
+            .collect();
+        say(PgasEvent::ReferenceDensity { components: sanity, params });
     }
 
     // Adaptive proposal SDs via Robbins-Monro stochastic approximation.
@@ -3893,41 +3932,11 @@ pub fn run_pgas(
         config.dt, obs_model, &obs_at_substep,
     )?;
     let current_ll = current_components.total;
-    eprintln!("  initial complete-data ll: {:.1}", current_ll);
-    if !current_ll.is_finite() {
-        let trans_inf = !current_components.transition.is_finite();
-        let obs_inf   = !current_components.observation.is_finite();
-        let init_inf  = !current_components.initial_state.is_finite();
-        if trans_inf {
-            eprintln!("  WARNING: initial *transition* log-density is non-finite \
-                       (transition_ll = {}).", current_components.transition);
-            eprintln!("  This indicates a mismatch between step_one and \
-                       log_transition_density_substep — run with \
-                       CAMDL_TRACE_STEPS=1 for per-substep diagnostics.");
-        }
-        if obs_inf {
-            eprintln!("  WARNING: initial *observation* log-density is non-finite \
-                       (observation_ll = {}). The reference trajectory cannot \
-                       explain the observed data at these starting parameters; \
-                       NUTS / MH will propose into a feasible region if one exists.",
-                       current_components.observation);
-        }
-        if init_inf {
-            eprintln!("  WARNING: initial *initial-state* log-density is \
-                       non-finite (initial_state_ll = {}) — the reference \
-                       trajectory's x0 has zero probability under the declared \
-                       `init {{ }}` law at these starting parameters.",
-                       current_components.initial_state);
-        }
-        eprintln!("  components: transition={:.1}, observation={:.1}, \
-                   initial_state={:.1}",
-            current_components.transition,
-            current_components.observation,
-            current_components.initial_state);
-        eprintln!("  Model has {} transitions, {} source groups",
-            model.model.transitions.len(),
-            model.source_groups.len());
-    }
+    say(PgasEvent::InitialLoglik {
+        components: current_components.clone(),
+        n_transitions: model.model.transitions.len(),
+        n_source_groups: model.source_groups.len(),
+    });
 
     // gh#607. A start with zero posterior density is put ON PROBATION here and
     // refused at the end of the first sweep (`start_at_zero_density` below) if
@@ -4003,7 +4012,7 @@ pub fn run_pgas(
     // Check if gradients are available (compiler emitted rate_grad)
     let has_gradients = nuts_active(config.use_nuts, model);
     if has_gradients {
-        eprintln!("  NUTS enabled (gradient expressions found in IR)");
+        say(PgasEvent::NutsEnabled);
     }
 
     // NUTS state — restored from resume or initialized fresh.
@@ -4041,11 +4050,6 @@ pub fn run_pgas(
     // burn-in counts are expected during step-size adaptation).
     let mut n_max_treedepth_post_burn: usize = 0;
     let mut n_divergent_post_burn: usize = 0;
-
-    if start_sweep >= config.n_sweeps {
-        eprintln!("  warning: chain already completed {} sweeps (requested {}). \
-                   Increase sweeps in fit.toml to continue.", start_sweep, config.n_sweeps);
-    }
 
     // gh#180 P5 — the `DerivEntry::Unsupported` preflight (proposal §4.4).
     //
@@ -4123,7 +4127,7 @@ pub fn run_pgas(
 
     // ── Trajectory warm-up: CSMC-only sweeps before parameter updates ──
     if config.trajectory_warmup > 0 && start_sweep == 0 {
-        eprintln!("  trajectory warm-up: {} CSMC-only sweeps", config.trajectory_warmup);
+        say(PgasEvent::TrajectoryWarmupStarting { sweeps: config.trajectory_warmup });
         for warmup_sweep in 0..config.trajectory_warmup {
             let csmc_seed = seed ^ ((warmup_sweep as u64).wrapping_mul(0x517cc1b727220a95));
             let (new_traj, _diag) = csmc_as(
@@ -4138,11 +4142,12 @@ pub fn run_pgas(
                 config.dt, obs_model, &obs_at_substep,
             )?.total;
             if warmup_sweep % 10 == 0 {
-                eprintln!("  trajectory warm-up {}/{}: LL={:.1}",
-                    warmup_sweep, config.trajectory_warmup, chain.log_lik);
+                say(PgasEvent::TrajectoryWarmupProgress {
+                    sweep: warmup_sweep, of: config.trajectory_warmup, log_lik: chain.log_lik,
+                });
             }
         }
-        eprintln!("  trajectory warm-up complete: LL={:.1}", chain.log_lik);
+        say(PgasEvent::TrajectoryWarmupDone { log_lik: chain.log_lik });
     }
 
     for sweep in start_sweep..config.n_sweeps {
@@ -4302,29 +4307,29 @@ pub fn run_pgas(
                             }
                         }
                         chain.nuts_mass = super::nuts::MassMatrix::dense_from_covariance(&cov, d);
-                        eprintln!("  dense mass matrix estimated (sweep {}):", sweep);
-                        for (i, spec) in if2_params.iter().enumerate() {
-                            let sd = (cov[i * d + i]).max(1e-10).sqrt();
-                            eprintln!("    {:12} sd={:.6}", spec.name, sd);
-                        }
-                        eprint!("    correlations:");
+                        let sds = if2_params.iter().enumerate()
+                            .map(|(i, spec)| (spec.name.clone(), (cov[i * d + i]).max(1e-10).sqrt()))
+                            .collect();
+                        let mut correlations = Vec::new();
                         for i in 0..d {
                             for j in (i+1)..d {
                                 let r = cov[i * d + j]
                                     / (cov[i * d + i].max(1e-10).sqrt() * cov[j * d + j].max(1e-10).sqrt());
-                                eprint!(" {}-{}={:.2}", &if2_params[i].name[..3.min(if2_params[i].name.len())],
-                                    &if2_params[j].name[..3.min(if2_params[j].name.len())], r);
+                                correlations.push((if2_params[i].name.clone(), if2_params[j].name.clone(), r));
                             }
                         }
-                        eprintln!();
+                        say(PgasEvent::MassMatrix { sweep, sds, correlations: Some(correlations) });
                     } else {
                         let variances: Vec<f64> = (0..d).map(|i|
                             (chain.welford_m2[i] / (chain.welford_n - 1.0)).max(1e-10)
                         ).collect();
-                        eprintln!("  diagonal mass matrix estimated (sweep {}):", sweep);
-                        for (i, spec) in if2_params.iter().enumerate() {
-                            eprintln!("    {:12} sd={:.6}", spec.name, variances[i].sqrt());
-                        }
+                        say(PgasEvent::MassMatrix {
+                            sweep,
+                            sds: if2_params.iter().enumerate()
+                                .map(|(i, spec)| (spec.name.clone(), variances[i].sqrt()))
+                                .collect(),
+                            correlations: None,
+                        });
                         chain.nuts_mass = super::nuts::MassMatrix::diagonal(variances);
                     }
                 }
@@ -4334,8 +4339,7 @@ pub fn run_pgas(
                 chain.nuts_step_size = chain.nuts_dual_avg.update(result.mean_accept_prob);
             } else if sweep == adapt_end {
                 chain.nuts_step_size = chain.nuts_dual_avg.final_step_size();
-                eprintln!("  NUTS fully adapted (sweep {}):", sweep);
-                eprintln!("    final step_size: {:.6}", chain.nuts_step_size);
+                say(PgasEvent::NutsAdapted { sweep, step_size: chain.nuts_step_size });
             }
         } else {
             // MH-within-Gibbs: one-at-a-time random walk proposals
@@ -4474,36 +4478,30 @@ pub fn run_pgas(
                             .unwrap_or(InitSource::UnconditionalFilter),
                     });
                 }
-                eprintln!("  chain recovered from a non-finite start on its first \
-                           trajectory update (complete-data ll: {:.1})", chain.log_lik);
+                say(PgasEvent::RecoveredStart { log_lik: chain.log_lik });
             }
         }
 
         // ── Output ──
         // Log adapted proposal SDs at end of burn-in
         if sweep + 1 == adapt_end {
-            eprintln!("  proposal SD adapted (end of burn-in):");
-            for (i, spec) in if2_params.iter().enumerate() {
-                let acc_rate = chain.total_accepted[i] as f64 / (sweep + 1) as f64;
-                eprintln!("    {:12} sd={:.6} acc={:.0}%",
-                    spec.name, chain.log_proposal_sd[i].exp(), acc_rate * 100.0);
-            }
-            eprintln!("  trajectory renewal: {:.1}%", csmc_diag.trajectory_renewal * 100.0);
-
-            // NUTS diagnostics (Stan-style warnings)
-            if has_gradients {
-                let pct_maxdepth = n_max_treedepth as f64 / (sweep + 1) as f64 * 100.0;
-                if n_max_treedepth > 0 {
-                    eprintln!("  WARNING: {}/{} sweeps ({:.0}%) hit max_treedepth={}. \
-                        Consider increasing max_treedepth or reparameterizing.",
-                        n_max_treedepth, sweep + 1, pct_maxdepth, config.max_tree_depth);
-                }
-                if n_divergent > 0 {
-                    eprintln!("  WARNING: {} divergent transitions during burn-in. \
-                        Consider reducing step size or reparameterizing.",
-                        n_divergent);
-                }
-            }
+            say(PgasEvent::BurnInEnd {
+                proposals: if2_params.iter().enumerate()
+                    .map(|(i, spec)| ProposalAdapted {
+                        name: spec.name.clone(),
+                        sd: chain.log_proposal_sd[i].exp(),
+                        acceptance: chain.total_accepted[i] as f64 / (sweep + 1) as f64,
+                    })
+                    .collect(),
+                trajectory_renewal: csmc_diag.trajectory_renewal,
+                // NUTS diagnostics (Stan-style warnings)
+                nuts: has_gradients.then_some(NutsBurnIn {
+                    n_max_treedepth,
+                    sweeps: sweep + 1,
+                    max_tree_depth: config.max_tree_depth,
+                    n_divergent,
+                }),
+            });
         }
 
         let proposal_sds: Vec<f64> = chain.log_proposal_sd.iter()

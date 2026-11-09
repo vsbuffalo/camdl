@@ -327,6 +327,7 @@ fn run(compiled: &Arc<CompiledModel>, label: &str) -> Result<PGASResult, SimErro
         SEED,
         None,
         None,
+        None,
         label.into(),
     )
 }

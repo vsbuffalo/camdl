@@ -276,7 +276,7 @@ fn pgas_rung(label: &str, fixture: &str, fixed: &[(&str, f64)], data: Option<(&s
             sc.spawn(move || {
                 let mut base = model.default_params.clone();
                 for p in est { base[p.index] = p.initial; }
-                let r = run_pgas(model, est, priors, &base, config, observations, obs, seed, None, None, "nuts-rungs".into())
+                let r = run_pgas(model, est, priors, &base, config, observations, obs, seed, None, None, None, "nuts-rungs".into())
                     .expect("PGAS run");
                 let n = r.sweeps.len() as f64;
                 (r.sweeps.iter().map(|s| est.iter().map(|p| s.params[p.index]).collect()).collect(),

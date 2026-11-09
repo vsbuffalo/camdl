@@ -151,7 +151,7 @@ fn run_once() -> PGASResult {
 
     run_pgas(
         &compiled, &pgas_params, &priors, &params, &config, &obs, &obs_model,
-        SEED, None, None, "thread_invariance".into(),
+        SEED, None, None, None, "thread_invariance".into(),
     )
     .expect("run_pgas must succeed")
 }

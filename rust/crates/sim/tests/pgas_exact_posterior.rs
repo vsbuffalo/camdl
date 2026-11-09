@@ -409,6 +409,7 @@ fn run_chain(use_nuts: bool, seed: u64) -> Vec<f64> {
         seed,
         None,
         None,
+        None,
         "hash".into(),
     )
     .unwrap();

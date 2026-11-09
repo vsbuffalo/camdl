@@ -262,7 +262,7 @@ fn nuts_with_the_latent_path_fixed() {
                 use_nuts: true, dense_mass: true, max_tree_depth: 6,
                 trajectory_warmup: 0, csmc_sweeps_per_nuts: 1, step_policy: sim::schedule::StepPolicy::Snap,
             };
-            let post = run_pgas(&model, &est, &priors, &base, &config, &observations, &obs, 9, None, None,
+            let post = run_pgas(&model, &est, &priors, &base, &config, &observations, &obs, 9, None, None, None,
                 "fixed-path".into()).expect("PGAS for a posterior path").final_trajectory;
             for (label, path) in [("true", &true_path), ("posterior", &post)] {
                 let start = Instant::now();

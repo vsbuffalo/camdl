@@ -181,7 +181,7 @@ fn cold_chain_is_deterministic_for_a_fixed_seed() {
 
     let result1 = run_pgas(
         &compiled, &if2_params, &priors, &base_params,
-        &config, &obs, &obs_m, 12345, None, None, "hash".into(),
+        &config, &obs, &obs_m, 12345, None, None, None, "hash".into(),
     ).unwrap();
 
     let obs_m2 = obs_model(&compiled);
@@ -201,7 +201,7 @@ fn cold_chain_is_deterministic_for_a_fixed_seed() {
 
     let result2 = run_pgas(
         &compiled, &if2_params, &priors, &base_params,
-        &config2, &obs, &obs_m2, 12345, None, None, "hash".into(),
+        &config2, &obs, &obs_m2, 12345, None, None, None, "hash".into(),
     ).unwrap();
 
     assert_eq!(result1.sweeps.len(), result2.sweeps.len());

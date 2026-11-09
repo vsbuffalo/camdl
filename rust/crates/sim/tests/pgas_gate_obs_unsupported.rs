@@ -186,7 +186,7 @@ fn attempt_nuts_fit_with(
 
     run_pgas(
         &compiled, &if2_params, &priors, &params,
-        &config, &obs, &obs_model, 12345, None, None, "gate_obs_unsupported".into(),
+        &config, &obs, &obs_model, 12345, None, None, None, "gate_obs_unsupported".into(),
     )
 }
 
