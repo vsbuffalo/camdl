@@ -17,6 +17,7 @@ project:
   render: &published
     - index.qmd
     # Get started (tutorials)
+    - install.md
     - intro.md
     - guide/dimensions.qmd
     - workflow.md
@@ -75,6 +76,8 @@ website:
       - index.qmd
       - section: "Get started"
         contents:
+          - text: "Installing camdl"
+            href: install.md
           - text: "A tour of the language"
             href: intro.md
           - text: "Dimensions and stratification"
