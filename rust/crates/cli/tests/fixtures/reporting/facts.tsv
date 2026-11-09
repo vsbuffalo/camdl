@@ -30,6 +30,7 @@ stuck	stderr	line	starts:	default: every estimated parameter declares a prior
 stuck	stderr	line	output:	results/fits/pmmh_stuck-
 stuck	stderr	line	── method:	pmmh
 stuck	stderr	line	Acceptance rates degrade for long observation series	(T > 500)
+stuck	stderr	line	Acceptance rates degrade for long observation series	This series has T = 14.
 stuck	stderr	line	note: `starts = "from_prior"`	does not set where the chains begin for: beta, gamma
 stuck	stderr	line	pfilter noise check	(20 particles, 20 evaluation pairs)
 stuck	stderr	line	log L̂ mean	-69.3

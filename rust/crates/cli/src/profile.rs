@@ -361,7 +361,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // Registry-driven caveat for methods carrying a status_note (Beta methods,
     // plus Stable methods with usage guidance — e.g. nl-*). After the profile
     // dispatch, so a refused algorithm is not first shown a caveat.
-    crate::fit::methods::emit_status_banner(method.algorithm, method.backend);
+    crate::fit::methods::emit_status_banner(method.algorithm, method.backend, None);
 
     let ir_path = a.model.to_string_lossy().into_owned();
     // The IF2-only flags are refused on an nl-* cell, and `--particles` is
