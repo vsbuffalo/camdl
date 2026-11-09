@@ -5407,7 +5407,7 @@ per-run alternative is the CLI: leave `simulate { to }` literal and pass
 
 Outputs are stored in a **content-addressed store** under an `output_dir` you
 choose, partitioned by artifact kind (`sims/` for `simulate` trajectories,
-`fits/` for inference stages, and so on):
+`fits/` for inference runs, and so on):
 
 ```
 {output_dir}/
@@ -5694,8 +5694,8 @@ package or Python's `SALib` on `ensemble.tsv`. See the Run Specification
 camdl pfilter MODEL --params P.toml --data cases.tsv \
     --particles 5000 --dt 1 --seed 42 --trace diag.tsv
 
-# Iterated filtering (MLE) is run as a one-stage fit. Write a fit.toml with a
-# single `algorithm = "if2"` stage and run it through `camdl fit run`:
+# Iterated filtering (MLE) is run as a fit. Write a fit.toml whose `[method]`
+# has `algorithm = "if2"` and run it through `camdl fit run`:
 #
 #   [model]
 #   camdl = "MODEL"

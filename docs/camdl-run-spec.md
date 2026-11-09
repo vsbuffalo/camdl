@@ -1404,7 +1404,7 @@ archived copy.
 step, and, on ODE, its integrator. Without a flag, every arm of
 `--draws posterior|prior|<file> --fit` (and `--init-state fit`) runs on them:
 
-- **backend** — a stored run's own record (its stage's `backend` in `run.json`);
+- **backend** — a stored run's own record (its method's `backend` in `run.json`);
   for a problem-folder handle or a fit config, the config's `[method] backend`.
   A fit config with no `[method]` names no backend, and the command's default
   applies.
@@ -2969,7 +2969,7 @@ as `{ from_mle = "@scout" }` names.
 | `record_prequential` | `true`  | Record per-step predictive samples and log-likelihoods for `camdl compare`. |
 
 **`nl-sbplx` / `nl-bobyqa` / `nl-lbfgs`** — `backend`, `chains` required
-(`NloptStageConfig`, `config_v2.rs`). All three read the same keys.
+(`NloptConfig`, `config_v2.rs`). All three read the same keys.
 
 | key         | default | meaning                                                              |
 | ----------- | ------- | -------------------------------------------------------------------- |
@@ -3359,7 +3359,7 @@ method executes.
    > `parameters not in model: nope`
 8. **(algorithm, backend)** against the registry. The error names the structural
    reason, suggests the right alternative, and lists the supported pairs:
-   > `[method]: stage has algorithm = "if2" with backend = "ode", which is not a supported inference method.`
+   > `[method]: method has algorithm = "if2" with backend = "ode", which is not a supported inference method.`
 9. `ic_free` support for the method.
 10. IF2 `iterations ≥ 1`.
 11. `burn_in < iterations` (`pmmh`, `mh`) and `burn_in < sweeps` (`pgas`), using
@@ -4573,7 +4573,7 @@ different models (the `model` level; `config` is unchanged).
   Label: `seed_{n}` — note this renders the _process_ seed, so a multi-replicate
   run shows segments like `seed_5871781006564002452`.
 
-**`FitStage` levels** (`fit::cas::resolve_fit_stage`):
+**`FitStage` levels** (`fit::cas::resolve_fit_method`):
 
 - `fit` — `FitDigest`: the `ModelDigest`; the content digest of each resolved
   _training_ stream; the content digest of each `[data.holdout]` stream; the
@@ -5464,11 +5464,11 @@ omitted from `run.json` when empty.
 > subcommand that produced those was removed. Equivalent reductions are
 > expressed in the model's `quantities {}` block (§10.8).
 
-### 10.10 `progress.json`: what a stage says while it runs, and how it ends
+### 10.10 `progress.json`: what a method run says while it runs, and how it ends
 
 A background thread rewrites `progress.json` every five seconds — a fixed
 wall-clock timer, not a step boundary, because one national-scale PGAS sweep can
-take minutes — so it is the one thing a watcher can read while a stage runs.
+take minutes — so it is the one thing a watcher can read while a method runs.
 Alongside `updated_at`, `pid` and the `state` counter it carries a `chains`
 block for any method that reports per-chain liveness:
 
@@ -5495,9 +5495,9 @@ block for any method that reports per-chain liveness:
 A chain is refused at its **start** (§10.7), so how many of the chains a run
 paid for are sampling is knowable in its first minutes; `fit_state.toml`'s
 `n_good_chains` and the `bad_init` records report the same thing only once the
-stage has finished. `running + completed` is the number that got past their
-start — `total - refused` is not the same thing mid-run, since a chain that has
-not started is neither good nor bad.
+run has finished. `running + completed` is the number that got past their start
+— `total - refused` is not the same thing mid-run, since a chain that has not
+started is neither good nor bad.
 
 **A chain with no row has not started.** That is the distinction an empty
 `chain_N/` directory cannot make: a refused chain and one queued behind
@@ -5526,9 +5526,9 @@ rest, `step` of `total` counts:
 
 #### The terminal state
 
-A stage that finishes writes `"state": "done"` after every other output in the
-leaf is on disk, so `done` is the cue that the final statistics are ready to
-read. A stage that camdl stops writes `"state": {"failed": {"reason": …}}`,
+A method run that finishes writes `"state": "done"` after every other output in
+the leaf is on disk, so `done` is the cue that the final statistics are ready to
+read. A run that camdl stops writes `"state": {"failed": {"reason": …}}`,
 carrying the same sentence the command printed on stderr — so a reader holding
 only `progress.json` learns what a reader of the terminal learns. Both are
 written before the leaf is finalized.
@@ -5898,7 +5898,7 @@ profile-base sidecar.
 
 ### 12.2 When priors are used at all
 
-| Stage algorithm                     | Prior used?                                                                          |
+| Method algorithm                    | Prior used?                                                                          |
 | ----------------------------------- | ------------------------------------------------------------------------------------ |
 | `pgas`, `pmmh`, `mh`                | Yes — the prior density enters the acceptance ratio; a missing prior is a hard error |
 | `if2`                               | No — iterated filtering is maximum likelihood; the code never reads a prior          |

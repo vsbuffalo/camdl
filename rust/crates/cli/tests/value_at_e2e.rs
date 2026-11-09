@@ -9,7 +9,7 @@
 //!   3. `simulate --quantities-out` on a `last_obs` model hard-errors naming
 //!      the quantity (a forward run has no observed data to anchor to).
 //!
-//! The posterior stage is **PGAS**, which stores the smoothed latent paths: an
+//! The posterior method is **PGAS**, which stores the smoothed latent paths: an
 //! in-window `value_at` is read off those (gh#722), so a sampler that stores
 //! none has no such quantity to band and this test would be asserting the
 //! empty case rather than the anchor arithmetic. The no-paths behaviour is

@@ -96,11 +96,11 @@ pub const NOISE_PAIRS: usize = 20;
 const GAUSSIAN_OBS_FLOOR: usize = 20;
 
 /// Stream offset for the `θ'` draw, so the parameter perturbation cannot
-/// collide with any particle-filter seed derived from the same stage seed.
+/// collide with any particle-filter seed derived from the same method seed.
 const THETA_PRIME_STREAM: u64 = 0x9E37_79B9_7F4A_7C15;
 
-/// The measured likelihood noise for one pseudo-marginal stage, persisted with
-/// the stage artifact (gh#764).
+/// The measured likelihood noise for one pseudo-marginal method, persisted with
+/// the method artifact (gh#764).
 ///
 /// Everything here is needed to read `sigma` and `s`: the particle count
 /// because `sigma ∝ 1/sqrt(N)`, and the pair count because it sets the
@@ -285,7 +285,7 @@ pub fn draw_proposed_theta(
     theta
 }
 
-/// Evaluate `NOISE_PAIRS` pairs of `log L̂`, under the scheme this stage runs.
+/// Evaluate `NOISE_PAIRS` pairs of `log L̂`, under the scheme this method runs.
 ///
 /// Returns `(base_lls, proposed_lls)`, parallel and in pair order. Errors are
 /// the inference convention: a structural error surfaces, a ruled-out θ is
@@ -303,7 +303,7 @@ pub fn measure(
 ) -> Result<(Vec<f64>, Vec<f64>), sim::error::SimError> {
     // Base-θ seeds stay `seed + i`, the seeds this loop used when it
     // measured σ alone, so `initial_loglik` is unchanged for every
-    // plain PMMH stage. The θ' evaluations take the block above it.
+    // plain PMMH method. The θ' evaluations take the block above it.
     let base_lls = (0..pairs)
         .map(|i| runner::run_quick_pfilter(config, base, n_particles, seed + i as u64))
         .collect::<Result<Vec<f64>, _>>()?;

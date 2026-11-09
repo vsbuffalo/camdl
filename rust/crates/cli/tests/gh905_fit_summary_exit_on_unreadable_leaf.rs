@@ -2,7 +2,7 @@
 //! asked about could not be read back.
 //!
 //! The text formatter printed `warning: cannot load <leaf>: …`, skipped the
-//! leaf, rendered a summary with no stage in it, and returned success. A
+//! leaf, rendered a summary with no method in it, and returned success. A
 //! script that asks "summarise this fit" and checks the status code was told
 //! the fit had been summarised. `--format json` was worse: the load error was
 //! swallowed entirely (`.ok()`), so the reader got `"methods": []` with nothing

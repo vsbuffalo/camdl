@@ -51,12 +51,12 @@ pub enum CalendarMode {
 }
 
 /// Resolved observation-time alignment: how observation times relate to the
-/// integrator `dt` grid for an inference stage (`crate` mirror of the CLI's
+/// integrator `dt` grid for an inference method (`crate` mirror of the CLI's
 /// `fit::methods::ObsAlignment`). The *resolved* value — not the requested
 /// `[config] obs_alignment` — drives the posterior: exact stepping and grid
 /// snapping produce different chains at the same config, and the default a
 /// given algorithm resolves to can flip across engine versions (gh#189). So
-/// the resolved value is folded into the stage identity by content, not left
+/// the resolved value is folded into the method identity by content, not left
 /// to ride only on the optional, skip-when-unset request field in the
 /// fit.toml blob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, RunInput)]
@@ -103,7 +103,7 @@ pub struct DataDigest(pub ContentHash);
 ///     file's bytes.
 ///   - `--init-state fit` (the paired `(θ_i, X_i(T))` posterior): the
 ///     [`InitStateEnsemble`] digest over the *resolved* ensemble actually used.
-///     Deliberately **not** the fit's `run_id` + stage + selection rule —
+///     Deliberately **not** the fit's `run_id` + method + selection rule —
 ///     keying on provenance means enumerating every knob that changes which
 ///     draws are selected, and a missed knob is two different clouds colliding
 ///     on one cache entry. Keying on the ensemble's own content cannot miss
@@ -147,7 +147,7 @@ pub struct InitStateRow {
 /// Its [`ContentAddressed::content_hash`] is what
 /// [`InitStateDigest::ensemble`] carries for the fit source. Whole-ensemble +
 /// row (rather than the row alone) mirrors the file source exactly: a change
-/// anywhere in the ensemble — a different fit, a different stage, a different
+/// anywhere in the ensemble — a different fit, a different method, a different
 /// forkable subset, a different draw cap, a different order — re-keys every
 /// cell. Conservative in the safe direction, and the same rule on both sources.
 ///
@@ -443,14 +443,14 @@ pub struct FitDigest {
     pub engine: EngineVersion,
 }
 
-/// One stage's config (the `stage` level): the whole canonicalized `Stage`
-/// config + the resolved obs-block + flow indices + `target_length` + the
-/// upstream `deps`. Hashing the whole struct (not a subset) mirrors fit-wide:
+/// One method's config (the `method` level): the whole canonicalized `Method`
+/// config + the resolved obs-block + flow indices + `target_length`; its
+/// `deps` ride beside it in the method level. Hashing the whole struct (not a subset) mirrors fit-wide:
 /// enumerating a subset is the hash-a-recipe antipattern. M1 sketches the
-/// load-bearing fields; M3 binds it to the real `Stage`.
+/// load-bearing fields; M3 binds it to the real `Method`.
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
 pub struct StageConfig {
-    /// Content digest of the whole canonicalized stage config block.
+    /// Content digest of the whole canonicalized method config block.
     pub config: ContentHash,
     /// Resolved obs-block name (the `--obs` selection): selects which series
     /// drives the likelihood; not in the toml.
@@ -459,35 +459,35 @@ pub struct StageConfig {
     pub flow_indices: Vec<u32>,
     /// Resume target length — a resumed run is a distinct artifact.
     pub target_length: u64,
-    /// The *resolved* observation-time alignment for this stage (gh#189).
-    /// Resolution is per-stage — a function of the stage algorithm and the
+    /// The *resolved* observation-time alignment for this method (gh#189).
+    /// Resolution is per-method — a function of the method algorithm and the
     /// fit-wide requested `[config] obs_alignment` — and it changes the
-    /// posterior, so it is keyed at the stage level (where the algorithm
+    /// posterior, so it is keyed at the method level (where the algorithm
     /// lives), not buried in the optional fit.toml request field that is
     /// skipped from the blob when unset.
     pub obs_alignment: ResolvedObsAlignment,
 }
 
-/// `fit` stage leaf (M3). The stage DAG recursion lives in `deps`:
-/// `02-posterior` folds in `01-scout`'s *identity*, so the posterior
-/// invalidates whenever the scout's inputs change. Sound only once the
-/// engine is pure (the M3 fixes).
+/// `fit` method leaf (M3). A sourced start's lineage lives in `deps`: a
+/// `from_mle` / `from_posterior` / `from_params` start folds in its source's
+/// identity, so the run invalidates whenever that source changes. Sound only
+/// once the engine is pure (the M3 fixes).
 #[derive(Debug, Clone, PartialEq, RunInput)]
 pub struct FitStageInput {
     pub fit: FitDigest,
-    pub stage: StageConfig,
+    pub method: StageConfig,
     pub deps: Deps,
     pub seed: Seed,
     #[run_input(provenance)]
     pub display: RunProvenance,
 }
 
-/// The `stage` *level* hash input: a stage's own config **plus its `deps`**.
-/// This is what the factored path's stage segment (`{NN}-{name}-{stage_h8}`)
-/// and the leaf `run_id` hash for the stage level — so `02-posterior`'s
-/// stage hash folds in `01-scout`'s identity (via `deps`), making the
-/// posterior re-key whenever the scout it consumes changes, while editing
-/// the posterior's own block leaves the scout leaf untouched (scout reuse).
+/// The `method` *level* hash input: a method's own config **plus its `deps`**.
+/// This is what the factored path's method segment (`{algorithm}-{method_h8}`)
+/// and the leaf `run_id` hash for the method level — so a run started
+/// `from_mle = @mle` folds in that source's identity (via `deps`) and re-keys
+/// whenever the source changes, while editing its own `[method]` leaves the
+/// source leaf untouched.
 /// Kept distinct from [`StageConfig`] so the bare config (without lineage)
 /// stays addressable, and from [`FitStageInput`] which composes all levels.
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
@@ -535,7 +535,7 @@ pub struct SurveyInput {
 //
 // A profile pins a focal parameter at each value of a grid and sub-fits the
 // rest at that pin. The factored levels are
-// `[base, point, stage, seed, start]`:
+// `[base, point, method, seed, start]`:
 //
 //   profile-base  — the inference *problem* (model, data, the canonical base
 //                   config: base params + fixed + obs + priors + fit.toml),
@@ -546,7 +546,7 @@ pub struct SurveyInput {
 //                   A path segment only — no base-level record (mirrors the
 //                   fit level).
 //   point         — the single pinned focal value(s) for this grid point.
-//   stage         — the sub-fit method + hyperparams (algorithm, particles,
+//   method         — the sub-fit method + hyperparams (algorithm, particles,
 //                   iterations, cooling, pmmh_*), shared across the grid.
 //   seed / start  — the resolved RNG seed and the multi-start index; the
 //                   (seed, start) pair pins the sub-fit's init deterministically.
@@ -554,7 +554,7 @@ pub struct SurveyInput {
 /// The shared `profile`-level digest: the inference problem being profiled,
 /// including the sweep grid so a distinct grid is a distinct run. `deps`
 /// carries the base fit's `starts_from` lineage (same deps-DAG mechanism as a
-/// fit stage).
+/// fit method).
 ///
 /// The grid is part of the identity (not `Eq` because it carries floats — same
 /// as [`ProfilePointConfig`]). Two runs with the same problem but a *different*
@@ -562,13 +562,13 @@ pub struct SurveyInput {
 /// rather than silently merging their cells onto one another (which produced a
 /// jagged union when the cell coordinates didn't line up). Re-running the
 /// *same* grid is stable (a cache hit); the method config still lives in the
-/// `stage` level, not here.
+/// `method` level, not here.
 #[derive(Debug, Clone, PartialEq, RunInput)]
 pub struct ProfileBase {
     pub model: ModelDigest,
     pub data: Vec<DataDigest>,
     /// Canonical digest of the base config (base params + fixed + obs + priors
-    /// + fit.toml) — method config excluded (it lives in `stage`).
+    /// + fit.toml) — method config excluded (it lives in `method`).
     pub base_config: ContentHash,
     /// The resolved sweep grid: each focal axis and its values, canonicalized
     /// (axes sorted by name, values ascending) so the identity is independent
@@ -585,7 +585,7 @@ pub struct ProfilePointConfig {
     pub focal: Vec<(ParamId, FiniteF64)>,
 }
 
-/// The `stage` level: the sub-fit method + hyperparams applied at every point.
+/// The `method` level: the sub-fit method + hyperparams applied at every point.
 /// Distinct from [`ProfileBase`] so a method change re-keys the points while
 /// the base stays shared.
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
@@ -603,12 +603,12 @@ pub struct StartLevel {
 /// `profile` point leaf (M3.3). Flat independent leaves — no inter-point deps:
 /// each point pins the focal param and sub-fits the rest, with no neighbour
 /// warm-start. Composes the five levels; the per-level hashes drive the path
-/// `profiles/<base>/<point>/<stage>/<seed>/<start>/`.
+/// `profiles/<base>/<point>/<method>/<seed>/<start>/`.
 #[derive(Debug, Clone, PartialEq, RunInput)]
 pub struct ProfilePointInput {
     pub base: ProfileBase,
     pub point: ProfilePointConfig,
-    pub stage: ProfileStage,
+    pub method: ProfileStage,
     pub seed: Seed,
     pub start: StartLevel,
     #[run_input(provenance)]

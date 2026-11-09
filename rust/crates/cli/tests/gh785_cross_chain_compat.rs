@@ -6,7 +6,7 @@
 //! genuinely having several modes. The in-crate unit tests pin what the numbers
 //! MEAN; this pins what a downstream reader (`camdl-scope`) actually finds:
 //!
-//! * the file exists for a PGAS stage, with the documented keys;
+//! * the file exists for a PGAS method, with the documented keys;
 //! * `chains` numbers the chains as the `chain_N/` directories beside it do, and
 //!   describes `M`'s actual rows;
 //! * the DIAGONAL agrees with what the sampler itself recorded for that chain's
@@ -14,7 +14,7 @@
 //!   Without that, the matrix could drift from the sampler's own numbers and
 //!   nothing would say so;
 //! * both derived numbers are the stated functions of `M`;
-//! * the file is ABSENT for a PMMH stage. PMMH accepts on a marginal likelihood
+//! * the file is ABSENT for a PMMH method. PMMH accepts on a marginal likelihood
 //!   estimate and stores no latent path, so there is nothing to score. An empty
 //!   matrix would read as "measured, found nothing" — a different and false
 //!   claim.
@@ -109,7 +109,7 @@ simulate { from = 0 'days  to = 20 'days }
 const SWEEPS: usize = 60;
 const BURN_IN: usize = 10;
 
-/// A fit.toml whose single stage runs `algorithm` with `chains` chains.
+/// A fit.toml whose single method runs `algorithm` with `chains` chains.
 fn write_fit_toml(
     dir: &Path, ir: &Path, data: &Path, algorithm: &str, chains: usize,
 ) -> (PathBuf, PathBuf) {
@@ -149,9 +149,9 @@ burn_in = {BURN_IN}
     (p, out)
 }
 
-/// The stage leaf directory under `<out>/fits/` — the one holding
+/// The method leaf directory under `<out>/fits/` — the one holding
 /// `diagnostics.json` and the `chain_N/` dirs.
-fn stage_leaf(out: &Path) -> PathBuf {
+fn method_leaf(out: &Path) -> PathBuf {
     let mut stack = vec![out.join("fits")];
     while let Some(d) = stack.pop() {
         let rj = d.join("run.json");
@@ -182,8 +182,8 @@ fn run_fit(bin: &Path, fit: &Path) {
 /// One chain's `trace.tsv` as a header plus one row of fields per sweep. The
 /// callback that writes it fires on EVERY sweep, so the last row is the final
 /// sweep — the one the matrix's diagonal is computed at.
-fn trace(stage: &Path, chain: usize) -> (Vec<String>, Vec<Vec<String>>) {
-    let path = stage.join(format!("chain_{chain}/trace.tsv"));
+fn trace(method: &Path, chain: usize) -> (Vec<String>, Vec<Vec<String>>) {
+    let path = method.join(format!("chain_{chain}/trace.tsv"));
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
@@ -236,13 +236,13 @@ fn pgas_writes_the_cross_chain_compatibility_matrix() {
     let (fit, out) = write_fit_toml(tmp.path(), &ir, &data, "pgas", 3);
     run_fit(&bin, &fit);
 
-    let stage = stage_leaf(&out);
-    let path = stage.join("cross_chain_compat.json");
+    let method = method_leaf(&out);
+    let path = method.join("cross_chain_compat.json");
     assert!(path.is_file(),
-        "a multi-chain PGAS stage must write cross_chain_compat.json beside \
+        "a multi-chain PGAS method must write cross_chain_compat.json beside \
          diagnostics.json; {} holds: {:?}",
-        stage.display(),
-        std::fs::read_dir(&stage).unwrap()
+        method.display(),
+        std::fs::read_dir(&method).unwrap()
             .flatten().map(|e| e.file_name()).collect::<Vec<_>>());
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).expect("parse artifact");
@@ -261,7 +261,7 @@ fn pgas_writes_the_cross_chain_compatibility_matrix() {
     assert_eq!(chains, vec![0, 1, 2],
         "chain ids are the `chain_N/` names, which are also draws.tsv's chain key");
     for &c in &chains {
-        assert!(stage.join(format!("chain_{c}")).is_dir(),
+        assert!(method.join(format!("chain_{c}")).is_dir(),
             "chains names chain {c}, but there is no chain_{c}/ directory beside the artifact");
     }
     let m: Vec<Vec<f64>> = serde_json::from_value(v["M"].clone()).expect("M");
@@ -279,7 +279,7 @@ fn pgas_writes_the_cross_chain_compatibility_matrix() {
     // is the rounding, not a fudge.
     let mut any_moved = false;
     for (i, &c) in chains.iter().enumerate() {
-        let (header, rows) = trace(&stage, c);
+        let (header, rows) = trace(&method, c);
         any_moved |= theta_moved_after_burn_in(&header, &rows);
         let recorded = last_sweep_path_term(&header, &rows);
         assert!(
@@ -327,10 +327,10 @@ fn pmmh_writes_no_cross_chain_compatibility_matrix() {
     let (fit, out) = write_fit_toml(tmp.path(), &ir, &data, "pmmh", 2);
     run_fit(&bin, &fit);
 
-    let stage = stage_leaf(&out);
-    assert!(stage.join("diagnostics.json").is_file(),
-        "sanity: the PMMH stage must have completed and written diagnostics.json");
-    assert!(!stage.join("cross_chain_compat.json").exists(),
+    let method = method_leaf(&out);
+    assert!(method.join("diagnostics.json").is_file(),
+        "sanity: the PMMH method must have completed and written diagnostics.json");
+    assert!(!method.join("cross_chain_compat.json").exists(),
         "PMMH has no stored latent path to score, so cross_chain_compat.json must not \
          exist at all — an empty matrix would read as a measurement");
 }

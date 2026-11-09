@@ -135,7 +135,7 @@ fn run_fit(config: &Path, out_root: &Path) -> String {
 }
 
 /// The single `fit_stage` leaf under `<out_root>/fits/`.
-fn stage_leaf(out_root: &Path) -> PathBuf {
+fn method_leaf(out_root: &Path) -> PathBuf {
     let mut stack = vec![out_root.join("fits")];
     while let Some(d) = stack.pop() {
         let rj = d.join("run.json");
@@ -284,7 +284,7 @@ fn pgas_best_chain_is_the_chain_the_run_named() {
     let out_root = tmp.path().join("results_pgas");
 
     let stderr = run_fit(&cfg, &out_root);
-    let leaf = stage_leaf(&out_root);
+    let leaf = method_leaf(&out_root);
     assert_best_chain_names_a_chain_dir(
         "pgas", &leaf, &stderr, "best complete-data ll:", 2);
 }
@@ -300,7 +300,7 @@ fn if2_best_chain_agrees_with_the_mle_provenance_chain() {
     let out_root = tmp.path().join("results_if2");
 
     let stderr = run_fit(&cfg, &out_root);
-    let leaf = stage_leaf(&out_root);
+    let leaf = method_leaf(&out_root);
     let stored = assert_best_chain_names_a_chain_dir("if2", &leaf, &stderr, "best ll=", 2);
 
     let prov = mle_provenance_chain(&leaf);

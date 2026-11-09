@@ -1,4 +1,4 @@
-//! Shared prior-resolution chain for `camdl fit run` Bayesian stages
+//! Shared prior-resolution chain for `camdl fit run` Bayesian methods
 //! (gh#75) and the prior provenance `camdl profile` records (gh#73).
 //!
 //! Precedence chain

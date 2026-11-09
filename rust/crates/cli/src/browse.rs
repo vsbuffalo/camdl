@@ -484,7 +484,7 @@ fn envelope_outputs(segment: &Path, run: Option<&str>) -> Vec<(PathBuf, String)>
     let ids: Vec<String> = match run {
         Some(id) => vec![id.to_string()],
         None => crate::fit::fit_view::FitView::read(segment)
-            .map(|v| v.stages.into_iter().map(|s| s.run_id).collect())
+            .map(|v| v.methods.into_iter().map(|s| s.run_id).collect())
             .unwrap_or_default(),
     };
     let single = ids.len() == 1;
@@ -902,7 +902,7 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
             };
             let _ = std::io::stdout().write_all(&bytes);
         }
-        // New-format fit stage: default to the θ̂ summary; `--stream NAME`
+        // New-format fit method: default to the θ̂ summary; `--stream NAME`
         // cats a named file from the leaf (e.g. `draws.tsv`,
         // `chain_1/trace.tsv`).
         Resolved::Fit { leaf, rel_path, .. } => {
@@ -1094,7 +1094,7 @@ fn discover_profiles(root: &str) -> Result<Vec<ProfileEntry>, String> {
             if let Some(h) = level_hash(leaf, "start") { start_hashes.insert(h); }
             let c = leaf_created(leaf);
             if c > created { created = c; }
-            // The profile-base segment is four levels up (start/seed/stage/
+            // The profile-base segment is four levels up (start/seed/method/
             // point → base); used for the sidecar (label/model) and rel path.
             if base_seg.is_none() {
                 base_seg = leaf.dir.ancestors().nth(4).map(|p| p.to_path_buf());
@@ -1220,7 +1220,7 @@ fn print_survey_json(surveys: &[SurveyRow]) {
 }
 
 /// Walk `root/fits/` one level deep — each immediate child is a fit
-/// directory (`<stem>-<hash[:8]>/`). Stage-level run.json records live
+/// directory (`<stem>-<hash[:8]>/`). Method-level run.json records live
 /// deeper and are not surfaced by `camdl list`.
 ///
 /// Implementation: delegates to `fit_tree::walk_fits_root` for
@@ -1265,7 +1265,7 @@ enum Resolved {
     SimEnsemble { leaf: cas_read::Leaf, rel_path: String, created: SystemTime },
     /// A fit SEGMENT under `fits/` — the fit's *output envelope*, not a single
     /// leaf. A fit has no fit-wide `run.json` (its identity is the `fit`-level
-    /// hash carried by every stage leaf + the `fit.meta.json` sidecar), so this
+    /// hash carried by every method leaf + the `fit.meta.json` sidecar), so this
     /// is a directory projection: it discovers the predict/quantities artifacts
     /// the fit produced. Reached by `@label`, by the segment dir, or by the
     /// fit-level hash prefix (the `fit_id` that `fit table`/`list` display).
@@ -1348,7 +1348,7 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
         sim_matches.push((leaf, rel, created));
     }
 
-    // New-format fit stages (M3.2): match the run_id hex prefix under fits/.
+    // New-format fit methods (M3.2): match the run_id hex prefix under fits/.
     let mut fit_matches: Vec<(cas_read::Leaf, String, SystemTime)> = Vec::new();
     for leaf in cas_read::resolve_fit_prefix(Path::new(root), hash_prefix) {
         let created = leaf_created(&leaf);
@@ -1392,9 +1392,9 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
     }
 
     // Fit ENVELOPES: a fit segment whose fit-level hash (the `fit_id` that
-    // `fit table`/`list` display, NOT a stage-leaf run_id) starts with the
+    // `fit table`/`list` display, NOT a method-leaf run_id) starts with the
     // prefix. This resolves the whole fit's output envelope. Folded into the
-    // same 0/1/many resolution below, so a prefix that collides with a stage
+    // same 0/1/many resolution below, so a prefix that collides with a method
     // leaf (`fit_matches`) surfaces as ambiguous rather than silently picked.
     let mut fit_envelope_matches: Vec<(PathBuf, String)> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(Path::new(root).join("fits")) {
@@ -1660,7 +1660,7 @@ fn print_fits_json(fits: &[FitEntry]) {
         // One object per discovered method leaf — the headline numbers
         // `FitView` folds from the leaves, plus the leaf's address.
         let methods: Vec<serde_json::Value> = v
-            .stages
+            .methods
             .iter()
             .map(|s| {
                 serde_json::json!({
@@ -1677,7 +1677,7 @@ fn print_fits_json(fits: &[FitEntry]) {
                     // run, so it belongs on the run's entry.
                     "label": s.label,
                     "created_at": s.created_at,
-                    "path": leaf_rel_path(&f.rel_path, &f.fit_dir, &s.stage_dir),
+                    "path": leaf_rel_path(&f.rel_path, &f.fit_dir, &s.method_dir),
                     "backend": s.backend.as_str(),
                     "seed": s.seed,
                     "n_chains": s.n_chains,

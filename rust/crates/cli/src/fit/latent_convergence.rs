@@ -1,6 +1,6 @@
 //! Convergence of the *latent path* itself — R̂ and ESS of every state
 //! variable at every substep, across the chains, computed over the posterior
-//! paths a PGAS stage saved (gh#822).
+//! paths a PGAS method saved (gh#822).
 //!
 //! # Why the parameter R̂ is not enough
 //!
@@ -71,7 +71,7 @@ pub const LATENT_CONVERGENCE_TSV: &str = "latent_convergence.tsv";
 /// compartments, real compartments, `flow_*`, `inc_*`).
 ///
 /// Flattened once, at the point the chain drops its `PosteriorDraw`s, so the
-/// stage retains eight bytes per cell per draw rather than the snapshot
+/// method retains eight bytes per cell per draw rather than the snapshot
 /// structures.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChainPaths {
@@ -526,16 +526,16 @@ pub fn latent_convergence(
     })
 }
 
-/// Every chain's saved paths in a finished PGAS stage, read back from
+/// Every chain's saved paths in a finished PGAS method, read back from
 /// `chain_N/trajectories.tsv` in chain order, with the shared column names —
-/// the input [`latent_convergence`] takes, so a stage that ran before the
+/// the input [`latent_convergence`] takes, so a method that ran before the
 /// block existed (or whose report scrolled by) can be scored from what it
-/// wrote. Chains without a `trajectories.tsv` (a refused start, or a stage
-/// that saved no paths) are skipped, as the stage skips them; `Ok(None)` is a
-/// stage with no such file at all. Chains whose headers disagree are refused.
-pub fn read_stage_paths(stage_dir: &Path) -> Result<Option<(Vec<ChainPaths>, Vec<String>)>, String> {
-    let mut files: Vec<(ChainIndex, std::path::PathBuf)> = std::fs::read_dir(stage_dir)
-        .map_err(|e| format!("cannot read {}: {e}", stage_dir.display()))?
+/// wrote. Chains without a `trajectories.tsv` (a refused start, or a method
+/// that saved no paths) are skipped, as the method skips them; `Ok(None)` is a
+/// method with no such file at all. Chains whose headers disagree are refused.
+pub fn read_method_paths(method_dir: &Path) -> Result<Option<(Vec<ChainPaths>, Vec<String>)>, String> {
+    let mut files: Vec<(ChainIndex, std::path::PathBuf)> = std::fs::read_dir(method_dir)
+        .map_err(|e| format!("cannot read {}: {e}", method_dir.display()))?
         .flatten()
         .filter_map(|e| {
             let n = ChainIndex::parse_dir_name(e.file_name().to_str()?)?;
@@ -669,13 +669,13 @@ fn row(label: &str, cells: &str) -> String {
 }
 
 impl LatentConvergence {
-    /// The end-of-stage block, printed directly under the renewal profile so
+    /// The end-of-run block, printed directly under the renewal profile so
     /// the two rows of tenths line up.
     ///
     /// Composed from the four pieces below rather than written out here, so
     /// `camdl fit summary` — which reorders them and gates the glossary behind
     /// `--explain` — reads the same numbers from the same code as the
-    /// end-of-stage print.
+    /// end-of-run print.
     pub fn report(&self) -> String {
         let mut s = String::from("\n");
         s.push_str(&self.headline());
@@ -993,7 +993,7 @@ mod tests {
     }
 
     /// `ESS min (mixed)` read exactly 40 in all ten bins of a real 8-chain,
-    /// 10-path PGAS stage. That is not a coincidence and not a floor the
+    /// 10-path PGAS method. That is not a coincidence and not a floor the
     /// reduction imposes: below
     /// [`MIN_DRAWS_FOR_INFORMATIVE_ESS`] the estimator returns
     /// `n_chains * (n_draws / 2)` for any input at all, so the row counts
@@ -1002,7 +1002,7 @@ mod tests {
     /// sentence saying so.
     #[test]
     fn the_ess_row_is_omitted_when_it_would_be_a_constant_not_a_measurement() {
-        // The shape the real stage had: 8 chains, 10 saved paths each.
+        // The shape the real method had: 8 chains, 10 saved paths each.
         let chains = block(8, 10, 12, 2, cloud);
         let lc = latent_convergence(&chains, &names(2)).unwrap();
         let ess: Vec<f64> = lc.cells.iter()
@@ -1022,7 +1022,7 @@ mod tests {
 
         // At the threshold the estimator runs, so the caveat must NOT fire —
         // otherwise it would read as a permanent disclaimer rather than a
-        // statement about this stage.
+        // statement about this method.
         let enough = block(8, MIN_DRAWS_FOR_INFORMATIVE_ESS, 12, 2, cloud);
         let lc = latent_convergence(&enough, &names(2)).unwrap();
         let report = lc.report();
@@ -1038,10 +1038,10 @@ mod tests {
             "and it varies across cells: {ess:?}");
     }
 
-    /// The four pieces ARE the end-of-stage block, in that order.
+    /// The four pieces ARE the end-of-run block, in that order.
     ///
     /// `camdl fit summary` reorders them and holds the glossary behind
-    /// `--explain`; the end-of-stage print must keep emitting exactly what it
+    /// `--explain`; the end-of-run print must keep emitting exactly what it
     /// always did. Pinning the composition is what stops one caller's layout
     /// change from silently rewriting the other's output.
     #[test]
@@ -1316,7 +1316,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_paths_come_in_chain_order_and_skip_chains_without_a_path() {
+    fn method_paths_come_in_chain_order_and_skip_chains_without_a_path() {
         let dir = tempfile::tempdir().unwrap();
         let rows: &[(f64, [f64; 2])] = &[(0.0, [1.0, 0.0]), (1.0, [2.0, 1.0])];
         // chain_10 must sort after chain_2; chain_3 refused its start and has
@@ -1334,7 +1334,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("chain_4")).unwrap();
         std::fs::write(dir.path().join("chain_4/trajectories.tsv"), "chain\tdraw\ttime\tS\tflow_a\n").unwrap();
 
-        let (chains, cols) = read_stage_paths(dir.path()).unwrap().unwrap();
+        let (chains, cols) = read_method_paths(dir.path()).unwrap().unwrap();
         assert_eq!(cols, vec!["S".to_string(), "flow_a".to_string()]);
         let first_s: Vec<f64> = chains.iter().map(|c| c.value(0, 1, 0)).collect();
         assert_eq!(first_s, vec![2.0, 4.0, 20.0], "chain_1, chain_2, chain_10");
@@ -1348,7 +1348,7 @@ mod tests {
         // A chain whose header names other columns is refused.
         std::fs::write(dir.path().join("chain_4/trajectories.tsv"),
             "chain\tdraw\ttime\tS\tflow_b\n4\t5\t0\t1\t0\n").unwrap();
-        let e = read_stage_paths(dir.path()).unwrap_err();
+        let e = read_method_paths(dir.path()).unwrap_err();
         assert!(e.contains("chain 4"), "{e}");
         // The reference is named by its chain number (chain_1/ is read first),
         // not by how many chains were read before the mismatch (two).
@@ -1358,12 +1358,12 @@ mod tests {
         // not scored under either label.
         std::fs::write(dir.path().join("chain_4/trajectories.tsv"),
             "chain\tdraw\ttime\tS\tflow_a\n3\t5\t0\t1\t0\n").unwrap();
-        let e = read_stage_paths(dir.path()).unwrap_err();
+        let e = read_method_paths(dir.path()).unwrap_err();
         assert!(e.contains("says chain 3") && e.contains("chain_4/"), "{e}");
 
         // No chain wrote a path at all.
         let empty = tempfile::tempdir().unwrap();
         std::fs::create_dir(empty.path().join("chain_1")).unwrap();
-        assert!(read_stage_paths(empty.path()).unwrap().is_none());
+        assert!(read_method_paths(empty.path()).unwrap().is_none());
     }
 }

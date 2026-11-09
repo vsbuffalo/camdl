@@ -1,4 +1,4 @@
-//! A PGAS stage publishes the convergence of its latent path: R̂ and ESS of
+//! A PGAS method publishes the convergence of its latent path: R̂ and ESS of
 //! every state at every substep across the chains' saved paths, as
 //! `latent_convergence.tsv` (one row per cell) and a `latent_convergence`
 //! block in `pgas_summary.json` (the per-bin reduction and the agreement
@@ -113,7 +113,7 @@ simulate {{ from = 0 'days  to = {T_END} 'days }}
 
 /// `thin = 1` and the default `n_trajectories` (200) exceeds the retained
 /// count, so every retained sweep saves a path and the per-chain vectors the
-/// stage reduced are exactly the ones in `trajectories.tsv`.
+/// method reduced are exactly the ones in `trajectories.tsv`.
 fn write_fit_toml(dir: &Path, ir: &Path, data: &Path) -> (PathBuf, PathBuf) {
     let out = dir.join("results");
     let toml = format!(r#"
@@ -146,7 +146,7 @@ starts = "uniform_unconstrained"
     (p, out)
 }
 
-fn stage_leaf(out: &Path) -> PathBuf {
+fn method_leaf(out: &Path) -> PathBuf {
     let mut stack = vec![out.join("fits")];
     while let Some(d) = stack.pop() {
         let rj = d.join("run.json");
@@ -190,14 +190,14 @@ fn col<'a>(header: &[String], row: &'a [String], name: &str) -> &'a str {
 
 /// Every chain's saved paths, as `paths[chain][draw][substep][column]` plus
 /// the data column names, read back from `trajectories.tsv`.
-fn read_paths(stage: &Path) -> (Vec<Vec<Vec<Vec<f64>>>>, Vec<String>) {
+fn read_paths(method: &Path) -> (Vec<Vec<Vec<Vec<f64>>>>, Vec<String>) {
     let mut chains = Vec::new();
     let mut columns: Option<Vec<String>> = None;
     for c in 0..CHAINS {
-        let (header, rows) = read_tsv(&stage.join(format!("chain_{c}/trajectories.tsv")));
+        let (header, rows) = read_tsv(&method.join(format!("chain_{c}/trajectories.tsv")));
         // The id and time columns lead: `chain draw time t_start t_stop`
         // (+ `date date_start date_stop` under a calendar); the rest are the
-        // trajectory columns the stage assesses.
+        // trajectory columns the method assesses.
         let data_cols: Vec<String> = header.iter()
             .filter(|h| !matches!(h.as_str(),
                 "chain" | "draw" | "time" | "t_start" | "t_stop"
@@ -223,7 +223,7 @@ fn read_paths(stage: &Path) -> (Vec<Vec<Vec<Vec<f64>>>>, Vec<String>) {
 }
 
 #[test]
-fn pgas_stage_publishes_latent_path_convergence_that_matches_its_own_paths() {
+fn pgas_method_publishes_latent_path_convergence_that_matches_its_own_paths() {
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("e2e");
@@ -234,10 +234,10 @@ fn pgas_stage_publishes_latent_path_convergence_that_matches_its_own_paths() {
         .output().expect("spawn camdl");
     assert!(r.status.success(),
         "fit run failed: {}", String::from_utf8_lossy(&r.stderr));
-    let stage = stage_leaf(&out);
+    let method = method_leaf(&out);
 
-    // ── The paths the stage reduced ───────────────────────────────────────
-    let (paths, columns) = read_paths(&stage);
+    // ── The paths the method reduced ───────────────────────────────────────
+    let (paths, columns) = read_paths(&method);
     let n_draws = paths.iter().map(|c| c.len()).min().unwrap();
     assert_eq!(n_draws, SWEEPS - BURN_IN, "thin = 1 and n_trajectories > retained: every retained sweep saved a path");
     let n_substeps = paths[0][0].len();
@@ -247,7 +247,7 @@ fn pgas_stage_publishes_latent_path_convergence_that_matches_its_own_paths() {
     let n_cols = columns.len();
 
     // ── One row per cell, every column assessed ───────────────────────────
-    let (header, rows) = read_tsv(&stage.join("latent_convergence.tsv"));
+    let (header, rows) = read_tsv(&method.join("latent_convergence.tsv"));
     assert_eq!(rows.len(), n_substeps * n_cols,
         "one row per (substep, column): {} substeps × {} columns", n_substeps, n_cols);
     let mut seen: BTreeMap<(usize, String), usize> = BTreeMap::new();
@@ -330,13 +330,13 @@ fn pgas_stage_publishes_latent_path_convergence_that_matches_its_own_paths() {
 
     // ── The JSON block is the table, reduced ──────────────────────────────
     let v: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(stage.join("pgas_summary.json")).unwrap()).unwrap();
+        &std::fs::read_to_string(method.join("pgas_summary.json")).unwrap()).unwrap();
     for key in ["method", "n_chains", "acceptance_rates", "thin", "trajectories",
                 "path_renewal", "rhat", "ess", "ess_tail"] {
         assert!(v.get(key).is_some(), "additive: `{key}` must still be in pgas_summary.json");
     }
     let lc = v.get("latent_convergence").unwrap_or_else(|| panic!(
-        "a PGAS stage must write a `latent_convergence` block; keys are {:?}",
+        "a PGAS method must write a `latent_convergence` block; keys are {:?}",
         v.as_object().map(|o| o.keys().collect::<Vec<_>>())));
     assert_eq!(lc["n_chains"].as_u64(), Some(CHAINS as u64));
     assert_eq!(lc["n_draws"].as_u64(), Some(n_draws as u64));
@@ -388,7 +388,7 @@ fn pgas_stage_publishes_latent_path_convergence_that_matches_its_own_paths() {
     // The five reduction rows (`bin` through `R̂ max`), compared trimmed. The
     // summary heads its section differently — the rows sit under a `latent
     // paths` rule rather than under the block's own title — but the NUMBERS
-    // are recomputed from the saved paths and must be the stage's own. That
+    // are recomputed from the saved paths and must be the method's own. That
     // agreement is the property; the title never was.
     fn profile_lines(text: &str) -> Vec<String> {
         // Anchor on `frozen-disagree`, not on `bin`: the path-renewal profile
@@ -405,15 +405,15 @@ fn pgas_stage_publishes_latent_path_convergence_that_matches_its_own_paths() {
     // The leaf, not the fit.toml: the run was made with `--seed 11`, which the
     // file alone does not make, so the file does not name it (gh#896).
     let s = Command::new(&bin)
-        .arg("fit").arg("summary").arg(&stage)
+        .arg("fit").arg("summary").arg(&method)
         .output().expect("spawn camdl");
     assert!(s.status.success(),
         "fit summary failed: {}", String::from_utf8_lossy(&s.stderr));
     let summary = String::from_utf8_lossy(&s.stdout);
-    let at_stage_end = profile_lines(&stderr);
+    let at_method_end = profile_lines(&stderr);
     let in_summary = profile_lines(&summary);
-    assert_eq!(at_stage_end.len(), 5, "stage-end profile:\n{stderr}");
-    assert!(at_stage_end[3].starts_with("R\u{302} max"),
-        "the anchored block must be the LATENT one, not path renewal: {at_stage_end:?}");
-    assert_eq!(in_summary, at_stage_end, "fit summary output:\n{summary}");
+    assert_eq!(at_method_end.len(), 5, "end-of-run profile:\n{stderr}");
+    assert!(at_method_end[3].starts_with("R\u{302} max"),
+        "the anchored block must be the LATENT one, not path renewal: {at_method_end:?}");
+    assert_eq!(in_summary, at_method_end, "fit summary output:\n{summary}");
 }

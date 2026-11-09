@@ -69,7 +69,7 @@ pub const WORST_ROWS: usize = 5;
 /// The filter ESS at one observation, over a set of sweeps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObsFilterEss {
-    /// Index into the stage's observation slice — the row of the data.
+    /// Index into the method's observation slice — the row of the data.
     pub obs: usize,
     /// The observation's time, in the model's time unit.
     pub time: f64,
@@ -124,10 +124,10 @@ pub struct FilterEss {
     pub table: String,
 }
 
-/// The stage-level result: the summary block plus the profiles it was
+/// The method-level result: the summary block plus the profiles it was
 /// reduced from, which go to the table rather than the JSON.
 #[derive(Debug, Clone)]
-pub struct FilterEssStage {
+pub struct FilterEssMethod {
     pub summary: FilterEss,
     /// Pooled over chains — the profile the summary's numbers come from.
     pub pooled: Vec<ObsFilterEss>,
@@ -144,7 +144,7 @@ struct ChainAccum {
     n_sweeps: usize,
 }
 
-/// Accumulator for [`FilterEssStage`] over the retained sweeps of every
+/// Accumulator for [`FilterEssMethod`] over the retained sweeps of every
 /// chain.
 ///
 /// A type rather than loose sums at the call site, for the same reason
@@ -159,7 +159,7 @@ pub struct FilterEssAccum {
 }
 
 impl FilterEssAccum {
-    /// `obs_times` is the stage's observation slice, in the order `csmc_as`
+    /// `obs_times` is the method's observation slice, in the order `csmc_as`
     /// indexes it — the same slice every sweep's `ess_by_obs` is indexed by.
     pub fn new(n_particles: usize, obs_times: Vec<f64>) -> Self {
         FilterEssAccum { n_particles, obs_times, chains: Vec::new() }
@@ -220,7 +220,7 @@ impl FilterEssAccum {
     /// `None` when no sweep scored any observation: the block is then omitted
     /// from the summary entirely rather than written as a row of nulls, which
     /// a consumer would read as "measured, found nothing".
-    pub fn finish(self) -> Option<FilterEssStage> {
+    pub fn finish(self) -> Option<FilterEssMethod> {
         let n_obs = self.obs_times.len();
         let profile = |sum: &[f64], min: &[f64], n: &[usize]| -> Vec<ObsFilterEss> {
             (0..n_obs)
@@ -281,15 +281,15 @@ impl FilterEssAccum {
             n_chains: self.chains.len(),
             table: FILTER_ESS_TSV.to_string(),
         };
-        Some(FilterEssStage { summary, pooled, per_chain })
+        Some(FilterEssMethod { summary, pooled, per_chain })
     }
 }
 
-impl FilterEssStage {
+impl FilterEssMethod {
     /// Write [`FILTER_ESS_TSV`]: the pooled profile first (`chain` = `all`),
     /// then one block per chain, one row per observation scored by at least
     /// one of that chain's retained sweeps. Column `obs` is the observation's
-    /// index in the stage's observation slice, so a row joins to the data
+    /// index in the method's observation slice, so a row joins to the data
     /// without a time match.
     pub fn write_tsv(&self, path: &Path) -> Result<(), String> {
         use std::io::Write;
@@ -325,7 +325,7 @@ impl FilterEssStage {
 impl FilterEss {
     /// The starvation finding, or `None` when no observation is starved.
     ///
-    /// One finding per stage, over the pooled profile, rather than one per
+    /// One finding per method, over the pooled profile, rather than one per
     /// chain or per observation: the block published beside it is the pooled
     /// one, and a reader comparing the message against the artifact must see
     /// the same numbers.
@@ -342,7 +342,7 @@ impl FilterEss {
         })
     }
 
-    /// The end-of-stage block, printed unconditionally: the three numbers
+    /// The end-of-run block, printed unconditionally: the three numbers
     /// over observations, the starved count against the bar, and the worst
     /// rows when there are any.
     pub fn report(&self) -> String {
@@ -399,7 +399,7 @@ impl FilterEss {
     }
 
     /// Read the block back from a parsed `pgas_summary.json`. `None` when the
-    /// stage wrote none (it predates the block, or no sweep scored anything).
+    /// method wrote none (it predates the block, or no sweep scored anything).
     pub fn read(summary: &serde_json::Value) -> Option<FilterEss> {
         summary.get(FILTER_ESS_KEY).and_then(|v| serde_json::from_value(v.clone()).ok())
     }
@@ -426,7 +426,7 @@ mod tests {
         t.finish(false)
     }
 
-    fn stage(n_particles: usize, chains: &[Vec<WeightCollapse>]) -> Option<FilterEssStage> {
+    fn method(n_particles: usize, chains: &[Vec<WeightCollapse>]) -> Option<FilterEssMethod> {
         let n_obs = chains.iter().flatten().map(|w| w.ess_by_obs.len()).max().unwrap_or(0);
         let times: Vec<f64> = (0..n_obs).map(|i| 10.0 * i as f64).collect();
         let mut acc = FilterEssAccum::new(n_particles, times);
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn pooled_profile_is_mean_and_min_over_every_sweep_of_every_chain() {
-        let st = stage(
+        let st = method(
             1000,
             &[
                 vec![sweep(&[Some(1000.0), Some(4.0), Some(900.0)]), sweep(&[Some(800.0), Some(2.0), Some(700.0)])],
@@ -471,7 +471,7 @@ mod tests {
     /// the peak is not a finding.
     #[test]
     fn starvation_is_a_mean_below_one_percent_of_the_particle_count() {
-        let st = stage(
+        let st = method(
             1000,
             &[vec![
                 sweep(&[Some(1000.0), Some(40.0), Some(4.0), Some(900.0)]),
@@ -497,7 +497,7 @@ mod tests {
         assert!(s.report().contains("1 of 4 observations starved"));
 
         // Raise the swarm at that observation to the bar and nothing fires.
-        let healthy = stage(1000, &[vec![sweep(&[Some(1000.0), Some(40.0), Some(10.0), Some(900.0)])]]).unwrap();
+        let healthy = method(1000, &[vec![sweep(&[Some(1000.0), Some(40.0), Some(10.0), Some(900.0)])]]).unwrap();
         assert_eq!(healthy.summary.n_starved, 0);
         assert!(healthy.summary.worst.is_empty());
         assert!(healthy.summary.starvation_finding().is_none());
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn worst_rows_are_the_smallest_means_first_and_capped() {
         let ess: Vec<Option<f64>> = (0..8).map(|i| Some(1.0 + i as f64)).collect();
-        let st = stage(1000, &[vec![sweep(&ess)]]).unwrap();
+        let st = method(1000, &[vec![sweep(&ess)]]).unwrap();
         let s = &st.summary;
         assert_eq!(s.n_starved, 8, "every mean is below 10");
         assert_eq!(s.worst.len(), WORST_ROWS);
@@ -519,10 +519,10 @@ mod tests {
 
     /// An observation no sweep scored is absent from the profile, not a zero;
     /// a sweep that weighed nothing is skipped; a chain of such sweeps is not
-    /// a contributing chain; a stage of them has no block at all.
+    /// a contributing chain; a method of them has no block at all.
     #[test]
     fn unscored_observations_and_empty_sweeps_are_skipped_not_zeroed() {
-        let st = stage(
+        let st = method(
             1000,
             &[
                 vec![sweep(&[None, Some(5.0), Some(500.0)]), WeightCollapse::none(1000)],
@@ -536,8 +536,8 @@ mod tests {
         assert_eq!(obs, vec![1, 2], "observation 0 was never scored");
         assert!((s.mean_min - 5.0).abs() < 1e-9);
 
-        assert!(stage(1000, &[vec![WeightCollapse::none(1000)]]).is_none());
-        assert!(stage(1000, &[]).is_none());
+        assert!(method(1000, &[vec![WeightCollapse::none(1000)]]).is_none());
+        assert!(method(1000, &[]).is_none());
     }
 
     #[test]
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn summary_block_round_trips_and_the_table_has_one_row_per_chain_and_observation() {
-        let st = stage(
+        let st = method(
             1000,
             &[
                 vec![sweep(&[Some(100.0), Some(4.0)])],

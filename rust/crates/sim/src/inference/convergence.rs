@@ -57,7 +57,7 @@ use std::fmt;
 /// numerical failure and hides which precondition was missed.
 ///
 /// Serialized so the numbers survive the trip to `*_summary.json` and
-/// `camdl fit summary` can print the same sentence the stage printed at the
+/// `camdl fit summary` can print the same sentence the run printed at the
 /// time. [`RhatRefusal`] is the lossy classification of the same fact — it
 /// answers "is this a sampler pathology"; this type answers "what exactly was
 /// wrong with the input".
@@ -704,7 +704,7 @@ mod tests {
     /// nothing" means. At the threshold the two separate. This is the
     /// mechanism behind
     /// `ESS min (mixed)` reading the same number in every bin of the
-    /// latent-path convergence block when a stage saves ten paths per chain.
+    /// latent-path convergence block when a run saves ten paths per chain.
     #[test]
     fn ess_below_the_informative_threshold_is_half_the_draws_whatever_the_draws() {
         // Deterministic, reproducible, and deliberately unalike: `sticky`

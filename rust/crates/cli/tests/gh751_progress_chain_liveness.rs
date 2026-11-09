@@ -1,6 +1,6 @@
 //! gh#751: `progress.json` says how many chains are actually sampling.
 //!
-//! While a PGAS stage runs, `progress.json` is the only thing written at the
+//! While a PGAS method runs, `progress.json` is the only thing written at the
 //! seed level, and it carried a global sweep counter and nothing about chains:
 //!
 //! ```json
@@ -152,7 +152,7 @@ fn progress_json_names_the_refused_chains_and_counts_them() {
         !chains.is_null(),
         "progress.json must carry per-chain liveness:\n{progress:#}"
     );
-    assert_eq!(chains["total"], 6, "the roster the stage was configured to run");
+    assert_eq!(chains["total"], 6, "the roster the method was configured to run");
     let refused = chains["refused"].as_u64().unwrap();
     let completed = chains["completed"].as_u64().unwrap();
     assert!(
@@ -187,7 +187,7 @@ fn progress_json_names_the_refused_chains_and_counts_them() {
     refused_ids.sort_unstable();
 
     // The claim that matters: the ids agree with the artifacts written after
-    // the stage, which is what a reader would otherwise have had to wait for.
+    // the method, which is what a reader would otherwise have had to wait for.
     // Every one of them numbers chains the same way (gh#781), so the
     // comparisons below are equalities — an artifact that needed `+ 1` to line
     // up with its neighbour is the defect, not the fixture.

@@ -11,7 +11,7 @@
 //! The in-crate unit tests pin what the two derived numbers MEAN. This pins
 //! what a downstream reader (`camdl-scope`) actually finds on disk:
 //!
-//! * the `path_renewal` block exists for a PGAS stage, with the documented
+//! * the `path_renewal` block exists for a PGAS method, with the documented
 //!   keys, and states what a bin spans — `bins[0] = 0.04` is uninterpretable
 //!   without that, and today the fact lives only in a source comment;
 //! * the published profile IS the mean down the `renewal_b<n>` columns of the
@@ -153,7 +153,7 @@ thin = 1
     (p, out)
 }
 
-fn stage_leaf(out: &Path) -> PathBuf {
+fn method_leaf(out: &Path) -> PathBuf {
     let mut stack = vec![out.join("fits")];
     while let Some(d) = stack.pop() {
         let rj = d.join("run.json");
@@ -174,8 +174,8 @@ fn stage_leaf(out: &Path) -> PathBuf {
 }
 
 /// One chain's `trace.tsv` as a header plus one row of fields per sweep.
-fn trace(stage: &Path, chain: usize) -> (Vec<String>, Vec<Vec<String>>) {
-    let path = stage.join(format!("chain_{chain}/trace.tsv"));
+fn trace(method: &Path, chain: usize) -> (Vec<String>, Vec<Vec<String>>) {
+    let path = method.join(format!("chain_{chain}/trace.tsv"));
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
@@ -202,13 +202,13 @@ fn col<'a>(header: &[String], row: &'a [String], name: &str) -> &'a str {
 /// substep on that sweep — is skipped, never counted as a renewal of zero.
 ///
 /// Returns `(per-bin means, aggregate mean, sweeps counted)`.
-fn profile_from_traces(stage: &Path) -> ([Option<f64>; N_BINS], f64, usize) {
+fn profile_from_traces(method: &Path) -> ([Option<f64>; N_BINS], f64, usize) {
     let mut sum = [0.0f64; N_BINS];
     let mut n = [0usize; N_BINS];
     let mut agg_sum = 0.0;
     let mut n_sweeps = 0usize;
     for c in 0..CHAINS {
-        let (header, rows) = trace(stage, c);
+        let (header, rows) = trace(method, c);
         for row in &rows {
             let sweep: usize = col(&header, row, "sweep").parse().expect("sweep parses");
             // thin = 1, so every post-burn-in sweep is a retained draw.
@@ -236,11 +236,11 @@ fn profile_from_traces(stage: &Path) -> ([Option<f64>; N_BINS], f64, usize) {
 /// gh#864: the mean down each `as_accept_b<n>` column over the same retained
 /// post-burn-in sweeps. `NA` — no ancestor move proposed in that bin on that
 /// sweep — is skipped, never counted as an acceptance rate of zero.
-fn as_accept_profile_from_traces(stage: &Path) -> [Option<f64>; N_BINS] {
+fn as_accept_profile_from_traces(method: &Path) -> [Option<f64>; N_BINS] {
     let mut sum = [0.0f64; N_BINS];
     let mut n = [0usize; N_BINS];
     for c in 0..CHAINS {
-        let (header, rows) = trace(stage, c);
+        let (header, rows) = trace(method, c);
         for row in &rows {
             let sweep: usize = col(&header, row, "sweep").parse().expect("sweep parses");
             if sweep < BURN_IN { continue; }
@@ -265,11 +265,11 @@ fn as_accept_profile_from_traces(stage: &Path) -> [Option<f64>; N_BINS] {
 ///
 /// `NA` is a sweep with no ancestor-sampling step to measure — dropped here,
 /// exactly as the summary drops it, and never read as an ESS of zero.
-fn ancestor_ess_from_traces(stage: &Path) -> (Vec<f64>, Vec<f64>) {
+fn ancestor_ess_from_traces(method: &Path) -> (Vec<f64>, Vec<f64>) {
     let mut pre = Vec::new();
     let mut post = Vec::new();
     for c in 0..CHAINS {
-        let (header, rows) = trace(stage, c);
+        let (header, rows) = trace(method, c);
         for row in &rows {
             let sweep: usize = col(&header, row, "sweep").parse().expect("sweep parses");
             if sweep < BURN_IN { continue; }
@@ -287,10 +287,10 @@ fn ancestor_ess_from_traces(stage: &Path) -> (Vec<f64>, Vec<f64>) {
 /// gh#864: the per-sweep acceptance-ratio columns over the same retained
 /// post-burn-in sweeps. Returns `(medians, fractions near parity, pooled
 /// sample size)`; `NA` — a sweep that measured no finite ratio — is skipped.
-fn logalpha_from_traces(stage: &Path) -> (Vec<f64>, Vec<f64>, u64) {
+fn logalpha_from_traces(method: &Path) -> (Vec<f64>, Vec<f64>, u64) {
     let (mut median, mut near, mut n) = (Vec::new(), Vec::new(), 0u64);
     for c in 0..CHAINS {
-        let (header, rows) = trace(stage, c);
+        let (header, rows) = trace(method, c);
         for row in &rows {
             let sweep: usize = col(&header, row, "sweep").parse().expect("sweep parses");
             if sweep < BURN_IN { continue; }
@@ -332,8 +332,8 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
     assert!(r.status.success(),
         "fit run failed: {}", String::from_utf8_lossy(&r.stderr));
 
-    let stage = stage_leaf(&out);
-    let summary_path = stage.join("pgas_summary.json");
+    let method = method_leaf(&out);
+    let summary_path = method.join("pgas_summary.json");
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap())
             .expect("parse pgas_summary.json");
@@ -350,7 +350,7 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
 
     // ── The block, and what it says about itself ──────────────────────────
     let pr = v.get("path_renewal").unwrap_or_else(|| panic!(
-        "a PGAS stage must write a `path_renewal` block; keys are {:?}",
+        "a PGAS method must write a `path_renewal` block; keys are {:?}",
         v.as_object().map(|o| o.keys().collect::<Vec<_>>())));
     assert_eq!(pr["n_bins"], serde_json::json!(N_BINS));
     assert_eq!(pr["n_prefix_bins"], serde_json::json!(N_BINS / 2));
@@ -371,7 +371,7 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
 
     // ── The block IS the mean down the trace columns ──────────────────────
     // The trace writes four decimals, so the tolerance is the rounding.
-    let (from_trace, agg_from_trace, n_sweeps) = profile_from_traces(&stage);
+    let (from_trace, agg_from_trace, n_sweeps) = profile_from_traces(&method);
     assert_eq!(pr["n_sweeps"].as_u64(), Some(n_sweeps as u64),
         "the block must say how many retained sweeps it averaged");
     assert_eq!(pr["n_chains"].as_u64(), Some(CHAINS as u64));
@@ -434,7 +434,7 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
     // weight leaves the move with one real option however many are admissible.
     // Both sides are published because the guard can lower the count and raise
     // the ESS, by removing a dominant candidate whose splice was infeasible.
-    let (ess_pre, ess_post) = ancestor_ess_from_traces(&stage);
+    let (ess_pre, ess_post) = ancestor_ess_from_traces(&method);
     for (key, from_trace) in [("as_ess_pre", &ess_pre), ("as_ess_post", &ess_post)] {
         let block = &pr[key];
         assert_eq!(block["n_sweeps"].as_u64(), Some(from_trace.len() as u64),
@@ -469,7 +469,7 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
         serde_json::from_value(pr["as_accept_bins"].clone()).expect("as_accept_bins");
     assert_eq!(as_accept_bins.len(), N_BINS,
         "one acceptance entry per bin, on the same bins as the renewal profile");
-    let from_trace_accept = as_accept_profile_from_traces(&stage);
+    let from_trace_accept = as_accept_profile_from_traces(&method);
     for b in 0..N_BINS {
         match (as_accept_bins[b], from_trace_accept[b]) {
             (Some(published), Some(recomputed)) => {
@@ -493,7 +493,7 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
     if let Some(pooled) = pr["as_accept"].as_f64() {
         let measured: Vec<f64> = as_accept_bins.iter().flatten().copied().collect();
         assert!(!measured.is_empty(),
-            "the stage proposed moves, so at least one bin must carry a rate");
+            "the method proposed moves, so at least one bin must carry a rate");
         let lo = measured.iter().cloned().fold(f64::INFINITY, f64::min);
         let hi = measured.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         assert!(lo - 1e-9 <= pooled && pooled <= hi + 1e-9,
@@ -505,7 +505,7 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
     // The outcome counters say how often the move landed; these say how far
     // from landing the ones that did not were, which is what decides between
     // "no proposal can help" and "a better-informed proposal would".
-    let (ratio_median, ratio_near, n_ratio) = logalpha_from_traces(&stage);
+    let (ratio_median, ratio_near, n_ratio) = logalpha_from_traces(&method);
     assert_eq!(pr["n_as_logalpha"].as_u64(), Some(n_ratio),
         "the block must publish the sample size the two ratio summaries are \
          over — the sum of the `as_logalpha_n` column over the retained sweeps");
@@ -537,7 +537,7 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
     // ── The aggregate is not replaced ─────────────────────────────────────
     // `trajectory_renewal` is what downstream tools read today, and it stays
     // where they read it.
-    let (header, _) = trace(&stage, 0);
+    let (header, _) = trace(&method, 0);
     for c in ["trajectory_renewal", "renewal_b0", "renewal_b9", "as_accept",
               "as_accept_b0", "as_accept_b9",
               "as_logalpha_median", "as_logalpha_near", "as_logalpha_n",
@@ -549,7 +549,7 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
     // ── The profile reaches the terminal, beside the aggregate ────────────
     let stderr = String::from_utf8_lossy(&r.stderr);
     assert!(stderr.contains("path renewal"),
-        "the end-of-stage output must print the profile; stderr was:\n{stderr}");
+        "the end-of-run output must print the profile; stderr was:\n{stderr}");
     assert!(stderr.contains("gradient") && stderr.contains("prefix"),
         "with both derived numbers; stderr was:\n{stderr}");
     assert!(stderr.contains("ancestor-sampling acceptance"),

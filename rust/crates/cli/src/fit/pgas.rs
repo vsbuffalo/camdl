@@ -7,7 +7,7 @@
 use crate::chain_index::ChainIndex;
 use crate::fit::state::FitState;
 use crate::fit::loglik::LoglikType;
-use crate::fit::runner::{FitRunConfig, StageConvergence};
+use crate::fit::runner::{FitRunConfig, MethodConvergence};
 use crate::cas::iso8601_utc;
 use sim::inference::{
     if2::EstimatedParam,
@@ -67,7 +67,7 @@ const AS_ACCEPT_BIN_COLUMNS: [&str; RENEWAL_BINS] = [
 /// test; neither carries its own copy, or the projected counts stop describing
 /// the run they precede.
 ///
-/// `draw_stride` is `None` when the stage saves no path at all
+/// `draw_stride` is `None` when the method saves no path at all
 /// (`n_trajectories == 0`, or no post-burn-in sweep) — an explicit "never",
 /// not a sentinel stride.
 ///
@@ -84,7 +84,7 @@ fn writes_path(k: usize, thin: usize, draw_stride: Option<usize>) -> bool {
     draw_idx.is_multiple_of(stride)
 }
 
-/// How many latent paths a PGAS stage writes, and how many of them a consumer
+/// How many latent paths a PGAS method writes, and how many of them a consumer
 /// can join to a posterior draw.
 ///
 /// These are the projection for a **fresh** run over `[burn_in, n_sweeps)`, so
@@ -114,7 +114,7 @@ pub(crate) struct TrajectoryStridePlan {
 
 impl TrajectoryStridePlan {
     /// Resolve the path-save rule against the draw-retention rule for one
-    /// PGAS stage.
+    /// PGAS method.
     pub fn resolve(
         n_sweeps: usize,
         burn_in: usize,
@@ -129,7 +129,7 @@ impl TrajectoryStridePlan {
             (n, t) => n.div_ceil(t),
         };
         // The stride is over DRAWS, so `n_trajectories` is spread across the
-        // draws the stage keeps rather than across the sweeps it runs.
+        // draws the method keeps rather than across the sweeps it runs.
         let draw_stride = (n_trajectories > 0 && n_draws > 0)
             .then(|| (n_draws / n_trajectories).max(1));
         let n_saved = draw_stride.map_or(0, |s| n_draws.div_ceil(s));
@@ -189,11 +189,11 @@ impl SavedPathCounts {
     }
 }
 
-/// Per-stage knobs extracted from a `Stage::PGAS { ... }` variant by
-/// the `camdl fit run` dispatcher and passed verbatim into `run_stage`.
-/// Mirrors every PGAS field in `Stage::PGAS` plus burn_in/thin defaults.
+/// Per-method knobs extracted from a `Algorithm::PGAS { ... }` variant by
+/// the `camdl fit run` dispatcher and passed verbatim into `run_method`.
+/// Mirrors every PGAS field in `Algorithm::PGAS` plus burn_in/thin defaults.
 #[derive(Debug)]
-pub struct PgasStageOpts {
+pub struct PgasMethodOpts {
     pub n_chains: usize,
     pub n_particles: usize,
     pub n_sweeps: usize,
@@ -207,17 +207,17 @@ pub struct PgasStageOpts {
     pub use_nuts: bool,
     /// Run the ancestor-sampling move (`ancestor_sampling = false` /
     /// `--no-ancestor-sampling` disables it — plain particle Gibbs, a
-    /// diagnostic control). Identity-bearing; see the field on `Stage::PGAS`.
+    /// diagnostic control). Identity-bearing; see the field on `Algorithm::PGAS`.
     pub ancestor_sampling: bool,
-    /// gh#747: the binomial sampler this stage's draws use. Hashed into the
-    /// stage identity by being a `Stage::PGAS` field.
+    /// gh#747: the binomial sampler this method's draws use. Hashed into the
+    /// method identity by being a `Algorithm::PGAS` field.
     pub binomial: sim::rng::BinomialAlgorithm,
 }
 
 pub(crate) const DEFAULT_BURN_IN: usize = 2000;
 const DEFAULT_THIN: usize = 5;
 
-impl PgasStageOpts {
+impl PgasMethodOpts {
     /// Build from an `Algorithm::PGAS { ... }` variant. Errors if
     /// `algorithm` is not the PGAS variant — caller's responsibility to
     /// dispatch.
@@ -230,7 +230,7 @@ impl PgasStageOpts {
                 dense_mass, use_nuts, ancestor_sampling, binomial,
                 ..
             } => {
-                Ok(PgasStageOpts {
+                Ok(PgasMethodOpts {
                     n_chains: *chains,
                     n_particles: *particles,
                     n_sweeps: *sweeps,
@@ -247,23 +247,23 @@ impl PgasStageOpts {
                 })
             }
             other => Err(format!(
-                "PgasStageOpts::from_algorithm: expected Algorithm::PGAS, got {}",
+                "PgasMethodOpts::from_algorithm: expected Algorithm::PGAS, got {}",
                 other.method_name())),
         }
     }
 }
 
 // Per-method entry point for PGAS — wide because every flag is
-// independent at the dispatch site (stage_dir, opts struct, RNG seed,
+// independent at the dispatch site (method_dir, opts struct, RNG seed,
 // --resume, the resolved starts). Same pattern as
 // `main::build_simulate_cas_sink` and `main::run_simulate`, both of which
 // also carry this allow.
 #[allow(clippy::too_many_arguments)]
-pub fn run_stage(
+pub fn run_method(
     fit: &super::config_v2::Problem,
     method: &super::config_v2::Method,
-    stage_dir: &Path,
-    pgas_opts: PgasStageOpts,
+    method_dir: &Path,
+    pgas_opts: PgasMethodOpts,
     seed: u64,
     force: bool,
     resume: bool,
@@ -272,11 +272,11 @@ pub fn run_stage(
     // `--resume`.
     resume_guard: &str,
     starts: &super::chain_starts::ResolvedStarts,
-    // The stage's liveness/progress heartbeat, owned by the runner so that
+    // The method's liveness/progress heartbeat, owned by the runner so that
     // every method has one and every exit leaves a terminal record (gh#900).
     heartbeat: &io::HeartbeatGuard,
 ) -> Result<(), String> {
-    let stage_name = method.algorithm.method_name();
+    let method_name = method.algorithm.method_name();
     let estimate = &fit.estimate;
     let n_chains = pgas_opts.n_chains;
     let n_sweeps = pgas_opts.n_sweeps;
@@ -288,16 +288,16 @@ pub fn run_stage(
     let dense_mass = pgas_opts.dense_mass;
 
     if !force && !resume {
-        let state_path = stage_dir.join("fit_state.toml");
+        let state_path = method_dir.join("fit_state.toml");
         if state_path.exists() {
             eprintln!("\x1b[33mpgas results already exist in {}. Use --force to re-run or --resume to continue.\x1b[0m",
-                stage_dir.display());
+                method_dir.display());
             return Ok(());
         }
     }
 
-    std::fs::create_dir_all(stage_dir)
-        .map_err(|e| format!("cannot create {}: {}", stage_dir.display(), e))?;
+    std::fs::create_dir_all(method_dir)
+        .map_err(|e| format!("cannot create {}: {}", method_dir.display(), e))?;
 
     let collector = DiagnosticCollector::new("pgas");
 
@@ -434,18 +434,18 @@ pub fn run_stage(
         let mut states = Vec::with_capacity(n_chains);
         let mut any_failed = false;
         for chain in ChainIndex::all(n_chains) {
-            let path: PathBuf = chain.dir_in(stage_dir).join("resume_state.bin");
+            let path: PathBuf = chain.dir_in(method_dir).join("resume_state.bin");
             match std::fs::read(&path) {
                 Ok(data) => match bincode::deserialize::<ChainResumeState>(&data) {
                     Ok(state) => {
                         if state.config_hash != config_hash {
-                            super::abandon_stage(heartbeat, format!(
+                            super::abandon_method(heartbeat, format!(
                                 "error: config hash mismatch for chain {} — \
                                 cannot resume. Either the model/data/priors changed \
                                 since the original run, or this chain predates a camdl \
-                                version that changed how a stage's identity is computed \
+                                version that changed how a method's identity is computed \
                                 (the 2026-08-23 subtractive-identity change re-keyed \
-                                every pgas/pmmh/mh/nuts stage). Re-run from scratch \
+                                every pgas/pmmh/mh/nuts method). Re-run from scratch \
                                 with --force.",
                                 chain));
                         }
@@ -468,7 +468,7 @@ pub fn run_stage(
             }
         }
         if any_failed {
-            super::abandon_stage(heartbeat,
+            super::abandon_method(heartbeat,
                 "error: --resume requires resume state files for all chains.\n  \
                  These are written automatically at the end of every PGAS run.\n  \
                  If the original run was interrupted before saving, use --force to \
@@ -514,7 +514,7 @@ pub fn run_stage(
 
     // Pre-create chain directories (must happen before parallel spawn)
     for chain in ChainIndex::all(n_chains) {
-        let chain_dir = chain.dir_in(stage_dir);
+        let chain_dir = chain.dir_in(method_dir);
         std::fs::create_dir_all(&chain_dir)
             .map_err(|e| format!("cannot create {}: {}", chain_dir.display(), e))?;
     }
@@ -524,7 +524,7 @@ pub fn run_stage(
     // final record once they finish (gh#887, gh#904). The pre-run write can
     // only say `accepted` — no chain has been refused yet — so the rewrite is
     // what makes the file true, and it is unconditional.
-    super::runner::record_chain_starts(stage_dir, &config, &drawn);
+    super::runner::record_chain_starts(method_dir, &config, &drawn);
     let retry_accepted: std::sync::Mutex<Vec<Option<super::chain_starts::ChainStart>>> =
         std::sync::Mutex::new(vec![None; n_chains]);
     let retry_rejected: std::sync::Mutex<Vec<super::chain_starts::RejectedStart>> =
@@ -557,7 +557,7 @@ pub fn run_stage(
         std::sync::Mutex::new(vec![Vec::new(); n_chains]);
 
     // Each chain's saved posterior paths, flattened, retained past the chain's
-    // own `trajectories.tsv` write so the stage can reduce them ACROSS chains
+    // own `trajectories.tsv` write so the method can reduce them ACROSS chains
     // (`latent_convergence`). Indexed by chain_id, filled inside the parallel
     // closure (the pattern `chain_nuts` uses); `None` for a chain that saved
     // no path. Chains run in parallel, so holding every chain's block at once
@@ -593,8 +593,8 @@ pub fn run_stage(
         .collect();
 
     // gh#278: the run's liveness/progress heartbeat, built by the runner
-    // (`fit::stage_heartbeat`) and passed in. A background thread writes
-    // `progress.json` into the stage dir on a fixed wall-clock timer —
+    // (`fit::method_heartbeat`) and passed in. A background thread writes
+    // `progress.json` into the method dir on a fixed wall-clock timer —
     // independent of sweep cadence, because one spatial PGAS sweep can take
     // minutes and a sweep-boundary heartbeat would be as stale as the trace.
     // Each chain only `bump`s a shared atomic (no I/O), so this cannot affect
@@ -603,7 +603,7 @@ pub fn run_stage(
     // sampling" from the first write. A chain is refused at its START, so how
     // many of the chains paid for are running is knowable in the first minutes;
     // `fit_state.toml` and `diagnostics.json` report the same thing only after
-    // the stage finishes, which on a multi-hour fit is hours too late to act
+    // the method finishes, which on a multi-hour fit is hours too late to act
     // on. Each chain reports below when a worker picks it up, when it is
     // refused, and when it finishes.
 
@@ -642,7 +642,7 @@ pub fn run_stage(
         super::chain_fanout::run_chains(n_chains, |chain_id| {
             let chain = ChainIndex(chain_id);
             let chain_seed = crate::util::derive_chain_seed(seed, chain_id);
-            let chain_dir = chain.dir_in(stage_dir);
+            let chain_dir = chain.dir_in(method_dir);
             let task = &bars[chain_id];
             // gh#751. HERE, at the top of the closure, is the moment a worker
             // picked this chain up — a chain still queued behind the pool has
@@ -651,8 +651,8 @@ pub fn run_stage(
             heartbeat.chain(chain_id, io::progress::ChainState::Running);
 
             let pgas_config = PGASConfig {
-                // gh#747: from the stage field, so the sampler that runs is the
-                // one the stage's address names.
+                // gh#747: from the method field, so the sampler that runs is the
+                // one the method's address names.
                 binomial: pgas_opts.binomial,
                 n_particles,
                 n_sweeps,
@@ -1116,7 +1116,7 @@ pub fn run_stage(
                     eprintln!("  chain {}: \x1b[31m✗ BadInit\x1b[0m — {}",
                         chain, reason);
                     // gh#751: and in `progress.json`, where a watcher sees it
-                    // now rather than when the stage ends. The short tag is the
+                    // now rather than when the method ends. The short tag is the
                     // machine-readable half of the same finding the `BadInit`
                     // diagnostic carries in full.
                     heartbeat.chain(chain_id, io::progress::ChainState::Refused {
@@ -1258,7 +1258,7 @@ pub fn run_stage(
         retry_rejected.into_inner().unwrap(),
         retry_refused.into_inner().unwrap(),
     );
-    super::runner::record_chain_starts(stage_dir, &config, &drawn);
+    super::runner::record_chain_starts(method_dir, &config, &drawn);
 
     // gh#607. Skip + continue: surface "ran K of N chains" so the user knows
     // the downstream R̂/ESS exclude the skipped chains. This line is the
@@ -1281,7 +1281,7 @@ pub fn run_stage(
     if all_results.is_empty() {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
         collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
-        let diag_path = stage_dir.join("diagnostics.json");
+        let diag_path = method_dir.join("diagnostics.json");
         let _ = collector.write_json(&diag_path.to_string_lossy());
         // gh#885: the reason and the remedies come from the one string the
         // other two all-chains-refused errors also carry (pmmh's init-eval
@@ -1290,18 +1290,18 @@ pub fn run_stage(
         // here is specific: a complete-data log-posterior that stayed
         // non-finite through the trajectory update, not a filter degeneracy.
         let reason = format!(
-            "pgas stage `{}`: all {} chain(s) were refused at their starting \
+            "pgas method `{}`: all {} chain(s) were refused at their starting \
              point — the complete-data log-posterior is non-finite for every \
              one and stayed non-finite through its first trajectory update, so \
              no chain could move. See `diagnostics.json` for the per-chain \
              `bad_init` entries and `chain_starts.tsv` for the starts they \
              name. {}",
-            stage_name, n_chains,
+            method_name, n_chains,
             super::chain_starts::UNSCOREABLE_START_ADVICE);
         // gh#891/gh#900: the worst case a fit can have — nothing ran — was the
         // one whose `progress.json` said the least, because returning here left
         // the last periodic `Running` as the file's final word. Returning the
-        // reason is now enough: the heartbeat's owner records it as the stage's
+        // reason is now enough: the heartbeat's owner records it as the method's
         // terminal `failed` state, beside the per-chain block that already
         // shows every chain refused.
         return Err(reason);
@@ -1368,7 +1368,7 @@ pub fn run_stage(
                 n_chains, starts: starts.rule.spelled(),
             }
         });
-        // RHAT_REPORT_THRESHOLD is unchanged from the value this stage has
+        // RHAT_REPORT_THRESHOLD is unchanged from the value this method has
         // always applied; only the STATISTIC it is applied to changed (gh#84).
         eprint!("{}", diagnostics.report(
             &collector, super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()));
@@ -1412,7 +1412,7 @@ pub fn run_stage(
     };
     if let Some(fe) = &filter_ess {
         eprint!("{}", fe.summary.report());
-        fe.write_tsv(&stage_dir.join(super::filter_ess::FILTER_ESS_TSV))?;
+        fe.write_tsv(&method_dir.join(super::filter_ess::FILTER_ESS_TSV))?;
     }
 
     // R̂/ESS of every latent state at every substep across the chains' saved
@@ -1429,7 +1429,7 @@ pub fn run_stage(
         ) {
             Ok(lc) => {
                 eprint!("{}", lc.report());
-                lc.write_tsv(&stage_dir.join(super::latent_convergence::LATENT_CONVERGENCE_TSV))?;
+                lc.write_tsv(&method_dir.join(super::latent_convergence::LATENT_CONVERGENCE_TSV))?;
                 Some(lc)
             }
             Err(e) => {
@@ -1532,7 +1532,7 @@ pub fn run_stage(
     }
 
     // gh#791. The coalescence finding, keyed on the SHAPE of the renewal
-    // profile rather than its level — pushed once for the stage, over the same
+    // profile rather than its level — pushed once for the method, over the same
     // pooled profile printed above and written into the summary, so the message
     // and the artifact cannot show a reader different numbers. It is a
     // `Severity::Warning` at any gradient and gates nothing: the profile is the
@@ -1541,7 +1541,7 @@ pub fn run_stage(
         collector.push(d);
     }
 
-    // gh#685. The starvation finding, once per stage over the pooled profile
+    // gh#685. The starvation finding, once per method over the pooled profile
     // printed above and written into the summary. A warning that gates
     // nothing: the profile is the diagnostic, this points at it.
     if let Some(d) = filter_ess.as_ref().and_then(|fe| fe.summary.starvation_finding()) {
@@ -1559,7 +1559,7 @@ pub fn run_stage(
         })
         .collect();
     let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
-    write_summary(stage_dir, &all_results, &config, thin, &traj_plan, &saved_paths,
+    write_summary(method_dir, &all_results, &config, thin, &traj_plan, &saved_paths,
         n_trajectories, &diagnostics, path_renewal.as_ref(),
         filter_ess.as_ref().map(|fe| &fe.summary), latent_convergence.as_ref())?;
 
@@ -1604,7 +1604,7 @@ pub fn run_stage(
     if sim::inference::no_finite_anchor(best_sweep.log_complete_data_ll) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
         collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
-        let diag_path = stage_dir.join("diagnostics.json");
+        let diag_path = method_dir.join("diagnostics.json");
         let _ = collector.write_json(&diag_path.to_string_lossy());
         return Err(format!(
             "pgas: all {} chain(s) reached no finite complete-data \
@@ -1631,7 +1631,7 @@ pub fn run_stage(
     }
 
     let state = FitState {
-        method: stage_name.to_string(),
+        method: method_name.to_string(),
         seed,
         timestamp: iso8601_utc(std::time::SystemTime::now()),
         input_hash: None,
@@ -1648,7 +1648,7 @@ pub fn run_stage(
         acceptance_rate: Some(best_chain.1.iter()
             .map(|s| s.accepted.iter().filter(|&&a| a).count() as f64 / s.accepted.len().max(1) as f64)
             .sum::<f64>() / best_chain.1.len().max(1) as f64),
-        // Bayesian stage, no IF2-style Â (chain agreement).
+        // Bayesian method, no IF2-style Â (chain agreement).
         tail_chain_agreement: std::collections::BTreeMap::new(),
         perturb_only_at_t0_params: Vec::new(),
         chain_logliks: Vec::new(),
@@ -1663,7 +1663,7 @@ pub fn run_stage(
         // was assessable (gh#871, gh#873, proposal 2026-09-08 §3.4).
         chain_init_source: Some(drawn.rule.spelled()),
         chain_starts_kind: Some(drawn.rule.kind()),
-        // gh#52: Richardson dt-check is wired only on IF2 stages in
+        // gh#52: Richardson dt-check is wired only on IF2 methods in
         // v1 (the inference math is shared but the dispatch site
         // refactor across PGAS/PMMH/NLopt is out of scope here).
         dt_check: None,
@@ -1673,13 +1673,13 @@ pub fn run_stage(
         pf_noise: None,
         optimizer_convergence: None,
     };
-    state.save(&stage_dir.to_string_lossy())?;
+    state.save(&method_dir.to_string_lossy())?;
 
     // Write draws.tsv: complete-M posterior draws (all params, estimated + fixed)
     // Post-burn-in, thinned draws from all chains combined.
     {
         use std::io::Write;
-        let draws_path = stage_dir.join("draws.tsv");
+        let draws_path = method_dir.join("draws.tsv");
         let mut f = std::io::BufWriter::new(
             std::fs::File::create(&draws_path)
                 .map_err(|e| format!("cannot create {}: {}", draws_path.display(), e))?
@@ -1745,7 +1745,7 @@ pub fn run_stage(
 
     // Render and persist diagnostics
     collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
-    let diag_path = stage_dir.join("diagnostics.json");
+    let diag_path = method_dir.join("diagnostics.json");
     let _ = collector.write_json(&diag_path.to_string_lossy());
 
     // gh#785. `cross_chain_compat.json`, beside `diagnostics.json`: the
@@ -1755,10 +1755,10 @@ pub fn run_stage(
     // read-only — k² evaluations of the density the sampler already ran, after
     // every draw is written, consuming no randomness.
     write_cross_chain_compat(
-        &config, dt, &all_results, chain_final_draw.into_inner().unwrap(), stage_dir);
+        &config, dt, &all_results, chain_final_draw.into_inner().unwrap(), method_dir);
 
     let wall_secs = elapsed.as_secs_f64();
-    eprintln!("\npgas complete in {:.1}s: {}/", wall_secs, stage_dir.display());
+    eprintln!("\npgas complete in {:.1}s: {}/", wall_secs, method_dir.display());
     eprintln!("  best complete-data ll: {:.1} (chain {})",
         best_sweep.log_complete_data_ll, ChainIndex(best_chain.0));
 
@@ -1792,7 +1792,7 @@ fn write_cross_chain_compat(
     dt: f64,
     all_results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
     chain_final_draw: Vec<ChainFinalDraw>,
-    stage_dir: &Path,
+    method_dir: &Path,
 ) {
     use super::cross_chain_compat::{ChainDraw, CrossChainCompat};
 
@@ -1820,7 +1820,7 @@ fn write_cross_chain_compat(
             })
             .collect();
     let obs_model = config.build_obs_model();
-    // The stage pins `StepPolicy::Snap` (see `pgas_config` above), under which
+    // The method pins `StepPolicy::Snap` (see `pgas_config` above), under which
     // `build_substep_grid`'s obs map IS `build_obs_at_substep` — the same map
     // `run_pgas` scored every recorded `transition_ll` against.
     let t_start = config.compiled.model.simulation.t_start;
@@ -1844,7 +1844,7 @@ fn write_cross_chain_compat(
             return;
         }
     };
-    if let Err(e) = compat.write(&stage_dir.join("cross_chain_compat.json")) {
+    if let Err(e) = compat.write(&method_dir.join("cross_chain_compat.json")) {
         eprintln!("warning: {e}");
         return;
     }
@@ -1856,8 +1856,8 @@ fn write_cross_chain_compat(
 fn compute_diagnostics(
     results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
     estimated_params: &[EstimatedParam],
-) -> StageConvergence {
-    StageConvergence::compute(estimated_params.iter().map(|spec| {
+) -> MethodConvergence {
+    MethodConvergence::compute(estimated_params.iter().map(|spec| {
         let chains: Vec<Vec<f64>> = results.iter()
             .map(|(_, sweeps, _)| sweeps.iter().map(|s| s.params[spec.index]).collect())
             .collect();
@@ -1878,7 +1878,7 @@ pub(crate) struct ChainSavedPaths {
     /// Which chain this row is, the number that names its `chain_N/` directory.
     /// Read from the artifact rather than inferred from the row's position:
     /// the rows are the chains that survived their start (gh#607), so on a
-    /// stage where any chain was refused the two differ.
+    /// method where any chain was refused the two differ.
     pub chain: u64,
     /// Latent paths this chain wrote.
     pub n_saved: u64,
@@ -1886,10 +1886,10 @@ pub(crate) struct ChainSavedPaths {
     pub n_forkable: u64,
 }
 
-/// The `trajectories` block of a stage summary, read back.
+/// The `trajectories` block of a method summary, read back.
 pub(crate) struct SavedPathReport {
     /// Retained **draws** between saved paths — not sweeps — or `None` when
-    /// the stage saved none.
+    /// the method saved none.
     pub draw_stride: Option<u64>,
     /// Sweeps between retained draws.
     pub thin: u64,
@@ -1897,15 +1897,15 @@ pub(crate) struct SavedPathReport {
     pub per_chain: Vec<ChainSavedPaths>,
 }
 
-/// Read the `trajectories` block back out of a stage summary JSON. `None` for
-/// a summary that carries no such block — a PMMH / NUTS stage saves no latent
-/// paths at all, and neither does a PGAS stage written before gh#727 — and for
+/// Read the `trajectories` block back out of a method summary JSON. `None` for
+/// a summary that carries no such block — a PMMH / NUTS method saves no latent
+/// paths at all, and neither does a PGAS method written before gh#727 — and for
 /// one whose per-chain arrays disagree in length, which is not a report.
 ///
 /// `chain_id` is required, not defaulted. A block without it cannot say which
-/// chain each row is, and the row's position is not an answer: a stage that
+/// chain each row is, and the row's position is not an answer: a method that
 /// refused a chain at its start has survivors whose ids are not `1..n`. A
-/// stage predating `chain_id` is therefore read as no report at all rather
+/// method predating `chain_id` is therefore read as no report at all rather
 /// than rendered against a positional guess.
 pub(crate) fn read_saved_path_counts(
     summary: &serde_json::Value,
@@ -1949,7 +1949,7 @@ fn write_summary(
     traj_plan: &TrajectoryStridePlan,
     saved_paths: &SavedPathCounts,
     n_trajectories: usize,
-    diagnostics: &StageConvergence,
+    diagnostics: &MethodConvergence,
     path_renewal: Option<&super::path_renewal::PathRenewal>,
     filter_ess: Option<&super::filter_ess::FilterEss>,
     latent_convergence: Option<&super::latent_convergence::LatentConvergence>,
@@ -1992,7 +1992,7 @@ fn write_summary(
     // and the ancestor-sampling acceptance rate. Purely ADDITIVE — no existing
     // key is renamed or reinterpreted, and `trace.tsv` keeps `trajectory_renewal`
     // and `renewal_b0 … renewal_b9` per sweep exactly as before. The block is
-    // OMITTED, not nulled, for a stage that retained no sweep: a row of nulls
+    // OMITTED, not nulled, for a method that retained no sweep: a row of nulls
     // would read as "measured, found nothing".
     if let Some(pr) = path_renewal {
         let block = serde_json::to_value(pr)
@@ -2009,7 +2009,7 @@ fn write_summary(
     }
     // Latent-path convergence: the per-bin reduction and the agreement
     // horizon; the per-cell table is `latent_convergence.tsv`. Omitted, not
-    // nulled, when the stage could not compute it.
+    // nulled, when the method could not compute it.
     if let Some(lc) = latent_convergence {
         summary.as_object_mut().expect("json! built an object")
             .insert(super::latent_convergence::LATENT_CONVERGENCE_KEY.to_string(), lc.summary_block());
@@ -2058,8 +2058,8 @@ mod tests {
             "each row keeps its own chain id and both counts"
         );
 
-        // Absent: a stage written before the ids were recorded. Reading it as
-        // `1..n` would be a guess, and on a stage that refused a chain at its
+        // Absent: a method written before the ids were recorded. Reading it as
+        // `1..n` would be a guess, and on a method that refused a chain at its
         // start it would be a wrong one.
         assert!(
             read_saved_path_counts(&block(serde_json::json!({}))).is_none(),
@@ -2125,7 +2125,7 @@ mod tests {
         }
     }
 
-    /// Every path a stage writes lands on a retained draw. That is the property
+    /// Every path a method writes lands on a retained draw. That is the property
     /// the change buys, so it is asserted against the replay — not read off the
     /// one field that is defined to equal the other.
     #[test]
@@ -2334,7 +2334,7 @@ mod tests {
     /// block.
     ///
     /// `retained` holds only the chains that survived their start (gh#607), so
-    /// on a stage where any chain was refused the two differ. Here chains 0 and
+    /// on a method where any chain was refused the two differ. Here chains 0 and
     /// 2 of 4 refused, leaving chains 1 and 3: the block must say `[1, 3]`. A
     /// positional emitter says `[0, 1]` and sends a reader inspecting "chain 0"
     /// to a directory holding only `trace.tsv`.

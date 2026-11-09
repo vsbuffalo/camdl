@@ -1,7 +1,7 @@
 //! gh#110 — PMMH skip-and-continue on PFDegenerate init.
 //!
 //! End-to-end test for the init-eval guard wired into
-//! `pmmh::run_stage`. We construct a two-chain PMMH fit whose
+//! `pmmh::run_method`. We construct a two-chain PMMH fit whose
 //! `starts = { from_posterior = … }` draws file holds two rows:
 //!
 //!   - pathological β=4.8, γ=0.05 → R0 ≈ 96 against a flat-low data
@@ -169,9 +169,9 @@ starts         = {{ from_posterior = "{draws}" }}
     p
 }
 
-/// The CAS method leaf for `stage_substr` under `fits_root` —
+/// The CAS method leaf for `method_substr` under `fits_root` —
 /// `<fit>/<method>-<h8>/seed_<N>-<h8>/` holding a `fit_stage` run.json.
-fn cas_stage_leaf(fits_root: &Path, stage_substr: &str) -> PathBuf {
+fn cas_method_leaf(fits_root: &Path, method_substr: &str) -> PathBuf {
     let mut stack = vec![fits_root.to_path_buf()];
     while let Some(d) = stack.pop() {
         if d.join("run.json").is_file() {
@@ -179,10 +179,10 @@ fn cas_stage_leaf(fits_root: &Path, stage_substr: &str) -> PathBuf {
                 &std::fs::read_to_string(d.join("run.json")).unwrap_or_default(),
             ) {
                 if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
-                    let stage = v["levels"].as_array().into_iter().flatten()
+                    let method = v["levels"].as_array().into_iter().flatten()
                         .find(|l| l["name"].as_str() == Some("method"))
                         .and_then(|l| l["label"].as_str()).unwrap_or("");
-                    if stage.contains(stage_substr) { return d; }
+                    if method.contains(method_substr) { return d; }
                 }
             }
         }
@@ -190,7 +190,7 @@ fn cas_stage_leaf(fits_root: &Path, stage_substr: &str) -> PathBuf {
             for e in es.flatten() { if e.path().is_dir() { stack.push(e.path()); } }
         }
     }
-    panic!("no CAS '{}' method leaf under {}", stage_substr, fits_root.display());
+    panic!("no CAS '{}' method leaf under {}", method_substr, fits_root.display());
 }
 
 /// One row of the leaf's `chain_starts.tsv`: `(chain_id, attempt, status,
@@ -258,10 +258,10 @@ fn pmmh_redraws_a_pathological_drawn_start_and_runs_every_chain() {
     // for each such draw — the EssCollapsed refusal and the ESS the filter
     // reached — and an accepted row at the sane point.
     let fits_dir = tmp.path().join("results/fits");
-    let stage_dir = cas_stage_leaf(&fits_dir, "pmmh");
-    assert!(stage_dir.join("run.json").is_file(),
-        "pmmh method leaf missing run.json: {}\nstderr:\n{}", stage_dir.display(), stderr);
-    let rows = start_rows(&stage_dir);
+    let method_dir = cas_method_leaf(&fits_dir, "pmmh");
+    assert!(method_dir.join("run.json").is_file(),
+        "pmmh method leaf missing run.json: {}\nstderr:\n{}", method_dir.display(), stderr);
+    let rows = start_rows(&method_dir);
     let rejected: Vec<_> = rows.iter().filter(|r| r.2 == "rejected").collect();
     let accepted: Vec<_> = rows.iter().filter(|r| r.2 == "accepted").collect();
     assert!(!rejected.is_empty(),
@@ -278,7 +278,7 @@ fn pmmh_redraws_a_pathological_drawn_start_and_runs_every_chain() {
     for a in &accepted {
         assert!((a.3 - 0.3).abs() < 1e-9, "the accepted start is the sane row: {a:?}");
     }
-    let diag_path = stage_dir.join("diagnostics.json");
+    let diag_path = method_dir.join("diagnostics.json");
     if diag_path.exists() {
         let diags: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&diag_path).unwrap()).unwrap();
@@ -290,7 +290,7 @@ fn pmmh_redraws_a_pathological_drawn_start_and_runs_every_chain() {
     }
 
     // Acceptance 3: every chain ran, so n_good_chains is unset.
-    let state_raw = std::fs::read_to_string(stage_dir.join("fit_state.toml")).unwrap();
+    let state_raw = std::fs::read_to_string(method_dir.join("fit_state.toml")).unwrap();
     let state: toml::Value = toml::from_str(&state_raw).unwrap();
     assert!(state.get("n_good_chains").is_none(),
         "every chain ran, so n_good_chains is unset:\n{state_raw}");
@@ -298,7 +298,7 @@ fn pmmh_redraws_a_pathological_drawn_start_and_runs_every_chain() {
 
     // Acceptance 4: both chains produced a trace with posterior draws.
     for chain in 0..2 {
-        let trace = stage_dir.join(format!("chain_{chain}/trace.tsv"));
+        let trace = method_dir.join(format!("chain_{chain}/trace.tsv"));
         assert!(trace.exists(), "{} must exist", trace.display());
         let lines = std::fs::read_to_string(&trace).unwrap()
             .lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty())

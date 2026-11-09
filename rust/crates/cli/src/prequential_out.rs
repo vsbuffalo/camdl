@@ -1,6 +1,6 @@
 //! The one writer for prequential trace artifacts (gh#650).
 //!
-//! `fit run` (PFilter stage) and `camdl pfilter --save-prequential` both
+//! `fit run` (PFilter method) and `camdl pfilter --save-prequential` both
 //! persist a `PrequentialTrace` as `{stem}.tsv` + `{stem}.json` under one
 //! filename convention. The tidy/long TSV schema (gh#269) landed first in
 //! the pfilter writer only, leaving `fit run` emitting a narrow v1 header

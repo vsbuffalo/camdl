@@ -136,7 +136,7 @@ fn write_data(path: &Path, n_rows: usize) {
 }
 
 /// A minimal fit toml. Only `[data.observations]` is consulted when resolving
-/// anchors; the rest is the schema-required minimum. A POSTERIOR stage (pmmh),
+/// anchors; the rest is the schema-required minimum. A POSTERIOR method (pmmh),
 /// deliberately tiny, because `fit predict` draws bands and refuses an
 /// optimizer-only fit.
 fn write_fit_toml(dir: &Path, model: &Path, data: &Path) -> PathBuf {

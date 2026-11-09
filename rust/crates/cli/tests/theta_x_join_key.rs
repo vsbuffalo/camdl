@@ -134,7 +134,7 @@ fn draws_tsv_key_joins_to_trajectories() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Locate the stage dir's draws.tsv + every chain_N/trajectories.tsv under it.
+    // Locate the method dir's draws.tsv + every chain_N/trajectories.tsv under it.
     let fits = tmp.join("results").join("fits");
     let mut draws_tsv: Option<PathBuf> = None;
     let mut traj_tsvs: Vec<PathBuf> = Vec::new();

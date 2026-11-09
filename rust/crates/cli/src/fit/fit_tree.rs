@@ -4,43 +4,43 @@
 //! enumerate fit-stage runs:
 //!
 //! - [`walk_fit_dir`] — given one fit_dir (`results/fits/<stem>-<hash>/`)
-//!   returns one [`StageNode`] per `FitStage` `runid::RunRecord` leaf found
-//!   underneath, each carrying the leaf's [`FitStageView`] (method, seed,
+//!   returns one [`MethodNode`] per `FitStage` `runid::RunRecord` leaf found
+//!   underneath, each carrying the leaf's [`FitMethodView`] (method, seed,
 //!   best_loglik, …) and its path-derived axes.
 //! - [`walk_fits_root`] — given the top-level `results/fits/` returns one
 //!   [`FitDirEntry`] per fit segment, each carrying its already-parsed
-//!   [`FitView`] (fit-level identity + provenance + stage views) so callers
-//!   filter by model_identity / label / declared stages without a second read.
+//!   [`FitView`] (fit-level identity + provenance + method views) so callers
+//!   filter by model_identity / label / declared methods without a second read.
 //!
-//! `StageNode`/`FitStageView` are method-agnostic by construction: they carry
+//! `MethodNode`/`FitMethodView` are method-agnostic by construction: they carry
 //! no `fit_state_path` (an IF2-only artifact). Consumers that need the typed
 //! result load it via `MethodResult::load_from`.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::fit::fit_view::{FitStageView, FitView};
+use crate::fit::fit_view::{FitMethodView, FitView};
 
 /// One discovered fit-stage run inside a fit_dir.
 ///
-/// `axes` (on the stage view) carries the (data_kind, fit_seed, sweep_slug)
+/// `axes` (on the method view) carries the (data_kind, fit_seed, sweep_slug)
 /// triple extracted from the path relative to the enclosing fit_dir. When the
-/// path doesn't fit the canonical v2 layout, `axes` is `None` — the stage is
+/// path doesn't fit the canonical v2 layout, `axes` is `None` — the method is
 /// still surfaced (its leaf is real) but consumers that need axis grouping skip
 /// it.
 #[derive(Debug, Clone)]
-pub struct StageNode {
-    /// Absolute (or whatever the caller passed) path to the stage directory
+pub struct MethodNode {
+    /// Absolute (or whatever the caller passed) path to the method directory
     /// containing the leaf `run.json`.
-    pub stage_dir: PathBuf,
-    /// The stage's projected new-format view.
-    pub stage: FitStageView,
+    pub method_dir: PathBuf,
+    /// The method's projected new-format view.
+    pub view: FitMethodView,
 }
 
-/// (data_kind, fit_seed, sweep_slug) triple extracted from a stage's
+/// (data_kind, fit_seed, sweep_slug) triple extracted from a method's
 /// path relative to its fit_dir.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StageAxes {
+pub struct MethodAxes {
     pub data_kind: DataKind,
     pub fit_seed: u64,
     /// `None` when no `--sweep` was active for this fit. When the sweep
@@ -48,7 +48,7 @@ pub struct StageAxes {
     pub sweep_slug: Option<String>,
 }
 
-/// Whether this stage fit a real-data dataset or one of N synthetic
+/// Whether this method fit a real-data dataset or one of N synthetic
 /// replicates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataKind {
@@ -58,42 +58,42 @@ pub enum DataKind {
 
 /// One fit segment returned by [`walk_fits_root`]. The `view` field is
 /// pre-parsed so `fit table`'s outer loop can filter by model_identity / label /
-/// declared stages without re-reading the leaves per row.
+/// declared methods without re-reading the leaves per row.
 #[derive(Debug, Clone)]
 pub struct FitDirEntry {
     pub fit_dir: PathBuf,
-    /// The fit-level view (identity + provenance + per-stage views).
+    /// The fit-level view (identity + provenance + per-method views).
     pub view: FitView,
 }
 
 /// Walk one fit directory and return every `FitStage` leaf found underneath,
-/// each as a [`StageNode`]. Filesystem layout is intentionally not constrained
-/// beyond "every stage writes a `runid::RunRecord` leaf": this walker works on
+/// each as a [`MethodNode`]. Filesystem layout is intentionally not constrained
+/// beyond "every method writes a `runid::RunRecord` leaf": this walker works on
 /// real-data fits, synthetic-replicate fits, sweep cells, any combination, and
 /// on user-defined non-canonical layouts.
 ///
-/// Returns runs in lexicographic order on `stage_dir` (deterministic for
-/// tests). A segment with stage leaves but no provenance sidecar is skipped
+/// Returns runs in lexicographic order on `method_dir` (deterministic for
+/// tests). A segment with method leaves but no provenance sidecar is skipped
 /// loudly (see [`FitView::read`]); the function then yields no nodes.
-pub fn walk_fit_dir(fit_dir: &Path) -> io::Result<Vec<StageNode>> {
+pub fn walk_fit_dir(fit_dir: &Path) -> io::Result<Vec<MethodNode>> {
     if !fit_dir.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!("fit_dir not found: {}", fit_dir.display()),
         ));
     }
-    let mut out: Vec<StageNode> = match FitView::read(fit_dir) {
+    let mut out: Vec<MethodNode> = match FitView::read(fit_dir) {
         Some(view) => view
-            .stages
+            .methods
             .into_iter()
-            .map(|stage| StageNode {
-                stage_dir: stage.stage_dir.clone(),
-                stage,
+            .map(|view| MethodNode {
+                method_dir: view.method_dir.clone(),
+                view,
             })
             .collect(),
         None => Vec::new(),
     };
-    out.sort_by(|a, b| a.stage_dir.cmp(&b.stage_dir));
+    out.sort_by(|a, b| a.method_dir.cmp(&b.method_dir));
     Ok(out)
 }
 
@@ -135,28 +135,28 @@ pub fn walk_fits_root(root: &Path) -> io::Result<Vec<FitDirEntry>> {
 
 // ── internals ───────────────────────────────────────────────────────
 
-/// Extract `StageAxes` from a stage path relative to its fit_dir.
+/// Extract `MethodAxes` from a method path relative to its fit_dir.
 /// Canonical v2 layouts:
 ///
 /// ```text
-/// <fit_dir>/real/fit_<seed>/<stage>/
-/// <fit_dir>/real/fit_<seed>/<sweep_slug>/<stage>/
-/// <fit_dir>/synthetic/ds_<NN>/fit_<seed>/<stage>/
-/// <fit_dir>/synthetic/ds_<NN>/fit_<seed>/<sweep_slug>/<stage>/
+/// <fit_dir>/real/fit_<seed>/<method>/
+/// <fit_dir>/real/fit_<seed>/<sweep_slug>/<method>/
+/// <fit_dir>/synthetic/ds_<NN>/fit_<seed>/<method>/
+/// <fit_dir>/synthetic/ds_<NN>/fit_<seed>/<sweep_slug>/<method>/
 /// ```
 ///
 /// Returns `None` when the path doesn't fit either shape (e.g. a non-canonical
-/// user layout or a profile sub-tree). The walker still surfaces those stages —
+/// user layout or a profile sub-tree). The walker still surfaces those methods —
 /// `axes` is None on the view and consumers that need axis grouping skip them.
-pub(crate) fn derive_axes(fit_dir: &Path, stage_dir: &Path) -> Option<StageAxes> {
-    let rel = stage_dir.strip_prefix(fit_dir).ok()?;
+pub(crate) fn derive_axes(fit_dir: &Path, method_dir: &Path) -> Option<MethodAxes> {
+    let rel = method_dir.strip_prefix(fit_dir).ok()?;
     let parts: Vec<&str> = rel
         .components()
         .filter_map(|c| c.as_os_str().to_str())
         .collect();
 
-    // The last component is the stage name; we don't need it for axes
-    // (it's already on the stage view's `stage`). What precedes it must match
+    // The last component is the method name; we don't need it for axes
+    // (it's already on the method view's `method`). What precedes it must match
     // one of the four shapes above.
     if parts.len() < 3 {
         return None;
@@ -171,7 +171,7 @@ pub(crate) fn derive_axes(fit_dir: &Path, stage_dir: &Path) -> Option<StageAxes>
             3 => Some(body[2].to_string()),
             _ => return None,
         };
-        return Some(StageAxes {
+        return Some(MethodAxes {
             data_kind: DataKind::Real,
             fit_seed,
             sweep_slug,
@@ -189,7 +189,7 @@ pub(crate) fn derive_axes(fit_dir: &Path, stage_dir: &Path) -> Option<StageAxes>
             4 => Some(body[3].to_string()),
             _ => return None,
         };
-        return Some(StageAxes {
+        return Some(MethodAxes {
             data_kind: DataKind::Synthetic { ds_idx },
             fit_seed,
             sweep_slug,
@@ -241,7 +241,7 @@ mod tests {
 
     /// Write a fit-level sidecar (`fit.meta.json`) under a segment dir so
     /// `FitView::read` treats it as a well-formed fit. Minimal provenance —
-    /// `methods_declared`/per-stage numbers come from the leaves.
+    /// `methods_declared`/per-method numbers come from the leaves.
     fn write_sidecar(seg: &Path) {
         std::fs::create_dir_all(seg).unwrap();
         std::fs::write(
@@ -252,13 +252,13 @@ mod tests {
     }
 
     /// Place a `FitStage` `runid::RunRecord` leaf at `<fit_dir>/<rel>/run.json`.
-    /// `ord` seeds a valid-hex run_id; `stage`/`method`/`seed` go in `inputs`.
-    fn place_stage(fit_dir: &Path, rel: &str, ord: u32, stage: &str, method: &str, seed: u64) {
+    /// `ord` seeds a valid-hex run_id; `method`/`method`/`seed` go in `inputs`.
+    fn place_method(fit_dir: &Path, rel: &str, ord: u32, name: &str, method: &str, seed: u64) {
         let dir = fit_dir.join(rel);
         std::fs::create_dir_all(&dir).unwrap();
         let run_id = format!("{:0<64}", format!("ae{ord:06x}"));
         let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"deadbeef00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"method","label":"{stage}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_{seed}","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":{seed},"n_chains":2,"best_loglik":-100.0,"best_chain":1}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
+            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"deadbeef00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"method","label":"{name}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_{seed}","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":{seed},"n_chains":2,"best_loglik":-100.0,"best_chain":1}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
         );
         std::fs::write(dir.join("run.json"), rec).unwrap();
     }
@@ -288,19 +288,19 @@ mod tests {
         let tmp = tempdir("real_only");
         let fit_dir = tmp.path().join("fit_he-deadbeef");
         write_sidecar(&fit_dir);
-        place_stage(&fit_dir, "real/fit_1/if2", 1, "if2", "if2", 1);
-        place_stage(&fit_dir, "real/fit_1/pgas", 2, "pgas", "pgas", 1);
+        place_method(&fit_dir, "real/fit_1/if2", 1, "if2", "if2", 1);
+        place_method(&fit_dir, "real/fit_1/pgas", 2, "pgas", "pgas", 1);
 
         let nodes = walk_fit_dir(&fit_dir).unwrap();
         assert_eq!(nodes.len(), 2);
         // Both nodes carry the canonical real/fit_1 axes, no sweep.
         for node in &nodes {
-            let axes = node.stage.axes.as_ref().expect("real fit must produce axes");
+            let axes = node.view.axes.as_ref().expect("real fit must produce axes");
             assert_eq!(axes.data_kind, DataKind::Real);
             assert_eq!(axes.fit_seed, 1);
             assert_eq!(axes.sweep_slug, None);
         }
-        let method_names: Vec<&str> = nodes.iter().map(|n| n.stage.method.as_str()).collect();
+        let method_names: Vec<&str> = nodes.iter().map(|n| n.view.method.as_str()).collect();
         assert!(method_names.contains(&"if2"));
         assert!(method_names.contains(&"pgas"));
     }
@@ -315,7 +315,7 @@ mod tests {
             for fs in [11u64, 22] {
                 ord += 1;
                 let rel = format!("synthetic/ds_{:02}/fit_{}/mle", ds, fs);
-                place_stage(&fit_dir, &rel, ord, "mle", "if2", fs);
+                place_method(&fit_dir, &rel, ord, "mle", "if2", fs);
             }
         }
         let nodes = walk_fit_dir(&fit_dir).unwrap();
@@ -324,11 +324,11 @@ mod tests {
         let ds01_22 = nodes
             .iter()
             .find(|n| {
-                let axes = n.stage.axes.as_ref().unwrap();
+                let axes = n.view.axes.as_ref().unwrap();
                 matches!(axes.data_kind, DataKind::Synthetic { ds_idx: 1 }) && axes.fit_seed == 22
             })
             .expect("ds_01 × fit_22 cell");
-        assert_eq!(ds01_22.stage.axes.as_ref().unwrap().sweep_slug, None);
+        assert_eq!(ds01_22.view.axes.as_ref().unwrap().sweep_slug, None);
     }
 
     #[test]
@@ -336,28 +336,28 @@ mod tests {
         let tmp = tempdir("sweep");
         let fit_dir = tmp.path().join("fit_sweep-12345678");
         write_sidecar(&fit_dir);
-        place_stage(&fit_dir, "real/fit_1/R0_1.000/mle", 1, "mle", "if2", 1);
-        place_stage(&fit_dir, "real/fit_1/R0_2.000/mle", 2, "mle", "if2", 1);
+        place_method(&fit_dir, "real/fit_1/R0_1.000/mle", 1, "mle", "if2", 1);
+        place_method(&fit_dir, "real/fit_1/R0_2.000/mle", 2, "mle", "if2", 1);
         let nodes = walk_fit_dir(&fit_dir).unwrap();
         assert_eq!(nodes.len(), 2);
         let slugs: Vec<String> = nodes
             .iter()
-            .map(|n| n.stage.axes.as_ref().unwrap().sweep_slug.clone().unwrap())
+            .map(|n| n.view.axes.as_ref().unwrap().sweep_slug.clone().unwrap())
             .collect();
         assert!(slugs.iter().any(|s| s == "R0_1.000"));
         assert!(slugs.iter().any(|s| s == "R0_2.000"));
     }
 
     #[test]
-    fn walks_mixed_method_stages() {
+    fn walks_mixed_method_methods() {
         let tmp = tempdir("mixed");
         let fit_dir = tmp.path().join("fit_mixed-aaaabbbb");
         write_sidecar(&fit_dir);
-        place_stage(&fit_dir, "real/fit_1/scout", 1, "scout", "if2", 1);
-        place_stage(&fit_dir, "real/fit_1/pgas", 2, "pgas", "pgas", 1);
+        place_method(&fit_dir, "real/fit_1/scout", 1, "scout", "if2", 1);
+        place_method(&fit_dir, "real/fit_1/pgas", 2, "pgas", "pgas", 1);
         let nodes = walk_fit_dir(&fit_dir).unwrap();
         assert_eq!(nodes.len(), 2);
-        let methods: Vec<&str> = nodes.iter().map(|n| n.stage.method.as_str()).collect();
+        let methods: Vec<&str> = nodes.iter().map(|n| n.view.method.as_str()).collect();
         assert!(methods.contains(&"if2"));
         assert!(methods.contains(&"pgas"));
     }
@@ -367,15 +367,15 @@ mod tests {
         let tmp = tempdir("malformed");
         let fit_dir = tmp.path().join("fit_bad-deadbeef");
         write_sidecar(&fit_dir);
-        let stage_dir = fit_dir.join("real/fit_1/scout");
-        std::fs::create_dir_all(&stage_dir).unwrap();
-        // Stage run.json is garbage — `walk_records` drops it.
-        std::fs::write(stage_dir.join("run.json"), "{ not valid json }").unwrap();
+        let method_dir = fit_dir.join("real/fit_1/scout");
+        std::fs::create_dir_all(&method_dir).unwrap();
+        // Method run.json is garbage — `walk_records` drops it.
+        std::fs::write(method_dir.join("run.json"), "{ not valid json }").unwrap();
 
         let nodes = walk_fit_dir(&fit_dir).unwrap();
         assert!(
             nodes.is_empty(),
-            "malformed stage run.json should be skipped, got {:?}",
+            "malformed method run.json should be skipped, got {:?}",
             nodes
         );
     }
@@ -394,11 +394,11 @@ mod tests {
         let tmp = tempdir("noncanon");
         let fit_dir = tmp.path().join("fit_x-aabbccdd");
         write_sidecar(&fit_dir);
-        place_stage(&fit_dir, "weird_layout/scout", 1, "scout", "if2", 1);
+        place_method(&fit_dir, "weird_layout/scout", 1, "scout", "if2", 1);
         let nodes = walk_fit_dir(&fit_dir).unwrap();
         assert_eq!(nodes.len(), 1);
         assert!(
-            nodes[0].stage.axes.is_none(),
+            nodes[0].view.axes.is_none(),
             "non-canonical layout must produce axes=None"
         );
     }
@@ -428,13 +428,13 @@ mod tests {
             .map(|e| e.fit_dir.file_name().unwrap().to_str().unwrap())
             .collect();
         assert_eq!(names, ["fit_a-11111111", "fit_b-22222222"]);
-        // The view is pre-parsed (derived from the stage leaves); `methods_declared`
-        // comes from the leaves' stage levels. gh#147: `estimated`/`fixed`/priors
+        // The view is pre-parsed (derived from the method leaves); `methods_declared`
+        // comes from the leaves' method levels. gh#147: `estimated`/`fixed`/priors
         // are config detail not carried on the leaves, so they default empty —
         // config-diff reads the archived `fit.toml.original` for those.
         assert_eq!(entries[0].view.methods_declared, vec!["if2"]);
         assert!(!entries[0].view.fit_hash.is_empty());
-        assert_eq!(entries[0].view.stages.len(), 1);
+        assert_eq!(entries[0].view.methods.len(), 1);
     }
 
     #[test]

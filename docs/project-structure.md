@@ -66,9 +66,9 @@ camdl/
 │   │   ├── cli/                     # CLI: camdl simulate/pfilter/fit/profile
 │   │   │   └── src/
 │   │   │       ├── main.rs          # Command dispatch
-│   │   │       └── fit/             # Multi-stage inference workflow
-│   │   │           ├── runner.rs    # Stage orchestration (camdl fit run)
-│   │   │           ├── nlopt_stage.rs # IF2 / NLopt MLE stages
+│   │   │       └── fit/             # Inference workflow (camdl fit …)
+│   │   │           ├── runner.rs    # Shared chain running (camdl fit run)
+│   │   │           ├── nlopt_method.rs # NLopt deterministic MLE
 │   │   │           ├── pgas.rs      # PGAS posterior sampling (production)
 │   │   │           ├── pmmh.rs      # PMMH posterior sampling
 │   │   │           ├── predict.rs   # Free-forward posterior predictive

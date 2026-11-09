@@ -77,7 +77,7 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
 fn draws_row_count(out_root: &Path) -> usize {
     let fits = out_root.join("fits");
     for e in std::fs::read_dir(&fits).unwrap().flatten() {
-        // draws.tsv lives at <segment>/<NN-stage>/seed_*/draws.tsv
+        // draws.tsv lives at <segment>/<NN-method>/seed_*/draws.tsv
         for d in walk(&e.path()) {
             if d.file_name().map(|n| n == "draws.tsv").unwrap_or(false) {
                 let txt = std::fs::read_to_string(&d).unwrap();

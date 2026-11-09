@@ -1,9 +1,9 @@
 //! gh#764 + fix 3 of the PMMH proposal-adaptation proposal.
 //!
-//! Two properties of a finished PMMH stage, both of which fail against the
+//! Two properties of a finished PMMH method, both of which fail against the
 //! preflight this replaces:
 //!
-//!  1. The measured likelihood noise is **in the stage artifact**. It was
+//!  1. The measured likelihood noise is **in the method artifact**. It was
 //!     computed at preflight, printed to stderr and dropped, so a downstream
 //!     team asked why their chains would not move could not tell us their
 //!     noise level without re-running an expensive fit. `fit_state.toml` now
@@ -145,9 +145,9 @@ fn pf_noise_field(state_toml: &str, key: &str) -> Option<f64> {
         })
 }
 
-/// The one `fit_state.toml` the stage wrote, under its content-addressed run
-/// directory (`results/fits/fit-<hash>/01-<stage>-<hash>/seed_N-<hash>/`).
-fn stage_state(results: &Path) -> String {
+/// The one `fit_state.toml` the method wrote, under its content-addressed run
+/// directory (`results/fits/fit-<hash>/01-<method>-<hash>/seed_N-<hash>/`).
+fn method_state(results: &Path) -> String {
     let mut found = Vec::new();
     let mut stack = vec![results.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -191,7 +191,7 @@ fn pmmh_persists_the_measured_noise_and_reports_the_acceptance_ceiling() {
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 
     // ── (1) gh#764: the spread is in the artifact, not only on stderr ──
-    let state = stage_state(&tmp.path().join("results"));
+    let state = method_state(&tmp.path().join("results"));
     assert!(state.contains("[pf_noise]"),
         "fit_state.toml must carry the measured likelihood noise (gh#764):\n{state}");
 
@@ -208,7 +208,7 @@ fn pmmh_persists_the_measured_noise_and_reports_the_acceptance_ceiling() {
 
     assert!(sigma.is_finite() && sigma > 0.0, "sigma = {sigma}");
     assert!(s.is_finite() && s > 0.0, "s = {s}");
-    assert_eq!(n_particles, 2000.0, "particle count must be the one the stage ran");
+    assert_eq!(n_particles, 2000.0, "particle count must be the one the method ran");
     assert_eq!(pairs, 20.0, "pair count must be the one the preflight measured");
     // Plain PMMH re-draws all of its randomness between the two evaluations,
     // so their difference is at least as spread as either one of them. It is

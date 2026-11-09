@@ -1,4 +1,4 @@
-//! gh#506: an IF2 stage must start where `[estimate].start` says.
+//! gh#506: an IF2 method must start where `[estimate].start` says.
 //!
 //! The defect was at a CALLSITE, not inside a unit-testable function:
 //! `fit/mod.rs` asked `FitRunConfig::build` for `random_starts` whenever the

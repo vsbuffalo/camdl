@@ -12,12 +12,12 @@
 //!
 //! Each `(grid point × seed × start)` is an independent content-
 //! addressed mini-fit, keyed by the five factored `runid` levels
-//! (`profile` / `point` / `stage` / `seed` / `start`) resolved in
+//! (`profile` / `point` / `method` / `seed` / `start`) resolved in
 //! [`crate::profile_cas`]. The leaf is an `ArtifactKind::ProfilePoint` run
 //! under `profiles/`; each path segment is `{label}-{hash8}`:
 //!
 //! ```text
-//! results/profiles/{stem}-{h8}/{point}-{h8}/{stage}-{h8}/seed_{n}-{h8}/start_{k}-{h8}/
+//! results/profiles/{stem}-{h8}/{point}-{h8}/{method}-{h8}/seed_{n}-{h8}/start_{k}-{h8}/
 //!   run.json                                # RunRecord (kind = profile_point)
 //!   mle.toml                                # MLE at this (point, seed, start)
 //! ```
@@ -146,7 +146,7 @@ struct ProfileBaseLevel<'a> {
     objective: crate::fit::config_v2::LikelihoodObjective,
 }
 
-/// The `stage` level's identity: the METHOD, i.e. how each cell is fitted.
+/// The `method` level's identity: the METHOD, i.e. how each cell is fitted.
 #[derive(serde::Serialize)]
 struct ProfileMethodLevel<'a> {
     algorithm: &'a str,
@@ -1446,15 +1446,15 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     }).collect();
 
     // gh#89: lowercased algorithm tag — a cache-key input for the
-    // method `stage` and the `stage`-segment display label.
+    // method `method` and the `method`-segment display label.
     let algorithm = format!("{:?}", profile_algo).to_lowercase();
 
     // ── gh#147 (M3.3): content-addressed profile-point identity inputs ──
-    // A profile point is a CAS leaf at `profiles/<base>/<point>/<stage>/
+    // A profile point is a CAS leaf at `profiles/<base>/<point>/<method>/
     // <seed>/<start>/`. The base is a path segment (no base-level record).
     // profile-base = the inference *problem*, with the focal GRID and the
     // method config EXCLUDED (guardrail 1) — the grid rides `point`, the
-    // method `stage`. The base fit's `starts_from` rides the base as a dep.
+    // method config `method`. The base fit's `starts_from` rides the base as a dep.
     let mut fixed_blob = fixed_for_cas.clone();
     fixed_blob.sort();
     let mut priors_blob = resolved_priors_kv.clone();
@@ -1576,7 +1576,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 
     // ── gh#147 (M3.3): pre-resolve every job's CAS identity ──────────
     // Job tuple (seed_idx, grid_idx, start_idx). The grid lives in the
-    // `point` level + the method in `stage`; (seed, point, start) pins the
+    // `point` level + the method in `method`; (seed, point, start) pins the
     // job's RNG deterministically (job_seed below).
     let jobs: Vec<(usize, usize, usize)> = (0..seeds.len())
         .flat_map(|seed_idx| (0..grid_points.len())
@@ -1764,7 +1764,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // Dispatch on algorithm. IF2 keeps the historical PF-driven
         // per-cell MLE; NLopt branches into the
         // deterministic-MLE path (gh#47) — same `compute_ode_loglik`
-        // closure that fit.toml stages call, with the focal grid value
+        // closure that fit.toml methods call, with the focal grid value
         // pinned in `params` and optimization confined to the non-focal
         // estimated indices.
         //
@@ -1893,7 +1893,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 let tolerance = nl_tolerance;
                 let max_evals = nl_max_evals;
                 diag.algo = Some(crate::profile_diagnostics::DiagAlgo::Nlopt);
-                match crate::fit::nlopt_stage::optimize_cell(
+                match crate::fit::nlopt_method::optimize_cell(
                     nlopt_algo,
                     &compiled,
                     &obs_model_obj,
@@ -1945,7 +1945,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 
         // gh#147 (M3.3): claim the CAS leaf, write the cell's mle.toml there,
         // finalize. The profile-base is never written (path segment only);
-        // each (point, stage, seed, start) is its own leaf. The display
+        // each (point, method, seed, start) is its own leaf. The display
         // payload (method/algorithm/loglik) is recorded in `inputs`, not
         // hashed.
         let algorithm_payload = match profile_algo {
@@ -2110,7 +2110,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 
     // gh#147 (M3.3): the per-seed profile.tsv curve + the cross-seed
     // summary.tsv are cross-point / cross-seed aggregates with no home in the
-    // base/point/stage/seed/start tree — they are M4-derived views over the
+    // base/point/method/seed/start tree — they are M4-derived views over the
     // per-cell leaves (same as the grid summary). gh#154 restores them via
     // `reindex`. Until then a profile run writes per-cell leaves but no curve.
     let n_cells = resolved_jobs.len();

@@ -3,7 +3,7 @@
 //! `optimize_det()` runs a local NLopt algorithm — Sbplx (default, robust to
 //! boundary non-smoothness), BOBYQA (faster on smooth interior objectives), or
 //! L-BFGS (quasi-Newton, needs a gradient) — on a user-supplied loglik closure
-//! with parameter bounds. Used by `cli::fit::nlopt_stage::run_stage` for
+//! with parameter bounds. Used by `cli::fit::nlopt_method::run_method` for
 //! ODE-backed MLE; see
 //! `docs/dev/proposals/2026-05-04-ode-inference-three-phase.md` §Phase 1.
 //!
@@ -15,7 +15,7 @@
 
 use nlopt::{Algorithm, Nlopt, Target};
 
-// Re-export so downstream crates (`cli::fit::nlopt_stage`) can pattern-
+// Re-export so downstream crates (`cli::fit::nlopt_method`) can pattern-
 // match on the `OptStatus::Converged(SuccessState)` variant without
 // taking a direct dep on the nlopt crate. The variant already leaks
 // `SuccessState` as part of its public API; the re-export just makes
@@ -64,7 +64,7 @@ impl NloptAlgorithm {
 
 /// Outcome classification for a single optimization run. The proposal calls
 /// out the distinction between a true convergence (parameter / function
-/// tolerance reached) and a soft failure (`MaxEvalReached`) so the per-stage
+/// tolerance reached) and a soft failure (`MaxEvalReached`) so the per-method
 /// runner can surface them separately rather than lumping under a single
 /// "status" string.
 #[derive(Debug, Clone, Copy)]
@@ -212,7 +212,7 @@ where
         // where the gradient could not be computed, i.e. a reported optimum
         // whose only property is that the gradient failed there. A caller that
         // wants a specific message latches its own reason (see
-        // `cli::fit::nlopt_stage::optimize_cell`); correctness does not rest on
+        // `cli::fit::nlopt_method::optimize_cell`); correctness does not rest on
         // NLopt's handling, only the promptness of the stop does.
         let raw = (ud.f)(params, grad);
         // NLopt is undefined on NaN. Map non-finite logliks (model blew up at

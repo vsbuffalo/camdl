@@ -216,7 +216,7 @@ impl Fit {
         names
     }
 
-    /// Every `run.json` under this fit — one per stage leaf — as
+    /// Every `run.json` under this fit — one per method leaf — as
     /// (segment-relative path, bytes), sorted. This IS the fit's identity on
     /// disk: the leaf addresses plus the records they hold.
     fn identity_snapshot(&self) -> Vec<(String, String)> {

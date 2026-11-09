@@ -867,7 +867,7 @@ cooling    = 0.70
     fn a_changed_particle_count_does_not_resolve() {
         // NEGATIVE CONTROL. Canonicalising too aggressively would silently hand
         // back the posterior of a DIFFERENT fit — worse than the bug fixed here.
-        // A stage knob is a real difference and must not resolve.
+        // A method knob is a real difference and must not resolve.
         let changed = ARCHIVED.replace("particles = 10", "particles = 20");
         assert_ne!(changed, ARCHIVED);
         let (got, _seg, tmp) = resolve_live_against_archive("particles", ARCHIVED, &changed);

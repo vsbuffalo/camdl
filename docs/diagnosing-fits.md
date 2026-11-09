@@ -118,10 +118,10 @@ method**, and reading the wrong symptom sends you to the wrong fix.
   rarely does, the chain barely moves in latent space, and what you see is
   **poor R̂ and a renewal profile that is flat near zero over the early part of
   the series** — never a noisy loglik. Read the **profile**, not the aggregate
-  (`path_renewal` in `pgas_summary.json`, printed at the end of every PGAS
-  stage). The **filter ESS** block beneath it (`filter_ess`, table
-  `filter_ess.tsv`) is the direct reading: it says, per observation, how many
-  particles the resample actually drew from.
+  (`path_renewal` in `pgas_summary.json`, printed at the end of every PGAS run).
+  The **filter ESS** block beneath it (`filter_ess`, table `filter_ess.tsv`) is
+  the direct reading: it says, per observation, how many particles the resample
+  actually drew from.
 
 **Read the profile, not `trajectory_renewal` alone.** The aggregate is a
 weighted mean over ten equal time bins, and its late bins are high in most runs:
@@ -185,15 +185,15 @@ to revisit them costs nothing. It is not benign if each chain is holding one
 draw from a wide posterior, because then θ is being conditioned on a prefix the
 sampler never revisits and the parameter R̂ is measuring agreement between chains
 that were never in the same place. The **latent-path convergence** block
-(printed directly under the renewal profile when a stage has at least two chains
+(printed directly under the renewal profile when a run has at least two chains
 and four saved paths per chain; `latent_convergence` in `pgas_summary.json`,
 per-cell table `latent_convergence.tsv`) answers that question. It is also
 recomputed from `chain_N/trajectories.tsv` by `camdl fit summary <fit>` for any
-finished PGAS stage, so a fit that ran before the block existed gets it without
-a re-run (the table is written once if the stage has none). It runs every
-(state, substep) cell of the saved paths — compartments, `flow_*`, `inc_*` —
-through the same rank-normalised R̂ the parameter table uses, and classifies
-each: **constant** (the pooled draws never moved: structurally zero, or pinned),
+finished PGAS run, so a fit that ran before the block existed gets it without a
+re-run (the table is written once if the leaf has none). It runs every (state,
+substep) cell of the saved paths — compartments, `flow_*`, `inc_*` — through the
+same rank-normalised R̂ the parameter table uses, and classifies each:
+**constant** (the pooled draws never moved: structurally zero, or pinned),
 **frozen-disagree** (every chain internally constant _and_ the chains differ:
 one draw per chain, R̂ undefined), or **mixed** (R̂ and ESS computed). The rows
 are the same tenths as the renewal profile, so they read together. Measured on a
@@ -395,7 +395,7 @@ Without them, a low acceptance rate is compatible with both "the move has good
 candidates and the Metropolis step rejects them" and "the move never had a
 choice", which have different fixes and very different costs. The medians over
 the retained sweeps are in the `path_renewal` block of `pgas_summary.json` and
-printed at the end of the stage beside the acceptance rate; the per-sweep values
+printed at the end of the run beside the acceptance rate; the per-sweep values
 are the `trace.tsv` columns above, written as the run proceeds.
 
 **Read the acceptance rate where it happened, not as one number.** The ancestor
@@ -404,7 +404,7 @@ end, and one rate averaged over the whole sweep hides that. `trace.tsv` carries
 `as_accept_b0 … as_accept_b9` — the acceptance rate among the Metropolis steps
 that ran in each tenth of the substep series, on the **same ten bins** as
 `renewal_b0 … renewal_b9`, so the two rows are read against each other. The
-end-of-stage block prints them as a pair — here the two rows of a 16-sweep,
+end-of-run block prints them as a pair — here the two rows of a 16-sweep,
 32-particle, 80-substep SIR test fixture, small enough that single bins are
 noisy, shown for the layout:
 
@@ -669,21 +669,22 @@ shared-`k` fit (U-shaped PIT) from the well-calibrated hierarchical-`k` fit in
 **Then read the surprise table before trusting any of the aggregates.** The
 elpd, the mean CRPS and the PIT coverage are all sums or averages over
 observations, and an average hides which terms carry it. Wherever camdl prints
-the elpd — the `pfilter` stage of `fit run`, `camdl pfilter --save-prequential`
-— it prints beneath it the five worst-scored observations of the trace, worst
-first, each with its share of the elpd, its PIT, and the filter's ESS at that
-step. The Ebola case that earned this table: an elpd of a few hundred nats over
-103 days read as ordinary, and so did the CRPS and the coverage; one day — a
-cumulative count re-issued and floored to zero — carried a log score of −26.6 on
-its own, a PIT of 0 and a filter ESS of 3, and stood only as one row of
-`prequential.tsv` that nobody opened. The reading is by shape. Shares that are
-flat at a few percent each say no observation dominates and the aggregates mean
-what they say. One row an order of magnitude below the rest, with `pit` pinned
-at 0 or 1 and `ess` in the single digits, is one observation the filter could
-not explain, and the first move is the data row at that `t`, not the model —
-that is also the observation `filter_ess` (§3) will have flagged if you ran
-PGAS. Several bad rows sharing a stream point at that stream's observation
-model; several sharing a window point at the transition model over that window.
+the elpd — a `pfilter` method under `fit run`,
+`camdl pfilter --save-prequential` — it prints beneath it the five worst-scored
+observations of the trace, worst first, each with its share of the elpd, its
+PIT, and the filter's ESS at that step. The Ebola case that earned this table:
+an elpd of a few hundred nats over 103 days read as ordinary, and so did the
+CRPS and the coverage; one day — a cumulative count re-issued and floored to
+zero — carried a log score of −26.6 on its own, a PIT of 0 and a filter ESS of
+3, and stood only as one row of `prequential.tsv` that nobody opened. The
+reading is by shape. Shares that are flat at a few percent each say no
+observation dominates and the aggregates mean what they say. One row an order of
+magnitude below the rest, with `pit` pinned at 0 or 1 and `ess` in the single
+digits, is one observation the filter could not explain, and the first move is
+the data row at that `t`, not the model — that is also the observation
+`filter_ess` (§3) will have flagged if you ran PGAS. Several bad rows sharing a
+stream point at that stream's observation model; several sharing a window point
+at the transition model over that window.
 
 ## 6. Read the MLE for "compensation" signatures
 

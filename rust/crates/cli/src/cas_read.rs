@@ -362,7 +362,7 @@ pub fn walk_fit_leaves(root: &Path) -> Vec<Leaf> {
     walk_kind(root, ArtifactKind::FitStage, Bounds::default())
 }
 
-/// New-format fit stages whose `run_id` hex matches `prefix` (for `show`/`cat`
+/// New-format fit methods whose `run_id` hex matches `prefix` (for `show`/`cat`
 /// prefix resolution alongside `resolve_sim_prefix`).
 pub fn resolve_fit_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
     resolve_prefix_indexed(root, ArtifactKind::FitStage, prefix, walk_fit_leaves)
@@ -370,7 +370,7 @@ pub fn resolve_fit_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
 
 /// All `profiles/` leaves of kind `ProfilePoint` (new-format profile-point
 /// mini-fits, M3.3). Each is one `(grid point × seed × start)` cell under the
-/// factored `profile/point/stage/seed/start` tree.
+/// factored `profile/point/method/seed/start` tree.
 pub fn walk_profile_leaves(root: &Path) -> Vec<Leaf> {
     walk_kind(root, ArtifactKind::ProfilePoint, Bounds::default())
 }

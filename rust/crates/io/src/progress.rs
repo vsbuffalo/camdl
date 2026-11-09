@@ -19,7 +19,7 @@
 //! A multi-chain method reports one more thing (gh#751): **which chains are
 //! actually sampling**. A chain is refused at its start, so how many of the 24
 //! paid for are running is knowable in the first minutes — and before this it
-//! was reported only after the stage finished, in `fit_state.toml` and
+//! was reported only after the method finished, in `fit_state.toml` and
 //! `diagnostics.json`, which on a multi-hour national fit is hours late. The
 //! only signal in the meantime was counting `chain_*/trace.tsv` files with more
 //! than a header, which reads a private layout and still cannot separate a
@@ -34,9 +34,9 @@
 //! artifact + the clock into that judgement once ([`RunLiveness`]).
 //!
 //! That inference only works if a *caught* failure looks different from an
-//! uncaught death, which means every exit a stage can see must write a
+//! uncaught death, which means every exit a method can see must write a
 //! terminal state. [`HeartbeatGuard`] owns the heartbeat for the length of one
-//! stage and does exactly that, so `PresumedDead` keeps meaning what it says.
+//! method and does exactly that, so `PresumedDead` keeps meaning what it says.
 //!
 //! The heartbeat is a **pure observer**: the step loop only stores into a shared
 //! atomic ([`Heartbeat::bump`]); a background thread does the file I/O. It reads
@@ -53,7 +53,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// The artifact filename written into a run's seed/stage directory.
+/// The artifact filename written into a run's seed/method directory.
 pub const PROGRESS_FILE: &str = "progress.json";
 
 /// What kind of work a run is doing — algorithm-agnostic, so every fitting
@@ -124,7 +124,7 @@ pub const CHAIN_NUMBERING: &str =
 ///
 /// A short tag rather than the refusal's prose, because this is what a
 /// dashboard or a `make watch` keys on; the full reason, with the log-posterior
-/// terms and the start vector, is the stage's `diagnostics.json` `bad_init`
+/// terms and the start vector, is the method's `diagnostics.json` `bad_init`
 /// record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -163,17 +163,17 @@ pub struct ChainStatus {
     pub state: ChainState,
 }
 
-/// How many chains of this stage are sampling, finished, or refused — and the
+/// How many chains of this method are sampling, finished, or refused — and the
 /// per-chain rows behind those counts.
 ///
 /// `running + completed` is the number of chains that got past their start;
 /// `total - refused` is not the same thing mid-run, because a chain that has
 /// not started yet is neither good nor bad. Both are recoverable from the four
-/// counts, and none of them is named `n_good_chains`, which is the stage's
+/// counts, and none of them is named `n_good_chains`, which is the method's
 /// FINAL verdict and belongs to `fit_state.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainLiveness {
-    /// Chains this stage was configured to run.
+    /// Chains this method was configured to run.
     pub total: u64,
     pub running: u64,
     pub completed: u64,
@@ -387,7 +387,7 @@ impl Heartbeat {
     /// below `burn_in` sweeps and `Sampling` at/after it. `total` is the total
     /// sweeps/steps. `interval` is a fixed wall-clock period (5–10 s).
     ///
-    /// `n_chains` is the roster the stage was configured to run, which is what
+    /// `n_chains` is the roster the method was configured to run, which is what
     /// makes "1 of 24 sampling" sayable at all — the count has to be known
     /// before any chain reports, or a run whose chains all refused would be
     /// indistinguishable from one that has not started (gh#751). Report each
@@ -465,10 +465,10 @@ impl Drop for Heartbeat {
 
 // ── The terminal-state guard ─────────────────────────────────────────────────
 
-/// What a run records when its stage stopped and nothing said why — a panic,
+/// What a run records when its method stopped and nothing said why — a panic,
 /// or a return that did not route through the runner's failure path.
 ///
-/// Deliberately not a diagnosis. All the guard knows is that the stage body
+/// Deliberately not a diagnosis. All the guard knows is that the method body
 /// exited without reporting, and the honest form of that is a terminal
 /// [`RunState::Failed`] carrying this sentence — not a `Running` counter left
 /// on disk to go stale, which a consumer reads as
@@ -477,7 +477,7 @@ impl Drop for Heartbeat {
 pub const UNREPORTED_FAILURE: &str =
     "the fit stopped without reporting a reason; see the command's output";
 
-/// Owns a [`Heartbeat`] for one stage and makes the stage leave a terminal
+/// Owns a [`Heartbeat`] for one method and makes the method leave a terminal
 /// record however it exits.
 ///
 /// The terminal write used to be a call at the end of one method's happy path,
@@ -486,7 +486,7 @@ pub const UNREPORTED_FAILURE: &str =
 /// That is the SIGKILL signature, so a caught refusal camdl printed a sentence
 /// for looked exactly like a process that died. The guard moves the
 /// responsibility off the exit sites onto one owner: [`done`](Self::done) when
-/// the stage returns, [`failed`](Self::failed) with the error text when it does
+/// the method returns, [`failed`](Self::failed) with the error text when it does
 /// not, and a [`Drop`] that records [`UNREPORTED_FAILURE`] if neither happened.
 ///
 /// The first terminal write wins, so a method that reported its own reason
@@ -504,7 +504,7 @@ pub struct HeartbeatGuard {
 }
 
 impl HeartbeatGuard {
-    /// Take ownership of a heartbeat for the length of one stage.
+    /// Take ownership of a heartbeat for the length of one method.
     pub fn new(hb: Heartbeat) -> HeartbeatGuard {
         HeartbeatGuard { hb: std::sync::Mutex::new(Some(hb)) }
     }
@@ -756,7 +756,7 @@ mod tests {
 
     // ── gh#900: the guard always leaves a terminal record ────────────────
 
-    /// The claim the guard exists for. A stage body that returns without
+    /// The claim the guard exists for. A method body that returns without
     /// reporting — an early `?`, a panic — used to leave the last periodic
     /// `Running` on disk, which a consumer reads as `PresumedDead`: the
     /// judgement reserved for a process that vanished. Dropping the guard
@@ -810,10 +810,10 @@ mod tests {
         );
     }
 
-    /// A clean stage still ends `done`, and the chain block survives the
+    /// A clean method still ends `done`, and the chain block survives the
     /// guard's terminal write exactly as it survives `Heartbeat::finish`.
     #[test]
-    fn a_guard_that_is_told_the_stage_finished_records_done() {
+    fn a_guard_that_is_told_the_method_finished_records_done() {
         let dir = tempfile::tempdir().unwrap();
         {
             let guard = HeartbeatGuard::new(Heartbeat::mcmc(

@@ -1,6 +1,6 @@
 //! Resolve a fit run's canonical posterior parameter draws.
 //!
-//! A Bayesian fit stage (PGAS / PMMH / MH) writes `<stage_dir>/draws.tsv`: the
+//! A Bayesian fit method (PGAS / PMMH / MH) writes `<method_dir>/draws.tsv`: the
 //! post-warm-up, thinned parameter draws, concatenated across chains, carrying
 //! *every* model parameter (estimated columns first, then the fixed values).
 //! That file — not the raw per-chain `trace.tsv`, which now carries warm-up
@@ -9,7 +9,7 @@
 //! silently fold warm-up draws into a "posterior" band.
 //!
 //! Resolution is **by artifact, not by method name** (proposal §"types first"):
-//! a stage has a posterior iff it wrote a `draws.tsv`. An optimizer-only fit
+//! a method has a posterior iff it wrote a `draws.tsv`. An optimizer-only fit
 //! (IF2 / NLopt) wrote none, so it resolves to an error, not a silent single
 //! point dressed up as a distribution.
 
@@ -25,17 +25,17 @@ use crate::KeyedDraw;
 /// resolved fit directory.
 #[derive(Debug, Clone)]
 pub struct PosteriorDrawsRef {
-    /// Bare stage name (`scout`, `refine`, `pgas`) the draws came from.
-    pub stage: String,
-    /// `<stage_dir>/draws.tsv` — the canonical post-warm-up posterior draws.
+    /// Bare method name (`scout`, `refine`, `pgas`) the draws came from.
+    pub name: String,
+    /// `<method_dir>/draws.tsv` — the canonical post-warm-up posterior draws.
     pub draws_path: PathBuf,
-    /// The stage's inference algorithm, when recoverable from the fit view.
-    /// Informational (the band's label); `None` when a stage dir was passed
+    /// The method's inference algorithm, when recoverable from the fit view.
+    /// Informational (the band's label); `None` when a method dir was passed
     /// directly with no fit-level view to read the method from.
     pub method: Option<FitAlgorithm>,
-    /// The simulation backend the stage ran on (`chain_binomial` / `ode`), so a
+    /// The simulation backend the method ran on (`chain_binomial` / `ode`), so a
     /// downstream predictive replays on the SAME forward simulator the fit used
-    /// — not a hardcoded default. `None` when a stage dir was passed directly.
+    /// — not a hardcoded default. `None` when a method dir was passed directly.
     pub backend: Option<InferenceBackend>,
     /// Read-side chain selection (`--exclude-chains`) to apply when the cloud is
     /// loaded — `None` for every consumer that does not surface the flag, so the
@@ -54,16 +54,16 @@ const DRAWS_FILE: &str = "draws.tsv";
 /// scores an optimizer fit at its single winner, `fit table --quantity` renders
 /// `—` — and before this type they took it on *any* error. That turned a
 /// refusal (a leaf whose chain directories count from 1, gh#990) or an
-/// unknown stage name into a silent point-estimate answer. The two cases are
+/// unknown method name into a silent point-estimate answer. The two cases are
 /// distinct values so a caller can fall back on the first and must propagate
 /// the second.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PosteriorDrawsError {
-    /// The fit has no posterior cloud: no stage (or not the named stage)
+    /// The fit has no posterior cloud: no method (or not the named method)
     /// wrote `draws.tsv` — an optimizer fit, or a sampler that has not
     /// finished. The point-estimate fallback is the right answer.
     NoPosterior(String),
-    /// Anything else — not a directory, an unknown stage name, a leaf refused
+    /// Anything else — not a directory, an unknown method name, a leaf refused
     /// for its chain numbering. Never a reason to fall back.
     Other(String),
 }
@@ -84,15 +84,15 @@ impl From<PosteriorDrawsError> for String {
 
 /// [`crate::chain_index::refuse_one_based_layout`], as a resolution failure
 /// that is not "no posterior".
-fn refuse_old_layout(stage_dir: &Path) -> Result<(), PosteriorDrawsError> {
-    crate::chain_index::refuse_one_based_layout(stage_dir).map_err(PosteriorDrawsError::Other)
+fn refuse_old_layout(method_dir: &Path) -> Result<(), PosteriorDrawsError> {
+    crate::chain_index::refuse_one_based_layout(method_dir).map_err(PosteriorDrawsError::Other)
 }
 
 /// Resolve a fit reference to its canonical posterior draws.
 ///
 /// `fit_ref` is a path to a fit results directory — either the segment
 /// (`results/fits/<stem>-<hash>/`) or a single leaf directory. The last leaf
-/// (in label order) that wrote a `draws.tsv` is chosen; `stage` names one
+/// (in label order) that wrote a `draws.tsv` is chosen; `method` names one
 /// leaf by its label instead — an internal selector, used by the readers that
 /// render one leaf's stanza. Errors (never guesses) when the directory holds
 /// no posterior draws or the named leaf has none
@@ -101,7 +101,7 @@ fn refuse_old_layout(stage_dir: &Path) -> Result<(), PosteriorDrawsError> {
 /// ([`PosteriorDrawsError::Other`]).
 pub fn resolve_posterior_draws(
     fit_ref: &str,
-    stage: Option<&str>,
+    method: Option<&str>,
 ) -> Result<PosteriorDrawsRef, PosteriorDrawsError> {
     use PosteriorDrawsError::{NoPosterior, Other};
     let dir = Path::new(fit_ref);
@@ -116,28 +116,28 @@ pub fn resolve_posterior_draws(
     // Segment case: the fit-level view enumerates the method leaves in label
     // order.
     if let Some(view) = FitView::read(dir) {
-        // Stages that actually wrote a posterior cloud — the artifact gate.
-        let with_draws: Vec<&crate::fit::fit_view::FitStageView> = view
-            .stages
+        // Methods that actually wrote a posterior cloud — the artifact gate.
+        let with_draws: Vec<&crate::fit::fit_view::FitMethodView> = view
+            .methods
             .iter()
-            .filter(|s| s.stage_dir.join(DRAWS_FILE).is_file())
+            .filter(|s| s.method_dir.join(DRAWS_FILE).is_file())
             .collect();
 
-        if let Some(want) = stage {
-            let chosen = view.stages.iter().find(|s| s.method.as_str() == want).ok_or_else(|| {
-                let names: Vec<&str> = view.stages.iter().map(|s| s.method.as_str()).collect();
+        if let Some(want) = method {
+            let chosen = view.methods.iter().find(|s| s.method.as_str() == want).ok_or_else(|| {
+                let names: Vec<&str> = view.methods.iter().map(|s| s.method.as_str()).collect();
                 Other(format!(
                     "no method named '{want}' in {fit_ref}\n  available methods: {}",
                     names.join(", ")
                 ))
             })?;
-            let draws_path = chosen.stage_dir.join(DRAWS_FILE);
+            let draws_path = chosen.method_dir.join(DRAWS_FILE);
             if !draws_path.is_file() {
-                return Err(NoPosterior(no_draws_for_stage(want, chosen.method)));
+                return Err(NoPosterior(no_draws_for_method(want, chosen.method)));
             }
-            refuse_old_layout(&chosen.stage_dir)?;
+            refuse_old_layout(&chosen.method_dir)?;
             return Ok(PosteriorDrawsRef {
-                stage: chosen.method.as_str().to_string(),
+                name: chosen.method.as_str().to_string(),
                 draws_path,
                 method: Some(chosen.method),
                 backend: Some(chosen.backend),
@@ -149,10 +149,10 @@ pub fn resolve_posterior_draws(
         // chain directories count from 1 is refused here, before any reader
         // follows a draw's `chain` key into `chain_<key>/` (gh#990).
         let chosen = with_draws.last().ok_or_else(|| NoPosterior(no_posterior_error(fit_ref, &view)))?;
-        let draws_path = chosen.stage_dir.join(DRAWS_FILE);
-        refuse_old_layout(&chosen.stage_dir)?;
+        let draws_path = chosen.method_dir.join(DRAWS_FILE);
+        refuse_old_layout(&chosen.method_dir)?;
         return Ok(PosteriorDrawsRef {
-            stage: chosen.method.as_str().to_string(),
+            name: chosen.method.as_str().to_string(),
             draws_path,
             method: Some(chosen.method),
             backend: Some(chosen.backend),
@@ -166,13 +166,13 @@ pub fn resolve_posterior_draws(
     let draws_path = dir.join(DRAWS_FILE);
     if draws_path.is_file() {
         refuse_old_layout(dir)?;
-        let stage = std::fs::read(dir.join("run.json"))
+        let method = std::fs::read(dir.join("run.json"))
             .ok()
             .and_then(|b| serde_json::from_slice::<runid::RunRecord>(&b).ok())
             .and_then(|r| r.inputs.get("method").and_then(|s| s.as_str()).map(String::from))
             .unwrap_or_default();
         return Ok(PosteriorDrawsRef {
-            stage,
+            name: method,
             draws_path,
             method: None,
             backend: None,
@@ -183,7 +183,7 @@ pub fn resolve_posterior_draws(
     Err(NoPosterior(format!(
         "no posterior draws under {fit_ref}\n  \
          expected a Bayesian fit (PGAS / PMMH / MH) that wrote {DRAWS_FILE}; \
-         found no fit stages there"
+         found no fit methods there"
     )))
 }
 
@@ -225,53 +225,53 @@ impl PosteriorDrawsRef {
     }
 }
 
-/// The "this stage has no `draws.tsv`" error, framed by the stage's method
+/// The "this method has no `draws.tsv`" error, framed by the leaf's algorithm
 /// (gh#343). A Bayesian sampler (PGAS / PMMH / MH) writes its cloud at
-/// completion, so a missing file means the stage is incomplete or still running
+/// completion, so a missing file means the method is incomplete or still running
 /// — not an optimizer. An optimizer (IF2 / NLopt) never has a band.
-fn no_draws_for_stage(stage: &str, method: FitAlgorithm) -> String {
+fn no_draws_for_method(name: &str, method: FitAlgorithm) -> String {
     let label = fit_algorithm_label(method);
     if method.is_posterior_sampler() {
         format!(
-            "stage '{stage}' ({label}) has not written its posterior draws \
+            "method '{name}' ({label}) has not written its posterior draws \
              ({DRAWS_FILE}) yet — it is a Bayesian sampler whose cloud is written at \
-             completion, so the stage is likely incomplete or still running."
+             completion, so the method is likely incomplete or still running."
         )
     } else {
         format!(
-            "stage '{stage}' produced no posterior draws ({DRAWS_FILE}).\n  \
-             {label} is an optimizer stage: it returns a single best-fit point, \
+            "method '{name}' produced no posterior draws ({DRAWS_FILE}).\n  \
+             {label} is an optimizer method: it returns a single best-fit point, \
              not a distribution."
         )
     }
 }
 
 /// Build the actionable "no posterior cloud here" error, framed by the terminal
-/// stage's method. A terminal Bayesian sampler with no `draws.tsv` is incomplete
+/// leaf's algorithm. A terminal Bayesian sampler with no `draws.tsv` is incomplete
 /// / still running — never an "optimizer fit" (gh#343); only a genuine optimizer
 /// is redirected to the plug-in-simulate workflow.
 fn no_posterior_error(fit_ref: &str, view: &FitView) -> String {
     let methods: Vec<String> = view
-        .stages
+        .methods
         .iter()
         .map(|s| format!("{} ({})", s.method.as_str(), fit_algorithm_label(s.method)))
         .collect();
-    if let Some(term) = view.stages.last().filter(|s| s.method.is_posterior_sampler()) {
+    if let Some(term) = view.methods.last().filter(|s| s.method.is_posterior_sampler()) {
         let label = fit_algorithm_label(term.method);
         return format!(
-            "no {DRAWS_FILE} under {fit_ref}: the terminal Bayesian stage '{}' \
+            "no {DRAWS_FILE} under {fit_ref}: the terminal Bayesian method '{}' \
              ({label}) has not written its posterior draws cloud.\n  \
-             stages found: {}\n  \
-             {DRAWS_FILE} is written at stage completion — if the fit is still \
+             methods found: {}\n  \
+             {DRAWS_FILE} is written at method completion — if the fit is still \
              running or was interrupted, let it finish (or re-run it); a completed \
-             {label} stage has a full posterior cloud to band.",
+             {label} method has a full posterior cloud to band.",
             term.method.as_str(),
             methods.join(", "),
         );
     }
     format!(
-        "no stage in {fit_ref} produced a posterior draws cloud ({DRAWS_FILE}).\n  \
-         stages found: {}\n  \
+        "no method in {fit_ref} produced a posterior draws cloud ({DRAWS_FILE}).\n  \
+         methods found: {}\n  \
          An optimizer fit (IF2 / NLopt) returns a single best-fit parameter set, \
          not a distribution, so there is no band to draw. Get those parameters with\n    \
          camdl fit summary {fit_ref} --params-only\n  \
@@ -337,22 +337,22 @@ mod tests {
     /// shape the runner writes: `<seg>/<label>-<h8>/seed_1-<h8>/run.json`.
     /// Returns the leaf dir (where `draws.tsv` would live). `method` is the
     /// inference algorithm tag; `draws` writes a `draws.tsv` iff `Some`.
-    fn write_stage_leaf(
+    fn write_method_leaf(
         seg: &Path,
-        stage_label: &str,
+        method_label: &str,
         method: &str,
         draws: Option<&str>,
     ) -> PathBuf {
-        let leaf = seg.join(format!("{stage_label}-1fb03eee")).join("seed_1-06cbd6b3");
+        let leaf = seg.join(format!("{method_label}-1fb03eee")).join("seed_1-06cbd6b3");
         fs::create_dir_all(&leaf).unwrap();
         let fit_hash = "abc12345".to_string() + &"0".repeat(56);
         // run_id must be valid 64-char hex (ContentHash rejects non-hex), and
         // unique per leaf — derive it from the label's bytes.
-        let ord_hex: String = stage_label.bytes().map(|b| format!("{b:02x}")).collect();
+        let ord_hex: String = method_label.bytes().map(|b| format!("{b:02x}")).collect();
         let run_id = format!("{:0<64}", format!("{ord_hex}abcdef"));
         let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"toy","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{stage_label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":-12.3,"best_chain":1}},"provenance":{{"created_at":"2026-06-22T00:00:0{ord}Z","argv":["camdl","fit","run"]}}}}"#,
-            ord = stage_label.len() % 10,
+            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"toy","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{method_label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":-12.3,"best_chain":1}},"provenance":{{"created_at":"2026-06-22T00:00:0{ord}Z","argv":["camdl","fit","run"]}}}}"#,
+            ord = method_label.len() % 10,
         );
         fs::write(leaf.join("run.json"), rec).unwrap();
         if let Some(content) = draws {
@@ -364,11 +364,11 @@ mod tests {
     /// A well-formed segment (with the required sidecar) holding the given
     /// method leaves. Each entry is `(leaf_label, method, draws?)` — the label
     /// and the method are the same string on every leaf the runner writes.
-    fn fixture_segment(root: &Path, stages: &[(&str, &str, Option<&str>)]) -> PathBuf {
+    fn fixture_segment(root: &Path, methods: &[(&str, &str, Option<&str>)]) -> PathBuf {
         let seg = root.join("fits").join("toy-abc12345");
         fs::create_dir_all(&seg).unwrap();
-        for (label, method, draws) in stages {
-            write_stage_leaf(&seg, label, method, *draws);
+        for (label, method, draws) in methods {
+            write_method_leaf(&seg, label, method, *draws);
         }
         // Sidecar with non-empty resolved_priors so a Bayesian segment is
         // treated as well-formed (FitView flags empty priors as a bug).
@@ -388,7 +388,7 @@ mod tests {
     const TWO_DRAWS: &str = "beta\tgamma\n0.5\t0.1\n0.6\t0.12\n";
 
     #[test]
-    fn resolves_terminal_stage_draws() {
+    fn resolves_terminal_method_draws() {
         let tmp = crate::test_support::unique_temp_dir("pdraws_ok");
         // An IF2 leaf (no draws) beside a PGAS leaf (draws) — two methods of
         // one problem: the leaf with a cloud wins.
@@ -397,7 +397,7 @@ mod tests {
             ("pgas", "pgas", Some(TWO_DRAWS)),
         ]);
         let r = resolve_posterior_draws(seg.to_str().unwrap(), None).expect("resolves");
-        assert_eq!(r.stage, "pgas");
+        assert_eq!(r.name, "pgas");
         assert_eq!(r.method, Some(FitAlgorithm::Pgas));
         assert!(r.draws_path.ends_with(DRAWS_FILE));
         assert!(r.draws_path.is_file());
@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn errors_when_no_stage_has_draws() {
+    fn errors_when_no_method_has_draws() {
         let tmp = crate::test_support::unique_temp_dir("pdraws_none");
         // An optimizer-only fit: no posterior cloud anywhere.
         let seg = fixture_segment(&tmp, &[
@@ -415,29 +415,29 @@ mod tests {
         let err = resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap_err();
         assert!(matches!(err, PosteriorDrawsError::NoPosterior(_)), "{err:?}");
         let err = err.to_string();
-        assert!(err.contains("no stage"), "actionable error, got: {err}");
+        assert!(err.contains("no method"), "actionable error, got: {err}");
         assert!(err.contains("--params-only"), "points to the optimizer workflow: {err}");
         fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
-    fn stage_override_selects_named_stage() {
-        let tmp = crate::test_support::unique_temp_dir("pdraws_stagepick");
+    fn method_override_selects_named_method() {
+        let tmp = crate::test_support::unique_temp_dir("pdraws_methodpick");
         let seg = fixture_segment(&tmp, &[
             ("pgas",  "pgas", Some("beta\n0.1\n")),
             ("pmmh",  "pmmh", Some(TWO_DRAWS)),
         ]);
         // Without a selector, the last leaf in label order (pmmh) wins...
-        assert_eq!(resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap().stage, "pmmh");
+        assert_eq!(resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap().name, "pmmh");
         // ...with the selector naming pgas, that leaf is chosen.
         let r = resolve_posterior_draws(seg.to_str().unwrap(), Some("pgas")).unwrap();
-        assert_eq!(r.stage, "pgas");
+        assert_eq!(r.name, "pgas");
         assert_eq!(r.method, Some(FitAlgorithm::Pgas));
         fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
-    fn errors_when_named_stage_has_no_draws() {
+    fn errors_when_named_method_has_no_draws() {
         let tmp = crate::test_support::unique_temp_dir("pdraws_namednone");
         let seg = fixture_segment(&tmp, &[
             ("if2",  "if2",  None),
@@ -451,30 +451,30 @@ mod tests {
     }
 
     #[test]
-    fn pgas_stage_without_draws_is_not_called_an_optimizer() {
-        // gh#343: a Bayesian sampler stage (pgas) that has not written draws.tsv
+    fn pgas_method_without_draws_is_not_called_an_optimizer() {
+        // gh#343: a Bayesian sampler method (pgas) that has not written draws.tsv
         // — incomplete or still running — must NOT be framed as an optimizer fit,
-        // on either the default (terminal-stage) or the --stage-named path.
+        // on either the default (last leaf) or the name-selected path.
         let tmp = crate::test_support::unique_temp_dir("pdraws_pgas_nodraws");
         let seg = fixture_segment(&tmp, &[("pgas", "pgas", None)]);
 
         let err = resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap_err();
         assert!(matches!(err, PosteriorDrawsError::NoPosterior(_)), "{err:?}");
         let err = err.to_string();
-        assert!(!err.contains("optimizer"), "a pgas stage is not an optimizer: {err}");
+        assert!(!err.contains("optimizer"), "a pgas method is not an optimizer: {err}");
         assert!(err.contains(DRAWS_FILE), "names the missing posterior draws: {err}");
 
         let err2 = resolve_posterior_draws(seg.to_str().unwrap(), Some("pgas")).unwrap_err();
         assert!(matches!(err2, PosteriorDrawsError::NoPosterior(_)), "{err2:?}");
         let err2 = err2.to_string();
-        assert!(!err2.contains("optimizer"), "named pgas stage is not an optimizer: {err2}");
-        assert!(err2.contains(DRAWS_FILE), "named stage names the missing draws: {err2}");
+        assert!(!err2.contains("optimizer"), "named pgas method is not an optimizer: {err2}");
+        assert!(err2.contains(DRAWS_FILE), "named method names the missing draws: {err2}");
         fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
-    fn errors_on_unknown_stage_name() {
-        let tmp = crate::test_support::unique_temp_dir("pdraws_badstage");
+    fn errors_on_unknown_method_name() {
+        let tmp = crate::test_support::unique_temp_dir("pdraws_badmethod");
         let seg = fixture_segment(&tmp, &[("pgas", "pgas", Some(TWO_DRAWS))]);
         let err = resolve_posterior_draws(seg.to_str().unwrap(), Some("nope")).unwrap_err();
         assert!(matches!(err, PosteriorDrawsError::Other(_)), "an unknown name is not 'no posterior': {err:?}");
@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn resolves_dir_with_draws_directly() {
         // A bare directory holding a draws.tsv (no fit view) resolves via the
-        // fallback — for power users who point at a stage dir directly.
+        // fallback — for power users who point at a method dir directly.
         let tmp = crate::test_support::unique_temp_dir("pdraws_direct");
         fs::create_dir_all(&tmp).unwrap();
         fs::write(tmp.join(DRAWS_FILE), TWO_DRAWS).unwrap();

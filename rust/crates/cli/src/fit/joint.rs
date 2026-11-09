@@ -8,7 +8,7 @@
 //! the parameter posterior.
 //!
 //! Both resolvers take the [`PosteriorDrawsRef`] — the draws authority — rather
-//! than a `(fit_ref, stage)` pair, and read the cloud through
+//! than a `(fit_ref, method)` pair, and read the cloud through
 //! [`PosteriorDrawsRef::load_keyed_with_info`]. That is what makes a read-side
 //! chain selection (`--exclude-chains`) reach the joint: the filter is applied
 //! once, where the ref carries it, so a `(θ, X)` consumer cannot band over a
@@ -136,13 +136,13 @@ pub fn classify_joint(
 /// belonging to a dropped chain has no retained draw to match.
 pub fn resolve_joint(pref: &PosteriorDrawsRef) -> Result<JointEnsemble, String> {
     let (keyed, sel_info) = pref.load_keyed_with_info()?;
-    let stage_dir = pref
+    let method_dir = pref
         .draws_path
         .parent()
         .ok_or_else(|| format!("draws path has no parent: {}", pref.draws_path.display()))?;
 
     let is_ode = pref.backend == Some(InferenceBackend::Ode);
-    let traj_keys = if is_ode { BTreeSet::new() } else { trajectory_keys(stage_dir) };
+    let traj_keys = if is_ode { BTreeSet::new() } else { trajectory_keys(method_dir) };
     Ok(classify_joint(keyed, &traj_keys, is_ode, sel_info))
 }
 
@@ -183,10 +183,10 @@ pub struct ForecastEnsemble {
     /// All posterior draws (the parameter-posterior size) — the denominator the
     /// forkable subset must be reported against.
     pub n_total: usize,
-    /// Provenance for the run's report: which stage's cloud this is, and the
+    /// Provenance for the run's report: which method's cloud this is, and the
     /// `draws.tsv` it was read from. The unpaired `--draws posterior` path
     /// prints the same two, so a user can tell the clouds apart in a log.
-    pub stage: String,
+    pub name: String,
     pub draws_path: std::path::PathBuf,
 }
 
@@ -227,7 +227,7 @@ pub fn resolve_forecast_ensemble(
         );
     }
     let (keyed, sel_info) = pref.load_keyed_with_info()?;
-    let stage_dir = pref
+    let method_dir = pref
         .draws_path
         .parent()
         .ok_or_else(|| format!("draws path has no parent: {}", pref.draws_path.display()))?;
@@ -238,7 +238,7 @@ pub fn resolve_forecast_ensemble(
     // can never disagree.
     let mut terminal: HashMap<(usize, usize), io::trajectories::TerminalState> = HashMap::new();
     let mut chain_files: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(stage_dir) {
+    if let Ok(entries) = std::fs::read_dir(method_dir) {
         for e in entries.flatten() {
             let traj = e.path().join("trajectories.tsv");
             if traj.is_file() {
@@ -295,12 +295,12 @@ pub fn resolve_forecast_ensemble(
         origin_t: origin.map(|(t, _, _)| t).unwrap_or(f64::NAN),
         draws,
         n_total,
-        stage: pref.stage.clone(),
+        name: pref.name.clone(),
         draws_path: pref.draws_path.clone(),
     })
 }
 
-/// Collect every `(chain, draw)` key from the stage's `chain_*/trajectories.tsv`
+/// Collect every `(chain, draw)` key from the method's `chain_*/trajectories.tsv`
 /// files. Skips the leading `# camdl-trajectories …` comment line and dedups
 /// the per-snapshot rows to one key per saved draw.
 ///
@@ -308,9 +308,9 @@ pub fn resolve_forecast_ensemble(
 /// [`classify_joint`] and the `quantities/` conditioned read (gh#722) both fold
 /// through it, so the forkable count a command reports and the paths it can
 /// actually open cannot disagree.
-pub(crate) fn trajectory_keys(stage_dir: &Path) -> BTreeSet<(usize, usize)> {
+pub(crate) fn trajectory_keys(method_dir: &Path) -> BTreeSet<(usize, usize)> {
     let mut keys = BTreeSet::new();
-    let Ok(entries) = std::fs::read_dir(stage_dir) else {
+    let Ok(entries) = std::fs::read_dir(method_dir) else {
         return keys;
     };
     for e in entries.flatten() {

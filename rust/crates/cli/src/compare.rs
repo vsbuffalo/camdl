@@ -1,7 +1,7 @@
 //! `camdl compare` — multi-model prequential comparison table.
 //!
 //! Consumes `prequential.json` artifacts written by `fit run` (PFilter
-//! stage) or `camdl pfilter --save-prequential`. Computes Δelpd / Δcrps
+//! method) or `camdl pfilter --save-prequential`. Computes Δelpd / Δcrps
 //! with paired pointwise SEs, refuses structurally unfair comparisons
 //! (T_score mismatch by default), renders as table / markdown / JSON.
 //!
@@ -862,7 +862,7 @@ fn write_pointwise(rows: &[Row], base_idx: usize, path: &Path) -> Result<usize, 
 ///
 /// 1. **Explicit prequential** (kept, tried first): a `.json` file that exists,
 ///    or a directory holding `prequential.json` — read+parsed as-is. Preserves
-///    `pfilter --save-prequential` and stage-dir inputs; the derive settings do
+///    `pfilter --save-prequential` and method-dir inputs; the derive settings do
 ///    not touch it.
 /// 2. **Fit handle** (Phase 2a): `@label` / hash prefix / run dir / `fit.toml`.
 ///    The prequential is DERIVED by invoking the canonical `camdl pfilter` at
@@ -1048,7 +1048,7 @@ fn try_load_explicit_prequential(path: &str) -> Result<Option<PrequentialTrace>,
 /// production filter + obs-model assembly rather than rebuilding it, so a
 /// derived trace can never silently diverge from a hand-run `pfilter`.
 ///
-/// Steps: (a) θ̂ from the winning stage as a flat params TOML; (b) the model
+/// Steps: (a) θ̂ from the winning method as a flat params TOML; (b) the model
 /// (archived IR if present, else the loose source the config names); (c) the
 /// fit's data streams as `--data NAME=PATH`; (d) run `pfilter
 /// --save-prequential` to a temp stem; (e) read back the `{stem}.json` trace.
@@ -1071,7 +1071,7 @@ fn derive_prequential(
     // be it (gh#896).
     let backend = match &resolved.leaf {
         Some(leaf) => crate::fit::fit_view::FitView::read(leaf)
-            .and_then(|v| v.stages.first().map(|s| s.backend)),
+            .and_then(|v| v.methods.first().map(|s| s.backend)),
         None => resolved.config.inference.method.as_ref().map(|m| m.algorithm.backend()),
     };
     if let Some(backend) = backend {
@@ -1674,7 +1674,7 @@ fn parse_cohort_exclude(
 }
 
 /// θ̂ for the prequential as a flat params TOML, routed through the draws-cloud
-/// authority. A Bayesian fit (its terminal stage wrote a `draws.tsv`) plugs in
+/// authority. A Bayesian fit (its terminal method wrote a `draws.tsv`) plugs in
 /// the posterior MEAN over the cloud; an optimizer fit (no cloud) plugs in its
 /// winner file (`final_params.toml`, via `winner_params_toml`). This is the
 /// "resolve by artifact, not by method name" rule — the headline `compare
@@ -2962,7 +2962,7 @@ mod tests {
         std::fs::write(&draws_path, s).unwrap();
 
         let pref = PosteriorDrawsRef {
-            stage: "pgas".into(),
+            name: "pgas".into(),
             draws_path,
             method: None,
             backend: None,

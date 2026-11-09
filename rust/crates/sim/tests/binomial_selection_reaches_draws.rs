@@ -1,6 +1,6 @@
 //! The selected binomial sampler must reach the draws — every one of them.
 //!
-//! The `binomial` knob travels **on the RNG** from the typed stage field to
+//! The `binomial` knob travels **on the RNG** from the typed method field to
 //! every draw site (proposal `2026-08-24-faster-binomial-sampler.md` §1). The
 //! draws happen on rayon workers inside nested `par_iter`s, where a
 //! thread-local set by the configuring thread is invisible — measured at 0 of

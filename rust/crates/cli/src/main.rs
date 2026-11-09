@@ -157,7 +157,7 @@ pub(crate) enum Command {
     /// Standalone bootstrap particle filter at fixed parameters
     Pfilter(args::PfilterArgs),
 
-    /// (removed) IF2 is now a one-stage fit — see `camdl fit run`
+    /// (removed) IF2 is now a one-method fit — see `camdl fit run`
     ///
     /// Hidden from the command list: kept only so `camdl if2` / `camdl mif2`
     /// print an actionable migration message instead of a bare clap error.
@@ -705,11 +705,11 @@ fn resolve_paired_posterior(
         eprintln!(
             "error: --init-state fit: {fit_ref} has no forkable posterior draws \
              (0/{} carry a saved latent path). The paired (θ_i, X_i(T)) origin comes \
-             from the smoothed latent paths a PGAS stage writes to \
-             <stage>/chain_*/trajectories.tsv; PMMH and particle-filter stages write \
-             none, and a stage run with `n_trajectories = 0` writes none either.\n  \
+             from the smoothed latent paths a PGAS method writes to \
+             <method>/chain_*/trajectories.tsv; PMMH and particle-filter methods write \
+             none, and a method run with `n_trajectories = 0` writes none either.\n  \
              Refusing rather than starting from `init {{}}`: that would look like a \
-             forecast and be a free-forward replay.\n  Fix: re-fit with a PGAS stage \
+             forecast and be a free-forward replay.\n  Fix: re-fit with a PGAS method \
              (or raise `n_trajectories`), or forecast at a single θ with \
              `camdl pfilter --save-final-state` + `--init-state <file>`.",
             ens.n_total,
@@ -729,7 +729,7 @@ fn resolve_paired_posterior(
         } else {
             String::new()
         },
-        ens.stage,
+        ens.name,
         ens.draws_path.display(),
     );
 
@@ -1813,7 +1813,7 @@ fn run_simulate(a: &args::SimulateArgs) {
             }
         } else if source == "posterior" {
             // Resolve the fit run's canonical post-warm-up draws cloud (the
-            // terminal Bayesian stage's draws.tsv). --fit names the fit results
+            // terminal Bayesian method's draws.tsv). --fit names the fit results
             // directory here, not a config TOML.
             let fit_handle = fit_path_for_draws.as_ref().unwrap_or_else(|| {
                 eprintln!("error: --draws posterior requires --fit <fit results dir> \
@@ -1905,7 +1905,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 loaded
             };
             eprintln!("draws: posterior — {} draws from {} method '{}' ({})",
-                loaded.len(), method_label, resolved.stage, resolved.draws_path.display());
+                loaded.len(), method_label, resolved.name, resolved.draws_path.display());
             loaded
             }
         } else {

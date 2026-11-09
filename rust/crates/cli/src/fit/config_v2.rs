@@ -456,7 +456,7 @@ pub struct SyntheticSpec {
 
     /// Forward-simulation backend used to GENERATE the synthetic datasets
     /// (`chain_binomial` | `gillespie` | `ode`). This is a property of data
-    /// generation, not of fitting — fit stages declare their own backends.
+    /// generation, not of fitting — fit methods declare their own backends.
     /// Relocated from `[config].backend` (gh#241): the backend only ever fed
     /// synthetic generation, so it belongs in the block that owns generation.
     #[serde(default = "default_backend")]
@@ -591,7 +591,7 @@ pub struct EstimateSpecV2 {
     /// gh#75: an explicit flat-prior opt-in is also recognized:
     ///   `prior = { flat = {} }`
     /// The flat variant is *only* meaningful in fit tomls — there is
-    /// no DSL `~ flat(...)` syntax. Honored by Bayesian stages as
+    /// no DSL `~ flat(...)` syntax. Honored by Bayesian methods as
     /// the "I want flat priors here, on purpose" declaration. The
     /// runner emits provenance `flat_explicit` for each such param.
     ///
@@ -993,7 +993,7 @@ pub enum Algorithm {
         #[serde(default)]
         gate: GateConfig,
         /// Post-fit Richardson dt-convergence check at θ̂ (gh#52).
-        /// Auto-runs at end-of-final-stage; halving-ladder pfilter
+        /// Auto-runs at end-of-final-method; halving-ladder pfilter
         /// eval that warns when the MLE is discretization-dependent.
         /// Defaults to `enabled = true`. Set `enabled = false` on
         /// scout / smoke fits where the check is unnecessary.
@@ -1012,7 +1012,7 @@ pub enum Algorithm {
         ///
         /// Selecting `btrs` CHANGES DRAWS — a different rejection scheme
         /// accepts different values from the same stream — so this field is
-        /// deliberately part of the stage's identity. `identity_payload` is
+        /// deliberately part of the method's identity. `identity_payload` is
         /// subtractive, so it is hashed by being here; two runs differing only
         /// in this field get different addresses and cannot be served from one
         /// another's leaf. That is why it is a typed field and not an
@@ -1022,10 +1022,10 @@ pub enum Algorithm {
         /// `serde(default)` is load-bearing: without it every existing
         /// `fit.toml` that predates this field fails to deserialize.
         ///
-        /// `skip_serializing_if` keeps a `btpe` stage's payload BYTE-IDENTICAL
+        /// `skip_serializing_if` keeps a `btpe` method's payload BYTE-IDENTICAL
         /// to what it was before this field existed, so adding the field
         /// orphans no stored leaf and breaks no in-flight `--resume`. Only a
-        /// `btrs` stage serialises it, and so only a `btrs` stage gets a new
+        /// `btrs` method serialises it, and so only a `btrs` method gets a new
         /// address — which is the only place the guarantee is needed.
         ///
         /// The predicate tests `== Btpe`, NOT `== default()`, and the
@@ -1075,7 +1075,7 @@ pub enum Algorithm {
         /// particle Gibbs without AS (Andrieu, Doucet & Holenstein 2010) — a
         /// valid kernel used as a diagnostic control: it measures what AS
         /// contributes to trajectory renewal, and what its density pass costs.
-        /// Spelled `ancestor_sampling = false` in the stage TOML or
+        /// Spelled `ancestor_sampling = false` in the `[method]` table or
         /// `--no-ancestor-sampling` on the CLI. Default: true.
         ///
         /// Identity: disabling AS changes the sampled draws, so `false` must
@@ -1155,7 +1155,7 @@ pub enum Algorithm {
         /// Same schema as `Algorithm::IF2::dt_check`. Identity-defining: the
         /// result is stored in `fit_state.toml.dt_check` (gh#726 — this
         /// field's addition is what made the CLI dt-check flags keyable
-        /// on mh stages).
+        /// on mh methods).
         #[serde(default)]
         dt_check: DtCheckConfig,
     },
@@ -1175,7 +1175,7 @@ pub enum Algorithm {
         /// Record per-step predictive samples + log-likelihoods for
         /// `camdl compare`'s prequential scoring (log score, CRPS, PIT).
         /// Roughly N × T f64 per step; cheap relative to the filter
-        /// itself. **On by default** — the post-fit PFilter stage is
+        /// itself. **On by default** — the post-fit PFilter method is
         /// where prequential is needed and the proposal calls for
         /// it as a first-class output. Set `false` to skip the trace
         /// write (e.g. when running PFilter purely for a loglik SD).
@@ -1187,13 +1187,13 @@ pub enum Algorithm {
     /// ODE-skeleton likelihood. Default for ODE-backend MLE; robust to
     /// boundary non-smoothness. Phase 1 of the ODE-inference proposal.
     #[serde(rename = "nl-sbplx")]
-    NlSbplx(NloptStageConfig),
+    NlSbplx(NloptConfig),
 
     /// NLopt BOBYQA — quadratic-trust-region MLE on the ODE-skeleton
     /// likelihood. Faster than Sbplx on smooth interior objectives but
     /// fails at parameter-bound boundaries.
     #[serde(rename = "nl-bobyqa")]
-    NlBobyqa(NloptStageConfig),
+    NlBobyqa(NloptConfig),
 
     /// NLopt L-BFGS — the gradient deterministic MLE on the ODE-skeleton
     /// likelihood. Its objective supplies `∇_θ log p(y | θ, ODE)` from the
@@ -1202,15 +1202,15 @@ pub enum Algorithm {
     /// capability gate refuses the rest at config-validation time, naming
     /// `nl-sbplx` as the derivative-free alternative.
     #[serde(rename = "nl-lbfgs")]
-    NlLbfgs(NloptStageConfig),
+    NlLbfgs(NloptConfig),
 }
 
-/// Shared config for the three NLopt deterministic MLE stages
+/// Shared config for the three NLopt deterministic MLE methods
 /// (`nl-sbplx`, `nl-bobyqa`, `nl-lbfgs`). All three read identical knobs;
 /// the variant tag picks which NLopt algorithm runs.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct NloptStageConfig {
+pub struct NloptConfig {
     pub backend: crate::run_meta::InferenceBackend,
     /// Number of starting points, each run as an independent NLopt
     /// optimization to convergence; best-loglik chain wins. Sbplx/BOBYQA are
@@ -1223,7 +1223,7 @@ pub struct NloptStageConfig {
     /// xtol-reached signal can lie there (every neighbouring point also
     /// -inf); such a chain reports a `-inf` log-likelihood and loses the
     /// winner comparison to any finite chain, and when every chain lands
-    /// there the stage refuses (gh#916). For such models, narrow the bounds.
+    /// there the method refuses (gh#916). For such models, narrow the bounds.
     pub chains: usize,
     /// `xtol_rel` passed to NLopt. Optimizer stops when relative
     /// parameter change between iterations falls below this.
@@ -1386,14 +1386,14 @@ impl Method {
     /// middle of a different schedule is statistically incoherent.
     /// PFilter is single-pass; nothing to extend.
     ///
-    /// Returned as `serde_json::Value` for `cas::stage_config_hash` to digest;
+    /// Returned as `serde_json::Value` for `cas::method_config_hash` to digest;
     /// stable across recompiles because `serde_json` sorts object keys
     /// lexically when serializing maps.
     pub fn identity_payload(&self) -> serde_json::Value {
         // SUBTRACTIVE, not enumerated: serialize the whole method and remove
         // only the keys that must not be hashed. The four sampler arms used
         // to LIST their included fields and destructure the rest with `..`,
-        // which made stage identity exclude-by-default — a field added to a
+        // which made method identity exclude-by-default — a field added to a
         // variant but forgotten here was silently absent from the key, and
         // two fits differing only in it collided. That is the shape behind
         // gh#514, gh#540 and the 2026-08-23 batch; the invariant even lived
@@ -1416,7 +1416,7 @@ impl Method {
         // method's own serialization; the enumerated arms used the Rust field
         // names, so those two spellings disagreed across variants. `starts`
         // is always concrete here: `resolve_starts` runs before any identity
-        // is taken, and `stage_config_hash` refuses an unresolved method.
+        // is taken, and `method_config_hash` refuses an unresolved method.
         //
         // `starts` is hashed by [`ChainStarts::identity_value`]: a sourced
         // rule by its kind, its source through `deps` (gh#896).
@@ -1445,7 +1445,7 @@ impl Method {
         // The shared subtraction (`fit::cas::serialize_minus`), not a third
         // copy of it. Infallible here by the same fallback this always had:
         // `identity_payload` returns a `Value`, and a method that cannot
-        // serialize is caught by `stage_config_hash`'s gate, which runs on the
+        // serialize is caught by `method_config_hash`'s gate, which runs on the
         // method itself.
         super::cas::serialize_minus(self, exclude).unwrap_or_else(|_| serde_json::json!({}))
     }
@@ -1519,7 +1519,7 @@ impl Algorithm {
         }
     }
 
-    /// Simulation backend the stage runs on. The (algorithm, backend)
+    /// Simulation backend the method runs on. The (algorithm, backend)
     /// pair is set by the user in fit.toml and validated against
     /// `methods::METHODS`; this accessor returns whichever backend was
     /// declared so dispatch and provenance can branch on it.
@@ -1549,11 +1549,11 @@ impl Algorithm {
         }
     }
 
-    /// gh#147 (M3.2). The stage's *extension dimension* (the field
+    /// gh#147 (M3.2). The method's *extension dimension* (the field
     /// `identity_payload` omits so `--resume` can extend a chain): PGAS
     /// `sweeps`, IF2/PMMH `iterations`. A resumed run is a distinct artifact
-    /// keyed on this value, so the CAS stage level folds it in. Single-pass
-    /// stages (PFilter) and the NLopt MLE stages (whose `max_evals` is a
+    /// keyed on this value, so the CAS method level folds it in. Single-pass
+    /// methods (PFilter) and the NLopt MLE methods (whose `max_evals` is a
     /// budget already in `identity_payload`, not an extension) report 0.
     pub fn cas_target_length(&self) -> u64 {
         match self {
@@ -1570,7 +1570,7 @@ impl Algorithm {
 
     /// The number of posterior trajectory samples saved to disk (PGAS only;
     /// default 200). An output-shaping knob that `identity_payload` otherwise
-    /// omits, but it is folded into the stage identity (count-in-the-key):
+    /// omits, but it is folded into the method identity (count-in-the-key):
     /// because it changes stored output, changing it yields a distinct leaf
     /// rather than silently reusing the wrong trajectory count, at the cost of
     /// re-fitting when it changes.
@@ -1602,7 +1602,7 @@ impl Algorithm {
     /// a flag that only means something beside another setting (`--adapt-start`
     /// needs adaptation on; `--max-tree-depth` needs NUTS) is refused when the
     /// overrides leave that setting off.
-    pub fn apply_cli_overrides(&mut self, cli: &CliStageOverrides) -> Result<(), String> {
+    pub fn apply_cli_overrides(&mut self, cli: &CliMethodOverrides) -> Result<(), String> {
         let method = self.method_kind();
         for flag in cli.passed() {
             if !flag.methods().contains(&method) {
@@ -1618,14 +1618,14 @@ impl Algorithm {
     /// these arms exactly — a test runs every flag on every method through
     /// this function and checks that it moves the method iff the table lists
     /// it.
-    fn write_cli_overrides(&mut self, cli: &CliStageOverrides) -> Result<(), String> {
+    fn write_cli_overrides(&mut self, cli: &CliMethodOverrides) -> Result<(), String> {
         // ── Sampler and output overrides (gh#540) ──
-        // Each of these used to be written into the `*StageOpts` struct at the
+        // Each of these used to be written into the `*MethodOpts` struct at the
         // dispatch site, AFTER the identity was taken from this one — so a run
         // differing only in `--n-trajectories` or `--no-nuts` shared a `run_id`
         // with the previous run and was served its result. Writing them here
         // means the identity sees them, and the dispatch site has nothing left
-        // to override: `*StageOpts::from_stage` reads what is written below.
+        // to override: `*MethodOpts::from_algorithm` reads what is written below.
         match self {
             Algorithm::PGAS {
                 max_tree_depth, trajectory_warmup,
@@ -1638,8 +1638,8 @@ impl Algorithm {
                 if let Some(n) = cli.n_trajectories { *n_trajectories = n; }
                 if cli.diagonal_mass { *dense_mass = false; }
                 if cli.no_nuts { *use_nuts = false; }
-                // gh#747: resolved INTO the stage, so the flag is keyed into
-                // the stage's identity rather than acting as an untracked
+                // gh#747: resolved INTO the method, so the flag is keyed into
+                // the method's identity rather than acting as an untracked
                 // side channel. Two runs differing only here get different
                 // addresses.
                 if let Some(b) = cli.binomial { *binomial = b; }
@@ -1694,7 +1694,7 @@ impl Algorithm {
     /// The second half of the refusal: a flag the method reads, but which the
     /// method's settings — after the overrides above — leave with nothing to
     /// do. Each would otherwise run, re-key and change nothing.
-    fn refuse_inert_cli_overrides(&self, cli: &CliStageOverrides) -> Result<(), String> {
+    fn refuse_inert_cli_overrides(&self, cli: &CliMethodOverrides) -> Result<(), String> {
         let method = self.method_name();
         let inert = |flag: &str, why: &str| -> Result<(), String> {
             Err(format!("{flag} has no effect on this `{method}` method: {why}. Drop the flag."))
@@ -1740,12 +1740,12 @@ impl Algorithm {
 }
 
 /// One `fit run` flag that writes into the method, i.e. one field of
-/// [`CliStageOverrides`].
+/// [`CliMethodOverrides`].
 ///
 /// The point is the table in [`OverrideFlag::methods`]: which methods read the
 /// flag. A flag passed to any other method is refused by
 /// [`Algorithm::apply_cli_overrides`], so no explicit option is ever silently
-/// dropped. [`CliStageOverrides::passed`] destructures the struct without `..`,
+/// dropped. [`CliMethodOverrides::passed`] destructures the struct without `..`,
 /// so a field added there does not compile until it names its flag here, and
 /// the match in `methods` does not compile until the flag has a row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1860,7 +1860,7 @@ impl OverrideFlag {
 /// deliberately absent: they do not change the artifact, so keying on them
 /// would invalidate cached fits for nothing.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct CliStageOverrides {
+pub struct CliMethodOverrides {
     pub max_tree_depth: Option<usize>,
     pub trajectory_warmup: Option<usize>,
     pub csmc_sweeps_per_nuts: Option<usize>,
@@ -1876,15 +1876,15 @@ pub struct CliStageOverrides {
     /// fraction is reached. Changes the perturbation schedule and therefore
     /// the MLE.
     pub cooling_target_iters: Option<usize>,
-    /// `--decibans-thresh`: overrides `gate.decibans_thresh` on stages that
+    /// `--decibans-thresh`: overrides `gate.decibans_thresh` on methods that
     /// carry a `GateConfig` (IF2, nl-sbplx, nl-bobyqa, nl-lbfgs). The applied gate is
     /// persisted in the leaf (`resolved_gate`), so it is stored output.
     pub decibans_thresh: Option<f64>,
     /// `--no-dt-check`: disables the post-fit Richardson dt-check, whose
     /// result is stored in `fit_state.toml.dt_check`. Applies to the
-    /// stages that run one: if2, mh, nl-* (gh#726).
+    /// methods that run one: if2, mh, nl-* (gh#726).
     pub no_dt_check: bool,
-    /// `--dt-check-halvings`: dt-check ladder depth. Same stages as
+    /// `--dt-check-halvings`: dt-check ladder depth. Same methods as
     /// `no_dt_check`.
     pub dt_check_halvings: Option<usize>,
     /// `--dt-check-strict`: use the strict warning threshold. Resolved to a
@@ -1893,7 +1893,7 @@ pub struct CliStageOverrides {
     /// leaf-byte-neutral abort policy, but it selects the stored verdict and
     /// threshold whenever the TOML leaves `threshold_nats` unset.
     pub dt_check_strict: bool,
-    /// gh#747: `--binomial`. `None` leaves the stage's own value (or its
+    /// gh#747: `--binomial`. `None` leaves the method's own value (or its
     /// `serde(default)`) untouched.
     pub binomial: Option<sim::rng::BinomialAlgorithm>,
     /// `--record-ancestry` (PFilter): one-way override to true; adds the
@@ -1935,14 +1935,14 @@ fn resolve_dt_check_strict(
     Ok(())
 }
 
-impl CliStageOverrides {
+impl CliMethodOverrides {
     /// The flags this set carries, in [`OverrideFlag::ALL`] order.
     ///
     /// Destructured without `..`: a field added to the struct is a compile
     /// error here until it names its [`OverrideFlag`], which in turn cannot
     /// compile without a row in [`OverrideFlag::methods`].
     pub fn passed(&self) -> Vec<OverrideFlag> {
-        let CliStageOverrides {
+        let CliMethodOverrides {
             max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts, n_trajectories,
             diagonal_mass, no_nuts, no_ancestor_sampling, no_adapt, adapt_start,
             cooling_target_iters, decibans_thresh, no_dt_check, dt_check_halvings,
@@ -2092,14 +2092,14 @@ fn default_pmmh_adapt() -> bool { true }
 fn default_pmmh_adapt_start() -> usize { 300 }
 
 // PFilter defaults
-/// Default to recording the prequential trace at the post-fit PFilter
-/// stage. Per the 2026-04-20 prequential proposal, every fit pipeline
+/// Default to recording the prequential trace under a `pfilter` method.
+/// Per the 2026-04-20 prequential proposal, every fit
 /// should produce a `PrequentialTrace` as a first-class output —
 /// downstream `camdl compare` consumes the per-step log-score / CRPS
 /// / PIT samples that this flag toggles. Cost is one extra
 /// per-particle obs draw per observation, on the first replicate
 /// only; the trace is auto-written to `prequential.{tsv,json}` in
-/// the stage dir. Set `record_prequential = false` in `[method]`
+/// the method dir. Set `record_prequential = false` in `[method]`
 /// to opt out (e.g. running PFilter purely for loglik SD without
 /// the diagnostic write).
 fn default_record_prequential() -> bool { true }
@@ -2146,7 +2146,7 @@ impl Default for GateConfig {
 // ─── Richardson dt-convergence check (gh#52) ─────────────────────────
 
 /// Configuration for the post-fit Richardson dt-convergence check.
-/// Auto-runs at the end of `camdl fit run`'s final stage (after the
+/// Auto-runs at the end of `camdl fit run`'s final method (after the
 /// compound gate); evaluates `loglik(θ̂; dt)` on a halving ladder
 /// `{dt_fit, dt_fit/2, ..., dt_fit/2^n}` and warns when the loglik
 /// is still drifting. See `docs/dev/proposals/2026-05-07-richardson-dt-check.md`.
@@ -2171,12 +2171,12 @@ pub struct DtCheckConfig {
     #[serde(default = "default_dt_check_halvings")]
     pub n_halvings: usize,
     /// Particle count per ladder-rung evaluation. Default `None` →
-    /// inherit from the stage's `loglik_eval.n_particles` (so the
+    /// inherit from the method's `loglik_eval.n_particles` (so the
     /// dt-check matches the gate's clean-eval budget).
     #[serde(default)]
     pub n_particles: Option<usize>,
     /// Replicate count per ladder-rung evaluation, combined via
-    /// `combine`. Default `None` → inherit from the stage's
+    /// `combine`. Default `None` → inherit from the method's
     /// `loglik_eval.n_replicates`.
     #[serde(default)]
     pub n_replicates: Option<usize>,
@@ -2190,7 +2190,7 @@ pub struct DtCheckConfig {
     #[serde(default)]
     pub threshold_nats: Option<f64>,
     /// Combiner for replicate logliks. Default `None` → inherit
-    /// from the stage's `loglik_eval.combine`. Almost always
+    /// from the method's `loglik_eval.combine`. Almost always
     /// `LogMeanExp` (unbiased on the likelihood scale).
     #[serde(default)]
     pub combine: Option<CombineMode>,
@@ -2238,7 +2238,7 @@ fn detect_relocated_config_backend(contents: &str) -> Result<(), String> {
         return Err(
             "`[config].backend` has moved to `[synthetic].backend` (gh#241).\n  \
              The backend is a forward-simulation setting for synthetic-data \
-             generation, not a fit-wide config — fit stages declare their own \
+             generation, not a fit-wide config — fit methods declare their own \
              `backend`. Move it under your `[synthetic]` block, or remove it for \
              a real-data fit.\n  See `camdl docs fit-toml`."
                 .into(),
@@ -2333,16 +2333,16 @@ fn detect_removed_estimate_transform(contents: &str) -> Result<(), String> {
 }
 
 /// The `[stages]` rejection (proposal 2026-09-08-workflow-first-fit-config,
-/// §5). A file that still carries the stage map is refused at load with the
-/// rewrite spelled out: the last-declared stage becomes the file's `[method]`,
-/// every other stage goes in its own file, `init` is `starts`, and a chained
+/// §5). A file that still carries the method map is refused at load with the
+/// rewrite spelled out: the last-declared method becomes the file's `[method]`,
+/// every other method goes in its own file, `init` is `starts`, and a chained
 /// `init_mle` — which started every chain at the upstream point estimate and
 /// made R̂ uninformative — is handed back to the author as a decision, because
 /// the file cannot name a handle that does not exist until the upstream has
 /// run. No silent conversion and no compatibility path.
 ///
 /// Declaration order is read off the raw text (`[stages.<name>]` headers in
-/// order), because `toml::Table` sorts its keys and the stage that should
+/// order), because `toml::Table` sorts its keys and the method that should
 /// survive as `[method]` is the one declared last.
 pub fn detect_legacy_stages(contents: &str, file_name: &str) -> Result<(), String> {
     let value: toml::Value = match toml::from_str(contents) {
@@ -2936,12 +2936,12 @@ impl FitConfig {
     /// here, at config-validation time, rather than partway through a search.
     ///
     /// `nl-lbfgs` is the only method whose objective calls `det_grad`
-    /// (`fit::nlopt_stage::score_with_gradient`), and `det_grad` runs
+    /// (`fit::nlopt_method::score_with_gradient`), and `det_grad` runs
     /// `preflight_gradient_ode` — the ONE place that answers "can this model be
     /// fit by the ODE gradient?" — before any gradient is taken. Running that
     /// same gate here, against the same model, converts a mid-search failure
     /// into a refusal before a leaf is claimed: the user is told what is wrong
-    /// and which method to reach for instead, and no half-written stage is left
+    /// and which method to reach for instead, and no half-written method is left
     /// behind. The rules are not restated; the gate's own sentence is quoted.
     ///
     /// Like [`Self::validate_priors_present`], this is factored out of
@@ -3190,7 +3190,7 @@ impl FitConfig {
         // them lives inside `params_resolver::resolve_parameters` rather than in
         // a function this could call. Rather than fork that walk, defer: a
         // scenario fit is checked by `det_grad` itself on the first evaluation,
-        // which the objective's latch turns into the same sentence one stage
+        // which the objective's latch turns into the same sentence one method
         // later. Lateness, not a wrong answer.
         if self.problem.scenario.is_some() {
             return Ok(());
@@ -3847,7 +3847,7 @@ cooling = 0.70
                 assert_eq!(*iterations, 80);
                 assert!((cooling - 0.70).abs() < 1e-10);
             }
-            _ => panic!("expected IF2 stage"),
+            _ => panic!("expected IF2 method"),
         }
     }
 
@@ -3978,7 +3978,7 @@ iterations = 10
     }
 
     /// An `nl-sbplx` method, for the gate and dt-check overrides on the
-    /// NloptStageConfig payload (gh#726).
+    /// NloptConfig payload (gh#726).
     fn nl_sbplx_method() -> Method {
         let cfg = parse(r#"
 [model]
@@ -4048,14 +4048,14 @@ starts     = "{starts}"
              the toml — they are the same fit");
     }
 
-    /// gh#540: EVERY sampler/output flag must move the stage identity, not
+    /// gh#540: EVERY sampler/output flag must move the method identity, not
     /// just the five chain-start ones gh#514 covered. Each of these was
-    /// applied to the `*StageOpts` struct at the dispatch site, AFTER the
-    /// identity was taken from the stage — so `--n-trajectories 500` was
+    /// applied to the `*MethodOpts` struct at the dispatch site, AFTER the
+    /// identity was taken from the method — so `--n-trajectories 500` was
     /// served the 200-trajectory leaf, and `--no-nuts` was served a posterior
     /// drawn by NUTS.
     ///
-    /// Table-driven so a flag added to `CliStageOverrides` without a case here
+    /// Table-driven so a flag added to `CliMethodOverrides` without a case here
     /// is conspicuous. A per-flag test would let the fourteenth flag slip in
     /// silently, which is exactly how the thirteen got here.
     ///
@@ -4065,59 +4065,59 @@ starts     = "{starts}"
     /// rather than the statistical fit, and it reaches the key by the separate
     /// `cas_n_trajectories` route that `StageConfig` folds in. It gets its own
     /// test below rather than a row here that would assert the wrong thing.
-    /// `--starts` is not a `CliStageOverrides` field at all — it writes
+    /// `--starts` is not a `CliMethodOverrides` field at all — it writes
     /// `Method::starts` directly; `cli_starts_override_changes_the_method_identity`
     /// pins it.
     #[test]
-    fn every_cli_sampler_flag_changes_the_stage_identity() {
-        let cases: Vec<(&str, Method, CliStageOverrides)> = vec![
+    fn every_cli_sampler_flag_changes_the_method_identity() {
+        let cases: Vec<(&str, Method, CliMethodOverrides)> = vec![
             ("--max-tree-depth", pgas_method(),
-             CliStageOverrides { max_tree_depth: Some(7), ..Default::default() }),
+             CliMethodOverrides { max_tree_depth: Some(7), ..Default::default() }),
             ("--trajectory-warmup", pgas_method(),
-             CliStageOverrides { trajectory_warmup: Some(3), ..Default::default() }),
+             CliMethodOverrides { trajectory_warmup: Some(3), ..Default::default() }),
             ("--csmc-sweeps-per-nuts", pgas_method(),
-             CliStageOverrides { csmc_sweeps_per_nuts: Some(4), ..Default::default() }),
+             CliMethodOverrides { csmc_sweeps_per_nuts: Some(4), ..Default::default() }),
             ("--diagonal-mass", pgas_method(),
-             CliStageOverrides { diagonal_mass: true, ..Default::default() }),
+             CliMethodOverrides { diagonal_mass: true, ..Default::default() }),
             ("--no-nuts", pgas_method(),
-             CliStageOverrides { no_nuts: true, ..Default::default() }),
+             CliMethodOverrides { no_nuts: true, ..Default::default() }),
             ("--no-adapt", pmmh_method(),
-             CliStageOverrides { no_adapt: true, ..Default::default() }),
+             CliMethodOverrides { no_adapt: true, ..Default::default() }),
             ("--adapt-start", pmmh_method(),
-             CliStageOverrides { adapt_start: Some(42), ..Default::default() }),
+             CliMethodOverrides { adapt_start: Some(42), ..Default::default() }),
             // The 2026-08-23 batch: found applied at the dispatch site,
             // after the CAS claim, exactly like the thirteen above.
             ("--cooling-target-iters", scout_method("single"),
-             CliStageOverrides { cooling_target_iters: Some(20), ..Default::default() }),
+             CliMethodOverrides { cooling_target_iters: Some(20), ..Default::default() }),
             ("--decibans-thresh", scout_method("single"),
-             CliStageOverrides { decibans_thresh: Some(5.0), ..Default::default() }),
+             CliMethodOverrides { decibans_thresh: Some(5.0), ..Default::default() }),
             ("--no-dt-check", scout_method("single"),
-             CliStageOverrides { no_dt_check: true, ..Default::default() }),
+             CliMethodOverrides { no_dt_check: true, ..Default::default() }),
             ("--dt-check-halvings", scout_method("single"),
-             CliStageOverrides { dt_check_halvings: Some(3), ..Default::default() }),
+             CliMethodOverrides { dt_check_halvings: Some(3), ..Default::default() }),
             ("--record-ancestry", pfilter_method(),
-             CliStageOverrides { record_ancestry: true, ..Default::default() }),
+             CliMethodOverrides { record_ancestry: true, ..Default::default() }),
             ("--record-prequential", pfilter_method(),
-             CliStageOverrides { record_prequential: true, ..Default::default() }),
+             CliMethodOverrides { record_prequential: true, ..Default::default() }),
             // gh#726: mh and nl-* store the dt-check result in the leaf;
             // their dt_check TOML field exists precisely so these flags
             // can reach the identity.
             ("--no-dt-check (mh)", mh_method(),
-             CliStageOverrides { no_dt_check: true, ..Default::default() }),
+             CliMethodOverrides { no_dt_check: true, ..Default::default() }),
             ("--dt-check-halvings (mh)", mh_method(),
-             CliStageOverrides { dt_check_halvings: Some(3), ..Default::default() }),
+             CliMethodOverrides { dt_check_halvings: Some(3), ..Default::default() }),
             ("--no-dt-check (nl-sbplx)", nl_sbplx_method(),
-             CliStageOverrides { no_dt_check: true, ..Default::default() }),
+             CliMethodOverrides { no_dt_check: true, ..Default::default() }),
             // gh#730: --dt-check-strict selects the threshold that is STORED
             // in fit_state.toml.dt_check (verdict + threshold_nats +
             // threshold_se_aware_nats + notes all derive from it), so it was
             // never the leaf-byte-neutral abort policy it was treated as.
             ("--dt-check-strict (if2)", scout_method("single"),
-             CliStageOverrides { dt_check_strict: true, ..Default::default() }),
+             CliMethodOverrides { dt_check_strict: true, ..Default::default() }),
             ("--dt-check-strict (mh)", mh_method(),
-             CliStageOverrides { dt_check_strict: true, ..Default::default() }),
+             CliMethodOverrides { dt_check_strict: true, ..Default::default() }),
             ("--decibans-thresh (nl-sbplx)", nl_sbplx_method(),
-             CliStageOverrides { decibans_thresh: Some(5.0), ..Default::default() }),
+             CliMethodOverrides { decibans_thresh: Some(5.0), ..Default::default() }),
         ];
         for (flag, base, cli) in cases {
             let mut overridden = base.clone();
@@ -4125,8 +4125,8 @@ starts     = "{starts}"
                 .unwrap_or_else(|e| panic!("{flag}: {e}"));
             assert_ne!(
                 base.identity_payload(), overridden.identity_payload(),
-                "{flag} changes what the stage computes or stores, so it must \
-                 change the stage identity. Sharing an identity means the run \
+                "{flag} changes what the method computes or stores, so it must \
+                 change the method identity. Sharing an identity means the run \
                  is served the OTHER setting's stored result (gh#540)."
             );
         }
@@ -4134,7 +4134,7 @@ starts     = "{starts}"
 
     /// gh#730: `--dt-check-strict` resolves to a CONCRETE threshold at
     /// override time, so it is keyed like any other stored setting — and a
-    /// stage that declares its own `threshold_nats` is unaffected, exactly as
+    /// method that declares its own `threshold_nats` is unaffected, exactly as
     /// before (the flag was already inert there).
     #[test]
     fn dt_check_strict_resolves_to_the_stored_threshold() {
@@ -4142,7 +4142,7 @@ starts     = "{starts}"
         use crate::run_meta::InferenceBackend;
 
         let mut if2 = scout_method("single");
-        if2.algorithm.apply_cli_overrides(&CliStageOverrides {
+        if2.algorithm.apply_cli_overrides(&CliMethodOverrides {
             dt_check_strict: true, ..Default::default() }).unwrap();
         match &if2.algorithm {
             Algorithm::IF2 { dt_check, backend, .. } => assert_eq!(
@@ -4161,13 +4161,13 @@ starts     = "{starts}"
         if let Algorithm::IF2 { dt_check, .. } = &mut declared.algorithm {
             dt_check.threshold_nats = Some(1.25);
         }
-        let err = declared.algorithm.apply_cli_overrides(&CliStageOverrides {
+        let err = declared.algorithm.apply_cli_overrides(&CliMethodOverrides {
             dt_check_strict: true, ..Default::default() }).unwrap_err();
         assert!(err.contains("--dt-check-strict") && err.contains("threshold_nats = 1.25"),
             "{err}");
     }
 
-    /// The subtractive payload is include-by-default: every stage field is in
+    /// The subtractive payload is include-by-default: every method field is in
     /// the identity unless deliberately subtracted. The enumerated arms it
     /// replaced swallowed anything they forgot to list, which is the shape
     /// behind gh#514, gh#540 and the 2026-08-23 batch.
@@ -4183,16 +4183,16 @@ starts     = "{starts}"
             "the extension dimension stays out (folded by cas_target_length)");
         assert!(!obj.contains_key("n_trajectories"),
             "folded by cas_n_trajectories instead — hashing it here double-folds");
-        // Everything else the stage carries is present, under its TOML spelling.
+        // Everything else the method carries is present, under its TOML spelling.
         for key in ["algorithm", "backend", "chains", "particles", "burn_in", "thin",
                     "use_nuts", "dense_mass", "max_tree_depth",
                     "starts", "trajectory_warmup", "csmc_sweeps_per_nuts"] {
             assert!(obj.contains_key(key),
-                "'{key}' must be in the stage identity; present keys: {:?}",
+                "'{key}' must be in the method identity; present keys: {:?}",
                 obj.keys().collect::<Vec<_>>());
         }
         // And the point of the change: a knob the enumerated arm never listed
-        // now re-keys. `loglik_eval` decides how the stage's stored MLE is
+        // now re-keys. `loglik_eval` decides how the method's stored MLE is
         // re-scored, and IF2 hashed it only because that arm full-serialized.
         let mut hot = scout_method("single");
         if let Algorithm::IF2 { loglik_eval, .. } = &mut hot.algorithm { loglik_eval.n_particles += 1; }
@@ -4222,11 +4222,11 @@ starts     = "{starts}"
     fn n_trajectories_is_count_in_the_key() {
         let base = pgas_method();
         let mut more = pgas_method();
-        more.algorithm.apply_cli_overrides(&CliStageOverrides {
+        more.algorithm.apply_cli_overrides(&CliMethodOverrides {
             n_trajectories: Some(500), ..Default::default() }).unwrap();
         assert_ne!(base.algorithm.cas_n_trajectories(), more.algorithm.cas_n_trajectories(),
             "`--n-trajectories` must reach `cas_n_trajectories` — it reads the \
-             stage, and the flag used to be applied to the opts struct instead, \
+             method, and the flag used to be applied to the opts struct instead, \
              so a 500-trajectory request was served the 200-trajectory leaf");
         assert_eq!(more.algorithm.cas_n_trajectories(), 500);
     }
@@ -4234,7 +4234,7 @@ starts     = "{starts}"
     /// AS-off changes the draws, so it is count-in-the-key; AS-on (the
     /// default) keeps the pre-field payload bytes, so nothing re-keys.
     #[test]
-    fn ancestor_sampling_off_is_in_the_stage_identity() {
+    fn ancestor_sampling_off_is_in_the_method_identity() {
         // Disabling AS changes the sampled draws, so it must re-key
         // (count-in-the-key discipline)…
         let on = pgas_method();
@@ -4258,7 +4258,7 @@ starts     = "{starts}"
 
     /// `ancestor_sampling = false` is the TOML spelling; absent means on.
     #[test]
-    fn ancestor_sampling_parses_from_stage_toml() {
+    fn ancestor_sampling_parses_from_method_toml() {
         let toml_src = r#"
             algorithm = "pgas"
             backend = "chain_binomial"
@@ -4267,13 +4267,13 @@ starts     = "{starts}"
             sweeps = 5
             ancestor_sampling = false
         "#;
-        let stage: Algorithm = toml::from_str(toml_src).expect("stage parses");
-        match stage {
+        let method: Algorithm = toml::from_str(toml_src).expect("method parses");
+        match method {
             Algorithm::PGAS { ancestor_sampling, .. } => assert!(!ancestor_sampling),
             other => panic!("expected PGAS, got {}", other.method_name()),
         }
         let default_src = toml_src.replace("ancestor_sampling = false", "");
-        match toml::from_str::<Algorithm>(&default_src).expect("stage parses") {
+        match toml::from_str::<Algorithm>(&default_src).expect("method parses") {
             Algorithm::PGAS { ancestor_sampling, .. } => assert!(ancestor_sampling,
                 "an absent field must mean ancestor sampling ON"),
             other => panic!("expected PGAS, got {}", other.method_name()),
@@ -4286,7 +4286,7 @@ starts     = "{starts}"
     fn cli_no_ancestor_sampling_overrides_and_rekeys() {
         let base = pgas_method();
         let mut overridden = pgas_method();
-        overridden.algorithm.apply_cli_overrides(&CliStageOverrides {
+        overridden.algorithm.apply_cli_overrides(&CliMethodOverrides {
             no_ancestor_sampling: true, ..Default::default() }).unwrap();
         match &overridden.algorithm {
             Algorithm::PGAS { ancestor_sampling, .. } => assert!(!ancestor_sampling),
@@ -4298,10 +4298,10 @@ starts     = "{starts}"
     /// The other half, and the one that protects existing users: a run with
     /// no CLI overrides must key exactly as it did before.
     #[test]
-    fn no_cli_override_leaves_the_stage_identity_untouched() {
+    fn no_cli_override_leaves_the_method_identity_untouched() {
         let declared = scout_method("uniform");
         let mut untouched = scout_method("uniform");
-        untouched.algorithm.apply_cli_overrides(&CliStageOverrides::default()).unwrap();
+        untouched.algorithm.apply_cli_overrides(&CliMethodOverrides::default()).unwrap();
         assert_eq!(declared.identity_payload(), untouched.identity_payload());
     }
 
@@ -4310,7 +4310,7 @@ starts     = "{starts}"
     /// fields false, so the one-way override to true is visible).
     fn base_method_for(algo: crate::run_meta::FitAlgorithm) -> Method {
         use crate::run_meta::FitAlgorithm as A;
-        let nl = |wrap: fn(NloptStageConfig) -> Algorithm| {
+        let nl = |wrap: fn(NloptConfig) -> Algorithm| {
             let mut m = nl_sbplx_method();
             if let Algorithm::NlSbplx(cfg) = m.algorithm.clone() { m.algorithm = wrap(cfg); }
             m
@@ -4328,27 +4328,27 @@ starts     = "{starts}"
     }
 
     /// The overrides with only `flag` passed, at a value off every default.
-    fn only(flag: OverrideFlag) -> CliStageOverrides {
-        let d = CliStageOverrides::default();
+    fn only(flag: OverrideFlag) -> CliMethodOverrides {
+        let d = CliMethodOverrides::default();
         match flag {
-            OverrideFlag::MaxTreeDepth => CliStageOverrides { max_tree_depth: Some(7), ..d },
-            OverrideFlag::TrajectoryWarmup => CliStageOverrides { trajectory_warmup: Some(3), ..d },
-            OverrideFlag::CsmcSweepsPerNuts => CliStageOverrides { csmc_sweeps_per_nuts: Some(4), ..d },
-            OverrideFlag::NTrajectories => CliStageOverrides { n_trajectories: Some(500), ..d },
-            OverrideFlag::DiagonalMass => CliStageOverrides { diagonal_mass: true, ..d },
-            OverrideFlag::NoNuts => CliStageOverrides { no_nuts: true, ..d },
-            OverrideFlag::NoAncestorSampling => CliStageOverrides { no_ancestor_sampling: true, ..d },
-            OverrideFlag::NoAdapt => CliStageOverrides { no_adapt: true, ..d },
-            OverrideFlag::AdaptStart => CliStageOverrides { adapt_start: Some(42), ..d },
-            OverrideFlag::CoolingTargetIters => CliStageOverrides { cooling_target_iters: Some(20), ..d },
-            OverrideFlag::DecibansThresh => CliStageOverrides { decibans_thresh: Some(5.0), ..d },
-            OverrideFlag::NoDtCheck => CliStageOverrides { no_dt_check: true, ..d },
-            OverrideFlag::DtCheckHalvings => CliStageOverrides { dt_check_halvings: Some(3), ..d },
-            OverrideFlag::DtCheckStrict => CliStageOverrides { dt_check_strict: true, ..d },
-            OverrideFlag::Binomial => CliStageOverrides {
+            OverrideFlag::MaxTreeDepth => CliMethodOverrides { max_tree_depth: Some(7), ..d },
+            OverrideFlag::TrajectoryWarmup => CliMethodOverrides { trajectory_warmup: Some(3), ..d },
+            OverrideFlag::CsmcSweepsPerNuts => CliMethodOverrides { csmc_sweeps_per_nuts: Some(4), ..d },
+            OverrideFlag::NTrajectories => CliMethodOverrides { n_trajectories: Some(500), ..d },
+            OverrideFlag::DiagonalMass => CliMethodOverrides { diagonal_mass: true, ..d },
+            OverrideFlag::NoNuts => CliMethodOverrides { no_nuts: true, ..d },
+            OverrideFlag::NoAncestorSampling => CliMethodOverrides { no_ancestor_sampling: true, ..d },
+            OverrideFlag::NoAdapt => CliMethodOverrides { no_adapt: true, ..d },
+            OverrideFlag::AdaptStart => CliMethodOverrides { adapt_start: Some(42), ..d },
+            OverrideFlag::CoolingTargetIters => CliMethodOverrides { cooling_target_iters: Some(20), ..d },
+            OverrideFlag::DecibansThresh => CliMethodOverrides { decibans_thresh: Some(5.0), ..d },
+            OverrideFlag::NoDtCheck => CliMethodOverrides { no_dt_check: true, ..d },
+            OverrideFlag::DtCheckHalvings => CliMethodOverrides { dt_check_halvings: Some(3), ..d },
+            OverrideFlag::DtCheckStrict => CliMethodOverrides { dt_check_strict: true, ..d },
+            OverrideFlag::Binomial => CliMethodOverrides {
                 binomial: Some(sim::rng::BinomialAlgorithm::Btrs), ..d },
-            OverrideFlag::RecordAncestry => CliStageOverrides { record_ancestry: true, ..d },
-            OverrideFlag::RecordPrequential => CliStageOverrides { record_prequential: true, ..d },
+            OverrideFlag::RecordAncestry => CliMethodOverrides { record_ancestry: true, ..d },
+            OverrideFlag::RecordPrequential => CliMethodOverrides { record_prequential: true, ..d },
         }
     }
 
@@ -4364,11 +4364,11 @@ starts     = "{starts}"
         // `OverrideFlag::ALL` covers every field: setting every flag in it
         // leaves no field of the struct at its default. The destructure has
         // no `..`, so a new field is a compile error here too.
-        let mut all = CliStageOverrides::default();
+        let mut all = CliMethodOverrides::default();
         for flag in OverrideFlag::ALL {
             let one = only(flag);
             assert_eq!(one.passed(), vec![flag], "{} round-trips through passed()", flag.spelling());
-            let CliStageOverrides {
+            let CliMethodOverrides {
                 max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts, n_trajectories,
                 diagonal_mass, no_nuts, no_ancestor_sampling, no_adapt, adapt_start,
                 cooling_target_iters, decibans_thresh, no_dt_check, dt_check_halvings,
@@ -4393,7 +4393,7 @@ starts     = "{starts}"
             all.record_prequential |= record_prequential;
         }
         assert_eq!(all.passed(), OverrideFlag::ALL.to_vec(),
-            "OverrideFlag::ALL must name every CliStageOverrides field");
+            "OverrideFlag::ALL must name every CliMethodOverrides field");
 
         let methods = [A::If2, A::Pgas, A::Pmmh, A::Mh, A::Pfilter,
                        A::NlSbplx, A::NlBobyqa, A::NlLbfgs];
@@ -4437,30 +4437,30 @@ starts     = "{starts}"
     /// is refused rather than run, re-keyed and ignored.
     #[test]
     fn a_flag_left_inert_by_another_setting_is_refused() {
-        let cases: Vec<(&str, Method, CliStageOverrides)> = vec![
+        let cases: Vec<(&str, Method, CliMethodOverrides)> = vec![
             ("--max-tree-depth", pgas_method(),
-             CliStageOverrides { no_nuts: true, max_tree_depth: Some(7), ..Default::default() }),
+             CliMethodOverrides { no_nuts: true, max_tree_depth: Some(7), ..Default::default() }),
             ("--diagonal-mass", pgas_method(),
-             CliStageOverrides { no_nuts: true, diagonal_mass: true, ..Default::default() }),
+             CliMethodOverrides { no_nuts: true, diagonal_mass: true, ..Default::default() }),
             ("--adapt-start", pmmh_method(),
-             CliStageOverrides { no_adapt: true, adapt_start: Some(42), ..Default::default() }),
+             CliMethodOverrides { no_adapt: true, adapt_start: Some(42), ..Default::default() }),
             ("--adapt-start", mh_method(),
-             CliStageOverrides { no_adapt: true, adapt_start: Some(42), ..Default::default() }),
+             CliMethodOverrides { no_adapt: true, adapt_start: Some(42), ..Default::default() }),
             ("--dt-check-halvings", scout_method("single"),
-             CliStageOverrides { no_dt_check: true, dt_check_halvings: Some(3), ..Default::default() }),
+             CliMethodOverrides { no_dt_check: true, dt_check_halvings: Some(3), ..Default::default() }),
             ("--dt-check-strict", nl_sbplx_method(),
-             CliStageOverrides { no_dt_check: true, dt_check_strict: true, ..Default::default() }),
+             CliMethodOverrides { no_dt_check: true, dt_check_strict: true, ..Default::default() }),
             // One chain: there is no between-chain spread for the gate to judge.
             ("--decibans-thresh", {
                 let mut m = scout_method("single");
                 if let Algorithm::IF2 { chains, .. } = &mut m.algorithm { *chains = 1; }
                 m
-            }, CliStageOverrides { decibans_thresh: Some(5.0), ..Default::default() }),
+            }, CliMethodOverrides { decibans_thresh: Some(5.0), ..Default::default() }),
             ("--decibans-thresh", {
                 let mut m = nl_sbplx_method();
                 if let Algorithm::NlSbplx(c) = &mut m.algorithm { c.chains = 1; }
                 m
-            }, CliStageOverrides { decibans_thresh: Some(5.0), ..Default::default() }),
+            }, CliMethodOverrides { decibans_thresh: Some(5.0), ..Default::default() }),
         ];
         for (flag, base, cli) in cases {
             let mut m = base.clone();
@@ -4470,7 +4470,7 @@ starts     = "{starts}"
         }
         // The same flag beside the setting it needs is fine.
         let mut m = pgas_method();
-        m.algorithm.apply_cli_overrides(&CliStageOverrides {
+        m.algorithm.apply_cli_overrides(&CliMethodOverrides {
             max_tree_depth: Some(7), ..Default::default() }).unwrap();
     }
 
@@ -4852,7 +4852,7 @@ cooling = 0.7
             "the same file without the line must parse: {:?}", parse(&without).err());
     }
 
-    /// The NLopt stages carry the same five keys whether or not the algorithm
+    /// The NLopt methods carry the same five keys whether or not the algorithm
     /// takes a gradient, so a key invented for the gradient one — `gradient =
     /// true`, the shape a user reaches for after reading that `nl-lbfgs` is
     /// "the gradient method" — is not a knob on either. serde cannot deny it
@@ -4886,7 +4886,7 @@ cooling = 0.7
                 panic!(
                     "`gradient = true` under a {algorithm} [method] must be rejected, \
                      not silently dropped — a dropped key is neither applied nor \
-                     hashed into the stage identity"
+                     hashed into the method identity"
                 )
             });
             assert!(
@@ -5010,7 +5010,7 @@ cooling = 0.7
         );
     }
 
-    /// A three-stage pipeline file — the shape the split retires — is refused
+    /// A three-stage `[stages]` file — the shape the split retires — is refused
     /// at load with the §5 rewrite: the last stage becomes `[method]`, the
     /// others go in their own files, and each chained `init_mle` is handed
     /// back as the choice between the two sourced `starts` rules.
@@ -5065,13 +5065,13 @@ replicates = 100
 init_mle = "mle"
         "#).expect_err("a [stages] map is refused at load");
 
-        // The last-declared stage is the one that becomes the file's method.
+        // The last-declared method is the one that becomes the file's method.
         assert!(err.starts_with("legacy table `[stages.evaluate]`"), "{err}");
         assert!(err.contains("rename to `[method]`") && err.contains("camdl fit run fit.toml"),
             "{err}");
         assert!(err.contains("put `[stages.mle]` and `[stages.posterior]` in its own file"),
             "{err}");
-        // A stage-name `init_mle` becomes a `@label` handle; a directory stays
+        // A method-name `init_mle` becomes a `@label` handle; a directory stays
         // a path. Both are the author's decision between the two sourced rules.
         assert!(err.contains("starts = { from_posterior = \"@mle\" }"), "{err}");
         assert!(err.contains("starts = { from_mle = \"@mle\" }"), "{err}");
@@ -5351,7 +5351,7 @@ cooling = 0.70
         // `validate_priors_present(&ir_priors)`. validate() no longer
         // looks at priors at all. When called with an empty
         // ir_prior_params set (no IR `~` priors), missing toml priors
-        // on Bayesian-stage params still produce the same error.
+        // on Bayesian-method params still produce the same error.
         let config = parse(r#"
 [model]
 camdl = "models/sir.camdl"
@@ -7017,14 +7017,14 @@ cooling = 0.70
     /// MLE on the ODE backend, but derivative-free); both must compile lean.
     #[test]
     fn needs_state_grad_only_for_the_ode_gradient_cells() {
-        let cfg = |stage: &str| -> FitConfig {
+        let cfg = |method: &str| -> FitConfig {
             let toml_str = format!(
                 "[model]\ncamdl = \"models/sir.camdl\"\n\n\
                  [data.observations]\ncases = \"data/cases.tsv\"\n\n\
                  [estimate]\nbeta = {{ bounds = [0.01, 2.0] }}\n\n\
-                 [fixed]\nN0 = 1000\n\n{stage}"
+                 [fixed]\nN0 = 1000\n\n{method}"
             );
-            FitConfig::from_toml_str(&toml_str).unwrap_or_else(|e| panic!("parse {stage:?}: {e}"))
+            FitConfig::from_toml_str(&toml_str).unwrap_or_else(|e| panic!("parse {method:?}: {e}"))
         };
 
         // nl-lbfgs + ode → the forward-sensitivity gradient, used for MLE
@@ -7066,7 +7066,7 @@ cooling = 0.70
 
     // ── Synthetic / fit_seeds schema extension ─────────────────────────────
 
-    fn minimal_fit_stages() -> &'static str {
+    fn minimal_fit_methods() -> &'static str {
         r#"
 [model]
 camdl = "models/sir.camdl"
@@ -7095,7 +7095,7 @@ cooling = 0.70
 [synthetic]
 true_params = "truth.toml"
 sim_seeds   = "1:20"
-"#, minimal_fit_stages());
+"#, minimal_fit_methods());
         let config = parse(&src).unwrap();
         let syn = config.problem.synthetic.as_ref().expect("[synthetic] missing");
         assert_eq!(syn.true_params, "truth.toml");
@@ -7109,7 +7109,7 @@ sim_seeds   = "1:20"
 [synthetic]
 true_params = "truth.toml"
 sim_seeds   = [7, 42, 101]
-"#, minimal_fit_stages());
+"#, minimal_fit_methods());
         let config = parse(&src).unwrap();
         let syn = config.problem.synthetic.unwrap();
         assert!(syn.datasets.is_none(), "datasets should be inferred, not set");
@@ -7124,7 +7124,7 @@ sim_seeds   = [7, 42, 101]
 true_params = "truth.toml"
 datasets    = 20
 sim_seeds   = "1:5"
-"#, minimal_fit_stages());
+"#, minimal_fit_methods());
         let config = parse(&src).unwrap();
         let err = config.problem.synthetic.unwrap().validate().unwrap_err();
         assert!(err.contains("20") && err.contains("5"),
@@ -7140,7 +7140,7 @@ cases = "data/cases.tsv"
 [synthetic]
 true_params = "truth.toml"
 sim_seeds   = "1:5"
-"#, minimal_fit_stages());
+"#, minimal_fit_methods());
         let config = parse(&src).unwrap();
         config.validate(&["beta".into(), "gamma".into(), "N0".into(), "I0".into()], InitLaw::Absent)
             .expect("[data] and [synthetic] together is a real-data fit with a recorded truth");
@@ -7149,7 +7149,7 @@ sim_seeds   = "1:5"
 
     #[test]
     fn neither_data_nor_synthetic_errors() {
-        let src = minimal_fit_stages().to_string();
+        let src = minimal_fit_methods().to_string();
         let config = parse(&src).unwrap();
         let err = config.validate(&["beta".into(), "gamma".into(), "N0".into(), "I0".into()], InitLaw::Absent)
             .unwrap_err();
@@ -7198,7 +7198,7 @@ sim_seeds   = "1:5"
 {}
 [data.observations]
 cases = "data/cases.tsv"
-"#, minimal_fit_stages());
+"#, minimal_fit_methods());
         let config = parse(&single_src).unwrap();
         assert_eq!(config.inference.fit_seeds.unwrap(), vec![42u64]);
 
@@ -7206,7 +7206,7 @@ cases = "data/cases.tsv"
 {}
 [data.observations]
 cases = "data/cases.tsv"
-"#, minimal_fit_stages());
+"#, minimal_fit_methods());
         let config = parse(&list_src).unwrap();
         assert_eq!(config.inference.fit_seeds.unwrap(), vec![101u64, 102, 103]);
     }
@@ -7302,7 +7302,7 @@ cooling = 0.7
 {}
 [data.observations]
 cases = "data/cases.tsv"
-"#, minimal_fit_stages());
+"#, minimal_fit_methods());
         let config = parse(&src).unwrap();
         let err = config.validate(&["beta".into(), "gamma".into(), "N0".into(), "I0".into()], InitLaw::Absent)
             .unwrap_err();
@@ -7326,7 +7326,7 @@ cases = "data/cases.tsv"
     }
 
     #[test]
-    fn ic_free_with_if2_stage_still_validates() {
+    fn ic_free_with_if2_method_still_validates() {
         // IF2 both drops y₁ from the accumulated loglik AND gives each
         // particle its own x₀ drawn from its own perturbed θ (gh#364), so
         // ic_free = true must NOT be rejected. Negative control for the
@@ -7334,16 +7334,16 @@ cases = "data/cases.tsv"
         // pass them all.
         let src = format!(
             "ic_free = true\n{}\n[data.observations]\ncases = \"data/cases.tsv\"\n",
-            minimal_fit_stages()
+            minimal_fit_methods()
         );
         let config = parse(&src).unwrap();
         config
             .validate(&ic_free_model_params(), InitLaw::Absent)
-            .expect("ic_free=true on an IF2 stage must validate (IF2 honors conditioning)");
+            .expect("ic_free=true on an IF2 method must validate (IF2 honors conditioning)");
     }
 
     #[test]
-    fn ic_free_with_pgas_stage_is_rejected() {
+    fn ic_free_with_pgas_method_is_rejected() {
         let src = r#"ic_free = true
 [model]
 camdl = "models/sir.camdl"
@@ -7369,12 +7369,12 @@ sweeps = 100
         let config = parse(src).unwrap();
         let err = config
             .validate(&ic_free_model_params(), InitLaw::Absent)
-            .expect_err("ic_free=true on a PGAS stage must be rejected (PGAS ignores conditioning)");
+            .expect_err("ic_free=true on a PGAS method must be rejected (PGAS ignores conditioning)");
         assert!(err.contains("ic_free"), "error must name ic_free: {err}");
-        assert!(err.contains("pgas"), "error must name the offending stage's algorithm: {err}");
+        assert!(err.contains("pgas"), "error must name the offending method's algorithm: {err}");
     }
 
-    // gh#347: a sampler stage whose burn_in ≥ the run length retains ZERO
+    // gh#347: a sampler method whose burn_in ≥ the run length retains ZERO
     // posterior draws (every sample discarded), and the post-burn acceptance
     // rate degenerates to 0/0 = a misleading "0%". Reject at config validation.
     #[test]
@@ -7454,7 +7454,7 @@ burn_in = 500
     }
 
     #[test]
-    fn ic_free_with_ode_mle_stage_is_rejected() {
+    fn ic_free_with_ode_mle_method_is_rejected() {
         let src = r#"ic_free = true
 [model]
 camdl = "models/sir.camdl"
@@ -7478,7 +7478,7 @@ chains = 1
         let config = parse(src).unwrap();
         let err = config
             .validate(&ic_free_model_params(), InitLaw::Absent)
-            .expect_err("ic_free=true on an ODE-MLE stage must be rejected (compute_ode_loglik ignores conditioning)");
+            .expect_err("ic_free=true on an ODE-MLE method must be rejected (compute_ode_loglik ignores conditioning)");
         assert!(err.contains("ic_free"), "error must name ic_free: {err}");
         assert!(err.contains("nl-sbplx"), "error must name the offending algorithm: {err}");
     }
@@ -7490,7 +7490,7 @@ chains = 1
     /// identically and the run drops y₁ instead of conditioning on it. Refuse
     /// at config load, naming the reason.
     #[test]
-    fn ic_free_with_plain_pmmh_stage_is_rejected() {
+    fn ic_free_with_plain_pmmh_method_is_rejected() {
         let src = r#"ic_free = true
 [model]
 camdl = "models/sir.camdl"
@@ -7516,7 +7516,7 @@ iterations = 100
         let config = parse(src).unwrap();
         let err = config
             .validate(&ic_free_model_params(), InitLaw::Absent)
-            .expect_err("ic_free=true on a plain PMMH stage must be rejected (gh#732)");
+            .expect_err("ic_free=true on a plain PMMH method must be rejected (gh#732)");
         assert!(err.contains("ic_free"), "error must name ic_free: {err}");
         assert!(err.contains("pmmh"), "error must name the offending algorithm: {err}");
         assert!(err.contains("bootstrap particle filter"),
@@ -7528,7 +7528,7 @@ iterations = 100
     /// gh#732, same cell, other algorithm: `pfilter` runs through the same arm
     /// and the same bootstrap PF.
     #[test]
-    fn ic_free_with_pfilter_stage_is_rejected() {
+    fn ic_free_with_pfilter_method_is_rejected() {
         let src = r#"ic_free = true
 [model]
 camdl = "models/sir.camdl"
@@ -7552,7 +7552,7 @@ particles = 500
         let config = parse(src).unwrap();
         let err = config
             .validate(&ic_free_model_params(), InitLaw::Absent)
-            .expect_err("ic_free=true on a pfilter stage must be rejected (gh#732)");
+            .expect_err("ic_free=true on a pfilter method must be rejected (gh#732)");
         assert!(err.contains("ic_free"), "error must name ic_free: {err}");
         assert!(err.contains("pfilter"), "error must name the offending algorithm: {err}");
         assert!(err.contains("no spread at t=0"),
@@ -7564,8 +7564,8 @@ particles = 500
     /// declares a law. Only the model fact differs — which is the point: the
     /// refusal is a property of (algorithm × model), not of the algorithm.
     #[test]
-    fn ic_free_with_bootstrap_pf_stages_validates_when_the_model_draws_x0() {
-        for (who, stage) in [
+    fn ic_free_with_bootstrap_pf_methods_validates_when_the_model_draws_x0() {
+        for (who, method) in [
             ("pmmh", "[method]\nalgorithm = \"pmmh\"\nbackend = \"chain_binomial\"\n\
                       chains = 1\nparticles = 500\niterations = 100\nburn_in = 10\n"),
             ("pfilter", "[method]\nalgorithm = \"pfilter\"\n\
@@ -7576,7 +7576,7 @@ particles = 500
                  [model]\ncamdl = \"models/sir.camdl\"\n\n\
                  [data.observations]\ncases = \"data/cases.tsv\"\n\n\
                  [estimate]\nbeta = {{ bounds = [0.01, 2.0] }}\n\n\
-                 [fixed]\nN0 = 1000\nI0 = 5\ngamma = 0.1\n\n{stage}"
+                 [fixed]\nN0 = 1000\nI0 = 5\ngamma = 0.1\n\n{method}"
             );
             let config = parse(&src).unwrap();
             config
@@ -7600,7 +7600,7 @@ particles = 500
     // nothing, so it would read the flag nowhere: such a config is refused at
     // load rather than run without it.
 
-    fn t0_fit(algorithm: &str, stage_body: &str, declare_flag: bool) -> String {
+    fn t0_fit(algorithm: &str, method_body: &str, declare_flag: bool) -> String {
         let flag = if declare_flag { ", perturb_only_at_t0 = true" } else { "" };
         format!(r#"[model]
 camdl = "models/sir.camdl"
@@ -7618,7 +7618,7 @@ N0 = 1000
 
 [method]
 algorithm = "{algorithm}"
-{stage_body}
+{method_body}
 "#)
     }
 
@@ -7628,7 +7628,7 @@ algorithm = "{algorithm}"
                              sweeps = 100\nburn_in = 10\n";
 
     #[test]
-    fn perturb_only_at_t0_with_if2_stage_validates() {
+    fn perturb_only_at_t0_with_if2_method_validates() {
         parse(&t0_fit("if2", IF2_BODY, true)).unwrap()
             .validate(&ic_free_model_params(), InitLaw::Absent)
             .expect("IF2 honours perturb_only_at_t0 — it is IF2's own schedule");
@@ -7674,7 +7674,7 @@ algorithm = "{algorithm}"
     #[test]
     fn pfilter_record_prequential_defaults_to_true() {
         // Per the 2026-04-20 prequential proposal, the post-fit
-        // PFilter stage should record a PrequentialTrace by default —
+        // PFilter method should record a PrequentialTrace by default —
         // omitting the field in TOML must produce `true`, not `false`.
         let cfg = parse(r#"
 [model]
@@ -7702,7 +7702,7 @@ particles = 1000
                 assert!(!*record_ancestry,
                     "record_ancestry stays opt-in (false default)");
             }
-            _ => panic!("expected PFilter stage"),
+            _ => panic!("expected PFilter method"),
         }
     }
 
@@ -7735,12 +7735,12 @@ record_prequential = false
             Algorithm::PFilter { record_prequential, .. } =>
                 assert!(!*record_prequential,
                     "explicit record_prequential = false must override the default"),
-            _ => panic!("expected PFilter stage"),
+            _ => panic!("expected PFilter method"),
         }
     }
 
     #[test]
-    fn if2_stage_loglik_eval_and_gate_default_when_omitted() {
+    fn if2_method_loglik_eval_and_gate_default_when_omitted() {
         let cfg = parse(r#"
 [model]
 camdl = "models/sir.camdl"
@@ -7771,12 +7771,12 @@ cooling = 0.9
                 assert!((gate.a_thresh - 1.01).abs() < 1e-12);
                 assert!((gate.decibans_thresh - 30.0).abs() < 1e-12);
             }
-            _ => panic!("expected IF2 stage"),
+            _ => panic!("expected IF2 method"),
         }
     }
 
     #[test]
-    fn if2_stage_loglik_eval_and_gate_parse_overrides() {
+    fn if2_method_loglik_eval_and_gate_parse_overrides() {
         let cfg = parse(r#"
 [model]
 camdl = "models/sir.camdl"
@@ -7809,7 +7809,7 @@ gate = { a_thresh = 1.05, decibans_thresh = 60.0 }
                 assert!((gate.a_thresh - 1.05).abs() < 1e-12);
                 assert!((gate.decibans_thresh - 60.0).abs() < 1e-12);
             }
-            _ => panic!("expected IF2 stage"),
+            _ => panic!("expected IF2 method"),
         }
 
         // The sub-table form, with partial overrides — unset fields take
@@ -7849,7 +7849,7 @@ decibans_thresh = 100.0
                 assert!((gate.a_thresh - 1.01).abs() < 1e-12);     // default
                 assert!((gate.decibans_thresh - 100.0).abs() < 1e-12);
             }
-            _ => panic!("expected IF2 stage"),
+            _ => panic!("expected IF2 method"),
         }
     }
 
@@ -7863,7 +7863,7 @@ decibans_thresh = 100.0
 
     /// Default-equipped PGAS method for identity tests, with `starts`
     /// resolved as `fit run` resolves it before any identity is taken.
-    fn make_pgas_stage(sweeps: usize) -> Method {
+    fn make_pgas_method(sweeps: usize) -> Method {
         Method {
             algorithm: Algorithm::PGAS {
                 backend: crate::run_meta::InferenceBackend::ChainBinomial,
@@ -7883,7 +7883,7 @@ decibans_thresh = 100.0
     }
 
     /// Default-equipped PMMH method for identity tests.
-    fn make_pmmh_stage(iterations: usize) -> Method {
+    fn make_pmmh_method(iterations: usize) -> Method {
         Method {
             algorithm: Algorithm::PMMH {
                 backend: crate::run_meta::InferenceBackend::ChainBinomial,
@@ -7900,12 +7900,12 @@ decibans_thresh = 100.0
         // Two PGAS methods identical except for `sweeps` must produce
         // the same identity_payload — that's the contract that lets
         // --resume extend a chain by changing the iteration count.
-        let s_short = make_pgas_stage(1000);
-        let s_long = make_pgas_stage(5000);
+        let s_short = make_pgas_method(1000);
+        let s_long = make_pgas_method(5000);
         assert_eq!(s_short.identity_payload(), s_long.identity_payload());
 
         // Changing any *other* PGAS field must change the payload.
-        let mut s_more_chains = make_pgas_stage(1000);
+        let mut s_more_chains = make_pgas_method(1000);
         if let Algorithm::PGAS { ref mut chains, .. } = s_more_chains.algorithm { *chains = 8; }
         assert_ne!(s_short.identity_payload(), s_more_chains.identity_payload());
     }
@@ -7917,8 +7917,8 @@ decibans_thresh = 100.0
         // or fewer samples doesn't change chain dynamics, so resume
         // should accept a different n_trajectories without
         // re-running.
-        let mut s_few = make_pgas_stage(1000);
-        let mut s_many = make_pgas_stage(1000);
+        let mut s_few = make_pgas_method(1000);
+        let mut s_many = make_pgas_method(1000);
         if let Algorithm::PGAS { ref mut n_trajectories, .. } = s_few.algorithm { *n_trajectories = 100; }
         if let Algorithm::PGAS { ref mut n_trajectories, .. } = s_many.algorithm { *n_trajectories = 1000; }
         assert_eq!(s_few.identity_payload(), s_many.identity_payload(),
@@ -7930,30 +7930,30 @@ decibans_thresh = 100.0
         // max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts,
         // dense_mass, use_nuts ALL change chain dynamics and MUST
         // invalidate identity.
-        let base = make_pgas_stage(1000);
+        let base = make_pgas_method(1000);
 
-        let mut s = make_pgas_stage(1000);
+        let mut s = make_pgas_method(1000);
         if let Algorithm::PGAS { ref mut max_tree_depth, .. } = s.algorithm { *max_tree_depth = 14; }
         assert_ne!(base.identity_payload(), s.identity_payload(), "max_tree_depth");
 
-        let mut s = make_pgas_stage(1000);
+        let mut s = make_pgas_method(1000);
         if let Algorithm::PGAS { ref mut trajectory_warmup, .. } = s.algorithm {
             *trajectory_warmup = 100;
         }
         assert_ne!(base.identity_payload(), s.identity_payload(), "trajectory_warmup");
 
-        let mut s = make_pgas_stage(1000);
+        let mut s = make_pgas_method(1000);
         if let Algorithm::PGAS { ref mut csmc_sweeps_per_nuts, .. } = s.algorithm {
             *csmc_sweeps_per_nuts = 3;
         }
         assert_ne!(base.identity_payload(), s.identity_payload(),
             "csmc_sweeps_per_nuts");
 
-        let mut s = make_pgas_stage(1000);
+        let mut s = make_pgas_method(1000);
         if let Algorithm::PGAS { ref mut dense_mass, .. } = s.algorithm { *dense_mass = false; }
         assert_ne!(base.identity_payload(), s.identity_payload(), "dense_mass");
 
-        let mut s = make_pgas_stage(1000);
+        let mut s = make_pgas_method(1000);
         if let Algorithm::PGAS { ref mut use_nuts, .. } = s.algorithm { *use_nuts = false; }
         assert_ne!(base.identity_payload(), s.identity_payload(), "use_nuts");
     }
@@ -7967,7 +7967,7 @@ decibans_thresh = 100.0
     /// source are one run (gh#896).
     #[test]
     fn starts_is_in_the_method_identity() {
-        for (who, base) in [("pgas", make_pgas_stage(1000)), ("pmmh", make_pmmh_stage(1000))] {
+        for (who, base) in [("pgas", make_pgas_method(1000)), ("pmmh", make_pmmh_method(1000))] {
             let with = |starts: ChainStarts| -> Method {
                 let mut m = base.clone();
                 m.starts = Some(starts);
@@ -7995,8 +7995,8 @@ decibans_thresh = 100.0
 
     #[test]
     fn pmmh_identity_payload_omits_iterations() {
-        let s_short = make_pmmh_stage(1000);
-        let s_long = make_pmmh_stage(8000);
+        let s_short = make_pmmh_method(1000);
+        let s_long = make_pmmh_method(8000);
         assert_eq!(s_short.identity_payload(), s_long.identity_payload());
     }
 
@@ -8007,9 +8007,9 @@ decibans_thresh = 100.0
     /// future serde mistake in either direction — a `skip_serializing_if` that
     /// starts skipping `btrs`, or one that stops skipping `btpe`.
     #[test]
-    fn binomial_sampler_is_in_the_stage_identity() {
-        let mut btpe = make_pgas_stage(1000);
-        let mut btrs = make_pgas_stage(1000);
+    fn binomial_sampler_is_in_the_method_identity() {
+        let mut btpe = make_pgas_method(1000);
+        let mut btrs = make_pgas_method(1000);
         if let Algorithm::PGAS { ref mut binomial, .. } = btrs.algorithm {
             *binomial = sim::rng::BinomialAlgorithm::Btrs;
         }
@@ -8019,17 +8019,17 @@ decibans_thresh = 100.0
         let a = serde_json::to_string(&btpe.identity_payload()).unwrap();
         let b = serde_json::to_string(&btrs.identity_payload()).unwrap();
         assert_ne!(a, b,
-            "btpe and btrs stages produced the SAME identity payload — the two \
+            "btpe and btrs methods produced the SAME identity payload — the two \
              samplers would share one address, and one sampler's posterior \
              would be served from the other's leaf. That is the exact failure \
              an environment variable would have caused, and the reason this is \
              a typed field.");
         assert!(b.contains(r#""binomial":"btrs""#),
-            "a btrs stage's payload must NAME the sampler; got {b}");
+            "a btrs method's payload must NAME the sampler; got {b}");
         // NOTE the key form, not the bare substring: `"backend":"chain_binomial"`
         // contains "binomial" and made the naive check fail.
         assert!(!a.contains(r#""binomial":"#),
-            "a btpe stage's payload must stay byte-identical to the pre-field \
+            "a btpe method's payload must stay byte-identical to the pre-field \
              format, so adding this field orphans no stored leaf. Absence means \
              BTPE — permanently, and NOT 'whatever the default is'. If the \
              default ever flips (gh#761), `is_btpe` must not follow it. Got {a}");
@@ -8037,14 +8037,14 @@ decibans_thresh = 100.0
 
     /// gh#747: the TOML spelling round-trips, and an absent field is BTPE.
     #[test]
-    fn binomial_sampler_parses_from_stage_toml() {
+    fn binomial_sampler_parses_from_method_toml() {
         let with_btrs: Algorithm = toml::from_str(
             "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 4\n\
              particles = 100\nsweeps = 1000\nbinomial = \"btrs\"\n").unwrap();
         match with_btrs {
             Algorithm::PGAS { binomial, .. } =>
                 assert_eq!(binomial, sim::rng::BinomialAlgorithm::Btrs),
-            _ => panic!("expected a PGAS stage"),
+            _ => panic!("expected a PGAS method"),
         }
         // Absent -> BTPE. Every fit.toml written before this field relies on it.
         let absent: Algorithm = toml::from_str(
@@ -8054,13 +8054,13 @@ decibans_thresh = 100.0
             Algorithm::PGAS { binomial, .. } =>
                 assert_eq!(binomial, sim::rng::BinomialAlgorithm::Btpe,
                     "an absent `binomial` must mean BTPE"),
-            _ => panic!("expected a PGAS stage"),
+            _ => panic!("expected a PGAS method"),
         }
     }
 
     #[test]
     fn identity_payload_is_byte_stable_against_recompiles() {
-        // Golden bytes for a fixed PGAS stage. Locks the
+        // Golden bytes for a fixed PGAS method. Locks the
         // serialization order so a recompile that silently changes
         // serde_json's key ordering would invalidate every
         // resume_state.bin in the wild — we'd rather fail this test
@@ -8071,8 +8071,8 @@ decibans_thresh = 100.0
         // like behavior is opt-in via `preserve_order` feature, off
         // by default; default Map sorts lexically). Either way the
         // result is deterministic, so a golden constant catches drift.
-        let stage = make_pgas_stage(1000);
-        let payload_bytes = serde_json::to_vec(&stage.identity_payload()).unwrap();
+        let method = make_pgas_method(1000);
+        let payload_bytes = serde_json::to_vec(&method.identity_payload()).unwrap();
         let payload_str = String::from_utf8(payload_bytes).unwrap();
         // Updated with the `[stages]` → `[method]` split (proposal
         // 2026-09-08): the payload is the method's own serialization, so the
@@ -8093,8 +8093,8 @@ decibans_thresh = 100.0
 
     #[test]
     fn pmmh_identity_payload_byte_stable() {
-        let stage = make_pmmh_stage(1000);
-        let payload_str = serde_json::to_string(&stage.identity_payload()).unwrap();
+        let method = make_pmmh_method(1000);
+        let payload_str = serde_json::to_string(&method.identity_payload()).unwrap();
         // Updated with the `[stages]` → `[method]` split — see the PGAS golden
         // above for the reason. Moved again when correlated pseudo-marginal
         // PMMH was removed: the `rho` key left the payload, so every PMMH
@@ -8107,13 +8107,13 @@ decibans_thresh = 100.0
 
     #[test]
     fn pmmh_identity_payload_includes_new_algorithmic_knobs() {
-        let base = make_pmmh_stage(1000);
+        let base = make_pmmh_method(1000);
 
-        let mut s = make_pmmh_stage(1000);
+        let mut s = make_pmmh_method(1000);
         if let Algorithm::PMMH { ref mut adapt, .. } = s.algorithm { *adapt = false; }
         assert_ne!(base.identity_payload(), s.identity_payload(), "adapt");
 
-        let mut s = make_pmmh_stage(1000);
+        let mut s = make_pmmh_method(1000);
         if let Algorithm::PMMH { ref mut adapt_start, .. } = s.algorithm { *adapt_start = 1000; }
         assert_ne!(base.identity_payload(), s.identity_payload(), "adapt_start");
     }
@@ -8310,7 +8310,7 @@ cooling = 0.7
 
     /// `starts` is a key of `[method]` whatever the algorithm — the NLopt
     /// methods included, which used to carry their own `init` inside
-    /// `NloptStageConfig` and could answer differently (gh#881).
+    /// `NloptConfig` and could answer differently (gh#881).
     #[test]
     fn starts_parses_on_every_algorithm() {
         let base = "[model]\ncamdl = \"models/sir.camdl\"\n\
@@ -8524,7 +8524,7 @@ cooling = 0.70
 
     #[test]
     fn typoed_top_level_key_is_rejected() {
-        // A typo'd key (here `iteration`, a near-miss for the stage's
+        // A typo'd key (here `iteration`, a near-miss for the method's
         // `iterations`) must not be silently ignored — strict config.
         let bad = format!("iteration = 80\n{STRICT_BASE}");
         let err = parse(&bad).expect_err(

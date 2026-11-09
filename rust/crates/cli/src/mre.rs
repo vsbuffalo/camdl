@@ -336,19 +336,19 @@ fn shell_join(tokens: &[String]) -> String {
 
 // ── shared bundle writer ────────────────────────────────────────────────────────
 
-/// Stage the closure into a temp dir preserving each file's contained-relative
+/// Method the closure into a temp dir preserving each file's contained-relative
 /// layout, write `manifest.toml` + `README.md`, tar+gzip to `out`, and print the
 /// report (+ a consent banner if observed data is included). Command-agnostic:
 /// it consumes a [`BundlePlan`] and never inspects how the closure was found.
 fn write_bundle(plan: &BundlePlan, out: &Path) -> Result<(), String> {
     let staging = tempfile::tempdir()
         .map_err(|e| format!("cannot create staging dir: {e}"))?;
-    let stage_root = staging.path();
+    let method_root = staging.path();
 
     let mut manifest_inputs: Vec<BundledInput> = Vec::new();
     let mut data_banner: Vec<(String, u64)> = Vec::new();
     for inp in &plan.inputs {
-        let dst = stage_root.join(&inp.dest);
+        let dst = method_root.join(&inp.dest);
         copy_into(&inp.src, &dst)?;
         let (bytes, sha) = digest_file(&dst)?;
         let rows = if inp.role.is_data() { Some(count_data_rows(&dst)?) } else { None };
@@ -375,9 +375,9 @@ fn write_bundle(plan: &BundlePlan, out: &Path) -> Result<(), String> {
     };
     let manifest_toml = toml::to_string_pretty(&manifest)
         .map_err(|e| format!("cannot serialize manifest: {e}"))?;
-    fs::write(stage_root.join("manifest.toml"), manifest_toml)
+    fs::write(method_root.join("manifest.toml"), manifest_toml)
         .map_err(|e| format!("cannot write manifest: {e}"))?;
-    fs::write(stage_root.join("README.md"), readme(&plan.reproduce, data_included))
+    fs::write(method_root.join("README.md"), readme(&plan.reproduce, data_included))
         .map_err(|e| format!("cannot write README: {e}"))?;
 
     // ── tarball ──
@@ -385,7 +385,7 @@ fn write_bundle(plan: &BundlePlan, out: &Path) -> Result<(), String> {
         .file_name()
         .map(|n| n.to_string_lossy().trim_end_matches(".tar.gz").to_string())
         .unwrap_or_else(|| "mre".to_string());
-    write_tarball(out, &bundle_name, stage_root)?;
+    write_tarball(out, &bundle_name, method_root)?;
 
     // ── report + consent banner ──
     if data_included {
@@ -525,11 +525,11 @@ fn count_data_rows(path: &Path) -> Result<u64, String> {
     Ok(rows)
 }
 
-fn write_tarball(out: &Path, bundle_name: &str, stage_root: &Path) -> Result<(), String> {
+fn write_tarball(out: &Path, bundle_name: &str, method_root: &Path) -> Result<(), String> {
     let f = fs::File::create(out).map_err(|e| format!("cannot create {}: {e}", out.display()))?;
     let enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
     let mut tar = tar::Builder::new(enc);
-    tar.append_dir_all(bundle_name, stage_root)
+    tar.append_dir_all(bundle_name, method_root)
         .map_err(|e| format!("cannot write tarball: {e}"))?;
     let enc = tar.into_inner().map_err(|e| format!("cannot finalize tar: {e}"))?;
     enc.finish().map_err(|e| format!("cannot finish gzip: {e}"))?;

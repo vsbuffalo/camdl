@@ -232,7 +232,7 @@ pub struct ChainLoglikMeans {
     /// [`chain_ids`](Self::chain_ids). `NaN` when a chain has no readable rows.
     pub scored: Vec<f64>,
     /// `true` when no discovered trace carries `scored_column` at all — a
-    /// stage whose chains cannot be compared, which the caller must SAY rather
+    /// method whose chains cannot be compared, which the caller must SAY rather
     /// than render as a table of dashes.
     pub scored_column_absent: bool,
     /// PGAS only: the sampler's own target and its latent-path term, shown
@@ -262,17 +262,17 @@ pub struct CompleteDataMeans {
     pub transition: Vec<f64>,
 }
 
-/// Read every `chain_*/trace.tsv` under `stage_dir` and return the per-chain
+/// Read every `chain_*/trace.tsv` under `method_dir` and return the per-chain
 /// post-burn-in means the summary table needs, ordered by ascending chain
 /// number.
 ///
-/// `kind` is the stage's log-likelihood class, which decides *by name* which
+/// `kind` is the method's log-likelihood class, which decides *by name* which
 /// column the chains may be compared on — see
 /// [`LoglikType::chain_agreement_column`] and this module's header for why a
 /// column *position* is the wrong key (gh#667).
 ///
 /// Returns `None` when no `chain_*/trace.tsv` files exist (the sampler wrote no
-/// per-chain trace — e.g. an optimizer-only stage) so the caller can say so
+/// per-chain trace — e.g. an optimizer-only method) so the caller can say so
 /// rather than silently show an empty table.
 ///
 /// ## Post-burn-in selection
@@ -292,12 +292,12 @@ pub struct CompleteDataMeans {
 ///   so warm-up is never included — a subset of the post-burn-in region when
 ///   thinning is on).
 ///
-/// When `draws.tsv` is absent or unreadable (a partial / hand-built stage) we
+/// When `draws.tsv` is absent or unreadable (a partial / hand-built method) we
 /// fall back to the whole trace: without the posterior manifest we cannot strip
 /// warm-up, so the mean is noisier but still honest. This never contaminates a
 /// well-formed fit.
-pub fn read_chain_mean_logliks(stage_dir: &Path, kind: LoglikType) -> Option<ChainLoglikMeans> {
-    let chain_dirs = discover_chain_dirs(stage_dir);
+pub fn read_chain_mean_logliks(method_dir: &Path, kind: LoglikType) -> Option<ChainLoglikMeans> {
+    let chain_dirs = discover_chain_dirs(method_dir);
     if chain_dirs.is_empty() {
         return None;
     }
@@ -305,7 +305,7 @@ pub fn read_chain_mean_logliks(stage_dir: &Path, kind: LoglikType) -> Option<Cha
     // Per-chain kept-draw counts from draws.tsv, keyed by the chain number —
     // the same number the directory carries (gh#990) — so a chain with no
     // draws pairs with nothing rather than with its neighbour's count.
-    let draw_counts = read_draw_counts(&stage_dir.join("draws.tsv"));
+    let draw_counts = read_draw_counts(&method_dir.join("draws.tsv"));
 
     let scored_column = kind.chain_agreement_column();
     // The complete-data split is PGAS's alone: the marginal samplers have no
@@ -328,7 +328,7 @@ pub fn read_chain_mean_logliks(stage_dir: &Path, kind: LoglikType) -> Option<Cha
     let mut transition = Vec::with_capacity(chain_dirs.len());
     // "Absent" means a readable trace exists and none of them names the scored
     // column — distinct from "no readable trace at all", which surfaces as NaN
-    // means. Starts `false` so an unreadable stage never claims the column is
+    // means. Starts `false` so an unreadable method never claims the column is
     // missing.
     let mut any_header_read = false;
     let mut any_scored_column = false;
@@ -381,14 +381,14 @@ fn retained_mean(all: &[f64], k: Option<usize>) -> f64 {
     }
 }
 
-/// Collect `(chain, dir)` for every `chain_<N>` subdirectory of `stage_dir`,
+/// Collect `(chain, dir)` for every `chain_<N>` subdirectory of `method_dir`,
 /// in ascending chain order. The number is the chain's label everywhere
 /// (gh#990), and it is carried with the directory rather than re-derived from
 /// the position in this list, so a leaf with a gap labels each directory as
 /// itself (gh#913).
-fn discover_chain_dirs(stage_dir: &Path) -> Vec<(ChainIndex, std::path::PathBuf)> {
+fn discover_chain_dirs(method_dir: &Path) -> Vec<(ChainIndex, std::path::PathBuf)> {
     let mut dirs = Vec::new();
-    let Ok(entries) = std::fs::read_dir(stage_dir) else {
+    let Ok(entries) = std::fs::read_dir(method_dir) else {
         return dirs;
     };
     for entry in entries.flatten() {
@@ -498,8 +498,8 @@ pub struct ChainUniqueDraws {
 /// `chain` column; vectors are compared as their exact on-disk text (the
 /// writer round-trips full precision, so textual equality is value
 /// equality). `None` when draws.tsv is missing/unreadable.
-pub fn read_chain_unique_draws(stage_dir: &Path) -> Option<Vec<ChainUniqueDraws>> {
-    let contents = std::fs::read_to_string(stage_dir.join("draws.tsv")).ok()?;
+pub fn read_chain_unique_draws(method_dir: &Path) -> Option<Vec<ChainUniqueDraws>> {
+    let contents = std::fs::read_to_string(method_dir.join("draws.tsv")).ok()?;
     let mut lines = contents.lines();
     let header = lines.next()?;
     let mut cols = header.split('\t');
@@ -532,12 +532,12 @@ pub fn read_chain_unique_draws(stage_dir: &Path) -> Option<Vec<ChainUniqueDraws>
 
 /// Per-chain [`ChainNegInf`] screen over the retained trace rows. `None`
 /// when no chain traces exist (same discovery as the mean-loglik reader).
-pub fn read_chain_neginf(stage_dir: &Path) -> Option<Vec<ChainNegInf>> {
-    let chain_dirs = discover_chain_dirs(stage_dir);
+pub fn read_chain_neginf(method_dir: &Path) -> Option<Vec<ChainNegInf>> {
+    let chain_dirs = discover_chain_dirs(method_dir);
     if chain_dirs.is_empty() {
         return None;
     }
-    let draw_counts = read_draw_counts(&stage_dir.join("draws.tsv"));
+    let draw_counts = read_draw_counts(&method_dir.join("draws.tsv"));
     let mut out = Vec::with_capacity(chain_dirs.len());
     for (chain, dir) in &chain_dirs {
         let cols = read_trace_cols(&dir.join("trace.tsv"), &[TRACE_COL_LOG_POSTERIOR]);
@@ -694,7 +694,7 @@ mod tests {
         assert!(scores[4].is_outlier, "the -400 outlier must still flag: mod_z={}", scores[4].mod_z);
     }
 
-    /// End-to-end reader: synthesize a six-chain stage dir (`chain_N/trace.tsv`,
+    /// End-to-end reader: synthesize a six-chain method dir (`chain_N/trace.tsv`,
     /// one stuck) + a `draws.tsv` manifest, with a warm-up prefix in each trace
     /// that MUST be stripped. Good chains carry jitter (distinct means) so the
     /// robust MAD is non-zero.
@@ -760,7 +760,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A six-chain PGAS stage whose complete-data ranking and observation-only
+    /// A six-chain PGAS method whose complete-data ranking and observation-only
     /// ranking DISAGREE, so the fixture discriminates between them.
     ///
     /// - chain 2 has a hugely concentrated latent path (`transition_ll` −800 vs
@@ -770,7 +770,7 @@ mod tests {
     ///
     /// Ranking on `log_complete_data_ll` flags chain 2 — a chain that fits the
     /// data as well as any other. Ranking on `obs_ll` flags chain 5.
-    fn write_disagreeing_pgas_stage(dir: &std::path::Path) {
+    fn write_disagreeing_pgas_method(dir: &std::path::Path) {
         std::fs::create_dir_all(dir).unwrap();
         // (transition_ll, obs_ll) per chain; complete = transition + obs.
         let chains = [
@@ -816,7 +816,7 @@ mod tests {
     #[test]
     fn pgas_chains_are_scored_on_obs_ll_not_the_complete_data_target() {
         let dir = crate::test_support::unique_temp_dir("chain_diag_gh667");
-        write_disagreeing_pgas_stage(&dir);
+        write_disagreeing_pgas_method(&dir);
 
         let means = read_chain_mean_logliks(&dir, LoglikType::CompleteData)
             .expect("six chain traces");

@@ -117,7 +117,7 @@ and are not configuration resolution. _Violated today._
 - `FitRunConfig::build` takes IF2's `n_iterations`, `cooling` and
   `cooling_target_iters` for every method (`runner.rs:325-335`), and PMMH, PGAS,
   NLopt and pfilter pass placeholders (`pmmh.rs:133-140`, `pgas.rs:304-310`,
-  `nlopt_stage.rs:80-92`, `mod.rs:1752-1758`).
+  `nlopt_method.rs:80-92`, `mod.rs:1752-1758`).
   `FitRunConfig.if2_config:
   IF2Config` (`runner.rs:106`) carries the
   particle-filter settings every method reads (`if2.rs:110-147`), and
@@ -168,7 +168,7 @@ with no readable `run.json` is recorded by the consumed file's digest in the
 `FitState` (`cli/src/fit/state.rs:19-182`) is written by IF2, NLopt, PMMH, MH
 and PGAS, each leaving the others' fields empty, and NLopt stores its
 per-parameter relative range under the field named for IF2's Â
-(`tail_chain_agreement`, `nlopt_stage.rs:297`).
+(`tail_chain_agreement`, `nlopt_method.rs:297`).
 
 **I7. One assessment rule per measurement type, computed on read under a stated
 policy.** An assessment reports a diagnostic it could not compute as
@@ -182,8 +182,8 @@ band (`gating.rs:182-260`); `compute_if2_gate_verdict` exempts nothing
 (`fit_summary.rs:1527-1532`) and its structured block returns no overall verdict
 when the decibans leg is missing (`fit_summary.rs:3028-3056`). A NaN Â is
 skipped by `fold(0.0, f64::max)` and so passes silently (`gating.rs:202`,
-`method_result.rs:1087-1091`). The NLopt verdict is the stage's two-leg rule
-(`nlopt_stage.rs:785`, `:803`) at run time and a bare `max_rel_range < 0.05` in
+`method_result.rs:1087-1091`). The NLopt verdict is the method's two-leg rule
+(`nlopt_method.rs:785`, `:803`) at run time and a bare `max_rel_range < 0.05` in
 `fit table` (`table_row.rs:293-294`). R̂ is judged against an unrecorded constant
 (`RHAT_CONVERGED_THRESHOLD = 1.05`, `method_result.rs:585`), so changing it
 re-judges every stored fit without saying so.

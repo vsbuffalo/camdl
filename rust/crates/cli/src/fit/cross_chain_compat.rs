@@ -220,7 +220,7 @@ impl CrossChainCompat {
         }
     }
 
-    /// The two lines printed beside the end-of-stage diagnostics.
+    /// The two lines printed beside the end-of-run diagnostics.
     pub fn report(&self) -> String {
         format!(
             "  cross-chain diagonal dominance: {:.1} nats \

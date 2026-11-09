@@ -125,7 +125,7 @@ burn_in = 2
     p
 }
 
-/// The `chain_0/trace.tsv` of the `post` stage leaf under `<out>/fits/`.
+/// The `chain_0/trace.tsv` of the `post` method leaf under `<out>/fits/`.
 fn trace_of_post_leaf(out: &Path) -> String {
     let mut stack = vec![out.join("fits")];
     while let Some(d) = stack.pop() {

@@ -1,10 +1,10 @@
 //! Integration test for `camdl fit run --resume` against PGAS.
 //!
-//! Verifies the wiring landed in 2026-04-30 (`Stage::identity_payload`
+//! Verifies the wiring landed in 2026-04-30 (`Method::identity_payload`
 //! split + `--resume` flag plumbed through the dispatcher):
 //!
 //! 1. A first PGAS run writes `chain_<n>/resume_state.bin` containing
-//!    completed_sweeps == n_sweeps and the stage's identity hash.
+//!    completed_sweeps == n_sweeps and the method's identity hash.
 //! 2. A second invocation with `--resume --sweeps N>n_sweeps`
 //!    succeeds and continues the chain (does not re-run burn-in).
 //! 3. Changing an *identity* field (e.g. `chains`) between the two
@@ -138,11 +138,11 @@ fn post_leaf(out: &Path, exclude: &[String]) -> (String, PathBuf, serde_json::Va
                 &std::fs::read_to_string(&rj).unwrap_or_default(),
             ) {
                 if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
-                    let stage = v["levels"].as_array().into_iter().flatten()
+                    let method = v["levels"].as_array().into_iter().flatten()
                         .find(|l| l["name"].as_str() == Some("method"))
                         .and_then(|l| l["label"].as_str()).unwrap_or("");
                     let rid = v["run_id"].as_str().unwrap_or("").to_string();
-                    if stage.contains("pgas") && !exclude.contains(&rid) {
+                    if method.contains("pgas") && !exclude.contains(&rid) {
                         return (rid, d, v);
                     }
                 }
@@ -367,7 +367,7 @@ fn pgas_resume_rejects_when_identity_field_changes() {
 /// data bytes, `[estimate]`, `[fixed]` and the method — and nothing in
 /// `[config]`. A chain fitted at `dt = 1` therefore resumed at `dt = 0.5`: a
 /// different likelihood, continued as if it were the same chain, into a leaf
-/// whose address (correctly) said `dt = 0.5`. The guard is now the CAS stage
+/// whose address (correctly) said `dt = 0.5`. The guard is now the CAS method
 /// identity less its extension dimension, so every input the leaf is keyed on
 /// but the sweep count must match.
 #[test]

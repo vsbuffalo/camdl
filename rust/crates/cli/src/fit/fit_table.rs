@@ -1,7 +1,7 @@
 //! `camdl fit table <root>` — the cross-fit aggregator.
 //!
 //! Walks `<root>/fits/` (or whatever root the caller passes), loads
-//! each fit's terminal-stage `MethodResult`, and projects each fit to
+//! each fit's terminal-method `MethodResult`, and projects each fit to
 //! one [`TableRow`]. The same row schema is embedded in
 //! `fit summary --format json` so the two surfaces never drift —
 //! see Deliverable C in
@@ -9,7 +9,7 @@
 //!
 //! Scope: this command is read-only. It never mutates fit_dirs and
 //! never touches the network or external systems. All state is
-//! recovered from the on-disk run.json + per-stage output files.
+//! recovered from the on-disk run.json + per-method output files.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -36,7 +36,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    // Outer-loop filters that key only on the FitView (no per-stage
+    // Outer-loop filters that key only on the FitView (no per-method
     // load needed). These are cheap; running them first avoids the
     // walker / MethodResult load on rows the user filtered out.
     let pre_filtered: Vec<&FitDirEntry> = entries
@@ -97,13 +97,13 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
         // leaf's own view, so every cell comes from that one run. A run that
         // has not completed, or whose method has no tabulated result
         // (pfilter), has no row.
-        for stage in &entry.view.stages {
-            if !stage.completed
-                || !crate::fit::method_result::MethodResult::has_result(stage.method)
+        for method in &entry.view.methods {
+            if !method.completed
+                || !crate::fit::method_result::MethodResult::has_result(method.method)
             {
                 continue;
             }
-            match table_row::build_row(&stage.stage_dir, diff.clone(), 0.0, now_unix) {
+            match table_row::build_row(&method.method_dir, diff.clone(), 0.0, now_unix) {
                 Ok(r) => rows.push(r),
                 Err(e) => {
                     // A run whose result cannot be read is listed as a warning,
@@ -111,10 +111,10 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
                     // dropping one would answer for fewer runs than were asked
                     // about.
                     if !args.quantities.is_empty() {
-                        eprintln!("error: {}: {}", stage.stage_dir.display(), e);
+                        eprintln!("error: {}: {}", method.method_dir.display(), e);
                         std::process::exit(1);
                     }
-                    errors.push(format!("{}: {}", stage.stage_dir.display(), e))
+                    errors.push(format!("{}: {}", method.method_dir.display(), e))
                 }
             }
         }
@@ -158,8 +158,8 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
             pre_filtered
                 .iter()
                 .flat_map(|e| {
-                    e.view.stages.iter().map(move |st| {
-                        (st.run_id.as_str(), (e.fit_dir.as_path(), st.stage_dir.as_path()))
+                    e.view.methods.iter().map(move |st| {
+                        (st.run_id.as_str(), (e.fit_dir.as_path(), st.method_dir.as_path()))
                     })
                 })
                 .collect();
@@ -488,7 +488,7 @@ fn resolve_quantity_median(
     }
 
     // (2/3) Derive only for fits that carry a posterior cloud — gated through
-    // the ARTIFACT authority (`resolve_posterior_draws`: does a stage have a
+    // the ARTIFACT authority (`resolve_posterior_draws`: does a method have a
     // `draws.tsv`?), NOT a per-method allowlist. A method-name check
     // (`pgas|pmmh`) silently dropped `mh` — an ODE/chain-binomial Bayesian
     // sampler that also writes `draws.tsv` — rendering `—` for a quantity that

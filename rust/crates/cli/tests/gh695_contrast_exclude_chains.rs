@@ -188,8 +188,8 @@ fn segment(tmp: &Path) -> PathBuf {
     dirs.pop().unwrap()
 }
 
-/// The stage leaf holding `draws.tsv` and the `chain_*/` path dirs.
-fn stage_dir(seg: &Path) -> PathBuf {
+/// The method leaf holding `draws.tsv` and the `chain_*/` path dirs.
+fn method_dir(seg: &Path) -> PathBuf {
     fn walk(dir: &Path) -> Option<PathBuf> {
         if dir.join("draws.tsv").is_file() {
             return Some(dir.to_path_buf());
@@ -210,7 +210,7 @@ fn stage_dir(seg: &Path) -> PathBuf {
 /// so the expected cloud size is the fit's, never a number restated from the
 /// sampler config.
 fn draws_per_chain(seg: &Path) -> HashMap<usize, usize> {
-    let path = stage_dir(seg).join("draws.tsv");
+    let path = method_dir(seg).join("draws.tsv");
     let txt = std::fs::read_to_string(&path).unwrap();
     let mut lines = txt.lines().filter(|l| !l.starts_with('#'));
     let header: Vec<&str> = lines.next().expect("draws header").split('\t').collect();
@@ -422,7 +422,7 @@ fn contrast_bands_over_the_retained_chains_only() {
 /// an empty band would be a fabricated answer.
 ///
 /// Constructed by deleting one chain's saved paths, which is the on-disk shape
-/// of "this chain saved nothing" (a PGAS stage run with `n_trajectories = 0`,
+/// of "this chain saved nothing" (a PGAS method run with `n_trajectories = 0`,
 /// or an interrupted write).
 #[test]
 fn empty_forkable_intersection_refuses_by_name() {
@@ -434,7 +434,7 @@ fn empty_forkable_intersection_refuses_by_name() {
     let n_chain0 = per_chain[&0];
 
     // Drop chain 1's saved paths (its directory is chain_1/).
-    let orphaned = stage_dir(&seg).join("chain_1");
+    let orphaned = method_dir(&seg).join("chain_1");
     assert!(orphaned.is_dir(), "expected saved paths at {}", orphaned.display());
     std::fs::remove_dir_all(&orphaned).unwrap();
 

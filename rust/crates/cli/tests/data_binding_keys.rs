@@ -52,7 +52,7 @@ fn write_data(dir: &Path) -> PathBuf {
     p
 }
 
-/// A one-stage fit.toml whose `[data.observations]` body is the variable under
+/// A one-method fit.toml whose `[data.observations]` body is the variable under
 /// test. Everything else is a working config.
 fn write_fit_toml(dir: &Path, observations: &str) -> PathBuf {
     let body = format!(

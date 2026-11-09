@@ -6,7 +6,7 @@
 //!   profile-point — single-shot): write the whole leaf into a staging dir
 //!   on the *same filesystem* as `results/`, apply the fsync ordering, then
 //!   `rename` it into place. A reader never sees a half-written leaf.
-//! - **Mode B — streamed `Running → Completed`** (fit stages — long,
+//! - **Mode B — streamed `Running → Completed`** (fit methods — long,
 //!   streaming, resumable): claim the leaf dir exclusively via an `O_EXCL`
 //!   `.lock`, write a `Running` `run.json`, stream files, then commit by
 //!   `run.json.tmp → rename` over `run.json`.
@@ -282,7 +282,7 @@ impl FsCasStore {
     /// Add one artifact to a leaf that is already `Completed`.
     ///
     /// The store had no way for a finished leaf to gain a file, and the gap
-    /// was load-bearing: `simulate --event-log` stages `event_log.tsv` into a
+    /// was load-bearing: `simulate --event-log` methods `event_log.tsv` into a
     /// leaf that may already exist, and the whole staged set was then
     /// discarded as an already-completed no-op, so the log was silently lost.
     /// The in-code note said `--force` was the workaround; it was not (that
@@ -992,8 +992,8 @@ fn rel_key(root: &Path, file: &Path) -> String {
 
 /// The leaf's OWN files must exactly match the manifest — no missing and no
 /// orphan — across its **whole subtree**, EXCEPT the reserved files and the
-/// declared `children` subdirs. A fit stage nests per-chain files
-/// (`chain_1/trace.tsv`) plus stage-root outputs (`fit_state.toml`,
+/// declared `children` subdirs. A fit method nests per-chain files
+/// (`chain_1/trace.tsv`) plus method-root outputs (`fit_state.toml`,
 /// `draws.tsv`), so the walk recurses; but it **stops at a declared child**
 /// (`obs/`, `trajectories/`, `dt_check/`) — those are separate artifacts with
 /// their own `run.json`, validated on their own lookup, never recursed into

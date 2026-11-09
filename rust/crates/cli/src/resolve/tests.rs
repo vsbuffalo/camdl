@@ -501,11 +501,11 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
     let sim = resolve_trajectory(&ctx(model, &out_sched, &params, 100.0, 1, 1)).expect("sim");
     out.push(("sim", sim.levels[0].hash, sim.run_id));
 
-    // fit — `resolve_fit_stage`; levels[0] is the `fit` level (folds the model
+    // fit — `resolve_fit_method`; levels[0] is the `fit` level (folds the model
     // digest alongside the data/config digests).
     let cfg = fit_config();
     let method = cfg.inference.method.clone().expect("fixture method");
-    let fit = crate::fit::cas::resolve_fit_stage(&crate::fit::cas::FitStageCtx {
+    let fit = crate::fit::cas::resolve_fit_method(&crate::fit::cas::FitMethodCtx {
         model,
         fit_stem: "sir",
         ir_version: IRV,

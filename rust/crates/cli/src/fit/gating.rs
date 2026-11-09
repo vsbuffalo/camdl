@@ -6,7 +6,7 @@
 //! [`check_source_converged`] refuses a source whose stored verdict is not
 //! converged unless `--allow-nonconverged-source` is passed: that is the
 //! purpose the old pre-refine gate served, kept where the upstream is
-//! consumed rather than inside a stage pipeline (proposal
+//! consumed rather than inside a `[stages]` pipeline (proposal
 //! 2026-09-08-workflow-first-fit-config, §8 item 11). The post-refine
 //! regression gate it used to pair with guarded an in-process handoff that no
 //! longer exists; across invocations a regression is visible in `fit table`.
@@ -69,7 +69,7 @@ pub enum AgreementBand {
 
 impl AgreementBand {
     /// The plain glyph. Colour is the renderer's business — `fit summary`
-    /// paints through its own `ok`/`warn`/`err`, the stage report through raw
+    /// paints through its own `ok`/`warn`/`err`, the method report through raw
     /// ANSI — so this returns the character alone.
     pub fn glyph(self) -> &'static str {
         match self {
@@ -169,7 +169,7 @@ pub enum SpreadChains {
 /// The IF2 convergence assessment of one stored fit: both legs of the
 /// compound gate, measured once. Every reader of an IF2 verdict — the
 /// warm-start source check ([`check_scout_convergence`]), `fit table`
-/// (`method_result::If2StageResult`) and `fit summary`'s gate block — reads
+/// (`method_result::If2Run`) and `fit summary`'s gate block — reads
 /// this, so the three cannot disagree about one fit.
 ///
 /// The overall verdict judges every estimated parameter, initial-state

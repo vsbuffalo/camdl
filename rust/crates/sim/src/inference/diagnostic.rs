@@ -291,7 +291,7 @@ pub enum DiagnosticKind {
     /// every slot, so the path through that observation is drawn from a
     /// handful of candidates, sweep after sweep.
     ///
-    /// One finding per stage over the pooled profile; the threshold and its
+    /// One finding per method run over the pooled profile; the threshold and its
     /// argument live with the accumulator (`cli::fit::filter_ess`).
     FilterStarved {
         /// Observations whose mean ESS is below the bar.
@@ -726,7 +726,7 @@ impl DiagnosticKind {
                 "Increase particles so the swarm can reach the observation",
             ],
             Self::FilterStarved { .. } => vec![
-                "Read filter_ess.tsv in the stage directory: one row per chain \
+                "Read filter_ess.tsv in the method directory: one row per chain \
                  and observation, mean and minimum ESS over the retained sweeps. \
                  The trough names the data row",
                 "Look at that observation in the data before touching the model: \

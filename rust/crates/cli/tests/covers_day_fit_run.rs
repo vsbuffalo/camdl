@@ -10,11 +10,11 @@
 //! under `day(time)` it is one boundary short and never scores the last row,
 //! and under a form with an offset it scores every row at the wrong boundary.
 //! The two `day` e2e tests before this one went through `pfilter`, which steps
-//! from the observation model itself; these go through the PGAS stage of
+//! from the observation model itself; these go through the PGAS method of
 //! `fit run`, whose schedule the driver builds — the path where the two lists
 //! were built separately.
 //!
-//! The observable: the stage's `filter_ess.tsv` has one row per observation
+//! The observable: the method's `filter_ess.tsv` has one row per observation
 //! boundary the driver scored, with its time, and the saved path in
 //! `chain_0/trajectories.tsv` runs to the last boundary the driver stepped to.
 
@@ -181,7 +181,7 @@ starts = "uniform_unconstrained"
     (p, out)
 }
 
-fn stage_leaf(out: &Path) -> PathBuf {
+fn method_leaf(out: &Path) -> PathBuf {
     let mut stack = vec![out.join("fits")];
     while let Some(d) = stack.pop() {
         let rj = d.join("run.json");
@@ -216,7 +216,7 @@ fn col<'a>(header: &[String], row: &'a [String], name: &str) -> &'a str {
     &row[i]
 }
 
-/// Run the PGAS stage on one form and check the driver walked the declared
+/// Run the PGAS method on one form and check the driver walked the declared
 /// boundaries: one filter-ESS row per boundary, and a path that reaches the
 /// last row's stop.
 fn assert_pgas_walks_the_declared_boundaries(form: &Form) {
@@ -229,9 +229,9 @@ fn assert_pgas_walks_the_declared_boundaries(form: &Form) {
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().expect("spawn camdl");
     assert!(r.status.success(), "[{}] fit run failed: {}", form.tag, String::from_utf8_lossy(&r.stderr));
-    let stage = stage_leaf(&out);
+    let method = method_leaf(&out);
 
-    let (header, rows) = read_tsv(&stage.join("filter_ess.tsv"));
+    let (header, rows) = read_tsv(&method.join("filter_ess.tsv"));
     let scored: BTreeSet<u32> = rows.iter()
         .filter(|r| col(&header, r, "chain") == "0")
         .map(|r| col(&header, r, "time").parse::<f64>().expect("time parses").round() as u32)
@@ -243,7 +243,7 @@ fn assert_pgas_walks_the_declared_boundaries(form: &Form) {
          a driver rebuilt from the labels would walk {labels:?}", form.tag
     );
 
-    let (h, paths) = read_tsv(&stage.join("chain_0/trajectories.tsv"));
+    let (h, paths) = read_tsv(&method.join("chain_0/trajectories.tsv"));
     let last_t = paths.iter()
         .map(|r| col(&h, r, "time").parse::<f64>().expect("time parses"))
         .fold(f64::NEG_INFINITY, f64::max);

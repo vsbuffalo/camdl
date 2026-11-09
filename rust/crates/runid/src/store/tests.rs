@@ -1428,7 +1428,7 @@ fn mode_b_reclaim_is_exclusive_under_concurrency() {
     cleanup(&root);
 }
 
-// ── Mode B: recursive (nested) exact-set manifest — fit stages nest chains ───
+// ── Mode B: recursive (nested) exact-set manifest — fit methods nest chains ───
 
 /// Build a record carrying declared child namespaces (e.g. `trajectories`).
 fn record_with_children(run_id: ContentHash, children: &[(&str, ContentHash)]) -> RunRecord {
@@ -1441,7 +1441,7 @@ fn record_with_children(run_id: ContentHash, children: &[(&str, ContentHash)]) -
 
 #[test]
 fn mode_b_nested_own_files_are_manifested_and_hit() {
-    // A fit stage streams per-chain files under `chain_N/` plus stage-root
+    // A fit method streams per-chain files under `chain_N/` plus method-root
     // outputs. The recursive manifest must capture every nested own-file
     // (keyed by its `/`-joined relative path), and lookup must Hit.
     let root = tmp_root("nested_hit");
@@ -1506,7 +1506,7 @@ fn mode_b_nested_orphan_file_is_orphan() {
 #[test]
 fn mode_b_declared_child_is_a_boundary_not_recursed() {
     // `trajectories/` is a declared child (its own artifact, keyed on
-    // n_trajectories). Its files must NOT enter the stage manifest and must
+    // n_trajectories). Its files must NOT enter the method manifest and must
     // NOT be orphaned — the recursive walk stops at the child boundary.
     let root = tmp_root("child_boundary");
     let store = FsCasStore::new(&root);
@@ -1522,10 +1522,10 @@ fn mode_b_declared_child_is_a_boundary_not_recursed() {
     match store.lookup(&dest, &LeafIdentity::new(id(0xaa))) {
         Lookup::Hit(r) => {
             assert!(r.artifacts.contains_key("fit_state.toml"));
-            // The child's files are NOT folded into the stage manifest — so
+            // The child's files are NOT folded into the method manifest — so
             // changing n_trajectories cannot re-key the θ̂ leaf.
             assert!(!r.artifacts.keys().any(|k| k.starts_with("trajectories/")),
-                "declared-child files must not enter the stage manifest: {:?}", r.artifacts.keys().collect::<Vec<_>>());
+                "declared-child files must not enter the method manifest: {:?}", r.artifacts.keys().collect::<Vec<_>>());
         }
         other => panic!("expected Hit (child is a recognized boundary), got {other:?}"),
     }

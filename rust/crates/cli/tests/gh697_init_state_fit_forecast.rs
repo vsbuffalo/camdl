@@ -113,8 +113,8 @@ struct Fixture {
     model: PathBuf,
     /// The fit results segment (`results/fits/<stem>-<hash>/`).
     fit: PathBuf,
-    /// The stage directory holding `draws.tsv` + `chain_*/trajectories.tsv`.
-    stage: PathBuf,
+    /// The method directory holding `draws.tsv` + `chain_*/trajectories.tsv`.
+    method: PathBuf,
 }
 
 fn run_in(bin: &Path, dir: &Path, args: &[String]) -> std::process::Output {
@@ -159,23 +159,23 @@ fn fixture() -> &'static Fixture {
             .map(|e| e.path())
             .find(|p| p.is_dir())
             .expect("one fit segment");
-        let stage = find_stage(&fit).expect("a stage leaf holding draws.tsv");
+        let method = find_method(&fit).expect("a method leaf holding draws.tsv");
 
         let model = dir.join("model.camdl");
-        Fixture { dir, model, fit, stage }
+        Fixture { dir, model, fit, method }
     })
 }
 
-/// The stage leaf under a fit segment: `<fit>/NN-<stage>-<hash>/seed_N-<hash>/`,
+/// The method leaf under a fit segment: `<fit>/NN-<method>-<hash>/seed_N-<hash>/`,
 /// found by the artifact it holds rather than by its path shape.
-fn find_stage(root: &Path) -> Option<PathBuf> {
+fn find_method(root: &Path) -> Option<PathBuf> {
     if root.join("draws.tsv").is_file() {
         return Some(root.to_path_buf());
     }
     let mut kids: Vec<PathBuf> =
         std::fs::read_dir(root).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
     kids.sort();
-    kids.iter().find_map(|k| find_stage(k))
+    kids.iter().find_map(|k| find_method(k))
 }
 
 // ── TSV helpers ──────────────────────────────────────────────────────────────
@@ -200,8 +200,8 @@ fn idx(hdr: &[String], name: &str) -> usize {
 type Sir = (i64, i64, i64);
 
 /// `draws.tsv` in file order: `(chain, draw, beta, gamma)`.
-fn read_draws(stage: &Path) -> Vec<(usize, usize, f64, f64)> {
-    let (hdr, rows) = read_tsv(&stage.join("draws.tsv"));
+fn read_draws(method: &Path) -> Vec<(usize, usize, f64, f64)> {
+    let (hdr, rows) = read_tsv(&method.join("draws.tsv"));
     let (ci, di) = (idx(&hdr, "chain"), idx(&hdr, "draw"));
     let (bi, gi) = (idx(&hdr, "beta"), idx(&hdr, "gamma"));
     rows.iter()
@@ -218,9 +218,9 @@ fn read_draws(stage: &Path) -> Vec<(usize, usize, f64, f64)> {
 
 /// The TERMINAL snapshot of every saved latent path, keyed by `(chain, draw)`:
 /// `(t, S, I, R)`. This is the object `--init-state fit` must restore.
-fn read_terminal_states(stage: &Path) -> BTreeMap<(usize, usize), (f64, Sir)> {
+fn read_terminal_states(method: &Path) -> BTreeMap<(usize, usize), (f64, Sir)> {
     let mut out: BTreeMap<(usize, usize), (f64, Sir)> = BTreeMap::new();
-    for e in std::fs::read_dir(stage).unwrap().flatten() {
+    for e in std::fs::read_dir(method).unwrap().flatten() {
         let traj = e.path().join("trajectories.tsv");
         if !traj.is_file() {
             continue;
@@ -249,9 +249,9 @@ fn read_terminal_states(stage: &Path) -> BTreeMap<(usize, usize), (f64, Sir)> {
 
 /// The paired ensemble the CLI must build, derived independently here: every
 /// `draws.tsv` row, in file order, that has a saved latent path.
-fn expected_pairing(stage: &Path) -> Vec<((usize, usize), (f64, f64), Sir)> {
-    let terminal = read_terminal_states(stage);
-    read_draws(stage)
+fn expected_pairing(method: &Path) -> Vec<((usize, usize), (f64, f64), Sir)> {
+    let terminal = read_terminal_states(method);
+    read_draws(method)
         .into_iter()
         .filter_map(|(c, d, beta, gamma)| {
             terminal.get(&(c, d)).map(|(_, sir)| ((c, d), (beta, gamma), *sir))
@@ -438,7 +438,7 @@ fn each_draw_restores_its_own_terminal_state_under_its_own_theta() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let expected = expected_pairing(&f.stage);
+    let expected = expected_pairing(&f.method);
     assert!(
         !expected.is_empty(),
         "the fixture must produce at least one forkable draw"
@@ -489,8 +489,8 @@ fn the_forkable_subset_is_counted_out_loud() {
     let bin = skip_if_missing();
     let f = fixture();
 
-    let n_total = read_draws(&f.stage).len();
-    let n_forkable = expected_pairing(&f.stage).len();
+    let n_total = read_draws(&f.method).len();
+    let n_forkable = expected_pairing(&f.method).len();
     assert!(
         n_forkable < n_total,
         "fixture precondition: the saved-path subset must be strict \
@@ -702,7 +702,7 @@ fn draws_without_init_state_still_free_forwards_from_t_start() {
     }
 }
 
-/// A fit whose stage saved no latent paths cannot supply a paired origin. It
+/// A fit whose method saved no latent paths cannot supply a paired origin. It
 /// must be refused BY NAME — never quietly fall back to `init {}`, which would
 /// look like a forecast and be a free-forward replay.
 ///

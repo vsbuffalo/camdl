@@ -1362,7 +1362,7 @@ refuses, with a message naming the reason, a model that has:
 
 Any of these is a hard error that points at the fix, raised at config validation
 — before a leaf is claimed, so a refusal costs a message rather than a
-half-written stage. A model that genuinely needs one of them — a mid-run
+half-written leaf. A model that genuinely needs one of them — a mid-run
 campaign, an estimated $S_0$ — is fit either with the gradient-free ODE methods
 (`mh` for a posterior, `nl-sbplx` for an MLE), or with the stochastic-process
 methods, which handle scheduled effects and estimated initial states.
@@ -1786,7 +1786,7 @@ camdl simulate model.camdl --fit results/fits/<stem>-<hash>/ \
 ```
 
 The origin is the last snapshot of each posterior draw's saved latent path,
-which a PGAS stage writes to `<stage>/chain_*/trajectories.tsv`. At the terminal
+which a PGAS run writes to `<method>/chain_*/trajectories.tsv`. At the terminal
 observation time the smoothing distribution equals the filtering distribution —
 no future data remains to condition on — so that row is a draw from p(x_T |
 y_{1:T}) carrying its own parameters. Interior origins are deliberately not
@@ -1798,7 +1798,7 @@ Biol_ 15(2):e1006785, doi:10.1371/journal.pcbi.1006785, use "the final values of
 estimated state trajectories as initial values for the forecasts".
 
 **Only draws with a saved path can be forecast, and the run says how many.**
-`n_trajectories` and `thin` are independent knobs, so a stage that retains 606
+`n_trajectories` and `thin` are independent knobs, so a run that retains 606
 posterior draws may have saved only 300 latent paths. The run reports the subset
 it used against the full posterior:
 

@@ -18,7 +18,7 @@ use crate::hash::{CanonicalHasher, ContentAddressed, ContentHash, HASH_VERSION};
 pub enum ArtifactKind {
     /// A forward-simulation trajectory (`simulate`).
     Sim,
-    /// One stage of a fit pipeline (`fit`/`if2`-desugared).
+    /// One method of a fit pipeline (`fit`/`if2`-desugared).
     FitStage,
     /// A particle-filter loglik evaluation at fixed params (`pfilter`).
     Pfilter,

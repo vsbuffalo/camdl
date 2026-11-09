@@ -514,7 +514,7 @@ fn fit_fixture(dir: &Path) -> (PathBuf, PathBuf) {
     (ir, truth)
 }
 
-const FIT_STAGES: &str = r#"
+const FIT_METHODS: &str = r#"
 [estimate]
 beta = { bounds = [0.01, 2.0], start = 0.5 }
 
@@ -590,12 +590,12 @@ camdl = "{ir}"
 [data.observations]
 cases = "{data}"
 prevalent = "{data}"
-{stages}
+{methods}
 "#,
             out = out_dir.display(),
             ir = ir.display(),
             data = data_path.display(),
-            stages = FIT_STAGES,
+            methods = FIT_METHODS,
         ),
     )
     .unwrap();
@@ -651,12 +651,12 @@ camdl = "{ir}"
 [synthetic]
 true_params = "{truth}"
 sim_seeds = [1]
-{stages}
+{methods}
 "#,
                 out = out_dir.display(),
                 ir = ir.display(),
                 truth = truth.display(),
-                stages = FIT_STAGES,
+                methods = FIT_METHODS,
             ),
         )
         .unwrap();
@@ -753,11 +753,11 @@ fn a_synthetic_fit_refuses_an_emit_every_that_contradicts_the_declared_window() 
         &toml,
         format!(
             "output_dir = \"{out}\"\n\n[model]\ncamdl = \"{ir}\"\n\n[synthetic]\n\
-             true_params = \"{truth}\"\nsim_seeds = [1]\n{stages}\n",
+             true_params = \"{truth}\"\nsim_seeds = [1]\n{methods}\n",
             out = tmp.path().join("out").display(),
             ir = ir.display(),
             truth = truth.display(),
-            stages = FIT_STAGES,
+            methods = FIT_METHODS,
         ),
     )
     .unwrap();
@@ -770,13 +770,13 @@ fn a_synthetic_fit_refuses_an_emit_every_that_contradicts_the_declared_window() 
 }
 
 /// Fit bases holding at least one `fit_stage` leaf — the cell fits, as opposed
-/// to the dataset-generation container (which carries no stage leaf).
+/// to the dataset-generation container (which carries no method leaf).
 fn cell_fit_bases(out: &Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(out.join("fits"))
         .map(|d| {
             d.flatten()
                 .map(|e| e.path())
-                .filter(|p| p.is_dir() && has_stage_leaf(p))
+                .filter(|p| p.is_dir() && has_method_leaf(p))
                 .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
                 .collect()
         })
@@ -785,7 +785,7 @@ fn cell_fit_bases(out: &Path) -> Vec<String> {
     v
 }
 
-fn has_stage_leaf(base: &Path) -> bool {
+fn has_method_leaf(base: &Path) -> bool {
     let mut stack = vec![base.to_path_buf()];
     while let Some(d) = stack.pop() {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(

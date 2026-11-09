@@ -44,7 +44,7 @@ use crate::state::{IntState, RealState};
 /// PGAS configuration.
 pub struct PGASConfig {
     /// gh#747: which binomial sampler the chain-binomial draws use. Selecting
-    /// `Btrs` CHANGES DRAWS, so it arrives from `Stage::PGAS.binomial`, a typed
+    /// `Btrs` CHANGES DRAWS, so it arrives from `Algorithm::PGAS.binomial`, a typed
     /// field that enters the run address -- never an environment variable.
     pub binomial: crate::rng::BinomialAlgorithm,
     pub n_particles: usize,
@@ -83,9 +83,9 @@ pub struct PGASConfig {
     /// particle Gibbs without AS — a valid kernel in its own right (ADH 2010;
     /// AS is the LJS mixing addition) used as a diagnostic control: it
     /// measures what AS contributes to renewal, and what it costs. Spelled
-    /// `ancestor_sampling = false` on the stage TOML or
+    /// `ancestor_sampling = false` in the `[method]` table or
     /// `--no-ancestor-sampling` on the CLI; identity-bearing (it changes the
-    /// sampled draws), riding the stage payload like `binomial` does.
+    /// sampled draws), riding the method payload like `binomial` does.
     pub ancestor_sampling: bool,
 }
 
@@ -2803,7 +2803,7 @@ pub fn csmc_as(
     // particle rather than on whichever rayon worker happens to steal it.
     binomial: crate::rng::BinomialAlgorithm,
     // Run the ancestor-sampling move at all (`ancestor_sampling = false` on
-    // the stage disables it). `false` is plain particle Gibbs — Andrieu,
+    // the method disables it). `false` is plain particle Gibbs — Andrieu,
     // Doucet & Holenstein (2010, JRSS-B 72:269-342) — which is a valid kernel
     // on its own: ancestor sampling is Lindsten-Jordan-Schön's mixing
     // addition, and removing it leaves the invariant distribution intact. The

@@ -12,7 +12,7 @@
 //! per-stream sum across all bound streams on the union axis (matching the
 //! joint, cross-stream predictive sample the score is computed against).
 //!
-//! gh#648 is the same bug at the OTHER call site. `fit run`'s PFilter stage
+//! gh#648 is the same bug at the OTHER call site. `fit run`'s PFilter method
 //! built its `y_obs` from `FitRunConfig.observations` — the canonical union
 //! TIME axis, whose `value` is documented as a never-scored placeholder 0.0
 //! (`fit/runner.rs`) — while `camdl pfilter --save-prequential` went through
@@ -224,10 +224,10 @@ fn prequential_y_obs_multi_stream_is_cross_stream_sum() {
     }
 }
 
-// ── gh#648: the same bug at `fit run`'s PFilter stage ──────────────────────
+// ── gh#648: the same bug at `fit run`'s PFilter method ──────────────────────
 
 /// A closed SIR with a weekly NegBinomial observation. Every parameter is
-/// pinned by the fit toml below, so the PFilter stage runs at a θ we can
+/// pinned by the fit toml below, so the PFilter method runs at a θ we can
 /// reproduce exactly on the `camdl pfilter` command line.
 const SIR_MODEL: &str = r#"
 time_unit = 'days
@@ -274,8 +274,8 @@ simulate {
 const SIR_DATA: &str =
     "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
-/// A single PFilter stage — no estimation. `start` values plus `[fixed]` fully
-/// determine `FitRunConfig::base_params`, which is the θ the stage filters at,
+/// A single PFilter method — no estimation. `start` values plus `[fixed]` fully
+/// determine `FitRunConfig::base_params`, which is the θ the method filters at,
 /// so `SIR_THETA` below reproduces it verbatim for the manual `camdl pfilter`.
 const SIR_FIT_TOML: &str = r#"output_dir = "results"
 
@@ -328,7 +328,7 @@ fn read_trace(path: &Path) -> PrequentialTrace {
         .unwrap_or_else(|e| panic!("{} is not a PrequentialTrace: {e}", path.display()))
 }
 
-/// gh#648: `fit run`'s PFilter stage and `camdl pfilter --save-prequential`
+/// gh#648: `fit run`'s PFilter method and `camdl pfilter --save-prequential`
 /// must produce the SAME prequential trace at the same model / data / θ /
 /// particles / seed. They call the same `bootstrap_filter` and the same
 /// `build_trace`; only the `y_obs` they score against differed, because
@@ -364,7 +364,7 @@ fn fit_run_prequential_equals_pfilter_prequential() {
     let out = run(&["fit", "run", "fit.toml", "--seed", "1"]);
     assert!(
         out.status.success(),
-        "fit run with a pfilter stage failed:\nstdout={}\nstderr={}",
+        "fit run with a pfilter method failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -393,7 +393,7 @@ fn fit_run_prequential_equals_pfilter_prequential() {
     );
 
     let fit_json = find_prequential_json(&dir.join("results"))
-        .expect("the pfilter stage wrote a prequential.json under results/");
+        .expect("the pfilter method wrote a prequential.json under results/");
     let from_fit = read_trace(&fit_json);
     let from_pfilter = read_trace(&dir.join("manual.json"));
 

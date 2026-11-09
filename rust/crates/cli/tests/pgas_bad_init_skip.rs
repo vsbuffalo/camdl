@@ -193,8 +193,8 @@ starts         = {{ from_posterior = "{draws}" }}
     (p, out_root)
 }
 
-/// The CAS stage leaf for `stage_substr` under `fits_root`.
-fn cas_stage_leaf(fits_root: &Path, stage_substr: &str) -> Option<PathBuf> {
+/// The CAS method leaf for `method_substr` under `fits_root`.
+fn cas_method_leaf(fits_root: &Path, method_substr: &str) -> Option<PathBuf> {
     let mut stack = vec![fits_root.to_path_buf()];
     while let Some(d) = stack.pop() {
         if d.join("run.json").is_file() {
@@ -202,10 +202,10 @@ fn cas_stage_leaf(fits_root: &Path, stage_substr: &str) -> Option<PathBuf> {
                 &std::fs::read_to_string(d.join("run.json")).unwrap_or_default(),
             ) {
                 if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
-                    let stage = v["levels"].as_array().into_iter().flatten()
+                    let method = v["levels"].as_array().into_iter().flatten()
                         .find(|l| l["name"].as_str() == Some("method"))
                         .and_then(|l| l["label"].as_str()).unwrap_or("");
-                    if stage.contains(stage_substr) { return Some(d); }
+                    if method.contains(method_substr) { return Some(d); }
                 }
             }
         }
@@ -368,9 +368,9 @@ fn a_refused_start_is_redrawn_and_the_chain_runs() {
         "the fit must succeed: a refused draw is redrawn.\n\
          stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
 
-    let stage_dir = cas_stage_leaf(&run.out_root.join("fits"), "pgas")
+    let method_dir = cas_method_leaf(&run.out_root.join("fits"), "pgas")
         .expect("committed `pgas` method leaf");
-    let rows = start_rows(&stage_dir);
+    let rows = start_rows(&method_dir);
     let rejected: Vec<&StartRow> = rows.iter().filter(|r| r.status == "rejected").collect();
     let accepted: Vec<&StartRow> = rows.iter().filter(|r| r.status == "accepted").collect();
     assert!(!rejected.is_empty(),
@@ -395,7 +395,7 @@ fn a_refused_start_is_redrawn_and_the_chain_runs() {
         assert_eq!(a.attempt, n_rejected, "the accepted attempt follows the rejections: {a:?}");
     }
     // The header counts the retries, so a skim of the file says it happened.
-    let text = std::fs::read_to_string(stage_dir.join("chain_starts.tsv")).unwrap();
+    let text = std::fs::read_to_string(method_dir.join("chain_starts.tsv")).unwrap();
     assert!(text.starts_with("# camdl chain_starts; starts=from_posterior "), "{text}");
     assert!(text.lines().next().unwrap().ends_with(&format!("retried={}", rejected.len())), "{text}");
 
@@ -404,11 +404,11 @@ fn a_refused_start_is_redrawn_and_the_chain_runs() {
     assert!(bad_init_entries(&run.out_root).is_empty(),
         "a redrawn chain is not a refused chain; got {:#?}\nstderr:\n{}",
         bad_init_entries(&run.out_root), run.stderr);
-    let mut chains = draws_chain_ids(&stage_dir.join("draws.tsv"));
+    let mut chains = draws_chain_ids(&method_dir.join("draws.tsv"));
     chains.sort_unstable();
     chains.dedup();
     assert_eq!(chains, vec![0, 1], "both chains contribute draws; got {chains:?}");
-    let state_raw = std::fs::read_to_string(stage_dir.join("fit_state.toml")).unwrap();
+    let state_raw = std::fs::read_to_string(method_dir.join("fit_state.toml")).unwrap();
     let state: toml::Value = toml::from_str(&state_raw).unwrap();
     assert!(state.get("n_good_chains").is_none(),
         "every chain ran, so n_good_chains is unset:\n{state_raw}");
@@ -482,13 +482,13 @@ fn all_chains_refused_is_an_error() {
 
     // gh#891: and `progress.json` says it too. This is the worst case a fit
     // can have — nothing ran — and it used to be the case whose progress file
-    // said the least: the stage returned without a terminal write, so the last
+    // said the least: the method returned without a terminal write, so the last
     // periodic `running` (up to five seconds stale, possibly from before any
     // chain reported) stayed on disk and an agent polling the file saw
     // `running` for ever.
     let progress: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(leaf.join("progress.json"))
-            .expect("a stage that ran at all writes progress.json"),
+            .expect("a method that ran at all writes progress.json"),
     ).expect("progress.json parses");
     let failed = progress["state"]["failed"].as_object()
         .unwrap_or_else(|| panic!(
@@ -539,9 +539,9 @@ fn a_start_the_trajectory_move_can_rescue_is_not_refused() {
         "the fixture must actually START at -inf and recover, or this test is \
          vacuous.\nstderr:\n{}", run.stderr);
 
-    let stage_dir = cas_stage_leaf(&run.out_root.join("fits"), "pgas")
+    let method_dir = cas_method_leaf(&run.out_root.join("fits"), "pgas")
         .expect("committed `pgas` method leaf");
-    let mut chains = draws_chain_ids(&stage_dir.join("draws.tsv"));
+    let mut chains = draws_chain_ids(&method_dir.join("draws.tsv"));
     chains.sort_unstable();
     chains.dedup();
     assert_eq!(chains, vec![0, 1],
@@ -564,20 +564,20 @@ fn healthy_fit_keeps_every_chain() {
     assert!(!run.stderr.contains("skipped via BadInit"),
         "a healthy fit must not report a skip.\nstderr:\n{}", run.stderr);
 
-    let stage_dir = cas_stage_leaf(&run.out_root.join("fits"), "pgas")
+    let method_dir = cas_method_leaf(&run.out_root.join("fits"), "pgas")
         .expect("committed `pgas` method leaf");
-    let rows = start_rows(&stage_dir);
+    let rows = start_rows(&method_dir);
     assert!(rows.iter().all(|r| r.status == "accepted" && r.attempt == 0),
         "a healthy fit redraws nothing: {rows:?}");
 
-    let state_raw = std::fs::read_to_string(stage_dir.join("fit_state.toml")).unwrap();
+    let state_raw = std::fs::read_to_string(method_dir.join("fit_state.toml")).unwrap();
     let state: toml::Value = toml::from_str(&state_raw).unwrap();
     assert!(state.get("n_good_chains").is_none(),
         "a healthy fit must leave n_good_chains unset (an Option::None field is \
          omitted from the TOML), so its fit_state.toml is byte-unchanged by the \
          guard:\n{state_raw}");
 
-    let mut chains = draws_chain_ids(&stage_dir.join("draws.tsv"));
+    let mut chains = draws_chain_ids(&method_dir.join("draws.tsv"));
     chains.sort_unstable();
     chains.dedup();
     assert_eq!(chains, vec![0, 1],
@@ -617,12 +617,12 @@ fn fit_summary_reports_a_chain_refused_at_its_start() {
          stderr:\n{}", run.stderr);
     let refused = bad[0]["chain_id"].as_u64().unwrap();
 
-    let stage_dir = cas_stage_leaf(&run.out_root.join("fits"), "pgas")
+    let method_dir = cas_method_leaf(&run.out_root.join("fits"), "pgas")
         .expect("committed `pgas` method leaf");
     let out = Command::new(camdl_bin().unwrap())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         // The fit directory: `fits/<fit>/<method>/<seed>` is the leaf.
-        .args(["fit", "summary"]).arg(stage_dir.parent().unwrap().parent().unwrap())
+        .args(["fit", "summary"]).arg(method_dir.parent().unwrap().parent().unwrap())
         .arg("--no-color")
         .output().expect("spawn camdl fit summary");
     let summary = String::from_utf8_lossy(&out.stdout);

@@ -1134,7 +1134,7 @@ mod single_flight {
 /// `needs_state_grad` decides whether the compile emits the WrtPop state-Jacobian
 /// (gh#439 A2). Only `fit --method nuts` on the `ode` backend reads it, so the
 /// simulate / predict paths pass `false` (lean IR, `--no-state-grad`) and
-/// the fit path passes `true` iff any stage is nuts+ode. The bit is folded into
+/// the fit path passes `true` iff any method is nuts+ode. The bit is folded into
 /// the cache key, so a lean entry is never reused for a nuts+ode fit.
 pub fn resolve_ir_path(path: &str, needs_state_grad: bool) -> Result<(String, Option<std::path::PathBuf>), String> {
     resolve_ir_path_with_quantities(path, needs_state_grad, None)
@@ -1717,7 +1717,7 @@ pub fn format_unbound_streams_warning(
 /// `interval_steps`' `debug_assert!(t1 >= t0)`, is stripped in release.)
 ///
 /// This is the load-bearing boundary check the time-helper docs defer to:
-/// caught once at config load, with a located message, before any stage runs.
+/// caught once at config load, with a located message, before any method runs.
 /// Returns `Ok(())` when every observation is at or after the origin. An
 /// observation exactly AT the origin is allowed here; whether an incidence row
 /// there can be scored is judged from the period it covers, by

@@ -1,8 +1,8 @@
 //! gh#794 — `predictive/<stream>.tsv` carries the convergence of the value in
-//! each row, not only the producing stage's worst-parameter stamp.
+//! each row, not only the producing method's worst-parameter stamp.
 //!
 //! `fit_rhat_max` / `fit_ess_min` are the fit's worst parameter, copied from
-//! the stage summary: one number repeated on every row of every stream. Under
+//! the method summary: one number repeated on every row of every stream. Under
 //! their former names (`rhat_max` / `ess_min`) they read as the R̂ *of the
 //! prediction beside them*, and a user acting on that draws the wrong
 //! conclusion in either direction — a reportable quantity can be far better
@@ -270,7 +270,7 @@ fn per_row_convergence_columns_are_written_and_vary_down_the_file() {
     let (header, rows) = rows_of(&txt, "free_forward");
     assert!(!rows.is_empty(), "free-forward rows must exist:\n{txt}");
 
-    // The documented layout: the stage stamp, then the two per-row pairs, then
+    // The documented layout: the method stamp, then the two per-row pairs, then
     // n_draws. A consumer reading positionally must not find them interleaved.
     let (c_rmax, c_emin) = (col(&header, "fit_rhat_max"), col(&header, "fit_ess_min"));
     let (c_rmean, c_emean) = (col(&header, "rhat_mean"), col(&header, "ess_mean"));
@@ -302,14 +302,14 @@ fn per_row_convergence_columns_are_written_and_vary_down_the_file() {
         }
     }
 
-    // The defect being fixed: the stage stamp is one number repeated on every
+    // The defect being fixed: the method stamp is one number repeated on every
     // row, while the per-row channel actually moves with the row.
     let stamps: std::collections::BTreeSet<&str> =
         rows.iter().map(|c| c[c_rmax]).collect();
     assert_eq!(
         stamps.len(),
         1,
-        "fit_rhat_max is the producing stage's worst parameter — provenance, constant \
+        "fit_rhat_max is the producing method's worst parameter — provenance, constant \
          down the file. Got {stamps:?}"
     );
     let stamp: f64 = stamps.iter().next().unwrap().parse().expect(
@@ -331,7 +331,7 @@ fn per_row_convergence_columns_are_written_and_vary_down_the_file() {
         let per_row: f64 = c[c_rmean].parse().unwrap();
         assert!(
             (per_row - stamp).abs() > 0.1,
-            "rhat_mean {per_row} must describe the row, not repeat the stage stamp {stamp}"
+            "rhat_mean {per_row} must describe the row, not repeat the method stamp {stamp}"
         );
     }
 
@@ -379,14 +379,14 @@ fn one_step_rows_leave_both_per_row_pairs_empty() {
              is withheld there — both channels empty, never just the diluted one"
         );
     }
-    // The stage stamp still rides on the one-step rows: it is provenance, so it
+    // The method stamp still rides on the one-step rows: it is provenance, so it
     // is horizon-independent and carries the SAME value the free-forward rows do.
     let i = col(&header, "fit_rhat_max");
     let (_, ff) = rows_of(&txt, "free_forward");
     let ff_stamp = ff[0][i];
     assert!(
         rows.iter().all(|c| c[i] == ff_stamp),
-        "the stage stamp is the same on every horizon (got {:?} against the \
+        "the method stamp is the same on every horizon (got {:?} against the \
          free-forward {ff_stamp:?})",
         rows.iter().map(|c| c[i]).collect::<Vec<_>>()
     );

@@ -59,7 +59,7 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         fit_toml: ContentHash::from_bytes([3; 32]),
         engine: EngineVersion("0.3.0".into()),
     };
-    let stage = StageConfig {
+    let method = StageConfig {
         config: ContentHash::from_bytes([7; 32]),
         obs_block: String::new(),
         flow_indices: vec![],
@@ -73,7 +73,7 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         scenario.content_hash(),
         seed.content_hash(),
     ];
-    let fit_levels = vec![fit.content_hash(), stage.content_hash(), seed.content_hash()];
+    let fit_levels = vec![fit.content_hash(), method.content_hash(), seed.content_hash()];
     vec![
         ("Backend::ChainBinomial", Backend::ChainBinomial.content_hash()),
         ("CalendarMode::Numeric", CalendarMode::Numeric.content_hash()),
@@ -84,7 +84,7 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         ("ResolvedParams", params.content_hash()),
         ("ResolvedScenario", scenario.content_hash()),
         ("FitDigest", fit.content_hash()),
-        ("StageConfig", stage.content_hash()),
+        ("StageConfig", method.content_hash()),
         ("run_id(Sim)", crate::run_id(ArtifactKind::Sim, &sim_levels)),
         ("run_id(FitStage)", crate::run_id(ArtifactKind::FitStage, &fit_levels)),
     ]
@@ -232,10 +232,10 @@ fn fit_digest_holdout_content_is_keyed() {
 }
 
 #[test]
-fn stage_config_obs_alignment_is_keyed() {
+fn method_config_obs_alignment_is_keyed() {
     // gh#189: the resolved obs alignment (snap vs exact) drives the posterior,
-    // so two otherwise-identical stage configs differing only in it must get
-    // distinct stage hashes — exact and snap cannot collide in the CAS store.
+    // so two otherwise-identical method configs differing only in it must get
+    // distinct method hashes — exact and snap cannot collide in the CAS store.
     let base = StageConfig {
         config: ContentHash::from_bytes([7; 32]),
         obs_block: String::new(),
@@ -248,7 +248,7 @@ fn stage_config_obs_alignment_is_keyed() {
     assert_ne!(
         base.content_hash(),
         flipped.content_hash(),
-        "the resolved obs_alignment must be folded into the stage identity (gh#189) — \
+        "the resolved obs_alignment must be folded into the method identity (gh#189) — \
          a snap fit and an exact fit at the same config must not collide"
     );
     assert_eq!(base.content_hash(), base.clone().content_hash());
@@ -402,7 +402,7 @@ fn init_state_is_keyed_into_config() {
 /// origin time, and every selected draw's `(chain, draw)` key plus restored
 /// values, in selection order.
 ///
-/// Content rather than provenance (the fit's `run_id` + stage + selection
+/// Content rather than provenance (the fit's `run_id` + method + selection
 /// rule) because provenance keying means enumerating every knob that changes
 /// which draws are selected: miss one and two different clouds collide on one
 /// cache entry, which is the silent-wrong the store exists to prevent. Each

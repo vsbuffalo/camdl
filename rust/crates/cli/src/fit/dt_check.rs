@@ -205,7 +205,7 @@ pub fn compute_verdict(
     }
 }
 
-/// Defaults inherited from the stage's `loglik_eval` block when the
+/// Defaults inherited from the method's `loglik_eval` block when the
 /// dt-check user didn't override n_particles/n_replicates/combine.
 /// Caller passes these as the inherit-from values.
 pub struct DtCheckInherits {
@@ -293,7 +293,7 @@ pub fn run_richardson_ladder(
     seed: u64,
 ) -> Result<DtCheckResult, String> {
     // `--dt-check-strict` is resolved INTO `config.threshold_nats` before the
-    // stage identity is taken (gh#730), so the fallback here is the routine
+    // method identity is taken (gh#730), so the fallback here is the routine
     // default; there is no runtime strict flag to consult.
     let threshold_floor = config.threshold_nats
         .unwrap_or_else(|| default_threshold_for_backend(backend, false));
@@ -331,9 +331,9 @@ pub fn run_richardson_ladder(
 
 /// Deterministic ODE dt-convergence check at θ̂ — the deterministic sibling of
 /// [`run_richardson_ladder`], for the `nl-sbplx` / `nl-bobyqa` (ODE-MLE) and
-/// `mh` (ODE marginal-likelihood MH) stages (gh#52, gh#227).
+/// `mh` (ODE marginal-likelihood MH) methods (gh#52, gh#227).
 ///
-/// Re-evaluates the SAME `compute_ode_loglik(θ̂; dt)` the stage scored with, on
+/// Re-evaluates the SAME `compute_ode_loglik(θ̂; dt)` the method scored with, on
 /// a halving ladder `dt ∈ {dt_fit, dt_fit/2, …}`, and warns when the fitted
 /// θ̂'s likelihood is still drifting past τ nats — i.e. when the MLE/MAP is
 /// discretization-dependent. This is exactly the trap a coarse-dt
@@ -349,7 +349,7 @@ pub fn run_richardson_ladder(
 ///
 /// Convergence-order note: since the augmented-flow unification (gh#166 Q1B),
 /// BOTH prevalence (RK4 state, O(dt⁴)) and incidence (augmented flow, `dc/dt =
-/// rate` through the same RK4 stages, also O(dt⁴)) converge at the same high
+/// rate` through the same RK4 methods, also O(dt⁴)) converge at the same high
 /// order, so the `InferenceBackend::Ode` τ calibrated to the prevalence case applies to
 /// incidence too. The one exception is a model that references `dt` in a rate
 /// (`Expr::Dt` / RUNTIME_DT), which keeps the first-order Euler flow (O(dt), the

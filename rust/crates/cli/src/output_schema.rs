@@ -91,7 +91,7 @@ fn first_chain_header(leaf: &Path, fname: &str) -> Option<Vec<String>> {
     dirs.iter().find_map(|d| header(&d.join(fname)))
 }
 
-/// Build the `output_schema` for a completed fit stage by classifying the actual
+/// Build the `output_schema` for a completed fit method by classifying the actual
 /// headers of the files it wrote under `leaf`. `estimated` is the sampled
 /// parameter names; `all_params` is every model parameter (estimated ∪ fixed).
 /// Best-effort: files that cannot be read are omitted.

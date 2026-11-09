@@ -1,4 +1,4 @@
-//! Stage C of counterfactual contrasts (proposal 2026-06-25): the two-arm replay
+//! Method C of counterfactual contrasts (proposal 2026-06-25): the two-arm replay
 //! reducer that CONSUMES the IR [`ir::contrast::Contrast`] node. Auto-emitted by
 //! `fit predict` when the model declares any `contrasts {}`.
 //!
@@ -154,7 +154,7 @@ struct ArmDrawResult {
 pub fn emit_contrasts(
     out_dir: &Path,
     run_dir: &Path,
-    stage: Option<&str>,
+    method: Option<&str>,
     selection: Option<&ChainSelection>,
     model: &ir::Model,
     fit_base: &crate::util::FitBase,
@@ -164,10 +164,10 @@ pub fn emit_contrasts(
     config_dt: f64,
 ) -> Result<Vec<PathBuf>, String> {
     // The draws authority, carrying the run's chain selection: one resolve, used
-    // both for the (θ, X) cloud below and for the stage dir the saved paths are
+    // both for the (θ, X) cloud below and for the method dir the saved paths are
     // read from — so the filtered cloud and the paths can never come from
-    // different stages.
-    let pref = crate::posterior_draws::resolve_posterior_draws(&run_dir.to_string_lossy(), stage)?
+    // different methods.
+    let pref = crate::posterior_draws::resolve_posterior_draws(&run_dir.to_string_lossy(), method)?
         .with_selection(selection.cloned());
 
     // The forkable subset, classified by LatentPath. A point-estimate fit is
@@ -187,7 +187,7 @@ pub fn emit_contrasts(
                  so there is no cloud to fork {} contrast(s) from. The excluded chain(s) held \
                  the saved paths.\n  \
                  Fix: retain a chain that saved paths (`camdl fit summary` reports the \
-                 per-chain forkability), or re-fit with a PGAS stage that saves paths on \
+                 per-chain forkability), or re-fit with a PGAS method that saves paths on \
                  every chain.",
                 info.excluded_csv(),
                 joint.n_total,
@@ -385,7 +385,7 @@ pub fn emit_contrasts(
         }
     }
 
-    let stage_dir = pref
+    let method_dir = pref
         .draws_path
         .parent()
         .ok_or_else(|| format!("draws path has no parent: {}", pref.draws_path.display()))?;
@@ -401,7 +401,7 @@ pub fn emit_contrasts(
     // model-wide, so the first forkable draw's path is representative; a draw that
     // happens to lack the derived fork errors loudly at `read_state_at`.
     let (_, snap_chain, snap_draw) = &forkable[0];
-    let snap_traj = ChainIndex(*snap_chain).dir_in(stage_dir).join("trajectories.tsv");
+    let snap_traj = ChainIndex(*snap_chain).dir_in(method_dir).join("trajectories.tsv");
     let snapshot_times = io::trajectories::snapshot_times(&snap_traj, *snap_chain, *snap_draw)?;
 
     // Per contrast: derive the fork (last saved snapshot before the toggled
@@ -478,7 +478,7 @@ pub fn emit_contrasts(
             let mut draw_results: HashMap<String, ArmDrawResult> = HashMap::new();
             for run in &runs_c {
                 let res = arms[run].replay(
-                    model, run, params_i, &col_spec, stage_dir, *chain, *draw, dt, arm_seed,
+                    model, run, params_i, &col_spec, method_dir, *chain, *draw, dt, arm_seed,
                     plan.fork_t, run_end,
                 )?;
                 draw_results.insert(run.clone(), res);
@@ -608,7 +608,7 @@ impl Arm {
         run: &str,
         params_i: &HashMap<String, f64>,
         col_spec: &io::trajectories::TrajColumnSpec,
-        stage_dir: &Path,
+        method_dir: &Path,
         chain: usize,
         draw: usize,
         dt: f64,
@@ -630,7 +630,7 @@ impl Arm {
         // Read the smoothed latent state X_i(fork) from the saved path. The
         // in-file `chain` key is the number of the `chain_N/` directory
         // (gh#990), and the key `read_state_at` matches.
-        let traj_path = ChainIndex(chain).dir_in(stage_dir).join("trajectories.tsv");
+        let traj_path = ChainIndex(chain).dir_in(method_dir).join("trajectories.tsv");
         let (int_s, real_s) =
             io::trajectories::read_state_at(&traj_path, col_spec, chain, draw, fork_t)
                 .map_err(|e| format!("contrast arm '{run}': reading X(fork={fork_t}): {e}"))?;

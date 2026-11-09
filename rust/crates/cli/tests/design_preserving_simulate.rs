@@ -107,7 +107,7 @@ const IRREGULAR_DATA: &str = "win_start\twin_stop\tcases\n\
      9\t10\t9\n\
      10\t11\t8\n";
 
-const STAGES: &str = r#"
+const METHODS: &str = r#"
 [estimate]
 beta  = { bounds = [0.01, 5.0], start = 1.0 }
 gamma = { bounds = [0.01, 1.0], start = 0.3 }
@@ -159,7 +159,7 @@ fn design_from_writes_the_bound_rows_windows_and_holes() {
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(
         "[model]\ncamdl = \"{}\"\n\n[data.observations]\ncases = \"{}\"\n{}",
-        ir.display(), data.display(), STAGES)).unwrap();
+        ir.display(), data.display(), METHODS)).unwrap();
 
     let out_dir = tmp.path().join("synth");
     let output = run(&[
@@ -237,7 +237,7 @@ fn a_synthetic_fit_on_a_windowed_model_completes() {
     std::fs::write(&fit_toml, format!(
         "output_dir = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
          [synthetic]\ntrue_params = \"{}\"\nsim_seeds = [3]\n{}",
-        out.display(), ir.display(), truth.display(), STAGES)).unwrap();
+        out.display(), ir.display(), truth.display(), METHODS)).unwrap();
 
     let output = run(&["fit", "run", fit_toml.to_str().unwrap()]);
     assert!(output.status.success(),
@@ -304,7 +304,7 @@ fn as_time(cell: &str) -> f64 {
     }
 }
 
-const REAL_SHAPED_STAGES: &str = r#"
+const REAL_SHAPED_METHODS: &str = r#"
 [estimate]
 beta = { bounds = [0.25, 0.5], start = 0.35 }
 
@@ -343,7 +343,7 @@ fn real_shaped_fit_paths(dir: &Path, ir: &Path, binds: &[(&str, PathBuf)]) -> Pa
     for (stream, file) in binds {
         s.push_str(&format!("{stream} = \"{}\"\n", file.display()));
     }
-    s.push_str(REAL_SHAPED_STAGES);
+    s.push_str(REAL_SHAPED_METHODS);
     let p = dir.join("fit.toml");
     std::fs::write(&p, s).unwrap();
     p
@@ -526,7 +526,7 @@ fn a_synthetic_fit_on_the_real_shaped_model_is_refused_by_name() {
     std::fs::write(&fit_toml, format!(
         "output_dir = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
          [synthetic]\ntrue_params = \"{}\"\nsim_seeds = [3]\n{}",
-        out.display(), ir.display(), truth.display(), REAL_SHAPED_STAGES)).unwrap();
+        out.display(), ir.display(), truth.display(), REAL_SHAPED_METHODS)).unwrap();
 
     let output = run(&["fit", "run", fit_toml.to_str().unwrap()]);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -594,7 +594,7 @@ fn design_from_refuses_a_covariate_stream_by_name_and_writes_nothing() {
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(
         "[model]\ncamdl = \"{}\"\n\n[data.observations]\nsurvey = \"{}\"\n{}",
-        ir.display(), data.display(), STAGES)).unwrap();
+        ir.display(), data.display(), METHODS)).unwrap();
 
     let out_dir = tmp.path().join("synth");
     let output = run(&[
@@ -631,7 +631,7 @@ fn design_from_refuses_a_scenario_and_writes_nothing() {
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(
         "[model]\ncamdl = \"{}\"\n\n[data.observations]\ncases = \"{}\"\n{}",
-        ir.display(), data.display(), STAGES)).unwrap();
+        ir.display(), data.display(), METHODS)).unwrap();
 
     let out_dir = tmp.path().join("synth");
     let output = run(&[
@@ -807,7 +807,7 @@ fn a_synthetic_fit_refuses_a_covariate_stream_by_name() {
     std::fs::write(&fit_toml, format!(
         "output_dir = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
          [synthetic]\ntrue_params = \"{}\"\nsim_seeds = [3]\n{}",
-        out.display(), ir.display(), truth.display(), STAGES)).unwrap();
+        out.display(), ir.display(), truth.display(), METHODS)).unwrap();
 
     let output = run(&["fit", "run", fit_toml.to_str().unwrap()]);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -942,7 +942,7 @@ init { S = 4990  I = 10 }
 simulate { from = 0 'days  to = 42 'days }
 "#;
 
-const RATIO_STAGES: &str = r#"
+const RATIO_METHODS: &str = r#"
 [estimate]
 mu_c = { bounds = [0.001, 0.5], start = 0.05 }
 
@@ -977,7 +977,7 @@ fn a_synthetic_fit_on_a_ratio_stream_completes() {
     std::fs::write(&fit_toml, format!(
         "output_dir = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
          [synthetic]\ntrue_params = \"{}\"\nsim_seeds = [3]\n{}",
-        out.display(), ir.display(), truth.display(), RATIO_STAGES)).unwrap();
+        out.display(), ir.display(), truth.display(), RATIO_METHODS)).unwrap();
 
     let output = run(&["fit", "run", fit_toml.to_str().unwrap()]);
     assert!(output.status.success(),

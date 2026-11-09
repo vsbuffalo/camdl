@@ -5,7 +5,7 @@
 //!
 //! - **A — end-to-end summary walks a real `cmd_fit_run_v2` output.**
 //!   Runs the runner, then `camdl fit summary --format json`, and
-//!   asserts the output contains a non-empty `stages` array. This is
+//!   asserts the output contains a non-empty `methods` array. This is
 //!   the structural defence against the v1-layout bug (audit §2.3).
 //!
 //! - **B — spec/code parity check.** Parses every fenced code block
@@ -123,7 +123,7 @@ simulate { from = 0 'days  to = 10 'days }
     std::fs::write(&ir_path, &output.stdout).unwrap();
 
     // Tiny synthetic data — 10 weekly cases. Doesn't matter for
-    // structural tests; we just need the runner to write a stage tree.
+    // structural tests; we just need the runner to write a method tree.
     let data_path = dir.join("cases.tsv");
     std::fs::write(
         &data_path,
@@ -134,7 +134,7 @@ simulate { from = 0 'days  to = 10 'days }
 }
 
 /// Write a tiny IF2 fit.toml that runs in seconds. 2 chains, 5 iters,
-/// 50 particles — enough to populate the v2 stage tree without
+/// 50 particles — enough to populate the v2 method tree without
 /// converging on anything meaningful (Deliverable A is structural,
 /// not statistical).
 fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, output_dir: &Path) -> PathBuf {
@@ -223,7 +223,7 @@ fn exec_fit_summary_json(camdl: &Path, fit_dir: &Path) -> serde_json::Value {
 }
 
 /// gh#147 (M3.2): the fit-level (FitDigest) hash for a CAS fit, read from any
-/// stage leaf's `levels[name=="fit"].hash`. A CAS fit has no fit-wide
+/// method leaf's `levels[name=="fit"].hash`. A CAS fit has no fit-wide
 /// `run.json`; this is `Run.hash` for the derived fit-level entry — the value
 /// `fit table --hash` filters on and `camdl label` resolves. Replaces the
 /// pre-M3.2 read of `<fit_dir>/run.json` `.hash`.
@@ -285,11 +285,11 @@ fn run_label(fit_dir: &Path) -> Option<String> {
     only_run(fit_dir)["provenance"]["label"].as_str().map(String::from)
 }
 
-/// gh#147 (M3.2): a method leaf for `stage_substr` exists under `fit_dir` at the
+/// gh#147 (M3.2): a method leaf for `method_substr` exists under `fit_dir` at the
 /// CAS shape `<fit_dir>/<method>-<h8>/seed_<N>-<h8>/run.json` (kind
 /// `fit_stage`). Returns the leaf dir. Replaces the pre-M3.2 hard-coded
-/// `<fit_dir>/real/fit_<seed>/<stage>` probe.
-fn cas_stage_leaf(fit_dir: &Path, stage_substr: &str) -> Option<PathBuf> {
+/// `<fit_dir>/real/fit_<seed>/<method>` probe.
+fn cas_method_leaf(fit_dir: &Path, method_substr: &str) -> Option<PathBuf> {
     let mut stack = vec![fit_dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         let rj = d.join("run.json");
@@ -298,14 +298,14 @@ fn cas_stage_leaf(fit_dir: &Path, stage_substr: &str) -> Option<PathBuf> {
                 &std::fs::read_to_string(&rj).unwrap_or_default(),
             ) {
                 if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
-                    let stage = v["levels"]
+                    let method = v["levels"]
                         .as_array()
                         .into_iter()
                         .flatten()
                         .find(|l| l["name"].as_str() == Some("method"))
                         .and_then(|l| l["label"].as_str())
                         .unwrap_or("");
-                    if stage.contains(stage_substr) {
+                    if method.contains(method_substr) {
                         return Some(d);
                     }
                 }
@@ -327,9 +327,9 @@ fn cas_stage_leaf(fit_dir: &Path, stage_substr: &str) -> Option<PathBuf> {
 /// The structural defence against the v1-layout bug from audit §2.3
 /// (`docs/dev/notes/2026-04-27-fit-experiment-management-audit.md`):
 /// `cmd_fit_summary` shipped with a walker hard-coded to
-/// `<fit_dir>/<stage>/` while `cmd_fit_run_v2` writes to
-/// `<fit_dir>/real/fit_<seed>/<stage>/`. Before this test existed,
-/// the failure mode was a silent "(no MLE stages found)" on every
+/// `<fit_dir>/<method>/` while `cmd_fit_run_v2` writes to
+/// `<fit_dir>/real/fit_<seed>/<method>/`. Before this test existed,
+/// the failure mode was a silent "(no MLE methods found)" on every
 /// real fit dir.
 #[test]
 fn fit_summary_walks_real_fit_run_v2_output() {
@@ -369,7 +369,7 @@ fn fit_summary_walks_real_fit_run_v2_output() {
     // M3.2). Hashes aren't predictable, so assert the *shape*: a `fit_stage`
     // leaf whose `method` level is "if2". Locks the CAS layout into the test
     // surface so a future runner change can't silently break the walker.
-    let leaf = cas_stage_leaf(&fit_dir, "if2").unwrap_or_else(|| {
+    let leaf = cas_method_leaf(&fit_dir, "if2").unwrap_or_else(|| {
         panic!(
             "expected a CAS `if2` method leaf under {} but none is present",
             fit_dir.display()
@@ -377,7 +377,7 @@ fn fit_summary_walks_real_fit_run_v2_output() {
     });
     assert!(
         leaf.join("run.json").is_file(),
-        "stage leaf {} must hold a run.json",
+        "method leaf {} must hold a run.json",
         leaf.display()
     );
 }
@@ -420,18 +420,18 @@ fn spec_layout_diagrams_match_fit_run_v2_output() {
     let output_dir = tmp.path().join("out");
     let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &output_dir);
 
-    // Rename the single declared stage to `mle` (already in
+    // Rename the single declared method to `mle` (already in
     // write_fit_toml). The spec diagrams reference scout / refine /
-    // validate, but the runner can be configured to use any stage
+    // validate, but the runner can be configured to use any method
     // name. We compare against the spec by running its declared
-    // stages — but driving a real scout/refine/validate fit takes
+    // methods — but driving a real scout/refine/validate fit takes
     // far longer than a structural test should. Instead: parse the
     // spec for paths, but only assert on the *layout shape*
-    // (everything up through the stage component), not on which
-    // exact stage name was declared.
+    // (everything up through the method component), not on which
+    // exact method name was declared.
     //
     // Concretely: every documented path under `<fit_dir>/real/...`
-    // looks like `<fit_dir>/real/fit_<seed>/<stage>/<...>`. We
+    // looks like `<fit_dir>/real/fit_<seed>/<method>/<...>`. We
     // assert the prefix `<fit_dir>/real/fit_<seed>/` is real on
     // disk. That's enough to catch the v1-layout bug class.
     let fit_dir = exec_fit_run_v2(&camdl, &fit_toml, &output_dir);
@@ -457,9 +457,9 @@ fn spec_layout_diagrams_match_fit_run_v2_output() {
 
     // Whittle down to paths whose *prefix* we can assert against the
     // real fit_dir. We can't reliably assert the leaf
-    // (stage names differ between docs and this fixture, parameter
+    // (method names differ between docs and this fixture, parameter
     // placeholders like `{param}` don't substitute, etc.), but we
-    // can require that the directory components up through the stage
+    // can require that the directory components up through the method
     // wrapper (`real/fit_<seed>/`) exist on disk. That's the test
     // surface the v1-layout bug actually breaks.
     let mut checked_prefixes: std::collections::BTreeSet<String> =
@@ -525,7 +525,7 @@ fn summary_table_row_equals_table_first_row() {
     // The fit-level hash picks the prefix `--hash` filter for `fit table`.
     // Eight characters is the proposal's documented short form. gh#147
     // (M3.2): a CAS fit has no fit-wide `run.json`; the fit-level hash is the
-    // `fit` level shared by its stage leaves.
+    // `fit` level shared by its method leaves.
     let full_hash = fit_level_hash(&fit_dir);
     let hash_prefix: String = full_hash.chars().take(8).collect();
 
@@ -626,10 +626,10 @@ fn summary_table_row_equals_table_first_row() {
 /// fit from `fit table`, nor blank `fit summary`'s `table_row`.
 ///
 /// `pfilter` has no `MethodResult` shape. The row builder used to pick the
-/// terminal stage by declared order alone, so a segment whose last leaf was a
+/// terminal method by declared order alone, so a segment whose last leaf was a
 /// `pfilter` chose it, failed to load it (`UnknownMethod`), and the whole fit
 /// went to the error list — absent from the survey view, reading as "never
-/// ran". The row must instead be built from the stage that has a result.
+/// ran". The row must instead be built from the method that has a result.
 #[test]
 fn a_pfilter_leaf_does_not_remove_the_fit_from_fit_table() {
     let camdl = camdl_bin();
@@ -671,8 +671,8 @@ fn a_pfilter_leaf_does_not_remove_the_fit_from_fit_table() {
     let fits_root = output_dir.join("fits");
     let segments: Vec<_> = std::fs::read_dir(&fits_root).unwrap().flatten().collect();
     assert_eq!(segments.len(), 1, "both methods must share one fit segment");
-    assert!(cas_stage_leaf(&fit_dir, "if2").is_some(), "no if2 leaf in {}", fit_dir.display());
-    assert!(cas_stage_leaf(&fit_dir, "pfilter").is_some(), "no pfilter leaf in {}", fit_dir.display());
+    assert!(cas_method_leaf(&fit_dir, "if2").is_some(), "no if2 leaf in {}", fit_dir.display());
+    assert!(cas_method_leaf(&fit_dir, "pfilter").is_some(), "no pfilter leaf in {}", fit_dir.display());
 
     let output = Command::new(&camdl)
         .arg("fit").arg("table").arg(&fits_root)
@@ -692,7 +692,7 @@ fn a_pfilter_leaf_does_not_remove_the_fit_from_fit_table() {
         rows.len()
     );
     assert_eq!(rows[0]["method"].as_str(), Some("if2"),
-        "the row is built from the stage that has a result: {}", rows[0]);
+        "the row is built from the method that has a result: {}", rows[0]);
 
     let summary = exec_fit_summary_json(&camdl, &fit_dir);
     assert!(

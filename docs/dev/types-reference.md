@@ -36,7 +36,7 @@ Each CAS-emitting command resolves CLI inputs into `runid` levels at one site:
 
 - `cli/src/resolve.rs` — `resolve_trajectory`: `simulate` → `ArtifactKind::Sim`
   levels (`model` / `config` / `params` / `scenario` / `seed`).
-- `cli/src/fit/cas.rs` — `resolve_fit_stage`: one method leaf of a fit →
+- `cli/src/fit/cas.rs` — `resolve_fit_method`: one method leaf of a fit →
   `ArtifactKind::FitStage` levels (`fit` / `method` / `seed`). The kind string
   and the `Stage*` type names are kept: the string is read back from every store
   on disk, and the type names are in no artifact.
@@ -57,7 +57,7 @@ content hashes type-distinct from arbitrary strings.
   and `camdl reindex`; `run.json` is truth, the index is a fast lookup.
 - `cli/src/browse.rs` — `list` / `show` / `cat` projections over discovered
   records.
-- `cli/src/fit/fit_view.rs` — `FitView` / `FitStageView`: the projection that
+- `cli/src/fit/fit_view.rs` — `FitView` / `FitMethodView`: the projection that
   aggregates a fit segment's method leaves into the headline numbers fit
   consumers read, each leaf carrying its `method`, `method_hash` and `run_id`.
 - `cli/src/run_meta.rs` — the cross-cutting value types readers/writers share

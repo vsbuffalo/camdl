@@ -2,8 +2,8 @@
 //! exit 0 and a silently degenerate posterior.
 //!
 //! DRIVER-level end-to-end coverage for the whole-fit backstop wired into the
-//! three fit drivers (`pmmh::run_stage`, IF2's
-//! `runner::run_chains_with_per_chain_params`, `pgas::run_stage`). The
+//! three fit drivers (`pmmh::run_method`, IF2's
+//! `runner::run_chains_with_per_chain_params`, `pgas::run_method`). The
 //! sim-level tests (`sim/tests/gh226_inf_loglik_backstop.rs`) pin the shared
 //! `no_finite_anchor` predicate and the raw `run_pmmh` result, but they do NOT
 //! prove the DRIVER now returns `Err` and the *process* exits non-zero. This
@@ -111,10 +111,10 @@ fn write_impossible_data(dir: &Path) -> PathBuf {
     p
 }
 
-/// The per-method stage block. Every method starts from the same fixed `start`
+/// The `[method]` table for each algorithm under test. Every method starts from the same fixed `start`
 /// values (`starts = "single"`), tiny particle/iteration counts (the assertion is
 /// "backstop fires", not convergence).
-fn stage_block(method: &str) -> String {
+fn method_block(method: &str) -> String {
     match method {
         "pmmh" => r#"[method]
 algorithm = "pmmh"
@@ -164,18 +164,18 @@ beta  = {{ bounds = [0.01, 5.0], prior = {{ log_normal = {{ mu = -0.3, sigma = 0
 gamma = {{ bounds = [0.01, 1.0], prior = {{ log_normal = {{ mu = -1.2, sigma = 0.5 }} }}, start = 0.1 }}
 [fixed]
 N0 = 1000
-{stage}"#,
+{method}"#,
         out = out_root.display(),
         ir = ir.display(),
         data = data.display(),
-        stage = stage_block(method));
+        method = method_block(method));
     let p = dir.join("fit.toml");
     std::fs::write(&p, toml).unwrap();
     (p, out_root)
 }
 
 /// Recursively collect every file named `diagnostics.json` under `root`.
-/// The failing stage errors out BEFORE CAS finalize, so its diagnostics land
+/// The failing method errors out BEFORE CAS finalize, so its diagnostics land
 /// in the streaming-claim leaf under the output tree — not at a predictable
 /// committed leaf. Walking the whole tree finds it wherever it is.
 fn find_diagnostics(root: &Path) -> Vec<PathBuf> {

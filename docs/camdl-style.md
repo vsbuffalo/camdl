@@ -145,7 +145,7 @@ table does not say:
 
 **A `fit.toml` sits beside its `.camdl` in `models/`, not in a `configs/`.**
 They are one artifact pair: the model alone is not runnable, because the config
-is what names the data, the bounds and priors, and the stages. Split them across
+is what names the data, the bounds and priors, and the method. Split them across
 two trees and every variant, rename and copy has to be done twice in two places,
 and the paths inside the config — which resolve relative to the config's own
 directory — grow a `../` for no gain.

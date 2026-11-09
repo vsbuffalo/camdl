@@ -135,7 +135,7 @@ fn run_fit_parallel(bin: &Path, fit_toml: &Path, parallel: usize) -> std::proces
 
 /// Every CAS fit-stage leaf under `out/fits/`: (leaf dir, run_id), read from
 /// each `run.json` (kind = `fit_stage`).
-fn stage_leaves(out: &Path) -> Vec<(PathBuf, String)> {
+fn method_leaves(out: &Path) -> Vec<(PathBuf, String)> {
     let mut found = Vec::new();
     let mut stack = vec![out.join("fits")];
     while let Some(dir) = stack.pop() {
@@ -162,7 +162,7 @@ fn stage_leaves(out: &Path) -> Vec<(PathBuf, String)> {
 
 /// The one leaf a single-file run wrote.
 fn only_leaf(out: &Path) -> (PathBuf, String) {
-    let leaves = stage_leaves(out);
+    let leaves = method_leaves(out);
     assert_eq!(leaves.len(), 1, "expected one method leaf, got {leaves:?}");
     leaves.into_iter().next().unwrap()
 }
@@ -197,7 +197,7 @@ fn chained_method_reuse_only_rekeys_the_downstream() {
     let post4 = write_posterior_toml(tmp.path(), &out, &data, &scout_leaf, 4);
     let r2 = run_fit(&bin, &post4, 1);
     assert!(r2.status.success(), "posterior run failed: {}", String::from_utf8_lossy(&r2.stderr));
-    let leaves2 = stage_leaves(&out);
+    let leaves2 = method_leaves(&out);
     assert_eq!(leaves2.len(), 2, "one problem, two methods, two leaves: {leaves2:?}");
     let post4_id = leaves2.iter().find(|(_, id)| *id != scout_id)
         .map(|(_, id)| id.clone()).expect("the downstream leaf");
@@ -225,7 +225,7 @@ fn chained_method_reuse_only_rekeys_the_downstream() {
     let post8 = write_posterior_toml(tmp.path(), &out, &data, &scout_leaf, 8);
     let r4 = run_fit(&bin, &post8, 1);
     assert!(r4.status.success(), "edited posterior run failed: {}", String::from_utf8_lossy(&r4.stderr));
-    let leaves4 = stage_leaves(&out);
+    let leaves4 = method_leaves(&out);
     let ids: std::collections::BTreeSet<&str> = leaves4.iter().map(|(_, id)| id.as_str()).collect();
 
     // The upstream is untouched (still exactly its one leaf), the first
@@ -249,15 +249,15 @@ fn chained_method_reuse_only_rekeys_the_downstream() {
 /// gh#901: a method leaf's `run.json` names its algorithm once, under
 /// `method`.
 ///
-/// It used to carry the same string twice — `inputs.stage` beside
+/// It used to carry the same string twice — `inputs.method` beside
 /// `inputs.method`, both set from `Algorithm::method_name()` — so the leaf
 /// published one fact under two vocabularies and a consumer could key on
-/// either. Two-sided: `method` is the algorithm the fit declared, and `stage`
+/// either. Two-sided: `method` is the algorithm the fit declared, and `method`
 /// is gone from `inputs` rather than kept beside it.
 ///
 /// The `kind` string stays `fit_stage`: it is read back from every store on
 /// disk, and renaming it would orphan them for a word that no consumer
-/// interprets as a workflow stage.
+/// interprets as a workflow method.
 #[test]
 fn a_method_leaf_names_its_algorithm_once() {
     let bin = bin();
@@ -351,7 +351,7 @@ fn fit_theta_hat_identical_across_parallel_flag() {
 }
 
 /// Property 3 (Q2): `fit run` must announce the directory its method leaves
-/// actually land in. The leaves are written by `resolve_fit_stage` under the
+/// actually land in. The leaves are written by `resolve_fit_method` under the
 /// `FitDigest` fit-level segment (`fits/{stem}-{h8}/`); the announced
 /// `output:` line must be exactly that segment — i.e. the announced path
 /// EXISTS and is the parent of the `{method}-{h8}` leaf dirs.

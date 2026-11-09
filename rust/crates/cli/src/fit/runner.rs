@@ -1,4 +1,4 @@
-//! Shared chain-running logic for all fit stages.
+//! Shared chain-running logic for all fit methods.
 //!
 //! Handles: model loading, EstimatedParam construction from fit.toml,
 //! obs_loglik construction from IR observation model, chain execution,
@@ -114,12 +114,12 @@ pub struct FitRunConfig {
     /// docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
     pub ic_free: bool,
     /// Clean-evaluation re-scoring config (Step 4 plumbing for §Proposal 1).
-    /// Set per stage at the `camdl fit run` dispatch site (CLI overrides
-    /// over stage TOML); legacy `camdl fit scout`/`fit refine` use the
-    /// `Default` (4000 × 8, logmeanexp). Consumed by Step 5.
+    /// Set per method at the `camdl fit run` dispatch site (CLI overrides
+    /// over the `[method]` table; the `Default` is 4000 × 8, logmeanexp).
+    /// Consumed by Step 5.
     pub loglik_eval: super::config_v2::LoglikEvalConfig,
     /// Compound scout-convergence gate config (Step 4 plumbing for
-    /// §Proposal 3). Same per-stage override semantics as `loglik_eval`.
+    /// §Proposal 3). Same per-method override semantics as `loglik_eval`.
     /// Consumed by Step 8.
     pub gate: super::config_v2::GateConfig,
     /// The applied training window (gh#585): `Some` iff the fit declared a
@@ -243,8 +243,8 @@ pub(crate) fn resolve_fit_parameters(
     seed: u64,
 ) -> Result<FitParameters, String> {
     // Load model. Prefer the pre-compiled IR threaded in by
-    // `cmd_fit_run_v2` (compiled once up front) so a multi-stage / swept
-    // fit doesn't re-invoke camdlc per (cell × sweep point × stage); fall
+    // `cmd_fit_run_v2` (compiled once up front) so a swept or replicated
+    // fit doesn't re-invoke camdlc per (cell × sweep point); fall
     // back to `model.camdl` (recompiles) when no compiled IR was provided
     // — the identity path is always `model.camdl`, not this.
     let model_path = fit.compiled_ir.as_deref().unwrap_or(&fit.model.camdl);
@@ -525,7 +525,7 @@ impl FitRunConfig {
         // (param names → indices, rw_sds from EstimateSpecV2.rw_sd).
         // Only IF2 currently honours these; PGAS/PMMH/PFilter consume
         // the same FitRunConfig but ignore simplex_groups (validation
-        // emits a warning when a non-IF2 stage runs against a fit
+        // emits a warning when a non-IF2 method runs against a fit
         // with simplex groups declared).
         let resolved_simplex_groups = resolve_simplex_groups(
             &fit.simplex_groups, &fit.estimate, &compiled.param_index, &if2_params)?;
@@ -595,7 +595,7 @@ impl FitRunConfig {
                  degenerates to dropping the first data point.\n\n\
                  Either declare the initial state as a law in the model:\
                  \n\n    init { I ~ poisson(rate = I0) }\n\n\
-                 or, for an `if2` stage, mark your initial-state parameter \
+                 or, for an `if2` method, mark your initial-state parameter \
                  perturb_only_at_t0:\
                  \n\n    [estimate]\n    \
                  I0 = { bounds = [1, 500], perturb_only_at_t0 = true }".into());
@@ -1025,13 +1025,13 @@ pub fn preflight_spread_starts(
 /// multi-chain sampler calls. Best-effort: a failure is reported, never
 /// fatal, since the file is an audit artifact and not an input.
 pub fn record_chain_starts(
-    stage_dir: &std::path::Path,
+    method_dir: &std::path::Path,
     config: &FitRunConfig,
     drawn: &super::chain_starts::DrawnStarts,
 ) {
     let records = drawn.records(&config.estimated_params);
     if let Err(e) = super::chain_starts::write_chain_starts_tsv(
-        stage_dir, &config.estimated_params, &drawn.rule, &records,
+        method_dir, &config.estimated_params, &drawn.rule, &records,
     ) {
         eprintln!("warning: could not write chain_starts.tsv: {}", e);
     }
@@ -1125,7 +1125,7 @@ pub fn run_quick_pfilter_with_dt(
 /// while the chains ran from `per_chain_params`, so it could disagree with the
 /// run in BOTH directions — showing a random draw when the chains used a
 /// declared start, and a declared start when the chains used draws. This table
-/// is the only thing most users look at to confirm a stage begins where they
+/// is the only thing most users look at to confirm a method begins where they
 /// asked, so a value that is merely *plausible* is worse than none.
 ///
 /// Reports chain 1. With more than one chain the table cannot show them all
@@ -2214,9 +2214,9 @@ fn run_one_chain(
     config: &FitRunConfig,
     per_chain_params: Option<&[EstimatedParam]>,
     task: Option<&crate::progress::Task>,
-    stage_dir: Option<&str>,
-    // The stage's liveness/progress heartbeat, owned by the runner
-    // (`fit::stage_heartbeat`). Its step is one IF2 cooling iteration (gh#900).
+    method_dir: Option<&str>,
+    // The method's liveness/progress heartbeat, owned by the runner
+    // (`fit::method_heartbeat`). Its step is one IF2 cooling iteration (gh#900).
     heartbeat: &io::HeartbeatGuard,
 ) -> Result<IF2Result, sim::error::SimError> {
     let chain_seed = crate::util::derive_chain_seed(config.seed, chain_id);
@@ -2227,7 +2227,7 @@ fn run_one_chain(
 
     let n_iter = config.if2_config.n_iterations;
 
-    // Streaming trace writer (opt-in via stage_dir). Each chain writes
+    // Streaming trace writer (opt-in via method_dir). Each chain writes
     // its own `chain_N/parameter_traces.tsv` from inside the IF2
     // progress callback, one row per iteration. Users can `tail -f`
     // during a long scout run to watch parameters move in real time.
@@ -2239,7 +2239,7 @@ fn run_one_chain(
     // Per-chain, single-writer-per-thread: no Mutex needed. RefCell
     // lets the `Fn` closure mutate the BufWriter.
     let trace_writer: Option<std::cell::RefCell<std::io::BufWriter<std::fs::File>>>
-        = stage_dir.and_then(|dir| {
+        = method_dir.and_then(|dir| {
             let chain_dir = ChainIndex(chain_id).dir_in(std::path::Path::new(dir));
             if std::fs::create_dir_all(&chain_dir).is_err() { return None; }
             let chain_dir = chain_dir.to_string_lossy().into_owned();
@@ -2332,7 +2332,7 @@ pub fn run_chains_with_per_chain_params(
     config: &FitRunConfig,
     per_chain_params: Option<&[Vec<EstimatedParam>]>,
     collector: &DiagnosticCollector,
-    stage_dir: Option<&str>,
+    method_dir: Option<&str>,
     heartbeat: &io::HeartbeatGuard,
 ) -> Result<ChainResults, String> {
     eprintln!("running {} chains × {} particles × {} iterations, cooling={}, dt={}",
@@ -2359,7 +2359,7 @@ pub fn run_chains_with_per_chain_params(
         super::chain_fanout::run_chains(config.n_chains, |chain_id| {
             let per_chain = per_chain_params.map(|pcp| &pcp[chain_id][..]);
             match run_one_chain(
-                chain_id, config, per_chain, Some(&bars[chain_id]), stage_dir, heartbeat,
+                chain_id, config, per_chain, Some(&bars[chain_id]), method_dir, heartbeat,
             ) {
                 Ok(result) => Ok((chain_id, result)),
                 // gh#110 (IF2 follow-up): a chain whose IF2 search wandered
@@ -2420,7 +2420,7 @@ pub fn run_chains_with_per_chain_params(
                 // Any non-degeneracy error is structural (config bug,
                 // unknown compartment, …) — every chain would hit it, so
                 // there is no survivor to fall back to. Fail loudly.
-                Err(other) => super::abandon_stage(
+                Err(other) => super::abandon_method(
                     heartbeat,
                     format!("chain {} error: {:?}", ChainIndex(chain_id), other),
                 ),
@@ -2437,7 +2437,7 @@ pub fn run_chains_with_per_chain_params(
 
     // gh#110 (IF2 follow-up): if EVERY chain degenerated there is no
     // inference to report. Fail with an actionable message rather than
-    // letting a later stage trip over an empty result set.
+    // letting a later reader trip over an empty result set.
     if results.is_empty() {
         // gh#885: the reason and the remedies come from the one string the
         // other two all-chains-refused errors also carry (pgas's start
@@ -2446,7 +2446,7 @@ pub fn run_chains_with_per_chain_params(
         // though the bounds were the lever; they are, but only in the
         // direction the shared sentence names, and the cause is the start the
         // filter cannot score.
-        super::abandon_stage(
+        super::abandon_method(
             heartbeat,
             format!(
                 "error: all {} IF2 chain(s) bailed via the PF degeneracy watchdog — no usable \
@@ -2506,7 +2506,7 @@ pub fn run_chains_with_per_chain_params(
         results.len(), config.loglik_eval.n_replicates, config.loglik_eval.n_particles);
     let loglik_eval_outcome = loglik_eval::run_loglik_eval(
         config, &results, &config.loglik_eval, config.seed,
-    ).unwrap_or_else(|e| super::abandon_stage(
+    ).unwrap_or_else(|e| super::abandon_method(
         heartbeat, format!("error: loglik-eval failed: {e}")));
 
     let (best_chain, best_loglik, best_se) =
@@ -2535,7 +2535,7 @@ pub fn run_chains_with_per_chain_params(
                 start_loglik, steps: steps.clone(),
             });
             collector.render_to_stderr(HintContext { chains_completed: Some(results.len()) });
-            if let Some(dir) = stage_dir {
+            if let Some(dir) = method_dir {
                 let _ = collector.write_json(&format!("{}/diagnostics.json", dir));
             }
             return Err(format!(
@@ -2547,7 +2547,7 @@ pub fn run_chains_with_per_chain_params(
         }
         collector.push(DiagnosticKind::InitialLoglikInfinite);
         collector.render_to_stderr(HintContext { chains_completed: Some(results.len()) });
-        if let Some(dir) = stage_dir {
+        if let Some(dir) = method_dir {
             let _ = collector.write_json(&format!("{}/diagnostics.json", dir));
         }
         return Err(format!(
@@ -2605,9 +2605,9 @@ pub fn run_chains_with_per_chain_params(
         } else {
             // Name the statistic and the threshold. Â is IF2 chain agreement,
             // NOT a posterior R̂, and the band comes from the gate that will
-            // judge this stage — a literal here diverged from `a_thresh` the
+            // judge this method — a literal here diverged from `a_thresh` the
             // moment the default moved to 1.01, so the same number printed ✓
-            // at the end of the stage and ✗ in `fit summary`'s gate block.
+            // at the end of the method and ✗ in `fit summary`'s gate block.
             eprintln!("\nÂ (IF2 chain agreement), threshold {:.2}:",
                 config.gate.a_thresh);
             for spec in &config.estimated_params {
@@ -2729,7 +2729,7 @@ impl ChainResults {
     ///
     /// **Use this — not `IF2Result.mle` of the winning chain — anywhere
     /// the user-facing "MLE" parameters are needed** (e.g. building
-    /// `start_values` for a downstream stage, writing
+    /// `start_values` a later fit starts from, writing
     /// `mle_params.toml`, status / summary tables). `IF2Result.mle` is
     /// the IF2 chain's argmax over its own noisy `if2_perturbed_loglik`
     /// — a separate, biased estimator. The clean-eval θ̂ is the
@@ -2974,9 +2974,9 @@ pub fn compute_rhat_ess(chains: &[Vec<f64>]) -> RhatEss {
 }
 
 /// The R̂ above which a parameter draws a `RhatHigh` diagnostic and the
-/// end-of-stage report marks it.
+/// end-of-run report marks it.
 ///
-/// Unchanged in value from what every Bayesian stage has always applied; what
+/// Unchanged in value from what every Bayesian method has always applied; what
 /// changed in gh#84 is the STATISTIC — `RhatEss::rhat` is now the
 /// rank-normalized split statistic of Vehtari et al. (2021) rather than the
 /// classic Gelman & Rubin (1992) one, so the same 1.1 is a stricter bar.
@@ -2985,24 +2985,24 @@ pub fn compute_rhat_ess(chains: &[Vec<f64>]) -> RhatEss {
 /// is deliberately NOT taken here.
 pub const RHAT_REPORT_THRESHOLD: f64 = 1.1;
 
-/// Per-parameter convergence diagnostics for one Bayesian stage — the single
+/// Per-parameter convergence diagnostics for one Bayesian method — the single
 /// shape every sampler fills and every renderer and serializer reads.
 ///
 /// PGAS, PMMH and nuts previously each carried their own parallel maps and
 /// their own copy of the report loop, which is how a new statistic ends up
 /// live in one sampler and absent in another. They now differ only in how they
 /// extract a parameter's per-chain trace from their own result type.
-pub struct StageConvergence(Vec<(String, RhatEss)>);
+pub struct MethodConvergence(Vec<(String, RhatEss)>);
 
 use std::collections::BTreeMap;
 use sim::inference::convergence::{ConvergenceError, RankConvergence, RhatRefusal};
 
-impl StageConvergence {
+impl MethodConvergence {
     /// Score each `(param name, chains[chain][draw])` pair. Order is preserved
     /// — callers pass their estimated params in declaration order and the
     /// report follows it.
     pub fn compute(entries: impl IntoIterator<Item = (String, Vec<Vec<f64>>)>) -> Self {
-        StageConvergence(
+        MethodConvergence(
             entries.into_iter()
                 .map(|(name, chains)| {
                     let d = compute_rhat_ess(&chains);
@@ -3092,9 +3092,9 @@ impl StageConvergence {
 
     /// The convergence half of a `*_summary.json`, as one object.
     ///
-    /// Every Bayesian sampler merges this into its own stage-specific fields,
+    /// Every Bayesian sampler merges this into its own method-specific fields,
     /// so a statistic cannot be live in one sampler's summary and silently
-    /// absent from another's — the divergence [`StageConvergence`] exists to
+    /// absent from another's — the divergence [`MethodConvergence`] exists to
     /// prevent, and which three hand-written `json!` blocks reintroduced.
     /// [`crate::fit::method_result::ConvergenceMaps`] is the matching reader.
     pub fn summary_fields(&self) -> serde_json::Map<String, serde_json::Value> {
@@ -3137,7 +3137,7 @@ impl StageConvergence {
             .collect()
     }
 
-    /// The end-of-stage convergence block, and the `RhatHigh` diagnostics that
+    /// The end-of-run convergence block, and the `RhatHigh` diagnostics that
     /// go with it. Returns the text so the caller decides where it lands.
     ///
     /// Every line carries bulk-ESS **and** ESS/N. The ratio is not decoration:
@@ -3158,7 +3158,7 @@ impl StageConvergence {
     /// be read as a verdict — today only a point start (gh#890). The block
     /// then prints the refusal and the ESS, no R̂ number and no glyph, and
     /// draws no `RhatHigh` finding: `fit summary` withholds R̂ for such a run
-    /// (proposal 2026-09-08 §3.4), and a stage that printed `Rhat=1.42 ✗` at
+    /// (proposal 2026-09-08 §3.4), and a method that printed `Rhat=1.42 ✗` at
     /// the end of the same run said a thing the summary of that run declines
     /// to say. The ESS is unaffected by how the chains were started and is
     /// reported either way.
@@ -3293,7 +3293,7 @@ pub fn write_chain_outputs(
         // of truth — we skip the post-hoc write to avoid clobbering
         // it. When it didn't run (e.g. an embedded test or non-CLI
         // consumer that called `run_chains_with_per_chain_params`
-        // with `stage_dir = None`), fall back to the post-hoc write.
+        // with `method_dir = None`), fall back to the post-hoc write.
         //
         // Trade-off: the streaming version writes `NA` in the
         // `loglik` column (clean-PF re-eval is post-hoc). The
@@ -3413,7 +3413,7 @@ pub fn write_clean_eval_tsv(
     Ok(())
 }
 
-/// Write `<dir>/final_params.toml` at the stage root, capturing the
+/// Write `<dir>/final_params.toml` at the method root, capturing the
 /// overall clean-eval winner across all chains. Mirrors the per-chain
 /// TOML schema but identifies which chain produced it.
 pub fn write_run_root_final_params(
@@ -5837,7 +5837,7 @@ dt = 1.0
         assert_eq!(d.refusal(), Some(&ConvergenceError::TooFewChains { n_chains: 1 }));
     }
 
-    /// The ✓/~/✗ glyph in the end-of-stage block and the `RhatHigh` finding in
+    /// The ✓/~/✗ glyph in the end-of-run block and the `RhatHigh` finding in
     /// `diagnostics.json` must agree about where the band is. They came from
     /// two places — the finding from the caller's `rhat_threshold`, the glyph
     /// from a literal `1.1` — which agreed only because the two numbers
@@ -5849,7 +5849,7 @@ dt = 1.0
         use sim::inference::diagnostic::{DiagnosticCollector, DiagnosticKind};
         let chains = load_convergence_chains();
         // R̂ ≈ 1.027 — under the 1.1 bar, over a 1.01 one.
-        let conv = StageConvergence::compute([("ar1_mixed".to_string(),
+        let conv = MethodConvergence::compute([("ar1_mixed".to_string(),
             chains["ar1_mixed"].clone())]);
 
         let collector = DiagnosticCollector::new("test");
@@ -5923,18 +5923,18 @@ dt = 1.0
             "an infinite R̂ is the worst band, not an absent one"
         );
 
-        let conv = StageConvergence::compute([("beta".to_string(), frozen)]);
+        let conv = MethodConvergence::compute([("beta".to_string(), frozen)]);
         let collector = DiagnosticCollector::new("test");
         let out = conv.report(&collector, RHAT_REPORT_THRESHOLD, None);
         assert!(
             out.contains('✗'),
-            "and the stage block must say so loudly:\n{out}"
+            "and the method block must say so loudly:\n{out}"
         );
     }
 
     /// One R̂, two commands, two glyphs.
     ///
-    /// The end-of-stage block glyphed against the caller's `rhat_threshold`
+    /// The end-of-run block glyphed against the caller's `rhat_threshold`
     /// (`RHAT_REPORT_THRESHOLD` = 1.1, the bar that draws a `RhatHigh`
     /// FINDING); `fit summary` glyphs against `RHAT_CONVERGED_THRESHOLD`
     /// (1.05, the bar `converged_at` and the machine-readable `converged`
@@ -5943,7 +5943,7 @@ dt = 1.0
     /// directory. Certification is one question; both surfaces must give it
     /// one answer.
     #[test]
-    fn the_stage_report_glyphs_rhat_against_the_bar_camdl_certifies_against() {
+    fn the_method_report_glyphs_rhat_against_the_bar_camdl_certifies_against() {
         use sim::inference::diagnostic::DiagnosticCollector;
         use crate::fit::method_result::{RhatBand, RHAT_CONVERGED_THRESHOLD};
 
@@ -5955,14 +5955,14 @@ dt = 1.0
             "fixture premise: R̂ must land in the disputed gap; got {rhat}"
         );
 
-        let conv = StageConvergence::compute([("beta".to_string(), chains)]);
+        let conv = MethodConvergence::compute([("beta".to_string(), chains)]);
         let collector = DiagnosticCollector::new("test");
         let out = conv.report(&collector, RHAT_REPORT_THRESHOLD, None);
 
         assert!(
             !out.contains('✓'),
             "R̂ = {rhat:.4} is above the bar `fit summary` certifies against, \
-             so the stage block must not print it green:\n{out}"
+             so the method block must not print it green:\n{out}"
         );
         assert_eq!(
             RhatBand::of(rhat),
@@ -5997,7 +5997,7 @@ dt = 1.0
     /// A run whose chains all began at one point has its R̂ reported as **not
     /// assessed** by `fit summary` (proposal 2026-09-08 §3.4) — chains that
     /// began together agree by construction, so the between-chain statistic
-    /// says nothing about whether the posterior was explored. The stage block
+    /// says nothing about whether the posterior was explored. The method block
     /// printed at the end of that same run printed `Rhat=1.09 ✗` anyway, so
     /// the two surfaces disagreed about the same numbers on the same
     /// directory, and the one printed first is the one a user sees.
@@ -6011,7 +6011,7 @@ dt = 1.0
         use sim::inference::diagnostic::DiagnosticCollector;
 
         let chains = offset_chains(0.09);
-        let conv = StageConvergence::compute([("beta".to_string(), chains)]);
+        let conv = MethodConvergence::compute([("beta".to_string(), chains)]);
 
         // Premise: with no refusal this block prints a number, a glyph and
         // (above the certification bar) a decomposition. Without this the
@@ -6045,7 +6045,7 @@ dt = 1.0
                 sim::inference::diagnostic::DiagnosticKind::RhatHigh { .. }
             )),
             "a `RhatHigh` finding is a reading of the withheld number, so the \
-             stage must not record one either"
+             method must not record one either"
         );
     }
 
@@ -6072,7 +6072,7 @@ dt = 1.0
     fn a_non_converged_parameter_shows_the_classic_rhat_and_the_per_chain_ess() {
         use sim::inference::diagnostic::DiagnosticCollector;
         let chains = load_convergence_chains();
-        let conv = StageConvergence::compute([(
+        let conv = MethodConvergence::compute([(
             "within_chain_drift".to_string(),
             chains["within_chain_drift"].clone(),
         )]);
@@ -6097,7 +6097,7 @@ dt = 1.0
         );
     }
 
-    /// A high R̂ has two structurally different causes and the end-of-stage
+    /// A high R̂ has two structurally different causes and the end-of-run
     /// report must say WHICH: chains disagreeing about **location**
     /// (`rhat_bulk`) or about **spread** (`rhat_folded`). Both halves are
     /// computed by `rank_convergence`; carrying only their `max` outward left
@@ -6112,7 +6112,7 @@ dt = 1.0
     fn the_report_names_which_half_drove_a_high_rhat() {
         use sim::inference::diagnostic::DiagnosticCollector;
         let chains = load_convergence_chains();
-        let conv = StageConvergence::compute([(
+        let conv = MethodConvergence::compute([(
             "scale_disagree".to_string(),
             chains["scale_disagree"].clone(),
         )]);
@@ -6143,7 +6143,7 @@ dt = 1.0
     fn the_report_names_the_location_half_when_that_is_the_driver() {
         use sim::inference::diagnostic::DiagnosticCollector;
         let chains = load_convergence_chains();
-        let conv = StageConvergence::compute([(
+        let conv = MethodConvergence::compute([(
             "within_chain_drift".to_string(),
             chains["within_chain_drift"].clone(),
         )]);

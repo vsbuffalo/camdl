@@ -1,6 +1,6 @@
 //! Sparse/holes through the `camdl fit` path.
 //!
-//! `camdl fit` (IF2, PGAS, PMMH, ODE-MLE, and the post-fit PFilter stage) must
+//! `camdl fit` (IF2, PGAS, PMMH, ODE-MLE, and the post-fit PFilter method) must
 //! LOAD a holed series (a value-column `NA` = a missing observation) and route
 //! the holes — as `None` cells — through the already hole-correct scoring seam
 //! (`MultiStreamObsModel`). A hole contributes NO likelihood term, but its
@@ -16,13 +16,13 @@
 //!   * `fit_if2_on_holed_series_runs_and_is_finite` — `camdl fit` (IF2) on a
 //!     series with an interior hole loads, runs, and produces a finite best
 //!     loglik (was: hard error at load).
-//!   * `fit_pfilter_stage_loglik_matches_standalone_pfilter_on_holes` — the
-//!     fit's internal PFilter-stage loglik on the holed series at FIXED params
+//!   * `fit_pfilter_method_loglik_matches_standalone_pfilter_on_holes` — the
+//!     fit's internal PFilter-method loglik on the holed series at FIXED params
 //!     equals `camdl pfilter` on the SAME holed data at the same
 //!     params/seed/particles. Same machinery → exact match. Pins that the fit
 //!     path routes holes through the same hole-correct code, not a parallel
 //!     reimplementation.
-//!   * `dense_fit_pfilter_stage_matches_standalone_pfilter` — dense parity: a
+//!   * `dense_fit_pfilter_method_matches_standalone_pfilter` — dense parity: a
 //!     no-hole series scores identically through the fit path and standalone
 //!     pfilter (the cell loader's all-`Some` output is the dense path).
 //!
@@ -148,7 +148,7 @@ cooling = 0.9
     (p, out_root)
 }
 
-/// Write a PFilter-stage fit.toml at FIXED params (start = the truth so the
+/// Write a PFilter-method fit.toml at FIXED params (start = the truth so the
 /// PF runs at the same params the standalone `camdl pfilter` is given). One
 /// replicate, prequential off (a holed series + prequential is rejected;
 /// here we just want the bare filter loglik).
@@ -188,8 +188,8 @@ fn run_fit(bin: &Path, fit_toml: &Path, seed: &str) -> std::process::Output {
         .expect("camdl fit must invoke")
 }
 
-/// Read the single replicate's loglik from the PFilter stage's `logliks.tsv`.
-fn read_pfilter_stage_loglik(out_root: &Path) -> f64 {
+/// Read the single replicate's loglik from the PFilter method's `logliks.tsv`.
+fn read_pfilter_method_loglik(out_root: &Path) -> f64 {
     // .../fits/<fit>/01-check-<hash>/seed_<S>-<hash>/logliks.tsv
     let mut found = None;
     for entry in walk(out_root) {
@@ -282,36 +282,36 @@ fn fit_if2_on_holed_series_runs_and_is_finite() {
 }
 
 #[test]
-fn fit_pfilter_stage_loglik_matches_standalone_pfilter_on_holes() {
+fn fit_pfilter_method_loglik_matches_standalone_pfilter_on_holes() {
     let camdl = camdl_bin();
     let tmp = tempdir("pfmatch");
     let ir = write_model(tmp.path());
     let data = write_holed_data(tmp.path());
     let (toml, out_root) = write_pfilter_toml(tmp.path(), &ir, &data, "holed");
 
-    // Same seed both sides: the PFilter stage's replicate-0 PF seed is
+    // Same seed both sides: the PFilter method's replicate-0 PF seed is
     // `seed ^ 0 = seed`, the same seed standalone pfilter uses; same
     // params/particles/dt → the bootstrap filter is identical → exact match.
     let seed = "7";
     let out = run_fit(&camdl, &toml, seed);
     assert!(out.status.success(),
-        "fit PFilter stage on holed series must run:\n{}",
+        "fit PFilter method on holed series must run:\n{}",
         String::from_utf8_lossy(&out.stderr));
 
-    let fit_ll = read_pfilter_stage_loglik(&out_root);
+    let fit_ll = read_pfilter_method_loglik(&out_root);
     let standalone_ll = run_standalone_pfilter(&camdl, &ir, &data, seed);
 
     assert!(fit_ll.is_finite() && standalone_ll.is_finite(),
         "both logliks must be finite: fit={fit_ll}, standalone={standalone_ll}");
     // Same machinery, same seed → identical to numerical write precision.
     assert!((fit_ll - standalone_ll).abs() < 1e-3,
-        "fit PFilter-stage loglik on holed data ({fit_ll}) must match standalone \
+        "fit PFilter-method loglik on holed data ({fit_ll}) must match standalone \
          pfilter ({standalone_ll}) — both route holes through the same \
          hole-correct scoring seam. diff = {}", (fit_ll - standalone_ll).abs());
 }
 
 #[test]
-fn dense_fit_pfilter_stage_matches_standalone_pfilter() {
+fn dense_fit_pfilter_method_matches_standalone_pfilter() {
     // Dense parity: a no-hole series scores identically through the fit path
     // (the cell loader emits all-`Some`) and standalone pfilter — so the cell
     // loader does not perturb the no-hole result.
@@ -324,12 +324,12 @@ fn dense_fit_pfilter_stage_matches_standalone_pfilter() {
     let seed = "7";
     let out = run_fit(&camdl, &toml, seed);
     assert!(out.status.success(),
-        "dense fit PFilter stage must run:\n{}",
+        "dense fit PFilter method must run:\n{}",
         String::from_utf8_lossy(&out.stderr));
 
-    let fit_ll = read_pfilter_stage_loglik(&out_root);
+    let fit_ll = read_pfilter_method_loglik(&out_root);
     let standalone_ll = run_standalone_pfilter(&camdl, &ir, &data, seed);
     assert!((fit_ll - standalone_ll).abs() < 1e-3,
-        "dense parity: fit PFilter-stage loglik ({fit_ll}) must equal standalone \
+        "dense parity: fit PFilter-method loglik ({fit_ll}) must equal standalone \
          pfilter ({standalone_ll}). diff = {}", (fit_ll - standalone_ll).abs());
 }

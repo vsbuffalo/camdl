@@ -180,7 +180,7 @@ pub struct FitState {
     pub pf_noise: Option<crate::fit::pf_noise::PfNoiseCheck>,
 
     /// An nl-* optimizer's own convergence verdict, as it judged its chains
-    /// at the end of the run (`nlopt_stage::check_convergence`). The verdict
+    /// at the end of the run (`nlopt_method::check_convergence`). The verdict
     /// needs per-chain values and the optimizer tolerance, which the rest of
     /// this file does not keep, so it is recorded rather than re-derived; the
     /// warm-start source check and `fit table` read it. `None` on every other
@@ -459,7 +459,7 @@ beta = 0.8
 
     /// gh#901: the file names the inference method under the key the rest of
     /// the tool uses. `fit_state.toml` is the inter-method handoff file — a
-    /// `from_mle` start reads it — and it spelled the method `stage` after the
+    /// `from_mle` start reads it — and it spelled the method `method` after the
     /// store levels, the config and the CLI had all moved to `method`. The
     /// assertion is two-sided: the new key is emitted *and* the old one is
     /// absent, so the rename cannot be half-reverted.
@@ -477,7 +477,7 @@ beta = 0.8
         assert_eq!(back.method, "scout");
         let old = body.replace("method = \"scout\"", "stage = \"scout\"");
         assert!(toml::from_str::<FitState>(&old).is_err(),
-            "a file spelling the key `stage` is not read (no compatibility \
+            "a file spelling the key `method` is not read (no compatibility \
              alias, VERSIONING.md alpha posture)");
     }
 }

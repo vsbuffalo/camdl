@@ -1,8 +1,8 @@
 //! New-format fit reader: project a CAS fit segment into the fit-level and
-//! per-stage views every fit consumer needs.
+//! per-method views every fit consumer needs.
 //!
 //! A content-addressed fit is a segment directory `fits/{stem}-{h8}/` holding
-//! one `FitStage` `runid::RunRecord` leaf per (cell × stage) plus a single
+//! one `FitStage` `runid::RunRecord` leaf per (cell × method) plus a single
 //! fit-level provenance sidecar (`fit.meta.json`). There is no fit-wide
 //! `run.json`: the fit-level identity is the `fit`-level hash shared by every
 //! leaf, and the fit-wide attributes the leaves don't carry (user `--label`,
@@ -10,7 +10,7 @@
 //! live once on the sidecar.
 //!
 //! [`FitView::read`] folds those leaves + sidecar into one fit-level view; each
-//! [`FitStageView`] carries the per-stage headline numbers (`method`, `seed`,
+//! [`FitMethodView`] carries the per-method headline numbers (`method`, `seed`,
 //! `n_chains`, `best_loglik`, `best_chain`, path-derived axes) read directly
 //! from the leaf's `RunRecord`. This is the single consumer-facing projection
 //! of the new format — `walk_fits_root`, `table_row`, `fit summary`, `browse`
@@ -22,16 +22,16 @@ use std::path::{Path, PathBuf};
 use runid::{ArtifactKind, RunRecord};
 
 use crate::chain_index::ChainIndex;
-use crate::fit::fit_tree::{derive_axes, StageAxes};
+use crate::fit::fit_tree::{derive_axes, MethodAxes};
 use crate::run_meta::{InferenceBackend, FitAlgorithm, ParameterProvenance, ResolvedPriorEntry};
 
 /// One fit-stage leaf, projected to the headline numbers the fit consumers
 /// read directly from the leaf's `RunRecord` (`inputs` + path-derived `axes`).
 #[derive(Debug, Clone)]
-pub struct FitStageView {
-    /// Stage directory holding this leaf's `run.json` (the consumer loads the
+pub struct FitMethodView {
+    /// Method directory holding this leaf's `run.json` (the consumer loads the
     /// typed θ̂ / diagnostics from sibling `fit_state.toml` etc. itself).
-    pub stage_dir: PathBuf,
+    pub method_dir: PathBuf,
     /// Inference algorithm tag. Its `as_str()` is also the leaf's label —
     /// the `method` store level's directory name — so there is no separate
     /// name field to drift from it (gh#901).
@@ -57,25 +57,25 @@ pub struct FitStageView {
     /// Whether the run's record says `completed` (not still running, nor
     /// failed): only a completed run is reported as a result.
     pub completed: bool,
-    /// Simulation backend the stage ran on. Defaults to `ChainBinomial` when
+    /// Simulation backend the method ran on. Defaults to `ChainBinomial` when
     /// absent.
     pub backend: InferenceBackend,
     pub seed: u64,
     pub n_chains: usize,
     pub best_loglik: Option<f64>,
     /// `inputs.best_chain` as recorded: the chain that won, naming a
-    /// `chain_N/` directory under `stage_dir` (gh#912, gh#990). Renderers
+    /// `chain_N/` directory under `method_dir` (gh#912, gh#990). Renderers
     /// print it as it stands. `None` for a method with replicates rather than
     /// competing chains (pfilter), and on a leaf written before the field
     /// existed.
     pub best_chain: Option<ChainIndex>,
     /// Path-derived `(data_kind, fit_seed, sweep_slug)` axes — `None` for a
-    /// stage outside the canonical `{real,synthetic}/...` layout.
-    pub axes: Option<StageAxes>,
+    /// method outside the canonical `{real,synthetic}/...` layout.
+    pub axes: Option<MethodAxes>,
 }
 
 /// Fit-level view of a CAS fit segment: the fit-wide identity + provenance plus
-/// one [`FitStageView`] per stage leaf, folded from the segment's stage-leaf
+/// one [`FitMethodView`] per method leaf, folded from the segment's method-leaf
 /// `RunRecord`s and the fit-level `FitSidecar`.
 #[derive(Debug, Clone)]
 pub struct FitView {
@@ -107,12 +107,12 @@ pub struct FitView {
     /// deduplicated. One per method that ran on this problem.
     pub methods_declared: Vec<String>,
     /// One view per discovered method leaf, sorted by method label then seed.
-    pub stages: Vec<FitStageView>,
+    pub methods: Vec<FitMethodView>,
 }
 
 /// The `method` level's readable label (the algorithm's name); `""` when
 /// absent.
-fn stage_label(r: &RunRecord) -> String {
+fn method_label(r: &RunRecord) -> String {
     r.levels
         .iter()
         .find(|l| l.name == "method")
@@ -136,12 +136,12 @@ fn skipped_leaf_line(dir: &Path, why: &str) -> String {
     format!("warning: skipping fit leaf {}: {why}", dir.display())
 }
 
-/// Build a [`FitStageView`] from a fit-stage leaf record + its directory.
+/// Build a [`FitMethodView`] from a fit-stage leaf record + its directory.
 /// Errs, with the reason, when the record is not a `FitStage` or its `inputs`
 /// lacks a `method` this camdl knows — a leaf written by a removed algorithm
 /// (`nuts` on the ODE backend) is the case that matters. The caller says so
 /// on stderr ([`skipped_leaf_line`]) rather than dropping the leaf silently.
-fn stage_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<FitStageView, String> {
+fn method_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<FitMethodView, String> {
     if rec.kind != ArtifactKind::FitStage {
         return Err("not a fit-stage record".into());
     }
@@ -162,8 +162,8 @@ fn stage_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<Fit
         .get("backend")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or(InferenceBackend::ChainBinomial);
-    Ok(FitStageView {
-        stage_dir: dir.to_path_buf(),
+    Ok(FitMethodView {
+        method_dir: dir.to_path_buf(),
         method,
         method_hash: rec
             .levels
@@ -240,7 +240,7 @@ impl FitView {
     /// `None` when no run is labelled. A label names one run, not the problem
     /// (gh#896), so a folder with several labelled runs shows each.
     pub fn label(&self) -> Option<String> {
-        let labels: Vec<&str> = self.stages.iter().filter_map(|s| s.label.as_deref()).collect();
+        let labels: Vec<&str> = self.methods.iter().filter_map(|s| s.label.as_deref()).collect();
         (!labels.is_empty()).then(|| labels.join(", "))
     }
 
@@ -248,14 +248,14 @@ impl FitView {
     /// Collects its `FitStage` leaves, sorts by method label then seed, reads
     /// the fit-level sidecar, and folds them.
     ///
-    /// Provenance integrity (gh#147): a segment with stage leaves but no
+    /// Provenance integrity (gh#147): a segment with method leaves but no
     /// sidecar is malformed — skipped with a loud error rather than surfaced
     /// with empty provenance. For a Bayesian fit (`pgas`/`pmmh` leaf), an empty
     /// `resolved_priors` is a dropped-provenance bug signal (gh#75) and is
     /// flagged. Returns `None` when `seg` holds no `FitStage` leaves.
     ///
     /// A leaf directory reads as the view of that one run (gh#896): the
-    /// problem's provenance from the segment the leaf sits in, and `stages`
+    /// problem's provenance from the segment the leaf sits in, and `methods`
     /// holding the leaf alone. Every reader that takes a fit directory
     /// therefore reads exactly the run a leaf path names, never a sibling.
     pub fn read(dir: &Path) -> Option<FitView> {
@@ -274,7 +274,7 @@ impl FitView {
         }
         // Label order, then seed: there is no execution order among methods.
         leaves.sort_by(|a, b| {
-            (stage_label(&a.1), seed_label(&a.1)).cmp(&(stage_label(&b.1), seed_label(&b.1)))
+            (method_label(&a.1), seed_label(&a.1)).cmp(&(method_label(&b.1), seed_label(&b.1)))
         });
 
         let fit_hash = leaves
@@ -302,7 +302,7 @@ impl FitView {
         // Method labels in label order, dedup preserving order.
         let mut methods_declared: Vec<String> = Vec::new();
         for (_, r) in &leaves {
-            let label = stage_label(r);
+            let label = method_label(r);
             if !methods_declared.contains(&label) {
                 methods_declared.push(label);
             }
@@ -315,7 +315,7 @@ impl FitView {
             Some(s) => s,
             None => {
                 eprintln!(
-                    "warning: fit {} has stage leaves but no fit.meta.json provenance \
+                    "warning: fit {} has method leaves but no fit.meta.json provenance \
                      sidecar — skipping (provenance missing)",
                     seg.display()
                 );
@@ -339,9 +339,9 @@ impl FitView {
             );
         }
 
-        let stages: Vec<FitStageView> = leaves
+        let methods: Vec<FitMethodView> = leaves
             .iter()
-            .filter_map(|(dir, r)| match stage_view_from_record(seg, dir, r) {
+            .filter_map(|(dir, r)| match method_view_from_record(seg, dir, r) {
                 Ok(v) => Some(v),
                 Err(why) => {
                     eprintln!("{}", skipped_leaf_line(dir, &why));
@@ -365,7 +365,7 @@ impl FitView {
             resolved_priors: side.resolved_priors,
             parameters_provenance: side.parameters_provenance.into_iter().collect(),
             methods_declared,
-            stages,
+            methods,
         })
     }
 }
@@ -390,7 +390,7 @@ mod tests {
             run_id = "ab".repeat(32),
         ))
         .unwrap();
-        let why = stage_view_from_record(&dir, &leaf, &rec)
+        let why = method_view_from_record(&dir, &leaf, &rec)
             .expect_err("`nuts` is not a FitAlgorithm any more");
         let line = skipped_leaf_line(&leaf, &why);
         assert!(line.starts_with("warning: skipping fit leaf "), "{line}");
@@ -406,14 +406,14 @@ mod tests {
     /// `{if2,pgas}-<h8>/seed_1-<h8>/run.json` `FitStage` leaves plus the
     /// fit-level `fit.meta.json` sidecar. Mirrors the on-disk shape the
     /// runner writes. `fit_h8` seeds the shared `fit`-level hash.
-    fn write_two_stage_fit(seg: &Path, fit_h8: &str) {
+    fn write_two_method_fit(seg: &Path, fit_h8: &str) {
         let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
-        let stages = [
+        let methods = [
             // (ordinal, method label, method, best_loglik, best_chain, created_at)
             (1_u8, "if2", "if2", -120.5_f64, 2_u64, "2026-04-27T00:00:01Z"),
             (2_u8, "pgas", "pgas", -56.7_f64, 1_u64, "2026-04-27T00:00:02Z"),
         ];
-        for (ord, label, method, best_ll, best_chain, created_at) in stages {
+        for (ord, label, method, best_ll, best_chain, created_at) in methods {
             let leaf = seg.join(format!("{label}-1fb03eee")).join("seed_1-06cbd6b3");
             std::fs::create_dir_all(&leaf).unwrap();
             // run_id must be valid 64-char hex (ContentHash rejects non-hex).
@@ -459,7 +459,7 @@ mod tests {
     fn fit_view_folds_segment_field_for_field() {
         let tmp = crate::test_support::unique_temp_dir("fit_view_equiv");
         let seg = tmp.join("fits").join("demo-abcd1234");
-        write_two_stage_fit(&seg, "abcd1234");
+        write_two_method_fit(&seg, "abcd1234");
 
         let view = FitView::read(&seg).expect("FitView::read must derive a fit");
 
@@ -485,15 +485,15 @@ mod tests {
         assert_eq!(view.methods_declared, vec!["if2", "pgas"], "label order");
 
         // Per-leaf fold, leaf-for-leaf.
-        assert_eq!(view.stages.len(), 2, "two method leaves");
-        let scout = view.stages.iter().find(|s| s.method == FitAlgorithm::If2).unwrap();
+        assert_eq!(view.methods.len(), 2, "two method leaves");
+        let scout = view.methods.iter().find(|s| s.method == FitAlgorithm::If2).unwrap();
         assert_eq!(scout.method, FitAlgorithm::If2, "if2 method");
         assert_eq!(scout.backend, InferenceBackend::ChainBinomial, "if2 backend");
         assert_eq!(scout.seed, 1, "if2 seed");
         assert_eq!(scout.n_chains, 4, "if2 n_chains");
         assert_eq!(scout.best_loglik, Some(-120.5), "if2 best_loglik");
         assert_eq!(scout.best_chain, Some(ChainIndex(2)), "if2 best_chain");
-        let refine = view.stages.iter().find(|s| s.method == FitAlgorithm::Pgas).unwrap();
+        let refine = view.methods.iter().find(|s| s.method == FitAlgorithm::Pgas).unwrap();
         assert_eq!(refine.method, FitAlgorithm::Pgas, "pgas method");
         assert_eq!(refine.best_loglik, Some(-56.7), "pgas best_loglik");
         assert_eq!(refine.best_chain, Some(ChainIndex(1)), "pgas best_chain");
@@ -508,13 +508,13 @@ mod tests {
     fn a_leaf_directory_reads_as_the_view_of_that_one_run() {
         let tmp = crate::test_support::unique_temp_dir("fit_view_leaf");
         let seg = tmp.join("fits").join("demo-abcd1234");
-        write_two_stage_fit(&seg, "abcd1234");
+        write_two_method_fit(&seg, "abcd1234");
         let leaf = seg.join("if2-1fb03eee").join("seed_1-06cbd6b3");
 
         let view = FitView::read(&leaf).expect("a leaf directory is a fit view");
-        assert_eq!(view.stages.len(), 1, "the leaf alone, not its sibling");
-        assert_eq!(view.stages[0].method, FitAlgorithm::If2);
-        assert_eq!(view.stages[0].stage_dir, leaf);
+        assert_eq!(view.methods.len(), 1, "the leaf alone, not its sibling");
+        assert_eq!(view.methods[0].method, FitAlgorithm::If2);
+        assert_eq!(view.methods[0].method_dir, leaf);
         assert_eq!(view.methods_declared, vec!["if2"]);
         assert_eq!(view.created_at, "2026-04-27T00:00:01Z", "this run's time, not the latest");
         // Problem provenance is the segment's.

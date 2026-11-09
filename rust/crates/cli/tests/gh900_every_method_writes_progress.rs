@@ -1,7 +1,7 @@
 //! gh#900: every fitting method leaves a terminal `progress.json`, and a
-//! stage that fails says so instead of going stale.
+//! method that fails says so instead of going stale.
 //!
-//! `progress.json` is the one artifact a watcher can read while a stage runs,
+//! `progress.json` is the one artifact a watcher can read while a method runs,
 //! and the gh#278 contract is that a consumer decides liveness from its
 //! freshness. Two things broke that. `Heartbeat::mcmc` was constructed in
 //! exactly one place, `pgas.rs`, so PMMH, `mh`, IF2 and the NLopt MLEs
@@ -132,7 +132,7 @@ simulate { from = 0 'days  to = 20 'days }
 "#;
 
 /// The `[method]` body for each method, at the smallest budget that still
-/// exercises its loop. The assertion is "the stage leaves a terminal record",
+/// exercises its loop. The assertion is "the method leaves a terminal record",
 /// not convergence, so the counts are deliberately tiny.
 fn method_body(method: &str) -> &'static str {
     match method {
@@ -248,7 +248,7 @@ N0 = 1000
         let progress = read_json(&leaf.join("progress.json"));
         assert_eq!(
             progress["state"], "done",
-            "{method}: a completed stage's last self-report must be `done`. Before \
+            "{method}: a completed method's last self-report must be `done`. Before \
              gh#900 only PGAS wrote this file at all, and a reader deciding liveness \
              from its freshness saw every other method as a run that had not started \
              yet.\n{progress:#}"
@@ -259,7 +259,7 @@ N0 = 1000
     }
 }
 
-// ── Claim 2: a failed PGAS stage says why ────────────────────────────────────
+// ── Claim 2: a failed PGAS method says why ────────────────────────────────────
 
 /// The same SIR, observed as `binomial(n = projected, p = 0.5)` with `projected = I`. `n` is
 /// bounded by the reachable `I`, so an observed count far above the population
@@ -292,7 +292,7 @@ simulate { from = 0 'days  to = 2 'days }
 "#;
 
 #[test]
-fn a_pgas_stage_that_fails_records_why_it_stopped() {
+fn a_pgas_method_that_fails_records_why_it_stopped() {
     require_tools();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -342,7 +342,7 @@ starts    = "single"
     let progress = read_json(&leaf.join("progress.json"));
     let failed = progress["state"]["failed"].as_object().unwrap_or_else(|| {
         panic!(
-            "a stage that stopped because camdl refused it must say `failed`. A \
+            "a method that stopped because camdl refused it must say `failed`. A \
              `running` record here is the SIGKILL signature — a reader applying the \
              gh#278 staleness rule would call this run presumed dead and never learn \
              that camdl had a reason and printed it.\n{progress:#}"

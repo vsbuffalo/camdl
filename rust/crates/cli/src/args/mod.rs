@@ -663,7 +663,7 @@ Notes:
   - Output goes under `<root>/fits/<stem>-<hash>/`; resolve with
     `camdl fit where fit.toml`.
 
-Priors (Bayesian stages: PGAS, PMMH):
+Priors (Bayesian methods: PGAS, PMMH):
   Each estimated parameter must have a prior available from one of
   three sources, resolved in this order:
 
@@ -802,12 +802,12 @@ pub struct FitRunArgs {
     // ── Richardson dt-convergence check (gh#52) ─────────────────────
 
     /// Skip the post-fit Richardson dt-convergence check at θ̂.
-    /// Default: the check runs on every IF2 stage (PF likelihood) and
-    /// every ODE inference stage — nl-sbplx, nl-bobyqa, nl-lbfgs, and mh
+    /// Default: the check runs on every IF2 method (PF likelihood) and
+    /// every ODE inference method — nl-sbplx, nl-bobyqa, nl-lbfgs, and mh
     /// (deterministic likelihood). Use this for CI smoke fits or
     /// known-converged-dt rerenders where the audit cost is unwelcome.
     ///: the dt-check result is stored in the leaf, so
-    /// the override is keyed into that stage's identity (gh#540 seam;
+    /// the override is keyed into that method's identity (gh#540 seam;
     /// gh#726 for the mh/nl-* dt_check field).
     #[arg(long)]
     pub no_dt_check: bool,
@@ -818,19 +818,19 @@ pub struct FitRunArgs {
     /// paper-grade conclusions; the routine default (2.0 / 0.5)
     /// allows more give before flagging.
     ///: the threshold it selects is stored in the leaf
-    /// (fit_state.toml.dt_check), so it is resolved into that stage's
-    /// dt_check.threshold_nats and keyed into its identity (gh#730). A stage
+    /// (fit_state.toml.dt_check), so it is resolved into that method's
+    /// dt_check.threshold_nats and keyed into its identity (gh#730). A method
     /// that declares its own threshold_nats is unaffected.
     #[arg(long)]
     pub dt_check_strict: bool,
 
-    /// Binomial sampler for a PGAS stage's chain-binomial draws: `btpe`
+    /// Binomial sampler for a PGAS method's chain-binomial draws: `btpe`
     /// (default) or `btrs` (Hörmann 1993; faster, gh#747).
     ///
     /// For the same reason as the flags above: the two
     /// samplers are NOT bit-compatible — a different rejection scheme accepts
     /// different draws from the same stream — so this is resolved into the
-    /// stage's `binomial` field and keyed into its identity. Two runs differing
+    /// method's `binomial` field and keyed into its identity. Two runs differing
     /// only in this flag get different addresses and cannot be served from one
     /// another's leaf. It is a flag rather than an environment variable for
     /// exactly that reason (gh#241 removed the last env-var input rather than
@@ -843,7 +843,7 @@ pub struct FitRunArgs {
     /// (evaluates at dt_fit, dt_fit/2, dt_fit/4 — 7× the
     /// loglik-eval cost). Use 3 for ambiguous cases at 15×.
     ///: the ladder result is stored in the leaf, so
-    /// the override is keyed into that stage's identity (gh#540 seam;
+    /// the override is keyed into that method's identity (gh#540 seam;
     /// gh#726 for the mh/nl-* dt_check field).
     #[arg(long, value_name = "N")]
     pub dt_check_halvings: Option<usize>,
@@ -1014,7 +1014,7 @@ pub struct FitSummaryArgs {
     /// the MCMC chains, dropping the named chain ids (comma-separated, e.g.
     /// `--exclude-chains 3,5`). Chain ids count from 0, the same numbers as
     /// the `chain` column of `draws.tsv` and the `chain_N/` dirs. A view only — nothing on disk changes. The
-    /// stage's identity line then reads `K of N chains (excluded 3,5)`, and the
+    /// method's identity line then reads `K of N chains (excluded 3,5)`, and the
     /// verdict's forkable count says it is over the retained chains. Post-hoc
     /// exclusion
     /// BIASES the posterior toward the retained mode and always prints a
@@ -1071,7 +1071,7 @@ every address the fit holds.
 
 Convergence columns — two different questions, do not mix them up:
   fit_rhat_max,        the fit's worst parameter, copied from the producing
-  fit_ess_min          stage. Provenance about the fit, not about this row:
+  fit_ess_min          method. Provenance about the fit, not about this row:
                        the same number repeats down the whole file.
   rhat_mean, ess_mean  this row's latent expected value, across chains.
                        \"Do the chains agree about the expected trajectory
@@ -1676,7 +1676,7 @@ pub struct PfilterArgs {
 // ─── if2 (removed; deprecation stub) ────────────────────────────────────────────
 
 /// `camdl if2` is removed (gh#147). A one-method IF2 fit is now a fit
-/// with a single `algorithm = "if2"` stage, run through `camdl fit run`.
+/// with a single `algorithm = "if2"` method, run through `camdl fit run`.
 /// This catch-all accepts and ignores any arguments so an old invocation
 /// lands on the actionable migration message in [`crate::if2::cmd_if2`]
 /// rather than a clap parse error — a deprecation redirect, not a
@@ -2478,7 +2478,7 @@ Examples:
   # Resolve a run by short hash prefix
   camdl show abc1234
 
-  # Path to a stage directory also works
+  # Path to a method directory also works
   camdl show results/fits/sir-8a3f12b4/refine
 
   # JSON output for scripting
@@ -2544,7 +2544,7 @@ pub struct ReindexArgs {
 
 /// `camdl compare` — multi-model prequential comparison table.
 ///
-/// Takes ≥2 prequential.json files / stage dirs (or fit handles, whose
+/// Takes ≥2 prequential.json files / method dirs (or fit handles, whose
 /// prequential is auto-derived) or a compare.toml, and renders a
 /// baseline-centered comparison.
 /// See docs/dev/proposals/2026-04-20-prequential-evaluation.md §8.
@@ -2600,7 +2600,7 @@ Examples:
 "))]
 pub struct CompareArgs {
     /// Models to compare — need ≥2 when --config is not used. Each is
-    /// either a prequential.json (or a stage dir holding one), read
+    /// either a prequential.json (or a method dir holding one), read
     /// as-is, OR a fit handle (@label / hash prefix / run dir / fit.toml),
     /// whose prequential is auto-derived from its sealed θ̂ + data.
     pub paths: Vec<String>,
@@ -3036,7 +3036,7 @@ mod tests {
     // gh#189: --loglik-eval-particles/-reps removed — loglik_eval is part of the
     // fit identity (set only in the method table), not a CLI override that
     // bypasses the run_id. The convergence-gate override (--decibans-thresh)
-    // stays, and no longer needs a stage to attach to.
+    // stays, and no longer needs a method to attach to.
     #[test]
     fn fit_run_gate_override_parses() {
         let a = try_parse_fit_run(&[

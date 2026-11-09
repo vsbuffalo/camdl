@@ -1,19 +1,19 @@
-//! gh#872: an IF2 stage writes `chain_starts.tsv` once, in the format every
-//! other stage kind writes.
+//! gh#872: an IF2 method writes `chain_starts.tsv` once, in the format every
+//! other method kind writes.
 //!
-//! Two functions used to write that file into the same stage directory: the
-//! provenance-carrying writer the PGAS and PMMH stages also use, and then a
+//! Two functions used to write that file into the same method directory: the
+//! provenance-carrying writer the PGAS and PMMH methods also use, and then a
 //! second, IF2-only one that overwrote it. The survivor had no `source`
-//! column, so an IF2 stage's `chain_starts.tsv` could not say whether the
+//! column, so an IF2 method's `chain_starts.tsv` could not say whether the
 //! chains were independently initialised — the audit question the file exists
 //! to answer (gh#871) — and the two writers numbered chains differently, so
 //! one parser could not read both and an off-by-one was available to anyone
 //! who tried.
 //!
-//! The pin is end-to-end and comparative: run one fit with an IF2 stage and a
-//! PGAS stage and require the two files to have the same columns and the same
+//! The pin is end-to-end and comparative: run one fit with an IF2 method and a
+//! PGAS method and require the two files to have the same columns and the same
 //! chain numbering. Asserting the IF2 column names literally would restate the
-//! writer; asserting them against another stage kind states the invariant that
+//! writer; asserting them against another method kind states the invariant that
 //! was broken, and would catch a future divergence from either side.
 //!
 //! The per-chain source labels are checked against the values they describe,
@@ -23,7 +23,7 @@
 //!
 //! Cheap on purpose — 2 chains, 20 particles, 1 IF2 iteration, 4 PGAS sweeps.
 //! Starting points are fixed before either sampler updates anything, so
-//! nothing here depends on either stage converging.
+//! nothing here depends on either method converging.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -45,7 +45,7 @@ fn golden_ir() -> PathBuf {
 
 /// The `chain_starts.tsv` written by the method whose CAS leaf sits under a
 /// `<method>-<h8>` directory.
-fn chain_starts_for_stage(root: &Path, method: &str) -> PathBuf {
+fn chain_starts_for_method(root: &Path, method: &str) -> PathBuf {
     let marker = format!("{method}-");
     let mut found: Vec<PathBuf> = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -94,7 +94,7 @@ fn column<'a>(cols: &[String], rows: &'a [Vec<String>], col: &str) -> Vec<&'a st
 }
 
 #[test]
-fn if2_chain_starts_matches_the_format_every_other_stage_writes() {
+fn if2_chain_starts_matches_the_format_every_other_method_writes() {
     let bin = binary();
     assert!(bin.exists(),
         "release camdl binary missing: {} — run `make build-rust` or `make test`",
@@ -175,9 +175,9 @@ starts    = \"uniform_unconstrained\"
 
     let results = dir.join("results");
     let (if2_comments, if2_cols, if2_rows) =
-        parse(&chain_starts_for_stage(&results, "if2"));
+        parse(&chain_starts_for_method(&results, "if2"));
     let (_, pgas_cols, pgas_rows) =
-        parse(&chain_starts_for_stage(&results, "pgas"));
+        parse(&chain_starts_for_method(&results, "pgas"));
     // The rows the chains ran from. A start the filter refused is on the
     // record ahead of its redraw as `rejected` (gh#887) — under twenty
     // particles that happens — and is not a chain's start.
@@ -192,27 +192,27 @@ starts    = \"uniform_unconstrained\"
     // The audit question: can a reader tell from this file alone whether the
     // chains were started apart?
     assert!(if2_cols.iter().any(|c| c == "source"),
-        "the IF2 stage's chain_starts.tsv has columns {if2_cols:?} and no \
+        "the IF2 method's chain_starts.tsv has columns {if2_cols:?} and no \
          `source`. That column is how the file answers whether the chains were \
          independently initialised, which is the whole reason it exists — an R̂ \
          computed over chains that all began at one point says nothing, and \
          this is the artifact that would have shown it.");
 
-    // One shape across stage kinds, so one parser reads both.
+    // One shape across method kinds, so one parser reads both.
     assert_eq!(if2_cols, pgas_cols,
-        "the IF2 stage writes chain_starts.tsv columns {if2_cols:?} while the \
-         PGAS stage in the same fit writes {pgas_cols:?}. A consumer cannot \
+        "the IF2 method writes chain_starts.tsv columns {if2_cols:?} while the \
+         PGAS method in the same fit writes {pgas_cols:?}. A consumer cannot \
          read both with one parser.");
 
     let if2_ids = column(&if2_cols, &if2_rows, "chain_id");
     let pgas_ids = column(&pgas_cols, &pgas_rows, "chain_id");
     assert_eq!(if2_ids, ["0", "1"],
-        "chain ids in the IF2 stage's chain_starts.tsv are {if2_ids:?}; the \
-         column counts from 0 on every stage that writes this file — the number \
-         of the `chain_N/` directory beside it (gh#781, gh#990) — and a stage that \
+        "chain ids in the IF2 method's chain_starts.tsv are {if2_ids:?}; the \
+         column counts from 0 on every method that writes this file — the number \
+         of the `chain_N/` directory beside it (gh#781, gh#990) — and a method that \
          numbers differently hands an off-by-one to anyone joining two.");
     assert_eq!(if2_ids, pgas_ids,
-        "the IF2 stage numbers its chains {if2_ids:?} and the PGAS stage \
+        "the IF2 method numbers its chains {if2_ids:?} and the PGAS method \
          numbers them {pgas_ids:?}.");
 
     // Provenance reaching disk, checked against the values it describes:
@@ -221,7 +221,7 @@ starts    = \"uniform_unconstrained\"
     let if2_sources = column(&if2_cols, &if2_rows, "source");
     assert_eq!(if2_sources,
         ["uniform_unconstrained:chain-0", "uniform_unconstrained:chain-1"],
-        "the IF2 stage's per-chain sources are {if2_sources:?}; the stage drew \
+        "the IF2 method's per-chain sources are {if2_sources:?}; the method drew \
          each chain its own point under `starts = \"uniform_unconstrained\"`, and \
          the file has to say so — under the same chain numbers the `chain_id` \
          column of those rows carries (gh#781).");
@@ -237,21 +237,21 @@ starts    = \"uniform_unconstrained\"
 
     let header = if2_comments.iter().find(|c| c.contains("chain_starts"))
         .unwrap_or_else(|| panic!(
-            "no `# camdl chain_starts` header in the IF2 stage's file: \
+            "no `# camdl chain_starts` header in the IF2 method's file: \
              {if2_comments:?}. The header names the init method, so a reader \
              who skims it gets the same answer as the rows."));
     assert!(header.contains("starts=uniform_unconstrained") && header.contains("kind=spread"),
-        "the IF2 stage's header is {header:?} and does not name the rule that \
+        "the IF2 method's header is {header:?} and does not name the rule that \
          supplied the starts, or its kind.");
 
     // The control for the point-start demotion (proposal 2026-09-08 §3.4):
     // both leaves record a spread start, and the PGAS leaf's R̂ is assessed.
     for method in ["if2", "pgas"] {
-        let leaf = chain_starts_for_stage(&results, method);
+        let leaf = chain_starts_for_method(&results, method);
         let state = std::fs::read_to_string(leaf.parent().unwrap().join("fit_state.toml")).unwrap();
         assert!(state.contains("chain_starts_kind = \"spread\""), "{method}: {state}");
     }
-    let pgas_leaf = chain_starts_for_stage(&results, "pgas");
+    let pgas_leaf = chain_starts_for_method(&results, "pgas");
     let segment = pgas_leaf.parent().unwrap().parent().unwrap().parent().unwrap();
     let out = Command::new(&bin)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")

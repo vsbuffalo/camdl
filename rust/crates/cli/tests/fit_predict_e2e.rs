@@ -409,7 +409,7 @@ thin = 1
     let pjson: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&pmf).unwrap()).unwrap();
     // The tag has to move with the fields it describes. v1 → v2 changed the two
-    // stage-provenance columns from classic Gelman-Rubin R̂ and a Geyer sum to
+    // method-provenance columns from classic Gelman-Rubin R̂ and a Geyer sum to
     // rank-normalized split R̂ and bulk-ESS (gh#84) WITHOUT renaming them, so
     // for those two versions the tag is the only signal that two artifacts in
     // one store hold different quantities. v3 renames them `fit_rhat_max` /

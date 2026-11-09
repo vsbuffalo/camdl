@@ -147,34 +147,34 @@ fn distinct_rw_sd_gets_a_distinct_base_dir() {
     let root = tmp.path().join("out");
     let (beta, gamma) = ("beta=lin(0.1,0.5,3)", "gamma=lin(0.03,0.25,3)");
 
-    // rw_sd rides the `stage` level (the method config), not the base dir —
-    // so the observable is the set of stage segments under a point. The
+    // rw_sd rides the `method` level (the method config), not the base dir —
+    // so the observable is the set of method segments under a point. The
     // magnitude must be on a NON-focal parameter: beta and gamma are pinned
     // by the sweep, so only N0 is actually estimated here.
     run_profile_with(&bin, &ir, &data, &root, beta, gamma, "N0=5.0");
-    let after_a = stage_dirs(&root);
-    assert_eq!(after_a.len(), 1, "one run → one stage segment, got {:?}", after_a);
+    let after_a = method_dirs(&root);
+    assert_eq!(after_a.len(), 1, "one run → one method segment, got {:?}", after_a);
 
     // Same magnitudes again — a cache hit, no new segment (the negative
     // control: this must NOT fork, or the assertion below proves nothing).
     run_profile_with(&bin, &ir, &data, &root, beta, gamma, "N0=5.0");
-    assert_eq!(stage_dirs(&root), after_a,
-        "re-running with the SAME rw_sd must reuse its stage segment");
+    assert_eq!(method_dirs(&root), after_a,
+        "re-running with the SAME rw_sd must reuse its method segment");
 
     // Different magnitudes — a different sampler, so a different artifact.
     run_profile_with(&bin, &ir, &data, &root, beta, gamma, "N0=50.0");
-    let after_b = stage_dirs(&root);
+    let after_b = method_dirs(&root);
     assert_eq!(after_b.len(), 2,
-        "a different --rw-sd must create a distinct stage segment rather than \
+        "a different --rw-sd must create a distinct method segment rather than \
          being served the previous run's landscape — got {:?}", after_b);
     assert!(after_b.is_superset(&after_a),
-        "the first run's stage segment must still be present alongside the second's");
+        "the first run's method segment must still be present alongside the second's");
 }
 
-/// The `stage` segments (`<method>-<methodhash>`) across every point, which is
+/// The `method` segments (`<method>-<methodhash>`) across every point, which is
 /// where the method config — particles, iterations, cooling, rw_sd, init —
 /// lands in the leaf path.
-fn stage_dirs(root: &Path) -> BTreeSet<String> {
+fn method_dirs(root: &Path) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut stack = vec![root.join("profiles")];
     while let Some(d) = stack.pop() {

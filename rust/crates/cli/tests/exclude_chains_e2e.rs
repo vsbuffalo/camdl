@@ -530,7 +530,7 @@ fn summary_subset_shows_header_recomputes_and_warns() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
-    // The stage's identity line names the subset and what was dropped.
+    // The method's identity line names the subset and what was dropped.
     assert!(
         stdout.contains("3 of 4 chains (excluded 3)"),
         "summary identity line must show the chain subset, got:\n{stdout}"
@@ -603,9 +603,9 @@ fn predict_subset_recomputes_convergence_agreeing_with_summary() {
     // the buggy path copies is deterministic (the reported 1.570) and the
     // recomputed subset value is unambiguously different.
     let draws = find_draws_tsv(&seg).expect("draws.tsv written by the fit");
-    let stage_dir = draws.parent().unwrap();
+    let method_dir = draws.parent().unwrap();
     std::fs::write(
-        stage_dir.join("pgas_summary.json"),
+        method_dir.join("pgas_summary.json"),
         r#"{"schema":"camdl.fit-summary/v2","method":"pgas","n_chains":4,"thin":1,"rhat":{"beta":1.5700,"gamma":1.3000},"ess":{"beta":55,"gamma":47}}"#,
     )
     .unwrap();

@@ -1,7 +1,7 @@
 //! gh#147 (M3.3). The profile-point CAS identity: map a resolved profile grid
 //! point into the `runid` factored levels (`profile` / `point` / `method` /
 //! `seed` / `start`) and its leaf `run_id`. Mirrors
-//! [`crate::fit::cas::resolve_fit_stage`].
+//! [`crate::fit::cas::resolve_fit_method`].
 //!
 //! Factoring (design locked in `7493cc0` — not re-litigated here):
 //!   - **profile (base)** — the inference *problem*: model + data + the
@@ -112,7 +112,7 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
         focal.push((ParamId(name.clone()), fv));
     }
     let point = ProfilePointConfig { focal };
-    let stage = ProfileStage { config: ctx.method_config.into_inner() };
+    let method = ProfileStage { config: ctx.method_config.into_inner() };
     let seed = Seed { process_seed: ctx.seed, base_seed: ctx.seed };
     let start = StartLevel { index: ctx.start_index };
 
@@ -130,7 +130,7 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
         // level and the word the rest of the tool uses. `run_id` folds level
         // HASHES only and the path segment is built from the label, so the
         // rename re-keys nothing and moves no directory.
-        level("method", ctx.method_name, structural_level_hash(&stage)),
+        level("method", ctx.method_name, structural_level_hash(&method)),
         level("seed", &format!("seed_{}", ctx.seed), structural_level_hash(&seed)),
         level("start", &format!("start_{}", ctx.start_index), structural_level_hash(&start)),
     ];

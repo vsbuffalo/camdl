@@ -1,4 +1,4 @@
-//! gh#916: an NLopt stage in which no chain reached a finite log-likelihood
+//! gh#916: an NLopt method in which no chain reached a finite log-likelihood
 //! must refuse (non-zero exit, no `mle_params.toml`), the way the PGAS, PMMH
 //! and IF2 drivers already do (gh#226).
 //!
@@ -137,7 +137,7 @@ chains = 1
 }
 
 #[test]
-fn an_nlopt_stage_with_no_finite_chain_refuses() {
+fn an_nlopt_method_with_no_finite_chain_refuses() {
     let tmp = tempdir("refuse");
     let Some((ok, stderr, outdir)) = run_fit(&tmp, 0) else {
         eprintln!("skip: release camdl / camdlc.exe missing (run `make build`)");
@@ -150,12 +150,12 @@ fn an_nlopt_stage_with_no_finite_chain_refuses() {
     );
     assert!(
         files_named(&outdir, "mle_params.toml").is_empty(),
-        "a refused NLopt stage must not write mle_params.toml"
+        "a refused NLopt method must not write mle_params.toml"
     );
 }
 
 /// Negative control: the same fixture seeded with ten infecteds is scorable,
-/// so the stage succeeds and writes its MLE. Without this, the test above
+/// so the method succeeds and writes its MLE. Without this, the test above
 /// would pass for a fixture that fails for any reason at all.
 #[test]
 fn the_same_fit_with_a_seeded_epidemic_succeeds() {

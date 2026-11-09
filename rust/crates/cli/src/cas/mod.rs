@@ -25,7 +25,7 @@
 //!                   obs.json                  # obs metadata (NOT a RunRecord)
 //!   fits/
 //!     {fit_stem}-{h8}/                        # FitDigest (model + data + fit-wide config)
-//!       {NN}-{stage}-{h8}/                    # e.g. 01-scout-{h8}, 02-posterior-{h8}
+//!       {algorithm}-{h8}/                     # e.g. pgas-{h8}, if2-{h8}
 //!         seed_{n}-{h8}/
 //!           run.json                          # RunRecord (kind = fit_stage)
 //! ```

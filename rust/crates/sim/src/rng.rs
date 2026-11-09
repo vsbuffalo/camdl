@@ -452,7 +452,7 @@ pub enum BinomialAlgorithm {
 }
 
 /// The production default. Selecting the other sampler CHANGES DRAWS, so it
-/// arrives through `Stage::PGAS.binomial` — a typed field that enters the run
+/// arrives through `Algorithm::PGAS.binomial` — a typed field that enters the run
 /// address — and travels on the RNG itself (`StatefulRng::with_binomial`).
 ///
 /// An environment variable was considered and rejected: one that changed draws
@@ -492,7 +492,7 @@ impl StatefulRng {
     ///
     /// Selecting `Btrs` CHANGES DRAWS — a different rejection scheme accepts
     /// different values from the same stream — so it must arrive from an input
-    /// that enters the run address. `Stage::PGAS.binomial` is that input; see
+    /// that enters the run address. `Algorithm::PGAS.binomial` is that input; see
     /// `docs/dev/proposals/2026-08-24-faster-binomial-sampler.md`.
     pub fn with_binomial(mut self, algo: BinomialAlgorithm) -> Self {
         self.algo = algo;

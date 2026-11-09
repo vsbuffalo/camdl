@@ -162,7 +162,7 @@ max_evals = 5000
     )
 }
 
-/// What one chain of a finished NLopt stage recorded.
+/// What one chain of a finished NLopt method recorded.
 struct Chain {
     loglik: f64,
     params: Vec<(String, f64)>,
@@ -267,7 +267,7 @@ N0 = 10000
         let states = find_all(&out_dir, "fit_state.toml");
         assert_eq!(
             states.len(), 1,
-            "{algorithm}: expected exactly one stage leaf under {}",
+            "{algorithm}: expected exactly one method leaf under {}",
             out_dir.display()
         );
         leaves.push((algorithm.to_string(), states[0].parent().unwrap().to_path_buf()));
@@ -331,7 +331,7 @@ N0 = 10000
     ).unwrap();
     assert_eq!(
         progress["state"], "done",
-        "a completed nl-lbfgs stage's last self-report must be `done`:\n{progress:#}"
+        "a completed nl-lbfgs method's last self-report must be `done`:\n{progress:#}"
     );
 }
 
@@ -394,7 +394,7 @@ N0 = 10000
         stderr.contains("nl-sbplx"),
         "the refusal must name the derivative-free alternative:\n{stderr}"
     );
-    // Refused before the optimizer ran, so no stage result exists anywhere.
+    // Refused before the optimizer ran, so no method result exists anywhere.
     for artifact in ["fit_state.toml", "mle_params.toml", "chain_results.tsv"] {
         let found = find_all(&out_dir, artifact);
         assert!(

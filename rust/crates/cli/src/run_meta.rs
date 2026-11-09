@@ -5,7 +5,7 @@
 //! cross-cutting value types those readers and writers share:
 //!
 //! - [`FitAlgorithm`] / [`InferenceBackend`] — the (algorithm, backend) tags a
-//!   fit stage records and a reader projects.
+//!   fit method records and a reader projects.
 //! - [`SurveyEvalMethod`] — how `camdl survey` evaluates the marginal
 //!   log-likelihood at each point.
 //! - [`ResolvedPriorEntry`] / [`ParameterProvenance`] / [`InitProvenance`] —
@@ -13,7 +13,7 @@
 //!   and in the fit-level [`FitSidecar`].
 //! - [`FitSidecar`] + [`write_fit_sidecar`] / [`read_fit_sidecar`] — the
 //!   fit-level provenance sidecar (`fit.meta.json`) a CAS fit segment carries
-//!   alongside its stage leaves.
+//!   alongside its method leaves.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -71,7 +71,7 @@ pub fn check_fit_summary_schema(v: &serde_json::Value, filename: &str) -> Result
 /// Inference algorithm tag — discriminator enum naming the algorithm
 /// independent of the simulation backend. Recorded in a fit-stage leaf's
 /// `inputs` alongside `Backend` to capture the (algorithm, backend) pair the
-/// stage ran. Wire format matches the lowercased / kebab-cased name
+/// method ran. Wire format matches the lowercased / kebab-cased name
 /// the user writes in fit.toml (`algorithm = "if2"`, `algorithm =
 /// "nl-sbplx"`, ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -102,8 +102,8 @@ impl FitAlgorithm {
         }
     }
 
-    /// The per-stage convergence-summary filename a Bayesian sampler writes into
-    /// its stage dir: `<algorithm>_summary.json`. The single source of this
+    /// The per-method convergence-summary filename a Bayesian sampler writes into
+    /// its method dir: `<algorithm>_summary.json`. The single source of this
     /// naming convention — written by the pgas / pmmh / mh runners, read
     /// back by `read_convergence` and the `MethodResult` loaders. Deterministic
     /// mh-ODE shares the PMMH runner but gets its OWN file (`mh_summary.json`),
@@ -148,7 +148,7 @@ impl std::fmt::Display for FitAlgorithm {
     }
 }
 
-/// Simulation backend the stage ran on. The (algorithm, backend) pair
+/// Simulation backend the method ran on. The (algorithm, backend) pair
 /// is constrained by `methods::METHODS`; PF-based algorithms require
 /// `chain_binomial`, deterministic-likelihood algorithms require `ode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -175,7 +175,7 @@ impl std::fmt::Display for InferenceBackend {
 
 /// Conversion failure from a [`ForwardBackend`](crate::args::types::ForwardBackend)
 /// into an [`InferenceBackend`]: `gillespie` is a valid forward-simulation
-/// backend but has no fit/inference interface, so it cannot back a fit stage.
+/// backend but has no fit/inference interface, so it cannot back a fit method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendDomainError {
     NotInferenceBackend,
@@ -186,7 +186,7 @@ impl std::fmt::Display for BackendDomainError {
         match self {
             BackendDomainError::NotInferenceBackend => f.write_str(
                 "gillespie is a forward-simulation backend, not an inference backend; \
-                 fit stages support only chain_binomial or ode",
+                 fit methods support only chain_binomial or ode",
             ),
         }
     }
@@ -208,7 +208,7 @@ impl TryFrom<crate::args::types::ForwardBackend> for InferenceBackend {
 }
 
 /// Every inference backend is also a valid forward-simulation backend (the fit
-/// dynamics are a forward model). Total — used to record the stage's actual
+/// dynamics are a forward model). Total — used to record the method's actual
 /// backend into forward-facing provenance (`MleMetadata.backend`).
 impl From<InferenceBackend> for crate::args::types::ForwardBackend {
     fn from(b: InferenceBackend) -> Self {
@@ -614,7 +614,7 @@ impl ObsSchema {
 /// The fit-level provenance sidecar (`fits/{stem}-{h8}/fit.meta.json`). A CAS
 /// fit's fit level is a path segment with no `RunRecord`; this sidecar is the
 /// single authoritative home for the fit-wide attributes that are NOT carried
-/// on the stage leaves — the user `--label` and the fit-wide provenance
+/// on the method leaves — the user `--label` and the fit-wide provenance
 /// (`resolved_priors` = gh#75 per-parameter prior source,
 /// `estimated`/`fixed`/`data_hashes`, `model_identity`, paths).
 ///
@@ -1069,7 +1069,7 @@ mod tests {
     }
 
     /// The reverse is total: every inference backend is a valid forward
-    /// backend (used to record stage provenance into `MleMetadata.backend`).
+    /// backend (used to record method provenance into `MleMetadata.backend`).
     #[test]
     fn inference_backend_is_always_a_forward_backend() {
         use crate::args::types::ForwardBackend;
@@ -1292,7 +1292,7 @@ mod tests {
     /// per-parameter prior sources must survive the fit-level sidecar
     /// write → `FitView::read` read round trip. Before the sidecar carried
     /// `resolved_priors`, the reader defaulted it empty and this class of bug
-    /// shipped silently. Write a Bayesian (`pgas`) stage leaf + a sidecar with
+    /// shipped silently. Write a Bayesian (`pgas`) method leaf + a sidecar with
     /// mixed sources, read the fit back, and assert each `.source` matches.
     #[test]
     fn fit_sidecar_resolved_priors_survive_fit_view_round_trip() {
@@ -1301,7 +1301,7 @@ mod tests {
         let seg = tmp.join("fits").join("demo-abc12345");
         let leaf = seg.join("pgas-1fb03eee").join("seed_1-06cbd6b3");
         std::fs::create_dir_all(&leaf).unwrap();
-        // A Bayesian (pgas) stage leaf — `FitView::read` requires its
+        // A Bayesian (pgas) method leaf — `FitView::read` requires its
         // sidecar to carry resolved_priors.
         std::fs::write(
             leaf.join("run.json"),
@@ -1343,10 +1343,10 @@ mod tests {
     }
 
     /// gh#29: the fit-level sidecar `label` is sticky across repeated
-    /// `fit run` invocations on the same fit segment. A multi-stage pipeline
-    /// (`scout → refine → validate`) rewrites the umbrella sidecar on every
-    /// call; a `--label` set on an earlier invocation must survive a later
-    /// stage-only re-run that passes no `--label`. So a write whose sidecar
+    /// `fit run` invocations on the same fit segment. Every `fit run` into the
+    /// segment (one per method file) rewrites the umbrella sidecar; a
+    /// `--label` set on an earlier invocation must survive a later re-run
+    /// that passes no `--label`. So a write whose sidecar
     /// carries `label: None` preserves a non-`None` label already on disk; an
     /// explicit label always overrides; a fresh segment with no prior label
     /// stays `None`.
@@ -1363,16 +1363,16 @@ mod tests {
         assert_eq!(label(&seg), None,
             "a fresh segment with no --label must stay unlabeled");
 
-        // `fit run … --stage scout --label "smoke test scout"`.
+        // `fit run mle.toml --label "smoke test scout"`.
         write_fit_sidecar(&seg, toml,
             &FitSidecar { label: Some("smoke test scout".into()), ..Default::default() }).unwrap();
         assert_eq!(label(&seg), Some("smoke test scout".into()));
 
-        // `fit run … --stage refine` (no --label): the earlier label must stick.
+        // `fit run posterior.toml` (no --label): the earlier label must stick.
         write_fit_sidecar(&seg, toml,
             &FitSidecar { label: None, ..Default::default() }).unwrap();
         assert_eq!(label(&seg), Some("smoke test scout".into()),
-            "gh#29: a stage-only re-run without --label must not clobber the label");
+            "gh#29: a method-only re-run without --label must not clobber the label");
 
         // A later invocation with an explicit --label overrides the sticky one.
         write_fit_sidecar(&seg, toml,

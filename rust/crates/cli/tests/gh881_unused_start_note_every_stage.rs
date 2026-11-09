@@ -1,11 +1,11 @@
-//! gh#881: a declared `[estimate].start` that the stage's `init` mode discards
-//! is announced for every stage kind, not just IF2.
+//! gh#881: a declared `[estimate].start` that the method's `init` mode discards
+//! is announced for every method kind, not just IF2.
 //!
 //! `init::ignores_base_point` had one production call site, inside the
-//! `Stage::IF2 { … }` arm of the `fit run` dispatch. PMMH, PGAS, MH, NUTS and
-//! the NLopt stages take their own arm and never reached it, so they threw the
+//! `Algorithm::IF2 { … }` arm of the `fit run` dispatch. PMMH, PGAS, MH, NUTS and
+//! the NLopt methods take their own arm and never reached it, so they threw the
 //! declared start away in silence. In gh#876 the modeller declared
-//! `start = 0.0001` — the true value — ran a `pmmh` stage under the default
+//! `start = 0.0001` — the true value — ran a `pmmh` method under the default
 //! `starts = "uniform_unconstrained"`, fit from starts 33-41% away from it, and
 //! had every chain refused; the note would have said why.
 //!
@@ -15,7 +15,7 @@
 //!
 //! Deliberately cheap: 2 chains, a few hundred particles at most, a handful of
 //! iterations, 5 observations — under a second for all three. The note is
-//! printed before the stage runs, so nothing here depends on the fit
+//! printed before the method runs, so nothing here depends on the fit
 //! converging or on it being a good fit.
 
 use std::path::{Path, PathBuf};
@@ -47,21 +47,21 @@ struct Run {
     stdout: String,
 }
 
-/// One single-stage fit over the SEIR golden IR. `stage_body` is spliced in
+/// One single-method fit over the SEIR golden IR. `method_body` is spliced in
 /// under `[method]`, so each caller varies exactly the algorithm and the
 /// `init` mode and nothing else. `beta` declares both a `start` and a prior
-/// (the Bayesian stages require one).
-fn run_fit(stage_body: &str) -> Run {
+/// (the Bayesian methods require one).
+fn run_fit(method_body: &str) -> Run {
     run_fit_with(
         "[estimate.beta]\nbounds = [0.01, 0.5]\nstart  = 0.123\n\
          prior  = { log_normal = { mu = -2.0, sigma = 0.5 } }\n",
-        stage_body,
+        method_body,
     )
 }
 
 /// `run_fit` with the `[estimate]` block supplied too, for the tests that
 /// vary whether `beta` declares a prior.
-fn run_fit_with(estimate_block: &str, stage_body: &str) -> Run {
+fn run_fit_with(estimate_block: &str, method_body: &str) -> Run {
     let bin = binary();
     assert!(bin.exists(),
         "release camdl binary missing: {} — run `make build-rust` or `make test`",
@@ -96,12 +96,12 @@ N0       = 1000
 I0       = 1
 
 [method]
-{stage_body}
+{method_body}
 
 [config]
 dt = 1.0
 "#, ir = golden_ir().display(), data = data.display(), estimate_block = estimate_block,
-     stage_body = stage_body)).unwrap();
+     method_body = method_body)).unwrap();
 
     let out = Command::new(&bin)
         .env("CAMDL_OUTPUT_DIR", dir.join("results"))
@@ -121,10 +121,10 @@ fn note_count(stderr: &str) -> usize {
     stderr.matches(NOTE).count()
 }
 
-/// The gh#881 regression proper. A `pmmh` stage under the default `init`
+/// The gh#881 regression proper. A `pmmh` method under the default `init`
 /// discards `[estimate].start`, and must say so — it said nothing.
 #[test]
-fn a_pmmh_stage_says_that_it_discarded_the_declared_start() {
+fn a_pmmh_method_says_that_it_discarded_the_declared_start() {
     let run = run_fit(
         "algorithm = \"pmmh\"\n\
          backend = \"chain_binomial\"\n\
@@ -134,7 +134,7 @@ fn a_pmmh_stage_says_that_it_discarded_the_declared_start() {
          burn_in = 2\n");
     assert!(run.ok, "fit run failed:\nstdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
     assert_eq!(note_count(&run.stderr), 1,
-        "a pmmh stage whose `init` draws every start must say that \
+        "a pmmh method whose `init` draws every start must say that \
          `[estimate].start` was unused, exactly once.\nstderr:\n{}", run.stderr);
     assert!(run.stderr.contains("`starts = \"from_prior\"` draws"),
         "and must name the rule that discarded it — the default here, since beta \

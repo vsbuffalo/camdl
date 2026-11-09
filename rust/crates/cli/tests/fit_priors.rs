@@ -279,7 +279,7 @@ fn run_fit(bin: &Path, fit_toml: &Path) -> std::process::Output {
 
 /// Load-bearing test for gh#75: priors live ONLY in the model file.
 /// Before gh#75 the validator at config_v2.rs rejected this with
-/// "stage 'posterior' (method=pmmh) requires priors, but missing for:
+/// "method 'posterior' (method=pmmh) requires priors, but missing for:
 /// beta, gamma". After gh#75 the fit succeeds and the resolver pulls
 /// the priors from the model IR.
 #[test]
@@ -575,11 +575,11 @@ simulate {{ from = 0 'days  to = 6 'days }}
     (ir_path, data_path)
 }
 
-/// A fit toml estimating only `rho`, everything else pinned. `stage` is
+/// A fit toml estimating only `rho`, everything else pinned. `method` is
 /// spliced in whole so one helper serves both the beta-prior (PMMH) arm and
 /// the no-prior (IF2) arm.
 fn write_probability_fit_toml(
-    dir: &Path, ir: &Path, data: &Path, rho_spec: &str, stage: &str, tag: &str,
+    dir: &Path, ir: &Path, data: &Path, rho_spec: &str, method: &str, tag: &str,
 ) -> PathBuf {
     let toml = format!(r#"
 output_dir = "{out}"
@@ -596,7 +596,7 @@ beta = 0.3
 gamma = 0.1
 N0 = 1000
 k = 10.0
-{stage}
+{method}
 "#,
         out  = dir.join("results").display(),
         ir   = ir.display(),
@@ -607,7 +607,7 @@ k = 10.0
     p
 }
 
-const PMMH_STAGE: &str = r#"[method]
+const PMMH_METHOD: &str = r#"[method]
 algorithm = "pmmh"
 backend = "chain_binomial"
 chains = 1
@@ -615,7 +615,7 @@ particles = 20
 iterations = 20
 burn_in = 2"#;
 
-const IF2_STAGE: &str = r#"[method]
+const IF2_METHOD: &str = r#"[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 1
@@ -639,7 +639,7 @@ fn beta_prior_on_an_undeclared_probability_is_accepted() {
     let fit = write_probability_fit_toml(
         tmp.path(), &ir, &data,
         "{ start = 0.5, prior = { beta = { alpha = 2.0, beta = 5.0 } } }",
-        PMMH_STAGE, "beta");
+        PMMH_METHOD, "beta");
     let out = run_fit(&bin, &fit);
     let log = combined(&out);
     assert!(out.status.success(),
@@ -659,7 +659,7 @@ fn if2_on_an_undeclared_probability_searches_the_unit_interval() {
     let tmp = tempdir("gh763_if2");
     let (ir, data) = write_probability_fixture(tmp.path(), "");
     let fit = write_probability_fit_toml(
-        tmp.path(), &ir, &data, "{ start = 0.5 }", IF2_STAGE, "if2");
+        tmp.path(), &ir, &data, "{ start = 0.5 }", IF2_METHOD, "if2");
     let out = run_fit(&bin, &fit);
     let log = combined(&out);
     assert!(out.status.success(),
@@ -690,7 +690,7 @@ fn declaring_the_unit_interval_explicitly_changes_nothing() {
         std::fs::create_dir_all(&dir).unwrap();
         let (ir, data) = write_probability_fixture(&dir, clause);
         let fit = write_probability_fit_toml(
-            &dir, &ir, &data, "{ start = 0.5 }", IF2_STAGE, tag);
+            &dir, &ir, &data, "{ start = 0.5 }", IF2_METHOD, tag);
         let out = run_fit(&bin, &fit);
         let log = combined(&out);
         assert!(out.status.success(), "{tag} arm must run; output:\n{log}");

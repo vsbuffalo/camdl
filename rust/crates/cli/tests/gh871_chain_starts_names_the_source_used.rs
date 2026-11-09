@@ -3,14 +3,14 @@
 //!
 //! A method started from a stored fit with `starts = { from_mle = "@prime" }`
 //! puts every chain at the upstream point estimate. The writer used to be
-//! handed the stage's declared `init` regardless, so the file recorded N
+//! handed the method's declared `init` regardless, so the file recorded N
 //! independent per-chain draws (`uniform_unconstrained:chain-0` …) beside N
 //! identical values. `chain_starts.tsv` is the artifact an auditor reads to
 //! answer "were these chains started apart?" — the question behind any R̂ that
 //! looks too good — so a wrong answer there is durable and looks authoritative.
 //!
 //! The defect was at a call site, as in gh#506 and gh#513:
-//! `write_chain_starts_tsv` was correct given its arguments, and the stage
+//! `write_chain_starts_tsv` was correct given its arguments, and the method
 //! dispatcher passed the wrong one. So the pin is end-to-end — run a real
 //! two-file chain (the second file names the first by `@label`) and read the
 //! file the second fit wrote. This is also the proposal's collapse test: the
@@ -48,7 +48,7 @@ fn golden_ir() -> PathBuf {
 /// The `chain_starts.tsv` written by the method whose CAS leaf sits under a
 /// `<method>-<h8>` directory. Each file writes one; only the chained one
 /// exercises gh#871.
-fn chain_starts_for_stage(root: &Path, method: &str) -> PathBuf {
+fn chain_starts_for_method(root: &Path, method: &str) -> PathBuf {
     let marker = format!("{method}-");
     let mut found: Vec<PathBuf> = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -90,7 +90,7 @@ fn parse(path: &Path) -> (Vec<String>, Vec<String>, Vec<Vec<String>>) {
 }
 
 #[test]
-fn chained_stage_records_the_point_it_started_from_not_the_declared_init() {
+fn chained_method_records_the_point_it_started_from_not_the_declared_init() {
     let bin = binary();
     assert!(bin.exists(),
         "release camdl binary missing: {} — run `make build-rust` or `make test`",
@@ -184,7 +184,7 @@ starts    = {{ from_mle = \"@prime\" }}
     assert!(stderr.contains("starts source:"),
         "the run must say which leaf the starts came from:\n{stderr}");
 
-    let path = chain_starts_for_stage(&dir.join("results"), "pgas");
+    let path = chain_starts_for_method(&dir.join("results"), "pgas");
     let (comments, cols, rows) = parse(&path);
 
     let source_idx = cols.iter().position(|c| c == "source")

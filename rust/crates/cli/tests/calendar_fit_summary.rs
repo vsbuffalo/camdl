@@ -205,8 +205,8 @@ fn instant_estimand_renders_as_calendar_date() {
 
     let mut saw_tau_date = false;
     let mut saw_beta = false;
-    for stage in methods {
-        let Some(params) = stage["parameters"].as_array() else { continue };
+    for method in methods {
+        let Some(params) = method["parameters"].as_array() else { continue };
         for p in params {
             match p["name"].as_str() {
                 Some("tau") => {

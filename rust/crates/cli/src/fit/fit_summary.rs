@@ -1,12 +1,12 @@
 //! `camdl fit summary` — single-fit interpretation surface.
 //!
 //! Reads a fit dir produced by `camdl fit run` and renders an
-//! interpretation block per stage. The block content is method-aware:
-//! IF2 stages render the compound-gate verdict, Â-keyed parameter
+//! interpretation block per method. The block content is method-aware:
+//! IF2 methods render the compound-gate verdict, Â-keyed parameter
 //! table, per-chain loglik-eval table, and filter-health provenance
-//! cross-check; PGAS / PMMH stages render the posterior summary
-//! (mean, R̂, ESS, acceptance) instead. Stage names come from the
-//! walker (`fit_tree::walk_fit_dir`) — there is no hard-coded stage
+//! cross-check; PGAS / PMMH methods render the posterior summary
+//! (mean, R̂, ESS, acceptance) instead. Method names come from the
+//! walker (`fit_tree::walk_fit_dir`) — there is no hard-coded method
 //! list.
 //!
 //! Boundary rule: `status` answers "what's the state of my filesystem
@@ -27,8 +27,8 @@ use crate::fit::gating::AgreementBand;
 use crate::fit::fit_tree::{self, DataKind};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
-    If2StageResult, MaxRhat, MethodResult, MinEss, ParamConvergence,
-    PgasStageResult, PmmhStageResult, PosteriorDiagnostics, RhatBand, RHAT_CONVERGED_THRESHOLD,
+    If2Run, MaxRhat, MethodResult, MinEss, ParamConvergence,
+    PgasRun, PmmhRun, PosteriorDiagnostics, RhatBand, RHAT_CONVERGED_THRESHOLD,
     Stat,
 };
 use crate::fit::state::FitState;
@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 /// different kinds, so the difference compared unlike quantities.
 const SCHEMA_VERSION: u32 = 3;
 
-/// Recompute a Bayesian stage's diagnostics + posterior means over a
+/// Recompute a Bayesian method's diagnostics + posterior means over a
 /// chain-filtered draws cloud, mutating `diag`/`posterior_mean` in place, and
 /// return the [`SubsetInfo`] provenance.
 ///
@@ -66,7 +66,7 @@ const SCHEMA_VERSION: u32 = 3;
 fn recompute_over_subset(
     diag: &mut crate::fit::method_result::PosteriorDiagnostics,
     posterior_mean: &mut BTreeMap<String, f64>,
-    stage_dir: &Path,
+    method_dir: &Path,
     selection: &ChainSelection,
 ) -> Result<SubsetInfo, String> {
     // Recompute R̂ / ESS over the retained chains for the estimated params — the
@@ -76,13 +76,13 @@ fn recompute_over_subset(
     // calls, so summary and predict cannot disagree on the same fit + selection.
     let param_names: Vec<String> = posterior_mean.keys().cloned().collect();
     let sub = crate::chain_selection::recompute_subset_diagnostics(
-        &stage_dir.join("draws.tsv"),
+        &method_dir.join("draws.tsv"),
         selection,
         &param_names,
     )?;
     // A subset of chains that began at one point still began at one point:
     // the recomputed R̂ is no more informative than the stored one.
-    let point = crate::fit::method_result::point_start(stage_dir).map_err(|e| e.to_string())?;
+    let point = crate::fit::method_result::point_start(method_dir).map_err(|e| e.to_string())?;
 
     // Posterior means over the retained rows — summary-specific, so computed
     // here from the shared recompute's `kept` rows rather than in the shared fn.
@@ -110,20 +110,20 @@ fn recompute_over_subset(
     Ok(sub.info)
 }
 
-/// Mutate a Bayesian stage's typed result to the chain-subset diagnostics.
-/// Errors (never silently no-ops) for a non-Bayesian stage — the caller only
-/// invokes it on Bayesian stages.
+/// Mutate a Bayesian method's typed result to the chain-subset diagnostics.
+/// Errors (never silently no-ops) for a non-Bayesian method — the caller only
+/// invokes it on Bayesian methods.
 fn apply_selection_to_typed(
     typed: &mut MethodResult,
-    stage_dir: &Path,
+    method_dir: &Path,
     selection: &ChainSelection,
 ) -> Result<SubsetInfo, String> {
     match typed {
         MethodResult::Pgas(r) => {
-            recompute_over_subset(&mut r.diagnostics, &mut r.posterior_mean, stage_dir, selection)
+            recompute_over_subset(&mut r.diagnostics, &mut r.posterior_mean, method_dir, selection)
         }
         MethodResult::Pmmh(r) => {
-            recompute_over_subset(&mut r.diagnostics, &mut r.posterior_mean, stage_dir, selection)
+            recompute_over_subset(&mut r.diagnostics, &mut r.posterior_mean, method_dir, selection)
         }
         _ => Err(
             "--exclude-chains applies only to Bayesian methods (PGAS / PMMH / MH)".to_string(),
@@ -136,12 +136,12 @@ fn apply_selection_to_typed(
 /// outlier signal is strong — gh#406), then the loud, non-quietable exclusion
 /// warning. The flag is the second thing the user reads, not the first.
 fn chain_selection_advisory(
-    stage_dir: &Path,
+    method_dir: &Path,
     info: &SubsetInfo,
     kind: super::loglik::LoglikType,
 ) {
     use super::chain_diagnostics as cd;
-    if let Some(means) = cd::read_chain_mean_logliks(stage_dir, kind) {
+    if let Some(means) = cd::read_chain_mean_logliks(method_dir, kind) {
         let scores = cd::chain_loglik_mod_zscores(&means.scored_by_chain());
         let outliers = cd::outlier_labels(&scores);
         if !outliers.is_empty() {
@@ -161,7 +161,7 @@ fn chain_selection_advisory(
 /// formatter based on `--format` and `--params-only`.
 ///
 /// Exits with code 1 when the handle does not resolve; when `--strict` is set
-/// and any IF2 stage's provenance cross-check fails; and when every method
+/// and any IF2 method's provenance cross-check fails; and when every method
 /// leaf the walker found failed to load, so the rendered summary has nothing
 /// behind it (gh#905, [`exit_if_nothing_loaded`]).
 ///
@@ -192,8 +192,8 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     let strict = args.strict || ci_env_set();
 
     // The full set of completed method leaves, walker-discovered, in label
-    // order (see `discover_stages`).
-    let discovered = discover_stages(Path::new(&dir));
+    // order (see `discover_methods`).
+    let discovered = discover_methods(Path::new(&dir));
     if discovered.is_empty() {
         eprintln!(
             "error: no completed method leaf under {dir}, so there is nothing to summarise.\n  \
@@ -223,10 +223,10 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
         }
     }
 
-    let selected: Vec<ResolvedStage> = discovered.clone();
+    let selected: Vec<ResolvedMethod> = discovered.clone();
 
     // Parse `--exclude-chains` at the boundary into a typed selection. A
-    // selection is meaningless without a Bayesian stage to subset — refuse it
+    // selection is meaningless without a Bayesian method to subset — refuse it
     // rather than silently no-op (an optimizer-only fit has no chains-as-draws).
     let selection: Option<ChainSelection> = match args.exclude_chains.as_deref() {
         Some(raw) => match ChainSelection::parse_exclude(raw) {
@@ -323,7 +323,7 @@ impl CalendarContext {
 }
 
 /// Load the calendar context from a fit dir: read the model path from the
-/// fit-level view (`FitView.model`, sidecar-sourced), falling back to any stage
+/// fit-level view (`FitView.model`, sidecar-sourced), falling back to any method
 /// leaf's `provenance.source_paths`; load that model and extract `origin`,
 /// `time_unit`, and the `instant`-kind parameter set. Any failure (no fit view,
 /// model moved/unparseable) degrades to an empty context (numeric-only
@@ -331,7 +331,7 @@ impl CalendarContext {
 fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
     // Legacy fits carried the model path on the top-level `Fit` run.json. A
     // content-addressed fit (gh#147 M3.2) has no fit-wide record — the fit
-    // level is a path segment — so recover the model path from any stage
+    // level is a path segment — so recover the model path from any method
     // leaf's `run.json` `provenance.source_paths`.
     let model_path = FitView::read(fit_dir)
         .map(|v| v.model)
@@ -392,10 +392,10 @@ fn load_model_docs_for_fit(fit_dir: &Path) -> (ir::ModelDocs, Vec<ir::parameter:
 /// and method (so consumers can pattern-match on `MethodResult` once
 /// the typed payload is loaded).
 #[derive(Debug, Clone)]
-struct ResolvedStage {
-    stage: String,
+struct ResolvedMethod {
+    name: String,
     method: String,
-    stage_dir: PathBuf,
+    method_dir: PathBuf,
 }
 
 /// A method leaf the walker found but whose stored result could not be read
@@ -404,7 +404,7 @@ struct ResolvedStage {
 ///
 /// Carried out of every formatter so the exit code is decided in one place
 /// (gh#905), and serialized into `--format json` so a reader parsing the
-/// document finds the cause of an empty `stages` array inside the document
+/// document finds the cause of an empty `methods` array inside the document
 /// rather than on a stderr stream it may not have captured.
 #[derive(Debug, Clone, Serialize)]
 pub struct LoadFailure {
@@ -417,7 +417,7 @@ pub struct LoadFailure {
 /// Whether the unreadable leaves leave the summary with nothing to stand on.
 ///
 /// `fit summary` used to warn about a leaf it could not read, skip it, render
-/// a summary with no stage in it, and exit 0 — so "this fit has nothing to
+/// a summary with no method in it, and exit 0 — so "this fit has nothing to
 /// say" and "this fit could not be read" were the same status code, and a
 /// caller that checked it carried on (gh#905).
 ///
@@ -426,13 +426,13 @@ pub struct LoadFailure {
 /// leaf failing IS every leaf failing. False when at least one leaf loaded —
 /// the summary is a complete answer for those leaves, the per-leaf warning
 /// names the ones it is missing, and the caller did get an answer.
-fn nothing_loaded(discovered: &[ResolvedStage], failures: &[LoadFailure]) -> bool {
+fn nothing_loaded(discovered: &[ResolvedMethod], failures: &[LoadFailure]) -> bool {
     !discovered.is_empty() && failures.len() >= discovered.len()
 }
 
 /// Report the leaves that could not be read, and exit non-zero when they leave
 /// no summary behind. Returns normally when at least one leaf loaded.
-fn exit_if_nothing_loaded(dir: &str, discovered: &[ResolvedStage], failures: &[LoadFailure]) {
+fn exit_if_nothing_loaded(dir: &str, discovered: &[ResolvedMethod], failures: &[LoadFailure]) {
     if !nothing_loaded(discovered, failures) {
         return;
     }
@@ -457,24 +457,24 @@ fn exit_if_nothing_loaded(dir: &str, discovered: &[ResolvedStage], failures: &[L
 /// The run id a leaf's stored-fit `starts` source resolved to, from its
 /// run.json `inputs.starts_source.run_id` (gh#896); `None` for a run that did
 /// not start from a stored fit.
-fn starts_source_run(stage_dir: &Path) -> Option<String> {
-    let bytes = std::fs::read(stage_dir.join("run.json")).ok()?;
+fn starts_source_run(method_dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(method_dir.join("run.json")).ok()?;
     let rec: runid::RunRecord = serde_json::from_slice(&bytes).ok()?;
     rec.inputs.get("starts_source")?.get("run_id")?.as_str().map(String::from)
 }
 
-/// Walk the fit_dir and return one `ResolvedStage` per completed method
+/// Walk the fit_dir and return one `ResolvedMethod` per completed method
 /// leaf. Order matches `FitView.methods_declared` (label order); leaves that
 /// didn't complete are dropped; leaves that completed but aren't in
 /// `methods_declared` (shouldn't happen in v2 layouts, but the walker is
 /// permissive) are appended at the end in walker order so they're still
 /// visible.
 ///
-/// When the same stage name appears in multiple cells (synthetic
+/// When the same method name appears in multiple cells (synthetic
 /// replicates, sweep cells), prefers Real over Synthetic, lowest
-/// `fit_seed`, then lex-first stage_dir — same priority as
-/// [`crate::fit::table_row::build_row`]'s terminal-stage picker.
-fn discover_stages(fit_dir: &Path) -> Vec<ResolvedStage> {
+/// `fit_seed`, then lex-first method_dir — same priority as
+/// [`crate::fit::table_row::build_row`]'s terminal-method picker.
+fn discover_methods(fit_dir: &Path) -> Vec<ResolvedMethod> {
     // Read the fit-level view for `methods_declared`; if missing, fall back to
     // walker-order (covers user-built non-canonical fits).
     let methods_declared: Vec<String> = FitView::read(fit_dir)
@@ -482,52 +482,52 @@ fn discover_stages(fit_dir: &Path) -> Vec<ResolvedStage> {
         .unwrap_or_default();
     let nodes = fit_tree::walk_fit_dir(fit_dir).unwrap_or_default();
 
-    // Best (stage_name, method, dir) per stage name, by (data_kind,
-    // fit_seed, stage_dir) priority.
+    // Best (method_name, method, dir) per method name, by (data_kind,
+    // fit_seed, method_dir) priority.
     type Rank = (u8, u64, PathBuf);
     let mut best: BTreeMap<String, (String, Rank, PathBuf)> = BTreeMap::new();
     for node in &nodes {
-        let method = node.stage.method.as_str().to_string();
-        let stage = method.clone();
-        let rank: Rank = match &node.stage.axes {
+        let method = node.view.method.as_str().to_string();
+        let name = method.clone();
+        let rank: Rank = match &node.view.axes {
             Some(axes) => {
                 let kind_rank = match axes.data_kind {
                     DataKind::Real => 0,
                     DataKind::Synthetic { .. } => 1,
                 };
-                (kind_rank, axes.fit_seed, node.stage_dir.clone())
+                (kind_rank, axes.fit_seed, node.method_dir.clone())
             }
-            None => (2, u64::MAX, node.stage_dir.clone()),
+            None => (2, u64::MAX, node.method_dir.clone()),
         };
-        best.entry(stage)
+        best.entry(name)
             .and_modify(|(meth, cur, dir)| {
                 if rank < *cur {
                     *meth = method.clone();
                     *cur = rank.clone();
-                    *dir = node.stage_dir.clone();
+                    *dir = node.method_dir.clone();
                 }
             })
-            .or_insert_with(|| (method.clone(), rank, node.stage_dir.clone()));
+            .or_insert_with(|| (method.clone(), rank, node.method_dir.clone()));
     }
 
-    let mut out: Vec<ResolvedStage> = Vec::new();
+    let mut out: Vec<ResolvedMethod> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for name in &methods_declared {
         if let Some((method, _, dir)) = best.get(name) {
-            out.push(ResolvedStage {
-                stage: name.clone(),
+            out.push(ResolvedMethod {
+                name: name.clone(),
                 method: method.clone(),
-                stage_dir: dir.clone(),
+                method_dir: dir.clone(),
             });
             seen.insert(name.clone());
         }
     }
     for (name, (method, _, dir)) in best {
         if !seen.contains(&name) {
-            out.push(ResolvedStage {
-                stage: name,
+            out.push(ResolvedMethod {
+                name,
                 method,
-                stage_dir: dir,
+                method_dir: dir,
             });
         }
     }
@@ -537,7 +537,7 @@ fn discover_stages(fit_dir: &Path) -> Vec<ResolvedStage> {
 fn format_text(
     dir: &str,
     args: &FitSummaryArgs,
-    stages: &[ResolvedStage],
+    methods: &[ResolvedMethod],
     strict: bool,
     selection: Option<&ChainSelection>,
 ) -> Vec<LoadFailure> {
@@ -547,7 +547,7 @@ fn format_text(
     let fmt = Formatter { use_color, cal, explain: args.explain };
     let mut had_provenance_failure = false;
     // Emit the loud selection advisory (nudge + warning) once, from the first
-    // Bayesian stage that recomputes.
+    // Bayesian method that recomputes.
     let mut warned = false;
 
     print!("{}", fmt.fit_header(dir));
@@ -574,44 +574,44 @@ fn format_text(
     print!("{}", parameter_legend(&docs.parameters, args.parameters));
     print!("{}", constant_legend(&constants, &docs.constants, args.parameters));
 
-    // The camdl version is a fact about the FIT, so it opens the first stage's
-    // identity line and is not repeated on the others'. A fit with no stage at
+    // The camdl version is a fact about the FIT, so it opens the first method's
+    // identity line and is not repeated on the others'. A fit with no method at
     // all still has to report it, below.
     let mut version_lead = format!("camdl {} · ", fmt.dim(version::VERSION_SHORT));
 
-    for resolved in stages {
+    for resolved in methods {
         let lead = std::mem::take(&mut version_lead);
-        let stage_dir_str = resolved.stage_dir.to_string_lossy().into_owned();
+        let method_dir_str = resolved.method_dir.to_string_lossy().into_owned();
         // A leaf whose chain directories count from 1 is refused before
         // anything on it is read: its per-chain table would label chain_N/ as
         // chain N while its draws.tsv keys the same chain N - 1 (gh#990).
-        if let Err(e) = crate::chain_index::refuse_one_based_layout(&resolved.stage_dir) {
-            eprintln!("warning: cannot load {} ({}): {}", stage_dir_str, resolved.method, e);
-            failures.push(LoadFailure { leaf: stage_dir_str.clone(), reason: e });
+        if let Err(e) = crate::chain_index::refuse_one_based_layout(&resolved.method_dir) {
+            eprintln!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e);
+            failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
             continue;
         }
-        let mut typed = match MethodResult::load_from(&resolved.stage_dir, &resolved.method) {
+        let mut typed = match MethodResult::load_from(&resolved.method_dir, &resolved.method) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!(
                     "warning: cannot load {} ({}): {}",
-                    stage_dir_str, resolved.method, e
+                    method_dir_str, resolved.method, e
                 );
                 failures.push(LoadFailure {
-                    leaf: stage_dir_str.clone(),
+                    leaf: method_dir_str.clone(),
                     reason: e.to_string(),
                 });
                 continue;
             }
         };
 
-        // The stage's log-likelihood class, derived once from the typed result
+        // The method's log-likelihood class, derived once from the typed result
         // (the single authority). It selects the per-chain trace column the
         // outlier diagnostics may compare across chains (gh#667).
         let ll_kind = crate::fit::loglik::LoglikType::from(&typed);
 
-        // Chain selection: recompute this Bayesian stage's diagnostics over the
-        // retained chains before rendering (an IF2 / NLopt stage has no chains
+        // Chain selection: recompute this Bayesian method's diagnostics over the
+        // retained chains before rendering (an IF2 / NLopt method has no chains
         // and is left untouched). The advisory prints once.
         let mut subset_info: Option<SubsetInfo> = None;
         if let Some(sel) = selection {
@@ -619,10 +619,10 @@ fn format_text(
                 typed,
                 MethodResult::Pgas(_) | MethodResult::Pmmh(_)
             ) {
-                match apply_selection_to_typed(&mut typed, &resolved.stage_dir, sel) {
+                match apply_selection_to_typed(&mut typed, &resolved.method_dir, sel) {
                     Ok(info) => {
                         if !warned {
-                            chain_selection_advisory(&resolved.stage_dir, &info, ll_kind);
+                            chain_selection_advisory(&resolved.method_dir, &info, ll_kind);
                             warned = true;
                         }
                         subset_info = Some(info);
@@ -639,29 +639,29 @@ fn format_text(
             MethodResult::If2(if2) => {
                 // IF2 keeps the rich FitState rendering — gate, params
                 // table, per-chain loglik-eval, provenance — because it
-                // surfaces information the typed `If2StageResult`
+                // surfaces information the typed `If2Run`
                 // doesn't (e.g. perturb_only_at_t0 markers, per-chain SE, raw
                 // start_values). The typed payload is the source of
                 // truth for headline scalars; FitState is the source
                 // for the rendered tables.
-                let state = match FitState::load(&stage_dir_str) {
+                let state = match FitState::load(&method_dir_str) {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!(
                             "warning: cannot load {}/fit_state.toml: {}",
-                            stage_dir_str, e
+                            method_dir_str, e
                         );
                         failures.push(LoadFailure {
-                            leaf: stage_dir_str.clone(),
+                            leaf: method_dir_str.clone(),
                             reason: format!("fit_state.toml: {e}"),
                         });
                         continue;
                     }
                 };
-                let block = fmt.stage_block(
+                let block = fmt.method_block(
                     &lead,
-                    &resolved.stage,
-                    &stage_dir_str,
+                    &resolved.name,
+                    &method_dir_str,
                     &state,
                     Some(if2),
                 );
@@ -673,20 +673,20 @@ fn format_text(
             MethodResult::Pgas(pgas) => {
                 print!(
                     "{}",
-                    fmt.bayesian_block(&lead, &resolved.stage, "pgas", &resolved.stage_dir, BayesianView::Pgas(pgas), subset_info.as_ref(), ll_kind, forkability(dir, &resolved.stage, selection).as_ref())
+                    fmt.bayesian_block(&lead, &resolved.name, "pgas", &resolved.method_dir, BayesianView::Pgas(pgas), subset_info.as_ref(), ll_kind, forkability(dir, &resolved.name, selection).as_ref())
                 );
             }
             MethodResult::Pmmh(pmmh) => {
                 print!(
                     "{}",
-                    fmt.bayesian_block(&lead, &resolved.stage, "pmmh", &resolved.stage_dir, BayesianView::Pmmh(pmmh), subset_info.as_ref(), ll_kind, forkability(dir, &resolved.stage, selection).as_ref())
+                    fmt.bayesian_block(&lead, &resolved.name, "pmmh", &resolved.method_dir, BayesianView::Pmmh(pmmh), subset_info.as_ref(), ll_kind, forkability(dir, &resolved.name, selection).as_ref())
                 );
             }
             MethodResult::Nlopt(r) => {
-                // NLopt stages are point-estimate (like IF2) but with no
+                // NLopt methods are point-estimate (like IF2) but with no
                 // FitState-rendered IF2 gate to display. Print a compact
                 // headline + the theta_hat table from the typed payload.
-                println!("\n  {}{} · {}", lead, fmt.bold(&resolved.stage), r.algorithm);
+                println!("\n  {}{} · {}", lead, fmt.bold(&resolved.name), r.algorithm);
                 println!(
                     "    loglik:   {:.2} ({})     converged chains: {}/{}",
                     r.best_loglik,
@@ -713,8 +713,8 @@ fn format_text(
         }
     }
 
-    if stages.is_empty() {
-        // The version still has to be reported; no stage line carried it.
+    if methods.is_empty() {
+        // The version still has to be reported; no method line carried it.
         println!("  camdl {}", fmt.dim(version::VERSION_SHORT));
         println!("  (no completed methods found in {})", dir);
     }
@@ -743,10 +743,10 @@ fn format_text(
     failures
 }
 
-/// gh#322: the keyed-joint (θ, X) forkable count for one stage — how many of
+/// gh#322: the keyed-joint (θ, X) forkable count for one method — how many of
 /// its posterior draws pair with a saved smoothed trajectory (or are
 /// deterministic, for ODE), i.e. how many a counterfactual `compare`/contrast
-/// could fork. `None` for a stage with no posterior cloud.
+/// could fork. `None` for a method with no posterior cloud.
 ///
 /// The cloud is resolved under this command's own `--exclude-chains`, so the
 /// count describes the same posterior the rest of the summary reports — never
@@ -755,18 +755,18 @@ fn format_text(
 /// reads identically whether it is a subset or the whole.
 fn forkability(
     dir: &str,
-    stage: &str,
+    method: &str,
     selection: Option<&ChainSelection>,
 ) -> Option<crate::fit::joint::JointEnsemble> {
-    crate::posterior_draws::resolve_posterior_draws(dir, Some(stage))
+    crate::posterior_draws::resolve_posterior_draws(dir, Some(method))
         .map_err(String::from)
         .map(|p| p.with_selection(selection.cloned()))
         .and_then(|p| crate::fit::joint::resolve_joint(&p))
         .ok()
 }
 
-fn format_json(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(dir, stages, selection);
+fn format_json(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
+    let doc = build_summary_doc(dir, methods, selection);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     let s = serde_json::to_string_pretty(&doc).expect("FitSummaryDoc must serialize");
     println!("{}", s);
@@ -777,8 +777,8 @@ fn format_json(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Opt
     doc.failures
 }
 
-fn format_md(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(dir, stages, selection);
+fn format_md(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
+    let doc = build_summary_doc(dir, methods, selection);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     print!("{}", render_markdown(&doc));
     if strict && any_failed {
@@ -788,8 +788,8 @@ fn format_md(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Optio
     doc.failures
 }
 
-fn format_latex(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(dir, stages, selection);
+fn format_latex(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
+    let doc = build_summary_doc(dir, methods, selection);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     print!("{}", render_latex(&doc));
     if strict && any_failed {
@@ -800,8 +800,8 @@ fn format_latex(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Op
 }
 
 enum BayesianView<'a> {
-    Pgas(&'a PgasStageResult),
-    Pmmh(&'a PmmhStageResult),
+    Pgas(&'a PgasRun),
+    Pmmh(&'a PmmhRun),
 }
 
 // ── Formatting layer ────────────────────────────────────────────────
@@ -815,7 +815,7 @@ struct Formatter {
     explain: bool,
 }
 
-struct StageBlock {
+struct MethodBlock {
     text: String,
     provenance_failed: bool,
 }
@@ -1097,7 +1097,7 @@ fn parameter_legend(
 /// value, its declared kind and its `#'` prose — or nothing.
 ///
 /// A constant is part of the model, not a parameter: no fit estimated or held
-/// it, so it appears in no stage's table. It is listed here, after the
+/// it, so it appears in no method's table. It is listed here, after the
 /// parameter legend and under the same flag, because its value is an
 /// assumption the fit rests on. Every constant is listed, documented or not.
 fn constant_legend(
@@ -1180,50 +1180,50 @@ fn worst_rhat_param(diag: &PosteriorDiagnostics) -> Option<(&str, f64)> {
     best
 }
 
-/// Everything one Bayesian stage's text block reads off disk, gathered once.
+/// Everything one Bayesian method's text block reads off disk, gathered once.
 ///
 /// The verdict line and the sections under it are views of the same facts — a
 /// chain the `chains` table flags is one of the outliers the verdict counts,
 /// and the chains that left latent paths are what the identity line counts —
 /// so they are read once, here, rather than by each section separately. Two
 /// renderings of one fit that each go to disk for themselves is how they drift.
-struct StageFacts {
+struct MethodFacts {
     /// Per-chain mean log-likelihood and the trace column it was read from.
     /// `None` when no per-chain trace is readable at all.
     logliks: Option<super::chain_diagnostics::ChainLoglikMeans>,
     /// Robust modified z per chain. Empty when no cross-chain comparison was
     /// possible — fewer than two chains with traces, or no scored column.
     scores: Vec<super::chain_diagnostics::ChainZScore>,
-    /// Per-chain saved / forkable latent-path counts. `None` for a stage that
+    /// Per-chain saved / forkable latent-path counts. `None` for a method that
     /// saved none, and for one whose `trajectories` block predates the chain
     /// ids that key the rows (gh#727 follow-up: a row's position is not an
     /// answer once a chain has been refused at its start).
     saved_paths: Option<super::pgas::SavedPathReport>,
     /// Latent-path convergence over the paths on disk, or the reason there is
-    /// none. `None` when the stage saved no path at all.
+    /// none. `None` when the method saved no path at all.
     latent: Option<Result<super::latent_convergence::LatentConvergence, String>>,
     /// How many chains left a latent path behind — counted from the paths
     /// themselves, so it is right even when the summary block cannot key them.
     n_chains_with_paths: usize,
 }
 
-impl StageFacts {
-    fn gather(stage_dir: &Path, ll_kind: super::loglik::LoglikType, is_pgas: bool) -> Self {
+impl MethodFacts {
+    fn gather(method_dir: &Path, ll_kind: super::loglik::LoglikType, is_pgas: bool) -> Self {
         use super::chain_diagnostics as cd;
-        let logliks = cd::read_chain_mean_logliks(stage_dir, ll_kind);
+        let logliks = cd::read_chain_mean_logliks(method_dir, ll_kind);
         let scores = match &logliks {
             Some(m) if !m.scored_column_absent && m.scored.len() >= 2 => {
                 cd::chain_loglik_mod_zscores(&m.scored_by_chain())
             }
             _ => Vec::new(),
         };
-        // PGAS is the one Bayesian stage that writes latent paths, so for PMMH
+        // PGAS is the one Bayesian method that writes latent paths, so for PMMH
         // / MH there is nothing to read and nothing to omit.
         if !is_pgas {
             return Self { logliks, scores, saved_paths: None, latent: None, n_chains_with_paths: 0 };
         }
         let summary = std::fs::read_to_string(
-            stage_dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename()),
+            method_dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename()),
         )
         .ok()
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
@@ -1232,7 +1232,7 @@ impl StageFacts {
             .and_then(super::pgas::read_saved_path_counts)
             .filter(|r| !r.per_chain.is_empty());
         let (latent, n_chains_with_paths) =
-            match super::latent_convergence::read_stage_paths(stage_dir) {
+            match super::latent_convergence::read_method_paths(method_dir) {
                 Ok(Some((chains, columns))) => {
                     let n = chains.len();
                     let lc = super::latent_convergence::latent_convergence(&chains, &columns)
@@ -1261,7 +1261,7 @@ fn max_rhat_cell(diag: &PosteriorDiagnostics) -> String {
 
 impl Formatter {
     /// The fit's own line: which directory. What produced it, and how, is on
-    /// the first stage's identity line — the version is a fit-level fact, so it
+    /// the first method's identity line — the version is a fit-level fact, so it
     /// opens that line rather than taking one of its own.
     fn fit_header(&self, dir: &str) -> String {
         format!("\n{}/\n", self.bold(dir))
@@ -1321,14 +1321,14 @@ impl Formatter {
         s
     }
 
-    /// One stage's identity line: what ran, with what, over how much.
+    /// One method's identity line: what ran, with what, over how much.
     ///
-    /// `lead` carries the fit-level facts that belong on the first stage's line
-    /// and nowhere else (the camdl version), so a multi-stage fit states them
-    /// once. `extra` is whatever the stage alone can say — for PGAS, how many
+    /// `lead` carries the fit-level facts that belong on the first method's line
+    /// and nowhere else (the camdl version), so a fit with several method leaves states them
+    /// once. `extra` is whatever the method alone can say — for PGAS, how many
     /// chains left a latent path behind.
-    fn identity_line(&self, lead: &str, stage: &str, method: &str, extra: &[String]) -> String {
-        let mut parts = vec![self.bold(stage), method.to_string()];
+    fn identity_line(&self, lead: &str, name: &str, method: &str, extra: &[String]) -> String {
+        let mut parts = vec![self.bold(name), method.to_string()];
         parts.extend(extra.iter().cloned());
         format!("  {}{}\n", lead, parts.join(" · "))
     }
@@ -1384,19 +1384,19 @@ impl Formatter {
         format!("  seeded from:  {}\n", what)
     }
 
-    fn stage_block(
+    fn method_block(
         &self,
         lead: &str,
-        stage: &str,
-        stage_dir: &str,
+        method: &str,
+        method_dir: &str,
         state: &FitState,
-        typed: Option<&If2StageResult>,
-    ) -> StageBlock {
+        typed: Option<&If2Run>,
+    ) -> MethodBlock {
         let mut s = String::new();
 
-        let refused = RefusedChains::load(Path::new(stage_dir));
+        let refused = RefusedChains::load(Path::new(method_dir));
         s.push_str(&self.identity_line(
-            lead, stage, "if2",
+            lead, method, "if2",
             &[refused
                 .ran_of(state.n_chains, state.n_good_chains)
                 .unwrap_or_else(|| format!("{} chains", state.n_chains))],
@@ -1405,7 +1405,7 @@ impl Formatter {
         s.push_str(&self.seeded_from_line(
             state.chain_init_source.as_deref(),
             state.chain_starts_kind,
-            starts_source_run(Path::new(stage_dir)).as_deref(),
+            starts_source_run(Path::new(method_dir)).as_deref(),
         ));
         s.push('\n');
 
@@ -1435,7 +1435,7 @@ impl Formatter {
         s.push_str(&self.gate_verdict_block(state));
 
         // Per-parameter table
-        s.push_str(&self.parameter_table(state, Some(std::path::Path::new(stage_dir))));
+        s.push_str(&self.parameter_table(state, Some(std::path::Path::new(method_dir))));
 
         // Per-chain loglik-eval table
         if !state.chain_eval_logliks.is_empty() {
@@ -1462,7 +1462,7 @@ impl Formatter {
         }
 
         // Richardson dt-convergence verdict (gh#52). Rendered when
-        // populated (every IF2 stage post-§Proposal-1 where dt_check
+        // populated (every IF2 method post-§Proposal-1 where dt_check
         // is enabled); legacy fit_state.toml or `enabled = false`
         // skips the block.
         if let Some(dt_check) = &state.dt_check {
@@ -1470,12 +1470,12 @@ impl Formatter {
         }
 
         // Provenance cross-check (#16 fixture, every read)
-        let prov = self.provenance_block(stage_dir, state);
+        let prov = self.provenance_block(method_dir, state);
         let provenance_failed = prov.failed;
         s.push_str(&prov.text);
 
         s.push('\n');
-        StageBlock { text: s, provenance_failed }
+        MethodBlock { text: s, provenance_failed }
     }
 
     /// Render the gh#52 Richardson dt-convergence verdict line +
@@ -1615,7 +1615,7 @@ impl Formatter {
         s
     }
 
-    fn parameter_table(&self, state: &FitState, stage_dir: Option<&std::path::Path>) -> String {
+    fn parameter_table(&self, state: &FitState, method_dir: Option<&std::path::Path>) -> String {
         let mut s = String::new();
         // The Â column is glyphed against the SAME gate the block above
         // reports, so one number cannot print ✗ there and ✓ here.
@@ -1640,7 +1640,7 @@ impl Formatter {
         // The estimated parameters (Â's keys, else the fit's record of
         // them); fixed params are noise here. Everything only when the leaf
         // records neither.
-        let estimated = crate::fit::method_result::estimated_names(stage_dir, state);
+        let estimated = crate::fit::method_result::estimated_names(method_dir, state);
         let est_keys: Vec<&String> = keys.iter()
             .filter(|k| estimated.as_ref().is_none_or(|set| set.contains(k.as_str())))
             .copied().collect();
@@ -1694,10 +1694,10 @@ impl Formatter {
             .map(|(i, _)| i);
         // ESS columns added in Phase 2. Today fit_state.toml only
         // carries the per-chain ll + se; per-chain ESS lives in
-        // <stage>_summary.json's `chains[]`. Phase 1 of summary keeps
+        // <method>_summary.json's `chains[]`. Phase 1 of summary keeps
         // the table simple and reads only what's already in
         // fit_state.toml; ESS surfacing in this table waits for a
-        // Phase 4 follow-up that loads <stage>_summary.json. Note
+        // Phase 4 follow-up that loads <method>_summary.json. Note
         // here so a future reader doesn't think it was forgotten.
         // The ids are read, never reconstructed from the position.
         // `ChainResults::chain_eval_logliks` sorts by chain id and then drops
@@ -1734,7 +1734,7 @@ impl Formatter {
         s
     }
 
-    /// Bayesian (PGAS / PMMH / MH) stage block.
+    /// Bayesian (PGAS / PMMH / MH) method block.
     ///
     /// Reading order is the whole design: what ran, then the verdict, then the
     /// estimates, then the diagnostics that qualify them. Convergence detail
@@ -1743,7 +1743,7 @@ impl Formatter {
     /// saw. Nothing is hidden to achieve the inversion — every section still
     /// carries its full table.
     ///
-    /// `ll_kind` is the stage's log-likelihood class, derived once by the
+    /// `ll_kind` is the method's log-likelihood class, derived once by the
     /// caller from the typed `MethodResult` (the single authority — see
     /// `loglik::LoglikType`). It decides which per-chain trace column the
     /// outlier table may compare (gh#667); it is not re-derived here, so the
@@ -1752,9 +1752,9 @@ impl Formatter {
     fn bayesian_block(
         &self,
         lead: &str,
-        stage: &str,
+        name: &str,
         method: &str,
-        stage_dir: &Path,
+        method_dir: &Path,
         view: BayesianView<'_>,
         subset: Option<&SubsetInfo>,
         ll_kind: super::loglik::LoglikType,
@@ -1773,7 +1773,7 @@ impl Formatter {
             ),
         };
         let is_pgas = matches!(view, BayesianView::Pgas(_));
-        let facts = StageFacts::gather(stage_dir, ll_kind, is_pgas);
+        let facts = MethodFacts::gather(method_dir, ll_kind, is_pgas);
 
         let mut s = String::new();
 
@@ -1783,11 +1783,11 @@ impl Formatter {
         // Read for the refused-chain count in the identity line only: a
         // display detail, not a verdict. The method result above already
         // read this leaf, so an unreadable file has been reported there.
-        let state = FitState::load(&stage_dir.to_string_lossy()).ok();
+        let state = FitState::load(&method_dir.to_string_lossy()).ok();
         // gh#663: a chain refused at its start is named here, from its durable
         // record, rather than folded into a chain count that reads as a normal
         // run.
-        let refused = RefusedChains::load(stage_dir);
+        let refused = RefusedChains::load(method_dir);
         let ran_of = state.as_ref().and_then(|st| refused.ran_of(st.n_chains, st.n_good_chains));
         let mut extra = vec![match (subset, &ran_of) {
             (Some(info), _) => format!(
@@ -1810,20 +1810,20 @@ impl Formatter {
                 "loglik {:.1} at the highest log-posterior draw (natural-scale prior, no Jacobian)",
                 ll));
         }
-        s.push_str(&self.identity_line(lead, stage, method, &extra));
+        s.push_str(&self.identity_line(lead, name, method, &extra));
         s.push_str(&self.refused_chains_lines(&refused));
         s.push_str(&self.seeded_from_line(
             state.as_ref().and_then(|st| st.chain_init_source.as_deref()),
             state.as_ref().and_then(|st| st.chain_starts_kind),
-            starts_source_run(Path::new(stage_dir)).as_deref(),
+            starts_source_run(Path::new(method_dir)).as_deref(),
         ));
 
         s.push_str(&self.verdict_block(diag, &facts, subset, forkable));
         s.push_str(&self.posterior_section(diag, posterior_mean));
         s.push_str(&self.convergence_section(diag, acceptance_summary));
-        s.push_str(&self.chains_section(stage_dir, diag.n_chains, &facts, subset));
+        s.push_str(&self.chains_section(method_dir, diag.n_chains, &facts, subset));
         if is_pgas {
-            s.push_str(&self.latent_paths_section(stage_dir, &facts));
+            s.push_str(&self.latent_paths_section(method_dir, &facts));
         }
         s
     }
@@ -1837,14 +1837,14 @@ impl Formatter {
     fn verdict_block(
         &self,
         diag: &PosteriorDiagnostics,
-        facts: &StageFacts,
+        facts: &MethodFacts,
         subset: Option<&SubsetInfo>,
         forkable: Option<&crate::fit::joint::JointEnsemble>,
     ) -> String {
         let mut s = String::from("\n");
         match diag.max_rhat_status() {
             MaxRhat::Reported(v) => {
-                // The same band the stage's own end-of-run block glyphs
+                // The same band the method's own end-of-run block glyphs
                 // against, so one R̂ cannot read ✓ when the fit finishes and ✗
                 // here. The verdict is also spelled out: on a surface a
                 // public-health decision is read off, a glyph should not have
@@ -1943,7 +1943,7 @@ impl Formatter {
     fn verdict_facts(
         &self,
         lead: Option<String>,
-        facts: &StageFacts,
+        facts: &MethodFacts,
         subset: Option<&SubsetInfo>,
         forkable: Option<&crate::fit::joint::JointEnsemble>,
     ) -> String {
@@ -2185,9 +2185,9 @@ impl Formatter {
     /// than skipping.
     fn chains_section(
         &self,
-        stage_dir: &Path,
+        method_dir: &Path,
         n_chains_expected: usize,
-        facts: &StageFacts,
+        facts: &MethodFacts,
         subset: Option<&SubsetInfo>,
     ) -> String {
         use super::chain_diagnostics as cd;
@@ -2239,7 +2239,7 @@ impl Formatter {
         // `draws.tsv`, so a -inf or point-mass chain must not go unreported
         // just because the comparison column is missing (gh#608, gh#635).
         if means.scored_column_absent {
-            // No silent gap: a stage whose traces predate the column would
+            // No silent gap: a method whose traces predate the column would
             // otherwise render as rows of dashes that read like broken chains.
             s.push_str(&format!("  {}\n", self.dim(&format!(
                 "(traces carry no `{}` column — cannot compare chains on it)",
@@ -2318,13 +2318,13 @@ impl Formatter {
         // (gh#607); the robust mod-z above cannot flag it (a -inf mean is
         // excluded from the centre/scale), so it gets its own loud line,
         // right where the reader is told the pooled numbers include it.
-        if let Some(neginf) = cd::read_chain_neginf(stage_dir) {
+        if let Some(neginf) = cd::read_chain_neginf(method_dir) {
             for d in neginf.iter().filter(|d| d.n_neginf > 0 && d.n_retained > 0) {
                 s.push_str(&self.note(Tone::Err, &format!(
                     "⚠ chain {}: log-posterior -inf on {:.1}% of retained draws \
                      ({}/{}) — a DEGENERATE chain; its draws are in draws.tsv \
                      and every pooled number in this block. View without it: \
-                     --exclude-chains <stage>:{} (exclusion stays explicit — \
+                     --exclude-chains <method>:{} (exclusion stays explicit — \
                      gh#419).",
                     d.chain,
                     100.0 * d.n_neginf as f64 / d.n_retained as f64,
@@ -2337,13 +2337,13 @@ impl Formatter {
         // vector across all retained draws (zero accepted θ-moves) — evades
         // both the mod-z score and the −inf screen when its start has finite
         // density. Same loud treatment.
-        if let Some(uniq) = cd::read_chain_unique_draws(stage_dir) {
+        if let Some(uniq) = cd::read_chain_unique_draws(method_dir) {
             for u in uniq.iter().filter(|u| u.n_unique == 1 && u.n_draws > 1) {
                 s.push_str(&self.note(Tone::Err, &format!(
                     "⚠ chain {}: ONE distinct parameter vector across {} retained \
                      draws (zero accepted moves) — a point-mass chain; its draws \
                      are in draws.tsv and every pooled number in this block. View \
-                     without it: --exclude-chains <stage>:{} (exclusion stays \
+                     without it: --exclude-chains <method>:{} (exclusion stays \
                      explicit — gh#419).",
                     u.chain, u.n_draws, u.chain,
                 )));
@@ -2364,11 +2364,11 @@ impl Formatter {
         s
     }
 
-    /// The `paths` / `forkable` columns on their own, for a stage whose chains
+    /// The `paths` / `forkable` columns on their own, for a method whose chains
     /// could not be ranked.
     ///
     /// The two halves of the `chains` table come from different artifacts —
-    /// the per-chain traces and the stage summary's `trajectories` block — and
+    /// the per-chain traces and the method summary's `trajectories` block — and
     /// either can be missing without the other. When the ranking half is,
     /// these counts are still a fact about each chain, and dropping them
     /// because their neighbours are absent would hide data the section holds.
@@ -2392,17 +2392,17 @@ impl Formatter {
     /// shortfall is a real event (a record skipped as incoherent, a chain
     /// resumed partway in) and is named rather than left for the reader to
     /// subtract.
-    fn saved_path_notes(&self, facts: &StageFacts, show_paths: bool) -> String {
+    fn saved_path_notes(&self, facts: &MethodFacts, show_paths: bool) -> String {
         let mut s = String::new();
         if !show_paths {
-            // A stage that saved paths but cannot say which chain each row
+            // A method that saved paths but cannot say which chain each row
             // belongs to. The columns are omitted rather than filled against a
             // positional guess, and the omission is stated (gh#727 follow-up).
             if facts.n_chains_with_paths > 0 {
                 s.push_str(&self.note(Tone::Dim,
                     "(no per-chain path counts: this leaf's `trajectories` block \
                      predates the chain ids that key them, and a row's position is \
-                     not an answer — re-run the stage to recover the columns)"));
+                     not an answer — re-run the method to recover the columns)"));
             }
             return s;
         }
@@ -2431,10 +2431,10 @@ impl Formatter {
     /// Both are about X rather than θ, which is why they share a section: the
     /// first says how well each observation was resolved, the second whether
     /// the resolved paths agree across chains.
-    fn latent_paths_section(&self, stage_dir: &Path, facts: &StageFacts) -> String {
+    fn latent_paths_section(&self, method_dir: &Path, facts: &MethodFacts) -> String {
         use super::latent_convergence::LATENT_CONVERGENCE_TSV;
         let mut s = self.section(SECTION_LATENT);
-        s.push_str(&self.filter_ess_lines(stage_dir));
+        s.push_str(&self.filter_ess_lines(method_dir));
         match &facts.latent {
             None => {
                 s.push_str(&format!("  {}\n", self.dim("(this leaf saved no latent path)")));
@@ -2454,10 +2454,10 @@ impl Formatter {
                 ));
                 s.push_str(&lc.bins_table());
                 s.push_str(&lc.findings());
-                // The per-cell table is the one the stage writes; when the
-                // stage did not (it predates the block), it is written now,
+                // The per-cell table is the one the method writes; when the
+                // method did not (it predates the block), it is written now,
                 // once — the same bytes a re-run would leave — and we say so.
-                let table = stage_dir.join(LATENT_CONVERGENCE_TSV);
+                let table = method_dir.join(LATENT_CONVERGENCE_TSV);
                 if !table.is_file() {
                     match lc.write_tsv(&table) {
                         Ok(()) => s.push_str(&format!("  {}\n", self.dim(&format!(
@@ -2474,12 +2474,12 @@ impl Formatter {
 
     /// The conditional filter's ESS at every observation (gh#685), read from
     /// the `filter_ess` block of `pgas_summary.json` through that module's
-    /// own reader, so producer and consumer cannot drift. Quiet for a stage
+    /// own reader, so producer and consumer cannot drift. Quiet for a method
     /// that wrote no block — one that predates it, or in which no sweep
     /// scored an observation.
-    fn filter_ess_lines(&self, stage_dir: &Path) -> String {
+    fn filter_ess_lines(&self, method_dir: &Path) -> String {
         use super::filter_ess::FilterEss;
-        let path = stage_dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename());
+        let path = method_dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename());
         let json = std::fs::read_to_string(&path)
             .ok()
             .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
@@ -2488,7 +2488,7 @@ impl Formatter {
         };
         let mut s = String::new();
         // Indented into the section with the rows below it; `FilterEss::report`
-        // is written for the stage-end print, which has no section to sit in.
+        // is written for the end-of-run print, which has no section to sit in.
         for line in fe.report().trim_start_matches('\n').lines() {
             s.push_str("  ");
             s.push_str(line);
@@ -2518,13 +2518,13 @@ impl Formatter {
         }
     }
 
-    fn provenance_block(&self, stage_dir: &str, state: &FitState)
+    fn provenance_block(&self, method_dir: &str, state: &FitState)
         -> ProvenanceBlock
     {
         let mut s = String::new();
         s.push_str(&format!("  {}\n", self.bold("provenance")));
-        let final_path = format!("{}/final_params.toml", stage_dir);
-        let mle_path = format!("{}/mle_params.toml", stage_dir);
+        let final_path = format!("{}/final_params.toml", method_dir);
+        let mle_path = format!("{}/mle_params.toml", method_dir);
         let mut failed = false;
 
         let final_params = read_param_values(&final_path);
@@ -2680,7 +2680,7 @@ pub struct FitSummaryDoc {
     /// fit could not be read", without parsing stderr.
     pub failures: Vec<LoadFailure>,
     /// Read-side chain selection (`--exclude-chains`), when active: the
-    /// `{excluded, kept, n_total}` provenance for the subset the stages'
+    /// `{excluded, kept, n_total}` provenance for the subset the methods'
     /// diagnostics were recomputed over. Absent (omitted) for a full-cloud
     /// summary, so existing machine consumers are unaffected.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2693,9 +2693,9 @@ pub struct SchemaInfo {
     pub camdl_version: String,
 }
 
-/// Per-stage report. Method-aware: IF2 stages populate the
+/// Per-method report. Method-aware: IF2 methods populate the
 /// `gate` / `parameters` / `chains` / `provenance` / `heuristic` blocks;
-/// PGAS / PMMH stages set them all to `None` and lean on the typed
+/// PGAS / PMMH methods set them all to `None` and lean on the typed
 /// `method_result` payload, which carries posterior summaries / R̂ /
 /// ESS for Bayesian methods.
 #[derive(Debug, Clone, Serialize)]
@@ -2714,10 +2714,10 @@ pub struct MethodReport {
     pub loglik_type: Option<crate::fit::loglik::LoglikType>,
     pub initial_loglik: Option<f64>,
     pub camdl_version: Option<String>,
-    /// Compound IF2 gate. `None` for Bayesian stages (the gate
+    /// Compound IF2 gate. `None` for Bayesian methods (the gate
     /// doesn't apply).
     pub gate: Option<GateReport>,
-    /// IF2 estimated parameters with Â. Empty for Bayesian stages
+    /// IF2 estimated parameters with Â. Empty for Bayesian methods
     /// (consult `method_result` for posterior_mean / ess).
     pub parameters: Vec<ParameterReport>,
     /// IF2 per-chain loglik-eval table. Empty for Bayesian.
@@ -2726,11 +2726,11 @@ pub struct MethodReport {
     /// `None` for Bayesian.
     pub provenance: Option<ProvenanceReport>,
     /// Typed `MethodResult` payload — pattern-match for headline
-    /// scalars. Always populated for stages that loaded successfully.
+    /// scalars. Always populated for methods that loaded successfully.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method_result: Option<MethodResult>,
     /// Advisory IF2 interpretation block. `None` for Bayesian
-    /// stages.
+    /// methods.
     #[serde(rename = "_heuristic")]
     pub heuristic: Option<HeuristicReport>,
     /// Calendar dates for `instant`-kind estimands (param name → ISO
@@ -2808,9 +2808,9 @@ impl ProvenanceReport {
 }
 
 impl MethodReport {
-    /// Helper for `--strict`: returns whether this stage's provenance
+    /// Helper for `--strict`: returns whether this method's provenance
     /// cross-check (when applicable) reported any failure. Bayesian
-    /// stages always return false (no provenance check applies).
+    /// methods always return false (no provenance check applies).
     fn provenance_failed(&self) -> bool {
         self.provenance
             .as_ref()
@@ -2825,12 +2825,12 @@ pub struct HeuristicReport {
     pub interpretation: Option<String>,
 }
 
-/// Walk the stage dirs and build a `FitSummaryDoc`. Used by JSON, MD,
+/// Walk the method dirs and build a `FitSummaryDoc`. Used by JSON, MD,
 /// and LaTeX formatters. Pure on its inputs (file system + the args
 /// it was called with).
 fn build_summary_doc(
     dir: &str,
-    stages: &[ResolvedStage],
+    methods: &[ResolvedMethod],
     selection: Option<&ChainSelection>,
 ) -> FitSummaryDoc {
     let cal = load_calendar_context(Path::new(dir));
@@ -2839,32 +2839,32 @@ fn build_summary_doc(
     let mut chain_selection_json: Option<serde_json::Value> = None;
     let mut failures: Vec<LoadFailure> = Vec::new();
     let mut advised = false;
-    for resolved in stages {
-        let stage_dir_str = resolved.stage_dir.to_string_lossy().into_owned();
+    for resolved in methods {
+        let method_dir_str = resolved.method_dir.to_string_lossy().into_owned();
         // The same refusal the text loop makes, before anything is read: the
         // per-chain rows and the `--exclude-chains` advisory would otherwise
         // label chain_N/ as chain N while draws.tsv keys it N - 1 (gh#990).
-        if let Err(e) = crate::chain_index::refuse_one_based_layout(&resolved.stage_dir) {
-            eprintln!("warning: cannot load {} ({}): {}", stage_dir_str, resolved.method, e);
-            failures.push(LoadFailure { leaf: stage_dir_str.clone(), reason: e });
+        if let Err(e) = crate::chain_index::refuse_one_based_layout(&resolved.method_dir) {
+            eprintln!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e);
+            failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
             continue;
         }
-        let typed_loaded = MethodResult::load_from(&resolved.stage_dir, &resolved.method);
+        let typed_loaded = MethodResult::load_from(&resolved.method_dir, &resolved.method);
         // Same warning the text formatter prints. `.ok()` alone left a machine
-        // reader with an empty `stages` array and nothing at all saying why
+        // reader with an empty `methods` array and nothing at all saying why
         // (gh#905).
         if let Err(e) = &typed_loaded {
             eprintln!(
                 "warning: cannot load {} ({}): {}",
-                stage_dir_str, resolved.method, e
+                method_dir_str, resolved.method, e
             );
             failures.push(LoadFailure {
-                leaf: stage_dir_str.clone(),
+                leaf: method_dir_str.clone(),
                 reason: e.to_string(),
             });
         }
         let mut typed = typed_loaded.ok();
-        // Chain selection: recompute this Bayesian stage's diagnostics over the
+        // Chain selection: recompute this Bayesian method's diagnostics over the
         // retained chains before the report is built from the (now mutated)
         // typed payload — so JSON / MD / LaTeX all carry the subset diagnostics.
         if let Some(sel) = selection {
@@ -2876,10 +2876,10 @@ fn build_summary_doc(
                     // Same authority as the text path: the class comes from the
                     // typed result, never from a column position (gh#667).
                     let ll_kind = crate::fit::loglik::LoglikType::from(&*t);
-                    match apply_selection_to_typed(t, &resolved.stage_dir, sel) {
+                    match apply_selection_to_typed(t, &resolved.method_dir, sel) {
                         Ok(info) => {
                             if !advised {
-                                chain_selection_advisory(&resolved.stage_dir, &info, ll_kind);
+                                chain_selection_advisory(&resolved.method_dir, &info, ll_kind);
                                 advised = true;
                             }
                             chain_selection_json = Some(info.to_json());
@@ -2894,23 +2894,23 @@ fn build_summary_doc(
         }
         let report = match (&typed, resolved.method.as_str()) {
             (Some(MethodResult::If2(_)), _) => {
-                let state = match FitState::load(&stage_dir_str) {
+                let state = match FitState::load(&method_dir_str) {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!(
                             "warning: cannot load {}/fit_state.toml: {}",
-                            stage_dir_str, e
+                            method_dir_str, e
                         );
                         failures.push(LoadFailure {
-                            leaf: stage_dir_str.clone(),
+                            leaf: method_dir_str.clone(),
                             reason: format!("fit_state.toml: {e}"),
                         });
                         continue;
                     }
                 };
-                if2_stage_report(
-                    &resolved.stage,
-                    &stage_dir_str,
+                if2_method_report(
+                    &resolved.name,
+                    &method_dir_str,
                     &state,
                     typed.clone(),
                     &cal,
@@ -2918,8 +2918,8 @@ fn build_summary_doc(
             }
             (Some(MethodResult::Pgas(_)), _)
             | (Some(MethodResult::Pmmh(_)), _) => {
-                bayesian_stage_report(
-                    &resolved.stage,
+                bayesian_method_report(
+                    &resolved.name,
                     &resolved.method,
                     typed.clone(),
                     &cal,
@@ -3001,10 +3001,10 @@ fn build_summary_table_row(fit_dir: &Path, now_unix: i64) -> TableRow {
     }
 }
 
-/// Bayesian stage report: only `method_result` carries content.
+/// Bayesian method report: only `method_result` carries content.
 /// IF2-specific subfields default to None / empty.
-fn bayesian_stage_report(
-    stage: &str,
+fn bayesian_method_report(
+    name: &str,
     method: &str,
     method_result: Option<MethodResult>,
     cal: &CalendarContext,
@@ -3028,7 +3028,7 @@ fn bayesian_stage_report(
     };
     let loglik_type = method_result.as_ref().map(crate::fit::loglik::LoglikType::from);
     MethodReport {
-        name: stage.to_string(),
+        name: name.to_string(),
         method: method.to_string(),
         n_chains,
         best_loglik,
@@ -3045,9 +3045,9 @@ fn bayesian_stage_report(
     }
 }
 
-fn if2_stage_report(
-    stage: &str,
-    stage_dir: &str,
+fn if2_method_report(
+    method: &str,
+    method_dir: &str,
     state: &FitState,
     method_result: Option<MethodResult>,
     cal: &CalendarContext,
@@ -3090,7 +3090,7 @@ fn if2_stage_report(
     let mut keys: Vec<&String> = state.start_values.keys().collect();
     keys.sort();
     let estimated = crate::fit::method_result::estimated_names(
-        Some(std::path::Path::new(stage_dir)), state);
+        Some(std::path::Path::new(method_dir)), state);
     let est_keys: Vec<&String> = keys.iter()
         .filter(|k| estimated.as_ref().is_none_or(|set| set.contains(k.as_str())))
         .copied().collect();
@@ -3130,8 +3130,8 @@ fn if2_stage_report(
     };
 
     // Provenance
-    let final_path = format!("{}/final_params.toml", stage_dir);
-    let mle_path = format!("{}/mle_params.toml", stage_dir);
+    let final_path = format!("{}/final_params.toml", method_dir);
+    let mle_path = format!("{}/mle_params.toml", method_dir);
     let final_params = read_param_values(&final_path);
     let mle_params = read_param_values(&mle_path);
     let final_matches_mle = match (&final_params, &mle_params) {
@@ -3180,11 +3180,11 @@ fn if2_stage_report(
     };
 
     MethodReport {
-        name: stage.to_string(),
+        name: method.to_string(),
         method: "if2".into(),
         n_chains: state.n_chains,
         best_loglik: Some(state.best_loglik),
-        // Derive from the typed result; fall back to the stage's recorded
+        // Derive from the typed result; fall back to the method's recorded
         // kind so a legacy run with no loadable `method_result` still
         // labels its IF2 marginal rather than reading `unknown`.
         loglik_type: method_result
@@ -3206,7 +3206,7 @@ fn if2_stage_report(
 }
 
 /// Render a `FitSummaryDoc` as GitHub-flavoured Markdown. Tabular per
-/// stage, code-fenced parameter tables. Suitable for embedding in book
+/// method, code-fenced parameter tables. Suitable for embedding in book
 /// chapters via `run_cli("camdl fit summary {dir} --format md", ...)`.
 pub fn render_markdown(doc: &FitSummaryDoc) -> String {
     let mut s = String::new();
@@ -3226,24 +3226,24 @@ pub fn render_markdown(doc: &FitSummaryDoc) -> String {
         s.push_str("_(no completed methods found)_\n");
         return s;
     }
-    for stage in &doc.methods {
-        s.push_str(&render_md_stage(stage));
+    for method in &doc.methods {
+        s.push_str(&render_md_method(method));
     }
     s
 }
 
-fn render_md_stage(stage: &MethodReport) -> String {
+fn render_md_method(method: &MethodReport) -> String {
     let mut s = String::new();
-    s.push_str(&format!("## `{}` ({})\n\n", stage.name, stage.method));
-    if let Some(ll) = stage.best_loglik {
+    s.push_str(&format!("## `{}` ({})\n\n", method.name, method.method));
+    if let Some(ll) = method.best_loglik {
         s.push_str(&format!("- best loglik: **{:.2}** ({})\n",
-            ll, crate::fit::loglik::LoglikType::tag_or_unknown(stage.loglik_type)));
+            ll, crate::fit::loglik::LoglikType::tag_or_unknown(method.loglik_type)));
     }
-    s.push_str(&format!("- chains: {}\n", stage.n_chains));
-    if let Some(init) = stage.initial_loglik {
+    s.push_str(&format!("- chains: {}\n", method.n_chains));
+    if let Some(init) = method.initial_loglik {
         s.push_str(&format!("- initial loglik: {:.2}\n", init));
     }
-    if let Some(prov) = &stage.provenance {
+    if let Some(prov) = &method.provenance {
         if let Some(stale) = &prov.stale_camdl_version {
             s.push_str(&format!("- ⚠ stale: produced by camdl `{}`, current is `{}`\n",
                 stale, version::VERSION_SHORT));
@@ -3252,7 +3252,7 @@ fn render_md_stage(stage: &MethodReport) -> String {
     s.push('\n');
 
     // IF2 gate verdict (only when populated).
-    if let Some(gate) = &stage.gate {
+    if let Some(gate) = &method.gate {
         s.push_str("### Compound scout-convergence gate\n\n");
         s.push_str("| leg | value | threshold | pass? |\n|---|---|---|---|\n");
         let glyph = |b| if b { "✓" } else { "✗" };
@@ -3278,7 +3278,7 @@ fn render_md_stage(stage: &MethodReport) -> String {
     }
 
     // Method-specific posterior block.
-    if let Some(MethodResult::Pgas(p)) = &stage.method_result {
+    if let Some(MethodResult::Pgas(p)) = &method.method_result {
         s.push_str(&format!("### Posterior summary (PGAS, max R̂ = {})\n\n",
             max_rhat_cell(&p.diagnostics)));
         s.push_str("| param | mean | q025 | q975 | ESS bulk | ESS tail | R̂ |\n|---|---|---|---|---|---|---|\n");
@@ -3286,7 +3286,7 @@ fn render_md_stage(stage: &MethodReport) -> String {
             let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
             let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
             let ess = p.diagnostics.ess_cell(name, "—");
-            let mean_cell = match stage.param_dates.get(name) {
+            let mean_cell = match method.param_dates.get(name) {
                 Some(date) => format!("{:.6} ({})", mean, date),
                 None => format!("{:.6}", mean),
             };
@@ -3294,7 +3294,7 @@ fn render_md_stage(stage: &MethodReport) -> String {
                 p.diagnostics.ess_tail_cell(name, "—"), p.diagnostics.rhat_cell(name, "—")));
         }
         s.push('\n');
-    } else if let Some(MethodResult::Pmmh(p)) = &stage.method_result {
+    } else if let Some(MethodResult::Pmmh(p)) = &method.method_result {
         s.push_str(&format!(
             "### Posterior summary (PMMH, max R̂ = {}, acceptance = {:.3})\n\n",
             max_rhat_cell(&p.diagnostics), p.acceptance_rate
@@ -3302,7 +3302,7 @@ fn render_md_stage(stage: &MethodReport) -> String {
         s.push_str("| param | mean | ESS bulk | ESS tail | R̂ |\n|---|---|---|---|---|\n");
         for (name, mean) in &p.posterior_mean {
             let ess = p.diagnostics.ess_cell(name, "—");
-            let mean_cell = match stage.param_dates.get(name) {
+            let mean_cell = match method.param_dates.get(name) {
                 Some(date) => format!("{:.6} ({})", mean, date),
                 None => format!("{:.6}", mean),
             };
@@ -3313,10 +3313,10 @@ fn render_md_stage(stage: &MethodReport) -> String {
     }
 
     // IF2 parameter table.
-    if !stage.parameters.is_empty() {
+    if !method.parameters.is_empty() {
         s.push_str("### Parameter estimates (loglik-eval, selected chain θ̂)\n\n");
         s.push_str("| name | estimate | Â | flags |\n|---|---|---|---|\n");
-        for p in &stage.parameters {
+        for p in &method.parameters {
             let a_str = p.chain_agreement
                 .map(|r| format!("{:.3}", r))
                 .unwrap_or_else(|| "—".into());
@@ -3332,14 +3332,14 @@ fn render_md_stage(stage: &MethodReport) -> String {
     }
 
     // IF2 per-chain loglik-eval.
-    if !stage.chains.is_empty() {
-        s.push_str(&format!("### Per-chain loglik-eval ({} chains)\n\n", stage.chains.len()));
+    if !method.chains.is_empty() {
+        s.push_str(&format!("### Per-chain loglik-eval ({} chains)\n\n", method.chains.len()));
         // Column / marker naming matches the text emitter and CLAUDE.md:
         // "loglik" / "selected", not "clean_ll" / "winner". The
         // ChainSummary.is_winner field name on the data side stays
         // (it's the data model); only the display label changed.
         s.push_str("| chain | loglik | ± se | selected |\n|---|---|---|---|\n");
-        for c in &stage.chains {
+        for c in &method.chains {
             let mark = if c.is_winner { "★" } else { "" };
             s.push_str(&format!("| {} | {:.2} | {:.2} | {} |\n",
                 c.chain_id, c.clean_loglik, c.clean_se, mark));
@@ -3348,7 +3348,7 @@ fn render_md_stage(stage: &MethodReport) -> String {
     }
 
     // IF2 provenance.
-    if let Some(prov) = &stage.provenance {
+    if let Some(prov) = &method.provenance {
         s.push_str("### Provenance\n\n");
         let prov_row = |label: &str, val: Option<bool>| {
             match val {
@@ -3366,8 +3366,8 @@ fn render_md_stage(stage: &MethodReport) -> String {
     s
 }
 
-/// Render a `FitSummaryDoc` as LaTeX `tabular` blocks per stage.
-/// One section per stage with three tables: gate verdict, parameters,
+/// Render a `FitSummaryDoc` as LaTeX `tabular` blocks per method.
+/// One section per method with three tables: gate verdict, parameters,
 /// per-chain loglik-eval. No preamble — the caller should embed inside
 /// an existing document.
 pub fn render_latex(doc: &FitSummaryDoc) -> String {
@@ -3384,8 +3384,8 @@ pub fn render_latex(doc: &FitSummaryDoc) -> String {
             render_id_csv(&cs["excluded"]),
         ));
     }
-    for stage in &doc.methods {
-        s.push_str(&render_latex_stage(stage));
+    for method in &doc.methods {
+        s.push_str(&render_latex_method(method));
     }
     s
 }
@@ -3404,26 +3404,26 @@ fn render_id_csv(v: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
-fn render_latex_stage(stage: &MethodReport) -> String {
+fn render_latex_method(method: &MethodReport) -> String {
     let mut s = String::new();
     s.push_str(&format!(
         "\\subsection*{{Method: \\texttt{{{}}} ({})}}\n\n",
-        escape_latex(&stage.name),
-        stage.method
+        escape_latex(&method.name),
+        method.method
     ));
 
-    if let Some(ll) = stage.best_loglik {
+    if let Some(ll) = method.best_loglik {
         s.push_str(&format!(
             "Best log-likelihood: \\textbf{{{:.2}}} ({}); chains: {}\n\n",
             ll,
-            crate::fit::loglik::LoglikType::tag_or_unknown(stage.loglik_type),
-            stage.n_chains
+            crate::fit::loglik::LoglikType::tag_or_unknown(method.loglik_type),
+            method.n_chains
         ));
     } else {
-        s.push_str(&format!("chains: {}\n\n", stage.n_chains));
+        s.push_str(&format!("chains: {}\n\n", method.n_chains));
     }
 
-    if let Some(gate) = &stage.gate {
+    if let Some(gate) = &method.gate {
         s.push_str("\\begin{tabular}{lrrl}\n");
         s.push_str("\\toprule\n");
         s.push_str("Leg & Value & Threshold & Pass? \\\\\n");
@@ -3442,10 +3442,10 @@ fn render_latex_stage(stage: &MethodReport) -> String {
         s.push_str("\\bottomrule\n\\end{tabular}\n\n");
     }
 
-    if !stage.parameters.is_empty() {
+    if !method.parameters.is_empty() {
         s.push_str("\\begin{tabular}{lrrl}\n\\toprule\n");
         s.push_str("Parameter & Estimate & $\\hat A$ & Flags \\\\\n\\midrule\n");
-        for p in &stage.parameters {
+        for p in &method.parameters {
             let a_str = p
                 .chain_agreement
                 .map(|r| format!("{:.3}", r))
@@ -3466,12 +3466,12 @@ fn render_latex_stage(stage: &MethodReport) -> String {
         s.push_str("\\bottomrule\n\\end{tabular}\n\n");
     }
 
-    if !stage.chains.is_empty() {
+    if !method.chains.is_empty() {
         // Column / marker naming matches the text + md emitters: "loglik"
         // / "Selected", not "clean_ll" / "Winner".
         s.push_str("\\begin{tabular}{rrrc}\n\\toprule\n");
         s.push_str("Chain & loglik & $\\pm$ se & Selected \\\\\n\\midrule\n");
-        for c in &stage.chains {
+        for c in &method.chains {
             let mark = if c.is_winner { "$\\star$" } else { "" };
             s.push_str(&format!(
                 "{} & {:.2} & {:.2} & {} \\\\\n",
@@ -3482,7 +3482,7 @@ fn render_latex_stage(stage: &MethodReport) -> String {
     }
 
     // PGAS / PMMH posterior block.
-    if let Some(MethodResult::Pgas(p)) = &stage.method_result {
+    if let Some(MethodResult::Pgas(p)) = &method.method_result {
         s.push_str(&format!(
             "Posterior summary (max $\\hat R$ = {}):\n\n",
             max_rhat_cell(&p.diagnostics)
@@ -3493,7 +3493,7 @@ fn render_latex_stage(stage: &MethodReport) -> String {
             let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
             let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
             let ess = p.diagnostics.ess_cell(name, "---");
-            let mean_cell = match stage.param_dates.get(name) {
+            let mean_cell = match method.param_dates.get(name) {
                 Some(date) => format!("{:.6} ({})", mean, date),
                 None => format!("{:.6}", mean),
             };
@@ -3505,7 +3505,7 @@ fn render_latex_stage(stage: &MethodReport) -> String {
             ));
         }
         s.push_str("\\bottomrule\n\\end{tabular}\n\n");
-    } else if let Some(MethodResult::Pmmh(p)) = &stage.method_result {
+    } else if let Some(MethodResult::Pmmh(p)) = &method.method_result {
         s.push_str(&format!(
             "Posterior summary (max $\\hat R$ = {}; acceptance = {:.3}):\n\n",
             max_rhat_cell(&p.diagnostics), p.acceptance_rate
@@ -3514,7 +3514,7 @@ fn render_latex_stage(stage: &MethodReport) -> String {
         s.push_str("Parameter & Mean & ESS bulk & ESS tail & $\\hat R$ \\\\\n\\midrule\n");
         for (name, mean) in &p.posterior_mean {
             let ess = p.diagnostics.ess_cell(name, "---");
-            let mean_cell = match stage.param_dates.get(name) {
+            let mean_cell = match method.param_dates.get(name) {
                 Some(date) => format!("{:.6} ({})", mean, date),
                 None => format!("{:.6}", mean),
             };
@@ -3548,43 +3548,42 @@ fn escape_latex(s: &str) -> String {
     }).collect()
 }
 
-/// The winning stage's point estimate (θ̂) as a flat params TOML — the same
+/// The winning method's point estimate (θ̂) as a flat params TOML — the same
 /// payload `fit summary --params-only` prints. A `pub(crate)` seam over
-/// [`discover_stages`] + [`dump_params_only`] so `compare` can derive a
+/// [`discover_methods`] + [`dump_params_only`] so `compare` can derive a
 /// prequential at θ̂ from a sealed fit without touching the private
-/// `ResolvedStage` type. The last completed method leaf's winner.
+/// `ResolvedMethod` type. The last completed method leaf's winner.
 pub(crate) fn winner_params_toml(segment: &Path) -> Result<String, String> {
     let dir = segment.to_string_lossy();
-    let discovered = discover_stages(segment);
+    let discovered = discover_methods(segment);
     dump_params_only(&dir, &discovered)
 }
 
-/// Dump the chosen stage's winner params as a flat TOML, pipeable
+/// Dump the chosen method's winner params as a flat TOML, pipeable
 /// into `camdl pfilter --params`. No header, no metadata, no
 /// provenance — just `name = value` lines the standard params loader
 /// will accept.
 ///
-/// `stage_filter` selects an explicit stage (must be present in
-/// `discovered`); when `None`, picks the *terminal* stage in
-/// declaration order (`FitView.methods_declared` walked in reverse).
+/// Reads the last leaf `discover_methods` returned, i.e. the last in
+/// declaration order (`FitView.methods_declared`).
 fn dump_params_only(
     dir: &str,
-    discovered: &[ResolvedStage],
+    discovered: &[ResolvedMethod],
 ) -> Result<String, String> {
     let target = discovered
         .iter()
         .next_back()
         .cloned()
         .ok_or_else(|| format!("no completed method leaves found in {}", dir))?;
-    let target_stage = target.stage.clone();
-    let stage_path = target.stage_dir.clone();
-    let path = format!("{}/final_params.toml", stage_path.to_string_lossy());
+    let target_method = target.name.clone();
+    let method_path = target.method_dir.clone();
+    let path = format!("{}/final_params.toml", method_path.to_string_lossy());
     let params = crate::util::load_params_toml(&path)
         .map_err(|e| format!("cannot read {}: {}", path, e))?;
     let mut keys: Vec<&String> = params.keys().collect();
     keys.sort();
     let mut out = String::new();
-    out.push_str(&format!("# camdl fit summary --params-only ({})\n", target_stage));
+    out.push_str(&format!("# camdl fit summary --params-only ({})\n", target_method));
     out.push_str(&format!("# source: {}\n", path));
     out.push_str(&format!("# camdl: {}\n\n", version::VERSION_SHORT));
     for k in keys {
@@ -3596,8 +3595,8 @@ fn dump_params_only(
     Ok(out)
 }
 
-/// The chains a stage refused at their start, read from the `bad_init`
-/// records in the stage's `diagnostics.json` (gh#607, gh#663) — the durable
+/// The chains a method refused at their start, read from the `bad_init`
+/// records in the method's `diagnostics.json` (gh#607, gh#663) — the durable
 /// record, which does not depend on anything having captured stderr.
 struct RefusedChains {
     /// `(chain, reason)`, in chain order.
@@ -3613,9 +3612,9 @@ impl RefusedChains {
     /// Entry by entry, so one record that does not parse costs that record and
     /// not the file: an R̂ of `+∞` that an earlier binary wrote as `null` must
     /// not take the `bad_init` records beside it out of the summary.
-    fn load(stage_dir: &Path) -> Self {
+    fn load(method_dir: &Path) -> Self {
         use sim::inference::diagnostic::{Diagnostic, DiagnosticKind};
-        let path = stage_dir.join("diagnostics.json");
+        let path = method_dir.join("diagnostics.json");
         let Ok(raw) = std::fs::read_to_string(&path) else {
             return RefusedChains { records: Vec::new(), unreadable: Vec::new() };
         };
@@ -3771,7 +3770,7 @@ fn null_culprits(entry: &serde_json::Value) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// gh#663: the chain-count text for a stage that refused chains. Nothing
+    /// gh#663: the chain-count text for a method that refused chains. Nothing
     /// refused reads as the plain count (`None`); a refusal names the ids; a
     /// `n_good_chains` with no refusal record behind it says so rather than
     /// silently picking one source.
@@ -3793,8 +3792,8 @@ mod tests {
             && s.contains("2 chain(s) not accounted for"), "{s}");
     }
 
-    /// A stage directory holding `diagnostics.json` with `raw` as its body.
-    fn stage_with_diagnostics(tag: &str, raw: &str) -> std::path::PathBuf {
+    /// A method directory holding `diagnostics.json` with `raw` as its body.
+    fn method_with_diagnostics(tag: &str, raw: &str) -> std::path::PathBuf {
         let dir = crate::test_support::unique_temp_dir(tag);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("diagnostics.json"), raw).unwrap();
@@ -3879,7 +3878,7 @@ mod tests {
     "timestamp": "2026-10-20T00:00:00Z"
   }
 ]"#;
-        let dir = stage_with_diagnostics("summary_legacy_null", raw);
+        let dir = method_with_diagnostics("summary_legacy_null", raw);
         let refused = RefusedChains::load(&dir);
         let lines = plain_formatter().refused_chains_lines(&refused);
         let _ = std::fs::remove_dir_all(&dir);
@@ -3947,7 +3946,7 @@ mod tests {
         }
     }
 
-    /// The `chains` section for a stage on disk. `StageFacts::gather` is asked
+    /// The `chains` section for a method on disk. `MethodFacts::gather` is asked
     /// for the PGAS reads unconditionally: a non-PGAS fixture writes neither a
     /// `pgas_summary.json` nor a `trajectories.tsv`, so they find nothing and
     /// the section renders exactly as it would for that sampler.
@@ -3957,7 +3956,7 @@ mod tests {
         n_chains: usize,
         kind: LoglikType,
     ) -> String {
-        let facts = StageFacts::gather(dir, kind, true);
+        let facts = MethodFacts::gather(dir, kind, true);
         fmt.chains_section(dir, n_chains, &facts, None)
     }
 
@@ -3965,13 +3964,13 @@ mod tests {
     /// no version lead, no resolved forkability.
     fn block(
         fmt: &Formatter,
-        stage: &str,
+        name: &str,
         method: &str,
-        stage_dir: &std::path::Path,
+        method_dir: &std::path::Path,
         view: BayesianView<'_>,
         ll_kind: LoglikType,
     ) -> String {
-        fmt.bayesian_block("", stage, method, stage_dir, view, None, ll_kind, None)
+        fmt.bayesian_block("", name, method, method_dir, view, None, ll_kind, None)
     }
 
     fn synthetic_fit_state() -> FitState {
@@ -4072,7 +4071,7 @@ mod tests {
         state.chain_eval_ids = [0, 2, 3, 5, 7].map(ChainIndex).to_vec();
         state.chain_eval_logliks = vec![-3810.5, -3812.0, -3808.7, -3804.9, -3807.6];
         state.chain_eval_ses = vec![1.5, 1.8, 1.4, 1.1, 1.5];
-        let report = if2_stage_report(
+        let report = if2_method_report(
             "scout", "/nonexistent", &state, None, &CalendarContext::default());
         let ids: Vec<ChainIndex> = report.chains.iter().map(|c| c.chain_id).collect();
         assert_eq!(ids, [0, 2, 3, 5, 7].map(ChainIndex).to_vec(),
@@ -4092,7 +4091,7 @@ mod tests {
         state.tail_chain_agreement =
             [("R0".to_string(), 1.001), ("sigma".to_string(), 1.002), ("I0".to_string(), 16.5)]
                 .into_iter().collect();
-        let report = if2_stage_report(
+        let report = if2_method_report(
             "scout", "/nonexistent", &state, None, &CalendarContext::default());
         let gate = report.gate.expect("an IF2 report has a gate");
         assert!(!gate.a_passes, "the initial-state Â is gated: {gate:?}");
@@ -4102,7 +4101,7 @@ mod tests {
         state.tail_chain_agreement.remove("I0");
         state.chain_eval_logliks.clear();
         state.chain_eval_ses.clear();
-        let report = if2_stage_report(
+        let report = if2_method_report(
             "scout", "/nonexistent", &state, None, &CalendarContext::default());
         let gate = report.gate.expect("an IF2 report has a gate");
         assert_eq!(gate.db_passes, None, "no clean-eval data, no decibans leg");
@@ -4116,7 +4115,7 @@ mod tests {
     fn the_structured_chain_table_is_omitted_without_ids_rather_than_mislabelled() {
         let mut state = synthetic_fit_state();
         state.chain_eval_ids = Vec::new();
-        let report = if2_stage_report(
+        let report = if2_method_report(
             "scout", "/nonexistent", &state, None, &CalendarContext::default());
         assert!(report.chains.is_empty(),
             "no ids, no rows — a position is not a chain number: {:?}", report.chains);
@@ -4207,7 +4206,7 @@ mod tests {
 
     /// A parameter whose within-chain variance collapsed has NO Â — the G-R
     /// formula divides by it, so `compute_chain_agreement` returns NaN and the
-    /// end-of-stage block prints "Â unavailable (W ≈ 0) — verdict incomplete". The summary
+    /// end-of-run block prints "Â unavailable (W ≈ 0) — verdict incomplete". The summary
     /// table compared that NaN to a literal, and every comparison against NaN
     /// is false, so it fell through to ✗ — reporting "this parameter failed"
     /// for a parameter that was never assessed.
@@ -4327,8 +4326,8 @@ mod tests {
     fn the_withholding_message_does_not_describe_a_retired_mechanism() {
         use std::collections::BTreeMap;
         let fmt = plain_formatter();
-        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
-        let r = PgasStageResult {
+        let no_traces = std::path::Path::new("/nonexistent/method_dir");
+        let r = PgasRun {
             diagnostics: PosteriorDiagnostics {
                 per_param: crate::fit::method_result::per_param_from_maps(
                     BTreeMap::from([("a2".to_string(), 1.01), ("tau".to_string(), 2.639)]),
@@ -4370,8 +4369,8 @@ mod tests {
     fn bayesian_block_withholds_efficiency_and_names_params_without_ess() {
         use std::collections::BTreeMap;
         let fmt = plain_formatter();
-        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
-        let mk = |ess: BTreeMap<String, f64>| PgasStageResult {
+        let no_traces = std::path::Path::new("/nonexistent/method_dir");
+        let mk = |ess: BTreeMap<String, f64>| PgasRun {
             diagnostics: PosteriorDiagnostics {
                 // Both assessed across chains; `tau` carries no bulk ESS,
                 // the state this block has to withhold the headline for.
@@ -4488,8 +4487,8 @@ mod tests {
     fn bayesian_block_fills_the_per_param_rhat_and_ess_columns() {
         use std::collections::BTreeMap;
         let fmt = plain_formatter();
-        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
-        let r = PgasStageResult {
+        let no_traces = std::path::Path::new("/nonexistent/method_dir");
+        let r = PgasRun {
             diagnostics: PosteriorDiagnostics {
                 per_param: crate::fit::method_result::per_param_from_maps(
                     BTreeMap::from([
@@ -4554,7 +4553,7 @@ mod tests {
     fn bayesian_block_reports_ess_per_second_off_the_slowest_param() {
         use std::collections::BTreeMap;
         let fmt = plain_formatter();
-        let mk = |wall: Option<f64>, n_samples: usize, thin: usize| PgasStageResult {
+        let mk = |wall: Option<f64>, n_samples: usize, thin: usize| PgasRun {
             diagnostics: PosteriorDiagnostics {
                 per_param: crate::fit::method_result::per_param_from_maps(
                     BTreeMap::from([("a2".to_string(), 1.01), ("g".to_string(), 1.00)]),
@@ -4573,7 +4572,7 @@ mod tests {
         };
         // No chain traces on disk for this in-memory result → the per-chain
         // table degrades to "unavailable"; the ESS lines under test are unaffected.
-        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let no_traces = std::path::Path::new("/nonexistent/method_dir");
         // min-param ESS (145) / wall (11.8 s) = 12.3 ESS/sec — thinning-invariant.
         let with = block(&fmt, "posterior", "pgas", no_traces, BayesianView::Pgas(&mk(Some(11.8), 500, 1)), LoglikType::CompleteData);
         assert!(
@@ -4606,7 +4605,7 @@ mod tests {
     }
 
     /// gh#406: the per-chain loglik table names the stuck chain in a Bayesian
-    /// summary. Six-chain stage dir (five near -50, chain 5 stuck at -300) with
+    /// summary. Six-chain method dir (five near -50, chain 5 stuck at -300) with
     /// per-chain traces + a draws.tsv manifest → the table flags chain 5 and the
     /// nudge fires.
     #[test]
@@ -4649,7 +4648,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// gh#667: a PGAS stage's per-chain table ranks on `obs_ll`
+    /// gh#667: a PGAS method's per-chain table ranks on `obs_ll`
     /// (`log p(y | X, θ)`), not on the `log_complete_data_ll` target. The
     /// fixture is built so the two rankings disagree: chain 2 has a hugely
     /// concentrated latent path (a high complete-data value) with an ordinary
@@ -4723,7 +4722,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// gh#667 must not cost gh#608/gh#635 their reach. A PGAS stage whose
+    /// gh#667 must not cost gh#608/gh#635 their reach. A PGAS method whose
     /// traces predate the `obs_ll` column cannot be compared chain-to-chain —
     /// the table says so by name rather than falling back to the position-1
     /// column — but the degeneracy screens read `log_posterior` and
@@ -4867,7 +4866,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// gh#406 negative control: a well-mixed six-chain stage flags no outlier and
+    /// gh#406 negative control: a well-mixed six-chain method flags no outlier and
     /// prints no "disagree" nudge — not a vacuous pass (the table still renders
     /// every chain with a finite z).
     #[test]
@@ -4910,7 +4909,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// gh#406: a stage with no per-chain traces says so rather than silently
+    /// gh#406: a method with no per-chain traces says so rather than silently
     /// omitting the section (no-silent-gap).
     #[test]
     fn bayesian_chain_loglik_table_reports_unavailable() {
@@ -4927,7 +4926,7 @@ mod tests {
 
     /// Write a `pgas_summary.json` carrying just the gh#727 `trajectories`
     /// block — the only key `saved_path_table` reads. `per_chain` rows are
-    /// `(chain id, written, forkable)`; the id is written because a stage that
+    /// `(chain id, written, forkable)`; the id is written because a method that
     /// refused a chain at its start has survivors whose ids are not `1..n`.
     fn write_traj_summary(
         dir: &std::path::Path,
@@ -4991,12 +4990,12 @@ mod tests {
 "  chain   paths   forkable\n",
 "      1     200        200\n",
 "      2     200        200\n",
-        ), "the counts render and NOTHING claims a shortfall this stage \
+        ), "the counts render and NOTHING claims a shortfall this method \
             does not have");
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A stage whose summary carries no `trajectories` block (PMMH / MH, or a
+    /// A method whose summary carries no `trajectories` block (PMMH / MH, or a
     /// PGAS run predating gh#727) renders nothing rather than a row of dashes.
     #[test]
     fn saved_path_table_is_empty_without_the_block() {
@@ -5008,7 +5007,7 @@ mod tests {
         assert_eq!(section_of(&out, SECTION_CHAINS),
 "  (per-chain traces unavailable \u{2014} cannot break down by chain)\n",
             "no `trajectories` block means no path columns and no note about \
-             them \u{2014} there is nothing this stage failed to report");
+             them \u{2014} there is nothing this method failed to report");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5046,7 +5045,7 @@ mod tests {
     // columns sit beside which — and none of them is visible one cell at a
     // time.
 
-    /// A PGAS stage whose parameters differ in R̂, in both halves of it, and in
+    /// A PGAS method whose parameters differ in R̂, in both halves of it, and in
     /// per-chain mixing — the shape every table below is read against.
     ///
     /// Alphabetically the order is `alpha, beta, gamma, tau`; by R̂ it is
@@ -5054,7 +5053,7 @@ mod tests {
     /// coincidence. `beta` is the one parameter whose FOLDED half is the larger
     /// — the chains agree on where it sits and disagree on its spread — which
     /// is the distinction the `worse` column exists to carry.
-    fn layout_pgas_result() -> PgasStageResult {
+    fn layout_pgas_result() -> PgasRun {
         use crate::fit::method_result::ParamConvergence;
         use std::collections::BTreeMap;
         let scored = |rhat: f64, bulk: f64, folded: f64, classic: f64,
@@ -5071,7 +5070,7 @@ mod tests {
                 rhat_withheld: None,
             }
         };
-        PgasStageResult {
+        PgasRun {
             diagnostics: PosteriorDiagnostics {
                 per_param: BTreeMap::from([
                     ("alpha".to_string(),
@@ -5110,7 +5109,7 @@ mod tests {
     #[test]
     fn the_verdict_comes_first_and_the_sections_in_reading_order() {
         let fmt = plain_formatter();
-        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let no_traces = std::path::Path::new("/nonexistent/method_dir");
         let r = layout_pgas_result();
         let out = block(&fmt, "posterior", "pgas", no_traces,
             BayesianView::Pgas(&r), LoglikType::CompleteData);
@@ -5147,7 +5146,7 @@ mod tests {
     #[test]
     fn the_posterior_table_is_ordered_by_rhat_not_by_name() {
         let fmt = plain_formatter();
-        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let no_traces = std::path::Path::new("/nonexistent/method_dir");
         let r = layout_pgas_result();
         let out = block(&fmt, "posterior", "pgas", no_traces,
             BayesianView::Pgas(&r), LoglikType::CompleteData);
@@ -5172,7 +5171,7 @@ mod tests {
     #[test]
     fn the_posterior_header_sits_over_its_columns_in_display_cells() {
         let fmt = plain_formatter();
-        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let no_traces = std::path::Path::new("/nonexistent/method_dir");
         let r = layout_pgas_result();
         let out = block(&fmt, "posterior", "pgas", no_traces,
             BayesianView::Pgas(&r), LoglikType::CompleteData);
@@ -5203,7 +5202,7 @@ mod tests {
     #[test]
     fn the_convergence_table_names_which_half_is_worse_per_parameter() {
         let fmt = plain_formatter();
-        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let no_traces = std::path::Path::new("/nonexistent/method_dir");
         let r = layout_pgas_result();
         let out = block(&fmt, "posterior", "pgas", no_traces,
             BayesianView::Pgas(&r), LoglikType::CompleteData);
@@ -5269,15 +5268,15 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A stage that saves no latent paths — PMMH here, and MH the same — has
+    /// A method that saves no latent paths — PMMH here, and MH the same — has
     /// no `latent paths` section at all, rather than one saying it has nothing.
     /// The remaining three still read as a layout.
     #[test]
-    fn a_stage_without_pgas_has_no_latent_path_section() {
+    fn a_method_without_pgas_has_no_latent_path_section() {
         let fmt = plain_formatter();
-        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let no_traces = std::path::Path::new("/nonexistent/method_dir");
         let pgas = layout_pgas_result();
-        let r = PmmhStageResult {
+        let r = PmmhRun {
             diagnostics: pgas.diagnostics.clone(),
             posterior_mean: pgas.posterior_mean.clone(),
             acceptance_rate: 0.234,
@@ -5372,7 +5371,7 @@ mod tests {
     fn explain_defines_each_term_once_where_it_is_read() {
         let fmt = explaining_formatter();
         let plain = plain_formatter();
-        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let no_traces = std::path::Path::new("/nonexistent/method_dir");
         let r = layout_pgas_result();
         let view = || BayesianView::Pgas(&r);
         let with = block(&fmt, "posterior", "pgas", no_traces, view(),
@@ -5434,7 +5433,7 @@ mod tests {
             n_total: 3,
         };
         let fmt = plain_formatter();
-        let facts = StageFacts::gather(&dir, LoglikType::Marginal, false);
+        let facts = MethodFacts::gather(&dir, LoglikType::Marginal, false);
         let section = fmt.chains_section(&dir, 2, &facts, Some(&info));
 
         assert!(section.contains("including the excluded 2"),
@@ -5448,7 +5447,7 @@ mod tests {
             "and the unfiltered/retained mismatch must not render as a count \
              that reads like a defect:\n{section}");
 
-        // Without a selection the same stage says none of it.
+        // Without a selection the same method says none of it.
         let plain = fmt.chains_section(&dir, 3, &facts, None);
         assert!(!plain.contains("excluded"), "no scope note when nothing was \
             excluded:\n{plain}");
@@ -5468,7 +5467,7 @@ mod tests {
             }),
         ]);
         let fmt = explaining_formatter();
-        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let no_traces = std::path::Path::new("/nonexistent/method_dir");
         let r = layout_pgas_result();
         let out = format!("{}{}", parameter_legend(&docs, true),
             block(&fmt, "posterior", "pgas", no_traces, BayesianView::Pgas(&r),
@@ -5492,9 +5491,9 @@ mod tests {
     // six orders of magnitude apart, and a chain set whose surviving ids are
     // not `1..n` — and the rendered text is compared whole.
 
-    fn wide_range_pgas_result() -> PgasStageResult {
+    fn wide_range_pgas_result() -> PgasRun {
         use std::collections::BTreeMap;
-        PgasStageResult {
+        PgasRun {
             diagnostics: PosteriorDiagnostics {
                 per_param: crate::fit::method_result::per_param_from_maps(
                     BTreeMap::from([
@@ -5549,7 +5548,7 @@ mod tests {
     #[test]
     fn posterior_summary_grid_holds_under_long_names_and_a_wide_value_range() {
         let fmt = plain_formatter();
-        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let no_traces = std::path::Path::new("/nonexistent/method_dir");
         let out = block(&fmt, "posterior", "pgas", no_traces,
             BayesianView::Pgas(&wide_range_pgas_result()), LoglikType::CompleteData);
         assert_eq!(section_of(&out, SECTION_POSTERIOR), concat!(
@@ -5582,7 +5581,7 @@ mod tests {
             BTreeMap::from([(long_a.to_string(), 300.0), (long_b.to_string(), 400.0)]),
         );
         let fmt = plain_formatter();
-        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let no_traces = std::path::Path::new("/nonexistent/method_dir");
         let out = block(&fmt, "posterior", "pgas", no_traces, BayesianView::Pgas(&r),
             LoglikType::CompleteData);
         let table = section_of(&out, SECTION_POSTERIOR);
@@ -5678,23 +5677,23 @@ mod tests {
 
     // ── Phase 4 / 5 tests ─────────────────────────────────────────
 
-    /// Build a fit dir with one stage at the v2 layout
-    /// (`<dir>/real/fit_1/<stage>/`), and write the top-level + stage
+    /// Build a fit dir with one method at the v2 layout
+    /// (`<dir>/real/fit_1/<method>/`), and write the top-level + method
     /// `run.json` files so `fit_tree::walk_fit_dir` finds it. Mirror
     /// of what `camdl fit run` produces, minus the bits these tests
     /// don't need.
-    fn make_fit_dir(stage: &str, state: &FitState, params: &[(&str, f64)])
+    fn make_fit_dir(method: &str, state: &FitState, params: &[(&str, f64)])
         -> std::path::PathBuf
     {
-        let dir = crate::test_support::unique_temp_dir(&format!("summary_format_{stage}"));
+        let dir = crate::test_support::unique_temp_dir(&format!("summary_format_{method}"));
         std::fs::create_dir_all(&dir).unwrap();
         let parent_hash: String = "deadbeef".repeat(8);
         write_top_level_fit_run(&dir, &parent_hash);
 
-        let stage_dir = dir.join("real").join("fit_1").join(stage);
-        std::fs::create_dir_all(&stage_dir).unwrap();
-        state.save(&stage_dir.to_string_lossy()).unwrap();
-        write_stage_run(&stage_dir, &parent_hash, stage, crate::run_meta::FitAlgorithm::If2);
+        let method_dir = dir.join("real").join("fit_1").join(method);
+        std::fs::create_dir_all(&method_dir).unwrap();
+        state.save(&method_dir.to_string_lossy()).unwrap();
+        write_method_run(&method_dir, &parent_hash, method, crate::run_meta::FitAlgorithm::If2);
 
         // final_params.toml + mle_params.toml carrying matching values
         // so the provenance cross-check passes.
@@ -5702,14 +5701,14 @@ mod tests {
         for (k, v) in params {
             body.push_str(&format!("{} = {}\n", k, v));
         }
-        std::fs::write(stage_dir.join("final_params.toml"), &body).unwrap();
-        std::fs::write(stage_dir.join("mle_params.toml"), &body).unwrap();
+        std::fs::write(method_dir.join("final_params.toml"), &body).unwrap();
+        std::fs::write(method_dir.join("mle_params.toml"), &body).unwrap();
         dir
     }
 
     /// Write the fit-level provenance sidecar at the segment root so
     /// `FitView::read` treats `dir` as a well-formed fit. `parent_hash` is the
-    /// `fit`-level hash the stage leaves also carry.
+    /// `fit`-level hash the method leaves also carry.
     fn write_top_level_fit_run(dir: &std::path::Path, _parent_hash: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
@@ -5719,16 +5718,16 @@ mod tests {
         .unwrap();
     }
 
-    /// Write a `FitStage` `runid::RunRecord` leaf for `stage` under `stage_dir`.
+    /// Write a `FitStage` `runid::RunRecord` leaf for `method` under `method_dir`.
     /// `parent_hash` seeds the shared `fit`-level hash; the `inputs` carry the
     /// per-leaf numbers (`method`, `n_chains`, `best_loglik`, …) the views
     /// project. The `method` LEVEL label is the leaf's name, and it is the
     /// same string as `inputs.method`.
-    fn write_stage_run(stage_dir: &std::path::Path, parent_hash: &str, stage: &str, method: crate::run_meta::FitAlgorithm) {
-        std::fs::create_dir_all(stage_dir).unwrap();
-        let stage_label = stage.to_string();
+    fn write_method_run(method_dir: &std::path::Path, parent_hash: &str, name: &str, method: crate::run_meta::FitAlgorithm) {
+        std::fs::create_dir_all(method_dir).unwrap();
+        let method_label = name.to_string();
         let fit_hash: String = parent_hash.chars().cycle().take(64).collect();
-        let run_id: String = format!("{}-{}", parent_hash, stage)
+        let run_id: String = format!("{}-{}", parent_hash, name)
             .chars()
             .filter(|c| c.is_ascii_hexdigit())
             .chain(std::iter::repeat('0'))
@@ -5748,7 +5747,7 @@ mod tests {
             "engine_version": "0.1.0+test",
             "levels": [
                 {"name": "fit",   "label": "fit",  "hash": fit_hash, "schema_version": 1},
-                {"name": "method", "label": stage_label, "hash": "1fb03eee00000000000000000000000000000000000000000000000000000000", "schema_version": 1},
+                {"name": "method", "label": method_label, "hash": "1fb03eee00000000000000000000000000000000000000000000000000000000", "schema_version": 1},
                 {"name": "seed",  "label": "seed_1","hash": "06cbd6b300000000000000000000000000000000000000000000000000000000", "schema_version": 1}
             ],
             "status": "completed",
@@ -5764,7 +5763,7 @@ mod tests {
             },
             "provenance": {"created_at": "2026-04-27T00:00:00Z", "argv": ["camdl"]}
         });
-        std::fs::write(stage_dir.join("run.json"), serde_json::to_string(&rec).unwrap()).unwrap();
+        std::fs::write(method_dir.join("run.json"), serde_json::to_string(&rec).unwrap()).unwrap();
     }
 
     /// JSON output is parseable, `schema.version` is the current one, and the
@@ -5772,7 +5771,7 @@ mod tests {
     /// Catches any future schema rename / removal that would break the book
     /// pipeline.
     ///
-    /// gh#901: the per-method array is `methods`, and `stages` is absent — a
+    /// gh#901: the per-method array is `methods`, and `methods` is absent — a
     /// consumer keyed on the old word must break loudly at the tag, not read
     /// an array that quietly stopped being there.
     ///
@@ -5784,8 +5783,8 @@ mod tests {
         let params = [("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)];
         let dir = make_fit_dir("if2", &state, &params);
 
-        let stages = discover_stages(&dir);
-        let doc = build_summary_doc(&dir.to_string_lossy(), &stages, None);
+        let methods = discover_methods(&dir);
+        let doc = build_summary_doc(&dir.to_string_lossy(), &methods, None);
         let json = serde_json::to_string_pretty(&doc).unwrap();
         assert!(json.contains("\"version\": 3"),
             "schema.version must be present and = 3: {}", json);
@@ -5816,8 +5815,8 @@ mod tests {
         let params = [("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)];
         let dir = make_fit_dir("if2", &state, &params);
 
-        let stages = discover_stages(&dir);
-        let doc = build_summary_doc(&dir.to_string_lossy(), &stages, None);
+        let methods = discover_methods(&dir);
+        let doc = build_summary_doc(&dir.to_string_lossy(), &methods, None);
         let md = render_markdown(&doc);
         assert!(md.contains("# Fit summary:"));
         assert!(md.contains("## `if2`"));
@@ -5837,10 +5836,10 @@ mod tests {
         let params = [("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)];
         let dir = make_fit_dir("if2", &state, &params);
 
-        let stages = discover_stages(&dir);
-        let doc = build_summary_doc(&dir.to_string_lossy(), &stages, None);
+        let methods = discover_methods(&dir);
+        let doc = build_summary_doc(&dir.to_string_lossy(), &methods, None);
         let tex = render_latex(&doc);
-        // No preamble, but tabular blocks per stage.
+        // No preamble, but tabular blocks per method.
         assert!(tex.contains("\\subsection*{Method:"));
         assert!(tex.contains("\\begin{tabular}"));
         assert!(tex.contains("$\\hat A$"));
@@ -5861,8 +5860,8 @@ mod tests {
         let params = [("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)];
         let dir = make_fit_dir("if2", &state, &params);
 
-        let stages = discover_stages(&dir);
-        let s = dump_params_only(&dir.to_string_lossy(), &stages).unwrap();
+        let methods = discover_methods(&dir);
+        let s = dump_params_only(&dir.to_string_lossy(), &methods).unwrap();
         // No metadata leaks at top level (the existing loader skips
         // `[provenance]`, but --params-only doesn't even emit it).
         assert!(!s.contains("[provenance]"),
@@ -5882,8 +5881,8 @@ mod tests {
     fn params_only_errors_when_no_completed_method() {
         let dir = crate::test_support::unique_temp_dir("summary_empty");
         std::fs::create_dir_all(&dir).unwrap();
-        let stages = discover_stages(&dir);
-        let err = dump_params_only(&dir.to_string_lossy(), &stages).unwrap_err();
+        let methods = discover_methods(&dir);
+        let err = dump_params_only(&dir.to_string_lossy(), &methods).unwrap_err();
         assert!(err.contains("no completed method leaves"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -6154,7 +6153,7 @@ mod tests {
     }
 
     fn synthetic_pgas_result() -> MethodResult {
-        MethodResult::Pgas(PgasStageResult {
+        MethodResult::Pgas(PgasRun {
             diagnostics: PosteriorDiagnostics {
                 per_param: crate::fit::method_result::per_param_from_maps(
                     BTreeMap::from([("R0".to_string(), 1.02)]),
@@ -6174,7 +6173,7 @@ mod tests {
     }
 
     fn synthetic_pmmh_result() -> MethodResult {
-        MethodResult::Pmmh(PmmhStageResult {
+        MethodResult::Pmmh(PmmhRun {
             diagnostics: PosteriorDiagnostics {
                 per_param: crate::fit::method_result::per_param_from_maps(
                     BTreeMap::from([("R0".to_string(), 1.03)]),
@@ -6193,7 +6192,7 @@ mod tests {
     }
 
     fn synthetic_if2_result() -> MethodResult {
-        MethodResult::If2(If2StageResult {
+        MethodResult::If2(If2Run {
             best_loglik: -3804.9,
             best_chain: ChainIndex(1),
             theta_hat: BTreeMap::new(),
@@ -6211,31 +6210,31 @@ mod tests {
     /// `complete_data` even though its `best_loglik` is null — that is the
     /// joint-vs-marginal distinction an agent scrapes.
     #[test]
-    fn stage_report_json_carries_loglik_type() {
+    fn method_report_json_carries_loglik_type() {
         let cal = CalendarContext::default();
 
-        let pgas = bayesian_stage_report("pgas", "pgas", Some(synthetic_pgas_result()), &cal);
+        let pgas = bayesian_method_report("pgas", "pgas", Some(synthetic_pgas_result()), &cal);
         let j = serde_json::to_value(&pgas).unwrap();
         assert_eq!(j["loglik_type"], serde_json::json!("complete_data"),
-            "PGAS stage must tag its joint loglik: {j}");
+            "PGAS method must tag its joint loglik: {j}");
         assert!(j["best_loglik"].is_null(),
             "PGAS has no scalar best_loglik, yet still carries loglik_type: {j}");
 
-        let pmmh = bayesian_stage_report("pmmh", "pmmh", Some(synthetic_pmmh_result()), &cal);
+        let pmmh = bayesian_method_report("pmmh", "pmmh", Some(synthetic_pmmh_result()), &cal);
         let j = serde_json::to_value(&pmmh).unwrap();
         assert_eq!(j["loglik_type"], serde_json::json!("marginal"),
             "PMMH MAP loglik is marginal: {j}");
 
-        // IF2 via the dedicated builder. No stage dir on disk → the
+        // IF2 via the dedicated builder. No method dir on disk → the
         // provenance reads tolerate absence; loglik_type comes from the
         // typed result.
-        let if2 = if2_stage_report(
-            "scout", "/nonexistent/stage", &synthetic_fit_state(),
+        let if2 = if2_method_report(
+            "scout", "/nonexistent/method", &synthetic_fit_state(),
             Some(synthetic_if2_result()), &cal,
         );
         let j = serde_json::to_value(&if2).unwrap();
         assert_eq!(j["loglik_type"], serde_json::json!("if2"),
-            "IF2 stage must tag its marginal: {j}");
+            "IF2 method must tag its marginal: {j}");
     }
 
     /// gh#280: human headlines label the loglik class, with the tag rendered
@@ -6246,8 +6245,8 @@ mod tests {
         let fmt = plain_formatter();
 
         // Terminal IF2 headline.
-        let block = fmt.stage_block(
-            "", "scout", "/nonexistent/stage", &synthetic_fit_state(), None,
+        let block = fmt.method_block(
+            "", "scout", "/nonexistent/method", &synthetic_fit_state(), None,
         );
         let line = block.text.lines().find(|l| l.contains("best loglik:"))
             .expect("IF2 block has a best-loglik headline");
@@ -6256,23 +6255,23 @@ mod tests {
         let tag_at = line.find("(if2)").unwrap();
         assert!(tag_at > num_at, "type tag must render after the number: {line}");
 
-        // Markdown + LaTeX exports of a PMMH (marginal) stage.
-        let pmmh = bayesian_stage_report("pmmh", "pmmh", Some(synthetic_pmmh_result()), &cal);
-        let md = render_md_stage(&pmmh);
+        // Markdown + LaTeX exports of a PMMH (marginal) method.
+        let pmmh = bayesian_method_report("pmmh", "pmmh", Some(synthetic_pmmh_result()), &cal);
+        let md = render_md_method(&pmmh);
         assert!(md.contains("- best loglik:") && md.contains("(marginal)"),
             "md PMMH headline carries (marginal): {md}");
-        let tex = render_latex_stage(&pmmh);
+        let tex = render_latex_method(&pmmh);
         assert!(tex.contains("Best log-likelihood") && tex.contains("(marginal)"),
             "latex PMMH headline carries (marginal): {tex}");
     }
 
     // ─── Unreadable method leaves (gh#905) ────────────────────────────
 
-    fn leaf(name: &str) -> ResolvedStage {
-        ResolvedStage {
-            stage: name.to_string(),
+    fn leaf(name: &str) -> ResolvedMethod {
+        ResolvedMethod {
+            name: name.to_string(),
             method: "pgas".to_string(),
-            stage_dir: PathBuf::from(format!("/nonexistent/{name}")),
+            method_dir: PathBuf::from(format!("/nonexistent/{name}")),
         }
     }
 
@@ -6311,7 +6310,7 @@ mod tests {
             "nothing failed");
 
         // A segment with no completed leaf at all is a different report — it
-        // prints "(no completed stages found)" and is not a load failure.
+        // prints "(no completed methods found)" and is not a load failure.
         assert!(!nothing_loaded(&[], &[]),
             "an empty segment is not an unreadable one");
     }

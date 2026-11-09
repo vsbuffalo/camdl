@@ -72,12 +72,12 @@ pub enum ParamTreatment {
     /// parameter uncertainty.
     Posterior(PosteriorDraws),
     /// A single best-guess parameter — a *narrower* band. v1 never builds one
-    /// (it refuses point-estimate fits); the variant carries the method/stage
+    /// (it refuses point-estimate fits); the variant carries the method/method
     /// the refusal names. The future plug-in cell resolves the point's
     /// parameter vector here.
     PlugIn {
         method: Option<FitAlgorithm>,
-        stage: String,
+        name: String,
     },
 }
 
@@ -140,13 +140,13 @@ impl ChainLabel {
     }
 }
 
-/// The producing stage's own convergence numbers, copied from its summary, so
+/// The producing method's own convergence numbers, copied from its summary, so
 /// a band is never silent about whether the fit behind it settled. It records
 /// the number; it does not reject a band on it (the refusal policy is the
 /// deferred guardrail).
 ///
 /// This is **provenance about the fit**, not a statement about any row: it is
-/// the worst parameter's R̂ over the whole stage, repeated identically on every
+/// the worst parameter's R̂ over the whole method, repeated identically on every
 /// row of every stream. That is why the columns it writes are named
 /// `fit_rhat_max` / `fit_ess_min` (gh#794) — under their former names
 /// `rhat_max` / `ess_min` they read as the R̂ of the predicted value beside
@@ -154,9 +154,9 @@ impl ChainLabel {
 /// [`BandRow::mean_conv`] and [`BandRow::pred_conv`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConvergenceStatus {
-    /// The stage reported a Gelman–Rubin R̂ / ESS summary.
+    /// The method reported a Gelman–Rubin R̂ / ESS summary.
     Reported { rhat_max: f64, ess_min: f64 },
-    /// No per-stage R̂ available (e.g. a single-chain stage).
+    /// No per-method R̂ available (e.g. a single-chain method).
     NotAssessed,
 }
 
@@ -196,14 +196,14 @@ pub struct PosteriorDraws {
     /// One complete parameter vector per draw (estimated + fixed columns).
     /// Private: the non-empty invariant lives in [`PosteriorDraws::new`].
     draws: Vec<IndexMap<String, f64>>,
-    /// Bare stage name the cloud came from.
-    pub stage: String,
+    /// Bare method name the cloud came from.
+    pub name: String,
     /// The inference algorithm, when recoverable.
     pub method: Option<FitAlgorithm>,
-    /// The forward simulator the producing stage ran on — the predictive
+    /// The forward simulator the producing method ran on — the predictive
     /// replays on the SAME backend the fit used, not a hardcoded default.
     pub backend: crate::args::types::ForwardBackend,
-    /// The stage's convergence summary.
+    /// The method's convergence summary.
     pub convergence: ConvergenceStatus,
     /// The read-side chain selection that produced this cloud, when one was
     /// active (`--exclude-chains`). `None` for a full-cloud posterior. Carried
@@ -211,12 +211,12 @@ pub struct PosteriorDraws {
     /// `chain_selection`) — a chain-subset band is never mistakable for a
     /// full-cloud one.
     pub selection: Option<SubsetInfo>,
-    /// Each draw's posterior key + the stage it came from — `None` when the
+    /// Each draw's posterior key + the method it came from — `None` when the
     /// cloud was built without them (the test constructors). See [`DrawKeys`].
     keys: Option<DrawKeys>,
 }
 
-/// Each posterior draw's `(chain, draw)` key and the stage directory its saved
+/// Each posterior draw's `(chain, draw)` key and the method directory its saved
 /// smoothing path would live in (gh#722).
 ///
 /// The key travels WITH the cloud rather than being re-read beside it, because
@@ -225,8 +225,8 @@ pub struct PosteriorDraws {
 /// band is the thing a situation report quotes.
 #[derive(Debug, Clone)]
 pub struct DrawKeys {
-    /// The stage directory holding `chain_<N+1>/trajectories.tsv`.
-    pub stage_dir: PathBuf,
+    /// The method directory holding `chain_<N+1>/trajectories.tsv`.
+    pub method_dir: PathBuf,
     /// Per draw, in cloud order: its `(chain, draw)` key, or `None` for a
     /// param-only `draws.tsv` with no key columns.
     pub per_draw: Vec<Option<(usize, usize)>>,
@@ -237,7 +237,7 @@ pub struct DrawKeys {
 /// openable are the same fact.
 #[derive(Debug, Clone)]
 pub struct SavedPaths {
-    pub stage_dir: PathBuf,
+    pub method_dir: PathBuf,
     /// Per draw, in cloud order: the key of its saved path, `None` when that
     /// draw has none. The trajectory save stride and `thin` need not agree, so
     /// this is a genuine subset (gh#727).
@@ -252,14 +252,14 @@ impl DrawKeys {
     /// runs only when a quantity needs a conditioned read — a `fit predict`
     /// with no in-window `value_at` pays nothing.
     pub fn resolve_saved(&self) -> SavedPaths {
-        let on_disk = crate::fit::joint::trajectory_keys(&self.stage_dir);
+        let on_disk = crate::fit::joint::trajectory_keys(&self.method_dir);
         let per_draw: Vec<Option<(usize, usize)>> = self
             .per_draw
             .iter()
             .map(|k| k.filter(|key| on_disk.contains(key)))
             .collect();
         let n_saved = per_draw.iter().filter(|k| k.is_some()).count();
-        SavedPaths { stage_dir: self.stage_dir.clone(), per_draw, n_saved }
+        SavedPaths { method_dir: self.method_dir.clone(), per_draw, n_saved }
     }
 }
 
@@ -268,21 +268,21 @@ impl PosteriorDraws {
     /// constructor, so an empty "posterior" band is unrepresentable.
     pub fn new(
         draws: Vec<IndexMap<String, f64>>,
-        stage: String,
+        name: String,
         method: Option<FitAlgorithm>,
         backend: crate::args::types::ForwardBackend,
         convergence: ConvergenceStatus,
     ) -> Result<Self, String> {
         if draws.is_empty() {
             return Err(format!(
-                "posterior stage '{stage}' has zero draws — cannot build a posterior \
-                 predictive band (check that the stage's draws.tsv is non-empty and \
+                "posterior method '{name}' has zero draws — cannot build a posterior \
+                 predictive band (check that the method's draws.tsv is non-empty and \
                  that burn-in did not discard every sweep)"
             ));
         }
         Ok(PosteriorDraws {
             draws,
-            stage,
+            name,
             method,
             backend,
             convergence,
@@ -313,7 +313,7 @@ impl PosteriorDraws {
         Ok(self)
     }
 
-    /// Each draw's `(chain, draw)` key + its stage dir, when the cloud carries
+    /// Each draw's `(chain, draw)` key + its method dir, when the cloud carries
     /// them.
     pub fn keys(&self) -> Option<&DrawKeys> {
         self.keys.as_ref()
@@ -381,19 +381,19 @@ impl FilterableFit {
 }
 
 /// What a fit actually produced — resolved once, at the boundary, **by
-/// artifact** (does the chosen stage have a draws cloud?), not by method name.
+/// artifact** (does the chosen method have a draws cloud?), not by method name.
 #[derive(Debug, Clone)]
 pub enum FitResult {
-    /// A Bayesian stage wrote a posterior draws cloud.
+    /// A Bayesian method wrote a posterior draws cloud.
     Posterior(PosteriorDraws),
-    /// No posterior draws cloud resolved for the chosen stage — so there is no
-    /// band to draw. Either a genuine optimizer stage (IF2 / NLopt: one best
+    /// No posterior draws cloud resolved for the chosen method — so there is no
+    /// band to draw. Either a genuine optimizer method (IF2 / NLopt: one best
     /// point, no cloud) or a Bayesian sampler whose `draws.tsv` is not yet
     /// present (incomplete / still running). The method (when known) tells the
     /// two apart, so the refusal never mislabels a sampler an optimizer (gh#343).
     PointEstimate {
         method: Option<FitAlgorithm>,
-        stage: String,
+        name: String,
     },
 }
 
@@ -405,8 +405,8 @@ impl FitResult {
     pub fn into_treatment(self) -> ParamTreatment {
         match self {
             FitResult::Posterior(pd) => ParamTreatment::Posterior(pd),
-            FitResult::PointEstimate { method, stage } => {
-                ParamTreatment::PlugIn { method, stage }
+            FitResult::PointEstimate { method, name } => {
+                ParamTreatment::PlugIn { method, name }
             }
         }
     }
@@ -523,7 +523,7 @@ pub struct PredictiveSection<'a> {
 /// header.
 ///
 /// Two convergence channels sit side by side and must not be confused (gh#794).
-/// `fit_rhat_max`/`fit_ess_min` are the *producing stage's* worst-parameter numbers,
+/// `fit_rhat_max`/`fit_ess_min` are the *producing method's* worst-parameter numbers,
 /// constant down the file — provenance. `rhat_mean`/`ess_mean` and
 /// `rhat_pred`/`ess_pred` describe *this row*: the first over the latent expected
 /// value, the second over the predictive draws.
@@ -693,7 +693,7 @@ pub fn index_dims_for(schema: Option<&ObsSchema>, source: &str, leaf_dims: &[Str
 
 impl FitResult {
     /// Resolve a fit results directory into a [`FitResult`] — by artifact.
-    /// A stage that wrote a `draws.tsv` → [`FitResult::Posterior`]; an
+    /// A method that wrote a `draws.tsv` → [`FitResult::Posterior`]; an
     /// optimizer-only fit (no cloud) → [`FitResult::PointEstimate`]; nothing
     /// resolvable → the resolver's actionable error.
     ///
@@ -727,13 +727,13 @@ impl FitResult {
                     });
                     draws.push(r.params.into_iter().collect());
                 }
-                let stage_dir = pref
+                let method_dir = pref
                     .draws_path
                     .parent()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| run_dir.to_path_buf());
                 // Convergence for the band. With NO chain selection this is the
-                // stage's stored full-cloud summary. With `--exclude-chains`
+                // method's stored full-cloud summary. With `--exclude-chains`
                 // active the stored summary describes the WHOLE cloud (including
                 // the dropped chains), so it must not label a subset band — a
                 // band drawn from the clean chains would carry a "did not
@@ -742,10 +742,10 @@ impl FitResult {
                 // uses, so the two agree on the same fit + selection (gh#409).
                 let convergence = match &pref.chain_selection {
                     Some(sel) => subset_convergence(segment, &pref.draws_path, sel)?,
-                    None => read_convergence(&stage_dir, pref.method),
+                    None => read_convergence(&method_dir, pref.method),
                 };
-                // Replay on the SAME backend the stage ran on; default only when
-                // a bare stage dir was passed (no fit view to read it from).
+                // Replay on the SAME backend the method ran on; default only when
+                // a bare method dir was passed (no fit view to read it from).
                 let backend = pref
                     .backend
                     .map(crate::args::types::ForwardBackend::from)
@@ -753,13 +753,13 @@ impl FitResult {
                 Ok(FitResult::Posterior(
                     PosteriorDraws::new(
                         draws,
-                        pref.stage,
+                        pref.name,
                         pref.method,
                         backend,
                         convergence,
                     )?
                     .with_selection_info(sel_info)
-                    .with_keys(DrawKeys { stage_dir, per_draw: keys })?,
+                    .with_keys(DrawKeys { method_dir, per_draw: keys })?,
                 ))
             }
             // No cloud: classify as a point-estimate fit, naming the method
@@ -769,10 +769,10 @@ impl FitResult {
             Err(posterior_draws::PosteriorDrawsError::Other(e)) => Err(e),
             Err(posterior_draws::PosteriorDrawsError::NoPosterior(e)) => {
                 if let Some(view) = crate::fit::fit_view::FitView::read(run_dir) {
-                    if let Some(s) = view.stages.last() {
+                    if let Some(s) = view.methods.last() {
                         return Ok(FitResult::PointEstimate {
                             method: Some(s.method),
-                            stage: s.method.as_str().to_string(),
+                            name: s.method.as_str().to_string(),
                         });
                     }
                 }
@@ -782,21 +782,21 @@ impl FitResult {
     }
 }
 
-/// Read a Bayesian stage's convergence summary (`<algorithm>_summary.json`):
+/// Read a Bayesian method's convergence summary (`<algorithm>_summary.json`):
 /// `max` over its R̂ map, and the min-parameter ESS **through the shared
 /// classification** ([`min_ess_over`]) rather than a bare fold. Returns
 /// [`ConvergenceStatus::NotAssessed`] when no summary or no R̂ is present (a
-/// single-chain stage), so a band is never silently "converged".
-fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> ConvergenceStatus {
+/// single-chain method), so a band is never silently "converged".
+fn read_convergence(method_dir: &Path, method: Option<FitAlgorithm>) -> ConvergenceStatus {
     // Chains that began at one point agree by construction; the leaf's R̂
     // is not a verdict (proposal 2026-09-08, §3.4), so the band carries no
     // number — the same demotion `fit summary` applies.
     // An unreadable fit_state.toml is not assessed either: never "converged".
-    if !matches!(crate::fit::method_result::point_start(stage_dir), Ok(None)) {
+    if !matches!(crate::fit::method_result::point_start(method_dir), Ok(None)) {
         return ConvergenceStatus::NotAssessed;
     }
     let try_read = |name: &str| -> Option<ConvergenceStatus> {
-        let bytes = std::fs::read(stage_dir.join(name)).ok()?;
+        let bytes = std::fs::read(method_dir.join(name)).ok()?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
         // gh#728: a summary of another vintage holds `rhat` and `ess` keys
         // that are different estimators under the same names, so labelling a
@@ -826,7 +826,7 @@ fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> Convergen
         }
     };
     // Each method reads its OWN `<algorithm>_summary.json` via the naming seam —
-    // no cross-name fallback. A missing summary (an unnamed stage dir, or a
+    // no cross-name fallback. A missing summary (an unnamed method dir, or a
     // pre-rename mh fit that stored `pmmh_summary.json`) is NotAssessed, never
     // read under a sibling's name. The mh-summary rename is a clean break: a fit
     // produced before it must be re-run to be assessed here.
@@ -996,7 +996,7 @@ impl ConditionedSource {
     fn load(
         scenario: String,
         per_draw: Vec<Option<(usize, usize)>>,
-        stage_dir: &Path,
+        method_dir: &Path,
         model: &ir::Model,
     ) -> Result<Self, String> {
         // No incidence columns: only STATE quantities route to the smoothing
@@ -1011,7 +1011,7 @@ impl ConditionedSource {
         }
         let mut paths = std::collections::HashMap::new();
         for (chain, keys) in by_chain {
-            let traj_path = ChainIndex(chain).dir_in(stage_dir).join("trajectories.tsv");
+            let traj_path = ChainIndex(chain).dir_in(method_dir).join("trajectories.tsv");
             let read = io::trajectories::read_trajectories(&traj_path, &columns, &keys)
                 .map_err(|e| {
                     format!(
@@ -1456,7 +1456,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     let treatment_kind = treatment.kind();
     let posterior = match treatment {
         ParamTreatment::Posterior(pd) => pd,
-        ParamTreatment::PlugIn { method, stage } => return Err(plugin_refusal(method, &stage)),
+        ParamTreatment::PlugIn { method, name } => return Err(plugin_refusal(method, &name)),
     };
 
     // A chain selection actually dropped chains — warn loudly (non-quietable),
@@ -1478,7 +1478,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
         Some(HorizonArg::OneStep) => {
             // EXPLICIT request: a non-filterable fit is a hard error with a redirect.
             Some(FilterableFit::from_posterior(posterior.clone()).map_err(|why| {
-                one_step_refusal(why, posterior.method, &posterior.stage)
+                one_step_refusal(why, posterior.method, &posterior.name)
             })?)
         }
         None => {
@@ -2197,7 +2197,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                 posterior.keys().map(|k| {
                     let saved = k.resolve_saved();
                     SavedPaths {
-                        stage_dir: saved.stage_dir,
+                        method_dir: saved.method_dir,
                         per_draw: ff_idx.iter().map(|&i| saved.per_draw[i]).collect(),
                         n_saved: ff_idx.iter().filter(|&&i| saved.per_draw[i].is_some()).count(),
                     }
@@ -2256,7 +2256,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                              reported as fully censored rather than taken from the \
                              free-forward replay, which ignores every observation they are \
                              anchored inside (gh#722).\n  \
-                             Fix: re-fit with `n_trajectories` set on the posterior stage \
+                             Fix: re-fit with `n_trajectories` set on the posterior method \
                              (PGAS/PMMH save the smoothing paths), then re-run \
                              `fit predict`."
                         );
@@ -2306,7 +2306,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                         Some(ConditionedSource::load(
                             scenario.clone(),
                             saved.per_draw.clone(),
-                            &saved.stage_dir,
+                            &saved.method_dir,
                             &model,
                         )?)
                     }
@@ -2349,7 +2349,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                         model: compiled_ir.clone(),
                         params_files: vec![],
                         // Replay on the SAME forward simulator the fit used
-                        // (chain_binomial / ode), resolved from the stage — never a
+                        // (chain_binomial / ode), resolved from the method — never a
                         // hardcoded default.
                         backend: posterior.backend,
                         dt,
@@ -2687,7 +2687,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
         // `--by-chain` wrote one, `scenario`, the `sweep:<param>` columns,
         // `time`, the stratum dims, `horizon`, `treatment`. The band columns are
         // the quantile labels; the diagnostics
-        // are the stage-provenance pair (`fit_rhat_max` / `fit_ess_min`, constant down
+        // are the method-provenance pair (`fit_rhat_max` / `fit_ess_min`, constant down
         // the file), the per-row pairs (`rhat_mean` / `ess_mean` over the latent
         // expected value, `rhat_pred` / `ess_pred` over the predictive draws —
         // gh#794), and `n_draws`. `value_kind` is the observation's likelihood
@@ -2887,7 +2887,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
         sources.len(),
         posterior.n_draws(),
         method_label,
-        posterior.stage,
+        posterior.name,
     );
     Ok(PredictOutcome { written, failures })
 }
@@ -4138,10 +4138,10 @@ mod tests {
 
     #[test]
     fn read_convergence_finds_mh_summary_for_mh_method() {
-        // An mh(-ODE) stage writes `mh_summary.json` (NOT `pmmh_summary.json`),
+        // An mh(-ODE) method writes `mh_summary.json` (NOT `pmmh_summary.json`),
         // so read_convergence must resolve it via the algorithm's own name. On
         // the pre-fix code — which searched only pgas/pmmh — this returned
-        // NotAssessed, silently dropping the mh stage's convergence.
+        // NotAssessed, silently dropping the mh method's convergence.
         let dir = std::env::temp_dir().join("camdl_read_convergence_mh_summary_test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -4156,7 +4156,7 @@ mod tests {
                 assert!((rhat_max - 1.03).abs() < 1e-9, "rhat_max from mh_summary.json");
                 assert!((ess_min - 250.0).abs() < 1e-9, "ess_min from mh_summary.json");
             }
-            _ => panic!("mh stage must resolve its own mh_summary.json, not NotAssessed"),
+            _ => panic!("mh method must resolve its own mh_summary.json, not NotAssessed"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4170,7 +4170,7 @@ mod tests {
     /// the value. Measured on the summary headline as a 13x inversion between
     /// two runs of one model differing only in particle count (gh#687); this is
     /// the same reduce, on the band label.
-    /// A stage whose R̂ was REFUSED must not have its predictive band labelled
+    /// A method whose R̂ was REFUSED must not have its predictive band labelled
     /// with a reported convergence status. The refusals live in the summary's
     /// `rhat_not_reported`, and reading only the numeric maps dropped them —
     /// silently promoting "we could not assess this parameter" to "assessed,
@@ -4666,7 +4666,7 @@ mod tests {
 
     #[test]
     fn refusal_for_a_posterior_sampler_is_not_an_optimizer_message() {
-        // gh#343: a Bayesian sampler stage (PGAS / PMMH / MH) that reaches the
+        // gh#343: a Bayesian sampler method (PGAS / PMMH / MH) that reaches the
         // refusal — its draws.tsv is absent (incomplete / still running) — must
         // NOT be called an "optimizer fit". PGAS is the *default* Bayesian path;
         // the misclassification made the blessed posterior-predictive verb
@@ -4831,7 +4831,7 @@ mod tests {
     /// The columns land in the header positions the manifest advertises, and an
     /// assessed row renders real numbers there.
     #[test]
-    fn per_row_convergence_columns_render_between_the_stage_stamp_and_n_draws() {
+    fn per_row_convergence_columns_render_between_the_method_stamp_and_n_draws() {
         let (means, preds, chains) = diluted_forecast_cell(12.0, 230.0);
         let row = band_row(56.0, vec![], CellDraws { predictive: &preds, mean: &means }, &chains)
             .expect("the cell bands");
@@ -4858,14 +4858,14 @@ mod tests {
         assert!(at("fit_rhat_max") < at("rhat_mean"));
         assert!(at("ess_mean") < at("rhat_pred"));
         assert!(at("ess_pred") < at("n_draws"));
-        // The stage stamp is the fit's worst parameter; the per-row numbers are
+        // The method stamp is the fit's worst parameter; the per-row numbers are
         // this row's. They are different numbers, which is the whole point.
         assert_eq!(cells[at("fit_rhat_max")], "2.7863");
         assert_ne!(cells[at("rhat_mean")], "", "an assessed row reports rhat_mean");
         assert_ne!(cells[at("rhat_pred")], "", "an assessed row reports rhat_pred");
         assert_ne!(
             cells[at("rhat_mean")], cells[at("fit_rhat_max")],
-            "the per-row R̂ must not be the stage's provenance stamp"
+            "the per-row R̂ must not be the method's provenance stamp"
         );
     }
 
@@ -5161,7 +5161,7 @@ mod tests {
         assert_eq!(Horizon::FreeForward.as_str(), "free_forward");
         assert_eq!(TreatmentKind::Posterior.label(), "posterior");
         assert_eq!(TreatmentKind::PlugIn.label(), "plug_in");
-        let plug = ParamTreatment::PlugIn { method: Some(FitAlgorithm::If2), stage: "scout".into() };
+        let plug = ParamTreatment::PlugIn { method: Some(FitAlgorithm::If2), name: "scout".into() };
         assert_eq!(plug.kind(), TreatmentKind::PlugIn);
     }
 
@@ -5181,11 +5181,11 @@ mod tests {
     fn point_estimate_fit_maps_to_plugin_treatment() {
         // The safety property, behaviourally: an optimizer fit can only ever
         // become a PlugIn treatment — never Posterior.
-        let fit = FitResult::PointEstimate { method: Some(FitAlgorithm::If2), stage: "scout".into() };
+        let fit = FitResult::PointEstimate { method: Some(FitAlgorithm::If2), name: "scout".into() };
         match fit.into_treatment() {
-            ParamTreatment::PlugIn { method, stage } => {
+            ParamTreatment::PlugIn { method, name } => {
                 assert_eq!(method, Some(FitAlgorithm::If2));
-                assert_eq!(stage, "scout");
+                assert_eq!(name, "scout");
             }
             ParamTreatment::Posterior(_) => panic!("a point estimate must not become a posterior band"),
         }

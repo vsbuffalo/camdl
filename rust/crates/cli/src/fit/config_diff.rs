@@ -1,7 +1,7 @@
 //! Structured fit-config diff engine.
 //!
 //! Computes a typed diff between two `FitConfig` instances —
-//! ([estimate], [fixed], bounds, priors, data hashes, stages) — for
+//! ([estimate], [fixed], bounds, priors, data hashes, methods) — for
 //! the `table_row.config_diff_from_baseline` field. JSON consumers
 //! need a structured shape (free-form text loses information); the
 //! text renderer in `fit table` projects the same struct
@@ -455,8 +455,8 @@ fn diff_methods(this: Option<&Method>, baseline: Option<&Method>) -> MethodChang
 
 /// The per-key settings deltas between two methods, in key order.
 pub fn method_setting_changes(this: &Method, baseline: &Method) -> Vec<MethodSettingChange> {
-    let ts = stage_settings_map(this);
-    let bs = stage_settings_map(baseline);
+    let ts = method_settings_map(this);
+    let bs = method_settings_map(baseline);
     let key_union: BTreeSet<&str> = ts.keys().chain(bs.keys()).map(|s| s.as_str()).collect();
     let mut out = Vec::new();
     for key in key_union {
@@ -479,7 +479,7 @@ pub fn method_setting_changes(this: &Method, baseline: &Method) -> Vec<MethodSet
 /// surface. Deriving from serialization means the key set can never drift
 /// from the enum; keys carry the TOML-side spellings (`starts`), which is
 /// what the user wrote and diffs against.
-fn stage_settings_map(method: &Method) -> BTreeMap<String, serde_json::Value> {
+fn method_settings_map(method: &Method) -> BTreeMap<String, serde_json::Value> {
     let mut m = BTreeMap::new();
     // The serde tag puts `algorithm` in the map alongside every field;
     // `backend` is an ordinary field on all variants.
@@ -536,7 +536,7 @@ mod tests {
             resolved_priors: Vec::new(),
             parameters_provenance: Default::default(),
             methods_declared: Vec::new(),
-            stages: Vec::new(),
+            methods: Vec::new(),
         }
     }
 
@@ -718,7 +718,7 @@ mod tests {
         starts     = "from_prior"
         "#).expect("toml parse");
         let method = cfg.inference.method.as_ref().unwrap();
-        let m = stage_settings_map(method);
+        let m = method_settings_map(method);
         for key in ["algorithm", "backend", "chains", "use_nuts", "starts"] {
             assert!(m.contains_key(key),
                 "settings map must carry '{key}' — a fit diff over it \
@@ -730,7 +730,7 @@ mod tests {
         if let crate::fit::config_v2::Algorithm::PGAS { use_nuts, .. } = &mut hot.algorithm {
             *use_nuts = true;
         }
-        let hot_map = stage_settings_map(&hot);
+        let hot_map = method_settings_map(&hot);
         assert_ne!(m.get("use_nuts"), hot_map.get("use_nuts"),
             "a use_nuts change must be visible to fit diff");
     }

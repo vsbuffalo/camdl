@@ -1,8 +1,8 @@
 //! Wiring guard for the deterministic ODE Richardson dt-convergence check
 //! (gh#52, gh#227) — `dt_check::run_richardson_ladder_ode`, wired into the
-//! `nl-sbplx`/`nl-bobyqa` (ODE-MLE) and `mh` (ODE-MH) stages.
+//! `nl-sbplx`/`nl-bobyqa` (ODE-MLE) and `mh` (ODE-MH) methods.
 //!
-//! The bug this guards: before gh#227 the ODE inference stages wrote
+//! The bug this guards: before gh#227 the ODE inference methods wrote
 //! `dt_check: None` — the post-fit dt-convergence audit silently never ran, so
 //! a discretization-dependent MLE/MAP (coarse dt creating a fake basin that
 //! synthetic recovery shares and can't detect) shipped with no warning. This
@@ -162,7 +162,7 @@ fn ode_dt_check_runs_and_writes_verdict() {
     let Some(text) = run_nlsbplx_fit("on", &[]) else { return };
     // The dt-check ran: fit_state.toml carries a [dt_check] block with a
     // non-skipped verdict. (Before gh#227 this block was absent —
-    // `dt_check: None` on every ODE stage.)
+    // `dt_check: None` on every ODE method.)
     assert!(text.contains("[dt_check]"),
         "fit_state.toml has no [dt_check] block — the ODE dt-check did not run \
          (regression: gh#227 wiring). Contents:\n{text}");
@@ -175,7 +175,7 @@ fn ode_dt_check_runs_and_writes_verdict() {
 #[test]
 fn ode_dt_check_suppressed_by_no_dt_check_flag() {
     // --no-dt-check is keyed into the method's identity via
-    // CliStageOverrides (gh#540 seam; gh#726 for the nl-* dt_check field).
+    // CliMethodOverrides (gh#540 seam; gh#726 for the nl-* dt_check field).
     let Some(text) = run_nlsbplx_fit("off", &["--no-dt-check"]) else { return };
     // --no-dt-check → enabled=false → Skipped → the block is omitted entirely
     // (mirrors the IF2 path's "skipped omits the block" semantics).

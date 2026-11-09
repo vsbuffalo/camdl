@@ -33,7 +33,7 @@ report.
 
 Count per-parameter clamp activations per iteration. When >10% of particle-steps
 hit the clamp, record in `ParamIterDiag` and report to stderr. The count goes
-into `parameter_traces.tsv` and the stage summary JSON for agent consumption.
+into `parameter_traces.tsv` and the method's summary JSON for agent consumption.
 
 ### 2. Preflight transform report (~30 lines in runner/if2)
 

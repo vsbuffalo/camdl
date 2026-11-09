@@ -5,8 +5,8 @@
 //! End-to-end: author a small SIR, simulate synthetic prevalence observations
 //! at a KNOWN beta on the ODE backend, then run an `mh`+`ode` fit starting far
 //! from the truth and assert the posterior recovers it. This guards the whole
-//! mh-on-ode path — the `Stage::Mh` config variant, the dispatch arm, and the
-//! deterministic `compute_ode_loglik` eval seam in `pmmh::run_stage` — against
+//! mh-on-ode path — the `Algorithm::Mh` config variant, the dispatch arm, and the
+//! deterministic `compute_ode_loglik` eval seam in `pmmh::run_method` — against
 //! "wiring broken / degenerate / silently-wrong" regressions. "Works as
 //! expected" = the chain moves from the start toward the truth and produces a
 //! finite, in-bounds posterior.
@@ -119,8 +119,8 @@ fn find_named(dir: &Path, name: &str) -> Vec<PathBuf> {
     found
 }
 
-/// Walk `dir` for every `trace.tsv`. The mh stage writes one per chain at
-/// `<stage_dir>/chain_<N>/trace.tsv`.
+/// Walk `dir` for every `trace.tsv`. The mh method writes one per chain at
+/// `<method_dir>/chain_<N>/trace.tsv`.
 fn find_traces(dir: &Path) -> Vec<PathBuf> {
     find_named(dir, "trace.tsv")
 }

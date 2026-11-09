@@ -205,7 +205,7 @@ fn quantity_fills_for_mh_fit_not_just_a_method_allowlist() {
     // gh#322 review (should-fix): the derive gate used a method allowlist
     // (`pgas|pmmh`) that silently dropped `mh` — a Bayesian sampler that ALSO
     // writes `draws.tsv`. Routed through the artifact authority
-    // (`resolve_posterior_draws`: does a stage have draws.tsv?), an mh fit's
+    // (`resolve_posterior_draws`: does a method have draws.tsv?), an mh fit's
     // quantity is DERIVED, not rendered `—`.
     let bin = skip_if_missing_binary();
     let tmp = std::env::temp_dir().join(format!("camdl_table_q_mh_{}", std::process::id()));

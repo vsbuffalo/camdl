@@ -1607,17 +1607,10 @@ flat IR — no IR changes needed.
 
 ### 15.6 Inference Pipeline Configuration `[v0.2+]`
 
-Three-stage pipeline (ODE → IF2 → PMCMC) as separate config:
-
-```
-inference: {
-  stages: [
-    { backend: "ode", method: "lbfgs", max_iter: 1000 },
-    { backend: "chain_binomial", method: "if2", particles: 500, iterations: 100 },
-    { backend: "gillespie", method: "pmcmc", particles: 200, mcmc_steps: 50000 }
-  ]
-}
-```
+Superseded. A `fit.toml` carries one `[method]`; a sequence such as ODE MLE →
+IF2 → a posterior sampler is several files, each starting from the last through
+`starts = { from_mle = "@label" }` or `from_posterior`
+(`docs/dev/proposals/2026-09-08-workflow-first-fit-config.md`).
 
 ### 15.7 Reporting Pipeline Implementation `[v0.2]`
 

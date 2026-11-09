@@ -57,22 +57,22 @@ to IR. `check` reports diagnostics (errors / warnings / lints);
 ## Which methods go through `fit run`
 
 `fit run` is the home for _fitting_. Every estimation and posterior-sampling
-method is expressible as a named stage in a `fit.toml`; some also have a
-standalone command for quick one-shot use.
+method is a `[method]` in a `fit.toml`; some also have a standalone command for
+quick one-shot use.
 
-| Method                   | `fit.toml` stage (`algorithm = …`) | Standalone command | Role                                                                       |
-| ------------------------ | ---------------------------------- | ------------------ | -------------------------------------------------------------------------- |
-| IF2 (iterated filtering) | `"if2"`                            | —                  | Maximum-likelihood point estimate.                                         |
-| PGAS + NUTS              | `"pgas"`                           | —                  | Bayesian posterior (exact complete-data likelihood, analytical gradients). |
-| PMMH                     | `"pmmh"`                           | —                  | Bayesian posterior, gradient-free.                                         |
-| Particle filter          | `"pfilter"`                        | `camdl pfilter`    | Log-likelihood evaluation at fixed θ (diagnostic).                         |
-| NLopt (Subplex / BOBYQA) | `"nl-sbplx"`, `"nl-bobyqa"`        | —                  | Deterministic MLE on the ODE backend.                                      |
-| Survey (LHS landscape)   | —                                  | `camdl survey`     | Identifiability diagnostic; _feeds_ a fit, is not a stage.                 |
-| Profile likelihood       | —                                  | `camdl profile`    | Meta-routine running IF2 per grid point.                                   |
+| Method                   | `[method]` (`algorithm = …`) | Standalone command | Role                                                                       |
+| ------------------------ | ---------------------------- | ------------------ | -------------------------------------------------------------------------- |
+| IF2 (iterated filtering) | `"if2"`                      | —                  | Maximum-likelihood point estimate.                                         |
+| PGAS + NUTS              | `"pgas"`                     | —                  | Bayesian posterior (exact complete-data likelihood, analytical gradients). |
+| PMMH                     | `"pmmh"`                     | —                  | Bayesian posterior, gradient-free.                                         |
+| Particle filter          | `"pfilter"`                  | `camdl pfilter`    | Log-likelihood evaluation at fixed θ (diagnostic).                         |
+| NLopt (Subplex / BOBYQA) | `"nl-sbplx"`, `"nl-bobyqa"`  | —                  | Deterministic MLE on the ODE backend.                                      |
+| Survey (LHS landscape)   | —                            | `camdl survey`     | Identifiability diagnostic; _feeds_ a fit, is not a method.                |
+| Profile likelihood       | —                            | `camdl profile`    | Meta-routine running IF2 per grid point.                                   |
 
 Two methods are **fit-run only** — PGAS and PMMH have no standalone command,
-because Bayesian sampling presupposes the priors, convergence gates, and staging
-that a `fit.toml` provides. Both **require priors** (declared under
+because Bayesian sampling presupposes the priors and convergence gates that a
+`fit.toml` provides. Both **require priors** (declared under
 `[estimate.<name>.prior]`); IF2, particle filter, and the NLopt optimizers do
 not. PGAS uses gradient-based NUTS by default, which requires the compiler to
 have emitted `rate_grad` expressions (autodiff); set `use_nuts = false` for a
@@ -81,7 +81,7 @@ gradient-free Metropolis-within-Gibbs fallback.
 Two routines are **standalone only**. `survey` is a diagnostic, not a fit — it
 maps the landscape so you can see ridges and multimodality before committing
 compute. `profile` is a meta-fit that runs IF2 at each point of a parameter
-grid; it orchestrates fits rather than being a single stage.
+grid; it orchestrates fits rather than being a single method.
 
 ## Workflows
 
@@ -223,20 +223,19 @@ camdl compare @baseline @candidate --pointwise pointwise.tsv
 
 `compare` renders a baseline-centered table of prequential scores (per-step
 log-score, CRPS, PIT). Each argument is either an explicit prequential artifact
-— a `prequential.json` (or a stage dir holding one), written by a `pfilter`
-stage within a fit or by `camdl pfilter --save-prequential`, and read **as-is**
-— **or** a fit handle (`@label`, a hash prefix, a run directory, or a
-`fit.toml`), whose prequential is **auto-derived** by re-filtering at the fit's
-sealed θ̂. `--particles` and `--seed` set the filter used for any auto-derived
-handle and are applied **uniformly** across all derived fits, so `T_score` and
-the scores stay commensurable; they are ignored for an explicit
-`prequential.json` (read as-is). The scores are **plug-in and
-in-sample-optimistic** — computed at a single θ fit to the whole series — so
-they are not a leave-future-out forecast score. The optimism does not cancel
-when two models are differenced, either: it grows with the effective number of
-parameters each model was free to tune against the same observations, so Δelpd
-tilts toward the more flexible model. Read a comparison as indicative, alongside
-`se(Δ)` and the caveats.
+— a `prequential.json` (or a method directory holding one), written by a
+`pfilter` method or by `camdl pfilter --save-prequential`, and read **as-is** —
+**or** a fit handle (`@label`, a hash prefix, a run directory, or a `fit.toml`),
+whose prequential is **auto-derived** by re-filtering at the fit's sealed θ̂.
+`--particles` and `--seed` set the filter used for any auto-derived handle and
+are applied **uniformly** across all derived fits, so `T_score` and the scores
+stay commensurable; they are ignored for an explicit `prequential.json` (read
+as-is). The scores are **plug-in and in-sample-optimistic** — computed at a
+single θ fit to the whole series — so they are not a leave-future-out forecast
+score. The optimism does not cancel when two models are differenced, either: it
+grows with the effective number of parameters each model was free to tune
+against the same observations, so Δelpd tilts toward the more flexible model.
+Read a comparison as indicative, alongside `se(Δ)` and the caveats.
 
 The evidence column is gated on that standard error: when `|Δelpd| < 2·se(Δ)`
 the cell reads `within noise` and carries no Jeffreys tier, because the tier
@@ -263,9 +262,9 @@ flow, produce different likelihoods at identical times; each per-stream score
 records what its value covered, and an older trace with no such record is
 refused as unverifiable rather than passed as agreeing), and fits bound to
 different observed data (gh#713; override: `--allow-data-mismatch`, which
-renders the Δ as confounded). A fit whose terminal stage ran on a backend other
-than `chain_binomial` is refused on the derive path, since the derived score
-would come from a different forward process than the fit used (gh#312).
+renders the Δ as confounded). A fit whose method ran on a backend other than
+`chain_binomial` is refused on the derive path, since the derived score would
+come from a different forward process than the fit used (gh#312).
 
 `--pointwise PATH` writes the per-observation difference the table already
 computes in order to form `se(Δelpd)`, as a TSV with one row per candidate ×

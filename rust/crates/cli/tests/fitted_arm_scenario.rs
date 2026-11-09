@@ -168,7 +168,7 @@ fn ok(out: Output, what: &str) -> Output {
     out
 }
 
-/// The one completed fit leaf (the stage leaf holding `draws.tsv`) under `root`.
+/// The one completed fit leaf (the method leaf holding `draws.tsv`) under `root`.
 fn draws_leaf(root: &Path) -> PathBuf {
     let mut found = Vec::new();
     let mut stack = vec![root.to_path_buf()];

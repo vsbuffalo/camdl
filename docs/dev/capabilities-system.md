@@ -103,9 +103,9 @@ but the "what the backend provides" side forks by mode.
   `--event-log` request time (ODE is rejected by a hand-written arm just above,
   so the bitflag check there only ever fires as an internal-error assertion).
 - `fit/methods.rs::check_model_capabilities` — the inference gate (hardcoded
-  table). Called per-stage on `camdl fit run` (`fit/mod.rs`, via
-  `gate_run_stages_against_model`), in `profile.rs`, in `survey.rs` (for
-  `--eval simulate`), and inside `nlopt_stage.rs`.
+  table). Called once per `camdl fit run` (`fit/mod.rs`, via
+  `gate_run_method_against_model`), in `profile.rs`, in `survey.rs` (for
+  `--eval simulate`), and inside `nlopt_method.rs`.
 
 The inference math itself contains **zero** capability references — the gate is
 the only thing standing between a real-compartment model and a silent mis-fit
@@ -165,8 +165,8 @@ algorithm with `methods::NUTS_STEER`, which points at PGAS's NUTS move
 **Enforcement.** `validate_combo` is called at config-load / pre-flight, both
 hard aborts:
 
-- `config_v2.rs` (inside `FitConfigV2::validate`) — **per stage** on
-  `camdl fit run` (a config can mix an ODE scout + a chain-binomial refine).
+- `config_v2.rs` (inside `FitConfigV2::validate`) — on the one `[method]` of
+  `camdl fit run`.
 - `profile.rs` — before any expensive setup, on the raw
   `--algorithm`/`--backend` flags.
 
@@ -179,8 +179,8 @@ some at config-load, some deep inside the algorithm at runtime. The defining
 property: a model accepted on a backend by one algorithm is **rejected on the
 same backend by another**. Representative confirmed cases:
 
-- **Priors required for Bayesian, not MLE.** `Stage::requires_priors` returns
-  true only for `PGAS`/`PMMH` (`config_v2.rs`); enforced pre-flight by
+- **Priors required for Bayesian, not MLE.** `Algorithm::requires_priors`
+  returns true only for `PGAS`/`PMMH` (`config_v2.rs`); enforced pre-flight by
   `validate_priors_present`. PGAS additionally refuses _implicit flat_ priors at
   runtime (`pgas.rs`). IF2/NLopt ignore priors (and warn if you declare unused
   ones).
@@ -195,7 +195,7 @@ same backend by another**. Representative confirmed cases:
   switch to IF2/PMMH. This is a top-severity _silent-wrong-answer_ guard, caught
   correctly.
 - **`ic_free` requires `if2`, or a model that DRAWS its initial state**
-  (`methods.rs::validate_ic_free`, called per stage from
+  (`methods.rs::validate_ic_free`, called on the method from
   `FitConfigV2::validate`). Two properties are needed, not one: the algorithm
   must drop y₁ from the accumulated log-likelihood, _and_ its particles must
   differ in x₀ — the reweight at y₁ is what pins the initial state, and with one

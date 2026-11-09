@@ -31,7 +31,7 @@ SD(m) / rw_sd = cooling ^ (m / cooling_target_iters)
 
 So the SD reaches `cooling × rw_sd` exactly at iteration `cooling_target_iters`,
 and keeps shrinking at the same geometric rate after that. It does not stop at
-the target and it does not depend on the stage's total `iterations`.
+the target and it does not depend on the run's total `iterations`.
 
 ## Relation to pomp
 
@@ -60,7 +60,7 @@ remaining after 50 of them (King, Nguyen & Ionides 2016, _J. Stat. Softw._
 
 Two consequences follow directly from the formula:
 
-- Lengthening a run cools it further. A 200-iteration stage at `cooling = 0.7`
+- Lengthening a run cools it further. A 200-iteration run at `cooling = 0.7`
   ends at 24% of `rw_sd`, not 70%.
 - Setting `cooling_target_iters` below `iterations` cools fast and then runs the
   remaining iterations near the noise floor; setting it above leaves the run hot

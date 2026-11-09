@@ -36,7 +36,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// the whole run.
 ///
 /// Shared between simulate (data-file hashing for run metadata) and fit
-/// (data-file hashing for per-stage provenance). Was
+/// (data-file hashing for per-method provenance). Was
 /// `fit::provenance::file_content_hash` before the 2026-04-19 unification.
 pub fn file_hash(path: &str) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;

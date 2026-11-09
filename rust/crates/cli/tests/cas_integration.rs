@@ -553,12 +553,12 @@ fn starts_from_resolves_short_hash() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let results = tmp.path().join("results");
-    // Fake a stage dir with a known-hash run.json. The resolver
+    // Fake a method dir with a known-hash run.json. The resolver
     // walks results/fits/**, so we need to place the run.json
     // under that structure.
-    let stage = results.join("fits").join("demo-abc12345")
+    let method = results.join("fits").join("demo-abc12345")
         .join("if2-1fb03eee").join("seed_1-06cbd6b3");
-    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::create_dir_all(&method).unwrap();
     // gh#147: the resolver matches a `FitStage` `runid::RunRecord` leaf on its
     // `run_id` hex prefix. Plant a leaf whose `run_id` starts `deadbeef`.
     let target_hash = "deadbeefc0ffee00000000000000000000000000000000000000000000000000";
@@ -574,7 +574,7 @@ fn starts_from_resolves_short_hash() {
         "inputs":{{"method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},
         "provenance":{{"created_at":"2026-04-19T12:00:00Z","argv":[]}}
     }}"#, target_hash);
-    std::fs::write(stage.join("run.json"), run_json).unwrap();
+    std::fs::write(method.join("run.json"), run_json).unwrap();
 
     // Exercise the short-hash leaf resolver through `fit run`: the removed
     // flags must error with the actionable replacement message, and the
@@ -695,7 +695,7 @@ fn list_kind_filter_isolates_sections() {
                "--output-dir", &output.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");
-    // Synthesise a CAS fit (single `mle` stage leaf + sidecar).
+    // Synthesise a CAS fit (single `mle` method leaf + sidecar).
     write_cas_fit(&output, "demo", "abc12345", &["if2"], "m");
 
     let fit_only = Command::new(&bin)
@@ -791,11 +791,11 @@ fn show_resolves_fit_by_hash_prefix() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
-    // gh#147 (M3.2): a CAS fit is addressed by its stage-leaf `run_id` prefix;
+    // gh#147 (M3.2): a CAS fit is addressed by its method-leaf `run_id` prefix;
     // there is no legacy fit-wide record. `run_id` starts `deadbeef` so the
     // short prefix matches.
     let run_id = "deadbeefc0ffee00000000000000000000000000000000000000000000000000";
-    write_cas_fit_stage(&output, run_id, "demo");
+    write_cas_fit_method(&output, run_id, "demo");
     let out = Command::new(&bin)
         .args(["show", "deadbee", "--root", &output.to_string_lossy()])
         .output().expect("spawn");
@@ -1004,7 +1004,7 @@ fn show_prints_metadata() {
 /// returned "unrecognised kind".
 /// A content-addressed fit-stage leaf (`runid::RunRecord`, M3.2) at
 /// `fits/{fit}/{method}/{seed}/run.json`, addressable by `run_id` prefix.
-fn write_cas_fit_stage(output: &Path, run_id: &str, fit_label: &str) -> PathBuf {
+fn write_cas_fit_method(output: &Path, run_id: &str, fit_label: &str) -> PathBuf {
     let leaf = output.join("fits")
         .join(format!("{fit_label}-5ca1ab1e"))
         .join("if2-1fb03eee")
@@ -1037,14 +1037,14 @@ fn write_cas_fit_stage(output: &Path, run_id: &str, fit_label: &str) -> PathBuf 
 /// the shape `read_fit_segment` derives a single fit-level entry from, so
 /// `list` / `fit table` see one fit with `methods_declared` taken from the
 /// leaves. Returns the segment dir.
-fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, stages: &[&str], model_identity: &str) -> PathBuf {
+fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, methods: &[&str], model_identity: &str) -> PathBuf {
     let seg = output.join("fits").join(format!("{label}-{fit_h8}"));
     std::fs::create_dir_all(&seg).unwrap();
     let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
-    for (i, stage) in stages.iter().enumerate() {
+    for (i, method) in methods.iter().enumerate() {
         let nn = i + 1;
         let leaf = seg
-            .join(format!("{stage}-1fb03eee"))
+            .join(format!("{method}-1fb03eee"))
             .join("seed_1-06cbd6b3");
         std::fs::create_dir_all(&leaf).unwrap();
         // Any distinct 64-hex run_id per leaf; `read_fit_segment` reads the
@@ -1059,12 +1059,12 @@ fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, stages: &[&str], mode
             "engine_version": "0.1.0+test",
             "levels": [
                 {{"name":"fit","label":"{label}","hash":"{fit_hash}","schema_version":1}},
-                {{"name":"method","label":"{stage}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},
+                {{"name":"method","label":"{method}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},
                 {{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}
             ],
             "status": "completed",
             "artifacts": {{}},
-            "inputs": {{"method":"{stage}","backend":"chain_binomial","seed":1,"n_chains":2}},
+            "inputs": {{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":2}},
             "provenance": {{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}
         }}"#);
         std::fs::write(leaf.join("run.json"), rec).unwrap();
@@ -1125,8 +1125,8 @@ fn write_two_leaves_of_one_method(output: &Path, method: &str) -> (PathBuf, [Str
 /// gh#895 + gh#901: `camdl list --kind fit --format json` speaks *method*, and
 /// its per-leaf entries are distinguishable from one another.
 ///
-/// Two things were wrong with the row. The keys were `stages`,
-/// `stages_declared` and per-entry `stage` — a vocabulary the store levels, the
+/// Two things were wrong with the row. The keys were `methods`,
+/// `stages_declared` and per-entry `method` — a vocabulary the store levels, the
 /// fit config and the CLI had all left. And two leaves of one algorithm in one
 /// segment were indistinguishable: each carries its own `method`-level hash and
 /// its own `run_id`, and the row carried neither, so a reader could not say
@@ -1186,14 +1186,14 @@ fn fit_list_json_names_methods_and_can_tell_two_leaves_apart() {
 }
 
 /// gh#147 (M3.2): `camdl show <fit-stage path | run_id prefix>` renders the
-/// CAS fit-stage `RunRecord` — factored levels + the recorded FitStageMeta.
+/// CAS fit-stage `RunRecord` — factored levels + the recorded method metadata.
 #[test]
-fn show_renders_fit_stage_metadata() {
+fn show_renders_fit_method_metadata() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
     let run_id = "5ca1ab1e00000000000000000000000000000000000000000000000000000000";
-    let leaf = write_cas_fit_stage(&output, run_id, "parent");
+    let leaf = write_cas_fit_method(&output, run_id, "parent");
 
     // Resolve by full path.
     let out = Command::new(&bin)

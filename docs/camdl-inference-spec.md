@@ -317,7 +317,7 @@ orthogonal axes:
 
 - **Data axis** — real data (`[data]`) or synthetic data (`[synthetic]`,
   generated from known truth). Mutually exclusive.
-- **Fit axis** — list-valued `fit_seeds`. Each seed runs the full stage pipeline
+- **Fit axis** — list-valued `fit_seeds`. Each seed runs the method
   independently with a different IF2/PGAS seed and (optionally) perturbation
   start.
 
@@ -455,7 +455,7 @@ case. Two things supply that spread, and either is enough:
   I0 = { bounds = [1, 500], perturb_only_at_t0 = true }
   ```
 
-The stage's algorithm must be `if2`, `pfilter` or `pmmh`; `pgas` and the ODE
+The method's algorithm must be `if2`, `pfilter` or `pmmh`; `pgas` and the ODE
 algorithms accumulate every observation unconditionally and are rejected
 outright.
 
@@ -561,8 +561,8 @@ E0 = 140
 I0 = 118
 
 [tail_chain_agreement]
-# Per-parameter Â over the last half of iterations. Refine reads
-# this to gate Stage 1 of its compound scout-convergence check.
+# Per-parameter Â over the last half of iterations: the Â leg of
+# the IF2 gate reads it.
 R0 = 1.02
 sigma = 1.01
 gamma = 1.07
@@ -652,7 +652,7 @@ The final output of inference. A valid params.toml with provenance in comments:
 # Data: data/london_cases.tsv (hash: f9e2b047)
 # Fit: fit.toml (hash: b2c4d6e8)
 # Seed: 1
-# Stage: validate, chain 1
+# Method: if2, chain 1
 # Log-likelihood: -3804.9 (sd: 5.2, N=10000)
 # ESS at MLE: mean=3842, min=1205
 # Timestamp: 2026-03-30T14:30:00Z
@@ -817,7 +817,7 @@ when any start exists).
   final_params.toml                 ← winner θ̂ + [provenance] (run-root)
   chain_evaluations.tsv             ← full loglik-eval score table
   diagnostics.json                  ← structured warnings
-  run.json                          ← stage metadata (post-Phase-3)
+  run.json                          ← method-leaf metadata (post-Phase-3)
 ```
 
 > **v2 layout note.** The `real/fit_<seed>/` wrapper was added in commit
@@ -849,7 +849,7 @@ scout runs a loglik-evaluation pass:
    `logmeanexp` (unbiased on the likelihood scale) to a single combined score;
    the SE is the delta-method approximation on the log scale via
    `evidence::logmeanexp_with_se`. Defaults: `n_particles = 4000`,
-   `n_replicates = 8`, `combine = LogMeanExp`. Override per-stage with
+   `n_replicates = 8`, `combine = LogMeanExp`. Override per method with
    `--loglik-eval-particles N` / `--loglik-eval-reps M`.
 3. **Cross-chain selection.** The maximum across per-chain clean logliks names
    the overall winner (the chain whose θ̂ is reported as the MLE). NaN chains are
@@ -873,10 +873,10 @@ Defaults: `a_thresh = 1.01`, `decibans_thresh = 30.0`. Override with
 Status surfaces the verdict as
 `loglik-eval Δ = X dB / threshold Y dB (σ_max=Z) ✓/✗` under scout and refine.
 The full per-(chain × candidate) score table is written to
-`<stage>/chain_evaluations.tsv` (header:
+`<method>/chain_evaluations.tsv` (header:
 `chain  candidate  loglik
 se  <param₁>  …`) and the run-root winner to
-`<stage>/final_params.toml`.
+`<method>/final_params.toml`.
 
 ### 6.2 Refine (a second IF2 file, started at the scout's estimate)
 
@@ -941,7 +941,7 @@ ESS at MLE: mean=312, min=8  ✗ filter is degenerate
   mle_params.toml             ← final MLE (provenance-hashed)
   pfilter_loglik.txt          ← precise loglik at MLE
   ess_at_mle.tsv              ← per-observation ESS trace at MLE
-  run.json                    ← stage metadata
+  run.json                    ← method-leaf metadata
 ```
 
 > **v2 layout note.** Same `real/fit_<seed>/` wrapper convention as
@@ -1006,8 +1006,8 @@ fit/he2010/ — He et al. 2010 London measles
           --params <fit_dir>/real/fit_<seed>/validate/mle_params.toml
 ```
 
-A stage that ran IF2 + loglik-eval but failed the compound gate (no `run.json`)
-is reported with a one-line pointer:
+A method leaf that ran IF2 + loglik-eval but failed the compound gate (no
+`run.json`) is reported with a one-line pointer:
 
 ```
 fit/he2010/
@@ -1022,8 +1022,8 @@ fit/he2010/
 camdl fit summary fit/he2010
 ```
 
-Reads each MLE stage's `fit_state.toml` + `final_params.toml` +
-`mle_params.toml` and renders a per-stage interpretation block:
+Reads each MLE method leaf's `fit_state.toml` + `final_params.toml` +
+`mle_params.toml` and renders a per-method interpretation block:
 
 - compound scout-convergence gate verdict (Â + decibans-spread, rendered against
   the _resolved_ gate config persisted in `fit_state.toml` — i.e. the threshold
@@ -1041,7 +1041,7 @@ Reads each MLE stage's `fit_state.toml` + `final_params.toml` +
 | `text` (default) | terminal block with ANSI colour. Auto-disables under non-TTY; honours `NO_COLOR`.        |
 | `json`           | machine-readable, versioned via `schema.version`. The book pipeline reads this directly. |
 | `md`             | GitHub-flavoured Markdown. Embeddable in chapters via Quarto's `run_cli`.                |
-| `latex`          | `\begin{tabular}` blocks per stage. No preamble — embed inside an existing document.     |
+| `latex`          | `\begin{tabular}` blocks per method. No preamble — embed inside an existing document.    |
 
 #### 7.2.2 JSON schema
 
@@ -1112,9 +1112,9 @@ Schema-stability rules:
 - **`failures` is always present**, one entry per method leaf the walker found
   and could not read back. Each entry carries `leaf` (the method-leaf directory)
   and `reason` (which file, and what was wrong with it), and is also warned
-  about on stderr. It is how a consumer tells an empty `stages` array that means
-  "this fit completed no method" from one that means "this fit could not be
-  read".
+  about on stderr. It is how a consumer tells an empty `methods` array that
+  means "this fit completed no method" from one that means "this fit could not
+  be read".
 
 #### 7.2.2.1 Exit code on an unreadable leaf
 

@@ -531,7 +531,7 @@ impl PathRenewal {
     /// shape — or cannot be asked, because one of the two end bins holds no
     /// substep.
     ///
-    /// One finding per stage, over the pooled profile, rather than one per
+    /// One finding per method, over the pooled profile, rather than one per
     /// chain: the profile published beside it is the pooled one, and a reader
     /// comparing the message against the artifact must see the same numbers.
     pub fn coalescence_finding(&self) -> Option<DiagnosticKind> {
@@ -549,7 +549,7 @@ impl PathRenewal {
         })
     }
 
-    /// The end-of-stage block printed beside the aggregate.
+    /// The end-of-run block printed beside the aggregate.
     ///
     /// Prints the whole profile, both derived numbers, the aggregate it
     /// resolves, and the ancestor-sampling acceptance rate — the last of these
@@ -1057,11 +1057,11 @@ mod tests {
         assert_eq!(pr.as_ess_post.n_sweeps, 3);
     }
 
-    /// No sweep measured one — ancestor sampling off for the whole stage — and
+    /// No sweep measured one — ancestor sampling off for the whole method — and
     /// the median is `null`, not 0.0. The block still publishes, because the
     /// profile and the acceptance rate are still measurements.
     #[test]
-    fn a_stage_that_measured_no_ancestor_ess_reports_null_not_zero() {
+    fn a_method_that_measured_no_ancestor_ess_reports_null_not_zero() {
         let diags: Vec<CSMCDiagnostics> = vec![sweep_ess(f64::NAN, f64::NAN)];
         let mut acc = PathRenewalAccum::new();
         acc.add_chain(diags.iter());
@@ -1072,7 +1072,7 @@ mod tests {
         let json = serde_json::to_value(&pr).expect("serializes");
         assert!(json["as_ess_pre"]["median"].is_null(),
             "null in the JSON too — a consumer must not read a collapsed \
-             categorical off a stage that measured none: {json}");
+             categorical off a method that measured none: {json}");
     }
 
     /// The guard can lower the candidate count and raise the ESS, so both sides
@@ -1201,7 +1201,7 @@ mod tests {
     /// No sweep, no block — the summary omits the key entirely rather than
     /// carrying a row of nulls a consumer would read as a measurement.
     #[test]
-    fn a_stage_with_no_retained_sweep_produces_no_block() {
+    fn a_method_with_no_retained_sweep_produces_no_block() {
         let mut acc = PathRenewalAccum::new();
         acc.add_chain(std::iter::empty());
         assert!(acc.clone().finish().is_none());
@@ -1377,7 +1377,7 @@ mod tests {
     /// is still a measurement, are different facts and both survive into the
     /// JSON.
     #[test]
-    fn a_stage_that_measured_no_ratio_reports_null_with_its_denominator() {
+    fn a_method_that_measured_no_ratio_reports_null_with_its_denominator() {
         let diags: Vec<CSMCDiagnostics> = vec![sweep_logalpha(f64::NAN, f64::NAN, 0)];
         let mut acc = PathRenewalAccum::new();
         acc.add_chain(diags.iter());
@@ -1388,7 +1388,7 @@ mod tests {
 
         let json = serde_json::to_value(&pr).expect("serializes");
         assert!(json["as_logalpha_median"]["median"].is_null(),
-            "null in the JSON — a consumer must not read parity off a stage \
+            "null in the JSON — a consumer must not read parity off a method \
              that measured no ratio at all: {json}");
         assert_eq!(json["n_as_logalpha"].as_u64(), Some(0),
             "with the sample size beside it: {json}");

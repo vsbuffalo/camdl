@@ -54,7 +54,7 @@ fn resolve_anchors_into_temp_ir(
     Ok(out.to_string_lossy().into_owned())
 }
 
-pub mod cas;  // gh#147 M3.2: fit-stage CAS identity (resolve_fit_stage)
+pub mod cas;  // gh#147 M3.2: fit-stage CAS identity (resolve_fit_method)
 pub mod coeff_guard;  // gh#342 P4: NUTS guard — param reaching a coefficient only via an init
 pub mod config_v2;
 pub mod loglik;  // gh#280: LoglikType — the single typed source for loglik class
@@ -72,7 +72,7 @@ pub use fit_table::cmd_fit_table;
 pub mod fit_summary;
 pub use fit_summary::cmd_fit_summary;
 pub mod pmmh;
-// Likelihood-noise preflight shared by the pseudo-marginal stages: the
+// Likelihood-noise preflight shared by the pseudo-marginal methods: the
 // measured log L-hat spread and the acceptance ceiling it implies (gh#764).
 pub mod pf_noise;
 pub mod pgas;
@@ -93,7 +93,7 @@ pub mod chain_fanout;   // gh#821: run chains so each started chain keeps advanc
 pub mod loglik_eval;
 pub mod methods;
 #[cfg(feature = "ode")]
-pub mod nlopt_stage;
+pub mod nlopt_method;
 pub mod fitted_model; // is the given model the one a fit ran on (the replay check)
 pub mod handle;   // gh#322: fit handles (@label / hash / run-dir / fit.toml) → segment
 pub mod joint;    // gh#322: keyed-joint (θ, X) read — LatentPath classifier + join
@@ -160,14 +160,14 @@ fn gate_run_method_against_model(
     compiled: &sim::CompiledModel,
     dt: f64,
 ) -> Result<(), String> {
-    let stage_name = algorithm.method_name();
+    let method_name = algorithm.method_name();
     {
-        let stage = algorithm;
-        if let Err(msg) = methods::check_model_capabilities(stage.backend(), compiled) {
-            return Err(format!("method '{}': {}", stage_name, msg));
+        let method = algorithm;
+        if let Err(msg) = methods::check_model_capabilities(method.backend(), compiled) {
+            return Err(format!("method '{}': {}", method_name, msg));
         }
         // gh#449: the recurring-fire collision guard (gh#447) lived only at the
-        // three forward backends' entry points; check it here too, per stage,
+        // three forward backends' entry points; check it here too, per method,
         // so a coarse-`dt` fit fails loudly instead of quietly losing fires.
         //
         // Only a Grid clock can drop a fire (effect plan, proposal 2026-10-04):
@@ -175,14 +175,14 @@ fn gate_run_method_against_model(
         // intervention once per step. An ODE-backed method fires every effect at
         // its own instant — at `dt` and at a coarse warm-up `burnin_dt` alike —
         // so for it the check does not apply.
-        let clock = match stage.backend() {
+        let clock = match method.backend() {
             crate::run_meta::InferenceBackend::Ode => sim::effect_plan::FireClock::Exact,
             _ => sim::effect_plan::FireClock::Grid { dt },
         };
         if let Err(e) =
             compiled.validate_recurring_dt_collisions(compiled.model.simulation.t_start, clock)
         {
-            return Err(format!("method '{}' (dt = {}): {}", stage_name, dt, e));
+            return Err(format!("method '{}' (dt = {}): {}", method_name, dt, e));
         }
     }
     // gh#166 B2: warn if an ODE-backed method will fit a `dt`-in-rate model
@@ -194,13 +194,13 @@ fn gate_run_method_against_model(
     Ok(())
 }
 
-/// How often the heartbeat thread rewrites a running stage's `progress.json`.
+/// How often the heartbeat thread rewrites a running method's `progress.json`.
 /// Wall-clock and fixed, deliberately independent of step cadence: one
 /// national-scale PGAS sweep can take minutes, so a step-boundary heartbeat
 /// would be as stale as the trace it is meant to substitute for (gh#278).
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The liveness/progress heartbeat one stage of `algorithm` runs under: what
+/// The liveness/progress heartbeat one method of `algorithm` runs under: what
 /// its step counter counts, how many of those a complete run takes, and — for
 /// the one method that reports per-chain liveness — the roster it was
 /// configured to run.
@@ -229,15 +229,15 @@ const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5
 /// A method whose options fail to parse also gets an inert guard: the dispatch
 /// arm reports that error and exits, and there is no run to report progress
 /// for.
-fn stage_heartbeat(
-    stage_dir: &std::path::Path,
+fn method_heartbeat(
+    method_dir: &std::path::Path,
     algorithm: &config_v2::Algorithm,
 ) -> io::HeartbeatGuard {
     use config_v2::Algorithm as A;
-    let dir = stage_dir.to_path_buf();
+    let dir = method_dir.to_path_buf();
     let held = io::HeartbeatGuard::new;
     match algorithm {
-        A::PGAS { .. } => match pgas::PgasStageOpts::from_algorithm(algorithm) {
+        A::PGAS { .. } => match pgas::PgasMethodOpts::from_algorithm(algorithm) {
             Ok(o) => held(io::Heartbeat::mcmc(
                 dir, o.burn_in as u64, o.n_sweeps as u64, HEARTBEAT_INTERVAL, o.n_chains)),
             Err(_) => io::HeartbeatGuard::inert(),
@@ -245,7 +245,7 @@ fn stage_heartbeat(
         // The roster is 0, so no `chains` block is written: gh#751 wired
         // per-chain reporting into PGAS only, and a table of rows that never
         // fill would say less than no table at all.
-        A::PMMH { .. } | A::Mh { .. } => match pmmh::PmmhStageOpts::from_algorithm(algorithm) {
+        A::PMMH { .. } | A::Mh { .. } => match pmmh::PmmhMethodOpts::from_algorithm(algorithm) {
             Ok(o) => held(io::Heartbeat::mcmc(
                 dir, o.burn_in as u64, o.n_steps as u64, HEARTBEAT_INTERVAL, 0)),
             Err(_) => io::HeartbeatGuard::inert(),
@@ -258,16 +258,16 @@ fn stage_heartbeat(
     }
 }
 
-/// Abandon the running stage: record the terminal `failed` state in its
+/// Abandon the running method: record the terminal `failed` state in its
 /// `progress.json`, carrying the same sentence the user is about to read, then
 /// print it and exit non-zero.
 ///
 /// `std::process::exit` runs no destructor, so the guard's `Drop` backstop
 /// cannot see these paths. Routing every fatal exit in the dispatch through one
-/// function is what makes "a stage always leaves a terminal record" true rather
+/// function is what makes "a method always leaves a terminal record" true rather
 /// than nearly true — and it is why a reader holding only `progress.json`
 /// learns what a reader of stderr learns.
-fn abandon_stage(heartbeat: &io::HeartbeatGuard, message: String) -> ! {
+fn abandon_method(heartbeat: &io::HeartbeatGuard, message: String) -> ! {
     heartbeat.failed(message.as_str());
     eprintln!("{}", message);
     std::process::exit(1);
@@ -331,7 +331,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // collected once so the method identity can see all of them. Applied to
     // the in-memory method below, before the CAS claim — the dispatch sites
     // no longer override anything, so there is no route around the key.
-    let cli_overrides = crate::fit::config_v2::CliStageOverrides {
+    let cli_overrides = crate::fit::config_v2::CliMethodOverrides {
         max_tree_depth:       a.max_tree_depth,
         trajectory_warmup:    a.trajectory_warmup,
         csmc_sweeps_per_nuts: a.csmc_sweeps_per_nuts,
@@ -584,7 +584,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     }
     // `nl-lbfgs` is the one method whose objective needs a gradient of this
     // model. Ask the gradient capability gate now, before a leaf is claimed, so
-    // a model it refuses costs a message rather than a half-run stage.
+    // a model it refuses costs a message rather than a half-run method.
     config.validate_gradient_capability(&model).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
@@ -865,7 +865,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // (synthetic data) live directly under it.
     // The fit-level identity (the `fit` CAS level) and the directory its
     // method leaves actually land in. `parent_fit_hash` is the fit-level
-    // `ContentHash` (the same hash `resolve_fit_stage` puts on the `fit`
+    // `ContentHash` (the same hash `resolve_fit_method` puts on the `fit`
     // level, and the same one `FitView.fit_hash` reads back from `run.json`),
     // and `announced_fit_dir` is `fits/{stem}-{h8}/` built from it — so the
     // path `fit run` announces is exactly where the `{method}-{h8}` leaves
@@ -1223,8 +1223,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             eprintln!("═══ sweep point {}/{}: {} ═══", pt_idx + 1, sweep_points.len(), slug);
         }
 
-        let stage_name = method.algorithm.method_name();
-        eprintln!("\n── method: {} ──", stage_name);
+        let method_name = method.algorithm.method_name();
+        eprintln!("\n── method: {} ──", method_name);
 
         // Resolve data the runners load from (also feeds the data digests).
         let data_spec = sweep_config.data_spec().unwrap_or_else(|e| {
@@ -1276,7 +1276,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 
         // ── CAS identity + claim ──
         // sweep_config is the authoritative problem inside the sweep loop.
-        let ctx = cas::FitStageCtx {
+        let ctx = cas::FitMethodCtx {
             model: &model,
             fit_stem: &fit_stem,
             ir_version: &ir_version_str,
@@ -1287,7 +1287,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             seed,
             deps: deps.clone(),
         };
-        let resolved = cas::resolve_fit_stage(&ctx).unwrap_or_else(|e| {
+        let resolved = cas::resolve_fit_method(&ctx).unwrap_or_else(|e| {
             eprintln!("error: fit-method identity: {}", e);
             std::process::exit(1);
         });
@@ -1306,7 +1306,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 None
             } else {
                 file_starts_deps.as_ref().and_then(|file_deps| {
-                    cas::resolve_fit_stage(&cas::FitStageCtx {
+                    cas::resolve_fit_method(&cas::FitMethodCtx {
                         model: &model,
                         fit_stem: &fit_stem,
                         ir_version: &ir_version_str,
@@ -1326,7 +1326,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             .filter(|_| file_run_id == Some(resolved.run_id));
         // gh#583 item G: the `--resume` key is this identity less its
         // extension dimension — the same levels, not a second hand-listed hash.
-        let resume_guard = cas::resume_guard(&cas::FitStageCtx { deps: starts_deps, ..ctx })
+        let resume_guard = cas::resume_guard(&cas::FitMethodCtx { deps: starts_deps, ..ctx })
             .unwrap_or_else(|e| {
                 eprintln!("error: fit-method resume key: {}", e);
                 std::process::exit(1);
@@ -1353,8 +1353,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let mut seg_sidecar = fit_sidecar.clone();
                 // The segment's parameter resolution: every parameter's
                 // source and value and every override of one tier's value by
-                // another's, recorded here and reported once, before any stage
-                // runs (each stage's `FitRunConfig::build` resolves the same
+                // another's, recorded here and reported once, before any method
+                // runs (each method's `FitRunConfig::build` resolves the same
                 // problem and reports nothing). A resolution that fails is
                 // left to that build, which reports it as the error it is.
                 // The resolver is the one writer of the values the fit runs
@@ -1548,7 +1548,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 std::process::exit(1);
             }
         };
-        let stage_dir = write.dir().to_path_buf();
+        let method_dir = write.dir().to_path_buf();
         // The claimed record carries the label; another run's check now sees it.
         drop(label_lock);
 
@@ -1557,23 +1557,23 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // read-only base. The runner then loads/extends these in the new leaf;
         // the base is never written.
         if let Some(base) = &resume_base {
-            copy_resume_carryover(base, &stage_dir).unwrap_or_else(|e| {
+            copy_resume_carryover(base, &method_dir).unwrap_or_else(|e| {
                 eprintln!("error: staging resume carry-over from {}: {}", base.display(), e);
                 std::process::exit(1);
             });
         }
 
-        let stage_t0 = std::time::Instant::now();
+        let method_t0 = std::time::Instant::now();
         // Uninitialized on purpose: every dispatch arm must assign a
         // loglik (or exit) — the compiler enforces that no arm can fall
         // through to the finalize below with a silent None.
-        let stage_best_loglik: Option<f64>;
+        let method_best_loglik: Option<f64>;
         // The chain that won, as it goes into run.json's `inputs.best_chain`
-        // — the same value the stage's `fit_state.toml` stores, naming an
+        // — the same value the method's `fit_state.toml` stores, naming an
         // existing `chain_N/` directory (gh#912, gh#990). PFilter has
         // replicates, not competing chains, so it legitimately leaves this
         // None.
-        let mut stage_best_chain: Option<crate::chain_index::ChainIndex> = None;
+        let mut method_best_chain: Option<crate::chain_index::ChainIndex> = None;
 
         // Surface the registry caveat for Beta/Experimental methods, once per
         // executing method (after the cache-hit skip above, so reused leaves
@@ -1612,17 +1612,17 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
         }
 
-        // gh#278, gh#900: the stage's liveness/progress heartbeat. A background
-        // thread writes `progress.json` into the stage dir on a fixed
+        // gh#278, gh#900: the method's liveness/progress heartbeat. A background
+        // thread writes `progress.json` into the method dir on a fixed
         // wall-clock timer, and the guard writes the terminal record however
-        // the stage exits — `done()` below when it returns, `abandon_stage` on
+        // the method exits — `done()` below when it returns, `abandon_method` on
         // every fatal path, its `Drop` on a panic. Built here, before the
         // dispatch, so no method can silently be the one without a heartbeat.
-        let heartbeat = stage_heartbeat(&stage_dir, &method.algorithm);
+        let heartbeat = method_heartbeat(&method_dir, &method.algorithm);
 
         match &method.algorithm {
             Algorithm::IF2 { backend, chains, particles, iterations, cooling, cooling_target_iters, loglik_eval, gate, dt_check, .. } => {
-                // clean_eval comes straight from the method TOML — it is part
+                // clean_eval comes straight from the `[method]` table — it is part
                 // of the fit's identity (folded into the IF2 method's
                 // whole-serialize identity_payload), so it has no CLI override
                 // (gh#189: a CLI override bypassed the run_id and silently
@@ -1642,7 +1642,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // the base point carries `[estimate].start`.
                     seed, false,
                 ).unwrap_or_else(|e| {
-                    abandon_stage(&heartbeat, format!("error building run config: {e}"))
+                    abandon_method(&heartbeat, format!("error building run config: {e}"))
                 });
                 run_config.loglik_eval = effective_loglik_eval.clone();
                 run_config.gate = effective_gate.clone();
@@ -1655,39 +1655,39 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         seg, run_config.applied_training_window);
                 }
 
-                std::fs::create_dir_all(&stage_dir).unwrap_or_else(|e| {
-                    abandon_stage(
+                std::fs::create_dir_all(&method_dir).unwrap_or_else(|e| {
+                    abandon_method(
                         &heartbeat,
-                        format!("error creating {}: {e}", stage_dir.display()),
+                        format!("error creating {}: {e}", method_dir.display()),
                     )
                 });
 
-                let collector = sim::inference::diagnostic::DiagnosticCollector::new(stage_name);
+                let collector = sim::inference::diagnostic::DiagnosticCollector::new(method_name);
                 let t0 = std::time::Instant::now();
                 // Per-chain starting points, through the one seam every runner
                 // draws from, under the resolved `starts` rule.
                 let drawn = runner::draw_chain_starts_for(
                     &run_config, &sweep_config.estimate, &resolved_starts, *chains, seed,
-                ).unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
+                ).unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
                 runner::refuse_starts_on_an_end(&run_config, &drawn)
-                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
+                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
                 // gh#887: a spread start the filter cannot score is redrawn,
                 // up to MAX_START_ATTEMPTS, before any chain runs; every
                 // attempt is on the record below.
                 let drawn = runner::preflight_spread_starts(
                     &run_config, &sweep_config.estimate, &resolved_starts, drawn, seed,
-                ).unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
+                ).unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
                 let per_chain_params: Vec<Vec<sim::inference::types::EstimatedParam>> =
                     drawn.to_estimated_params(&run_config.estimated_params);
                 // The audit sidecar, captured before the first filter pass.
-                runner::record_chain_starts(&stage_dir, &run_config, &drawn);
+                runner::record_chain_starts(&method_dir, &run_config, &drawn);
                 let chain_init_source = drawn.rule.spelled();
                 let chain_starts_kind = drawn.rule.kind();
-                let stage_dir_str = stage_dir.to_string_lossy();
+                let method_dir_str = method_dir.to_string_lossy();
                 let chain_results = runner::run_chains_with_per_chain_params(
                     &run_config, Some(&per_chain_params), &collector,
-                    Some(stage_dir_str.as_ref()), &heartbeat)
-                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
+                    Some(method_dir_str.as_ref()), &heartbeat)
+                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
                 let elapsed = t0.elapsed();
                 // A chain skipped mid-run started from an accepted start, so
                 // the file written before the run calls it `accepted`. Write
@@ -1695,27 +1695,27 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // record of what every chain did.
                 if !chain_results.skipped.is_empty() {
                     let drawn = drawn.clone().with_skipped(chain_results.skipped.clone());
-                    runner::record_chain_starts(&stage_dir, &run_config, &drawn);
+                    runner::record_chain_starts(&method_dir, &run_config, &drawn);
                 }
 
                 // Write outputs
                 let param_names: Vec<String> = model.parameters.iter().map(|p| p.name.clone()).collect();
                 runner::write_chain_outputs(
-                    &stage_dir.to_string_lossy(), &chain_results.results,
+                    &method_dir.to_string_lossy(), &chain_results.results,
                     &run_config.estimated_params, &param_names,
                     &run_config.base_params, &run_config.compiled,
                     Some(&chain_results.loglik_eval),
                 ).unwrap_or_else(|e| eprintln!("warning: {}", e));
                 runner::write_clean_eval_tsv(
-                    &stage_dir.to_string_lossy(),
+                    &method_dir.to_string_lossy(),
                     &chain_results.loglik_eval, &run_config.estimated_params,
                 ).unwrap_or_else(|e| eprintln!("warning: {}", e));
                 runner::write_run_root_final_params(
-                    &stage_dir.to_string_lossy(),
+                    &method_dir.to_string_lossy(),
                     &chain_results.loglik_eval, &run_config.estimated_params,
                     &param_names, &run_config.base_params, &run_config.compiled,
                 ).unwrap_or_else(|e| eprintln!("warning: {}", e));
-                runner::write_diagnostics(&stage_dir.to_string_lossy(), &chain_results.results)
+                runner::write_diagnostics(&method_dir.to_string_lossy(), &chain_results.results)
                     .unwrap_or_else(|e| eprintln!("warning: {}", e));
 
                 // Write fit_state.toml — the leaf's result record.
@@ -1759,10 +1759,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     },
                     dt_check_seed,
                 )
-                .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
+                .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
                 dt_check::print_terminal_report(&dt_check_result);
                 let fit_state = state::FitState {
-                    method: stage_name.to_string(),
+                    method: method_name.to_string(),
                     seed,
                     timestamp: crate::cas::iso8601_utc(std::time::SystemTime::now()),
                     input_hash: None,
@@ -1789,7 +1789,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // Persist the gate / clean-eval config that was
                     // *actually in force* — `effective_gate` and
                     // `effective_loglik_eval` above already collapsed the
-                    // priority chain (CLI flag > method TOML > defaults).
+                    // priority chain (CLI flag > `[method]` table > defaults).
                     // `summary` reads these so its verdict line reports
                     // against the threshold the run was judged by, not
                     // whatever `fit.toml` says at summary-time.
@@ -1810,7 +1810,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     pf_noise: None,
                     optimizer_convergence: None,
                 };
-                fit_state.save(&stage_dir.to_string_lossy()).unwrap_or_else(|e| {
+                fit_state.save(&method_dir.to_string_lossy()).unwrap_or_else(|e| {
                     eprintln!("warning: could not save fit_state: {}", e);
                 });
 
@@ -1819,11 +1819,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     winner_theta, &run_config.estimated_params, &run_config.model,
                     &run_config.base_params, &run_config.compiled,
                 );
-                let mle_path = format!("{}/mle_params.toml", stage_dir.display());
+                let mle_path = format!("{}/mle_params.toml", method_dir.display());
                 let model_identity =
                     crate::resolve::model_identity_from_ir(&run_config.model_ir_json);
                 let data_hashes: Vec<(String, String)> = sweep_config.data_spec()
-                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")))
+                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")))
                     .observations.iter()
                     .map(|(name, path)| {
                         let bytes = std::fs::read(path).unwrap_or_default();
@@ -1847,7 +1847,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     model_identity: model_identity.clone(),
                     data_hashes: data_hashes.clone(),
                     seed,
-                    method: stage_name.to_string(),
+                    method: method_name.to_string(),
                     best_chain: chain_results.best_chain,
                     // Record the backend the method actually fit on (gh#241):
                     // the `simulate --params` guardrail replays θ̂ with this,
@@ -1878,24 +1878,24 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     chains_completed: Some(chain_results.results.len()),
                 });
 
-                stage_best_loglik = Some(chain_results.best_loglik);
-                stage_best_chain = Some(chain_results.best_chain);
+                method_best_loglik = Some(chain_results.best_loglik);
+                method_best_chain = Some(chain_results.best_chain);
 
                 eprintln!();
-                crate::status::done("stored", format!("{} \u{b7} {}/", stage_name, stage_dir.display()));
+                crate::status::done("stored", format!("{} \u{b7} {}/", method_name, method_dir.display()));
                 crate::status::hint(format!("best ll={:.1} (chain {}) in {:.1}s",
                     chain_results.best_loglik, chain_results.best_chain, elapsed.as_secs_f64()));
             }
             Algorithm::PGAS { .. } => {
-                let pgas_opts = pgas::PgasStageOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
+                let pgas_opts = pgas::PgasMethodOpts::from_algorithm(&method.algorithm)
+                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
                 // gh#540: no CLI overrides here. Every flag that reaches this
                 // method was written into it before its content address was
                 // taken, so `from_algorithm` above already carries them.
-                pgas::run_stage(
+                pgas::run_method(
                     &sweep_config,
                     &method,
-                    &stage_dir,
+                    &method_dir,
                     pgas_opts,
                     seed, force,
                     a.resume.is_some(),
@@ -1903,20 +1903,20 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     &resolved_starts,
                     &heartbeat,
                 ).unwrap_or_else(|e| {
-                    abandon_stage(&heartbeat, format!("error running pgas: {e}"))
+                    abandon_method(&heartbeat, format!("error running pgas: {e}"))
                 });
                 // Bubble loglik from fit_state.toml written by PGAS runner
-                let fs = load_stage_result_or_exit(&heartbeat, stage_name, &stage_dir);
-                stage_best_loglik = Some(fs.best_loglik);
-                stage_best_chain = Some(fs.best_chain);
+                let fs = load_method_result_or_exit(&heartbeat, method_name, &method_dir);
+                method_best_loglik = Some(fs.best_loglik);
+                method_best_chain = Some(fs.best_chain);
             }
             Algorithm::PMMH { .. } => {
-                let pmmh_opts = pmmh::PmmhStageOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
-                pmmh::run_stage(
+                let pmmh_opts = pmmh::PmmhMethodOpts::from_algorithm(&method.algorithm)
+                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
+                pmmh::run_method(
                     &sweep_config,
                     &method,
-                    &stage_dir,
+                    &method_dir,
                     pmmh_opts,
                     seed, force,
                     a.resume.is_some(),
@@ -1926,22 +1926,22 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     /* dt_check_opt */ None,
                     &heartbeat,
                 ).unwrap_or_else(|e| {
-                    abandon_stage(&heartbeat, format!("error running pmmh: {e}"))
+                    abandon_method(&heartbeat, format!("error running pmmh: {e}"))
                 });
-                let fs = load_stage_result_or_exit(&heartbeat, stage_name, &stage_dir);
-                stage_best_loglik = Some(fs.best_loglik);
-                stage_best_chain = Some(fs.best_chain);
+                let fs = load_method_result_or_exit(&heartbeat, method_name, &method_dir);
+                method_best_loglik = Some(fs.best_loglik);
+                method_best_chain = Some(fs.best_chain);
             }
             Algorithm::Mh { dt_check, .. } => {
                 // Deterministic-ODE Metropolis-Hastings. Routes through the
                 // shared PMMH machinery (chains, adaptive proposal, priors,
-                // MAP, R̂/ESS, trace output); `pmmh::run_stage` swaps the PF
+                // MAP, R̂/ESS, trace output); `pmmh::run_method` swaps the PF
                 // likelihood for `compute_ode_loglik` when the algorithm is the
-                // Mh variant. `PmmhStageOpts::from_algorithm` parses the Mh
+                // Mh variant. `PmmhMethodOpts::from_algorithm` parses the Mh
                 // fields with `n_particles = 0` (the deterministic path has
                 // no filter).
-                let pmmh_opts = pmmh::PmmhStageOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
+                let pmmh_opts = pmmh::PmmhMethodOpts::from_algorithm(&method.algorithm)
+                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
                 // Deterministic ODE dt-check at the MAP (gh#52, gh#227). On by
                 // default; honours the same CLI flags as the IF2 path
                 // (--no-dt-check / --dt-check-halvings / --dt-check-strict).
@@ -1950,10 +1950,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // was taken, and the field is in Mh's identity_payload (the
                 // result is stored in fit_state.toml.dt_check).
                 let mh_dt_check = dt_check.clone();
-                pmmh::run_stage(
+                pmmh::run_method(
                     &sweep_config,
                     &method,
-                    &stage_dir,
+                    &method_dir,
                     pmmh_opts,
                     seed, force,
                     a.resume.is_some(),
@@ -1962,11 +1962,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     Some(mh_dt_check),
                     &heartbeat,
                 ).unwrap_or_else(|e| {
-                    abandon_stage(&heartbeat, format!("error running mh: {e}"))
+                    abandon_method(&heartbeat, format!("error running mh: {e}"))
                 });
-                let fs = load_stage_result_or_exit(&heartbeat, stage_name, &stage_dir);
-                stage_best_loglik = Some(fs.best_loglik);
-                stage_best_chain = Some(fs.best_chain);
+                let fs = load_method_result_or_exit(&heartbeat, method_name, &method_dir);
+                method_best_loglik = Some(fs.best_loglik);
+                method_best_chain = Some(fs.best_chain);
             }
             Algorithm::NlSbplx(nl_cfg)
             | Algorithm::NlBobyqa(nl_cfg)
@@ -2002,15 +2002,15 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // Deterministic ODE dt-check at θ̂ (gh#52, gh#227). On by
                     // default. gh#726: the method's dt_check field — CLI
                     // overrides were applied through `apply_cli_overrides`
-                    // BEFORE the identity was taken, and NloptStageConfig
+                    // BEFORE the identity was taken, and NloptConfig
                     // full-serializes into its identity (the result is
                     // stored in fit_state.toml.dt_check).
                     let nl_dt_check = nl_cfg.dt_check.clone();
 
-                    nlopt_stage::run_stage(
+                    nlopt_method::run_method(
                         &sweep_config,
                         &method,
-                        &stage_dir,
+                        &method_dir,
                         seed,
                         &resolved_starts,
                         &parent_fit_hash,
@@ -2019,19 +2019,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         &nl_dt_check,
                         &heartbeat,
                     ).unwrap_or_else(|e| {
-                        abandon_stage(
+                        abandon_method(
                             &heartbeat,
-                            format!("error running {stage_name}: {e}"),
+                            format!("error running {method_name}: {e}"),
                         )
                     });
-                    let fs = load_stage_result_or_exit(&heartbeat, stage_name, &stage_dir);
-                    stage_best_loglik = Some(fs.best_loglik);
-                    stage_best_chain = Some(fs.best_chain);
+                    let fs = load_method_result_or_exit(&heartbeat, method_name, &method_dir);
+                    method_best_loglik = Some(fs.best_loglik);
+                    method_best_chain = Some(fs.best_chain);
                 }
                 #[cfg(not(feature = "ode"))]
                 {
-                    let _ = (stage_name, &sweep_config, &stage_dir, seed, nl_cfg, &resolved_starts);
-                    abandon_stage(
+                    let _ = (method_name, &sweep_config, &method_dir, seed, nl_cfg, &resolved_starts);
+                    abandon_method(
                         &heartbeat,
                         format!(
                             "error: this binary was built without --features ode, \
@@ -2062,7 +2062,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     Some(&method.algorithm),
                     1, *particles, 1, 1.0, 1, seed, false,
                 ).unwrap_or_else(|e| {
-                    abandon_stage(&heartbeat, format!("error building pfilter config: {e}"))
+                    abandon_method(&heartbeat, format!("error building pfilter config: {e}"))
                 });
 
                 // gh#585: same §3.7.3(b) proof recording as the IF2/Bayesian
@@ -2072,10 +2072,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         seg, run_config.applied_training_window);
                 }
 
-                std::fs::create_dir_all(&stage_dir).unwrap_or_else(|e| {
-                    abandon_stage(
+                std::fs::create_dir_all(&method_dir).unwrap_or_else(|e| {
+                    abandon_method(
                         &heartbeat,
-                        format!("error creating {}: {e}", stage_dir.display()),
+                        format!("error creating {}: {e}", method_dir.display()),
                     )
                 });
 
@@ -2085,7 +2085,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // so one draw of the rule is the point.
                 let drawn = runner::draw_chain_starts_for(
                     &run_config, &sweep_config.estimate, &resolved_starts, 1, seed,
-                ).unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
+                ).unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
                 let mle_params: Vec<f64> = drawn
                     .to_param_vecs(&run_config.estimated_params, &run_config.base_params)
                     .into_iter()
@@ -2116,7 +2116,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     let result = sim::inference::bootstrap_filter(
                         &process, &obs_model, &mle_params, &smc_config, pf_seed,
                     ).unwrap_or_else(|e| {
-                        abandon_stage(&heartbeat, format!("pfilter error: {}", crate::util::sim_error_text(&e)))
+                        abandon_method(&heartbeat, format!("pfilter error: {}", crate::util::sim_error_text(&e)))
                     });
                     if record_preq {
                         if let Some(ref recorded) = result.prequential {
@@ -2162,7 +2162,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // Write logliks.tsv
                 {
                     use std::io::Write;
-                    let path = format!("{}/logliks.tsv", stage_dir.display());
+                    let path = format!("{}/logliks.tsv", method_dir.display());
                     let mut f = std::fs::File::create(&path).unwrap();
                     writeln!(f, "replicate\tloglik").unwrap();
                     for (i, ll) in logliks.iter().enumerate() {
@@ -2176,10 +2176,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // carries the same tidy/long schema as `camdl pfilter
                 // --save-prequential` (gh#650).
                 if let Some(ref trace) = preq_trace {
-                    let stem = format!("{}/prequential", stage_dir.display());
+                    let stem = format!("{}/prequential", method_dir.display());
                     crate::prequential_out::write_prequential_outputs(&stem, trace)
                         .unwrap_or_else(|e| {
-                            abandon_stage(
+                            abandon_method(
                                 &heartbeat,
                                 format!("error writing prequential: {e}"),
                             )
@@ -2188,12 +2188,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         trace.elpd(), trace.mean_crps(), trace.pit_coverage(0.90));
                     eprint!("{}", crate::prequential_out::surprise_table(trace));
                 }
-                stage_best_loglik = Some(mean_ll);
+                method_best_loglik = Some(mean_ll);
             }
         }
 
-        // The stage is done: every arm either reached here or abandoned the run
-        // through `abandon_stage`. The terminal write goes down BEFORE
+        // The method is done: every arm either reached here or abandoned the run
+        // through `abandon_method`. The terminal write goes down BEFORE
         // `finalize` below, so the timer thread is stopped before the leaf's
         // manifest is taken over its files — a `progress.json` rewritten during
         // the manifest walk would be hashed mid-flight.
@@ -2201,11 +2201,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 
         // ── finalize the CAS fit-method leaf ──
         // The runners streamed every output (chains, fit_state.toml,
-        // draws.tsv, trajectories/, …) into `stage_dir = claim.dir()`;
+        // draws.tsv, trajectories/, …) into `method_dir = claim.dir()`;
         // `finalize` builds the recursive exact-set manifest over them and
         // commits Running→Completed. The display fields ride in `run.json`
         // `inputs` (recorded, never hashed) for show/status.
-        let stage_elapsed = stage_t0.elapsed();
+        let method_elapsed = method_t0.elapsed();
         let algo_tag = method.algorithm.method_name();
         let backend_tag = method.algorithm.backend().as_str();
         let algo_json = match &method.algorithm {
@@ -2224,21 +2224,21 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         };
         // gh#901: no `stage` key. It held exactly `algo_tag` — the method's
         // own name — so the leaf carried the same string twice under two
-        // vocabularies, and `FitStageView` now reads the label off `method`.
+        // vocabularies, and `FitMethodView` now reads the label off `method`.
         let inputs_json = serde_json::json!({
             "method": algo_tag,
             "backend": backend_tag,
             "seed": seed,
             "n_chains": method.algorithm.chains(),
-            "best_loglik": stage_best_loglik,
-            "best_chain": stage_best_chain,
+            "best_loglik": method_best_loglik,
+            "best_chain": method_best_chain,
             "algorithm": algo_json,
             "starts": starts_rule.spelled(),
             "chain_starts_kind": starts_rule.kind().as_str(),
             "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
             "config_identities": cell_config_identity.into_iter().collect::<Vec<_>>(),
             "starts_source": starts_source_record,
-            "wall_time_seconds": stage_elapsed.as_secs_f64(),
+            "wall_time_seconds": method_elapsed.as_secs_f64(),
         });
         // Declare the tabular outputs' column schema in run.json (proposal
         // 2026-07-15): classify each written file's real header so a consumer
@@ -2275,7 +2275,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
         };
         crate::status::done("stored",
-            format!("{} \u{b7} {} \u{b7} {:.1}s", stage_name, dest.display(), stage_elapsed.as_secs_f64()));
+            format!("{} \u{b7} {} \u{b7} {:.1}s", method_name, dest.display(), method_elapsed.as_secs_f64()));
 
     } // end sweep_points
     } // end cells
@@ -2400,18 +2400,18 @@ fn removed_flag_message(a: &crate::args::FitRunArgs) -> Option<String> {
 /// corrupt file at that point is a runner bug or a torn write; the previous
 /// `if let Ok` swallow left a silent `null` in run.json where the result
 /// belonged. Fail loudly instead.
-fn load_stage_result_or_exit(
+fn load_method_result_or_exit(
     heartbeat: &io::HeartbeatGuard,
-    stage_name: &str,
-    stage_dir: &std::path::Path,
+    method_name: &str,
+    method_dir: &std::path::Path,
 ) -> state::FitState {
-    state::FitState::load(&stage_dir.to_string_lossy()).unwrap_or_else(|e| {
-        abandon_stage(
+    state::FitState::load(&method_dir.to_string_lossy()).unwrap_or_else(|e| {
+        abandon_method(
             heartbeat,
             format!(
                 "error: method '{}' reported success but its fit_state.toml \
                  cannot be read back from {}: {}",
-                stage_name, stage_dir.display(), e),
+                method_name, method_dir.display(), e),
         )
     })
 }
@@ -3035,9 +3035,9 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
                 "error: `{}` is the fit id of {}, a problem folder, not a run; a label \
                  names one run. Label one of its runs by its run_id:",
                 args.hash, seg.display());
-            for st in view.iter().flat_map(|v| v.stages.iter()) {
+            for st in view.iter().flat_map(|v| v.methods.iter()) {
                 eprintln!("    camdl label {} \"{}\"    # {}", &st.run_id[..12], new_label,
-                    st.stage_dir.display());
+                    st.method_dir.display());
             }
             std::process::exit(1);
         }
@@ -3164,11 +3164,11 @@ mod tests {
         refuse_pfilter_point_source_missing(&rule, &state, &["beta"]).unwrap();
     }
 
-    // ── gh#191: per-stage capability gate on `fit run` ─────────────
+    // ── gh#191: per-method capability gate on `fit run` ─────────────
 
     /// A chain_binomial IF2 method — the inference path that carries no
     /// real reservoir state (gh#191).
-    fn chain_binomial_if2_stage() -> config_v2::Algorithm {
+    fn chain_binomial_if2_method() -> config_v2::Algorithm {
         config_v2::Algorithm::IF2 {
             backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 1,
@@ -3182,9 +3182,9 @@ mod tests {
         }
     }
 
-    /// An `mh`-on-ODE stage carrying `burnin_dt`, for the gh#449 warm-up-step
+    /// An `mh`-on-ODE method carrying `burnin_dt`, for the gh#449 warm-up-step
     /// checks. Only `backend` and `burnin_dt` matter to the gate.
-    fn mh_stage_with_burnin_dt(burnin_dt: Option<f64>) -> config_v2::Algorithm {
+    fn mh_method_with_burnin_dt(burnin_dt: Option<f64>) -> config_v2::Algorithm {
         config_v2::Algorithm::Mh {
             backend: crate::run_meta::InferenceBackend::Ode,
             chains: 1,
@@ -3218,13 +3218,13 @@ mod tests {
     }
 
     #[test]
-    fn fit_run_rejects_real_compartments_on_chain_binomial_stage() {
-        // gh#191: `fit run` never gated the model against the per-stage
+    fn fit_run_rejects_real_compartments_on_chain_binomial_method() {
+        // gh#191: `fit run` never gated the model against the per-method
         // backend, so a real-compartment (ODE-coupled) model on a
-        // chain_binomial inference stage was silently mis-fit — the filter
+        // chain_binomial inference method was silently mis-fit — the filter
         // loops freeze the real reservoir at its init value. The fit-run
         // path must REJECT it with the REAL_COMPARTMENTS message, naming the
-        // offending stage.
+        // offending method.
         let compiled = compiled_golden("ocaml/golden/sir_reservoir_mixed.ir.json");
         assert!(
             compiled
@@ -3232,9 +3232,9 @@ mod tests {
                 .contains(sim::Capabilities::REAL_COMPARTMENTS),
             "fixture must actually require REAL_COMPARTMENTS"
         );
-        let stage = chain_binomial_if2_stage();
-        let err = gate_run_method_against_model(&stage, &compiled, 1.0)
-            .expect_err("real-coupled model on a chain_binomial fit stage must be rejected");
+        let method = chain_binomial_if2_method();
+        let err = gate_run_method_against_model(&method, &compiled, 1.0)
+            .expect_err("real-coupled model on a chain_binomial fit method must be rejected");
         assert!(err.contains("gh#191"), "should cite the tracking issue: {err}");
         assert!(
             err.contains("frozen"),
@@ -3244,7 +3244,7 @@ mod tests {
     }
 
     #[test]
-    fn fit_run_accepts_balance_on_chain_binomial_stage() {
+    fn fit_run_accepts_balance_on_chain_binomial_method() {
         // gh#192: a `balance{}` model is a chain-binomial-only construct the
         // inference loops apply via step_one — `fit run` accepts it, so the
         // gate must too (and not falsely reject it once wired in). Inject a
@@ -3276,9 +3276,9 @@ mod tests {
                 .contains(sim::Capabilities::BALANCE),
             "fixture must actually require BALANCE"
         );
-        let stage = chain_binomial_if2_stage();
-        gate_run_method_against_model(&stage, &compiled, 1.0).unwrap_or_else(|e| {
-            panic!("fit run must ACCEPT a balance{{}} model on a chain_binomial stage: {e}")
+        let method = chain_binomial_if2_method();
+        gate_run_method_against_model(&method, &compiled, 1.0).unwrap_or_else(|e| {
+            panic!("fit run must ACCEPT a balance{{}} model on a chain_binomial method: {e}")
         });
     }
 
@@ -3320,8 +3320,8 @@ mod tests {
             "precondition: dt=400 must collide on this model"
         );
 
-        let stage = chain_binomial_if2_stage();
-        let err = gate_run_method_against_model(&stage, &compiled, 400.0)
+        let method = chain_binomial_if2_method();
+        let err = gate_run_method_against_model(&method, &compiled, 400.0)
             .expect_err("a fit dt that drops recurring fires must be rejected, not silently merged");
         assert!(err.contains("if2"), "should name the offending method: {err}");
         assert!(
@@ -3335,36 +3335,36 @@ mod tests {
     #[test]
     fn fit_run_accepts_dt_finer_than_the_recurrence_period() {
         let compiled = compiled_golden("ocaml/golden/seir_seasonal_importation.ir.json");
-        let stage = chain_binomial_if2_stage();
-        gate_run_method_against_model(&stage, &compiled, 1.0).unwrap_or_else(|e| {
+        let method = chain_binomial_if2_method();
+        gate_run_method_against_model(&method, &compiled, 1.0).unwrap_or_else(|e| {
             panic!("dt=1 is far finer than the 365.25-day period and must be accepted: {e}")
         });
     }
 
-    /// An `mh` stage (ODE-backed) with a coarse `burnin_dt` is accepted: the
+    /// An `mh` method (ODE-backed) with a coarse `burnin_dt` is accepted: the
     /// ODE fires every effect at its own instant (proposal 2026-10-04, D2), so
     /// a warm-up step coarser than the recurrence period drops no fire. The
     /// coarse warm-up still clips onto each effect instant (`run_ode`).
     #[test]
-    fn fit_run_accepts_coarse_burnin_dt_on_an_ode_stage() {
+    fn fit_run_accepts_coarse_burnin_dt_on_an_ode_method() {
         let compiled = compiled_golden("ocaml/golden/seir_seasonal_importation.ir.json");
-        let stage = mh_stage_with_burnin_dt(Some(400.0));
-        gate_run_method_against_model(&stage, &compiled, 1.0).unwrap_or_else(|e| {
-            panic!("an ODE stage fires each effect at its own instant; burnin_dt=400 drops nothing: {e}")
+        let method = mh_method_with_burnin_dt(Some(400.0));
+        gate_run_method_against_model(&method, &compiled, 1.0).unwrap_or_else(|e| {
+            panic!("an ODE method fires each effect at its own instant; burnin_dt=400 drops nothing: {e}")
         });
         // And at a coarse dt too: the check is a Grid-clock check.
-        gate_run_method_against_model(&stage, &compiled, 400.0).unwrap_or_else(|e| {
-            panic!("an ODE stage fires each effect at its own instant; dt=400 drops nothing: {e}")
+        gate_run_method_against_model(&method, &compiled, 400.0).unwrap_or_else(|e| {
+            panic!("an ODE method fires each effect at its own instant; dt=400 drops nothing: {e}")
         });
     }
 
-    /// The same stage with no `burnin_dt` set passes too.
+    /// The same method with no `burnin_dt` set passes too.
     #[test]
-    fn fit_run_accepts_an_mh_stage_without_burnin_dt() {
+    fn fit_run_accepts_an_mh_method_without_burnin_dt() {
         let compiled = compiled_golden("ocaml/golden/seir_seasonal_importation.ir.json");
-        let stage = mh_stage_with_burnin_dt(None);
-        gate_run_method_against_model(&stage, &compiled, 1.0).unwrap_or_else(|e| {
-            panic!("an mh stage with no burnin_dt must be accepted at dt=1: {e}")
+        let method = mh_method_with_burnin_dt(None);
+        gate_run_method_against_model(&method, &compiled, 1.0).unwrap_or_else(|e| {
+            panic!("an mh method with no burnin_dt must be accepted at dt=1: {e}")
         });
     }
 

@@ -264,7 +264,7 @@ pub struct SubsetDiagnostics {
     pub n_chains: usize,
 }
 
-/// Drop the selected chains from a stage's `draws.tsv` and recompute the
+/// Drop the selected chains from a method's `draws.tsv` and recompute the
 /// per-param R̂ / ESS over the RETAINED chains, using the SAME
 /// [`compute_rhat_ess`](crate::fit::runner::compute_rhat_ess) the fit used at
 /// completion and the SAME [`apply_keyed`](ChainSelection::apply_keyed) filter.

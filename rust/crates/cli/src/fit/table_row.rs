@@ -17,11 +17,11 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::fit::config_diff::ConfigDiff;
-use crate::fit::fit_tree::{self, StageNode};
+use crate::fit::fit_tree::{self, MethodNode};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
-    EssSummary, GateVerdict, If2StageResult, MethodResult, MethodResultError,
-    PgasStageResult, PmmhStageResult,
+    EssSummary, GateVerdict, If2Run, MethodResult, MethodResultError,
+    PgasRun, PmmhRun,
 };
 
 /// Schema discriminator. Field additions are non-breaking under a
@@ -103,7 +103,7 @@ pub struct TableRow {
     /// `null`. `None` only on the error-placeholder row.
     pub loglik_type: Option<crate::fit::loglik::LoglikType>,
     /// Maximum chain-agreement Â (NOT Gelman-Rubin). IF2 only; null
-    /// otherwise. See `If2StageResult.max_chain_agreement`.
+    /// otherwise. See `If2Run.max_chain_agreement`.
     pub max_chain_agreement: Option<f64>,
     /// Maximum Gelman-Rubin R̂. PGAS / PMMH only; null otherwise.
     pub max_rhat: Option<f64>,
@@ -115,14 +115,14 @@ pub struct TableRow {
     pub ess_at_mle: Option<EssSummary>,
     /// Rank-normalized **bulk** ESS per parameter — the cross-chain statistic
     /// of Vehtari et al. (2021), not a per-chain or summed one. Every Bayesian
-    /// stage fills it (PGAS, PMMH, mh); `None` on a non-Bayesian stage.
+    /// method fills it (PGAS, PMMH, mh); `None` on a non-Bayesian method.
     /// Parameters with no bulk ESS are omitted rather than carrying a NaN.
     pub ess_posterior: Option<BTreeMap<String, f64>>,
     /// ESS/iteration — the algorithm-comparison metric: min-parameter ESS per raw
     /// sampling step (thinning-invariant, hardware-independent). PGAS / PMMH only.
     #[serde(default)]
     pub ess_per_iter: Option<f64>,
-    /// ESS/second — the runtime metric: min-parameter ESS per second of stage
+    /// ESS/second — the runtime metric: min-parameter ESS per second of method
     /// wall-clock (thinning-invariant but hardware-dependent). PGAS / PMMH only.
     #[serde(default)]
     pub ess_per_sec: Option<f64>,
@@ -166,9 +166,9 @@ pub enum TableRowError {
         fit_dir: std::path::PathBuf,
         message: String,
     },
-    /// The walker found no completed stages under this fit_dir.
-    NoStages { fit_dir: std::path::PathBuf },
-    /// Loading the terminal stage's `MethodResult` failed.
+    /// The walker found no completed methods under this fit_dir.
+    NoMethods { fit_dir: std::path::PathBuf },
+    /// Loading the terminal method's `MethodResult` failed.
     Method(MethodResultError),
 }
 
@@ -181,7 +181,7 @@ impl std::fmt::Display for TableRowError {
                 fit_dir.display(),
                 message
             ),
-            TableRowError::NoStages { fit_dir } => write!(
+            TableRowError::NoMethods { fit_dir } => write!(
                 f,
                 "no completed method leaves found under {}",
                 fit_dir.display()
@@ -220,19 +220,19 @@ pub fn build_row(
         fit_dir: fit_dir.to_path_buf(),
         message: format!("walker: {}", e),
     })?;
-    let terminal = pick_terminal_stage(&view, &nodes).ok_or_else(|| {
-        TableRowError::NoStages {
+    let terminal = pick_terminal_method(&view, &nodes).ok_or_else(|| {
+        TableRowError::NoMethods {
             fit_dir: fit_dir.to_path_buf(),
         }
     })?;
     let completed_methods = completed_method_names(&view, &nodes);
 
-    let method = terminal.stage.method.as_str().to_string();
-    let method_result = MethodResult::load_from(&terminal.stage_dir, &method)?;
+    let method = terminal.view.method.as_str().to_string();
+    let method_result = MethodResult::load_from(&terminal.method_dir, &method)?;
     let mview = MethodView::from(&method_result);
 
     let stem = stem_from_fit_toml_path(&view.fit_toml_path);
-    let created = parse_iso8601_to_unix(&terminal.stage.created_at);
+    let created = parse_iso8601_to_unix(&terminal.view.created_at);
     let age_seconds = match created {
         Some(c) => now_unix - c,
         None => 0,
@@ -243,12 +243,12 @@ pub fn build_row(
         fit_id: short_hash(&view.fit_hash),
         fit_hash: view.fit_hash.clone(),
         // The row's run's own label and time (gh#896), never another run's.
-        label: terminal.stage.label.clone(),
+        label: terminal.view.label.clone(),
         stem,
         model_identity: view.model_identity.clone(),
         methods: completed_methods,
         method,
-        run_id: terminal.stage.run_id.clone(),
+        run_id: terminal.view.run_id.clone(),
         config_diff_from_baseline: config_diff,
         converged: mview.converged,
         gate_verdict: mview.gate_verdict,
@@ -264,7 +264,7 @@ pub fn build_row(
         params: mview.params,
         delta_ll_vs_best,
         age_seconds,
-        created_at: terminal.stage.created_at.clone(),
+        created_at: terminal.view.created_at.clone(),
         stale: false,
         stale_reason: None,
         quantities: BTreeMap::new(),
@@ -297,7 +297,7 @@ impl MethodView {
         }
     }
 
-    fn from_nlopt(r: &super::method_result::NloptStageResult) -> Self {
+    fn from_nlopt(r: &super::method_result::NloptRun) -> Self {
         // The optimizer's own recorded verdict — the one the warm-start
         // source check reads. A leaf written before it was recorded is not
         // assessed rather than judged by a weaker rule.
@@ -323,7 +323,7 @@ impl MethodView {
         }
     }
 
-    fn from_if2(r: &If2StageResult) -> Self {
+    fn from_if2(r: &If2Run) -> Self {
         let gate_str = serde_json::to_value(r.gate_verdict)
             .ok()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -343,7 +343,7 @@ impl MethodView {
         }
     }
 
-    fn from_pgas(r: &PgasStageResult) -> Self {
+    fn from_pgas(r: &PgasRun) -> Self {
         let d = &r.diagnostics;
         Self {
             converged: d.converged_at(
@@ -361,7 +361,7 @@ impl MethodView {
         }
     }
 
-    fn from_pmmh(r: &PmmhStageResult) -> Self {
+    fn from_pmmh(r: &PmmhRun) -> Self {
         let d = &r.diagnostics;
         Self {
             converged: d.converged_at(
@@ -380,24 +380,24 @@ impl MethodView {
     }
 }
 
-/// Find the terminal completed stage. Walks `methods_declared` in
-/// reverse and returns the first node whose stage name matches a
+/// Find the terminal completed method. Walks `methods_declared` in
+/// reverse and returns the first node whose method name matches a
 /// completed run. Picks Real over Synthetic, lowest `fit_seed`, then
-/// lex-first stage_dir — same priority as
-/// `fit_summary::resolve_if2_stage_dirs`.
+/// lex-first method_dir — same priority as
+/// `fit_summary::discover_methods`.
 ///
 /// Only a leaf whose method has a [`MethodResult`] shape is a candidate
 /// (gh#590). A `pfilter` leaf has none; picking it made the row builder fail
 /// with `UnknownMethod`, and the whole fit vanished from `fit table` because
 /// one of its leaves could not be a row. Such a leaf is skipped, and the row
 /// comes from the next declared method that has a result.
-fn pick_terminal_stage<'a>(
+fn pick_terminal_method<'a>(
     view: &FitView,
-    nodes: &'a [StageNode],
-) -> Option<&'a StageNode> {
-    let has_result = |n: &&StageNode| MethodResult::has_result(n.stage.method);
-    for stage_name in view.methods_declared.iter().rev() {
-        if let Some(node) = best_node_for_stage(stage_name, nodes).filter(has_result) {
+    nodes: &'a [MethodNode],
+) -> Option<&'a MethodNode> {
+    let has_result = |n: &&MethodNode| MethodResult::has_result(n.view.method);
+    for method_name in view.methods_declared.iter().rev() {
+        if let Some(node) = best_node_for_method(method_name, nodes).filter(has_result) {
             return Some(node);
         }
     }
@@ -405,14 +405,14 @@ fn pick_terminal_stage<'a>(
     nodes.iter().find(has_result)
 }
 
-fn best_node_for_stage<'a>(stage_name: &str, nodes: &'a [StageNode]) -> Option<&'a StageNode> {
+fn best_node_for_method<'a>(method_name: &str, nodes: &'a [MethodNode]) -> Option<&'a MethodNode> {
     use crate::fit::fit_tree::DataKind;
-    let mut best: Option<(&'a StageNode, (u8, u64))> = None;
+    let mut best: Option<(&'a MethodNode, (u8, u64))> = None;
     for node in nodes {
-        if node.stage.method.as_str() != stage_name {
+        if node.view.method.as_str() != method_name {
             continue;
         }
-        let rank: (u8, u64) = match &node.stage.axes {
+        let rank: (u8, u64) = match &node.view.axes {
             Some(axes) => {
                 let kind_rank = match axes.data_kind {
                     DataKind::Real => 0,
@@ -432,9 +432,9 @@ fn best_node_for_stage<'a>(stage_name: &str, nodes: &'a [StageNode]) -> Option<&
 
 /// The label of every `method` level under this fit whose leaf completed, in
 /// the order the fit view lists them.
-fn completed_method_names(view: &FitView, nodes: &[StageNode]) -> Vec<String> {
+fn completed_method_names(view: &FitView, nodes: &[MethodNode]) -> Vec<String> {
     let completed: std::collections::HashSet<&str> =
-        nodes.iter().map(|n| n.stage.method.as_str()).collect();
+        nodes.iter().map(|n| n.view.method.as_str()).collect();
     view.methods_declared
         .iter()
         .filter(|s| completed.contains(s.as_str()))
@@ -511,7 +511,7 @@ mod tests {
         use crate::fit::method_result::PosteriorDiagnostics;
         use std::collections::BTreeMap;
 
-        let refused = PgasStageResult {
+        let refused = PgasRun {
             diagnostics: PosteriorDiagnostics {
                 // Every parameter refused → nothing reached the map.
                 per_param: crate::fit::method_result::per_param_from_maps(
@@ -537,7 +537,7 @@ mod tests {
 
         // Control: a genuinely-assessed converged fit still reports true, so the
         // fix is a classification and not a blanket refusal.
-        let ok = PgasStageResult {
+        let ok = PgasRun {
             diagnostics: PosteriorDiagnostics {
                 per_param: crate::fit::method_result::per_param_from_maps(
                     BTreeMap::from([("tau".to_string(), 1.01)]),
@@ -581,7 +581,7 @@ mod tests {
         assert!(parse_iso8601_to_unix("2026-04-27 18:30:21").is_none());
     }
 
-    /// The discriminator every consumer keys on. v2 is the `stages` →
+    /// The discriminator every consumer keys on. v2 is the `methods` →
     /// `methods` rename (gh#890): a key that changes name under an unchanged
     /// version is the vintage problem gh#728 describes, one file later. v3
     /// adds `run_id` (gh#896).

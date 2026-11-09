@@ -177,7 +177,7 @@ cooling    = 0.5
 }
 
 /// Find the profile-base segment under `<out_root>/profiles/`. Each run
-/// writes one factored tree `profiles/<base>/<point>/<stage>/<seed>/<start>/`
+/// writes one factored tree `profiles/<base>/<point>/<method>/<seed>/<start>/`
 /// with the provenance sidecar at the base; this returns that base dir.
 fn find_profile_base(out_root: &Path) -> PathBuf {
     let profiles = out_root.join("profiles");

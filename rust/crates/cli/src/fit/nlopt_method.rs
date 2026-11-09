@@ -1,9 +1,9 @@
-//! Per-stage runner for NLopt deterministic MLE — Phase 1 of the
+//! Per-method runner for NLopt deterministic MLE — Phase 1 of the
 //! ODE-inference proposal
 //! (`docs/dev/proposals/2026-05-04-ode-inference-three-phase.md`).
 //!
-//! Mirrors the shape of `pgas::run_stage` / `pmmh::run_stage`: parses the
-//! NLopt-shaped `Stage` variant, builds a `FitRunConfig`, draws LHS-spread
+//! Mirrors the shape of `pgas::run_method` / `pmmh::run_method`: parses the
+//! NLopt-shaped `Method` variant, builds a `FitRunConfig`, draws LHS-spread
 //! per-chain starts, runs each chain's NLopt optimization in parallel via
 //! rayon, aggregates the winner, writes per-chain outputs +
 //! `fit_state.toml`, and emits a two-leg convergence diagnostic
@@ -20,7 +20,7 @@ use sim::inference::deterministic::{
 };
 
 use crate::chain_index::ChainIndex;
-use crate::fit::config_v2::{Algorithm, DtCheckConfig, GateConfig, Method, NloptStageConfig, Problem};
+use crate::fit::config_v2::{Algorithm, DtCheckConfig, GateConfig, Method, NloptConfig, Problem};
 use crate::fit::dt_check;
 use crate::fit::loglik::LoglikType;
 use crate::fit::methods::check_model_capabilities;
@@ -33,22 +33,22 @@ use crate::fit::provenance;
 /// `Algorithm::NlBobyqa` or `Algorithm::NlLbfgs`). Errors with a clear message
 /// if the algorithm is anything else — caller's job to dispatch correctly.
 #[allow(clippy::too_many_arguments)]
-pub fn run_stage(
+pub fn run_method(
     fit: &Problem,
     method: &Method,
-    stage_dir: &Path,
+    method_dir: &Path,
     seed: u64,
     starts: &super::chain_starts::ResolvedStarts,
     parent_fit_hash: &str,
     model_identity: &str,
     data_hashes: &[(String, String)],
     dt_check_cfg: &DtCheckConfig,
-    // The stage's liveness/progress heartbeat, owned by the runner
-    // (`fit::stage_heartbeat`). Its step is one objective evaluation, against
+    // The method's liveness/progress heartbeat, owned by the runner
+    // (`fit::method_heartbeat`). Its step is one objective evaluation, against
     // the `max_evals` budget (gh#900).
     heartbeat: &io::HeartbeatGuard,
 ) -> Result<(), String> {
-    let stage_name = method.algorithm.method_name();
+    let method_name = method.algorithm.method_name();
     let (algorithm, knobs) = extract_nlopt_config(&method.algorithm)?;
 
     eprintln!(
@@ -72,7 +72,7 @@ pub fn run_stage(
     let n_chains = knobs.chains;
     if n_chains == 0 {
         return Err(format!(
-            "stage '{stage_name}': chains must be ≥ 1; got 0"
+            "method '{method_name}': chains must be ≥ 1; got 0"
         ));
     }
 
@@ -138,15 +138,15 @@ pub fn run_stage(
         drawn.to_param_vecs(&run_config.estimated_params, &run_config.base_params);
     let n_chains = effective_chains;
 
-    std::fs::create_dir_all(stage_dir).map_err(|e| {
-        format!("creating {}: {}", stage_dir.display(), e)
+    std::fs::create_dir_all(method_dir).map_err(|e| {
+        format!("creating {}: {}", method_dir.display(), e)
     })?;
 
     let arc_config = Arc::new(run_config);
     let bounds_ref = bounds.clone();
     let est_indices_ref = est_indices.clone();
 
-    // Build the obs model + obs-time vector ONCE for the whole stage.
+    // Build the obs model + obs-time vector ONCE for the whole method.
     // The per-chain closures borrow these via Arc, so per-eval cost is
     // one ODE solve + one obs scoring pass with no reconstruction.
     let obs_model = Arc::new(arc_config.build_obs_model());
@@ -187,18 +187,18 @@ pub fn run_stage(
         .ok_or_else(|| "no chains ran".to_string())?;
 
     // Per-chain final params dump for inspection. Written before the refusal
-    // below, so a refused stage still records what each chain reached.
-    write_per_chain_files(stage_dir, &chain_outcomes, &est_names)?;
+    // below, so a refused method still records what each chain reached.
+    write_per_chain_files(method_dir, &chain_outcomes, &est_names)?;
 
     // gh#226 / gh#916. Whole-fit backstop, as in the PGAS, PMMH and IF2
     // drivers: the winner is the maximum over every chain, so a non-finite
     // winner means not one chain scored a finite point. Without this the
-    // stage writes a `-inf` best log-likelihood and an `mle_params.toml` at
+    // method writes a `-inf` best log-likelihood and an `mle_params.toml` at
     // wherever the search stopped, and exits 0. `optimize_det` reports its
     // internal non-finite floor as `-inf`, which is what makes this reachable.
     if sim::inference::no_finite_anchor(winner.loglik) {
         return Err(format!(
-            "{stage_name}: all {n_chains} chain(s) reached no finite \
+            "{method_name}: all {n_chains} chain(s) reached no finite \
              log-likelihood (best = {}). The ODE likelihood is `-inf` at every \
              θ the search evaluated, so there is no optimum to report. Most \
              often the starting values sit in an impossible region — check \
@@ -208,7 +208,7 @@ pub fn run_stage(
              mean is 0 for every θ in the bounds). Also check the observation \
              model and parameter bounds. Per-chain results: {}.",
             winner.loglik,
-            stage_dir.join("chain_results.tsv").display()
+            method_dir.join("chain_results.tsv").display()
         ));
     }
 
@@ -249,11 +249,11 @@ pub fn run_stage(
         dt,
         dt_check_cfg,
     )
-    .unwrap_or_else(|e| super::abandon_stage(heartbeat, format!("error: {e}")));
+    .unwrap_or_else(|e| super::abandon_method(heartbeat, format!("error: {e}")));
     dt_check::print_terminal_report(&dt_check_result);
 
     // Persist the winner's full parameter vector via fit_state.toml so
-    // downstream stages (`refine`, `pgas`, `posterior`) can resume from it.
+    // a later fit can start from it.
     let mut start_values = std::collections::BTreeMap::new();
     for (slot, name) in est_names.iter().enumerate() {
         start_values.insert(name.clone(), winner.params[slot]);
@@ -266,7 +266,7 @@ pub fn run_stage(
         .collect();
 
     let fit_state = FitState {
-        method: stage_name.to_string(),
+        method: method_name.to_string(),
         seed,
         timestamp: crate::cas::iso8601_utc(std::time::SystemTime::now()),
         input_hash: None,
@@ -316,7 +316,7 @@ pub fn run_stage(
         }),
     };
     fit_state
-        .save(&stage_dir.to_string_lossy())
+        .save(&method_dir.to_string_lossy())
         .map_err(|e| format!("writing fit_state.toml: {e}"))?;
 
     // Write mle_params.toml — full parameter vector at the winner with
@@ -330,16 +330,16 @@ pub fn run_stage(
     for (slot, name) in est_names.iter().enumerate() {
         all_params.insert(name.clone(), winner.params[slot]);
     }
-    let mle_path = stage_dir.join("mle_params.toml");
+    let mle_path = method_dir.join("mle_params.toml");
     let mle_meta = provenance::MleMetadata {
         input_hash: parent_fit_hash.to_string(),
         model_path: fit.model.camdl.clone(),
         model_identity: model_identity.to_string(),
         data_hashes: data_hashes.to_vec(),
         seed,
-        method: stage_name.to_string(),
+        method: method_name.to_string(),
         best_chain: ChainIndex(winner_idx),
-        // NLopt stages always run on the ODE backend (validated by
+        // NLopt methods always run on the ODE backend (validated by
         // methods::validate_combo); record it from the inference domain
         // (total `From<InferenceBackend>` into the forward provenance field).
         backend: crate::run_meta::InferenceBackend::Ode.into(),
@@ -361,13 +361,13 @@ pub fn run_stage(
 
 fn extract_nlopt_config(
     algorithm: &Algorithm,
-) -> Result<(NloptAlgorithm, &NloptStageConfig), String> {
+) -> Result<(NloptAlgorithm, &NloptConfig), String> {
     match algorithm {
         Algorithm::NlSbplx(c) => Ok((NloptAlgorithm::Sbplx, c)),
         Algorithm::NlBobyqa(c) => Ok((NloptAlgorithm::Bobyqa, c)),
         Algorithm::NlLbfgs(c) => Ok((NloptAlgorithm::Lbfgs, c)),
         other => Err(format!(
-            "nlopt_stage::run_stage: expected nl-sbplx, nl-bobyqa or nl-lbfgs, got {}",
+            "nlopt_method::run_method: expected nl-sbplx, nl-bobyqa or nl-lbfgs, got {}",
             other.method_name()
         )),
     }
@@ -386,7 +386,7 @@ struct ChainOutcome {
 #[allow(clippy::too_many_arguments)]
 fn run_one_chain(
     algorithm: NloptAlgorithm,
-    knobs: &NloptStageConfig,
+    knobs: &NloptConfig,
     compiled: &Arc<sim::CompiledModel>,
     obs_model: &Arc<sim::inference::MultiStreamObsModel>,
     obs_times: &[f64],
@@ -440,8 +440,8 @@ fn run_one_chain(
     }
 }
 
-/// One NLopt cell-level optimization — shared by `nlopt_stage::run_stage`
-/// (multi-chain MLE for fit.toml stages) and `cli::profile` (per-cell MLE
+/// One NLopt cell-level optimization — shared by `nlopt_method::run_method`
+/// (multi-chain MLE for fit.toml methods) and `cli::profile` (per-cell MLE
 /// with focal params pinned). The cell is defined by `full_start`: every
 /// non-estimated index (focal pins, fixed params, model defaults) is read
 /// out of it verbatim; only the indices in `est_indices` are optimized.
@@ -459,7 +459,7 @@ fn run_one_chain(
 ///   slot; the value returned is the same ODE marginal likelihood the
 ///   derivative-free path computes, off the same trajectory.
 ///
-/// Both pass `burnin_dt = dt`, i.e. no coarse warm-up: the NLopt stage uses
+/// Both pass `burnin_dt = dt`, i.e. no coarse warm-up: the NLopt method uses
 /// the fine step throughout, and value and gradient must be taken on the same
 /// trajectory or the reported optimum is not the optimum of the reported
 /// likelihood.
@@ -662,12 +662,12 @@ fn describe_point(
 }
 
 fn write_per_chain_files(
-    stage_dir: &Path,
+    method_dir: &Path,
     chain_outcomes: &[(usize, ChainOutcome)],
     est_names: &[String],
 ) -> Result<(), String> {
     use std::io::Write;
-    let path = stage_dir.join("chain_results.tsv");
+    let path = method_dir.join("chain_results.tsv");
     let mut f = std::fs::File::create(&path)
         .map_err(|e| format!("creating {}: {}", path.display(), e))?;
     write!(f, "chain\tloglik\tstatus\tn_evals").map_err(io_err)?;
@@ -697,7 +697,7 @@ fn io_err(e: std::io::Error) -> String {
     format!("io error: {e}")
 }
 
-/// Two-leg convergence diagnostic for NLopt stages — generalises IF2's
+/// Two-leg convergence diagnostic for NLopt methods — generalises IF2's
 /// compound gate (chain-agreement + decibans-spread) to deterministic
 /// optimizers. See proposal §"Convergence diagnostics for NLopt chains".
 struct ConvergenceVerdict {
@@ -863,7 +863,7 @@ fn print_verdict(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fit::config_v2::{Algorithm, GateConfig, NloptStageConfig};
+    use crate::fit::config_v2::{Algorithm, GateConfig, NloptConfig};
     use crate::run_meta::InferenceBackend;
     use sim::inference::deterministic::SuccessState;
 
@@ -1121,8 +1121,8 @@ mod tests {
         );
     }
 
-    fn nlopt_config() -> NloptStageConfig {
-        NloptStageConfig {
+    fn nlopt_config() -> NloptConfig {
+        NloptConfig {
             backend: InferenceBackend::Ode,
             chains: 4,
             tolerance: 1e-6,
@@ -1144,8 +1144,8 @@ mod tests {
 
     #[test]
     fn extract_nlopt_config_sbplx_returns_sbplx_algorithm() {
-        let stage = Algorithm::NlSbplx(nlopt_config());
-        let (algo, cfg) = extract_nlopt_config(&stage).expect("ok");
+        let method = Algorithm::NlSbplx(nlopt_config());
+        let (algo, cfg) = extract_nlopt_config(&method).expect("ok");
         assert_eq!(algo, NloptAlgorithm::Sbplx);
         assert_eq!(cfg.chains, 4);
         assert_eq!(cfg.tolerance, 1e-6);
@@ -1153,32 +1153,32 @@ mod tests {
 
     #[test]
     fn extract_nlopt_config_bobyqa_returns_bobyqa_algorithm() {
-        let stage = Algorithm::NlBobyqa(nlopt_config());
-        let (algo, cfg) = extract_nlopt_config(&stage).expect("ok");
+        let method = Algorithm::NlBobyqa(nlopt_config());
+        let (algo, cfg) = extract_nlopt_config(&method).expect("ok");
         assert_eq!(algo, NloptAlgorithm::Bobyqa);
         assert_eq!(cfg.chains, 4);
     }
 
     #[test]
     fn extract_nlopt_config_lbfgs_returns_lbfgs_algorithm() {
-        let stage = Algorithm::NlLbfgs(nlopt_config());
-        let (algo, cfg) = extract_nlopt_config(&stage).expect("ok");
+        let method = Algorithm::NlLbfgs(nlopt_config());
+        let (algo, cfg) = extract_nlopt_config(&method).expect("ok");
         assert_eq!(algo, NloptAlgorithm::Lbfgs);
         assert!(algo.uses_gradient(), "nl-lbfgs is the gradient algorithm");
         assert_eq!(cfg.chains, 4);
     }
 
     #[test]
-    fn extract_nlopt_config_rejects_non_nlopt_stage() {
+    fn extract_nlopt_config_rejects_non_nlopt_method() {
         // PFilter is the simplest non-nlopt variant to construct.
-        let stage = Algorithm::PFilter {
+        let method = Algorithm::PFilter {
             backend: InferenceBackend::ChainBinomial,
             particles: 100,
             replicates: None,
             record_ancestry: false,
             record_prequential: false,
         };
-        let err = extract_nlopt_config(&stage).expect_err("must reject");
+        let err = extract_nlopt_config(&method).expect_err("must reject");
         assert!(err.contains("expected nl-sbplx, nl-bobyqa or nl-lbfgs"),
             "error must name the expected variants; got: {err}");
         assert!(err.contains("pfilter"),

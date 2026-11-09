@@ -2,7 +2,7 @@
 //!
 //! One variant per inference method: each carries the typed payload its
 //! method produces, so consumers pattern-match instead of stringly-dispatching
-//! on the stage leaf's `inputs.method` tag.
+//! on the method leaf's `inputs.method` tag.
 //!
 //! Three variants — pfilter is excluded by design (it's a CLI
 //! evaluator on already-fixed parameters, never a fit-stage). See
@@ -24,21 +24,21 @@ use sim::inference::convergence::{ConvergenceError, RhatDriver, RhatRefusal};
 use crate::chain_index::ChainIndex;
 use crate::fit::state::FitState;
 
-/// One stage of a fit, typed by method. The variant carries the
+/// One method of a fit, typed by method. The variant carries the
 /// payload appropriate to its inference method (point estimate +
 /// gates for IF2; posterior summaries + R̂ for Bayesian; status +
 /// per-chain spread for NLopt deterministic MLE).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "kebab-case")]
 pub enum MethodResult {
-    If2(If2StageResult),
-    Pgas(PgasStageResult),
-    Pmmh(PmmhStageResult),
+    If2(If2Run),
+    Pgas(PgasRun),
+    Pmmh(PmmhRun),
     #[serde(rename = "nl-sbplx", alias = "nl-bobyqa", alias = "nl-lbfgs")]
-    Nlopt(NloptStageResult),
+    Nlopt(NloptRun),
 }
 
-/// Compound scout-convergence gate verdict (the IF2 "is this stage
+/// Compound scout-convergence gate verdict (the IF2 "is this method
 /// converged" answer). String projection used in
 /// `table_row.gate_verdict`:
 ///
@@ -73,12 +73,12 @@ pub enum GateVerdict {
 // with that and prone to drift; consumers call `serde_json::to_value`
 // (or destructure on the variant) instead.
 
-/// IF2-stage result: point estimate + convergence diagnostics.
+/// IF2-method result: point estimate + convergence diagnostics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct If2StageResult {
+pub struct If2Run {
     pub best_loglik: f64,
     /// The winning chain as `fit_state.toml` stores it: the number of a
-    /// `chain_N/` directory in the stage dir (gh#912, gh#990).
+    /// `chain_N/` directory in the method dir (gh#912, gh#990).
     pub best_chain: ChainIndex,
     /// Winner θ̂ from clean-eval. Estimated parameters only — fixed
     /// params live elsewhere (e.g. `final_params.toml` carries both).
@@ -92,7 +92,7 @@ pub struct If2StageResult {
     pub max_chain_agreement: Option<f64>,
     pub gate_verdict: GateVerdict,
     /// Particle-filter ESS evaluated at the clean-eval winner θ̂.
-    /// `None` when the stage didn't compute one (e.g. clean-eval was
+    /// `None` when the method didn't compute one (e.g. clean-eval was
     /// disabled or the file is absent).
     pub ess_at_mle: Option<EssSummary>,
     pub n_chains: usize,
@@ -385,12 +385,12 @@ pub struct PosteriorDiagnostics {
     /// ESS/iteration.
     #[serde(default = "default_thin")]
     pub thin: usize,
-    /// Stage wall-clock (seconds), from `run.json inputs.wall_time_seconds`.
+    /// Method wall-clock (seconds), from `run.json inputs.wall_time_seconds`.
     /// `None` on older runs that predate the field. Denominator for ESS/second.
     #[serde(default)]
     pub wall_time_secs: Option<f64>,
     /// Number of chains. R̂ requires ≥2; part of "how this posterior was
-    /// sampled", so it lives here rather than on each stage result.
+    /// sampled", so it lives here rather than on each method result.
     pub n_chains: usize,
 }
 
@@ -607,7 +607,7 @@ pub const RHAT_SEVERE_THRESHOLD: f64 = 1.5;
 /// Where a reported R̂ sits against the bar camdl **certifies** against.
 ///
 /// One band for every surface that glyphs an R̂. Two surfaces used to spell it
-/// differently — the end-of-stage block against `RHAT_REPORT_THRESHOLD` (1.1,
+/// differently — the end-of-run block against `RHAT_REPORT_THRESHOLD` (1.1,
 /// which is the bar that draws a *finding*), `fit summary` against
 /// `RHAT_CONVERGED_THRESHOLD` (1.05, the bar `converged_at` and the
 /// machine-readable `converged` column key on). A parameter in `[1.05, 1.1)`
@@ -767,12 +767,12 @@ pub enum MinEss {
     NoParams,
 }
 
-/// PGAS-stage result: posterior approximation. Convergence + efficiency
+/// PGAS-method result: posterior approximation. Convergence + efficiency
 /// diagnostics live in the shared [`PosteriorDiagnostics`]; the fields here are
 /// PGAS-specific (posterior moments + per-param acceptance from its inner
 /// Gibbs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PgasStageResult {
+pub struct PgasRun {
     pub diagnostics: PosteriorDiagnostics,
     pub posterior_mean: BTreeMap<String, f64>,
     pub posterior_q025: BTreeMap<String, f64>,
@@ -786,13 +786,13 @@ fn default_thin() -> usize {
     1
 }
 
-/// NLopt-stage result: deterministic MLE on the ODE skeleton (Phase 1
-/// of the ODE-inference proposal). Mirrors `If2StageResult`'s point-
+/// NLopt-method result: deterministic MLE on the ODE skeleton (Phase 1
+/// of the ODE-inference proposal). Mirrors `If2Run`'s point-
 /// estimate shape, with NLopt-specific convergence info (status and
 /// per-param chain spread) replacing IF2's chain-agreement Â and
 /// PF-ESS columns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NloptStageResult {
+pub struct NloptRun {
     pub best_loglik: f64,
     /// The winning chain as `fit_state.toml` stores it, matching the `chain`
     /// column of `chain_results.tsv` beside it (gh#912, gh#990).
@@ -818,10 +818,10 @@ pub struct NloptStageResult {
     pub optimizer_convergence: Option<crate::fit::state::OptimizerConvergence>,
 }
 
-/// PMMH-stage result: posterior approximation + scalar acceptance. Convergence
+/// PMMH-method result: posterior approximation + scalar acceptance. Convergence
 /// + efficiency diagnostics live in the shared [`PosteriorDiagnostics`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PmmhStageResult {
+pub struct PmmhRun {
     pub diagnostics: PosteriorDiagnostics,
     pub posterior_mean: BTreeMap<String, f64>,
     /// Scalar across chains (mean of per-chain rates). PGAS reports
@@ -831,7 +831,7 @@ pub struct PmmhStageResult {
     pub map_loglik: f64,
 }
 
-/// Errors loading a `MethodResult` from a stage directory.
+/// Errors loading a `MethodResult` from a method directory.
 #[derive(Debug)]
 pub enum MethodResultError {
     /// `run.json` named a method this ADT doesn't carry. New methods
@@ -840,11 +840,11 @@ pub enum MethodResultError {
     /// this typing was designed to surface.
     UnknownMethod {
         method: String,
-        stage_dir: PathBuf,
+        method_dir: PathBuf,
     },
     /// A required artifact was missing or unreadable.
     Io {
-        stage_dir: PathBuf,
+        method_dir: PathBuf,
         message: String,
     },
 }
@@ -852,15 +852,15 @@ pub enum MethodResultError {
 impl std::fmt::Display for MethodResultError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MethodResultError::UnknownMethod { method, stage_dir } => write!(
+            MethodResultError::UnknownMethod { method, method_dir } => write!(
                 f,
                 "unknown fit-stage method `{}` at {} (expected if2, pgas, \
                  pmmh, mh, nl-sbplx, nl-bobyqa, or nl-lbfgs)",
                 method,
-                stage_dir.display()
+                method_dir.display()
             ),
-            MethodResultError::Io { stage_dir, message } => {
-                write!(f, "loading {}: {}", stage_dir.display(), message)
+            MethodResultError::Io { method_dir, message } => {
+                write!(f, "loading {}: {}", method_dir.display(), message)
             }
         }
     }
@@ -889,10 +889,10 @@ impl MethodResult {
 
     /// Dispatch on `method` and load the matching variant. Errors on
     /// unknown methods rather than silently producing a generic shape.
-    pub fn load_from(stage_dir: &Path, method: &str) -> Result<Self, MethodResultError> {
+    pub fn load_from(method_dir: &Path, method: &str) -> Result<Self, MethodResultError> {
         match method {
-            "if2" => Ok(MethodResult::If2(If2StageResult::load(stage_dir)?)),
-            "pgas" => Ok(MethodResult::Pgas(PgasStageResult::load(stage_dir)?)),
+            "if2" => Ok(MethodResult::If2(If2Run::load(method_dir)?)),
+            "pgas" => Ok(MethodResult::Pgas(PgasRun::load(method_dir)?)),
             // `mh` (deterministic Metropolis-Hastings) runs through the PMMH
             // runner and writes the same posterior artifacts (`fit_state.toml`,
             // `draws.tsv`, acceptance + R̂), so it loads as a Pmmh result. Without
@@ -907,37 +907,37 @@ impl MethodResult {
                 } else {
                     crate::run_meta::FitAlgorithm::Pmmh
                 };
-                Ok(MethodResult::Pmmh(PmmhStageResult::load(stage_dir, algo)?))
+                Ok(MethodResult::Pmmh(PmmhRun::load(method_dir, algo)?))
             }
             "nl-sbplx" | "nl-bobyqa" | "nl-lbfgs" => Ok(MethodResult::Nlopt(
-                NloptStageResult::load(stage_dir, method)?,
+                NloptRun::load(method_dir, method)?,
             )),
             unknown => Err(MethodResultError::UnknownMethod {
                 method: unknown.to_string(),
-                stage_dir: stage_dir.to_owned(),
+                method_dir: method_dir.to_owned(),
             }),
         }
     }
 }
 
-/// Read the stage leaf's `inputs` map from its `run.json` (`runid::RunRecord`).
-/// Convenience for loaders that need stage-level metadata (`n_chains`,
+/// Read the method leaf's `inputs` map from its `run.json` (`runid::RunRecord`).
+/// Convenience for loaders that need method-level metadata (`n_chains`,
 /// `algorithm`) recorded alongside the leaf. Errors with a typed
 /// [`MethodResultError::Io`] on a missing / malformed file or a non-`FitStage`
 /// record — the contract is "every fit-stage writes a `RunRecord` leaf whose
 /// `inputs` carries its config".
-fn read_stage_inputs(stage_dir: &Path) -> Result<serde_json::Value, MethodResultError> {
-    let bytes = std::fs::read(stage_dir.join("run.json")).map_err(|e| MethodResultError::Io {
-        stage_dir: stage_dir.to_owned(),
+fn read_method_inputs(method_dir: &Path) -> Result<serde_json::Value, MethodResultError> {
+    let bytes = std::fs::read(method_dir.join("run.json")).map_err(|e| MethodResultError::Io {
+        method_dir: method_dir.to_owned(),
         message: format!("run.json: {}", e),
     })?;
     let rec: runid::RunRecord = serde_json::from_slice(&bytes).map_err(|e| MethodResultError::Io {
-        stage_dir: stage_dir.to_owned(),
+        method_dir: method_dir.to_owned(),
         message: format!("run.json: {}", e),
     })?;
     if rec.kind != runid::ArtifactKind::FitStage {
         return Err(MethodResultError::Io {
-            stage_dir: stage_dir.to_owned(),
+            method_dir: method_dir.to_owned(),
             message: "run.json is not a fit-stage".into(),
         });
     }
@@ -956,13 +956,13 @@ fn inputs_n_chains(inputs: &serde_json::Value) -> usize {
 /// about how the chains were started and an absent field makes no claim. A
 /// `fit_state.toml` that exists but cannot be read is an error: reading it as
 /// "no claim" would leave a point-started R̂ looking assessed.
-pub fn point_start(stage_dir: &Path) -> Result<Option<(usize, String)>, MethodResultError> {
-    if !stage_dir.join("fit_state.toml").is_file() {
+pub fn point_start(method_dir: &Path) -> Result<Option<(usize, String)>, MethodResultError> {
+    if !method_dir.join("fit_state.toml").is_file() {
         return Ok(None);
     }
-    let state = FitState::load(&stage_dir.to_string_lossy()).map_err(|e| {
+    let state = FitState::load(&method_dir.to_string_lossy()).map_err(|e| {
         MethodResultError::Io {
-            stage_dir: stage_dir.to_owned(),
+            method_dir: method_dir.to_owned(),
             message: format!("fit_state.toml: {e}"),
         }
     })?;
@@ -982,7 +982,7 @@ pub fn point_start(stage_dir: &Path) -> Result<Option<(usize, String)>, MethodRe
 /// [`PosteriorDiagnostics`], so the point-start demotion cannot be missed by
 /// a loader that forgot it.
 fn posterior_diagnostics(
-    stage_dir: &Path,
+    method_dir: &Path,
     per_param: BTreeMap<String, ParamConvergence>,
     n_samples: usize,
     thin: usize,
@@ -990,7 +990,7 @@ fn posterior_diagnostics(
     n_chains: usize,
 ) -> Result<PosteriorDiagnostics, MethodResultError> {
     let mut diag = PosteriorDiagnostics { per_param, n_samples, thin, wall_time_secs, n_chains };
-    if let Some((n, starts)) = point_start(stage_dir)? {
+    if let Some((n, starts)) = point_start(method_dir)? {
         diag.demote_point_start(n, &starts);
     }
     Ok(diag)
@@ -1002,8 +1002,8 @@ fn posterior_diagnostics(
 /// parameter), else the fit's own record of it (`fit.meta.json` `estimated`,
 /// in the nearest ancestor segment). Only a leaf with neither — written
 /// before either existed — falls back to every stored value.
-fn theta_hat_from_state(stage_dir: &Path, state: &FitState) -> BTreeMap<String, f64> {
-    let estimated = estimated_names(Some(stage_dir), state);
+fn theta_hat_from_state(method_dir: &Path, state: &FitState) -> BTreeMap<String, f64> {
+    let estimated = estimated_names(Some(method_dir), state);
     state
         .start_values
         .iter()
@@ -1014,15 +1014,15 @@ fn theta_hat_from_state(stage_dir: &Path, state: &FitState) -> BTreeMap<String, 
 
 /// The estimated parameters of an optimizer leaf, for [`theta_hat_from_state`]
 /// and `fit summary`'s parameter listings. `None` only when the leaf records
-/// neither Â nor (with `stage_dir`) a `fit.meta.json` `estimated` list.
+/// neither Â nor (with `method_dir`) a `fit.meta.json` `estimated` list.
 pub(crate) fn estimated_names(
-    stage_dir: Option<&Path>,
+    method_dir: Option<&Path>,
     state: &FitState,
 ) -> Option<std::collections::BTreeSet<String>> {
     if !state.tail_chain_agreement.is_empty() {
         Some(state.tail_chain_agreement.keys().cloned().collect())
     } else {
-        stage_dir?
+        method_dir?
             .ancestors()
             .skip(1)
             .take(4)
@@ -1034,9 +1034,9 @@ pub(crate) fn estimated_names(
     }
 }
 
-// ── NloptStageResult ────────────────────────────────────────────────
+// ── NloptRun ────────────────────────────────────────────────
 
-impl NloptStageResult {
+impl NloptRun {
     /// The chain-agreement measurement (largest relative range across the
     /// converged chains), or `None` when the leg was not computed: fewer than
     /// two converged chains, where the stored 0.0 is a placeholder.
@@ -1046,11 +1046,11 @@ impl NloptStageResult {
         (compared >= 2).then_some(self.max_rel_range)
     }
 
-    pub fn load(stage_dir: &Path, method: &str) -> Result<Self, MethodResultError> {
-        let n_chains = inputs_n_chains(&read_stage_inputs(stage_dir)?);
-        let state = FitState::load(&stage_dir.to_string_lossy()).map_err(|e| {
+    pub fn load(method_dir: &Path, method: &str) -> Result<Self, MethodResultError> {
+        let n_chains = inputs_n_chains(&read_method_inputs(method_dir)?);
+        let state = FitState::load(&method_dir.to_string_lossy()).map_err(|e| {
             MethodResultError::Io {
-                stage_dir: stage_dir.to_owned(),
+                method_dir: method_dir.to_owned(),
                 message: format!("fit_state.toml: {}", e),
             }
         })?;
@@ -1058,7 +1058,7 @@ impl NloptStageResult {
         // theta_hat: estimated parameters only. NLopt's tail_chain_agreement
         // (per-param relative range) carries one entry per estimated param
         // — same trick the IF2 loader uses to filter to the estimated set.
-        let theta_hat = theta_hat_from_state(stage_dir, &state);
+        let theta_hat = theta_hat_from_state(method_dir, &state);
 
         let max_rel_range = state
             .tail_chain_agreement
@@ -1066,7 +1066,7 @@ impl NloptStageResult {
             .copied()
             .fold(0.0_f64, f64::max);
 
-        Ok(NloptStageResult {
+        Ok(NloptRun {
             best_loglik: state.best_loglik,
             best_chain: state.best_chain,
             theta_hat,
@@ -1079,16 +1079,16 @@ impl NloptStageResult {
     }
 }
 
-// ── If2StageResult ──────────────────────────────────────────────────
+// ── If2Run ──────────────────────────────────────────────────
 
-impl If2StageResult {
-    pub fn load(stage_dir: &Path) -> Result<Self, MethodResultError> {
-        let inputs = read_stage_inputs(stage_dir)?;
+impl If2Run {
+    pub fn load(method_dir: &Path) -> Result<Self, MethodResultError> {
+        let inputs = read_method_inputs(method_dir)?;
         let n_chains = inputs_n_chains(&inputs);
 
-        let state = FitState::load(&stage_dir.to_string_lossy()).map_err(|e| {
+        let state = FitState::load(&method_dir.to_string_lossy()).map_err(|e| {
             MethodResultError::Io {
-                stage_dir: stage_dir.to_owned(),
+                method_dir: method_dir.to_owned(),
                 message: format!("fit_state.toml: {}", e),
             }
         })?;
@@ -1100,7 +1100,7 @@ impl If2StageResult {
         // is empty (legacy file), fall back to the full start_values
         // map (which over-includes fixed params, but is the best we
         // can do without re-reading fit.toml).
-        let theta_hat = theta_hat_from_state(stage_dir, &state);
+        let theta_hat = theta_hat_from_state(method_dir, &state);
 
         let max_chain_agreement = (!state.tail_chain_agreement.is_empty()).then(|| {
             state.tail_chain_agreement.values().copied().fold(0.0_f64, f64::max)
@@ -1108,7 +1108,7 @@ impl If2StageResult {
 
         let gate_verdict = compute_if2_gate_verdict(&state);
 
-        let ess_at_mle = read_ess_at_mle(stage_dir);
+        let ess_at_mle = read_ess_at_mle(method_dir);
 
         let n_iter = inputs
             .get("algorithm")
@@ -1117,7 +1117,7 @@ impl If2StageResult {
             .map(|n| n as usize)
             .unwrap_or(0);
 
-        Ok(If2StageResult {
+        Ok(If2Run {
             best_loglik: state.best_loglik,
             best_chain: state.best_chain,
             theta_hat,
@@ -1166,8 +1166,8 @@ fn compute_if2_gate_verdict(state: &FitState) -> GateVerdict {
 /// across all rows), since clean-eval re-scoring is done per
 /// (chain × candidate) and the IF2's `best_chain` is the overall
 /// max. Returns `None` if the file is absent or malformed.
-fn read_ess_at_mle(stage_dir: &Path) -> Option<EssSummary> {
-    let path = stage_dir.join("chain_evaluations.tsv");
+fn read_ess_at_mle(method_dir: &Path) -> Option<EssSummary> {
+    let path = method_dir.join("chain_evaluations.tsv");
     let contents = std::fs::read_to_string(&path).ok()?;
     let mut header: Option<Vec<String>> = None;
     let mut best_row: Option<(f64, EssSummary)> = None;
@@ -1203,11 +1203,11 @@ fn read_ess_at_mle(stage_dir: &Path) -> Option<EssSummary> {
     best_row.map(|(_, s)| s)
 }
 
-// ── PgasStageResult ─────────────────────────────────────────────────
+// ── PgasRun ─────────────────────────────────────────────────
 
-impl PgasStageResult {
-    pub fn load(stage_dir: &Path) -> Result<Self, MethodResultError> {
-        let inputs = read_stage_inputs(stage_dir)?;
+impl PgasRun {
+    pub fn load(method_dir: &Path) -> Result<Self, MethodResultError> {
+        let inputs = read_method_inputs(method_dir)?;
         let n_chains = inputs_n_chains(&inputs);
         let wall_time_secs = inputs.get("wall_time_seconds").and_then(|v| v.as_f64());
 
@@ -1215,7 +1215,7 @@ impl PgasStageResult {
         // doesn't store them directly. Fall back to "every column in
         // draws.tsv" if not in algorithm.
         let summary =
-            read_summary_json(stage_dir, &crate::run_meta::FitAlgorithm::Pgas.summary_filename())?;
+            read_summary_json(method_dir, &crate::run_meta::FitAlgorithm::Pgas.summary_filename())?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
         let conv = ConvergenceMaps::read(&summary);
@@ -1230,7 +1230,7 @@ impl PgasStageResult {
         // a fit report none at all.
         let est_names: Vec<String> = conv.param_names();
         let (n_samples, posterior_mean, posterior_q025, posterior_q975) =
-            posterior_summaries(stage_dir, &est_names);
+            posterior_summaries(method_dir, &est_names);
 
         // Acceptance per param: pgas writes acceptance_rates as
         // Vec<Vec<f64>> (n_chains × n_estimated). Aggregate to per-
@@ -1270,9 +1270,9 @@ impl PgasStageResult {
             }
         };
 
-        Ok(PgasStageResult {
+        Ok(PgasRun {
             diagnostics: posterior_diagnostics(
-                stage_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
+                method_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
             )?,
             posterior_mean,
             posterior_q025,
@@ -1282,17 +1282,17 @@ impl PgasStageResult {
     }
 }
 
-// ── PmmhStageResult ─────────────────────────────────────────────────
+// ── PmmhRun ─────────────────────────────────────────────────
 
-impl PmmhStageResult {
+impl PmmhRun {
     pub fn load(
-        stage_dir: &Path,
+        method_dir: &Path,
         algo: crate::run_meta::FitAlgorithm,
     ) -> Result<Self, MethodResultError> {
-        let inputs = read_stage_inputs(stage_dir)?;
+        let inputs = read_method_inputs(method_dir)?;
         let n_chains = inputs_n_chains(&inputs);
         let wall_time_secs = inputs.get("wall_time_seconds").and_then(|v| v.as_f64());
-        let summary = read_summary_json(stage_dir, &algo.summary_filename())?;
+        let summary = read_summary_json(method_dir, &algo.summary_filename())?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
         let conv = ConvergenceMaps::read(&summary);
@@ -1303,7 +1303,7 @@ impl PmmhStageResult {
         // a fit report none at all.
         let est_names: Vec<String> = conv.param_names();
         let (n_samples, posterior_mean, _q025, _q975) =
-            posterior_summaries(stage_dir, &est_names);
+            posterior_summaries(method_dir, &est_names);
 
         // PMMH writes acceptance_rate as Vec<f64> (one per chain). The
         // table-row scalar is the mean across chains.
@@ -1324,9 +1324,9 @@ impl PmmhStageResult {
             .and_then(|v| v.as_f64())
             .unwrap_or(f64::NEG_INFINITY);
 
-        Ok(PmmhStageResult {
+        Ok(PmmhRun {
             diagnostics: posterior_diagnostics(
-                stage_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
+                method_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
             )?,
             posterior_mean,
             acceptance_rate,
@@ -1337,10 +1337,10 @@ impl PmmhStageResult {
 
 // ── shared helpers ──────────────────────────────────────────────────
 
-/// The convergence half of a stage summary, read once.
+/// The convergence half of a method summary, read once.
 ///
 /// The mirror of
-/// [`StageConvergence::summary_fields`](crate::fit::runner::StageConvergence::summary_fields):
+/// [`MethodConvergence::summary_fields`](crate::fit::runner::MethodConvergence::summary_fields):
 /// one writer, one reader, so a statistic the samplers store cannot be dropped
 /// by a loader that forgot to add a key. Every field is optional on the wire —
 /// a fit written before a statistic existed simply has no entry for it, and the
@@ -1363,7 +1363,7 @@ pub struct ConvergenceMaps {
 }
 
 impl ConvergenceMaps {
-    /// Read every convergence key a stage summary may carry.
+    /// Read every convergence key a method summary may carry.
     pub fn read(summary: &serde_json::Value) -> Self {
         ConvergenceMaps {
             // A `null` R̂ (a NaN, as serde_json writes one) is kept as NaN:
@@ -1522,7 +1522,7 @@ fn read_f64_map(summary: &serde_json::Value, key: &str) -> BTreeMap<String, f64>
         .unwrap_or_default()
 }
 
-/// Read a stage's summary JSON (`pgas_summary.json` /
+/// Read a method's summary JSON (`pgas_summary.json` /
 /// `pmmh_summary.json` / `mh_summary.json`) into a serde value. These files
 /// are written by the runners and persist scalar diagnostics that aren't in
 /// fit_state.toml.
@@ -1531,31 +1531,31 @@ fn read_f64_map(summary: &serde_json::Value, key: &str) -> BTreeMap<String, f64>
 /// every `MethodResult` goes through, so refusing here is what keeps a
 /// `rhat` written under one definition from being reported under another.
 fn read_summary_json(
-    stage_dir: &Path,
+    method_dir: &Path,
     filename: &str,
 ) -> Result<serde_json::Value, MethodResultError> {
-    let path = stage_dir.join(filename);
+    let path = method_dir.join(filename);
     let contents = std::fs::read_to_string(&path).map_err(|e| MethodResultError::Io {
-        stage_dir: stage_dir.to_owned(),
+        method_dir: method_dir.to_owned(),
         message: format!("{}: {}", filename, e),
     })?;
     let value: serde_json::Value =
         serde_json::from_str(&contents).map_err(|e| MethodResultError::Io {
-            stage_dir: stage_dir.to_owned(),
+            method_dir: method_dir.to_owned(),
             message: format!("{}: parse error: {}", filename, e),
         })?;
     crate::run_meta::check_fit_summary_schema(&value, filename).map_err(|message| {
-        MethodResultError::Io { stage_dir: stage_dir.to_owned(), message }
+        MethodResultError::Io { method_dir: method_dir.to_owned(), message }
     })?;
     Ok(value)
 }
 
-/// Read `<stage>/draws.tsv` and compute (n_samples, mean, q025, q975)
+/// Read `<method>/draws.tsv` and compute (n_samples, mean, q025, q975)
 /// for each param in `est_names`. `draws.tsv` is the canonical
 /// posterior-sample table written by both PGAS and PMMH (post-
 /// burn-in, thinned, all params).
 fn posterior_summaries(
-    stage_dir: &Path,
+    method_dir: &Path,
     est_names: &[String],
 ) -> (
     usize,
@@ -1563,7 +1563,7 @@ fn posterior_summaries(
     BTreeMap<String, f64>,
     BTreeMap<String, f64>,
 ) {
-    let path = stage_dir.join("draws.tsv");
+    let path = method_dir.join("draws.tsv");
     let mut mean = BTreeMap::new();
     let mut q025 = BTreeMap::new();
     let mut q975 = BTreeMap::new();
@@ -1651,7 +1651,7 @@ mod tests {
 
     /// Write a `FitStage` `runid::RunRecord` leaf at `dir` carrying the
     /// `inputs` the loaders read (`method`, `n_chains`, `algorithm`).
-    fn write_stage_run(dir: &Path, method: crate::run_meta::FitAlgorithm, n_chains: usize, algorithm: serde_json::Value) {
+    fn write_method_run(dir: &Path, method: crate::run_meta::FitAlgorithm, n_chains: usize, algorithm: serde_json::Value) {
         std::fs::create_dir_all(dir).unwrap();
         let rec = serde_json::json!({
             "format_version": 1,
@@ -1727,7 +1727,7 @@ mod tests {
     fn if2_verdict_is_the_same_for_the_table_the_summary_and_a_starts_source() {
         let tmp = tempdir("if2_t0_only");
         let dir = tmp.path();
-        write_stage_run(
+        write_method_run(
             dir,
             crate::run_meta::FitAlgorithm::If2,
             4,
@@ -1743,7 +1743,7 @@ mod tests {
         let err = crate::fit::gating::check_source_converged(dir, "@t0", false)
             .expect_err("an initial-state Â failure fails the source check");
         assert!(err.contains("I0"), "{err}");
-        let r = If2StageResult::load(dir).unwrap();
+        let r = If2Run::load(dir).unwrap();
         assert_eq!(r.gate_verdict, GateVerdict::FailA,
             "`fit table` agrees with the source check");
 
@@ -1764,7 +1764,7 @@ mod tests {
         nan.save(&dir.to_string_lossy()).unwrap();
         assert!(crate::fit::gating::check_source_converged(dir, "@soft_nan", false).is_err(),
             "soft band + NaN Â is refused");
-        assert_eq!(If2StageResult::load(dir).unwrap().gate_verdict, GateVerdict::Incomplete);
+        assert_eq!(If2Run::load(dir).unwrap().gate_verdict, GateVerdict::Incomplete);
 
         let mut spread = synthetic_if2_state();
         soft(&mut spread);
@@ -1774,7 +1774,7 @@ mod tests {
         spread.save(&dir.to_string_lossy()).unwrap();
         assert!(crate::fit::gating::check_source_converged(dir, "@soft_db", false).is_err(),
             "soft band + failing decibans leg is refused");
-        assert_eq!(If2StageResult::load(dir).unwrap().gate_verdict, GateVerdict::FailDb);
+        assert_eq!(If2Run::load(dir).unwrap().gate_verdict, GateVerdict::FailDb);
     }
 
     /// A NaN Â (within-chain variance collapsed) is unavailable, and an
@@ -1786,7 +1786,7 @@ mod tests {
     fn a_nan_chain_agreement_is_unavailable_and_never_a_pass() {
         let tmp = tempdir("if2_nan");
         let dir = tmp.path();
-        write_stage_run(
+        write_method_run(
             dir,
             crate::run_meta::FitAlgorithm::If2,
             4,
@@ -1801,7 +1801,7 @@ mod tests {
                 state.chain_eval_ses.clear();
             }
             state.save(&dir.to_string_lossy()).unwrap();
-            let r = If2StageResult::load(dir).unwrap();
+            let r = If2Run::load(dir).unwrap();
             assert_eq!(r.gate_verdict, GateVerdict::Incomplete,
                 "NaN Â on R0 (decibans leg present: {with_decibans}) is not a pass");
             let err = crate::fit::gating::check_source_converged(dir, "@nan", false)
@@ -1824,12 +1824,12 @@ mod tests {
             serde_json::json!({"estimated": ["R0", "sigma"]}).to_string()).unwrap();
         let dir = seg.join("if2-abcd").join("seed_1-ef01");
         std::fs::create_dir_all(&dir).unwrap();
-        write_stage_run(&dir, crate::run_meta::FitAlgorithm::If2, 1,
+        write_method_run(&dir, crate::run_meta::FitAlgorithm::If2, 1,
             serde_json::json!({"method": "if2", "iterations": 50}));
         let mut state = synthetic_if2_state();
         state.tail_chain_agreement.clear(); // one chain: no Â
         state.save(&dir.to_string_lossy()).unwrap();
-        let r = If2StageResult::load(&dir).unwrap();
+        let r = If2Run::load(&dir).unwrap();
         assert_eq!(r.theta_hat.keys().cloned().collect::<Vec<_>>(), vec!["R0", "sigma"],
             "the fixed N0 is not an estimate");
     }
@@ -1843,7 +1843,7 @@ mod tests {
     fn a_one_chain_if2_fit_is_not_assessed() {
         let tmp = tempdir("if2_one_chain");
         let dir = tmp.path();
-        write_stage_run(dir, crate::run_meta::FitAlgorithm::If2, 1,
+        write_method_run(dir, crate::run_meta::FitAlgorithm::If2, 1,
             serde_json::json!({"method": "if2", "iterations": 50}));
         let mut state = synthetic_if2_state();
         state.method = "if2".into();
@@ -1852,7 +1852,7 @@ mod tests {
         state.chain_eval_logliks = vec![-3804.9];
         state.chain_eval_ses = vec![1.0];
         state.save(&dir.to_string_lossy()).unwrap();
-        let r = If2StageResult::load(dir).unwrap();
+        let r = If2Run::load(dir).unwrap();
         assert_eq!(r.gate_verdict, GateVerdict::NotAssessed);
         assert_eq!(r.max_chain_agreement, None, "no Â, not a perfect 0.0");
         crate::fit::gating::check_source_converged(dir, "@one", false)
@@ -1875,7 +1875,7 @@ mod tests {
     fn an_if2_fit_that_lost_started_chains_is_incomplete() {
         let tmp = tempdir("if2_lost_chains");
         let dir = tmp.path();
-        write_stage_run(dir, crate::run_meta::FitAlgorithm::If2, 4,
+        write_method_run(dir, crate::run_meta::FitAlgorithm::If2, 4,
             serde_json::json!({"method": "if2", "iterations": 50}));
         let mut state = synthetic_if2_state();
         state.method = "if2".into();
@@ -1885,7 +1885,7 @@ mod tests {
         state.chain_eval_logliks = vec![-3804.9];
         state.chain_eval_ses = vec![1.0];
         state.save(&dir.to_string_lossy()).unwrap();
-        let r = If2StageResult::load(dir).unwrap();
+        let r = If2Run::load(dir).unwrap();
         assert_eq!(r.gate_verdict, GateVerdict::Incomplete);
         let err = crate::fit::gating::check_source_converged(dir, "@lossy", false)
             .expect_err("a source that lost 3 of 4 chains is refused");
@@ -1902,14 +1902,14 @@ mod tests {
         state.chain_eval_logliks = vec![-3804.9, -3805.0];
         state.chain_eval_ses = vec![1.0, 1.0];
         state.save(&dir.to_string_lossy()).unwrap();
-        assert_eq!(If2StageResult::load(dir).unwrap().gate_verdict, GateVerdict::Incomplete);
+        assert_eq!(If2Run::load(dir).unwrap().gate_verdict, GateVerdict::Incomplete);
 
         // Two survivors that disagree: the failure is the verdict, and the
         // refusal also names the loss.
         state.tail_chain_agreement =
             [("beta".to_string(), 1.5), ("gamma".to_string(), 1.002)].into();
         state.save(&dir.to_string_lossy()).unwrap();
-        assert_eq!(If2StageResult::load(dir).unwrap().gate_verdict, GateVerdict::FailA);
+        assert_eq!(If2Run::load(dir).unwrap().gate_verdict, GateVerdict::FailA);
         let err = crate::fit::gating::check_source_converged(dir, "@lossy", false).unwrap_err();
         assert!(err.contains("it did not converge") && err.contains("2 of its 4 IF2 chains were lost"),
             "{err}");
@@ -1919,7 +1919,7 @@ mod tests {
         state.tail_chain_agreement =
             [("beta".to_string(), 1.001), ("gamma".to_string(), 1.002)].into();
         state.save(&dir.to_string_lossy()).unwrap();
-        assert_eq!(If2StageResult::load(dir).unwrap().gate_verdict, GateVerdict::Pass);
+        assert_eq!(If2Run::load(dir).unwrap().gate_verdict, GateVerdict::Pass);
     }
 
     /// With fewer than two converged nl-* chains the chain-agreement leg is
@@ -1927,7 +1927,7 @@ mod tests {
     /// surface as a measured agreement.
     #[test]
     fn an_uncomputed_nlopt_chain_agreement_is_none() {
-        let mut r = NloptStageResult {
+        let mut r = NloptRun {
             best_loglik: -10.0, best_chain: ChainIndex(0), theta_hat: BTreeMap::new(),
             algorithm: "nl-sbplx".into(), n_converged: 1, max_rel_range: 0.0, n_chains: 2,
             optimizer_convergence: Some(crate::fit::state::OptimizerConvergence {
@@ -1943,10 +1943,10 @@ mod tests {
     }
 
     #[test]
-    fn loads_if2_stage_result_pass_verdict() {
+    fn loads_if2_method_result_pass_verdict() {
         let tmp = tempdir("if2_pass");
         let dir = tmp.path();
-        write_stage_run(
+        write_method_run(
             dir,
             crate::run_meta::FitAlgorithm::If2,
             4,
@@ -1956,7 +1956,7 @@ mod tests {
             .save(&dir.to_string_lossy())
             .unwrap();
 
-        let r = If2StageResult::load(dir).unwrap();
+        let r = If2Run::load(dir).unwrap();
         assert_eq!(r.n_chains, 4);
         assert_eq!(r.n_iter, 50);
         assert_eq!(r.best_chain, ChainIndex(1));
@@ -1979,7 +1979,7 @@ mod tests {
     fn if2_pass_verdict_when_thresholds_clear() {
         let tmp = tempdir("if2_clean");
         let dir = tmp.path();
-        write_stage_run(
+        write_method_run(
             dir,
             crate::run_meta::FitAlgorithm::If2,
             4,
@@ -1989,7 +1989,7 @@ mod tests {
         state.tail_chain_agreement.insert("R0".into(), 1.005);
         state.tail_chain_agreement.insert("sigma".into(), 1.002);
         state.save(&dir.to_string_lossy()).unwrap();
-        let r = If2StageResult::load(dir).unwrap();
+        let r = If2Run::load(dir).unwrap();
         assert_eq!(r.gate_verdict, GateVerdict::Pass);
     }
 
@@ -1997,7 +1997,7 @@ mod tests {
     fn loads_if2_ess_from_chain_evaluations_tsv() {
         let tmp = tempdir("if2_ess");
         let dir = tmp.path();
-        write_stage_run(
+        write_method_run(
             dir,
             crate::run_meta::FitAlgorithm::If2,
             2,
@@ -2015,7 +2015,7 @@ mod tests {
              2\tfinal_iter\t-3812.0\t1.0\t820.0\t380.0\t15\t0\t57.0\n",
         )
         .unwrap();
-        let r = If2StageResult::load(dir).unwrap();
+        let r = If2Run::load(dir).unwrap();
         let ess = r.ess_at_mle.expect("ESS summary must be loaded");
         // Best (highest loglik) row is chain 1 / final_iter at -3805.1.
         assert!((ess.ess_min - 412.0).abs() < 1e-9);
@@ -2027,7 +2027,7 @@ mod tests {
     fn ess_at_mle_none_when_file_absent() {
         let tmp = tempdir("if2_no_ess");
         let dir = tmp.path();
-        write_stage_run(
+        write_method_run(
             dir,
             crate::run_meta::FitAlgorithm::If2,
             2,
@@ -2036,15 +2036,15 @@ mod tests {
         synthetic_if2_state()
             .save(&dir.to_string_lossy())
             .unwrap();
-        let r = If2StageResult::load(dir).unwrap();
+        let r = If2Run::load(dir).unwrap();
         assert!(r.ess_at_mle.is_none());
     }
 
     #[test]
-    fn loads_pgas_stage_result() {
+    fn loads_pgas_method_result() {
         let tmp = tempdir("pgas");
         let dir = tmp.path();
-        write_stage_run(
+        write_method_run(
             dir,
             crate::run_meta::FitAlgorithm::Pgas,
             2,
@@ -2074,7 +2074,7 @@ mod tests {
         )
         .unwrap();
 
-        let r = PgasStageResult::load(dir).unwrap();
+        let r = PgasRun::load(dir).unwrap();
         assert_eq!(r.diagnostics.n_chains, 2);
         assert_eq!(r.diagnostics.n_samples, 4);
         // BTreeMap order: alphabetic. R0 first, sigma second.
@@ -2111,7 +2111,7 @@ mod tests {
     fn a_point_started_sampler_leaf_reads_as_not_assessed() {
         let tmp = tempdir("point_start");
         let dir = tmp.path();
-        write_stage_run(
+        write_method_run(
             dir,
             crate::run_meta::FitAlgorithm::Pgas,
             4,
@@ -2128,7 +2128,7 @@ mod tests {
         // Every chain at @mle's estimate: the R̂ of 1.001 is agreement by
         // construction and must not be reported.
         write_state_with_starts(dir, 4, Some("point"), "from_mle @mle");
-        let r = PgasStageResult::load(dir).unwrap();
+        let r = PgasRun::load(dir).unwrap();
         match r.diagnostics.max_rhat_status() {
             MaxRhat::NotApplicable { reason } => assert_eq!(reason, RhatRefusal::PointStart),
             other => panic!("a point start must read as not assessed, got {other:?}"),
@@ -2149,7 +2149,7 @@ mod tests {
 
         // The same leaf under a spread start reports what it stored.
         write_state_with_starts(dir, 4, Some("spread"), "from_prior");
-        let r = PgasStageResult::load(dir).unwrap();
+        let r = PgasRun::load(dir).unwrap();
         assert!((r.diagnostics.max_rhat().unwrap() - 1.002).abs() < 1e-9);
         assert!(r.diagnostics.converged_at(RHAT_CONVERGED_THRESHOLD));
     }
@@ -2177,10 +2177,10 @@ mod tests {
     }
 
     #[test]
-    fn loads_pmmh_stage_result() {
+    fn loads_pmmh_method_result() {
         let tmp = tempdir("pmmh");
         let dir = tmp.path();
-        write_stage_run(
+        write_method_run(
             dir,
             crate::run_meta::FitAlgorithm::Pmmh,
             2,
@@ -2209,7 +2209,7 @@ mod tests {
         )
         .unwrap();
 
-        let r = PmmhStageResult::load(dir, crate::run_meta::FitAlgorithm::Pmmh).unwrap();
+        let r = PmmhRun::load(dir, crate::run_meta::FitAlgorithm::Pmmh).unwrap();
         assert_eq!(r.diagnostics.n_chains, 2);
         assert_eq!(r.diagnostics.n_samples, 2);
         // Mean over the two posterior samples for R0.
@@ -2242,7 +2242,7 @@ mod tests {
     fn load_from_dispatches_on_method_string() {
         let tmp = tempdir("dispatch");
         let dir = tmp.path();
-        write_stage_run(
+        write_method_run(
             dir,
             crate::run_meta::FitAlgorithm::If2,
             2,

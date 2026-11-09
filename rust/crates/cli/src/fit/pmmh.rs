@@ -8,7 +8,7 @@ use crate::chain_index::ChainIndex;
 use crate::fit::state::FitState;
 use crate::fit::pf_noise;
 use crate::fit::loglik::LoglikType;
-use crate::fit::runner::{self, FitRunConfig, StageConvergence};
+use crate::fit::runner::{self, FitRunConfig, MethodConvergence};
 use crate::cas::iso8601_utc;
 use sim::inference::{
     if2::EstimatedParam,
@@ -19,12 +19,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Per-stage knobs extracted from a `Stage::PMMH { ... }` variant by
-/// the `camdl fit run` dispatcher and passed verbatim into `run_stage`.
+/// Per-method knobs extracted from a `Algorithm::PMMH { ... }` variant by
+/// the `camdl fit run` dispatcher and passed verbatim into `run_method`.
 /// Mirrors every PMMH field. v1 calls iterations `steps`; v2 calls
 /// them `iterations` (we keep the internal `n_steps` name to match
 /// `sim::PMMHConfig.n_steps`).
-pub struct PmmhStageOpts {
+pub struct PmmhMethodOpts {
     pub n_chains: usize,
     pub n_particles: usize,
     pub n_steps: usize,
@@ -37,7 +37,7 @@ pub struct PmmhStageOpts {
 pub(crate) const DEFAULT_BURN_IN: usize = 5000;
 const DEFAULT_THIN: usize = 10;
 
-impl PmmhStageOpts {
+impl PmmhMethodOpts {
     /// Build from an `Algorithm::PMMH { ... }` or `Algorithm::Mh { ... }`
     /// variant. Errors otherwise — caller's responsibility to dispatch.
     pub fn from_algorithm(algorithm: &super::config_v2::Algorithm) -> Result<Self, String> {
@@ -47,7 +47,7 @@ impl PmmhStageOpts {
                 adapt, adapt_start,
                 ..
             } => {
-                Ok(PmmhStageOpts {
+                Ok(PmmhMethodOpts {
                     n_chains: *chains,
                     n_particles: *particles,
                     n_steps: *iterations,
@@ -57,7 +57,7 @@ impl PmmhStageOpts {
                     adapt_start: *adapt_start,
                 })
             }
-            // Deterministic-ODE MH reuses the PMMH machinery via `run_stage`'s
+            // Deterministic-ODE MH reuses the PMMH machinery via `run_method`'s
             // `is_ode_mh` seam. It carries no `particles` (no PF), so
             // `n_particles` is 0 (unused on the deterministic path).
             super::config_v2::Algorithm::Mh {
@@ -65,7 +65,7 @@ impl PmmhStageOpts {
                 adapt, adapt_start,
                 ..
             } => {
-                Ok(PmmhStageOpts {
+                Ok(PmmhMethodOpts {
                     n_chains: *chains,
                     n_particles: 0,
                     n_steps: *iterations,
@@ -76,24 +76,24 @@ impl PmmhStageOpts {
                 })
             }
             other => Err(format!(
-                "PmmhStageOpts::from_algorithm: expected Algorithm::PMMH or Algorithm::Mh, got {}",
+                "PmmhMethodOpts::from_algorithm: expected Algorithm::PMMH or Algorithm::Mh, got {}",
                 other.method_name())),
         }
     }
 }
 
-// See pgas::run_stage for the comment on this allow.
+// See pgas::run_method for the comment on this allow.
 #[allow(clippy::too_many_arguments)]
-pub fn run_stage(
+pub fn run_method(
     fit: &super::config_v2::Problem,
     method: &super::config_v2::Method,
-    stage_dir: &Path,
-    pmmh_opts: PmmhStageOpts,
+    method_dir: &Path,
+    pmmh_opts: PmmhMethodOpts,
     seed: u64,
     force: bool,
     resume: bool,
     // The leaf's resume-compatibility key (`cas::resume_guard`); see
-    // `pgas::run_stage`.
+    // `pgas::run_method`.
     resume_guard: &str,
     starts: &super::chain_starts::ResolvedStarts,
     // Post-fit deterministic ODE dt-check config (gh#52, gh#227). `Some` only on
@@ -101,8 +101,8 @@ pub fn run_stage(
     // wired on the IF2 path). `--dt-check-strict` is resolved into the config's
     // `threshold_nats` before identity is taken (gh#730), so no flag rides here.
     dt_check_opt: Option<super::config_v2::DtCheckConfig>,
-    // The stage's liveness/progress heartbeat, owned by the runner
-    // (`fit::stage_heartbeat`). Its step is one MCMC iteration (gh#900).
+    // The method's liveness/progress heartbeat, owned by the runner
+    // (`fit::method_heartbeat`). Its step is one MCMC iteration (gh#900).
     heartbeat: &io::HeartbeatGuard,
 ) -> Result<(), String> {
     // The PMMH prefer-PGAS-for-long-series caveat banner is emitted by the
@@ -110,8 +110,8 @@ pub fn run_stage(
     // registry `status_note` so it can't drift from `camdl fit methods`.
     // gh#909: this runner serves `pmmh` and `mh` + `ode`; every label it
     // prints or records is the method that ran, never the runner's name.
-    let stage_name = method.algorithm.method_name();
-    let collector = DiagnosticCollector::new(stage_name);
+    let method_name = method.algorithm.method_name();
+    let collector = DiagnosticCollector::new(method_name);
     let estimate = &fit.estimate;
 
     let n_chains = pmmh_opts.n_chains;
@@ -122,7 +122,7 @@ pub fn run_stage(
     let adapt = pmmh_opts.adapt;
     let adapt_start = pmmh_opts.adapt_start;
 
-    // Deterministic-ODE Metropolis-Hastings: the stage is `Stage::Mh`. The MH
+    // Deterministic-ODE Metropolis-Hastings: the method is `Algorithm::Mh`. The MH
     // chain/adaptive-proposal/diagnostics machinery below is shared with PMMH;
     // the ONLY difference is the per-step likelihood evaluation — the
     // deterministic `compute_ode_loglik` instead of the bootstrap particle
@@ -198,12 +198,12 @@ pub fn run_stage(
     // draws from (`chain_starts::draw_chain_starts`), under the resolved
     // `starts` rule.
     let drawn = super::runner::draw_chain_starts_for(&config, estimate, starts, n_chains, seed)
-        .map_err(|e| format!("{stage_name}: {e}"))?;
-    super::runner::refuse_starts_on_an_end(&config, &drawn).map_err(|e| format!("{stage_name}: {e}"))?;
+        .map_err(|e| format!("{method_name}: {e}"))?;
+    super::runner::refuse_starts_on_an_end(&config, &drawn).map_err(|e| format!("{method_name}: {e}"))?;
     let chain_starts: Vec<Vec<f64>> = drawn.to_param_vecs(&config.estimated_params, &base);
 
     let ll_mean: f64;
-    // gh#764: the measured spread, carried to the stage artifact instead of
+    // gh#764: the measured spread, carried to the method artifact instead of
     // being printed and dropped. `None` on the ODE-MH path (no filter) and
     // when an evaluation is ruled out (no spread to report).
     let mut pf_noise_check: Option<pf_noise::PfNoiseCheck> = None;
@@ -228,7 +228,7 @@ pub fn run_stage(
         // What governs acceptance is the spread of the log-likelihood
         // *difference* between the two θ a Metropolis step compares, so the
         // preflight evaluates pairs: once at the base θ, once at a θ' drawn
-        // from the initial proposal, sharing whatever randomness this stage's
+        // from the initial proposal, sharing whatever randomness this method's
         // scheme shares. One θ' is drawn and reused across the pairs so the
         // spread is estimator noise and not the curvature of the likelihood
         // surface — see `pf_noise::draw_proposed_theta`.
@@ -274,23 +274,23 @@ pub fn run_stage(
 
 
     if !force && !resume {
-        let state_path = stage_dir.join("fit_state.toml");
+        let state_path = method_dir.join("fit_state.toml");
         if state_path.exists() {
-            eprintln!("\x1b[33m{stage_name} results already exist in {}. Use --force to re-run or --resume to continue.\x1b[0m",
-                stage_dir.display());
+            eprintln!("\x1b[33m{method_name} results already exist in {}. Use --force to re-run or --resume to continue.\x1b[0m",
+                method_dir.display());
             return Ok(());
         }
     }
 
-    std::fs::create_dir_all(stage_dir)
-        .map_err(|e| format!("cannot create {}: {}", stage_dir.display(), e))?;
+    std::fs::create_dir_all(method_dir)
+        .map_err(|e| format!("cannot create {}: {}", method_dir.display(), e))?;
 
     // The audit sidecar, captured before any step runs so a watcher can read
     // the starts while the chains are still going, and rewritten from the
     // final record once they finish (gh#887, gh#904). The pre-run write can
     // only say `accepted` — no chain has been refused yet — so the rewrite is
     // what makes the file true, and it is unconditional.
-    super::runner::record_chain_starts(stage_dir, &config, &drawn);
+    super::runner::record_chain_starts(method_dir, &config, &drawn);
     let retry_accepted: std::sync::Mutex<Vec<Option<super::chain_starts::ChainStart>>> =
         std::sync::Mutex::new(vec![None; n_chains]);
     let retry_rejected: std::sync::Mutex<Vec<super::chain_starts::RejectedStart>> =
@@ -319,18 +319,18 @@ pub fn run_stage(
         let mut states = Vec::with_capacity(n_chains);
         let mut any_failed = false;
         for chain in ChainIndex::all(n_chains) {
-            let path: PathBuf = chain.dir_in(stage_dir).join("resume_state.bin");
+            let path: PathBuf = chain.dir_in(method_dir).join("resume_state.bin");
             match std::fs::read(&path) {
                 Ok(data) => match bincode::deserialize::<PMMHResumeState>(&data) {
                     Ok(state) => {
                         if state.config_hash != config_hash {
-                            super::abandon_stage(heartbeat, format!(
+                            super::abandon_method(heartbeat, format!(
                                 "error: config hash mismatch for chain {} — \
                                 cannot resume. Either the model/data/priors changed \
                                 since the original run, or this chain predates a camdl \
-                                version that changed how a stage's identity is computed \
+                                version that changed how a method's identity is computed \
                                 (the 2026-08-23 subtractive-identity change re-keyed \
-                                every pgas/pmmh/mh/nuts stage). Re-run from scratch \
+                                every pgas/pmmh/mh/nuts method). Re-run from scratch \
                                 with --force.",
                                 chain));
                         }
@@ -353,7 +353,7 @@ pub fn run_stage(
             }
         }
         if any_failed {
-            super::abandon_stage(heartbeat,
+            super::abandon_method(heartbeat,
                 "error: --resume requires resume state files for all chains.\n  \
                  These are written automatically at the end of every PMMH run.\n  \
                  If the original run was interrupted before saving, use --force to \
@@ -366,7 +366,7 @@ pub fn run_stage(
 
     // The ODE path runs no particle filter, so it has no particle count.
     let particles = if is_ode_mh { String::new() } else { format!(" × {n_particles} particles") };
-    eprintln!("\n{stage_name}: {n_chains} chains × {n_steps} steps{particles}, \
+    eprintln!("\n{method_name}: {n_chains} chains × {n_steps} steps{particles}, \
                burn_in={burn_in}, thin={thin}, adapt={adapt}");
     eprintln!("  proposal_sd (transformed): [{}]",
         config.estimated_params.iter().zip(&proposal_sd)
@@ -384,7 +384,7 @@ pub fn run_stage(
 
     // Pre-create chain directories
     for chain in ChainIndex::all(n_chains) {
-        let chain_dir = chain.dir_in(stage_dir);
+        let chain_dir = chain.dir_in(method_dir);
         std::fs::create_dir_all(&chain_dir)
             .map_err(|e| format!("cannot create {}: {}", chain_dir.display(), e))?;
     }
@@ -595,11 +595,11 @@ pub fn run_stage(
                 // takes the boundary as its own `adapt_stop`. No new
                 // configuration key, so no new run-identity input — the
                 // boundary moves only when `burn_in` does, and `burn_in` is
-                // already part of a stage's identity payload.
+                // already part of a method's identity payload.
                 //
                 // How much of a run this actually freezes is therefore set by
                 // `burn_in`, whose default is `DEFAULT_BURN_IN` = 5000 while
-                // config validation requires `burn_in < iterations`. A stage
+                // config validation requires `burn_in < iterations`. A method
                 // that leaves it unset and asks for 5,001 iterations adapts
                 // over 5,000 of them and freezes for one; the same default at
                 // 20,000 iterations freezes three quarters of the run. The
@@ -643,7 +643,7 @@ pub fn run_stage(
             let accepted_count = AtomicUsize::new(0);
 
             // Streaming trace: use TraceWriter with append mode when resuming
-            let chain_dir = ChainIndex(chain_id).dir_in(stage_dir);
+            let chain_dir = ChainIndex(chain_id).dir_in(method_dir);
             let _ = std::fs::create_dir_all(&chain_dir);
             let trace_path = chain_dir.join("trace.tsv");
             let trace_path_str = trace_path.to_string_lossy().into_owned();
@@ -749,7 +749,7 @@ pub fn run_stage(
         retry_rejected.into_inner().unwrap(),
         retry_refused.into_inner().unwrap(),
     );
-    super::runner::record_chain_starts(stage_dir, &config, &drawn);
+    super::runner::record_chain_starts(method_dir, &config, &drawn);
 
     // gh#110. Skip + continue: surface "ran K of N chains" so the
     // user knows downstream R̂/ESS exclude skipped chains. This
@@ -801,7 +801,7 @@ pub fn run_stage(
                 n_chains, starts: starts.rule.spelled(),
             }
         });
-        // RHAT_REPORT_THRESHOLD is unchanged from the value this stage has
+        // RHAT_REPORT_THRESHOLD is unchanged from the value this method has
         // always applied; only the STATISTIC it is applied to changed (gh#84).
         eprint!("{}", diagnostics.report(
             &collector, super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()));
@@ -812,18 +812,18 @@ pub fn run_stage(
     // rather than panicking on .unwrap() of an empty results vec.
     if results.is_empty() {
         collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
-        let diag_path = stage_dir.join("diagnostics.json");
+        let diag_path = method_dir.join("diagnostics.json");
         let _ = collector.write_json(&diag_path.to_string_lossy());
         // gh#880, gh#885. The reason and the remedies come from the one
         // string the other two all-chains-refused errors also carry, so they
         // cannot drift apart again.
         return Err(format!(
-            "pmmh stage `{}`: all {} chains failed init-eval with \
+            "pmmh method `{}`: all {} chains failed init-eval with \
              PFDegenerate — the particle filter could not score any chain's \
              starting parameters. See `diagnostics.json` for the per-chain \
              BadInit entries and `chain_starts.tsv` for the starts they name. \
              {}",
-            stage_name, n_chains,
+            method_name, n_chains,
             crate::fit::chain_starts::UNSCOREABLE_START_ADVICE));
     }
 
@@ -842,10 +842,10 @@ pub fn run_stage(
     if results.iter().all(|(_, r)| sim::inference::no_finite_anchor(r.map_loglik)) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
         collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
-        let diag_path = stage_dir.join("diagnostics.json");
+        let diag_path = method_dir.join("diagnostics.json");
         let _ = collector.write_json(&diag_path.to_string_lossy());
         return Err(format!(
-            "pmmh stage `{}`: all {} surviving chain(s) reached no finite \
+            "pmmh method `{}`: all {} surviving chain(s) reached no finite \
              log-likelihood anchor — every evaluated θ scored -inf, so the \
              MH chain never moves (-inf - (-inf) = NaN, never accepted) and \
              the posterior is degenerate. Most often the starting values sit \
@@ -856,7 +856,7 @@ pub fn run_stage(
              error fires at every θ (gh#226). Also check the observation model \
              and parameter bounds; run with --verbosity debug for per-substep \
              diagnostics.",
-            stage_name, results.len()));
+            method_name, results.len()));
     }
 
     // Find MAP across surviving chains
@@ -871,7 +871,7 @@ pub fn run_stage(
     } else {
         crate::run_meta::FitAlgorithm::Pmmh
     };
-    write_summary(stage_dir, &results, &config, thin, &diagnostics, algo)?;
+    write_summary(method_dir, &results, &config, thin, &diagnostics, algo)?;
 
     // Write fit_state.toml
     let mut start_values = std::collections::BTreeMap::new();
@@ -916,7 +916,7 @@ pub fn run_stage(
     };
 
     let state = FitState {
-        method: stage_name.to_string(),
+        method: method_name.to_string(),
         seed,
         timestamp: iso8601_utc(std::time::SystemTime::now()),
         input_hash: None,
@@ -933,7 +933,7 @@ pub fn run_stage(
         start_values,
         loglik_type: Some(LoglikType::Marginal),
         acceptance_rate: Some(map_result.acceptance_rate),
-        // Bayesian stages don't produce an IF2-style Â table; the
+        // Bayesian methods don't produce an IF2-style Â table; the
         // refine-gates proposal only gates on scout→refine handoffs.
         tail_chain_agreement: std::collections::BTreeMap::new(),
         perturb_only_at_t0_params: Vec::new(),
@@ -958,7 +958,7 @@ pub fn run_stage(
         pf_noise: pf_noise_check,
         optimizer_convergence: None,
     };
-    state.save(&stage_dir.to_string_lossy())?;
+    state.save(&method_dir.to_string_lossy())?;
 
     // Write draws.tsv: complete-M posterior draws (all params, estimated + fixed)
     // Reads the per-chain trace.tsv files (which now also carry warm-up rows),
@@ -966,7 +966,7 @@ pub fn run_stage(
     // parameter columns.
     {
         use std::io::Write;
-        let draws_path = stage_dir.join("draws.tsv");
+        let draws_path = method_dir.join("draws.tsv");
         let mut f = std::io::BufWriter::new(
             std::fs::File::create(&draws_path)
                 .map_err(|e| format!("cannot create {}: {}", draws_path.display(), e))?
@@ -996,7 +996,7 @@ pub fn run_stage(
         // Read each chain's trace.tsv and extract param columns
         let mut n_draws = 0usize;
         for chain in ChainIndex::all(n_chains) {
-            let trace_path = chain.dir_in(stage_dir).join("trace.tsv");
+            let trace_path = chain.dir_in(method_dir).join("trace.tsv");
             if let Ok(content) = std::fs::read_to_string(&trace_path) {
                 let mut lines = content.lines();
                 let header = lines.next().unwrap_or("");
@@ -1044,11 +1044,11 @@ pub fn run_stage(
 
     // Render and persist diagnostics
     collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
-    let diag_path = stage_dir.join("diagnostics.json");
+    let diag_path = method_dir.join("diagnostics.json");
     let _ = collector.write_json(&diag_path.to_string_lossy());
 
     eprintln!("\n{}", completion_line(
-        stage_name, is_ode_mh, elapsed.as_secs_f64(), n_chains, n_steps, stage_dir));
+        method_name, is_ode_mh, elapsed.as_secs_f64(), n_chains, n_steps, method_dir));
     eprintln!("  loglik at the highest log-posterior draw (natural-scale prior, no Jacobian): {:.1} (chain {})", map_result.map_loglik, ChainIndex(*map_chain));
 
     Ok(())
@@ -1067,8 +1067,8 @@ fn build_proposal_sd(config: &FitRunConfig) -> Vec<f64> {
 fn compute_diagnostics(
     results: &[(usize, PMMHResult)],
     estimated_params: &[EstimatedParam],
-) -> StageConvergence {
-    StageConvergence::compute(estimated_params.iter().map(|spec| {
+) -> MethodConvergence {
+    MethodConvergence::compute(estimated_params.iter().map(|spec| {
         let chains: Vec<Vec<f64>> = results.iter()
             .map(|(_, r)| r.steps.iter().map(|s| s.params[spec.index]).collect())
             .collect();
@@ -1084,7 +1084,7 @@ fn write_summary(
     results: &[(usize, PMMHResult)],
     config: &FitRunConfig,
     thin: usize,
-    diagnostics: &StageConvergence,
+    diagnostics: &MethodConvergence,
     algo: crate::run_meta::FitAlgorithm,
 ) -> Result<(), String> {
     let acceptance_rates: Vec<f64> = results.iter().map(|(_, r)| r.acceptance_rate).collect();
@@ -1131,25 +1131,25 @@ fn write_summary(
 
 /// The run's closing stderr line: which method ran, how long it took, and how
 /// many likelihood evaluations that was (gh#909). This runner serves both
-/// `pmmh` and `mh` + `ode`, so the method is `stage_name`, never a literal,
+/// `pmmh` and `mh` + `ode`, so the method is `method_name`, never a literal,
 /// and the evaluations are named by what computed them: a particle filter's
 /// estimate for PMMH, the deterministic ODE marginal likelihood for `mh`.
 /// The per-evaluation time is wall time per evaluation within one chain, the
 /// chains running in parallel.
 fn completion_line(
-    stage_name: &str,
+    method_name: &str,
     is_ode_mh: bool,
     wall_secs: f64,
     n_chains: usize,
     n_steps: usize,
-    stage_dir: &Path,
+    method_dir: &Path,
 ) -> String {
     let total_evals = n_chains * n_steps;
     let what = if is_ode_mh { "ODE likelihood evaluations" } else { "PF evaluations" };
-    format!("{stage_name} complete in {:.1}s ({} {what}, {:.1}ms/eval): {}/",
+    format!("{method_name} complete in {:.1}s ({} {what}, {:.1}ms/eval): {}/",
         wall_secs, total_evals,
         wall_secs * 1000.0 / total_evals as f64 * n_chains as f64,
-        stage_dir.display())
+        method_dir.display())
 }
 
 /// `Err` naming every estimated parameter whose prior log-density is not

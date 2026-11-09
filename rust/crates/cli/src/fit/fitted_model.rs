@@ -332,7 +332,7 @@ impl FittedSimulator {
 
 /// The simulator of a stored fit — the one reader.
 ///
-/// - **backend**: the named run's own record (its stage's `backend` in
+/// - **backend**: the named run's own record (its method's `backend` in
 ///   `run.json`, as `fit predict` and `compare` read it); for a problem-folder
 ///   handle, the config's `[method]`.
 /// - **dt**: `fit.meta.json`'s recorded step; for a fit recorded before the
@@ -363,7 +363,7 @@ pub fn stored_fit_simulator(
         .leaf
         .as_ref()
         .and_then(|leaf| crate::fit::fit_view::FitView::read(leaf))
-        .and_then(|v| v.stages.first().map(|s| ForwardBackend::from(s.backend)))
+        .and_then(|v| v.methods.first().map(|s| ForwardBackend::from(s.backend)))
         .or_else(|| {
             resolved.config.inference.method.as_ref().map(|m| ForwardBackend::from(m.algorithm.backend()))
         });

@@ -40,7 +40,7 @@ impl MethodStatus {
 pub enum MethodCategory {
     /// Inference algorithm — fits parameters to data (MLE or Bayesian).
     Inference,
-    /// Diagnostic stage — evaluates the likelihood at fixed parameters.
+    /// Diagnostic method — evaluates the likelihood at fixed parameters.
     /// Not a parameter-inference method; surfaced separately.
     Diagnostic,
 }
@@ -194,8 +194,8 @@ pub fn validate_combo(
 /// Parse a user-supplied `(algorithm, backend)` string pair (the CLI boundary
 /// for `camdl profile`/`fit`) into the typed registry entry. Strings enter the
 /// typed world *here*; on any failure the error names the problem and points at
-/// the matrix. `fit.toml` does not use this — its `Stage` is already typed, so
-/// it calls [`validate_combo`] with `stage.method_kind()` / `stage.backend()`.
+/// the matrix. `fit.toml` does not use this — its `Method` is already typed, so
+/// it calls [`validate_combo`] with `method.method_kind()` / `method.backend()`.
 pub fn parse_combo(
     algorithm: &str,
     backend: &str,
@@ -351,7 +351,7 @@ fn render_invalid_combo(algorithm: FitAlgorithm, backend: InferenceBackend) -> S
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "stage has algorithm = \"{}\" with backend = \"{}\", which is not \
+        "method has algorithm = \"{}\" with backend = \"{}\", which is not \
          a supported inference method.",
         algorithm, backend
     );
@@ -383,7 +383,7 @@ fn render_unknown_combo(
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "stage has algorithm = \"{}\" with backend = \"{}\", which is not \
+        "method has algorithm = \"{}\" with backend = \"{}\", which is not \
          a supported inference method.",
         algorithm, backend
     );
@@ -676,7 +676,7 @@ pub fn check_model_capabilities(
     // via `Capabilities`, which lets the error name the offending compartment and
     // transitions. ODE inference runs every transition as a deterministic flow
     // and is exempt. This is the single inference chokepoint every stochastic
-    // fit stage / profile / survey routes through.
+    // fit method / profile / survey routes through.
     if matches!(backend, InferenceBackend::ChainBinomial) {
         compiled
             .validate_deterministic_source_exits()
@@ -725,7 +725,7 @@ pub fn check_model_capabilities(
 /// size. This is allowed and not a capability error, but it silently degrades
 /// incidence accuracy relative to every other model, so it is surfaced LOUDLY,
 /// once per invocation, by the ODE dispatch chokepoints (`util::run_simulation`
-/// for `simulate`, `gate_run_stages_against_model` for `fit`). No-op unless the
+/// for `simulate`, `gate_run_method_against_model` for `fit`). No-op unless the
 /// model is RUNTIME_DT (callers gate on the ODE backend).
 pub fn warn_if_ode_euler_flow(compiled: &sim::CompiledModel) {
     if compiled
@@ -998,7 +998,7 @@ mod tests {
 
     /// A transition consuming two units of its source per firing (`S + S --> D`,
     /// net stoichiometry `S: -2`) is refused by the chain-binomial inference
-    /// dispatch check — the one every `fit` stage, `profile` and survey routes
+    /// dispatch check — the one every `fit` method, `profile` and survey routes
     /// through — with a message naming the transition, the units and the
     /// compartment. ODE inference runs it as a continuous flow and accepts it.
     #[test]

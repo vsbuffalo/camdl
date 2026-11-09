@@ -45,16 +45,16 @@ use super::config_v2::{Algorithm, FitConfig, Method, Problem};
 
 /// A fully-resolved fit-method leaf: the factored identity levels (in path
 /// order) and the leaf `run_id` composed from their hashes.
-pub struct ResolvedFitStage {
+pub struct ResolvedFitMethod {
     pub levels: Vec<LevelId>,
     pub run_id: ContentHash,
 }
 
-/// Inputs to [`resolve_fit_stage`], all already resolved by the caller
+/// Inputs to [`resolve_fit_method`], all already resolved by the caller
 /// (sweep overrides applied to `problem`, CLI overrides and the `starts`
 /// default applied to `method`, data paths resolved). Labels are provenance;
 /// identity rides in the hashes.
-pub struct FitStageCtx<'a> {
+pub struct FitMethodCtx<'a> {
     pub model: &'a ir::Model,
     pub fit_stem: &'a str,
     pub ir_version: &'a str,
@@ -220,13 +220,13 @@ pub(crate) fn canonical_config_hash<T: serde::Serialize>(
 ///
 /// The one implementation of "include by default, and name every omission".
 /// It had three: this, [`fit_config_blob_hash`]'s inline copy, and
-/// `Stage::payload_minus` — which is how the helper's own docstring came to
+/// `Method::payload_minus` — which is how the helper's own docstring came to
 /// warn against creating "the second implementation it exists to prevent"
 /// while shipping as the third. Both now call this.
 ///
 /// Does NOT gate finiteness: callers that hash gate first
-/// ([`canonical_config_hash`]), while `Stage::payload_minus` returns a `Value`
-/// whose gate happens later at `stage_config_hash`. Gating here would
+/// ([`canonical_config_hash`]), while `Method::payload_minus` returns a `Value`
+/// whose gate happens later at `method_config_hash`. Gating here would
 /// double-gate one caller and change the other's signature for nothing.
 pub(crate) fn serialize_minus<T: serde::Serialize>(
     value: &T,
@@ -257,7 +257,7 @@ pub(crate) fn serialize_minus<T: serde::Serialize>(
 // serde_json 1.0.150 serializes a non-finite f64/f32 (NaN / ±Inf) as `null`
 // in BOTH `to_value` (→ `Value::Null`) and the text serializer (→ writes
 // `null`) — neither errors. `inf`/`nan` are valid TOML floats, so two configs
-// or stages differing only in a non-finite value would both collapse to the
+// or methods differing only in a non-finite value would both collapse to the
 // same `null` and hash equal: a silent collision. This generic gate rejects
 // any non-finite float anywhere in a `Serialize` value *before* it reaches the
 // nulling serializer, field-agnostically (a future float field is covered
@@ -479,7 +479,7 @@ pub fn config_identity_hash(config: &FitConfig) -> Result<String, String> {
 /// function of the problem, and hashing an absent key would let a file that
 /// spells the default and one that omits it key differently — or, worse, let
 /// the run draw from a rule its address never saw.
-fn stage_config_hash(method: &Method) -> Result<ContentHash, String> {
+fn method_config_hash(method: &Method) -> Result<ContentHash, String> {
     method.starts()?;
     // Gate the Method struct itself: `identity_payload()` already built its
     // Value via `json!`, which would have nulled any non-finite cooling —
@@ -494,7 +494,7 @@ fn stage_config_hash(method: &Method) -> Result<ContentHash, String> {
 
 /// Build the `fit`-level [`FitDigest`] — the seed-independent, method-
 /// independent identity shared by every method leaf of a fit. This is the
-/// single source of truth for the `fit` level: [`resolve_fit_stage`] folds it
+/// single source of truth for the `fit` level: [`resolve_fit_method`] folds it
 /// into the leaf, and [`fit_segment_dir`] hashes it into the `fits/{stem}-{h8}/`
 /// directory name, so the announced fit directory and the directory the leaves
 /// actually land in are guaranteed identical (they share this function).
@@ -521,7 +521,7 @@ pub fn fit_level_digest(
 }
 
 /// The fit-level content hash (the `fit` level's `ContentHash`). Identical to
-/// the hash `resolve_fit_stage` puts on the `fit` level, so a fit's directory
+/// the hash `resolve_fit_method` puts on the `fit` level, so a fit's directory
 /// name (`fits/{stem}-{short8}/`) and its leaves' `fit` level always agree.
 pub fn fit_level_hash(
     model: &ir::Model,
@@ -537,7 +537,7 @@ pub fn fit_level_hash(
 /// `<root>/fits/{path_label(stem)}-{short8}/`. This is the grandparent of
 /// every method leaf (`store_path` factors the leaf as
 /// `fits/{fit}/{method}/{seed}/`), so the directory this returns is exactly
-/// where `resolve_fit_stage`'s leaves land — `fit run` can announce it and be
+/// where `resolve_fit_method`'s leaves land — `fit run` can announce it and be
 /// right. Pass the hash from [`fit_level_hash`] (the `fit`-level
 /// `ContentHash`).
 pub fn fit_segment_dir(root: &Path, stem: &str, fit_hash: &ContentHash) -> std::path::PathBuf {
@@ -573,12 +573,12 @@ fn resolved_obs_alignment(algorithm: &Algorithm, problem: &Problem) -> ResolvedO
 /// method / seed) and the `run_id` derived from their hashes. The method
 /// level's label is the algorithm's name — there is no order among methods
 /// and nothing for an ordinal to encode.
-pub fn resolve_fit_stage(ctx: &FitStageCtx) -> Result<ResolvedFitStage, String> {
-    let levels = fit_stage_levels(ctx, ctx.method.algorithm.cas_target_length())?;
+pub fn resolve_fit_method(ctx: &FitMethodCtx) -> Result<ResolvedFitMethod, String> {
+    let levels = fit_method_levels(ctx, ctx.method.algorithm.cas_target_length())?;
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
     let rid = run_id(ArtifactKind::FitStage, &level_hashes);
 
-    Ok(ResolvedFitStage { levels, run_id: rid })
+    Ok(ResolvedFitMethod { levels, run_id: rid })
 }
 
 /// The `--resume` compatibility key of a PGAS / PMMH / MH method leaf: its
@@ -588,7 +588,7 @@ pub fn resolve_fit_stage(ctx: &FitStageCtx) -> Result<ResolvedFitStage, String> 
 /// a leaf of its own (the target length, and a dep on the base, are in its
 /// `run_id`), yet it continues the base's chain state, which is only sound if
 /// every OTHER input is the one the base ran under. This is exactly that
-/// question asked of the CAS identity: the same levels [`resolve_fit_stage`]
+/// question asked of the CAS identity: the same levels [`resolve_fit_method`]
 /// hashes, with the target length zeroed. The runner records it in each
 /// chain's `resume_state.bin` and a resume refuses a state whose key differs.
 ///
@@ -600,17 +600,17 @@ pub fn resolve_fit_stage(ctx: &FitStageCtx) -> Result<ResolvedFitStage, String> 
 /// scenario, `ic_free`, the holdout, `n_trajectories` and the resolved
 /// observation alignment, so a chain fitted at one `dt` resumed silently at
 /// another (gh#583 item G).
-pub fn resume_guard(ctx: &FitStageCtx) -> Result<String, String> {
-    let levels = fit_stage_levels(ctx, 0)?;
+pub fn resume_guard(ctx: &FitMethodCtx) -> Result<String, String> {
+    let levels = fit_method_levels(ctx, 0)?;
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
     Ok(run_id(ArtifactKind::FitStage, &level_hashes).to_hex())
 }
 
 /// The three factored levels of a fit-method leaf (fit / method / seed), with
 /// the method level's target length given. The one level builder
-/// [`resolve_fit_stage`] (the run's address) and [`resume_guard`] (its
+/// [`resolve_fit_method`] (the run's address) and [`resume_guard`] (its
 /// extension-free key) share.
-fn fit_stage_levels(ctx: &FitStageCtx, target_length: u64) -> Result<Vec<LevelId>, String> {
+fn fit_method_levels(ctx: &FitMethodCtx, target_length: u64) -> Result<Vec<LevelId>, String> {
     let fit = fit_level_digest(
         ctx.model,
         ctx.ir_version,
@@ -619,8 +619,8 @@ fn fit_stage_levels(ctx: &FitStageCtx, target_length: u64) -> Result<Vec<LevelId
         ctx.data_paths,
     )?;
 
-    let stage_config = StageConfig {
-        config: stage_config_hash(ctx.method)?,
+    let method_config = StageConfig {
+        config: method_config_hash(ctx.method)?,
         // Fits select observation streams via `[data]` (captured in
         // `FitDigest.data`); there is no fit-level `--obs`/`--flow`.
         obs_block: String::new(),
@@ -629,7 +629,7 @@ fn fit_stage_levels(ctx: &FitStageCtx, target_length: u64) -> Result<Vec<LevelId
         // gh#189: the resolved (not requested) obs alignment, keyed per method.
         obs_alignment: resolved_obs_alignment(&ctx.method.algorithm, ctx.problem),
     };
-    let stage_level = StageLevel { config: stage_config, deps: Deps(ctx.deps.clone()) };
+    let method_level = StageLevel { config: method_config, deps: Deps(ctx.deps.clone()) };
 
     // Fits have no grid-cell seed mixing (each sweep point is a distinct fit
     // leaf via FitDigest); the seed level hashes the resolved fit RNG seed.
@@ -637,7 +637,7 @@ fn fit_stage_levels(ctx: &FitStageCtx, target_length: u64) -> Result<Vec<LevelId
 
     Ok(vec![
         level("fit", ctx.fit_stem, structural_level_hash(&fit)),
-        level("method", ctx.method.algorithm.method_name(), structural_level_hash(&stage_level)),
+        level("method", ctx.method.algorithm.method_name(), structural_level_hash(&method_level)),
         level("seed", &format!("seed_{}", ctx.seed), structural_level_hash(&seed)),
     ])
 }
@@ -704,7 +704,7 @@ mod tests {
             .expect("minimal method toml must parse")
     }
 
-    fn pgas_stage(n_trajectories: usize) -> Method {
+    fn pgas_method(n_trajectories: usize) -> Method {
         method(&format!(
             "algorithm = \"pgas\"\n\
              backend = \"chain_binomial\"\n\
@@ -725,7 +725,7 @@ mod tests {
         )
         .unwrap();
         assert!(m.starts.is_none());
-        let err = stage_config_hash(&m).unwrap_err();
+        let err = method_config_hash(&m).unwrap_err();
         assert!(err.contains("unresolved"), "{err}");
     }
 
@@ -742,7 +742,7 @@ mod tests {
             toml::from_str(&format!("{base}starts = {{ from_mle = \"@a\" }}\n")).unwrap();
         let mle_b: Method =
             toml::from_str(&format!("{base}starts = {{ from_mle = \"@b\" }}\n")).unwrap();
-        let h = |m: &Method| stage_config_hash(m).unwrap();
+        let h = |m: &Method| method_config_hash(m).unwrap();
         assert_ne!(h(&lhs), h(&prior));
         assert_ne!(h(&prior), h(&mle));
         // gh#896: the handle as written is not the key; which source run was
@@ -755,26 +755,26 @@ mod tests {
     }
 
     /// Guardrail-1 (gh#147 M3.2, deviation-A). `n_trajectories` is folded into
-    /// the stage identity, so two stages differing ONLY in it produce DISTINCT
-    /// stage hashes — each value gets its own leaf and there is no silent
+    /// the method identity, so two methods differing ONLY in it produce DISTINCT
+    /// method hashes — each value gets its own leaf and there is no silent
     /// reuse of the wrong trajectory count. (The collision this guards is the
     /// silent-wrong-answer class: without the fold, both map to one `run_id`
     /// and the first run's trajectories are served for the second.)
     #[test]
-    fn n_trajectories_changes_the_stage_identity() {
-        let h200 = stage_config_hash(&pgas_stage(200)).unwrap();
-        let h10 = stage_config_hash(&pgas_stage(10)).unwrap();
+    fn n_trajectories_changes_the_method_identity() {
+        let h200 = method_config_hash(&pgas_method(200)).unwrap();
+        let h10 = method_config_hash(&pgas_method(10)).unwrap();
         assert_ne!(
             h200, h10,
-            "two stages differing only in n_trajectories must have distinct \
-             stage hashes (guardrail-A) — else a changed n_trajectories \
+            "two methods differing only in n_trajectories must have distinct \
+             method hashes (guardrail-A) — else a changed n_trajectories \
              silently reuses the wrong trajectory count"
         );
         // No spurious sensitivity: identical n_trajectories → identical hash.
-        assert_eq!(h200, stage_config_hash(&pgas_stage(200)).unwrap());
+        assert_eq!(h200, method_config_hash(&pgas_method(200)).unwrap());
     }
 
-    fn mh_ode_stage(burnin_dt: Option<f64>) -> Method {
+    fn mh_ode_method(burnin_dt: Option<f64>) -> Method {
         let burnin_line = match burnin_dt {
             Some(b) => format!("burnin_dt = {b}\n"),
             None => String::new(),
@@ -789,28 +789,28 @@ mod tests {
     }
 
     /// `burnin_dt` (coarse warm-up step) changes the coarsely-integrated transient
-    /// → the scored trajectory → the draws, so two `mh` stages differing ONLY in it
-    /// must produce DISTINCT stage hashes (count-in-the-key). Without listing it in
+    /// → the scored trajectory → the draws, so two `mh` methods differing ONLY in it
+    /// must produce DISTINCT method hashes (count-in-the-key). Without listing it in
     /// the identity payload it would be swept into `..` and two fits at different
     /// `burnin_dt` would collide on one `run_id`, serving the first's posterior for
     /// the second — a silent-wrong answer.
     #[test]
-    fn burnin_dt_changes_the_mh_ode_stage_identity() {
-        let off = stage_config_hash(&mh_ode_stage(None)).unwrap();
-        let on7 = stage_config_hash(&mh_ode_stage(Some(7.0))).unwrap();
-        let on14 = stage_config_hash(&mh_ode_stage(Some(14.0))).unwrap();
-        assert_ne!(off, on7, "setting burnin_dt must re-key the mh stage");
-        assert_ne!(on7, on14, "distinct burnin_dt values must produce distinct stage hashes");
+    fn burnin_dt_changes_the_mh_ode_method_identity() {
+        let off = method_config_hash(&mh_ode_method(None)).unwrap();
+        let on7 = method_config_hash(&mh_ode_method(Some(7.0))).unwrap();
+        let on14 = method_config_hash(&mh_ode_method(Some(14.0))).unwrap();
+        assert_ne!(off, on7, "setting burnin_dt must re-key the mh method");
+        assert_ne!(on7, on14, "distinct burnin_dt values must produce distinct method hashes");
         // No spurious sensitivity: off is stable and hashes identically each time.
-        assert_eq!(off, stage_config_hash(&mh_ode_stage(None)).unwrap());
+        assert_eq!(off, method_config_hash(&mh_ode_method(None)).unwrap());
     }
 
     /// The deterministic compute identity is stable: re-resolving the same
-    /// stage config yields the same hash (canonical-JSON key sort).
+    /// method config yields the same hash (canonical-JSON key sort).
     #[test]
-    fn stage_config_hash_is_stable() {
-        let a = stage_config_hash(&pgas_stage(50)).unwrap();
-        let b = stage_config_hash(&pgas_stage(50)).unwrap();
+    fn method_config_hash_is_stable() {
+        let a = method_config_hash(&pgas_method(50)).unwrap();
+        let b = method_config_hash(&pgas_method(50)).unwrap();
         assert_eq!(a, b);
     }
 
@@ -828,7 +828,7 @@ mod tests {
         .problem
     }
 
-    fn if2_stage(loglik_particles: usize) -> Method {
+    fn if2_method(loglik_particles: usize) -> Method {
         method(&format!(
             "algorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
              chains = 2\nparticles = 100\niterations = 10\ncooling = 0.7\n\
@@ -837,16 +837,16 @@ mod tests {
     }
 
     /// gh#189: `loglik_eval` determines the reported θ̂/loglik, so it's part of
-    /// the IF2 stage identity (folded via IF2's whole-serialize identity_payload).
-    /// Two stages differing only in it must get distinct hashes — there is no CLI
+    /// the IF2 method identity (folded via IF2's whole-serialize identity_payload).
+    /// Two methods differing only in it must get distinct hashes — there is no CLI
     /// override that could silently re-score under the same key (the flag was
-    /// removed; loglik_eval is set in the stage TOML only).
+    /// removed; loglik_eval is set in the `[method]` table only).
     #[test]
-    fn loglik_eval_changes_the_if2_stage_identity() {
-        let a = stage_config_hash(&if2_stage(4000)).unwrap();
-        let b = stage_config_hash(&if2_stage(8000)).unwrap();
-        assert_ne!(a, b, "loglik_eval must fold into the IF2 stage identity (gh#189)");
-        assert_eq!(a, stage_config_hash(&if2_stage(4000)).unwrap());
+    fn loglik_eval_changes_the_if2_method_identity() {
+        let a = method_config_hash(&if2_method(4000)).unwrap();
+        let b = method_config_hash(&if2_method(8000)).unwrap();
+        assert_ne!(a, b, "loglik_eval must fold into the IF2 method identity (gh#189)");
+        assert_eq!(a, method_config_hash(&if2_method(4000)).unwrap());
     }
 
     /// gh#189: `allow_degenerate_rates` is a keyed `[config]` field (was a CLI
@@ -967,10 +967,10 @@ mod tests {
     /// gh#189: the integrator `[config] dt` changes the substep grid (and, via
     /// `Expr::Dt` and the obs-alignment substep window, the computed output), so
     /// two fits differing only in `dt` must get distinct fit-level hashes — else
-    /// a changed `dt` silently reuses a stale fit / stage leaf (the
+    /// a changed `dt` silently reuses a stale fit / method leaf (the
     /// count-in-the-key, silent-wrong-answer class). `dt` is keyed at the fit
-    /// level (`[config]` is part of the serialized fit blob); the stage leaf
-    /// nests under it, so the whole stage artifact (incl. `resume_state.bin`)
+    /// level (`[config]` is part of the serialized fit blob); the method leaf
+    /// nests under it, so the whole method artifact (incl. `resume_state.bin`)
     /// relocates when `dt` changes — there is no stale resume.
     #[test]
     fn dt_changes_the_fit_identity() {
@@ -1030,9 +1030,9 @@ mod tests {
     /// IF2 method resolves to `Exact`. The two must therefore produce distinct
     /// `StageConfig`s (so a snap and an exact fit never collide in the store).
     #[test]
-    fn resolved_obs_alignment_is_keyed_per_stage() {
-        let if2 = if2_stage(4000);
-        let pgas = pgas_stage(200);
+    fn resolved_obs_alignment_is_keyed_per_method() {
+        let if2 = if2_method(4000);
+        let pgas = pgas_method(200);
         let cfg = minimal_config(""); // obs_alignment unset → per-algorithm default
         assert_eq!(
             resolved_obs_alignment(&if2.algorithm, &cfg),
@@ -1045,9 +1045,9 @@ mod tests {
             "pgas resolves to snap (uniform grid)"
         );
 
-        // The resolved value is folded into the stage-level identity. Holding
+        // The resolved value is folded into the method-level identity. Holding
         // every other StageConfig field fixed, flipping ONLY the resolved
-        // alignment must change the stage hash (snap and exact can't collide).
+        // alignment must change the method hash (snap and exact can't collide).
         let mk = |align: ResolvedObsAlignment| -> ContentHash {
             StageConfig {
                 config: ContentHash::from_bytes([0; 32]),
@@ -1061,7 +1061,7 @@ mod tests {
         assert_ne!(
             mk(ResolvedObsAlignment::Snap),
             mk(ResolvedObsAlignment::Exact),
-            "the resolved obs_alignment must distinguish the stage identities (gh#189)"
+            "the resolved obs_alignment must distinguish the method identities (gh#189)"
         );
     }
 

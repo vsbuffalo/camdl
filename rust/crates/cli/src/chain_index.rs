@@ -43,9 +43,9 @@ impl ChainIndex {
         format!("{DIR_PREFIX}{}", self.0)
     }
 
-    /// `<stage_dir>/chain_<n>`.
-    pub fn dir_in(self, stage_dir: &Path) -> PathBuf {
-        stage_dir.join(self.dir_name())
+    /// `<method_dir>/chain_<n>`.
+    pub fn dir_in(self, method_dir: &Path) -> PathBuf {
+        method_dir.join(self.dir_name())
     }
 
     /// The chain whose directory is named `name`, when `name` is `chain_<n>`.
@@ -68,7 +68,7 @@ impl std::str::FromStr for ChainIndex {
     }
 }
 
-/// Refuse a stage leaf whose chain directories were written by a camdl that
+/// Refuse a method leaf whose chain directories were written by a camdl that
 /// counted them from 1.
 ///
 /// Before gh#990 the directories were `chain_1/ … chain_N/` while
@@ -82,8 +82,8 @@ impl std::str::FromStr for ChainIndex {
 /// directory for every chain it is asked to run, so a leaf of the new form
 /// with any chain directory at all has `chain_0/`, and a leaf with `chain_1/`
 /// and no `chain_0/` can only have been written under the old numbering.
-pub fn refuse_one_based_layout(stage_dir: &Path) -> Result<(), String> {
-    let has = |c: usize| ChainIndex(c).dir_in(stage_dir).is_dir();
+pub fn refuse_one_based_layout(method_dir: &Path) -> Result<(), String> {
+    let has = |c: usize| ChainIndex(c).dir_in(method_dir).is_dir();
     if has(1) && !has(0) {
         return Err(format!(
             "{}: this leaf was written by a camdl that counted chains from 1 \
@@ -92,7 +92,7 @@ pub fn refuse_one_based_layout(stage_dir: &Path) -> Result<(), String> {
              draws.tsv, so this leaf's directories, `best_chain` and \
              `chain_eval_ids` cannot be read without shifting every chain by \
              one. Re-run the fit to rewrite the leaf under the current camdl.",
-            stage_dir.display()
+            method_dir.display()
         ));
     }
     Ok(())

@@ -59,7 +59,7 @@ results/<kind_dir>/<seg>/<seg>/…/run.json
 | `fit_stage`     | `fits`      | fit · method · seed                       |
 | `pfilter`       | `pfilters`  | model · config · params · seed            |
 | `survey`        | `surveys`   | model · config · box · seed               |
-| `profile_point` | `profiles`  | profile · point · stage · seed · start    |
+| `profile_point` | `profiles`  | profile · point · method · seed · start   |
 | `sim_ensemble`  | `ensembles` | model · config · params · grid            |
 
 A **fit** is the `fits/<stem>-<hash8>/` segment: it has no `run.json` of its own

@@ -195,7 +195,7 @@ high. A large `rhat_bulk` says the chains disagree about where the posterior
 sits — lengthen warm-up, or discard more of it. A large `rhat_folded` says they
 agree on location and disagree on how wide the posterior is, which for a
 particle method points at per-chain effective particle diversity. Above the
-threshold, `camdl fit summary` and the end-of-stage block print the split:
+threshold, `camdl fit summary` and the end-of-run block print the split:
 
 ```
 max R̂ = 1.313  ~  NOT converged  (rank-normalized split R̂, threshold 1.05)
