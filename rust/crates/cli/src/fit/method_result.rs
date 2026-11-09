@@ -41,6 +41,11 @@ pub enum MethodResult {
     Pfilter(PfilterRun),
 }
 
+/// One replicate's log-likelihood as `logliks.tsv` stores it: four decimals.
+pub fn loglik_tsv_cell(loglik: f64) -> String {
+    format!("{loglik:.4}")
+}
+
 /// A pfilter fit method's result: the log-likelihood mean and standard
 /// deviation over its replicate filters, from `logliks.tsv`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,9 +59,19 @@ pub struct PfilterRun {
 }
 
 impl PfilterRun {
+    /// The result the run prints at its end, from the replicate
+    /// log-likelihoods it holds in memory. Each passes through
+    /// `logliks.tsv`'s own cell first, so the run computes from the values
+    /// `fit summary` reads back and the two cannot differ in a printed digit.
+    pub fn from_run(logliks: &[f64], n_particles: usize) -> Self {
+        let stored: Vec<f64> = logliks.iter()
+            .map(|&l| loglik_tsv_cell(l).parse().expect("a formatted f64 parses back"))
+            .collect();
+        Self::from_logliks(&stored, n_particles)
+    }
+
     /// The mean and the sample standard deviation (`n − 1`) of the replicate
-    /// log-likelihoods, as the run prints them. The run computes them from
-    /// the values as `logliks.tsv` stores them, so this and the run agree.
+    /// log-likelihoods.
     pub fn from_logliks(logliks: &[f64], n_particles: usize) -> Self {
         let n = logliks.len();
         let ll_mean = logliks.iter().sum::<f64>() / n.max(1) as f64;
@@ -1760,6 +1775,24 @@ pub(crate) fn posterior_summaries(
 
 #[cfg(test)]
 mod tests {
+
+    /// pfilter's run line and `fit summary`'s pfilter block show one
+    /// `loglik = mean ± sd`. The summary reads `logliks.tsv`, which stores
+    /// each replicate to four decimals, so a run that computes from full
+    /// precision can disagree in the printed digit: −1.04996 prints −1.0
+    /// while its stored −1.0500 prints −1.1.
+    #[test]
+    fn the_pfilter_run_line_and_the_summary_show_the_same_loglik() {
+        let logliks = [-1.04996_f64];
+        let stored: Vec<f64> = logliks.iter().map(|&l| loglik_tsv_cell(l).parse().unwrap()).collect();
+        let run = PfilterRun::from_run(&logliks, 10);
+        let summary = PfilterRun::from_logliks(&stored, 10);
+        assert_eq!(
+            format!("{:.1} ± {:.1}", run.ll_mean, run.ll_sd),
+            format!("{:.1} ± {:.1}", summary.ll_mean, summary.ll_sd),
+        );
+    }
+
     use super::*;
     use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
 
