@@ -28,7 +28,7 @@ use crate::fit::gating::AgreementBand;
 use crate::fit::fit_tree::{self, DataKind};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
-    If2Run, MaxRhat, MethodResult, MinEss, ParamConvergence,
+    If2Record, If2Run, MaxRhat, MethodResult, MinEss, ParamConvergence,
     PgasRun, PmmhRun, PosteriorDiagnostics, RhatBand, RHAT_CONVERGED_THRESHOLD,
     Stat,
 };
@@ -638,33 +638,13 @@ fn format_text(
 
         match &typed {
             MethodResult::If2(if2) => {
-                // IF2 keeps the rich FitState rendering — gate, params
-                // table, per-chain loglik-eval, provenance — because it
-                // surfaces information the typed `If2Run`
-                // doesn't (e.g. perturb_only_at_t0 markers, per-chain SE, raw
-                // start_values). The typed payload is the source of
-                // truth for headline scalars; FitState is the source
-                // for the rendered tables.
-                let state = match FitState::load(&method_dir_str) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!(
-                            "warning: cannot load {}/fit_state.toml: {}",
-                            method_dir_str, e
-                        );
-                        failures.push(LoadFailure {
-                            leaf: method_dir_str.clone(),
-                            reason: format!("fit_state.toml: {e}"),
-                        });
-                        continue;
-                    }
-                };
+                // Everything the IF2 block shows was read with the typed
+                // result (`If2Run::record`): `fit_state.toml` is read once.
                 let block = fmt.method_block(
                     &lead,
                     &resolved.name,
                     &method_dir_str,
-                    &state,
-                    Some(if2),
+                    if2,
                 );
                 if block.provenance_failed {
                     had_provenance_failure = true;
@@ -1391,9 +1371,10 @@ impl Formatter {
         lead: &str,
         method: &str,
         method_dir: &str,
-        state: &FitState,
-        typed: Option<&If2Run>,
+        if2: &If2Run,
     ) -> MethodBlock {
+        let state = &if2.record;
+        let typed = Some(if2);
         let mut s = String::new();
 
         let refused = RefusedChains::load(Path::new(method_dir));
@@ -1414,7 +1395,7 @@ impl Formatter {
         // Headline — type tag *after* the number (gh#280), so a scraper
         // reading `loglik=<num>` stops at the first non-numeric char.
         s.push_str(&format!("  best loglik:  {:.1} ({})",
-            state.best_loglik,
+            if2.best_loglik,
             crate::fit::loglik::LoglikType::tag_or_unknown(state.loglik_type)));
         if !state.chain_eval_logliks.is_empty() {
             // The headline loglik is the cross-chain max of the
@@ -1526,7 +1507,7 @@ impl Formatter {
     ///
     /// Shared by the gate block and the parameter table so the two cannot
     /// glyph one number against two different thresholds.
-    fn resolve_gate(state: &FitState) -> (GateConfig, GateThresholdSource) {
+    fn resolve_gate(state: &If2Record) -> (GateConfig, GateThresholdSource) {
         match &state.resolved_gate {
             Some(g) => (g.clone(), GateThresholdSource::Resolved),
             None => (GateConfig::default(), GateThresholdSource::DefaultFallback),
@@ -1544,7 +1525,7 @@ impl Formatter {
         }
     }
 
-    fn gate_verdict_block(&self, state: &FitState) -> String {
+    fn gate_verdict_block(&self, state: &If2Record) -> String {
         let mut s = String::new();
         s.push_str(&format!("  {}\n", self.bold("compound scout-convergence gate")));
 
@@ -1617,7 +1598,7 @@ impl Formatter {
         s
     }
 
-    fn parameter_table(&self, state: &FitState, method_dir: Option<&std::path::Path>) -> String {
+    fn parameter_table(&self, state: &If2Record, method_dir: Option<&std::path::Path>) -> String {
         let mut s = String::new();
         // The Â column is glyphed against the SAME gate the block above
         // reports, so one number cannot print ✗ there and ✓ here.
@@ -1642,7 +1623,7 @@ impl Formatter {
         // The estimated parameters (Â's keys, else the fit's record of
         // them); fixed params are noise here. Everything only when the leaf
         // records neither.
-        let estimated = crate::fit::method_result::estimated_names(method_dir, state);
+        let estimated = crate::fit::method_result::estimated_names(method_dir, &state.tail_chain_agreement);
         let est_keys: Vec<&String> = keys.iter()
             .filter(|k| estimated.as_ref().is_none_or(|set| set.contains(k.as_str())))
             .copied().collect();
@@ -1686,7 +1667,7 @@ impl Formatter {
         s
     }
 
-    fn chain_loglik_eval_table(&self, state: &FitState) -> String {
+    fn chain_loglik_eval_table(&self, state: &If2Record) -> String {
         let mut s = String::new();
         let n = state.chain_eval_logliks.len();
         s.push_str(&format!("  {}\n",
@@ -2520,7 +2501,7 @@ impl Formatter {
         }
     }
 
-    fn provenance_block(&self, method_dir: &str, state: &FitState)
+    fn provenance_block(&self, method_dir: &str, state: &If2Record)
         -> ProvenanceBlock
     {
         let mut s = String::new();
@@ -2867,28 +2848,8 @@ fn build_summary_doc(
             }
         }
         let report = match (&typed, resolved.method.as_str()) {
-            (Some(MethodResult::If2(_)), _) => {
-                let state = match FitState::load(&method_dir_str) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!(
-                            "warning: cannot load {}/fit_state.toml: {}",
-                            method_dir_str, e
-                        );
-                        failures.push(LoadFailure {
-                            leaf: method_dir_str.clone(),
-                            reason: format!("fit_state.toml: {e}"),
-                        });
-                        continue;
-                    }
-                };
-                if2_method_report(
-                    &resolved.name,
-                    &method_dir_str,
-                    &state,
-                    typed.clone(),
-                    &cal,
-                )
+            (Some(MethodResult::If2(if2)), _) => {
+                if2_method_report(&resolved.name, &method_dir_str, if2, &cal)
             }
             (Some(MethodResult::Pgas(_)), _)
             | (Some(MethodResult::Pmmh(_)), _) => {
@@ -3022,10 +2983,11 @@ fn bayesian_method_report(
 fn if2_method_report(
     method: &str,
     method_dir: &str,
-    state: &FitState,
-    method_result: Option<MethodResult>,
+    if2: &If2Run,
     cal: &CalendarContext,
 ) -> MethodReport {
+    let state = &if2.record;
+    let method_result = Some(MethodResult::If2(if2.clone()));
     // Gate analysis — same logic as Formatter::gate_verdict_block but
     // returning structured data instead of pre-formatted strings.
     let (gate_cfg, threshold_source) = match &state.resolved_gate {
@@ -3064,7 +3026,7 @@ fn if2_method_report(
     let mut keys: Vec<&String> = state.start_values.keys().collect();
     keys.sort();
     let estimated = crate::fit::method_result::estimated_names(
-        Some(std::path::Path::new(method_dir)), state);
+        Some(std::path::Path::new(method_dir)), &state.tail_chain_agreement);
     let est_keys: Vec<&String> = keys.iter()
         .filter(|k| estimated.as_ref().is_none_or(|set| set.contains(k.as_str())))
         .copied().collect();
@@ -3157,7 +3119,7 @@ fn if2_method_report(
         name: method.to_string(),
         method: "if2".into(),
         n_chains: state.n_chains,
-        best_loglik: Some(state.best_loglik),
+        best_loglik: Some(if2.best_loglik),
         // Derive from the typed result; fall back to the method's recorded
         // kind so a legacy run with no loadable `method_result` still
         // labels its IF2 marginal rather than reading `unknown`.
@@ -4004,7 +3966,7 @@ mod tests {
         state.chain_eval_ids = [0, 2, 3, 5, 7].map(ChainIndex).to_vec();
         state.chain_eval_logliks = vec![-3810.5, -3812.0, -3808.7, -3804.9, -3807.6];
         state.chain_eval_ses = vec![1.5, 1.8, 1.4, 1.1, 1.5];
-        let out = fmt.chain_loglik_eval_table(&state);
+        let out = fmt.chain_loglik_eval_table(&If2Record::from_state(&state));
 
         for id in ["    0 ", "    2 ", "    3 ", "    5 ", "    7 "] {
             assert!(out.contains(id), "surviving chain {id:?} must be named:\n{out}");
@@ -4027,7 +3989,7 @@ mod tests {
         let fmt = plain_formatter();
         let mut state = synthetic_fit_state();
         state.chain_eval_ids = Vec::new();
-        let out = fmt.chain_loglik_eval_table(&state);
+        let out = fmt.chain_loglik_eval_table(&If2Record::from_state(&state));
         assert!(out.contains("predates per-chain ids"),
             "the omission is stated and explained:\n{out}");
         assert!(!out.contains("selected"),
@@ -4045,8 +4007,7 @@ mod tests {
         state.chain_eval_ids = [0, 2, 3, 5, 7].map(ChainIndex).to_vec();
         state.chain_eval_logliks = vec![-3810.5, -3812.0, -3808.7, -3804.9, -3807.6];
         state.chain_eval_ses = vec![1.5, 1.8, 1.4, 1.1, 1.5];
-        let report = if2_method_report(
-            "scout", "/nonexistent", &state, None, &CalendarContext::default());
+        let report = if2_method_report("scout", "/nonexistent", &If2Run::from_state(Path::new("/nonexistent"), &state, state.n_chains, 0), &CalendarContext::default());
         let ids: Vec<ChainIndex> = report.chains.iter().map(|c| c.chain_id).collect();
         assert_eq!(ids, [0, 2, 3, 5, 7].map(ChainIndex).to_vec(),
             "rows carry the surviving chains' own numbers");
@@ -4065,8 +4026,7 @@ mod tests {
         state.tail_chain_agreement =
             [("R0".to_string(), 1.001), ("sigma".to_string(), 1.002), ("I0".to_string(), 16.5)]
                 .into_iter().collect();
-        let report = if2_method_report(
-            "scout", "/nonexistent", &state, None, &CalendarContext::default());
+        let report = if2_method_report("scout", "/nonexistent", &If2Run::from_state(Path::new("/nonexistent"), &state, state.n_chains, 0), &CalendarContext::default());
         let gate = report.gate.expect("an IF2 report has a gate");
         assert!(!gate.a_passes, "the initial-state Â is gated: {gate:?}");
         assert_eq!(gate.max_a_param.as_deref(), Some("I0"));
@@ -4075,8 +4035,7 @@ mod tests {
         state.tail_chain_agreement.remove("I0");
         state.chain_eval_logliks.clear();
         state.chain_eval_ses.clear();
-        let report = if2_method_report(
-            "scout", "/nonexistent", &state, None, &CalendarContext::default());
+        let report = if2_method_report("scout", "/nonexistent", &If2Run::from_state(Path::new("/nonexistent"), &state, state.n_chains, 0), &CalendarContext::default());
         let gate = report.gate.expect("an IF2 report has a gate");
         assert_eq!(gate.db_passes, None, "no clean-eval data, no decibans leg");
         assert_eq!(gate.overall_pass, Some(true),
@@ -4089,8 +4048,7 @@ mod tests {
     fn the_structured_chain_table_is_omitted_without_ids_rather_than_mislabelled() {
         let mut state = synthetic_fit_state();
         state.chain_eval_ids = Vec::new();
-        let report = if2_method_report(
-            "scout", "/nonexistent", &state, None, &CalendarContext::default());
+        let report = if2_method_report("scout", "/nonexistent", &If2Run::from_state(Path::new("/nonexistent"), &state, state.n_chains, 0), &CalendarContext::default());
         assert!(report.chains.is_empty(),
             "no ids, no rows — a position is not a chain number: {:?}", report.chains);
     }
@@ -4099,7 +4057,7 @@ mod tests {
     fn formatter_renders_pass_verdict_when_thresholds_clear() {
         let state = synthetic_fit_state();
         let fmt = plain_formatter();
-        let block = fmt.gate_verdict_block(&state);
+        let block = fmt.gate_verdict_block(&If2Record::from_state(&state));
 
         // Â leg: max = 1.21 on gamma, threshold 1.01 → fail.
         // Spread is small (~7 nats) → decibans leg passes.
@@ -4120,7 +4078,7 @@ mod tests {
         state.tail_chain_agreement =
             [("R0".to_string(), 1.001), ("sigma".to_string(), 1.002), ("I0".to_string(), 16.5)]
                 .into_iter().collect();
-        let block = plain_formatter().gate_verdict_block(&state);
+        let block = plain_formatter().gate_verdict_block(&If2Record::from_state(&state));
         assert!(block.contains("max Â = 16.500 (I0)"), "{block}");
         assert!(block.contains("dynamics only (without perturb_only_at_t0): ✓"), "{block}");
         assert!(block.contains("FAIL"), "{block}");
@@ -4134,7 +4092,7 @@ mod tests {
         state.tail_chain_agreement.clear();
         state.chain_eval_logliks = vec![-3804.9];
         state.chain_eval_ses = vec![1.0];
-        let block = plain_formatter().gate_verdict_block(&state);
+        let block = plain_formatter().gate_verdict_block(&If2Record::from_state(&state));
         assert!(block.contains("NOT ASSESSED") && !block.contains("PASS"), "{block}");
     }
 
@@ -4143,7 +4101,7 @@ mod tests {
         let mut state = synthetic_fit_state();
         state.resolved_gate = None;
         let fmt = plain_formatter();
-        let block = fmt.gate_verdict_block(&state);
+        let block = fmt.gate_verdict_block(&If2Record::from_state(&state));
         assert!(block.contains("thresholds unknown"),
             "legacy fit_state without resolved_gate must surface caveat; got: {}",
             block);
@@ -4168,7 +4126,7 @@ mod tests {
             gate.a_thresh
         );
         let fmt = plain_formatter();
-        let table = fmt.parameter_table(&state, None);
+        let table = fmt.parameter_table(&If2Record::from_state(&state), None);
         let r0 = table.lines().find(|l| l.contains("R0")).expect("an R0 row");
         assert!(
             !r0.contains('✓'),
@@ -4189,7 +4147,7 @@ mod tests {
         let mut state = synthetic_fit_state();
         state.tail_chain_agreement.insert("sigma".into(), f64::NAN);
         let fmt = plain_formatter();
-        let table = fmt.parameter_table(&state, None);
+        let table = fmt.parameter_table(&If2Record::from_state(&state), None);
         let sigma = table.lines().find(|l| l.contains("sigma")).expect("a sigma row");
         assert!(
             !sigma.contains('✗'),
@@ -4216,7 +4174,7 @@ mod tests {
         state.start_values.insert("N".into(), 2_400_000.0);
         state.tail_chain_agreement.insert("N".into(), 1.02);
         let fmt = plain_formatter();
-        let table = fmt.parameter_table(&state, None);
+        let table = fmt.parameter_table(&If2Record::from_state(&state), None);
         let cols: Vec<usize> = table
             .lines()
             .filter(|l| l.contains("Â="))
@@ -4238,7 +4196,7 @@ mod tests {
     fn parameter_table_filters_to_estimated_params() {
         let state = synthetic_fit_state();
         let fmt = plain_formatter();
-        let block = fmt.parameter_table(&state, None);
+        let block = fmt.parameter_table(&If2Record::from_state(&state), None);
         assert!(block.contains("R0"), "R0 row missing: {}", block);
         assert!(block.contains("Â=1.040"), "R0 agreement missing: {}", block);
         assert!(block.contains("sigma"));
@@ -4277,7 +4235,7 @@ mod tests {
 
         let state = synthetic_fit_state();
         let fmt = plain_formatter();
-        let prov = fmt.provenance_block(&dir.to_string_lossy(), &state);
+        let prov = fmt.provenance_block(&dir.to_string_lossy(), &If2Record::from_state(&state));
         assert!(prov.failed, "must flag the disagreement: {}", prov.text);
         assert!(prov.text.contains("DISAGREE"),
             "must call out DISAGREE: {}", prov.text);
@@ -5642,7 +5600,7 @@ mod tests {
             "R0 = 56.0\nsigma = 0.08\ngamma = 0.08\n").unwrap();
         let state = synthetic_fit_state();
         let fmt = plain_formatter();
-        let prov = fmt.provenance_block(&dir.to_string_lossy(), &state);
+        let prov = fmt.provenance_block(&dir.to_string_lossy(), &If2Record::from_state(&state));
         assert!(!prov.failed, "must not flag when params match: {}", prov.text);
         assert!(prov.text.contains("✓"));
 
@@ -5997,7 +5955,7 @@ mod tests {
     fn if2_text_parameter_table_annotates_instant_date() {
         let state = instant_fit_state();
         let fmt = Formatter { painter: Painter::plain(), cal: instant_cal(), explain: false };
-        let block = fmt.parameter_table(&state, None);
+        let block = fmt.parameter_table(&If2Record::from_state(&state), None);
         // tau row carries the calendar date; numeric value preserved.
         assert!(block.contains("tau"), "tau row missing: {}", block);
         assert!(block.contains("(2020-03-18)"),
@@ -6013,7 +5971,7 @@ mod tests {
         let state = instant_fit_state();
         // Default (no origin) context → numeric-only, no crash, no date.
         let fmt = plain_formatter();
-        let block = fmt.parameter_table(&state, None);
+        let block = fmt.parameter_table(&If2Record::from_state(&state), None);
         assert!(block.contains("tau"), "tau row missing: {}", block);
         assert!(!block.contains("2020-"),
             "no date should appear without an origin: {}", block);
@@ -6175,6 +6133,7 @@ mod tests {
             ess_at_mle: None,
             n_chains: 8,
             n_iter: 50,
+            record: If2Record::from_state(&synthetic_fit_state()),
         })
     }
 
@@ -6203,8 +6162,8 @@ mod tests {
         // provenance reads tolerate absence; loglik_type comes from the
         // typed result.
         let if2 = if2_method_report(
-            "scout", "/nonexistent/method", &synthetic_fit_state(),
-            Some(synthetic_if2_result()), &cal,
+            "scout", "/nonexistent/method",
+            &match synthetic_if2_result() { MethodResult::If2(r) => r, _ => unreachable!() }, &cal,
         );
         let j = serde_json::to_value(&if2).unwrap();
         assert_eq!(j["loglik_type"], serde_json::json!("if2"),
@@ -6220,7 +6179,8 @@ mod tests {
 
         // Terminal IF2 headline.
         let block = fmt.method_block(
-            "", "scout", "/nonexistent/method", &synthetic_fit_state(), None,
+            "", "scout", "/nonexistent/method",
+            &If2Run::from_state(Path::new("/nonexistent/method"), &synthetic_fit_state(), 4, 0),
         );
         let line = block.text.lines().find(|l| l.contains("best loglik:"))
             .expect("IF2 block has a best-loglik headline");

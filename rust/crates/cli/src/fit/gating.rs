@@ -20,6 +20,7 @@
 use std::path::Path;
 
 use super::config_v2::GateConfig;
+use super::method_result::If2Record;
 use super::state::FitState;
 use crate::chain_index::ChainIndex;
 use crate::evidence::NATS_TO_DB;
@@ -216,8 +217,13 @@ impl LostChains {
     /// when fewer finished than started. A leaf that records no
     /// `n_good_chains` (written before IF2 recorded it) reads as none lost.
     pub fn from_state(state: &FitState) -> Option<Self> {
-        let finished = state.n_good_chains?;
-        (finished < state.n_chains).then_some(LostChains { started: state.n_chains, finished })
+        Self::of(state.n_chains, state.n_good_chains)
+    }
+
+    /// From the started and finished chain counts.
+    pub fn of(n_chains: usize, n_good_chains: Option<usize>) -> Option<Self> {
+        let finished = n_good_chains?;
+        (finished < n_chains).then_some(LostChains { started: n_chains, finished })
     }
 
     pub fn lost(&self) -> usize {
@@ -309,8 +315,10 @@ impl If2Assessment {
     }
 }
 
-/// Measure both legs of the IF2 gate on `state` under `gate`.
-pub fn assess_if2(state: &FitState, gate: &GateConfig) -> If2Assessment {
+/// Measure both legs of the IF2 gate on an IF2 leaf's record under `gate`.
+/// The one measurement the warm-start source check, `fit summary` and
+/// `fit table` read.
+pub fn assess_if2(state: &If2Record, gate: &GateConfig) -> If2Assessment {
     let t0_set: std::collections::HashSet<&str> =
         state.perturb_only_at_t0_params.iter().map(|s| s.as_str()).collect();
     let mut structural: Vec<(String, f64)> = Vec::new();
@@ -349,7 +357,7 @@ pub fn assess_if2(state: &FitState, gate: &GateConfig) -> If2Assessment {
     });
     If2Assessment {
         structural, unavailable, perturb_only_at_t0, a_band, spread,
-        lost_chains: LostChains::from_state(state),
+        lost_chains: LostChains::of(state.n_chains, state.n_good_chains),
     }
 }
 
@@ -384,7 +392,7 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
             Some(_) => ScoutGateVerdict::Incomplete { params: Vec::new(), lost_chains },
         };
     }
-    let assessed = assess_if2(scout, gate);
+    let assessed = assess_if2(&If2Record::from_state(scout), gate);
 
     // Step 1 — Â check. Reduced through `GateConfig::a_band`, the same
     // authority every renderer uses, so a printed glyph and this verdict
@@ -983,8 +991,8 @@ decibans_failed = true
             }
             other => panic!("expected Hard on the initial-state params, got {:?}", other),
         }
-        assert!(!assess_if2(&s, &legacy_gate()).a_passes());
-        assert!(assess_if2(&s, &legacy_gate()).dynamics_a_passes(&legacy_gate()),
+        assert!(!assess_if2(&If2Record::from_state(&s), &legacy_gate()).a_passes());
+        assert!(assess_if2(&If2Record::from_state(&s), &legacy_gate()).dynamics_a_passes(&legacy_gate()),
             "the dynamics-only sub-verdict passes");
     }
 
