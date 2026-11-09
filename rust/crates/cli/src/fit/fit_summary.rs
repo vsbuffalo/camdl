@@ -1189,7 +1189,7 @@ fn worst_rhat_param(diag: &PosteriorDiagnostics) -> Option<(&str, f64)> {
 /// and the chains that left latent paths are what the identity line counts —
 /// so they are read once, here, rather than by each section separately. Two
 /// renderings of one fit that each go to disk for themselves is how they drift.
-struct MethodFacts {
+struct ChainDetail {
     /// Per-chain mean log-likelihood and the trace column it was read from.
     /// `None` when no per-chain trace is readable at all.
     logliks: Option<super::chain_diagnostics::ChainLoglikMeans>,
@@ -1209,7 +1209,7 @@ struct MethodFacts {
     n_chains_with_paths: usize,
 }
 
-impl MethodFacts {
+impl ChainDetail {
     fn gather(method_dir: &Path, ll_kind: super::loglik::LoglikType, is_pgas: bool) -> Self {
         use super::chain_diagnostics as cd;
         let logliks = cd::read_chain_mean_logliks(method_dir, ll_kind);
@@ -1775,7 +1775,7 @@ impl Formatter {
             ),
         };
         let is_pgas = matches!(view, BayesianView::Pgas(_));
-        let facts = MethodFacts::gather(method_dir, ll_kind, is_pgas);
+        let facts = ChainDetail::gather(method_dir, ll_kind, is_pgas);
 
         let mut s = String::new();
 
@@ -1839,7 +1839,7 @@ impl Formatter {
     fn verdict_block(
         &self,
         diag: &PosteriorDiagnostics,
-        facts: &MethodFacts,
+        facts: &ChainDetail,
         subset: Option<&SubsetInfo>,
         forkable: Option<&crate::fit::joint::JointEnsemble>,
     ) -> String {
@@ -1945,7 +1945,7 @@ impl Formatter {
     fn verdict_facts(
         &self,
         lead: Option<String>,
-        facts: &MethodFacts,
+        facts: &ChainDetail,
         subset: Option<&SubsetInfo>,
         forkable: Option<&crate::fit::joint::JointEnsemble>,
     ) -> String {
@@ -2189,7 +2189,7 @@ impl Formatter {
         &self,
         method_dir: &Path,
         n_chains_expected: usize,
-        facts: &MethodFacts,
+        facts: &ChainDetail,
         subset: Option<&SubsetInfo>,
     ) -> String {
         use super::chain_diagnostics as cd;
@@ -2394,7 +2394,7 @@ impl Formatter {
     /// shortfall is a real event (a record skipped as incoherent, a chain
     /// resumed partway in) and is named rather than left for the reader to
     /// subtract.
-    fn saved_path_notes(&self, facts: &MethodFacts, show_paths: bool) -> String {
+    fn saved_path_notes(&self, facts: &ChainDetail, show_paths: bool) -> String {
         let mut s = String::new();
         if !show_paths {
             // A method that saved paths but cannot say which chain each row
@@ -2433,7 +2433,7 @@ impl Formatter {
     /// Both are about X rather than θ, which is why they share a section: the
     /// first says how well each observation was resolved, the second whether
     /// the resolved paths agree across chains.
-    fn latent_paths_section(&self, method_dir: &Path, facts: &MethodFacts) -> String {
+    fn latent_paths_section(&self, method_dir: &Path, facts: &ChainDetail) -> String {
         use super::latent_convergence::LATENT_CONVERGENCE_TSV;
         let mut s = self.section(SECTION_LATENT);
         s.push_str(&self.filter_ess_lines(method_dir));
@@ -3920,7 +3920,7 @@ mod tests {
         }
     }
 
-    /// The `chains` section for a method on disk. `MethodFacts::gather` is asked
+    /// The `chains` section for a method on disk. `ChainDetail::gather` is asked
     /// for the PGAS reads unconditionally: a non-PGAS fixture writes neither a
     /// `pgas_summary.json` nor a `trajectories.tsv`, so they find nothing and
     /// the section renders exactly as it would for that sampler.
@@ -3930,7 +3930,7 @@ mod tests {
         n_chains: usize,
         kind: LoglikType,
     ) -> String {
-        let facts = MethodFacts::gather(dir, kind, true);
+        let facts = ChainDetail::gather(dir, kind, true);
         fmt.chains_section(dir, n_chains, &facts, None)
     }
 
@@ -5407,7 +5407,7 @@ mod tests {
             n_total: 3,
         };
         let fmt = plain_formatter();
-        let facts = MethodFacts::gather(&dir, LoglikType::Marginal, false);
+        let facts = ChainDetail::gather(&dir, LoglikType::Marginal, false);
         let section = fmt.chains_section(&dir, 2, &facts, Some(&info));
 
         assert!(section.contains("including the excluded 2"),
