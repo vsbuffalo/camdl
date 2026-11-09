@@ -669,7 +669,7 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
                     eprintln!(
                         "{w} starts source {handle}: chain agreement is \
                          below the certification band on {}",
-                        named.join(", "), w = crate::style::warning_tag()
+                        named.join(", "), w = crate::out::paint::warning_tag()
                     );
                     None
                 }
@@ -729,7 +729,7 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
             eprintln!(
                 "{w} starts source {handle}: {msg}\n  \
                  --allow-nonconverged-source: starting from it anyway.",
-                w = crate::style::warning_tag()
+                w = crate::out::paint::warning_tag()
             );
             Ok(())
         }

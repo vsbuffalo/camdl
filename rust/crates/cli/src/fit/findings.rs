@@ -9,7 +9,7 @@ use sim::inference::diagnostic::{
     render_entry, Diagnostic, DiagnosticCollector, DiagnosticKind, HintContext, MergeKey, Severity,
 };
 
-use crate::style::{Line, Span, Style};
+use crate::out::paint::{Line, Span, Style};
 
 /// Indent of a multi-line finding's continuation lines: under the text after
 /// `  ! `, as the warnings these sentences came from were laid out.
@@ -72,7 +72,7 @@ pub fn render(diags: &[Diagnostic], ctx: HintContext) -> Vec<Line> {
 pub fn print(collector: &DiagnosticCollector, ctx: HintContext) {
     let lines = render(&collector.snapshot(), ctx);
     // stderr is unbuffered and a failed write to it has nowhere to be reported.
-    let _ = crate::style::stderr().write(&mut std::io::stderr(), &lines);
+    let _ = crate::out::paint::stderr().write(&mut std::io::stderr(), &lines);
 }
 
 #[cfg(test)]

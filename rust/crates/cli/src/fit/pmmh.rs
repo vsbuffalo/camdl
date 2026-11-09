@@ -4,7 +4,7 @@
 //! filter as an unbiased likelihood estimator. Outputs per-chain trace files,
 //! convergence diagnostics (R̂, ESS), and a summary JSON.
 
-use crate::style::Style;
+use crate::out::paint::Style;
 use crate::chain_index::ChainIndex;
 use crate::fit::state::FitState;
 use crate::fit::pf_noise;
@@ -274,7 +274,7 @@ pub fn run_method(
                     ceiling to report. The chain\n    still runs; its acceptance rate is then \
                     the only evidence on whether it moves.",
                     which,
-                    tag = crate::style::stderr().paint("⚠ no noise measurement", Style::Warn));
+                    tag = crate::out::paint::stderr().paint("⚠ no noise measurement", Style::Warn));
             }
         }
     }
@@ -283,7 +283,7 @@ pub fn run_method(
     if !force && !resume {
         let state_path = method_dir.join("fit_state.toml");
         if state_path.exists() {
-            eprintln!("{}", crate::style::stderr().paint(&format!(
+            eprintln!("{}", crate::out::paint::stderr().paint(&format!(
                 "{method_name} results already exist in {}. Use --force to re-run or --resume to continue.",
                 method_dir.display()), Style::Warn));
             return Ok(());
@@ -485,7 +485,7 @@ pub fn run_method(
                              multi-start `init`, or adjust the start toward a θ that \
                              sustains the epidemic).",
                             ChainIndex(chain_id),
-                            w = crate::style::stderr().paint("warning", Style::Warn));
+                            w = crate::out::paint::stderr().paint("warning", Style::Warn));
                     }
                     _ => {
                         // Ok(finite) or a recoverable Err (ruled-out θ) — MH
@@ -570,7 +570,7 @@ pub fn run_method(
                         });
                         eprintln!("  chain {}: {} — {}",
                             ChainIndex(chain_id),
-                            crate::style::stderr().paint("✗ BadInit", Style::Err), reason);
+                            crate::out::paint::stderr().paint("✗ BadInit", Style::Err), reason);
                         // The bar is cleared in the post-loop finish; the skip
                         // is already loud on stderr above.
                         return Ok(None);
@@ -782,7 +782,7 @@ pub fn run_method(
     if n_good_chains < n_chains {
         eprintln!("\n{} \
                    ({} skipped via BadInit; see diagnostics below)",
-            crate::style::stderr().paint(&format!("ran {n_good_chains} of {n_chains} chains"), Style::Warn),
+            crate::out::paint::stderr().paint(&format!("ran {n_good_chains} of {n_chains} chains"), Style::Warn),
             n_chains - n_good_chains);
     }
 
@@ -812,7 +812,7 @@ pub fn run_method(
     let (lo, hi) = kernel.healthy_band();
     eprintln!("\nacceptance rates:");
     for (chain_id, result) in &results {
-        let p = crate::style::stderr();
+        let p = crate::out::paint::stderr();
         let status = if result.acceptance_rate < lo {
             p.paint("✗ too low", Style::Err)
         } else if result.acceptance_rate > hi {

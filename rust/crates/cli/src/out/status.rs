@@ -13,7 +13,7 @@
 //! Use these instead of ad-hoc `eprintln!("✓ …")` so the look stays unified;
 //! when you add a new milestone, reach for `step`/`done`/`hint` first.
 
-use crate::style::{self, Style};
+use crate::out::paint::{self as style, Style};
 
 /// Width the verb column is right-aligned to (cargo uses ~12; we use 9 to fit
 /// `compiled`/`storing`/`stored`/`ensemble` without truncation).

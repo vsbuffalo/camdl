@@ -677,7 +677,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // gh#71: a point-started multi-chain sampler's R̂ is uninformative;
         // the summary will report it as not assessed. A note, not an error —
         // the sample is still valid.
-        eprintln!("{} {}", crate::style::note_tag(), msg);
+        eprintln!("{} {}", crate::out::paint::note_tag(), msg);
     }
 
     // ── Validate sweeps ───────────────────────────────────────────────────
@@ -841,7 +841,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     (a.diagonal_mass, "--diagonal-mass"),
                 ].into_iter().filter_map(|(on, name)| on.then_some(name)).collect();
                 match config_v2::nuts_unavailable(declared, &tuning) {
-                    Ok(note) => eprintln!("{} {note}", crate::style::note_tag()),
+                    Ok(note) => eprintln!("{} {note}", crate::out::paint::note_tag()),
                     Err(e) => {
                         eprintln!("error: {fit_path}: {e}");
                         std::process::exit(1);
@@ -985,7 +985,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             .map(|(n, _)| n.as_str())
             .collect();
         eprintln!("\n  {} conditioning on y₁",
-            crate::style::stderr().paint("ic-free inference:", crate::style::Style::Info));
+            crate::out::paint::stderr().paint("ic-free inference:", crate::out::paint::Style::Info));
         // Name every ACTUAL source of the t=0 spread. There are two — a
         // declared `init { }` law, which every filter draws per particle
         // (gh#732), and, under IF2, a `perturb_only_at_t0` parameter (gh#364).
@@ -1543,10 +1543,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         if a.resume.is_none() {
             match crate::resolve::check_reuse(&store, &cas_root, &resolved_artifact, policy) {
                 Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
-                    eprintln!("  {}", crate::style::stderr().paint(
+                    eprintln!("  {}", crate::out::paint::stderr().paint(
                         &format!("cache hit — reusing {}",
                             dir.strip_prefix(&cas_root).unwrap_or(&dir).display()),
-                        crate::style::Style::Warn));
+                        crate::out::paint::Style::Warn));
                     crate::resolve::note_leaf_from_another_model_file(
                         &dir, &sweep_config.model.camdl);
                     // This config now names the stored run too.
@@ -1645,7 +1645,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             // scale is converted to the transformed scale at it
             // (`pmmh::build_proposal_sd`). Only where the chains begin
             // ignores it.
-            eprintln!("  {} {}", crate::style::note_tag(),
+            eprintln!("  {} {}", crate::out::paint::note_tag(),
                 report::unused_starts_note(starts_rule.tag(), &unused_starts,
                     still_reads_declared_starts(&method.algorithm)));
         }

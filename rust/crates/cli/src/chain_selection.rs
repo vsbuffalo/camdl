@@ -122,7 +122,7 @@ impl ChainSelection {
         eprintln!(
             "{w} --exclude-chains will drop chain(s) {} from each fit's \
              posterior cloud.",
-            self.excluded_csv(), w = crate::style::warning_tag()
+            self.excluded_csv(), w = crate::out::paint::warning_tag()
         );
         eprintln!("         {BIAS_CAVEAT_A}");
         eprintln!("         {BIAS_CAVEAT_B}");
@@ -135,7 +135,7 @@ impl ChainSelection {
     pub fn warn_requested_for_fit(&self, fit: &str) {
         eprintln!(
             "{w} --exclude-chains will drop chain(s) {} from fit '{fit}'.",
-            self.excluded_csv(), w = crate::style::warning_tag()
+            self.excluded_csv(), w = crate::out::paint::warning_tag()
         );
     }
 
@@ -433,7 +433,7 @@ pub fn warn_active_selection(info: &SubsetInfo) {
         info.excluded_csv(),
         info.kept.len(),
         info.n_total,
-        w = crate::style::warning_tag()
+        w = crate::out::paint::warning_tag()
     );
     eprintln!("         {BIAS_CAVEAT_A}");
     eprintln!("         {BIAS_CAVEAT_B}");

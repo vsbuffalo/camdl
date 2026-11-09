@@ -18,7 +18,7 @@
 //! for the step-5 walker-consumer refactor; this file's prior shape
 //! is preserved in git history at commit `d45c932` for context.
 
-use crate::style::{Painter, Stream, Style};
+use crate::out::paint::{Painter, Stream, Style};
 use crate::fit::report::{Check, ChainWarmup, MethodFacts, Verdict};
 use crate::args::{FitSummaryArgs, FitSummaryFormat};
 use crate::chain_index::ChainIndex;
@@ -151,7 +151,7 @@ fn chain_selection_advisory(
                 "{n} {} disagree strongly with the others on `{}` — before \
                  excluding, ask whether a parameter is unidentified (a flat likelihood ridge). \
                  The per-chain table below names them; the primary fix is the model, not the flag.",
-                outliers.join(", "), means.scored_column, n = crate::style::note_tag()
+                outliers.join(", "), means.scored_column, n = crate::out::paint::note_tag()
             );
         }
     }
@@ -209,7 +209,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     // dates can't be rendered and the omission is otherwise silent.
     // stderr keeps the warning out of the JSON/stdout payload.
     if let Some(msg) = load_calendar_context(Path::new(&dir)).missing_origin_warning() {
-        eprintln!("{} {}", crate::style::warning_tag(), msg);
+        eprintln!("{} {}", crate::out::paint::warning_tag(), msg);
     }
 
     if args.params_only {

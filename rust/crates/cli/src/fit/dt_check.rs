@@ -19,7 +19,7 @@
 //!      compound gate; serialise to `fit_state.toml.dt_check`; `camdl
 //!      fit dt-check <fit_dir>` standalone.
 
-use crate::style::Style;
+use crate::out::paint::Style;
 use crate::fit::config_v2::{CombineMode, DtCheckConfig};
 use crate::fit::loglik_eval::combine_with_se;
 use crate::fit::runner::{
@@ -395,7 +395,7 @@ pub fn print_terminal_report(result: &DtCheckResult) {
     use std::io::Write as _;
     let stderr = std::io::stderr();
     let mut w = stderr.lock();
-    let p = crate::style::stderr();
+    let p = crate::out::paint::stderr();
 
     if matches!(result.verdict, DtCheckVerdict::Skipped) {
         // Don't shout when the user explicitly opted out.
