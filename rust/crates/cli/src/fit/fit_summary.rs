@@ -18,10 +18,10 @@
 //! for the step-5 walker-consumer refactor; this file's prior shape
 //! is preserved in git history at commit `d45c932` for context.
 
-use crate::out::paint::{Painter, Stream, Style};
+use crate::out::paint::{Painter, Stream};
 use crate::fit::report::{Check, ChainDetail, MethodFacts};
 use crate::fit::report::render::*;
-use crate::fit::report::build::{build_method_report, CalendarContext, MethodReport};
+use crate::fit::report::build::{build_method_report, CalendarContext, MethodOutcome, MethodReport};
 use crate::args::{FitSummaryArgs, FitSummaryFormat};
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
 use crate::fit::config_diff::ConfigDiff;
@@ -448,6 +448,9 @@ fn discover_methods(fit_dir: &Path) -> Vec<ResolvedMethod> {
     out
 }
 
+/// `fit summary`'s text: every method leaf loaded into its report, each
+/// drawn by `render_report` under the summary view, with the fit's own lines
+/// around them.
 fn format_text(
     dir: &str,
     args: &FitSummaryArgs,
@@ -458,13 +461,10 @@ fn format_text(
     let mut failures: Vec<LoadFailure> = Vec::new();
     let painter = Painter::for_stream(Stream::Stdout, args.no_color);
     let cal = load_calendar_context(Path::new(dir));
-    let fmt = Formatter { painter };
     let mut had_provenance_failure = false;
     // Emit the loud selection advisory (nudge + warning) once, from the first
     // Bayesian method that recomputes.
     let mut warned = false;
-
-    print!("{}", fmt.fit_header(dir));
 
     // One compile of the fit's model: its `#'` docs and constants for the
     // legends, its observation streams for the method reports' checks.
@@ -473,26 +473,8 @@ fn format_text(
     let (docs, constants) = envelope.as_ref()
         .map(|env| (env.docs.clone(), env.model.constants.clone()))
         .unwrap_or_default();
-
-    // What this model IS, from its file-header `#'` block (gh#750) — so the
-    // first question a summary raises ("a fit of what?") is answered without
-    // opening the `.camdl`. One source line per output line, so a
-    // `@base`/`@adds`/`@changes` lineage header stays readable.
-    if let Some(d) = &docs.model {
-        if let Some(t) = &d.text {
-            println!();
-            for line in t.lines() {
-                println!("  {}", line);
-            }
-        }
-        if let Some(r) = &d.reference {
-            println!("  [{}]", r);
-        }
-    }
-
     let has_legend = !docs.parameters.is_empty() || !constants.is_empty();
-    print!("{}", parameter_legend(&docs.parameters, args.parameters));
-    print!("{}", constant_legend(&constants, &docs.constants, args.parameters));
+    print_lines(painter, &summary_head(dir, &docs, &constants, args.parameters));
 
     // The camdl version is a fact about the FIT, so it opens the first method's
     // identity line and is not repeated on the others'. A fit with no method at
@@ -535,10 +517,7 @@ fn format_text(
         // and is left untouched). The advisory prints once.
         let mut subset_info: Option<SubsetInfo> = None;
         if let Some(sel) = selection {
-            if matches!(
-                typed,
-                MethodResult::Pgas(_) | MethodResult::Pmmh(_)
-            ) {
+            if matches!(typed, MethodResult::Pgas(_) | MethodResult::Pmmh(_)) {
                 match apply_selection_to_typed(&mut typed, &resolved.method_dir, sel) {
                     Ok(info) => {
                         if !warned {
@@ -576,86 +555,15 @@ fn format_text(
                 continue;
             }
         };
-
-        match &report.method_result {
-            Some(MethodResult::If2(if2)) => {
-                if report.provenance_failed() {
-                    had_provenance_failure = true;
-                }
-                print!("{}", fmt.paint(&if2_block(version_lead, &report, if2)));
-            }
-            Some(MethodResult::Pgas(_) | MethodResult::Pmmh(_)) => {
-                print!("{}", fmt.paint(&bayesian_block(version_lead, &report, args.explain)));
-            }
-            Some(MethodResult::Nlopt(r)) => {
-                // NLopt methods are point-estimate (like IF2) but with no
-                // FitState-rendered IF2 gate to display. Print a compact
-                // headline + the theta_hat table from the typed payload.
-                let lead = if version_lead {
-                    format!("camdl {} · ", fmt.dim(version::VERSION_SHORT))
-                } else {
-                    String::new()
-                };
-                println!("\n  {}{} · {}", lead, fmt.bold(&report.name), r.algorithm);
-                println!(
-                    "    loglik:   {:.2} ({})     converged chains: {}/{}",
-                    r.best_loglik,
-                    crate::fit::loglik::LoglikType::tag_or_unknown(report.loglik_type),
-                    r.n_converged, r.n_chains
-                );
-                match r.chain_agreement() {
-                    Some(range) => println!(
-                        "    chain-agreement: max rel range = {:.2}% bound", range * 100.0),
-                    None if r.n_chains > 1 => println!(
-                        "    chain-agreement: not computed (fewer than two converged chains)"),
-                    None => {}
-                }
-                println!("    θ̂ ({} estimated params):", r.theta_hat.len());
-                let w = name_col_width(r.theta_hat.keys().map(String::as_str), 14);
-                for (k, v) in &r.theta_hat {
-                    let shown = fit_name(k, w);
-                    match report.param_dates.get(k) {
-                        Some(date) => println!("      {:<w$} = {}  ({})", shown, v, date),
-                        None => println!("      {:<w$} = {}", shown, v),
-                    }
-                }
-            }
-            Some(MethodResult::Pfilter(r)) => {
-                // A likelihood at fixed parameters: the mean and spread over
-                // its replicate filters, as the run printed them.
-                let lead = if version_lead {
-                    format!("camdl {} · ", fmt.dim(version::VERSION_SHORT))
-                } else {
-                    String::new()
-                };
-                println!("\n  {}{} · pfilter", lead, fmt.bold(&report.name));
-                println!("    loglik = {:.1} ± {:.1} ({} reps, {} particles)",
-                    r.ll_mean, r.ll_sd, r.n_replicates, r.n_particles);
-            }
-            None => {}
-        }
+        had_provenance_failure |= report.provenance_failed();
+        let view = View::Summary(SummaryView { explain: args.explain, version_lead });
+        print_lines(painter, &render_report(&MethodOutcome::Completed(report), view));
     }
 
     if methods.is_empty() {
-        // The version still has to be reported; no method line carried it.
-        println!("  camdl {}", fmt.dim(version::VERSION_SHORT));
-        println!("  (no completed methods found in {})", dir);
+        print_lines(painter, &summary_no_methods(dir));
     }
-
-    // The two flags that ADD to this output, named where a reader has just
-    // finished reading it and is deciding what to ask next. Each is offered
-    // only while it would change what is on screen.
-    let mut offers: Vec<&str> = Vec::new();
-    if has_legend && !args.parameters {
-        offers.push("--parameters for priors and provenance");
-    }
-    if !args.explain {
-        offers.push("--explain for how to read this");
-    }
-    if !offers.is_empty() {
-        println!();
-        println!("  {}", fmt.dim(&offers.join(" · ")));
-    }
+    print_lines(painter, &summary_foot(has_legend, args.parameters, args.explain));
 
     if strict && had_provenance_failure {
         eprintln!();
@@ -664,6 +572,14 @@ fn format_text(
     }
 
     failures
+}
+
+/// Write `lines` to stdout through `painter`. A write that fails is fatal, as
+/// it is for `print!`.
+fn print_lines(painter: Painter, lines: &[crate::out::paint::Line]) {
+    if let Err(e) = painter.write(&mut std::io::stdout().lock(), lines) {
+        panic!("failed printing to stdout: {e}");
+    }
 }
 
 /// gh#322: the keyed-joint (θ, X) forkable count for one method — how many of
@@ -725,11 +641,6 @@ fn format_latex(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: 
 
 // ── Formatting layer ────────────────────────────────────────────────
 
-struct Formatter {
-    /// The stdout painter under `--no-color` (`Painter::for_stream`).
-    painter: Painter,
-}
-
 /// The max-R̂ cell for the export formats: the number, or a word saying why
 /// there isn't one. Never `0.000` — that is a real R̂ value and must not double
 /// as "could not be computed" (review blocker 1).
@@ -741,25 +652,6 @@ fn max_rhat_cell(diag: &PosteriorDiagnostics) -> String {
         MaxRhat::NotApplicable { reason } => format!("not assessed ({})", reason.describe()),
         MaxRhat::NoParams => "not assessed".to_string(),
     }
-}
-
-impl Formatter {
-    /// The fit's own line: which directory. What produced it, and how, is on
-    /// the first method's identity line — the version is a fit-level fact, so it
-    /// opens that line rather than taking one of its own.
-    fn fit_header(&self, dir: &str) -> String {
-        format!("\n{}/\n", self.bold(dir))
-    }
-
-    // ── Colour helpers ──────────────────────────────────────────────
-
-    /// `lines` as text, each with its newline, styled by this painter.
-    fn paint(&self, lines: &[crate::out::paint::Line]) -> String {
-        lines.iter().map(|l| self.painter.render(l) + "\n").collect()
-    }
-
-    fn bold(&self, s: &str)  -> String { self.painter.paint(s, Style::Bold) }
-    fn dim(&self, s: &str)   -> String { self.painter.paint(s, Style::Dim) }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
