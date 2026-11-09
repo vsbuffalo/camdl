@@ -19,7 +19,7 @@
 //! is preserved in git history at commit `d45c932` for context.
 
 use crate::out::paint::{Painter, Stream, Style};
-use crate::fit::report::{Check, ChainWarmup, MethodFacts, Verdict};
+use crate::fit::report::{Check, ChainDetail, ChainWarmup, MethodFacts, Verdict};
 use crate::args::{FitSummaryArgs, FitSummaryFormat};
 use crate::chain_index::ChainIndex;
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
@@ -1172,72 +1172,6 @@ fn worst_rhat_param(diag: &PosteriorDiagnostics) -> Option<(&str, f64)> {
         }
     }
     best
-}
-
-/// Everything one Bayesian method's text block reads off disk, gathered once.
-///
-/// The verdict line and the sections under it are views of the same facts — a
-/// chain the `chains` table flags is one of the outliers the verdict counts,
-/// and the chains that left latent paths are what the identity line counts —
-/// so they are read once, here, rather than by each section separately. Two
-/// renderings of one fit that each go to disk for themselves is how they drift.
-struct ChainDetail {
-    /// Per-chain mean log-likelihood and the trace column it was read from.
-    /// `None` when no per-chain trace is readable at all.
-    logliks: Option<super::chain_diagnostics::ChainLoglikMeans>,
-    /// Robust modified z per chain. Empty when no cross-chain comparison was
-    /// possible — fewer than two chains with traces, or no scored column.
-    scores: Vec<super::chain_diagnostics::ChainZScore>,
-    /// Per-chain saved / forkable latent-path counts. `None` for a method that
-    /// saved none, and for one whose `trajectories` block predates the chain
-    /// ids that key the rows (gh#727 follow-up: a row's position is not an
-    /// answer once a chain has been refused at its start).
-    saved_paths: Option<super::pgas::SavedPathReport>,
-    /// Latent-path convergence over the paths on disk, or the reason there is
-    /// none. `None` when the method saved no path at all.
-    latent: Option<Result<super::latent_convergence::LatentConvergence, String>>,
-    /// How many chains left a latent path behind — counted from the paths
-    /// themselves, so it is right even when the summary block cannot key them.
-    n_chains_with_paths: usize,
-}
-
-impl ChainDetail {
-    fn gather(method_dir: &Path, ll_kind: super::loglik::LoglikType, is_pgas: bool) -> Self {
-        use super::chain_diagnostics as cd;
-        let logliks = cd::read_chain_mean_logliks(method_dir, ll_kind);
-        let scores = match &logliks {
-            Some(m) if !m.scored_column_absent && m.scored.len() >= 2 => {
-                cd::chain_loglik_mod_zscores(&m.scored_by_chain())
-            }
-            _ => Vec::new(),
-        };
-        // PGAS is the one Bayesian method that writes latent paths, so for PMMH
-        // / MH there is nothing to read and nothing to omit.
-        if !is_pgas {
-            return Self { logliks, scores, saved_paths: None, latent: None, n_chains_with_paths: 0 };
-        }
-        let summary = std::fs::read_to_string(
-            method_dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename()),
-        )
-        .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
-        let saved_paths = summary
-            .as_ref()
-            .and_then(super::pgas::read_saved_path_counts)
-            .filter(|r| !r.per_chain.is_empty());
-        let (latent, n_chains_with_paths) =
-            match super::latent_convergence::read_method_paths(method_dir) {
-                Ok(Some((chains, columns))) => {
-                    let n = chains.len();
-                    let lc = super::latent_convergence::latent_convergence(&chains, &columns)
-                        .map_err(|e| e.to_string());
-                    (Some(lc), n)
-                }
-                Ok(None) => (None, 0),
-                Err(e) => (Some(Err(e)), 0),
-            };
-        Self { logliks, scores, saved_paths, latent, n_chains_with_paths }
-    }
 }
 
 /// The max-R̂ cell for the export formats: the number, or a word saying why
