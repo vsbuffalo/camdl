@@ -1,5 +1,10 @@
 //! The stream layer: how anything reaches the terminal. Knows nothing about
 //! fits.
+//!
+//! It carries both streams, not only stdout: stdout holds data and a report
+//! command's report (`fit summary`, `fit diff`), and stderr holds everything
+//! else — progress, milestones, notices, warnings, errors and `fit run`'s
+//! end-of-run block. "out" names the layer, not the stream.
 
 pub mod notice;
 pub mod paint;
@@ -23,8 +28,6 @@ pub fn live() -> LiveHandle {
 }
 
 impl LiveHandle {
-    /// A plain progress line (`chain 1 1/3000  ll=-319.5  acc=0%`), written
-    /// whole.
     /// A chain that finished with something the end of the run will report
     /// in full (`chain 0: proposal scale at its floor …`), so a long run does
     /// not hide it until it ends.
@@ -32,6 +35,8 @@ impl LiveHandle {
         self.progress(line);
     }
 
+    /// A plain progress line (`chain 1 1/3000  ll=-319.5  acc=0%`), written
+    /// whole.
     pub fn progress(&self, line: &str) {
         use std::io::Write;
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
