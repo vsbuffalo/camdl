@@ -161,11 +161,11 @@ pub fn acceptance_ceiling(s: f64) -> f64 {
 /// The target the Robbins–Monro scale adaptation drives toward:
 /// `0.234 + 0.206/d`.
 ///
-/// This mirrors `AdaptiveProposal::target_accept` in `sim`, which is the code
-/// the check is about; the two must agree or the preflight reports a ceiling
-/// against a target the sampler does not use.
+/// The sampler's own formula (`sim::inference::pmmh::target_acceptance`), so
+/// the preflight cannot report a ceiling against a target the sampler does not
+/// use.
 pub fn target_acceptance(d: usize) -> f64 {
-    0.234 + 0.206 / d.max(1) as f64
+    sim::inference::pmmh::target_acceptance(d)
 }
 
 /// The spread at which the ceiling equals the target — above it the
