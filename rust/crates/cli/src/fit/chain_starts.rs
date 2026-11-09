@@ -814,7 +814,7 @@ fn draw_from_prior(
              Declare a `~ <dist>` prior in the model or a `prior = {{ ... }}` in \
              [estimate] to draw them from one.",
             no_prior_names.join(", "),
-            w = crate::style::warning_tag(),
+            w = crate::out::paint::warning_tag(),
         );
     }
     let base = estimate_values_from_resolved(resolved);
@@ -867,7 +867,7 @@ fn draw_from_prior(
              agree.",
             MAX_PRIOR_BOX_REDRAWS,
             box_fallbacks.join(", "),
-            w = crate::style::warning_tag(),
+            w = crate::out::paint::warning_tag(),
         );
     }
     Ok(starts)
@@ -1161,7 +1161,7 @@ where F: Fn(PathBuf) -> InitSource,
             "{w} starts source `{}` is missing \
              parameter(s): {}. Falling back to bounds-uniform for \
              those parameter(s).",
-            path.display(), missing.join(", "), w = crate::style::warning_tag());
+            path.display(), missing.join(", "), w = crate::out::paint::warning_tag());
     }
     let path_buf: PathBuf = path.to_path_buf();
     // Build the per-chain values once — all chains share the point;

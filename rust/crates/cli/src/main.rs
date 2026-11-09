@@ -5434,8 +5434,8 @@ fn print_dry_run(
     obs_only: &Option<String>,
     design: Option<&crate::sim_ensemble_cas::ResolvedDesign>,
 ) {
-    let d = style::dim;
-    let b = style::bold;
+    let d = out::paint::dim;
+    let b = out::paint::bold;
 
     eprintln!("{}", b("camdl simulate (dry run)"));
     eprintln!();
@@ -5633,7 +5633,7 @@ fn print_store_view(
     force: bool,
     quantities: bool,
 ) {
-    let d = style::dim;
+    let d = out::paint::dim;
     let (specs, _) = engine::plan_grid(job);
     let root = cas.root();
     let rel_of = |dir: &std::path::Path| {

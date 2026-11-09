@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::style::{self, Style};
+use crate::out::paint::{self as style, Style};
 
 use crate::cas_read;
 use crate::util::fmt_relative_time;

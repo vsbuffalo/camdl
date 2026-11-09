@@ -4,7 +4,7 @@
 //! obs_loglik construction from IR observation model, chain execution,
 //! chain-agreement (Â) computation, and MAD-based auto rw_sd calibration.
 
-use crate::style::Style;
+use crate::out::paint::Style;
 use crate::chain_index::ChainIndex;
 use crate::fit::loglik_eval;
 use crate::params_resolver::resolved_bounds;
@@ -989,7 +989,7 @@ pub fn preflight_spread_starts(
                                     "  chain {}: {} — none of {} starts drawn \
                                      under `starts = {}` could be scored by the filter (last: {}); \
                                      see chain_starts.tsv for every attempt",
-                                    ChainIndex(chain_id), crate::style::stderr().paint("✗ refused", Style::Err),
+                                    ChainIndex(chain_id), crate::out::paint::stderr().paint("✗ refused", Style::Err),
                                     MAX_START_ATTEMPTS, starts.rule.spelled(), reason);
                                 return Ok((Some(current), rejected, true));
                             }
@@ -1171,7 +1171,7 @@ pub fn print_preflight(
         .count();
 
     if starts_differ {
-        eprintln!("\ntransforms {}:", crate::style::stderr().paint(&format!(
+        eprintln!("\ntransforms {}:", crate::out::paint::stderr().paint(&format!(
             "(chain 1 of {}; chains start at different points — see chain_starts.tsv)",
             config.n_chains), Style::Dim));
     } else {
@@ -1192,7 +1192,7 @@ pub fn print_preflight(
             });
         }
         let mark = if compressed {
-            format!(" {}", crate::style::stderr().paint("⚠ compressed", Style::Warn))
+            format!(" {}", crate::out::paint::stderr().paint("⚠ compressed", Style::Warn))
         } else {
             String::new()
         };
@@ -1201,7 +1201,7 @@ pub fn print_preflight(
         // natural-scale step it is at the reference point (the box's
         // midpoint, else the start), the unit an explicit rw_sd is written in.
         let source = if spec.rw_sd_auto {
-            crate::style::stderr().paint("auto", Style::Warn)
+            crate::out::paint::stderr().paint("auto", Style::Warn)
         } else {
             "explicit".to_string()
         };
@@ -1223,7 +1223,7 @@ pub fn print_preflight(
     }
 
     if n_auto > 0 {
-        eprintln!("\n  {}", crate::style::stderr().paint(&format!(
+        eprintln!("\n  {}", crate::out::paint::stderr().paint(&format!(
             "⚠ {}/{} parameters using auto rw_sd. Check traces and set explicit values.",
             n_auto, specs.len()), Style::Warn));
     }
@@ -2015,7 +2015,7 @@ pub(crate) fn apply_holdout_declaration(
             "  {h} training window [{t_start}, {tau}]; \
              {withheld} observation row(s) at t > {tau} withheld from \
              training (scored out-of-sample by `camdl compare`)",
-            h = crate::style::stderr().paint("holdout:", Style::Info));
+            h = crate::out::paint::stderr().paint("holdout:", Style::Info));
         return Ok(Some(TrainingWindow { train_end: tau }));
     }
 
@@ -2058,7 +2058,7 @@ pub(crate) fn apply_holdout_declaration(
             "  {h} training window [{t_start}, {train_end}]; \
              {n_holdout} held-out observation row(s) bound as the tail \
              (scored out-of-sample by `camdl compare`)",
-            h = crate::style::stderr().paint("holdout:", Style::Info));
+            h = crate::out::paint::stderr().paint("holdout:", Style::Info));
         return Ok(Some(TrainingWindow { train_end }));
     }
 
@@ -2424,7 +2424,7 @@ pub fn run_chains_with_per_chain_params(
                         attempts: Vec::new(),
                     });
                     eprintln!("  chain {}: {} — {} ({})",
-                        ChainIndex(chain_id), crate::style::stderr().paint("✗ skipped", Style::Err),
+                        ChainIndex(chain_id), crate::out::paint::stderr().paint("✗ skipped", Style::Err),
                         label, reason);
                     // The bar is cleared in the post-loop finish; the skip
                     // is already loud on stderr above. The chain and its
@@ -2623,9 +2623,9 @@ pub fn run_chains_with_per_chain_params(
                 match chain_agreement.get(&spec.name) {
                     Some(&r) if r.is_finite() => {
                         let status = match config.gate.a_band(r) {
-                            super::gating::AgreementBand::Pass => crate::style::stderr().paint("✓", Style::Ok),
-                            super::gating::AgreementBand::SoftWarn => crate::style::stderr().paint("~", Style::Warn),
-                            super::gating::AgreementBand::Fail => crate::style::stderr().paint("✗", Style::Err),
+                            super::gating::AgreementBand::Pass => crate::out::paint::stderr().paint("✓", Style::Ok),
+                            super::gating::AgreementBand::SoftWarn => crate::out::paint::stderr().paint("~", Style::Warn),
+                            super::gating::AgreementBand::Fail => crate::out::paint::stderr().paint("✗", Style::Err),
                             // Unreachable: `r.is_finite()` is the match guard.
                             super::gating::AgreementBand::NotAssessed => "n/a".to_string(),
                         };
@@ -3220,7 +3220,7 @@ impl MethodConvergence {
             // keeps the glyph from ever being greener than the finding allows.
             let drew_finding = r.rhat > rhat_threshold;
             let band = RhatBand::of(r.rhat);
-            let p = crate::style::stderr();
+            let p = crate::out::paint::stderr();
             let status = match band.glyph_with_finding(drew_finding) {
                 "✓" => p.paint("✓", Style::Ok),
                 "~" => p.paint("~", Style::Warn),

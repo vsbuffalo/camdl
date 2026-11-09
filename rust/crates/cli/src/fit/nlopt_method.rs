@@ -12,7 +12,7 @@
 //! The optimizer itself lives in `sim::inference::deterministic`; this
 //! module is the orchestration layer wiring it to the fit framework.
 
-use crate::style::Style;
+use crate::out::paint::Style;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -62,7 +62,7 @@ pub fn run_method(
         });
     eprintln!(
         "{} deterministic MLE on the ODE-skeleton likelihood.",
-        crate::style::stderr().paint(&head, Style::Warn)
+        crate::out::paint::stderr().paint(&head, Style::Warn)
     );
     eprintln!(
         "  camdl computes p(y|θ, ODE_skeleton) under {algorithm}, not the \
@@ -431,7 +431,7 @@ fn run_one_chain(
             // structural: this chain has no optimum to report, so it carries
             // `Failed` and a `-inf` loglik, which loses the winner comparison
             // to any chain that did converge.
-            eprintln!("{} {}: {e}", crate::style::stderr().paint("✗", Style::Err), algorithm.as_str());
+            eprintln!("{} {}: {e}", crate::out::paint::stderr().paint("✗", Style::Err), algorithm.as_str());
             ChainOutcome {
                 params: est_indices.iter().map(|&i| full_start[i]).collect(),
                 loglik: f64::NEG_INFINITY,
@@ -825,7 +825,7 @@ fn check_convergence(
 /// The chain-agreement line of the end-of-run verdict. With fewer than two
 /// converged chains the leg is not computed, and says so rather than
 /// printing a 0.00% range and a ✓.
-fn chain_agreement_line(painter: &crate::style::Painter, v: &ConvergenceVerdict) -> String {
+fn chain_agreement_line(painter: &crate::out::paint::Painter, v: &ConvergenceVerdict) -> String {
     if v.n_converged < 2 {
         return "  chain-agreement: not computed (fewer than two converged chains)".to_string();
     }
@@ -843,7 +843,7 @@ fn print_verdict(
     n_chains: usize,
     decibans_thresh: f64,
 ) {
-    let p = crate::style::stderr();
+    let p = crate::out::paint::stderr();
     let ok = p.paint("✓", Style::Ok);
     let bad = p.paint("✗", Style::Err);
     eprintln!();
@@ -1237,7 +1237,7 @@ mod tests {
             (0, outcome(-100.0, vec![0.5], OptStatus::Converged(SuccessState::XtolReached))),
         ];
         let v = check_convergence(&chains, &names(1), &[(0.0, 1.0)], &GateConfig::default(), 1e-6);
-        let line = chain_agreement_line(&crate::style::Painter::plain(), &v);
+        let line = chain_agreement_line(&crate::out::paint::Painter::plain(), &v);
         assert!(line.contains("not computed (fewer than two converged chains)")
             && !line.contains('✓'), "{line}");
     }

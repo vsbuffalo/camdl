@@ -2,5 +2,6 @@
 //! fits.
 
 pub mod notice;
+pub mod paint;
 pub mod progress;
 pub mod status;

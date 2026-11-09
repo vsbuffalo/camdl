@@ -4,7 +4,7 @@
 //! updates (θ | X) with conditional SMC trajectory updates (X | θ, y).
 //! Outputs per-chain trace files, convergence diagnostics, and summary.
 
-use crate::style::Style;
+use crate::out::paint::Style;
 use crate::chain_index::ChainIndex;
 use crate::fit::state::FitState;
 use crate::fit::loglik::LoglikType;
@@ -291,7 +291,7 @@ pub fn run_method(
     if !force && !resume {
         let state_path = method_dir.join("fit_state.toml");
         if state_path.exists() {
-            eprintln!("{}", crate::style::stderr().paint(&format!(
+            eprintln!("{}", crate::out::paint::stderr().paint(&format!(
                 "pgas results already exist in {}. Use --force to re-run or --resume to continue.",
                 method_dir.display()), Style::Warn));
             return Ok(());
@@ -1116,7 +1116,7 @@ pub fn run_method(
                         chain_id, params, reason: reason.clone(), attempts,
                     });
                     eprintln!("  chain {}: {} — {}",
-                        chain, crate::style::stderr().paint("✗ BadInit", Style::Err), reason);
+                        chain, crate::out::paint::stderr().paint("✗ BadInit", Style::Err), reason);
                     // gh#751: and in `progress.json`, where a watcher sees it
                     // now rather than when the method ends. The short tag is the
                     // machine-readable half of the same finding the `BadInit`
@@ -1270,7 +1270,7 @@ pub fn run_method(
     if n_good_chains < n_chains {
         eprintln!("\n{} \
                    ({} skipped via BadInit; see diagnostics below)",
-            crate::style::stderr().paint(&format!("ran {n_good_chains} of {n_chains} chains"), Style::Warn),
+            crate::out::paint::stderr().paint(&format!("ran {n_good_chains} of {n_chains} chains"), Style::Warn),
             n_chains - n_good_chains);
     }
 
@@ -1345,7 +1345,7 @@ pub fn run_method(
                     }
                 }
                 format!("  {}={}", p.name,
-                    crate::style::stderr().paint(&format!("{:.0}%", r * 100.0), status))
+                    crate::out::paint::stderr().paint(&format!("{:.0}%", r * 100.0), status))
             })
             .collect();
         if block_update {

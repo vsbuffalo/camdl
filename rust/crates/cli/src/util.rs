@@ -1,4 +1,4 @@
-use crate::style::Style;
+use crate::out::paint::Style;
 use std::collections::HashMap;
 use ir::intervention::Intervention;
 use sim::{
@@ -534,7 +534,7 @@ pub(crate) fn camdlc_emit_deps(
 /// instead, through the two variables the shared policy reads, so a compile
 /// error is coloured exactly when camdl's own stderr is.
 fn pass_stderr_color_policy(cmd: &mut std::process::Command) {
-    if crate::style::enabled() {
+    if crate::out::paint::enabled() {
         cmd.env("CLICOLOR_FORCE", "1");
     } else {
         cmd.env("NO_COLOR", "1");
@@ -2693,7 +2693,7 @@ pub fn print_scheduled_actions_summary(
         eprintln!("  interventions ({} active of {} declared):", active_count, decl_interv.len());
         for iv in &decl_interv {
             let on = active_names.contains(iv.name.as_str());
-            let p = crate::style::stderr();
+            let p = crate::out::paint::stderr();
             let glyph = if on { p.paint("✓", Style::Ok) } else { p.paint("✗", Style::Dim) };
             let note = if on { "" } else { "  (off — not enabled)" };
             eprintln!("    {} {}{}", glyph, iv.name, note);
@@ -2704,7 +2704,7 @@ pub fn print_scheduled_actions_summary(
         eprintln!("  events ({} declared, {} active):", decl_events.len(), active_count);
         for iv in &decl_events {
             let on = active_names.contains(iv.name.as_str());
-            let p = crate::style::stderr();
+            let p = crate::out::paint::stderr();
             let glyph = if on { p.paint("✓", Style::Ok) } else { p.paint("✗", Style::Dim) };
             let note = if on { "" } else { "  (disabled)" };
             eprintln!("    {} {}{}", glyph, iv.name, note);
@@ -2728,7 +2728,7 @@ pub fn print_observations_summary(model: &ir::Model) {
     for check in crate::fit::report::obs_stream_checks(model) {
         if let crate::fit::report::Check::ObsStream { name, carrier, family } = check {
             eprintln!("    {} {:<16} {:<28} {}",
-                crate::style::stderr().paint("✓", Style::Ok), name, carrier, family);
+                crate::out::paint::stderr().paint("✓", Style::Ok), name, carrier, family);
         }
     }
     let warn_negbin_on_snapshot = model.observations.iter().any(|obs| {
@@ -2736,7 +2736,7 @@ pub fn print_observations_summary(model: &ir::Model) {
             && crate::fit::report::projection_is_snapshot(&obs.projection)
     });
     if warn_negbin_on_snapshot {
-        let p = crate::style::stderr();
+        let p = crate::out::paint::stderr();
         eprintln!("    {}", p.paint("note: NegBinomial on a prevalence / snapshot projection is valid", Style::Dim));
         eprintln!("{}", p.paint("          but uncommon. Binomial or Poisson is the typical choice for", Style::Dim));
         eprintln!("{}", p.paint("          point-in-time counts. See camdl-run-spec.md §14.4.", Style::Dim));
@@ -3934,7 +3934,7 @@ pub fn simulate_compiled(
     if let ir::model::OutputSchedule::AtTimes(ts) = &compiled.model.output.times {
         let t_end = compiled.model.simulation.t_end;
         if !ts.is_empty() && ts.iter().all(|&t| t > t_end) {
-            let w = crate::style::stderr().paint("warning:", Style::Warn);
+            let w = crate::out::paint::stderr().paint("warning:", Style::Warn);
             eprintln!(
                 "{w} every `at = [...]` output time is beyond the \
                  simulation horizon (t_end = {t_end}); the trajectory will have no rows \

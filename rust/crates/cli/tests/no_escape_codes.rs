@@ -1,6 +1,6 @@
 //! Colour is applied in one place in the command-line crate.
 //!
-//! `style::Painter` decides whether a stream gets colour (`--no-color`, then
+//! `out::paint::Painter` decides whether a stream gets colour (`--no-color`, then
 //! `NO_COLOR`, then `CLICOLOR_FORCE`, then whether the stream is a terminal)
 //! and is the only code that writes an escape sequence. A literal escape code
 //! anywhere else in `cli/src/` writes colour into a pipe or a file whatever the
@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 /// The one file allowed to spell an escape code: it owns the policy.
-const ALLOWED: &[&str] = &["style.rs"];
+const ALLOWED: &[&str] = &["out/paint.rs"];
 
 /// Spellings of ESC in Rust source, and the colour library.
 const FORBIDDEN: &[&str] = &["\\x1b", "\\x1B", "\\u{1b}", "\\u{1B}", "\\u{001b}", "\\u{001B}", "\\033", "owo_colors"];
@@ -63,7 +63,7 @@ fn no_escape_code_outside_the_painter() {
 #[test]
 fn the_patterns_match_the_painter() {
     let style = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/style.rs")).unwrap();
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/out/paint.rs")).unwrap();
     assert!(FORBIDDEN.iter().any(|p| style.contains(p)),
-        "style.rs writes the escape code, so at least one pattern must match it");
+        "out/paint.rs writes the escape code, so at least one pattern must match it");
 }
