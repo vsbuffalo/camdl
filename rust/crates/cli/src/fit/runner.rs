@@ -2550,22 +2550,16 @@ pub fn run_chains_with_per_chain_params(
                 start_loglik, steps: steps.clone(),
             });
             collector.render_to_stderr(HintContext { chains_completed: Some(results.len()) }, crate::style::enabled());
-            if let Some(dir) = method_dir {
-                let _ = collector.write_json(&format!("{}/diagnostics.json", dir));
-            }
-            return Err(format!(
+            return Err(fail_recording_findings(collector, method_dir, format!(
                 "if2: every chain's final estimate has log-likelihood -inf (best = {best_loglik}), \
                  but a chain's start scores {start_loglik:.1}: the start is feasible and the \
                  perturbed swarm is not, so the perturbation is too large. The steps at the \
                  start, in each parameter's transformed coordinate, were {}. Give a smaller explicit rw_sd \
-                 (`rw_sd = …` in its [estimate] entry).", steps.join(", ")));
+                 (`rw_sd = …` in its [estimate] entry).", steps.join(", "))));
         }
         collector.push(DiagnosticKind::InitialLoglikInfinite);
         collector.render_to_stderr(HintContext { chains_completed: Some(results.len()) }, crate::style::enabled());
-        if let Some(dir) = method_dir {
-            let _ = collector.write_json(&format!("{}/diagnostics.json", dir));
-        }
-        return Err(format!(
+        return Err(fail_recording_findings(collector, method_dir, format!(
             "if2: all {} surviving chain(s) reached no finite log-likelihood \
              (best = {}). The likelihood surface is `-inf` at every evaluated \
              θ. Most often the starting values sit in an impossible region — \
@@ -2574,7 +2568,7 @@ pub fn run_chains_with_per_chain_params(
              impossible under this model, or a recoverable \
              error fires at every θ (gh#226). Also check the observation model \
              and parameter bounds.",
-            config.n_chains, best_loglik));
+            config.n_chains, best_loglik)));
     }
 
     // Report. `best_se` is derived locally; we log it here but don't
@@ -3272,6 +3266,19 @@ impl MethodConvergence {
             }
         }
         out
+    }
+}
+
+/// The error a failing IF2 run returns, with its findings written first when
+/// it has a method directory to write them to (`fit::write_diagnostics_then_fail`).
+fn fail_recording_findings(
+    collector: &sim::inference::diagnostic::DiagnosticCollector,
+    method_dir: Option<&str>,
+    reason: String,
+) -> String {
+    match method_dir {
+        Some(dir) => super::write_diagnostics_then_fail(collector, std::path::Path::new(dir), reason),
+        None => reason,
     }
 }
 
