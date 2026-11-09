@@ -54,7 +54,7 @@ fn no_escape_code_outside_the_painter() {
         }
     }
     assert!(hits.is_empty(),
-        "colour must go through `style::Painter` (`paint`, `write`), not a literal escape code \
+        "colour must go through `out::paint::Painter` (`paint`, `write`), not a literal escape code \
          or a direct colour-library call:\n{}", hits.join("\n"));
 }
 
