@@ -142,37 +142,11 @@ fn action_phase(action: &Action) -> EventPhase {
 }
 
 impl EffectKind {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             EffectKind::Intervention => "INTERVENTION",
             EffectKind::Event => "EVENT",
         }
-    }
-}
-
-/// `CAMDL_TRACE_STEPS` observability for one action. Stderr-only, env-gated, no
-/// effect on results — kept out of the pure resolver and emitted at the wiring.
-fn trace_action(kind: EffectKind, iv_name: &str, action: &Action, v: f64, t: f64) {
-    if !crate::chain_binomial::trace_enabled() {
-        return;
-    }
-    let k = kind.label();
-    match action {
-        Action::Add(a) => eprintln!(
-            "{k} '{iv_name}' at t={t:.1}: add {} += {} (raw={v:.2})",
-            a.compartment, v.round() as i64
-        ),
-        Action::Set(a) => {
-            eprintln!("{k} '{iv_name}' at t={t:.1}: set {} = {v:.2}", a.compartment)
-        }
-        Action::FractionTransfer(ft) => eprintln!(
-            "{k} '{iv_name}' at t={t:.1}: transfer {} -> {} (frac={:.2})",
-            ft.src, ft.dst, v.clamp(0.0, 1.0)
-        ),
-        Action::AbsoluteTransfer(at) => eprintln!(
-            "{k} '{iv_name}' at t={t:.1}: transfer {} -> {} (raw={v:.2})",
-            at.src, at.dst
-        ),
     }
 }
 
@@ -252,7 +226,7 @@ fn resolve_one(
     };
     let v = eval_resolved(&model.resolved.intervention_exprs[iv_idx][action_idx], &ctx);
     let v = crate::intervention::finite_action_value(v, iv_name, action, t)?;
-    trace_action(kind, iv_name, action, v, t);
+    crate::trace::effect_action(kind, iv_name, action, v, t);
     resolve_action(model, action, v, snap, t, out)
 }
 
@@ -958,7 +932,7 @@ impl EventArena for ContinuousArena<'_> {
                 }
                 let v = eval_amount_f64(model, iv_idx, action_idx, &snap_int, &snap_real, params, t, dt);
                 let v = crate::intervention::finite_action_value(v, &iv.name, action, t)?;
-                trace_action(EffectKind::Event, &iv.name, action, v, t);
+                crate::trace::effect_action(EffectKind::Event, &iv.name, action, v, t);
                 action_changes_f64(model, action, v, &snap_int, &snap_real, &mut changes)?;
             }
         }
@@ -1052,7 +1026,7 @@ pub fn apply_interventions_continuous(
             let live_real = real_vals.to_vec();
             let v = eval_amount_f64(model, iv_idx, action_idx, &live_int, &live_real, params, t, dt);
             let v = crate::intervention::finite_action_value(v, &iv.name, action, t)?;
-            trace_action(EffectKind::Intervention, &iv.name, action, v, t);
+            crate::trace::effect_action(EffectKind::Intervention, &iv.name, action, v, t);
             apply_action_f64(model, action, v, &live_int, &live_real, int_vals, real_vals)?;
         }
     }

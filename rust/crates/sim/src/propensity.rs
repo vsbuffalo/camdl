@@ -3,7 +3,8 @@ use std::cell::RefCell;
 use crate::{
     compiled_model::{CompiledModel, CompiledTimeFuncKind},
     error::{SimError, CollapseKind},
-    eval_stats::{allow_degenerate_rates, eval_unresolved},
+    eval_stats::allow_degenerate_rates,
+    trace::eval_unresolved,
     flat_eval::{self, FlatCache},
     resolved_expr::{eval_resolved, ResolvedExpr},
     state::{IntState, RealState},
@@ -692,7 +693,7 @@ pub fn eval_propensities(
     // model binding is evaluated at most once instead of on every BindingRef
     // (the on-demand path is restored when `_cache` drops at function exit).
     let _cache = crate::resolved_expr::CacheScope::enter(model.resolved.bindings.len());
-    // Bench/validation switch (eval_stats::eval_unresolved): off → the
+    // Bench/validation switch (trace::eval_unresolved): off → the
     // pre-resolved index path (default, hot); on → the string-keyed
     // eval_expr path. Read once here and branched per-transition below,
     // so the off path is identical to not having the switch at all.
