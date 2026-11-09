@@ -44,10 +44,6 @@ indicatif = "0.17"
 io = { path = "../io" }
 ir = { path = "../ir" }
 log = "0.4"
-# Terminal colors for `camdl list/show/cat` output. Zero-dep, zero-alloc,
-# respects NO_COLOR when the `supports-colors` feature is enabled on the
-# call site via `.if_supports_color(...)`.
-owo-colors = { version = "4", features = ["supports-colors"] }
 rand = "0.8"
 rand_distr = "0.4"
 rayon = "1"

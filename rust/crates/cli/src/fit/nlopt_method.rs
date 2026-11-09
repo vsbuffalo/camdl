@@ -12,6 +12,7 @@
 //! The optimizer itself lives in `sim::inference::deterministic`; this
 //! module is the orchestration layer wiring it to the fit framework.
 
+use crate::style::Style;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -51,16 +52,17 @@ pub fn run_method(
     let method_name = method.algorithm.method_name();
     let (algorithm, knobs) = extract_nlopt_config(&method.algorithm)?;
 
-    eprintln!(
-        "\x1b[33mℹ {} ({}):\x1b[0m deterministic MLE on the ODE-skeleton \
-         likelihood.",
+    let head = format!("ℹ {} ({}):",
         algorithm.as_str(),
         match algorithm {
             NloptAlgorithm::Sbplx => "Subspace simplex; robust to boundary non-smoothness",
             NloptAlgorithm::Bobyqa => "Quadratic trust region; smooth-objective only",
             NloptAlgorithm::Lbfgs =>
                 "Quasi-Newton on the forward-sensitivity gradient; differentiable models only",
-        }
+        });
+    eprintln!(
+        "{} deterministic MLE on the ODE-skeleton likelihood.",
+        crate::style::stderr().paint(&head, Style::Warn)
     );
     eprintln!(
         "  camdl computes p(y|θ, ODE_skeleton) under {algorithm}, not the \
@@ -429,7 +431,7 @@ fn run_one_chain(
             // structural: this chain has no optimum to report, so it carries
             // `Failed` and a `-inf` loglik, which loses the winner comparison
             // to any chain that did converge.
-            eprintln!("\x1b[31m✗\x1b[0m {}: {e}", algorithm.as_str());
+            eprintln!("{} {}: {e}", crate::style::stderr().paint("✗", Style::Err), algorithm.as_str());
             ChainOutcome {
                 params: est_indices.iter().map(|&i| full_start[i]).collect(),
                 loglik: f64::NEG_INFINITY,
@@ -823,7 +825,7 @@ fn check_convergence(
 /// The chain-agreement line of the end-of-run verdict. With fewer than two
 /// converged chains the leg is not computed, and says so rather than
 /// printing a 0.00% range and a ✓.
-fn chain_agreement_line(v: &ConvergenceVerdict) -> String {
+fn chain_agreement_line(painter: &crate::style::Painter, v: &ConvergenceVerdict) -> String {
     if v.n_converged < 2 {
         return "  chain-agreement: not computed (fewer than two converged chains)".to_string();
     }
@@ -831,7 +833,7 @@ fn chain_agreement_line(v: &ConvergenceVerdict) -> String {
         "  chain-agreement: rel range = {:.2}% bound | abs range = {:.3e}   {}",
         v.max_rel_range * 100.0,
         v.max_abs_range,
-        if v.chain_agreement_failed { "\x1b[31m✗\x1b[0m" } else { "\x1b[32m✓\x1b[0m" }
+        if v.chain_agreement_failed { painter.paint("✗", Style::Err) } else { painter.paint("✓", Style::Ok) }
     )
 }
 
@@ -841,14 +843,15 @@ fn print_verdict(
     n_chains: usize,
     decibans_thresh: f64,
 ) {
-    let ok = "\x1b[32m✓\x1b[0m";
-    let bad = "\x1b[31m✗\x1b[0m";
+    let p = crate::style::stderr();
+    let ok = p.paint("✓", Style::Ok);
+    let bad = p.paint("✗", Style::Err);
     eprintln!();
     eprintln!(
         "  status: {} converged, {} max-eval, {} failed (of {})",
         v.n_converged, v.n_maxeval, v.n_failed, n_chains
     );
-    eprintln!("{}", chain_agreement_line(v));
+    eprintln!("{}", chain_agreement_line(&p, v));
     eprintln!(
         "  loglik-eval:     Δ = {:.1} dB / threshold {:.0} dB                {}",
         v.delta_loglik * NATS_TO_DB,
@@ -1234,7 +1237,7 @@ mod tests {
             (0, outcome(-100.0, vec![0.5], OptStatus::Converged(SuccessState::XtolReached))),
         ];
         let v = check_convergence(&chains, &names(1), &[(0.0, 1.0)], &GateConfig::default(), 1e-6);
-        let line = chain_agreement_line(&v);
+        let line = chain_agreement_line(&crate::style::Painter::plain(), &v);
         assert!(line.contains("not computed (fewer than two converged chains)")
             && !line.contains('✓'), "{line}");
     }

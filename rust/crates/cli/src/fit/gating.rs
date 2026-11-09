@@ -659,9 +659,9 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
                         .map(|(n, a)| format!("{n} (Â = {a:.3})"))
                         .collect();
                     eprintln!(
-                        "\x1b[33mwarning:\x1b[0m starts source {handle}: chain agreement is \
+                        "{w} starts source {handle}: chain agreement is \
                          below the certification band on {}",
-                        named.join(", ")
+                        named.join(", "), w = crate::style::warning_tag()
                     );
                     None
                 }
@@ -719,8 +719,9 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
         None => Ok(()),
         Some(msg) if allow => {
             eprintln!(
-                "\x1b[33mwarning:\x1b[0m starts source {handle}: {msg}\n  \
-                 --allow-nonconverged-source: starting from it anyway."
+                "{w} starts source {handle}: {msg}\n  \
+                 --allow-nonconverged-source: starting from it anyway.",
+                w = crate::style::warning_tag()
             );
             Ok(())
         }

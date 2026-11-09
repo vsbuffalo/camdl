@@ -265,9 +265,8 @@ pub fn status_note(algorithm: FitAlgorithm, backend: InferenceBackend) -> Option
 /// by the registry so the banner text and `camdl fit methods` stay in lockstep
 /// — this replaces the previously hand-coded, PMMH-only banner.
 pub fn emit_status_banner(algorithm: FitAlgorithm, backend: InferenceBackend) {
-    use owo_colors::OwoColorize;
     if let Some(note) = status_note(algorithm, backend) {
-        eprintln!("{}", format!("⚠ {note}").yellow());
+        eprintln!("{}", crate::style::stderr().paint(&format!("⚠ {note}"), crate::style::Style::Warn));
         eprintln!();
     }
 }
@@ -732,14 +731,13 @@ pub fn warn_if_ode_euler_flow(compiled: &sim::CompiledModel) {
         .required_capabilities()
         .contains(sim::Capabilities::RUNTIME_DT)
     {
-        eprintln!(
-            "\x1b[33m⚠ model references `dt` in a rate (Expr::Dt): on the ODE \
+        eprintln!("{}", crate::style::stderr().paint(
+            "⚠ model references `dt` in a rate (Expr::Dt): on the ODE \
              backend its incidence is computed with the first-order Euler method \
              — the high-order augmented flow is undefined when a rate depends on \
              the step size. `dt` in a rate is a discrete-time construct; consider \
              whether it belongs on the continuous ODE backend (every other model \
-             gets high-order incidence).\x1b[0m"
-        );
+             gets high-order incidence).", crate::style::Style::Warn));
     }
 }
 
@@ -762,15 +760,14 @@ pub(crate) fn gillespie_time_dep_warn(compiled: &sim::CompiledModel) -> bool {
 /// dispatch chokepoint. No-op unless the model has a time-varying rate.
 pub fn warn_if_gillespie_time_dep(compiled: &sim::CompiledModel) {
     if gillespie_time_dep_warn(compiled) {
-        eprintln!(
-            "\x1b[33m⚠ model has time-varying transition rate(s): on the \
+        eprintln!("{}", crate::style::stderr().paint(
+            "⚠ model has time-varying transition rate(s): on the \
              gillespie backend the next-event draw holds the total rate constant \
              over each exponential wait, so a time-varying rate is treated as \
              piecewise-constant on the output grid — biasing the inhomogeneous \
              Poisson process. Mitigations: use a fine output grid (smaller steps \
              → smaller bias), or prefer backend = \"chain_binomial\", which \
-             re-evaluates the rate every substep. (gh#95)\x1b[0m"
-        );
+             re-evaluates the rate every substep. (gh#95)", crate::style::Style::Warn));
     }
 }
 

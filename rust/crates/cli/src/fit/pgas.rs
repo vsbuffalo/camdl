@@ -4,6 +4,7 @@
 //! updates (θ | X) with conditional SMC trajectory updates (X | θ, y).
 //! Outputs per-chain trace files, convergence diagnostics, and summary.
 
+use crate::style::Style;
 use crate::chain_index::ChainIndex;
 use crate::fit::state::FitState;
 use crate::fit::loglik::LoglikType;
@@ -290,8 +291,9 @@ pub fn run_method(
     if !force && !resume {
         let state_path = method_dir.join("fit_state.toml");
         if state_path.exists() {
-            eprintln!("\x1b[33mpgas results already exist in {}. Use --force to re-run or --resume to continue.\x1b[0m",
-                method_dir.display());
+            eprintln!("{}", crate::style::stderr().paint(&format!(
+                "pgas results already exist in {}. Use --force to re-run or --resume to continue.",
+                method_dir.display()), Style::Warn));
             return Ok(());
         }
     }
@@ -1113,8 +1115,8 @@ pub fn run_method(
                         // every other artifact name it (gh#990).
                         chain_id, params, reason: reason.clone(), attempts,
                     });
-                    eprintln!("  chain {}: \x1b[31m✗ BadInit\x1b[0m — {}",
-                        chain, reason);
+                    eprintln!("  chain {}: {} — {}",
+                        chain, crate::style::stderr().paint("✗ BadInit", Style::Err), reason);
                     // gh#751: and in `progress.json`, where a watcher sees it
                     // now rather than when the method ends. The short tag is the
                     // machine-readable half of the same finding the `BadInit`
@@ -1266,9 +1268,10 @@ pub fn run_method(
     // than silently dropped. Mirrors PMMH (`pmmh.rs`).
     let n_good_chains = all_results.len();
     if n_good_chains < n_chains {
-        eprintln!("\n\x1b[33mran {} of {} chains\x1b[0m \
+        eprintln!("\n{} \
                    ({} skipped via BadInit; see diagnostics below)",
-            n_good_chains, n_chains, n_chains - n_good_chains);
+            crate::style::stderr().paint(&format!("ran {n_good_chains} of {n_chains} chains"), Style::Warn),
+            n_chains - n_good_chains);
     }
 
     // gh#607. Every chain was refused at its start — there is no posterior to
@@ -1280,7 +1283,7 @@ pub fn run_method(
     // to look for.
     if all_results.is_empty() {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
+        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
         let diag_path = method_dir.join("diagnostics.json");
         let _ = collector.write_json(&diag_path.to_string_lossy());
         // gh#885: the reason and the remedies come from the one string the
@@ -1333,9 +1336,9 @@ pub fn run_method(
             && rates.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
         let summary: Vec<String> = config.estimated_params.iter().zip(rates)
             .map(|(p, &r)| {
-                let status = if r < lo { "\x1b[31m" }
-                    else if r > hi { "\x1b[33m" }
-                    else { "\x1b[32m" };
+                let status = if r < lo { Style::Err }
+                    else if r > hi { Style::Warn }
+                    else { Style::Ok };
                 if !block_update {
                     if let Some(d) = sim::inference::diagnostic::acceptance_diagnostic(
                         r, Some(p.name.clone()), kernel)
@@ -1343,7 +1346,8 @@ pub fn run_method(
                         collector.push(d);
                     }
                 }
-                format!("  {}={}{:.0}%\x1b[0m", p.name, status, r * 100.0)
+                format!("  {}={}", p.name,
+                    crate::style::stderr().paint(&format!("{:.0}%", r * 100.0), status))
             })
             .collect();
         if block_update {
@@ -1603,7 +1607,7 @@ pub fn run_method(
     // starts finite and walks into a `-inf` region it cannot leave.
     if sim::inference::no_finite_anchor(best_sweep.log_complete_data_ll) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
+        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
         let diag_path = method_dir.join("diagnostics.json");
         let _ = collector.write_json(&diag_path.to_string_lossy());
         return Err(format!(
@@ -1744,7 +1748,7 @@ pub fn run_method(
     }
 
     // Render and persist diagnostics
-    collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
+    collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
     let diag_path = method_dir.join("diagnostics.json");
     let _ = collector.write_json(&diag_path.to_string_lossy());
 

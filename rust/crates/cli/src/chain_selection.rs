@@ -120,9 +120,9 @@ impl ChainSelection {
     /// the requested ids. Printed once, to stderr, before the derivations run.
     pub fn warn_requested(&self) {
         eprintln!(
-            "\x1b[33mwarning:\x1b[0m --exclude-chains will drop chain(s) {} from each fit's \
+            "{w} --exclude-chains will drop chain(s) {} from each fit's \
              posterior cloud.",
-            self.excluded_csv()
+            self.excluded_csv(), w = crate::style::warning_tag()
         );
         eprintln!("         {BIAS_CAVEAT_A}");
         eprintln!("         {BIAS_CAVEAT_B}");
@@ -134,8 +134,8 @@ impl ChainSelection {
     /// prints once for a multi-fit selection.
     pub fn warn_requested_for_fit(&self, fit: &str) {
         eprintln!(
-            "\x1b[33mwarning:\x1b[0m --exclude-chains will drop chain(s) {} from fit '{fit}'.",
-            self.excluded_csv()
+            "{w} --exclude-chains will drop chain(s) {} from fit '{fit}'.",
+            self.excluded_csv(), w = crate::style::warning_tag()
         );
     }
 
@@ -428,11 +428,12 @@ pub fn artifact_name(base: &str, selection: Option<&ChainSelection>) -> String {
 /// and points at `fit summary` for the per-chain diagnostics (gh#406).
 pub fn warn_active_selection(info: &SubsetInfo) {
     eprintln!(
-        "\x1b[33mwarning:\x1b[0m --exclude-chains dropped chain(s) {} \
+        "{w} --exclude-chains dropped chain(s) {} \
          ({} of {} chains kept).",
         info.excluded_csv(),
         info.kept.len(),
-        info.n_total
+        info.n_total,
+        w = crate::style::warning_tag()
     );
     eprintln!("         {BIAS_CAVEAT_A}");
     eprintln!("         {BIAS_CAVEAT_B}");

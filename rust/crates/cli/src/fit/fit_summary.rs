@@ -18,6 +18,7 @@
 //! for the step-5 walker-consumer refactor; this file's prior shape
 //! is preserved in git history at commit `d45c932` for context.
 
+use crate::style::{Painter, Stream, Style};
 use crate::args::{FitSummaryArgs, FitSummaryFormat};
 use crate::chain_index::ChainIndex;
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
@@ -146,10 +147,10 @@ fn chain_selection_advisory(
         let outliers = cd::outlier_labels(&scores);
         if !outliers.is_empty() {
             eprintln!(
-                "\x1b[33mnote:\x1b[0m {} disagree strongly with the others on `{}` — before \
+                "{n} {} disagree strongly with the others on `{}` — before \
                  excluding, ask whether a parameter is unidentified (a flat likelihood ridge). \
                  The per-chain table below names them; the primary fix is the model, not the flag.",
-                outliers.join(", "), means.scored_column
+                outliers.join(", "), means.scored_column, n = crate::style::note_tag()
             );
         }
     }
@@ -207,7 +208,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     // dates can't be rendered and the omission is otherwise silent.
     // stderr keeps the warning out of the JSON/stdout payload.
     if let Some(msg) = load_calendar_context(Path::new(&dir)).missing_origin_warning() {
-        eprintln!("\x1b[33mwarning:\x1b[0m {}", msg);
+        eprintln!("{} {}", crate::style::warning_tag(), msg);
     }
 
     if args.params_only {
@@ -542,9 +543,9 @@ fn format_text(
     selection: Option<&ChainSelection>,
 ) -> Vec<LoadFailure> {
     let mut failures: Vec<LoadFailure> = Vec::new();
-    let use_color = should_use_color(args.no_color);
+    let painter = Painter::for_stream(Stream::Stdout, args.no_color);
     let cal = load_calendar_context(Path::new(dir));
-    let fmt = Formatter { use_color, cal, explain: args.explain };
+    let fmt = Formatter { painter, cal, explain: args.explain };
     let mut had_provenance_failure = false;
     // Emit the loud selection advisory (nudge + warning) once, from the first
     // Bayesian method that recomputes.
@@ -807,7 +808,8 @@ enum BayesianView<'a> {
 // ── Formatting layer ────────────────────────────────────────────────
 
 struct Formatter {
-    use_color: bool,
+    /// The stdout painter under `--no-color` (`Painter::for_stream`).
+    painter: Painter,
     /// Calendar context for date-rendering `instant`-kind estimands.
     /// Empty (no origin / no instant params) → numeric-only.
     cal: CalendarContext,
@@ -2574,18 +2576,11 @@ impl Formatter {
 
     // ── Colour helpers ──────────────────────────────────────────────
 
-    fn wrap(&self, code: &str, s: &str) -> String {
-        if self.use_color {
-            format!("\x1b[{}m{}\x1b[0m", code, s)
-        } else {
-            s.to_string()
-        }
-    }
-    fn bold(&self, s: &str)  -> String { self.wrap("1", s) }
-    fn dim(&self, s: &str)   -> String { self.wrap("2", s) }
-    fn ok(&self, s: &str)    -> String { self.wrap("32", s) }
-    fn warn(&self, s: &str)  -> String { self.wrap("33", s) }
-    fn err(&self, s: &str)   -> String { self.wrap("31", s) }
+    fn bold(&self, s: &str)  -> String { self.painter.paint(s, Style::Bold) }
+    fn dim(&self, s: &str)   -> String { self.painter.paint(s, Style::Dim) }
+    fn ok(&self, s: &str)    -> String { self.painter.paint(s, Style::Ok) }
+    fn warn(&self, s: &str)  -> String { self.painter.paint(s, Style::Warn) }
+    fn err(&self, s: &str)   -> String { self.painter.paint(s, Style::Err) }
 }
 
 struct ProvenanceBlock {
@@ -2606,27 +2601,6 @@ enum GateThresholdSource {
 
 fn ci_env_set() -> bool {
     matches!(std::env::var("CI").as_deref(), Ok("true") | Ok("1"))
-}
-
-/// Resolve color preference with the standard Unix precedence, highest first:
-/// the `--no-color` flag, then the `NO_COLOR` env var (forces off; see
-/// no-color.org), then `CLICOLOR_FORCE` (forces on regardless of TTY; the
-/// convention ls / grep / git use when piped through `less -R`), then TTY
-/// auto-detect.
-///
-/// Default behavior (no flag, no env): colored when stdout is a TTY,
-/// plain text otherwise. Pipe to `less -R` with `CLICOLOR_FORCE=1`
-/// to keep colors in a pager.
-fn should_use_color(no_color_flag: bool) -> bool {
-    if no_color_flag { return false; }
-    if std::env::var("NO_COLOR").is_ok() { return false; }
-    if std::env::var("CLICOLOR_FORCE").is_ok() { return true; }
-    is_stdout_tty()
-}
-
-fn is_stdout_tty() -> bool {
-    use std::io::IsTerminal;
-    std::io::stdout().is_terminal()
 }
 
 /// Read a params TOML, returning a flat name→value map. Skips any
@@ -3903,12 +3877,12 @@ mod tests {
     /// The renderer under test in nearly every case: no colour (so a block can
     /// be compared as plain text), no calendar, no `--explain`.
     fn plain_formatter() -> Formatter {
-        Formatter { use_color: false, cal: CalendarContext::default(), explain: false }
+        Formatter { painter: Painter::plain(), cal: CalendarContext::default(), explain: false }
     }
 
     /// The same renderer with `--explain` on.
     fn explaining_formatter() -> Formatter {
-        Formatter { use_color: false, cal: CalendarContext::default(), explain: true }
+        Formatter { painter: Painter::plain(), cal: CalendarContext::default(), explain: true }
     }
 
     /// Everything the renderer put under the `name` section rule, up to the
@@ -6022,7 +5996,7 @@ mod tests {
     #[test]
     fn if2_text_parameter_table_annotates_instant_date() {
         let state = instant_fit_state();
-        let fmt = Formatter { use_color: false, cal: instant_cal(), explain: false };
+        let fmt = Formatter { painter: Painter::plain(), cal: instant_cal(), explain: false };
         let block = fmt.parameter_table(&state, None);
         // tau row carries the calendar date; numeric value preserved.
         assert!(block.contains("tau"), "tau row missing: {}", block);

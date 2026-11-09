@@ -2914,9 +2914,7 @@ impl FitConfig {
         // Algorithm-aware warning: a non-IF2 method does not honour simplex
         // groups.
         if !self.problem.simplex_groups.is_empty() && !matches!(algorithm, Algorithm::IF2 { .. }) {
-            let use_color = std::io::IsTerminal::is_terminal(&std::io::stderr())
-                && std::env::var("NO_COLOR").is_err();
-            let tag = if use_color { "\x1b[33mwarning:\x1b[0m" } else { "warning:" };
+            let tag = crate::style::warning_tag();
             eprintln!("{} fit declares simplex_groups, \
                 but the `{}` method does not currently honour the \
                 simplex constraint — members will be perturbed \

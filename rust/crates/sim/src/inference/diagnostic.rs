@@ -789,21 +789,27 @@ impl DiagnosticCollector {
             .any(|d| d.severity != Severity::Info)
     }
 
-    /// Render all diagnostics to stderr with ANSI coloring.
+    /// Render all diagnostics to stderr, with ANSI colour on the severity
+    /// icons when `color` is true.
     ///
     /// `ctx` carries what the hints need to know about the run — the caller is
     /// the only one who knows how many chains finished — and
     /// [`HintContext::default`] is the honest answer when it does not.
-    pub fn render_to_stderr(&self, ctx: HintContext) {
+    /// `color` is the caller's colour policy for stderr: this crate has none of
+    /// its own, so it never decides whether a stream gets escape codes.
+    pub fn render_to_stderr(&self, ctx: HintContext, color: bool) {
         let diags = self.diagnostics.lock().unwrap();
         if diags.is_empty() { return; }
 
         eprintln!("\n── diagnostics ──────────────────────────────────────");
         for d in diags.iter() {
-            let icon = match d.severity {
-                Severity::Info    => "\x1b[34mi\x1b[0m",
-                Severity::Warning => "\x1b[33m!\x1b[0m",
-                Severity::Error   => "\x1b[31mx\x1b[0m",
+            let icon = match (d.severity.clone(), color) {
+                (Severity::Info, true)    => "\x1b[34mi\x1b[0m",
+                (Severity::Warning, true) => "\x1b[33m!\x1b[0m",
+                (Severity::Error, true)   => "\x1b[31mx\x1b[0m",
+                (Severity::Info, false)    => "i",
+                (Severity::Warning, false) => "!",
+                (Severity::Error, false)   => "x",
             };
             eprintln!("  {} {}", icon, d.message);
             for hint in d.kind.hints(ctx) {

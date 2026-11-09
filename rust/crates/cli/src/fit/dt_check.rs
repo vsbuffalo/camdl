@@ -19,6 +19,7 @@
 //!      compound gate; serialise to `fit_state.toml.dt_check`; `camdl
 //!      fit dt-check <fit_dir>` standalone.
 
+use crate::style::Style;
 use crate::fit::config_v2::{CombineMode, DtCheckConfig};
 use crate::fit::loglik_eval::combine_with_se;
 use crate::fit::runner::{
@@ -394,6 +395,7 @@ pub fn print_terminal_report(result: &DtCheckResult) {
     use std::io::Write as _;
     let stderr = std::io::stderr();
     let mut w = stderr.lock();
+    let p = crate::style::stderr();
 
     if matches!(result.verdict, DtCheckVerdict::Skipped) {
         // Don't shout when the user explicitly opted out.
@@ -402,8 +404,8 @@ pub fn print_terminal_report(result: &DtCheckResult) {
     }
     if matches!(result.verdict, DtCheckVerdict::Pass) {
         let _ = writeln!(w,
-            "\ndt-convergence at θ̂: \x1b[32mPASS\x1b[0m  ({})",
-            result.notes);
+            "\ndt-convergence at θ̂: {}  ({})",
+            p.paint("PASS", Style::Ok), result.notes);
         return;
     }
 
@@ -424,8 +426,8 @@ pub fn print_terminal_report(result: &DtCheckResult) {
         }
     }
     let label = match result.verdict {
-        DtCheckVerdict::Fail     => "\x1b[31mFAIL\x1b[0m",
-        DtCheckVerdict::Marginal => "\x1b[33mMARGINAL\x1b[0m",
+        DtCheckVerdict::Fail     => p.paint("FAIL", Style::Err),
+        DtCheckVerdict::Marginal => p.paint("MARGINAL", Style::Warn),
         DtCheckVerdict::Pass | DtCheckVerdict::Skipped => unreachable!(),
     };
     let _ = writeln!(w,
@@ -444,8 +446,9 @@ pub fn print_terminal_report(result: &DtCheckResult) {
         if leg2_abs > 100.0 * result.threshold_se_aware_nats {
             let _ = writeln!(w);
             let _ = writeln!(w,
-                "    \x1b[33m⚠ For failures of this magnitude (≥ 100·τ; here {:.0}×),\x1b[0m",
-                leg2_abs / result.threshold_se_aware_nats);
+                "    {}",
+                p.paint(&format!("⚠ For failures of this magnitude (≥ 100·τ; here {:.0}×),",
+                    leg2_abs / result.threshold_se_aware_nats), Style::Warn));
             let _ = writeln!(w,
                 "    the discretization itself may be the issue — i.e. the");
             let _ = writeln!(w,
