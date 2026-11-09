@@ -115,8 +115,34 @@ impl Out {
 
     /// A milestone (`   stored pmmh · results/fits/… · 1.0s`).
     pub fn milestone(&self, verb: &str, detail: impl std::fmt::Display) {
+        self.say(status::step_text(self.stderr, verb, detail));
+    }
+
+    /// A dimmed continuation under a milestone, aligned under its detail
+    /// (`           camdl cat <id>`).
+    pub fn hint(&self, detail: impl std::fmt::Display) {
+        self.say(status::hint_text(self.stderr, detail));
+    }
+
+    /// One line of the command's own account of what it is doing, on stderr
+    /// (`pfilter: 14 observation boundaries × 1 streams, …`). `text` may hold
+    /// several lines; a newline is added after the last.
+    ///
+    /// The lines a command narrates as it goes are not yet typed values; this
+    /// is where they reach stderr, so that the command writes through `Out`
+    /// and through nothing else.
+    pub fn say(&self, text: impl std::fmt::Display) {
+        self.say_raw(format_args!("{text}\n"));
+    }
+
+    /// [`say`](Self::say) without the newline, for text that already ends in
+    /// one (a pre-rendered table) or is completed by a later write.
+    pub fn say_raw(&self, text: impl std::fmt::Display) {
         let _ = std::io::stdout().flush();
-        eprintln!("{}", status::step_text(self.stderr, verb, detail));
+        let _guard = live().lock.lock().unwrap_or_else(|e| e.into_inner());
+        // stderr is unbuffered, and a failed write to it has nowhere to be
+        // reported.
+        let _ = write!(std::io::stderr().lock(), "{text}");
     }
 
     /// Start recording a method: its opening block and its heartbeat. Returns
@@ -215,20 +241,26 @@ impl Out {
     }
 
     /// Report `e` on stderr and return the status the command exits with.
-    pub fn error(&mut self, e: CommandError) -> ExitCode {
+    pub fn error(&self, e: CommandError) -> ExitCode {
         if let Some(m) = &self.method {
             // The same sentence a reader of stderr gets, for a reader holding
             // only `progress.json`.
             m.heartbeat.failed(e.message.as_str());
         }
-        let _ = std::io::stdout().flush();
-        eprintln!("{}", e.message);
+        self.say(&e.message);
         if let Some(hint) = &e.hint {
             for line in hint.lines() {
-                eprintln!("  {line}");
+                self.say(format_args!("  {line}"));
             }
         }
         e.code
+    }
+
+    /// Report `message` as an error exiting 1, and exit: the
+    /// `eprintln!(…); process::exit(1)` pair every command's error sites
+    /// were written as.
+    pub fn fail(&self, message: impl Into<String>) -> ! {
+        self.error(CommandError::new(message)).exit()
     }
 
     /// A report command's report, on stdout.
@@ -238,8 +270,19 @@ impl Out {
     }
 
     /// The writer a command's data goes to: stdout, unpainted.
-    pub fn data(&mut self) -> Data {
+    pub fn data(&self) -> Data {
         Data(std::io::stdout().lock())
+    }
+
+    /// One line of a data command's data, on stdout.
+    pub fn data_line(&self, text: impl std::fmt::Display) {
+        self.data_raw(format_args!("{text}\n"));
+    }
+
+    /// [`data_line`](Self::data_line) without the newline.
+    pub fn data_raw(&self, text: impl std::fmt::Display) {
+        let written = write!(std::io::stdout().lock(), "{text}");
+        stdout_written(written);
     }
 }
 
@@ -326,7 +369,7 @@ mod tests {
         assert_eq!(e.code, ExitCode::FAILURE);
         assert_eq!(e.code.0, 1);
         assert_eq!(e.hint, None);
-        let mut out = Out::new(true);
+        let out = Out::new(true);
         assert_eq!(out.error(CommandError { code: ExitCode(2), ..e }), ExitCode(2));
     }
 
