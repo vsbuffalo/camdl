@@ -2549,7 +2549,7 @@ pub fn run_chains_with_per_chain_params(
             collector.push(DiagnosticKind::PerturbedSwarmInfeasible {
                 start_loglik, steps: steps.clone(),
             });
-            super::findings::print(collector, HintContext { chains_completed: Some(results.len()) });
+            super::report::findings::print(collector, HintContext { chains_completed: Some(results.len()) });
             return Err(fail_recording_findings(collector, method_dir, format!(
                 "if2: every chain's final estimate has log-likelihood -inf (best = {best_loglik}), \
                  but a chain's start scores {start_loglik:.1}: the start is feasible and the \
@@ -2558,7 +2558,7 @@ pub fn run_chains_with_per_chain_params(
                  (`rw_sd = …` in its [estimate] entry).", steps.join(", "))));
         }
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        super::findings::print(collector, HintContext { chains_completed: Some(results.len()) });
+        super::report::findings::print(collector, HintContext { chains_completed: Some(results.len()) });
         return Err(fail_recording_findings(collector, method_dir, format!(
             "if2: all {} surviving chain(s) reached no finite log-likelihood \
              (best = {}). The likelihood surface is `-inf` at every evaluated \

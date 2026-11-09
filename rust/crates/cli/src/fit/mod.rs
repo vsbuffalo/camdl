@@ -72,10 +72,8 @@ pub use fit_table::cmd_fit_table;
 pub mod fit_summary;
 pub use fit_summary::cmd_fit_summary;
 pub mod pmmh;
-// The typed record of what a method's run shows (proposal 2026-11-08).
+// The fit report: what a method run shows (proposal 2026-11-08).
 pub mod report;
-// The `── diagnostics ──` block, findings merged (proposal 2026-11-08).
-pub mod findings;
 // Likelihood-noise preflight shared by the pseudo-marginal methods: the
 // measured log L-hat spread and the acceptance ceiling it implies (gh#764).
 pub mod pf_noise;
@@ -1912,7 +1910,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 provenance::write_mle_params(&mle_path, &all_params, &metadata)
                     .unwrap_or_else(|e| eprintln!("warning: {}", e));
 
-                findings::print(&collector, sim::inference::diagnostic::HintContext {
+                report::findings::print(&collector, sim::inference::diagnostic::HintContext {
                     chains_completed: Some(chain_results.results.len()),
                 });
                 // Recorded, as every other method's are, so `fit summary`

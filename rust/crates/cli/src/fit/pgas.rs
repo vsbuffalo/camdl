@@ -1283,7 +1283,7 @@ pub fn run_method(
     // to look for.
     if all_results.is_empty() {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        super::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
+        super::report::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
         // gh#885: the reason and the remedies come from the one string the
         // other two all-chains-refused errors also carry (pmmh's init-eval
         // refusal, IF2's watchdog bail), so they cannot drift apart again.
@@ -1609,7 +1609,7 @@ pub fn run_method(
     // starts finite and walks into a `-inf` region it cannot leave.
     if sim::inference::no_finite_anchor(best_sweep.log_complete_data_ll) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        super::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
+        super::report::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
         return Err(super::write_diagnostics_then_fail(&collector, method_dir, format!(
             "pgas: all {} chain(s) reached no finite complete-data \
              log-likelihood (best = {}). The reachable surface is `-inf` at \
@@ -1748,7 +1748,7 @@ pub fn run_method(
     }
 
     // Render and persist diagnostics
-    super::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
+    super::report::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
     super::write_diagnostics(&collector, method_dir)?;
 
     // gh#785. `cross_chain_compat.json`, beside `diagnostics.json`: the

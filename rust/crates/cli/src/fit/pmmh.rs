@@ -861,7 +861,7 @@ pub fn run_method(
     // Render diagnostics, persist them, and bail with a clear error
     // rather than panicking on .unwrap() of an empty results vec.
     if results.is_empty() {
-        super::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
+        super::report::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
         // gh#880, gh#885. The reason and the remedies come from the one
         // string the other two all-chains-refused errors also carry, so they
         // cannot drift apart again.
@@ -889,7 +889,7 @@ pub fn run_method(
     // predicate is false → no fire).
     if results.iter().all(|(_, r)| sim::inference::no_finite_anchor(r.map_loglik)) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        super::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
+        super::report::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
         return Err(super::write_diagnostics_then_fail(&collector, method_dir, format!(
             "pmmh method `{}`: all {} surviving chain(s) reached no finite \
              log-likelihood anchor — every evaluated θ scored -inf, so the \
@@ -1089,7 +1089,7 @@ pub fn run_method(
     }
 
     // Render and persist diagnostics
-    super::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
+    super::report::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
     super::write_diagnostics(&collector, method_dir)?;
 
     eprintln!("\n{}", completion_line(method_name, is_ode_mh, &cost, method_dir));
