@@ -11,7 +11,7 @@ use serde::Serialize;
 use super::{Check, ChainWarmup, MethodFacts, Verdict};
 use crate::chain_index::ChainIndex;
 use crate::fit::config_v2::{GateConfig, LoglikEvalConfig};
-use crate::fit::method_result::{If2Run, MethodResult};
+use crate::fit::method_result::{If2Record, If2Run, MethodResult};
 use crate::version;
 
 /// Calendar context for date-rendering `instant`-kind estimands
@@ -167,6 +167,16 @@ pub struct MethodReport {
     /// Where the leaf landed and the method's wall time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stored: Option<crate::fit::report::Stored>,
+    /// Entries of `diagnostics.json` that could not be read, one sentence
+    /// each; absent when every entry read. A finding missing from `findings`
+    /// is named here, never silently dropped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub findings_unreadable: Vec<String>,
+    /// What the summary's text reads from the leaf beside the typed result.
+    /// Not serialized: the JSON carries the typed result and the findings,
+    /// and this is the text view's own read-back.
+    #[serde(skip)]
+    pub chain_detail: Option<super::ChainDetail>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -223,10 +233,16 @@ pub struct ProvenanceReport {
     pub final_params_matches_mle_params: Option<bool>,
     pub fit_state_winner_matches_final_params: Option<bool>,
     pub stale_camdl_version: Option<String>,
+    /// Whether `final_params.toml` and `mle_params.toml` were there to
+    /// compare, so the text can name the absent one.
+    #[serde(skip)]
+    pub final_params_present: bool,
+    #[serde(skip)]
+    pub mle_params_present: bool,
 }
 
 impl ProvenanceReport {
-    fn any_failed(&self) -> bool {
+    pub(crate) fn any_failed(&self) -> bool {
         matches!(self.final_params_matches_mle_params, Some(false))
             || matches!(self.fit_state_winner_matches_final_params, Some(false))
     }
@@ -276,6 +292,8 @@ pub(crate) fn build_method_report(facts: MethodFacts, cal: &CalendarContext) -> 
     report.findings = facts.findings;
     report.header = facts.header;
     report.stored = facts.stored;
+    report.findings_unreadable = facts.findings_unreadable;
+    report.chain_detail = facts.chain_detail;
     report
 }
 
@@ -311,6 +329,8 @@ fn point_method_report(
         verdict: Verdict::NotApplicable,
         header: None,
         stored: None,
+        findings_unreadable: Vec::new(),
+        chain_detail: None,
     }
 }
 
@@ -362,6 +382,8 @@ pub(crate) fn bayesian_method_report(
         verdict: Verdict::NotApplicable,
         header: None,
         stored: None,
+        findings_unreadable: Vec::new(),
+        chain_detail: None,
     }
 }
 
@@ -373,8 +395,8 @@ pub(crate) fn if2_method_report(
 ) -> MethodReport {
     let state = &if2.record;
     let method_result = Some(MethodResult::If2(if2.clone()));
-    // Gate analysis — same logic as Formatter::gate_verdict_block but
-    // returning structured data instead of pre-formatted strings.
+    // Gate analysis — the measurement `render::if2_gate_section` draws,
+    // as structured data.
     let (gate_cfg, threshold_source) = match &state.resolved_gate {
         Some(g) => (g.clone(), "resolved".to_string()),
         None    => (GateConfig::default(), "default_fallback".to_string()),
@@ -404,27 +426,7 @@ pub(crate) fn if2_method_report(
         resolved_loglik_eval: state.resolved_loglik_eval.clone(),
     };
 
-    // Parameters
-    let t0_set: std::collections::HashSet<&str> =
-        state.perturb_only_at_t0_params.iter()
-        .map(|s| s.as_str()).collect();
-    let mut keys: Vec<&String> = state.start_values.keys().collect();
-    keys.sort();
-    let estimated = crate::fit::method_result::estimated_names(
-        Some(std::path::Path::new(method_dir)), &state.tail_chain_agreement);
-    let est_keys: Vec<&String> = keys.iter()
-        .filter(|k| estimated.as_ref().is_none_or(|set| set.contains(k.as_str())))
-        .copied().collect();
-    let parameters: Vec<ParameterReport> = est_keys.iter().map(|k| {
-        let estimate = state.start_values[*k];
-        ParameterReport {
-            name: (*k).clone(),
-            estimate,
-            chain_agreement: state.tail_chain_agreement.get(*k).copied(),
-            perturb_only_at_t0: t0_set.contains(k.as_str()),
-            estimate_date: cal.date_for(k, estimate),
-        }
-    }).collect();
+    let parameters = if2_parameters(state, Some(std::path::Path::new(method_dir)), cal);
     let param_dates: BTreeMap<String, String> = parameters
         .iter()
         .filter_map(|p| p.estimate_date.clone().map(|d| (p.name.clone(), d)))
@@ -450,40 +452,7 @@ pub(crate) fn if2_method_report(
         Vec::new()
     };
 
-    // Provenance
-    let final_path = format!("{}/final_params.toml", method_dir);
-    let mle_path = format!("{}/mle_params.toml", method_dir);
-    let final_params = read_param_values(&final_path);
-    let mle_params = read_param_values(&mle_path);
-    let final_matches_mle = match (&final_params, &mle_params) {
-        (Some(f), Some(m)) => Some(params_agree(f, m)),
-        _ => None,
-    };
-    let state_matches_final = match &final_params {
-        Some(f) if !state.start_values.is_empty() => {
-            let mut ok = true;
-            for (k, fv) in f {
-                if let Some(sv) = state.start_values.get(k) {
-                    let scale = fv.abs().max(1.0);
-                    if (sv - fv).abs() > 1e-9 * scale {
-                        ok = false;
-                        break;
-                    }
-                }
-            }
-            Some(ok)
-        }
-        _ => None,
-    };
-    let stale = match &state.camdl_version {
-        Some(v) if v != version::VERSION_SHORT => Some(v.clone()),
-        _ => None,
-    };
-    let provenance = ProvenanceReport {
-        final_params_matches_mle_params: final_matches_mle,
-        fit_state_winner_matches_final_params: state_matches_final,
-        stale_camdl_version: stale,
-    };
+    let provenance = if2_provenance(state, method_dir);
 
     let overall_status = match overall_pass {
         Some(true)  => "pass".to_string(),
@@ -529,6 +498,72 @@ pub(crate) fn if2_method_report(
         verdict: Verdict::NotApplicable,
         header: None,
         stored: None,
+        findings_unreadable: Vec::new(),
+        chain_detail: None,
     }
 }
 
+/// The estimated parameters at the selected chain's θ̂, by name, with their Â
+/// and calendar dates. Fixed parameters are left out: the estimated set is
+/// Â's keys, else the fit's record of it, else every recorded value.
+pub(crate) fn if2_parameters(
+    state: &If2Record,
+    method_dir: Option<&std::path::Path>,
+    cal: &CalendarContext,
+) -> Vec<ParameterReport> {
+    let t0_set: std::collections::HashSet<&str> =
+        state.perturb_only_at_t0_params.iter().map(|s| s.as_str()).collect();
+    let mut keys: Vec<&String> = state.start_values.keys().collect();
+    keys.sort();
+    let estimated = crate::fit::method_result::estimated_names(method_dir, &state.tail_chain_agreement);
+    keys.into_iter()
+        .filter(|k| estimated.as_ref().is_none_or(|set| set.contains(k.as_str())))
+        .map(|k| {
+            let estimate = state.start_values[k];
+            ParameterReport {
+                name: k.clone(),
+                estimate,
+                chain_agreement: state.tail_chain_agreement.get(k).copied(),
+                perturb_only_at_t0: t0_set.contains(k.as_str()),
+                estimate_date: cal.date_for(k, estimate),
+            }
+        })
+        .collect()
+}
+
+/// The IF2 provenance cross-check: `final_params.toml` against
+/// `mle_params.toml`, and the recorded winner against `final_params.toml`.
+pub(crate) fn if2_provenance(state: &If2Record, method_dir: &str) -> ProvenanceReport {
+    let final_params = read_param_values(&format!("{}/final_params.toml", method_dir));
+    let mle_params = read_param_values(&format!("{}/mle_params.toml", method_dir));
+    let final_matches_mle = match (&final_params, &mle_params) {
+        (Some(f), Some(m)) => Some(params_agree(f, m)),
+        _ => None,
+    };
+    let state_matches_final = match &final_params {
+        Some(f) if !state.start_values.is_empty() => {
+            let mut ok = true;
+            for (k, fv) in f {
+                if let Some(sv) = state.start_values.get(k) {
+                    if (sv - fv).abs() > 1e-9 * fv.abs().max(1.0) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            Some(ok)
+        }
+        _ => None,
+    };
+    let stale = match &state.camdl_version {
+        Some(v) if v != version::VERSION_SHORT => Some(v.clone()),
+        _ => None,
+    };
+    ProvenanceReport {
+        final_params_matches_mle_params: final_matches_mle,
+        fit_state_winner_matches_final_params: state_matches_final,
+        stale_camdl_version: stale,
+        final_params_present: final_params.is_some(),
+        mle_params_present: mle_params.is_some(),
+    }
+}

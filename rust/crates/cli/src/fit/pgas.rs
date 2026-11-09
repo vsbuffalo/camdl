@@ -1877,6 +1877,7 @@ fn compute_diagnostics(
 pub(crate) const TRAJECTORIES_KEY: &str = "trajectories";
 
 /// One chain's row of the `trajectories` block.
+#[derive(Debug, Clone)]
 pub(crate) struct ChainSavedPaths {
     /// Which chain this row is, the number that names its `chain_N/` directory.
     /// Read from the artifact rather than inferred from the row's position:
@@ -1890,6 +1891,7 @@ pub(crate) struct ChainSavedPaths {
 }
 
 /// The `trajectories` block of a method summary, read back.
+#[derive(Debug, Clone)]
 pub(crate) struct SavedPathReport {
     /// Retained **draws** between saved paths — not sweeps — or `None` when
     /// the method saved none.
