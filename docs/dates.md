@@ -35,19 +35,54 @@ events. The model file has to say, because the data will not.
 camdl therefore keeps these concepts distinct at the user boundary and lowers
 them into a deliberately simpler internal representation.
 
+<!-- figure: dates-overview -->
+
+```
+CALENDAR TIME: what you write
+             07-01     07-02     07-03     07-04     07-05
+an instant     |---------|---------•---------|---------|     date("2026-07-03")
+a period                 [-------------------)               interval(start, stop)
+
+    one translation, when the model is compiled and when data is loaded:
+    t = (day(T) − day(origin)) / days per time_unit
+    here origin = 2026-07-01 and time_unit = days, so 1 July is 0
+
+INTERNAL TIME: all the engine uses
+               0         1         2         3         4
+state X_t      •---------•---------•---------•---------•     a value at each t
+flow             (0, 1]    (1, 2]    (2, 3]    (3, 4]       summed over (t_prev, t]
+effect at t                                  ◆               acts from t onward
+```
+
+<!-- /figure -->
+
+The split is deliberate:
+
+> **The internal time system is designed for clean, reliable interval operations
+> inside the engine. The external system is designed to express the temporal
+> conventions epidemiologists actually bring to a model.**
+
+The two need not share a surface convention. They need one precise, centralized,
+tested translation between them.
+
 ## The calendar axis
 
 Everything on this page is drawn on one number line. It is worth building it
 before anything uses it.
 
-**A date is a day-number.** camdl converts an ISO date to its
-proleptic-Gregorian day number — its _rata die_ — so consecutive dates are
-always consecutive integers, with no exceptions for month lengths or leap years:
+**A date is a day-number.** camdl converts an ISO date to a day number, a
+running count of days on the proleptic-Gregorian calendar (the Gregorian
+calendar extended backwards), so consecutive dates are always consecutive
+integers, with no exceptions for month lengths or leap years. The code calls it
+`rata_die`. Unlike the standard rata die, which counts from 1 January of year 1,
+camdl counts from an arbitrary fixed day, and only the difference between two
+day numbers is ever used:
 
 ```
-2026-07-01  ->  739433
-2026-07-02  ->  739434
-2026-07-03  ->  739435
+2026-07-01  ->  n
+2026-07-02  ->  n + 1
+2026-07-03  ->  n + 2
+2026-08-01  ->  n + 31
 ```
 
 **`origin` fixes which day-number is internal zero.** With
@@ -119,44 +154,6 @@ integer), an **instant** (a point, what `date()` returns), a **civil day** (an
 interval between two instants), and a **bucket** (what the engine accumulates
 over, `(previous, this]`).
 
-## The system in one picture
-
-```
-USER-FACING CALENDAR MODEL          (normative; see "Known deviations")
---------------------------
-date("2026-07-05")            an Instant; zero width; the boundary at which
-                              5 July begins
-
-                     |                                  |
-              date("2026-07-05")                 date("2026-07-06")
-                     v                                  v
-                     [------------ 5 July -------------)
-
-interval(start, stop)         [start, stop)         ← the period primitive
-                              PLANNED — no period constructor ships today;
-                              see "Known implementation deviations"
-
-                              |
-                              |  one centralized lowering
-                              v
-
-CAMDL ENGINE
-------------
-state  X_t                    the value AT boundary t
-flow bucket ending at t       accumulated over (t_prev, t]
-effect scheduled at t         changes state at t, and dynamics after t
-internal time                 continuous f64 in the model's time_unit
-```
-
-The split is deliberate:
-
-> **The internal time system is designed for clean, reliable interval operations
-> inside the engine. The external system is designed to express the temporal
-> conventions epidemiologists actually bring to a model.**
-
-The two need not share a surface convention. They need one precise, centralized,
-tested translation between them.
-
 ## Three concepts
 
 **Instant** — a point on the time axis, zero duration. `date("2026-07-05")` is
@@ -222,6 +219,8 @@ discrete backend, endpoint membership _can_ matter — a counting measure is mad
 of point masses at event times — and the equivalence comes from explicit
 ordering rather than from measure:
 
+<!-- figure: dates-boundary-order -->
+
 ```
 boundary s
     apply interventions and events scheduled at s
@@ -232,6 +231,8 @@ boundary e
     read and reset the accumulator
     apply anything scheduled at e to the NEXT period
 ```
+
+<!-- /figure -->
 
 The lowering rule, stated once:
 
@@ -291,6 +292,8 @@ surveillance systems label — by the day the count describes — means `[D, D+1
 and under the closing reading it is scored one day early. On the axis above, the
 mismatch is one unit:
 
+<!-- figure: dates-closing-at-offset -->
+
 ```
                     (0,1]      (1,2]     (2,3]
 closing_at scores  "07-02"    "07-03"   "07-04"      row label -> bucket
@@ -301,16 +304,22 @@ closing_at reads           "07-02" as (0,1] = 1 Jul
                                       ^^^^^ one unit apart
 ```
 
+<!-- /figure -->
+
 **Changing `origin` does not fix it.** `origin` shifts every date coordinate by
 the same amount, so the span between two dated rows is invariant under it — a
 row labelled `D` under `closing_at` spans the civil day before `D` whatever
 origin you pick:
+
+<!-- figure: dates-origin-shift -->
 
 ```
 origin = 2026-07-01   row "07-02" -> (0,1] -> 1 Jul
 origin = 2026-06-30   row "07-02" -> (1,2] -> 1 Jul
 origin = 2026-06-25   row "07-02" -> (6,7] -> 1 Jul
 ```
+
+<!-- /figure -->
 
 **When it is visible.** If every date in the model is a data row, the offset
 shifts everything together and changes no fitted number — the epidemic is
@@ -469,10 +478,14 @@ In unanchored mode, a reference to `origin` is **E327** (same family as
 numerical engine operates only on internal numeric time; two places translate,
 and everything below them is a plain `f64`:
 
+<!-- figure: dates-one-rule -->
+
 ```
 ISO date  ──parse_time_cell──▶   internal time (f64)   ──date-renderer──▶  ISO date
  (data in, date() literal)          (the whole engine)                     (output)
 ```
+
+<!-- /figure -->
 
 An **instant** is a calendar point, written ISO 8601 `YYYY-MM-DD`. `origin` is
 the instant mapped to internal time `t = 0`. Then, for any instant `T`:

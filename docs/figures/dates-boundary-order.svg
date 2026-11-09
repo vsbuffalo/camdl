@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 300" role="img" aria-labelledby="t d">
+  <title id="t">What happens at and between boundaries</title>
+  <desc id="d">At boundary s, interventions and events scheduled at s are applied; then the transitions belonging to [s, e) are generated; at boundary e the accumulator is read and reset, and anything scheduled at e is applied to the next period.</desc>
+  <defs>
+    <marker id="dates-boundary-order-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
+    </marker>
+  </defs>
+
+  <line x1="40" y1="40" x2="40" y2="236" class="s-muted"/>
+  <line x1="40" y1="236" x2="40" y2="290" class="s-muted" stroke-dasharray="4 4"/>
+
+  <circle cx="40" cy="40" r="6" class="fig-accent"/>
+  <text x="62" y="46" class="t-label t-b fig-ink">boundary <tspan class="t-code-label">s</tspan></text>
+  <text x="62" y="76" class="t-label fig-ink">apply interventions and events scheduled at <tspan class="t-code-label">s</tspan></text>
+
+  <rect x="34" y="96" width="12" height="96" rx="3" class="fig-accent-soft"/>
+  <line x1="40" y1="96" x2="40" y2="192" class="s-accent" stroke-width="3"/>
+  <text x="62" y="150" class="t-label fig-ink">generate the transitions belonging to <tspan class="t-code-label">[s, e)</tspan></text>
+
+  <circle cx="40" cy="212" r="6" class="fig-accent"/>
+  <text x="62" y="218" class="t-label t-b fig-ink">boundary <tspan class="t-code-label">e</tspan></text>
+  <text x="62" y="248" class="t-label fig-ink">read and reset the accumulator</text>
+  <text x="62" y="276" class="t-label fig-ink">apply anything scheduled at <tspan class="t-code-label">e</tspan> to the <tspan class="t-b">next</tspan> period</text>
+</svg>
