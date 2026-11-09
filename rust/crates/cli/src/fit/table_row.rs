@@ -547,6 +547,8 @@ mod tests {
             posterior_q025: BTreeMap::new(),
             posterior_q975: BTreeMap::new(),
             acceptance_per_param: BTreeMap::new(),
+            acceptance_per_chain: BTreeMap::new(),
+            acceptance_kernel: None,
         };
         let row = MethodView::from_pgas(&refused);
         assert!(!row.converged,
@@ -572,6 +574,8 @@ mod tests {
             posterior_q025: BTreeMap::new(),
             posterior_q975: BTreeMap::new(),
             acceptance_per_param: BTreeMap::new(),
+            acceptance_per_chain: BTreeMap::new(),
+            acceptance_kernel: None,
         };
         assert!(MethodView::from_pgas(&ok).converged,
             "an assessed, converged fit must still report converged");

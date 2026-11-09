@@ -15,7 +15,7 @@ use crate::cas::iso8601_utc;
 use sim::inference::{
     if2::EstimatedParam,
     pmmh::{run_pmmh, Prior, PMMHConfig, PMMHResult, PMMHResumeState},
-    diagnostic::{DiagnosticCollector, DiagnosticKind, HintContext},
+    diagnostic::DiagnosticKind,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -110,14 +110,17 @@ pub fn run_method(
     // The method's liveness/progress heartbeat, owned by the runner
     // (`fit::method_heartbeat`). Its step is one MCMC iteration (gh#900).
     heartbeat: &io::HeartbeatGuard,
-) -> Result<(), String> {
+    // The command's output handle: the checks the run shows are recorded on
+    // it, and its findings go to the collector it holds.
+    out: &mut crate::out::Out,
+) -> Result<Vec<ChainWarmup>, String> {
     // The PMMH prefer-PGAS-for-long-series caveat banner is emitted by the
     // dispatch chokepoint (`methods::emit_status_banner`), driven by the
     // registry `status_note` so it can't drift from `camdl fit methods`.
     // gh#909: this runner serves `pmmh` and `mh` + `ode`; every label it
     // prints or records is the method that ran, never the runner's name.
     let method_name = method.algorithm.method_name();
-    let collector = DiagnosticCollector::new(method_name);
+    let collector = out.collector();
     let estimate = &fit.estimate;
 
     let n_chains = pmmh_opts.n_chains;
@@ -153,6 +156,13 @@ pub fn run_method(
     if !is_ode_mh {
         super::methods::emit_status_banner(
             crate::run_meta::FitAlgorithm::Pmmh, method.algorithm.backend(), Some(series_len));
+        if let Some(note) = super::methods::status_note(
+            crate::run_meta::FitAlgorithm::Pmmh, method.algorithm.backend())
+        {
+            out.check(super::report::Check::MethodCaveat {
+                method: method_name.to_string(), note: note.to_string(), series_len: Some(series_len),
+            });
+        }
     }
 
     let dt = config.if2_config.dt;
@@ -263,6 +273,7 @@ pub fn run_method(
                     config.estimated_params.len(),
                     config.observations.len(),
                 ));
+                out.check(super::report::Check::FilterNoise { check });
                 pf_noise_check = Some(check);
             }
             None => {
@@ -296,7 +307,7 @@ pub fn run_method(
             eprintln!("{}", crate::out::paint::stderr().paint(&format!(
                 "{method_name} results already exist in {}. Use --force to re-run or --resume to continue.",
                 method_dir.display()), Style::Warn));
-            return Ok(());
+            return Ok(Vec::new());
         }
     }
 
@@ -324,6 +335,9 @@ pub fn run_method(
     // Active interventions + events — see same block in pgas.rs.
     crate::util::print_scheduled_actions_summary(&config.model_declared, &config.model);
     crate::util::print_observations_summary(&config.model);
+    for c in super::report::obs_stream_checks(&config.model) {
+        out.check(c);
+    }
 
     let dt = config.if2_config.dt;
 
@@ -342,7 +356,7 @@ pub fn run_method(
                 Ok(data) => match bincode::deserialize::<PMMHResumeState>(&data) {
                     Ok(state) => {
                         if state.config_hash != config_hash {
-                            super::abandon_method(heartbeat, format!(
+                            super::abandon_method(out, format!(
                                 "error: config hash mismatch for chain {} — \
                                 cannot resume. Either the model/data/priors changed \
                                 since the original run, or this chain predates a camdl \
@@ -376,7 +390,7 @@ pub fn run_method(
             }
         }
         if any_failed {
-            super::abandon_method(heartbeat,
+            super::abandon_method(out,
                 "error: --resume requires resume state files for all chains.\n  \
                  These are written automatically at the end of every PMMH run.\n  \
                  If the original run was interrupted before saving, use --force to \
@@ -820,17 +834,14 @@ pub fn run_method(
     // coloring, the finding and the message a user reads cannot disagree about
     // where the band starts (gh#299 item 3).
     let kernel = sim::inference::diagnostic::AcceptanceKernel::RandomWalk;
-    // The table: each chain's rate, and the scale its draws were proposed
-    // under with its warm-up's floor count (`report::render::acceptance_table`).
-    let rates: std::collections::BTreeMap<usize, f64> =
-        results.iter().map(|(c, r)| (*c, r.acceptance_rate)).collect();
-    let _ = crate::out::paint::stderr().write(&mut std::io::stderr(),
-        &super::report::render::acceptance_table(&rates, &warmup, kernel));
+    // The table — each chain's rate, and the scale its draws were proposed
+    // under with its warm-up's floor count — is drawn at the end of the run
+    // from the recorded rates (`report::render::acceptance_table`).
     for (chain_id, result) in &results {
         if let Some(d) = sim::inference::diagnostic::acceptance_diagnostic(
             Some(*chain_id), result.acceptance_rate, None, kernel)
         {
-            collector.push(d);
+            out.finding(d);
         }
     }
 
@@ -845,10 +856,10 @@ pub fn run_method(
         });
         // RHAT_REPORT_THRESHOLD is unchanged from the value this method has
         // always applied; only the STATISTIC it is applied to changed (gh#84).
-        eprint!("{}", diagnostics.report(
-            super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()));
+        // The table is drawn at the end of the run, from the summary written
+        // below (`report::render::rhat_run_table`).
         for kind in diagnostics.rhat_findings(super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()) {
-            collector.push(kind);
+            out.finding(kind);
         }
     }
 
@@ -858,7 +869,7 @@ pub fn run_method(
     if adapt {
         for (chain_id, r) in &results {
             if let Some(kind) = scale_at_floor(*chain_id, r).or_else(|| scale_far_from_optimum(*chain_id, r)) {
-                collector.push(kind);
+                out.finding(kind);
             }
         }
     }
@@ -867,7 +878,6 @@ pub fn run_method(
     // Render diagnostics, persist them, and bail with a clear error
     // rather than panicking on .unwrap() of an empty results vec.
     if results.is_empty() {
-        super::report::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
         // gh#880, gh#885. The reason and the remedies come from the one
         // string the other two all-chains-refused errors also carry, so they
         // cannot drift apart again.
@@ -894,8 +904,7 @@ pub fn run_method(
     // finite loglik still succeeds (that chain sets a finite MAP → the
     // predicate is false → no fire).
     if results.iter().all(|(_, r)| sim::inference::no_finite_anchor(r.map_loglik)) {
-        collector.push(DiagnosticKind::InitialLoglikInfinite);
-        super::report::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
+        out.finding(DiagnosticKind::InitialLoglikInfinite);
         return Err(super::write_diagnostics_then_fail(&collector, method_dir, format!(
             "pmmh method `{}`: all {} surviving chain(s) reached no finite \
              log-likelihood anchor — every evaluated θ scored -inf, so the \
@@ -1094,14 +1103,12 @@ pub fn run_method(
         eprintln!("  draws.tsv: {} posterior samples (all {} params)", n_draws, all_names.len());
     }
 
-    // Render and persist diagnostics
-    super::report::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
+    // Persist the findings. The end of the run prints them once, merged,
+    // with the cost of sampling and the highest-posterior draw after them
+    // (`report::render`'s run-end view, from what is recorded here).
     super::write_diagnostics(&collector, method_dir)?;
 
-    eprintln!("\n{}", completion_line(method_name, is_ode_mh, &cost));
-    eprintln!("  loglik at the highest log-posterior draw (natural-scale prior, no Jacobian): {:.1} (chain {})", map_result.map_loglik, ChainIndex(*map_chain));
-
-    Ok(())
+    Ok(warmup)
 }
 
 /// The `ScaleAtFloor` finding a chain's result raises: its scale sat at the
@@ -1264,7 +1271,7 @@ fn write_summary(
 ///
 /// The leaf's path is not on this line: the `stored` milestone that closes the
 /// run carries it.
-fn completion_line(method_name: &str, is_ode_mh: bool, cost: &SamplingCost) -> String {
+pub(crate) fn completion_line(method_name: &str, is_ode_mh: bool, cost: &SamplingCost) -> String {
     let what = if is_ode_mh { "ODE likelihood evaluations" } else { "PF evaluations" };
     format!("{method_name} complete in {:.1}s ({} {what}, {:.1}ms/eval)",
         cost.sampling_seconds, cost.evaluations, cost.ms_per_evaluation)

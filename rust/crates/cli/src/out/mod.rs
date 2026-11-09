@@ -12,8 +12,10 @@ pub mod progress;
 pub mod status;
 
 use std::io::Write;
+use std::sync::Arc;
 
 use paint::{Line, Painter, Stream};
+use sim::inference::diagnostic::DiagnosticCollector;
 
 /// A command's exit status, as the process reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,7 +51,8 @@ impl CommandError {
     }
 }
 
-/// The one handle a command writes through, to either stream.
+/// The one handle a command writes through, to either stream, and the record
+/// of the method a `fit run` is running.
 ///
 /// stdout carries a report command's report ([`report`](Self::report)) and a
 /// data command's data ([`data`](Self::data)); everything else goes to
@@ -61,6 +64,27 @@ pub struct Out {
     stdout: Painter,
     stderr: Painter,
     notices: Vec<notice::Notice>,
+    /// The method running now, from [`begin_method`](Self::begin_method) to
+    /// [`end_method`](Self::end_method).
+    method: Option<RunningMethod>,
+}
+
+/// What `Out` keeps for the method that is running: the run's opening block,
+/// the checks it has shown, the collector its findings go to, and its
+/// heartbeat, which an error marks failed.
+struct RunningMethod {
+    header: crate::fit::report::RunHeader,
+    checks: Vec<crate::fit::report::Check>,
+    collector: Arc<DiagnosticCollector>,
+    heartbeat: Arc<io::HeartbeatGuard>,
+}
+
+/// A method's record as it ended: what a failed run's report is built from,
+/// and what a completed run's report adds to its leaf's typed result.
+pub struct MethodRecord {
+    pub header: crate::fit::report::RunHeader,
+    pub checks: Vec<crate::fit::report::Check>,
+    pub findings: Vec<sim::inference::diagnostic::Diagnostic>,
 }
 
 impl Out {
@@ -71,12 +95,105 @@ impl Out {
             stdout: Painter::for_stream(Stream::Stdout, no_color),
             stderr: Painter::for_stream(Stream::Stderr, no_color),
             notices: Vec::new(),
+            method: None,
         }
     }
 
     /// The stderr painter, for call sites that still build their own strings.
     pub fn stderr_painter(&self) -> Painter {
         self.stderr
+    }
+
+    /// Write `lines` to stderr, after flushing stdout.
+    pub fn stderr_lines(&self, lines: &[Line]) {
+        let _ = std::io::stdout().flush();
+        let _guard = live().lock.lock().unwrap_or_else(|e| e.into_inner());
+        // stderr is unbuffered, and a failed write to it has nowhere to be
+        // reported.
+        let _ = self.stderr.write(&mut std::io::stderr().lock(), lines);
+    }
+
+    /// A milestone (`   stored pmmh · results/fits/… · 1.0s`).
+    pub fn milestone(&self, verb: &str, detail: impl std::fmt::Display) {
+        let _ = std::io::stdout().flush();
+        eprintln!("{}", status::step_text(self.stderr, verb, detail));
+    }
+
+    /// Start recording a method: its opening block and its heartbeat. Returns
+    /// the collector its findings go to, for the chain workers that push from
+    /// their own threads; the command's own thread pushes through
+    /// [`finding`](Self::finding).
+    pub fn begin_method(
+        &mut self,
+        header: crate::fit::report::RunHeader,
+        method: &str,
+        heartbeat: Arc<io::HeartbeatGuard>,
+    ) -> Arc<DiagnosticCollector> {
+        let collector = Arc::new(DiagnosticCollector::new(method));
+        self.method = Some(RunningMethod {
+            header, checks: Vec::new(), collector: collector.clone(), heartbeat,
+        });
+        collector
+    }
+
+    /// Record a check the run has just shown. The check's own printer writes
+    /// its lines today (`pf_noise::report`, `util::print_observations_summary`,
+    /// the caveat banner, the starts note); this keeps the value, so the
+    /// run's report carries what it showed.
+    pub fn check(&mut self, c: crate::fit::report::Check) {
+        if let Some(m) = self.method.as_mut() {
+            m.checks.push(c);
+        }
+    }
+
+    /// The running method's collector, for code that pushes findings from the
+    /// chain workers' threads.
+    ///
+    /// # Panics
+    /// When no method is running: a method's findings have nowhere else to
+    /// go, and a runner called outside one is a wiring bug.
+    pub fn collector(&self) -> Arc<DiagnosticCollector> {
+        self.method.as_ref().map(|m| m.collector.clone())
+            .expect("a method's collector is asked for only while it runs (`Out::begin_method`)")
+    }
+
+    /// Record a finding, from the command's thread.
+    pub fn finding(&self, kind: sim::inference::diagnostic::DiagnosticKind) {
+        if let Some(m) = &self.method {
+            m.collector.push(kind);
+        }
+    }
+
+    /// The method ran to its end: its heartbeat's terminal record is `done`.
+    pub fn method_done(&self) {
+        if let Some(m) = &self.method {
+            m.heartbeat.done();
+        }
+    }
+
+    /// Stop recording the method and hand back what it recorded.
+    pub fn end_method(&mut self) -> Option<MethodRecord> {
+        self.method.take().map(|m| MethodRecord {
+            header: m.header,
+            checks: m.checks,
+            findings: m.collector.snapshot(),
+        })
+    }
+
+    /// The running method's record so far, without ending it.
+    pub fn method_record(&self) -> Option<MethodRecord> {
+        self.method.as_ref().map(|m| MethodRecord {
+            header: m.header.clone(),
+            checks: m.checks.clone(),
+            findings: m.collector.snapshot(),
+        })
+    }
+
+    /// The end-of-run block, drawn once from the method's outcome
+    /// (`View::RunEnd`), on stderr.
+    pub fn method_report(&mut self, o: &crate::fit::report::build::MethodOutcome) {
+        use crate::fit::report::render::{render_report, View};
+        self.stderr_lines(&render_report(o, View::RunEnd));
     }
 
     /// A notice, printed once and kept with the command's others.
@@ -96,6 +213,11 @@ impl Out {
 
     /// Report `e` on stderr and return the status the command exits with.
     pub fn error(&mut self, e: CommandError) -> ExitCode {
+        if let Some(m) = &self.method {
+            // The same sentence a reader of stderr gets, for a reader holding
+            // only `progress.json`.
+            m.heartbeat.failed(e.message.as_str());
+        }
         let _ = std::io::stdout().flush();
         eprintln!("{}", e.message);
         if let Some(hint) = &e.hint {
@@ -197,6 +319,34 @@ mod tests {
         assert_eq!(e.hint, None);
         let mut out = Out::new(true);
         assert_eq!(out.error(CommandError { code: ExitCode(2), ..e }), ExitCode(2));
+    }
+
+    /// What a method records on `Out` — the checks it showed, the findings
+    /// pushed from the command's thread and from a worker's — comes back
+    /// whole when it ends, and nothing is recorded once it has.
+    #[test]
+    fn a_method_hands_back_what_it_recorded() {
+        use crate::fit::report::{Check, RunHeader};
+        use sim::inference::diagnostic::DiagnosticKind;
+        let header = RunHeader {
+            config: "f.toml".into(), method: "pmmh".into(), model: "m.camdl".into(),
+            estimate: vec!["beta".into()], fixed: Vec::new(), starts: "single".into(),
+            output: "results/fits/f".into(),
+        };
+        let mut out = Out::new(true);
+        let worker = out.begin_method(header.clone(), "pmmh", Arc::new(io::HeartbeatGuard::inert()));
+        out.check(Check::Starts { mode: "lhs".into(), params: vec!["beta".into()], note: "n".into() });
+        out.finding(DiagnosticKind::InitialLoglikInfinite);
+        std::thread::scope(|s| {
+            s.spawn(|| worker.push(DiagnosticKind::InitialLoglikInfinite));
+        });
+        let record = out.end_method().expect("a method was begun");
+        assert_eq!(record.header, header);
+        assert_eq!(record.checks.len(), 1);
+        assert_eq!(record.findings.len(), 2);
+        assert!(out.end_method().is_none());
+        out.finding(DiagnosticKind::InitialLoglikInfinite);
+        assert_eq!(worker.snapshot().len(), 2, "a finding after the method ended went nowhere");
     }
 
     #[test]

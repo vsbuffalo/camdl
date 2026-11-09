@@ -56,6 +56,10 @@ stuck	stderr	block	acceptance rates:	3           27.2% ✓                   9.0
 stuck	stderr	line	chain 1: proposal scale at its floor	for 415 of 1000 warm-up steps (details at the end)
 stuck	stderr	line	chain 2: proposal scale at its floor	for 331 of 1000 warm-up steps (details at the end)
 stuck	stderr	line	R̂ (rank-normalized split, Vehtari et al. 2021) / ESS	R̂ threshold 1.05
+stuck	stderr	line	✗ NOT converged	the chains are in different places
+stuck	stderr	line	max R̂	3.479 (beta), threshold 1.05
+stuck	stderr	line	parameters above threshold	2 of 2 parameters above threshold · 1 outlier chain · 0/200 forkable
+stuck	stderr	line	R̂: below 1.05 counts as converged	above 1.1 draws a finding, a warning up to 1.5
 stuck	stderr	line	beta         Rhat=	3.479 ✗ ESS bulk=5 tail=— (2.7% of 200 draws)
 stuck	stderr	line	gamma        Rhat=	2.157 ✗ ESS bulk=6 tail=5 (3.2% of 200 draws)
 stuck	stderr	line	R̂ = max(bulk 3.479, folded 2.317)	classic 16.647; the bulk half is larger
@@ -108,6 +112,8 @@ converged	stderr	block	acceptance rates:	3           30.6% ✓                  
 converged	stderr	line	beta         Rhat=	0.998 ✓ ESS bulk=324 tail=342 (81.1% of 400 draws)
 converged	stderr	line	gamma        Rhat=	1.001 ✓ ESS bulk=344 tail=337 (85.9% of 400 draws)
 converged	stderr	line	draws.tsv:	400 posterior samples (all 4 params)
+converged	stderr	line	✓ converged	✓ converged
+converged	stderr	line	max R̂	1.001 (gamma), threshold 1.05
 converged	stderr	line	pmmh complete in	(8000 PF evaluations
 converged	stderr	line	loglik at the highest log-posterior draw	-44.3 (chain 3)
 converged	stderr	line	stored pmmh	results/fits/pmmh_converged-
@@ -164,6 +170,8 @@ pgas	stderr	line	mean ESS over sweeps, by observation:	min 22.4   10% quantile 2
 pgas	stderr	line	of 14 observations starved	0 of 14
 pgas	stderr	line	no frozen-disagree cell	the chains' paths mix everywhere
 pgas	stderr	line	draws.tsv:	40 posterior samples (all 4 params)
+pgas	stderr	line	✗ NOT converged	the chains are in different places
+pgas	stderr	line	parameters above threshold	2 of 2 parameters above threshold · no outlier chains · 40/40 forkable
 pgas	stderr	line	rank-normalized split R̂ for 'beta'	1.753 (threshold 1.100)
 pgas	stderr	line	rank-normalized split R̂ for 'gamma'	2.150 (threshold 1.100)
 pgas	stderr	line	error(s)	2 error(s), 0 warning(s), 0 info
@@ -208,8 +216,6 @@ fail	stderr	line	pmmh:	2 chains × 200 steps × 2 particles, burn_in=100, thin=1
 fail	stderr	line	chain 0:	✗ BadInit
 fail	stderr	line	chain 1:	✗ BadInit
 fail	stderr	line	ran 0 of 2 chains	(2 skipped via BadInit; see diagnostics below)
-fail	stderr	line	R̂ — not assessed:	all 2 chains started at one point (starts = single)
-fail	stderr	line	beta         not reported	R̂ needs at least 2 chains; got 0
 fail	stderr	line	Chain 0 starting parameters were pathological	Init: [beta=0.5000, gamma=0.2000]
 fail	stderr	line	Chain 1 starting parameters were pathological	Init: [beta=0.5000, gamma=0.2000]
 fail	stderr	line	error(s)	2 error(s), 0 warning(s), 0 info

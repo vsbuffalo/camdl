@@ -261,7 +261,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
 /// `time_unit`, and the `instant`-kind parameter set. Any failure (no fit view,
 /// model moved/unparseable) degrades to an empty context (numeric-only
 /// rendering) — never panics.
-fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
+pub(crate) fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
     // Legacy fits carried the model path on the top-level `Fit` run.json. A
     // content-addressed fit (gh#147 M3.2) has no fit-wide record — the fit
     // level is a path segment — so recover the model path from any method
@@ -583,7 +583,7 @@ fn write_data(out: &mut Out, text: &str) {
 /// the full cloud under a header that says chains were dropped (gh#695). The
 /// retained-chain scope is named on the line itself, because "24/24 forkable"
 /// reads identically whether it is a subset or the whole.
-fn forkability(
+pub(crate) fn forkability(
     dir: &str,
     method: &str,
     selection: Option<&ChainSelection>,
@@ -1609,6 +1609,8 @@ mod tests {
             posterior_q025: BTreeMap::new(),
             posterior_q975: BTreeMap::new(),
             acceptance_per_param: BTreeMap::new(),
+            acceptance_per_chain: BTreeMap::new(),
+            acceptance_kernel: None,
         };
         let out = block(&fmt, "pgas", "pgas", no_traces, BayesianView::Pgas(&r),
             crate::fit::loglik::LoglikType::CompleteData);
@@ -1654,6 +1656,8 @@ mod tests {
             posterior_q025: BTreeMap::new(),
             posterior_q975: BTreeMap::new(),
             acceptance_per_param: BTreeMap::new(),
+            acceptance_per_chain: BTreeMap::new(),
+            acceptance_kernel: None,
         };
 
         // `tau` reports no ESS → no efficiency headline, and `tau` is named.
@@ -1783,6 +1787,8 @@ mod tests {
             posterior_q025: BTreeMap::new(),
             posterior_q975: BTreeMap::new(),
             acceptance_per_param: BTreeMap::new(),
+            acceptance_per_chain: BTreeMap::new(),
+            acceptance_kernel: None,
         };
         let out = block(&fmt, "posterior", "pgas", no_traces, BayesianView::Pgas(&r),
             LoglikType::CompleteData);
@@ -1834,6 +1840,8 @@ mod tests {
             posterior_q025: BTreeMap::new(),
             posterior_q975: BTreeMap::new(),
             acceptance_per_param: BTreeMap::new(),
+            acceptance_per_chain: BTreeMap::new(),
+            acceptance_kernel: None,
         };
         // No chain traces on disk for this in-memory result → the per-chain
         // table degrades to "unavailable"; the ESS lines under test are unaffected.
@@ -2361,6 +2369,8 @@ mod tests {
             posterior_q025: BTreeMap::new(),
             posterior_q975: BTreeMap::new(),
             acceptance_per_param: BTreeMap::new(),
+            acceptance_per_chain: BTreeMap::new(),
+            acceptance_kernel: None,
         }
     }
 
@@ -2547,6 +2557,8 @@ mod tests {
             acceptance_rate: 0.234,
             acceptance_per_chain: BTreeMap::new(),
             map_loglik: -1234.5,
+            map_chain: None,
+            cost: None,
             pf_noise: None,
         };
         let out = block(&fmt, "posterior", "pmmh", no_traces,
@@ -2801,6 +2813,8 @@ mod tests {
             posterior_q025: BTreeMap::new(),
             posterior_q975: BTreeMap::new(),
             acceptance_per_param: BTreeMap::new(),
+            acceptance_per_chain: BTreeMap::new(),
+            acceptance_kernel: None,
         }
     }
 
@@ -3436,6 +3450,8 @@ mod tests {
             posterior_q025: BTreeMap::new(),
             posterior_q975: BTreeMap::new(),
             acceptance_per_param: BTreeMap::new(),
+            acceptance_per_chain: BTreeMap::new(),
+            acceptance_kernel: None,
         })
     }
 
@@ -3456,6 +3472,8 @@ mod tests {
             acceptance_rate: 0.24,
             acceptance_per_chain: BTreeMap::new(),
             map_loglik: -3801.2,
+            map_chain: None,
+            cost: None,
             pf_noise: None,
         })
     }

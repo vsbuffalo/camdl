@@ -69,6 +69,8 @@ pub fn render(diags: &[Diagnostic], ctx: HintContext) -> Vec<Line> {
 }
 
 /// Print the collector's findings to stderr.
+#[expect(dead_code, reason = "every run prints its findings in its run-end block now; deleted \
+    in its own commit")]
 pub fn print(collector: &DiagnosticCollector, ctx: HintContext) {
     let lines = render(&collector.snapshot(), ctx);
     // stderr is unbuffered and a failed write to it has nowhere to be reported.

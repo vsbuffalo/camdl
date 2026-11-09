@@ -298,14 +298,32 @@ pub(crate) fn write_diagnostics_then_fail(
     }
 }
 
-fn abandon_method(heartbeat: &io::HeartbeatGuard, message: String) -> ! {
+/// [`abandon_method`] from inside the IF2 runner, which holds the heartbeat
+/// but not the command's `Out` (one of its sites is a chain worker's thread):
+/// the error and the heartbeat's terminal record, as before `Out` existed.
+pub(crate) fn abandon_method_on(heartbeat: &io::HeartbeatGuard, message: String) -> ! {
     heartbeat.failed(message.as_str());
     eprintln!("{}", message);
     std::process::exit(1);
 }
 
+pub(crate) fn abandon_method(out: &mut crate::out::Out, message: String) -> ! {
+    // The run's report as far as it got: the findings it recorded before it
+    // stopped, then the error (`Out::error`, which also records it as the
+    // heartbeat's terminal `failed` state).
+    if let Some(r) = out.method_record() {
+        out.method_report(&report::build::MethodOutcome::Failed {
+            header: r.header, findings: r.findings, error: message.clone(),
+        });
+    }
+    out.error(crate::out::CommandError::new(message)).exit()
+}
+
 pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     use config_v2::{Algorithm, FitConfig};
+    // `fit run` has no `--no-color`: its painters follow the environment and
+    // whether each stream is a terminal.
+    let mut out = crate::out::Out::new(false);
 
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
     // allow_degenerate_rates is set from the loaded `[config]` below (it's a
@@ -1614,6 +1632,17 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // None.
         let mut method_best_chain: Option<crate::chain_index::ChainIndex> = None;
 
+        // gh#278, gh#900: the method's liveness/progress heartbeat. A background
+        // thread writes `progress.json` into the method dir on a fixed
+        // wall-clock timer, and the guard writes the terminal record however
+        // the method exits — `Out::method_done` below when it returns,
+        // `abandon_method` (through `Out::error`) on every fatal path, its
+        // `Drop` on a panic. Built here, before the dispatch, so no method can
+        // silently be the one without a heartbeat. `Out` records the method
+        // from here: the checks it shows and the findings it draws.
+        let heartbeat = std::sync::Arc::new(method_heartbeat(&method_dir, &method.algorithm));
+        let collector = out.begin_method(run_header.clone(), method_name, heartbeat.clone());
+
         // Surface the registry caveat for Beta/Experimental methods, once per
         // executing method (after the cache-hit skip above, so reused leaves
         // stay silent). Registry-driven so it can't drift from `fit methods`.
@@ -1621,6 +1650,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // can carry the series length it is about (`pmmh::run_method`).
         if !matches!(method.algorithm, Algorithm::PMMH { .. }) {
             methods::emit_status_banner(method.algorithm.method_kind(), method.algorithm.backend(), None);
+            if let Some(note) = methods::status_note(method.algorithm.method_kind(), method.algorithm.backend()) {
+                out.check(report::Check::MethodCaveat {
+                    method: method_name.to_string(), note: note.to_string(), series_len: None,
+                });
+            }
         }
 
         // gh#506 follow-up, gh#881: a declared `start` that the chosen starts
@@ -1645,18 +1679,17 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             // scale is converted to the transformed scale at it
             // (`pmmh::build_proposal_sd`). Only where the chains begin
             // ignores it.
-            eprintln!("  {} {}", crate::out::paint::note_tag(),
-                report::unused_starts_note(starts_rule.tag(), &unused_starts,
-                    still_reads_declared_starts(&method.algorithm)));
+            let note = report::unused_starts_note(starts_rule.tag(), &unused_starts,
+                still_reads_declared_starts(&method.algorithm));
+            eprintln!("  {} {}", crate::out::paint::note_tag(), note);
+            out.check(report::Check::Starts {
+                mode: starts_rule.tag().to_string(), params: unused_starts.clone(), note,
+            });
         }
-
-        // gh#278, gh#900: the method's liveness/progress heartbeat. A background
-        // thread writes `progress.json` into the method dir on a fixed
-        // wall-clock timer, and the guard writes the terminal record however
-        // the method exits — `done()` below when it returns, `abandon_method` on
-        // every fatal path, its `Drop` on a panic. Built here, before the
-        // dispatch, so no method can silently be the one without a heartbeat.
-        let heartbeat = method_heartbeat(&method_dir, &method.algorithm);
+        // The method's warm-up record (PMMH, `mh`), as the run kept it, and a
+        // hint said under the `stored` line (IF2's best chain).
+        let mut method_warmup: Vec<report::ChainWarmup> = Vec::new();
+        let mut stored_hint: Option<String> = None;
 
         match &method.algorithm {
             Algorithm::IF2 { backend, chains, particles, iterations, cooling, cooling_target_iters, loglik_eval, gate, dt_check, .. } => {
@@ -1680,7 +1713,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // the base point carries `[estimate].start`.
                     seed, false,
                 ).unwrap_or_else(|e| {
-                    abandon_method(&heartbeat, format!("error building run config: {e}"))
+                    abandon_method(&mut out, format!("error building run config: {e}"))
                 });
                 run_config.loglik_eval = effective_loglik_eval.clone();
                 run_config.gate = effective_gate.clone();
@@ -1694,27 +1727,24 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 }
 
                 std::fs::create_dir_all(&method_dir).unwrap_or_else(|e| {
-                    abandon_method(
-                        &heartbeat,
-                        format!("error creating {}: {e}", method_dir.display()),
+                    abandon_method(&mut out, format!("error creating {}: {e}", method_dir.display()),
                     )
                 });
 
-                let collector = sim::inference::diagnostic::DiagnosticCollector::new(method_name);
                 let t0 = std::time::Instant::now();
                 // Per-chain starting points, through the one seam every runner
                 // draws from, under the resolved `starts` rule.
                 let drawn = runner::draw_chain_starts_for(
                     &run_config, &sweep_config.estimate, &resolved_starts, *chains, seed,
-                ).unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
+                ).unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")));
                 runner::refuse_starts_on_an_end(&run_config, &drawn)
-                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
+                    .unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")));
                 // gh#887: a spread start the filter cannot score is redrawn,
                 // up to MAX_START_ATTEMPTS, before any chain runs; every
                 // attempt is on the record below.
                 let drawn = runner::preflight_spread_starts(
                     &run_config, &sweep_config.estimate, &resolved_starts, drawn, seed,
-                ).unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
+                ).unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")));
                 let per_chain_params: Vec<Vec<sim::inference::types::EstimatedParam>> =
                     drawn.to_estimated_params(&run_config.estimated_params);
                 // The audit sidecar, captured before the first filter pass.
@@ -1725,7 +1755,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let chain_results = runner::run_chains_with_per_chain_params(
                     &run_config, Some(&per_chain_params), &collector,
                     Some(method_dir_str.as_ref()), &heartbeat)
-                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
+                    .unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")));
                 let elapsed = t0.elapsed();
                 // A chain skipped mid-run started from an accepted start, so
                 // the file written before the run calls it `accepted`. Write
@@ -1797,7 +1827,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     },
                     dt_check_seed,
                 )
-                .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
+                .unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")));
                 dt_check::print_terminal_report(&dt_check_result);
                 let fit_state = state::FitState {
                     method: method_name.to_string(),
@@ -1861,7 +1891,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let model_identity =
                     crate::resolve::model_identity_from_ir(&run_config.model_ir_json);
                 let data_hashes: Vec<(String, String)> = sweep_config.data_spec()
-                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")))
+                    .unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")))
                     .observations.iter()
                     .map(|(name, path)| {
                         let bytes = std::fs::read(path).unwrap_or_default();
@@ -1912,25 +1942,20 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 provenance::write_mle_params(&mle_path, &all_params, &metadata)
                     .unwrap_or_else(|e| eprintln!("warning: {}", e));
 
-                report::findings::print(&collector, sim::inference::diagnostic::HintContext {
-                    chains_completed: Some(chain_results.results.len()),
-                });
                 // Recorded, as every other method's are, so `fit summary`
-                // shows the findings this run printed.
+                // shows the findings this run printed; the end of the run
+                // prints them.
                 write_diagnostics(&collector, &method_dir)
-                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
+                    .unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")));
 
                 method_best_loglik = Some(chain_results.best_loglik);
                 method_best_chain = Some(chain_results.best_chain);
-
-                eprintln!();
-                crate::out::status::done("stored", format!("{} \u{b7} {}/", method_name, method_dir.display()));
-                crate::out::status::hint(format!("best ll={:.1} (chain {}) in {:.1}s",
+                stored_hint = Some(format!("best ll={:.1} (chain {}) in {:.1}s",
                     chain_results.best_loglik, chain_results.best_chain, elapsed.as_secs_f64()));
             }
             Algorithm::PGAS { .. } => {
                 let pgas_opts = pgas::PgasMethodOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
+                    .unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")));
                 // gh#540: no CLI overrides here. Every flag that reaches this
                 // method was written into it before its content address was
                 // taken, so `from_algorithm` above already carries them.
@@ -1944,18 +1969,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     &resume_guard,
                     &resolved_starts,
                     &heartbeat,
+                    &mut out,
                 ).unwrap_or_else(|e| {
-                    abandon_method(&heartbeat, format!("error running pgas: {e}"))
+                    abandon_method(&mut out, format!("error running pgas: {e}"))
                 });
                 // Bubble loglik from fit_state.toml written by PGAS runner
-                let fs = load_method_result_or_exit(&heartbeat, method_name, &method_dir);
+                let fs = load_method_result_or_exit(&mut out, method_name, &method_dir);
                 method_best_loglik = Some(fs.best_loglik);
                 method_best_chain = Some(fs.best_chain);
             }
             Algorithm::PMMH { .. } => {
                 let pmmh_opts = pmmh::PmmhMethodOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
-                pmmh::run_method(
+                    .unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")));
+                method_warmup = pmmh::run_method(
                     &sweep_config,
                     &method,
                     &method_dir,
@@ -1969,10 +1995,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // PMMH's dt-check is the PF-based one wired on the IF2 path.
                     /* dt_check_opt */ None,
                     &heartbeat,
+                    &mut out,
                 ).unwrap_or_else(|e| {
-                    abandon_method(&heartbeat, format!("error running pmmh: {e}"))
+                    abandon_method(&mut out, format!("error running pmmh: {e}"))
                 });
-                let fs = load_method_result_or_exit(&heartbeat, method_name, &method_dir);
+                let fs = load_method_result_or_exit(&mut out, method_name, &method_dir);
                 method_best_loglik = Some(fs.best_loglik);
                 method_best_chain = Some(fs.best_chain);
             }
@@ -1985,7 +2012,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // fields with `n_particles = 0` (the deterministic path has
                 // no filter).
                 let pmmh_opts = pmmh::PmmhMethodOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
+                    .unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")));
                 // Deterministic ODE dt-check at the MAP (gh#52, gh#227). On by
                 // default; honours the same CLI flags as the IF2 path
                 // (--no-dt-check / --dt-check-halvings / --dt-check-strict).
@@ -1994,7 +2021,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // was taken, and the field is in Mh's identity_payload (the
                 // result is stored in fit_state.toml.dt_check).
                 let mh_dt_check = dt_check.clone();
-                pmmh::run_method(
+                method_warmup = pmmh::run_method(
                     &sweep_config,
                     &method,
                     &method_dir,
@@ -2007,10 +2034,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     &base_warmup(resume_base.as_deref(), &method.algorithm),
                     Some(mh_dt_check),
                     &heartbeat,
+                    &mut out,
                 ).unwrap_or_else(|e| {
-                    abandon_method(&heartbeat, format!("error running mh: {e}"))
+                    abandon_method(&mut out, format!("error running mh: {e}"))
                 });
-                let fs = load_method_result_or_exit(&heartbeat, method_name, &method_dir);
+                let fs = load_method_result_or_exit(&mut out, method_name, &method_dir);
                 method_best_loglik = Some(fs.best_loglik);
                 method_best_chain = Some(fs.best_chain);
             }
@@ -2065,21 +2093,17 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         &nl_dt_check,
                         &heartbeat,
                     ).unwrap_or_else(|e| {
-                        abandon_method(
-                            &heartbeat,
-                            format!("error running {method_name}: {e}"),
+                        abandon_method(&mut out, format!("error running {method_name}: {e}"),
                         )
                     });
-                    let fs = load_method_result_or_exit(&heartbeat, method_name, &method_dir);
+                    let fs = load_method_result_or_exit(&mut out, method_name, &method_dir);
                     method_best_loglik = Some(fs.best_loglik);
                     method_best_chain = Some(fs.best_chain);
                 }
                 #[cfg(not(feature = "ode"))]
                 {
                     let _ = (method_name, &sweep_config, &method_dir, seed, nl_cfg, &resolved_starts);
-                    abandon_method(
-                        &heartbeat,
-                        format!(
+                    abandon_method(&mut out, format!(
                             "error: this binary was built without --features ode, \
                              which is required for algorithm = \"{}\". Rebuild \
                              with `cargo build --features ode` (default).",
@@ -2108,7 +2132,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     Some(&method.algorithm),
                     1, *particles, 1, 1.0, 1, seed, false,
                 ).unwrap_or_else(|e| {
-                    abandon_method(&heartbeat, format!("error building pfilter config: {e}"))
+                    abandon_method(&mut out, format!("error building pfilter config: {e}"))
                 });
 
                 // gh#585: same §3.7.3(b) proof recording as the IF2/Bayesian
@@ -2119,9 +2143,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 }
 
                 std::fs::create_dir_all(&method_dir).unwrap_or_else(|e| {
-                    abandon_method(
-                        &heartbeat,
-                        format!("error creating {}: {e}", method_dir.display()),
+                    abandon_method(&mut out, format!("error creating {}: {e}", method_dir.display()),
                     )
                 });
 
@@ -2131,7 +2153,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // so one draw of the rule is the point.
                 let drawn = runner::draw_chain_starts_for(
                     &run_config, &sweep_config.estimate, &resolved_starts, 1, seed,
-                ).unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
+                ).unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")));
                 let mle_params: Vec<f64> = drawn
                     .to_param_vecs(&run_config.estimated_params, &run_config.base_params)
                     .into_iter()
@@ -2162,7 +2184,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     let result = sim::inference::bootstrap_filter(
                         &process, &obs_model, &mle_params, &smc_config, pf_seed,
                     ).unwrap_or_else(|e| {
-                        abandon_method(&heartbeat, format!("pfilter error: {}", crate::util::sim_error_text(&e)))
+                        abandon_method(&mut out, format!("pfilter error: {}", crate::util::sim_error_text(&e)))
                     });
                     if record_preq {
                         if let Some(ref recorded) = result.prequential {
@@ -2220,9 +2242,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     let stem = format!("{}/prequential", method_dir.display());
                     crate::prequential_out::write_prequential_outputs(&stem, trace)
                         .unwrap_or_else(|e| {
-                            abandon_method(
-                                &heartbeat,
-                                format!("error writing prequential: {e}"),
+                            abandon_method(&mut out, format!("error writing prequential: {e}"),
                             )
                         });
                     eprintln!("  prequential: elpd={:.2}, mean_crps={:.3}, PIT 90% cov={:.2}",
@@ -2238,7 +2258,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // `finalize` below, so the timer thread is stopped before the leaf's
         // manifest is taken over its files — a `progress.json` rewritten during
         // the manifest walk would be hashed mid-flight.
-        heartbeat.done();
+        out.method_done();
 
         // ── finalize the CAS fit-method leaf ──
         // The runners streamed every output (chains, fit_state.toml,
@@ -2312,13 +2332,24 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
         let dest = match write.finalize(inputs_json) {
             Ok(d) => d,
-            Err(e) => {
-                eprintln!("error: could not finalize fit method leaf {}: {}", cas_path.display(), e);
-                std::process::exit(1);
-            }
+            Err(e) => out.error(crate::out::CommandError::new(format!(
+                "error: could not finalize fit method leaf {}: {}", cas_path.display(), e))).exit(),
         };
-        crate::out::status::done("stored",
+        // The end-of-run block, from the report built over what the run kept
+        // in memory and the leaf it finalized; then the `stored` milestone.
+        let record = out.end_method().expect("the method was begun before its dispatch");
+        match completed_outcome(method_name, &dest, record, method_warmup,
+            method_elapsed.as_secs_f64())
+        {
+            Ok(outcome) => out.method_report(&outcome),
+            Err(e) => eprintln!("warning: the run's report could not be built from {}: {e}",
+                dest.display()),
+        }
+        out.milestone("stored",
             format!("{} \u{b7} {} \u{b7} {:.1}s", method_name, dest.display(), method_elapsed.as_secs_f64()));
+        if let Some(hint) = stored_hint {
+            crate::out::status::hint(hint);
+        }
 
     } // end sweep_points
     } // end cells
@@ -2437,6 +2468,55 @@ fn removed_flag_message(a: &crate::args::FitRunArgs) -> Option<String> {
     removed_flags_message("fit run", lines)
 }
 
+/// The report of a method that completed: built by the one builder from what
+/// the run kept in memory — its opening block, the checks it showed, its
+/// findings, its warm-up and its wall time — and the typed result of the leaf
+/// it finalized (`MethodResult::load_from`, which reads `run.json` `inputs`,
+/// written by `finalize`). `fit summary` builds the same report from the leaf
+/// alone (`fit_summary::load_method_facts`).
+fn completed_outcome(
+    method_name: &str,
+    leaf: &std::path::Path,
+    record: crate::out::MethodRecord,
+    warmup: Vec<report::ChainWarmup>,
+    total_seconds: f64,
+) -> Result<report::build::MethodOutcome, String> {
+    use method_result::MethodResult;
+    let result = MethodResult::load_from(leaf, method_name).map_err(|e| e.to_string())?;
+    // The fit directory: `<fit>/<method>-<hash>/<seed leaf>`.
+    let fit_dir = leaf.parent().and_then(|p| p.parent()).unwrap_or(leaf);
+    let ll_kind = loglik::LoglikType::from(&result);
+    let chain_detail = match &result {
+        MethodResult::Pgas(_) | MethodResult::Pmmh(_) => Some(report::ChainDetail::gather(
+            leaf,
+            ll_kind,
+            matches!(result, MethodResult::Pgas(_)),
+            None,
+            fit_summary::forkability(&fit_dir.to_string_lossy(), method_name, None),
+        )),
+        MethodResult::If2(_) => Some(report::ChainDetail::default()),
+        MethodResult::Nlopt(_) | MethodResult::Pfilter(_) => None,
+    };
+    let facts = report::MethodFacts {
+        name: method_name.to_string(),
+        method: method_name.to_string(),
+        method_dir: leaf.to_path_buf(),
+        header: Some(record.header),
+        result,
+        checks: record.checks,
+        warmup,
+        findings: record.findings,
+        findings_unreadable: Vec::new(),
+        stored: Some(report::Stored {
+            leaf: report::display_path(leaf),
+            total_seconds: Some(total_seconds),
+        }),
+        chain_detail,
+    };
+    let cal = fit_summary::load_calendar_context(fit_dir);
+    Ok(report::build::MethodOutcome::Completed(report::build::build_method_report(facts, &cal)))
+}
+
 /// After a runner reported success, its `fit_state.toml` is the channel
 /// carrying the result back to this orchestrator (`best_loglik` /
 /// `best_chain` end up in the finalized run.json inputs). A missing or
@@ -2444,13 +2524,13 @@ fn removed_flag_message(a: &crate::args::FitRunArgs) -> Option<String> {
 /// `if let Ok` swallow left a silent `null` in run.json where the result
 /// belonged. Fail loudly instead.
 fn load_method_result_or_exit(
-    heartbeat: &io::HeartbeatGuard,
+    out: &mut crate::out::Out,
     method_name: &str,
     method_dir: &std::path::Path,
 ) -> state::FitState {
     state::FitState::load(&method_dir.to_string_lossy()).unwrap_or_else(|e| {
         abandon_method(
-            heartbeat,
+            out,
             format!(
                 "error: method '{}' reported success but its fit_state.toml \
                  cannot be read back from {}: {}",

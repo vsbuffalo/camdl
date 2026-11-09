@@ -180,17 +180,17 @@ pub struct MethodReport {
 }
 
 /// What a method's run came to. A run that fails has no `MethodResult`, and
-/// still has a report: the header, checks and findings, which exist before
-/// sampling ends, and the error that stopped it.
+/// still has a report: the header and findings, which exist before sampling
+/// ends, and the error that stopped it. The checks the run showed are not
+/// carried: the run's end has shown them already, and nothing else renders a
+/// failed run.
 #[derive(Debug, Clone)]
 pub enum MethodOutcome {
     Completed(MethodReport),
     /// Every chain failed to start, no chain reached a finite log-likelihood,
     /// or the method returned an error.
-    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by `fit run`'s failure path, which builds its outcome from memory (proposal step 7, the run side)"))]
     Failed {
         header: super::RunHeader,
-        checks: Vec<Check>,
         findings: Vec<sim::inference::diagnostic::Diagnostic>,
         /// The error as the command reports it.
         error: String,

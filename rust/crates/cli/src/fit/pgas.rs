@@ -15,7 +15,7 @@ use sim::inference::{
     pmmh::Prior,
     prior::Density,
     pgas::{PGASConfig, ChainResumeState, run_pgas, PGASSweep, PGASTrajectory, RENEWAL_BINS},
-    diagnostic::{DiagnosticCollector, DiagnosticKind, HintContext},
+    diagnostic::DiagnosticKind,
 };
 use io::trajectories::{
     Granularity, PosteriorDraw, TrajColumnSpec, TrajManifest, write_trajectories_tsv,
@@ -276,6 +276,9 @@ pub fn run_method(
     // The method's liveness/progress heartbeat, owned by the runner so that
     // every method has one and every exit leaves a terminal record (gh#900).
     heartbeat: &io::HeartbeatGuard,
+    // The command's output handle: the checks the run shows are recorded on
+    // it, and its findings go to the collector it holds.
+    out: &mut crate::out::Out,
 ) -> Result<(), String> {
     let method_name = method.algorithm.method_name();
     let estimate = &fit.estimate;
@@ -301,7 +304,7 @@ pub fn run_method(
     std::fs::create_dir_all(method_dir)
         .map_err(|e| format!("cannot create {}: {}", method_dir.display(), e))?;
 
-    let collector = DiagnosticCollector::new("pgas");
+    let collector = out.collector();
 
     // Build FitRunConfig (reuse existing builder). cooling_target_iters
     // is IF2-specific and never read by PGAS — pass 1 as a harmless value.
@@ -360,6 +363,9 @@ pub fn run_method(
     // hide as "0 of N firing" behind a 6-hour chain.
     crate::util::print_scheduled_actions_summary(&config.model_declared, &config.model);
     crate::util::print_observations_summary(&config.model);
+    for c in super::report::obs_stream_checks(&config.model) {
+        out.check(c);
+    }
 
     // Report priors
     let any_non_flat = priors.iter().any(|p| !matches!(p, Prior::Fixed(Density::Flat)));
@@ -441,7 +447,7 @@ pub fn run_method(
                 Ok(data) => match bincode::deserialize::<ChainResumeState>(&data) {
                     Ok(state) => {
                         if state.config_hash != config_hash {
-                            super::abandon_method(heartbeat, format!(
+                            super::abandon_method(out, format!(
                                 "error: config hash mismatch for chain {} — \
                                 cannot resume. Either the model/data/priors changed \
                                 since the original run, or this chain predates a camdl \
@@ -470,7 +476,7 @@ pub fn run_method(
             }
         }
         if any_failed {
-            super::abandon_method(heartbeat,
+            super::abandon_method(out,
                 "error: --resume requires resume state files for all chains.\n  \
                  These are written automatically at the end of every PGAS run.\n  \
                  If the original run was interrupted before saving, use --force to \
@@ -1283,7 +1289,6 @@ pub fn run_method(
     // to look for.
     if all_results.is_empty() {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        super::report::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
         // gh#885: the reason and the remedies come from the one string the
         // other two all-chains-refused errors also carry (pmmh's init-eval
         // refusal, IF2's watchdog bail), so they cannot drift apart again.
@@ -1327,36 +1332,27 @@ pub fn run_method(
     } else {
         sim::inference::diagnostic::AcceptanceKernel::RandomWalk
     };
-    let (lo, hi) = kernel.healthy_band();
-    eprintln!("\nacceptance rates{}:", if nuts { " (NUTS block; ~80% is the target)" } else { "" });
+    // The table is drawn at the end of the run from the recorded rates
+    // (`report::render::pgas_acceptance_table`); the findings are pushed here.
     for &(chain_id, _, ref rates) in &all_results {
         let block_update = rates.len() > 1
             && rates.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
-        let summary: Vec<String> = config.estimated_params.iter().zip(rates)
-            .map(|(p, &r)| {
-                let status = if r < lo { Style::Err }
-                    else if r > hi { Style::Warn }
-                    else { Style::Ok };
-                if !block_update {
-                    if let Some(d) = sim::inference::diagnostic::acceptance_diagnostic(
-                        Some(chain_id), r, Some(p.name.clone()), kernel)
-                    {
-                        collector.push(d);
-                    }
-                }
-                format!("  {}={}", p.name,
-                    crate::out::paint::stderr().paint(&format!("{:.0}%", r * 100.0), status))
-            })
-            .collect();
         if block_update {
             if let Some(d) = rates.first()
                 .and_then(|&r| sim::inference::diagnostic::acceptance_diagnostic(
                     Some(chain_id), r, None, kernel))
             {
-                collector.push(d);
+                out.finding(d);
+            }
+        } else {
+            for (p, &r) in config.estimated_params.iter().zip(rates) {
+                if let Some(d) = sim::inference::diagnostic::acceptance_diagnostic(
+                    Some(chain_id), r, Some(p.name.clone()), kernel)
+                {
+                    out.finding(d);
+                }
             }
         }
-        eprintln!("  chain {}: {}", ChainIndex(chain_id), summary.join(" "));
     }
 
     if n_chains > 1 {
@@ -1373,10 +1369,10 @@ pub fn run_method(
         });
         // RHAT_REPORT_THRESHOLD is unchanged from the value this method has
         // always applied; only the STATISTIC it is applied to changed (gh#84).
-        eprint!("{}", diagnostics.report(
-            super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()));
+        // The table is drawn at the end of the run, from the summary written
+        // below (`report::render::rhat_run_table`).
         for kind in diagnostics.rhat_findings(super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()) {
-            collector.push(kind);
+            out.finding(kind);
         }
     }
 
@@ -1565,7 +1561,7 @@ pub fn run_method(
         })
         .collect();
     let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
-    write_summary(method_dir, &all_results, &config, thin, &traj_plan, &saved_paths,
+    write_summary(method_dir, &all_results, kernel, thin, &traj_plan, &saved_paths,
         n_trajectories, &diagnostics, path_renewal.as_ref(),
         filter_ess.as_ref().map(|fe| &fe.summary), latent_convergence.as_ref())?;
 
@@ -1609,7 +1605,6 @@ pub fn run_method(
     // starts finite and walks into a `-inf` region it cannot leave.
     if sim::inference::no_finite_anchor(best_sweep.log_complete_data_ll) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        super::report::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
         return Err(super::write_diagnostics_then_fail(&collector, method_dir, format!(
             "pgas: all {} chain(s) reached no finite complete-data \
              log-likelihood (best = {}). The reachable surface is `-inf` at \
@@ -1747,8 +1742,7 @@ pub fn run_method(
         eprintln!("  draws.tsv: {} posterior samples (all {} params)", n_draws, all_names.len());
     }
 
-    // Render and persist diagnostics
-    super::report::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
+    // Persist the findings; the end of the run prints them once, merged.
     super::write_diagnostics(&collector, method_dir)?;
 
     // gh#785. `cross_chain_compat.json`, beside `diagnostics.json`: the
@@ -1949,7 +1943,7 @@ pub(crate) fn read_saved_path_counts(
 fn write_summary(
     dir: &Path,
     results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
-    _config: &FitRunConfig,
+    kernel: sim::inference::diagnostic::AcceptanceKernel,
     thin: usize,
     traj_plan: &TrajectoryStridePlan,
     saved_paths: &SavedPathCounts,
@@ -1971,6 +1965,10 @@ fn write_summary(
         "method": "pgas",
         "n_chains": results.len(),
         "acceptance_rates": acceptance_rates,
+        // The chain each row of `acceptance_rates` belongs to: refused chains
+        // leave no row, so a row's position is not its chain.
+        "acceptance_chains": results.iter().map(|(c, _, _)| *c).collect::<Vec<usize>>(),
+        "acceptance_kernel": kernel,
         // Thinning factor: `n_samples` (kept draws) × `thin` = raw sampling
         // iterations, the thinning-invariant denominator for ESS/iteration.
         "thin": thin,
