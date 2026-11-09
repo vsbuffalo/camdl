@@ -97,6 +97,67 @@ pub struct If2Run {
     pub ess_at_mle: Option<EssSummary>,
     pub n_chains: usize,
     pub n_iter: usize,
+    /// The rest of what the leaf's `fit_state.toml` records, read in the same
+    /// load: what `fit summary`'s IF2 report and the convergence measurement
+    /// read, so nothing reads the file a second time.
+    pub record: If2Record,
+}
+
+/// What an IF2 leaf's `fit_state.toml` records about its run, beyond the
+/// headline scalars of [`If2Run`]. One field per fact a report reads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct If2Record {
+    /// Chains started.
+    pub n_chains: usize,
+    /// Chains that finished, when some were lost (`FitState::n_good_chains`).
+    #[serde(default)]
+    pub n_good_chains: Option<usize>,
+    /// The winner's full parameter vector, fixed parameters included.
+    pub start_values: BTreeMap<String, f64>,
+    /// Tail chain-agreement Â per estimated parameter.
+    pub tail_chain_agreement: BTreeMap<String, f64>,
+    /// Estimated parameters perturbed at t = 0 only.
+    pub perturb_only_at_t0_params: Vec<String>,
+    /// Clean-eval log-likelihood, standard error and chain of each row.
+    pub chain_eval_logliks: Vec<f64>,
+    pub chain_eval_ses: Vec<f64>,
+    pub chain_eval_ids: Vec<ChainIndex>,
+    /// The convergence check's configuration as applied; `None` in a file
+    /// written before it was recorded.
+    pub resolved_gate: Option<crate::fit::config_v2::GateConfig>,
+    pub resolved_loglik_eval: Option<crate::fit::config_v2::LoglikEvalConfig>,
+    #[serde(with = "sim::inference::json_f64")]
+    pub initial_loglik: f64,
+    pub camdl_version: Option<String>,
+    pub loglik_type: Option<crate::fit::loglik::LoglikType>,
+    /// The starts rule as written, and its kind.
+    pub chain_init_source: Option<String>,
+    pub chain_starts_kind: Option<crate::fit::starts::ChainStartsKind>,
+    pub dt_check: Option<crate::fit::dt_check::DtCheckResult>,
+}
+
+impl If2Record {
+    /// The record's part of a `fit_state.toml` already read.
+    pub fn from_state(state: &FitState) -> Self {
+        If2Record {
+            n_chains: state.n_chains,
+            n_good_chains: state.n_good_chains,
+            start_values: state.start_values.clone(),
+            tail_chain_agreement: state.tail_chain_agreement.clone(),
+            perturb_only_at_t0_params: state.perturb_only_at_t0_params.clone(),
+            chain_eval_logliks: state.chain_eval_logliks.clone(),
+            chain_eval_ses: state.chain_eval_ses.clone(),
+            chain_eval_ids: state.chain_eval_ids.clone(),
+            resolved_gate: state.resolved_gate.clone(),
+            resolved_loglik_eval: state.resolved_loglik_eval.clone(),
+            initial_loglik: state.initial_loglik,
+            camdl_version: state.camdl_version.clone(),
+            loglik_type: state.loglik_type,
+            chain_init_source: state.chain_init_source.clone(),
+            chain_starts_kind: state.chain_starts_kind,
+            dt_check: state.dt_check.clone(),
+        }
+    }
 }
 
 /// PF ESS summary at the IF2 winner θ̂. Three numbers; renderers can
@@ -1003,7 +1064,7 @@ fn posterior_diagnostics(
 /// in the nearest ancestor segment). Only a leaf with neither — written
 /// before either existed — falls back to every stored value.
 fn theta_hat_from_state(method_dir: &Path, state: &FitState) -> BTreeMap<String, f64> {
-    let estimated = estimated_names(Some(method_dir), state);
+    let estimated = estimated_names(Some(method_dir), &state.tail_chain_agreement);
     state
         .start_values
         .iter()
@@ -1017,10 +1078,10 @@ fn theta_hat_from_state(method_dir: &Path, state: &FitState) -> BTreeMap<String,
 /// neither Â nor (with `method_dir`) a `fit.meta.json` `estimated` list.
 pub(crate) fn estimated_names(
     method_dir: Option<&Path>,
-    state: &FitState,
+    tail_chain_agreement: &BTreeMap<String, f64>,
 ) -> Option<std::collections::BTreeSet<String>> {
-    if !state.tail_chain_agreement.is_empty() {
-        Some(state.tail_chain_agreement.keys().cloned().collect())
+    if !tail_chain_agreement.is_empty() {
+        Some(tail_chain_agreement.keys().cloned().collect())
     } else {
         method_dir?
             .ancestors()
@@ -1093,6 +1154,17 @@ impl If2Run {
             }
         })?;
 
+        let n_iter = inputs
+            .get("algorithm")
+            .and_then(|a| a.get("iterations"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(0);
+        Ok(If2Run::from_state(method_dir, &state, n_chains, n_iter))
+    }
+
+    /// The typed result of a `fit_state.toml` already read from `method_dir`.
+    pub fn from_state(method_dir: &Path, state: &FitState, n_chains: usize, n_iter: usize) -> Self {
         // theta_hat: estimated parameters only. We don't have direct
         // access to the [estimate] block from this side of the
         // pipeline, but `tail_chain_agreement` only contains estimated
@@ -1100,24 +1172,17 @@ impl If2Run {
         // is empty (legacy file), fall back to the full start_values
         // map (which over-includes fixed params, but is the best we
         // can do without re-reading fit.toml).
-        let theta_hat = theta_hat_from_state(method_dir, &state);
+        let theta_hat = theta_hat_from_state(method_dir, state);
 
         let max_chain_agreement = (!state.tail_chain_agreement.is_empty()).then(|| {
             state.tail_chain_agreement.values().copied().fold(0.0_f64, f64::max)
         });
 
-        let gate_verdict = compute_if2_gate_verdict(&state);
+        let gate_verdict = compute_if2_gate_verdict(state);
 
         let ess_at_mle = read_ess_at_mle(method_dir);
 
-        let n_iter = inputs
-            .get("algorithm")
-            .and_then(|a| a.get("iterations"))
-            .and_then(|v| v.as_u64())
-            .map(|n| n as usize)
-            .unwrap_or(0);
-
-        Ok(If2Run {
+        If2Run {
             best_loglik: state.best_loglik,
             best_chain: state.best_chain,
             theta_hat,
@@ -1126,7 +1191,8 @@ impl If2Run {
             ess_at_mle,
             n_chains,
             n_iter,
-        })
+            record: If2Record::from_state(state),
+        }
     }
 }
 
@@ -1138,7 +1204,7 @@ impl If2Run {
 /// is then judged on Â alone.
 fn compute_if2_gate_verdict(state: &FitState) -> GateVerdict {
     let gate = state.resolved_gate.clone().unwrap_or_default();
-    let assessed = crate::fit::gating::assess_if2(state, &gate);
+    let assessed = crate::fit::gating::assess_if2(&If2Record::from_state(state), &gate);
     if assessed.is_not_assessed() {
         return GateVerdict::NotAssessed;
     }
