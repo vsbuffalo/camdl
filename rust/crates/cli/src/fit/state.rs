@@ -1,4 +1,12 @@
-//! `fit_state.toml` — inter-method handoff file.
+//! `fit_state.toml` — a fit method's result record.
+//!
+//! Written once per method leaf when the method finishes. Read today by:
+//! sourced chain starts (`chain_starts.rs`: a `from_mle` / `from_params`
+//! source's estimated values), the convergence check on such a source
+//! (`gating.rs`, unless `--allow-nonconverged-source`), `camdl profile` when it
+//! starts from a fit (`profile.rs`), and the typed method results
+//! (`method_result.rs`: `If2Run`, `PmmhRun`, …) that `fit summary` and
+//! `fit table` are built from.
 
 use serde::{Deserialize, Serialize};
 // gh#519: `fit_state.toml` is a serialized artifact whose digest is recorded
@@ -51,10 +59,9 @@ pub struct FitState {
     pub acceptance_rate: Option<f64>,
 
     /// Per-parameter tail chain-agreement Â (last half of iterations).
-    /// Populated when the method finishes, so a downstream method
-    /// (notably refine) can gate on scout's convergence without re-running. Absent in
-    /// legacy fit_state.toml files — downstream readers must treat
-    /// absence as "unknown, proceed with warning," not "converged."
+    /// Read by the convergence check on a starts source (`gating.rs`) and by
+    /// `If2Run`. Absent in old fit_state.toml files — readers must treat
+    /// absence as "unknown", not "converged."
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tail_chain_agreement: BTreeMap<String, f64>,
 
@@ -67,19 +74,16 @@ pub struct FitState {
     pub perturb_only_at_t0_params: Vec<String>,
 
     /// Per-chain final log-likelihoods (the full distribution behind
-    /// `best_loglik`). Refine's post-run loglik-regression gate uses
-    /// the spread to compute its tolerance ε. Short vector; cheap to
-    /// serialise.
+    /// `best_loglik`). The convergence check on a starts source reads their
+    /// spread (`gating.rs`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chain_logliks: Vec<f64>,
 
     /// Per-chain CLEAN-EVAL log-likelihoods — the de-biased combined
-    /// score for each chain's winning candidate, in chain-id order. New
-    /// in proposal §Proposal 1 (Step 8); the compound scout-convergence
-    /// gate uses these together with `chain_eval_ses` to compute an
-    /// SE-aware decibans-spread threshold. Absent in pre-§Proposal 1
-    /// fit_state files; the gate falls back to the chain-agreement-only
-    /// check when this is empty.
+    /// score for each chain's winning candidate, in chain-id order. The
+    /// compound IF2 convergence check uses these together with
+    /// `chain_eval_ses` to compute an SE-aware decibans-spread threshold;
+    /// with this empty it falls back to the chain-agreement-only check.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chain_eval_logliks: Vec<f64>,
 
@@ -99,7 +103,7 @@ pub struct FitState {
     /// Per-chain clean-eval standard errors, parallel to
     /// `chain_eval_logliks`. `max(SE)` drives the SE-aware decibans
     /// floor: noisier chains get proportionally more tolerance before
-    /// the spread gate fires. New in §Proposal 1 (Step 8).
+    /// the spread check fails.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chain_eval_ses: Vec<f64>,
 
@@ -343,8 +347,8 @@ mod tests {
     }
 
     /// fit_state.toml round-trips through save/load with the new
-    /// Step-8/9 fields populated. Catches schema regressions where a
-    /// rename or type change would break the inter-method handoff.
+    /// clean-eval fields populated. Catches schema regressions where a
+    /// rename or type change would break a reader of the record.
     #[test]
     fn fit_state_round_trip_with_clean_eval_fields() {
         let dir = std::env::temp_dir().join(format!(
@@ -458,8 +462,7 @@ beta = 0.8
     }
 
     /// gh#901: the file names the inference method under the key the rest of
-    /// the tool uses. `fit_state.toml` is the inter-method handoff file — a
-    /// `from_mle` start reads it — and it spelled the method `method` after the
+    /// the tool uses. A `from_mle` start reads `fit_state.toml`, and it spelled the method `method` after the
     /// store levels, the config and the CLI had all moved to `method`. The
     /// assertion is two-sided: the new key is emitted *and* the old one is
     /// absent, so the rename cannot be half-reverted.
@@ -470,7 +473,7 @@ beta = 0.8
             "fit_state.toml must name the method under `method`:\n{body}");
         assert!(!body.contains("stage = "),
             "and must not spell it `stage`, which no other surface does:\n{body}");
-        // The reader is the other half of the handoff: a file written with the
+        // The reader is the other half: a file written with the
         // new key must load, and one written with the old key must not quietly
         // parse into a default.
         let back: FitState = toml::from_str(&body).expect("round-trips");
