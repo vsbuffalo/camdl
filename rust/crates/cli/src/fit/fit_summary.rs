@@ -21,23 +21,13 @@
 use crate::out::paint::{Painter, Stream, Style};
 use crate::fit::report::{Check, ChainDetail, MethodFacts};
 use crate::fit::report::render::*;
-use crate::fit::report::build::{
-    build_method_report, params_agree, read_param_values, CalendarContext, MethodReport,
-};
+use crate::fit::report::build::{build_method_report, CalendarContext, MethodReport};
 use crate::args::{FitSummaryArgs, FitSummaryFormat};
-use crate::chain_index::ChainIndex;
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
 use crate::fit::config_diff::ConfigDiff;
-use crate::fit::config_v2::GateConfig;
-use crate::fit::gating::AgreementBand;
 use crate::fit::fit_tree::{self, DataKind};
 use crate::fit::fit_view::FitView;
-use crate::fit::method_result::{
-    If2Record, If2Run, MaxRhat, MethodResult, MinEss, ParamConvergence,
-    PgasRun, PmmhRun, PosteriorDiagnostics, RhatBand, RHAT_CONVERGED_THRESHOLD,
-    Stat,
-};
-use crate::fit::state::FitState;
+use crate::fit::method_result::{MaxRhat, MethodResult, PosteriorDiagnostics};
 use crate::fit::table_row::{self, TableRow};
 use crate::version;
 use serde::Serialize;
@@ -308,24 +298,6 @@ fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
     }
 }
 
-/// The fit's model `#'` documentation dictionary — the model's own header block
-/// and its per-parameter docs, for the two legends at the top of the summary.
-/// Uses the same model-path recovery as [`load_calendar_context`]. Empty when
-/// the model can't be located or documents nothing, so an undocumented fit
-/// prints no legend at all.
-///
-/// One loader for both, because they come from one compile: asking twice would
-/// shell out to `camdlc` twice and let the two halves disagree about which
-/// model they describe.
-fn load_model_docs_for_fit(fit_dir: &Path) -> (ir::ModelDocs, Vec<ir::parameter::Constant>) {
-    // The envelope dictionary keys by base parameter name (`R0`, not
-    // `R0_urban`), so a stratified family shows once — `BTreeMap` order is
-    // deterministic. The model's constants come from the same compile.
-    load_fit_envelope(fit_dir)
-        .map(|env| (env.docs, env.model.constants))
-        .unwrap_or_default()
-}
-
 /// The fit's model, compiled from the source path its records name.
 fn load_fit_envelope(fit_dir: &Path) -> Option<ir::IrEnvelope> {
     let model_path = FitView::read(fit_dir)
@@ -403,15 +375,6 @@ fn exit_if_nothing_loaded(dir: &str, discovered: &[ResolvedMethod], failures: &[
         eprintln!("  {}: {}", f.leaf, f.reason);
     }
     std::process::exit(1);
-}
-
-/// The run id a leaf's stored-fit `starts` source resolved to, from its
-/// run.json `inputs.starts_source.run_id` (gh#896); `None` for a run that did
-/// not start from a stored fit.
-fn starts_source_run(method_dir: &Path) -> Option<String> {
-    let bytes = std::fs::read(method_dir.join("run.json")).ok()?;
-    let rec: runid::RunRecord = serde_json::from_slice(&bytes).ok()?;
-    rec.inputs.get("starts_source")?.get("run_id")?.as_str().map(String::from)
 }
 
 /// Walk the fit_dir and return one `ResolvedMethod` per completed method
@@ -495,7 +458,7 @@ fn format_text(
     let mut failures: Vec<LoadFailure> = Vec::new();
     let painter = Painter::for_stream(Stream::Stdout, args.no_color);
     let cal = load_calendar_context(Path::new(dir));
-    let fmt = Formatter { painter, cal, explain: args.explain };
+    let fmt = Formatter { painter };
     let mut had_provenance_failure = false;
     // Emit the loud selection advisory (nudge + warning) once, from the first
     // Bayesian method that recomputes.
@@ -503,7 +466,13 @@ fn format_text(
 
     print!("{}", fmt.fit_header(dir));
 
-    let (docs, constants) = load_model_docs_for_fit(Path::new(dir));
+    // One compile of the fit's model: its `#'` docs and constants for the
+    // legends, its observation streams for the method reports' checks.
+    let envelope = load_fit_envelope(Path::new(dir));
+    let model = envelope.as_ref().map(|env| &env.model);
+    let (docs, constants) = envelope.as_ref()
+        .map(|env| (env.docs.clone(), env.model.constants.clone()))
+        .unwrap_or_default();
 
     // What this model IS, from its file-header `#'` block (gh#750) — so the
     // first question a summary raises ("a fit of what?") is answered without
@@ -528,10 +497,10 @@ fn format_text(
     // The camdl version is a fact about the FIT, so it opens the first method's
     // identity line and is not repeated on the others'. A fit with no method at
     // all still has to report it, below.
-    let mut version_lead = format!("camdl {} · ", fmt.dim(version::VERSION_SHORT));
+    let mut first = true;
 
     for resolved in methods {
-        let lead = std::mem::take(&mut version_lead);
+        let version_lead = std::mem::replace(&mut first, false);
         let method_dir_str = resolved.method_dir.to_string_lossy().into_owned();
         // A leaf whose chain directories count from 1 is refused before
         // anything on it is read: its per-chain table would label chain_N/ as
@@ -586,42 +555,52 @@ fn format_text(
             }
         }
 
-        match &typed {
-            MethodResult::If2(if2) => {
-                // Everything the IF2 block shows was read with the typed
-                // result (`If2Run::record`): `fit_state.toml` is read once.
-                let block = fmt.method_block(
-                    &lead,
-                    &resolved.name,
-                    &method_dir_str,
-                    if2,
-                );
-                if block.provenance_failed {
+        // Everything the text reads from the leaf beside the typed result,
+        // read once, here.
+        let chain_detail = match &typed {
+            MethodResult::Pgas(_) | MethodResult::Pmmh(_) => Some(ChainDetail::gather(
+                &resolved.method_dir,
+                ll_kind,
+                matches!(typed, MethodResult::Pgas(_)),
+                subset_info,
+                forkability(dir, &resolved.name, selection),
+            )),
+            MethodResult::If2(_) => Some(ChainDetail::default()),
+            MethodResult::Nlopt(_) | MethodResult::Pfilter(_) => None,
+        };
+        let report = match load_method_facts(resolved, typed, model, chain_detail) {
+            Ok(facts) => build_method_report(facts, &cal),
+            Err(e) => {
+                eprintln!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e);
+                failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
+                continue;
+            }
+        };
+
+        match &report.method_result {
+            Some(MethodResult::If2(if2)) => {
+                if report.provenance_failed() {
                     had_provenance_failure = true;
                 }
-                print!("{}", block.text);
+                print!("{}", fmt.paint(&if2_block(version_lead, &report, if2)));
             }
-            MethodResult::Pgas(pgas) => {
-                print!(
-                    "{}",
-                    fmt.bayesian_block(&lead, &resolved.name, "pgas", &resolved.method_dir, BayesianView::Pgas(pgas), subset_info.as_ref(), ll_kind, forkability(dir, &resolved.name, selection).as_ref())
-                );
+            Some(MethodResult::Pgas(_) | MethodResult::Pmmh(_)) => {
+                print!("{}", fmt.paint(&bayesian_block(version_lead, &report, args.explain)));
             }
-            MethodResult::Pmmh(pmmh) => {
-                print!(
-                    "{}",
-                    fmt.bayesian_block(&lead, &resolved.name, "pmmh", &resolved.method_dir, BayesianView::Pmmh(pmmh), subset_info.as_ref(), ll_kind, forkability(dir, &resolved.name, selection).as_ref())
-                );
-            }
-            MethodResult::Nlopt(r) => {
+            Some(MethodResult::Nlopt(r)) => {
                 // NLopt methods are point-estimate (like IF2) but with no
                 // FitState-rendered IF2 gate to display. Print a compact
                 // headline + the theta_hat table from the typed payload.
-                println!("\n  {}{} · {}", lead, fmt.bold(&resolved.name), r.algorithm);
+                let lead = if version_lead {
+                    format!("camdl {} · ", fmt.dim(version::VERSION_SHORT))
+                } else {
+                    String::new()
+                };
+                println!("\n  {}{} · {}", lead, fmt.bold(&report.name), r.algorithm);
                 println!(
                     "    loglik:   {:.2} ({})     converged chains: {}/{}",
                     r.best_loglik,
-                    crate::fit::loglik::LoglikType::from(&typed).tag(),
+                    crate::fit::loglik::LoglikType::tag_or_unknown(report.loglik_type),
                     r.n_converged, r.n_chains
                 );
                 match r.chain_agreement() {
@@ -635,19 +614,25 @@ fn format_text(
                 let w = name_col_width(r.theta_hat.keys().map(String::as_str), 14);
                 for (k, v) in &r.theta_hat {
                     let shown = fit_name(k, w);
-                    match fmt.cal.date_for(k, *v) {
+                    match report.param_dates.get(k) {
                         Some(date) => println!("      {:<w$} = {}  ({})", shown, v, date),
                         None => println!("      {:<w$} = {}", shown, v),
                     }
                 }
             }
-            MethodResult::Pfilter(r) => {
+            Some(MethodResult::Pfilter(r)) => {
                 // A likelihood at fixed parameters: the mean and spread over
                 // its replicate filters, as the run printed them.
-                println!("\n  {}{} · pfilter", lead, fmt.bold(&resolved.name));
+                let lead = if version_lead {
+                    format!("camdl {} · ", fmt.dim(version::VERSION_SHORT))
+                } else {
+                    String::new()
+                };
+                println!("\n  {}{} · pfilter", lead, fmt.bold(&report.name));
                 println!("    loglik = {:.1} ± {:.1} ({} reps, {} particles)",
                     r.ll_mean, r.ll_sd, r.n_replicates, r.n_particles);
             }
+            None => {}
         }
     }
 
@@ -695,12 +680,13 @@ fn forkability(
     dir: &str,
     method: &str,
     selection: Option<&ChainSelection>,
-) -> Option<crate::fit::joint::JointEnsemble> {
+) -> Option<crate::fit::report::Forkable> {
     crate::posterior_draws::resolve_posterior_draws(dir, Some(method))
         .map_err(String::from)
         .map(|p| p.with_selection(selection.cloned()))
         .and_then(|p| crate::fit::joint::resolve_joint(&p))
         .ok()
+        .map(|j| crate::fit::report::Forkable { n_forkable: j.n_forkable, n_total: j.n_total, selection: j.selection })
 }
 
 fn format_json(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
@@ -737,35 +723,11 @@ fn format_latex(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: 
     doc.failures
 }
 
-enum BayesianView<'a> {
-    Pgas(&'a PgasRun),
-    Pmmh(&'a PmmhRun),
-}
-
 // ── Formatting layer ────────────────────────────────────────────────
 
 struct Formatter {
     /// The stdout painter under `--no-color` (`Painter::for_stream`).
     painter: Painter,
-    /// Calendar context for date-rendering `instant`-kind estimands.
-    /// Empty (no origin / no instant params) → numeric-only.
-    cal: CalendarContext,
-    /// `--explain`: append each section's term definitions under its table.
-    explain: bool,
-}
-
-struct MethodBlock {
-    text: String,
-    provenance_failed: bool,
-}
-
-/// How loud a note under a table is. Not a severity the code branches on —
-/// only which colour [`Formatter::note`] paints it.
-#[derive(Clone, Copy)]
-enum Tone {
-    Dim,
-    Warn,
-    Err,
 }
 
 /// The max-R̂ cell for the export formats: the number, or a word saying why
@@ -789,1333 +751,15 @@ impl Formatter {
         format!("\n{}/\n", self.bold(dir))
     }
 
-    /// A section rule: `── name ─────…` to [`SECTION_WIDTH`].
-    ///
-    /// One horizontal character and nothing else. A box — corners, verticals,
-    /// junctions — has to stay aligned to read as a box, and a terminal
-    /// narrower than the table breaks it into rubble; a rule that is simply
-    /// too long just wraps, and the section is still findable.
-    fn section(&self, name: &str) -> String {
-        let used = 3 + name.chars().count() + 1;
-        format!(
-            "\n{} {} {}\n",
-            self.dim("──"),
-            self.bold(name),
-            self.dim(&"─".repeat(SECTION_WIDTH.saturating_sub(used))),
-        )
-    }
-
-    /// A note under a table, wrapped to the section width and indented with
-    /// the rows.
-    ///
-    /// Diagnostics here run to two hundred characters — the shortfall
-    /// explanation, the outlier nudge, the reason a column is missing — and an
-    /// unwrapped one is folded by the terminal at whatever column it happens to
-    /// be, mid-word, which is how a finding stops being read.
-    fn note(&self, tone: Tone, text: &str) -> String {
-        let mut s = String::new();
-        for line in wrap(text, SECTION_WIDTH - 2) {
-            s.push_str(&format!("  {}\n", match tone {
-                Tone::Dim => self.dim(&line),
-                Tone::Warn => self.warn(&line),
-                Tone::Err => self.err(&line),
-            }));
-        }
-        s
-    }
-
-    /// The `--explain` block for `section`, or nothing — because the flag is
-    /// off, or because this section defines no term of its own.
-    ///
-    /// Rendered dim and indented past the table's own rows, so it reads as
-    /// subordinate to the numbers rather than as another row of them.
-    fn explain(&self, section: &str) -> String {
-        if !self.explain {
-            return String::new();
-        }
-        let Some((_, text)) = EXPLAIN.iter().find(|(k, _)| *k == section) else {
-            return String::new();
-        };
-        let mut s = String::from("\n");
-        for line in wrap(text, SECTION_WIDTH - 6) {
-            s.push_str(&format!("      {}\n", self.dim(&line)));
-        }
-        s
-    }
-
-    /// One method's identity line: what ran, with what, over how much.
-    ///
-    /// `lead` carries the fit-level facts that belong on the first method's line
-    /// and nowhere else (the camdl version), so a fit with several method leaves states them
-    /// once. `extra` is whatever the method alone can say — for PGAS, how many
-    /// chains left a latent path behind.
-    fn identity_line(&self, lead: &str, name: &str, method: &str, extra: &[String]) -> String {
-        let mut parts = vec![self.bold(name), method.to_string()];
-        parts.extend(extra.iter().cloned());
-        format!("  {}{}\n", lead, parts.join(" · "))
-    }
-
-    /// One line per chain refused at its start, each carrying the refusal's
-    /// own reason — for PGAS the log-likelihood breakdown (transition,
-    /// observation, ivp, prior), which says which term was impossible. Empty
-    /// when nothing was refused.
-    fn refused_chains_lines(&self, refused: &RefusedChains) -> String {
-        let mut s = String::new();
-        for e in &refused.unreadable {
-            s.push_str(&format!("  {}\n", self.warn(e)));
-        }
-        for (chain, reason) in &refused.records {
-            s.push_str(&format!("  {} chain {chain}: {reason}\n", self.warn("refused")));
-        }
-        s
-    }
-
-    /// Where the chains began — the rule as written and whether it spread
-    /// them — under every leaf's identity line, so the reader of an R̂ (or an
-    /// Â) knows what it can and cannot say. A leaf written before the fields
-    /// existed says `unknown` rather than a guess.
-    /// `source_run` is the run id a stored-fit source resolved to when this
-    /// run started (run.json `inputs.starts_source.run_id`, gh#896): the
-    /// handle is how the rule was written, the run id is what it read.
-    fn seeded_from_line(
-        &self,
-        source: Option<&str>,
-        kind: Option<crate::fit::starts::ChainStartsKind>,
-        source_run: Option<&str>,
-    ) -> String {
-        let named;
-        let source = match (source, source_run) {
-            (Some(src), Some(id)) => {
-                named = format!("{src}, run {}", &id[..12.min(id.len())]);
-                Some(named.as_str())
-            }
-            (src, _) => src,
-        };
-        let what = match (source, kind) {
-            (Some(src), Some(k)) => format!(
-                "{} ({})",
-                src,
-                match k {
-                    crate::fit::starts::ChainStartsKind::Spread => "one independent draw per chain",
-                    crate::fit::starts::ChainStartsKind::Point => "every chain at one point",
-                }
-            ),
-            (Some(src), None) => src.to_string(),
-            (None, _) => "unknown".to_string(),
-        };
-        format!("  seeded from:  {}\n", what)
-    }
-
-    fn method_block(
-        &self,
-        lead: &str,
-        method: &str,
-        method_dir: &str,
-        if2: &If2Run,
-    ) -> MethodBlock {
-        let state = &if2.record;
-        let typed = Some(if2);
-        let mut s = String::new();
-
-        let refused = RefusedChains::load(Path::new(method_dir));
-        s.push_str(&self.identity_line(
-            lead, method, "if2",
-            &[refused
-                .ran_of(state.n_chains, state.n_good_chains)
-                .unwrap_or_else(|| format!("{} chains", state.n_chains))],
-        ));
-        s.push_str(&self.refused_chains_lines(&refused));
-        s.push_str(&self.seeded_from_line(
-            state.chain_init_source.as_deref(),
-            state.chain_starts_kind,
-            starts_source_run(Path::new(method_dir)).as_deref(),
-        ));
-        s.push('\n');
-
-        // Headline — type tag *after* the number (gh#280), so a scraper
-        // reading `loglik=<num>` stops at the first non-numeric char.
-        s.push_str(&format!("  best loglik:  {:.1} ({})",
-            if2.best_loglik,
-            crate::fit::loglik::LoglikType::tag_or_unknown(state.loglik_type)));
-        if !state.chain_eval_logliks.is_empty() {
-            // The headline loglik is the cross-chain max of the
-            // re-scored per-chain values (loglik-eval — see
-            // crates/cli/src/fit/loglik_eval.rs for the pipeline,
-            // and the per-chain table below for breakdown).
-            s.push_str("  (loglik-eval, max across chains)");
-        }
-        s.push('\n');
-        if let Some(ref v) = state.camdl_version {
-            if v != version::VERSION_SHORT {
-                s.push_str(&format!("                {}\n",
-                    self.warn(&format!("⚠ stale: produced by {}, current is {}",
-                        v, version::VERSION_SHORT))));
-            }
-        }
-        s.push('\n');
-
-        // Compound-gate verdict
-        s.push_str(&self.gate_verdict_block(state));
-
-        // Per-parameter table
-        s.push_str(&self.parameter_table(state, Some(std::path::Path::new(method_dir))));
-
-        // Per-chain loglik-eval table
-        if !state.chain_eval_logliks.is_empty() {
-            s.push_str(&self.chain_loglik_eval_table(state));
-        }
-
-        // ESS-at-MLE — surfaced from the typed payload only, not from
-        // FitState (FitState doesn't carry it; the loader extracts it
-        // from chain_evaluations.tsv).
-        if let Some(if2) = typed {
-            if let Some(ess) = &if2.ess_at_mle {
-                s.push_str(&format!("  {}\n", self.bold("ESS at θ̂")));
-                s.push_str(&format!(
-                    "    min  = {:>8.0}{}    mean = {:>8.0}\n",
-                    ess.ess_min,
-                    match ess.ess_min_step {
-                        Some(step) => format!("  (at obs step {})", step),
-                        None => String::new(),
-                    },
-                    ess.ess_mean,
-                ));
-                s.push('\n');
-            }
-        }
-
-        // Richardson dt-convergence verdict (gh#52). Rendered when
-        // populated (every IF2 method post-§Proposal-1 where dt_check
-        // is enabled); legacy fit_state.toml or `enabled = false`
-        // skips the block.
-        if let Some(dt_check) = &state.dt_check {
-            s.push_str(&self.dt_check_block(dt_check));
-        }
-
-        // Provenance cross-check (#16 fixture, every read)
-        let prov = self.provenance_block(method_dir, state);
-        let provenance_failed = prov.failed;
-        s.push_str(&prov.text);
-
-        s.push('\n');
-        MethodBlock { text: s, provenance_failed }
-    }
-
-    /// Render the gh#52 Richardson dt-convergence verdict line +
-    /// optional ladder. Pass case is one line; fail/marginal includes
-    /// the ladder rows for context.
-    fn dt_check_block(&self, dt_check: &super::dt_check::DtCheckResult) -> String {
-        use super::dt_check::DtCheckVerdict;
-        let mut s = String::new();
-        s.push_str(&format!("  {}\n", self.bold("dt-convergence at θ̂ (Richardson)")));
-        let label = match dt_check.verdict {
-            DtCheckVerdict::Pass     => self.ok("PASS"),
-            DtCheckVerdict::Marginal => self.warn("MARGINAL"),
-            DtCheckVerdict::Fail     => self.err("FAIL"),
-            DtCheckVerdict::Skipped  => "skipped".to_string(),
-        };
-        s.push_str(&format!("    verdict: {}    ({})\n", label, dt_check.notes));
-        // Ladder rows for non-pass verdicts; the pass case's
-        // numbers are already in `notes` and the ladder is noise.
-        if !matches!(dt_check.verdict, DtCheckVerdict::Pass | DtCheckVerdict::Skipped) {
-            s.push_str(&format!(
-                "    threshold τ = {:.2} nats  (SE-aware floor 4·σ_max = {:.2})\n",
-                dt_check.threshold_nats, dt_check.threshold_se_aware_nats));
-            for (i, rung) in dt_check.ladder.iter().enumerate() {
-                let tag = if i == 0 { "(fit)" } else { "" };
-                s.push_str(&format!(
-                    "    dt = {:>7.4}   ll = {:>9.2} ± {:.2}   {}\n",
-                    rung.dt, rung.loglik, rung.se, tag));
-            }
-            if dt_check.pf_se_inflation {
-                s.push_str(&format!(
-                    "    {} PF-SE inflated as dt halved (auxiliary signal).\n",
-                    self.warn("⚠")));
-            }
-            if matches!(dt_check.verdict, DtCheckVerdict::Fail) {
-                s.push_str("    Note: synthetic recovery shares this dt and \
-                    cannot detect dt bias by itself.\n");
-            }
-        }
-        s.push('\n');
-        s
-    }
-
-    /// The gate config to render an Â against. Priority:
-    ///   1. `state.resolved_gate` (Phase 3 — the value actually used)
-    ///   2. `GateConfig::default()`, with a "(thresholds unknown)" caveat
-    ///
-    /// Shared by the gate block and the parameter table so the two cannot
-    /// glyph one number against two different thresholds.
-    fn resolve_gate(state: &If2Record) -> (GateConfig, GateThresholdSource) {
-        match &state.resolved_gate {
-            Some(g) => (g.clone(), GateThresholdSource::Resolved),
-            None => (GateConfig::default(), GateThresholdSource::DefaultFallback),
-        }
-    }
-
-    /// One Â glyph, painted. The band comes from the gate; only the colour is
-    /// this renderer's own.
-    fn a_glyph(&self, gate: &GateConfig, a: f64) -> String {
-        match gate.a_band(a) {
-            AgreementBand::Pass => self.ok("✓"),
-            AgreementBand::SoftWarn => self.warn("~"),
-            AgreementBand::Fail => self.err("✗"),
-            AgreementBand::NotAssessed => self.dim("n/a").to_string(),
-        }
-    }
-
-    fn gate_verdict_block(&self, state: &If2Record) -> String {
-        let mut s = String::new();
-        s.push_str(&format!("  {}\n", self.bold("compound scout-convergence gate")));
-
-        let (gate, threshold_source) = Self::resolve_gate(state);
-
-        // Both legs from the one measurement the source check and `fit
-        // table` read, so the three cannot disagree about this fit.
-        let assessed = crate::fit::gating::assess_if2(state, &gate);
-
-        // Â leg — over every estimated parameter, initial-state ones
-        // included; the dynamics-only sub-verdict is reported beside it.
-        let (max_a, max_a_param) = assessed.worst()
-            .map(|(n, a)| (a, n))
-            .unwrap_or((0.0, "—".into()));
-        let a_passes = assessed.a_passes();
-        let a_glyph = if a_passes { self.ok("✓") } else { self.err("✗") };
-        s.push_str(&format!(
-            "    Â leg:           max Â = {:.3} ({})  {}  (threshold {:.2})\n",
-            max_a, max_a_param, a_glyph, gate.a_thresh));
-        if !assessed.unavailable.is_empty() {
-            s.push_str(&format!(
-                "    {}\n",
-                self.warn(&format!("Â unavailable (not finite), so not a pass: {}",
-                    assessed.unavailable.join(", ")))));
-        }
-        if !assessed.perturb_only_at_t0.is_empty() {
-            let dynamics = if assessed.dynamics_a_passes(&gate) { "✓" } else { "✗" };
-            s.push_str(&format!(
-                "    {}\n",
-                self.dim(&format!("dynamics only (without perturb_only_at_t0): {dynamics}"))));
-        }
-
-        // Decibans leg
-        if let Some(leg) = assessed.spread {
-            let db_passes = leg.passes();
-            let db_glyph = if db_passes { self.ok("✓") } else { self.err("✗") };
-            s.push_str(&format!(
-                "    decibans leg:    Δ = {:.1} dB / threshold {:.1} dB  {}  (σ_max={:.2})\n",
-                leg.delta_db, leg.threshold_db, db_glyph, leg.sigma_max));
-
-        } else {
-            s.push_str(&format!("    decibans leg:    {} (loglik-eval data not present)\n",
-                self.dim("—")));
-        }
-        let overall = if assessed.is_not_assessed() {
-            self.warn("— NOT ASSESSED (one chain: nothing to compare between chains)")
-        } else if let (true, Some(lost)) = (assessed.is_incomplete(), assessed.lost_chains) {
-            self.warn(&format!(
-                "— INCOMPLETE ({} of {} chains lost mid-run; not a pass)",
-                lost.lost(), lost.started))
-        } else if assessed.is_incomplete() {
-            self.warn("— INCOMPLETE (not a pass)")
-        } else if assessed.passes() {
-            self.ok("✓ PASS")
-        } else {
-            self.err("✗ FAIL")
-        };
-        s.push_str(&format!("    overall:         {}\n", overall));
-
-        match threshold_source {
-            GateThresholdSource::Resolved => {}
-            GateThresholdSource::DefaultFallback => {
-                s.push_str(&format!("    {}\n", self.warn(
-                    "(thresholds unknown — fit_state.toml predates Phase 3; \
-                     showing GateConfig::default())"
-                )));
-            }
-        }
-        s.push('\n');
-        s
-    }
-
-    fn parameter_table(&self, state: &If2Record, method_dir: Option<&std::path::Path>) -> String {
-        let mut s = String::new();
-        // The Â column is glyphed against the SAME gate the block above
-        // reports, so one number cannot print ✗ there and ✓ here.
-        let (gate, _) = Self::resolve_gate(state);
-        s.push_str(&format!(
-            "  {}  {}\n",
-            self.bold("parameter estimates (loglik-eval, selected chain θ̂)"),
-            self.dim(&format!("Â threshold {:.2}", gate.a_thresh))));
-        if state.start_values.is_empty() {
-            s.push_str(&format!("    {}\n", self.dim("(no start_values in fit_state.toml)")));
-            s.push('\n');
-            return s;
-        }
-        let t0_set: std::collections::HashSet<&str> =
-            state.perturb_only_at_t0_params.iter()
-            .map(|s| s.as_str()).collect();
-        let mut keys: Vec<&String> = state.start_values.keys().collect();
-        keys.sort();
-        // Filter to params we have agreement data for (these are the
-        // estimated ones); fixed params are noise here. Fall back to
-        // showing everything if no agreement data.
-        // The estimated parameters (Â's keys, else the fit's record of
-        // them); fixed params are noise here. Everything only when the leaf
-        // records neither.
-        let estimated = crate::fit::method_result::estimated_names(method_dir, &state.tail_chain_agreement);
-        let est_keys: Vec<&String> = keys.iter()
-            .filter(|k| estimated.as_ref().is_none_or(|set| set.contains(k.as_str())))
-            .copied().collect();
-        // Sized to the names present: `{:12}` was a minimum width, so a
-        // longer name shifted the `=` and every column after it.
-        let w = name_col_width(est_keys.iter().map(|k| k.as_str()), 12);
-        // Rendered once so the value column can be sized to them too. `{:.6}`
-        // bounds the decimals but not the integer part, so a population-sized
-        // estimate (1e6 renders 14 characters) overran the 12-wide field and
-        // shifted the Â column and everything after it on that row alone.
-        let vals: Vec<String> =
-            est_keys.iter().map(|k| format!("{:.6}", state.start_values[*k])).collect();
-        let vw = num_col_width(vals.iter().map(|v| v.as_str()), 12);
-        for (k, val) in est_keys.iter().zip(&vals) {
-            let k = *k;
-            let v = state.start_values[k];
-            let agreement = state.tail_chain_agreement.get(k).copied();
-            let agreement_str = match agreement {
-                // A collapsed within-chain variance leaves no Â at all; say so
-                // rather than printing `Â=NaN ✗`, which reads as a failure the
-                // estimator never assessed (gh#45).
-                Some(r) if !r.is_finite() => {
-                    self.dim("Â unavailable — verdict incomplete").to_string()
-                }
-                Some(r) => format!("Â={:.3} {}", r, self.a_glyph(&gate, r)),
-                None => self.dim("Â=—").to_string(),
-            };
-            let t0_marker = if t0_set.contains(k.as_str()) {
-                format!(" {}", self.dim("(t0-only)"))
-            } else {
-                String::new()
-            };
-            let date_marker = match self.cal.date_for(k, v) {
-                Some(date) => format!("  ({})", date),
-                None => String::new(),
-            };
-            s.push_str(&format!("    {:w$} = {:<vw$}  {}{}{}\n",
-                fit_name(k, w), val, agreement_str, t0_marker, date_marker));
-        }
-        s.push('\n');
-        s
-    }
-
-    fn chain_loglik_eval_table(&self, state: &If2Record) -> String {
-        let mut s = String::new();
-        let n = state.chain_eval_logliks.len();
-        s.push_str(&format!("  {}\n",
-            self.bold(&format!("per-chain loglik-eval ({} chains)", n))));
-        let best_idx = state.chain_eval_logliks.iter().enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i);
-        // ESS columns added in Phase 2. Today fit_state.toml only
-        // carries the per-chain ll + se; per-chain ESS lives in
-        // <method>_summary.json's `chains[]`. Phase 1 of summary keeps
-        // the table simple and reads only what's already in
-        // fit_state.toml; ESS surfacing in this table waits for a
-        // Phase 4 follow-up that loads <method>_summary.json. Note
-        // here so a future reader doesn't think it was forgotten.
-        // The ids are read, never reconstructed from the position.
-        // `ChainResults::chain_eval_logliks` sorts by chain id and then drops
-        // it, and IF2 removes PF-degenerate chains before that, so row `i` is
-        // not chain `i + 1` on any fit where a chain was dropped -- which put
-        // the `<- selected` marker on the wrong chain. A fit_state written
-        // before `chain_eval_ids` existed carries none, and the table is
-        // omitted rather than mislabelled (alpha posture: no fallback).
-        if state.chain_eval_ids.len() != n {
-            s.push_str(&format!("    {}\n", self.dim(
-                "(omitted: this fit_state predates per-chain ids, and a row \
-                 position is not a chain number once a chain has been dropped)")));
-            s.push('\n');
-            return s;
-        }
-        s.push_str(&format!("    {:6} {:>12}   {:>6}\n", "chain", "loglik", "± se"));
-        for i in 0..n {
-            let ll = state.chain_eval_logliks[i];
-            let se = state.chain_eval_ses.get(i).copied().unwrap_or(f64::NAN);
-            // Marker for the chain whose θ̂ is reported as the MLE
-            // (cross-chain argmax of clean re-scored loglik).
-            // "selected" rather than "winner" — neutral, no competition
-            // framing; describes the operation (the cross-chain argmax
-            // selected this chain's θ̂ as the reported MLE).
-            let marker = if Some(i) == best_idx {
-                format!("  {}", self.ok("← selected"))
-            } else {
-                String::new()
-            };
-            s.push_str(&format!("    {:6} {:>12.2}   ± {:>4.2}{}\n",
-                state.chain_eval_ids[i], ll, se, marker));
-        }
-        s.push('\n');
-        s
-    }
-
-    /// Bayesian (PGAS / PMMH / MH) method block.
-    ///
-    /// Reading order is the whole design: what ran, then the verdict, then the
-    /// estimates, then the diagnostics that qualify them. Convergence detail
-    /// used to open the block and the posterior summary closed it, so the
-    /// answer a reader came for sat sixty-five lines below the first thing they
-    /// saw. Nothing is hidden to achieve the inversion — every section still
-    /// carries its full table.
-    ///
-    /// `ll_kind` is the method's log-likelihood class, derived once by the
-    /// caller from the typed `MethodResult` (the single authority — see
-    /// `loglik::LoglikType`). It decides which per-chain trace column the
-    /// outlier table may compare (gh#667); it is not re-derived here, so the
-    /// summary and every other surface cannot disagree about it.
-    #[allow(clippy::too_many_arguments)]
-    fn bayesian_block(
-        &self,
-        lead: &str,
-        name: &str,
-        method: &str,
-        method_dir: &Path,
-        view: BayesianView<'_>,
-        subset: Option<&SubsetInfo>,
-        ll_kind: super::loglik::LoglikType,
-        forkable: Option<&crate::fit::joint::JointEnsemble>,
-    ) -> String {
-        // Convergence + efficiency come from the shared diagnostics; the
-        // method-specific extras (acceptance summary, the highest-draw loglik) are pulled
-        // per variant. Every Bayesian sampler routes through this one block.
-        let (diag, posterior_mean, acceptance_summary, map_loglik) = match view {
-            BayesianView::Pgas(r) => (&r.diagnostics, &r.posterior_mean, None::<f64>, None::<f64>),
-            BayesianView::Pmmh(r) => (
-                &r.diagnostics,
-                &r.posterior_mean,
-                Some(r.acceptance_rate),
-                Some(r.map_loglik),
-            ),
-        };
-        let is_pgas = matches!(view, BayesianView::Pgas(_));
-        let facts = ChainDetail::gather(method_dir, ll_kind, is_pgas);
-
-        let mut s = String::new();
-
-        // Identity. With an active chain selection `diag.n_chains` is already
-        // the RETAINED count (recomputed), so name the subset and what was
-        // dropped rather than printing a total that is no longer the total.
-        // Read for the refused-chain count in the identity line only: a
-        // display detail, not a verdict. The method result above already
-        // read this leaf, so an unreadable file has been reported there.
-        let state = FitState::load(&method_dir.to_string_lossy()).ok();
-        // gh#663: a chain refused at its start is named here, from its durable
-        // record, rather than folded into a chain count that reads as a normal
-        // run.
-        let refused = RefusedChains::load(method_dir);
-        let ran_of = state.as_ref().and_then(|st| refused.ran_of(st.n_chains, st.n_good_chains));
-        let mut extra = vec![match (subset, &ran_of) {
-            (Some(info), _) => format!(
-                "{} of {} chains (excluded {})",
-                info.kept.len(), info.n_total, info.excluded_csv()
-            ),
-            (None, Some(text)) => text.clone(),
-            (None, None) => format!("{} chains", diag.n_chains),
-        }];
-        extra.push(format!("{} draws", diag.n_samples));
-        if facts.n_chains_with_paths > 0 {
-            extra.push(format!("{} chains saved paths", facts.n_chains_with_paths));
-        }
-        if let Some(ll) = map_loglik {
-            // `map_loglik` is the log-likelihood of the visited draw that
-            // maximised log-likelihood + log prior, the prior on the natural
-            // scale with no transform Jacobian: not a MAP estimate, and not
-            // an MLE. Said as what it is.
-            extra.push(format!(
-                "loglik {:.1} at the highest log-posterior draw (natural-scale prior, no Jacobian)",
-                ll));
-        }
-        s.push_str(&self.identity_line(lead, name, method, &extra));
-        s.push_str(&self.refused_chains_lines(&refused));
-        s.push_str(&self.seeded_from_line(
-            state.as_ref().and_then(|st| st.chain_init_source.as_deref()),
-            state.as_ref().and_then(|st| st.chain_starts_kind),
-            starts_source_run(Path::new(method_dir)).as_deref(),
-        ));
-
-        s.push_str(&self.verdict_block(diag, &facts, subset, forkable));
-        s.push_str(&self.posterior_section(diag, posterior_mean));
-        s.push_str(&self.convergence_section(diag, acceptance_summary));
-        s.push_str(&self.chains_section(method_dir, diag.n_chains, &facts, subset));
-        if is_pgas {
-            s.push_str(&self.latent_paths_section(method_dir, &facts));
-        }
-        s
-    }
-
-    /// The answer, before any table: did this fit converge, and what are the
-    /// two or three numbers that qualify the answer.
-    ///
-    /// Every fact on the second and third lines is also a column somewhere
-    /// below — the point is that a reader who stops here has not been misled,
-    /// and a reader who continues knows what to look for.
-    fn verdict_block(
-        &self,
-        diag: &PosteriorDiagnostics,
-        facts: &ChainDetail,
-        subset: Option<&SubsetInfo>,
-        forkable: Option<&crate::fit::joint::JointEnsemble>,
-    ) -> String {
-        let mut s = String::from("\n");
-        match diag.max_rhat_status() {
-            MaxRhat::Reported(v) => {
-                // The same band the method's own end-of-run block glyphs
-                // against, so one R̂ cannot read ✓ when the fit finishes and ✗
-                // here. The verdict is also spelled out: on a surface a
-                // public-health decision is read off, a glyph should not have
-                // to carry the whole meaning.
-                let band = RhatBand::of(v);
-                let glyph = match band {
-                    RhatBand::Converged => self.ok(band.glyph()),
-                    RhatBand::NotConverged => self.warn(band.glyph()),
-                    RhatBand::Severe => self.err(band.glyph()),
-                    RhatBand::NotAssessed => self.dim(band.glyph()).to_string(),
-                };
-                s.push_str(&format!("  {} {}\n", glyph, band.describe()));
-                let carrier = match worst_rhat_param(diag) {
-                    Some((name, _)) => format!(" ({})", name),
-                    None => String::new(),
-                };
-                s.push_str(&format!(
-                    "    max R̂ {:.3}{}, threshold {}\n",
-                    v, carrier, RHAT_CONVERGED_THRESHOLD
-                ));
-                let n_above = diag
-                    .per_param
-                    .values()
-                    .filter(|p| match p.rhat() {
-                        Stat::Value(x) => x >= RHAT_CONVERGED_THRESHOLD,
-                        Stat::Infinite => true,
-                        Stat::Undefined => false,
-                    })
-                    .count();
-                s.push_str(&self.verdict_facts(
-                    Some(format!(
-                        "{} of {} parameters above threshold",
-                        n_above,
-                        diag.per_param.len()
-                    )),
-                    facts,
-                    subset,
-                    forkable,
-                ));
-            }
-            MaxRhat::Unassessable { params } => {
-                s.push_str(&format!("  {} NOT converged\n", self.err("✗")));
-                s.push_str(&format!(
-                    "    R̂ is unavailable for {} of {} parameters (a sampler failure, or a \
-                     summary that does not record it), so the fit is not certified\n",
-                    params.len(),
-                    diag.per_param.len()
-                ));
-                s.push_str(&self.verdict_facts(
-                    Some("each parameter's reason is under `convergence`".to_string()),
-                    facts,
-                    subset,
-                    forkable,
-                ));
-            }
-            MaxRhat::NotApplicable { reason } => {
-                s.push_str(&format!("  {} not assessed\n", self.dim("—")));
-                // The refusal with its numbers, when the leaf carries them:
-                // "all 4 chains started at one point (starts = from_mle @mle)"
-                // says what the bare classification cannot.
-                let detail = diag.per_param.values().find_map(|p| match p {
-                    ParamConvergence::Scored { rhat_withheld: Some(e), .. }
-                    | ParamConvergence::NotScored { detail: Some(e), .. } => Some(e.to_string()),
-                    _ => None,
-                });
-                match detail {
-                    Some(d) => s.push_str(&format!("    R̂ — not assessed: {}\n", d)),
-                    None => s.push_str(&format!(
-                        "    a between-chain statistic was never possible here: {}\n",
-                        reason.describe()
-                    )),
-                }
-                s.push_str(&self.verdict_facts(None, facts, subset, forkable));
-            }
-            MaxRhat::NoParams => {
-                s.push_str(&format!("  {} not assessed\n", self.dim("—")));
-                s.push_str("    no parameter was assessed across chains\n");
-                s.push_str(&self.verdict_facts(None, facts, subset, forkable));
-            }
-        }
-        s
-    }
-
-    /// The verdict's third line: the counts that qualify it, dot-separated.
-    ///
-    /// A fact with nothing to report is dropped rather than printed as a
-    /// zero — "0 outlier chains" and "outliers were never scored" are
-    /// different statements and must not share a rendering.
-    ///
-    /// `subset` is present only under `--exclude-chains`, and its job here is
-    /// to say what the outlier count is NOT. R̂ and the parameter counts on the
-    /// lines above are recomputed over the retained chains; the outlier score
-    /// is read from the per-chain traces on disk, which the selection does not
-    /// filter. Standing unlabelled beside recomputed numbers, it would read as
-    /// though it shared their scope.
-    fn verdict_facts(
-        &self,
-        lead: Option<String>,
-        facts: &ChainDetail,
-        subset: Option<&SubsetInfo>,
-        forkable: Option<&crate::fit::joint::JointEnsemble>,
-    ) -> String {
-        let mut parts: Vec<String> = lead.into_iter().collect();
-        if !facts.scores.is_empty() {
-            let n = facts.scores.iter().filter(|s| s.is_outlier).count();
-            let scope = match subset {
-                Some(_) => " (over every chain, not the retained subset)",
-                None => "",
-            };
-            parts.push(match n {
-                0 => format!("no outlier chains{scope}"),
-                1 => format!("1 outlier chain{scope}"),
-                n => format!("{n} outlier chains{scope}"),
-            });
-        }
-        if let Some(j) = forkable {
-            let scope = match &j.selection {
-                Some(info) => format!(" over the retained chains (chain(s) {} excluded)",
-                    info.excluded_csv()),
-                None => String::new(),
-            };
-            parts.push(format!("{}/{} forkable{}", j.n_forkable, j.n_total, scope));
-        }
-        if parts.is_empty() {
-            return String::new();
-        }
-        // Packed at the `·` separators, never inside a fact: word-wrapping this
-        // line splits `80/48000 forkable` across two of them, which reads as a
-        // number and then an orphaned word.
-        let mut s = String::new();
-        let mut line = String::new();
-        for part in parts {
-            if !line.is_empty() && line.chars().count() + 3 + part.chars().count()
-                > SECTION_WIDTH - 2
-            {
-                s.push_str(&format!("    {}\n", self.dim(&line)));
-                line.clear();
-            }
-            if !line.is_empty() {
-                line.push_str(" · ");
-            }
-            line.push_str(&part);
-        }
-        if !line.is_empty() {
-            s.push_str(&format!("    {}\n", self.dim(&line)));
-        }
-        s
-    }
-
-    /// The estimates, worst R̂ first.
-    fn posterior_section(
-        &self,
-        diag: &PosteriorDiagnostics,
-        posterior_mean: &BTreeMap<String, f64>,
-    ) -> String {
-        let mut s = self.section(SECTION_POSTERIOR);
-        if posterior_mean.is_empty() {
-            s.push_str(&format!("  {}\n", self.dim("(no posterior parameters)")));
-            return s;
-        }
-        // The column is sized to the names in THIS table. `{:14}` is a
-        // minimum width, so a name longer than it pushes every later
-        // column right and the grid stops being one.
-        let w = name_col_width(posterior_mean.keys().map(String::as_str), 14);
-        // Every header cell but the last is plain ASCII, where `{:>N}` pads to
-        // the right column. `R̂` is not: it is two `char`s in one cell, so
-        // `{:>8}` gave it a seven-cell field and the label sat one cell left of
-        // the eight-cell column of numbers it names.
-        s.push_str(&format!(
-            "  {:w$} {:>14} {:>10} {:>10} {}\n",
-            "param", "mean", "ESS bulk", "ESS tail", right_align("R̂", 8)
-        ));
-        for name in by_rhat_desc(diag, posterior_mean.keys().map(String::as_str)) {
-            let mean = posterior_mean[name];
-            // Both encodings of "no pooled ESS" — an absent key on the
-            // loaded path, a present NaN on the --exclude-chains recompute
-            // — render as the same dash (gh#691). One fact, one rendering.
-            let ess_str = format!("{:>10}", diag.ess_cell(name, "—"));
-            let date_marker = match self.cal.date_for(name, mean) {
-                Some(date) => format!("  ({})", date),
-                None => String::new(),
-            };
-            s.push_str(&format!(
-                "  {:w$} {:>14} {} {:>10} {:>8}{}\n",
-                fit_name(name, w),
-                sig_figs(mean, POSTERIOR_MEAN_SIG_FIGS),
-                ess_str,
-                diag.ess_tail_cell(name, "—"),
-                diag.rhat_cell(name, "—"),
-                date_marker
-            ));
-        }
-        s.push_str(&self.explain(SECTION_POSTERIOR));
-        s
-    }
-
-    /// Both halves of R̂, the classic statistic, which half is worse, and the
-    /// per-chain ESS — one row per parameter, in the same order the posterior
-    /// table uses.
-    ///
-    /// Every parameter gets a row, not only the failing ones. A reader
-    /// comparing a failing parameter against a healthy one needs both on
-    /// screen, and the healthy rows are what make the failing gap legible.
-    fn convergence_section(
-        &self,
-        diag: &PosteriorDiagnostics,
-        acceptance_summary: Option<f64>,
-    ) -> String {
-        let mut s = self.section(SECTION_CONVERGENCE);
-        if diag.per_param.is_empty() {
-            s.push_str(&format!("  {}\n", self.dim("(no parameter was assessed across chains)")));
-        } else {
-            let w = name_col_width(diag.per_param.keys().map(String::as_str), 14);
-            s.push_str(&format!(
-                "  {:w$} {:>8} {:>9} {:>9}   {:<6} {}\n",
-                "param", "bulk", "folded", "classic", "worse", "per-chain ESS"
-            ));
-            for name in by_rhat_desc(diag, diag.per_param.keys().map(String::as_str)) {
-                let p = &diag.per_param[name];
-                let worse = match p.rhat_driver() {
-                    Some(d) => d.half().to_string(),
-                    None => "—".to_string(),
-                };
-                let per_chain: String = p
-                    .ess_per_chain()
-                    .iter()
-                    .map(|e| if e.is_finite() { format!("{e:.0}") } else { "—".to_string() })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                s.push_str(&format!(
-                    "  {:w$} {:>8} {:>9} {:>9}   {:<6} {}\n",
-                    fit_name(name, w),
-                    p.rhat_bulk().cell(3, "—"),
-                    p.rhat_folded().cell(3, "—"),
-                    p.rhat_classic().cell(3, "—"),
-                    worse,
-                    per_chain,
-                ));
-            }
-            // A parameter carrying no usable R̂ has a row of dashes above; the
-            // reason it has one is the finding, and it is only readable here.
-            for (name, p) in &diag.per_param {
-                if let Some(why) = p.why_no_rhat() {
-                    s.push_str(&format!("  {}\n", self.warn(&format!("{name} — {why}"))));
-                }
-            }
-        }
-        if let Some(acc) = acceptance_summary {
-            s.push_str(&format!("  acceptance = {:.3} (mean across chains)\n", acc));
-        }
-        s.push_str(&self.efficiency_lines(diag));
-        s.push_str(&self.explain(SECTION_CONVERGENCE));
-        s
-    }
-
-    /// ESS per raw sampling iteration and per wall-clock second — or the
-    /// reason neither can be reported.
-    ///
-    /// Both are the min-parameter ESS over a denominator, so both stand or
-    /// fall with that minimum being defined. It is defined only when every
-    /// parameter assessed across chains reports a pooled ESS: a minimum over
-    /// the reporting subset RISES as a fit gets worse, because the badly-mixing
-    /// parameters drop out and the survivors set it (gh#687). When it is
-    /// undefined, name the parameters that withhold it — the blank is then the
-    /// diagnosis rather than a gap the reader must interpret.
-    fn efficiency_lines(&self, diag: &PosteriorDiagnostics) -> String {
-        let mut s = String::new();
-        match diag.min_ess_status() {
-            MinEss::Reported(min_ess) => {
-                // ESS/iteration — the ALGORITHM-comparison metric: min-parameter
-                // ESS per raw sampling step. `n_samples` is KEPT (thinned) draws,
-                // so `× thin` recovers the raw iterations, making this invariant
-                // to thinning and iteration count. Hardware-independent: "this
-                // sampler mixes N× better per step" holds on any machine.
-                if let Some(epi) = diag.ess_per_iter() {
-                    s.push_str(&format!(
-                        "  ESS/iter = {}  (min-param ESS {:.0} / {} raw sampling iters)\n",
-                        sig_figs(epi, EFFICIENCY_SIG_FIGS), min_ess, diag.raw_iters()
-                    ));
-                }
-                // ESS/second — the RUNTIME metric: min-parameter ESS per second of
-                // wall-clock. Also thinning-invariant, but hardware/implementation-
-                // dependent, so it estimates runtime-to-target on THIS machine
-                // rather than comparing algorithms. `None` wall-time (older runs)
-                // simply omits it.
-                if let (Some(eps), Some(secs)) =
-                    (diag.ess_per_sec(), diag.wall_time_secs.filter(|s| *s > 0.0))
-                {
-                    s.push_str(&format!(
-                        "  ESS/sec  = {}  (min-param ESS {:.0} / {:.1}s wall)\n",
-                        sig_figs(eps, EFFICIENCY_SIG_FIGS), min_ess, secs
-                    ));
-                }
-            }
-            MinEss::Unreportable { missing, n_expected } => {
-                s.push_str("  ESS/iter = —   ESS/sec = —   (efficiency not reportable)\n");
-                s.push_str(&format!(
-                    "    {} of {} parameters report no bulk ESS — either the estimator\n",
-                    missing.len(),
-                    n_expected
-                ));
-                s.push_str("    refused their draws outright, or the rank-transformed draws\n");
-                s.push_str("    are constant so the autocorrelation is undefined. Each says\n");
-                s.push_str("    which in the per-parameter table above:\n");
-                // Wrap the names to a readable width. The per-parameter table
-                // above marks them too, but a column of dashes reads as "not
-                // applicable"; the reader should not have to derive the list.
-                for line in wrap(&missing.join(", "), 62) {
-                    s.push_str(&format!("      {}\n", line));
-                }
-                s.push_str(&format!(
-                    "    A minimum over the {} that did report would rise as the fit got\n",
-                    n_expected - missing.len()
-                ));
-                s.push_str("    worse, so no efficiency headline is given.\n");
-            }
-            // No parameter was assessed across chains — there was never an
-            // efficiency line here, and nothing to explain.
-            MinEss::NoParams => {}
-        }
-        s
-    }
-
-    /// Per-chain log-likelihood, the robust outlier score, and — for PGAS —
-    /// how many latent paths each chain left behind.
-    ///
-    /// One table, because both halves are keyed on the chain id and answer
-    /// halves of one question: chain 7 is the outlier, and chain 7 is also
-    /// where ten of the forkable paths came from. They were two tables for
-    /// no reason but the order they were written in.
-    ///
-    /// `kind` decides WHICH trace column is compared, by name: `obs_ll`
-    /// (`log p(y | X, θ)`) for PGAS, `log_likelihood` (`log p(y | θ)`) for
-    /// pmmh / mh (gh#667). For PGAS the complete-data target and its
-    /// transition term are shown alongside — the sampler's own objective, and
-    /// the term whose spread makes a flat-ridge diagnosis obvious — but they
-    /// are never ranked on. When no per-chain traces exist, says so rather
-    /// than skipping.
-    fn chains_section(
-        &self,
-        method_dir: &Path,
-        n_chains_expected: usize,
-        facts: &ChainDetail,
-        subset: Option<&SubsetInfo>,
-    ) -> String {
-        use super::chain_diagnostics as cd;
-        let mut s = self.section(SECTION_CHAINS);
-
-        // `--exclude-chains` recomputes the posterior diagnostics over the
-        // retained chains, but this table is read from the per-chain traces on
-        // disk and the selection does not filter them. Every excluded chain
-        // still has a row, and the mod-z scale is still set by all of them.
-        // That is deliberate — inspecting the chain you dropped is the reason
-        // you dropped it — but it must be SAID, or the rows read as though
-        // they shared the recomputed scope of the tables above.
-        if let Some(info) = subset {
-            s.push_str(&self.note(Tone::Dim, &format!(
-                "(every chain is listed, including the excluded {} — this table \
-                 is read from the traces on disk, and the outlier score is over \
-                 all of them)",
-                info.excluded_csv())));
-        }
-
-        // Per-chain path counts, keyed by the chain id the artifact records —
-        // never by a row's position, which is not an answer once a chain has
-        // been refused at its start (gh#607).
-        let paths: BTreeMap<u64, (u64, u64)> = facts
-            .saved_paths
-            .as_ref()
-            .map(|r| r.per_chain.iter().map(|c| (c.chain, (c.n_saved, c.n_forkable))).collect())
-            .unwrap_or_default();
-        let show_paths = !paths.is_empty();
-
-        let Some(means) = &facts.logliks else {
-            s.push_str(&format!("  {}\n", self.dim(
-                "(per-chain traces unavailable — cannot break down by chain)")));
-            // The path counts are a separate artifact and survive the absence
-            // of the traces. Withholding them because the loglik columns
-            // cannot be filled would lose a fact this section still holds.
-            s.push_str(&self.path_only_table(&paths));
-            s.push_str(&self.saved_path_notes(facts, show_paths));
-            // `--explain` defines the section's terms, not this fit's numbers,
-            // so it belongs on every exit — a reader who gets the degraded
-            // table needs the vocabulary at least as much as one who does not.
-            s.push_str(&self.explain(SECTION_CHAINS));
-            return s;
-        };
-
-        // Whether a cross-chain comparison is possible at all. When it is not,
-        // the reason is stated and the ranked table is skipped — but the
-        // degeneracy screens below still run: they read `log_posterior` and
-        // `draws.tsv`, so a -inf or point-mass chain must not go unreported
-        // just because the comparison column is missing (gh#608, gh#635).
-        if means.scored_column_absent {
-            // No silent gap: a method whose traces predate the column would
-            // otherwise render as rows of dashes that read like broken chains.
-            s.push_str(&format!("  {}\n", self.dim(&format!(
-                "(traces carry no `{}` column — cannot compare chains on it)",
-                means.scored_column))));
-            s.push_str(&self.path_only_table(&paths));
-        } else if means.scored.len() < 2 {
-            s.push_str(&format!("  {}\n", self.dim(
-                "(need ≥2 chains with traces for a cross-chain outlier score)")));
-            s.push_str(&self.path_only_table(&paths));
-        } else {
-            // Under a selection `n_chains_expected` is the RETAINED count while
-            // the rows are every chain on disk, so the comparison would read
-            // "found traces for 16 of 6 chains". The note above already says
-            // why the two differ; this line only makes sense unfiltered.
-            if subset.is_none() && n_chains_expected != 0
-                && means.scored.len() != n_chains_expected
-            {
-                s.push_str(&format!("  {}\n", self.dim(&format!(
-                    "(found traces for {} of {} chains)",
-                    means.scored.len(), n_chains_expected))));
-            }
-            let path_head = if show_paths {
-                format!(" {:>7} {:>10}", "paths", "forkable")
-            } else {
-                String::new()
-            };
-            match &means.complete_data {
-                Some(_) => s.push_str(&format!("  {:5} {:>14}  {:>7}  {:>14} {:>14}{}   {}\n",
-                    "chain", "obs ll", "mod-z", "transition ll", "complete ll", path_head, "flag")),
-                None => s.push_str(&format!("  {:5} {:>14}  {:>7}{}   {}\n",
-                    "chain", "mean loglik", "mod-z", path_head, "flag")),
-            }
-            for (i, sc) in facts.scores.iter().enumerate() {
-                let flag = if sc.is_outlier {
-                    self.err("← outlier")
-                } else {
-                    String::new()
-                };
-                // gh#608: distinguish "stuck at -inf" (a degenerate chain whose
-                // draws contaminate the pooled numbers) from "no readable trace"
-                // (—). The old rendering softened the one signal that existed.
-                let ll = self.chain_loglik_cell(sc.mean_loglik, 14);
-                // A non-finite mod-z (unreadable trace) renders `—`, never a fake 0.
-                let z = if sc.mod_z.is_finite() {
-                    format!("{:>7.2}", sc.mod_z)
-                } else {
-                    format!("{:>7}", "—")
-                };
-                let path_cells = if show_paths {
-                    match paths.get(&(sc.chain.0 as u64)) {
-                        Some((n_saved, n_forkable)) => format!(" {:>7} {:>10}", n_saved, n_forkable),
-                        None => format!(" {:>7} {:>10}", "—", "—"),
-                    }
-                } else {
-                    String::new()
-                };
-                match &means.complete_data {
-                    Some(cd_means) => {
-                        let trans = self.chain_loglik_cell(
-                            cd_means.transition.get(i).copied().unwrap_or(f64::NAN), 14);
-                        let complete = self.chain_loglik_cell(
-                            cd_means.complete.get(i).copied().unwrap_or(f64::NAN), 14);
-                        s.push_str(&format!("  {:5} {}  {}  {} {}{}   {}\n",
-                            sc.chain, ll, z, trans, complete, path_cells, flag));
-                    }
-                    None => s.push_str(&format!("  {:5} {}  {}{}   {}\n",
-                        sc.chain, ll, z, path_cells, flag)),
-                }
-            }
-        }
-
-        s.push_str(&self.saved_path_notes(facts, show_paths));
-
-        // gh#608 (ebola F8): the stuck-state screen. A chain recording a
-        // non-finite log-posterior as its CURRENT state is degenerate
-        // (gh#607); the robust mod-z above cannot flag it (a -inf mean is
-        // excluded from the centre/scale), so it gets its own loud line,
-        // right where the reader is told the pooled numbers include it.
-        if let Some(neginf) = cd::read_chain_neginf(method_dir) {
-            for d in neginf.iter().filter(|d| d.n_neginf > 0 && d.n_retained > 0) {
-                s.push_str(&self.note(Tone::Err, &format!(
-                    "⚠ chain {}: log-posterior -inf on {:.1}% of retained draws \
-                     ({}/{}) — a DEGENERATE chain; its draws are in draws.tsv \
-                     and every pooled number in this block. View without it: \
-                     --exclude-chains <method>:{} (exclusion stays explicit — \
-                     gh#419).",
-                    d.chain,
-                    100.0 * d.n_neginf as f64 / d.n_retained as f64,
-                    d.n_neginf, d.n_retained, d.chain,
-                )));
-            }
-        }
-
-        // gh#635 (ebola item 1): a POINT-MASS chain — one distinct parameter
-        // vector across all retained draws (zero accepted θ-moves) — evades
-        // both the mod-z score and the −inf screen when its start has finite
-        // density. Same loud treatment.
-        if let Some(uniq) = cd::read_chain_unique_draws(method_dir) {
-            for u in uniq.iter().filter(|u| u.n_unique == 1 && u.n_draws > 1) {
-                s.push_str(&self.note(Tone::Err, &format!(
-                    "⚠ chain {}: ONE distinct parameter vector across {} retained \
-                     draws (zero accepted moves) — a point-mass chain; its draws \
-                     are in draws.tsv and every pooled number in this block. View \
-                     without it: --exclude-chains <method>:{} (exclusion stays \
-                     explicit — gh#419).",
-                    u.chain, u.n_draws, u.chain,
-                )));
-            }
-        }
-
-        let flagged = cd::outlier_labels(&facts.scores);
-        if !flagged.is_empty() {
-            // The one-line nudge: chains in a distinctly different part of the
-            // likelihood surface is the near-unidentified-parameter (flat-ridge)
-            // signature.
-            s.push_str(&self.note(Tone::Warn, &format!(
-                "⚠ chains disagree ({} — {} far from the rest) — is a parameter \
-                 weakly identified? Inspect its per-chain posterior.",
-                flagged.join(", "), means.scored_column)));
-        }
-        s.push_str(&self.explain(SECTION_CHAINS));
-        s
-    }
-
-    /// The `paths` / `forkable` columns on their own, for a method whose chains
-    /// could not be ranked.
-    ///
-    /// The two halves of the `chains` table come from different artifacts —
-    /// the per-chain traces and the method summary's `trajectories` block — and
-    /// either can be missing without the other. When the ranking half is,
-    /// these counts are still a fact about each chain, and dropping them
-    /// because their neighbours are absent would hide data the section holds.
-    fn path_only_table(&self, paths: &BTreeMap<u64, (u64, u64)>) -> String {
-        if paths.is_empty() {
-            return String::new();
-        }
-        let mut s = format!("  {:5} {:>7} {:>10}\n", "chain", "paths", "forkable");
-        for (chain, (n_saved, n_forkable)) in paths {
-            s.push_str(&format!("  {:5} {:>7} {:>10}\n", chain, n_saved, n_forkable));
-        }
-        s
-    }
-
-    /// What the `paths` / `forkable` columns could not say, and why.
-    ///
-    /// A PGAS chain retains a posterior draw every `thin` sweeps and writes a
-    /// latent path on every `draw_stride`-th of those draws, so every written
-    /// path should be one a consumer can join to a draw — `simulate
-    /// --init-state fit` or a `last_obs`-anchored `quantities {}` entry. A
-    /// shortfall is a real event (a record skipped as incoherent, a chain
-    /// resumed partway in) and is named rather than left for the reader to
-    /// subtract.
-    fn saved_path_notes(&self, facts: &ChainDetail, show_paths: bool) -> String {
-        let mut s = String::new();
-        if !show_paths {
-            // A method that saved paths but cannot say which chain each row
-            // belongs to. The columns are omitted rather than filled against a
-            // positional guess, and the omission is stated (gh#727 follow-up).
-            if facts.n_chains_with_paths > 0 {
-                s.push_str(&self.note(Tone::Dim,
-                    "(no per-chain path counts: this leaf's `trajectories` block \
-                     predates the chain ids that key them, and a row's position is \
-                     not an answer — re-run the method to recover the columns)"));
-            }
-            return s;
-        }
-        let Some(report) = &facts.saved_paths else { return s };
-        let total_saved: u64 = report.per_chain.iter().map(|c| c.n_saved).sum();
-        let total_forkable: u64 = report.per_chain.iter().map(|c| c.n_forkable).sum();
-        if total_forkable < total_saved {
-            s.push_str(&self.note(Tone::Warn, &format!(
-                "{} of {} written paths cannot be joined to a posterior draw",
-                total_saved - total_forkable, total_saved)));
-            s.push_str(&self.note(Tone::Dim, &format!(
-                "a path is written on every {} retained draw (thin {}), so every \
-                 one should be joinable; the shortfall is paths that were \
-                 written outside this leaf's retained set or skipped as \
-                 incoherent records",
-                report.draw_stride.map_or("—".to_string(), |v| v.to_string()),
-                report.thin)));
-        }
-        s
-    }
-
-    /// Whether the sampled latent paths themselves mixed — the particle
-    /// filter's ESS at each observation, then R̂ and the frozen-cell fractions
-    /// over the paths on disk.
-    ///
-    /// Both are about X rather than θ, which is why they share a section: the
-    /// first says how well each observation was resolved, the second whether
-    /// the resolved paths agree across chains.
-    fn latent_paths_section(&self, method_dir: &Path, facts: &ChainDetail) -> String {
-        use super::latent_convergence::LATENT_CONVERGENCE_TSV;
-        let mut s = self.section(SECTION_LATENT);
-        s.push_str(&self.filter_ess_lines(method_dir));
-        match &facts.latent {
-            None => {
-                s.push_str(&format!("  {}\n", self.dim("(this leaf saved no latent path)")));
-            }
-            Some(Err(e)) => {
-                s.push_str(&self.note(Tone::Warn, &format!("not computed: {e}")));
-            }
-            Some(Ok(lc)) => {
-                // The headline the section rule has already half-said, compact:
-                // which chains, how many paths each, over what shape.
-                s.push_str(&format!(
-                    "  chains {} × {} paths · {} substeps × {} columns\n",
-                    lc.chain_ids.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", "),
-                    lc.n_draws,
-                    lc.n_substeps,
-                    lc.columns.len(),
-                ));
-                s.push_str(&lc.bins_table());
-                s.push_str(&lc.findings());
-                // The per-cell table is the one the method writes; when the
-                // method did not (it predates the block), it is written now,
-                // once — the same bytes a re-run would leave — and we say so.
-                let table = method_dir.join(LATENT_CONVERGENCE_TSV);
-                if !table.is_file() {
-                    match lc.write_tsv(&table) {
-                        Ok(()) => s.push_str(&format!("  {}\n", self.dim(&format!(
-                            "the leaf predates this block; {LATENT_CONVERGENCE_TSV} written now from its saved paths")))),
-                        Err(e) => s.push_str(&format!("  {}\n", self.dim(&format!(
-                            "the leaf predates this block and the table could not be written: {e}")))),
-                    }
-                }
-            }
-        }
-        s.push_str(&self.explain(SECTION_LATENT));
-        s
-    }
-
-    /// The conditional filter's ESS at every observation (gh#685), read from
-    /// the `filter_ess` block of `pgas_summary.json` through that module's
-    /// own reader, so producer and consumer cannot drift. Quiet for a method
-    /// that wrote no block — one that predates it, or in which no sweep
-    /// scored an observation.
-    fn filter_ess_lines(&self, method_dir: &Path) -> String {
-        use super::filter_ess::FilterEss;
-        let path = method_dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename());
-        let json = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
-        let Some(fe) = json.as_ref().and_then(FilterEss::read) else {
-            return String::new();
-        };
-        let mut s = String::new();
-        // Indented into the section with the rows below it; `FilterEss::report`
-        // is written for the end-of-run print, which has no section to sit in.
-        for line in fe.report().trim_start_matches('\n').lines() {
-            s.push_str("  ");
-            s.push_str(line);
-            s.push('\n');
-        }
-        if fe.n_starved > 0 {
-            s.push_str(&self.note(Tone::Warn, &format!(
-                "the path through {} starved observation(s) is drawn from a handful of \
-                 particles every sweep; look at the data at t={} before the model",
-                fe.n_starved,
-                fe.worst.first().map_or("?".to_string(), |o| crate::quantile::fmt_time(o.time)))));
-        }
-        s
-    }
-
-    /// One right-aligned per-chain log-likelihood cell. `-inf` (a chain stuck
-    /// off the support, gh#608) is rendered loudly and distinctly from `—`
-    /// (nothing readable) — softening either one hides the only signal there
-    /// is.
-    fn chain_loglik_cell(&self, v: f64, width: usize) -> String {
-        if v.is_finite() {
-            format!("{:>width$.2}", v, width = width)
-        } else if v == f64::NEG_INFINITY {
-            format!("{:>width$}", self.err("-inf"), width = width)
-        } else {
-            format!("{:>width$}", "—", width = width)
-        }
-    }
-
-    fn provenance_block(&self, method_dir: &str, state: &If2Record)
-        -> ProvenanceBlock
-    {
-        let mut s = String::new();
-        s.push_str(&format!("  {}\n", self.bold("provenance")));
-        let final_path = format!("{}/final_params.toml", method_dir);
-        let mle_path = format!("{}/mle_params.toml", method_dir);
-        let mut failed = false;
-
-        let final_params = read_param_values(&final_path);
-        let mle_params = read_param_values(&mle_path);
-
-        match (&final_params, &mle_params) {
-            (Some(f), Some(m)) => {
-                let agree = params_agree(f, m);
-                if agree {
-                    s.push_str(&format!("    final_params.toml ↔ mle_params.toml: {}\n",
-                        self.ok("✓ params match")));
-                } else {
-                    s.push_str(&format!("    final_params.toml ↔ mle_params.toml: {}\n",
-                        self.err("✗ DISAGREE — silent-wrong-answer (GH #16) class")));
-                    failed = true;
-                }
-            }
-            (None, _) => s.push_str(&format!("    final_params.toml: {}\n",
-                self.dim("(absent)"))),
-            (_, None) => s.push_str(&format!("    mle_params.toml:   {}\n",
-                self.dim("(absent)"))),
-        }
-
-        // fit_state winner ↔ final_params
-        if let Some(f) = final_params.as_ref().filter(|_| !state.start_values.is_empty()) {
-            let mut state_matches = true;
-            for (k, fv) in f {
-                if let Some(sv) = state.start_values.get(k) {
-                    if (sv - fv).abs() > 1e-9 * fv.abs().max(1.0) {
-                        state_matches = false;
-                        break;
-                    }
-                }
-            }
-            if state_matches {
-                s.push_str(&format!("    fit_state.toml ↔ final_params.toml:   {}\n",
-                    self.ok("✓ params match")));
-            } else {
-                s.push_str(&format!("    fit_state.toml ↔ final_params.toml:   {}\n",
-                    self.err("✗ DISAGREE — fit_state's start_values diverge from winner")));
-                failed = true;
-            }
-        }
-
-        ProvenanceBlock { text: s, failed }
-    }
-
     // ── Colour helpers ──────────────────────────────────────────────
+
+    /// `lines` as text, each with its newline, styled by this painter.
+    fn paint(&self, lines: &[crate::out::paint::Line]) -> String {
+        lines.iter().map(|l| self.painter.render(l) + "\n").collect()
+    }
 
     fn bold(&self, s: &str)  -> String { self.painter.paint(s, Style::Bold) }
     fn dim(&self, s: &str)   -> String { self.painter.paint(s, Style::Dim) }
-    fn ok(&self, s: &str)    -> String { self.painter.paint(s, Style::Ok) }
-    fn warn(&self, s: &str)  -> String { self.painter.paint(s, Style::Warn) }
-    fn err(&self, s: &str)   -> String { self.painter.paint(s, Style::Err) }
-}
-
-struct ProvenanceBlock {
-    text: String,
-    failed: bool,
-}
-
-enum GateThresholdSource {
-    /// Read from `state.resolved_gate` (Phase 3 — what the run was
-    /// actually judged against).
-    Resolved,
-    /// Legacy fit_state.toml — no resolved_gate. Showing
-    /// `GateConfig::default()` with a caveat.
-    DefaultFallback,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -2232,7 +876,7 @@ fn build_summary_doc(
         }
         // A leaf whose typed result did not load is already in `failures`.
         let Some(typed) = typed else { continue };
-        match load_method_facts(resolved, typed, model.as_ref()) {
+        match load_method_facts(resolved, typed, model.as_ref(), None) {
             Ok(facts) => method_reports.push(build_method_report(facts, &cal)),
             Err(e) => {
                 eprintln!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e);
@@ -2320,6 +964,7 @@ fn load_method_facts(
     resolved: &ResolvedMethod,
     result: MethodResult,
     model: Option<&ir::Model>,
+    mut chain_detail: Option<ChainDetail>,
 ) -> Result<MethodFacts, String> {
     let dir = &resolved.method_dir;
     let inputs: serde_json::Value = std::fs::read(dir.join("run.json")).ok()
@@ -2373,7 +1018,13 @@ fn load_method_facts(
         }
         _ => Vec::new(),
     };
-    let findings = crate::fit::report::read_findings(dir)?;
+    let read = crate::fit::report::read_findings(dir)?;
+    if let Some(detail) = chain_detail.as_mut() {
+        detail.source_run = inputs.get("starts_source")
+            .and_then(|s| s.get("run_id"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+    }
     let stored = Some(crate::fit::report::Stored {
         leaf: crate::fit::report::display_path(dir),
         total_seconds: inputs.get("wall_time_seconds").and_then(|v| v.as_f64()),
@@ -2386,8 +1037,10 @@ fn load_method_facts(
         result,
         checks,
         warmup,
-        findings,
+        findings: read.findings,
+        findings_unreadable: read.unreadable,
         stored,
+        chain_detail,
     })
 }
 
@@ -2781,181 +1434,18 @@ fn dump_params_only(
     Ok(out)
 }
 
-/// The chains a method refused at their start, read from the `bad_init`
-/// records in the method's `diagnostics.json` (gh#607, gh#663) — the durable
-/// record, which does not depend on anything having captured stderr.
-struct RefusedChains {
-    /// `(chain, reason)`, in chain order.
-    records: Vec<(ChainIndex, String)>,
-    /// One sentence per thing in `diagnostics.json` that could not be read —
-    /// the whole file when it is not a JSON array, else each entry that does
-    /// not parse — so the summary says it could not look rather than implying
-    /// nothing was refused. Empty when everything read.
-    unreadable: Vec<String>,
-}
-
-impl RefusedChains {
-    /// Entry by entry, so one record that does not parse costs that record and
-    /// not the file: an R̂ of `+∞` that an earlier binary wrote as `null` must
-    /// not take the `bad_init` records beside it out of the summary.
-    fn load(method_dir: &Path) -> Self {
-        use sim::inference::diagnostic::{Diagnostic, DiagnosticKind};
-        let path = method_dir.join("diagnostics.json");
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            return RefusedChains { records: Vec::new(), unreadable: Vec::new() };
-        };
-        let entries = match serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
-            Ok(entries) => entries,
-            Err(e) => {
-                return RefusedChains {
-                    records: Vec::new(),
-                    unreadable: vec![format!(
-                        "diagnostics.json could not be read, so refused chains are not \
-                         listed: {}: {e}",
-                        path.display()
-                    )],
-                }
-            }
-        };
-        let mut records = Vec::new();
-        let mut unreadable = Vec::new();
-        for (i, entry) in entries.iter().enumerate() {
-            match serde_json::from_value::<Diagnostic>(entry.clone()) {
-                Ok(d) => {
-                    if let DiagnosticKind::BadInit { chain_id, reason, .. } = d.kind {
-                        records.push((ChainIndex(chain_id), reason));
-                    }
-                }
-                Err(e) => unreadable.push(unreadable_entry(&path, i, entry, &e)),
-            }
-        }
-        records.sort_by_key(|(id, _)| *id);
-        RefusedChains { records, unreadable }
-    }
-
-    /// `"6 of 8 chains ran — refused at start: 3, 5"`, or `None` when every
-    /// chain ran. The count that ran is `fit_state.toml`'s `n_good_chains`
-    /// when the sampler recorded it, else the total less the refusal records;
-    /// if the two sources disagree — a count with no record behind it — the
-    /// line says so rather than choosing one.
-    fn ran_of(&self, n_chains: usize, n_good_chains: Option<usize>) -> Option<String> {
-        let n_refused = self.records.len();
-        let ran = n_good_chains.unwrap_or(n_chains.saturating_sub(n_refused));
-        if ran >= n_chains && n_refused == 0 {
-            return None;
-        }
-        let ids: Vec<String> = self.records.iter().map(|(id, _)| id.to_string()).collect();
-        let mut text = format!("{ran} of {n_chains} chains ran");
-        if !ids.is_empty() {
-            text.push_str(&format!(" — refused at start: {}", ids.join(", ")));
-        }
-        if ran + n_refused != n_chains {
-            text.push_str(&format!(
-                " ({} chain(s) not accounted for by a refusal record in diagnostics.json; \
-                 chain_starts.tsv gives each chain's status)",
-                n_chains.abs_diff(ran + n_refused)
-            ));
-        }
-        Some(text)
-    }
-}
-
-/// The sentence for entry `i` (0-based) of `diagnostics.json`, which did not
-/// parse with `err`.
-///
-/// When the entry's `null`s are what stop it — a file written before
-/// non-finite numbers were spelled out, where `null` stood for `+∞`, `−∞` and
-/// `NaN` alike — the sentence names those fields and says so. The entry is
-/// still refused: admitting the `null` as any one of the three would be a
-/// guess, and the guess decides a finding's severity.
-fn unreadable_entry(path: &Path, i: usize, entry: &serde_json::Value, err: &serde_json::Error) -> String {
-    let kind = entry
-        .pointer("/kind/type")
-        .and_then(|t| t.as_str())
-        .unwrap_or("unknown type");
-    let head = format!("{} entry {} (`{kind}`) could not be read", path.display(), i + 1);
-    let culprits = null_culprits(entry);
-    if culprits.is_empty() {
-        return format!("{head}: {err}");
-    }
-    let fields: Vec<String> = culprits.iter().map(|f| format!("`{f}`")).collect();
-    format!(
-        "{head}: {} {} null. The file was written before camdl spelled a non-finite \
-         number as \"inf\", \"-inf\" or \"NaN\"; null stood for all three, so the value \
-         is not recoverable from it. The file's other entries are read.",
-        fields.join(", "),
-        if fields.len() == 1 { "is" } else { "are" },
-    )
-}
-
-/// The fields of `entry` whose `null` alone stops it parsing as a
-/// [`Diagnostic`], as dotted paths under `kind` (`rhat`, `attempts.0.time`).
-///
-/// Found by trial rather than by schema, so it cannot drift from the type: with
-/// every `null` replaced by the non-finite spelling `"NaN"` — which a number
-/// field, an optional number and an optional string all accept — the entry
-/// must parse, or its fault is something else and nothing is named. Each
-/// `null` is then restored alone; the ones the entry cannot carry are the
-/// culprits, and a `null` that is a value (an attempt's `projected_max` when no
-/// particle was live) is not blamed.
-fn null_culprits(entry: &serde_json::Value) -> Vec<String> {
-    use serde_json::Value;
-    use sim::inference::diagnostic::Diagnostic;
-
-    fn nulls(v: &Value, at: &str, out: &mut Vec<String>) {
-        match v {
-            Value::Null => out.push(at.to_string()),
-            Value::Array(xs) => {
-                for (i, x) in xs.iter().enumerate() {
-                    nulls(x, &format!("{at}/{i}"), out);
-                }
-            }
-            Value::Object(m) => {
-                for (k, x) in m {
-                    let k = k.replace('~', "~0").replace('/', "~1");
-                    nulls(x, &format!("{at}/{k}"), out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let parses = |v: &Value| serde_json::from_value::<Diagnostic>(v.clone()).is_ok();
-    let set = |v: &mut Value, at: &str, to: Value| {
-        if let Some(slot) = v.pointer_mut(at) {
-            *slot = to;
-        }
-    };
-
-    let mut paths = Vec::new();
-    nulls(entry, "", &mut paths);
-    let mut filled = entry.clone();
-    for at in &paths {
-        set(&mut filled, at, Value::from("NaN"));
-    }
-    if paths.is_empty() || !parses(&filled) {
-        return Vec::new();
-    }
-    paths
-        .into_iter()
-        .filter(|at| {
-            let mut one = filled.clone();
-            set(&mut one, at, Value::Null);
-            !parses(&one)
-        })
-        .map(|at| {
-            let at = at.strip_prefix("/kind/").unwrap_or(at.trim_start_matches('/'));
-            at.split('/')
-                .map(|seg| seg.replace("~1", "/").replace("~0", "~"))
-                .collect::<Vec<_>>()
-                .join(".")
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fit::report::build::{bayesian_method_report, if2_method_report, ParameterReport};
+    use crate::chain_index::ChainIndex;
+    use crate::fit::method_result::{If2Record, If2Run, PgasRun, PmmhRun};
+    use crate::fit::report::RefusedChains;
+    use crate::fit::state::FitState;
+    use crate::fit::report::build::{
+        bayesian_method_report, if2_method_report, if2_parameters, if2_provenance, ParameterReport,
+    };
+    use crate::fit::report::render::seeded_from_line as render_seeded_from_line;
+    use crate::fit::method_result::Stat;
 
     /// gh#663: the chain-count text for a method that refused chains. Nothing
     /// refused reads as the plain count (`None`); a refusal names the ids; a
@@ -3009,7 +1499,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         c.write_json(dir.join("diagnostics.json").to_str().unwrap()).unwrap();
 
-        let refused = RefusedChains::load(&dir);
+        let read = crate::fit::report::read_findings(&dir).unwrap();
+        let refused = RefusedChains::from_findings(&read.findings, &read.unreadable);
         let lines = plain_formatter().refused_chains_lines(&refused);
         let ran = refused.ran_of(3, Some(2));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3066,7 +1557,8 @@ mod tests {
   }
 ]"#;
         let dir = method_with_diagnostics("summary_legacy_null", raw);
-        let refused = RefusedChains::load(&dir);
+        let read = crate::fit::report::read_findings(&dir).unwrap();
+        let refused = RefusedChains::from_findings(&read.findings, &read.unreadable);
         let lines = plain_formatter().refused_chains_lines(&refused);
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -3087,16 +1579,71 @@ mod tests {
     use crate::fit::loglik::LoglikType;
     use crate::fit::method_result::PosteriorDiagnostics;
 
-    /// The renderer under test in nearly every case: no colour (so a block can
-    /// be compared as plain text), no calendar, no `--explain`.
-    fn plain_formatter() -> Formatter {
-        Formatter { painter: Painter::plain(), cal: CalendarContext::default(), explain: false }
+    /// The text view under test in nearly every case: no calendar, no
+    /// `--explain`. Its methods render one section each, as plain text (no
+    /// colour, so a block can be compared as text).
+    struct TextView {
+        cal: CalendarContext,
+        explain: bool,
     }
 
-    /// The same renderer with `--explain` on.
-    fn explaining_formatter() -> Formatter {
-        Formatter { painter: Painter::plain(), cal: CalendarContext::default(), explain: true }
+    /// What the provenance section printed, and whether it failed.
+    struct Provenance {
+        text: String,
+        failed: bool,
     }
+
+    impl TextView {
+        fn refused_chains_lines(&self, refused: &RefusedChains) -> String {
+            text(&refused_lines(refused))
+        }
+        fn chain_loglik_eval_table(&self, state: &If2Record) -> String {
+            text(&if2_chain_eval_table(state))
+        }
+        fn gate_verdict_block(&self, state: &If2Record) -> String {
+            text(&if2_gate_section(state))
+        }
+        fn parameter_table(&self, state: &If2Record, method_dir: Option<&Path>) -> String {
+            text(&if2_parameter_table(state, &if2_parameters(state, method_dir, &self.cal)))
+        }
+        fn provenance_block(&self, method_dir: &str, state: &If2Record) -> Provenance {
+            let prov = if2_provenance(state, method_dir);
+            Provenance { text: text(&provenance_section(&prov)), failed: prov.any_failed() }
+        }
+        fn dt_check_block(&self, dt_check: &super::super::dt_check::DtCheckResult) -> String {
+            text(&dt_check_section(dt_check))
+        }
+        fn seeded_from_line(
+            &self,
+            source: Option<&str>,
+            kind: Option<crate::fit::starts::ChainStartsKind>,
+            source_run: Option<&str>,
+        ) -> String {
+            text(&[render_seeded_from_line(source, kind, source_run)])
+        }
+        fn method_block(&self, lead: &str, name: &str, method_dir: &str, if2: &If2Run) -> Provenance {
+            let report = if2_method_report(name, method_dir, if2, &self.cal);
+            Provenance {
+                text: text(&if2_block(!lead.is_empty(), &report, if2)),
+                failed: report.provenance_failed(),
+            }
+        }
+    }
+
+    fn plain_formatter() -> TextView {
+        TextView { cal: CalendarContext::default(), explain: false }
+    }
+
+    /// The same view with `--explain` on.
+    fn explaining_formatter() -> TextView {
+        TextView { cal: CalendarContext::default(), explain: true }
+    }
+
+    /// Rendered lines as plain text, each with its newline.
+    fn text(lines: &[crate::out::paint::Line]) -> String {
+        lines.iter().map(|l| l.text() + "\n").collect()
+    }
+
 
     /// Everything the renderer put under the `name` section rule, up to the
     /// next rule or the end of the block — the rule's own dash count excluded,
@@ -3138,26 +1685,38 @@ mod tests {
     /// `pgas_summary.json` nor a `trajectories.tsv`, so they find nothing and
     /// the section renders exactly as it would for that sampler.
     fn chain_table(
-        fmt: &Formatter,
+        fmt: &TextView,
         dir: &std::path::Path,
         n_chains: usize,
         kind: LoglikType,
     ) -> String {
-        let facts = ChainDetail::gather(dir, kind, true);
-        fmt.chains_section(dir, n_chains, &facts, None)
+        let facts = ChainDetail::gather(dir, kind, true, None, None);
+        text(&chains_section(n_chains, &facts, fmt.explain))
+    }
+
+    /// Which Bayesian result a [`block`] renders.
+    enum BayesianView<'a> {
+        Pgas(&'a PgasRun),
+        Pmmh(&'a PmmhRun),
     }
 
     /// `bayesian_block` for a test that cares only about the rendered sections:
     /// no version lead, no resolved forkability.
     fn block(
-        fmt: &Formatter,
+        fmt: &TextView,
         name: &str,
         method: &str,
         method_dir: &std::path::Path,
         view: BayesianView<'_>,
         ll_kind: LoglikType,
     ) -> String {
-        fmt.bayesian_block("", name, method, method_dir, view, None, ll_kind, None)
+        let (result, is_pgas) = match view {
+            BayesianView::Pgas(r) => (MethodResult::Pgas(r.clone()), true),
+            BayesianView::Pmmh(r) => (MethodResult::Pmmh(r.clone()), false),
+        };
+        let mut report = bayesian_method_report(name, method, Some(result), &fmt.cal);
+        report.chain_detail = Some(ChainDetail::gather(method_dir, ll_kind, is_pgas, None, None));
+        text(&bayesian_block(false, &report, fmt.explain))
     }
 
     fn synthetic_fit_state() -> FitState {
@@ -3625,7 +2184,6 @@ mod tests {
     #[test]
     fn the_efficiency_headline_stays_informative_at_a_tiny_ess() {
         use std::collections::BTreeMap;
-        let fmt = plain_formatter();
         let diag = |n_samples: usize| PosteriorDiagnostics {
             per_param: crate::fit::method_result::per_param_from_maps(
                 BTreeMap::from([("beta".to_string(), 2.639)]),
@@ -3640,7 +2198,7 @@ mod tests {
 
         // 8 / 48,000 iterations and 8 / 1,200 s: three significant figures at
         // both magnitudes, where fixed decimals had none and one.
-        let out = fmt.efficiency_lines(&diag(48_000));
+        let out = text(&efficiency_lines(&diag(48_000)));
         assert!(
             out.contains("ESS/iter = 0.000167  (min-param ESS 8 / 48000 raw sampling iters)"),
             "the per-iteration ratio keeps its digits at 1.67e-4:\n{out}"
@@ -3653,7 +2211,7 @@ mod tests {
         // Ten times longer, ten times worse: the two must be distinguishable,
         // and below 1e-4 the fixed form is mostly leading zeros, so it switches
         // to scientific rather than growing them.
-        let worse = fmt.efficiency_lines(&diag(480_000));
+        let worse = text(&efficiency_lines(&diag(480_000)));
         assert!(
             worse.contains("ESS/iter = 1.67e-5"),
             "an order of magnitude worse reads as an order of magnitude worse:\n{worse}"
@@ -4617,9 +3175,8 @@ mod tests {
             kept: vec![ChainIndex(0), ChainIndex(1)],
             n_total: 3,
         };
-        let fmt = plain_formatter();
-        let facts = ChainDetail::gather(&dir, LoglikType::Marginal, false);
-        let section = fmt.chains_section(&dir, 2, &facts, Some(&info));
+        let facts = ChainDetail::gather(&dir, LoglikType::Marginal, false, Some(info), None);
+        let section = text(&chains_section(2, &facts, false));
 
         assert!(section.contains("including the excluded 2"),
             "the table must say whose rows it is still showing:\n{section}");
@@ -4633,7 +3190,8 @@ mod tests {
              that reads like a defect:\n{section}");
 
         // Without a selection the same method says none of it.
-        let plain = fmt.chains_section(&dir, 3, &facts, None);
+        let facts = ChainDetail::gather(&dir, LoglikType::Marginal, false, None, None);
+        let plain = text(&chains_section(3, &facts, false));
         assert!(!plain.contains("excluded"), "no scope note when nothing was \
             excluded:\n{plain}");
         std::fs::remove_dir_all(&dir).ok();
@@ -5207,7 +3765,7 @@ mod tests {
     #[test]
     fn if2_text_parameter_table_annotates_instant_date() {
         let state = instant_fit_state();
-        let fmt = Formatter { painter: Painter::plain(), cal: instant_cal(), explain: false };
+        let fmt = TextView { cal: instant_cal(), explain: false };
         let block = fmt.parameter_table(&If2Record::from_state(&state), None);
         // tau row carries the calendar date; numeric value preserved.
         assert!(block.contains("tau"), "tau row missing: {}", block);

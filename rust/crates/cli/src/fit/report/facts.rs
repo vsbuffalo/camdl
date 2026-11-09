@@ -266,18 +266,207 @@ pub struct MethodFacts {
     pub warmup: Vec<ChainWarmup>,
     /// One record per finding, as `diagnostics.json` holds them.
     pub findings: Vec<sim::inference::diagnostic::Diagnostic>,
+    /// What in `diagnostics.json` could not be read; empty from the run.
+    pub findings_unreadable: Vec<String>,
     pub stored: Option<Stored>,
+    /// What the summary's text reads from the leaf beside the typed result;
+    /// `None` for a view that does not show it.
+    pub chain_detail: Option<ChainDetail>,
+}
+
+/// What a leaf's `diagnostics.json` holds: the findings that read, and one
+/// sentence for each thing that did not.
+#[derive(Debug, Clone, Default)]
+pub struct ReadFindings {
+    pub findings: Vec<sim::inference::diagnostic::Diagnostic>,
+    /// The whole file when it is not a JSON array, else each entry that does
+    /// not parse, named by position, type and field. Empty when all read.
+    pub unreadable: Vec<String>,
 }
 
 /// The findings a leaf recorded (`diagnostics.json`), or none when it holds no
-/// such file. A file that exists and does not read is an error: reading it as
-/// "no findings" would show a fit with problems as one without.
-pub fn read_findings(method_dir: &Path) -> Result<Vec<sim::inference::diagnostic::Diagnostic>, String> {
+/// such file.
+///
+/// Read entry by entry, so one record that does not parse costs that record
+/// and not the file: an R̂ of `+∞` that an earlier binary wrote as `null` must
+/// not take the `bad_init` records beside it out of the summary. Nothing that
+/// fails to read is read as "no findings": each is named in
+/// [`ReadFindings::unreadable`], which the summary prints and its JSON
+/// carries. A file that exists and cannot be opened is an error.
+pub fn read_findings(method_dir: &Path) -> Result<ReadFindings, String> {
+    use sim::inference::diagnostic::Diagnostic;
     let path = method_dir.join("diagnostics.json");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(format!("{}: {e}", path.display())),
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ReadFindings::default()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let entries = match serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
+        Ok(entries) => entries,
+        Err(e) => {
+            return Ok(ReadFindings {
+                findings: Vec::new(),
+                unreadable: vec![format!(
+                    "diagnostics.json could not be read, so refused chains are not \
+                     listed: {}: {e}",
+                    path.display()
+                )],
+            })
+        }
+    };
+    let mut out = ReadFindings::default();
+    for (i, entry) in entries.iter().enumerate() {
+        match serde_json::from_value::<Diagnostic>(entry.clone()) {
+            Ok(d) => out.findings.push(d),
+            Err(e) => out.unreadable.push(unreadable_entry(&path, i, entry, &e)),
+        }
+    }
+    Ok(out)
+}
+
+/// The sentence for entry `i` (0-based) of `diagnostics.json`, which did not
+/// parse with `err`.
+///
+/// When the entry's `null`s are what stop it — a file written before
+/// non-finite numbers were spelled out, where `null` stood for `+∞`, `−∞` and
+/// `NaN` alike — the sentence names those fields and says so. The entry is
+/// still refused: admitting the `null` as any one of the three would be a
+/// guess, and the guess decides a finding's severity.
+fn unreadable_entry(path: &Path, i: usize, entry: &serde_json::Value, err: &serde_json::Error) -> String {
+    let kind = entry
+        .pointer("/kind/type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("unknown type");
+    let head = format!("{} entry {} (`{kind}`) could not be read", path.display(), i + 1);
+    let culprits = null_culprits(entry);
+    if culprits.is_empty() {
+        return format!("{head}: {err}");
+    }
+    let fields: Vec<String> = culprits.iter().map(|f| format!("`{f}`")).collect();
+    format!(
+        "{head}: {} {} null. The file was written before camdl spelled a non-finite \
+         number as \"inf\", \"-inf\" or \"NaN\"; null stood for all three, so the value \
+         is not recoverable from it. The file's other entries are read.",
+        fields.join(", "),
+        if fields.len() == 1 { "is" } else { "are" },
+    )
+}
+
+/// The fields of `entry` whose `null` alone stops it parsing as a
+/// [`Diagnostic`](sim::inference::diagnostic::Diagnostic), as dotted paths
+/// under `kind` (`rhat`, `attempts.0.time`).
+///
+/// Found by trial rather than by schema, so it cannot drift from the type: with
+/// every `null` replaced by the non-finite spelling `"NaN"` — which a number
+/// field, an optional number and an optional string all accept — the entry
+/// must parse, or its fault is something else and nothing is named. Each
+/// `null` is then restored alone; the ones the entry cannot carry are the
+/// culprits, and a `null` that is a value (an attempt's `projected_max` when no
+/// particle was live) is not blamed.
+fn null_culprits(entry: &serde_json::Value) -> Vec<String> {
+    use serde_json::Value;
+    use sim::inference::diagnostic::Diagnostic;
+
+    fn nulls(v: &Value, at: &str, out: &mut Vec<String>) {
+        match v {
+            Value::Null => out.push(at.to_string()),
+            Value::Array(xs) => {
+                for (i, x) in xs.iter().enumerate() {
+                    nulls(x, &format!("{at}/{i}"), out);
+                }
+            }
+            Value::Object(m) => {
+                for (k, x) in m {
+                    let k = k.replace('~', "~0").replace('/', "~1");
+                    nulls(x, &format!("{at}/{k}"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let parses = |v: &Value| serde_json::from_value::<Diagnostic>(v.clone()).is_ok();
+    let set = |v: &mut Value, at: &str, to: Value| {
+        if let Some(slot) = v.pointer_mut(at) {
+            *slot = to;
+        }
+    };
+
+    let mut paths = Vec::new();
+    nulls(entry, "", &mut paths);
+    let mut filled = entry.clone();
+    for at in &paths {
+        set(&mut filled, at, Value::from("NaN"));
+    }
+    if paths.is_empty() || !parses(&filled) {
+        return Vec::new();
+    }
+    paths
+        .into_iter()
+        .filter(|at| {
+            let mut one = filled.clone();
+            set(&mut one, at, Value::Null);
+            !parses(&one)
+        })
+        .map(|at| {
+            let at = at.strip_prefix("/kind/").unwrap_or(at.trim_start_matches('/'));
+            at.split('/')
+                .map(|seg| seg.replace("~1", "/").replace("~0", "~"))
+                .collect::<Vec<_>>()
+                .join(".")
+        })
+        .collect()
+}
+
+/// The chains a method refused at their start, from the `bad_init` records
+/// among its findings (gh#607, gh#663) — the durable record, which does not
+/// depend on anything having captured stderr.
+#[derive(Debug, Clone, Default)]
+pub struct RefusedChains {
+    /// `(chain, reason)`, in chain order.
+    pub records: Vec<(crate::chain_index::ChainIndex, String)>,
+    /// What in `diagnostics.json` could not be read ([`ReadFindings::unreadable`]),
+    /// so the summary says it could not look rather than implying nothing was
+    /// refused.
+    pub unreadable: Vec<String>,
+}
+
+impl RefusedChains {
+    pub fn from_findings(findings: &[sim::inference::diagnostic::Diagnostic], unreadable: &[String]) -> Self {
+        use sim::inference::diagnostic::DiagnosticKind;
+        let mut records: Vec<_> = findings.iter().filter_map(|d| match &d.kind {
+            DiagnosticKind::BadInit { chain_id, reason, .. } => {
+                Some((crate::chain_index::ChainIndex(*chain_id), reason.clone()))
+            }
+            _ => None,
+        }).collect();
+        records.sort_by_key(|(id, _)| *id);
+        RefusedChains { records, unreadable: unreadable.to_vec() }
+    }
+
+    /// `"6 of 8 chains ran — refused at start: 3, 5"`, or `None` when every
+    /// chain ran. The count that ran is `fit_state.toml`'s `n_good_chains`
+    /// when the sampler recorded it, else the total less the refusal records;
+    /// if the two sources disagree — a count with no record behind it — the
+    /// line says so rather than choosing one.
+    pub fn ran_of(&self, n_chains: usize, n_good_chains: Option<usize>) -> Option<String> {
+        let n_refused = self.records.len();
+        let ran = n_good_chains.unwrap_or(n_chains.saturating_sub(n_refused));
+        if ran >= n_chains && n_refused == 0 {
+            return None;
+        }
+        let ids: Vec<String> = self.records.iter().map(|(id, _)| id.to_string()).collect();
+        let mut text = format!("{ran} of {n_chains} chains ran");
+        if !ids.is_empty() {
+            text.push_str(&format!(" — refused at start: {}", ids.join(", ")));
+        }
+        if ran + n_refused != n_chains {
+            text.push_str(&format!(
+                " ({} chain(s) not accounted for by a refusal record in diagnostics.json; \
+                 chain_starts.tsv gives each chain's status)",
+                n_chains.abs_diff(ran + n_refused)
+            ));
+        }
+        Some(text)
     }
 }
 
@@ -306,6 +495,7 @@ pub fn unused_starts_note(rule_tag: &str, params: &[String], still_read: bool) -
 /// and the chains that left latent paths are what the identity line counts —
 /// so they are read once, here, rather than by each section separately. Two
 /// renderings of one fit that each go to disk for themselves is how they drift.
+#[derive(Debug, Clone, Default)]
 pub struct ChainDetail {
     /// Per-chain mean log-likelihood and the trace column it was read from.
     /// `None` when no per-chain trace is readable at all.
@@ -321,13 +511,70 @@ pub struct ChainDetail {
     /// Latent-path convergence over the paths on disk, or the reason there is
     /// none. `None` when the method saved no path at all.
     pub latent: Option<Result<crate::fit::latent_convergence::LatentConvergence, String>>,
+    /// Whether this read wrote the per-cell latent table because the leaf
+    /// predates it: `Some(Ok)` written now, `Some(Err)` could not be written,
+    /// `None` when the leaf already had it or there was nothing to write.
+    pub latent_table_written: Option<Result<(), String>>,
     /// How many chains left a latent path behind — counted from the paths
     /// themselves, so it is right even when the summary block cannot key them.
     pub n_chains_with_paths: usize,
+    /// The conditional filter's ESS by observation (`pgas_summary.json`'s
+    /// `filter_ess` block); `None` for a method that wrote none.
+    pub filter_ess: Option<crate::fit::filter_ess::FilterEss>,
+    /// Per-chain count of retained draws whose log-posterior is `-inf`.
+    pub neginf: Option<Vec<crate::fit::chain_diagnostics::ChainNegInf>>,
+    /// Per-chain count of distinct parameter vectors among the retained draws.
+    pub unique_draws: Option<Vec<crate::fit::chain_diagnostics::ChainUniqueDraws>>,
+    /// How many posterior draws a counterfactual could fork from, over the
+    /// same chains the rest of the summary reports.
+    pub forkable: Option<Forkable>,
+    /// The chains `--exclude-chains` kept and dropped, when it is active.
+    pub subset: Option<crate::chain_selection::SubsetInfo>,
+    /// How many chains the sampler ran and where they began, from
+    /// `fit_state.toml`; `None` when the leaf has none (IF2 carries its own).
+    pub chain_starts: Option<ChainStarts>,
+    /// The run id a stored-fit `starts` source resolved to when this run
+    /// started (`run.json` `inputs.starts_source.run_id`, gh#896).
+    pub source_run: Option<String>,
+}
+
+/// How many chains a sampler ran and where they began, as `fit_state.toml`
+/// records it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChainStarts {
+    pub n_chains: usize,
+    pub n_good_chains: Option<usize>,
+    /// The starts rule as written (`from_prior`, `from_mle @mle`).
+    pub source: Option<String>,
+    pub kind: Option<crate::fit::starts::ChainStartsKind>,
+}
+
+/// The keyed-joint forkable count of a posterior: of `n_total` draws (after
+/// any chain selection), `n_forkable` pair with a saved latent path or are
+/// deterministic (gh#322).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Forkable {
+    pub n_forkable: usize,
+    pub n_total: usize,
+    /// The chain selection the count is over; `None` is the whole posterior.
+    pub selection: Option<crate::chain_selection::SubsetInfo>,
 }
 
 impl ChainDetail {
-    pub fn gather(method_dir: &Path, ll_kind: crate::fit::loglik::LoglikType, is_pgas: bool) -> Self {
+    /// Everything the summary's Bayesian block reads from the leaf beside the
+    /// typed result. `subset` and `forkable` were resolved by the caller under
+    /// the command's `--exclude-chains`.
+    ///
+    /// A PGAS leaf written before the per-cell latent table existed has the
+    /// table written here, once, from its saved paths: the same bytes a re-run
+    /// would leave.
+    pub fn gather(
+        method_dir: &Path,
+        ll_kind: crate::fit::loglik::LoglikType,
+        is_pgas: bool,
+        subset: Option<crate::chain_selection::SubsetInfo>,
+        forkable: Option<Forkable>,
+    ) -> Self {
         use crate::fit::chain_diagnostics as cd;
         let logliks = cd::read_chain_mean_logliks(method_dir, ll_kind);
         let scores = match &logliks {
@@ -336,20 +583,44 @@ impl ChainDetail {
             }
             _ => Vec::new(),
         };
+        let mut detail = Self {
+            logliks,
+            scores,
+            saved_paths: None,
+            latent: None,
+            latent_table_written: None,
+            n_chains_with_paths: 0,
+            filter_ess: None,
+            neginf: cd::read_chain_neginf(method_dir),
+            unique_draws: cd::read_chain_unique_draws(method_dir),
+            forkable,
+            subset,
+            // Read for the identity line's chain count and the seeded-from
+            // line: display details, not a verdict.
+            chain_starts: crate::fit::state::FitState::load(&method_dir.to_string_lossy()).ok()
+                .map(|st| ChainStarts {
+                    n_chains: st.n_chains,
+                    n_good_chains: st.n_good_chains,
+                    source: st.chain_init_source,
+                    kind: st.chain_starts_kind,
+                }),
+            source_run: None,
+        };
         // PGAS is the one Bayesian method that writes latent paths, so for PMMH
         // / MH there is nothing to read and nothing to omit.
         if !is_pgas {
-            return Self { logliks, scores, saved_paths: None, latent: None, n_chains_with_paths: 0 };
+            return detail;
         }
         let summary = std::fs::read_to_string(
             method_dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename()),
         )
         .ok()
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
-        let saved_paths = summary
+        detail.saved_paths = summary
             .as_ref()
             .and_then(crate::fit::pgas::read_saved_path_counts)
             .filter(|r| !r.per_chain.is_empty());
+        detail.filter_ess = summary.as_ref().and_then(crate::fit::filter_ess::FilterEss::read);
         let (latent, n_chains_with_paths) =
             match crate::fit::latent_convergence::read_method_paths(method_dir) {
                 Ok(Some((chains, columns))) => {
@@ -361,7 +632,15 @@ impl ChainDetail {
                 Ok(None) => (None, 0),
                 Err(e) => (Some(Err(e)), 0),
             };
-        Self { logliks, scores, saved_paths, latent, n_chains_with_paths }
+        if let Some(Ok(lc)) = &latent {
+            let table = method_dir.join(crate::fit::latent_convergence::LATENT_CONVERGENCE_TSV);
+            if !table.is_file() {
+                detail.latent_table_written = Some(lc.write_tsv(&table));
+            }
+        }
+        detail.latent = latent;
+        detail.n_chains_with_paths = n_chains_with_paths;
+        detail
     }
 }
 
