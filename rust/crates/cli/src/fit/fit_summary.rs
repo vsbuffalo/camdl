@@ -18,7 +18,8 @@
 //! for the step-5 walker-consumer refactor; this file's prior shape
 //! is preserved in git history at commit `d45c932` for context.
 
-use crate::out::paint::{Painter, Stream, Style};
+use crate::out::paint::{Painter, Style};
+use crate::out::{CommandError, Out};
 use crate::fit::report::{Check, ChainDetail, MethodFacts};
 use crate::fit::report::export::{render_latex, render_markdown};
 use crate::fit::report::render::*;
@@ -172,6 +173,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     // rather than one chosen by directory order (gh#896). summary operates on
     // the directory; it needs no config.
     use crate::fit::handle::{self, FitTarget};
+    let mut out = Out::new(args.no_color);
     let target = handle::resolve_target(&args.fit).and_then(|t| match t {
         FitTarget::Leaf(leaf) => Ok(leaf.dir),
         FitTarget::Segment(seg) => {
@@ -180,27 +182,23 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     });
     let segment = match target {
         Ok(dir) => dir,
-        Err(e) => {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
+        Err(e) => out.error(CommandError::new(format!("error: {e}"))).exit(),
     };
     let dir = segment.to_string_lossy().into_owned();
 
     let strict = args.strict || ci_env_set();
     // Warnings and notes go to stderr under the same `--no-color` as the
     // summary on stdout.
-    let stderr = Painter::for_stream(Stream::Stderr, args.no_color);
+    let stderr = out.stderr_painter();
 
     // The full set of completed method leaves, walker-discovered, in label
     // order (see `discover_methods`).
     let discovered = discover_methods(Path::new(&dir));
     if discovered.is_empty() {
-        eprintln!(
+        out.error(CommandError::new(format!(
             "error: no completed method leaf under {dir}, so there is nothing to summarise.\n  \
              Pass a fit's directory, a leaf directory, @label, a run-id prefix, or its fit.toml."
-        );
-        std::process::exit(1);
+        ))).exit();
     }
 
     // gh#103 (H17): warn (once, to stderr) when the fit has instant-kind
@@ -214,13 +212,10 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     if args.params_only {
         match dump_params_only(&dir, &discovered) {
             Ok(s) => {
-                print!("{}", s);
+                write_data(&mut out, &s);
                 return;
             }
-            Err(e) => {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            }
+            Err(e) => out.error(CommandError::new(format!("error: {e}"))).exit(),
         }
     }
 
@@ -236,32 +231,28 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
                     matches!(s.method.as_str(), "pgas" | "pmmh" | "mh")
                 });
                 if !has_bayesian {
-                    eprintln!(
+                    out.error(CommandError::new(
                         "error: --exclude-chains needs a Bayesian method (PGAS / PMMH / MH) to \
                          subset; this fit's selected method(s) have no posterior chains"
-                    );
-                    std::process::exit(1);
+                    )).exit();
                 }
                 Some(sel)
             }
-            Err(e) => {
-                eprintln!("error: {e}");
-                std::process::exit(1);
-            }
+            Err(e) => out.error(CommandError::new(format!("error: {e}"))).exit(),
         },
         None => None,
     };
 
     let failures = match args.format {
-        FitSummaryFormat::Text => format_text(&dir, args, &selected, strict, selection.as_ref(), stderr),
-        FitSummaryFormat::Json => format_json(&dir, &selected, strict, selection.as_ref(), stderr),
-        FitSummaryFormat::Md => format_md(&dir, &selected, strict, selection.as_ref(), stderr),
-        FitSummaryFormat::Latex => format_latex(&dir, &selected, strict, selection.as_ref(), stderr),
+        FitSummaryFormat::Text => format_text(&mut out, &dir, args, &selected, strict, selection.as_ref()),
+        FitSummaryFormat::Json => format_json(&mut out, &dir, &selected, strict, selection.as_ref()),
+        FitSummaryFormat::Md => format_md(&mut out, &dir, &selected, strict, selection.as_ref()),
+        FitSummaryFormat::Latex => format_latex(&mut out, &dir, &selected, strict, selection.as_ref()),
     };
 
     // One exit decision for all four formats: an unreadable leaf is reported
     // the same way whatever was being rendered (gh#905).
-    exit_if_nothing_loaded(&dir, &discovered, &failures);
+    exit_if_nothing_loaded(&mut out, &dir, &discovered, &failures);
 }
 
 /// Load the calendar context from a fit dir: read the model path from the
@@ -360,26 +351,23 @@ fn nothing_loaded(discovered: &[ResolvedMethod], failures: &[LoadFailure]) -> bo
 
 /// Report the leaves that could not be read, and exit non-zero when they leave
 /// no summary behind. Returns normally when at least one leaf loaded.
-fn exit_if_nothing_loaded(dir: &str, discovered: &[ResolvedMethod], failures: &[LoadFailure]) {
+fn exit_if_nothing_loaded(out: &mut Out, dir: &str, discovered: &[ResolvedMethod], failures: &[LoadFailure]) {
     if !nothing_loaded(discovered, failures) {
         return;
     }
-    // The rendered document is already on stdout; flush it before the process
-    // ends so a reader piping stdout still gets what was produced.
-    use std::io::Write;
-    let _ = std::io::stdout().flush();
-    eprintln!();
-    eprintln!(
-        "error: no method leaf under {} could be read back, so there is nothing to \
+    // The rendered document is already on stdout; `Out::error` flushes it
+    // first, so a reader piping stdout still gets what was produced.
+    let mut message = format!(
+        "\nerror: no method leaf under {} could be read back, so there is nothing to \
          summarise ({} found, {} unreadable):",
         dir,
         discovered.len(),
         failures.len()
     );
     for f in failures {
-        eprintln!("  {}: {}", f.leaf, f.reason);
+        message.push_str(&format!("\n  {}: {}", f.leaf, f.reason));
     }
-    std::process::exit(1);
+    out.error(CommandError::new(message)).exit();
 }
 
 /// Walk the fit_dir and return one `ResolvedMethod` per completed method
@@ -457,15 +445,15 @@ fn discover_methods(fit_dir: &Path) -> Vec<ResolvedMethod> {
 /// drawn by `render_report` under the summary view, with the fit's own lines
 /// around them.
 fn format_text(
+    out: &mut Out,
     dir: &str,
     args: &FitSummaryArgs,
     methods: &[ResolvedMethod],
     strict: bool,
     selection: Option<&ChainSelection>,
-    stderr: Painter,
 ) -> Vec<LoadFailure> {
     let mut failures: Vec<LoadFailure> = Vec::new();
-    let painter = Painter::for_stream(Stream::Stdout, args.no_color);
+    let stderr = out.stderr_painter();
     let cal = load_calendar_context(Path::new(dir));
     let mut had_provenance_failure = false;
     // Emit the loud selection advisory (nudge + warning) once, from the first
@@ -480,7 +468,7 @@ fn format_text(
         .map(|env| (env.docs.clone(), env.model.constants.clone()))
         .unwrap_or_default();
     let has_legend = !docs.parameters.is_empty() || !constants.is_empty();
-    print_lines(painter, &summary_head(dir, &docs, &constants, args.parameters));
+    out.report(&summary_head(dir, &docs, &constants, args.parameters));
 
     // The camdl version is a fact about the FIT, so it opens the first method's
     // identity line and is not repeated on the others'. A fit with no method at
@@ -532,10 +520,7 @@ fn format_text(
                         }
                         subset_info = Some(info);
                     }
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        std::process::exit(1);
-                    }
+                    Err(e) => out.error(CommandError::new(format!("error: {e}"))).exit(),
                 }
             }
         }
@@ -563,27 +548,27 @@ fn format_text(
         };
         had_provenance_failure |= report.provenance_failed();
         let view = View::Summary(SummaryView { explain: args.explain, version_lead });
-        print_lines(painter, &render_report(&MethodOutcome::Completed(report), view));
+        out.report(&render_report(&MethodOutcome::Completed(report), view));
     }
 
     if methods.is_empty() {
-        print_lines(painter, &summary_no_methods(dir));
+        out.report(&summary_no_methods(dir));
     }
-    print_lines(painter, &summary_foot(has_legend, args.parameters, args.explain));
+    out.report(&summary_foot(has_legend, args.parameters, args.explain));
 
     if strict && had_provenance_failure {
-        eprintln!();
-        eprintln!("error: provenance cross-checks failed (--strict).");
-        std::process::exit(1);
+        out.error(CommandError::new("\nerror: provenance cross-checks failed (--strict).")).exit();
     }
 
     failures
 }
 
-/// Write `lines` to stdout through `painter`. A write that fails is fatal, as
-/// it is for `print!`.
-fn print_lines(painter: Painter, lines: &[crate::out::paint::Line]) {
-    if let Err(e) = painter.write(&mut std::io::stdout().lock(), lines) {
+/// `text` as a command's data on stdout.
+fn write_data(out: &mut Out, text: &str) {
+    use std::io::Write;
+    let mut data = out.data();
+    // `Data` ends the command on a closed pipe; any other failure is fatal.
+    if let Err(e) = data.write_all(text.as_bytes()).and_then(|()| data.flush()) {
         panic!("failed printing to stdout: {e}");
     }
 }
@@ -611,36 +596,33 @@ fn forkability(
         .map(|j| crate::fit::report::Forkable { n_forkable: j.n_forkable, n_total: j.n_total, selection: j.selection })
 }
 
-fn format_json(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>, stderr: Painter) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(dir, methods, selection, stderr);
+fn format_json(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
+    let doc = build_summary_doc(out, dir, methods, selection);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     let s = serde_json::to_string_pretty(&doc).expect("FitSummaryDoc must serialize");
-    println!("{}", s);
+    write_data(out, &format!("{s}\n"));
     if strict && any_failed {
-        eprintln!("error: provenance cross-checks failed (--strict).");
-        std::process::exit(1);
+        out.error(CommandError::new("error: provenance cross-checks failed (--strict).")).exit();
     }
     doc.failures
 }
 
-fn format_md(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>, stderr: Painter) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(dir, methods, selection, stderr);
+fn format_md(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
+    let doc = build_summary_doc(out, dir, methods, selection);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
-    print!("{}", render_markdown(&doc));
+    write_data(out, &render_markdown(&doc));
     if strict && any_failed {
-        eprintln!("error: provenance cross-checks failed (--strict).");
-        std::process::exit(1);
+        out.error(CommandError::new("error: provenance cross-checks failed (--strict).")).exit();
     }
     doc.failures
 }
 
-fn format_latex(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>, stderr: Painter) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(dir, methods, selection, stderr);
+fn format_latex(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
+    let doc = build_summary_doc(out, dir, methods, selection);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
-    print!("{}", render_latex(&doc));
+    write_data(out, &render_latex(&doc));
     if strict && any_failed {
-        eprintln!("error: provenance cross-checks failed (--strict).");
-        std::process::exit(1);
+        out.error(CommandError::new("error: provenance cross-checks failed (--strict).")).exit();
     }
     doc.failures
 }
@@ -695,11 +677,12 @@ pub struct SchemaInfo {
 /// and LaTeX formatters. Pure on its inputs (file system + the args
 /// it was called with).
 fn build_summary_doc(
+    out: &mut Out,
     dir: &str,
     methods: &[ResolvedMethod],
     selection: Option<&ChainSelection>,
-    stderr: Painter,
 ) -> FitSummaryDoc {
+    let stderr = out.stderr_painter();
     let cal = load_calendar_context(Path::new(dir));
     let model = load_fit_envelope(Path::new(dir)).map(|env| env.model);
     let mut method_reports: Vec<MethodReport> = Vec::new();
@@ -752,10 +735,7 @@ fn build_summary_doc(
                             }
                             chain_selection_json = Some(info.to_json());
                         }
-                        Err(e) => {
-                            eprintln!("error: {e}");
-                            std::process::exit(1);
-                        }
+                        Err(e) => out.error(CommandError::new(format!("error: {e}"))).exit(),
                     }
                 }
             }
@@ -3071,7 +3051,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&dir.to_string_lossy(), &methods, None, Painter::plain());
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None);
         let json = serde_json::to_string_pretty(&doc).unwrap();
         assert!(json.contains("\"version\": 4"),
             "schema.version must be present and = 4: {}", json);
@@ -3103,7 +3083,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&dir.to_string_lossy(), &methods, None, Painter::plain());
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None);
         let md = render_markdown(&doc);
         assert!(md.contains("# Fit summary:"));
         assert!(md.contains("## `if2`"));
@@ -3124,7 +3104,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&dir.to_string_lossy(), &methods, None, Painter::plain());
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None);
         let tex = render_latex(&doc);
         // No preamble, but tabular blocks per method.
         assert!(tex.contains("\\subsection*{Method:"));
