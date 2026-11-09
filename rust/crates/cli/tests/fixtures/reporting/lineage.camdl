@@ -1,0 +1,25 @@
+#' Closed SIR whose infections carry lineage: the event-log fixture behind
+#' the reporting facts test's `simulate --event-log` and `lineage` runs.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  #' per-capita transmission rate
+  beta  : rate in [0.001, 5.0]
+  #' recovery rate; mean infectious period is 1/gamma
+  gamma : rate in [0.01, 1.0]
+}
+
+let N = S + I + R
+
+transitions {
+  #[lineage]
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+
+init { S = 99  I = 1 }
+
+simulate { from = 0 'days  to = 30 'days }
