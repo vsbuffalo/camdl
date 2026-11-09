@@ -174,15 +174,15 @@ pub(crate) struct CasSink {
     /// (`total > 1`) — a LONE `simulate` gets the engine's per-timestep bar
     /// instead, so its overall bar would be a redundant `1/1`. `None` is the
     /// inert case (single cell, or `--progress none`/tests). Honours the
-    /// `--progress` mode via [`crate::progress::Task`].
-    pub(crate) progress: Option<crate::progress::Task>,
+    /// `--progress` mode via [`crate::out::progress::Task`].
+    pub(crate) progress: Option<crate::out::progress::Task>,
 }
 
 /// The overall cells bar for a multi-cell run, or `None` for a single cell
 /// (the engine's per-timestep bar covers that) or when no bar applies. The
 /// `Task` itself honours `--progress none`/`plain` internally.
-pub(crate) fn cells_progress(total: usize, label: impl Into<String>) -> Option<crate::progress::Task> {
-    (total > 1).then(|| crate::progress::Reporter::new().task(total as u64, label, "cells"))
+pub(crate) fn cells_progress(total: usize, label: impl Into<String>) -> Option<crate::out::progress::Task> {
+    (total > 1).then(|| crate::out::progress::Reporter::new().task(total as u64, label, "cells"))
 }
 
 impl CasSink {
@@ -346,7 +346,7 @@ impl CasSink {
             obj.insert("parameters_provenance".into(),
                 serde_json::to_value(&provenance).map_err(|e| e.to_string())?);
             let horizon = resolved.t_end.unwrap_or(self.base_model.simulation.t_end);
-            let notices: crate::notice::Notices = crate::params_resolver::notices(&[&resolved_params])
+            let notices: crate::out::notice::Notices = crate::params_resolver::notices(&[&resolved_params])
                 .iter()
                 .cloned()
                 .chain(crate::obs_anchor::spline_hold_notices(&self.base_model, &self.base_anchors, horizon)

@@ -636,7 +636,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             // (`begin_resolved_write` finds it by identity), so report the
             // path the store names, not this run's `cas_path`.
             Err(runid::CasError::AlreadyCompleted { path }) => {
-                crate::status::step("cached", path);
+                crate::out::status::step("cached", path);
                 return;
             }
             // Another process is computing this same evaluation right now. The
@@ -676,8 +676,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         if let Err(e) = write.finalize(inputs_json) {
             eprintln!("warning: finalize pfilter leaf {}: {}", cas_path.display(), e);
         } else {
-            crate::status::done("stored", cas_path.display());
-            crate::status::hint(format!("camdl cat {}", resolved_id.run_id.to_hex()));
+            crate::out::status::done("stored", cas_path.display());
+            crate::out::status::hint(format!("camdl cat {}", resolved_id.run_id.to_hex()));
         }
     };
 
@@ -734,7 +734,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         // the parallel loop (`Task` is `Send + Sync`); honors `--progress
         // none/plain`. Finer per-obs-window progress would need a callback
         // into `sim::bootstrap_filter` — deferred (an inference-crate change).
-        let bar = crate::progress::Reporter::new().task(n_replicates as u64, "pfilter", "reps");
+        let bar = crate::out::progress::Reporter::new().task(n_replicates as u64, "pfilter", "reps");
         let acc = std::sync::Mutex::new((0.0_f64, 0usize)); // (Σ loglik, count)
         let logliks: Vec<f64> = run_pooled(&pf_pool, || {
             (0..n_replicates).into_par_iter().map(|rep| {

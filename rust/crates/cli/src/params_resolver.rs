@@ -98,7 +98,7 @@ use std::path::PathBuf;
 use indexmap::{IndexMap, IndexSet};
 use ir::table::TableSource;
 
-use crate::notice::{Notice, Notices, Severity};
+use crate::out::notice::{Notice, Notices, Severity};
 
 // ─── The range a parameter is valid on ───────────────────────────────────────
 

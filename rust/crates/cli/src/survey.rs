@@ -93,7 +93,7 @@ struct ResolvedSurveyInputs {
     /// Each resolved parameter's provenance, with every override, and the
     /// notices the resolution reported: recorded in `run.json`, never hashed.
     parameters_provenance: std::collections::BTreeMap<String, crate::run_meta::ParameterProvenance>,
-    notices: crate::notice::Notices,
+    notices: crate::out::notice::Notices,
     /// The survey's partition and the legacy `estimated` / `fixed` fields
     /// generated from it: recorded in `run.json`, never hashed.
     roles: crate::roles::RoleRecord,
@@ -396,7 +396,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     };
     match crate::resolve::check_reuse(&store, &output_root, &resolved_artifact, policy) {
         Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
-            crate::status::step("cached", dir.display());
+            crate::out::status::step("cached", dir.display());
             crate::resolve::note_leaf_from_another_model_file(&dir, &model_path_str);
             let html_path = dir.join("landscape.html");
             if a.render && !html_path.exists() {
@@ -441,9 +441,9 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     let summary_path = staging.join("summary.json");
     let html_path = staging.join("landscape.html");
 
-    crate::status::done("stored",
+    crate::out::status::done("stored",
         format!("{} \u{b7} {} points (eval={})", run_dir.display(), n_points, eval_method));
-    crate::status::hint("camdl list --kind survey");
+    crate::out::status::hint("camdl list --kind survey");
     if eval_method == SurveyEvalMethod::Simulate {
         eprintln!(
             "  --eval simulate now computes p(y|θ, ODE_skeleton) via the ODE \
@@ -516,7 +516,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // Progress: one overall bar over the LHS points, ticked from the parallel
     // sweep (`Task` is `Send + Sync`), with the best loglik found so far as the
     // researcher metric. Honors `--progress none/plain`.
-    let bar = crate::progress::Reporter::new().task(n_points as u64, "survey", "pts");
+    let bar = crate::out::progress::Reporter::new().task(n_points as u64, "survey", "pts");
     let best = std::sync::Mutex::new(f64::NEG_INFINITY);
     let sweep = || lhs_starts.par_iter().enumerate()
         .map(|(point_id, draw)| {
@@ -550,7 +550,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
                 if let Ok(mut b) = best.lock() {
                     if row.loglik > *b {
                         *b = row.loglik;
-                        bar.set(crate::progress::best_ll(*b));
+                        bar.set(crate::out::progress::best_ll(*b));
                     }
                 }
             }

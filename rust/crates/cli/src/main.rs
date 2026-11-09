@@ -2,7 +2,6 @@ mod args;
 #[cfg(test)]
 mod test_support;   // collision-free unique_temp_dir for unit tests (gh#153)
 mod util;
-mod notice;         // Notice/Notices: collected user-facing info/warning lines, emitted once
 mod params_resolver;  // unified parameter-value resolver (2026-05-25 CLI UX rev 2)
 mod cas_read;       // generic RunRecord reader (new-format sims); transitional alongside run_meta (gh#147)
 mod cas_index;      // derived run_id→leaf index + `camdl reindex` (gh#147 M4)
@@ -42,8 +41,7 @@ mod if2;
 mod profile;
 mod profile_cas;     // gh#147 M3.3: profile-point CAS identity (resolve_profile_point)
 mod profile_diagnostics;
-mod progress;
-mod status;        // tidy colored one-shot milestone lines (compiled/storing/stored)
+mod out;           // the stream layer: notices, progress, milestones, colour
 mod evidence;
 mod survey;
 mod survey_cas;     // gh#147 (M3.3): survey CAS identity (model/config/box/seed)
@@ -544,7 +542,7 @@ fn main() {
     // plain-mode log lines from callbacks reach the configured filter.
     // `--no-progress` is the discoverable shorthand for `--progress none` and
     // wins when both are given.
-    progress::init(if cli.no_progress { args::types::ProgressMode::None } else { cli.progress });
+    out::progress::init(if cli.no_progress { args::types::ProgressMode::None } else { cli.progress });
     util::set_ir_cache_disabled(cli.no_ir_cache);
     util::set_licm_disabled(cli.no_licm);
 
@@ -2456,9 +2454,9 @@ fn run_simulate(a: &args::SimulateArgs) {
             // The post-bar pause the user sees is this: writing + fsyncing the
             // combined wide-format TSV as the ensemble leaf. Announce it so a
             // multi-MB ensemble doesn't look like a hang.
-            crate::status::step("storing",
+            crate::out::status::step("storing",
                 format!("ensemble \u{b7} {} cells ({})",
-                    total_runs, crate::status::human_bytes(bytes.len() as u64)));
+                    total_runs, crate::out::status::human_bytes(bytes.len() as u64)));
             write_sim_ensemble(
                 &sink.cas, bytes, &cas_root, label_arg.clone(), design.as_ref().map(|(_, d)| d),
             );
@@ -2467,7 +2465,7 @@ fn run_simulate(a: &args::SimulateArgs) {
 
     // Report what the store supplied and where the leaves landed.
     if sink.n_reused > 0 {
-        crate::status::step("cached", format!(
+        crate::out::status::step("cached", format!(
             "{} of {} cells read from the store; simulated {}",
             sink.n_reused, total_runs, total_runs - sink.n_reused
         ));
@@ -3318,7 +3316,7 @@ fn write_sim_ensemble(
         Ok(crate::resolve::ResolvedWrite::Committed(dest)) => {
             // Full rooted path (e.g. `./results/ensembles/…`), matching the
             // `stored` banner — not the bare store-relative `ensembles/…`.
-            crate::status::step("ensemble", dest.to_string_lossy());
+            crate::out::status::step("ensemble", dest.to_string_lossy());
         }
         Ok(crate::resolve::ResolvedWrite::Streaming(_)) => {
             unreachable!("Atomic write mode never returns a streaming claim")
@@ -3341,14 +3339,14 @@ fn report_cas_leaves(runs: &[crate::cas_sink::RunEntry], cas_root: &str) {
         0 => {}
         1 => {
             let r = &runs[0];
-            crate::status::done("stored", format!("{}/{}", root, r.run_path));
+            crate::out::status::done("stored", format!("{}/{}", root, r.run_path));
             if let Some(id) = r.run_id {
-                crate::status::hint(format!("camdl cat {}", id.to_hex()));
+                crate::out::status::hint(format!("camdl cat {}", id.to_hex()));
             }
         }
         n => {
-            crate::status::done("stored", format!("{} leaves \u{b7} {}/sims/", n, root));
-            crate::status::hint("camdl list");
+            crate::out::status::done("stored", format!("{} leaves \u{b7} {}/sims/", n, root));
+            crate::out::status::hint("camdl list");
         }
     }
 }

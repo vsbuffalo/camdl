@@ -1924,8 +1924,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 method_best_chain = Some(chain_results.best_chain);
 
                 eprintln!();
-                crate::status::done("stored", format!("{} \u{b7} {}/", method_name, method_dir.display()));
-                crate::status::hint(format!("best ll={:.1} (chain {}) in {:.1}s",
+                crate::out::status::done("stored", format!("{} \u{b7} {}/", method_name, method_dir.display()));
+                crate::out::status::hint(format!("best ll={:.1} (chain {}) in {:.1}s",
                     chain_results.best_loglik, chain_results.best_chain, elapsed.as_secs_f64()));
             }
             Algorithm::PGAS { .. } => {
@@ -2322,7 +2322,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 std::process::exit(1);
             }
         };
-        crate::status::done("stored",
+        crate::out::status::done("stored",
             format!("{} \u{b7} {} \u{b7} {:.1}s", method_name, dest.display(), method_elapsed.as_secs_f64()));
 
     } // end sweep_points
