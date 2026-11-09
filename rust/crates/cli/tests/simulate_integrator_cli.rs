@@ -53,7 +53,7 @@ init {{ S = 9990  I = 10 }}
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, &src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
     ir_path
@@ -63,6 +63,7 @@ init {{ S = 9990  I = 10 }}
 /// returning the trajectory TSV captured from stdout.
 fn simulate_stdout(bin: &Path, ir: &Path, params: &Path, integrator: Option<&str>) -> String {
     let mut cmd = Command::new(bin);
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.args(["simulate"]).arg(ir)
         .args(["--params"]).arg(params)
         .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--stdout"])

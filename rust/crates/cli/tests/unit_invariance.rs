@@ -74,7 +74,7 @@ fn simulate(dir: &Path, time_unit: &str, dt: &str, every: &str) -> Vec<Vec<f64>>
     let src = dir.join(format!("sir_{time_unit}.camdl"));
     std::fs::write(&src, model(time_unit)).unwrap();
     let out = dir.join(format!("{time_unit}.tsv"));
-    let o = Command::new(binary())
+    let o = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", dir.join("cas"))
         .args([
@@ -165,7 +165,7 @@ fn pfilter_loglik(dir: &Path, time_unit: &str, week: u32, dt: &str) -> f64 {
         .map(|(k, y)| format!("{}\t{y}\n", (k as u32 + 1) * week))
         .collect();
     std::fs::write(&data, format!("time\ty\n{rows}")).unwrap();
-    let o = Command::new(binary())
+    let o = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", dir.join("cas"))
         .args([

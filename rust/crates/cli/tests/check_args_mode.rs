@@ -31,7 +31,7 @@ fn camdl_bin() -> PathBuf {
 
 /// Run `camdl __check-args -- <args>` and return the exit code.
 fn check(args: &[&str]) -> i32 {
-    let out = Command::new(camdl_bin())
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .arg("__check-args")
         .arg("--")
         .args(args)

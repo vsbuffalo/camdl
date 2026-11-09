@@ -98,7 +98,7 @@ fn profile_cli_family_binding_slices_per_stratum() {
     let out_root = tmp.path().join("out_cli");
     let out_tsv = tmp.path().join("profile_cli.tsv");
 
-    let output = Command::new(&bin)
+    let output = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", &out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
@@ -172,7 +172,7 @@ cooling    = 0.5
 
     let out_root = tmp.path().join("out_fit");
     let out_tsv = tmp.path().join("profile_fit.tsv");
-    let output = Command::new(&bin)
+    let output = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", &out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([

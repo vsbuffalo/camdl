@@ -61,7 +61,7 @@ fn camdlc_bin() -> PathBuf {
 /// Compile the fixture model to IR in `dir` and return the `.ir.json` path.
 fn compile_model(dir: &Path) -> PathBuf {
     let ir = dir.join("polio_afp_es_2patch.ir.json");
-    let out = Command::new(camdlc_bin())
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE")
         .arg(fixture("polio_afp_es_2patch.camdl"))
         .output()
         .expect("spawn camdlc");
@@ -96,7 +96,7 @@ fn read_times(path: &Path, level: &str) -> Vec<f64> {
 /// long-form file per observation source. Returns (afp, es) paths.
 fn generate_data(bin: &Path, ir: &Path, dir: &Path) -> (PathBuf, PathBuf) {
     let obs_dir = dir.join("obs");
-    let out = Command::new(bin)
+    let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "simulate", &ir.to_string_lossy(),
@@ -154,7 +154,7 @@ fn run_pfilter(bin: &Path, ir: &Path, data_args: &[String]) -> (bool, String, St
         "1".to_string(),
     ];
     args.extend_from_slice(data_args);
-    let out = Command::new(bin)
+    let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(&args)
         .output()
@@ -283,7 +283,7 @@ fn synthetic_fit_recovers_params() {
     // CAMDL_OUTPUT_DIR.
     let fit_toml = fixture("polio_afp_es/fit.toml");
     let tmp = tempfile::tempdir().unwrap();
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .current_dir(tmp.path())
         .env("CAMDL_OUTPUT_DIR", tmp.path().join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")

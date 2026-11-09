@@ -84,7 +84,7 @@ simulate { from = 0 'days  to = 6 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -111,7 +111,7 @@ fn starts_arg(ir: &Path) -> String {
 fn run_profile(bin: &Path, ir: &Path, data: &Path, root: &Path, parallel: u32)
     -> BTreeMap<String, String>
 {
-    let out = Command::new(bin)
+    let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", root)
         .args([

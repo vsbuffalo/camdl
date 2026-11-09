@@ -61,7 +61,7 @@ fn cas_first_run_writes_cache_and_metadata() {
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
 
-    let status = Command::new(&bin)
+    let status = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline",
                "--seed", "42",
@@ -109,7 +109,7 @@ fn cas_second_identical_run_does_not_rewrite_leaf() {
     let output = tmp.path().join("output");
 
     let run_once = || {
-        Command::new(&bin)
+        Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline",
                    "--seed", "42",
@@ -147,7 +147,7 @@ fn cas_different_seed_new_cache_entry() {
     let output = tmp.path().join("output");
 
     for seed in ["42", "43"] {
-        let st = Command::new(&bin)
+        let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline",
                    "--seed", seed,
@@ -215,7 +215,7 @@ fn cas_different_models_do_not_collide() {
     std::fs::write(&path_b, serde_json::to_string(&v2).unwrap()).unwrap();
 
     let run = |model: &Path| {
-        let st = Command::new(&bin)
+        let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["simulate", &model.to_string_lossy(),
                    "--scenario", "baseline",
                    "--seed", "1",
@@ -267,7 +267,7 @@ fn cas_multi_seeds_writes_one_leaf_per_seed() {
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline",
                "--seeds", "1:3",
@@ -309,7 +309,7 @@ fn cas_replicates_write_one_leaf_each_and_single_run_writes_one() {
 
     // 3 replicates → 3 leaves, 3 distinct run_ids.
     let out3 = tmp.path().join("out3");
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42", "--replicates", "3",
                "--output-dir", &out3.to_string_lossy(),
@@ -326,7 +326,7 @@ fn cas_replicates_write_one_leaf_each_and_single_run_writes_one() {
 
     // 1 run (no --replicates) → exactly one leaf.
     let out1 = tmp.path().join("out1");
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42",
                "--output-dir", &out1.to_string_lossy(),
@@ -358,7 +358,7 @@ fn multi_cell_and_single_cell_leaves_are_byte_identical() {
     let single_out = tmp.path().join("single_out");
 
     // One multi-cell run over an explicit seed list.
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline",
                "--params", &params.to_string_lossy(),
@@ -370,7 +370,7 @@ fn multi_cell_and_single_cell_leaves_are_byte_identical() {
 
     // The same three cells, one lone run each, into a second store.
     for seed in ["10", "11", "12"] {
-        let st = Command::new(&bin)
+        let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline",
                    "--params", &params.to_string_lossy(),
@@ -433,7 +433,7 @@ fn a_camdl_source_lands_on_one_model_directory_with_the_ir_cache_on_or_off() {
     std::fs::write(&params, "beta = 0.3\ngamma = 0.1\nN0 = 1000\nI0 = 10\n").unwrap();
     let store = tmp.path().join("store");
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &model.to_string_lossy(),
                "--scenario", "baseline",
                "--params", &params.to_string_lossy(),
@@ -452,6 +452,7 @@ fn a_camdl_source_lands_on_one_model_directory_with_the_ir_cache_on_or_off() {
     // directory named for the IR would differ from every other invocation.
     for no_cache in [false, true] {
         let mut cmd = Command::new(&bin);
+        cmd.env_remove("CLICOLOR_FORCE");
         cmd.args(["simulate", &model.to_string_lossy(),
                   "--scenario", "baseline",
                   "--params", &params.to_string_lossy(),
@@ -485,6 +486,7 @@ fn a_camdl_source_dry_run_counts_the_leaves_the_run_wrote() {
     let store = tmp.path().join("store");
     let simulate = |seeds: &str, dry_run: bool| -> String {
         let mut cmd = Command::new(&bin);
+        cmd.env_remove("CLICOLOR_FORCE");
         cmd.args(["simulate", &model.to_string_lossy(),
                   "--scenario", "baseline",
                   "--params", &params.to_string_lossy(),
@@ -522,7 +524,7 @@ fn list_shows_cached_runs() {
 
     // Cache two runs
     for seed in ["42", "99"] {
-        Command::new(&bin)
+        Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline",
                    "--seed", seed,
@@ -533,7 +535,7 @@ fn list_shows_cached_runs() {
     }
 
     // `camdl list` should find both
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["list", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "list should succeed");
@@ -610,7 +612,7 @@ cooling = 0.7
 
     // Removed flags, every one named with its replacement in one message
     // (the ebola agents' habitual `--stage posterior --init from_prior`).
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .current_dir(tmp.path())
         .args(["fit", "run", &fit_toml.to_string_lossy(),
                "--stage", "posterior", "--init", "from_prior",
@@ -631,7 +633,7 @@ cooling = 0.7
     // gh#889: `camdl profile` answers the same four flags the same way, and
     // refuses before it does any work — the earlier surface accepted them and
     // ran with a start rule the flag was meant to select.
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .current_dir(tmp.path())
         .args(["profile", &ir.to_string_lossy(),
                "--data", &format!("cases={}", data.display()),
@@ -652,7 +654,7 @@ cooling = 0.7
         "the refusal must land before any work, got: {stderr}");
 
     // Bad hash with the new spelling: the resolver finds no leaf and no fit.
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .current_dir(tmp.path())
         .args(["fit", "run", &fit_toml.to_string_lossy(),
                "--starts", "from_mle=zzzznonexistent"])
@@ -668,7 +670,7 @@ cooling = 0.7
     // the fit does anything expensive, so the success path is that the
     // failure comes AFTER the lookup — the planted leaf holds no
     // `fit_state.toml`, and the error says so about that leaf.
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .current_dir(tmp.path())
         .args(["fit", "run", &fit_toml.to_string_lossy(),
                "--starts", "from_mle=deadbeef"])
@@ -689,7 +691,7 @@ fn list_kind_filter_isolates_sections() {
     let output = tmp.path().join("output");
 
     // Cache one sim.
-    Command::new(&bin)
+    Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "7", "--cas",
                "--output-dir", &output.to_string_lossy(),
@@ -698,14 +700,14 @@ fn list_kind_filter_isolates_sections() {
     // Synthesise a CAS fit (single `mle` method leaf + sidecar).
     write_cas_fit(&output, "demo", "abc12345", &["if2"], "m");
 
-    let fit_only = Command::new(&bin)
+    let fit_only = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["list", "--kind", "fit", &output.to_string_lossy()])
         .output().expect("spawn");
     let s = String::from_utf8_lossy(&fit_only.stdout);
     assert!(s.contains("demo"), "--kind fit should show fits: {}", s);
     assert!(!s.contains("seed_7"), "--kind fit must hide sims: {}", s);
 
-    let sim_only = Command::new(&bin)
+    let sim_only = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["list", "--kind", "sim", &output.to_string_lossy()])
         .output().expect("spawn");
     let s = String::from_utf8_lossy(&sim_only.stdout);
@@ -728,7 +730,7 @@ fn list_shows_fit_entries() {
     // comes from the leaves (`if2`, `pgas`).
     write_cas_fit(&output, "demo", "abc12345", &["if2", "pgas"], "m000");
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["list", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "list should succeed: stderr={:?}",
@@ -756,7 +758,7 @@ fn cas_tampered_leaf_is_repaired_on_rerun() {
     let output = tmp.path().join("output");
 
     let run_once = || {
-        Command::new(&bin)
+        Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline",
                    "--seed", "42",
@@ -796,7 +798,7 @@ fn show_resolves_fit_by_hash_prefix() {
     // short prefix matches.
     let run_id = "deadbeefc0ffee00000000000000000000000000000000000000000000000000";
     write_cas_fit_method(&output, run_id, "demo");
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["show", "deadbee", "--root", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "show by run_id prefix should resolve: stderr={}",
@@ -813,7 +815,7 @@ fn cat_emits_cached_trajectory() {
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
 
-    Command::new(&bin)
+    Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline",
                "--seed", "42",
@@ -830,7 +832,7 @@ fn cat_emits_cached_trajectory() {
     let short = &run_id[..8];
 
     // `camdl cat <short>` uniquely resolves and emits the TSV
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["cat", short, "--root", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "cat short-hash should resolve uniquely");
@@ -867,7 +869,7 @@ fn sweep_point_is_recorded_in_run_json_and_listed() {
     let params_path = tmp.path().join("params.toml");
     std::fs::write(&params_path, "gamma = 0.1\nN0 = 1000\nI0 = 10\n").unwrap();
 
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--params", &params_path.to_string_lossy(),
                "--sweep", "beta=0.2,0.3,0.4",
@@ -902,7 +904,7 @@ fn sweep_point_is_recorded_in_run_json_and_listed() {
 
     // `camdl list --kind sim` shows the beta values in the PARAMS column (the
     // default listing folds a multi-cell run's cells into its ensemble row).
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["list", &output.to_string_lossy(), "--kind", "sim"])
         .output().expect("spawn");
     assert!(out.status.success());
@@ -922,7 +924,7 @@ fn sweep_dry_run_prints_the_grid_and_writes_nothing() {
     let params_path = tmp.path().join("params.toml");
     std::fs::write(&params_path, "gamma = 0.1\nN0 = 1000\nI0 = 10\n").unwrap();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--params", &params_path.to_string_lossy(),
                "--sweep", "beta=0.2,0.3,0.4",
@@ -957,7 +959,7 @@ fn simulate_batch_flag_rejected_cleanly() {
     let batch_path = tmp.path().join("foo.toml");
     std::fs::write(&batch_path, "").unwrap();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate",
                &golden_sir_basic().to_string_lossy(),
                "--batch", &batch_path.to_string_lossy()])
@@ -974,7 +976,7 @@ fn show_prints_metadata() {
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
 
-    Command::new(&bin)
+    Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline",
                "--seed", "42",
@@ -988,7 +990,7 @@ fn show_prints_metadata() {
     let meta = read_meta(&dir);
     let short = &meta["run_id"].as_str().unwrap()[..8];
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["show", short, "--root", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "show should succeed");
@@ -1045,7 +1047,7 @@ fn a_leaf_under_the_old_fit_kind_is_named_by_list_and_show() {
     let text = std::fs::read_to_string(&rj).unwrap();
     std::fs::write(&rj, text.replace(r#""kind": "fit_method""#, r#""kind": "fit_stage""#)).unwrap();
 
-    let out = Command::new(&bin).args(["list", &output.to_string_lossy()]).output().expect("spawn");
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").args(["list", &output.to_string_lossy()]).output().expect("spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("fit_stage") && stderr.contains("fit_method")
             && stderr.contains("run the fit again"),
@@ -1053,7 +1055,7 @@ fn a_leaf_under_the_old_fit_kind_is_named_by_list_and_show() {
     assert!(!String::from_utf8_lossy(&out.stdout).contains("old-5ca1ab1e"),
         "the old leaf is not listed as a run");
 
-    let out = Command::new(&bin).args(["show", &leaf.to_string_lossy()]).output().expect("spawn");
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").args(["show", &leaf.to_string_lossy()]).output().expect("spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "show must refuse the old record");
     assert!(stderr.contains("fit_stage") && stderr.contains("fit_method"),
@@ -1167,7 +1169,7 @@ fn fit_list_json_names_methods_and_can_tell_two_leaves_apart() {
     let output = tmp.path().join("output");
     let (_seg, hashes) = write_two_leaves_of_one_method(&output, "pgas");
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["list", "--kind", "fit", "--format", "json", &output.to_string_lossy()])
         .output()
         .expect("spawn");
@@ -1225,7 +1227,7 @@ fn show_renders_fit_method_metadata() {
     let leaf = write_cas_fit_method(&output, run_id, "parent");
 
     // Resolve by full path.
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["show", &leaf.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "show fit-method failed: stderr={}",
@@ -1237,7 +1239,7 @@ fn show_renders_fit_method_metadata() {
     assert!(s.contains("-123.45"),   "best_loglik missing: {}", s);
 
     // Resolve by run_id prefix.
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["show", "5ca1ab1e", "--root", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "show by run_id prefix failed: stderr={}",
@@ -1259,7 +1261,7 @@ fn label_works_on_sim_runs() {
     let output = tmp.path().join("output");
 
     // Sim run — golden_sir_basic has no parameter defaults, so pass them.
-    Command::new(&bin)
+    Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--param", "beta=2.0",
                "--param", "gamma=0.3",
@@ -1276,7 +1278,7 @@ fn label_works_on_sim_runs() {
     let sim_hash: String = sim_meta["run_id"].as_str().unwrap().chars().take(8).collect();
 
     // Label the sim by run_id prefix.
-    let status = Command::new(&bin)
+    let status = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["label", &sim_hash, "test sim label",
                "--root", &output.to_string_lossy()])
         .status().expect("spawn");
@@ -1300,7 +1302,7 @@ fn reindex_builds_index_and_show_still_resolves() {
 
     // Cache two sims.
     for seed in ["42", "99"] {
-        Command::new(&bin)
+        Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline", "--seed", seed, "--cas",
                    "--output-dir", &output.to_string_lossy(),
@@ -1311,7 +1313,7 @@ fn reindex_builds_index_and_show_still_resolves() {
     // No index yet (the writer does not emit one in M4 piece 1).
     assert!(!output.join("index.json").exists(), "no index before reindex");
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["dev", "reindex", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "reindex should succeed: {}",
@@ -1326,7 +1328,7 @@ fn reindex_builds_index_and_show_still_resolves() {
     let dir = walkdir(&output.join("sims")).into_iter()
         .find(|p| p.join("run.json").exists()).unwrap();
     let short = &read_meta(&dir)["run_id"].as_str().unwrap()[..8].to_string();
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["show", short, "--root", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "show via index should resolve: {}",
@@ -1343,20 +1345,20 @@ fn out_of_band_leaf_is_found_via_walk_fallback() {
     let output = tmp.path().join("output");
 
     // Cache one sim and build an index that knows only about it.
-    Command::new(&bin)
+    Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "1", "--cas",
                "--output-dir", &output.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["dev", "reindex", &output.to_string_lossy()])
         .status().expect("spawn");
     assert!(st.success());
 
     // Add a SECOND sim out of band (seed 2). The index from the reindex above
     // does NOT contain it.
-    Command::new(&bin)
+    Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "2", "--cas",
                "--output-dir", &output.to_string_lossy(),
@@ -1372,7 +1374,7 @@ fn out_of_band_leaf_is_found_via_walk_fallback() {
 
     // `show` of the out-of-band hash must succeed via the walk fallback, NOT
     // report "no match" because the (stale) index lacks the entry.
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["show", oob_short, "--root", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(),
@@ -1391,13 +1393,13 @@ fn removed_leaf_does_not_resolve_to_dead_path() {
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
 
-    Command::new(&bin)
+    Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "1", "--cas",
                "--output-dir", &output.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["dev", "reindex", &output.to_string_lossy()])
         .status().expect("spawn");
     assert!(st.success());
@@ -1406,14 +1408,14 @@ fn removed_leaf_does_not_resolve_to_dead_path() {
         .find(|p| p.join("run.json").exists()).unwrap();
     let short = read_meta(&dir)["run_id"].as_str().unwrap()[..8].to_string();
     // It resolves while present.
-    assert!(Command::new(&bin)
+    assert!(Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["show", &short, "--root", &output.to_string_lossy()])
         .status().expect("spawn").success(), "resolves while present");
 
     // Remove the leaf out of band; the index entry is now stale.
     std::fs::remove_dir_all(&dir).unwrap();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["show", &short, "--root", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(!out.status.success(),
@@ -1443,7 +1445,7 @@ fn ensemble_cell_count_is_in_the_run_id() {
     let tmp = tempfile::tempdir().unwrap();
 
     let out3 = tmp.path().join("out3");
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42", "--replicates", "3",
                "--output-dir", &out3.to_string_lossy()])
@@ -1451,7 +1453,7 @@ fn ensemble_cell_count_is_in_the_run_id() {
     assert!(st.success(), "3-replicate simulate should succeed");
 
     let out4 = tmp.path().join("out4");
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42", "--replicates", "4",
                "--output-dir", &out4.to_string_lossy()])
@@ -1482,7 +1484,7 @@ fn ensemble_round_trip_deps_cat_and_list() {
     let out = tmp.path().join("out");
     let mirror = tmp.path().join("combined.tsv");
 
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42", "--replicates", "3",
                "--output-dir", &out.to_string_lossy(),
@@ -1516,7 +1518,7 @@ fn ensemble_round_trip_deps_cat_and_list() {
     // `cat <ensemble-hash>` emits the combined TSV byte-identical to the `-o`
     // mirror, and that TSV has a `replicate` column with 3 replicates.
     let ens_id = ens_meta["run_id"].as_str().unwrap();
-    let cat = Command::new(&bin)
+    let cat = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["cat", &ens_id[..16], "--root", &out.to_string_lossy()])
         .output().expect("spawn");
     assert!(cat.status.success(), "cat <ensemble> failed: {}",
@@ -1544,7 +1546,7 @@ fn ensemble_round_trip_deps_cat_and_list() {
 
     // `list --kind ensemble` surfaces the ensemble (table to stderr; json to
     // stdout, one record per line).
-    let list = Command::new(&bin)
+    let list = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["list", &out.to_string_lossy(), "--kind", "ensemble", "--format", "json"])
         .output().expect("spawn");
     assert!(list.status.success(), "list --kind ensemble failed: {}",
@@ -1569,7 +1571,7 @@ fn single_run_writes_no_ensemble() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("out");
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42",
                "--output-dir", &out.to_string_lossy(),
@@ -1591,7 +1593,7 @@ fn simulate_writes_nothing_to_stdout_without_output_flag() {
 
     // Single-run, no -o: empty stdout, one Sim leaf, no ensemble.
     let out1 = tmp.path().join("out1");
-    let single = Command::new(&bin)
+    let single = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42",
                "--output-dir", &out1.to_string_lossy()])
@@ -1607,7 +1609,7 @@ fn simulate_writes_nothing_to_stdout_without_output_flag() {
 
     // Multi-cell, no -o: empty stdout, but the leaves AND ensemble exist.
     let out3 = tmp.path().join("out3");
-    let multi = Command::new(&bin)
+    let multi = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42", "--replicates", "3",
                "--output-dir", &out3.to_string_lossy()])
@@ -1625,7 +1627,7 @@ fn simulate_writes_nothing_to_stdout_without_output_flag() {
     // With -o, the mirror is written and matches `cat <ensemble>`.
     let out3b = tmp.path().join("out3b");
     let mirror = tmp.path().join("m.tsv");
-    let mirrored = Command::new(&bin)
+    let mirrored = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42", "--replicates", "3",
                "--output-dir", &out3b.to_string_lossy(),
@@ -1682,7 +1684,7 @@ simulate { from = 0 'days  to = 60 'days }
     let model = tmp.join("sir_lineage.camdl");
     std::fs::write(&model, SIR_LINEAGE).unwrap();
     let ir = tmp.join("sir_lineage.ir.json");
-    let compiled = Command::new(bin)
+    let compiled = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(["dev", "compile", model.to_str().unwrap(), "-o", ir.to_str().unwrap()])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().expect("spawn compile");
@@ -1712,7 +1714,7 @@ fn event_log_lands_in_sim_leaf_alongside_traj() {
 
     // (1) plain simulate → leaf with traj.tsv only.
     let out_plain = tmp.path().join("plain");
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &ir_s]).args(common)
         .args(["--output-dir", &out_plain.to_string_lossy(),
                "-o", &tmp.path().join("traj_plain.tsv").to_string_lossy()])
@@ -1728,7 +1730,7 @@ fn event_log_lands_in_sim_leaf_alongside_traj() {
     //     run_id and identical traj bytes; PATH is a byte-identical mirror.
     let out_el = tmp.path().join("el");
     let mirror = tmp.path().join("mirror.tsv");
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &ir_s]).args(common)
         .args(["--output-dir", &out_el.to_string_lossy(),
                "--event-log", &mirror.to_string_lossy()])
@@ -1766,7 +1768,7 @@ fn simulate_label_applies_on_cached_leaf() {
             "--scenario".into(), "baseline".into(), "--seed".into(), "123".into(),
             "--output-dir".into(), out.to_string_lossy().into_owned()];
         if let Some(l) = label { args.push("--label".into()); args.push(l.into()); }
-        assert!(Command::new(&bin).args(&args).status().expect("spawn").success());
+        assert!(Command::new(&bin).env_remove("CLICOLOR_FORCE").args(&args).status().expect("spawn").success());
     };
 
     // 1. fresh run, no label → null label.
@@ -1797,7 +1799,7 @@ fn list_collapses_ensemble_members_and_accepts_root_flag() {
     let tmp = tempfile::tempdir().unwrap();
     let store = tmp.path().join("store");
     let store_s = store.to_string_lossy().into_owned();
-    assert!(Command::new(&bin)
+    assert!(Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "5", "--replicates", "3",
                "--output-dir", &store_s])
@@ -1807,7 +1809,7 @@ fn list_collapses_ensemble_members_and_accepts_root_flag() {
     // the TOP-LEVEL `kind` — a substring match would be fooled by the
     // ensemble record's embedded `deps`, each of which carries `"kind":"sim"`.
     let count_kind = |args: &[&str], kind: &str| -> usize {
-        let out = Command::new(&bin).args(args).output().expect("spawn");
+        let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").args(args).output().expect("spawn");
         String::from_utf8_lossy(&out.stdout).lines()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
             .filter(|v| v["kind"] == kind)
@@ -1837,7 +1839,7 @@ fn stored_banner_includes_output_dir_prefix_and_cat_hint() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let store = tmp.path().join("store");
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "7",
                "--output-dir", &store.to_string_lossy()])
@@ -1857,7 +1859,7 @@ fn stdout_streams_trajectory_and_skips_the_store() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let store = tmp.path().join("store");
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "7",
                "--output-dir", &store.to_string_lossy(), "--stdout"])
@@ -1886,7 +1888,7 @@ fn progress_mode_does_not_change_trajectories() {
     let tmp = tempfile::tempdir().unwrap();
     let run = |mode: &str, tag: &str| -> Vec<u8> {
         let o = tmp.path().join(format!("traj_{tag}.tsv"));
-        let st = Command::new(&bin)
+        let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline", "--seed", "7", "--replicates", "3",
                    "--output-dir", &tmp.path().join(tag).to_string_lossy(),

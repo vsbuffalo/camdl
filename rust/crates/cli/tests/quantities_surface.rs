@@ -39,7 +39,7 @@ fn run_showcase(tmp: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let qdir = tmp.join("q");
     let traj = tmp.join("traj.tsv");
     let obs = tmp.join("obs.tsv");
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate",
             fixture.to_str().unwrap(),

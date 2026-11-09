@@ -45,7 +45,7 @@ simulate {{ from = 0 'days to = 20 'days }}
 }
 
 fn simulate(bin: &Path, model_path: &Path) -> std::process::Output {
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate",
             &model_path.to_string_lossy(),
@@ -136,7 +136,7 @@ simulate {{ from = 0 'days to = 20 'days }}
 }
 
 fn simulate_ode(bin: &Path, model_path: &Path) -> std::process::Output {
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate",
             &model_path.to_string_lossy(),

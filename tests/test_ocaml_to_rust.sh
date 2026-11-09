@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# camdl colours stderr under CLICOLOR_FORCE whatever the stream is; every
+# assertion below reads text, so the suite runs with it unset.
+unset CLICOLOR_FORCE
 
 CAMDLC=${CAMDLC:-camdlc}
 CAMDL=${CAMDL:-camdl}

@@ -92,7 +92,7 @@ simulate { from = 0 'days  to = 6 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -232,7 +232,7 @@ fn run_profile(
         args.push(format!("from_params={}", ir.with_file_name("start.toml").to_string_lossy()));
     }
     for a in extra_args { args.push((*a).into()); }
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args.iter().map(|s| s.as_str()))
@@ -398,7 +398,7 @@ fn focal_param_in_fixed_errors_clearly() {
 /// Run a `camdl <subcmd>` reader command against the CAS root, returning its
 /// captured stdout (the reader display) as a String.
 fn camdl_read(bin: &Path, out_root: &Path, args: &[&str]) -> String {
-    let out = Command::new(bin)
+    let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args)
@@ -538,7 +538,7 @@ fn label_command_relabels_profile_sidecar() {
     let dir_name = base.file_name().unwrap().to_string_lossy().into_owned();
     let hash8 = dir_name.rsplit('-').next().unwrap().to_string();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["label", &hash8, "relabelled profile",
                "--root", &out_root.to_string_lossy()])

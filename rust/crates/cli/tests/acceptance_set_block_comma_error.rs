@@ -73,7 +73,7 @@ fn comma_in_set_block_errors_with_separator_hint() {
 
     // simulate compiles the model first; the parse error surfaces before any
     // simulation. (-o to a temp path so we never reach output writing.)
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &model.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .output().expect("spawn");

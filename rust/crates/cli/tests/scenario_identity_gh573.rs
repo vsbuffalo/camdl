@@ -131,7 +131,7 @@ fn simulate_arms(scenarios: &[&str]) -> BTreeMap<String, Leaf> {
     let (model, params) = write_inputs(tmp.path());
     let out = tmp.path().join("out");
     let arms = scenarios.join(",");
-    let run = Command::new(&bin)
+    let run = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate", &model.to_string_lossy(),
             "--params", &params.to_string_lossy(),
@@ -159,7 +159,7 @@ fn simulate_each(scenarios: &[&str]) -> (BTreeMap<String, Leaf>, BTreeMap<String
     let (model, params) = write_inputs(tmp.path());
     let out = tmp.path().join("out");
     for s in scenarios {
-        let run = Command::new(&bin)
+        let run = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args([
                 "simulate", &model.to_string_lossy(),
                 "--params", &params.to_string_lossy(),

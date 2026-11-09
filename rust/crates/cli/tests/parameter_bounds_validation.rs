@@ -85,6 +85,7 @@ fn run_simulate(
     let tmp = tempfile::tempdir().unwrap();
     let out_path = tmp.path().join("traj.tsv");
     let mut cmd = Command::new(bin);
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.args([
         "simulate", &model.to_string_lossy(),
         "--params", &params.to_string_lossy(),

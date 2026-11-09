@@ -86,7 +86,7 @@ fn fixture(fit: &str) -> tempfile::TempDir {
 }
 
 fn camdl(dir: &Path, args: &[&str]) -> Output {
-    let out = Command::new(binary()).args(args).current_dir(dir).output().expect("spawn");
+    let out = Command::new(binary()).env_remove("CLICOLOR_FORCE").args(args).current_dir(dir).output().expect("spawn");
     assert!(out.status.success(), "camdl {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     out
 }

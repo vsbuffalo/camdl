@@ -109,7 +109,7 @@ simulate { from = 0 'days  to = 12 'days }
     let model = tmp.join("sir.camdl");
     std::fs::write(&model, src).unwrap();
     let ir = tmp.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir, &out.stdout).unwrap();
     std::fs::write(
@@ -146,7 +146,7 @@ n_trajectories = 4
         data = tmp.join("cases.tsv").display(),
     )).unwrap();
 
-    let r = Command::new(&bin)
+    let r = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit).arg("--seed").arg("1")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().expect("spawn");

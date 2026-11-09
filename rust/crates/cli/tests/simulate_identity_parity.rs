@@ -42,7 +42,7 @@ fn compile(dir: &Path, camdlc: &Path, src: &str, stem: &str) -> PathBuf {
     let model_path = dir.join(format!("{stem}.camdl"));
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join(format!("{stem}.ir.json"));
-    let out = Command::new(camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
     ir_path
@@ -102,7 +102,7 @@ fn integrator_override_splits_the_cas_leaves() {
     let out = tmp.path().join("out");
 
     for m in ["rk4", "rk45"] {
-        let st = Command::new(&bin)
+        let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["simulate"]).arg(&ir)
             .args(["--params"]).arg(&params)
             .args(["--backend", "ode", "--dt", "1", "--seed", "1",
@@ -143,6 +143,7 @@ fn force_replaces_the_stored_leaf() {
 
     let run = |extra: &[&str]| {
         let mut cmd = Command::new(&bin);
+        cmd.env_remove("CLICOLOR_FORCE");
         cmd.args(["simulate"]).arg(&ir)
             .args(["--params"]).arg(&params)
             .args(["--backend", "ode", "--dt", "1", "--seed", "1",
@@ -220,7 +221,7 @@ fn param_vec_values_split_the_cas_leaves() {
     for (tag, a, b) in [("v1", 0.4, 0.6), ("v2", 0.9, 1.1)] {
         let vec_file = tmp.path().join(format!("beta_{tag}.tsv"));
         std::fs::write(&vec_file, format!("a\t{a}\nb\t{b}\n")).unwrap();
-        let st = Command::new(&bin)
+        let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["simulate"]).arg(&ir)
             .args(["--params"]).arg(&params)
             .args(["--seed", "1",
@@ -266,6 +267,7 @@ fn param_that_shadows_a_draw_splits_the_cas_leaves() {
 
     for (tag, extra) in [("plain", None), ("shadowed", Some("beta=0.6"))] {
         let mut cmd = Command::new(&bin);
+        cmd.env_remove("CLICOLOR_FORCE");
         cmd.args(["simulate"]).arg(&ir)
             .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--draws"]).arg(&draws)
             .args(["--output-dir"]).arg(&out)
@@ -312,7 +314,7 @@ fn sim_leaf_records_the_parameters_it_ran() {
     let draws = tmp.path().join("d.tsv");
     std::fs::write(&draws, "beta\tgamma\tN0\n0.3\t0.1\t10000\n").unwrap();
     let out = tmp.path().join("out");
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate"]).arg(&ir)
         .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--draws"]).arg(&draws)
         .args(["--param", "beta=0.6", "--output-dir"]).arg(&out)
@@ -331,7 +333,7 @@ fn sim_leaf_records_the_parameters_it_ran() {
     assert_eq!(params["N0"], 10000.0, "the draw's N0: {record}");
 
     let run_id = record["run_id"].as_str().unwrap().to_string();
-    let show = Command::new(&bin)
+    let show = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["show", &run_id, "--root"]).arg(&out)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("NO_COLOR", "1")
@@ -398,6 +400,7 @@ fn dates_reach_the_mirror_and_not_the_stored_ensemble() {
     let out = tmp.path().join("out");
     let run = |tag: &str, dates: bool| {
         let mut cmd = Command::new(&bin);
+        cmd.env_remove("CLICOLOR_FORCE");
         cmd.args(["simulate"]).arg(&ir)
             .args(["--param", "beta=0.3", "--param", "gamma=0.1", "--param", "N0=1000",
                    "--seeds", "1,2", "--output-dir"]).arg(&out)
@@ -475,7 +478,7 @@ fn single_and_multi_cell_runs_share_a_leaf_over_a_defaulted_parameter() {
     let out = tmp.path().join("store");
 
     // The lone run of seed 3.
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate"]).arg(&ir)
         .args(["--params"]).arg(&params)
         .args(["--seed", "3", "--output-dir"]).arg(&out)
@@ -485,7 +488,7 @@ fn single_and_multi_cell_runs_share_a_leaf_over_a_defaulted_parameter() {
     assert_eq!(sim_leaves(&out).len(), 1, "the lone run writes one leaf");
 
     // A multi-cell run whose first cell is the same (model, params file, seed).
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate"]).arg(&ir)
         .args(["--params"]).arg(&params)
         .args(["--seeds", "3,4", "--output-dir"]).arg(&out)

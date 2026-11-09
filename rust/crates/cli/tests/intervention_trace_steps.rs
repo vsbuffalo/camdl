@@ -95,6 +95,7 @@ fn run_capture_stderr(args: &[&str], trace: bool) -> String {
     let traj_path = tmp.path().join("traj.tsv");
     let cas_dir = tmp.path().join("results");
     let mut cmd = Command::new(&bin);
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.args(args)
         .args([
             "-o",

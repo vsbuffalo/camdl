@@ -88,7 +88,7 @@ simulate { from = 0 'days  to = 6 'days }
     let model_path = dir.join("survey.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("survey.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -179,7 +179,7 @@ cooling = 0.9
 }
 
 fn run_fit(bin: &Path, fit_toml: &Path, seed: &str) -> std::process::Output {
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "run", &fit_toml.to_string_lossy(), "--seed", seed])
         .output()

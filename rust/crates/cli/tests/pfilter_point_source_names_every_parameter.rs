@@ -67,7 +67,7 @@ observations {
 init { S = 9990  I = 10 }
 simulate { from = 0 'days  to = 20 'days }
 "#).unwrap();
-    let out = Command::new(&camdlc).arg(&model).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model).output().unwrap();
     assert!(out.status.success(), "camdlc: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join("sir.ir.json");
     std::fs::write(&ir, &out.stdout).unwrap();
@@ -102,6 +102,7 @@ starts = {{ from_params = "{theta}" }}
 "#, out = dir.join("out").display(), ir = ir.display(),
         data = dir.join("cases.tsv").display(), theta = dir.join("theta.toml").display())).unwrap();
     let mut cmd = Command::new(camdl_bin());
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.args(["fit", "run"]).arg(&fit).env("CAMDL_SKIP_VERSION_CHECK", "1");
     if via_flag {
         cmd.arg("--starts").arg(format!("from_params={}", dir.join("theta.toml").display()));

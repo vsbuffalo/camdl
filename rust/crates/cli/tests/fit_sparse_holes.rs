@@ -96,7 +96,7 @@ simulate { from = 0 'days  to = 6 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -181,7 +181,7 @@ record_prequential = false
 }
 
 fn run_fit(bin: &Path, fit_toml: &Path, seed: &str) -> std::process::Output {
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "run", &fit_toml.to_string_lossy(), "--seed", seed])
         .output()
@@ -211,7 +211,7 @@ fn read_pfilter_method_loglik(out_root: &Path) -> f64 {
 /// Run `camdl pfilter` standalone at the fixed truth params and return its
 /// stdout loglik.
 fn run_standalone_pfilter(bin: &Path, ir: &Path, data: &Path, seed: &str) -> f64 {
-    let out = Command::new(bin)
+    let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", ir.to_str().unwrap(),

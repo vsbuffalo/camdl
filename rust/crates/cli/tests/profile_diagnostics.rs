@@ -89,7 +89,7 @@ simulate { from = 0 'days  to = 6 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -177,7 +177,7 @@ fn run_profile_if2(
         "--output".into(), out_tsv.to_string_lossy().into_owned(),
         "--seed".into(), format!("{}", seed),
     ];
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args.iter().map(|s| s.as_str()))
@@ -367,7 +367,7 @@ fn profile_starts_n_completed_reflects_diverged_chains() {
         "--output".into(), out_tsv.to_string_lossy().into_owned(),
         "--seed".into(), "7".into(),
     ];
-    let output = Command::new(&bin)
+    let output = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", &out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args.iter().map(|s| s.as_str()))

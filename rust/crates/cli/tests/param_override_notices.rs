@@ -54,7 +54,7 @@ fn simulate(dir: &Path, args: &[&str]) -> Run {
     let model = dir.join("m.camdl");
     std::fs::write(&model, MODEL).unwrap();
     let store = dir.join("out");
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("simulate")
         .arg(&model)
         .args(args)

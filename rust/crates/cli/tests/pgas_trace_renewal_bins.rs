@@ -82,7 +82,7 @@ simulate { from = 0 'days  to = 6 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -156,7 +156,7 @@ fn pgas_trace_carries_renewal_resolved_in_time() {
     let out = tmp.path().join("results");
 
     let fit = write_fit_toml(tmp.path(), &ir, &data, 8);
-    let r = Command::new(&bin)
+    let r = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit).arg("--seed").arg("1")
         .output().expect("spawn");
     assert!(r.status.success(), "PGAS run failed: {}", String::from_utf8_lossy(&r.stderr));

@@ -63,7 +63,7 @@ fn run(backend: &str, extra: &[&str]) -> std::process::Output {
             .iter()
             .map(|s| s.to_string()),
     );
-    Command::new(&bin).args(&args).output().expect("spawn camdl")
+    Command::new(&bin).env_remove("CLICOLOR_FORCE").args(&args).output().expect("spawn camdl")
 }
 
 /// Dormant reactive policy (not enabled) → accepted; dropped like any

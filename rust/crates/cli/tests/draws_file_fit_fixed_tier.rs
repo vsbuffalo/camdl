@@ -77,7 +77,7 @@ fn fit_with_prior() -> String {
 
 fn setup(dir: &Path) {
     std::fs::write(dir.join("m.camdl"), MODEL).unwrap();
-    let out = Command::new(camdlc_bin()).arg(dir.join("m.camdl")).output().unwrap();
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(dir.join("m.camdl")).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(dir.join("m.ir.json"), &out.stdout).unwrap();
     std::fs::write(dir.join("cases.tsv"), "time\tcases\n1\t10\n2\t11\n3\t10\n").unwrap();
@@ -93,7 +93,7 @@ fn setup(dir: &Path) {
 fn simulate_n0(dir: &Path, cwd: &str, args: &[&str]) -> f64 {
     let work = dir.join(cwd);
     std::fs::create_dir_all(&work).unwrap();
-    let out: Output = Command::new(camdl_bin())
+    let out: Output = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(&work)
         .args(["simulate", &dir.join("m.ir.json").to_string_lossy()])

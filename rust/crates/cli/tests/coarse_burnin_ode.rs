@@ -81,14 +81,14 @@ fn setup(tag: &str, model_src: &str) -> Option<(TempDir, PathBuf, PathBuf)> {
     let model_path = tmp.path().join("model.camdl");
     std::fs::write(&model_path, model_src).unwrap();
     let ir = tmp.path().join("model.ir.json");
-    let out = Command::new(camdlc().unwrap()).arg(&model_path).output().unwrap();
+    let out = Command::new(camdlc().unwrap()).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir, &out.stdout).unwrap();
 
     let truth = tmp.path().join("truth.toml");
     std::fs::write(&truth, format!("beta = {TRUE_BETA}\nsigma = 0.2\ngamma = 0.1\nN0 = 10000\n")).unwrap();
     let full = tmp.path().join("full.tsv");
-    let sim = Command::new(&bin)
+    let sim = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate"]).arg(&ir)
         .args(["--params"]).arg(&truth)
         .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--obs-only"]).arg(&full)
@@ -153,7 +153,7 @@ fn burnin_dt_below_dt_is_rejected() {
     // dt defaults to 1; burnin_dt = 0.5 < dt is nonsensical (coarser means larger).
     std::fs::write(&fit, fit_toml_mh(&out_dir, &ir, &data, "prev", "burnin_dt = 0.5")).unwrap();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"]).arg(&fit)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();
@@ -205,7 +205,7 @@ fn mh_ode_coarse_burnin_prevalence_recovers() {
     let fit = tmp.path().join("fit.toml");
     std::fs::write(&fit, fit_toml_mh(&out_dir, &ir, &data, "prev", "burnin_dt = 5.0")).unwrap();
 
-    let status = Command::new(&bin)
+    let status = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"]).arg(&fit)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .status().unwrap();
@@ -239,7 +239,7 @@ fn mh_burnin_dt_refuses_incidence_stream() {
     let fit = tmp.path().join("fit.toml");
     std::fs::write(&fit, fit_toml_mh(&out_dir, &ir, &data, "prev", "burnin_dt = 5.0")).unwrap();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"]).arg(&fit)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();

@@ -86,7 +86,7 @@ simulate { from = 0 'days  to = 10 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let output = Command::new(&camdl).arg(&model_path).output().unwrap();
+    let output = Command::new(&camdl).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(output.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&output.stderr));
     std::fs::write(&ir_path, &output.stdout).unwrap();
@@ -120,7 +120,7 @@ cooling = 0.7
 }
 
 fn run_fit(bin: &Path, fit_toml: &Path) {
-    let status = Command::new(bin)
+    let status = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run")
         .arg(fit_toml)
         .status()
@@ -349,7 +349,7 @@ iterations = 5
 cooling = 0.7
 "#, out.display(), ir.display(), data_tsv.display())).unwrap();
 
-    let res = Command::new(&bin)
+    let res = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit_toml)
         .args(["--progress", "none"])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -618,7 +618,7 @@ fn obs_only_dir_and_synthetic_agree_byte_for_byte_at_same_seed() {
 
     // Path A: --obs-only-dir at seed=10
     let cli_dir = tmp.path().join("cli");
-    let cli_status = Command::new(&bin).arg("simulate")
+    let cli_status = Command::new(&bin).env_remove("CLICOLOR_FORCE").arg("simulate")
         .arg(&ir)
         .args(["--params"]).arg(&truth)
         .args(["--seed", "10"])
@@ -683,7 +683,7 @@ sim_seeds = [1]
 {}
 "#, out.display(), ir.display(), data_tsv.display(), truth.display(), methods_block())).unwrap();
 
-    let output = Command::new(&bin).arg("fit").arg("run")
+    let output = Command::new(&bin).env_remove("CLICOLOR_FORCE").arg("fit").arg("run")
         .arg(&fit_toml).output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(),

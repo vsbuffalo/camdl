@@ -111,7 +111,7 @@ dt = 1.0
     .unwrap();
 
     let results = dir.join("results");
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", &results)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
@@ -167,7 +167,7 @@ fn summary(segment: &Path, extra: &[&str]) -> std::process::Output {
     let mut args: Vec<String> =
         vec!["fit".into(), "summary".into(), segment.to_string_lossy().into_owned()];
     args.extend(extra.iter().map(|s| s.to_string()));
-    Command::new(binary())
+    Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", camdlc_bin())
         .args(&args)

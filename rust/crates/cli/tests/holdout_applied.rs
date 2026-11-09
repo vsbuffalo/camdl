@@ -104,7 +104,7 @@ dt = 1.0
     let fit_c = write_fit("c", 0.10, "");
 
     for sub in [&fit_a, &fit_b, &fit_c] {
-        let out = Command::new(&bin)
+        let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["fit", "run", "fit.toml", "--seed", "1"])
             .current_dir(sub)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -118,7 +118,7 @@ dt = 1.0
         args.extend_from_slice(paths);
         args.extend_from_slice(&["--format", "json", "--particles", "100"]);
         args.extend_from_slice(extra);
-        Command::new(&bin)
+        Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(&args)
             .current_dir(dir)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -201,7 +201,7 @@ fn pfilter_score_from_windows_the_trace_not_the_likelihood() {
             "--save-prequential", stem,
         ];
         args.extend_from_slice(extra);
-        Command::new(&bin)
+        Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(&args)
             .current_dir(dir)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -304,7 +304,7 @@ dt = 1.0
     std::fs::write(dir.join("fit.toml"), toml_src).unwrap();
 
     let run = || {
-        Command::new(&bin)
+        Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["fit", "run", "fit.toml", "--seed", "1"])
             .current_dir(dir)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")

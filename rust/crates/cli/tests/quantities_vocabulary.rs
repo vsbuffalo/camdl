@@ -74,7 +74,7 @@ const VOCAB_A: &str = "quantities {\n  attack_rate = final((N0 - S) / N0)\n  r_z
 const VOCAB_B: &str = "quantities {\n  peak_time = time_of_max(I)\n}\n";
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(binary())
+    Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()

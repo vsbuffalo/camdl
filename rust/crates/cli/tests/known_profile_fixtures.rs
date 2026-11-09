@@ -45,7 +45,7 @@ fn bounds(fit: &str, name: &str) -> (f64, f64) {
 fn both_models_compile() {
     let tmp = tempfile::tempdir().unwrap();
     for m in ["k1", "k2"] {
-        let out = Command::new(binary())
+        let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
             .args(["dev", "compile"])
             .arg(fixtures().join("models").join(format!("{m}.camdl")))
             .arg("-o")

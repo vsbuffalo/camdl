@@ -93,7 +93,7 @@ cooling = 0.7
 }
 
 fn run_fit(fit_toml: &Path) -> String {
-    let out = Command::new(bin())
+    let out = Command::new(bin()).env_remove("CLICOLOR_FORCE")
         .arg("fit")
         .arg("run")
         .arg(fit_toml)

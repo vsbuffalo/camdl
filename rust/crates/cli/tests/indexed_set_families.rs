@@ -69,7 +69,7 @@ fn simulate(src: &str, backend: &str) -> (bool, String, String) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("m.camdl");
     std::fs::write(&path, src).unwrap();
-    let out = Command::new(bin)
+    let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate", path.to_str().unwrap(), "--backend", backend,
             "--param", "gamma=0", "--seed", "1", "--to", "2", "--output-every", "1",

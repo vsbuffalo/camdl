@@ -126,7 +126,7 @@ fn progress_json_names_the_refused_chains_and_counts_them() {
     std::fs::write(tmp.join("cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), FIT_TOML).unwrap();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run", "fit.toml", "--seed", "1", "--progress", "none"])
         .current_dir(&tmp)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")

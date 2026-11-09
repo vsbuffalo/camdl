@@ -94,7 +94,7 @@ simulate {{ from = 0 'days  to = 60 'days  {integ} }}
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, &src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(camdl).arg(&model_path).output().unwrap();
+    let out = Command::new(camdl).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -176,7 +176,7 @@ fn recover_beta_integ(
     let truth = tmp.path().join("truth.toml");
     std::fs::write(&truth, format!("beta = {TRUE_BETA}\ngamma = 0.3\nN0 = 10000\n")).unwrap();
     let data = tmp.path().join("cases.tsv");
-    let sim = Command::new(&bin)
+    let sim = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate"]).arg(&ir)
         .args(["--params"]).arg(&truth)
         .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--obs-only"]).arg(&data)
@@ -213,7 +213,7 @@ iterations = 1500
 burn_in = {burn_in}
 "#, out = out.display(), ir = ir.display(), data = data.display(), burn_in = BURN_IN)).unwrap();
 
-    let run = Command::new(&bin)
+    let run = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"]).arg(&fit_toml)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();

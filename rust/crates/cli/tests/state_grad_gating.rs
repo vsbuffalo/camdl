@@ -66,6 +66,7 @@ simulate { from = 0 'days  to = 20 'days }
 /// and parse the IR emitted on stdout.
 fn compile(camdlc: &Path, model: &Path, lean: bool) -> ir::Model {
     let mut cmd = Command::new(camdlc);
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.arg(model);
     if lean {
         cmd.arg("--no-state-grad");
@@ -140,7 +141,7 @@ fn simulate_runtime_compiles_lean() {
     let cache = tmp.path().join("ircache");
     let out_dir = tmp.path().join("out");
 
-    let st = Command::new(&bin)
+    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate",
             model.to_str().unwrap(),

@@ -159,7 +159,7 @@ thin      = 1
 starts    = {{ from_mle = \"@prime\" }}
 ")).unwrap();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
@@ -171,7 +171,7 @@ starts    = {{ from_mle = \"@prime\" }}
     assert!(out.status.success(), "prime fit run failed:\nstderr={stderr}");
     // The one-iteration IF2 does not converge; starting from it anyway is the
     // deliberate choice this flag records.
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
@@ -240,7 +240,7 @@ starts    = {{ from_mle = \"@prime\" }}
     assert!(state.contains("chain_starts_kind = \"point\""), "{state}");
     assert!(state.contains("chain_init_source = \"from_mle @prime\""), "{state}");
     let segment = leaf.parent().unwrap().parent().unwrap();
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "summary", &segment.to_string_lossy()])
         .output()

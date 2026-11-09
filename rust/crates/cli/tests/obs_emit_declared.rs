@@ -34,7 +34,7 @@ fn tempdir(tag: &str) -> PathBuf {
 }
 
 fn run(camdl: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(camdl).args(args).env("CAMDL_SKIP_VERSION_CHECK", "1").output().expect("camdl must invoke")
+    Command::new(camdl).env_remove("CLICOLOR_FORCE").args(args).env("CAMDL_SKIP_VERSION_CHECK", "1").output().expect("camdl must invoke")
 }
 
 fn write_model(dir: &Path, name: &str, src: &str) -> PathBuf {
@@ -219,7 +219,7 @@ fn real_shaped(name: &str) -> PathBuf {
 
 fn compile_real_shaped(dir: &Path) -> PathBuf {
     let ir = dir.join("surveillance.ir.json");
-    let out = std::process::Command::new(camdlc())
+    let out = std::process::Command::new(camdlc()).env_remove("CLICOLOR_FORCE")
         .arg(real_shaped("surveillance.camdl"))
         .arg("-o")
         .arg(&ir)

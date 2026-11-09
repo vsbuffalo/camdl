@@ -116,7 +116,7 @@ fn run_simulate(args: &[&str]) -> String {
     let tmp = tempfile::tempdir().unwrap();
     let traj_path = tmp.path().join("traj.tsv");
     let cas_dir = tmp.path().join("results");
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .args(["-o", &traj_path.to_string_lossy(),
                "--output-dir", &cas_dir.to_string_lossy()])
@@ -249,7 +249,7 @@ observations = {}
     // `fit run` will fail on the missing model but only AFTER TOML parse.
     // If serde rejects `scenario`, stderr contains "unknown field"; we
     // assert that it does NOT.
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run", &fit_path.to_string_lossy()])
         .output().expect("spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -291,7 +291,7 @@ iterations = 1
 cooling = 0.7
 "#, model = model_path.display(), out = tmp.path().display())).unwrap();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run", &fit_path.to_string_lossy()])
         .output().expect("spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);

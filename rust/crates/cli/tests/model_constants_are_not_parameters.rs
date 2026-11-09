@@ -78,7 +78,7 @@ fn fixture() -> tempfile::TempDir {
 }
 
 fn camdl(dir: &Path, args: &[&str]) -> Output {
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -95,7 +95,7 @@ fn refused_with_hint(out: &Output, what: &str) {
 #[test]
 fn a_typed_constant_is_in_constants_not_parameters() {
     let tmp = fixture();
-    let out = Command::new(camdlc_bin()).arg(tmp.path().join("model.camdl")).output().unwrap();
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(tmp.path().join("model.camdl")).output().unwrap();
     assert!(out.status.success(), "camdlc: {}", String::from_utf8_lossy(&out.stderr));
     let env: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let model = &env["model"];

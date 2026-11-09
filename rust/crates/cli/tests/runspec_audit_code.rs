@@ -55,7 +55,7 @@ fn fixture(dir: &Path) {
 }
 
 fn camdl(dir: &Path, args: &[&str]) -> Output {
-    Command::new(binary())
+    Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
         .env("CAMDL_OUTPUT_DIR", dir.join("out"))

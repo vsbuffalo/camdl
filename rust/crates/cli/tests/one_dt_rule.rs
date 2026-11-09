@@ -59,7 +59,7 @@ observations {{
 init {{ S = 9990  I = 10 }}
 simulate {{ from = 0 'days  to = 20 'days {sim_dt}}}
 "#)).unwrap();
-    let out = Command::new(camdlc()).arg(&model).output().unwrap();
+    let out = Command::new(camdlc()).env_remove("CLICOLOR_FORCE").arg(&model).output().unwrap();
     assert!(out.status.success(), "camdlc: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join("sir.ir.json");
     std::fs::write(&ir, &out.stdout).unwrap();
@@ -97,7 +97,7 @@ N0 = 10000
 }
 
 fn fit_run(fit: &Path) -> (bool, String) {
-    let out = Command::new(camdl_bin())
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"]).arg(fit).args(["--no-progress"])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();
@@ -203,7 +203,7 @@ gamma = {{ bounds = [0.01, 1.0], start = 0.3 }}
 [fixed]
 N0 = 10000
 "#, ir = ir.display(), data = dir.join("cases.tsv").display())).unwrap();
-    let out = Command::new(camdl_bin())
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .args(["profile"]).arg(ir).arg("--fit").arg(&fit)
         .arg("--data").arg(dir.join("cases.tsv"))
         .args(["--sweep", "beta=0.4,0.5", "--rw-sd", "gamma=auto", "--n-starts", "1"])
@@ -253,7 +253,7 @@ fn profile_cells_step_at_the_models_dt() {
 }
 
 fn pfilter(dir: &Path, ir: &Path, extra: &[&str]) -> (bool, String) {
-    let out = Command::new(camdl_bin())
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .args(["pfilter"]).arg(ir).arg("--data").arg(dir.join("cases.tsv"))
         .args(["--particles", "50", "--param", "beta=0.4", "--param", "gamma=0.3",
                "--param", "N0=10000"])

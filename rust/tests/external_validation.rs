@@ -125,7 +125,7 @@ fn run_all_cases() {
     let camdl = camdl_bin();
 
     let cases_root = root.join("tests/external/cases");
-    let status = Command::new(&bin)
+    let status = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["run-all", "--root"])
         .arg(&cases_root)
         .current_dir(&root)

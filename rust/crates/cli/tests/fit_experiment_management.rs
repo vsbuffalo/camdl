@@ -114,7 +114,7 @@ simulate { from = 0 'days  to = 10 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let output = Command::new(camdlc).arg(&model_path).output().unwrap();
+    let output = Command::new(camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(
         output.status.success(),
         "camdlc failed: {}",
@@ -175,7 +175,7 @@ cooling    = 0.7
 /// Run `camdl fit run <fit_toml>` and return the produced fit_dir
 /// (the single child of `<output_dir>/fits/`).
 fn exec_fit_run_v2(camdl: &Path, fit_toml: &Path, output_dir: &Path) -> PathBuf {
-    let status = Command::new(camdl)
+    let status = Command::new(camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit")
         .arg("run")
         .arg(fit_toml)
@@ -199,7 +199,7 @@ fn exec_fit_run_v2(camdl: &Path, fit_toml: &Path, output_dir: &Path) -> PathBuf 
 }
 
 fn exec_fit_summary_json(camdl: &Path, fit_dir: &Path) -> serde_json::Value {
-    let output = Command::new(camdl)
+    let output = Command::new(camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit")
         .arg("summary")
         .arg(fit_dir)
@@ -538,7 +538,7 @@ fn summary_table_row_equals_table_first_row() {
     // Run `fit table` against the parent of fit_dir (results/fits/),
     // filtered to a single row by --hash.
     let fits_root = output_dir.join("fits");
-    let output = std::process::Command::new(&camdl)
+    let output = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit")
         .arg("table")
         .arg(&fits_root)
@@ -660,7 +660,7 @@ fn a_pfilter_leaf_does_not_remove_the_fit_from_fit_table() {
     .unwrap();
 
     let fit_dir = exec_fit_run_v2(&camdl, &if2_toml, &output_dir);
-    let status = Command::new(&camdl)
+    let status = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&pfilter_toml)
         .status()
         .expect("camdl fit run must invoke");
@@ -674,7 +674,7 @@ fn a_pfilter_leaf_does_not_remove_the_fit_from_fit_table() {
     assert!(cas_method_leaf(&fit_dir, "if2").is_some(), "no if2 leaf in {}", fit_dir.display());
     assert!(cas_method_leaf(&fit_dir, "pfilter").is_some(), "no pfilter leaf in {}", fit_dir.display());
 
-    let output = Command::new(&camdl)
+    let output = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("table").arg(&fits_root)
         .arg("--format").arg("json")
         .output()
@@ -719,7 +719,7 @@ fn a_swept_fit_records_each_segments_own_fixed_values() {
     let output_dir = tmp.path().join("out");
     let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &output_dir); // N0 = 1000
 
-    let status = Command::new(&camdl)
+    let status = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit_toml)
         .arg("--sweep").arg("N0=500,2000")
         .status()
@@ -946,7 +946,7 @@ fn fit_label_workflow_persists_and_surfaces_in_table() {
 
     // Step 1: fit run --label "..."
     let initial_label = "narrow R0, take 1";
-    let status = std::process::Command::new(&camdl)
+    let status = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run")
         .arg("--label").arg(initial_label)
         .arg(&fit_toml)
@@ -967,7 +967,7 @@ fn fit_label_workflow_persists_and_surfaces_in_table() {
         "--label must be recorded on the run");
 
     // Step 3: fit table surfaces the label.
-    let table_out = std::process::Command::new(&camdl)
+    let table_out = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("table").arg(&fits)
         .arg("--hash").arg(&hash_prefix)
         .arg("--format").arg("json")
@@ -982,7 +982,7 @@ fn fit_label_workflow_persists_and_surfaces_in_table() {
     // folder, not a run) and by the run's own id (a label never moves).
     let run_id: String = only_run(&fit_dir)["run_id"].as_str().unwrap().chars().take(12).collect();
     for target in [hash_prefix.as_str(), run_id.as_str()] {
-        let status = std::process::Command::new(&camdl)
+        let status = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
             .arg("label").arg(target).arg("narrow R0, take 2")
             .arg("--root").arg(&output_dir)
             .status().expect("camdl label must invoke");
@@ -993,7 +993,7 @@ fn fit_label_workflow_persists_and_surfaces_in_table() {
         "relabel attempts must not change the fit-level hash");
 
     // Step 4: fit table still shows it.
-    let table_out2 = std::process::Command::new(&camdl)
+    let table_out2 = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("table").arg(&fits)
         .arg("--hash").arg(&hash_prefix)
         .arg("--format").arg("json")
@@ -1012,7 +1012,7 @@ fn fit_label_rejects_empty_label_at_cli() {
     let (ir, data) = build_fixture(&camdlc, tmp.path());
     let output_dir = tmp.path().join("out");
     let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &output_dir);
-    assert!(std::process::Command::new(&camdl)
+    assert!(std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit_toml)
         .status().unwrap().success());
 
@@ -1022,7 +1022,7 @@ fn fit_label_rejects_empty_label_at_cli() {
     let hash_prefix: String = fit_level_hash(&fit_dir).chars().take(8).collect();
 
     for empty in ["", "   "] {
-        let out = std::process::Command::new(&camdl)
+        let out = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
             .arg("label")
             .arg(&hash_prefix)
             .arg(empty)
@@ -1113,7 +1113,7 @@ cooling    = 0.7
     // `proj/` (CWD) and pointed to `models/sir.ir.json` in `proj`'s
     // *parent*. Post-fix, it resolves against `proj/fits/` (the toml's
     // dir) and correctly lands in `proj/models/sir.ir.json`.
-    let out = std::process::Command::new(&camdl)
+    let out = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .current_dir(&proj)
         .arg("fit").arg("run")
         .arg("fits/he2010.fit.toml")

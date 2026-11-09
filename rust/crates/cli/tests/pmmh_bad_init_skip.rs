@@ -90,7 +90,7 @@ simulate { from = 0 'days  to = 30 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -231,7 +231,7 @@ fn pmmh_redraws_a_pathological_drawn_start_and_runs_every_chain() {
     let draws = write_draws(tmp.path());
     let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &draws);
     let t0 = std::time::Instant::now();
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "run", &fit_toml.to_string_lossy(),
                "--seed", "1", "--progress", "none"])

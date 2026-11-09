@@ -56,7 +56,7 @@ fn fixture(rel: &str) -> PathBuf {
 
 fn compile_model(dir: &Path) -> PathBuf {
     let ir = dir.join("polio_afp_es_2patch.ir.json");
-    let out = Command::new(camdlc_bin())
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE")
         .arg(fixture("polio_afp_es_2patch.camdl"))
         .output()
         .expect("spawn camdlc");
@@ -119,7 +119,7 @@ fn shrunk_config(
 
 /// Run `camdl fit run` on a config, returning its stderr.
 fn run_fit(config: &Path, out_root: &Path) -> String {
-    let r = Command::new(camdl_bin())
+    let r = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .current_dir(config.parent().expect("config parent"))
         // The fixture declares no `output_dir` (one would write into the
         // committed fixture directory), so the destination is pinned here —

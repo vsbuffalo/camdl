@@ -54,7 +54,7 @@ fn seir_spatial_5_inference() -> PathBuf {
 /// the surrounding tempdir.
 fn synth_obs_tsv(bin: &Path, tmp: &Path) -> PathBuf {
     let obs_path = tmp.join("seir_obs.tsv");
-    let status = Command::new(bin)
+    let status = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "simulate", &seir_spatial_5_inference().to_string_lossy(),
@@ -125,7 +125,7 @@ fn run_profile(
     data_path: &Path,
     out_tsv: &Path,
 ) -> Vec<f64> {
-    let status = Command::new(bin)
+    let status = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", output_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
@@ -229,7 +229,7 @@ fn profile_multi_stream_model_requires_explicit_obs() {
     let out_dir = tmp.path().join("out_no_obs");
     let out_tsv = tmp.path().join("profile_no_obs.tsv");
 
-    let output = Command::new(&bin)
+    let output = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", &out_dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([

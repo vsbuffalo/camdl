@@ -73,7 +73,7 @@ fn render_graph_emits_the_flow_graph_a_viewer_draws() {
     let model = tmp.path().join("agepool.camdl");
     std::fs::write(&model, MODEL).unwrap();
 
-    let run = Command::new(&bin)
+    let run = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["render", &model.to_string_lossy(), "--format", "graph"])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()

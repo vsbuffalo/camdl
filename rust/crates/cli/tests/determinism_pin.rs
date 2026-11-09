@@ -102,7 +102,7 @@ fn run_sim(bin: &Path, model: &Path, extra: &[&str], out: &Path) {
     args.extend(extra.iter().map(|s| s.to_string()));
     args.push("-o".into());
     args.push(out.to_string_lossy().into_owned());
-    let o = Command::new(bin).args(&args).output().expect("spawn");
+    let o = Command::new(bin).env_remove("CLICOLOR_FORCE").args(&args).output().expect("spawn");
     assert!(o.status.success(),
         "simulate {:?} failed: {}", extra, String::from_utf8_lossy(&o.stderr));
 }

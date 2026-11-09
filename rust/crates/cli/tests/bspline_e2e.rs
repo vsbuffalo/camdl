@@ -30,7 +30,7 @@ fn compile(dir: &Path, name: &str, src: &str, values: &[(&str, f64)]) -> ir::Mod
     let camdl = dir.join(format!("{name}.camdl"));
     let out = dir.join(format!("{name}.ir.json"));
     std::fs::write(&camdl, src).unwrap();
-    let o = Command::new(camdlc()).arg(&camdl).arg("-o").arg(&out).output().unwrap();
+    let o = Command::new(camdlc()).env_remove("CLICOLOR_FORCE").arg(&camdl).arg("-o").arg(&out).output().unwrap();
     assert!(o.status.success(), "camdlc {name}:\n{}", String::from_utf8_lossy(&o.stderr));
     let mut m = ir::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
     for p in &mut m.parameters {
@@ -217,6 +217,7 @@ fn simulate(dir: &Path, model: &Path, fit: Option<&Path>) -> (bool, String, Path
     std::fs::write(&params, "beta = 0.12\ngamma = 0.1\nrho = 0.6\n").unwrap();
     let cas = dir.join("cas");
     let mut cmd = Command::new(bin());
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.arg("simulate")
         .arg(model)
         .args(["--backend", "chain_binomial", "--seed", "1", "--dt", "1"])
@@ -318,7 +319,7 @@ fn pfilter_profile_and_survey_notice_the_hold() {
     let line = "info: forcing `mult` is held at its value at t = 21 from t = 21 to the horizon t = 120; \
                 its window ends at last_obs - 14";
     let run = |label: &str, args: Vec<String>| {
-        let o = Command::new(bin())
+        let o = Command::new(bin()).env_remove("CLICOLOR_FORCE")
             .args(&args)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
@@ -358,7 +359,7 @@ fn pgas_fit(tmp: &Path, tag: &str, model: &Path, estimate: &str, fixed: &str) ->
         out = tmp.join(format!("results_{tag}")).display(),
         model = model.display(), data = data.display(),
     )).unwrap();
-    let o = Command::new(bin())
+    let o = Command::new(bin()).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run", toml.to_str().unwrap()])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.join("irc"))
@@ -427,7 +428,7 @@ fn smooth_coefficients_are_not_yet_available() {
         "gamma = 0.15\nb = 0.0\nrho = 0.5\ntau = 0.3\nz_m1 = 0.0\nz_m2 = 0.0\nz_m3 = 0.0\nz_m4 = 0.0\n");
     assert!(!ok && stderr.contains("`coefs = smooth(...)` is not yet available in this release")
         && stderr.contains("keep `n_basis` small"), "fit run must refuse smooth:\n{stderr}");
-    let o = Command::new(bin())
+    let o = Command::new(bin()).env_remove("CLICOLOR_FORCE")
         .args(["simulate", model.to_str().unwrap(), "--param", "a=-1.5", "--param", "b=0", "--param", "tau=0.3",
                "--param", "z_m1=0", "--param", "z_m2=0", "--param", "z_m3=0", "--param", "z_m4=0",
                "--param", "gamma=0.15", "--param", "rho=0.5", "--seed", "1", "--stdout"])

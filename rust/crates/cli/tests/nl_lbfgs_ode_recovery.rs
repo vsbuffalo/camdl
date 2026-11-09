@@ -51,7 +51,7 @@ fn tempdir(tag: &str) -> TempDir {
 fn compile(dir: &Path, stem: &str, src: &str) -> PathBuf {
     let model = dir.join(format!("{stem}.camdl"));
     std::fs::write(&model, src).unwrap();
-    let out = Command::new(camdlc().unwrap()).arg(&model).output().unwrap();
+    let out = Command::new(camdlc().unwrap()).env_remove("CLICOLOR_FORCE").arg(&model).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join(format!("{stem}.ir.json"));
     std::fs::write(&ir, &out.stdout).unwrap();
@@ -218,7 +218,7 @@ fn nl_lbfgs_recovers_the_truth_and_matches_the_derivative_free_optimum() {
     std::fs::write(&truth, format!("beta = {TRUE_BETA}\ngamma = {TRUE_GAMMA}\nN0 = 10000\n"))
         .unwrap();
     let data = tmp.path().join("cases.tsv");
-    let sim = Command::new(&bin)
+    let sim = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate"]).arg(&ir)
         .args(["--params"]).arg(&truth)
         .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--obs-only"]).arg(&data)
@@ -253,7 +253,7 @@ N0 = 10000
             body = method_body(algorithm),
         )).unwrap();
 
-        let r = Command::new(&bin)
+        let r = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["fit", "run"]).arg(&fit_toml)
             .args(["--seed", "1", "--progress", "none"])
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -376,7 +376,7 @@ N0 = 10000
         body = method_body("nl-lbfgs"),
     )).unwrap();
 
-    let r = Command::new(&bin)
+    let r = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"]).arg(&fit_toml)
         .args(["--seed", "1", "--progress", "none"])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")

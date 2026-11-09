@@ -113,7 +113,7 @@ fn run_fit(bin: &Path, fit_toml: &Path, threads: usize) -> std::process::Output 
         .expect("read fit toml")
         .contains("from_mle");
     let lift: &[&str] = if starts_from_a_fit { &["--allow-nonconverged-source"] } else { &[] };
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(fit_toml)
         .args(lift)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -125,7 +125,7 @@ fn run_fit(bin: &Path, fit_toml: &Path, threads: usize) -> std::process::Output 
 /// Like `run_fit` but caps the pool via the `--parallel` FLAG (gh#162) rather
 /// than the RAYON_NUM_THREADS env — exercises the flag's wiring end to end.
 fn run_fit_parallel(bin: &Path, fit_toml: &Path, parallel: usize) -> std::process::Output {
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(fit_toml)
         .arg("--parallel").arg(parallel.to_string())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")

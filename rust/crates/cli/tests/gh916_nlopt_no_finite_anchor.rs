@@ -89,7 +89,7 @@ simulate {{ from = 0 'days  to = 20 'days }}
 "#);
     let model = tmp.path().join("sir.camdl");
     std::fs::write(&model, src).unwrap();
-    let out = Command::new(&camdlc).arg(&model).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model).output().unwrap();
     assert!(out.status.success(), "camdlc: {}", String::from_utf8_lossy(&out.stderr));
     let ir = tmp.path().join("sir.ir.json");
     std::fs::write(&ir, &out.stdout).unwrap();
@@ -125,7 +125,7 @@ backend = "ode"
 chains = 1
 "#, out = outdir.display(), ir = ir.display(), data = data.display())).unwrap();
 
-    let run = Command::new(&bin)
+    let run = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"]).arg(&fit_toml).arg("--no-dt-check")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();

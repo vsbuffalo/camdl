@@ -61,7 +61,7 @@ fn binary() -> PathBuf {
 }
 
 fn camdl(dir: &Path, args: &[&str]) -> Output {
-    Command::new(binary()).args(args).current_dir(dir).output().expect("spawn camdl")
+    Command::new(binary()).env_remove("CLICOLOR_FORCE").args(args).current_dir(dir).output().expect("spawn camdl")
 }
 
 fn ok(out: &Output, what: &str) -> String {
@@ -334,7 +334,7 @@ fn pfilter_routes_to_one_point_score_one_likelihood_under_one_run_id() {
         let mut argv = vec!["pfilter", "m.camdl", "--data", "cases.tsv",
             "--particles", "200", "--seed", "5"];
         argv.extend_from_slice(args);
-        let out = Command::new(binary()).args(&argv).current_dir(dir)
+        let out = Command::new(binary()).env_remove("CLICOLOR_FORCE").args(&argv).current_dir(dir)
             .env("CAMDL_OUTPUT_DIR", &store).output().expect("spawn");
         let stderr = ok(&out, &format!("pfilter route {name}"));
         let loglik = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -363,7 +363,7 @@ fn pfilter_reports_a_later_params_file_over_an_earlier_one() {
     routes_fixture(dir);
     let sim = simulate_route(dir, "data", &["--params", "p.toml"]);
     std::fs::write(dir.join("cases.tsv"), &sim.obs).unwrap();
-    let out = Command::new(binary())
+    let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(["pfilter", "m.camdl", "--data", "cases.tsv", "--particles", "50",
                "--params", "base.toml", "--params", "p.toml"])
         .current_dir(dir).env("CAMDL_OUTPUT_DIR", dir.join("pf")).output().expect("spawn");
@@ -545,7 +545,7 @@ fn profile_run_rw(dir: &Path, store: &str, rw_sd: &str, extra: &[&str])
         "--sweep", "beta=lin(0.2,0.4,2)", "--particles", "30", "--iterations", "3",
         "--n-starts", "1", "--rw-sd", rw_sd, "--output", "p.tsv", "--seed", "1"];
     argv.extend_from_slice(extra);
-    let out = Command::new(binary()).args(&argv).current_dir(dir)
+    let out = Command::new(binary()).env_remove("CLICOLOR_FORCE").args(&argv).current_dir(dir)
         .env("CAMDL_OUTPUT_DIR", dir.join(store)).output().expect("spawn");
     let stderr = ok(&out, &format!("profile {extra:?}"));
     let provs: Vec<serde_json::Value> = run_jsons(&dir.join(store)).into_iter()

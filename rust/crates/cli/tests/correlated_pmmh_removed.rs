@@ -21,7 +21,7 @@ fn camdl_bin() -> PathBuf {
 
 #[test]
 fn fit_run_rho_flag_is_refused_with_the_removal_message() {
-    let out = Command::new(camdl_bin())
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "run", "/no/such/fit.toml", "--rho", "0.99"])
         .output()
@@ -39,7 +39,7 @@ fn profile_pmmh_rho_flag_is_refused_with_the_removal_message() {
     // `--sweep` and `--particles` are required arguments of `profile`, so
     // they are supplied; the model path is never opened — the trap answers
     // first.
-    let out = Command::new(camdl_bin())
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "profile", "/no/such/model.ir.json",

@@ -68,7 +68,7 @@ simulate { from = 0 'days  to = 60 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(camdl).arg(&model_path).output().unwrap();
+    let out = Command::new(camdl).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -80,7 +80,7 @@ fn gen_data(bin: &Path, ir: &Path, dir: &Path) -> PathBuf {
     let truth = dir.join("truth.toml");
     std::fs::write(&truth, "beta = 0.8\ngamma = 0.3\nN0 = 10000\n").unwrap();
     let data = dir.join("cases.tsv");
-    let sim = Command::new(bin)
+    let sim = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate"]).arg(ir)
         .args(["--params"]).arg(&truth)
         .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--obs-only"]).arg(&data)
@@ -147,6 +147,7 @@ chains = 1
 "#, out = out.display(), ir = ir.display(), data = data.display())).unwrap();
 
     let mut cmd = Command::new(&bin);
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.args(["fit", "run"]).arg(&fit_toml);
     for a in extra_args { cmd.arg(a); }
     let status = cmd.env("CAMDL_SKIP_VERSION_CHECK", "1").status().unwrap();

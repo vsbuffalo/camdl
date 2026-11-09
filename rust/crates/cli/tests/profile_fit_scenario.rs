@@ -94,7 +94,7 @@ const CASES_TSV: &str = "time\tcases\n1\t10\n2\t11\n3\t10\n4\t12\n5\t11\n6\t10\n
 fn setup(dir: &Path, name: &str, n0: Option<f64>, top: &str) -> (PathBuf, PathBuf) {
     let model_src = dir.join("m.camdl");
     std::fs::write(&model_src, MODEL).unwrap();
-    let out = Command::new(camdlc_bin()).arg(&model_src).output().unwrap();
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(&model_src).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join("m.ir.json");
@@ -121,7 +121,7 @@ gamma = {{ bounds = [0.01, 1.0], start = 0.1 }}
 /// lands in `cwd/results` (profile has no output-root flag).
 fn profile(cwd: &Path, ir: &Path, fit: &Path, extra: &[&str]) -> Output {
     std::fs::create_dir_all(cwd).unwrap();
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(cwd)
         .args(["profile", &ir.to_string_lossy(), "--fit", &fit.to_string_lossy()])

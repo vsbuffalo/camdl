@@ -91,7 +91,7 @@ const CASES_TSV: &str = "time\tcases\n1\t10\n2\t11\n3\t10\n4\t12\n5\t11\n6\t10\n
 fn setup(dir: &Path, name: &str, gamma: Option<f64>, top: &str) -> (PathBuf, PathBuf) {
     let model_src = dir.join("m.camdl");
     std::fs::write(&model_src, MODEL).unwrap();
-    let out = Command::new(camdlc_bin()).arg(&model_src).output().unwrap();
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(&model_src).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join("m.ir.json");
@@ -115,7 +115,7 @@ N0 = 1000
 }
 
 fn survey(root: &Path, ir: &Path, fit: &Path, extra: &[&str]) -> Output {
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["survey", &ir.to_string_lossy(), "--fit", &fit.to_string_lossy()])
         .args(extra)

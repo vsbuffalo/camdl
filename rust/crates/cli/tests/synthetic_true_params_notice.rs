@@ -74,7 +74,7 @@ cooling = 0.7
 
 fn setup(dir: &Path) {
     std::fs::write(dir.join("m.camdl"), MODEL).unwrap();
-    let out = Command::new(camdlc_bin()).arg(dir.join("m.camdl")).output().unwrap();
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(dir.join("m.camdl")).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(dir.join("m.ir.json"), &out.stdout).unwrap();
     std::fs::write(dir.join("truth.toml"), "beta = 0.3\ngamma = 0.1\nN0 = 1000\n").unwrap();
@@ -88,7 +88,7 @@ fn true_params_replacing_the_synthetic_scenario_is_named_as_the_source() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     setup(dir);
-    let out = Command::new(camdl_bin())
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(dir)
         .args(["fit", "run", "syn.toml", "--seed", "1"])

@@ -98,7 +98,7 @@ fn compile(dir: &Path, stem: &str, src: &str) -> PathBuf {
     let camdlc = camdlc_bin().expect("camdlc.exe present");
     let model = dir.join(format!("{stem}.camdl"));
     std::fs::write(&model, src).unwrap();
-    let out = Command::new(&camdlc).arg(&model).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join(format!("{stem}.ir.json"));
     std::fs::write(&ir, &out.stdout).unwrap();
@@ -123,7 +123,7 @@ fn run_fit(dir: &Path, ir: &Path, estimate: &str, method: &str, tag: &str) -> (O
     );
     let path = dir.join(format!("fit_{tag}.toml"));
     std::fs::write(&path, toml).unwrap();
-    let out = Command::new(camdl_bin())
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"])
         .arg(&path)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")

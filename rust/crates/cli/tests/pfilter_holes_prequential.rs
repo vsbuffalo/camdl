@@ -39,7 +39,7 @@ fn save_prequential_and_trace_accept_na_holes() {
 
     let stem = tmp.path().join("preq").to_string_lossy().into_owned();
     let trace = tmp.path().join("trace.tsv");
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", &model.to_string_lossy(),

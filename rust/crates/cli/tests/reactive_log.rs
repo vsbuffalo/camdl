@@ -87,7 +87,7 @@ fn run(extra: &[&str]) -> Run {
             .iter()
             .map(|s| s.to_string()),
     );
-    let out = Command::new(&bin).args(&args).output().expect("spawn camdl");
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").args(&args).output().expect("spawn camdl");
     Run { _tmp: tmp, cas, mirror, out }
 }
 

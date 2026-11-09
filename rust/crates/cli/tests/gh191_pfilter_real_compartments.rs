@@ -39,7 +39,7 @@ fn golden(name: &str) -> PathBuf {
 #[test]
 fn pfilter_rejects_real_coupled_model() {
     let bin = skip_if_missing();
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args([
             "pfilter", &golden("sir_reservoir_mixed").to_string_lossy(),
             "--param", "beta=0.3", "--param", "gamma=0.1", "--param", "xi=0.05",
@@ -70,7 +70,7 @@ fn pfilter_rejects_real_coupled_model() {
 #[test]
 fn pfilter_does_not_over_reject_real_free_model() {
     let bin = skip_if_missing();
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args([
             "pfilter", &golden("sir_basic").to_string_lossy(),
             "--param", "beta=0.3", "--param", "gamma=0.1",

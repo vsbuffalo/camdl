@@ -23,7 +23,7 @@ fn binary() -> PathBuf {
 
 #[test]
 fn explain_prints_the_methods_topic_without_any_model_arguments() {
-    let out = Command::new(binary())
+    let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(["compare", "--explain"])
         .output()
         .expect("spawn camdl compare --explain");
@@ -51,11 +51,11 @@ fn explain_prints_the_methods_topic_without_any_model_arguments() {
 /// in and the two can drift.
 #[test]
 fn explain_and_the_docs_topic_serve_the_same_bytes() {
-    let via_compare = Command::new(binary())
+    let via_compare = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(["compare", "--explain"])
         .output()
         .expect("spawn camdl compare --explain");
-    let via_docs = Command::new(binary())
+    let via_docs = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(["docs", "model-comparison"])
         .output()
         .expect("spawn camdl docs model-comparison");
@@ -67,7 +67,7 @@ fn explain_and_the_docs_topic_serve_the_same_bytes() {
 /// paths here do not exist, so a run would have failed loudly.
 #[test]
 fn explain_with_model_paths_prints_and_runs_no_comparison() {
-    let out = Command::new(binary())
+    let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(["compare", "--explain", "/no/such/a", "/no/such/b"])
         .output()
         .expect("spawn camdl compare --explain with paths");

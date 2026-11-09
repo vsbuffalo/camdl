@@ -19,7 +19,7 @@ fn camdl_bin() -> PathBuf {
 
 #[test]
 fn tempering_flag_is_refused_with_the_removal_message() {
-    let out = Command::new(camdl_bin())
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "run", "/no/such/fit.toml", "--tempering", "1.0"])
         .output()

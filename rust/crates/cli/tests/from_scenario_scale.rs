@@ -64,14 +64,14 @@ const PREV_TSV: &str = "time\tprev\n1\t10\n2\t12\n3\t13\n4\t15\n5\t16\n6\t18\n7\
 fn setup(dir: &Path) {
     let src = dir.join("m.camdl");
     std::fs::write(&src, MODEL).unwrap();
-    let out = Command::new(camdlc_bin()).arg(&src).output().unwrap();
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(&src).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(dir.join("m.ir.json"), &out.stdout).unwrap();
     std::fs::write(dir.join("prev.tsv"), PREV_TSV).unwrap();
 }
 
 fn camdl(dir: &Path, args: &[&str]) -> Output {
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(dir)
         .args(args)

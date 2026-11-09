@@ -188,7 +188,7 @@ fn repo() -> PathBuf {
 
 fn compile(fixture: &str) -> ir::Model {
     let out = std::env::temp_dir().join(format!("nuts_rungs_{}_{}.ir.json", std::process::id(), fixture.replace('/', "_")));
-    let o = std::process::Command::new(repo().join("ocaml/_build/default/bin/camdlc.exe"))
+    let o = std::process::Command::new(repo().join("ocaml/_build/default/bin/camdlc.exe")).env_remove("CLICOLOR_FORCE")
         .arg(repo().join(fixture)).arg("-o").arg(&out).output().unwrap();
     assert!(o.status.success(), "{fixture}: {}", String::from_utf8_lossy(&o.stderr));
     ir::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap()

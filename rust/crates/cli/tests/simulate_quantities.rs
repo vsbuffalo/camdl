@@ -90,7 +90,7 @@ fn write_model(dir: &Path) -> PathBuf {
 }
 
 fn run(bin: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         // Ad-hoc run: skip the camdlc git-hash handshake (the binary under test
         // is self-consistent; the worktree camdlc is found via the CAMDLC env or

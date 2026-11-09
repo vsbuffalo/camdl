@@ -228,7 +228,7 @@ fn two_data_vintages_do_not_share_a_run_id() {
     let cas = tmp.path().join("cas");
 
     let run = |label: &str| -> String {
-        let o = Command::new(&bin)
+        let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .arg("simulate")
             .arg(&model)
             .args(["--backend", "chain_binomial", "--seed", "1", "--dt", "1"])
@@ -293,7 +293,7 @@ fn the_same_data_twice_keeps_one_run_id() {
     write_data(&data, 4);
 
     for label in ["a", "b"] {
-        let o = Command::new(&bin)
+        let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .arg("simulate")
             .arg(&model)
             .args(["--backend", "chain_binomial", "--seed", "1", "--dt", "1"])
@@ -325,7 +325,7 @@ fn an_anchored_model_without_fit_is_refused() {
     let model = write_model(tmp.path(), "120 'days");
     let params = params_file(tmp.path());
 
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("simulate")
         .arg(&model)
         .args(["--backend", "chain_binomial", "--seed", "1", "--dt", "1"])
@@ -359,7 +359,7 @@ fn an_anchored_horizon_resolves_and_sets_the_grid() {
     let params = params_file(tmp.path());
 
     let out = tmp.path().join("traj.tsv");
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("simulate")
         .arg(&model)
         .args(["--backend", "chain_binomial", "--seed", "1", "--dt", "1"])
@@ -413,7 +413,7 @@ fn predict_refuses_a_scenario_horizon_that_differs_after_resolution() {
     write_data(&data, 4); // last_obs = 28
     let toml = write_fit_toml(tmp.path(), &model, &data);
 
-    let fit = Command::new(&bin)
+    let fit = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"])
         .arg(&toml)
         .args(["--seed", "1"])
@@ -437,7 +437,7 @@ fn predict_refuses_a_scenario_horizon_that_differs_after_resolution() {
         .expect("one fit segment");
 
     let predict = || -> (bool, String) {
-        let o = Command::new(&bin)
+        let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["fit", "predict"])
             .arg(&segment)
             .args(["--scenario", "forecast"])
@@ -517,7 +517,7 @@ fn an_anchored_model_forecasts_from_a_filtered_state() {
 
     // The state file comes from the UNANCHORED twin (pfilter resolves no
     // anchors); it records counts plus the origin, not the model that made it.
-    let pf = Command::new(&bin)
+    let pf = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("pfilter")
         .arg(&plain)
         .args(["--params", params.to_str().unwrap()])
@@ -535,7 +535,7 @@ fn an_anchored_model_forecasts_from_a_filtered_state() {
     );
 
     let out = tmp.path().join("forecast.tsv");
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("simulate")
         .arg(&anchored)
         .args(["--backend", "chain_binomial", "--seed", "3", "--dt", "1"])
@@ -601,7 +601,7 @@ fn an_anchor_resolving_before_the_forecast_origin_is_refused() {
     let toml = write_fit_toml(tmp.path(), &anchored, &data);
     let state = tmp.path().join("final.tsv");
 
-    let pf = Command::new(&bin)
+    let pf = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("pfilter")
         .arg(&plain)
         .args(["--params", params.to_str().unwrap()])
@@ -614,7 +614,7 @@ fn an_anchor_resolving_before_the_forecast_origin_is_refused() {
         .expect("spawn pfilter");
     assert!(pf.status.success(), "{}", String::from_utf8_lossy(&pf.stderr));
 
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("simulate")
         .arg(&anchored)
         .args(["--backend", "chain_binomial", "--seed", "3", "--dt", "1"])
@@ -659,7 +659,7 @@ fn an_anchored_horizon_can_write_observations() {
     let toml = write_fit_toml(tmp.path(), &anchored, &data);
 
     let obs = tmp.path().join("ppc.tsv");
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("simulate")
         .arg(&anchored)
         .args(["--backend", "chain_binomial", "--seed", "1", "--dt", "1"])
@@ -729,7 +729,7 @@ fn pfilter_resolves_an_anchored_model_and_reports_a_finite_loglik() {
     let toml = write_fit_toml(tmp.path(), &model, &data);
     let params = params_file(tmp.path());
 
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("pfilter")
         .arg(&model)
         .args(["--params", params.to_str().unwrap()])
@@ -764,7 +764,7 @@ fn profile_resolves_an_anchored_model() {
     write_data(&data, 4);
     let toml = write_fit_toml(tmp.path(), &model, &data);
 
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("profile")
         .arg(&model)
         .args(["--fit", toml.to_str().unwrap()])
@@ -798,7 +798,7 @@ fn survey_resolves_an_anchored_model_in_both_input_modes() {
     let toml = write_fit_toml(tmp.path(), &model, &data);
 
     let run = |args: Vec<&str>, out: &str| -> String {
-        let o = Command::new(&bin)
+        let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .arg("survey")
             .arg(&model)
             .args(args)
@@ -844,7 +844,7 @@ fn pfilter_refuses_an_anchored_model_with_no_data_bound() {
     let model = write_model(tmp.path(), "last_obs + 4 'weeks");
     let params = params_file(tmp.path());
 
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("pfilter")
         .arg(&model)
         .args(["--params", params.to_str().unwrap()])
@@ -883,7 +883,7 @@ fn pfilter_scenario_horizon_guard_compares_resolved_numbers() {
     write_data(&data, 4); // last_obs = 28, so the model horizon resolves to 56
 
     let run = |dir: &Path| -> (bool, String) {
-        let o = Command::new(&bin)
+        let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .arg("pfilter")
             .arg(dir.join("anchored.camdl"))
             .args(["--scenario", "forecast"])
@@ -942,7 +942,7 @@ fn survey_records_a_distinct_model_identity_per_data_vintage() {
 
     let run = |rows: usize| {
         write_data(&data, rows);
-        let o = Command::new(&bin)
+        let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .arg("survey")
             .arg(&model)
             .args(["--fit", toml.to_str().unwrap()])
@@ -1016,7 +1016,7 @@ fn anchors_resolve_at_the_step_the_fit_runs_at() {
     let text = std::fs::read_to_string(&toml).unwrap().replace("dt = 1.0", "dt = 0.5");
     std::fs::write(&toml, text).unwrap();
 
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"])
         .arg(&toml)
         .arg("--no-progress")
@@ -1042,7 +1042,7 @@ fn anchors_resolve_at_the_step_the_fit_runs_at() {
         .filter_map(|d| d.ok().map(|d| d.path()))
         .find(|p| p.is_dir())
         .expect("one fit segment");
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "predict"])
         .arg(&segment)
         .args(["--n-draws", "5"])

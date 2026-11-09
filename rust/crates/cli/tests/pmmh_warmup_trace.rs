@@ -74,7 +74,7 @@ simulate { from = 0 'days  to = 20 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -163,7 +163,7 @@ fn pmmh_trace_carries_warmup_but_draws_excludes_it() {
     let (ir, data) = write_fixture(tmp.path());
     let fit_toml = write_fit_toml(tmp.path(), &ir, &data);
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"]).arg(&fit_toml)
         .args(["--seed", "1"])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")

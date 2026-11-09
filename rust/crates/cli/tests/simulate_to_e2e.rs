@@ -125,7 +125,7 @@ fn absolute_to_extends_trajectory_and_rekeys() {
             args.push("--to".into());
             args.push(t.into());
         }
-        let o = Command::new(&bin)
+        let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
             .args(&args)
@@ -186,7 +186,7 @@ fn anchored_to_without_fit_is_refused() {
         "--stdout".into(),
     ];
     args.extend(PARAMS.iter().map(|s| s.to_string()));
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
         .args(&args)
@@ -219,7 +219,7 @@ fn anchored_to_resolves_against_fit_data() {
         "--seed".into(), "1".into(),
     ];
     args.extend(PARAMS.iter().map(|s| s.to_string()));
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
         .args(&args)
@@ -251,7 +251,7 @@ fn inverted_horizon_is_refused() {
         "--stdout".into(),
     ];
     args.extend(PARAMS.iter().map(|s| s.to_string()));
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
         .args(&args)
@@ -269,7 +269,7 @@ fn inverted_horizon_is_refused() {
 fn scenario_horizon_conflict_is_refused() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
         .args([
@@ -291,7 +291,7 @@ fn scenario_horizon_conflict_is_refused() {
     // allowed (the same rule refuse_scenario_horizon applies to presets that
     // restate the run horizon). Params may fail later; the horizon check must
     // not be what refuses it.
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas2"))
         .args([
@@ -335,7 +335,7 @@ fn extending_to_with_at_list_emit_schedule_is_refused() {
         "--seed".into(), "1".into(),
     ];
     args.extend(PARAMS.iter().map(|s| s.to_string()));
-    let o = Command::new(&bin)
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
         .args(&args)
