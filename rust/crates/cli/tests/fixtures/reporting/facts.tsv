@@ -21,6 +21,13 @@
 # every chain refused at its start, pfilter.toml is a fit whose method is a
 # particle filter at fixed parameters. cases.tsv is
 # `camdl simulate sir.camdl --params truth.toml --seed 3 --obs-only cases.tsv`.
+#
+# Fixed seeds make the draws reproducible on one platform, not bit-identical
+# across libm implementations. Bulk and classic R-hat are stable to the printed
+# digits under last-bit differences in the draws; folded R-hat is not, because
+# |x - median| puts near-ties around the median whose ranks flip (PGAS gamma's
+# folded R-hat is 1.263 on macOS and 1.271 on Linux CI). PGAS folded values
+# are therefore not recorded; PMMH's matched on both platforms.
 run	stream	scope	label	value
 stuck	stderr	line	fit:	pmmh_stuck.toml (method=pmmh)
 stuck	stderr	line	model:	sir.camdl
@@ -252,7 +259,7 @@ pgas.summary	stdout	line	max R̂	2.150 (gamma), threshold 1.05
 pgas.summary	stdout	line	parameters above threshold	2 of 2 parameters above threshold · no outlier chains · 40/40 forkable
 pgas.summary	stdout	line	gamma                  0.1079	4         28    2.150
 pgas.summary	stdout	line	beta                   0.5754	5         50    1.753
-pgas.summary	stdout	line	gamma             2.150	1.263     4.477   bulk   10 5
+pgas.summary	stdout	line	gamma             2.150	4.477   bulk   10 5
 pgas.summary	stdout	line	beta              1.753	1.042     2.394   bulk   17 20
 pgas.summary	stdout	line	ESS/iter =	0.0211  (min-param ESS 4 / 200 raw sampling iters)
 pgas.summary	stdout	line	chain         obs ll    mod-z	transition ll    complete ll   paths   forkable   flag
