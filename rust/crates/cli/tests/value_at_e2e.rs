@@ -176,7 +176,7 @@ fn predict_resolves_last_obs_and_censors_past_horizon() {
     let data = write_data(tmp.path());
     let fit_toml = write_fit_toml(tmp.path(), &model, &data);
 
-    let fit = Command::new(bin())
+    let fit = Command::new(bin()).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"])
         .arg(&fit_toml)
         .arg("--no-progress")
@@ -190,7 +190,7 @@ fn predict_resolves_last_obs_and_censors_past_horizon() {
     );
 
     let segment = fit_segment(&tmp.path().join("out"));
-    let predict = Command::new(bin())
+    let predict = Command::new(bin()).env_remove("CLICOLOR_FORCE")
         .args(["fit", "predict"])
         .arg(&segment)
         .arg("--no-progress")
@@ -314,7 +314,7 @@ fn simulate_refuses_last_obs_naming_the_quantity() {
     )
     .unwrap();
 
-    let out = Command::new(bin())
+    let out = Command::new(bin()).env_remove("CLICOLOR_FORCE")
         .arg("simulate")
         .arg(&model)
         .args(["--backend", "chain_binomial", "--seed", "1", "--dt", "1"])

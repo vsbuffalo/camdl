@@ -64,7 +64,7 @@ const CASES_TSV: &str =
 fn setup(dir: &Path) {
     let src = dir.join("m.camdl");
     std::fs::write(&src, MODEL).unwrap();
-    let out = Command::new(camdlc_bin()).arg(&src).output().unwrap();
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(&src).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(dir.join("m.ir.json"), &out.stdout).unwrap();
     std::fs::write(dir.join("cases.tsv"), CASES_TSV).unwrap();
@@ -84,7 +84,7 @@ fn fit_toml(dir: &Path, name: &str, chains: usize, particles: usize, starts: &st
 }
 
 fn camdl(dir: &Path, args: &[&str]) -> Output {
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(dir)
         .args(args)

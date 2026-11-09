@@ -89,7 +89,7 @@ simulate { from = 0 'days  to = 20 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -172,7 +172,7 @@ fn method_leaf(out: &Path) -> PathBuf {
 }
 
 fn run_fit(bin: &Path, fit: &Path) {
-    let r = Command::new(bin)
+    let r = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(fit).arg("--seed").arg("7")
         .output().expect("spawn camdl");
     assert!(r.status.success(),

@@ -116,6 +116,7 @@ fn obs_stream_files(seed_leaf: &Path) -> Vec<PathBuf> {
 /// --seeds <seeds> --output-dir <output> <extra…>`.
 fn simulate(bin: &Path, model: &Path, params: &Path, output: &Path, seeds: &str, extra: &[&str]) -> Output {
     let mut cmd = Command::new(bin);
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.args(["simulate", &model.to_string_lossy(),
               "--params", &params.to_string_lossy(),
               "--backend", "chain_binomial", "--dt", "1",

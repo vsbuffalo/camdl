@@ -101,7 +101,7 @@ fn setup(dir: &Path, src: &str) -> (PathBuf, PathBuf) {
 }
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(binary())
+    Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
@@ -505,7 +505,7 @@ fn fit_fixture(dir: &Path) -> (PathBuf, PathBuf) {
     let camdlc = camdlc().expect("checked by the caller");
     let src = dir.join("m.camdl");
     std::fs::write(&src, MODEL).unwrap();
-    let out = Command::new(&camdlc).arg(&src).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&src).output().unwrap();
     assert!(out.status.success(), "camdlc: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join("m.ir.json");
     std::fs::write(&ir, &out.stdout).unwrap();
@@ -531,7 +531,7 @@ cooling = 0.7
 "#;
 
 fn run_fit(fit_toml: &Path, extra: &[&str]) -> std::process::Output {
-    Command::new(binary())
+    Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .arg("fit")
         .arg("run")
         .arg(fit_toml)

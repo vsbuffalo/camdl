@@ -74,7 +74,7 @@ fn pfilter_cli_family_binding_slices_per_stratum() {
     write_long_form(&data);
     let params = params_file(tmp.path());
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", tmp.path().join("out_cli"))
         .args([
@@ -139,7 +139,7 @@ cooling    = 0.5
         data = data.display(),
     ));
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", tmp.path().join("out_fit"))
         .args([

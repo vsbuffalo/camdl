@@ -417,7 +417,7 @@ fn run_example(ex: &Example) -> Result<(), String> {
     std::fs::write(&model, format!("{preamble_src}\nobservations {{\n{}}}\n", ex.declaration))
         .unwrap();
     let ir = dir.join("model.ir.json");
-    let out = Command::new(camdlc()).arg(&model).arg("-o").arg(&ir).output().unwrap();
+    let out = Command::new(camdlc()).env_remove("CLICOLOR_FORCE").arg(&model).arg("-o").arg(&ir).output().unwrap();
     if !out.status.success() {
         return Err(format!(
             "the stream declared at {}:{} does not compile under preamble '{}':\n{}",
@@ -438,7 +438,7 @@ fn run_example(ex: &Example) -> Result<(), String> {
     let data = dir.join("data.tsv");
     std::fs::write(&data, &ex.file).unwrap();
     let stem = dir.join("preq");
-    let out = Command::new(camdl_bin())
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .args([
             "pfilter",
             ir.to_str().unwrap(),

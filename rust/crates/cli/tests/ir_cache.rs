@@ -107,7 +107,7 @@ fn run_simulate(bin: &Path, shim_dir: &Path, model: &Path, cache_dir: &Path, out
         "--output-dir", out.to_str().unwrap(), "--progress", "none",
     ];
     if no_cache { args.push("--no-ir-cache"); }
-    let st = Command::new(bin)
+    let st = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(&args)
         .env("PATH", format!("{}:{}", shim_dir.display(), old_path))
         .env("CAMDL_IR_CACHE_DIR", cache_dir)
@@ -186,7 +186,7 @@ fn editing_the_model_invalidates_the_cache() {
 /// read() table, not a CLI param).
 fn run_patches(bin: &Path, shim_dir: &Path, model: &Path, cache_dir: &Path, out: &Path) {
     let old_path = std::env::var("PATH").unwrap_or_default();
-    let st = Command::new(bin)
+    let st = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate", model.to_str().unwrap(),
             "--backend", "chain_binomial", "--seed", "1",
@@ -272,7 +272,7 @@ fn same_model_different_read_data_do_not_share_a_cache_entry() {
 /// the unfolded IR — a different compile output for the same model.
 fn run_simulate_fold_off(bin: &Path, shim_dir: &Path, model: &Path, cache_dir: &Path, out: &Path) {
     let old_path = std::env::var("PATH").unwrap_or_default();
-    let st = Command::new(bin)
+    let st = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate", model.to_str().unwrap(),
             "--backend", "chain_binomial", "--seed", "1",
@@ -337,7 +337,7 @@ fn spawn_simulate(bin: &Path, shim_dir: &Path, model: &Path, cache_dir: &Path, o
     -> std::process::Child
 {
     let old_path = std::env::var("PATH").unwrap_or_default();
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate", model.to_str().unwrap(),
             "--backend", "chain_binomial", "--seed", seed,
@@ -458,7 +458,7 @@ fn try_simulate(bin: &Path, shim_dir: &Path, model: &Path, cache_dir: &Path, out
     -> std::process::Output
 {
     let old_path = std::env::var("PATH").unwrap_or_default();
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate", model.to_str().unwrap(),
             "--backend", "chain_binomial", "--seed", "1",

@@ -121,7 +121,7 @@ simulate { from = 0 'days  to = 6 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -341,7 +341,7 @@ fn run_fit_seeded(
 
     let draws = draws(tmp.path());
     let (fit_toml, out_root) = write_fit_toml(tmp.path(), &ir, &data, &draws);
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "run", &fit_toml.to_string_lossy(),
                "--seed", seed, "--progress", "none"])
@@ -619,7 +619,7 @@ fn fit_summary_reports_a_chain_refused_at_its_start() {
 
     let method_dir = cas_method_leaf(&run.out_root.join("fits"), "pgas")
         .expect("committed `pgas` method leaf");
-    let out = Command::new(camdl_bin().unwrap())
+    let out = Command::new(camdl_bin().unwrap()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         // The fit directory: `fits/<fit>/<method>/<seed>` is the leaf.
         .args(["fit", "summary"]).arg(method_dir.parent().unwrap().parent().unwrap())

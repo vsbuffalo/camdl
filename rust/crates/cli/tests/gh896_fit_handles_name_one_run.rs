@@ -99,7 +99,7 @@ dt = 1.0
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(binary())
+        Command::new(binary()).env_remove("CLICOLOR_FORCE")
             .current_dir(self.dir())
             .env("CAMDL_OUTPUT_DIR", self.dir().join("results"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -663,7 +663,7 @@ fn concurrent_labels_give_one_label_to_one_run() {
         let children: Vec<std::process::Child> = ids
             .iter()
             .map(|id| {
-                Command::new(binary())
+                Command::new(binary()).env_remove("CLICOLOR_FORCE")
                     .current_dir(p.dir())
                     .env("CAMDL_OUTPUT_DIR", p.dir().join("results"))
                     .args(["label", &id[..12], &label])

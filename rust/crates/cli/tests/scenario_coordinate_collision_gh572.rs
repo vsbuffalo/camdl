@@ -80,7 +80,7 @@ impl Fixture {
     }
 
     fn camdl(&self, args: &[&str]) -> Output {
-        Command::new(skip_if_missing_binary())
+        Command::new(skip_if_missing_binary()).env_remove("CLICOLOR_FORCE")
             .args(args)
             .current_dir(self.dir.path())
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -354,6 +354,7 @@ scenarios { slow { set = { mu = 0.01 } } }
     let bin = skip_if_missing_binary();
     let simulate = |out: &str, scenario: Option<&str>| {
         let mut cmd = Command::new(&bin);
+        cmd.env_remove("CLICOLOR_FORCE");
         cmd.current_dir(p)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .args([

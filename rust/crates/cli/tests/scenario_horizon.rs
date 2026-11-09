@@ -113,6 +113,7 @@ fn simulate_on(
     let out = tmp.path().join("traj.tsv");
     let store = tmp.path().join("store");
     let mut cmd = Command::new(bin);
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.args([
         "simulate",
         &model.to_string_lossy(),
@@ -429,6 +430,7 @@ fn pfilter_and_profile_refuse_a_scenario_horizon_they_cannot_honour() {
         ("profile", vec!["--sweep", "beta=0.3,0.4", "--rw-sd", "auto"]),
     ] {
         let mut cmd = Command::new(&bin);
+        cmd.env_remove("CLICOLOR_FORCE");
         cmd.env("CAMDL_SKIP_VERSION_CHECK", "1").args([
             subcmd,
             &model.to_string_lossy(),
@@ -608,7 +610,7 @@ fn a_shortened_horizon_emits_no_observations_past_its_own_trajectory() {
     let store = tmp.path().join("store");
     let obs = tmp.path().join("obs.tsv");
     let traj = tmp.path().join("traj.tsv");
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate",
             &model.to_string_lossy(),
@@ -719,7 +721,7 @@ fn extending_past_a_baked_intervention_end_is_refused() {
     // Baked end (no `until`) + extending scenario → refused, naming both.
     let baked = tmp.path().join("baked.camdl");
     write_campaign_model(&baked, None);
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "simulate", &baked.to_string_lossy(), "--params", &params.to_string_lossy(),
@@ -744,7 +746,7 @@ fn extending_past_a_baked_intervention_end_is_refused() {
     // after the scenario filter removed the un-fired campaign, so a horizon
     // menu beside an intervention library is not refused over a campaign that
     // could never fire.
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "simulate", &baked.to_string_lossy(), "--params", &params.to_string_lossy(),
@@ -760,7 +762,7 @@ fn extending_past_a_baked_intervention_end_is_refused() {
     );
 
     // A SHORTENED horizon over the same baked end is safe and must run.
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "simulate", &baked.to_string_lossy(), "--params", &params.to_string_lossy(),
@@ -778,7 +780,7 @@ fn extending_past_a_baked_intervention_end_is_refused() {
     // campaign actually fires through it: V climbs past the old horizon.
     let explicit = tmp.path().join("explicit.camdl");
     write_campaign_model(&explicit, Some("200 'days"));
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "simulate", &explicit.to_string_lossy(), "--params", &params.to_string_lossy(),
@@ -834,7 +836,7 @@ fn obs_mirror_refuses_scenarios_with_different_horizons() {
         let obs = tmp.path().join("obs.tsv");
         let traj = tmp.path().join("traj.tsv");
         let store = tmp.path().join("store");
-        let out = Command::new(&bin)
+        let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .args([
                 "simulate", &model.to_string_lossy(), "--params",

@@ -53,6 +53,7 @@ fn single_block_model() -> PathBuf {
 fn synth_obs(bin: &Path, model: &Path, tmp: &Path, extra_args: &[&str]) -> PathBuf {
     let obs_path = tmp.join("obs.tsv");
     let mut cmd = Command::new(bin);
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.env("CAMDL_SKIP_VERSION_CHECK", "1").args([
         "simulate",
         &model.to_string_lossy(),
@@ -124,7 +125,7 @@ fn prequential_y_obs_single_stream_equals_data() {
     let obs = synth_obs(&bin, &single_block_model(), tmp.path(), &[]);
     let stem = tmp.path().join("preq");
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter",
@@ -176,7 +177,7 @@ fn prequential_y_obs_multi_stream_is_cross_stream_sum() {
     let stem = tmp.path().join("preq");
 
     // Bind two streams (their own distinct columns of the same wide obs file).
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter",
@@ -353,7 +354,7 @@ fn fit_run_prequential_equals_pfilter_prequential() {
     std::fs::write(dir.join("theta.toml"), SIR_THETA).unwrap();
 
     let run = |args: &[&str]| {
-        Command::new(&bin)
+        Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(args)
             .current_dir(dir)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")

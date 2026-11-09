@@ -162,7 +162,7 @@ starts    = \"uniform_unconstrained\"
 ")).unwrap();
 
     for toml in [&if2_toml, &pgas_toml] {
-        let out = Command::new(&bin)
+        let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .env("CAMDL_OUTPUT_DIR", dir.join("results"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", &camdlc)
@@ -253,7 +253,7 @@ starts    = \"uniform_unconstrained\"
     }
     let pgas_leaf = chain_starts_for_method(&results, "pgas");
     let segment = pgas_leaf.parent().unwrap().parent().unwrap().parent().unwrap();
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "summary", &segment.to_string_lossy()])
         .output()

@@ -72,7 +72,7 @@ fn run_simulate(bin: &Path, tmp: &Path, extra: &[&str]) -> PathBuf {
         "-o".into(), tmp.join("t.tsv").to_string_lossy().to_string(),
     ];
     for a in extra { args.push(a.to_string()); }
-    let out = Command::new(bin).args(&args).output().expect("spawn");
+    let out = Command::new(bin).env_remove("CLICOLOR_FORCE").args(&args).output().expect("spawn");
     assert!(out.status.success(), "simulate should succeed; stderr: {}",
         String::from_utf8_lossy(&out.stderr));
     output

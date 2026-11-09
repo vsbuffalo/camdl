@@ -167,7 +167,7 @@ fn the_one_step_band_is_filtered_on_the_dt_the_fit_used() {
         std::fs::write(dir.join("fit.toml"), fit_toml("sir.camdl", config_dt)).unwrap();
 
         let run = |args: &[&str]| -> std::process::Output {
-            Command::new(&bin)
+            Command::new(&bin).env_remove("CLICOLOR_FORCE")
                 .args(args)
                 .current_dir(&dir)
                 .env("CAMDL_SKIP_VERSION_CHECK", "1")

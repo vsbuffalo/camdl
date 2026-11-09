@@ -110,6 +110,7 @@ cooling = 0.5
 
 fn camdl(bin: &Path, dir: &Path) -> Command {
     let mut c = Command::new(bin);
+    c.env_remove("CLICOLOR_FORCE");
     c.env("CAMDL_SKIP_VERSION_CHECK", "1");
     c.env("CAMDLC", camdlc_bin());
     c.current_dir(dir);

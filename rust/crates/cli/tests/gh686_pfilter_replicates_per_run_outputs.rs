@@ -60,7 +60,7 @@ simulate { from = 0 'days  to = 10 'days }
 "#;
     let model = dir.join("sir.camdl");
     std::fs::write(&model, src).unwrap();
-    let out = Command::new(&camdlc).arg(&model).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model).output().unwrap();
     assert!(out.status.success(), "camdlc: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join("sir.ir.json");
     std::fs::write(&ir, &out.stdout).unwrap();
@@ -73,7 +73,7 @@ simulate { from = 0 'days  to = 10 'days }
 
 fn pfilter(dir: &Path, fx: &(PathBuf, PathBuf, PathBuf), extra: &[&str]) -> std::process::Output {
     let (ir, params, data) = fx;
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .arg("pfilter").arg(ir)
         .arg("--params").arg(params)
         .arg("--data").arg(data)

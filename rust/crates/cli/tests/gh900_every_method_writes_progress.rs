@@ -45,7 +45,7 @@ fn require_tools() {
 fn compile(dir: &Path, stem: &str, src: &str) -> PathBuf {
     let model = dir.join(format!("{stem}.camdl"));
     std::fs::write(&model, src).unwrap();
-    let out = Command::new(camdlc()).arg(&model).output().unwrap();
+    let out = Command::new(camdlc()).env_remove("CLICOLOR_FORCE").arg(&model).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join(format!("{stem}.ir.json"));
     std::fs::write(&ir, &out.stdout).unwrap();
@@ -88,7 +88,7 @@ fn fit_run(dir: &Path, tag: &str, fit_toml: String) -> Run {
     let out = dir.join(format!("out-{tag}"));
     let path = dir.join(format!("fit-{tag}.toml"));
     std::fs::write(&path, fit_toml).unwrap();
-    let r = Command::new(binary())
+    let r = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"])
         .arg(&path)
         .args(["--seed", "1", "--progress", "none"])
@@ -205,7 +205,7 @@ fn every_method_leaves_a_terminal_progress_record() {
     let truth = dir.join("truth.toml");
     std::fs::write(&truth, "beta = 0.8\ngamma = 0.3\nN0 = 1000\n").unwrap();
     let data = dir.join("cases.tsv");
-    let sim = Command::new(binary())
+    let sim = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .arg("simulate")
         .arg(&ir)
         .args(["--params"])

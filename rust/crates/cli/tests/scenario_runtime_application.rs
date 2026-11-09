@@ -76,6 +76,7 @@ fn simulate_terminal_s(
     let tmp = tempfile::tempdir().unwrap();
     let out_path = tmp.path().join("traj.tsv");
     let mut cmd = Command::new(bin);
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.args([
         "simulate", &model.to_string_lossy(),
         "--params", &params.to_string_lossy(),
@@ -155,7 +156,7 @@ fn scenario_set_beats_generated_draw_on_same_param() {
     write_baseline_params(&params);
 
     let out_path = tmp.path().join("traj.tsv");
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate", &model.to_string_lossy(),
             "--params", &params.to_string_lossy(),
@@ -203,7 +204,7 @@ fn draws_file_colliding_with_scenario_is_hard_error() {
     std::fs::write(&draws, "mu\tnu\n0.3\t0.5\n0.4\t0.5\n").unwrap();
 
     let out_path = tmp.path().join("traj.tsv");
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate", &model.to_string_lossy(),
             "--draws", &draws.to_string_lossy(),
@@ -258,7 +259,7 @@ fn draws_file_and_scenario_on_different_params_both_apply() {
     // variation; no scenario to collide). This is the baseline that the
     // collision test's failure is contrasted against — a file WITHOUT a
     // colliding scenario runs fine.
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate", &model.to_string_lossy(),
             "--draws", &draws.to_string_lossy(),
@@ -371,7 +372,7 @@ fn pfilter_scenario_with_params_aborts_not_silently_overrides() {
     // fires at parse time, well before any data is read.
     std::fs::write(&data, "t\tS_obs\n0\t1000\n").unwrap();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args([
             "pfilter", &model.to_string_lossy(),
             // `fast` sets mu=0.5; --params pins mu=0.1. If the conflict were

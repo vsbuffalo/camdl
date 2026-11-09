@@ -57,7 +57,7 @@ fn fit(camdlc: &Path, fixture: &str, estimate: &str, iterations: usize, starts: 
     let tmp = tempdir(fixture);
     let dir = &tmp.0;
     let src = bench_dir().join("fixtures").join(fixture).join("model.camdl");
-    let out = Command::new(camdlc).arg(&src).output().unwrap();
+    let out = Command::new(camdlc).env_remove("CLICOLOR_FORCE").arg(&src).output().unwrap();
     assert!(out.status.success(), "camdlc {}: {}", src.display(), String::from_utf8_lossy(&out.stderr));
     std::fs::write(dir.join("m.ir.json"), &out.stdout).unwrap();
     std::fs::copy(bench_dir().join("fixtures/sir/data/weekly_cases.tsv"), dir.join("cases.tsv")).unwrap();
@@ -67,7 +67,7 @@ fn fit(camdlc: &Path, fixture: &str, estimate: &str, iterations: usize, starts: 
          rho = 0.6\nk = 10.0\n[method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
          chains = 4\nparticles = 1000\niterations = {iterations}\ncooling = 0.7\nstarts = \"{starts}\"\n"
     )).unwrap();
-    let out = Command::new(camdl_bin())
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run", "fit.toml", "--seed", "1", "--progress", "none"])
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")

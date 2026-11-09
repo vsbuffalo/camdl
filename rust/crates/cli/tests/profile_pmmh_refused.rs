@@ -31,7 +31,7 @@ fn profile(extra: &[&str]) -> Output {
         "--rw-sd", "auto",
     ];
     argv.extend_from_slice(extra);
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(&argv)
         .output()

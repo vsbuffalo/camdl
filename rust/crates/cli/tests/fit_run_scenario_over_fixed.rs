@@ -91,7 +91,7 @@ fn fixture() -> tempfile::TempDir {
 fn run(dir: &Path, name: &str, gamma: f64, scenario: &str, extra: &[&str]) -> Output {
     std::fs::write(dir.join(format!("{name}.toml")), fit_toml(&format!("res_{name}"), gamma, scenario))
         .unwrap();
-    Command::new(binary())
+    Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run", &format!("{name}.toml"), "--seed", "1"])
         .args(extra)
         .current_dir(dir).output().expect("spawn")

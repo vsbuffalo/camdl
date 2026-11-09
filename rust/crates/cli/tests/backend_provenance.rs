@@ -83,7 +83,7 @@ fn simulate_refuses_a_params_file_edited_after_its_fit() {
     std::fs::write(&mle, text.replace("mu = 0.05\n", "mu = 0.07\n")).unwrap();
 
     let output = tmp.path().join("out");
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_pure_death().to_string_lossy(),
                "--params", &mle.to_string_lossy(),
                "--seed", "1", "--output-dir", &output.to_string_lossy(),
@@ -111,7 +111,7 @@ fn simulate_runs_an_unedited_fit_params_file() {
     let tmp = tempfile::tempdir().unwrap();
     let mle = tmp.path().join("mle.toml");
     write_fake_mle(&mle, "chain_binomial", 1.0);
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_pure_death().to_string_lossy(),
                "--params", &mle.to_string_lossy(),
                "--seed", "1", "--output-dir", &tmp.path().join("out").to_string_lossy(),
@@ -130,7 +130,7 @@ fn simulate_auto_matches_fit_backend_when_backend_not_passed() {
     let mle = tmp.path().join("mle.toml");
     write_fake_mle(&mle, "chain_binomial", 1.0);
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_pure_death().to_string_lossy(),
                "--params", &mle.to_string_lossy(),
                "--replicates", "2", "--seed", "1",
@@ -152,7 +152,7 @@ fn simulate_warns_on_explicit_backend_mismatch() {
     let mle = tmp.path().join("mle.toml");
     write_fake_mle(&mle, "chain_binomial", 1.0);
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_pure_death().to_string_lossy(),
                "--params", &mle.to_string_lossy(),
                "--replicates", "2", "--seed", "1",
@@ -178,7 +178,7 @@ fn simulate_silent_on_matching_explicit_backend() {
     let mle = tmp.path().join("mle.toml");
     write_fake_mle(&mle, "chain_binomial", 1.0);
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_pure_death().to_string_lossy(),
                "--params", &mle.to_string_lossy(),
                "--replicates", "2", "--seed", "1",
@@ -201,7 +201,7 @@ fn simulate_unchanged_on_standalone_params_file() {
     // No [provenance] block — should behave as pre-guardrail.
     std::fs::write(&standalone, "mu = 0.05\n").unwrap();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_pure_death().to_string_lossy(),
                "--params", &standalone.to_string_lossy(),
                "--replicates", "2", "--seed", "1",
@@ -248,7 +248,7 @@ n_particles = 500
     std::fs::write(&mle, contents).unwrap();
 
     let output = tmp.path().join("out");
-    let status = Command::new(&bin)
+    let status = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_pure_death().to_string_lossy(),
                "--params", &mle.to_string_lossy(),
                "--seed", "1", "--cas",
@@ -324,7 +324,7 @@ fn run_simulate_cas(
         "-o".into(), tmp.join("t.tsv").to_string_lossy().to_string(),
     ];
     for a in extra { args.push(a.to_string()); }
-    let status = Command::new(bin).args(&args)
+    let status = Command::new(bin).env_remove("CLICOLOR_FORCE").args(&args)
         .status().expect("spawn");
     assert!(status.success(), "simulate --cas should succeed");
     output
@@ -486,7 +486,7 @@ cooling = 0.7
     );
     std::fs::write(&fit_toml, body).unwrap();
 
-    let output = Command::new(&bin)
+    let output = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit_toml)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().expect("spawn camdl fit run");
@@ -509,7 +509,7 @@ cooling = 0.7
     // carry ten decimals, so this pins that the declared `content_hash` is
     // over the values as written (a hash over the unrounded estimate refused
     // every real fit's file).
-    let sim = Command::new(&bin)
+    let sim = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &seed_timing_model().to_string_lossy(),
                "--params", &mle.to_string_lossy(),
                "--seed", "1", "--output-dir", &tmp.path().join("sim").to_string_lossy(),

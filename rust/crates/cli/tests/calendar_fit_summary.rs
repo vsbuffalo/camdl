@@ -135,7 +135,7 @@ cooling    = 0.7
 }
 
 fn exec_fit_run(camdl: &Path, fit_toml: &Path, output_dir: &Path) -> PathBuf {
-    let out = Command::new(camdl)
+    let out = Command::new(camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit")
         .arg("run")
         .arg(fit_toml)
@@ -158,7 +158,7 @@ fn exec_fit_run(camdl: &Path, fit_toml: &Path, output_dir: &Path) -> PathBuf {
 }
 
 fn exec_summary(camdl: &Path, fit_dir: &Path, format: &str) -> String {
-    let out = Command::new(camdl)
+    let out = Command::new(camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit")
         .arg("summary")
         .arg(fit_dir)

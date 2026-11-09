@@ -77,7 +77,7 @@ simulate { from = 0 'days  to = 6 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -119,7 +119,7 @@ fn survey_write_then_list_show_cat_roundtrip() {
     let root = tmp.path().join("results");
 
     // ── 1. Write: run the real `camdl survey` command. ──────────────
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "survey", &ir.to_string_lossy(),
@@ -165,7 +165,7 @@ fn survey_write_then_list_show_cat_roundtrip() {
     // ── 2. list --kind survey --format json: leaf is discoverable. ──
     // `root` is resolved from CAMDL_OUTPUT_DIR (positional default) so the
     // same env works uniformly across list / show / cat.
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", &*root.to_string_lossy())
         .args(["list", "--kind", "survey", "--format", "json"])
@@ -178,7 +178,7 @@ fn survey_write_then_list_show_cat_roundtrip() {
         run_id, list_json);
 
     // ── 3. show <prefix>: resolves the hash prefix, prints kind survey. ─
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", &*root.to_string_lossy())
         .args(["show", prefix])
@@ -193,7 +193,7 @@ fn survey_write_then_list_show_cat_roundtrip() {
         "show must print the full run_id:\n{}", show_out);
 
     // ── 4. cat <prefix>: emits the landscape.tsv body. ──────────────
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", &*root.to_string_lossy())
         .args(["cat", prefix])

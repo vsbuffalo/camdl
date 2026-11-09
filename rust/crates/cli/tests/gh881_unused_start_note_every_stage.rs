@@ -103,7 +103,7 @@ dt = 1.0
 "#, ir = golden_ir().display(), data = data.display(), estimate_block = estimate_block,
      method_body = method_body)).unwrap();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
@@ -255,7 +255,7 @@ I0       = 1
 dt = 1.0
 "#, ir = golden_ir().display(), data = data.display())).unwrap();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
@@ -269,7 +269,7 @@ dt = 1.0
         "the refusal must name the table and show its shape:\n{stderr}");
 
     // The same file is a complete problem for `simulate --draws prior --fit`.
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
         .args(["simulate", &golden_ir().to_string_lossy(),

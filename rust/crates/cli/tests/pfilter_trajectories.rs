@@ -47,7 +47,7 @@ fn save_paths_writes_n_times_t_rows() {
     let (data, params) = write_fixture(tmp.path());
     let paths = tmp.path().join("paths.tsv");
 
-    let status = Command::new(&bin)
+    let status = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["pfilter", &golden_pure_death().to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--data",   &data.to_string_lossy(),
@@ -83,7 +83,7 @@ fn save_filtering_writes_n_times_t_particles() {
     let (data, params) = write_fixture(tmp.path());
     let filter = tmp.path().join("filter.tsv");
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["pfilter", &golden_pure_death().to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--data",   &data.to_string_lossy(),
@@ -112,7 +112,7 @@ fn save_filtering_emits_mandatory_info_log() {
     let (data, params) = write_fixture(tmp.path());
     let filter = tmp.path().join("f.tsv");
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["pfilter", &golden_pure_death().to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--data",   &data.to_string_lossy(),
@@ -137,7 +137,7 @@ fn save_paths_does_not_emit_filtering_caveat() {
     let (data, params) = write_fixture(tmp.path());
     let paths = tmp.path().join("p.tsv");
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["pfilter", &golden_pure_death().to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--data",   &data.to_string_lossy(),
@@ -159,7 +159,7 @@ fn save_paths_values_are_monotone_nonincreasing_for_pure_death() {
     let (data, params) = write_fixture(tmp.path());
     let paths = tmp.path().join("paths.tsv");
 
-    Command::new(&bin)
+    Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["pfilter", &golden_pure_death().to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--data",   &data.to_string_lossy(),

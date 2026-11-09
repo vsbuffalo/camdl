@@ -51,7 +51,7 @@ fn tempdir(tag: &str) -> PathBuf {
 }
 
 fn run(camdl: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(camdl)
+    Command::new(camdl).env_remove("CLICOLOR_FORCE")
         .args(args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()

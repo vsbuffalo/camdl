@@ -99,7 +99,7 @@ fn obs_only_dir_writes_one_file_per_stream() {
     write_sir_two_cadence_obs(&model);
     write_params(&params);
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &model.to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--backend", "chain_binomial",
@@ -141,7 +141,7 @@ fn multi_cadence_single_file_error_names_both_dir_flags() {
     write_sir_two_cadence_obs(&model);
     write_params(&params);
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &model.to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--backend", "chain_binomial",

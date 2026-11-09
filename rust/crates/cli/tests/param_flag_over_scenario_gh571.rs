@@ -117,7 +117,7 @@ impl Fixture {
     }
 
     fn camdl(&self, args: &[&str]) -> Output {
-        Command::new(skip_if_missing_binary())
+        Command::new(skip_if_missing_binary()).env_remove("CLICOLOR_FORCE")
             .args(args)
             .current_dir(self.dir.path())
             .env("CAMDL_SKIP_VERSION_CHECK", "1")

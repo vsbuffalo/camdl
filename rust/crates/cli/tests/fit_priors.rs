@@ -136,7 +136,7 @@ simulate {{ from = 0 'days  to = 6 'days }}
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -268,7 +268,7 @@ fn read_resolved_priors(fit_dir: &Path) -> Vec<serde_json::Value> {
 const OVERRIDE_WARNING: &str = "fit.toml prior overrides the model's `~` prior";
 
 fn run_fit(bin: &Path, fit_toml: &Path) -> std::process::Output {
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "run", &fit_toml.to_string_lossy(), "--seed", "1"])
         .output()
@@ -564,7 +564,7 @@ simulate {{ from = 0 'days  to = 6 'days }}
     let model_path = dir.join("prob.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("prob.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();

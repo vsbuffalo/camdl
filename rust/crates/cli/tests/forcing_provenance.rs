@@ -188,7 +188,7 @@ fn compile_at(cc: &Path, dir: &Path, rel: &str, header: &str) -> (ir::Model, Vec
     std::fs::write(&model_path, MODEL_TEMPLATE.replace("{DATA}", rel)).unwrap();
     let out = dir.join("m.ir.json");
 
-    let status = Command::new(cc)
+    let status = Command::new(cc).env_remove("CLICOLOR_FORCE")
         .arg(&model_path)
         .arg("-o")
         .arg(&out)
@@ -309,7 +309,7 @@ fn inspect_forcings_reports_the_file_and_a_hash_prefix() {
     let Some(cc) = camdlc() else { return };
     let root = repo_root();
 
-    let out = Command::new(&cc)
+    let out = Command::new(&cc).env_remove("CLICOLOR_FORCE")
         .arg("inspect")
         .arg(root.join("ocaml/golden/flu_data_forcing.camdl"))
         .arg("--forcings")
@@ -337,7 +337,7 @@ fn inspect_forcings_reports_the_file_and_a_hash_prefix() {
     // A forcing that reads no file is still listed — the command answers "what
     // forcings does this model have", not only "which ones read a file" — but
     // it must not invent a source for one.
-    let out = Command::new(&cc)
+    let out = Command::new(&cc).env_remove("CLICOLOR_FORCE")
         .arg("inspect")
         .arg(root.join("ocaml/golden/seir_seasonal_patch.camdl"))
         .arg("--forcings")

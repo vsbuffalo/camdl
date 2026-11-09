@@ -126,7 +126,7 @@ starts       = "single"
 dt = 1.0
 "#, ir = golden_ir().display(), data = data.display())).unwrap();
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)

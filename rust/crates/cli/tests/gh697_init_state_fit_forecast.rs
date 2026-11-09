@@ -118,7 +118,7 @@ struct Fixture {
 }
 
 fn run_in(bin: &Path, dir: &Path, args: &[String]) -> std::process::Output {
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")

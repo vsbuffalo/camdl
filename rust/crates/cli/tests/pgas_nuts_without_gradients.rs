@@ -58,7 +58,7 @@ observations {
 init { S = 9990  I = 10 }
 simulate { from = 0 'days  to = 20 'days }
 "#).unwrap();
-    let out = Command::new(&camdlc).arg(&model).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model).output().unwrap();
     assert!(out.status.success(), "camdlc: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join("m.ir.json");
     std::fs::write(&ir, &out.stdout).unwrap();
@@ -92,7 +92,7 @@ burn_in = 2
 {use_nuts_line}
 "#, out = dir.join("out").display(), ir = ir.display(),
         data = dir.join("cases.tsv").display())).unwrap();
-    let out = Command::new(camdl_bin())
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run"]).arg(&fit).arg("--no-progress")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();

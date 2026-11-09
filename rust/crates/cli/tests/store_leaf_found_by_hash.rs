@@ -80,7 +80,7 @@ impl Fixture {
             "--dt", "1", "--seed", "7", "--replicates", "2", "--output-dir", "out",
         ];
         args.extend_from_slice(extra);
-        Command::new(skip_if_missing_binary())
+        Command::new(skip_if_missing_binary()).env_remove("CLICOLOR_FORCE")
             .args(&args)
             .current_dir(self.dir.path())
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -234,6 +234,7 @@ enum IrCache {
 /// with every other input fixed.
 fn simulate_with_cache(fx: &Fixture, model: &str, out: &str, cache: IrCache) -> Output {
     let mut cmd = Command::new(skip_if_missing_binary());
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.args([
         "simulate", model, "--params", "p.toml", "--backend", "chain_binomial",
         "--dt", "1", "--seed", "7", "--replicates", "2", "--output-dir", out,
@@ -344,7 +345,7 @@ fn pfilter_reports_the_stored_leaf_it_found_under_another_file_name() {
         "--param", "k=20", "--param", "tau=30",
     ];
     let run = |args: &[&str]| -> Output {
-        Command::new(&bin)
+        Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(args)
             .args(params)
             .current_dir(dir.path())

@@ -35,7 +35,7 @@ fn seed_timing_dated() -> PathBuf {
 }
 
 fn run(camdl: &Path, args: &[&str]) -> String {
-    let out = Command::new(camdl)
+    let out = Command::new(camdl).env_remove("CLICOLOR_FORCE")
         .args(args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()

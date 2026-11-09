@@ -46,7 +46,7 @@ fn tempdir(tag: &str) -> TempDir {
 }
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .args(args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
@@ -58,7 +58,7 @@ fn compile(dir: &Path, stem: &str, src: &str) -> PathBuf {
     let camdlc = camdlc().expect("camdlc.exe");
     let model = dir.join(format!("{stem}.camdl"));
     std::fs::write(&model, src).unwrap();
-    let out = Command::new(&camdlc).arg(&model).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join(format!("{stem}.ir.json"));

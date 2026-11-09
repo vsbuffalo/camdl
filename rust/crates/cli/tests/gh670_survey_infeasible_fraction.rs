@@ -66,7 +66,7 @@ fn tempdir(tag: &str) -> Tmp {
 fn compile(dir: &Path, stem: &str, src: &str) -> PathBuf {
     let model_path = dir.join(format!("{stem}.camdl"));
     std::fs::write(&model_path, src).unwrap();
-    let out = Command::new(camdlc_bin()).arg(&model_path).output().unwrap();
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     let ir_path = dir.join(format!("{stem}.ir.json"));
@@ -188,6 +188,7 @@ fn find_leaf_file(root: &Path, name: &str) -> PathBuf {
 /// Run `camdl survey` and return its stderr.
 fn run_survey(root: &Path, ir: &Path, data: &Path, args: &[&str]) -> String {
     let mut cmd = Command::new(camdl_bin());
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["survey", &ir.to_string_lossy()])
         .args(["--data", &data.to_string_lossy()])

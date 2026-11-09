@@ -178,6 +178,7 @@ fn run(bin: &Path, args: &[String]) -> std::process::Output {
 /// removes that shared mutable state.
 fn run_in_store(bin: &Path, args: &[String], store: Option<&Path>) -> std::process::Output {
     let mut cmd = Command::new(bin);
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.args(args).env("CAMDL_SKIP_VERSION_CHECK", "1");
     if let Some(dir) = store {
         cmd.env("CAMDL_OUTPUT_DIR", dir);

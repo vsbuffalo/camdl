@@ -110,7 +110,7 @@ fn a_fit_summary_declares_its_schema_and_a_reader_requires_it() {
     std::fs::write(tmp.join("fit.toml"), FIT_TOML).unwrap();
 
     let run = |args: &[&str]| -> std::process::Output {
-        Command::new(&bin)
+        Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(args)
             .current_dir(&tmp)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")

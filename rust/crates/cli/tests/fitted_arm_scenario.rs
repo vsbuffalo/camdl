@@ -109,7 +109,7 @@ const CASES_TSV: &str = "time\tcases\n1\t10\n2\t11\n3\t10\n4\t12\n5\t11\n6\t10\n
 fn compile(dir: &Path, name: &str, src: &str) -> PathBuf {
     let model_src = dir.join(format!("{name}.camdl"));
     std::fs::write(&model_src, src).unwrap();
-    let out = Command::new(camdlc_bin()).arg(&model_src).output().unwrap();
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(&model_src).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join(format!("{name}.ir.json"));
     std::fs::write(&ir, &out.stdout).unwrap();
@@ -153,7 +153,7 @@ fn run(dir: &Path, args: &[&str]) -> Output {
 
 /// [`run`] with the store root a handle (`@label`) resolves under.
 fn run_in(dir: &Path, store: &Path, args: &[&str]) -> Output {
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", store)

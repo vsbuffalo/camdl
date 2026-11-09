@@ -65,7 +65,7 @@ fn a_misaligned_stream_leaves_no_partial_obs_child() {
     std::fs::write(&model, MODEL).unwrap();
     std::fs::write(tmp.path().join("p.toml"), "beta = 0.5\ngamma = 0.1\n").unwrap();
 
-    let out = Command::new(binary())
+    let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate", "m.camdl", "--params", "p.toml", "--backend", "chain_binomial",
             "--dt", "1", "--seeds", "1,2", "--obs-dir", "synth", "--output-dir", "out",

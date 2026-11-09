@@ -43,7 +43,7 @@ fn compile(fixture: &str) -> Option<ir::Model> {
         .unwrap_or_else(|_| repo().join("ocaml/_build/default/bin/camdlc.exe"));
     let dir = tempfile_dir();
     let out = dir.join(format!("{}.ir.json", fixture.replace('/', "_")));
-    let o = std::process::Command::new(&camdlc).arg(repo().join(fixture)).arg("-o").arg(&out).output().unwrap();
+    let o = std::process::Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(repo().join(fixture)).arg("-o").arg(&out).output().unwrap();
     if !o.status.success() {
         eprintln!("{fixture}: does not compile here, skipped");
         return None;

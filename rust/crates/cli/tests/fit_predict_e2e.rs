@@ -129,7 +129,7 @@ k   = 10.0
 }
 
 fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
         // Ad-hoc run: skip the camdlc git-hash handshake (the binary under test

@@ -41,6 +41,7 @@ fn multi_block_model() -> PathBuf {
 fn synth_obs(bin: &Path, model: &Path, tmp: &Path, extra_args: &[&str]) -> PathBuf {
     let obs_path = tmp.join("obs.tsv");
     let mut cmd = Command::new(bin);
+    cmd.env_remove("CLICOLOR_FORCE");
     cmd.env("CAMDL_SKIP_VERSION_CHECK", "1").args([
         "simulate",
         &model.to_string_lossy(),
@@ -114,7 +115,7 @@ fn prequential_per_stream_tsv_has_stream_column_and_joint_equals_sum() {
     let obs = synth_obs(&bin, &multi_block_model(), tmp.path(), &["--scenario", "true_params"]);
     let stem = tmp.path().join("preq");
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter",

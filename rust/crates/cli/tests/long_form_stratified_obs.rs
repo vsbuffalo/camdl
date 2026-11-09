@@ -43,7 +43,7 @@ fn write(path: &Path, contents: &str) {
 }
 
 fn run_pfilter(bin: &Path, model: &Path, data: &Path, params: &Path) -> (bool, String, String) {
-    let out = Command::new(bin)
+    let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", &model.to_string_lossy(),

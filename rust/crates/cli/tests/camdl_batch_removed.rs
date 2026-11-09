@@ -24,7 +24,7 @@ fn camdl_bin() -> PathBuf {
 #[test]
 fn batch_is_an_unrecognized_subcommand() {
     for sub in ["run", "status"] {
-        let out = Command::new(camdl_bin())
+        let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .args(["batch", sub, "/no/such/sweep.toml"])
             .output()

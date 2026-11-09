@@ -75,7 +75,7 @@ fn write_fixture(dir: &Path, src: &str, data: &[(&str, &str)]) -> PathBuf {
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -199,7 +199,7 @@ fn trace_of_post_leaf(out: &Path) -> String {
 }
 
 fn run_fit(bin: &Path, fit: &Path) {
-    let r = Command::new(bin)
+    let r = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(fit).arg("--seed").arg("1")
         .output().expect("spawn");
     assert!(r.status.success(), "PGAS run failed: {}", String::from_utf8_lossy(&r.stderr));

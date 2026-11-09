@@ -85,11 +85,11 @@ fn a_feasible_start_with_too_large_a_step_names_the_perturbed_swarm() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     std::fs::write(dir.join("m.camdl"), MODEL).unwrap();
-    let out = Command::new(&camdlc).arg(dir.join("m.camdl")).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(dir.join("m.camdl")).output().unwrap();
     assert!(out.status.success(), "camdlc: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(dir.join("m.ir.json"), &out.stdout).unwrap();
     std::fs::write(dir.join("truth.toml"), "a = 0.9\ngamma = 0.3\n").unwrap();
-    let sim = Command::new(camdl_bin())
+    let sim = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .args(["simulate", "m.ir.json", "--params", "truth.toml", "--backend", "chain_binomial",
                "--seed", "3", "--obs-only", "cases.tsv"])
         .current_dir(dir).env("CAMDL_SKIP_VERSION_CHECK", "1").output().unwrap();
@@ -97,7 +97,7 @@ fn a_feasible_start_with_too_large_a_step_names_the_perturbed_swarm() {
 
     let run = |rw_sd: f64| {
         std::fs::write(dir.join("fit.toml"), fit_toml(rw_sd)).unwrap();
-        Command::new(camdl_bin())
+        Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
             .args(["fit", "run", "fit.toml", "--seed", "1", "--force", "--progress", "none"])
             .current_dir(dir).env("CAMDL_SKIP_VERSION_CHECK", "1").output().unwrap()
     };

@@ -77,7 +77,7 @@ fn col_at(traj_path: &Path, col_name: &str, target_t: f64) -> Option<f64> {
 }
 
 fn run_simulate(camdl: &Path, model: &Path, backend: &str, traj: &Path) {
-    let out = Command::new(camdl)
+    let out = Command::new(camdl).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "simulate", model.to_str().unwrap(),

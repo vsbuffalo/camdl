@@ -70,7 +70,7 @@ simulate { from = 0 'days  to = 10 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
     let data = dir.join("cases.tsv");
@@ -85,7 +85,7 @@ fn run_pfilter(bin: &Path, out_root: &Path, ir: &Path, data: &Path, beta: f64) -
 fn run_pfilter_reps(
     bin: &Path, out_root: &Path, ir: &Path, data: &Path, beta: f64, replicates: usize,
 ) -> std::process::Output {
-    Command::new(bin)
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
@@ -122,7 +122,7 @@ fn find_pfilter_leaf(out_root: &Path) -> (PathBuf, String) {
 }
 
 fn camdl_read(bin: &Path, out_root: &Path, args: &[&str]) -> String {
-    let out = Command::new(bin)
+    let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_OUTPUT_DIR", out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args).output().expect("spawn camdl reader");
@@ -252,7 +252,7 @@ fn label_works_on_pfilter_runs() {
 
     // Label by run_id prefix. `--root` is honoured here; the env path is
     // exercised by the reader helpers, which set CAMDL_OUTPUT_DIR.
-    let labelled = Command::new(&bin)
+    let labelled = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["label", &rid[..8], "baseline-pfilter",
                "--root", &out_root.to_string_lossy()])

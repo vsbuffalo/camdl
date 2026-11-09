@@ -90,7 +90,7 @@ cooling = 0.7
 fn setup(dir: &Path) -> PathBuf {
     let src = dir.join("m.camdl");
     std::fs::write(&src, MODEL).unwrap();
-    let out = Command::new(camdlc_bin()).arg(&src).output().unwrap();
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(&src).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join("m.ir.json");
     std::fs::write(&ir, &out.stdout).unwrap();
@@ -110,7 +110,7 @@ fn fit_toml(dir: &Path, name: &str, top: &str, estimate: &str, fixed: &str) -> P
 }
 
 fn camdl(dir: &Path, args: &[&str]) -> Output {
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(dir)
         .args(args)
@@ -267,7 +267,7 @@ fn profile(dir: &Path, cwd: &str, fit: &str, extra: &[&str]) -> Output {
     std::fs::create_dir_all(&cwd).unwrap();
     let ir = dir.join("m.ir.json");
     let fit = dir.join(fit);
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(&cwd)
         .args(["profile", &ir.to_string_lossy(), "--fit", &fit.to_string_lossy()])
@@ -323,7 +323,7 @@ fn profile_refuses_a_scenario_that_sets_an_estimated_parameter() {
 fn profile_plain(dir: &Path, cwd: &str, args: &[&str]) -> Output {
     let cwd = dir.join(cwd);
     std::fs::create_dir_all(&cwd).unwrap();
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(&cwd)
         .args(["profile", &dir.join("m.ir.json").to_string_lossy(),
@@ -396,7 +396,7 @@ fn profile_accepts_a_scenario_whose_parameters_are_pinned() {
 
 fn survey(dir: &Path, root: &str, args: &[&str]) -> Output {
     let ir = dir.join("m.ir.json");
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(dir)
         .args(["survey", &ir.to_string_lossy()])
@@ -515,7 +515,7 @@ fn profile_scenario_setting_the_focal_parameter_is_an_info_notice() {
     fit_toml(dir, "pf_focal", "", "beta = { bounds = [0.01, 1.0], start = 0.3 }", "N0 = 1000");
     let cwd = dir.join("focal");
     std::fs::create_dir_all(&cwd).unwrap();
-    let out = Command::new(camdl_bin())
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(&cwd)
         .args(["profile", &dir.join("m.ir.json").to_string_lossy(),

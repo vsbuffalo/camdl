@@ -94,7 +94,7 @@ fn mre_bundle_reproduces_fit_by_run_id() {
     let bundle = work.path().join("b.tar.gz");
 
     // 1. pack the fixture
-    let pack = Command::new(&camdl)
+    let pack = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .args(["mre", "fit"])
         .arg(fixture.join("fit.toml"))
         .arg("-b")
@@ -125,7 +125,7 @@ fn mre_bundle_reproduces_fit_by_run_id() {
     //    dir) is location-independent, which is what makes the bundle
     //    reproduce; the test mirrors that.
     let out_a = work.path().join("out_a");
-    let run_a = Command::new(&camdl)
+    let run_a = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run", "fit.toml", "--seed", "1"])
         .current_dir(&fixture)
         .env("CAMDL_OUTPUT_DIR", &out_a)
@@ -159,7 +159,7 @@ fn mre_bundle_reproduces_fit_by_run_id() {
 
     // 4. run the fit from inside the unpacked bundle
     let out_b = work.path().join("out_b");
-    let run_b = Command::new(&camdl)
+    let run_b = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run", "fit.toml", "--seed", "1"])
         .current_dir(&bundle_root)
         .env("CAMDL_OUTPUT_DIR", &out_b)
@@ -195,7 +195,7 @@ fn mre_simulate_bundle_reproduces_by_run_id() {
     //    command has no config to anchor on). The model read()s model/pop.tsv
     //    at compile time; the bundle must capture it (it is named nowhere on the
     //    command line).
-    let pack = Command::new(&camdl)
+    let pack = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .args([
             "mre", "simulate", "model/sir_patches.camdl",
             "--params", "params.toml", "--seed", "1", "--obs-only",
@@ -221,7 +221,7 @@ fn mre_simulate_bundle_reproduces_by_run_id() {
 
     // 2. in-place run for the run_id baseline
     let out_a = work.path().join("out_a");
-    let run_a = Command::new(&camdl)
+    let run_a = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .args(["simulate", "model/sir_patches.camdl", "--params", "params.toml", "--seed", "1"])
         .current_dir(&fixture)
         .env("CAMDL_OUTPUT_DIR", &out_a)
@@ -257,7 +257,7 @@ fn mre_simulate_bundle_reproduces_by_run_id() {
 
     // 4. run from inside the unpacked bundle
     let out_b = work.path().join("out_b");
-    let run_b = Command::new(&camdl)
+    let run_b = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .args(["simulate", "model/sir_patches.camdl", "--params", "params.toml", "--seed", "1"])
         .current_dir(&bundle_root)
         .env("CAMDL_OUTPUT_DIR", &out_b)

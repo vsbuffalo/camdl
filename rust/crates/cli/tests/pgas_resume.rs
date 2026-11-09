@@ -75,7 +75,7 @@ simulate { from = 0 'days  to = 6 'days }
     let model_path = dir.join("sir.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("sir.ir.json");
-    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -185,7 +185,7 @@ fn pgas_resume_writes_distinct_leaf_with_base_untouched_and_dep() {
 
     // Run 1: 8 sweeps → base leaf.
     let fit8 = write_fit_toml(tmp.path(), &ir, &data, 8, 1);
-    let r1 = Command::new(&bin)
+    let r1 = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit8).arg("--seed").arg("1")
         .output().expect("spawn");
     assert!(r1.status.success(), "first PGAS run failed: {}", String::from_utf8_lossy(&r1.stderr));
@@ -196,7 +196,7 @@ fn pgas_resume_writes_distinct_leaf_with_base_untouched_and_dep() {
 
     // Run 2: 16 sweeps, --resume <base run_id>. Distinct leaf; base read-only.
     let fit16 = write_fit_toml(tmp.path(), &ir, &data, 16, 1);
-    let r2 = Command::new(&bin)
+    let r2 = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit16)
         .arg("--seed").arg("1").arg("--resume").arg(&base_id)
         .output().expect("spawn");
@@ -213,7 +213,7 @@ fn pgas_resume_writes_distinct_leaf_with_base_untouched_and_dep() {
     // Run 3 (chained): resume the *resumed* leaf, 16 → 24. The dep must point
     // at the actual prior (the 16-sweep leaf), not the original base.
     let fit24 = write_fit_toml(tmp.path(), &ir, &data, 24, 1);
-    let r3 = Command::new(&bin)
+    let r3 = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit24)
         .arg("--seed").arg("1").arg("--resume").arg(&resumed_id)
         .output().expect("spawn");
@@ -246,7 +246,7 @@ fn pgas_trace_loglik_column_names_complete_data() {
     let out = tmp.path().join("results");
 
     let fit8 = write_fit_toml(tmp.path(), &ir, &data, 8, 1);
-    let r = Command::new(&bin)
+    let r = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit8).arg("--seed").arg("1")
         .output().expect("spawn");
     assert!(r.status.success(), "PGAS run failed: {}", String::from_utf8_lossy(&r.stderr));
@@ -294,7 +294,7 @@ fn pgas_trace_emits_nuts_diagnostics() {
     let out = tmp.path().join("results");
 
     let fit8 = write_fit_toml(tmp.path(), &ir, &data, 8, 1);
-    let r = Command::new(&bin)
+    let r = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit8).arg("--seed").arg("1")
         .output().expect("spawn");
     assert!(r.status.success(), "PGAS run failed: {}", String::from_utf8_lossy(&r.stderr));
@@ -344,7 +344,7 @@ fn pgas_resume_rejects_when_identity_field_changes() {
 
     // Run 1: 1 chain → base.
     let fit1 = write_fit_toml(tmp.path(), &ir, &data, 8, 1);
-    let r1 = Command::new(&bin)
+    let r1 = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit1).arg("--seed").arg("1")
         .output().expect("spawn");
     assert!(r1.status.success(), "first PGAS run failed: {}", String::from_utf8_lossy(&r1.stderr));
@@ -352,7 +352,7 @@ fn pgas_resume_rejects_when_identity_field_changes() {
 
     // Run 2: 2 chains (an identity field) + --resume <base>. Reject.
     let fit2 = write_fit_toml(tmp.path(), &ir, &data, 8, 2);
-    let r2 = Command::new(&bin)
+    let r2 = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit2)
         .arg("--seed").arg("1").arg("--resume").arg(&base_id)
         .output().expect("spawn");
@@ -379,14 +379,14 @@ fn pgas_resume_rejects_a_changed_dt() {
     let out = tmp.path().join("results");
 
     let base = write_fit_toml_dt(tmp.path(), &ir, &data, 8, 1, "1.0");
-    let r1 = Command::new(&bin)
+    let r1 = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&base).arg("--seed").arg("1")
         .output().expect("spawn");
     assert!(r1.status.success(), "first PGAS run failed: {}", String::from_utf8_lossy(&r1.stderr));
     let (base_id, _, _) = post_leaf(&out, &[]);
 
     let resumed = write_fit_toml_dt(tmp.path(), &ir, &data, 16, 1, "0.5");
-    let r2 = Command::new(&bin)
+    let r2 = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&resumed)
         .arg("--seed").arg("1").arg("--resume").arg(&base_id)
         .output().expect("spawn");
@@ -409,7 +409,7 @@ fn pgas_plain_progress_feed_marks_complete_data() {
     let (ir, data) = write_fixture(tmp.path());
     let toml = write_fit_toml(tmp.path(), &ir, &data, 8, 1);
 
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&toml)
         .arg("--seed").arg("1")
         .arg("--progress").arg("plain")

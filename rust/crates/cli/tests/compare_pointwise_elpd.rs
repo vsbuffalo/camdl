@@ -85,7 +85,7 @@ fn pointwise_tsv_localizes_the_elpd_difference_to_one_step_and_one_stream() {
         trace_json([-6.0, -3.0, -6.0], [-3.0, 0.0, -3.0], [-3.0, -3.0, -3.0])).unwrap();
 
     let out = dir.join("pointwise.tsv");
-    let run = Command::new(&bin)
+    let run = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("compare")
         .arg(&base)
         .arg(&cand)
@@ -170,7 +170,7 @@ fn compare_refuses_traces_on_different_observation_axes() {
         trace_json([-5.0, -6.0, -6.0], [-3.0, -3.0, -3.0], [-3.0, -3.0, -3.0])
             .replace("\"t\": 21", "\"t\": 28")).unwrap();
 
-    let run = Command::new(&bin)
+    let run = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("compare").arg(&base).arg(&cand)
         .args(["--baseline", "base.json"])
         .output().expect("running camdl compare");
@@ -209,7 +209,7 @@ fn compare_still_renders_when_the_observation_axes_agree() {
     std::fs::write(&cand,
         trace_json([-5.0, -6.0, -6.0], [-3.0, -3.0, -3.0], [-3.0, -3.0, -3.0])).unwrap();
 
-    let run = Command::new(&bin)
+    let run = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("compare").arg(&base).arg(&cand)
         .args(["--baseline", "base.json"])
         .output().expect("running camdl compare");
@@ -253,7 +253,7 @@ fn compare_refuses_two_models_that_scored_different_stream_sets() {
     std::fs::write(&cand, cand_text).unwrap();
 
     let out = dir.join("pointwise.tsv");
-    let run = Command::new(&bin)
+    let run = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("compare").arg(&base).arg(&cand)
         .args(["--baseline", "base.json"])
         .arg("--pointwise").arg(&out)

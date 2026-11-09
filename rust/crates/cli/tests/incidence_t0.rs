@@ -60,7 +60,7 @@ fn pfilter(camdl: &Path, model: &Path, data: &Path) -> std::process::Output {
         "--data", data.to_str().unwrap(),
     ];
     args.extend_from_slice(BASE_PARAMS);
-    Command::new(camdl)
+    Command::new(camdl).env_remove("CLICOLOR_FORCE")
         .args(&args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()

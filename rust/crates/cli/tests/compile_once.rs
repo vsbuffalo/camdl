@@ -121,7 +121,7 @@ fn run_and_count_compiles(bin: &Path, real: &Path, replicates: usize) -> (usize,
     let old_path = std::env::var("PATH").unwrap_or_default();
     let new_path = format!("{}:{}", shim_dir.display(), old_path);
 
-    let out = Command::new(bin)
+    let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate",
             &model.to_string_lossy(),

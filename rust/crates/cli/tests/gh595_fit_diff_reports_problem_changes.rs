@@ -75,7 +75,7 @@ fn run_diff(a: &Path, b: &Path) -> Option<String> {
     if !bin.exists() { return None; }
     // `fit diff` compiles each `.camdl` to compare the models; point it at the
     // compiler under test (this child process only).
-    let out = Command::new(&bin)
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "diff"]).arg(a).arg(b)
         .env("CAMDLC", camdlc)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")

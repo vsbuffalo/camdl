@@ -85,7 +85,7 @@ I0 = 10
     std::fs::write(dir.join("model.camdl"), MODEL).unwrap();
     std::fs::write(dir.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(dir.join("fit.toml"), toml).unwrap();
-    Command::new(binary())
+    Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(args)
         .env("CAMDL_OUTPUT_DIR", dir.join("res"))
         .current_dir(dir)

@@ -85,7 +85,7 @@ fn camdl(dir: &Path, extra: &[&str]) -> Output {
         "--param", "gamma=0.2", "--progress", "none",
     ];
     args.extend_from_slice(extra);
-    Command::new(camdl_bin())
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .current_dir(dir)
         .args(&args)
         .env("CAMDLC", real_camdlc())
