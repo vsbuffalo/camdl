@@ -5930,6 +5930,26 @@ dt = 1.0
         ]
     }
 
+    /// The R̂ table `fit run` draws for `conv`: the convergence half of the
+    /// summary the run writes (`summary_fields`), read back the way the report
+    /// reads it (`ConvergenceMaps`), drawn by `report::render::rhat_run_table`.
+    /// `withheld` is read the way a point-started leaf is
+    /// (`PosteriorDiagnostics::demote_point_start`).
+    fn run_table(conv: &MethodConvergence, withheld: Option<&ConvergenceError>) -> String {
+        use crate::fit::method_result::{ConvergenceMaps, PosteriorDiagnostics};
+        let summary = serde_json::Value::Object(conv.summary_fields());
+        let n_samples = conv.iter().find_map(|(_, d)| d.rank().map(|r| r.n_draws_total)).unwrap_or(0);
+        let mut diag = PosteriorDiagnostics {
+            per_param: ConvergenceMaps::read(&summary).per_param(),
+            n_samples, thin: 1, wall_time_secs: None, n_chains: 4,
+        };
+        if let Some(ConvergenceError::PointStart { n_chains, starts }) = withheld {
+            diag.demote_point_start(*n_chains, starts);
+        }
+        crate::fit::report::render::rhat_run_table(&diag).iter()
+            .map(|l| l.text()).collect::<Vec<_>>().join("\n")
+    }
+
     /// R̂ = `+∞` — every chain frozen at its own value, the 0%-acceptance
     /// deadlock — is a real answer and the worst one camdl can report. It must
     /// glyph as loudly as any other failure. A band that treated every
@@ -5967,6 +5987,12 @@ dt = 1.0
             out.contains('✗'),
             "and the method block must say so loudly:\n{out}"
         );
+        // The table `fit run` draws reads the R̂ back from the summary, which
+        // records a non-finite R̂ as a refusal, not as a number; the glyph
+        // must still be the worst one.
+        let table = run_table(&conv, None);
+        let row = table.lines().find(|l| l.contains("beta")).expect("a row for beta");
+        assert!(row.contains('✗'), "the run's table must say so loudly too:\n{table}");
     }
 
     /// One R̂, two commands, two glyphs.
