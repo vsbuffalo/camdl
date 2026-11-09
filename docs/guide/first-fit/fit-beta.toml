@@ -1,0 +1,21 @@
+[model]
+camdl = "sir-beta.camdl"
+
+[data.observations]
+in_bed = "data/in_bed.tsv"
+
+[estimate]
+beta  = { start = 1.5 }
+gamma = { start = 0.4 }
+
+[fixed]
+N0 = 763
+I0 = 3
+
+[method]
+algorithm  = "pmmh"
+backend    = "chain_binomial"
+chains     = 4
+particles  = 1000
+iterations = 3000
+burn_in    = 1000
