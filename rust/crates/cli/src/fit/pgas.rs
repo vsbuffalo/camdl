@@ -1284,8 +1284,6 @@ pub fn run_method(
     if all_results.is_empty() {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
         collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
-        let diag_path = method_dir.join("diagnostics.json");
-        let _ = collector.write_json(&diag_path.to_string_lossy());
         // gh#885: the reason and the remedies come from the one string the
         // other two all-chains-refused errors also carry (pmmh's init-eval
         // refusal, IF2's watchdog bail), so they cannot drift apart again.
@@ -1307,7 +1305,7 @@ pub fn run_method(
         // reason is now enough: the heartbeat's owner records it as the method's
         // terminal `failed` state, beside the per-chain block that already
         // shows every chain refused.
-        return Err(reason);
+        return Err(super::write_diagnostics_then_fail(&collector, method_dir, reason));
     }
 
     let elapsed = t0.elapsed();
@@ -1608,9 +1606,7 @@ pub fn run_method(
     if sim::inference::no_finite_anchor(best_sweep.log_complete_data_ll) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
         collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
-        let diag_path = method_dir.join("diagnostics.json");
-        let _ = collector.write_json(&diag_path.to_string_lossy());
-        return Err(format!(
+        return Err(super::write_diagnostics_then_fail(&collector, method_dir, format!(
             "pgas: all {} chain(s) reached no finite complete-data \
              log-likelihood (best = {}). The reachable surface is `-inf` at \
              every evaluated θ. Most often the starting values sit in an \
@@ -1619,7 +1615,7 @@ pub fn run_method(
              often the data are impossible under this model, or a recoverable \
              error fires at every θ (gh#226). Also check the observation \
              model and parameter bounds.",
-            n_chains, best_sweep.log_complete_data_ll));
+            n_chains, best_sweep.log_complete_data_ll)));
     }
 
     let mut start_values = std::collections::BTreeMap::new();
@@ -1749,8 +1745,7 @@ pub fn run_method(
 
     // Render and persist diagnostics
     collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
-    let diag_path = method_dir.join("diagnostics.json");
-    let _ = collector.write_json(&diag_path.to_string_lossy());
+    super::write_diagnostics(&collector, method_dir)?;
 
     // gh#785. `cross_chain_compat.json`, beside `diagnostics.json`: the
     // cross-chain path/parameter compatibility matrix `M[i][j] = log p(x_j |

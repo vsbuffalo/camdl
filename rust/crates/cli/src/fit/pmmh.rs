@@ -819,19 +819,17 @@ pub fn run_method(
     // rather than panicking on .unwrap() of an empty results vec.
     if results.is_empty() {
         collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
-        let diag_path = method_dir.join("diagnostics.json");
-        let _ = collector.write_json(&diag_path.to_string_lossy());
         // gh#880, gh#885. The reason and the remedies come from the one
         // string the other two all-chains-refused errors also carry, so they
         // cannot drift apart again.
-        return Err(format!(
+        return Err(super::write_diagnostics_then_fail(&collector, method_dir, format!(
             "pmmh method `{}`: all {} chains failed init-eval with \
              PFDegenerate — the particle filter could not score any chain's \
              starting parameters. See `diagnostics.json` for the per-chain \
              BadInit entries and `chain_starts.tsv` for the starts they name. \
              {}",
             method_name, n_chains,
-            crate::fit::chain_starts::UNSCOREABLE_START_ADVICE));
+            crate::fit::chain_starts::UNSCOREABLE_START_ADVICE)));
     }
 
     // gh#226. Whole-fit backstop: every surviving (non-skipped) chain
@@ -849,9 +847,7 @@ pub fn run_method(
     if results.iter().all(|(_, r)| sim::inference::no_finite_anchor(r.map_loglik)) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
         collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
-        let diag_path = method_dir.join("diagnostics.json");
-        let _ = collector.write_json(&diag_path.to_string_lossy());
-        return Err(format!(
+        return Err(super::write_diagnostics_then_fail(&collector, method_dir, format!(
             "pmmh method `{}`: all {} surviving chain(s) reached no finite \
              log-likelihood anchor — every evaluated θ scored -inf, so the \
              MH chain never moves (-inf - (-inf) = NaN, never accepted) and \
@@ -863,7 +859,7 @@ pub fn run_method(
              error fires at every θ (gh#226). Also check the observation model \
              and parameter bounds; run with --verbosity debug for per-substep \
              diagnostics.",
-            method_name, results.len()));
+            method_name, results.len())));
     }
 
     // Find MAP across surviving chains
@@ -1051,8 +1047,7 @@ pub fn run_method(
 
     // Render and persist diagnostics
     collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
-    let diag_path = method_dir.join("diagnostics.json");
-    let _ = collector.write_json(&diag_path.to_string_lossy());
+    super::write_diagnostics(&collector, method_dir)?;
 
     eprintln!("\n{}", completion_line(
         method_name, is_ode_mh, elapsed.as_secs_f64(), n_chains, n_steps, method_dir));

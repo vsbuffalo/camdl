@@ -267,6 +267,35 @@ fn method_heartbeat(
 /// function is what makes "a method always leaves a terminal record" true rather
 /// than nearly true — and it is why a reader holding only `progress.json`
 /// learns what a reader of stderr learns.
+/// Write a method's findings to `<method_dir>/diagnostics.json`.
+///
+/// A failed write is the run's failure. `diagnostics.json` is the only record
+/// of the run's findings, and `fit summary` reads its count and its verdict
+/// back from it, so a run that reported success without it would leave a fit
+/// whose problems no later command can show.
+pub(crate) fn write_diagnostics(
+    collector: &sim::inference::diagnostic::DiagnosticCollector,
+    method_dir: &std::path::Path,
+) -> Result<(), String> {
+    let path = method_dir.join("diagnostics.json");
+    collector.write_json(&path.to_string_lossy())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// [`write_diagnostics`] on a path where the run is already failing with
+/// `reason`: the run's own error stays the message, and a failed write is
+/// added to it rather than replacing it.
+pub(crate) fn write_diagnostics_then_fail(
+    collector: &sim::inference::diagnostic::DiagnosticCollector,
+    method_dir: &std::path::Path,
+    reason: String,
+) -> String {
+    match write_diagnostics(collector, method_dir) {
+        Ok(()) => reason,
+        Err(e) => format!("{reason}\n  and its findings were not recorded: {e}"),
+    }
+}
+
 fn abandon_method(heartbeat: &io::HeartbeatGuard, message: String) -> ! {
     heartbeat.failed(message.as_str());
     eprintln!("{}", message);
@@ -3146,6 +3175,32 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A findings file that cannot be written is an error naming the path, not
+    /// a discarded result; on a run already failing, the run's own error stays
+    /// first and the unwritten record is added to it.
+    #[test]
+    fn an_unwritable_diagnostics_file_is_an_error() {
+        use sim::inference::diagnostic::{DiagnosticCollector, DiagnosticKind};
+        let dir = tempfile::tempdir().unwrap();
+        let collector = DiagnosticCollector::new("pmmh");
+        collector.push(DiagnosticKind::InitialLoglikInfinite);
+
+        write_diagnostics(&collector, dir.path()).expect("a writable directory takes the file");
+        let written = std::fs::read_to_string(dir.path().join("diagnostics.json")).unwrap();
+        assert!(written.contains("initial_loglik_infinite"), "{written}");
+
+        // A directory where the file should go: the write fails.
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir_all(blocked.join("diagnostics.json")).unwrap();
+        let err = write_diagnostics(&collector, &blocked).expect_err("the path is a directory");
+        assert!(err.starts_with("cannot write ") && err.contains("diagnostics.json"), "{err}");
+
+        let msg = write_diagnostics_then_fail(&collector, &blocked, "all chains refused".into());
+        assert!(msg.starts_with("all chains refused\n"), "{msg}");
+        assert!(msg.contains("its findings were not recorded: cannot write"), "{msg}");
+        assert_eq!(write_diagnostics_then_fail(&collector, dir.path(), "x".into()), "x");
+    }
 
     /// The `from_mle` branch of the pfilter point refusal: a stored fit (here
     /// an nl-* leaf, whose fit_state.toml holds the estimated values) that
