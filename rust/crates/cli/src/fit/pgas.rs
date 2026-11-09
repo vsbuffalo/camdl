@@ -1914,6 +1914,31 @@ fn chain_event_text(chain: ChainIndex, event: &PgasEvent) -> String {
                 }
             }
         }
+        PgasEvent::DegenerateAncestorSampling { n_degenerate, n_substeps } => {
+            let pct = *n_degenerate as f64 / *n_substeps as f64 * 100.0;
+            lines.push(format!("CSMC-AS: {}/{} substeps ({:.0}%) had degenerate ancestor sampling — \
+                        reference trajectory is too far from particle cloud. \
+                        Consider more particles or smaller parameter proposals.",
+                        n_degenerate, n_substeps, pct));
+        }
+        PgasEvent::WeightCollapse {
+            n_particles, n_windows, n_obs_substeps, first_substep, t, final_draw_fell_back,
+        } => {
+            lines.push(format!(
+                "CSMC-AS: all {} particles scored zero observation density at {} of {} \
+                 observation substeps this sweep, first at substep {} (t={:.1}). The weight \
+                 vector there cannot be sampled: the following resample draws from a uniform \
+                 distribution no particle earned{}. The sweep completed and carries \
+                 `weight_collapse` on its diagnostics — a run of these is a run whose filter \
+                 found no trajectory that explains the data at these parameters.",
+                n_particles, n_windows, n_obs_substeps, first_substep, t,
+                if *final_draw_fell_back {
+                    ", and the sweep's final trajectory draw returned the reference by fallback"
+                } else {
+                    ""
+                },
+            ));
+        }
     }
     let mut text = String::new();
     for (i, line) in lines.iter().enumerate() {

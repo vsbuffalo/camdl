@@ -3367,17 +3367,6 @@ pub fn csmc_as(
         history_gammas.push(substep_gammas.to_vec());
     }
 
-    // Diagnostic: warn if many substeps had degenerate ancestor sampling
-    if n_degenerate > 0 {
-        let pct = n_degenerate as f64 / n_substeps as f64 * 100.0;
-        if pct > 10.0 {
-            log::warn!("CSMC-AS: {}/{} substeps ({:.0}%) had degenerate ancestor sampling — \
-                        reference trajectory is too far from particle cloud. \
-                        Consider more particles or smaller parameter proposals.",
-                        n_degenerate, n_substeps, pct);
-        }
-    }
-
     // ── Select final trajectory ──
     // gh#783: this draw fails when the last weight-setting substep left every
     // particle at zero density, and its fallback is the reference slot's index
@@ -3392,30 +3381,8 @@ pub fn csmc_as(
         };
     let weight_collapse = weight_collapse.finish(final_draw_fell_back);
 
-    // The sweep is not refused, so say what happened. `log::warn!` reaches the
-    // user without a flag: the CLI's default log filter is `Warn`
-    // (`cli/src/main.rs`).
-    if let Some(first) = weight_collapse.first_substep {
-        log::warn!(
-            "CSMC-AS: all {} particles scored zero observation density at {} of {} \
-             observation substeps this sweep, first at substep {} (t={:.1}). The weight \
-             vector there cannot be sampled: the following resample draws from a uniform \
-             distribution no particle earned{}. The sweep completed and carries \
-             `weight_collapse` on its diagnostics — a run of these is a run whose filter \
-             found no trajectory that explains the data at these parameters.",
-            n_particles,
-            weight_collapse.n_windows,
-            obs_at_substep.len(),
-            first,
-            reference.substeps[first].t0,
-            if weight_collapse.final_draw_fell_back {
-                ", and the sweep's final trajectory draw returned the reference by fallback"
-            } else {
-                ""
-            },
-        );
-    }
-
+    // The sweep is not refused; `run_pgas` says what happened
+    // (`PgasEvent::WeightCollapse`, from the diagnostics this sweep returns).
     // Trace back through ancestry and compute trajectory renewal
     let mut trajectory_substeps = Vec::with_capacity(n_substeps);
     let mut particle = k;
@@ -3692,6 +3659,57 @@ pub enum PgasEvent {
     /// acceptance over the sweeps so far, the sweep's trajectory renewal, and
     /// under NUTS the burn-in's tree-depth and divergence counts.
     BurnInEnd { proposals: Vec<ProposalAdapted>, trajectory_renewal: f64, nuts: Option<NutsBurnIn> },
+    /// A CSMC sweep in which more than a tenth of the substeps drew their
+    /// ancestor from the reference slot alone
+    /// ([`CSMCDiagnostics::n_degenerate`] of [`CSMCDiagnostics::n_substeps`]).
+    DegenerateAncestorSampling { n_degenerate: usize, n_substeps: usize },
+    /// A CSMC sweep in which every one of `n_particles` particles scored zero
+    /// observation density at `n_windows` of its `n_obs_substeps` observation
+    /// substeps, the first at `first_substep` (time `t`). The sweep completed;
+    /// [`CSMCDiagnostics::weight_collapse`] carries the same reading.
+    WeightCollapse {
+        n_particles: usize,
+        n_windows: usize,
+        n_obs_substeps: usize,
+        first_substep: usize,
+        t: f64,
+        final_draw_fell_back: bool,
+    },
+}
+
+/// What a finished CSMC sweep's diagnostics call for saying
+/// ([`PgasEvent::DegenerateAncestorSampling`], [`PgasEvent::WeightCollapse`],
+/// in that order). `reference` is the trajectory the sweep was conditioned on,
+/// whose substep times date the first collapsed window. `run_pgas` calls it
+/// after every CSMC sweep it runs, warm-up sweeps included.
+pub fn csmc_events(
+    diag: &CSMCDiagnostics,
+    reference: &PGASTrajectory,
+    n_particles: usize,
+    n_obs_substeps: usize,
+) -> Vec<PgasEvent> {
+    let mut events = Vec::new();
+    if diag.n_degenerate > 0 {
+        let pct = diag.n_degenerate as f64 / diag.n_substeps as f64 * 100.0;
+        if pct > 10.0 {
+            events.push(PgasEvent::DegenerateAncestorSampling {
+                n_degenerate: diag.n_degenerate,
+                n_substeps: diag.n_substeps,
+            });
+        }
+    }
+    let wc = &diag.weight_collapse;
+    if let Some(first) = wc.first_substep {
+        events.push(PgasEvent::WeightCollapse {
+            n_particles,
+            n_windows: wc.n_windows,
+            n_obs_substeps,
+            first_substep: first,
+            t: reference.substeps[first].t0,
+            final_draw_fell_back: wc.final_draw_fell_back,
+        });
+    }
+    events
 }
 
 /// One parameter's MH proposal at the end of burn-in ([`PgasEvent::BurnInEnd`]).
@@ -4130,12 +4148,15 @@ pub fn run_pgas(
         say(PgasEvent::TrajectoryWarmupStarting { sweeps: config.trajectory_warmup });
         for warmup_sweep in 0..config.trajectory_warmup {
             let csmc_seed = seed ^ ((warmup_sweep as u64).wrapping_mul(0x517cc1b727220a95));
-            let (new_traj, _diag) = csmc_as(
+            let (new_traj, diag) = csmc_as(
                 model, &chain.params, observations, &chain.trajectory,
                 config.n_particles, config.dt, obs_model,
                 csmc_seed, &obs_at_substep, &plan, config.binomial,
                 config.ancestor_sampling,
             )?;
+            for e in csmc_events(&diag, &chain.trajectory, config.n_particles, obs_at_substep.len()) {
+                say(e);
+            }
             chain.trajectory = new_traj;
             chain.log_lik = complete_data_loglik(
                 model, &chain.trajectory, &chain.params, observations,
@@ -4430,6 +4451,9 @@ pub fn run_pgas(
                 csmc_seed, &obs_at_substep, &plan, config.binomial,
                 config.ancestor_sampling,
             )?;
+            for e in csmc_events(&diag, &chain.trajectory, config.n_particles, obs_at_substep.len()) {
+                say(e);
+            }
             chain.trajectory = new_trajectory;
             csmc_diag = diag;
         }
