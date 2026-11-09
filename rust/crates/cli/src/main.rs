@@ -509,30 +509,10 @@ fn main() {
 
     let cli = Cli::parse();
 
-    // Resolve the effective verbosity. Precedence:
-    //   1. Explicit --verbosity wins over everything.
-    //   2. Else, if `--progress plain` is in effect (or `auto` on
-    //      non-TTY stderr), bump to `info` — plain-mode progress
-    //      lines are emitted via `log::info!` and would otherwise
-    //      be silently filtered by the default `warn` threshold
-    //      (GH #14, comment re: silent plain mode).
-    //   3. Else, RUST_LOG env → else `warn`.
-    //
-    // Note — a cleaner long-term design (option 2 in Vince's GH #14
-    // comment) would route progress through a dedicated non-`log::*`
-    // channel, making "progress visibility" independent of "log
-    // filter." That decouples user-facing progress from
-    // developer-facing logging, which is the right mental model but
-    // a bigger refactor; this auto-bump is the minimal fix.
-    let progress_wants_info = match cli.progress {
-        args::types::ProgressMode::Plain => true,
-        args::types::ProgressMode::Auto =>
-            !std::io::IsTerminal::is_terminal(&std::io::stderr()),
-        args::types::ProgressMode::Pretty | args::types::ProgressMode::None => false,
-    };
-    let effective_verbosity: log::LevelFilter = cli.verbosity.unwrap_or(
-        if progress_wants_info { log::LevelFilter::Info } else { log::LevelFilter::Warn }
-    );
+    // The log filter: explicit --verbosity, else RUST_LOG, else `warn`.
+    // Plain progress lines do not pass through `log` (`out::LiveHandle`,
+    // GH #14's option 2), so `--progress` no longer bumps it.
+    let effective_verbosity: log::LevelFilter = cli.verbosity.unwrap_or(log::LevelFilter::Warn);
 
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or(effective_verbosity.as_str())

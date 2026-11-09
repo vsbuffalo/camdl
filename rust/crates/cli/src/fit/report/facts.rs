@@ -92,6 +92,10 @@ pub struct SamplingPlan {
     pub burn_in: usize,
     pub thin: usize,
     pub adapt: bool,
+    /// Observation times the likelihood sums over (the `T` of the PMMH
+    /// caveat). 0 in a summary written before it was recorded.
+    #[serde(default)]
+    pub series_len: usize,
     /// The initial proposal SD per estimated parameter, on the transformed
     /// scale.
     pub proposal_sd: BTreeMap<String, f64>,
@@ -142,8 +146,9 @@ pub enum Check {
     /// The particle-filter noise measurement before PMMH samples. The record
     /// carries its own `log L̂` mean (`PfNoiseCheck::ll_mean`).
     FilterNoise { check: crate::fit::pf_noise::PfNoiseCheck },
-    /// The method registry's caveat for this method and backend.
-    MethodCaveat { method: String, note: String },
+    /// The method registry's caveat for this method and backend, and the
+    /// series length it is said with, when the run recorded it.
+    MethodCaveat { method: String, note: String, series_len: Option<usize> },
     /// A starts rule that discards the declared `[estimate].start` values of
     /// `params`, with the note the run prints.
     Starts { mode: String, params: Vec<String>, note: String },

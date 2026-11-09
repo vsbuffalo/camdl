@@ -335,7 +335,7 @@ fn run_one_cell_with_progress(spec: CellSpec) -> Result<CellResult, String> {
 
     if crate::out::progress::is_plain() {
         // One up-front line; the live bar is invisible off-TTY (hidden target).
-        log::info!("simulate \u{b7} {backend}: running \u{2026}");
+        crate::out::live().progress(&format!("simulate \u{b7} {backend}: running \u{2026}"));
     }
 
     let result = util::simulate_compiled(&compiled, &model, &spec.sim_run, Some(&pb))

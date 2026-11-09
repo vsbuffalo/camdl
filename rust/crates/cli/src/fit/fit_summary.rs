@@ -3045,7 +3045,16 @@ fn load_method_facts(
     // the noise check, the observation streams.
     let mut checks = Vec::new();
     if let Some(note) = crate::fit::methods::status_note_for(method, backend) {
-        checks.push(Check::MethodCaveat { method: method.to_string(), note: note.to_string() });
+        // PMMH records the series length it said its caveat with
+        // (`pmmh_summary.json` `plan.series_len`).
+        let series_len = (method == "pmmh").then(|| {
+            std::fs::read_to_string(dir.join("pmmh_summary.json")).ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|v| v["plan"]["series_len"].as_u64())
+                .map(|n| n as usize)
+                .filter(|&n| n > 0)
+        }).flatten();
+        checks.push(Check::MethodCaveat { method: method.to_string(), note: note.to_string(), series_len });
     }
     let unused = inputs.get("unused_starts");
     let params: Vec<String> = unused.and_then(|u| u.get("params")).and_then(|v| v.as_array())

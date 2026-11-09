@@ -965,12 +965,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     eprintln!("  estimate: {}", run_header.estimate.join(", "));
     eprintln!("  fixed:    {}", run_header.fixed.join(", "));
     eprintln!("  starts:   {}", run_header.starts);
-    // gh#507: absolute, not as-written. A relative string here is consistent
-    // with either base (the CWD or the fit.toml's directory), so it cannot
-    // tell you which one you got — which is exactly how a run tree ended up
-    // outside its repository unnoticed.
-    eprintln!("  output:   {}",
-        crate::run_paths::display_absolute(&announced_fit_dir).display());
+    // Relative to the working directory when the fit lands under it, else
+    // absolute (`report::display_path`): either way there is one base to
+    // read it against, which is what gh#507 asked of this line.
+    eprintln!("  output:   {}", run_header.output);
 
     // IC-free inference diagnostic: when ic_free = true, make it
     // visible on the startup block so the user can confirm the PF is
@@ -1619,7 +1617,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // Surface the registry caveat for Beta/Experimental methods, once per
         // executing method (after the cache-hit skip above, so reused leaves
         // stay silent). Registry-driven so it can't drift from `fit methods`.
-        methods::emit_status_banner(method.algorithm.method_kind(), method.algorithm.backend());
+        // PMMH says its caveat itself, once its data is bound, so the caveat
+        // can carry the series length it is about (`pmmh::run_method`).
+        if !matches!(method.algorithm, Algorithm::PMMH { .. }) {
+            methods::emit_status_banner(method.algorithm.method_kind(), method.algorithm.backend(), None);
+        }
 
         // gh#506 follow-up, gh#881: a declared `start` that the chosen starts
         // rule discards is a silent no-op. Not an error — the spread rules

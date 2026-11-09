@@ -399,8 +399,9 @@ fn pgas_resume_rejects_a_changed_dt() {
 
 /// gh#280: PGAS reports a complete-data loglik, so its live progress feed must
 /// read `ll(complete)=`, not the bare `ll=` that means a marginal for every
-/// other method. `--progress plain` bumps verbosity to Info (main.rs) so the
-/// throttled per-sweep line reaches stderr; the first sweep always emits.
+/// other method. `--progress plain` writes the throttled per-sweep line to
+/// stderr directly (`out::LiveHandle`), not through `log`; the first sweep
+/// always emits.
 #[test]
 fn pgas_plain_progress_feed_marks_complete_data() {
     let bin = camdl_bin();
@@ -419,4 +420,7 @@ fn pgas_plain_progress_feed_marks_complete_data() {
     assert!(stderr.contains("ll(complete)="),
         "PGAS plain-progress feed must carry the complete-data prefix \
          `ll(complete)=`, not a bare `ll=`:\n{stderr}");
+    // GH #14: the line is the line, not a log record.
+    assert!(!stderr.contains("camdl::progress") && !stderr.contains(" INFO "),
+        "plain progress carries no log timestamp or module path:\n{stderr}");
 }

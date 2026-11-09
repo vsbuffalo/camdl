@@ -145,6 +145,16 @@ pub fn run_method(
         seed, false,
     )?;
 
+    // The registry caveat, with the series length it is about: the data are
+    // bound now, so `config.observations` is the series the likelihood sums
+    // over. `mh` + `ode` has its caveat said at the dispatch, as every other
+    // method does.
+    let series_len = config.observations.len();
+    if !is_ode_mh {
+        super::methods::emit_status_banner(
+            crate::run_meta::FitAlgorithm::Pmmh, method.algorithm.backend(), Some(series_len));
+    }
+
     let dt = config.if2_config.dt;
 
     // Deterministic-ODE MH eval inputs, built once and shared (read-only)
@@ -794,7 +804,7 @@ pub fn run_method(
     // condition a stuck chain leaves is readable without its stderr.
     let warmup = chain_warmups(&results, adapt, resume, base_warmup);
     let plan = SamplingPlan {
-        n_chains, n_steps, n_particles, burn_in, thin, adapt,
+        n_chains, n_steps, n_particles, burn_in, thin, adapt, series_len,
         proposal_sd: config.estimated_params.iter().zip(&proposal_sd)
             .map(|(p, &sd)| (p.name.clone(), sd))
             .collect(),

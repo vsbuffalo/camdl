@@ -258,6 +258,16 @@ pub fn status_note(algorithm: FitAlgorithm, backend: InferenceBackend) -> Option
         .filter(|s| !s.is_empty())
 }
 
+/// A registry caveat as the run prints it: the note, then the series length
+/// when known (`This series has T = 14.`), so a caveat about long series says
+/// whether this one is.
+pub fn caveat_text(note: &str, series_len: Option<usize>) -> String {
+    match series_len {
+        Some(n) => format!("{note} This series has T = {n}."),
+        None => note.to_string(),
+    }
+}
+
 /// [`status_note`] for the method and backend as `run.json` spells them.
 pub(crate) fn status_note_for(method: &str, backend: &str) -> Option<&'static str> {
     status_note(parse_algorithm(method)?, parse_backend(backend)?)
@@ -269,9 +279,13 @@ pub(crate) fn status_note_for(method: &str, backend: &str) -> Option<&'static st
 /// unregistered pairs (those fail earlier in `validate_combo`). Driven entirely
 /// by the registry so the banner text and `camdl fit methods` stay in lockstep
 /// — this replaces the previously hand-coded, PMMH-only banner.
-pub fn emit_status_banner(algorithm: FitAlgorithm, backend: InferenceBackend) {
+///
+/// `series_len`, the number of observation times the likelihood sums over,
+/// is said after the caveat when the caller knows it ([`caveat_text`]).
+pub fn emit_status_banner(algorithm: FitAlgorithm, backend: InferenceBackend, series_len: Option<usize>) {
     if let Some(note) = status_note(algorithm, backend) {
-        eprintln!("{}", crate::out::paint::stderr().paint(&format!("⚠ {note}"), crate::out::paint::Style::Warn));
+        eprintln!("{}", crate::out::paint::stderr().paint(
+            &format!("⚠ {}", caveat_text(note, series_len)), crate::out::paint::Style::Warn));
         eprintln!();
     }
 }

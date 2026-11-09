@@ -244,8 +244,8 @@ impl Task {
                 if ready {
                     let m = self.metric.lock().map(|s| s.clone()).unwrap_or_default();
                     let sep = if m.is_empty() { "" } else { "  " };
-                    log::info!("{} {}/{}{}{}", self.label, self.pb.position(),
-                        self.pb.length().unwrap_or(0), sep, m);
+                    crate::out::live().progress(&format!("{} {}/{}{}{}", self.label,
+                        self.pb.position(), self.pb.length().unwrap_or(0), sep, m));
                 }
             }
             Resolved::None => {}
