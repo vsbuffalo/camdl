@@ -2196,14 +2196,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 }
                 let elapsed = t0.elapsed();
 
-                let mean_ll = logliks.iter().sum::<f64>() / logliks.len() as f64;
-                let sd_ll = if logliks.len() > 1 {
-                    let var = logliks.iter().map(|l| (l - mean_ll).powi(2)).sum::<f64>() / (logliks.len() - 1) as f64;
-                    var.sqrt()
-                } else { 0.0 };
-
+                let result = crate::fit::method_result::PfilterRun::from_run(&logliks, *particles);
                 eprintln!("\n  loglik = {:.1} ± {:.1} ({} reps, {} particles, {:.1}s)",
-                    mean_ll, sd_ll, n_reps, particles, elapsed.as_secs_f64());
+                    result.ll_mean, result.ll_sd, n_reps, particles, elapsed.as_secs_f64());
 
                 // Write logliks.tsv
                 {
@@ -2212,7 +2207,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     let mut f = std::fs::File::create(&path).unwrap();
                     writeln!(f, "replicate\tloglik").unwrap();
                     for (i, ll) in logliks.iter().enumerate() {
-                        writeln!(f, "{}\t{:.4}", i + 1, ll).unwrap();
+                        writeln!(f, "{}\t{}", i + 1, crate::fit::method_result::loglik_tsv_cell(*ll)).unwrap();
                     }
                 }
 
@@ -2234,7 +2229,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         trace.elpd(), trace.mean_crps(), trace.pit_coverage(0.90));
                     eprint!("{}", crate::prequential_out::surprise_table(trace));
                 }
-                method_best_loglik = Some(mean_ll);
+                method_best_loglik = Some(result.ll_mean);
             }
         }
 
