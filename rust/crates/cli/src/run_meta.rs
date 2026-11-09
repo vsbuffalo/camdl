@@ -1385,7 +1385,7 @@ mod tests {
 
     /// gh#353: the fit run leaf archives the model `.camdl` source as
     /// `model.camdl.original`, symmetric with `fit.toml.original`, so a consumer
-    /// (e.g. camdl-watch's Source tab) can read it from the self-contained leaf
+    /// (e.g. camdl-scope's Source tab) can read it from the self-contained leaf
     /// instead of a checkout-relative path that doesn't resolve elsewhere.
     ///
     /// The recorded `model_path` is `config.model.camdl` — the *same* string the

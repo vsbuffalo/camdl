@@ -1408,7 +1408,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 }
                 // Archive the model's display render (`model.render.json`) and
                 // the flow graph (`model.graph.json`) beside the IR so a viewer
-                // (camdl-watch) can show the model's math without recompiling.
+                // (camdl-scope) can show the model's math without recompiling.
                 // Best-effort + identity-neutral, like the IR archive above; a
                 // render failure never aborts the fit.
                 //

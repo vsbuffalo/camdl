@@ -1,5 +1,5 @@
 //! Integration test: `camdl render --format graph` emits the structured flow
-//! graph (`model.graph.json`) a viewer (camdl-watch) draws the compartmental
+//! graph (`model.graph.json`) a viewer (camdl-scope) draws the compartmental
 //! diagram from without recompiling — the sidecar `fit run` archives beside
 //! `model.render.json`.
 //!
