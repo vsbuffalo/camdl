@@ -48,8 +48,8 @@ use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{
-    build_obs_at_substep, csmc_as, simulate_reference, CSMCDiagnostics, ObsAtSubstep,
-    PGASTrajectory, WeightCollapseTally,
+    build_obs_at_substep, csmc_as, csmc_events, simulate_reference, CSMCDiagnostics,
+    ObsAtSubstep, PGASTrajectory, PgasEvent, WeightCollapseTally,
 };
 use sim::rng::StatefulRng;
 
@@ -279,6 +279,35 @@ fn a_collapsed_sweep_and_a_legitimate_reference_kept_sweep_are_distinguishable()
     assert_eq!(dead_wc.min_alive, 0, "no particle carried a finite weight");
     assert_eq!(dead_wc.min_ess(), Some((0, 0.0)), "a dead vector is an ESS of 0");
     assert!(dead_wc.final_draw_fell_back, "the final draw had nothing to select");
+}
+
+/// The collapsed sweep is said, not only recorded: `run_pgas` hands the caller
+/// a `WeightCollapse` event naming the first collapsed window and its time,
+/// and the legitimate reference-kept sweep calls for nothing.
+#[test]
+fn a_collapsed_sweep_is_said_and_a_legitimate_one_is_not() {
+    let live = fixture(1, &[(0, OBSERVED_COUNT)], LIVE_REF_I0);
+    let dead = fixture(1, &[(0, OBSERVED_COUNT)], 0.0);
+    let (_, live_diag) = sweep(&live);
+    let (_, dead_diag) = sweep(&dead);
+
+    let live_events = csmc_events(&live_diag, &live.reference, N_PARTICLES, live.obs_at_substep.len());
+    assert!(live_events.is_empty(), "nothing to say about a legitimate sweep: {live_events:?}");
+
+    let dead_events = csmc_events(&dead_diag, &dead.reference, N_PARTICLES, dead.obs_at_substep.len());
+    match dead_events.as_slice() {
+        [PgasEvent::WeightCollapse {
+            n_particles, n_windows, n_obs_substeps, first_substep, t, final_draw_fell_back,
+        }] => {
+            assert_eq!(*n_particles, N_PARTICLES);
+            assert_eq!(*n_windows, 1);
+            assert_eq!(*n_obs_substeps, 1);
+            assert_eq!(*first_substep, 0);
+            assert_eq!(*t, dead.reference.substeps[0].t0);
+            assert!(*final_draw_fell_back);
+        }
+        other => panic!("expected one WeightCollapse event, got {other:?}"),
+    }
 }
 
 /// gh#685. The ESS sees what the alive count cannot. Every weight here is
