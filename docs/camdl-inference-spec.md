@@ -1036,12 +1036,12 @@ Reads each MLE stage's `fit_state.toml` + `final_params.toml` +
 
 #### 7.2.1 Output formats
 
-| `--format`       | use case                                                                                    |
-| ---------------- | ------------------------------------------------------------------------------------------- |
-| `text` (default) | terminal block with ANSI colour. Auto-disables under non-TTY; honours `NO_COLOR`.           |
-| `json`           | machine-readable, versioned via `schema.version: 1`. The book pipeline reads this directly. |
-| `md`             | GitHub-flavoured Markdown. Embeddable in chapters via Quarto's `run_cli`.                   |
-| `latex`          | `\begin{tabular}` blocks per stage. No preamble — embed inside an existing document.        |
+| `--format`       | use case                                                                                 |
+| ---------------- | ---------------------------------------------------------------------------------------- |
+| `text` (default) | terminal block with ANSI colour. Auto-disables under non-TTY; honours `NO_COLOR`.        |
+| `json`           | machine-readable, versioned via `schema.version`. The book pipeline reads this directly. |
+| `md`             | GitHub-flavoured Markdown. Embeddable in chapters via Quarto's `run_cli`.                |
+| `latex`          | `\begin{tabular}` blocks per stage. No preamble — embed inside an existing document.     |
 
 #### 7.2.2 JSON schema
 
@@ -1049,7 +1049,7 @@ Top-level shape:
 
 ```json
 {
-  "schema": {"version": 2, "camdl_version": "0.1.0+abc1234"},
+  "schema": {"version": 3, "camdl_version": "0.1.0+abc1234"},
   "fit_dir": "fit/he2010",
   "methods": [
     {
@@ -1072,7 +1072,6 @@ Top-level shape:
         "resolved_gate": {"a_thresh": 1.01, "decibans_thresh": 30.0},
         "resolved_loglik_eval": {"n_particles": 4000, "n_replicates": 8, "combine": "log_mean_exp"}
       },
-      "method_progression": null,
       "parameters": [
         {"name": "R0", "estimate": 87.67, "chain_agreement": 1.21, "perturb_only_at_t0": false},
         ...

@@ -195,6 +195,16 @@ order. Every handle now names one run, or is refused with the runs listed.
 
 ### Other breaking changes
 
+- **`fit summary` no longer compares a method with the one listed before it.**
+  The `vs <previous>: Δ = … nats ✓/✗` line (text and Markdown) and the
+  `method_progression` field (`--format json`) compared successive stages of the
+  removed `[stages]` pipeline. Leaves under one fit directory are now
+  independent runs whose log-likelihoods can be of different kinds (an IF2
+  loglik-eval maximum, a PMMH MAP, none for PGAS), so the difference compared
+  unlike quantities. The summary JSON is at `schema.version` 3. Migration: a
+  reader of `method_progression` compares the leaves' `best_loglik` itself, only
+  where their `loglik_type` agrees.
+
 - **A model's file name is a label, not part of its identity.** `camdlc` names a
   model after its source file's stem, and that name used to enter the model
   hash, so two byte-identical models under different file names (`a.camdl`,

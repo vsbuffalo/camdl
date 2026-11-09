@@ -984,7 +984,7 @@ pub struct FitSummaryArgs {
     pub fit: String,
 
     /// Output format. `text` (default) emits the terminal block;
-    /// `json` emits a versioned `schema.version: 1` document; `md`
+    /// `json` emits a document versioned by `schema.version`; `md`
     /// emits GitHub-flavoured Markdown; `latex` emits `\begin{tabular}`
     /// blocks per section.
     #[arg(long, value_enum, default_value_t = FitSummaryFormat::Text,

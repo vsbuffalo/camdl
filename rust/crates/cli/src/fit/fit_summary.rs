@@ -46,7 +46,13 @@ use std::path::{Path, PathBuf};
 /// config, the store levels and the CLI no longer use, and the array is
 /// machine-read (the book pipeline and `fit table`'s byte-equality check both
 /// parse it).
-const SCHEMA_VERSION: u32 = 2;
+///
+/// v3: the per-method `method_progression` field is gone. It carried the
+/// log-likelihood difference against the method leaf listed before it, which
+/// compared successive stages of the removed `[stages]` pipeline; leaves under
+/// one fit directory are now independent runs whose log-likelihoods can be of
+/// different kinds, so the difference compared unlike quantities.
+const SCHEMA_VERSION: u32 = 3;
 
 /// Recompute a Bayesian stage's diagnostics + posterior means over a
 /// chain-filtered draws cloud, mutating `diag`/`posterior_mean` in place, and
@@ -573,8 +579,6 @@ fn format_text(
     // all still has to report it, below.
     let mut version_lead = format!("camdl {} · ", fmt.dim(version::VERSION_SHORT));
 
-    let mut prev_loglik: Option<f64> = None;
-    let mut prev_stage_name: Option<String> = None;
     for resolved in stages {
         let lead = std::mem::take(&mut version_lead);
         let stage_dir_str = resolved.stage_dir.to_string_lossy().into_owned();
@@ -660,32 +664,23 @@ fn format_text(
                     &stage_dir_str,
                     &state,
                     Some(if2),
-                    prev_loglik,
-                    prev_stage_name.as_deref(),
                 );
                 if block.provenance_failed {
                     had_provenance_failure = true;
                 }
                 print!("{}", block.text);
-                prev_loglik = Some(state.best_loglik);
-                prev_stage_name = Some(resolved.stage.clone());
             }
             MethodResult::Pgas(pgas) => {
                 print!(
                     "{}",
                     fmt.bayesian_block(&lead, &resolved.stage, "pgas", &resolved.stage_dir, BayesianView::Pgas(pgas), subset_info.as_ref(), ll_kind, forkability(dir, &resolved.stage, selection).as_ref())
                 );
-                prev_stage_name = Some(resolved.stage.clone());
-                // Bayesian rows have no scalar best_loglik to chain
-                // through; `prev_loglik` stays where it was.
             }
             MethodResult::Pmmh(pmmh) => {
                 print!(
                     "{}",
                     fmt.bayesian_block(&lead, &resolved.stage, "pmmh", &resolved.stage_dir, BayesianView::Pmmh(pmmh), subset_info.as_ref(), ll_kind, forkability(dir, &resolved.stage, selection).as_ref())
                 );
-                prev_loglik = Some(pmmh.map_loglik);
-                prev_stage_name = Some(resolved.stage.clone());
             }
             MethodResult::Nlopt(r) => {
                 // NLopt stages are point-estimate (like IF2) but with no
@@ -714,8 +709,6 @@ fn format_text(
                         None => println!("      {:<w$} = {}", shown, v),
                     }
                 }
-                prev_loglik = Some(r.best_loglik);
-                prev_stage_name = Some(resolved.stage.clone());
             }
         }
     }
@@ -1398,8 +1391,6 @@ impl Formatter {
         stage_dir: &str,
         state: &FitState,
         typed: Option<&If2StageResult>,
-        prev_loglik: Option<f64>,
-        prev_stage_name: Option<&str>,
     ) -> StageBlock {
         let mut s = String::new();
 
@@ -1437,14 +1428,6 @@ impl Formatter {
                     self.warn(&format!("⚠ stale: produced by {}, current is {}",
                         v, version::VERSION_SHORT))));
             }
-        }
-        if let Some(prev) = prev_loglik {
-            let delta = state.best_loglik - prev;
-            let prev_label = prev_stage_name.unwrap_or("prev");
-            let glyph = if delta >= 0.0 { self.ok("✓") } else { self.err("✗") };
-            s.push_str(&format!(
-                "  vs {}:    Δ = {:+.1} nats  {}\n",
-                prev_label, delta, glyph));
         }
         s.push('\n');
 
@@ -2734,7 +2717,6 @@ pub struct MethodReport {
     /// Compound IF2 gate. `None` for Bayesian stages (the gate
     /// doesn't apply).
     pub gate: Option<GateReport>,
-    pub method_progression: Option<MethodProgression>,
     /// IF2 estimated parameters with Â. Empty for Bayesian stages
     /// (consult `method_result` for posterior_mean / ess).
     pub parameters: Vec<ParameterReport>,
@@ -2783,13 +2765,6 @@ pub struct GateReport {
     pub threshold_source: String,
     pub resolved_gate: Option<GateConfig>,
     pub resolved_loglik_eval: Option<LoglikEvalConfig>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct MethodProgression {
-    pub previous_method: String,
-    pub previous_loglik: f64,
-    pub delta_nats: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2860,8 +2835,6 @@ fn build_summary_doc(
 ) -> FitSummaryDoc {
     let cal = load_calendar_context(Path::new(dir));
     let mut method_reports: Vec<MethodReport> = Vec::new();
-    let mut prev_loglik: Option<f64> = None;
-    let mut prev_stage_name_owned: Option<String> = None;
     // The chain-selection provenance (stamped on the doc) + one-shot advisory.
     let mut chain_selection_json: Option<serde_json::Value> = None;
     let mut failures: Vec<LoadFailure> = Vec::new();
@@ -2919,7 +2892,6 @@ fn build_summary_doc(
                 }
             }
         }
-        let prev_name = prev_stage_name_owned.as_deref();
         let report = match (&typed, resolved.method.as_str()) {
             (Some(MethodResult::If2(_)), _) => {
                 let state = match FitState::load(&stage_dir_str) {
@@ -2936,35 +2908,26 @@ fn build_summary_doc(
                         continue;
                     }
                 };
-                let r = if2_stage_report(
+                if2_stage_report(
                     &resolved.stage,
                     &stage_dir_str,
                     &state,
                     typed.clone(),
-                    prev_loglik,
-                    prev_name,
                     &cal,
-                );
-                prev_loglik = Some(state.best_loglik);
-                r
+                )
             }
             (Some(MethodResult::Pgas(_)), _)
             | (Some(MethodResult::Pmmh(_)), _) => {
-                let r = bayesian_stage_report(
+                bayesian_stage_report(
                     &resolved.stage,
                     &resolved.method,
                     typed.clone(),
                     &cal,
-                );
-                if let Some(MethodResult::Pmmh(p)) = &typed {
-                    prev_loglik = Some(p.map_loglik);
-                }
-                r
+                )
             }
             _ => continue,
         };
         method_reports.push(report);
-        prev_stage_name_owned = Some(resolved.stage.clone());
     }
 
     // Build the table_row block. For single-fit summary the row is
@@ -3073,7 +3036,6 @@ fn bayesian_stage_report(
         initial_loglik: None,
         camdl_version: Some(version::VERSION_SHORT.to_string()),
         gate: None,
-        method_progression: None,
         parameters: Vec::new(),
         chains: Vec::new(),
         provenance: None,
@@ -3088,8 +3050,6 @@ fn if2_stage_report(
     stage_dir: &str,
     state: &FitState,
     method_result: Option<MethodResult>,
-    prev_loglik: Option<f64>,
-    prev_stage_name: Option<&str>,
     cal: &CalendarContext,
 ) -> MethodReport {
     // Gate analysis — same logic as Formatter::gate_verdict_block but
@@ -3204,12 +3164,6 @@ fn if2_stage_report(
         stale_camdl_version: stale,
     };
 
-    let method_progression = prev_loglik.zip(prev_stage_name).map(|(prev, prev_name)| MethodProgression {
-        previous_method: prev_name.to_string(),
-        previous_loglik: prev,
-        delta_nats: state.best_loglik - prev,
-    });
-
     let overall_status = match overall_pass {
         Some(true)  => "pass".to_string(),
         Some(false) => "fail".to_string(),
@@ -3242,7 +3196,6 @@ fn if2_stage_report(
         } else { None },
         camdl_version: state.camdl_version.clone(),
         gate: Some(gate),
-        method_progression,
         parameters,
         chains,
         provenance: Some(provenance),
@@ -3289,10 +3242,6 @@ fn render_md_stage(stage: &MethodReport) -> String {
     s.push_str(&format!("- chains: {}\n", stage.n_chains));
     if let Some(init) = stage.initial_loglik {
         s.push_str(&format!("- initial loglik: {:.2}\n", init));
-    }
-    if let Some(prog) = &stage.method_progression {
-        s.push_str(&format!("- vs `{}`: Δ = {:+.2} nats\n",
-            prog.previous_method, prog.delta_nats));
     }
     if let Some(prov) = &stage.provenance {
         if let Some(stale) = &prov.stale_camdl_version {
@@ -4124,7 +4073,7 @@ mod tests {
         state.chain_eval_logliks = vec![-3810.5, -3812.0, -3808.7, -3804.9, -3807.6];
         state.chain_eval_ses = vec![1.5, 1.8, 1.4, 1.1, 1.5];
         let report = if2_stage_report(
-            "scout", "/nonexistent", &state, None, None, None, &CalendarContext::default());
+            "scout", "/nonexistent", &state, None, &CalendarContext::default());
         let ids: Vec<ChainIndex> = report.chains.iter().map(|c| c.chain_id).collect();
         assert_eq!(ids, [0, 2, 3, 5, 7].map(ChainIndex).to_vec(),
             "rows carry the surviving chains' own numbers");
@@ -4144,7 +4093,7 @@ mod tests {
             [("R0".to_string(), 1.001), ("sigma".to_string(), 1.002), ("I0".to_string(), 16.5)]
                 .into_iter().collect();
         let report = if2_stage_report(
-            "scout", "/nonexistent", &state, None, None, None, &CalendarContext::default());
+            "scout", "/nonexistent", &state, None, &CalendarContext::default());
         let gate = report.gate.expect("an IF2 report has a gate");
         assert!(!gate.a_passes, "the initial-state Â is gated: {gate:?}");
         assert_eq!(gate.max_a_param.as_deref(), Some("I0"));
@@ -4154,7 +4103,7 @@ mod tests {
         state.chain_eval_logliks.clear();
         state.chain_eval_ses.clear();
         let report = if2_stage_report(
-            "scout", "/nonexistent", &state, None, None, None, &CalendarContext::default());
+            "scout", "/nonexistent", &state, None, &CalendarContext::default());
         let gate = report.gate.expect("an IF2 report has a gate");
         assert_eq!(gate.db_passes, None, "no clean-eval data, no decibans leg");
         assert_eq!(gate.overall_pass, Some(true),
@@ -4168,7 +4117,7 @@ mod tests {
         let mut state = synthetic_fit_state();
         state.chain_eval_ids = Vec::new();
         let report = if2_stage_report(
-            "scout", "/nonexistent", &state, None, None, None, &CalendarContext::default());
+            "scout", "/nonexistent", &state, None, &CalendarContext::default());
         assert!(report.chains.is_empty(),
             "no ids, no rows — a position is not a chain number: {:?}", report.chains);
     }
@@ -5826,6 +5775,9 @@ mod tests {
     /// gh#901: the per-method array is `methods`, and `stages` is absent — a
     /// consumer keyed on the old word must break loudly at the tag, not read
     /// an array that quietly stopped being there.
+    ///
+    /// v3: `method_progression` is gone. A Δ against the leaf listed before
+    /// this one compared runs whose log-likelihoods may be of different kinds.
     #[test]
     fn json_format_round_trips_and_carries_schema_version() {
         let state = synthetic_fit_state();
@@ -5835,15 +5787,17 @@ mod tests {
         let stages = discover_stages(&dir);
         let doc = build_summary_doc(&dir.to_string_lossy(), &stages, None);
         let json = serde_json::to_string_pretty(&doc).unwrap();
-        assert!(json.contains("\"version\": 2"),
-            "schema.version must be present and = 2: {}", json);
+        assert!(json.contains("\"version\": 3"),
+            "schema.version must be present and = 3: {}", json);
         // Reparse and pin the load-bearing fields.
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["schema"]["version"], 2);
+        assert_eq!(parsed["schema"]["version"], 3);
         assert_eq!(parsed["fit_dir"], dir.to_string_lossy().as_ref());
         assert_eq!(parsed["methods"][0]["name"], "if2");
         assert!(parsed.get("stages").is_none(),
             "the old `stages` key must be gone, not kept beside `methods`: {json}");
+        assert!(parsed["methods"][0].get("method_progression").is_none(),
+            "no method is compared against the leaf listed before it: {json}");
         assert!((parsed["methods"][0]["best_loglik"].as_f64().unwrap() - (-3804.9)).abs() < 1e-6);
         // Heuristic block is namespaced.
         assert!(parsed["methods"][0]["_heuristic"]["overall_status"].is_string());
@@ -6277,7 +6231,7 @@ mod tests {
         // typed result.
         let if2 = if2_stage_report(
             "scout", "/nonexistent/stage", &synthetic_fit_state(),
-            Some(synthetic_if2_result()), None, None, &cal,
+            Some(synthetic_if2_result()), &cal,
         );
         let j = serde_json::to_value(&if2).unwrap();
         assert_eq!(j["loglik_type"], serde_json::json!("if2"),
@@ -6293,7 +6247,7 @@ mod tests {
 
         // Terminal IF2 headline.
         let block = fmt.stage_block(
-            "", "scout", "/nonexistent/stage", &synthetic_fit_state(), None, None, None,
+            "", "scout", "/nonexistent/stage", &synthetic_fit_state(), None,
         );
         let line = block.text.lines().find(|l| l.contains("best loglik:"))
             .expect("IF2 block has a best-loglik headline");
