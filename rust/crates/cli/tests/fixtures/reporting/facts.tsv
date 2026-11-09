@@ -1,0 +1,235 @@
+# What each fixture's output shows, as (label, value, stream) facts.
+#
+# Read by cli/tests/reporting_facts.rs, which runs every fixture below in a
+# fresh copy of this directory and fails on any fact it cannot find. A change
+# to what camdl shows is therefore an edit to this file, made in the same
+# commit as the change, with the reason in the commit message. Hashes,
+# timings and absolute paths are not facts and are not recorded.
+#
+# Columns, tab-separated:
+#   run     the command that shows the fact (the list is in the test file)
+#   stream  stdout or stderr
+#   scope   line: the value is on a line that contains the label
+#           block: the value is on a line containing the label, or on a later
+#                  line before the next blank line (the label heads a section)
+#   label   text that names the fact
+#   value   the fact itself
+#
+# A label may match several lines; the fact holds if any of them carries the
+# value. The fixtures are deliberately small runs, not the tutorial's fits:
+# pmmh_stuck leaves two of four chains at the proposal-scale floor, fail has
+# every chain refused at its start. cases.tsv is
+# `camdl simulate sir.camdl --params truth.toml --seed 3 --obs-only cases.tsv`.
+run	stream	scope	label	value
+stuck	stderr	line	fit:	pmmh_stuck.toml (method=pmmh)
+stuck	stderr	line	model:	sir.camdl
+stuck	stderr	line	estimate:	beta, gamma
+stuck	stderr	line	fixed:	rho, N0
+stuck	stderr	line	starts:	from_prior (one independent draw per chain)
+stuck	stderr	line	starts:	default: every estimated parameter declares a prior
+stuck	stderr	line	output:	results/fits/pmmh_stuck-
+stuck	stderr	line	── method:	pmmh
+stuck	stderr	line	Acceptance rates degrade for long observation series	(T > 500)
+stuck	stderr	line	note: `starts = "from_prior"`	does not set where the chains begin for: beta, gamma
+stuck	stderr	line	pfilter noise check	(20 particles, 20 evaluation pairs)
+stuck	stderr	line	log L̂ mean	-69.3
+stuck	stderr	line	log L̂ mean	sd σ = 5.42
+stuck	stderr	line	log L̂ ratio spread s	8.03 ±1.30
+stuck	stderr	line	acceptance ceiling 2·Φ(-s/2)	<0.1%
+stuck	stderr	line	target 0.234 + 0.206/d	33.7% (d = 2)
+stuck	stderr	line	s would have to fall below	1.92
+stuck	stderr	line	✓ cases	incidence(infection)
+stuck	stderr	line	✓ cases	Poisson
+stuck	stderr	line	pmmh:	4 chains × 1500 steps × 20 particles
+stuck	stderr	line	pmmh:	burn_in=1000, thin=10, adapt=true
+stuck	stderr	line	proposal_sd (transformed)	beta=0.2500, gamma=0.2500
+stuck	stderr	line	the adaptive proposal scale sat at its lower bound	(lambda = 4.5e-5)
+stuck	stderr	line	warm-up steps: no scale reached the	for 331 of 1000
+stuck	stderr	line	warm-up steps: no scale reached the	for 415 of 1000
+stuck	stderr	line	target acceptance, so the proposal is far narrower	33.7%
+stuck	stderr	line	adaptive proposal scale at end of warm-up	lambda = 4.540e-5
+stuck	stderr	line	adaptive proposal scale at end of warm-up	lambda = 5.715e-1
+stuck	stderr	line	adaptive proposal scale at end of warm-up	lambda = 9.013e-1
+stuck	stderr	line	chain 0:	45.0% ✓
+stuck	stderr	line	chain 1:	0.0% ✗ too low
+stuck	stderr	line	chain 2:	0.0% ✗ too low
+stuck	stderr	line	chain 3:	27.2% ✓
+stuck	stderr	line	R̂ (rank-normalized split, Vehtari et al. 2021) / ESS	R̂ threshold 1.05
+stuck	stderr	line	beta         Rhat=	3.479 ✗ ESS bulk=5 tail=— (2.7% of 200 draws)
+stuck	stderr	line	gamma        Rhat=	2.157 ✗ ESS bulk=6 tail=5 (3.2% of 200 draws)
+stuck	stderr	line	R̂ = max(bulk 3.479, folded 2.317)	classic 16.647; the bulk half is larger
+stuck	stderr	line	R̂ = max(bulk 2.157, folded 1.610)	classic 2.675; the bulk half is larger
+stuck	stderr	line	per-chain ESS	[50, 1, 1, 24]
+stuck	stderr	line	per-chain ESS	[50, 1, 1, 27]
+stuck	stderr	line	draws.tsv:	200 posterior samples (all 4 params)
+stuck	stderr	line	chain acceptance rate	0.0% is outside healthy range [15%, 50%] (random-walk MH)
+stuck	stderr	line	rank-normalized split R̂ for 'beta'	3.479 (threshold 1.100)
+stuck	stderr	line	rank-normalized split R̂ for 'gamma'	2.157 (threshold 1.100)
+stuck	stderr	line	error(s)	4 error(s), 0 warning(s), 0 info
+stuck	stderr	line	pmmh complete in	(6000 PF evaluations
+stuck	stderr	line	loglik at the highest log-posterior draw	-44.3 (chain 0)
+stuck	stderr	line	stored pmmh	results/fits/pmmh_stuck-
+stuck	stderr	block	pfilter noise check	⚠ ceiling below target
+stuck	stderr	block	acceptance rates:	chain 1: 0.0% ✗ too low
+stuck.summary	stdout	line	results/fits/pmmh_stuck-	/
+stuck.summary	stdout	line	Closed SIR with daily reported cases	Fitted to one stream
+stuck.summary	stdout	line	pmmh · pmmh	4 chains · 200 draws · loglik -44.3 at the highest log-posterior draw
+stuck.summary	stdout	line	seeded from:	from_prior (one independent draw per chain)
+stuck.summary	stdout	line	✗ NOT converged	the chains are in different places
+stuck.summary	stdout	line	max R̂	3.479 (beta), threshold 1.05
+stuck.summary	stdout	line	parameters above threshold	2 of 2 parameters above threshold · 1 outlier chain · 0/200 forkable
+stuck.summary	stdout	line	beta                   0.7425	5          —    3.479
+stuck.summary	stdout	line	gamma                  0.1317	6          5    2.157
+stuck.summary	stdout	line	beta              3.479	2.317    16.647   bulk   50 1 1 24
+stuck.summary	stdout	line	gamma             2.157	1.610     2.675   bulk   50 1 1 27
+stuck.summary	stdout	line	acceptance =	0.180 (mean across chains)
+stuck.summary	stdout	line	ESS/iter =	0.00274  (min-param ESS 5 / 2000 raw sampling iters)
+stuck.summary	stdout	line	      0  	-44.66     0.67
+stuck.summary	stdout	line	      1  	-158.12    -0.67
+stuck.summary	stdout	line	      2  	-679.42    -6.85   ← outlier
+stuck.summary	stdout	line	      3  	-44.22     0.68
+stuck.summary	stdout	line	⚠ chain 1:	ONE distinct parameter vector across 50 retained draws
+stuck.summary	stdout	line	⚠ chain 2:	ONE distinct parameter vector across 50 retained draws
+stuck.summary	stdout	line	⚠ chains disagree	(chain 2 — log_likelihood far from the rest)
+converged	stderr	line	fit:	pmmh_converged.toml (method=pmmh)
+converged	stderr	line	log L̂ mean	-65.6
+converged	stderr	line	log L̂ mean	sd σ = 2.05
+converged	stderr	line	log L̂ ratio spread s	2.10 ±0.34
+converged	stderr	line	acceptance ceiling 2·Φ(-s/2)	29.5%
+converged	stderr	line	? verdict unresolved	s = 2.10 ± 0.34 (1 SE) straddles the crossover s* = 1.92
+converged	stderr	block	this fit sums over only	14 observation times
+converged	stderr	line	pmmh:	4 chains × 2000 steps × 100 particles
+converged	stderr	line	chain 0:	start 1 of 10 refused by the filter
+converged	stderr	line	chain 2:	start 1 of 10 refused by the filter
+converged	stderr	line	adaptive proposal scale at end of warm-up	lambda = 1.049e0
+converged	stderr	line	adaptive proposal scale at end of warm-up	lambda = 7.449e-1
+converged	stderr	line	adaptive proposal scale at end of warm-up	lambda = 8.949e-1
+converged	stderr	line	adaptive proposal scale at end of warm-up	lambda = 9.223e-1
+converged	stderr	line	chain 0:	30.6% ✓
+converged	stderr	line	chain 1:	31.2% ✓
+converged	stderr	line	chain 2:	36.2% ✓
+converged	stderr	line	chain 3:	30.6% ✓
+converged	stderr	line	beta         Rhat=	0.998 ✓ ESS bulk=324 tail=342 (81.1% of 400 draws)
+converged	stderr	line	gamma        Rhat=	1.001 ✓ ESS bulk=344 tail=337 (85.9% of 400 draws)
+converged	stderr	line	draws.tsv:	400 posterior samples (all 4 params)
+converged	stderr	line	pmmh complete in	(8000 PF evaluations
+converged	stderr	line	loglik at the highest log-posterior draw	-44.3 (chain 3)
+converged	stderr	line	stored pmmh	results/fits/pmmh_converged-
+converged.summary	stdout	line	pmmh · pmmh	4 chains · 400 draws · loglik -44.3
+converged.summary	stdout	line	✓ converged	✓ converged
+converged.summary	stdout	line	max R̂	1.001 (gamma), threshold 1.05
+converged.summary	stdout	line	parameters above threshold	0 of 2 parameters above threshold · no outlier chains · 0/400 forkable
+converged.summary	stdout	line	gamma                  0.1172	344        337    1.001
+converged.summary	stdout	line	beta                   0.5795	324        342    0.998
+converged.summary	stdout	line	gamma             1.001	1.000     0.997   bulk   69 100 100 85
+converged.summary	stdout	line	beta              0.998	0.997     0.996   bulk   49 87 79 66
+converged.summary	stdout	line	acceptance =	0.322 (mean across chains)
+converged.summary	stdout	line	ESS/iter =	0.0811  (min-param ESS 324 / 4000 raw sampling iters)
+converged.summary	stdout	line	      1  	-44.59     2.95
+resumed	stderr	line	fit:	pmmh_resumed.toml (method=pmmh)
+resumed	stderr	line	chain 0:	resuming from step 2000
+resumed	stderr	line	chain 3:	resuming from step 2000
+resumed	stderr	line	pmmh:	4 chains × 2500 steps × 100 particles
+resumed	stderr	line	resuming from step	2000...
+resumed	stderr	line	adaptive proposal scale at end of warm-up	lambda = 1.049e0
+resumed	stderr	line	adaptive proposal scale at end of warm-up	lambda = 9.223e-1
+resumed	stderr	line	chain 0:	10.5% ✗ too low
+resumed	stderr	line	chain 1:	10.9% ✗ too low
+resumed	stderr	line	chain 2:	11.9% ✗ too low
+resumed	stderr	line	chain 3:	10.1% ✗ too low
+resumed	stderr	line	beta         Rhat=	1.001 ✓ ESS bulk=187 tail=192 (93.7% of 200 draws)
+resumed	stderr	line	gamma        Rhat=	1.019 ✓ ESS bulk=173 tail=194 (86.4% of 200 draws)
+resumed	stderr	line	draws.tsv:	200 posterior samples (all 4 params)
+resumed	stderr	line	chain acceptance rate	10.5% is outside healthy range [15%, 50%]
+resumed	stderr	line	chain acceptance rate	10.1% is outside healthy range [15%, 50%]
+resumed	stderr	line	error(s)	0 error(s), 4 warning(s), 0 info
+resumed	stderr	line	pmmh complete in	(10000 PF evaluations
+resumed	stderr	line	stored pmmh	results/fits/pmmh_resumed-
+pgas	stderr	line	fit:	pgas.toml (method=pgas)
+pgas	stderr	line	── method:	pgas
+pgas	stderr	line	beta         LogNormal	(mu=-1.0000, sigma=0.5000) → median=0.4
+pgas	stderr	line	gamma        LogNormal	(mu=-2.0000, sigma=0.5000) → median=0.1
+pgas	stderr	line	pgas:	2 chains × 200 sweeps × 50 particles, burn_in=100, thin=5
+pgas	stderr	line	chain starts:	starts = from_prior
+pgas	stderr	line	estimated output:	20 posterior samples per chain
+pgas	stderr	line	saved latent paths:	20 per chain, 20 of them forkable
+pgas	stderr	line	simulate_reference LL sanity check	-443.2 (finite ✓)
+pgas	stderr	line	simulate_reference LL sanity check	-160.5 (finite ✓)
+pgas	stderr	line	WARNING:	2 divergent transitions during burn-in
+pgas	stderr	line	WARNING:	1 divergent transitions during burn-in
+pgas	stderr	line	chain 0 done:	acceptance: [beta=88%, gamma=88%]
+pgas	stderr	line	chain 1 done:	acceptance: [beta=90%, gamma=90%]
+pgas	stderr	line	acceptance rates	(NUTS block; ~80% is the target)
+pgas	stderr	line	chain 0:	beta=88%   gamma=88%
+pgas	stderr	line	chain 1:	beta=90%   gamma=90%
+pgas	stderr	line	beta         Rhat=	1.753 ✗ ESS bulk=5 tail=50 (12.2% of 40 draws)
+pgas	stderr	line	gamma        Rhat=	2.150 ✗ ESS bulk=4 tail=28 (10.5% of 40 draws)
+pgas	stderr	line	per-chain ESS	[17, 20]
+pgas	stderr	line	prefix (mean b0-b4):	0.972   gradient (b9 - b0): 0.062   aggregate trajectory_renewal: 0.961
+pgas	stderr	line	ancestor-sampling acceptance	0.7626 (379/497 proposals)
+pgas	stderr	line	mean ESS over sweeps, by observation:	min 22.4   10% quantile 27.3   median 39.1
+pgas	stderr	line	of 14 observations starved	0 of 14
+pgas	stderr	line	no frozen-disagree cell	the chains' paths mix everywhere
+pgas	stderr	line	draws.tsv:	40 posterior samples (all 4 params)
+pgas	stderr	line	rank-normalized split R̂ for 'beta'	1.753 (threshold 1.100)
+pgas	stderr	line	rank-normalized split R̂ for 'gamma'	2.150 (threshold 1.100)
+pgas	stderr	line	error(s)	2 error(s), 0 warning(s), 0 info
+pgas	stderr	line	cross-chain diagonal dominance:	77.1 nats
+pgas	stderr	line	cross-chain asymmetry:	10.3 nats
+pgas	stderr	line	best complete-data ll:	-114.9 (chain 1)
+pgas	stderr	line	stored pgas	results/fits/pgas-
+if2	stderr	line	fit:	if2.toml (method=if2)
+if2	stderr	line	running	4 chains × 200 particles × 20 iterations, cooling=0.9, dt=1
+if2	stderr	line	beta         log_interval	[0.05, 2]  start=0.4928 z=0.49  step(z)=0.050 ≈ rw_sd 0.0146 at the midpoint (auto)
+if2	stderr	line	gamma        log_interval	[0.02, 1]  start=0.2125 z=0.42  step(z)=0.050 ≈ rw_sd 0.0069 at the midpoint (auto)
+if2	stderr	line	parameters using auto rw_sd	2/2
+if2	stderr	line	cooling:	cf50=0.90, reached at iter 50 (target), over a 20-iteration run × 14 observations
+if2	stderr	line	chain 0: ll=	-44.1
+if2	stderr	line	best chain:	3 (loglik=-44.15 ± 0.02)
+if2	stderr	line	chain clean logliks:	[-44.2, -44.2, -44.2, -44.2]
+if2	stderr	line	Â (IF2 chain agreement)	threshold 1.01
+if2	stderr	line	beta         Â=	1.171 ✗
+if2	stderr	line	gamma        Â=	1.136 ✗
+if2	stderr	line	dt = 0.5000	ll = -45.63 ± 0.01   Δ = -1.45 nats
+if2	stderr	line	⚠ MARGINAL:	leg-1 |Δ| = 1.45 nats < τ = 2.00
+if2	stderr	line	Auto step for 'beta'	0.0500 in its transformed coordinate
+if2	stderr	line	parameters have Â > 1.1	2/2 parameters have Â > 1.1 (max 1.17)
+if2	stderr	line	error(s)	0 error(s), 1 warning(s), 2 info
+if2	stderr	line	best ll=	-44.2 (chain 3)
+if2	stderr	line	stored if2	results/fits/if2-
+nlopt	stderr	line	fit:	nlopt.toml (method=nl-sbplx)
+nlopt	stderr	line	── method:	nl-sbplx
+nlopt	stderr	line	ℹ nl-sbplx	(Subspace simplex; robust to boundary non-smoothness): deterministic MLE on the ODE-skeleton likelihood.
+nlopt	stderr	line	status:	2 converged, 0 max-eval, 0 failed (of 2)
+nlopt	stderr	line	chain-agreement:	rel range = 0.00% bound
+nlopt	stderr	line	chain-agreement:	✓
+nlopt	stderr	line	loglik-eval:	Δ = 0.0 dB / threshold 30 dB
+nlopt	stderr	line	dt-convergence at θ̂:	PASS
+nlopt	stderr	line	stored nl-sbplx	results/fits/nlopt-
+fail	stderr	line	note: `starts = single`	puts all 2 chains at one point
+fail	stderr	line	starts:	single (every chain at one point)
+fail	stderr	line	pfilter noise check	(2 particles, 20 evaluation pairs)
+fail	stderr	line	log L̂ mean	-inf
+fail	stderr	line	⚠ no noise measurement	the filter ruled out both the base θ and the proposed θ'
+fail	stderr	line	pmmh:	2 chains × 200 steps × 2 particles, burn_in=100, thin=10, adapt=true
+fail	stderr	line	chain 0:	✗ BadInit
+fail	stderr	line	chain 1:	✗ BadInit
+fail	stderr	line	ran 0 of 2 chains	(2 skipped via BadInit; see diagnostics below)
+fail	stderr	line	R̂ — not assessed:	all 2 chains started at one point (starts = single)
+fail	stderr	line	beta         not reported	R̂ needs at least 2 chains; got 0
+fail	stderr	line	Chain 0 starting parameters were pathological	Init: [beta=0.5000, gamma=0.2000]
+fail	stderr	line	Chain 1 starting parameters were pathological	Init: [beta=0.5000, gamma=0.2000]
+fail	stderr	line	error(s)	2 error(s), 0 warning(s), 0 info
+fail	stderr	line	error running pmmh:	all 2 chains failed init-eval with PFDegenerate
+compare	stdout	line	@converged	14   -44.24   -0.03   0.967    0.34   -0.1 dB, within noise   3.583   +0.061        1.00
+compare	stdout	line	@if2	14   -44.20       —       —       —                       —   3.521        —        0.93
+compare	stdout	line	Scored steps:	14 (t0=0).  Baseline: @if2.
+compare	stdout	line	filter-noise MC SE of elpd:	@if2 ±0.03, @converged ±0.03
+compare	stdout	line	lag-1 autocorrelation	@converged +0.14
+compare	stderr	line	compare: if2_	5 filter passes (1 draw(s) × 5 replicate(s), 1000 particles each
+compare	stderr	line	compare: pmmh_converged_	5 filter passes (1 draw(s) × 5 replicate(s), 1000 particles each
+pfilter	stdout	line	-44.0696	-44.0696
+pfilter	stderr	line	pfilter: objective:	full likelihood (if2.toml does not set ic_free = true)
+pfilter	stderr	line	pfilter: bound streams:	cases(poisson)
+pfilter	stderr	line	pfilter:	14 observation boundaries × 1 streams, 200 particles, dt=1, seed=1
+pfilter	stderr	line	stored	results/pfilters/sir-

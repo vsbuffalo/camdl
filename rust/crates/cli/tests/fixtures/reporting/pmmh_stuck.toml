@@ -1,0 +1,22 @@
+[model]
+camdl = "sir.camdl"
+
+[data.observations]
+cases = "cases.tsv"
+
+[estimate]
+beta  = { start = 0.5 }
+gamma = { start = 0.2 }
+
+[fixed]
+rho = 0.5
+N0  = 2000
+
+[method]
+algorithm  = "pmmh"
+backend    = "chain_binomial"
+chains     = 4
+particles  = 20
+iterations = 1500
+burn_in    = 1000
+thin       = 10
