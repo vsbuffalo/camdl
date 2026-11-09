@@ -232,6 +232,18 @@ pub struct Task {
 }
 
 impl Task {
+    /// A whole line said while the task runs (a chain that finished with
+    /// something to report). Above the bars on a terminal, so it does not tear
+    /// them; through [`crate::out::LiveHandle`] off one.
+    pub fn live_line(&self, line: &str) {
+        match self.mode {
+            Resolved::Pretty => {
+                let _ = self._mp.println(line);
+            }
+            Resolved::Plain | Resolved::None => crate::out::live().chain_finished(line),
+        }
+    }
+
     /// Advance by `n`. `Pretty`: redraw. `Plain`: a throttled
     /// `label pos/len <metric>` log line (position is tracked even against a
     /// hidden target). `None`: no-op.

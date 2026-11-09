@@ -48,15 +48,12 @@ stuck	stderr	line	the adaptive proposal scale sat at its lower bound	(lambda = 4
 stuck	stderr	line	warm-up steps: no scale reached the	for 415 and 331 of 1000
 stuck	stderr	line	! chains 1, 2:	the adaptive proposal scale sat at its lower bound
 stuck	stderr	line	target acceptance, so the proposal is far narrower	33.7%
-stuck	stderr	line	adaptive proposal scale at end of warm-up	lambda = 4.540e-5
-stuck	stderr	line	chain 1: adaptive proposal scale at end of warm-up	lambda = 4.540e-5
-stuck	stderr	line	chain 2: adaptive proposal scale at end of warm-up	lambda = 4.540e-5
-stuck	stderr	line	chain 0: adaptive proposal scale at end of warm-up	lambda = 5.715e-1
-stuck	stderr	line	chain 3: adaptive proposal scale at end of warm-up	lambda = 9.013e-1
-stuck	stderr	line	chain 0:	45.0% ✓
-stuck	stderr	line	chain 1:	0.0% ✗ too low
-stuck	stderr	line	chain 2:	0.0% ✗ too low
-stuck	stderr	line	chain 3:	27.2% ✓
+stuck	stderr	block	acceptance rates:	0           45.0% ✓                   5.715e-1        0 / 1000
+stuck	stderr	block	acceptance rates:	1            0.0% ✗ too low           4.540e-5      415 / 1000
+stuck	stderr	block	acceptance rates:	2            0.0% ✗ too low           4.540e-5      331 / 1000
+stuck	stderr	block	acceptance rates:	3           27.2% ✓                   9.013e-1        0 / 1000
+stuck	stderr	line	chain 1: proposal scale at its floor	for 415 of 1000 warm-up steps (details at the end)
+stuck	stderr	line	chain 2: proposal scale at its floor	for 331 of 1000 warm-up steps (details at the end)
 stuck	stderr	line	R̂ (rank-normalized split, Vehtari et al. 2021) / ESS	R̂ threshold 1.05
 stuck	stderr	line	beta         Rhat=	3.479 ✗ ESS bulk=5 tail=— (2.7% of 200 draws)
 stuck	stderr	line	gamma        Rhat=	2.157 ✗ ESS bulk=6 tail=5 (3.2% of 200 draws)
@@ -73,7 +70,6 @@ stuck	stderr	line	pmmh complete in	(6000 PF evaluations
 stuck	stderr	line	loglik at the highest log-posterior draw	-44.3 (chain 0)
 stuck	stderr	line	stored pmmh	results/fits/pmmh_stuck-
 stuck	stderr	block	pfilter noise check	⚠ ceiling below target
-stuck	stderr	block	acceptance rates:	chain 1: 0.0% ✗ too low
 stuck.summary	stdout	line	results/fits/pmmh_stuck-	/
 stuck.summary	stdout	line	Closed SIR with daily reported cases	Fitted to one stream
 stuck.summary	stdout	line	pmmh · pmmh	4 chains · 200 draws · loglik -44.3 at the highest log-posterior draw
@@ -104,14 +100,10 @@ converged	stderr	block	this fit sums over only	14 observation times
 converged	stderr	line	pmmh:	4 chains × 2000 steps × 100 particles
 converged	stderr	line	chain 0:	start 1 of 10 refused by the filter
 converged	stderr	line	chain 2:	start 1 of 10 refused by the filter
-converged	stderr	line	adaptive proposal scale at end of warm-up	lambda = 1.049e0
-converged	stderr	line	adaptive proposal scale at end of warm-up	lambda = 7.449e-1
-converged	stderr	line	adaptive proposal scale at end of warm-up	lambda = 8.949e-1
-converged	stderr	line	adaptive proposal scale at end of warm-up	lambda = 9.223e-1
-converged	stderr	line	chain 0:	30.6% ✓
-converged	stderr	line	chain 1:	31.2% ✓
-converged	stderr	line	chain 2:	36.2% ✓
-converged	stderr	line	chain 3:	30.6% ✓
+converged	stderr	block	acceptance rates:	0           30.6% ✓                   8.949e-1        0 / 1000
+converged	stderr	block	acceptance rates:	1           31.2% ✓                   7.449e-1        0 / 1000
+converged	stderr	block	acceptance rates:	2           36.2% ✓                   9.223e-1        0 / 1000
+converged	stderr	block	acceptance rates:	3           30.6% ✓                    1.049e0        0 / 1000
 converged	stderr	line	beta         Rhat=	0.998 ✓ ESS bulk=324 tail=342 (81.1% of 400 draws)
 converged	stderr	line	gamma        Rhat=	1.001 ✓ ESS bulk=344 tail=337 (85.9% of 400 draws)
 converged	stderr	line	draws.tsv:	400 posterior samples (all 4 params)
@@ -134,12 +126,10 @@ resumed	stderr	line	chain 0:	resuming from step 2000
 resumed	stderr	line	chain 3:	resuming from step 2000
 resumed	stderr	line	pmmh:	4 chains × 2500 steps × 100 particles
 resumed	stderr	line	chain 1: resuming from step	2000
-resumed	stderr	line	adaptive proposal scale at end of warm-up	lambda = 1.049e0
-resumed	stderr	line	adaptive proposal scale at end of warm-up	lambda = 9.223e-1
-resumed	stderr	line	chain 0:	10.5% ✗ too low
-resumed	stderr	line	chain 1:	10.9% ✗ too low
-resumed	stderr	line	chain 2:	11.9% ✗ too low
-resumed	stderr	line	chain 3:	10.1% ✗ too low
+resumed	stderr	block	acceptance rates:	0           10.5% ✗ too low           8.949e-1        0 / 1000
+resumed	stderr	block	acceptance rates:	1           10.9% ✗ too low           7.449e-1        0 / 1000
+resumed	stderr	block	acceptance rates:	2           11.9% ✗ too low           9.223e-1        0 / 1000
+resumed	stderr	block	acceptance rates:	3           10.1% ✗ too low            1.049e0        0 / 1000
 resumed	stderr	line	beta         Rhat=	1.001 ✓ ESS bulk=187 tail=192 (93.7% of 200 draws)
 resumed	stderr	line	gamma        Rhat=	1.019 ✓ ESS bulk=173 tail=194 (86.4% of 200 draws)
 resumed	stderr	line	draws.tsv:	200 posterior samples (all 4 params)

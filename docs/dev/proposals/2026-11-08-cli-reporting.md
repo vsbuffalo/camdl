@@ -848,3 +848,48 @@ Decided during step 6:
   `warmup`, `findings` and `verdict` (schema version 4). The calendar context a
   report's date annotations need is passed to `build_method_report` beside the
   facts, since it belongs to the fit, not the method.
+
+The layout the reporting code lands in:
+
+| Path                                        | Holds                                                                                      |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `cli/src/out/`                              | the stream layer: how anything reaches the terminal; knows nothing about fits              |
+| `out/mod.rs`                                | `Out`, `LiveHandle`, `CommandError`                                                        |
+| `out/paint.rs`                              | `Style`, `Span`, `Line`, `Painter`, `Stream`; `style.rs` keeps only the `--help` colouring |
+| `out/notice.rs`, `progress.rs`, `status.rs` | moved from `cli/src/`                                                                      |
+| `cli/src/fit/report/`                       | the fit report: what a method run shows; never writes, returns `Line`s                     |
+| `report/facts.rs`                           | `MethodFacts`, `RunHeader`, `Check`, `ChainWarmup`, `ChainDetail`                          |
+| `report/build.rs`                           | `build_method_report` → `MethodOutcome`                                                    |
+| `report/render.rs`                          | `render_report`, `View`                                                                    |
+| `report/findings.rs`                        | the diagnostics block                                                                      |
+
+`fit_summary.rs` ends as loading plus choosing a view, with no rendering of its
+own. `DiagnosticKind`, `merge_key`, `render_entry` and `fmt_rate` stay in `sim`.
+Files move in commits of moves only.
+
+Steps 7 and 8 as landed:
+
+- **Step 8 landed before the rest of step 7.** Plain progress lines are written
+  whole through `out::LiveHandle`, not `log::info!`, so they carry no timestamp
+  or module path, and `--progress` no longer raises the log filter (GH #14's
+  option 2). The `output:` line is relative to the working directory when the
+  fit lands under it, else absolute (`report::display_path`). PMMH's caveat
+  carries `This series has T = n.`; because the series is known only once its
+  data are bound, PMMH says its caveat at the start of `pmmh::run_method`, after
+  the starts note rather than before it, and records `plan.series_len` for the
+  loader's `Check::MethodCaveat`.
+- **Step 7, PMMH's run end.** A chain that finishes with its scale at the floor
+  says so at once
+  (`chain k: proposal scale at its floor for n of m warm-up steps
+  (details at the end)`),
+  decided by the predicate that pushes the finding after the join; on a terminal
+  the line prints above the bars. The acceptance section is one table in chain
+  order with the scale and floor count beside each rate
+  (`report::render::acceptance_table`), replacing the per-chain λ lines. The
+  completion line drops the leaf path, which the `stored` line carries.
+- **Not yet landed from step 7**: `Out` itself, `MethodOutcome`, `render_report`
+  with its two views, the verdict section and R̂ legend in `fit run`, `fit run`
+  building `MethodFacts` from memory, the run-equals-loader test,
+  `fit summary`'s text output on `render_report`, `ChainDetail` in `facts.rs`,
+  and the deletion of `ConvergenceDiagnostics::report`'s printing and the PGAS
+  acceptance printer.

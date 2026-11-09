@@ -116,14 +116,18 @@ fn every_new_pmmh_record_matches_the_line_the_run_printed() {
         "chains {}: the adaptive proposal scale sat at its lower bound", chains.join(", "))), "{stderr}");
     assert!(stderr.contains(&format!(
         "for {} of 1000 warm-up steps: no scale reached the", floors.join(" and "))), "{stderr}");
-    let mut lambdas: Vec<String> = warmup.iter()
-        .map(|w| format!("lambda = {:.3e}", w["final_scale"].as_f64().unwrap())).collect();
-    let mut printed_lambdas: Vec<String> = stderr.lines()
-        .filter(|l| l.contains("adaptive proposal scale at end of warm-up:"))
-        .map(|l| after(l, "warm-up:").to_string()).collect();
-    lambdas.sort();
-    printed_lambdas.sort();
-    assert_eq!(lambdas, printed_lambdas);
+    // Each chain's row of the acceptance table carries its recorded scale and
+    // floor count.
+    let table: Vec<&str> = stderr.lines()
+        .skip_while(|l| *l != "acceptance rates:").skip(2)
+        .take_while(|l| !l.trim().is_empty()).collect();
+    assert_eq!(table.len(), 4, "{stderr}");
+    for (row, w) in table.iter().zip(warmup) {
+        let cells: Vec<&str> = row.split_whitespace().collect();
+        assert_eq!(cells[0], w["chain"].to_string(), "{row}");
+        assert!(row.contains(&format!("{:.3e}", w["final_scale"].as_f64().unwrap())), "{row}");
+        assert!(row.ends_with(&format!("{} / {}", w["steps_at_scale_floor"], w["warmup_steps"])), "{row}");
+    }
     for w in warmup {
         assert_eq!(w["warmup_steps"], 1000);
         assert!(stderr.contains(&format!("{:.1}% target acceptance", w["target_accept"].as_f64().unwrap() * 100.0))

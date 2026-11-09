@@ -15,7 +15,7 @@ use crate::cas::iso8601_utc;
 use sim::inference::{
     if2::EstimatedParam,
     pmmh::{run_pmmh, Prior, PMMHConfig, PMMHResult, PMMHResumeState},
-    diagnostic::{fmt_rate, DiagnosticCollector, DiagnosticKind, HintContext},
+    diagnostic::{DiagnosticCollector, DiagnosticKind, HintContext},
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -746,6 +746,15 @@ pub fn run_method(
             // on the borrowed Task here). The `acceptance rates:` report below
             // carries the per-chain summary.
             task.set(crate::out::progress::mcmc(result.map_loglik, result.acceptance_rate));
+            // Said now, by the same predicate that pushes the finding after the
+            // join, so a line here is exactly a floor finding at the end.
+            if let Some(DiagnosticKind::ScaleAtFloor { steps_at_floor, warmup_steps, .. }) =
+                scale_at_floor(chain_id, &result)
+            {
+                task.live_line(&format!(
+                    "  chain {}: proposal scale at its floor for {steps_at_floor} of {warmup_steps} \
+                     warm-up steps (details at the end)", ChainIndex(chain_id)));
+            }
 
             // Save resume state for future --resume
             let resume_path = chain_dir.join("resume_state.bin");
@@ -775,14 +784,6 @@ pub fn run_method(
         retry_refused.into_inner().unwrap(),
     );
     super::runner::record_chain_starts(method_dir, &config, &drawn);
-
-    // The scale each chain's kept draws were proposed under, in chain order.
-    if adapt {
-        for (chain_id, r) in &results {
-            eprintln!("  chain {}: adaptive proposal scale at end of warm-up: lambda = {:.3e}",
-                ChainIndex(*chain_id), r.final_scale);
-        }
-    }
 
     // gh#110. Skip + continue: surface "ran K of N chains" so the
     // user knows downstream R̂/ESS exclude skipped chains. This
@@ -819,18 +820,13 @@ pub fn run_method(
     // coloring, the finding and the message a user reads cannot disagree about
     // where the band starts (gh#299 item 3).
     let kernel = sim::inference::diagnostic::AcceptanceKernel::RandomWalk;
-    let (lo, hi) = kernel.healthy_band();
-    eprintln!("\nacceptance rates:");
+    // The table: each chain's rate, and the scale its draws were proposed
+    // under with its warm-up's floor count (`report::render::acceptance_table`).
+    let rates: std::collections::BTreeMap<usize, f64> =
+        results.iter().map(|(c, r)| (*c, r.acceptance_rate)).collect();
+    let _ = crate::out::paint::stderr().write(&mut std::io::stderr(),
+        &super::report::render::acceptance_table(&rates, &warmup, kernel));
     for (chain_id, result) in &results {
-        let p = crate::out::paint::stderr();
-        let status = if result.acceptance_rate < lo {
-            p.paint("✗ too low", Style::Err)
-        } else if result.acceptance_rate > hi {
-            p.paint("~ high", Style::Warn)
-        } else {
-            p.paint("✓", Style::Ok)
-        };
-        eprintln!("  chain {}: {} {}", ChainIndex(*chain_id), fmt_rate(result.acceptance_rate), status);
         if let Some(d) = sim::inference::diagnostic::acceptance_diagnostic(
             Some(*chain_id), result.acceptance_rate, None, kernel)
         {
@@ -1102,7 +1098,7 @@ pub fn run_method(
     super::report::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
     super::write_diagnostics(&collector, method_dir)?;
 
-    eprintln!("\n{}", completion_line(method_name, is_ode_mh, &cost, method_dir));
+    eprintln!("\n{}", completion_line(method_name, is_ode_mh, &cost));
     eprintln!("  loglik at the highest log-posterior draw (natural-scale prior, no Jacobian): {:.1} (chain {})", map_result.map_loglik, ChainIndex(*map_chain));
 
     Ok(())
@@ -1265,16 +1261,13 @@ fn write_summary(
 /// estimate for PMMH, the deterministic ODE marginal likelihood for `mh`.
 /// The per-evaluation time is wall time per evaluation within one chain, the
 /// chains running in parallel.
-fn completion_line(
-    method_name: &str,
-    is_ode_mh: bool,
-    cost: &SamplingCost,
-    method_dir: &Path,
-) -> String {
+///
+/// The leaf's path is not on this line: the `stored` milestone that closes the
+/// run carries it.
+fn completion_line(method_name: &str, is_ode_mh: bool, cost: &SamplingCost) -> String {
     let what = if is_ode_mh { "ODE likelihood evaluations" } else { "PF evaluations" };
-    format!("{method_name} complete in {:.1}s ({} {what}, {:.1}ms/eval): {}/",
-        cost.sampling_seconds, cost.evaluations, cost.ms_per_evaluation,
-        method_dir.display())
+    format!("{method_name} complete in {:.1}s ({} {what}, {:.1}ms/eval)",
+        cost.sampling_seconds, cost.evaluations, cost.ms_per_evaluation)
 }
 
 /// `Err` naming every estimated parameter whose prior log-density is not
@@ -1315,15 +1308,15 @@ mod tests {
     /// did.
     #[test]
     fn completion_line_names_the_method_and_its_evaluations() {
-        let dir = Path::new("out/mh-1");
-        let mh = completion_line("mh", true, &sampling_cost(0.3, 1, 3000), dir);
+        let mh = completion_line("mh", true, &sampling_cost(0.3, 1, 3000));
         assert!(mh.starts_with("mh complete in 0.3s"), "{mh}");
         assert!(!mh.contains("pmmh") && !mh.contains("PF"), "{mh}");
         assert!(mh.contains("3000 ODE likelihood evaluations"), "{mh}");
 
-        let pmmh = completion_line("pmmh", false, &sampling_cost(2.0, 2, 500), dir);
+        let pmmh = completion_line("pmmh", false, &sampling_cost(2.0, 2, 500));
         assert!(pmmh.starts_with("pmmh complete in 2.0s"), "{pmmh}");
         assert!(pmmh.contains("1000 PF evaluations"), "{pmmh}");
+        assert!(pmmh.ends_with("ms/eval)"), "the leaf's path is the `stored` line's: {pmmh}");
     }
     /// A hierarchical prior whose argument is out of its domain at the start
     /// (sigma = s_h with s_h = -1) has zero density there; the guard names the
