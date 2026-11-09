@@ -425,15 +425,16 @@ pub fn artifact_name(base: &str, selection: Option<&ChainSelection>) -> String {
 /// it were a normal one. So the warning cannot be a warning the tooling can
 /// suppress — it prints whenever a selection actually dropped a chain. It names
 /// the dropped chains and states the bias direction (toward the retained mode),
-/// and points at `fit summary` for the per-chain diagnostics (gh#406).
-pub fn warn_active_selection(info: &SubsetInfo) {
+/// and points at `fit summary` for the per-chain diagnostics (gh#406). `stderr`
+/// paints the tag under the command's own colour policy (its `--no-color`).
+pub fn warn_active_selection(info: &SubsetInfo, stderr: crate::out::paint::Painter) {
     eprintln!(
         "{w} --exclude-chains dropped chain(s) {} \
          ({} of {} chains kept).",
         info.excluded_csv(),
         info.kept.len(),
         info.n_total,
-        w = crate::out::paint::warning_tag()
+        w = stderr.paint("warning:", crate::out::paint::Style::Warn)
     );
     eprintln!("         {BIAS_CAVEAT_A}");
     eprintln!("         {BIAS_CAVEAT_B}");

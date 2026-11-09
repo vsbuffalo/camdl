@@ -18,7 +18,7 @@
 //! for the step-5 walker-consumer refactor; this file's prior shape
 //! is preserved in git history at commit `d45c932` for context.
 
-use crate::out::paint::{Painter, Stream};
+use crate::out::paint::{Painter, Stream, Style};
 use crate::fit::report::{Check, ChainDetail, MethodFacts};
 use crate::fit::report::export::{render_latex, render_markdown};
 use crate::fit::report::render::*;
@@ -136,6 +136,7 @@ fn chain_selection_advisory(
     method_dir: &Path,
     info: &SubsetInfo,
     kind: super::loglik::LoglikType,
+    stderr: Painter,
 ) {
     use super::chain_diagnostics as cd;
     if let Some(means) = cd::read_chain_mean_logliks(method_dir, kind) {
@@ -146,11 +147,11 @@ fn chain_selection_advisory(
                 "{n} {} disagree strongly with the others on `{}` — before \
                  excluding, ask whether a parameter is unidentified (a flat likelihood ridge). \
                  The per-chain table below names them; the primary fix is the model, not the flag.",
-                outliers.join(", "), means.scored_column, n = crate::out::paint::note_tag()
+                outliers.join(", "), means.scored_column, n = stderr.paint("note:", Style::Warn)
             );
         }
     }
-    warn_active_selection(info);
+    warn_active_selection(info, stderr);
 }
 
 /// Top-level entry point. Resolves `args.fit` (the fit handle) to its segment
@@ -187,6 +188,9 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     let dir = segment.to_string_lossy().into_owned();
 
     let strict = args.strict || ci_env_set();
+    // Warnings and notes go to stderr under the same `--no-color` as the
+    // summary on stdout.
+    let stderr = Painter::for_stream(Stream::Stderr, args.no_color);
 
     // The full set of completed method leaves, walker-discovered, in label
     // order (see `discover_methods`).
@@ -204,7 +208,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     // dates can't be rendered and the omission is otherwise silent.
     // stderr keeps the warning out of the JSON/stdout payload.
     if let Some(msg) = load_calendar_context(Path::new(&dir)).missing_origin_warning() {
-        eprintln!("{} {}", crate::out::paint::warning_tag(), msg);
+        eprintln!("{} {}", stderr.paint("warning:", Style::Warn), msg);
     }
 
     if args.params_only {
@@ -249,10 +253,10 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     };
 
     let failures = match args.format {
-        FitSummaryFormat::Text => format_text(&dir, args, &selected, strict, selection.as_ref()),
-        FitSummaryFormat::Json => format_json(&dir, &selected, strict, selection.as_ref()),
-        FitSummaryFormat::Md => format_md(&dir, &selected, strict, selection.as_ref()),
-        FitSummaryFormat::Latex => format_latex(&dir, &selected, strict, selection.as_ref()),
+        FitSummaryFormat::Text => format_text(&dir, args, &selected, strict, selection.as_ref(), stderr),
+        FitSummaryFormat::Json => format_json(&dir, &selected, strict, selection.as_ref(), stderr),
+        FitSummaryFormat::Md => format_md(&dir, &selected, strict, selection.as_ref(), stderr),
+        FitSummaryFormat::Latex => format_latex(&dir, &selected, strict, selection.as_ref(), stderr),
     };
 
     // One exit decision for all four formats: an unreadable leaf is reported
@@ -458,6 +462,7 @@ fn format_text(
     methods: &[ResolvedMethod],
     strict: bool,
     selection: Option<&ChainSelection>,
+    stderr: Painter,
 ) -> Vec<LoadFailure> {
     let mut failures: Vec<LoadFailure> = Vec::new();
     let painter = Painter::for_stream(Stream::Stdout, args.no_color);
@@ -522,7 +527,7 @@ fn format_text(
                 match apply_selection_to_typed(&mut typed, &resolved.method_dir, sel) {
                     Ok(info) => {
                         if !warned {
-                            chain_selection_advisory(&resolved.method_dir, &info, ll_kind);
+                            chain_selection_advisory(&resolved.method_dir, &info, ll_kind, stderr);
                             warned = true;
                         }
                         subset_info = Some(info);
@@ -606,8 +611,8 @@ fn forkability(
         .map(|j| crate::fit::report::Forkable { n_forkable: j.n_forkable, n_total: j.n_total, selection: j.selection })
 }
 
-fn format_json(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(dir, methods, selection);
+fn format_json(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>, stderr: Painter) -> Vec<LoadFailure> {
+    let doc = build_summary_doc(dir, methods, selection, stderr);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     let s = serde_json::to_string_pretty(&doc).expect("FitSummaryDoc must serialize");
     println!("{}", s);
@@ -618,8 +623,8 @@ fn format_json(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: O
     doc.failures
 }
 
-fn format_md(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(dir, methods, selection);
+fn format_md(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>, stderr: Painter) -> Vec<LoadFailure> {
+    let doc = build_summary_doc(dir, methods, selection, stderr);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     print!("{}", render_markdown(&doc));
     if strict && any_failed {
@@ -629,8 +634,8 @@ fn format_md(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Opt
     doc.failures
 }
 
-fn format_latex(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(dir, methods, selection);
+fn format_latex(dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>, stderr: Painter) -> Vec<LoadFailure> {
+    let doc = build_summary_doc(dir, methods, selection, stderr);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     print!("{}", render_latex(&doc));
     if strict && any_failed {
@@ -693,6 +698,7 @@ fn build_summary_doc(
     dir: &str,
     methods: &[ResolvedMethod],
     selection: Option<&ChainSelection>,
+    stderr: Painter,
 ) -> FitSummaryDoc {
     let cal = load_calendar_context(Path::new(dir));
     let model = load_fit_envelope(Path::new(dir)).map(|env| env.model);
@@ -741,7 +747,7 @@ fn build_summary_doc(
                     match apply_selection_to_typed(t, &resolved.method_dir, sel) {
                         Ok(info) => {
                             if !advised {
-                                chain_selection_advisory(&resolved.method_dir, &info, ll_kind);
+                                chain_selection_advisory(&resolved.method_dir, &info, ll_kind, stderr);
                                 advised = true;
                             }
                             chain_selection_json = Some(info.to_json());
@@ -3065,7 +3071,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&dir.to_string_lossy(), &methods, None);
+        let doc = build_summary_doc(&dir.to_string_lossy(), &methods, None, Painter::plain());
         let json = serde_json::to_string_pretty(&doc).unwrap();
         assert!(json.contains("\"version\": 4"),
             "schema.version must be present and = 4: {}", json);
@@ -3097,7 +3103,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&dir.to_string_lossy(), &methods, None);
+        let doc = build_summary_doc(&dir.to_string_lossy(), &methods, None, Painter::plain());
         let md = render_markdown(&doc);
         assert!(md.contains("# Fit summary:"));
         assert!(md.contains("## `if2`"));
@@ -3118,7 +3124,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&dir.to_string_lossy(), &methods, None);
+        let doc = build_summary_doc(&dir.to_string_lossy(), &methods, None, Painter::plain());
         let tex = render_latex(&doc);
         // No preamble, but tabular blocks per method.
         assert!(tex.contains("\\subsection*{Method:"));
