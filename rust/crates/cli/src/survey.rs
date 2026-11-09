@@ -111,34 +111,33 @@ struct ResolvedSurveyInputs {
 // ─── cmd_survey entry point ──────────────────────────────────────────────────
 
 pub fn cmd_survey(a: &crate::args::SurveyArgs) {
+    // survey has no `--no-color`: its painters follow the environment and
+    // whether each stream is a terminal.
+    let out = crate::out::Out::new(false);
     // Validate input mode mutual exclusion at the boundary.
     if a.fit.is_none() {
         if a.data.is_none() {
-            eprintln!(
+            out.fail(
                 "error: camdl survey requires either --fit FIT.toml \
                  (fit-aware mode) or --data DATA.tsv with --estimate \
                  NAME=LO:HI flags (inline mode).\n\
                  Got neither.");
-            std::process::exit(1);
         }
         if a.estimate.is_empty() {
-            eprintln!(
+            out.fail(format!(
                 "error: --data {} given without any --estimate flags. \
                  Pass --estimate NAME=LO:HI for each parameter to vary \
                  across the LHS box (repeat for multiple parameters).",
-                a.data.as_ref().unwrap().display());
-            std::process::exit(1);
+                a.data.as_ref().unwrap().display()));
         }
     }
 
     if a.eval_replicates == 0 {
-        eprintln!("error: --eval-replicates must be >= 1 (got 0).");
-        std::process::exit(1);
+        out.fail("error: --eval-replicates must be >= 1 (got 0).");
     }
     if a.eval_particles == 0 && matches!(a.eval, SurveyEvalMethod::Pfilter | SurveyEvalMethod::Auto) {
-        eprintln!("error: --eval-particles must be >= 1 \
+        out.fail("error: --eval-particles must be >= 1 \
                    (in case --eval auto resolves to pfilter).");
-        std::process::exit(1);
     }
     // n_points = 0 is the auto-scale sentinel; resolved against d
     // after model loading. Negative values can't happen — usize.
@@ -147,8 +146,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         Some(raw) => match crate::fit::validate_label(raw) {
             Ok(l) => Some(l),
             Err(e) => {
-                eprintln!("error: invalid --label: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: invalid --label: {}", e));
             }
         },
         None => None,
@@ -166,8 +164,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
                 .num_threads(a.parallel)
                 .build()
                 .unwrap_or_else(|e| {
-                    eprintln!("error: failed to build thread pool (--parallel {}): {}", a.parallel, e);
-                    std::process::exit(1);
+                    out.fail(format!("error: failed to build thread pool (--parallel {}): {}", a.parallel, e));
                 }),
         )
     } else {
@@ -177,8 +174,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     let resolved = match resolve_survey_inputs(a) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         }
     };
 
@@ -193,19 +189,17 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         // (the ODE skeleton scores every observation), so `auto` takes it
         // regardless of the model's process noise.
         SurveyEvalMethod::Auto if objective.skips_first_observation() => {
-            eprintln!(
-                "survey: --eval auto resolved to 'pfilter' (the fit config sets \
+            out.say("survey: --eval auto resolved to 'pfilter' (the fit config sets \
                  ic_free = true, which only the particle filter scores)");
             SurveyEvalMethod::Pfilter
         }
         SurveyEvalMethod::Simulate if objective.skips_first_observation() => {
-            eprintln!(
+            out.fail(
                 "error: the --fit config sets ic_free = true, so the fit scores \
                  log p(y₂:T | y₁, θ) — y₁'s term left out. `--eval simulate` scores \
                  the deterministic ODE skeleton over every observation and cannot \
                  leave it out, so its landscape would rank points on a different \
                  likelihood from the fit's. Use `--eval pfilter` (or `--eval auto`).");
-            std::process::exit(1);
         }
         SurveyEvalMethod::Auto => {
             let needs_pf = resolved.compiled
@@ -216,11 +210,11 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
             } else {
                 SurveyEvalMethod::Simulate
             };
-            eprintln!(
+            out.say(format_args!(
                 "survey: --eval auto resolved to '{}' (model {} \
                  stochastic process noise)",
                 resolved_eval,
-                if needs_pf { "has" } else { "does not have" });
+                if needs_pf { "has" } else { "does not have" }));
             resolved_eval
         }
         explicit => explicit,
@@ -239,13 +233,12 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         if let Err(msg) = crate::fit::methods::check_model_capabilities(
             crate::run_meta::InferenceBackend::Ode, &resolved.compiled,
         ) {
-            eprintln!("error: {}", msg);
-            eprintln!(
+            out.say(format_args!("error: {}", msg));
+            out.fail(
                 "  (drop `--eval simulate` to use `--eval auto`, which \
                  routes overdispersed models through the particle filter \
                  automatically.)"
             );
-            std::process::exit(1);
         }
     } else if eval_method == SurveyEvalMethod::Pfilter {
         // gh#191: `--eval pfilter` (and `--eval auto` resolved to pfilter above)
@@ -257,8 +250,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         if let Err(msg) = crate::fit::methods::check_model_capabilities(
             crate::run_meta::InferenceBackend::ChainBinomial, &resolved.compiled,
         ) {
-            eprintln!("error: {}", msg);
-            std::process::exit(1);
+            out.fail(format!("error: {}", msg));
         }
     }
 
@@ -273,42 +265,41 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     let d = resolved.estimated.len();
     let n_points: usize = if a.n_points == 0 {
         let auto = (1000usize).max(50 * d.saturating_mul(d));
-        eprintln!("survey: --n-points auto-scaled to {} for d={}", auto, d);
+        out.say(format_args!("survey: --n-points auto-scaled to {} for d={}", auto, d));
         auto
     } else {
         a.n_points
     };
 
     if d > 10 {
-        eprintln!(
+        out.say(format_args!(
             "warning: surveying {} parameters; pair-plots become \
              hard to interpret past d ~= 8. Consider `camdl profile` \
              for higher-dimensional identifiability questions, or \
-             restricting [estimate] to a focal subset.", d);
+             restricting [estimate] to a focal subset.", d));
     } else if d > 6 {
-        eprintln!(
+        out.say(format_args!(
             "note: surveying {} parameters; pair-plot 2D marginals \
              project a {}-D joint distribution. Concentrations in \
              one panel may reflect tight conditioning on parameters \
-             not visible in that view.", d, d);
+             not visible in that view.", d, d));
     }
     if d > 0 {
         let coverage_floor = 50.0 * (d as f64) * (d as f64);
         if (n_points as f64) < coverage_floor {
-            eprintln!(
+            out.say(format_args!(
                 "note: --n-points {} is below the rule-of-thumb \
                  coverage floor of n_points/d^2 >= 50 (d={}, \
                  recommended >= {}). Consider --n-points {} for \
                  adequate pair-plot resolution.",
-                n_points, d, coverage_floor as usize, coverage_floor as usize);
+                n_points, d, coverage_floor as usize, coverage_floor as usize));
         }
     }
     if eval_method == SurveyEvalMethod::Simulate && a.eval == SurveyEvalMethod::Simulate {
         // Only warn on explicit --eval simulate. `Auto`-resolved
         // Simulate already eprintln'd that the model has no process
         // noise; doubling the warning would confuse the user.
-        eprintln!(
-            "warning: --eval simulate uses a single deterministic \
+        out.say("warning: --eval simulate uses a single deterministic \
              trajectory per LHS point. This is a 1-sample MC estimator \
              of p(y|theta) — biased toward 'lucky outliers' when \
              process noise is non-trivial (Andrieu & Roberts 2009; \
@@ -353,7 +344,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     };
     let resolved_id = match crate::survey_cas::resolve_survey(&survey_ctx) {
         Ok(r) => r,
-        Err(e) => { eprintln!("error: survey CAS identity: {}", e); std::process::exit(1); }
+        Err(e) => { out.fail(format!("error: survey CAS identity: {}", e)); }
     };
 
     let output_root = crate::run_paths::output_root(
@@ -396,23 +387,22 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     };
     match crate::resolve::check_reuse(&store, &output_root, &resolved_artifact, policy) {
         Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
-            crate::out::status::step("cached", dir.display());
+            out.milestone("cached", dir.display());
             crate::resolve::note_leaf_from_another_model_file(&dir, &model_path_str);
             let html_path = dir.join("landscape.html");
             if a.render && !html_path.exists() {
-                eprintln!("  rendering --render HTML from cached landscape.tsv …");
+                out.say("  rendering --render HTML from cached landscape.tsv …");
                 if let Err(e) = render_landscape_html(
                     &dir.join("landscape.tsv"), &html_path, &landscape_meta)
                 {
-                    eprintln!("warning: HTML render failed: {}", e);
+                    out.say(format_args!("warning: HTML render failed: {}", e));
                 }
             }
             return;
         }
         Ok(crate::resolve::ReuseVerdict::MustRun) => {}
         Err(e) => {
-            eprintln!("error: survey cache check {}: {}", run_dir.display(), e);
-            std::process::exit(1);
+            out.fail(format!("error: survey cache check {}: {}", run_dir.display(), e));
         }
     }
 
@@ -432,8 +422,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
             unreachable!("Streaming write mode never returns a committed path")
         }
         Err(e) => {
-            eprintln!("error: claim survey leaf {}: {}", run_dir.display(), e);
-            std::process::exit(1);
+            out.fail(format!("error: claim survey leaf {}: {}", run_dir.display(), e));
         }
     };
     let staging = write.dir().to_path_buf();
@@ -441,12 +430,11 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     let summary_path = staging.join("summary.json");
     let html_path = staging.join("landscape.html");
 
-    crate::out::status::done("stored",
+    out.milestone("stored",
         format!("{} \u{b7} {} points (eval={})", run_dir.display(), n_points, eval_method));
-    crate::out::status::hint("camdl list --kind survey");
+    out.hint("camdl list --kind survey");
     if eval_method == SurveyEvalMethod::Simulate {
-        eprintln!(
-            "  --eval simulate now computes p(y|θ, ODE_skeleton) via the ODE \
+        out.say("  --eval simulate now computes p(y|θ, ODE_skeleton) via the ODE \
              backend (Phase 1 of the ODE-inference proposal). Pre-2026-05-04 \
              this flag ran a 1-particle bootstrap PF on chain_binomial; \
              cached landscape.tsv files from the older schema have been \
@@ -488,7 +476,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         {
             let projection = StreamProjection::from_ir(
                 &obs.projection, &resolved.compiled, &obs.name,
-            ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+            ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
             // survey is dense + aux-free in v1 (survey denominators bind in the
             // fit / pfilter loaders; survey rejects NA upstream).
             let observations = sim::inference::dense_cells(
@@ -503,13 +491,11 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         }
         let (bound, _report) = BoundObs::bind(resolved.compiled.model.simulation.t_start, stream_specs)
             .unwrap_or_else(|report| {
-            eprintln!("error: observation data invalid:\n{}", report.render());
-            std::process::exit(1);
+            out.fail(format!("error: observation data invalid:\n{}", report.render()));
         });
         Arc::new(MultiStreamObsModel::new(bound, resolved.compiled.clone())
             .unwrap_or_else(|e| {
-                eprintln!("error: observation model construction failed: {:?}", e);
-                std::process::exit(1);
+                out.fail(format!("error: observation model construction failed: {:?}", e));
             }))
     };
 
@@ -574,24 +560,23 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     if let Err(e) = write_landscape_tsv(
         &landscape_path, &sorted, &resolved.estimated, eval_method,
         &run_id_hex) {
-        eprintln!("error writing landscape.tsv: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error writing landscape.tsv: {}", e));
     }
-    eprintln!("survey: wrote {} ({} rows)", landscape_path.display(), sorted.len());
+    out.say(format_args!("survey: wrote {} ({} rows)", landscape_path.display(), sorted.len()));
 
     // ── Feasibility of the sampled box (gh#670) ─────────────────────
     // Reported before the ranking diagnostics below: a box that is mostly
     // infeasible makes "where do the top points cluster" a question about
     // whatever fraction survived, and the modeller should know that first.
     let feasibility = FeasibilityTally::from_rows(&sorted);
-    eprintln!("{}", feasibility_summary_line(&feasibility));
+    out.say(format_args!("{}", feasibility_summary_line(&feasibility)));
     if let Some(w) = feasibility_warning(&feasibility) {
-        eprintln!("{}", w);
+        out.say(format_args!("{}", w));
     }
 
     // ── SE-distribution warning (proposal §"Runtime warnings") ──────
     if eval_method == SurveyEvalMethod::Pfilter {
-        emit_se_warning(&sorted);
+        emit_se_warning(&out, &sorted);
     }
 
     // ── Silent-miss mitigation: bound clustering + start-rank check ─
@@ -609,28 +594,28 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // Threshold: 5% of bound width (linear) or 5% of log-bound range
     // (Log-typed). Fires when the median of top-K values falls within
     // that fraction of either bound.
-    emit_bound_clustering_warning(&sorted, &resolved.estimated, 0.10);
+    emit_bound_clustering_warning(&out, &sorted, &resolved.estimated, 0.10);
 
     // Start-rank check (fit-aware mode): for each [estimate].start =
     // value present in the fit.toml, find where it falls in the LHS
     // landscape. Quick "is the user's prior best-guess even in the
     // bounds box?" sanity check.
     if let Some(starts) = &resolved.estimate_starts {
-        emit_start_rank_report(&sorted, &resolved.estimated, starts);
+        emit_start_rank_report(&out, &sorted, &resolved.estimated, starts);
     }
 
     // ── summary.json ────────────────────────────────────────────────
     if let Err(e) = write_summary_json(
         &summary_path, &sorted, &feasibility, a, eval_method, d) {
-        eprintln!("warning: could not write summary.json: {}", e);
+        out.say(format_args!("warning: could not write summary.json: {}", e));
     }
 
     // ── Render HTML if requested ────────────────────────────────────
     if a.render {
         if let Err(e) = render_landscape_html(&landscape_path, &html_path, &landscape_meta) {
-            eprintln!("warning: HTML render failed: {}", e);
+            out.say(format_args!("warning: HTML render failed: {}", e));
         } else {
-            eprintln!("survey: wrote {}", html_path.display());
+            out.say(format_args!("survey: wrote {}", html_path.display()));
         }
     }
 
@@ -664,7 +649,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         "notices":         resolved.notices,
     });
     if let Err(e) = write.finalize(inputs_json) {
-        eprintln!("warning: finalize survey leaf {}: {}", run_dir.display(), e);
+        out.say(format_args!("warning: finalize survey leaf {}: {}", run_dir.display(), e));
     }
 }
 
@@ -1625,7 +1610,7 @@ fn format_float(v: f64) -> String {
 
 // ─── SE warning ──────────────────────────────────────────────────────────────
 
-fn emit_se_warning(rows: &[LandscapeRow]) {
+fn emit_se_warning(out: &crate::out::Out, rows: &[LandscapeRow]) {
     // Doucet et al. 2015 (Biometrika): per-point loglik SE > ~1.7 nats
     // makes pseudo-marginal MCMC ranks unreliable. Survey isn't doing
     // PMMH but the same bar applies to ranking N points.
@@ -1638,12 +1623,12 @@ fn emit_se_warning(rows: &[LandscapeRow]) {
     let above = finite_se.iter().filter(|&&s| s > DOUCET).count();
     let pct = 100.0 * (above as f64) / (n as f64);
     if pct > 25.0 {
-        eprintln!(
+        out.say(format_args!(
             "warning: {:.0}% of survey points have loglik_se > {} nats — \
              ranks for those points are unreliable. Consider:\n  \
              --eval-replicates 5  (3x compute, ~sqrt(5/3) variance reduction)\n  \
              --eval-particles 500 (2.5x compute, lower per-replicate variance)",
-            pct, DOUCET);
+            pct, DOUCET));
     }
 }
 
@@ -1668,6 +1653,7 @@ fn emit_se_warning(rows: &[LandscapeRow]) {
 const BOUND_PIN_FRACTION: f64 = 0.05;
 
 fn emit_bound_clustering_warning(
+    out: &crate::out::Out,
     rows: &[LandscapeRow],
     estimated: &[EstimatedParam],
     top_pct: f64,
@@ -1720,13 +1706,12 @@ fn emit_bound_clustering_warning(
     }
 
     if !warnings.is_empty() {
-        eprintln!(
+        out.say(format_args!(
             "warning: top-{:.0}% of survey points cluster near declared \
              bounds for these parameters:",
-            top_pct * 100.0);
-        for w in &warnings { eprintln!("{}", w); }
-        eprintln!(
-            "  this can mean (a) the true basin extends outside your \
+            top_pct * 100.0));
+        for w in &warnings { out.say(format_args!("{}", w)); }
+        out.say("  this can mean (a) the true basin extends outside your \
              bounds box, or (b) the bounds reflect informed priors and \
              the basin really is at the edge. Consider widening the \
              relevant bounds and re-running to disambiguate.");
@@ -1734,6 +1719,7 @@ fn emit_bound_clustering_warning(
 }
 
 fn emit_start_rank_report(
+    out: &crate::out::Out,
     rows: &[LandscapeRow],
     estimated: &[EstimatedParam],
     starts: &HashMap<String, f64>,
@@ -1770,21 +1756,21 @@ fn emit_start_rank_report(
 
     let pct = 100.0 * (best_rank as f64) / (n as f64);
     if pct > 90.0 {
-        eprintln!(
+        out.say(format_args!(
             "warning: closest LHS draw to your [estimate].start values \
              ranks {} of {} ({:.0}th percentile from the top) — your \
              seeded best-guess falls in the bottom {}% of survey points. \
              Likely causes: bounds exclude the basin, prior best-guess \
              is in a low-loglik region, or the model is misspecified.",
-            best_rank + 1, n, 100.0 - pct, (100.0 - pct).round() as i64);
+            best_rank + 1, n, 100.0 - pct, (100.0 - pct).round() as i64));
     } else if pct > 50.0 {
-        eprintln!(
+        out.say(format_args!(
             "note: closest LHS draw to your [estimate].start values \
              ranks {} of {} (top {:.0}%) — outside the top half of \
              the survey. The basin LHS found may be a better starting \
              point; consider starting from an IF2 fit's estimate \
              (`starts = {{ from_mle = \"@label\" }}`) instead of a hardcoded start.",
-            best_rank + 1, n, pct);
+            best_rank + 1, n, pct));
     }
 }
 
