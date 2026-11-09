@@ -14,7 +14,7 @@ use sim::inference::{
     if2::EstimatedParam,
     pmmh::Prior,
     prior::Density,
-    pgas::{PGASConfig, ChainResumeState, run_pgas, PGASSweep, PGASTrajectory, RENEWAL_BINS},
+    pgas::{PGASConfig, ChainResumeState, run_pgas, PGASSweep, PGASTrajectory, PgasEvent, RENEWAL_BINS},
     diagnostic::DiagnosticKind,
 };
 use io::trajectories::{
@@ -458,6 +458,11 @@ pub fn run_method(
                                 chain));
                         }
                         eprintln!("  chain {}: resuming from sweep {}", chain, state.completed_sweeps);
+                        if state.completed_sweeps >= n_sweeps {
+                            eprintln!("  warning: chain already completed {} sweeps (requested {}). \
+                                       Increase sweeps in fit.toml to continue.",
+                                state.completed_sweeps, n_sweeps);
+                        }
                         states.push(Some(state));
                     }
                     Err(e) => {
@@ -1031,6 +1036,7 @@ pub fn run_method(
                 &obs_model,
                 chain_seed,
                 Some(&progress_cb),
+                Some(&|e: PgasEvent| task.live_line(&chain_event_text(chain, &e))),
                 resume_states[chain_id].clone(),
                 config_hash.clone(),
             ) {
@@ -1765,6 +1771,160 @@ pub fn run_method(
     heartbeat.done();
 
     Ok(())
+}
+
+/// What a chain's [`PgasEvent`] says, as the lines `fit run` shows while the
+/// chains run: the first line names the chain, the rest are its detail. One
+/// string, so the caller writes the block whole and two chains' blocks never
+/// interleave line by line.
+fn chain_event_text(chain: ChainIndex, event: &PgasEvent) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    match event {
+        PgasEvent::ReferenceStarting { n_particles } => {
+            lines.push(format!("initializing reference trajectory (unconditional SMC pass, \
+                       {} particles)...", n_particles));
+        }
+        PgasEvent::ReferenceDrawn { n_substeps, initial_first, source, seconds } => {
+            lines.push(format!("reference: {} substeps, initial S={} — {} ({:.1}s)",
+                n_substeps, initial_first, source, seconds));
+        }
+        PgasEvent::ReferenceDensity { components: sanity, params } => {
+            // gh#80: distinguish the failure modes. -inf in the *transition*
+            // term is a step_one/density-evaluator disagreement (a real bug).
+            // -inf in the *observation* term is "this starting point is
+            // incompatible with the data". This block only explains; the
+            // chain-start refusal decides.
+            if !sanity.total.is_finite() {
+                if !sanity.transition.is_finite() {
+                    lines.push(format!("BUG: simulate_reference trajectory has non-finite \
+                              *transition* log-density at own params (transition_ll = {}).",
+                              sanity.transition));
+                    lines.push("This indicates a mismatch between step_one and \
+                               log_transition_density_substep.".to_string());
+                    lines.push("Run with CAMDL_TRACE_STEPS=1 for detailed per-substep \
+                               diagnostics.".to_string());
+                }
+                if !sanity.observation.is_finite() {
+                    lines.push(format!("WARNING: simulate_reference predicts observed data with \
+                              probability 0 (observation_ll = {}).", sanity.observation));
+                    lines.push("This is the data-vs-model side, NOT a step_one bug — the \
+                               predicted trajectory at these starting parameters cannot \
+                               explain the observed values.".to_string());
+                    lines.push("Common cause: a discrete-event parameter (e.g. `tau`) is \
+                               outside the simulation window, so the seeding mechanism \
+                               never fires and predicted incidence is 0 while real data has \
+                               cases. Adjust starting bounds, or rely on NUTS / MH to \
+                               propose into a feasible region.".to_string());
+                }
+                lines.push("params used:".to_string());
+                for (name, value) in params {
+                    lines.push(format!("  {} = {}", name, value));
+                }
+                lines.push(format!("components: transition={:.1}, observation={:.1}, \
+                           initial_state={:.1}",
+                    sanity.transition, sanity.observation, sanity.initial_state));
+            } else {
+                lines.push(format!("simulate_reference LL sanity check: {:.1} (finite ✓)", sanity.total));
+            }
+        }
+        PgasEvent::InitialLoglik { components, n_transitions, n_source_groups } => {
+            lines.push(format!("initial complete-data ll: {:.1}", components.total));
+            if !components.total.is_finite() {
+                if !components.transition.is_finite() {
+                    lines.push(format!("WARNING: initial *transition* log-density is non-finite \
+                               (transition_ll = {}).", components.transition));
+                    lines.push("This indicates a mismatch between step_one and \
+                               log_transition_density_substep — run with \
+                               CAMDL_TRACE_STEPS=1 for per-substep diagnostics.".to_string());
+                }
+                if !components.observation.is_finite() {
+                    lines.push(format!("WARNING: initial *observation* log-density is non-finite \
+                               (observation_ll = {}). The reference trajectory cannot \
+                               explain the observed data at these starting parameters; \
+                               NUTS / MH will propose into a feasible region if one exists.",
+                               components.observation));
+                }
+                if !components.initial_state.is_finite() {
+                    lines.push(format!("WARNING: initial *initial-state* log-density is \
+                               non-finite (initial_state_ll = {}) — the reference \
+                               trajectory's x0 has zero probability under the declared \
+                               `init {{ }}` law at these starting parameters.",
+                               components.initial_state));
+                }
+                lines.push(format!("components: transition={:.1}, observation={:.1}, \
+                           initial_state={:.1}",
+                    components.transition, components.observation, components.initial_state));
+                lines.push(format!("Model has {} transitions, {} source groups",
+                    n_transitions, n_source_groups));
+            }
+        }
+        PgasEvent::NutsEnabled => {
+            lines.push("NUTS enabled (gradient expressions found in IR)".to_string());
+        }
+        PgasEvent::TrajectoryWarmupStarting { sweeps } => {
+            lines.push(format!("trajectory warm-up: {} CSMC-only sweeps", sweeps));
+        }
+        PgasEvent::TrajectoryWarmupProgress { sweep, of, log_lik } => {
+            lines.push(format!("trajectory warm-up {}/{}: LL={:.1}", sweep, of, log_lik));
+        }
+        PgasEvent::TrajectoryWarmupDone { log_lik } => {
+            lines.push(format!("trajectory warm-up complete: LL={:.1}", log_lik));
+        }
+        PgasEvent::MassMatrix { sweep, sds, correlations } => {
+            let kind = if correlations.is_some() { "dense" } else { "diagonal" };
+            lines.push(format!("{kind} mass matrix estimated (sweep {}):", sweep));
+            for (name, sd) in sds {
+                lines.push(format!("  {:12} sd={:.6}", name, sd));
+            }
+            if let Some(pairs) = correlations {
+                // Each name cut to its first three bytes, as the line always has.
+                let short = |n: &str| n[..3.min(n.len())].to_string();
+                let cells: String = pairs.iter()
+                    .map(|(a, b, r)| format!(" {}-{}={:.2}", short(a), short(b), r))
+                    .collect();
+                lines.push(format!("  correlations:{cells}"));
+            }
+        }
+        PgasEvent::NutsAdapted { sweep, step_size } => {
+            lines.push(format!("NUTS fully adapted (sweep {}):", sweep));
+            lines.push(format!("  final step_size: {:.6}", step_size));
+        }
+        PgasEvent::RecoveredStart { log_lik } => {
+            lines.push(format!("chain recovered from a non-finite start on its first \
+                       trajectory update (complete-data ll: {:.1})", log_lik));
+        }
+        PgasEvent::BurnInEnd { proposals, trajectory_renewal, nuts } => {
+            lines.push("proposal SD adapted (end of burn-in):".to_string());
+            for p in proposals {
+                lines.push(format!("  {:12} sd={:.6} acc={:.0}%", p.name, p.sd, p.acceptance * 100.0));
+            }
+            lines.push(format!("trajectory renewal: {:.1}%", trajectory_renewal * 100.0));
+            // NUTS diagnostics (Stan-style warnings)
+            if let Some(n) = nuts {
+                if n.n_max_treedepth > 0 {
+                    let pct_maxdepth = n.n_max_treedepth as f64 / n.sweeps as f64 * 100.0;
+                    lines.push(format!("WARNING: {}/{} sweeps ({:.0}%) hit max_treedepth={}. \
+                        Consider increasing max_treedepth or reparameterizing.",
+                        n.n_max_treedepth, n.sweeps, pct_maxdepth, n.max_tree_depth));
+                }
+                if n.n_divergent > 0 {
+                    lines.push(format!("WARNING: {} divergent transitions during burn-in. \
+                        Consider reducing step size or reparameterizing.",
+                        n.n_divergent));
+                }
+            }
+        }
+    }
+    let mut text = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i == 0 {
+            text.push_str(&format!("  chain {chain}: {line}"));
+        } else {
+            text.push_str("\n  ");
+            text.push_str(line);
+        }
+    }
+    text
 }
 
 // ── Cross-chain path/parameter compatibility (gh#785) ────────────

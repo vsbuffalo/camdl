@@ -116,7 +116,7 @@ fn run(fixture: &str) -> Option<(Vec<String>, Vec<Chain>)> {
                 for p in est {
                     base[p.index] = p.initial;
                 }
-                let r = run_pgas(model, est, priors, &base, config, observations, obs, seed, None, None,
+                let r = run_pgas(model, est, priors, &base, config, observations, obs, seed, None, None, None,
                     "prior-only-bisection".into()).expect("PGAS run");
                 Chain {
                     params: r.sweeps.iter().map(|s| est.iter().map(|p| s.params[p.index]).collect()).collect(),

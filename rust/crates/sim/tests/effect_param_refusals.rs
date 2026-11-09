@@ -161,7 +161,7 @@ fn run_pgas_estimating(model: &Arc<CompiledModel>, estimated: &[&str]) -> Result
         step_policy: sim::schedule::StepPolicy::Snap,
     };
     let obs = MultiStreamObsModel::empty(model.clone());
-    run_pgas(model, &if2_params, &priors, &model.default_params, &config, &[], &obs, 1, None, None, "d3".into())
+    run_pgas(model, &if2_params, &priors, &model.default_params, &config, &[], &obs, 1, None, None, None, "d3".into())
         .map(|_| ())
         .map_err(|e| e.to_string())
 }

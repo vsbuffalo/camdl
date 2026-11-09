@@ -382,6 +382,7 @@ fn recoverable_error_at_a_proposed_theta_does_not_kill_the_chain() {
         SEED,
         None,
         None,
+        None,
         "gh82".into(),
     )
     .expect(
@@ -469,6 +470,7 @@ fn degenerate_error_outside_the_proposal_site_still_terminates_the_chain() {
         &obs,
         &obs_m,
         SEED,
+        None,
         None,
         None,
         "gh82-control".into(),

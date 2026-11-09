@@ -149,7 +149,7 @@ fn pgas(m: &Arc<CompiledModel>, times: &[f64]) -> Result<(), String> {
     let obs: Vec<Observation> = times.iter().map(|&time| Observation { time, value: 11.0 }).collect();
     run_pgas(
         m, &est, &[Prior::Fixed(sim::inference::prior::Density::Flat)], &m.default_params, &config,
-        &obs, &i_obs(m, times), 1, None, None, "past_end".into(),
+        &obs, &i_obs(m, times), 1, None, None, None, "past_end".into(),
     )
     .map(|_| ())
     .map_err(|e| e.to_string())

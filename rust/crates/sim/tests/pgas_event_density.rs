@@ -438,7 +438,7 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
 
     let result = run_pgas(
         &compiled, &if2_params, &priors, &params,
-        &config, &obs, &obs_model, 4242, None, None, "gh80_smoke".into(),
+        &config, &obs, &obs_model, 4242, None, None, None, "gh80_smoke".into(),
     ).unwrap();
 
     let final_ll = result.sweeps.last().unwrap().log_complete_data_ll;
@@ -497,7 +497,7 @@ fn exact_alignment_rejected_on_always_active_event_model() {
         [3.25, 12.0].iter().map(|&t| Observation { time: t, value: 0.0 }).collect();
     match run_pgas(
         &compiled, &if2_params, &priors, &params, &config,
-        &obs, &obs_model, 1, None, None, "exact_event_guard".into(),
+        &obs, &obs_model, 1, None, None, None, "exact_event_guard".into(),
     ) {
         Ok(_) => panic!("exact + an off-grid observation + an event must be refused"),
         Err(e) => {

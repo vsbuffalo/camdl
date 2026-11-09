@@ -235,7 +235,7 @@ fn gh76_pgas_runs_betabinomial_routed_param_with_nuts() {
 
     let result = run_pgas(
         &compiled, &if2_params, &priors, &params,
-        &config, &obs, &obs_model, 12345, None, None, "gate_betabinomial".into(),
+        &config, &obs, &obs_model, 12345, None, None, None, "gate_betabinomial".into(),
     );
 
     // Must NOT be refused by the C1 gate. The BetaBinomial gradient arm is
@@ -340,7 +340,7 @@ fn gh180_pgas_admits_parametric_derived_projection_param() {
 
     let result = run_pgas(
         &compiled, &if2_params, &priors, &params,
-        &config, &obs, &obs_model, 12345, None, None, "gate_derived_proj".into(),
+        &config, &obs, &obs_model, 12345, None, None, None, "gate_derived_proj".into(),
     );
 
     // Must NOT be refused: the parametric projection now carries a real emitted

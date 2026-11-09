@@ -497,7 +497,7 @@ fn r3_prior_only_run_draws_the_smooth_prior() {
                 for p in est {
                     base[p.index] = p.initial;
                 }
-                let r = run_pgas(model, est, priors, &base, config, observations, obs_model, seed, None, None,
+                let r = run_pgas(model, est, priors, &base, config, observations, obs_model, seed, None, None, None,
                     "bspline-r3-prior".into()).expect("prior-only PGAS-NUTS run");
                 eprintln!("chain {seed}: {} divergent ({} after adaptation)", r.n_divergent_total, r.n_divergent_post_burn);
                 (r.sweeps.iter().map(|s| s.params.clone()).collect::<Vec<_>>(), r.n_divergent_post_burn)
@@ -669,7 +669,7 @@ fn r3_prior_only_run_draws_the_explicit_prior() {
                 for p in est {
                     base[p.index] = p.initial;
                 }
-                let r = run_pgas(model, est, priors, &base, config, observations, obs_model, seed, None, None,
+                let r = run_pgas(model, est, priors, &base, config, observations, obs_model, seed, None, None, None,
                     "bspline-r3-prior-explicit".into()).expect("prior-only PGAS-NUTS run");
                 eprintln!("chain {seed}: {} divergent ({} after adaptation)", r.n_divergent_total, r.n_divergent_post_burn);
                 (r.sweeps.iter().map(|s| s.params.clone()).collect::<Vec<_>>(), r.n_divergent_post_burn)

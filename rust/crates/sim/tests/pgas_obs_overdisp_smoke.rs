@@ -163,7 +163,7 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
 
     let result = run_pgas(
         &compiled, &if2_params, &priors, &params,
-        &config, &obs, &obs_model_, 12345, None, None, "smoke_gh20".into(),
+        &config, &obs, &obs_model_, 12345, None, None, None, "smoke_gh20".into(),
     ).unwrap();
 
     // Acceptance bar: chain ran to completion, posterior acceptance > 0,
@@ -287,7 +287,7 @@ fn smoke_pgas_nuts_estimates_rho() {
 
     let result = run_pgas(
         &compiled, &if2_params, &priors, &params,
-        &config, &obs, &obs_model_, 67890, None, None, "smoke_gh76".into(),
+        &config, &obs, &obs_model_, 67890, None, None, None, "smoke_gh76".into(),
     ).unwrap();
 
     let final_ll = result.sweeps.last().unwrap().log_complete_data_ll;

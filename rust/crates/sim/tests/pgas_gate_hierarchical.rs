@@ -182,6 +182,7 @@ fn gh175_pgas_refuses_hierarchical_prior_with_clear_error() {
         12345,
         None,
         None,
+        None,
         "gate_hierarchical".into(),
     );
 

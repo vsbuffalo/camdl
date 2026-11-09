@@ -137,7 +137,7 @@ impl Fit {
             base[p.index] = p.initial;
         }
         run_pgas(&self.model, &self.est, &self.priors, &base, config, &self.observations,
-                 &self.obs_model, seed, None, None, "bspline-r3".into())
+                 &self.obs_model, seed, None, None, None, "bspline-r3".into())
             .expect("PGAS-NUTS run")
     }
 }

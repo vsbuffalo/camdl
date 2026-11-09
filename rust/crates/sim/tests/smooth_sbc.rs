@@ -112,7 +112,7 @@ fn one(model: &Arc<CompiledModel>, sim_id: usize) -> Vec<usize> {
         base[p.index] = p.initial;
     }
     let r = run_pgas(model, &est, &priors, &base, &config, &observations, &obs_model, 100 + sim_id as u64,
-        None, None, "smooth-sbc".into()).expect("SBC fit");
+        None, None, None, "smooth-sbc".into()).expect("SBC fit");
     let draws: Vec<Vec<f64>> = r.sweeps.iter().take(99).map(|s| quantities(model, &s.params)).collect();
     assert_eq!(draws.len(), 99, "99 thinned draws");
     let t = quantities(model, &truth);

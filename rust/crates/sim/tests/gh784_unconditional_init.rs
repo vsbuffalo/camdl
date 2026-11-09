@@ -269,6 +269,7 @@ impl Fixture {
             seed,
             None,
             None,
+            None,
             "gh784".into(),
         )
     }

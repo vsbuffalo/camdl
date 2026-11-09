@@ -588,7 +588,7 @@ fn run_pgas_exact(compiled: &Arc<CompiledModel>, obs_times: &[f64], run_id: &str
         trajectory_warmup: 0, csmc_sweeps_per_nuts: 1,
         step_policy: StepPolicy::Exact,
     };
-    run_pgas(compiled, &if2_params, &priors, &params, &config, &observations, &obs_model, 1, None, None, run_id.into())
+    run_pgas(compiled, &if2_params, &priors, &params, &config, &observations, &obs_model, 1, None, None, None, run_id.into())
         .map(|_| ())
 }
 
