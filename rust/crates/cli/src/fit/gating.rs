@@ -499,7 +499,7 @@ pub fn format_decibans_spread_verdict(
                     ll, (ll - lo) * NATS_TO_DB));
             }
             msg.push_str("\n  fit_state.toml records no `chain_eval_ids` matching these \
-                logliks, so they cannot be attributed to chains; re-run the scout to \
+                logliks, so they cannot be attributed to chains; re-run that fit to \
                 record which chain each belongs to.\n");
             msg.push_str(PICK_ONE);
             return msg;
@@ -538,7 +538,7 @@ pub fn format_decibans_spread_verdict(
 
 /// The remedies closing every `DecibansSpread` message.
 const PICK_ONE: &str = "\n  Pick one:\n    \
-                  - re-run scout with more chains (the wider the spread,\n      \
+                  - re-run it with more chains (the wider the spread,\n      \
                     the higher the chance one chain is in the right basin)\n    \
                   - inspect chain_evaluations.tsv to see which candidate\n      \
                     label dominated each chain — divergent labels are a\n      \
@@ -1147,6 +1147,24 @@ decibans_failed = true
     /// `(chain, loglik)` pairs for contiguous chains counted from 0.
     fn indexed(logliks: &[f64]) -> SpreadChains {
         SpreadChains::Named(logliks.iter().enumerate().map(|(i, &v)| (ChainIndex(i), v)).collect())
+    }
+
+    /// The refusals a user reads name no stage of the retired staged
+    /// pipeline: "scout" is not a thing a fit has any more, so "re-run the
+    /// scout" sends the reader looking for one.
+    #[test]
+    fn the_refusals_name_no_retired_stage() {
+        let named = format_decibans_spread_verdict(
+            240.0, 30.0, 0.5, &indexed(&[-60.0, -61.0, -300.0]));
+        let unnamed = format_decibans_spread_verdict(
+            240.0, 30.0, 0.5, &SpreadChains::Unnamed(vec![-60.0, -300.0]));
+        let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
+        let hard = format_hard_verdict(
+            &gate, &[("beta".into(), 1.4)], &[("beta".into(), 1.4)], &[], 50.0, -60.0,
+            Some(&[("beta".into(), 0.5)]));
+        for msg in [named, unnamed, hard] {
+            assert!(!msg.to_lowercase().contains("scout"), "{msg}");
+        }
     }
 
     #[test]

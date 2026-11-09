@@ -98,7 +98,7 @@ impl PfilterRun {
     }
 }
 
-/// Compound scout-convergence gate verdict (the IF2 "is this method
+/// Compound convergence gate verdict (the IF2 "is this method
 /// converged" answer). String projection used in
 /// `table_row.gate_verdict`:
 ///

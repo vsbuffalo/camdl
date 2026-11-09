@@ -2114,7 +2114,7 @@ impl Default for LoglikEvalConfig {
     }
 }
 
-/// Compound scout-convergence gate: chain agreement (Â) AND inter-chain
+/// Compound convergence gate: chain agreement (Â) AND inter-chain
 /// log-likelihood spread (decibans, with an SE-aware floor). See
 /// proposal §Proposal 3.
 #[derive(Debug, Clone, Deserialize, Serialize)]

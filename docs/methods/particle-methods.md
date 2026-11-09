@@ -179,8 +179,7 @@ camdl reports a between-chain agreement statistic Â for IF2 chains. This is
 **not** Gelman-Rubin's $\hat{R}$ — that is a posterior- sampling diagnostic; IF2
 chains are MLE optimization trajectories, not posterior samples. The naming is
 intentional: Â flags when optimizers have converged to the same neighbourhood,
-and is part of the compound scout-convergence gate. See TODO
-`chain-agreement.md`.
+and is part of the compound convergence gate. See TODO `chain-agreement.md`.
 
 ### Citations
 
@@ -287,9 +286,9 @@ CSMC-AS sweep showing ancestor sampling at $t=2$. Cross-reference
   the $N/2$ threshold convention, ESS-at-MLE reporting in loglik-eval).
 - **Chain agreement Â** (between-chain MLE-optimizer convergence diagnostic —
   **not** Gelman-Rubin). TODO `chain-agreement.md`.
-- **Compound scout-convergence gate** (Â + decibans-spread, SE-aware floor).
+- **Compound convergence gate** (Â + decibans-spread, SE-aware floor).
   Project-specific composition of standard pieces; needs its own methods note.
-  TODO `scout-gate.md`.
+  TODO `convergence-gate.md`.
 - **Clean re-evaluation of IF2 final-iter mean.** Post-IF2, `coef(mif2_out)` is
   re-scored with `M` high-particle PF replicates and combined via `logmeanexp`
   on the likelihood scale — pomp's documented post-`mif2` workflow (King,

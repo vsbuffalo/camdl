@@ -1413,6 +1413,8 @@ mod tests {
         // Â leg: max = 1.21 on gamma, threshold 1.01 → fail.
         // Spread is small (~7 nats) → decibans leg passes.
         // Overall: FAIL because Â leg fails.
+        assert!(block.contains("compound convergence gate") && !block.contains("scout"),
+            "the gate is named for what it checks: {block}");
         assert!(block.contains("Â leg:"));
         assert!(block.contains("max Â = 1.210 (gamma)"),
             "expected max Â call-out; got: {}", block);
@@ -3130,7 +3132,7 @@ mod tests {
         let md = render_markdown(&doc);
         assert!(md.contains("# Fit summary:"));
         assert!(md.contains("## `if2`"));
-        assert!(md.contains("### Compound scout-convergence gate"));
+        assert!(md.contains("### Compound convergence gate"));
         assert!(md.contains("| Â (max over params"));
         assert!(md.contains("### Parameter estimates"));
         assert!(md.contains("`R0`"));

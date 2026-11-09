@@ -121,9 +121,9 @@ error costs much more. Default to pausing.
   pinning" to an agent is often partially wrong about location, extent, or
   whether multiple basins are present. Surface the rendered HTML path and a
   one-line summary ("survey rendered to `survey.html`; my read is X but please
-  confirm before I seed scout"), don't act on the survey unilaterally. The
-  numerical TSV next to the HTML is reliable for argmax-loglik points; the
-  geometry interpretation is not.
+  confirm before I start the fit from it"), don't act on the survey
+  unilaterally. The numerical TSV next to the HTML is reliable for argmax-loglik
+  points; the geometry interpretation is not.
 - **External-oracle disagreements**: if a model is meant to reproduce a
   published result (He et al. 2010 measles, K-McK final-size, etc.) and the
   numbers don't match within the expected tolerance, surface immediately rather
