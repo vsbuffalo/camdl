@@ -55,7 +55,7 @@ use sim::inference::convergence::{
     rank_convergence, ConvergenceError, RankConvergence, DEGENERATE_REL_TOL,
     MIN_DRAWS_FOR_INFORMATIVE_ESS,
 };
-use super::fit_summary::display_width;
+use super::report::render::display_width;
 use crate::chain_index::ChainIndex;
 use sim::inference::pgas::{PositionBins, RENEWAL_BINS};
 use sim::state::Flows;
