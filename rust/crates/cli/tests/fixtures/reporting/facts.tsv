@@ -313,3 +313,95 @@ pfilter_fit	stderr	line	── method:	pfilter
 pfilter_fit	stderr	line	loglik =	-64.5 ± 0.5 (3 reps, 200 particles
 pfilter_fit.summary	stdout	line	pfilter · pfilter	pfilter · pfilter
 pfilter_fit.summary	stdout	line	loglik =	-64.5 ± 0.5 (3 reps, 200 particles)
+pfilter.replicates	stdout	line	seed	loglik
+pfilter.replicates	stdout	line	-43.9979	-43.9979
+pfilter.replicates	stderr	line	pfilter:	3 replicates × 100 particles
+pfilter.replicates	stderr	line	loglik =	-44.1 ± 0.2 (3 replicates, N=100)
+pfilter.replicates	stderr	line	stored	results/pfilters/sir-
+pfilter.files	stderr	line	[info] --save-filtering	emits filtering marginals
+pfilter.files	stderr	line	trace written to	tr.tsv
+pfilter.files	stderr	line	pf-health written to	h.tsv
+pfilter.files	stderr	line	pf-health summary	(14 obs, N=100)
+pfilter.files	stderr	line	ESS fraction:	median 82.7%, worst 35.4%
+pfilter.files	stderr	line	log-weight variance	median 0.76, max 5.39
+pfilter.files	stderr	line	implied N to avoid collapse	~1 (median step), ~15 (worst step)
+pfilter.files	stderr	line	Snyder et al. 2008 heuristic	not a guarantee
+pfilter.files	stderr	line	final particle states	(100 particles) at t=14 written to fs.tsv
+pfilter.files	stderr	line	sample paths written to	2 sample paths written to p.tsv
+pfilter.files	stderr	line	prequential trace written:	elpd=-44.58, mean_crps=3.825, PIT 90% cov=0.86
+pfilter.files	stderr	line	worst-scored observations	(5 of 14 scored; together 43.1% of elpd -44.6)
+pfilter.files	stderr	block	worst-scored observations	67         [66, 102]    -4.3 (-4.3)    9.7%  0.06     53.4
+pfilter.files	stderr	line	filtering marginals written to	f.tsv
+pfilter.files	stderr	line	loglik written to	ll.toml
+pfilter.no_data	stderr	line	error: pfilter needs observation data to score:	or `--fit FOO.toml` with a [data.observations] section.
+profile	stderr	line	profile: using --fit	'if2.toml' for priors / bounds / [fixed]
+profile	stderr	line	profile: no --data flags supplied	reading bindings from --fit toml [data.observations]
+profile	stderr	line	profile: using observation model	'cases' from IR
+profile	stderr	line	profile:	3 grid (beta=3) × 2 starts × 1 seeds = 6 IF2 runs
+profile	stderr	line	profile: IF2 per cell	100 particles × 3 iterations
+profile	stderr	line	warning: profile grid point 1 (start 1)	produced a non-finite log-likelihood (-inf)
+profile	stderr	line	warning: profile grid point 0 (start 0)	the point will be MISSING from the profile curve
+profile	stderr	line	profile:	6 cells written under results/profiles
+profile.cached	stderr	line	profile:	6 of 6 starts already cached — resuming
+profile.cached	stderr	line	profile:	6 cells written under results/profiles
+profile.refused	stderr	line	error:	--particles is required for an if2 profile
+survey	stderr	line	survey: --eval auto	resolved to 'simulate' (model does not have stochastic process noise)
+survey	stderr	line	note: --n-points 8	below the rule-of-thumb coverage floor of n_points/d^2 >= 50 (d=2, recommended >= 200)
+survey	stderr	line	stored	8 points (eval=simulate)
+survey	stderr	line	camdl list	--kind survey
+survey	stderr	line	--eval simulate now computes	p(y|θ, ODE_skeleton) via the ODE backend
+survey	stderr	line	survey: wrote	landscape.tsv (8 rows)
+survey	stderr	line	survey: 0 of 8 points	(0.0%) scored a non-finite log-likelihood
+survey.cached	stderr	line	cached	results/surveys/sir-
+survey.refused	stderr	block	error: camdl survey requires either --fit FIT.toml	Got neither.
+compare.refused	stderr	line	error:	compare requires either --config FILE or ≥2 fit leaf paths
+predict	stderr	line	fit predict: free_forward horizon	subsampling 5 of 400 posterior draws (raise with --n-draws)
+predict	stderr	line	fit predict: horizon=free_forward	treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 400 draws from pmmh method 'pmmh'
+predict	stdout	line	wrote	/predictive/cases.tsv
+predict	stdout	line	wrote	/observed/cases.tsv
+predict	stdout	line	wrote	/report.json
+predict.refused	stderr	line	error:	no completed fit run labelled @nope under results/fits
+simulate	stderr	line	compiling	sir.camdl...
+simulate	stderr	line	simulate · chain_binomial:	running …
+simulate	stderr	line	stored	./results/sims/sir-
+simulate	stderr	line	camdl cat	camdl cat
+simulate.stdout	stdout	line	t_start	flow_infection
+simulate.stdout	stdout	line	1076	619
+simulate.seeds	stderr	line	3 replicates	= 3 runs
+simulate.seeds	stderr	line	trajectory written to	traj.tsv
+simulate.seeds	stderr	line	storing ensemble	3 cells
+simulate.seeds	stderr	line	ensemble	./results/ensembles/sir-
+simulate.seeds	stderr	line	stored	3 leaves · ./results/sims/
+simulate.seeds	stderr	line	observations written to	obsd/cases.tsv
+simulate.dry	stderr	line	camdl simulate	(dry run)
+simulate.dry	stderr	line	backend:	chain_binomial
+simulate.dry	stderr	line	Parameters	(4):
+simulate.dry	stderr	line	beta	0.600000  truth.toml
+simulate.refused	stderr	line	error: unknown parameter	'zzz' from --param.
+simulate.refused	stderr	line	Available parameters:	beta, gamma, rho, N0
+simulate.events	stderr	line	event log:	185 events (99 lineage); stored as event_log.tsv in the run leaf, mirrored to ev.tsv (tsv); exact (Gillespie)
+simulate.events	stderr	line	next:	camdl lineage realize ev.tsv --identity-seed <N> -o line_list.tsv
+lineage.realize	stderr	line	lineage realize:	identity-seed 7, 99 edges, log P(line list | event log) = -664.457449
+lineage.realize	stderr	line	sub-dt bias:	0.000 (exact — Gillespie event log)
+lineage.tree	stderr	line	lineage tree:	100 candidate individuals, 100 sampled tips, 1 tree(s)
+lineage.sojourn	stderr	line	lineage sojourn (compartment 1):	85 completed, 14 right-censored; mean dwell 8.6400, median 7.2129, p90 19.0997
+lineage.cohort	stderr	line	lineage cohort:	2 window(s), 99 total events
+lineage.refused	stderr	line	error:	read line list nope.tsv
+list	stderr	line	fits	fits
+list	stderr	line	sims	sims
+list	stdout	line	converged	./results/fits/pmmh_converged-
+list	stdout	line	CREATED	ESTIMATE
+show	stdout	block	kind	fit_method
+show	stdout	block	method	if2
+show	stdout	block	seed	seed_1
+cat	stdout	line	t_start	flow_infection
+cat	stdout	line	1076	619
+show.refused	stderr	line	error:	no run matches 'zzzzzzzz' in ./results
+fit.diff	stdout	line	diff:	if2.toml → pmmh_converged.toml
+fit.diff	stdout	block	Model:	(no model changes)
+fit.diff	stdout	line	algorithm:	"pmmh" → "if2"
+fit.diff	stdout	line	particles:	100 → 200
+fit.diff.refused	stderr	line	error loading nope.toml:	cannot read nope.toml
+fit.table	stdout	line	fit_id	best_ll
+fit.table	stdout	line	converged	pmmh     pmmh    yes             -44.3 marginal
+fit.table.md	stdout	line	| converged |	| pmmh | pmmh | ✓ | -44.3 | marginal |

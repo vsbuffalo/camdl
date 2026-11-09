@@ -195,6 +195,72 @@ fn every_recorded_fact_is_shown() {
         "--particles", "200", "--seed", "1",
     ]))));
 
+    // The other commands, each with one run that refuses its input, so an
+    // error line is a recorded fact too.
+    let none = ["--progress", "none"];
+    let mle_s = mle.to_str().unwrap();
+    let pf = |extra: &[&str]| {
+        let mut v = a(&["pfilter", "sir.camdl", "--fit", "if2.toml", "--params", mle_s]);
+        v.extend(a(extra));
+        v.extend(a(&none));
+        v
+    };
+    runs.push(("pfilter.replicates", run(&pf(&["--particles", "100", "--seed", "2", "--replicates", "3"]))));
+    runs.push(("pfilter.files", run(&pf(&[
+        "--particles", "100", "--seed", "3", "--trace", "tr.tsv", "--pf-health", "h.tsv",
+        "--save-final-state", "fs.tsv", "--save-paths", "p.tsv", "--n-paths", "2",
+        "--save-filtering", "f.tsv", "--save-prequential", "preq", "-o", "ll.toml",
+    ]))));
+    runs.push(("pfilter.no_data", run(&a(&["pfilter", "sir.camdl", "--params", mle_s, "--particles", "100"]))));
+    let profile = a(&[
+        "profile", "sir.camdl", "--fit", "if2.toml", "--sweep", "beta=lin(0.3,0.6,3)", "--particles", "100",
+        "--iterations", "3", "--n-starts", "2", "--seed", "1", "--rw-sd", "auto", "--progress", "none",
+    ]);
+    runs.push(("profile", run(&profile)));
+    runs.push(("profile.cached", run(&profile)));
+    runs.push(("profile.refused", run(&a(&["profile", "sir.camdl", "--fit", "if2.toml", "--sweep", "beta=lin(0.3,0.6,3)"]))));
+    let survey = a(&[
+        "survey", "sir.camdl", "--fit", "if2.toml", "--n-points", "8", "--eval-particles", "50", "--seed", "1",
+        "--progress", "none",
+    ]);
+    runs.push(("survey", run(&survey)));
+    runs.push(("survey.cached", run(&survey)));
+    runs.push(("survey.refused", run(&a(&["survey", "sir.camdl", "--estimate", "beta=0:1"]))));
+    runs.push(("compare.refused", run(&a(&["compare", "@if2"]))));
+    runs.push(("predict", run(&a(&["fit", "predict", "@converged", "--horizon", "free_forward", "--n-draws", "5"]))));
+    runs.push(("predict.refused", run(&a(&["fit", "predict", "@nope", "--horizon", "free_forward"]))));
+    let sim = |extra: &[&str]| {
+        let mut v = a(&["simulate", "sir.camdl", "--params", "truth.toml"]);
+        v.extend(a(extra));
+        v
+    };
+    runs.push(("simulate", run(&sim(&["--seed", "1"]))));
+    runs.push(("simulate.stdout", run(&sim(&["--seed", "1", "--stdout"]))));
+    runs.push(("simulate.seeds", run(&sim(&["--seeds", "1:3", "--obs-dir", "obsd", "-o", "traj.tsv", "--progress", "none"]))));
+    runs.push(("simulate.dry", run(&sim(&["--seed", "1", "--dry-run"]))));
+    runs.push(("simulate.refused", run(&a(&["simulate", "sir.camdl", "--param", "zzz=1"]))));
+    runs.push(("simulate.events", run(&a(&[
+        "simulate", "lineage.camdl", "--param", "beta=0.8", "--param", "gamma=0.1", "--seed", "3",
+        "--event-log", "ev.tsv", "--tsv", "--backend", "gillespie",
+    ]))));
+    let sim_id = runs.iter().find(|(n, _)| *n == "simulate").unwrap().1.stderr.lines()
+        .find_map(|l| l.trim().strip_prefix("camdl cat ").map(str::to_string))
+        .expect("simulate names its leaf as `camdl cat <id>`");
+    runs.push(("lineage.realize", run(&a(&["lineage", "realize", "ev.tsv", "--identity-seed", "7", "-o", "ll.tsv"]))));
+    runs.push(("lineage.tree", run(&a(&["lineage", "tree", "ll.tsv", "--scheme", "flat:1.0", "--output", "tree.nwk"]))));
+    runs.push(("lineage.sojourn", run(&a(&["lineage", "sojourn", "ll.tsv", "--compartment", "1", "--output", "soj.tsv"]))));
+    runs.push(("lineage.cohort", run(&a(&["lineage", "cohort", "ll.tsv", "--event", "infection", "--window", "7", "--output", "coh.tsv"]))));
+    runs.push(("lineage.refused", run(&a(&["lineage", "tree", "nope.tsv", "--scheme", "flat:1.0"]))));
+    runs.push(("list", run(&a(&["list"]))));
+    let if2_leaf = leaf(&work, "if2", "if2");
+    runs.push(("show", run(&a(&["show", if2_leaf.to_str().unwrap()]))));
+    runs.push(("cat", run(&a(&["cat", &sim_id]))));
+    runs.push(("show.refused", run(&a(&["show", "zzzzzzzz"]))));
+    runs.push(("fit.diff", run(&a(&["fit", "diff", "if2.toml", "pmmh_converged.toml"]))));
+    runs.push(("fit.diff.refused", run(&a(&["fit", "diff", "if2.toml", "nope.toml"]))));
+    runs.push(("fit.table", run(&a(&["fit", "table", "results/fits"]))));
+    runs.push(("fit.table.md", run(&a(&["fit", "table", "results/fits", "--format", "md"]))));
+
     run_equals_loader(&work, &captured, |args, capture| run_capturing(&a(args), capture));
 
     let facts = read_facts();
