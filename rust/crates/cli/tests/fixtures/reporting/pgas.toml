@@ -1,0 +1,21 @@
+[model]
+camdl = "sir.camdl"
+
+[data.observations]
+cases = "cases.tsv"
+
+[estimate]
+beta  = { start = 0.5 }
+gamma = { start = 0.2 }
+
+[fixed]
+rho = 0.5
+N0  = 2000
+
+[method]
+algorithm = "pgas"
+backend   = "chain_binomial"
+chains    = 2
+particles = 50
+sweeps    = 200
+burn_in   = 100

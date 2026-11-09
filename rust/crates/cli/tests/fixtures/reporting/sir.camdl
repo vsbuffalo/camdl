@@ -1,0 +1,37 @@
+#' Closed SIR with daily reported cases: the fixture behind the reporting
+#' facts test (`cli/tests/reporting_facts.rs`). Fitted to one stream,
+#' daily case counts, a Poisson draw around a fraction of new infections.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  #' per-capita transmission rate
+  beta  : rate        in [0.05, 2.0] ~ log_normal(mu = -1.0, sigma = 0.5)
+  #' recovery rate; mean infectious period is 1/gamma
+  gamma : rate        in [0.02, 1.0] ~ log_normal(mu = -2.0, sigma = 0.5)
+  #' reporting fraction
+  rho   : probability in [0.01, 1.0]
+  #' population size
+  N0    : count       in [100, 100000]
+}
+
+transitions {
+  infection : S --> I @ beta * S * I / N0
+  recovery  : I --> R @ gamma * I
+}
+
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 1 'days
+    cases         ~ poisson(rate = rho * projected)
+  }
+}
+
+init { S = 1990  I = 10 }
+
+simulate { from = 0 'days  to = 14 'days }

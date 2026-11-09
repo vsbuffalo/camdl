@@ -1,0 +1,21 @@
+[model]
+camdl = "sir.camdl"
+
+[data.observations]
+cases = "cases.tsv"
+
+[estimate]
+beta  = { start = 0.5 }
+gamma = { start = 0.2 }
+
+[fixed]
+rho = 0.5
+N0  = 2000
+
+[method]
+algorithm  = "if2"
+backend    = "chain_binomial"
+chains     = 4
+particles  = 200
+iterations = 20
+cooling    = 0.9
