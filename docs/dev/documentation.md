@@ -206,6 +206,26 @@ to show. An `include` whose `lines` range runs past the end of the file fails
 too, since the excerpt no longer matches what it was written against. Model
 files live next to the page, in `docs/guide/<page>/`.
 
+A tutorial whose commands write files, such as a fit, declares a scratch
+directory in its front matter:
+
+```yaml
+camdl-run-scratch: first-fit
+```
+
+Every block on that page then runs in a fresh copy of `docs/guide/first-fit/`,
+made once per render and deleted afterwards. The commands read as a user types
+them inside their own project (`camdl fit run fit.toml`), the checkout never
+collects a `results/` directory, and a fit `--label`, which can never be reused,
+is new on every render. `include` paths stay relative to the page.
+
+A block that draws a plot names the SVG it writes with `figure="name.svg"` (and
+an optional `caption="..."`), and the filter inlines that file under the block's
+output; a missing file fails the render. The plots are `uv run` scripts beside
+the page, with their dependencies declared inline, so a site build needs `uv` on
+PATH (the CI workflow installs it). A script that draws in `currentColor`, as
+`guide/first-fit/plot_prior.py` does, follows the light and dark themes.
+
 Because the output is regenerated on every build, a tutorial cannot show output
 the current code no longer produces. The prose around it can still drift: when a
 command's output changes, reread the paragraph that describes it.

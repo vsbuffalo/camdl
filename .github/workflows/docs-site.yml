@@ -63,6 +63,9 @@ jobs:
         with:
           version: 1.9.38
 
+      # The tutorials draw their plots with `uv run` scripts at render time.
+      - uses: astral-sh/setup-uv@v6
+
       - name: Build camdl and render site
         run: opam exec -- make docs-site
 

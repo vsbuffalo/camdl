@@ -13,6 +13,18 @@
 --     Runs the command at render time and shows it with its real output. A
 --     non-zero exit fails the render; mark a deliberate error with
 --     `expect="fail"` (and then a zero exit fails the render instead).
+--     `figure="prior.svg"` inlines an SVG the command wrote below its output,
+--     with an optional `caption="..."`; a missing file fails the render.
+--
+-- A page that writes results declares a scratch directory in its front matter:
+--
+--   camdl-run-scratch: first-fit
+--
+-- Every block then runs in a fresh copy of that subdirectory, made once per
+-- render and deleted after it, so the commands read as a user types them in
+-- their project (`camdl fit run fit.toml`), the checkout never collects
+-- results/, and a run label (which can never be reused) is new each render.
+-- `include` paths stay relative to the page.
 --
 -- The binaries come from PATH. `make docs-site` puts this checkout's freshly
 -- built camdl first, so the output always matches the code being documented.
@@ -63,9 +75,11 @@ end
 -- Runs the block under bash with -e and pipefail, so a failure anywhere in a
 -- multi-line block or a pipeline is its exit status, and with stderr folded
 -- into the shown output for every command, not only the last.
+local workdir = nil -- set per page by setup(); nil means the page directory
+
 local function run(cmd)
   local script = "set -eo pipefail\nexport NO_COLOR=1 CLICOLOR=0 TERM=dumb\n"
-    .. "cd " .. shell_quote(page_dir()) .. " || exit 125\n" .. cmd
+    .. "cd " .. shell_quote(workdir or page_dir()) .. " || exit 125\n" .. cmd
   local full = "bash -c " .. shell_quote(script)
     .. " 2>&1; printf '\\n__camdl_run_exit=%s' $?"
   local handle = io.popen(full)
@@ -75,7 +89,57 @@ local function run(cmd)
   return strip_ansi(body or out):gsub("%s+$", ""), tonumber(code or "1")
 end
 
-function CodeBlock(block)
+local function capture(cmd)
+  local handle = io.popen(cmd)
+  local out = handle:read("*a")
+  local ok = handle:close()
+  return out:gsub("%s+$", ""), ok
+end
+
+local function setup(meta)
+  local sub = meta["camdl-run-scratch"]
+  if not sub then
+    return
+  end
+  sub = pandoc.utils.stringify(sub)
+  if sub == "" or sub:find("%.%.") or sub:sub(1, 1) == "/" then
+    error("camdl-run-scratch must name a subdirectory of the page, got " .. sub)
+  end
+  local src = page_dir() .. "/" .. sub
+  local tmp, ok = capture("mktemp -d")
+  if not ok or tmp == "" then
+    error("camdl-run: mktemp -d failed")
+  end
+  local _, copied = capture("cp -R " .. shell_quote(src) .. "/. " .. shell_quote(tmp) .. "/")
+  if not copied then
+    error("camdl-run: cannot copy " .. src .. " to " .. tmp)
+  end
+  workdir = tmp
+end
+
+local function teardown()
+  if workdir then
+    capture("rm -rf " .. shell_quote(workdir))
+    workdir = nil
+  end
+end
+
+-- An SVG the block wrote, inlined so it takes the page's colours (a plot
+-- drawn in `currentColor` follows the light and dark themes).
+local function figure_block(path, caption)
+  if path:find("%.%.") or path:sub(1, 1) == "/" or not path:match("%.svg$") then
+    error("camdl-run: figure must be a relative .svg path, got " .. path)
+  end
+  local svg = read_file((workdir or page_dir()) .. "/" .. path)
+  svg = svg:gsub("^%s*<%?xml.-%?>%s*", ""):gsub("^%s*<!DOCTYPE.->%s*", "")
+  local html = '<figure class="camdl-fig camdl-plot">' .. svg
+  if caption then
+    html = html .. "<figcaption>" .. caption:gsub("&", "&amp;"):gsub("<", "&lt;") .. "</figcaption>"
+  end
+  return pandoc.RawBlock("html", html .. "</figure>")
+end
+
+local function code_block(block)
   local include = block.attributes["include"]
   if include then
     local text = read_file(page_dir() .. "/" .. include)
@@ -111,9 +175,22 @@ function CodeBlock(block)
     elseif not expect_fail and code ~= 0 then
       error("camdl-run: `" .. cmd .. "` exited " .. code .. ":\n" .. output)
     end
-    return pandoc.Div({
-      pandoc.CodeBlock(cmd, pandoc.Attr("", { "bash", "camdl-run-cmd" })),
-      pandoc.CodeBlock(output, pandoc.Attr("", { "camdl-run-out" })),
-    }, pandoc.Attr("", { "camdl-run" }))
+    local blocks = { pandoc.CodeBlock(cmd, pandoc.Attr("", { "bash", "camdl-run-cmd" })) }
+    if output ~= "" then
+      table.insert(blocks, pandoc.CodeBlock(output, pandoc.Attr("", { "camdl-run-out" })))
+    end
+    local run_block = pandoc.Div(blocks, pandoc.Attr("", { "camdl-run" }))
+    local figure = block.attributes["figure"]
+    if not figure then
+      return run_block
+    end
+    return { run_block, figure_block(figure, block.attributes["caption"]) }
   end
 end
+
+-- Three passes in order: make the scratch copy, run the blocks, delete it.
+return {
+  { Meta = function(meta) setup(meta) end },
+  { CodeBlock = code_block },
+  { Pandoc = function() teardown() end },
+}
