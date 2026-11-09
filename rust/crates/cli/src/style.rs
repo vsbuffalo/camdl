@@ -145,7 +145,7 @@ mod tests {
         // ANSI escape bytes.
         let raw = "Examples:\n  # see `--resume`\n  camdl X";
         let out: String = raw.lines().map(strip_backticks).collect::<Vec<_>>().join("\n");
-        assert!(!out.contains('\x1b'));
+        assert!(!out.contains(char::from(0x1b)), "no escape character");
         assert!(!out.contains('`'));
     }
 }
