@@ -1920,6 +1920,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 findings::print(&collector, sim::inference::diagnostic::HintContext {
                     chains_completed: Some(chain_results.results.len()),
                 });
+                // Recorded, as every other method's are, so `fit summary`
+                // shows the findings this run printed.
+                write_diagnostics(&collector, &method_dir)
+                    .unwrap_or_else(|e| abandon_method(&heartbeat, format!("error: {e}")));
 
                 method_best_loglik = Some(chain_results.best_loglik);
                 method_best_chain = Some(chain_results.best_chain);
