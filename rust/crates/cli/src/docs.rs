@@ -75,7 +75,7 @@ const TOPICS: &[Topic] = &[
     Topic {
         slug: "fit-toml",
         aliases: &["fittoml", "fit-config"],
-        summary: "fit.toml reference: model/data/estimate/fixed/stages, priors, stage algorithms",
+        summary: "fit.toml reference: model/data/estimate/fixed/method/config, chain starts, priors, method algorithms",
         body: include_str!("../../../../docs/fit-toml.md"),
     },
     Topic {
