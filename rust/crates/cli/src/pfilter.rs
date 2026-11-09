@@ -63,6 +63,9 @@ fn check_per_run_outputs(a: &crate::args::PfilterArgs) -> Result<(), String> {
 }
 
 pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
+    // pfilter has no `--no-color`: its painters follow the environment and
+    // whether each stream is a terminal.
+    let out = crate::out::Out::new(false);
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
     sim::eval_stats::set_allow_degenerate_rates(a.inference.allow_degenerate_rates);  // gh#audit-C6
     let ir_path = a.model.to_string_lossy().into_owned();
@@ -84,8 +87,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // per-run output would be silently not written — at exit 0, leaving any
     // stale file of that name to be read as this run's. Refuse instead.
     if let Err(e) = check_per_run_outputs(a) {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+        out.fail(format!("error: {e}"));
     }
 
     // The likelihood this run scores. With `--fit` it is the fit config's own
@@ -95,8 +97,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let fit_problem: Option<crate::fit::config_v2::Problem> = a.fit.as_ref().map(|fit_path| {
         let path_str = fit_path.to_string_lossy();
         crate::fit::config_v2::Problem::load(&path_str).unwrap_or_else(|e| {
-            eprintln!("error: failed to load --fit toml '{}': {}", path_str, e);
-            std::process::exit(1);
+            out.fail(format!("error: failed to load --fit toml '{}': {}", path_str, e));
         })
     });
     let objective = fit_problem
@@ -121,8 +122,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         || !a.scenario.disable.is_empty();
     let fit_base: Option<crate::util::FitBase> = fit_problem.as_ref().map(|p| {
         crate::util::FitBase::of(p).unwrap_or_else(|e| {
-            eprintln!("error: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: {e}"));
         })
     });
     if let Some(base) = &fit_base {
@@ -137,8 +137,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             disable: &base.selection.disable,
         };
         if let Err(e) = crate::util::combine_fit_scenario(flag, config) {
-            eprintln!("error: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: {e}"));
         }
     }
     // Scored under the fit's selection exactly when the flags select nothing
@@ -153,13 +152,12 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
 
     // Load model (supports .camdl via camdlc)
     let (mut model_in, _model_json) = crate::util::load_model(&ir_path)
-        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+        .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     if let Some(base) = &scored_fit_base {
         let (enable, disable) = base.lists(&model_in).unwrap_or_else(|e| {
-            eprintln!("error: --fit: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: --fit: {e}"));
         });
-        eprintln!("pfilter: scoring under the fit's own {} (from --fit)", base.describe());
+        out.say(format_args!("pfilter: scoring under the fit's own {} (from --fit)", base.describe()));
         adhoc_enable = enable;
         adhoc_disable = disable;
     }
@@ -173,8 +171,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let dt = crate::dt_rule::effective_dt_for_command(
         a.inference.dt, fit_written_dt, model_in.simulation.dt,
     ).unwrap_or_else(|e| {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+        out.fail(format!("error: {e}"));
     });
 
     // ── Resolve --data flags (gh#90) ─────────────────────────────────
@@ -209,16 +206,15 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         a.fit.as_ref().map(|fit_path| {
             load_data_observations_from_fit_toml(fit_path, &model_obs_names)
                 .unwrap_or_else(|e| {
-                    eprintln!("error: --fit toml fallback for --data: {}", e);
-                    std::process::exit(1);
+                    out.fail(format!("error: --fit toml fallback for --data: {}", e));
                 })
         })
     } else {
         if a.fit.is_some() {
-            eprintln!("pfilter: --data on CLI overrides --fit toml [data.observations]");
+            out.say("pfilter: --data on CLI overrides --fit toml [data.observations]");
         }
         Some(crate::util::resolve_data_specs(&cli_data_specs, &model_obs_names, obs_name.as_deref())
-            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); }))
+            .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); }))
     };
 
     // gh#616: pfilter binds observation data, so it RESOLVES a model's
@@ -240,14 +236,12 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     match &bound_streams {
         Some(bound) => {
             if let Err(e) = crate::obs_anchor::resolve_from_bindings(&mut model_in, bound, dt) {
-                eprintln!("error: {e}");
-                std::process::exit(1);
+                out.fail(format!("error: {e}"));
             }
         }
         None => {
             if let Some(msg) = crate::obs_anchor::refuse_without_data(&model_in, PFILTER_SUPPLY) {
-                eprintln!("error: {msg}");
-                std::process::exit(1);
+                out.fail(format!("error: {msg}"));
             }
             crate::obs_anchor::spline_hold_notices(&model_in, &[], model_in.simulation.t_end)
                 .emit_stderr();
@@ -270,8 +264,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         "a particle filter scores at the observation times, so its window comes \
          from the data, not the model horizon",
     ) {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+        out.fail(format!("error: {e}"));
     }
 
     // Unified resolver (2026-05-25 CLI UX rev 2). Maps the legacy
@@ -305,34 +298,33 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         fit_toml_estimate: &fte,
         table_files: &table_files,
     }).unwrap_or_else(|e| {
-        eprintln!("error: {}", e.with_flags(crate::params_resolver::FlagStyle::Params));
-        std::process::exit(1);
+        out.fail(format!("error: {}", e.with_flags(crate::params_resolver::FlagStyle::Params)));
     });
     emit_notices(&[&resolved]);
     let model = resolved.model.clone();
 
     let compiled = CompiledModel::new(model.clone())
-        .unwrap_or_else(|e| { eprintln!("compile error: {:?}", e); std::process::exit(1); });
+        .unwrap_or_else(|e| { out.fail(format!("compile error: {:?}", e)); });
     // gh#122: the particle filter is a stochastic (chain_binomial) producer; a
     // source that mixes a deterministic exit with another exit would over-draw
     // the source. Reject it here (the standalone `pfilter` command bypasses
     // `check_model_capabilities`).
     compiled
         .validate_deterministic_source_exits()
-        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+        .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     // gh#121: a multi-source stochastic transition (`A + B --> C`) is bounded by
     // only its first source on chain_binomial, driving the secondary source
     // negative. The standalone pfilter bypasses check_model_capabilities, so
     // gate it here too.
     compiled
         .validate_single_source_transitions()
-        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+        .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     // A transition consuming more than one unit of its source per firing has no
     // meaning in the chain-binomial kernel the filter steps with; refuse it here
     // for the same reason.
     compiled
         .validate_unit_source_consumption()
-        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+        .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     // gh#191: the particle filter is a chain_binomial INFERENCE producer — it
     // carries no real state and never advances a reservoir, so a real-coupled
     // (REAL_COMPARTMENTS) model would be filtered with its reservoir frozen at
@@ -341,7 +333,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // it — so gate here too, with the same shared inference gate.
     crate::fit::methods::check_model_capabilities(
         crate::run_meta::InferenceBackend::ChainBinomial, &compiled,
-    ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let params = compiled.default_params.clone();
 
     // The conditional objective (`ic_free = true`) is admitted by the check
@@ -360,28 +352,25 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             if let Err(msg) = crate::fit::methods::validate_ic_free(
                 crate::run_meta::FitAlgorithm::Pfilter, init_law,
             ) {
-                eprintln!("error: the --fit config sets ic_free = true. {msg}");
-                std::process::exit(1);
+                out.fail(format!("error: the --fit config sets ic_free = true. {msg}"));
             }
-            eprintln!("pfilter: objective: conditional on the first observation \
+            out.say(format_args!("pfilter: objective: conditional on the first observation \
                 (ic_free = true in {fit_name}); omit --fit and pass --data for the \
-                full likelihood");
+                full likelihood"));
         } else {
-            eprintln!("pfilter: objective: full likelihood ({fit_name} does not set \
-                ic_free = true)");
+            out.say(format_args!("pfilter: objective: full likelihood ({fit_name} does not set \
+                ic_free = true)"));
         }
     }
 
     // The missing-data refusal, reported here rather than where the binding was
     // resolved, so every gate above keeps first say (see the binding block).
     let bound_streams = bound_streams.unwrap_or_else(|| {
-        eprintln!("error: pfilter needs observation data to score: {PFILTER_SUPPLY}");
-        std::process::exit(1);
+        out.fail(format!("error: pfilter needs observation data to score: {PFILTER_SUPPLY}"));
     });
     if bound_streams.is_empty() {
-        eprintln!("error: zero streams resolved from --data / --fit toml. \
+        out.fail("error: zero streams resolved from --data / --fit toml. \
                    pfilter requires at least one observation stream.");
-        std::process::exit(1);
     }
 
     // Load data — route the time column through the calendar-time boundary
@@ -406,10 +395,10 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // boundary; it is retained below only for the CAS data-hash + the unbound-
     // streams warning, whose key-space (leaf name / family root) must not change.
     let effective = crate::fit::runner::data_bindings_to_effective(&model, &bound_streams)
-        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+        .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let streams = crate::fit::runner::resolve_and_load_obs_streams(
         &model, &compiled, &effective, dt, &time_opts,
-    ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let n_streams = streams.len();
 
     // Holes (missing observations via `NA`) are correct for the filter
@@ -428,20 +417,18 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // reader of the outputs knows rows were skipped rather than zero-filled.
     let has_holes = streams.iter().any(|s| s.cells.iter().any(|c| c.is_none()));
     if has_holes && (save_prequential.is_some() || trace_path.is_some()) {
-        eprintln!(
-            "pfilter: data has missing observations (NA) — prequential/trace \
+        out.say("pfilter: data has missing observations (NA) — prequential/trace \
              scores skip the missing (stream, time) cells; a step with no \
              present stream is omitted from the prequential and prints NA in \
-             the trace."
-        );
+             the trace.");
     }
 
     if n_streams > 1 {
-        eprintln!("  streams: {}", streams.iter()
-            .map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
+        out.say(format_args!("  streams: {}", streams.iter()
+            .map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")));
     }
 
-    eprintln!("pfilter: bound streams: {}", streams.iter()
+    out.say(format_args!("pfilter: bound streams: {}", streams.iter()
         .map(|s| format!("{}({})", s.name, match &s.obs_model_ir.likelihood {
             ir::observation::Likelihood::NegBinomial(_)  => "neg_binomial",
             ir::observation::Likelihood::Normal(_)       => "normal",
@@ -451,7 +438,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             ir::observation::Likelihood::Beta(_)         => "beta",
             ir::observation::Likelihood::Bernoulli(_)    => "bernoulli",
             ir::observation::Likelihood::ZeroInflatedNegBinomial(_) => "zero_inflated_neg_binomial",
-        })).collect::<Vec<_>>().join(", "));
+        })).collect::<Vec<_>>().join(", ")));
 
     // gh#90: emit unbound-streams warning if a multi-block model is only
     // partially covered. The bound set is the RESOLVED leaf names (a family root
@@ -465,7 +452,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         if let Some(w) = crate::util::format_unbound_streams_warning(
             "pfilter", &all_names, &bound_names,
         ) {
-            eprint!("{}", w);
+            out.say_raw(format_args!("{}", w));
         }
     }
 
@@ -479,20 +466,18 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let stream_specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
     let (bound, report) = BoundObs::bind(compiled.model.simulation.t_start, stream_specs)
         .unwrap_or_else(|report| {
-        eprintln!("error: observation data invalid:\n{}", report.render());
-        std::process::exit(1);
+        out.fail(format!("error: observation data invalid:\n{}", report.render()));
     });
 
     // gh#812: a non-fatal bind report was previously discarded, so the
     // Warn channel was write-only. Surface it — a zero denominator scores
     // as zero, and the user must be told which rows and why.
     if !report.findings().is_empty() {
-        eprintln!("{}", report.render());
+        out.say(format_args!("{}", report.render()));
     }
     let obs_model = MultiStreamObsModel::new(bound, compiled.clone())
         .unwrap_or_else(|e| {
-            eprintln!("error: observation model construction failed: {:?}", e);
-            std::process::exit(1);
+            out.fail(format!("error: observation model construction failed: {:?}", e));
         });
 
     // Canonical observations: the UNION axis the bound model scores along —
@@ -508,8 +493,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         .map(|&time| Observation { time, value: 0.0 })
         .collect();
 
-    eprintln!("pfilter: {} observation boundaries × {} streams, {} particles, dt={}, seed={}",
-        observations.len(), n_streams, n_particles, dt, seed);
+    out.say(format_args!("pfilter: {} observation boundaries × {} streams, {} particles, dt={}, seed={}",
+        observations.len(), n_streams, n_particles, dt, seed));
 
     // Record ancestry when either --save-paths or --save-filtering is
     // active. Both flags consume the same per-step snapshot data; the
@@ -542,11 +527,11 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // they were smoothing paths — is silent. See
     // docs/dev/proposals/2026-04-19-pf-latent-trajectories.md.
     if save_filtering.is_some() {
-        eprintln!("[info] --save-filtering emits filtering marginals \
+        out.say(format_args!("[info] --save-filtering emits filtering marginals \
                    p(x_t | y_{{1..t}}), not smoothing paths. Joining \
                    particles across time by index does NOT yield \
                    trajectory samples from the posterior. For coherent \
-                   sample paths use --save-paths N PATH.");
+                   sample paths use --save-paths N PATH."));
     }
 
     // ── Default-CAS: record this eval as a content-addressed `Pfilter` leaf
@@ -586,7 +571,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         };
         let resolved_id = match crate::pfilter_cas::resolve_pfilter(&ctx) {
             Ok(r) => r,
-            Err(e) => { eprintln!("warning: pfilter CAS identity: {}", e); return; }
+            Err(e) => { out.say(format_args!("warning: pfilter CAS identity: {}", e)); return; }
         };
         let root = crate::run_paths::output_root(None, None);
         let cas_path = runid::store_path(&root, runid::ArtifactKind::Pfilter, &resolved_id.levels);
@@ -636,14 +621,14 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             // (`begin_resolved_write` finds it by identity), so report the
             // path the store names, not this run's `cas_path`.
             Err(runid::CasError::AlreadyCompleted { path }) => {
-                crate::out::status::step("cached", path);
+                out.milestone("cached", path);
                 return;
             }
             // Another process is computing this same evaluation right now. The
             // loglik above is still correct and already printed; only the store
             // write is skipped.
             Err(e @ runid::CasError::FitInProgress { .. }) => {
-                eprintln!("warning: not storing this pfilter leaf — {}", e);
+                out.say(format_args!("warning: not storing this pfilter leaf — {}", e));
                 return;
             }
             // Anything else means the result was NOT recorded. Say so
@@ -657,10 +642,10 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             // leaf is an honest miss downstream (`camdl cat` reports not
             // found); it can never be read as a wrong number.
             Err(e) => {
-                eprintln!("warning: this pfilter result was NOT stored in the \
+                out.say(format_args!("warning: this pfilter result was NOT stored in the \
                            run cache — {}\n  (the log-likelihood above is \
                            valid; only the cached leaf at {} is missing)",
-                    e, cas_path.display());
+                    e, cas_path.display()));
                 return;
             }
         };
@@ -670,14 +655,13 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         // Through the claim (fsync'd), and the error is fatal: a discarded
         // write error could finalize a Completed leaf with no loglik.toml in it.
         if let Err(e) = write.write("loglik.toml", body.as_bytes()) {
-            eprintln!("error: writing pfilter loglik.toml into {}: {}", cas_path.display(), e);
-            std::process::exit(1);
+            out.fail(format!("error: writing pfilter loglik.toml into {}: {}", cas_path.display(), e));
         }
         if let Err(e) = write.finalize(inputs_json) {
-            eprintln!("warning: finalize pfilter leaf {}: {}", cas_path.display(), e);
+            out.say(format_args!("warning: finalize pfilter leaf {}: {}", cas_path.display(), e));
         } else {
-            crate::out::status::done("stored", cas_path.display());
-            crate::out::status::hint(format!("camdl cat {}", resolved_id.run_id.to_hex()));
+            out.milestone("stored", cas_path.display());
+            out.hint(format_args!("camdl cat {}", resolved_id.run_id.to_hex()));
         }
     };
 
@@ -699,8 +683,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                 .num_threads(parallel)
                 .build()
                 .unwrap_or_else(|e| {
-                    eprintln!("error: failed to build thread pool (--parallel {}): {}", parallel, e);
-                    std::process::exit(1);
+                    out.fail(format!("error: failed to build thread pool (--parallel {}): {}", parallel, e));
                 }),
         )
     } else {
@@ -719,10 +702,10 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
 
     // ── Replicates mode: run N independent pfilters, output loglik summary ──
     if n_replicates > 1 {
-        eprintln!("pfilter: {} replicates × {} particles{}",
+        out.say(format_args!("pfilter: {} replicates × {} particles{}",
             n_replicates, n_particles,
             if parallel > 0 { format!(" (parallel = {})", parallel) }
-            else { String::new() });
+            else { String::new() }));
         // Im20 in 2026-04-19 inference review batch 3: replicate
         // seeding was `seed + rep`, which gives highly correlated
         // ChaCha8 initial states across replicates. Use the
@@ -742,8 +725,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                 let result = bootstrap_filter(
                     &process, &obs_model, &params, &smc_config, rep_seed,
                 ).unwrap_or_else(|e| {
-                    eprintln!("pfilter replicate {} error: {:?}", rep + 1, e);
-                    std::process::exit(1);
+                    out.fail(format!("pfilter replicate {} error: {:?}", rep + 1, e));
                 });
                 bar.inc(1);
                 if result.log_likelihood.is_finite() {
@@ -762,23 +744,23 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         let var_ll = logliks.iter().map(|&l| (l - mean_ll).powi(2)).sum::<f64>() / (n_replicates - 1) as f64;
         let sd_ll = var_ll.sqrt();
 
-        eprintln!("loglik = {:.1} ± {:.1} ({} replicates, N={})", mean_ll, sd_ll, n_replicates, n_particles);
+        out.say(format_args!("loglik = {:.1} ± {:.1} ({} replicates, N={})", mean_ll, sd_ll, n_replicates, n_particles));
 
         // Output: TSV of seed + loglik, or summary to --output
         match &output_path {
             Some(path) => {
                 let mut f = std::fs::File::create(path)
-                    .unwrap_or_else(|e| { eprintln!("cannot create {}: {}", path, e); std::process::exit(1); });
+                    .unwrap_or_else(|e| { out.fail(format!("cannot create {}: {}", path, e)); });
                 writeln!(f, "seed\tloglik").unwrap();
                 for (rep, ll) in logliks.iter().enumerate() {
                     writeln!(f, "{}\t{:.4}", seed.wrapping_add((rep as u64).wrapping_mul(SEED_STRIDE)), ll).unwrap();
                 }
-                eprintln!("replicate logliks written to {}", path);
+                out.say(format_args!("replicate logliks written to {}", path));
             }
             None => {
-                println!("seed\tloglik");
+                out.data_line("seed\tloglik");
                 for (rep, ll) in logliks.iter().enumerate() {
-                    println!("{}\t{:.4}", seed.wrapping_add((rep as u64).wrapping_mul(SEED_STRIDE)), ll);
+                    out.data_line(format_args!("{}\t{:.4}", seed.wrapping_add((rep as u64).wrapping_mul(SEED_STRIDE)), ll));
                 }
             }
         }
@@ -794,19 +776,18 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         bootstrap_filter(
             &process, &obs_model, &params, &smc_config, seed,
         ).unwrap_or_else(|e| {
-            eprintln!("pfilter error: {}", crate::util::sim_error_text(&e));
-            std::process::exit(1);
+            out.fail(format!("pfilter error: {}", crate::util::sim_error_text(&e)));
         })
     });
 
     // Write trace diagnostics
     let trace_to_stdout = trace_path.as_deref() == Some("-");
     if let Some(ref path) = trace_path {
-        let mut out: Box<dyn Write> = if path == "-" {
-            Box::new(std::io::BufWriter::new(std::io::stdout().lock()))
+        let mut w: Box<dyn Write> = if path == "-" {
+            Box::new(std::io::BufWriter::new(out.data()))
         } else {
             let f = std::fs::File::create(path)
-                .unwrap_or_else(|e| { eprintln!("cannot create {}: {}", path, e); std::process::exit(1); });
+                .unwrap_or_else(|e| { out.fail(format!("cannot create {}: {}", path, e)); });
             Box::new(std::io::BufWriter::new(f))
         };
         // gh#268: the real observed value per union step (cross-stream sum),
@@ -825,50 +806,49 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             }
         };
         if let Some(ref preds) = result.predictions {
-            writeln!(out, "time\tll_increment\tESS\tobs_mean\tobs_q05\tobs_q50\tobs_q95\tstate_mean\tstate_q05\tstate_q50\tstate_q95\tobserved").unwrap();
+            writeln!(w, "time\tll_increment\tESS\tobs_mean\tobs_q05\tobs_q50\tobs_q95\tstate_mean\tstate_q05\tstate_q50\tstate_q95\tobserved").unwrap();
             for (i, obs) in observations.iter().enumerate() {
                 let p = &preds[i];
-                writeln!(out, "{}\t{:.4}\t{:.1}\t{:.1}\t{:.0}\t{:.0}\t{:.0}\t{:.1}\t{:.0}\t{:.0}\t{:.0}\t{:.0}",
+                writeln!(w, "{}\t{:.4}\t{:.1}\t{:.1}\t{:.0}\t{:.0}\t{:.0}\t{:.1}\t{:.0}\t{:.0}\t{:.0}\t{:.0}",
                     obs.time, result.ll_increments[i], result.ess_trace[i],
                     p.obs_mean, p.obs_q05, p.obs_q50, p.obs_q95,
                     p.state_mean, p.state_q05, p.state_q50, p.state_q95,
                     observed_cell(i)).unwrap();
             }
         } else {
-            writeln!(out, "time\tll_increment\tESS\tobserved").unwrap();
+            writeln!(w, "time\tll_increment\tESS\tobserved").unwrap();
             for (i, obs) in observations.iter().enumerate() {
-                writeln!(out, "{}\t{:.4}\t{:.1}\t{:.0}",
+                writeln!(w, "{}\t{:.4}\t{:.1}\t{:.0}",
                     obs.time, result.ll_increments[i], result.ess_trace[i],
                     observed_cell(i)).unwrap();
             }
         }
-        drop(out);
+        drop(w);
         if path != "-" {
-            eprintln!("trace written to {}", path);
+            out.say(format_args!("trace written to {}", path));
         }
     }
 
     // Particle-filter health report (ESS + Snyder τ²) — `--pf-health`.
     if let Some(ref path) = a.pf_health {
-        let mut out: Box<dyn Write> = if path == "-" {
-            Box::new(std::io::BufWriter::new(std::io::stdout().lock()))
+        let mut w: Box<dyn Write> = if path == "-" {
+            Box::new(std::io::BufWriter::new(out.data()))
         } else {
             let f = std::fs::File::create(path).unwrap_or_else(|e| {
-                eprintln!("cannot create {}: {}", path, e);
-                std::process::exit(1);
+                out.fail(format!("cannot create {}: {}", path, e));
             });
             Box::new(std::io::BufWriter::new(f))
         };
         let n = n_particles as f64;
-        writeln!(out, "time\tESS\tESS_frac\ttau2").unwrap();
+        writeln!(w, "time\tESS\tESS_frac\ttau2").unwrap();
         for i in 0..result.ess_trace.len() {
             let t = observations.get(i).map(|o| o.time).unwrap_or(i as f64);
-            writeln!(out, "{}\t{:.2}\t{:.4}\t{:.4}",
+            writeln!(w, "{}\t{:.2}\t{:.4}\t{:.4}",
                 t, result.ess_trace[i], result.ess_trace[i] / n, result.logw_var_trace[i]).unwrap();
         }
-        drop(out);
+        drop(w);
         if path != "-" {
-            eprintln!("pf-health written to {}", path);
+            out.say(format_args!("pf-health written to {}", path));
         }
 
         // Summary: ESS-fraction health + the Snyder implied-particle-count estimate.
@@ -883,14 +863,14 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             let med_ess_frac = median(&ess_frac);
             let med_tau2 = median(&result.logw_var_trace);
             let max_tau2 = result.logw_var_trace.iter().copied().fold(0.0_f64, f64::max);
-            eprintln!("\npf-health summary ({} obs, N={}):", result.ess_trace.len(), n_particles);
-            eprintln!("  ESS fraction:           median {:.1}%, worst {:.1}%",
-                100.0 * med_ess_frac, 100.0 * min_ess_frac);
-            eprintln!("  log-weight variance τ²: median {:.2}, max {:.2}", med_tau2, max_tau2);
-            eprintln!("  implied N to avoid collapse exp(τ²/2): ~{} (median step), ~{} (worst step)",
+            out.say(format_args!("\npf-health summary ({} obs, N={}):", result.ess_trace.len(), n_particles));
+            out.say(format_args!("  ESS fraction:           median {:.1}%, worst {:.1}%",
+                100.0 * med_ess_frac, 100.0 * min_ess_frac));
+            out.say(format_args!("  log-weight variance τ²: median {:.2}, max {:.2}", med_tau2, max_tau2));
+            out.say(format_args!("  implied N to avoid collapse exp(τ²/2): ~{} (median step), ~{} (worst step)",
                 fmt_implied_n((0.5 * med_tau2).exp()),
-                fmt_implied_n((0.5 * max_tau2).exp()));
-            eprintln!("  [Snyder et al. 2008 heuristic — an order-of-magnitude floor at THIS θ and N, not a guarantee]");
+                fmt_implied_n((0.5 * max_tau2).exp())));
+            out.say("  [Snyder et al. 2008 heuristic — an order-of-magnitude floor at THIS θ and N, not a guarantee]");
         }
     }
 
@@ -911,11 +891,10 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             io::write_final_states(
                 std::path::Path::new(path), states, &columns, origin_t,
             ).unwrap_or_else(|e| {
-                eprintln!("error writing final states: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error writing final states: {}", e));
             });
-            eprintln!("final particle states ({} particles) at t={} written to {}",
-                states.len(), origin_t, path);
+            out.say(format_args!("final particle states ({} particles) at t={} written to {}",
+                states.len(), origin_t, path));
         }
     }
 
@@ -927,10 +906,9 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         let paths = sim::inference::ancestor_trace::sample_paths(
             trace, n_paths, seed);
         write_paths_tsv(path, &paths, &model).unwrap_or_else(|e| {
-            eprintln!("error writing paths: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error writing paths: {}", e));
         });
-        eprintln!("{} sample paths written to {}", n_paths, path);
+        out.say(format_args!("{} sample paths written to {}", n_paths, path));
     }
 
     // Save prequential trace (--save-prequential STEM): writes
@@ -956,8 +934,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                 let spec = crate::fit::runner::parse_time_spec(
                     "--score-from", raw, model.origin.as_deref(), &model.time_unit,
                 ).unwrap_or_else(|e| {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
+                    out.fail(format!("error: {}", e));
                 });
                 let t = match spec {
                     crate::fit::runner::TimeSpec::Absolute(v) => v,
@@ -970,11 +947,10 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                     }
                 };
                 if t >= last - 1e-9 {
-                    eprintln!(
+                    out.fail(format!(
                         "error: --score-from {raw} resolves to t = {t}, at or \
                          after the last observation (t = {last}) — nothing \
-                         would be scored.");
-                    std::process::exit(1);
+                         would be scored."));
                 }
                 let t0 = recorded.obs_times.iter()
                     .filter(|&&ot| ot <= t + 1e-9).count();
@@ -999,13 +975,12 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                 sim::inference::prequential::PrequentialWarning::SamplesNotSaved);
         }
         crate::prequential_out::write_prequential_outputs(stem, &trace).unwrap_or_else(|e| {
-            eprintln!("error writing prequential: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error writing prequential: {}", e));
         });
-        eprintln!(
+        out.say(format_args!(
             "prequential trace written: elpd={:.2}, mean_crps={:.3}, PIT 90% cov={:.2}",
-            trace.elpd(), trace.mean_crps(), trace.pit_coverage(0.90));
-        eprint!("{}", crate::prequential_out::surprise_table(&trace));
+            trace.elpd(), trace.mean_crps(), trace.pit_coverage(0.90)));
+        out.say_raw(format_args!("{}", crate::prequential_out::surprise_table(&trace)));
     }
 
     // Save filtering marginals (--save-filtering PATH): per-step
@@ -1015,24 +990,23 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         let trace = result.ancestry.as_ref().expect(
             "record_ancestry must be true when save_filtering is set");
         write_filtering_tsv(path, trace, &model).unwrap_or_else(|e| {
-            eprintln!("error writing filtering: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error writing filtering: {}", e));
         });
-        eprintln!("filtering marginals written to {}", path);
+        out.say(format_args!("filtering marginals written to {}", path));
     }
 
     // Write loglik
     match &output_path {
         Some(path) => {
             std::fs::write(path, format!("{:.4}\n", result.log_likelihood))
-                .unwrap_or_else(|e| { eprintln!("cannot write {}: {}", path, e); std::process::exit(1); });
-            eprintln!("loglik written to {}", path);
+                .unwrap_or_else(|e| { out.fail(format!("cannot write {}: {}", path, e)); });
+            out.say(format_args!("loglik written to {}", path));
         }
         None => {
             if trace_to_stdout {
-                eprintln!("{:.4}", result.log_likelihood);
+                out.say(format_args!("{:.4}", result.log_likelihood));
             } else {
-                println!("{:.4}", result.log_likelihood);
+                out.data_line(format_args!("{:.4}", result.log_likelihood));
             }
         }
     }

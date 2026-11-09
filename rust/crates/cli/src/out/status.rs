@@ -41,7 +41,12 @@ pub fn done(verb: &str, detail: impl std::fmt::Display) {
 /// A dimmed continuation under a milestone — a hint or next-step command,
 /// aligned under the detail column, e.g. `           camdl cat <id>`.
 pub fn hint(detail: impl std::fmt::Display) {
-    eprintln!("{:>VERB_W$} {}", "", style::stderr().paint(&detail.to_string(), Style::Dim));
+    eprintln!("{}", hint_text(style::stderr(), detail));
+}
+
+/// The line [`hint`] prints, painted by `p`, without its newline.
+pub fn hint_text(p: style::Painter, detail: impl std::fmt::Display) -> String {
+    format!("{:>VERB_W$} {}", "", p.paint(&detail.to_string(), Style::Dim))
 }
 
 /// A concise display path: relative to the current directory when the path is
