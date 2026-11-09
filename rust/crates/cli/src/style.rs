@@ -2,8 +2,7 @@
 //!
 //! Two surfaces:
 //!
-//!   1. `bold / dim / cyan / ok / warn / err` — small text-coloring
-//!      helpers. Each returns the input unchanged when color is
+//!   1. `bold / dim` — small text-coloring helpers. Each returns the input unchanged when color is
 //!      disabled (NO_COLOR env var, or stderr is not a TTY).
 //!
 //!   2. `colored_help!` macro + `colorize_after_help` — turn the
@@ -56,10 +55,6 @@ fn maybe<F: FnOnce(&str) -> String>(s: &str, f: F) -> String {
 
 pub fn bold(s: &str) -> String { maybe(s, |x| x.bold().to_string()) }
 pub fn dim (s: &str) -> String { maybe(s, |x| x.dimmed().to_string()) }
-pub fn cyan(s: &str) -> String { maybe(s, |x| x.cyan().to_string()) }
-pub fn ok  (s: &str) -> String { maybe(s, |x| x.green().to_string()) }
-pub fn warn(s: &str) -> String { maybe(s, |x| x.yellow().to_string()) }
-pub fn err (s: &str) -> String { maybe(s, |x| x.red().to_string()) }
 
 // ─── Help-block colorizer ─────────────────────────────────────────────────────
 
