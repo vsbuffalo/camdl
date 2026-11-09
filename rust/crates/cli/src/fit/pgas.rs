@@ -1283,7 +1283,7 @@ pub fn run_method(
     // to look for.
     if all_results.is_empty() {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
+        super::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
         // gh#885: the reason and the remedies come from the one string the
         // other two all-chains-refused errors also carry (pmmh's init-eval
         // refusal, IF2's watchdog bail), so they cannot drift apart again.
@@ -1339,7 +1339,7 @@ pub fn run_method(
                     else { Style::Ok };
                 if !block_update {
                     if let Some(d) = sim::inference::diagnostic::acceptance_diagnostic(
-                        r, Some(p.name.clone()), kernel)
+                        Some(chain_id), r, Some(p.name.clone()), kernel)
                     {
                         collector.push(d);
                     }
@@ -1350,7 +1350,8 @@ pub fn run_method(
             .collect();
         if block_update {
             if let Some(d) = rates.first()
-                .and_then(|&r| sim::inference::diagnostic::acceptance_diagnostic(r, None, kernel))
+                .and_then(|&r| sim::inference::diagnostic::acceptance_diagnostic(
+                    Some(chain_id), r, None, kernel))
             {
                 collector.push(d);
             }
@@ -1373,7 +1374,10 @@ pub fn run_method(
         // RHAT_REPORT_THRESHOLD is unchanged from the value this method has
         // always applied; only the STATISTIC it is applied to changed (gh#84).
         eprint!("{}", diagnostics.report(
-            &collector, super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()));
+            super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()));
+        for kind in diagnostics.rhat_findings(super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()) {
+            collector.push(kind);
+        }
     }
 
     // gh#791. Trajectory renewal resolved in time, pooled over the retained
@@ -1605,7 +1609,7 @@ pub fn run_method(
     // starts finite and walks into a `-inf` region it cannot leave.
     if sim::inference::no_finite_anchor(best_sweep.log_complete_data_ll) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
+        super::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
         return Err(super::write_diagnostics_then_fail(&collector, method_dir, format!(
             "pgas: all {} chain(s) reached no finite complete-data \
              log-likelihood (best = {}). The reachable surface is `-inf` at \
@@ -1744,7 +1748,7 @@ pub fn run_method(
     }
 
     // Render and persist diagnostics
-    collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
+    super::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
     super::write_diagnostics(&collector, method_dir)?;
 
     // gh#785. `cross_chain_compat.json`, beside `diagnostics.json`: the

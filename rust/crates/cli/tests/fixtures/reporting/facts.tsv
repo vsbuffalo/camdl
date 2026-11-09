@@ -44,12 +44,14 @@ stuck	stderr	line	pmmh:	4 chains × 1500 steps × 20 particles
 stuck	stderr	line	pmmh:	burn_in=1000, thin=10, adapt=true
 stuck	stderr	line	proposal_sd (transformed)	beta=0.2500, gamma=0.2500
 stuck	stderr	line	the adaptive proposal scale sat at its lower bound	(lambda = 4.5e-5)
-stuck	stderr	line	warm-up steps: no scale reached the	for 331 of 1000
-stuck	stderr	line	warm-up steps: no scale reached the	for 415 of 1000
+stuck	stderr	line	warm-up steps: no scale reached the	for 415 and 331 of 1000
+stuck	stderr	line	! chains 1, 2:	the adaptive proposal scale sat at its lower bound
 stuck	stderr	line	target acceptance, so the proposal is far narrower	33.7%
 stuck	stderr	line	adaptive proposal scale at end of warm-up	lambda = 4.540e-5
-stuck	stderr	line	adaptive proposal scale at end of warm-up	lambda = 5.715e-1
-stuck	stderr	line	adaptive proposal scale at end of warm-up	lambda = 9.013e-1
+stuck	stderr	line	chain 1: adaptive proposal scale at end of warm-up	lambda = 4.540e-5
+stuck	stderr	line	chain 2: adaptive proposal scale at end of warm-up	lambda = 4.540e-5
+stuck	stderr	line	chain 0: adaptive proposal scale at end of warm-up	lambda = 5.715e-1
+stuck	stderr	line	chain 3: adaptive proposal scale at end of warm-up	lambda = 9.013e-1
 stuck	stderr	line	chain 0:	45.0% ✓
 stuck	stderr	line	chain 1:	0.0% ✗ too low
 stuck	stderr	line	chain 2:	0.0% ✗ too low
@@ -62,10 +64,10 @@ stuck	stderr	line	R̂ = max(bulk 2.157, folded 1.610)	classic 2.675; the bulk ha
 stuck	stderr	line	per-chain ESS	[50, 1, 1, 24]
 stuck	stderr	line	per-chain ESS	[50, 1, 1, 27]
 stuck	stderr	line	draws.tsv:	200 posterior samples (all 4 params)
-stuck	stderr	line	chain acceptance rate	0.0% is outside healthy range [15%, 50%] (random-walk MH)
+stuck	stderr	line	x chains 1, 2:	chain acceptance rates 0.0% and 0.0% are outside healthy range [15%, 50%] (random-walk MH)
 stuck	stderr	line	rank-normalized split R̂ for 'beta'	3.479 (threshold 1.100)
 stuck	stderr	line	rank-normalized split R̂ for 'gamma'	2.157 (threshold 1.100)
-stuck	stderr	line	error(s)	4 error(s), 0 warning(s), 0 info
+stuck	stderr	line	error(s)	4 error(s), 2 warning(s), 0 info
 stuck	stderr	line	pmmh complete in	(6000 PF evaluations
 stuck	stderr	line	loglik at the highest log-posterior draw	-44.3 (chain 0)
 stuck	stderr	line	stored pmmh	results/fits/pmmh_stuck-
@@ -130,7 +132,7 @@ resumed	stderr	line	fit:	pmmh_resumed.toml (method=pmmh)
 resumed	stderr	line	chain 0:	resuming from step 2000
 resumed	stderr	line	chain 3:	resuming from step 2000
 resumed	stderr	line	pmmh:	4 chains × 2500 steps × 100 particles
-resumed	stderr	line	resuming from step	2000...
+resumed	stderr	line	chain 1: resuming from step	2000
 resumed	stderr	line	adaptive proposal scale at end of warm-up	lambda = 1.049e0
 resumed	stderr	line	adaptive proposal scale at end of warm-up	lambda = 9.223e-1
 resumed	stderr	line	chain 0:	10.5% ✗ too low
@@ -140,8 +142,7 @@ resumed	stderr	line	chain 3:	10.1% ✗ too low
 resumed	stderr	line	beta         Rhat=	1.001 ✓ ESS bulk=187 tail=192 (93.7% of 200 draws)
 resumed	stderr	line	gamma        Rhat=	1.019 ✓ ESS bulk=173 tail=194 (86.4% of 200 draws)
 resumed	stderr	line	draws.tsv:	200 posterior samples (all 4 params)
-resumed	stderr	line	chain acceptance rate	10.5% is outside healthy range [15%, 50%]
-resumed	stderr	line	chain acceptance rate	10.1% is outside healthy range [15%, 50%]
+resumed	stderr	line	! chains 0, 1, 2, 3:	chain acceptance rates 10.5%, 10.9%, 11.9% and 10.1% are outside healthy range [15%, 50%]
 resumed	stderr	line	error(s)	0 error(s), 4 warning(s), 0 info
 resumed	stderr	line	pmmh complete in	(10000 PF evaluations
 resumed	stderr	line	stored pmmh	results/fits/pmmh_resumed-

@@ -75,20 +75,40 @@ impl AcceptanceKernel {
 }
 
 /// The diagnostic an acceptance `rate` deserves under `kernel`, or `None` when
-/// it is inside that kernel's healthy band.
+/// it is inside that kernel's healthy band. `chain` is the chain whose rate it
+/// is, when the rate belongs to one.
 ///
 /// Every emitter routes through this rather than re-deriving the comparison:
 /// a band that is decided in one place and rendered from another is how the
 /// NUTS false-firing of gh#631 and the 10%-vs-15% discrepancy of gh#299 item 3
 /// both arose.
 pub fn acceptance_diagnostic(
+    chain: Option<usize>,
     rate: f64,
     param: Option<String>,
     kernel: AcceptanceKernel,
 ) -> Option<DiagnosticKind> {
     let (lo, hi) = kernel.healthy_band();
     (!(lo..=hi).contains(&rate))
-        .then_some(DiagnosticKind::AcceptanceRateUnhealthy { rate, param, kernel })
+        .then_some(DiagnosticKind::AcceptanceRateUnhealthy { rate, param, kernel, chain_id: chain })
+}
+
+/// An acceptance rate as every per-chain surface prints it: one decimal at 1%
+/// and above, two significant digits below (`39.6%`, `0.10%`, `0.050%`), so a
+/// chain's rate never reads at two precisions in one block. `0.0%` for a chain
+/// that accepted nothing.
+pub fn fmt_rate(rate: f64) -> String {
+    let pct = rate * 100.0;
+    if !pct.is_finite() {
+        return format!("{pct}%");
+    }
+    if pct == 0.0 || pct.abs() >= 1.0 {
+        return format!("{pct:.1}%");
+    }
+    // Two significant digits: the leading digit sits at 10^floor(log10 pct),
+    // so one more decimal than that exponent's magnitude.
+    let decimals = (1 - pct.abs().log10().floor() as i32).max(0) as usize;
+    format!("{pct:.decimals$}%")
 }
 
 /// Machine-readable diagnostic classification.
@@ -325,6 +345,28 @@ pub enum DiagnosticKind {
         /// NUTS block (≈0.8 is the TARGET there, not a failure). Serialized so
         /// diagnostics.json readers can key on it too.
         kernel: AcceptanceKernel,
+        /// The chain whose rate it is; `None` for a rate pooled across chains
+        /// or recorded before the field existed.
+        #[serde(default)]
+        chain_id: Option<usize>,
+    },
+    /// A PMMH chain's adaptive proposal scale sat at its lower bound
+    /// (`pmmh::LOG_SCALE_MIN`) for some of its warm-up: no scale reached the
+    /// target acceptance, so the kept draws were proposed far narrower than the
+    /// posterior.
+    ScaleAtFloor {
+        chain_id: usize,
+        steps_at_floor: usize,
+        warmup_steps: usize,
+        #[serde(with = "json_f64")]
+        target_accept: f64,
+    },
+    /// A PMMH chain finished warm-up with its scale far from the λ = 1
+    /// optimum without reaching the floor (`pmmh::scale_is_far_from_optimum`).
+    ScaleFarFromOptimum {
+        chain_id: usize,
+        #[serde(with = "json_f64")]
+        final_scale: f64,
     },
 
     // ── Parameters ───────────────────────────────────────────────
@@ -492,6 +534,7 @@ impl DiagnosticKind {
             Self::AcceptanceRateUnhealthy { rate, kernel: AcceptanceKernel::Nuts, .. }
                 if *rate < 0.30 || *rate > 0.99 => Severity::Error,
             Self::AcceptanceRateUnhealthy { .. } => Severity::Warning,
+            Self::ScaleAtFloor { .. } | Self::ScaleFarFromOptimum { .. } => Severity::Warning,
             // gh#791: never an error, at any gradient. The threshold behind it
             // is a midpoint of the statistic's own range and not a calibrated
             // bar (see `cli::fit::path_renewal::COALESCENCE_GRADIENT`), so it
@@ -598,11 +641,16 @@ impl DiagnosticKind {
                     worst_time, worst_mean, worst_min),
             Self::GammaDensityDisabled { reason } =>
                 format!("Gamma density disabled: {}", reason),
-            Self::AcceptanceRateUnhealthy { rate, param, kernel } => {
+            Self::AcceptanceRateUnhealthy { rate, param, kernel, .. } => {
                 let target = if param.is_some() { "parameter" } else { "chain" };
-                format!("{} acceptance rate {:.1}% is outside healthy range {}.",
-                    target, rate * 100.0, kernel.band_label())
+                format!("{} acceptance rate {} is outside healthy range {}.",
+                    target, fmt_rate(*rate), kernel.band_label())
             }
+            Self::ScaleAtFloor { steps_at_floor, warmup_steps, target_accept, .. } =>
+                scale_at_floor_lines(&steps_at_floor.to_string(), *warmup_steps, *target_accept)
+                    .join("\n"),
+            Self::ScaleFarFromOptimum { final_scale, .. } =>
+                scale_far_lines(*final_scale).join("\n"),
             Self::ParamNearBound { param, value, bound, bound_type } =>
                 format!("'{}' = {} is near {} bound {} and may be on it. IF2 cannot \
                          place an estimate exactly on a bound; to test whether the maximum \
@@ -745,6 +793,190 @@ impl DiagnosticKind {
     }
 }
 
+/// The `ScaleAtFloor` sentence, with `steps` the floor-step count (or counts,
+/// joined) and `warmup_steps` the window they are counted in.
+fn scale_at_floor_lines(steps: &str, warmup_steps: usize, target_accept: f64) -> Vec<String> {
+    let lam = crate::inference::pmmh::LOG_SCALE_MIN.exp();
+    let ran = warmup_steps.max(1);
+    let target_pct = target_accept * 100.0;
+    vec![
+        format!("the adaptive proposal scale sat at its lower bound (lambda = {lam:.1e})"),
+        format!("for {steps} of {ran} warm-up steps: no scale reached the"),
+        format!("{target_pct:.1}% target acceptance, so the proposal is far narrower"),
+        "than the posterior and the draws taken under the frozen kernel do".to_string(),
+        "not cover it. Under a particle-filter likelihood the attainable".to_string(),
+        "acceptance is capped by the spread of log L-hat, so raise the".to_string(),
+        "particle count (aim for a log-likelihood standard deviation near 1".to_string(),
+        "at the mode). A longer chain will not help.".to_string(),
+    ]
+}
+
+/// The `ScaleFarFromOptimum` sentence.
+fn scale_far_lines(final_scale: f64) -> Vec<String> {
+    let (factor, direction) = if final_scale < 1.0 {
+        (1.0 / final_scale, "narrower")
+    } else {
+        (final_scale, "wider")
+    };
+    vec![
+        format!("the chain sampled at lambda = {final_scale:.3e}, a proposal {factor:.0}x"),
+        format!("{direction} than the posterior covariance it scales (lambda = 1 is"),
+        "the optimum by construction, from the 2.38^2/d factor). Posterior".to_string(),
+        "traversal time scales as lambda^-2, so these draws are correlated".to_string(),
+        "far more strongly than the chain length suggests: check R-hat and".to_string(),
+        "ESS before reading them as a posterior. Under a particle-filter".to_string(),
+        "likelihood a scale far below 1 is estimator noise rather than".to_string(),
+        "proposal tuning — raise the particle count.".to_string(),
+    ]
+}
+
+/// Whether findings may print as one entry, and with what identity.
+///
+/// Findings print merged only when their keys are equal. The identity holds
+/// everything the shared sentence states; the per-chain values are never part
+/// of it and are printed beside their chain ids instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeKey {
+    /// Printed on its own: every variant whose detail is per-chain prose, or
+    /// that is not about a chain.
+    Never,
+    Group { variant: &'static str, identity: Vec<(&'static str, String)> },
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn join_and(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+impl DiagnosticKind {
+    /// The chain the finding is about, when it is about one.
+    pub fn chain(&self) -> Option<usize> {
+        match self {
+            Self::BadInit { chain_id, .. }
+            | Self::ScaleAtFloor { chain_id, .. }
+            | Self::ScaleFarFromOptimum { chain_id, .. } => Some(*chain_id),
+            Self::AcceptanceRateUnhealthy { chain_id, .. } => *chain_id,
+            _ => None,
+        }
+    }
+
+    /// Whether the printed entry names the finding's chain in front of the
+    /// sentence. False for `BadInit`, whose sentence names it itself.
+    fn labelled_by_chain(&self) -> bool {
+        !matches!(self, Self::BadInit { .. }) && self.chain().is_some()
+    }
+
+    /// Exhaustive: a new variant does not compile until it decides.
+    pub fn merge_key(&self) -> MergeKey {
+        match self {
+            Self::AcceptanceRateUnhealthy { rate, param, kernel, chain_id: Some(_) } => {
+                let (lo, _) = kernel.healthy_band();
+                let side = if *rate < lo { "below" } else { "above" };
+                let mut identity = vec![
+                    ("side", side.to_string()),
+                    ("kernel", format!("{kernel:?}")),
+                    ("band", kernel.band_label()),
+                    // One icon per entry: a warning-level and an error-level
+                    // rate do not share one.
+                    ("severity", format!("{:?}", self.severity())),
+                ];
+                if let Some(p) = param {
+                    identity.push(("param", p.clone()));
+                }
+                MergeKey::Group { variant: "AcceptanceRateUnhealthy", identity }
+            }
+            Self::ScaleAtFloor { warmup_steps, target_accept, .. } => MergeKey::Group {
+                variant: "ScaleAtFloor",
+                identity: vec![
+                    ("warmup_steps", warmup_steps.to_string()),
+                    ("target", format!("{:.1}", target_accept * 100.0)),
+                ],
+            },
+            Self::AcceptanceRateUnhealthy { chain_id: None, .. }
+            | Self::ScaleFarFromOptimum { .. }
+            | Self::RhatHigh { .. }
+            | Self::MultimodalLikelihood { .. }
+            | Self::ConvergenceIncomplete { .. }
+            | Self::LowESS { .. }
+            | Self::LowESSAtMLE { .. }
+            | Self::InitialLoglikInfinite
+            | Self::PerturbedSwarmInfeasible { .. }
+            | Self::BadInit { .. }
+            | Self::MaxTreeDepthHits { .. }
+            | Self::DivergentTransitions { .. }
+            | Self::DegenerateAncestorSampling { .. }
+            | Self::LowTrajectoryRenewal { .. }
+            | Self::PathRenewalCoalesced { .. }
+            | Self::FilterWeightCollapse { .. }
+            | Self::FilterStarved { .. }
+            | Self::GammaDensityDisabled { .. }
+            | Self::ParamNearBound { .. }
+            | Self::ProfileCIUnbounded { .. }
+            | Self::FlatProfile { .. }
+            | Self::AutoRwSd { .. }
+            | Self::CompressedLogitPosition { .. }
+            | Self::AutoRwSdNoConsensus { .. }
+            | Self::CoolingExhausted { .. }
+            | Self::ObsModelMismatch { .. }
+            | Self::ZeroRateNonzeroFlow { .. }
+            | Self::ResumeConfigMismatch { .. }
+            | Self::ResumeParamMissing { .. } => MergeKey::Never,
+        }
+    }
+}
+
+/// The printed text of one entry: findings that share a [`MergeKey::Group`]
+/// key (or one finding alone), in the order given.
+///
+/// One finding prints its own sentence, with `chain k: ` in front when it is
+/// about a chain its sentence does not name. Several print as one sentence
+/// naming every chain, its values joined in chain order: `chains 0, 1: chain
+/// acceptance rates 0.050% and 0.10% are outside …`. A multi-line sentence
+/// keeps its line breaks.
+pub fn render_entry(group: &[&DiagnosticKind]) -> String {
+    let [first, ..] = group else { return String::new() };
+    if group.len() == 1 {
+        return match first.chain() {
+            Some(c) if first.labelled_by_chain() => format!("chain {c}: {}", first.render()),
+            _ => first.render(),
+        };
+    }
+    let chains: Vec<String> = group.iter()
+        .map(|k| k.chain().map_or_else(|| "?".to_string(), |c| c.to_string()))
+        .collect();
+    let label = format!("chains {}", chains.join(", "));
+    match first {
+        DiagnosticKind::AcceptanceRateUnhealthy { param, kernel, .. } => {
+            let rates: Vec<String> = group.iter()
+                .filter_map(|k| match k {
+                    DiagnosticKind::AcceptanceRateUnhealthy { rate, .. } => Some(fmt_rate(*rate)),
+                    _ => None,
+                })
+                .collect();
+            let target = if param.is_some() { "parameter" } else { "chain" };
+            format!("{label}: {target} acceptance rates {} are outside healthy range {}.",
+                join_and(&rates), kernel.band_label())
+        }
+        DiagnosticKind::ScaleAtFloor { warmup_steps, target_accept, .. } => {
+            let steps: Vec<String> = group.iter()
+                .filter_map(|k| match k {
+                    DiagnosticKind::ScaleAtFloor { steps_at_floor, .. } => Some(steps_at_floor.to_string()),
+                    _ => None,
+                })
+                .collect();
+            format!("{label}: {}",
+                scale_at_floor_lines(&join_and(&steps), *warmup_steps, *target_accept).join("\n"))
+        }
+        // Only the variants above have a group key; anything else reaching
+        // here is printed one by one rather than misrendered.
+        _ => group.iter().map(|k| render_entry(&[*k])).collect::<Vec<_>>().join("\n"),
+    }
+}
+
 /// Accumulates diagnostics during an inference run.
 /// Thread-safe via Mutex.
 pub struct DiagnosticCollector {
@@ -775,6 +1007,11 @@ impl DiagnosticCollector {
         self.diagnostics.lock().unwrap().push(diag);
     }
 
+    /// The findings so far, in push order, without removing them.
+    pub fn snapshot(&self) -> Vec<Diagnostic> {
+        self.diagnostics.lock().unwrap().clone()
+    }
+
     pub fn drain(&self) -> Vec<Diagnostic> {
         std::mem::take(&mut *self.diagnostics.lock().unwrap())
     }
@@ -787,39 +1024,6 @@ impl DiagnosticCollector {
     pub fn has_warnings(&self) -> bool {
         self.diagnostics.lock().unwrap().iter()
             .any(|d| d.severity != Severity::Info)
-    }
-
-    /// Render all diagnostics to stderr, with ANSI colour on the severity
-    /// icons when `color` is true.
-    ///
-    /// `ctx` carries what the hints need to know about the run — the caller is
-    /// the only one who knows how many chains finished — and
-    /// [`HintContext::default`] is the honest answer when it does not.
-    /// `color` is the caller's colour policy for stderr: this crate has none of
-    /// its own, so it never decides whether a stream gets escape codes.
-    pub fn render_to_stderr(&self, ctx: HintContext, color: bool) {
-        let diags = self.diagnostics.lock().unwrap();
-        if diags.is_empty() { return; }
-
-        eprintln!("\n── diagnostics ──────────────────────────────────────");
-        for d in diags.iter() {
-            let icon = match (d.severity.clone(), color) {
-                (Severity::Info, true)    => "\x1b[34mi\x1b[0m",
-                (Severity::Warning, true) => "\x1b[33m!\x1b[0m",
-                (Severity::Error, true)   => "\x1b[31mx\x1b[0m",
-                (Severity::Info, false)    => "i",
-                (Severity::Warning, false) => "!",
-                (Severity::Error, false)   => "x",
-            };
-            eprintln!("  {} {}", icon, d.message);
-            for hint in d.kind.hints(ctx) {
-                eprintln!("    -> {}", hint);
-            }
-        }
-        let n_err = diags.iter().filter(|d| d.severity == Severity::Error).count();
-        let n_warn = diags.iter().filter(|d| d.severity == Severity::Warning).count();
-        let n_info = diags.iter().filter(|d| d.severity == Severity::Info).count();
-        eprintln!("  {} error(s), {} warning(s), {} info", n_err, n_warn, n_info);
     }
 
     /// Write diagnostics to a JSON file.
@@ -999,18 +1203,15 @@ mod tests {
     #[test]
     fn acceptance_severity_keys_on_kernel() {
         let nuts_ok = DiagnosticKind::AcceptanceRateUnhealthy {
-            rate: 0.83, param: None, kernel: AcceptanceKernel::Nuts,
-        };
+            rate: 0.83, param: None, kernel: AcceptanceKernel::Nuts, chain_id: None };
         assert_eq!(nuts_ok.severity(), Severity::Warning,
             "0.83 under NUTS is at worst a warning, never an error");
         let rw_bad = DiagnosticKind::AcceptanceRateUnhealthy {
-            rate: 0.83, param: None, kernel: AcceptanceKernel::RandomWalk,
-        };
+            rate: 0.83, param: None, kernel: AcceptanceKernel::RandomWalk, chain_id: None };
         assert_eq!(rw_bad.severity(), Severity::Error,
             "0.83 under random-walk MH is the >0.80 error band");
         let nuts_collapsed = DiagnosticKind::AcceptanceRateUnhealthy {
-            rate: 0.004, param: None, kernel: AcceptanceKernel::Nuts,
-        };
+            rate: 0.004, param: None, kernel: AcceptanceKernel::Nuts, chain_id: None };
         assert_eq!(nuts_collapsed.severity(), Severity::Error,
             "0.4% under NUTS is the genuinely-stuck error band");
     }
@@ -1018,13 +1219,11 @@ mod tests {
     #[test]
     fn acceptance_message_names_the_kernel_band() {
         let m = DiagnosticKind::AcceptanceRateUnhealthy {
-            rate: 0.83, param: Some("r_eff".into()), kernel: AcceptanceKernel::Nuts,
-        }.render();
+            rate: 0.83, param: Some("r_eff".into()), kernel: AcceptanceKernel::Nuts, chain_id: None }.render();
         assert!(m.contains("[60%, 95%]") && m.contains("NUTS"),
             "NUTS message names its own band: {m}");
         let m = DiagnosticKind::AcceptanceRateUnhealthy {
-            rate: 0.83, param: None, kernel: AcceptanceKernel::RandomWalk,
-        }.render();
+            rate: 0.83, param: None, kernel: AcceptanceKernel::RandomWalk, chain_id: None }.render();
         assert!(m.contains("[15%, 50%]"), "RW message keeps its band: {m}");
     }
 
@@ -1038,18 +1237,17 @@ mod tests {
         for kernel in [AcceptanceKernel::RandomWalk, AcceptanceKernel::Nuts] {
             let (lo, hi) = kernel.healthy_band();
             let msg = DiagnosticKind::AcceptanceRateUnhealthy {
-                rate: lo - 0.01, param: None, kernel,
-            }.render();
+                rate: lo - 0.01, param: None, kernel, chain_id: None }.render();
             assert!(msg.contains(&format!("[{:.0}%, {:.0}%]", lo * 100.0, hi * 100.0)),
                 "{kernel:?}: message must name the band that fires: {msg}");
             // Just inside both ends: silent. Just outside: reported.
-            assert!(acceptance_diagnostic(lo, None, kernel).is_none(),
+            assert!(acceptance_diagnostic(None, lo, None, kernel).is_none(),
                 "{kernel:?}: the lower edge is healthy");
-            assert!(acceptance_diagnostic(hi, None, kernel).is_none(),
+            assert!(acceptance_diagnostic(None, hi, None, kernel).is_none(),
                 "{kernel:?}: the upper edge is healthy");
-            assert!(acceptance_diagnostic(lo - 1e-6, None, kernel).is_some(),
+            assert!(acceptance_diagnostic(None, lo - 1e-6, None, kernel).is_some(),
                 "{kernel:?}: below the lower edge must be reported");
-            assert!(acceptance_diagnostic(hi + 1e-6, None, kernel).is_some(),
+            assert!(acceptance_diagnostic(None, hi + 1e-6, None, kernel).is_some(),
                 "{kernel:?}: above the upper edge must be reported");
         }
         assert_eq!(AcceptanceKernel::RandomWalk.healthy_band(), (0.15, 0.50),
@@ -1064,16 +1262,16 @@ mod tests {
     fn a_well_tuned_nuts_block_draws_no_finding_but_a_random_walk_one_would() {
         for rate in [0.80, 0.87, 0.92, 0.95] {
             assert!(
-                acceptance_diagnostic(rate, None, AcceptanceKernel::Nuts).is_none(),
+                acceptance_diagnostic(None, rate, None, AcceptanceKernel::Nuts).is_none(),
                 "{rate} is a healthy NUTS block and must not be reported"
             );
             assert!(
-                acceptance_diagnostic(rate, None, AcceptanceKernel::RandomWalk).is_some(),
+                acceptance_diagnostic(None, rate, None, AcceptanceKernel::RandomWalk).is_some(),
                 "fixture premise: {rate} IS outside the random-walk band"
             );
         }
         // A collapsed NUTS kernel still lands, and still as an error.
-        let stuck = acceptance_diagnostic(0.004, None, AcceptanceKernel::Nuts)
+        let stuck = acceptance_diagnostic(None, 0.004, None, AcceptanceKernel::Nuts)
             .expect("0.4% under NUTS is a finding");
         assert_eq!(stuck.severity(), Severity::Error);
     }
@@ -1154,8 +1352,7 @@ mod tests {
             },
             DiagnosticKind::GammaDensityDisabled { reason: "r".into() },
             DiagnosticKind::AcceptanceRateUnhealthy {
-                rate: x, param: None, kernel: AcceptanceKernel::RandomWalk,
-            },
+                rate: x, param: None, kernel: AcceptanceKernel::RandomWalk, chain_id: None },
             DiagnosticKind::ParamNearBound {
                 param: "beta".into(), value: x, bound: x, bound_type: "upper".into(),
             },
@@ -1173,6 +1370,10 @@ mod tests {
             DiagnosticKind::ZeroRateNonzeroFlow { transition: "infection".into(), flow: 3 },
             DiagnosticKind::ResumeConfigMismatch { expected: "a".into(), found: "b".into() },
             DiagnosticKind::ResumeParamMissing { param: "beta".into() },
+            DiagnosticKind::ScaleAtFloor {
+                chain_id: 1, steps_at_floor: 3, warmup_steps: 10, target_accept: x,
+            },
+            DiagnosticKind::ScaleFarFromOptimum { chain_id: 1, final_scale: x },
         ]
     }
 
@@ -1210,7 +1411,72 @@ mod tests {
             ResumeConfigMismatch { .. } => 25,
             ResumeParamMissing { .. } => 26,
             PerturbedSwarmInfeasible { .. } => 27,
+            ScaleAtFloor { .. } => 28,
+            ScaleFarFromOptimum { .. } => 29,
         }
+    }
+
+    /// One formatter for every per-chain rate: one decimal from 1%, two
+    /// significant digits below it — the proposal's three examples, and the
+    /// rates of the beta tutorial's two stuck chains.
+    #[test]
+    fn fmt_rate_reads_small_rates_at_two_significant_digits() {
+        assert_eq!(fmt_rate(0.396), "39.6%");
+        assert_eq!(fmt_rate(0.001), "0.10%");
+        assert_eq!(fmt_rate(0.0005), "0.050%");
+        assert_eq!(fmt_rate(0.0), "0.0%");
+        assert_eq!(fmt_rate(0.105), "10.5%");
+        assert_eq!(fmt_rate(0.0123), "1.2%");
+    }
+
+    fn acc(chain: usize, rate: f64) -> DiagnosticKind {
+        acceptance_diagnostic(Some(chain), rate, None, AcceptanceKernel::RandomWalk).unwrap()
+    }
+
+    /// Two chains' acceptance findings with the same side, kernel, band and
+    /// severity share a key; the rate is never part of it. A pooled rate (no
+    /// chain) and a different severity do not merge.
+    #[test]
+    fn findings_merge_only_on_an_equal_key() {
+        assert_eq!(acc(0, 0.0005).merge_key(), acc(1, 0.001).merge_key());
+        assert!(matches!(acc(0, 0.0005).merge_key(), MergeKey::Group { .. }));
+        assert_ne!(acc(0, 0.001).merge_key(), acc(1, 0.12).merge_key(),
+            "an error-level and a warning-level rate keep their own icons");
+        assert_ne!(acc(0, 0.01).merge_key(), acc(1, 0.9).merge_key(), "below is not above");
+        let pooled = acceptance_diagnostic(None, 0.01, None, AcceptanceKernel::RandomWalk).unwrap();
+        assert_eq!(pooled.merge_key(), MergeKey::Never);
+        let bad = DiagnosticKind::BadInit {
+            chain_id: 0, params: Default::default(), reason: "r".into(), attempts: vec![],
+        };
+        assert_eq!(bad.merge_key(), MergeKey::Never);
+        assert_eq!(bad.chain(), Some(0));
+        let floor = |c, n| DiagnosticKind::ScaleAtFloor {
+            chain_id: c, steps_at_floor: n, warmup_steps: 1000, target_accept: 0.337,
+        };
+        assert_eq!(floor(0, 241).merge_key(), floor(1, 365).merge_key());
+    }
+
+    /// The merged entries read as the proposal prints them; one chain prints
+    /// its one-chain sentence behind its chain id.
+    #[test]
+    fn a_merged_entry_names_every_chain_and_each_value() {
+        let (a, b) = (acc(0, 0.0005), acc(1, 0.001));
+        assert_eq!(render_entry(&[&a, &b]),
+            "chains 0, 1: chain acceptance rates 0.050% and 0.10% are outside healthy \
+             range [15%, 50%] (random-walk MH).");
+        assert_eq!(render_entry(&[&a]),
+            "chain 0: chain acceptance rate 0.050% is outside healthy range [15%, 50%] (random-walk MH).");
+        let floor = |c, n| DiagnosticKind::ScaleAtFloor {
+            chain_id: c, steps_at_floor: n, warmup_steps: 1000, target_accept: 0.337,
+        };
+        let (f0, f1) = (floor(0, 241), floor(1, 365));
+        let merged = render_entry(&[&f0, &f1]);
+        let lines: Vec<&str> = merged.lines().collect();
+        assert_eq!(lines[0], "chains 0, 1: the adaptive proposal scale sat at its lower bound (lambda = 4.5e-5)");
+        assert_eq!(lines[1], "for 241 and 365 of 1000 warm-up steps: no scale reached the");
+        assert_eq!(lines[2], "33.7% target acceptance, so the proposal is far narrower");
+        assert_eq!(lines.len(), 8);
+        assert_eq!(render_entry(&[&f0]).lines().nth(1), Some("for 241 of 1000 warm-up steps: no scale reached the"));
     }
 
     /// The compressed-position warning states the direction the per-particle
@@ -1287,7 +1553,7 @@ mod tests {
     fn every_variant_round_trips_non_finite_numbers_losslessly() {
         let covered: std::collections::BTreeSet<usize> =
             every_variant(0.5).iter().map(variant_index).collect();
-        assert_eq!(covered, (0..28).collect(),
+        assert_eq!(covered, (0..30).collect(),
             "every_variant must build one of every DiagnosticKind variant");
 
         for x in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
@@ -1344,7 +1610,10 @@ mod tests {
                 r#""starved_below":0.25,"worst_time":0.25,"worst_mean":0.25,"worst_min":0.25}"#,
             ),
             r#"{"type":"gamma_density_disabled","reason":"r"}"#,
-            r#"{"type":"acceptance_rate_unhealthy","rate":0.25,"param":null,"kernel":"random_walk"}"#,
+            concat!(
+                r#"{"type":"acceptance_rate_unhealthy","rate":0.25,"param":null,"#,
+                r#""kernel":"random_walk","chain_id":null}"#,
+            ),
             r#"{"type":"param_near_bound","param":"beta","value":0.25,"bound":0.25,"bound_type":"upper"}"#,
             r#"{"type":"profile_c_i_unbounded","param":"beta","direction":"above"}"#,
             r#"{"type":"flat_profile","param":"beta","curvature":0.25}"#,
@@ -1362,6 +1631,11 @@ mod tests {
             r#"{"type":"zero_rate_nonzero_flow","transition":"infection","flow":3}"#,
             r#"{"type":"resume_config_mismatch","expected":"a","found":"b"}"#,
             r#"{"type":"resume_param_missing","param":"beta"}"#,
+            concat!(
+                r#"{"type":"scale_at_floor","chain_id":1,"steps_at_floor":3,"#,
+                r#""warmup_steps":10,"target_accept":0.25}"#,
+            ),
+            r#"{"type":"scale_far_from_optimum","chain_id":1,"final_scale":0.25}"#,
         ];
         assert_eq!(json.len(), want.len());
         for (got, want) in json.iter().zip(want) {

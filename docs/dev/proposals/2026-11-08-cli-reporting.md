@@ -779,3 +779,41 @@ and R̂ printers, `render_to_stderr` in `sim`, the library's `warn` closure,
 net change in lines is small. The change is in where printing lives: from 40
 files in `cli/src/` and the library to `out.rs`, `style.rs` and the renderers,
 with `sim` printing nothing.
+
+## Implementation notes
+
+Where the implementation of steps 1–5 differs from the text above, and why.
+
+- **Eight discarded writes, not five.** `let _ = collector.write_json(…)`
+  appeared at eight sites: three in `pmmh.rs`, three in `pgas.rs`, two in IF2's
+  `runner.rs`. All eight return the error. On a path where the run is already
+  failing, the run's own error stays first and the unwritten record is appended
+  to it (`fit::write_diagnostics_then_fail`), so a write failure never hides why
+  the run stopped. IF2's successful path writes no `diagnostics.json` at all;
+  step 6's loader has to account for that.
+- **The acceptance merge key carries the severity.** Two below-band rates, one
+  at 0.1% (an error) and one at 12% (a warning), would otherwise share
+  `(side, kernel, band)` and print under one icon. `merge_key` adds `severity`
+  to the identity, so each entry's icon is true of every chain it names.
+- **One-chain entries carry their chain.** A finding about one chain prints its
+  one-chain sentence with `chain k:` in front (`BadInit`, whose sentence already
+  names its chain, excepted), so no per-chain value prints unlabelled. Three or
+  more merged values read `a, b and c`.
+- **The library's resume line goes.** `run_pmmh` printed
+  `resuming from step N...` once per chain beside the CLI's own
+  `chain k: resuming from step N`; the CLI line carries the fact. The
+  already-completed warning moved to the CLI's resume loader, word for word.
+- **Until step 7 draws the acceptance table, the λ lines print after the chains
+  join**, in chain order, as
+  `chain k: adaptive proposal scale at end of
+  warm-up: lambda = …`.
+- **Records.** `PfNoiseCheck.ll_mean` reads as NaN from a `fit_state.toml`
+  written before it existed, so an old record cannot show a mean it never had.
+  `PMMHResult.target_accept` is `pmmh::target_acceptance(d)`, the formula the
+  adaptive proposal already used, now a free function; `warmup` is recorded only
+  when `adapt = true`. A resumed chain whose base has no `warmup` record gets
+  none, rather than its own call's partial count.
+- **The OCaml policy reaches compile errors camdl relays.** camdl captures
+  camdlc's stderr when compiling, so camdlc sees a pipe; camdl passes its own
+  stderr decision on as `CLICOLOR_FORCE=1` or `NO_COLOR=1`
+  (`util::pass_stderr_color_policy`).

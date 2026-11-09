@@ -15,7 +15,7 @@ use crate::cas::iso8601_utc;
 use sim::inference::{
     if2::EstimatedParam,
     pmmh::{run_pmmh, Prior, PMMHConfig, PMMHResult, PMMHResumeState},
-    diagnostic::{DiagnosticCollector, DiagnosticKind, HintContext},
+    diagnostic::{fmt_rate, DiagnosticCollector, DiagnosticKind, HintContext},
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -343,6 +343,11 @@ pub fn run_method(
                                 chain));
                         }
                         eprintln!("  chain {}: resuming from step {}", chain, state.completed_steps);
+                        if state.completed_steps >= n_steps {
+                            eprintln!("  warning: chain already completed {} steps (requested {}). \
+                                       Increase steps in fit.toml to continue.",
+                                state.completed_steps, n_steps);
+                        }
                         states.push(Some(state));
                     }
                     Err(e) => {
@@ -761,6 +766,14 @@ pub fn run_method(
     );
     super::runner::record_chain_starts(method_dir, &config, &drawn);
 
+    // The scale each chain's kept draws were proposed under, in chain order.
+    if adapt {
+        for (chain_id, r) in &results {
+            eprintln!("  chain {}: adaptive proposal scale at end of warm-up: lambda = {:.3e}",
+                ChainIndex(*chain_id), r.final_scale);
+        }
+    }
+
     // gh#110. Skip + continue: surface "ran K of N chains" so the
     // user knows downstream R̂/ESS exclude skipped chains. This
     // line is the load-bearing user-facing signal that bad inits
@@ -807,9 +820,9 @@ pub fn run_method(
         } else {
             p.paint("✓", Style::Ok)
         };
-        eprintln!("  chain {}: {:.1}% {}", ChainIndex(*chain_id), result.acceptance_rate * 100.0, status);
+        eprintln!("  chain {}: {} {}", ChainIndex(*chain_id), fmt_rate(result.acceptance_rate), status);
         if let Some(d) = sim::inference::diagnostic::acceptance_diagnostic(
-            result.acceptance_rate, None, kernel)
+            Some(*chain_id), result.acceptance_rate, None, kernel)
         {
             collector.push(d);
         }
@@ -827,14 +840,28 @@ pub fn run_method(
         // RHAT_REPORT_THRESHOLD is unchanged from the value this method has
         // always applied; only the STATISTIC it is applied to changed (gh#84).
         eprint!("{}", diagnostics.report(
-            &collector, super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()));
+            super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()));
+        for kind in diagnostics.rhat_findings(super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()) {
+            collector.push(kind);
+        }
+    }
+
+    // What each chain's warm-up says about its draws, after the chains join
+    // and in chain order. Judged here from the chain's result, not inside the
+    // sampler, so the finding can be recorded and printed once.
+    if adapt {
+        for (chain_id, r) in &results {
+            if let Some(kind) = scale_at_floor(*chain_id, r).or_else(|| scale_far_from_optimum(*chain_id, r)) {
+                collector.push(kind);
+            }
+        }
     }
 
     // gh#110. All chains skipped via BadInit — no MAP to report.
     // Render diagnostics, persist them, and bail with a clear error
     // rather than panicking on .unwrap() of an empty results vec.
     if results.is_empty() {
-        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
+        super::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
         // gh#880, gh#885. The reason and the remedies come from the one
         // string the other two all-chains-refused errors also carry, so they
         // cannot drift apart again.
@@ -862,7 +889,7 @@ pub fn run_method(
     // predicate is false → no fire).
     if results.iter().all(|(_, r)| sim::inference::no_finite_anchor(r.map_loglik)) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
+        super::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
         return Err(super::write_diagnostics_then_fail(&collector, method_dir, format!(
             "pmmh method `{}`: all {} surviving chain(s) reached no finite \
              log-likelihood anchor — every evaluated θ scored -inf, so the \
@@ -1062,13 +1089,33 @@ pub fn run_method(
     }
 
     // Render and persist diagnostics
-    collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
+    super::findings::print(&collector, HintContext { chains_completed: Some(n_good_chains) });
     super::write_diagnostics(&collector, method_dir)?;
 
     eprintln!("\n{}", completion_line(method_name, is_ode_mh, &cost, method_dir));
     eprintln!("  loglik at the highest log-posterior draw (natural-scale prior, no Jacobian): {:.1} (chain {})", map_result.map_loglik, ChainIndex(*map_chain));
 
     Ok(())
+}
+
+/// The `ScaleAtFloor` finding a chain's result raises: its scale sat at the
+/// lower bound for some warm-up step. The one predicate both the live line and
+/// the recorded finding are decided by.
+pub(crate) fn scale_at_floor(chain: usize, r: &PMMHResult) -> Option<DiagnosticKind> {
+    (r.steps_at_scale_floor > 0).then_some(DiagnosticKind::ScaleAtFloor {
+        chain_id: chain,
+        steps_at_floor: r.steps_at_scale_floor,
+        warmup_steps: r.warmup_steps,
+        target_accept: r.target_accept,
+    })
+}
+
+/// The `ScaleFarFromOptimum` finding: the chain finished far from λ = 1
+/// without reaching the floor. Never raised beside [`scale_at_floor`]'s, which
+/// says the same thing more precisely.
+fn scale_far_from_optimum(chain: usize, r: &PMMHResult) -> Option<DiagnosticKind> {
+    (r.steps_at_scale_floor == 0 && sim::inference::pmmh::scale_is_far_from_optimum(r.final_scale))
+        .then_some(DiagnosticKind::ScaleFarFromOptimum { chain_id: chain, final_scale: r.final_scale })
 }
 
 /// Build proposal SDs on the transformed scale from `[estimate]`'s

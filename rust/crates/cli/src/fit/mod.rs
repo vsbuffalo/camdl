@@ -74,6 +74,8 @@ pub use fit_summary::cmd_fit_summary;
 pub mod pmmh;
 // The typed record of what a method's run shows (proposal 2026-11-08).
 pub mod report;
+// The `── diagnostics ──` block, findings merged (proposal 2026-11-08).
+pub mod findings;
 // Likelihood-noise preflight shared by the pseudo-marginal methods: the
 // measured log L-hat spread and the acceptance ceiling it implies (gh#764).
 pub mod pf_noise;
@@ -1915,9 +1917,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 provenance::write_mle_params(&mle_path, &all_params, &metadata)
                     .unwrap_or_else(|e| eprintln!("warning: {}", e));
 
-                collector.render_to_stderr(sim::inference::diagnostic::HintContext {
+                findings::print(&collector, sim::inference::diagnostic::HintContext {
                     chains_completed: Some(chain_results.results.len()),
-                }, crate::style::enabled());
+                });
 
                 method_best_loglik = Some(chain_results.best_loglik);
                 method_best_chain = Some(chain_results.best_chain);

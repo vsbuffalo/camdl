@@ -2549,7 +2549,7 @@ pub fn run_chains_with_per_chain_params(
             collector.push(DiagnosticKind::PerturbedSwarmInfeasible {
                 start_loglik, steps: steps.clone(),
             });
-            collector.render_to_stderr(HintContext { chains_completed: Some(results.len()) }, crate::style::enabled());
+            super::findings::print(collector, HintContext { chains_completed: Some(results.len()) });
             return Err(fail_recording_findings(collector, method_dir, format!(
                 "if2: every chain's final estimate has log-likelihood -inf (best = {best_loglik}), \
                  but a chain's start scores {start_loglik:.1}: the start is feasible and the \
@@ -2558,7 +2558,7 @@ pub fn run_chains_with_per_chain_params(
                  (`rw_sd = …` in its [estimate] entry).", steps.join(", "))));
         }
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        collector.render_to_stderr(HintContext { chains_completed: Some(results.len()) }, crate::style::enabled());
+        super::findings::print(collector, HintContext { chains_completed: Some(results.len()) });
         return Err(fail_recording_findings(collector, method_dir, format!(
             "if2: all {} surviving chain(s) reached no finite log-likelihood \
              (best = {}). The likelihood surface is `-inf` at every evaluated \
@@ -3146,8 +3146,30 @@ impl MethodConvergence {
             .collect()
     }
 
-    /// The end-of-run convergence block, and the `RhatHigh` diagnostics that
-    /// go with it. Returns the text so the caller decides where it lands.
+    /// The `RhatHigh` findings the run draws: one per parameter whose R̂ is
+    /// above `rhat_threshold`, in parameter order, and none when the R̂ is
+    /// `withheld` (a point start, gh#890). [`report`](Self::report) glyphs
+    /// against the same predicate, so the table and the findings agree.
+    pub fn rhat_findings(
+        &self,
+        rhat_threshold: f64,
+        withheld: Option<&sim::inference::convergence::ConvergenceError>,
+    ) -> Vec<sim::inference::diagnostic::DiagnosticKind> {
+        if withheld.is_some() {
+            return Vec::new();
+        }
+        self.iter()
+            .filter_map(|(name, d)| d.rank().map(|r| (name, r.rhat)))
+            .filter(|(_, rhat)| *rhat > rhat_threshold)
+            .map(|(name, rhat)| sim::inference::diagnostic::DiagnosticKind::RhatHigh {
+                param: name.to_string(), rhat, threshold: rhat_threshold,
+            })
+            .collect()
+    }
+
+    /// The end-of-run convergence block. Returns the text so the caller
+    /// decides where it lands; the findings that go with it are
+    /// [`rhat_findings`](Self::rhat_findings).
     ///
     /// Every line carries bulk-ESS **and** ESS/N. The ratio is not decoration:
     /// Geyer's truncation destabilizes as the integrated autocorrelation time
@@ -3173,7 +3195,6 @@ impl MethodConvergence {
     /// reported either way.
     pub fn report(
         &self,
-        collector: &sim::inference::diagnostic::DiagnosticCollector,
         rhat_threshold: f64,
         withheld: Option<&sim::inference::convergence::ConvergenceError>,
     ) -> String {
@@ -3258,11 +3279,6 @@ impl MethodConvergence {
                     out.push_str(&format!(
                         "  {:12}   per-chain ESS [{}]\n", "", cells.join(", ")));
                 }
-            }
-            if drew_finding {
-                collector.push(sim::inference::diagnostic::DiagnosticKind::RhatHigh {
-                    param: name.to_string(), rhat: r.rhat, threshold: rhat_threshold,
-                });
             }
         }
         out
@@ -5869,25 +5885,25 @@ dt = 1.0
     /// an error.
     #[test]
     fn the_report_glyph_and_the_finding_use_the_same_threshold() {
-        use sim::inference::diagnostic::{DiagnosticCollector, DiagnosticKind};
+        use sim::inference::diagnostic::DiagnosticKind;
         let chains = load_convergence_chains();
         // R̂ ≈ 1.027 — under the 1.1 bar, over a 1.01 one.
         let conv = MethodConvergence::compute([("ar1_mixed".to_string(),
             chains["ar1_mixed"].clone())]);
 
-        let collector = DiagnosticCollector::new("test");
-        let lenient = conv.report(&collector, 1.1, None);
+        let lenient = conv.report(1.1, None);
+        let findings = conv.rhat_findings(1.1, None);
         assert!(lenient.contains("✓"), "1.027 is inside a 1.1 band: {lenient}");
-        assert!(!collector.drain().iter().any(|d|
-            matches!(d.kind, DiagnosticKind::RhatHigh { .. })),
+        assert!(!findings.iter().any(|d|
+            matches!(d, DiagnosticKind::RhatHigh { .. })),
             "and draws no finding there");
 
-        let collector = DiagnosticCollector::new("test");
-        let strict = conv.report(&collector, 1.01, None);
+        let strict = conv.report(1.01, None);
+        let findings = conv.rhat_findings(1.01, None);
         assert!(!strict.contains("✓"),
             "the same R̂ must NOT print green under a 1.01 band: {strict}");
-        assert!(collector.drain().iter().any(|d|
-            matches!(d.kind, DiagnosticKind::RhatHigh { .. })),
+        assert!(findings.iter().any(|d|
+            matches!(d, DiagnosticKind::RhatHigh { .. })),
             "and must draw the finding that goes with the glyph");
     }
 
@@ -5925,7 +5941,6 @@ dt = 1.0
     /// `Inf` for this shape (the folded half is only constant at two chains).
     #[test]
     fn a_frozen_parameter_glyphs_as_the_worst_band_not_as_a_blank() {
-        use sim::inference::diagnostic::DiagnosticCollector;
         use crate::fit::method_result::RhatBand;
 
         let frozen: Vec<Vec<f64>> = vec![
@@ -5947,8 +5962,7 @@ dt = 1.0
         );
 
         let conv = MethodConvergence::compute([("beta".to_string(), frozen)]);
-        let collector = DiagnosticCollector::new("test");
-        let out = conv.report(&collector, RHAT_REPORT_THRESHOLD, None);
+        let out = conv.report(RHAT_REPORT_THRESHOLD, None);
         assert!(
             out.contains('✗'),
             "and the method block must say so loudly:\n{out}"
@@ -5967,7 +5981,6 @@ dt = 1.0
     /// one answer.
     #[test]
     fn the_method_report_glyphs_rhat_against_the_bar_camdl_certifies_against() {
-        use sim::inference::diagnostic::DiagnosticCollector;
         use crate::fit::method_result::{RhatBand, RHAT_CONVERGED_THRESHOLD};
 
         let chains = offset_chains(0.09);
@@ -5979,8 +5992,8 @@ dt = 1.0
         );
 
         let conv = MethodConvergence::compute([("beta".to_string(), chains)]);
-        let collector = DiagnosticCollector::new("test");
-        let out = conv.report(&collector, RHAT_REPORT_THRESHOLD, None);
+        let out = conv.report(RHAT_REPORT_THRESHOLD, None);
+        let findings = conv.rhat_findings(RHAT_REPORT_THRESHOLD, None);
 
         assert!(
             !out.contains('✓'),
@@ -5996,8 +6009,8 @@ dt = 1.0
         // The finding is a SEPARATE band and must not have moved: nothing is
         // drawn below `RHAT_REPORT_THRESHOLD`.
         assert!(
-            !collector.drain().iter().any(|f| matches!(
-                f.kind,
+            !findings.iter().any(|f| matches!(
+                f,
                 sim::inference::diagnostic::DiagnosticKind::RhatHigh { .. }
             )),
             "the finding bar is 1.1 and this R̂ is below it — no finding"
@@ -6031,7 +6044,6 @@ dt = 1.0
     #[test]
     fn a_point_started_run_reports_rhat_as_not_assessed_and_keeps_the_ess() {
         use sim::inference::convergence::ConvergenceError;
-        use sim::inference::diagnostic::DiagnosticCollector;
 
         let chains = offset_chains(0.09);
         let conv = MethodConvergence::compute([("beta".to_string(), chains)]);
@@ -6039,16 +6051,15 @@ dt = 1.0
         // Premise: with no refusal this block prints a number, a glyph and
         // (above the certification bar) a decomposition. Without this the
         // assertions below could pass on a fixture that never had an R̂.
-        let collector = DiagnosticCollector::new("test");
-        let assessed = conv.report(&collector, RHAT_REPORT_THRESHOLD, None);
+        let assessed = conv.report(RHAT_REPORT_THRESHOLD, None);
         assert!(assessed.contains("Rhat="), "fixture premise:\n{assessed}");
 
-        let collector = DiagnosticCollector::new("test");
         let withheld = ConvergenceError::PointStart {
             n_chains: 4,
             starts: "from_mle @scout".to_string(),
         };
-        let out = conv.report(&collector, RHAT_REPORT_THRESHOLD, Some(&withheld));
+        let out = conv.report(RHAT_REPORT_THRESHOLD, Some(&withheld));
+        let findings = conv.rhat_findings(RHAT_REPORT_THRESHOLD, Some(&withheld));
 
         assert!(
             out.contains("R̂ — not assessed: all 4 chains started at one point \
@@ -6063,8 +6074,8 @@ dt = 1.0
             "the ESS does not depend on how the chains were started and is \
              still reported:\n{out}");
         assert!(
-            !collector.drain().iter().any(|f| matches!(
-                f.kind,
+            !findings.iter().any(|f| matches!(
+                f,
                 sim::inference::diagnostic::DiagnosticKind::RhatHigh { .. }
             )),
             "a `RhatHigh` finding is a reading of the withheld number, so the \
@@ -6093,14 +6104,12 @@ dt = 1.0
     /// converged. Printing both is the whole reason to keep both.
     #[test]
     fn a_non_converged_parameter_shows_the_classic_rhat_and_the_per_chain_ess() {
-        use sim::inference::diagnostic::DiagnosticCollector;
         let chains = load_convergence_chains();
         let conv = MethodConvergence::compute([(
             "within_chain_drift".to_string(),
             chains["within_chain_drift"].clone(),
         )]);
-        let collector = DiagnosticCollector::new("test");
-        let out = conv.report(&collector, 1.05, None);
+        let out = conv.report(1.05, None);
 
         assert!(
             out.contains("classic 1.001"),
@@ -6133,14 +6142,12 @@ dt = 1.0
 
     #[test]
     fn the_report_names_which_half_drove_a_high_rhat() {
-        use sim::inference::diagnostic::DiagnosticCollector;
         let chains = load_convergence_chains();
         let conv = MethodConvergence::compute([(
             "scale_disagree".to_string(),
             chains["scale_disagree"].clone(),
         )]);
-        let collector = DiagnosticCollector::new("test");
-        let out = conv.report(&collector, 1.05, None);
+        let out = conv.report(1.05, None);
 
         assert!(
             out.contains("folded"),
@@ -6164,14 +6171,12 @@ dt = 1.0
     /// the test above.
     #[test]
     fn the_report_names_the_location_half_when_that_is_the_driver() {
-        use sim::inference::diagnostic::DiagnosticCollector;
         let chains = load_convergence_chains();
         let conv = MethodConvergence::compute([(
             "within_chain_drift".to_string(),
             chains["within_chain_drift"].clone(),
         )]);
-        let collector = DiagnosticCollector::new("test");
-        let out = conv.report(&collector, 1.05, None);
+        let out = conv.report(1.05, None);
         assert!(
             out.contains("where the posterior sits"),
             "drifting chains disagree about WHERE the posterior sits:\n{out}"
