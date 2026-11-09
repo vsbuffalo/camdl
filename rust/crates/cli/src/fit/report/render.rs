@@ -1,14 +1,15 @@
-//! Sections of a method's report, as lines. Never writes: the caller hands
-//! the lines to the stream's painter.
+//! A method's report as lines ([`render_report`]), section by section, and the
+//! fit-level lines `fit summary` puts around its methods. Never writes: the
+//! caller hands the lines to the stream's painter.
 
 use std::collections::BTreeMap;
 
 use sim::inference::diagnostic::{fmt_rate, AcceptanceKernel};
 
-use super::build::{MethodReport, ParameterReport, ProvenanceReport};
-use super::{ChainDetail, ChainWarmup, RefusedChains};
+use super::build::{MethodOutcome, MethodReport, ParameterReport, ProvenanceReport};
+use super::{ChainDetail, ChainWarmup, RefusedChains, RunHeader};
 use crate::fit::config_v2::GateConfig;
-use crate::fit::method_result::{If2Record, If2Run, MethodResult};
+use crate::fit::method_result::{If2Record, If2Run, MethodResult, NloptRun, PfilterRun};
 use crate::fit::method_result::{PosteriorDiagnostics, Stat};
 use crate::out::paint::{Line, Span, Style};
 
@@ -125,6 +126,166 @@ pub(crate) fn explain(on: bool, section: &str) -> Vec<Line> {
 /// The lines of a block some other module renders as text, each a plain line.
 fn text_lines(text: &str) -> Vec<Line> {
     text.lines().map(plain).collect()
+}
+
+// ─── The report, rendered whole ───────────────────────────────────────────────
+
+/// Which sections a view shows. Each section is one function; a view is a
+/// list of them, so two views share every section they both show.
+#[derive(Clone, Copy, Debug)]
+pub enum View {
+    /// `fit summary`'s text.
+    Summary(SummaryView),
+}
+
+/// The choices `fit summary`'s text makes per method.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SummaryView {
+    /// `--explain`: each section's terms defined under its table.
+    pub explain: bool,
+    /// The camdl version opens this method's identity line: it is a fact
+    /// about the fit, said once, on the first method.
+    pub version_lead: bool,
+}
+
+/// One method's outcome as lines. Pure: reads only the outcome.
+pub fn render_report(outcome: &MethodOutcome, view: View) -> Vec<Line> {
+    match (view, outcome) {
+        (View::Summary(v), MethodOutcome::Completed(report)) => match &report.method_result {
+            Some(MethodResult::If2(if2)) => if2_block(v.version_lead, report, if2),
+            Some(MethodResult::Pgas(_) | MethodResult::Pmmh(_)) => {
+                bayesian_block(v.version_lead, report, v.explain)
+            }
+            Some(MethodResult::Nlopt(r)) => nlopt_block(v.version_lead, report, r),
+            Some(MethodResult::Pfilter(r)) => pfilter_block(v.version_lead, report, r),
+            None => Vec::new(),
+        },
+        (View::Summary(v), MethodOutcome::Failed { header, findings, error, .. }) => {
+            failed_block(v.version_lead, header, findings, error)
+        }
+    }
+}
+
+/// An NLopt method's block: a point estimate with no IF2 gate, so a compact
+/// headline and the θ̂ table from the typed result.
+fn nlopt_block(version_lead: bool, report: &MethodReport, r: &NloptRun) -> Vec<Line> {
+    let mut out = vec![Line::default(), identity_line(version_lead, &report.name, &r.algorithm, &[])];
+    out.push(plain(format!(
+        "    loglik:   {:.2} ({})     converged chains: {}/{}",
+        r.best_loglik,
+        crate::fit::loglik::LoglikType::tag_or_unknown(report.loglik_type),
+        r.n_converged, r.n_chains
+    )));
+    match r.chain_agreement() {
+        Some(range) => out.push(plain(format!(
+            "    chain-agreement: max rel range = {:.2}% bound", range * 100.0))),
+        None if r.n_chains > 1 => out.push(plain(
+            "    chain-agreement: not computed (fewer than two converged chains)")),
+        None => {}
+    }
+    out.push(plain(format!("    θ̂ ({} estimated params):", r.theta_hat.len())));
+    let w = name_col_width(r.theta_hat.keys().map(String::as_str), 14);
+    for (k, v) in &r.theta_hat {
+        let shown = fit_name(k, w);
+        out.push(plain(match report.param_dates.get(k) {
+            Some(date) => format!("      {:<w$} = {}  ({})", shown, v, date),
+            None => format!("      {:<w$} = {}", shown, v),
+        }));
+    }
+    out
+}
+
+/// A pfilter method's block: the likelihood at fixed parameters, the mean
+/// and spread over its replicate filters, as the run printed them.
+fn pfilter_block(version_lead: bool, report: &MethodReport, r: &PfilterRun) -> Vec<Line> {
+    vec![
+        Line::default(),
+        identity_line(version_lead, &report.name, "pfilter", &[]),
+        plain(format!("    loglik = {:.1} ± {:.1} ({} reps, {} particles)",
+            r.ll_mean, r.ll_sd, r.n_replicates, r.n_particles)),
+    ]
+}
+
+/// A failed method's block: the run's opening block as `fit run` prints it,
+/// the findings recorded before it stopped, and the error that stopped it.
+fn failed_block(
+    version_lead: bool,
+    header: &RunHeader,
+    findings: &[sim::inference::diagnostic::Diagnostic],
+    error: &str,
+) -> Vec<Line> {
+    let mut out = vec![Line::default()];
+    if version_lead {
+        out.push(Line(vec![Span::plain("  camdl "), Span::styled(crate::version::VERSION_SHORT, Style::Dim)]));
+    }
+    out.push(plain(format!("fit: {} (method={})", header.config, header.method)));
+    out.push(plain(format!("  model:    {}", header.model)));
+    out.push(plain(format!("  estimate: {}", header.estimate.join(", "))));
+    out.push(plain(format!("  fixed:    {}", header.fixed.join(", "))));
+    out.push(plain(format!("  starts:   {}", header.starts)));
+    out.push(plain(format!("  output:   {}", header.output)));
+    out.extend(super::findings::render(
+        findings,
+        sim::inference::diagnostic::HintContext { chains_completed: None },
+    ));
+    out.push(Line(vec![Span::styled("error:", Style::Err), Span::plain(format!(" {error}"))]));
+    out
+}
+
+// ─── The fit around the methods (`fit summary`) ───────────────────────────────
+
+/// What `fit summary` shows above its first method: the fit's directory,
+/// what the model is (its file-header `#'` block, gh#750, one source line per
+/// output line so a `@base`/`@adds`/`@changes` header stays readable), and,
+/// under `--parameters`, the parameter and constant legends.
+pub(crate) fn summary_head(
+    dir: &str,
+    docs: &ir::ModelDocs,
+    constants: &[ir::parameter::Constant],
+    parameters: bool,
+) -> Vec<Line> {
+    let mut out = vec![
+        Line::default(),
+        Line(vec![Span::styled(dir, Style::Bold), Span::plain("/")]),
+    ];
+    if let Some(d) = &docs.model {
+        if let Some(t) = &d.text {
+            out.push(Line::default());
+            out.extend(t.lines().map(|l| plain(format!("  {l}"))));
+        }
+        if let Some(r) = &d.reference {
+            out.push(plain(format!("  [{r}]")));
+        }
+    }
+    out.extend(text_lines(&parameter_legend(&docs.parameters, parameters)));
+    out.extend(text_lines(&constant_legend(constants, &docs.constants, parameters)));
+    out
+}
+
+/// The line for a fit with no completed method: the version, which no
+/// method line carried, and the absence itself.
+pub(crate) fn summary_no_methods(dir: &str) -> Vec<Line> {
+    vec![
+        Line(vec![Span::plain("  camdl "), Span::styled(crate::version::VERSION_SHORT, Style::Dim)]),
+        plain(format!("  (no completed methods found in {dir})")),
+    ]
+}
+
+/// The two flags that add to `fit summary`'s output, named where a reader has
+/// just finished reading it and is deciding what to ask next. Each is offered
+/// only while it would change what is on screen.
+pub(crate) fn summary_foot(has_legend: bool, parameters: bool, explain: bool) -> Vec<Line> {
+    let mut offers: Vec<&str> = Vec::new();
+    if has_legend && !parameters {
+        offers.push("--parameters for priors and provenance");
+    }
+    if !explain {
+        offers.push("--explain for how to read this");
+    }
+    if offers.is_empty() {
+        return Vec::new();
+    }
+    vec![Line::default(), indented("  ", offers.join(" · "), Style::Dim)]
 }
 
 // ─── What every method block opens with ───────────────────────────────────────
@@ -1618,5 +1779,40 @@ mod tests {
             && text[3].contains("4.540e-5") && text[3].ends_with("241 / 1000"), "{}", text[3]);
         assert!(text[4].starts_with("  2") && text[4].contains("39.6% ✓")
             && text[4].ends_with("—"), "{}", text[4]);
+    }
+
+    /// A failed run's report: its opening block, the findings recorded before
+    /// it stopped, and the error, in that order; the checks travel with it.
+    #[test]
+    fn a_failed_outcome_shows_its_header_findings_and_error() {
+        use sim::inference::diagnostic::{DiagnosticCollector, DiagnosticKind};
+        let c = DiagnosticCollector::new("pmmh");
+        c.push(DiagnosticKind::BadInit {
+            chain_id: 0,
+            params: BTreeMap::from([("beta".to_string(), 0.5)]),
+            reason: "no start of 10 could be scored".into(),
+            attempts: Vec::new(),
+        });
+        let header = RunHeader {
+            config: "fail.toml".into(), method: "pmmh".into(), model: "sir.camdl".into(),
+            estimate: vec!["beta".into(), "gamma".into()], fixed: vec!["rho".into()],
+            starts: "single (every chain at one point)".into(), output: "results/fits/fail-1".into(),
+        };
+        let checks = vec![super::super::Check::Starts {
+            mode: "single".into(), params: vec!["beta".into()], note: "n".into(),
+        }];
+        let outcome = MethodOutcome::Failed {
+            header, checks: checks.clone(), findings: c.snapshot(),
+            error: "all 2 chains failed init-eval with PFDegenerate".into(),
+        };
+        let MethodOutcome::Failed { checks: carried, .. } = &outcome else { unreachable!() };
+        assert_eq!(carried, &checks);
+        let text: Vec<String> = render_report(&outcome, View::Summary(SummaryView::default()))
+            .iter().map(Line::text).collect();
+        let at = |needle: &str| text.iter().position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no `{needle}` in {text:#?}"));
+        assert!(at("fit: fail.toml (method=pmmh)") < at("estimate: beta, gamma"));
+        assert!(at("estimate: beta, gamma") < at("── diagnostics"));
+        assert!(at("── diagnostics") < at("error: all 2 chains failed"));
     }
 }
