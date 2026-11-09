@@ -125,7 +125,12 @@ fn every_recorded_fact_is_shown() {
     let work = std::env::temp_dir().join(format!("camdl_reporting_facts_{}_{ns}", std::process::id()));
     std::fs::create_dir_all(&work).unwrap();
     let _guard = Tmp(work.clone());
+    // Files only: the fixture is flat, and a directory beside it (an editor's
+    // or tool's state folder) is not part of it.
     for entry in std::fs::read_dir(manifest().join("tests/fixtures/reporting")).unwrap().flatten() {
+        if !entry.path().is_file() {
+            continue;
+        }
         std::fs::copy(entry.path(), work.join(entry.file_name())).unwrap();
     }
 
