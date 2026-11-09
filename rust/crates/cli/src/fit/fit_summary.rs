@@ -19,6 +19,7 @@
 //! is preserved in git history at commit `d45c932` for context.
 
 use crate::style::{Painter, Stream, Style};
+use crate::fit::report::{Check, ChainWarmup, MethodFacts, Verdict};
 use crate::args::{FitSummaryArgs, FitSummaryFormat};
 use crate::chain_index::ChainIndex;
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
@@ -53,7 +54,7 @@ use std::path::{Path, PathBuf};
 /// compared successive stages of the removed `[stages]` pipeline; leaves under
 /// one fit directory are now independent runs whose log-likelihoods can be of
 /// different kinds, so the difference compared unlike quantities.
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 /// Recompute a Bayesian method's diagnostics + posterior means over a
 /// chain-filtered draws cloud, mutating `diag`/`posterior_mean` in place, and
@@ -272,7 +273,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
 /// degrades to numeric-only — `date_for` returns `None` and no
 /// formatter changes shape.
 #[derive(Debug, Clone, Default)]
-struct CalendarContext {
+pub(crate) struct CalendarContext {
     /// `origin` date string from the model (`Some` iff declared).
     origin: Option<String>,
     /// Model `time_unit` (`days`/`weeks`/`months`/`years`); the divisor
@@ -372,6 +373,16 @@ fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
 /// shell out to `camdlc` twice and let the two halves disagree about which
 /// model they describe.
 fn load_model_docs_for_fit(fit_dir: &Path) -> (ir::ModelDocs, Vec<ir::parameter::Constant>) {
+    // The envelope dictionary keys by base parameter name (`R0`, not
+    // `R0_urban`), so a stratified family shows once — `BTreeMap` order is
+    // deterministic. The model's constants come from the same compile.
+    load_fit_envelope(fit_dir)
+        .map(|env| (env.docs, env.model.constants))
+        .unwrap_or_default()
+}
+
+/// The fit's model, compiled from the source path its records name.
+fn load_fit_envelope(fit_dir: &Path) -> Option<ir::IrEnvelope> {
     let model_path = FitView::read(fit_dir)
         .map(|v| v.model)
         .filter(|m| !m.is_empty())
@@ -380,13 +391,7 @@ fn load_model_docs_for_fit(fit_dir: &Path) -> (ir::ModelDocs, Vec<ir::parameter:
                 .into_iter()
                 .find_map(|(_, rec)| rec.provenance.source_paths.first().cloned())
         });
-    let Some(model_path) = model_path else { return Default::default() };
-    // The envelope dictionary keys by base parameter name (`R0`, not
-    // `R0_urban`), so a stratified family shows once — `BTreeMap` order is
-    // deterministic. The model's constants come from the same compile.
-    crate::util::load_model_envelope(&model_path)
-        .map(|env| (env.docs, env.model.constants))
-        .unwrap_or_default()
+    crate::util::load_model_envelope(&model_path?).ok()
 }
 
 /// One resolved fit-method leaf to render: its name, on-disk directory,
@@ -690,6 +695,13 @@ fn format_text(
                         None => println!("      {:<w$} = {}", shown, v),
                     }
                 }
+            }
+            MethodResult::Pfilter(r) => {
+                // A likelihood at fixed parameters: the mean and spread over
+                // its replicate filters, as the run printed them.
+                println!("\n  {}{} · pfilter", lead, fmt.bold(&resolved.name));
+                println!("    loglik = {:.1} ± {:.1} ({} reps, {} particles)",
+                    r.ll_mean, r.ll_sd, r.n_replicates, r.n_particles);
             }
         }
     }
@@ -2697,6 +2709,23 @@ pub struct MethodReport {
     /// posterior table value cell.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub param_dates: BTreeMap<String, String>,
+    /// The checks the run made before sampling, as it showed them.
+    pub checks: Vec<Check>,
+    /// Each chain's adaptive warm-up (PMMH, `mh`); empty when nothing adapted.
+    pub warmup: Vec<ChainWarmup>,
+    /// The method's findings, one record per finding, as `diagnostics.json`
+    /// holds them.
+    pub findings: Vec<sim::inference::diagnostic::Diagnostic>,
+    /// The verdict, from R̂ alone (`report::verdict`), so a consumer reads it
+    /// rather than recomputing it.
+    pub verdict: Verdict,
+    /// The run's opening block (`run.json` `inputs.header`); absent for a leaf
+    /// written before it was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<crate::fit::report::RunHeader>,
+    /// Where the leaf landed and the method's wall time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stored: Option<crate::fit::report::Stored>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2789,6 +2818,7 @@ fn build_summary_doc(
     selection: Option<&ChainSelection>,
 ) -> FitSummaryDoc {
     let cal = load_calendar_context(Path::new(dir));
+    let model = load_fit_envelope(Path::new(dir)).map(|env| env.model);
     let mut method_reports: Vec<MethodReport> = Vec::new();
     // The chain-selection provenance (stamped on the doc) + one-shot advisory.
     let mut chain_selection_json: Option<serde_json::Value> = None;
@@ -2847,22 +2877,15 @@ fn build_summary_doc(
                 }
             }
         }
-        let report = match (&typed, resolved.method.as_str()) {
-            (Some(MethodResult::If2(if2)), _) => {
-                if2_method_report(&resolved.name, &method_dir_str, if2, &cal)
+        // A leaf whose typed result did not load is already in `failures`.
+        let Some(typed) = typed else { continue };
+        match load_method_facts(resolved, typed, model.as_ref()) {
+            Ok(facts) => method_reports.push(build_method_report(facts, &cal)),
+            Err(e) => {
+                eprintln!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e);
+                failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
             }
-            (Some(MethodResult::Pgas(_)), _)
-            | (Some(MethodResult::Pmmh(_)), _) => {
-                bayesian_method_report(
-                    &resolved.name,
-                    &resolved.method,
-                    typed.clone(),
-                    &cal,
-                )
-            }
-            _ => continue,
-        };
-        method_reports.push(report);
+        }
     }
 
     // Build the table_row block. For single-fit summary the row is
@@ -2936,6 +2959,139 @@ fn build_summary_table_row(fit_dir: &Path, now_unix: i64) -> TableRow {
     }
 }
 
+/// The one builder of a [`MethodReport`]: every format and both producers
+/// (the end of `fit run`, from memory; `fit summary`'s loader, from the leaf)
+/// go through it. Exhaustive over [`MethodResult`], so a new method does not
+/// compile until it has a report.
+pub(crate) fn build_method_report(facts: MethodFacts, cal: &CalendarContext) -> MethodReport {
+    let dir = facts.method_dir.to_string_lossy().into_owned();
+    let mut report = match &facts.result {
+        MethodResult::If2(if2) => if2_method_report(&facts.name, &dir, if2, cal),
+        MethodResult::Pgas(_) | MethodResult::Pmmh(_) => {
+            bayesian_method_report(&facts.name, &facts.method, Some(facts.result.clone()), cal)
+        }
+        MethodResult::Nlopt(r) => point_method_report(
+            &facts.name, &facts.method, r.n_chains, Some(r.best_loglik), &facts.result,
+            r.theta_hat.iter().filter_map(|(k, v)| cal.date_for(k, *v).map(|d| (k.clone(), d))).collect(),
+        ),
+        MethodResult::Pfilter(r) => point_method_report(
+            &facts.name, &facts.method, 0, Some(r.ll_mean), &facts.result, BTreeMap::new(),
+        ),
+    };
+    report.verdict = crate::fit::report::verdict(&facts.result);
+    report.checks = facts.checks;
+    report.warmup = facts.warmup;
+    report.findings = facts.findings;
+    report.header = facts.header;
+    report.stored = facts.stored;
+    report
+}
+
+/// The report of a method with no IF2 gate and no posterior: NLopt's
+/// optimum, pfilter's likelihood at fixed parameters. The typed result
+/// carries the content.
+fn point_method_report(
+    name: &str,
+    method: &str,
+    n_chains: usize,
+    best_loglik: Option<f64>,
+    result: &MethodResult,
+    param_dates: BTreeMap<String, String>,
+) -> MethodReport {
+    MethodReport {
+        name: name.to_string(),
+        method: method.to_string(),
+        n_chains,
+        best_loglik,
+        loglik_type: Some(crate::fit::loglik::LoglikType::from(result)),
+        initial_loglik: None,
+        camdl_version: Some(version::VERSION_SHORT.to_string()),
+        gate: None,
+        parameters: Vec::new(),
+        chains: Vec::new(),
+        provenance: None,
+        method_result: Some(result.clone()),
+        heuristic: None,
+        param_dates,
+        checks: Vec::new(),
+        warmup: Vec::new(),
+        findings: Vec::new(),
+        verdict: Verdict::NotApplicable,
+        header: None,
+        stored: None,
+    }
+}
+
+/// `fit summary`'s producer of [`MethodFacts`]: everything the report needs,
+/// read from the method leaf. `result` is the typed result already loaded
+/// (and, under `--exclude-chains`, recomputed over the kept chains); `model`
+/// is the fit's model, for the observation-stream checks.
+fn load_method_facts(
+    resolved: &ResolvedMethod,
+    result: MethodResult,
+    model: Option<&ir::Model>,
+) -> Result<MethodFacts, String> {
+    let dir = &resolved.method_dir;
+    let inputs: serde_json::Value = std::fs::read(dir.join("run.json")).ok()
+        .and_then(|b| serde_json::from_slice::<runid::RunRecord>(&b).ok())
+        .map(|r| r.inputs)
+        .unwrap_or(serde_json::Value::Null);
+    let header: Option<crate::fit::report::RunHeader> = inputs.get("header")
+        .and_then(|h| serde_json::from_value(h.clone()).ok());
+    let method = resolved.method.as_str();
+    let backend = inputs.get("backend").and_then(|v| v.as_str()).unwrap_or("");
+
+    // In the order the run shows them: the method's caveat, the starts note,
+    // the noise check, the observation streams.
+    let mut checks = Vec::new();
+    if let Some(note) = crate::fit::methods::status_note_for(method, backend) {
+        checks.push(Check::MethodCaveat { method: method.to_string(), note: note.to_string() });
+    }
+    let unused = inputs.get("unused_starts");
+    let params: Vec<String> = unused.and_then(|u| u.get("params")).and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if !params.is_empty() {
+        let mode = unused.and_then(|u| u.get("rule")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let note = crate::fit::report::unused_starts_note(&mode, &params, matches!(method, "pmmh" | "mh"));
+        checks.push(Check::Starts { mode, params, note });
+    }
+    if let MethodResult::Pmmh(r) = &result {
+        if let Some(check) = r.pf_noise {
+            checks.push(Check::FilterNoise { check });
+        }
+    }
+    if matches!(method, "pmmh" | "mh" | "pgas") {
+        if let Some(m) = model {
+            checks.extend(crate::fit::report::obs_stream_checks(m));
+        }
+    }
+
+    let warmup = match method {
+        "pmmh" | "mh" => {
+            let algo = crate::fit::methods::parse_algorithm(method).expect("pmmh and mh are registered");
+            crate::fit::report::read_warmup(&dir.join(algo.summary_filename()))
+        }
+        _ => Vec::new(),
+    };
+    let findings = crate::fit::report::read_findings(dir)?;
+    let stored = Some(crate::fit::report::Stored {
+        leaf: crate::fit::report::display_path(dir),
+        total_seconds: inputs.get("wall_time_seconds").and_then(|v| v.as_f64()),
+    });
+    Ok(MethodFacts {
+        name: resolved.name.clone(),
+        method: resolved.method.clone(),
+        method_dir: dir.clone(),
+        header,
+        result,
+        checks,
+        warmup,
+        findings,
+        stored,
+    })
+}
+
 /// Bayesian method report: only `method_result` carries content.
 /// IF2-specific subfields default to None / empty.
 fn bayesian_method_report(
@@ -2977,6 +3133,12 @@ fn bayesian_method_report(
         method_result,
         heuristic: None,
         param_dates,
+        checks: Vec::new(),
+        warmup: Vec::new(),
+        findings: Vec::new(),
+        verdict: Verdict::NotApplicable,
+        header: None,
+        stored: None,
     }
 }
 
@@ -3138,6 +3300,12 @@ fn if2_method_report(
         method_result,
         heuristic: Some(HeuristicReport { overall_status, interpretation }),
         param_dates,
+        checks: Vec::new(),
+        warmup: Vec::new(),
+        findings: Vec::new(),
+        verdict: Verdict::NotApplicable,
+        header: None,
+        stored: None,
     }
 }
 
@@ -5212,7 +5380,9 @@ mod tests {
             diagnostics: pgas.diagnostics.clone(),
             posterior_mean: pgas.posterior_mean.clone(),
             acceptance_rate: 0.234,
+            acceptance_per_chain: BTreeMap::new(),
             map_loglik: -1234.5,
+            pf_noise: None,
         };
         let out = block(&fmt, "posterior", "pmmh", no_traces,
             BayesianView::Pmmh(&r), LoglikType::Marginal);
@@ -5718,11 +5888,11 @@ mod tests {
         let methods = discover_methods(&dir);
         let doc = build_summary_doc(&dir.to_string_lossy(), &methods, None);
         let json = serde_json::to_string_pretty(&doc).unwrap();
-        assert!(json.contains("\"version\": 3"),
-            "schema.version must be present and = 3: {}", json);
+        assert!(json.contains("\"version\": 4"),
+            "schema.version must be present and = 4: {}", json);
         // Reparse and pin the load-bearing fields.
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["schema"]["version"], 3);
+        assert_eq!(parsed["schema"]["version"], 4);
         assert_eq!(parsed["fit_dir"], dir.to_string_lossy().as_ref());
         assert_eq!(parsed["methods"][0]["name"], "if2");
         assert!(parsed.get("stages").is_none(),
@@ -6119,7 +6289,9 @@ mod tests {
             },
             posterior_mean: BTreeMap::new(),
             acceptance_rate: 0.24,
+            acceptance_per_chain: BTreeMap::new(),
             map_loglik: -3801.2,
+            pf_noise: None,
         })
     }
 

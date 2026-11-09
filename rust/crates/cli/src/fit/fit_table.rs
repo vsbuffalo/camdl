@@ -99,7 +99,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
         // (pfilter), has no row.
         for method in &entry.view.methods {
             if !method.completed
-                || !crate::fit::method_result::MethodResult::has_result(method.method)
+                || !crate::fit::method_result::MethodResult::is_fitted(method.method)
             {
                 continue;
             }

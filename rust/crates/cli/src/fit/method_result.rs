@@ -36,6 +36,51 @@ pub enum MethodResult {
     Pmmh(PmmhRun),
     #[serde(rename = "nl-sbplx", alias = "nl-bobyqa", alias = "nl-lbfgs")]
     Nlopt(NloptRun),
+    /// `algorithm = "pfilter"` as a fit method: the log-likelihood at fixed
+    /// parameters, over replicate filters.
+    Pfilter(PfilterRun),
+}
+
+/// A pfilter fit method's result: the log-likelihood mean and standard
+/// deviation over its replicate filters, from `logliks.tsv`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PfilterRun {
+    #[serde(with = "sim::inference::json_f64")]
+    pub ll_mean: f64,
+    #[serde(with = "sim::inference::json_f64")]
+    pub ll_sd: f64,
+    pub n_replicates: usize,
+    pub n_particles: usize,
+}
+
+impl PfilterRun {
+    /// The mean and the sample standard deviation (`n − 1`) of the replicate
+    /// log-likelihoods, as the run prints them. The run computes them from
+    /// the values as `logliks.tsv` stores them, so this and the run agree.
+    pub fn from_logliks(logliks: &[f64], n_particles: usize) -> Self {
+        let n = logliks.len();
+        let ll_mean = logliks.iter().sum::<f64>() / n.max(1) as f64;
+        let ll_sd = if n > 1 {
+            (logliks.iter().map(|l| (l - ll_mean).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt()
+        } else {
+            0.0
+        };
+        PfilterRun { ll_mean, ll_sd, n_replicates: n, n_particles }
+    }
+
+    pub fn load(method_dir: &Path) -> Result<Self, MethodResultError> {
+        let inputs = read_method_inputs(method_dir)?;
+        let n_particles = inputs.get("algorithm").and_then(|a| a.get("particles"))
+            .and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let path = method_dir.join("logliks.tsv");
+        let io = |message: String| MethodResultError::Io { method_dir: method_dir.to_owned(), message };
+        let text = std::fs::read_to_string(&path).map_err(|e| io(format!("logliks.tsv: {e}")))?;
+        let logliks = text.lines().skip(1).filter(|l| !l.trim().is_empty())
+            .map(|l| l.split('\t').nth(1).and_then(|v| v.parse::<f64>().ok())
+                .ok_or_else(|| io(format!("logliks.tsv: unreadable row `{l}`"))))
+            .collect::<Result<Vec<f64>, _>>()?;
+        Ok(PfilterRun::from_logliks(&logliks, n_particles))
+    }
 }
 
 /// Compound scout-convergence gate verdict (the IF2 "is this method
@@ -678,7 +723,8 @@ pub const RHAT_SEVERE_THRESHOLD: f64 = 1.5;
 /// Certification and severity are separate questions and stay separate: this
 /// band answers "may this be reported as converged", and
 /// `DiagnosticKind::severity` answers "is the finding a warning or an error".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RhatBand {
     /// Below [`RHAT_CONVERGED_THRESHOLD`]: may be reported as converged.
     Converged,
@@ -889,7 +935,16 @@ pub struct PmmhRun {
     /// per-parameter rates because its inner Gibbs proposes parameters
     /// one at a time; PMMH proposes the full vector each step.
     pub acceptance_rate: f64,
+    /// Each chain's acceptance rate, keyed by its number. Empty for a summary
+    /// written before chain numbers were recorded beside the rates, when the
+    /// rates' positions are not known to be chain numbers.
+    #[serde(default)]
+    pub acceptance_per_chain: BTreeMap<usize, f64>,
     pub map_loglik: f64,
+    /// The pre-run noise check (`fit_state.toml` `pf_noise`); `None` on the
+    /// deterministic `mh` path and when the check had no spread to measure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pf_noise: Option<crate::fit::pf_noise::PfNoiseCheck>,
 }
 
 /// Errors loading a `MethodResult` from a method directory.
@@ -930,20 +985,15 @@ impl std::fmt::Display for MethodResultError {
 impl std::error::Error for MethodResultError {}
 
 impl MethodResult {
-    /// Whether [`MethodResult::load_from`] has a variant for this algorithm.
-    ///
-    /// `pfilter` does not: it evaluates a likelihood at fixed θ with
-    /// replicates rather than fitting, and writes no `fit_state.toml`. A
-    /// caller choosing *which* leaf of a segment to summarize must skip such a
-    /// leaf rather than pick it and fail — otherwise its mere presence drops
-    /// the whole fit from `fit table` (gh#590). The match is exhaustive so a
-    /// new algorithm must decide here; `has_result_agrees_with_load_from`
-    /// pins it against `load_from`'s arms.
-    pub fn has_result(algo: crate::run_meta::FitAlgorithm) -> bool {
+    /// Whether the algorithm fits parameters, so a leaf of it is one a
+    /// `fit table` row may summarize. `pfilter` does not: it evaluates a
+    /// likelihood at fixed θ. A caller choosing *which* leaf of a segment to
+    /// summarize skips such a leaf, so its presence never displaces the
+    /// fit's estimate from `fit table` (gh#590).
+    pub fn is_fitted(algo: crate::run_meta::FitAlgorithm) -> bool {
         use crate::run_meta::FitAlgorithm as A;
         match algo {
-            A::If2 | A::Pgas | A::Pmmh | A::Mh
-            | A::NlSbplx | A::NlBobyqa | A::NlLbfgs => true,
+            A::If2 | A::Pgas | A::Pmmh | A::Mh | A::NlSbplx | A::NlBobyqa | A::NlLbfgs => true,
             A::Pfilter => false,
         }
     }
@@ -973,6 +1023,7 @@ impl MethodResult {
             "nl-sbplx" | "nl-bobyqa" | "nl-lbfgs" => Ok(MethodResult::Nlopt(
                 NloptRun::load(method_dir, method)?,
             )),
+            "pfilter" => Ok(MethodResult::Pfilter(PfilterRun::load(method_dir)?)),
             unknown => Err(MethodResultError::UnknownMethod {
                 method: unknown.to_string(),
                 method_dir: method_dir.to_owned(),
@@ -1389,8 +1440,21 @@ impl PmmhRun {
             .get("map_loglik")
             .and_then(|v| v.as_f64())
             .unwrap_or(f64::NEG_INFINITY);
+        let rates: Vec<f64> = summary.get("acceptance_rate").and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_f64()).collect()).unwrap_or_default();
+        let ids: Vec<usize> = summary.get("acceptance_chains").and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_u64().map(|c| c as usize)).collect())
+            .unwrap_or_default();
+        let acceptance_per_chain: BTreeMap<usize, f64> = if ids.len() == rates.len() {
+            ids.into_iter().zip(rates).collect()
+        } else {
+            BTreeMap::new()
+        };
+        let pf_noise = FitState::load(&method_dir.to_string_lossy()).ok().and_then(|s| s.pf_noise);
 
         Ok(PmmhRun {
+            acceptance_per_chain,
+            pf_noise,
             diagnostics: posterior_diagnostics(
                 method_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
             )?,
@@ -2295,22 +2359,19 @@ mod tests {
         assert!((r.diagnostics.max_rhat().unwrap() - 1.03).abs() < 1e-9);
     }
 
-    /// gh#590: `has_result` and `load_from` must agree on every algorithm —
-    /// `true` exactly where `load_from` has an arm (so an empty leaf fails
-    /// with a load error, not `UnknownMethod`), `false` exactly where it
-    /// answers `UnknownMethod`.
+    /// Every method has a typed result: `load_from` has an arm for each
+    /// algorithm, so an empty leaf fails with a load error, never
+    /// `UnknownMethod` (gh#590's pfilter case included).
     #[test]
-    fn has_result_agrees_with_load_from() {
+    fn every_algorithm_has_a_load_from_arm() {
         use crate::run_meta::FitAlgorithm as A;
-        let tmp = tempdir("has_result");
+        let tmp = tempdir("every_arm");
         for algo in [A::If2, A::Pgas, A::Pmmh, A::Mh, A::Pfilter,
                      A::NlSbplx, A::NlBobyqa, A::NlLbfgs] {
-            let unknown = matches!(
+            assert!(!matches!(
                 MethodResult::load_from(tmp.path(), algo.as_str()),
                 Err(MethodResultError::UnknownMethod { .. })
-            );
-            assert_eq!(MethodResult::has_result(algo), !unknown,
-                "has_result({}) disagrees with load_from", algo.as_str());
+            ), "load_from has no arm for {}", algo.as_str());
         }
     }
 

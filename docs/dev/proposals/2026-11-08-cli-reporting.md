@@ -817,3 +817,34 @@ Where the implementation of steps 1–5 differs from the text above, and why.
   camdlc's stderr when compiling, so camdlc sees a pipe; camdl passes its own
   stderr decision on as `CLICOLOR_FORCE=1` or `NO_COLOR=1`
   (`util::pass_stderr_color_policy`).
+
+Decided during step 6:
+
+- **`fit summary`'s text output comes from the report too.** `format_text`
+  rendered from `MethodResult` and the leaf's files and never touched
+  `MethodReport`; only json, md and latex went through `build_summary_doc`. Step
+  7 rebuilds it on `MethodReport` through `render_report`, so all four formats
+  come from one report, and the facts fixture is the proof that nothing was
+  dropped: a changed fact is a named edit to `facts.tsv`.
+- **IF2 goes through the builder like every other method.** `If2Run::load` kept
+  a lossy summary and `if2_method_report` read `fit_state.toml` a second time.
+  `If2Run` now carries `record: If2Record`, everything the IF2 report and text
+  read, from the one load; `gating::assess_if2` takes the record.
+- **The summary's private per-chain read-back is `ChainDetail`.** It was named
+  `MethodFacts`; it is the proposal's `ChainDetail`, renamed before the real
+  `MethodFacts` was built around it.
+- **A successful IF2 run writes `diagnostics.json`.** It did not, so the loader
+  had no IF2 findings to read.
+- **Records the loader derives checks from.** `run.json` `inputs` gains
+  `unused_starts` (`{rule, params}`), from which `Check::Starts` and its note
+  are rebuilt; `pmmh_summary.json` gains `acceptance_chains`, the chain each
+  `acceptance_rate` belongs to (refused chains leave gaps), from which
+  `PmmhRun::acceptance_per_chain` is read. `Check::FilterNoise` carries the
+  `PfNoiseCheck` alone, since the record holds its own `ll_mean`.
+- **`Verdict` has an `Unassessable { params }` arm**, for `MaxRhat`'s "R̂
+  unavailable for a reason that is a problem": not converged, with no number to
+  report. `NotConverged` needs a `max_rhat` it does not have.
+- **The JSON report also carries `header` and `stored`**, beside `checks`,
+  `warmup`, `findings` and `verdict` (schema version 4). The calendar context a
+  report's date annotations need is passed to `build_method_report` beside the
+  facts, since it belongs to the fit, not the method.

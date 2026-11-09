@@ -2725,39 +2725,16 @@ pub fn print_observations_summary(model: &ir::Model) {
     eprintln!("  observations ({} stream{}):",
         model.observations.len(),
         if model.observations.len() == 1 { "" } else { "s" });
-    let mut warn_negbin_on_snapshot = false;
-    for obs in &model.observations {
-        let (kind_label, is_snapshot) = match &obs.projection {
-            ir::observation::Projection::CumulativeFlow(name) =>
-                (format!("incidence({})", name), false),
-            ir::observation::Projection::CumulativeFlowSum(names) =>
-                (format!("incidence({})", names.join(" + ")), false),
-            ir::observation::Projection::FlowRatio { numerator, denominator } =>
-                (format!("incidence({}) / incidence({})",
-                         numerator.join(" + "), denominator.join(" + ")), false),
-            ir::observation::Projection::CurrentPop(name) =>
-                (name.to_string(), true),
-            ir::observation::Projection::CurrentPopSum(names) =>
-                (names.join(" + "), true),
-            ir::observation::Projection::DerivedExpr(_) =>
-                ("derived expression".to_string(), true),
-        };
-        let lik_label = match &obs.likelihood {
-            ir::observation::Likelihood::NegBinomial(_)  => "NegBinomial",
-            ir::observation::Likelihood::Poisson(_)      => "Poisson",
-            ir::observation::Likelihood::Normal(_)       => "Normal",
-            ir::observation::Likelihood::Binomial(_)     => "Binomial",
-            ir::observation::Likelihood::BetaBinomial(_) => "BetaBinomial",
-            ir::observation::Likelihood::Beta(_)         => "Beta",
-            ir::observation::Likelihood::Bernoulli(_)    => "Bernoulli",
-            ir::observation::Likelihood::ZeroInflatedNegBinomial(_) => "ZeroInflatedNegBinomial",
-        };
-        eprintln!("    {} {:<16} {:<28} {}",
-            crate::style::stderr().paint("✓", Style::Ok), obs.name, kind_label, lik_label);
-        if is_snapshot && matches!(obs.likelihood, ir::observation::Likelihood::NegBinomial(_)) {
-            warn_negbin_on_snapshot = true;
+    for check in crate::fit::report::obs_stream_checks(model) {
+        if let crate::fit::report::Check::ObsStream { name, carrier, family } = check {
+            eprintln!("    {} {:<16} {:<28} {}",
+                crate::style::stderr().paint("✓", Style::Ok), name, carrier, family);
         }
     }
+    let warn_negbin_on_snapshot = model.observations.iter().any(|obs| {
+        matches!(obs.likelihood, ir::observation::Likelihood::NegBinomial(_))
+            && crate::fit::report::projection_is_snapshot(&obs.projection)
+    });
     if warn_negbin_on_snapshot {
         let p = crate::style::stderr();
         eprintln!("    {}", p.paint("note: NegBinomial on a prevalence / snapshot projection is valid", Style::Dim));

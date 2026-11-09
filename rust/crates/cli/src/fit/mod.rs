@@ -1629,30 +1629,25 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // that it had no effect, rather than inferring a start that never
         // happened. Every method kind draws its chain starts the same way, so
         // this runs once here, before the dispatch.
-        if starts_rule.ignores_base_point(method.algorithm.chains()) {
-            let declared: Vec<&str> = sweep_config.estimate.iter()
+        // Recorded (`run.json` `inputs.unused_starts`) so `fit summary` can
+        // show the same check (`report::Check::Starts`).
+        let unused_starts: Vec<String> = if starts_rule.ignores_base_point(method.algorithm.chains()) {
+            sweep_config.estimate.iter()
                 .filter(|(_, spec)| spec.start.is_some())
-                .map(|(n, _)| n.as_str())
-                .collect();
-            if !declared.is_empty() {
-                // PMMH and MH still read the declared point: their pre-run
-                // likelihood check is evaluated there, and the initial
-                // proposal scale is converted to the transformed scale at it
-                // (`pmmh::build_proposal_sd`). Only where the chains begin
-                // ignores it.
-                let still_read = if matches!(method.algorithm, Algorithm::PMMH { .. } | Algorithm::Mh { .. }) {
-                    " It still sets the point of the pre-run likelihood check and the \
-                     scale of the initial proposal."
-                } else {
-                    ""
-                };
-                eprintln!(
-                    "  {n} `starts = \"{}\"` draws every chain's \
-                     start, so `[estimate].start` does not set where the chains \
-                     begin for: {}.{still_read} Use `starts = \"single\"` to start \
-                     every chain at the declared values.",
-                    starts_rule.tag(), declared.join(", "), n = crate::style::note_tag());
-            }
+                .map(|(n, _)| n.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !unused_starts.is_empty() {
+            // PMMH and MH still read the declared point: their pre-run
+            // likelihood check is evaluated there, and the initial proposal
+            // scale is converted to the transformed scale at it
+            // (`pmmh::build_proposal_sd`). Only where the chains begin
+            // ignores it.
+            eprintln!("  {} {}", crate::style::note_tag(),
+                report::unused_starts_note(starts_rule.tag(), &unused_starts,
+                    still_reads_declared_starts(&method.algorithm)));
         }
 
         // gh#278, gh#900: the method's liveness/progress heartbeat. A background
@@ -2291,6 +2286,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             "starts_source": starts_source_record,
             "wall_time_seconds": method_elapsed.as_secs_f64(),
             "header": run_header,
+            "unused_starts": { "rule": starts_rule.tag(), "params": unused_starts },
         });
         // Declare the tabular outputs' column schema in run.json (proposal
         // 2026-07-15): classify each written file's real header so a consumer
@@ -2482,6 +2478,13 @@ fn resolve_base_ref(reference: &str, cas_root: &std::path::Path) -> Option<std::
     } else {
         None
     }
+}
+
+/// Whether the method's pre-run likelihood check and initial proposal read the
+/// declared `[estimate].start` values even when its starts rule does not
+/// start chains there: PMMH and `mh`.
+pub(crate) fn still_reads_declared_starts(algorithm: &config_v2::Algorithm) -> bool {
+    matches!(algorithm, config_v2::Algorithm::PMMH { .. } | config_v2::Algorithm::Mh { .. })
 }
 
 /// The base leaf's per-chain warm-up record, for a resumed PMMH or `mh` run

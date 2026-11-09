@@ -258,6 +258,11 @@ pub fn status_note(algorithm: FitAlgorithm, backend: InferenceBackend) -> Option
         .filter(|s| !s.is_empty())
 }
 
+/// [`status_note`] for the method and backend as `run.json` spells them.
+pub(crate) fn status_note_for(method: &str, backend: &str) -> Option<&'static str> {
+    status_note(parse_algorithm(method)?, parse_backend(backend)?)
+}
+
 /// Print the registry caveat banner to stderr when the chosen method carries
 /// a caveat (non-empty `status_note` — every Beta method, plus any Stable
 /// method with usage guidance). No-op for methods without a note and for

@@ -1,0 +1,19 @@
+[model]
+camdl = "sir.camdl"
+
+[data.observations]
+cases = "cases.tsv"
+
+[estimate]
+beta  = { start = 0.5 }
+gamma = { start = 0.2 }
+
+[fixed]
+rho = 0.5
+N0  = 2000
+
+[method]
+algorithm  = "pfilter"
+backend    = "chain_binomial"
+particles  = 200
+replicates = 3
