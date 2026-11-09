@@ -72,6 +72,8 @@ pub use fit_table::cmd_fit_table;
 pub mod fit_summary;
 pub use fit_summary::cmd_fit_summary;
 pub mod pmmh;
+// The typed record of what a method's run shows (proposal 2026-11-08).
+pub mod report;
 // Likelihood-noise preflight shared by the pseudo-marginal methods: the
 // measured log L-hat spread and the acceptance ceiling it implies (gh#764).
 pub mod pf_noise;
@@ -947,15 +949,22 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         .ok()
         .and_then(|t| crate::fit::handle::config_identity(&t).ok());
 
-    eprintln!("fit: {} (method={})", fit_path, method.algorithm.method_name());
-    eprintln!("  model:    {}", config.problem.model.camdl);
-    eprintln!("  estimate: {}", config.problem.estimate.keys()
-        .map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
-    eprintln!("  fixed:    {}", {
-        let resolved = config.problem.fixed.resolve().unwrap_or_default();
-        resolved.keys().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
-    });
-    eprintln!("  starts:   {}", starts_resolution.describe());
+    // The opening block, as a record first: `run.json` keeps it
+    // (`inputs.header`) so `fit summary` can show what this run showed.
+    let run_header = report::RunHeader {
+        config: fit_path.to_string(),
+        method: method.algorithm.method_name().to_string(),
+        model: config.problem.model.camdl.clone(),
+        estimate: config.problem.estimate.keys().cloned().collect(),
+        fixed: config.problem.fixed.resolve().unwrap_or_default().keys().cloned().collect(),
+        starts: starts_resolution.describe(),
+        output: report::display_path(&announced_fit_dir),
+    };
+    eprintln!("fit: {} (method={})", run_header.config, run_header.method);
+    eprintln!("  model:    {}", run_header.model);
+    eprintln!("  estimate: {}", run_header.estimate.join(", "));
+    eprintln!("  fixed:    {}", run_header.fixed.join(", "));
+    eprintln!("  starts:   {}", run_header.starts);
     // gh#507: absolute, not as-written. A relative string here is consistent
     // with either base (the CWD or the fit.toml's directory), so it cannot
     // tell you which one you got — which is exactly how a run tree ended up
@@ -1954,6 +1963,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     a.resume.is_some(),
                     &resume_guard,
                     &resolved_starts,
+                    // A resumed chain extends its base's warm-up record.
+                    &base_warmup(resume_base.as_deref(), &method.algorithm),
                     // PMMH's dt-check is the PF-based one wired on the IF2 path.
                     /* dt_check_opt */ None,
                     &heartbeat,
@@ -1991,6 +2002,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     a.resume.is_some(),
                     &resume_guard,
                     &resolved_starts,
+                    // A resumed chain extends its base's warm-up record.
+                    &base_warmup(resume_base.as_deref(), &method.algorithm),
                     Some(mh_dt_check),
                     &heartbeat,
                 ).unwrap_or_else(|e| {
@@ -2271,6 +2284,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             "config_identities": cell_config_identity.into_iter().collect::<Vec<_>>(),
             "starts_source": starts_source_record,
             "wall_time_seconds": method_elapsed.as_secs_f64(),
+            "header": run_header,
         });
         // Declare the tabular outputs' column schema in run.json (proposal
         // 2026-07-15): classify each written file's real header so a consumer
@@ -2462,6 +2476,21 @@ fn resolve_base_ref(reference: &str, cas_root: &std::path::Path) -> Option<std::
     } else {
         None
     }
+}
+
+/// The base leaf's per-chain warm-up record, for a resumed PMMH or `mh` run
+/// (`report::ChainWarmup`). Empty for a fresh run, and for a base written
+/// before the record existed.
+fn base_warmup(
+    base: Option<&std::path::Path>,
+    algorithm: &config_v2::Algorithm,
+) -> Vec<report::ChainWarmup> {
+    let summary = match algorithm {
+        config_v2::Algorithm::Mh { .. } => crate::run_meta::FitAlgorithm::Mh,
+        _ => crate::run_meta::FitAlgorithm::Pmmh,
+    }
+    .summary_filename();
+    base.map(|b| report::read_warmup(&b.join(summary))).unwrap_or_default()
 }
 
 /// Copy the base leaf's per-chain resume state (`chain_*/resume_state.bin` +
