@@ -251,7 +251,7 @@ pub struct Stored {
 /// Everything a method's report is built from. Two producers fill it: the end
 /// of the method's run, from memory, and `fit summary`'s loader, from the leaf
 /// (`fit_summary::load_method_facts`). Nothing else builds a `MethodReport`
-/// ([`crate::fit::fit_summary::build_method_report`]).
+/// ([`crate::fit::report::build::build_method_report`]).
 #[derive(Debug, Clone)]
 pub struct MethodFacts {
     /// The method leaf's label, its method (`pmmh`, `nl-sbplx`, …) and
