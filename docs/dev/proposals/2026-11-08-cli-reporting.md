@@ -862,6 +862,7 @@ The layout the reporting code lands in:
 | `report/build.rs`                           | `build_method_report` → `MethodOutcome`                                                    |
 | `report/render.rs`                          | `render_report`, `View`                                                                    |
 | `report/findings.rs`                        | the diagnostics block                                                                      |
+| `report/export.rs`                          | `fit summary`'s md and LaTeX projections                                                   |
 
 `fit_summary.rs` ends as loading plus choosing a view, with no rendering of its
 own. `DiagnosticKind`, `merge_key`, `render_entry` and `fmt_rate` stay in `sim`.
@@ -887,9 +888,48 @@ Steps 7 and 8 as landed:
   order with the scale and floor count beside each rate
   (`report::render::acceptance_table`), replacing the per-chain λ lines. The
   completion line drops the leaf path, which the `stored` line carries.
-- **Not yet landed from step 7**: `Out` itself, `MethodOutcome`, `render_report`
-  with its two views, the verdict section and R̂ legend in `fit run`, `fit run`
-  building `MethodFacts` from memory, the run-equals-loader test,
-  `fit summary`'s text output on `render_report`, `ChainDetail` in `facts.rs`,
-  and the deletion of `ConvergenceDiagnostics::report`'s printing and the PGAS
-  acceptance printer.
+- **Step 7, `fit summary` from one report.** `fit summary`'s text loads each
+  leaf into its `MethodReport` through `load_method_facts` and
+  `build_method_report`, as json, md and latex already did, and draws it with
+  `render_report(&MethodOutcome::Completed(report), View::Summary(..))`;
+  `fit_summary.rs` keeps the loading and the choice of format, and no rendering.
+  The md and LaTeX renderers moved to `report/export.rs`. Text output is
+  byte-identical on every fixture; the facts fixture gained `fit summary` runs
+  for PGAS (plain, and under `--explain --parameters`), IF2, nl-sbplx, pfilter,
+  `--exclude-chains` and the all-chains-fail fit before the port, and lost
+  nothing.
+- **`View` has one arm, `Summary(SummaryView)`.** `SummaryView` carries
+  `--explain` and whether the camdl version leads the method's identity line (a
+  fit-level fact said once, on the first method), which a bare `Summary` arm had
+  nowhere to hold. `RunEnd` lands with its renderer on the run side; an arm with
+  no renderer would have had to panic.
+- **`MethodOutcome::Failed` carries `error: String`**, since `CommandError`
+  belongs to `Out`, and nothing constructs it yet: `fit run`'s failure path
+  builds it from memory on the run side, so the variant carries an
+  `expect(dead_code)` outside tests until then. Its summary rendering (the run's
+  opening block, the findings, the error) is tested. `fit summary` of a failed
+  leaf still refuses it as no completed method, as today. `build_method_report`
+  still returns a `MethodReport`, which the JSON document holds;
+  `MethodOutcome::Completed` wraps it.
+- **`ChainDetail` is everything the summary's text reads beside the typed
+  result**: the per-chain trace means and outlier scores, the degeneracy
+  screens, the filter ESS, the latent paths, the chain counts and starts in
+  `fit_state.toml`, the stored-fit source run, the forkable counts (counts, not
+  the whole `JointEnsemble`) and the `--exclude-chains` subset. It is
+  `MethodFacts::chain_detail: Option<_>`, filled only for the text view, and
+  `MethodReport` carries it unserialized. The subset sits there, not in
+  `MethodFacts` proper, because it is the summary's read-back and the run never
+  fills it. A leaf that predates `latent_convergence.tsv` has it written by that
+  read, never by the renderer.
+- **`diagnostics.json` is read entry by entry for every format**, as the text's
+  refused-chain reader already did: an entry that does not parse costs that
+  entry and is named. The JSON report gains `findings_unreadable` (omitted when
+  empty, schema version unchanged), so a consumer is told what was not read
+  instead of a leaf failing to load. `ProvenanceReport` gains two unserialized
+  flags saying which params file was absent, which the text names.
+
+Not yet landed from step 7 (the run side): `Out` itself and `CommandError`,
+`View::RunEnd` with the verdict section and R̂ legend in `fit run`, `fit run`
+building `MethodFacts` from memory and constructing `MethodOutcome`, the
+run-equals-loader test, and the deletion of `ConvergenceDiagnostics::report`'s
+printing and the PGAS acceptance printer.
