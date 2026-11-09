@@ -97,9 +97,9 @@ pub struct PMMHResult {
     ///
     /// Non-zero means the adaptation was chasing an acceptance rate no scale
     /// attains, so the proposal was as narrow as the sampler permits and those
-    /// draws do not cover the posterior. `run_pmmh` warns on it; carried here
-    /// so a caller can persist or gate on the condition rather than having to
-    /// scrape stderr.
+    /// draws do not cover the posterior. The caller reports it
+    /// (`DiagnosticKind::ScaleAtFloor`) and persists it; `run_pmmh` prints
+    /// nothing.
     pub steps_at_scale_floor: usize,
     /// The Robbins–Monro global scale λ the run finished with — the λ every
     /// kept draw was proposed under, since adaptation stops at
@@ -111,9 +111,9 @@ pub struct PMMHResult {
     /// λ = 4.8e-4, where a σ = 2 run of the synthetic target in
     /// `tests/pmmh_scale_collapse.rs` ends, means the chain sampled with a
     /// proposal 2,000× narrower than the covariance it was scaling — and it
-    /// mixes as λ⁻². `run_pmmh` reports it and warns when
-    /// [`scale_is_far_from_optimum`] holds; carried here so a caller can read
-    /// the condition rather than scrape stderr. 1.0 when `adapt = false`,
+    /// mixes as λ⁻². The caller reports it, and a finding when
+    /// [`scale_is_far_from_optimum`] holds (`DiagnosticKind::
+    /// ScaleFarFromOptimum`). 1.0 when `adapt = false`,
     /// where no scale multiplies the configured diagonal.
     pub final_scale: f64,
     /// Steps on which this call adapted the scale: the part of the warm-up
@@ -572,7 +572,6 @@ pub fn run_pmmh(
     let mut rng: StatefulRng;
 
     if let Some(state) = resume_from {
-        eprintln!("  resuming from step {}...", state.completed_steps);
         start_step = state.completed_steps;
         current_params = state.params;
         n_accepted = state.n_accepted;
@@ -655,11 +654,6 @@ pub fn run_pmmh(
     // that freezes at step 500 of 5,000 can only have sat on the floor for
     // 500 steps, and reporting it against 5,000 would understate it fivefold.
     let mut adapt_steps = 0usize;
-
-    if start_step >= config.n_steps {
-        eprintln!("  warning: chain already completed {} steps (requested {}). \
-                   Increase steps in fit.toml to continue.", start_step, config.n_steps);
-    }
 
     for step in start_step..config.n_steps {
         // Inside the warm-up window? Both adapting quantities — λ and the
@@ -799,67 +793,11 @@ pub fn run_pmmh(
         }
     }
 
-    // Shared layout for the end-of-run warnings: `warning:` on the first line,
-    // aligned continuation after it.
-    let warn = |lines: &[String]| {
-        for (i, text) in lines.iter().enumerate() {
-            if i == 0 {
-                eprintln!("  warning: {text}");
-            } else {
-                eprintln!("           {text}");
-            }
-        }
-    };
-
+    // The scale the kept draws were proposed under. What it says about the
+    // run — a floor reached, a scale far from its optimum — is judged by the
+    // caller from this and `steps_at_scale_floor` (`DiagnosticKind::
+    // ScaleAtFloor`, `ScaleFarFromOptimum`); the library reports nothing.
     let final_scale = adaptive.as_ref().map_or(1.0, |ap| ap.scale());
-
-    // The scale floor is a bound on the damage, not a repair: a chain that
-    // spent time pinned there did not explore its posterior, and the draws it
-    // produced must not be read as one. Say so, and name the knob that fixes
-    // it — for a particle-filter likelihood the cause is estimator noise, not
-    // proposal tuning, so a longer chain does not help.
-    if steps_at_scale_floor > 0 {
-        let ran = adapt_steps.max(1);
-        let target_pct = adaptive.as_ref().map_or(0.0, |ap| ap.target_accept() * 100.0);
-        let lam = LOG_SCALE_MIN.exp();
-        warn(&[
-            format!("the adaptive proposal scale sat at its lower bound (lambda = {lam:.1e})"),
-            format!("for {steps_at_scale_floor} of {ran} warm-up steps: no scale reached the"),
-            format!("{target_pct:.1}% target acceptance, so the proposal is far narrower"),
-            "than the posterior and the draws taken under the frozen kernel do".to_string(),
-            "not cover it. Under a particle-filter likelihood the attainable".to_string(),
-            "acceptance is capped by the spread of log L-hat, so raise the".to_string(),
-            "particle count (aim for a log-likelihood standard deviation near 1".to_string(),
-            "at the mode). A longer chain will not help.".to_string(),
-        ]);
-    }
-
-    // The scale the sampling phase ran at, reported whether or not it is a
-    // problem. `steps_at_scale_floor` catches only the chains that hit
-    // `LOG_SCALE_MIN`; a chain can end orders of magnitude below the λ = 1
-    // optimum without ever reaching it, and that chain looks like an ordinary
-    // completed run with a poor R-hat. Skip the second warning when the floor
-    // warning already fired — it is the same condition, said more precisely.
-    if adaptive.is_some() {
-        eprintln!("  adaptive proposal scale at end of warm-up: lambda = {final_scale:.3e}");
-        if scale_is_far_from_optimum(final_scale) && steps_at_scale_floor == 0 {
-            let (factor, direction) = if final_scale < 1.0 {
-                (1.0 / final_scale, "narrower")
-            } else {
-                (final_scale, "wider")
-            };
-            warn(&[
-                format!("the chain sampled at lambda = {final_scale:.3e}, a proposal {factor:.0}x"),
-                format!("{direction} than the posterior covariance it scales (lambda = 1 is"),
-                "the optimum by construction, from the 2.38^2/d factor). Posterior".to_string(),
-                "traversal time scales as lambda^-2, so these draws are correlated".to_string(),
-                "far more strongly than the chain length suggests: check R-hat and".to_string(),
-                "ESS before reading them as a posterior. Under a particle-filter".to_string(),
-                "likelihood a scale far below 1 is estimator noise rather than".to_string(),
-                "proposal tuning — raise the particle count.".to_string(),
-            ]);
-        }
-    }
 
     // gh#audit-M4. acceptance_rate now divides by post-burn-in step
     // count so it reports the rate over the *sampling* phase, not

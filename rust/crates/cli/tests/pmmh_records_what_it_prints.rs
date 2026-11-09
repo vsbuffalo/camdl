@@ -102,22 +102,20 @@ fn every_new_pmmh_record_matches_the_line_the_run_printed() {
     let ll_mean = state["pf_noise"]["ll_mean"].as_float().unwrap();
     assert!(after(&stderr, "log L̂ mean =").starts_with(&format!("{ll_mean:.1},")), "{ll_mean}");
 
-    // Warm-up: one record per chain; the two chains that printed a floor
-    // warning are the two with floor steps, with the printed counts.
+    // Warm-up: one record per chain; the chains the floor finding names are
+    // the ones with floor steps, with the printed counts, in chain order.
     let summary = json(&dir.join("pmmh_summary.json"));
     let warmup = summary["warmup"].as_array().unwrap();
     assert_eq!(warmup.len(), 4);
-    let mut floors: Vec<u64> = warmup.iter()
-        .map(|w| w["steps_at_scale_floor"].as_u64().unwrap())
-        .filter(|&n| n > 0)
-        .collect();
-    floors.sort();
-    let mut printed: Vec<u64> = stderr.lines()
-        .filter(|l| l.contains("warm-up steps: no scale reached the"))
-        .map(|l| l.trim().strip_prefix("for ").unwrap().split(' ').next().unwrap().parse().unwrap())
-        .collect();
-    printed.sort();
-    assert_eq!(floors, printed, "{stderr}");
+    let (chains, floors): (Vec<String>, Vec<String>) = warmup.iter()
+        .filter(|w| w["steps_at_scale_floor"].as_u64().unwrap() > 0)
+        .map(|w| (w["chain"].to_string(), w["steps_at_scale_floor"].to_string()))
+        .unzip();
+    assert_eq!(chains.len(), 2, "fixture premise: two chains reach the floor");
+    assert!(stderr.contains(&format!(
+        "chains {}: the adaptive proposal scale sat at its lower bound", chains.join(", "))), "{stderr}");
+    assert!(stderr.contains(&format!(
+        "for {} of 1000 warm-up steps: no scale reached the", floors.join(" and "))), "{stderr}");
     let mut lambdas: Vec<String> = warmup.iter()
         .map(|w| format!("lambda = {:.3e}", w["final_scale"].as_f64().unwrap())).collect();
     let mut printed_lambdas: Vec<String> = stderr.lines()
