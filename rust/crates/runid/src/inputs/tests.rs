@@ -59,7 +59,7 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         fit_toml: ContentHash::from_bytes([3; 32]),
         engine: EngineVersion("0.3.0".into()),
     };
-    let method = StageConfig {
+    let method = MethodConfig {
         config: ContentHash::from_bytes([7; 32]),
         obs_block: String::new(),
         flow_indices: vec![],
@@ -84,7 +84,7 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         ("ResolvedParams", params.content_hash()),
         ("ResolvedScenario", scenario.content_hash()),
         ("FitDigest", fit.content_hash()),
-        ("StageConfig", method.content_hash()),
+        ("MethodConfig", method.content_hash()),
         ("run_id(Sim)", crate::run_id(ArtifactKind::Sim, &sim_levels)),
         ("run_id(FitMethod)", crate::run_id(ArtifactKind::FitMethod, &fit_levels)),
     ]
@@ -111,9 +111,13 @@ fn canonical_encoding_is_pinned() {
         // scale is pinned too). `run_id(Sim)` moves with it.
         ("ResolvedScenario", "ff4394e51bd629ed88ae4ed859a84acd4753183fddf39112e1e088b6026ed098"),
         ("FitDigest", "a87aad94ad68c799fd558a872ebeb7de8507c3da867c6553ad198af38882d7e7"),
-        ("StageConfig", "f6eb2654d2393f1365ba8610b3a80a5a5772e752b54179dc208f82b995f067df"),
+        // The `[stages]` -> `[method]` rename: the type is `MethodConfig`, not
+        // `StageConfig`, and the derive hashes the fully-qualified type name as
+        // its domain tag. Same fields, same bytes, new tag; `run_id(FitMethod)`
+        // moves with it. Nothing else here moves.
+        ("MethodConfig", "587e3f9c3ec89f384041cb45d988179626f57dc0c892ff2eb7675dbed03a2a87"),
         ("run_id(Sim)", "54093e502e4b5bcafed3d24360b1ea0750ab1749ab8d47cef286342490cf9bfb"),
-        ("run_id(FitMethod)", "882fceab6e6120667091cc2f4c02a8a035645e46f4d81b86643ea591ee101836"),
+        ("run_id(FitMethod)", "b4a12ff70b9c27a597f88d77c2a1e05dc1871c4f71ec63053af013810b0394ea"),
     ];
     let actual = golden_fixtures();
     assert_eq!(actual.len(), expected.len(), "fixture/expected count drift");
@@ -236,7 +240,7 @@ fn method_config_obs_alignment_is_keyed() {
     // gh#189: the resolved obs alignment (snap vs exact) drives the posterior,
     // so two otherwise-identical method configs differing only in it must get
     // distinct method hashes — exact and snap cannot collide in the CAS store.
-    let base = StageConfig {
+    let base = MethodConfig {
         config: ContentHash::from_bytes([7; 32]),
         obs_block: String::new(),
         flow_indices: vec![],

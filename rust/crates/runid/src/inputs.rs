@@ -449,7 +449,7 @@ pub struct FitDigest {
 /// enumerating a subset is the hash-a-recipe antipattern. M1 sketches the
 /// load-bearing fields; M3 binds it to the real `Method`.
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
-pub struct StageConfig {
+pub struct MethodConfig {
     /// Content digest of the whole canonicalized method config block.
     pub config: ContentHash,
     /// Resolved obs-block name (the `--obs` selection): selects which series
@@ -473,9 +473,9 @@ pub struct StageConfig {
 /// identity, so the run invalidates whenever that source changes. Sound only
 /// once the engine is pure (the M3 fixes).
 #[derive(Debug, Clone, PartialEq, RunInput)]
-pub struct FitStageInput {
+pub struct FitMethodInput {
     pub fit: FitDigest,
-    pub method: StageConfig,
+    pub method: MethodConfig,
     pub deps: Deps,
     pub seed: Seed,
     #[run_input(provenance)]
@@ -488,11 +488,11 @@ pub struct FitStageInput {
 /// `from_mle = @mle` folds in that source's identity (via `deps`) and re-keys
 /// whenever the source changes, while editing its own `[method]` leaves the
 /// source leaf untouched.
-/// Kept distinct from [`StageConfig`] so the bare config (without lineage)
-/// stays addressable, and from [`FitStageInput`] which composes all levels.
+/// Kept distinct from [`MethodConfig`] so the bare config (without lineage)
+/// stays addressable, and from [`FitMethodInput`] which composes all levels.
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
-pub struct StageLevel {
-    pub config: StageConfig,
+pub struct MethodLevel {
+    pub config: MethodConfig,
     pub deps: Deps,
 }
 
@@ -589,7 +589,7 @@ pub struct ProfilePointConfig {
 /// Distinct from [`ProfileBase`] so a method change re-keys the points while
 /// the base stays shared.
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
-pub struct ProfileStage {
+pub struct ProfileMethod {
     pub config: ContentHash,
 }
 
@@ -608,7 +608,7 @@ pub struct StartLevel {
 pub struct ProfilePointInput {
     pub base: ProfileBase,
     pub point: ProfilePointConfig,
-    pub method: ProfileStage,
+    pub method: ProfileMethod,
     pub seed: Seed,
     pub start: StartLevel,
     #[run_input(provenance)]

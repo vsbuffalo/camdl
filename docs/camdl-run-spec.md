@@ -4581,14 +4581,13 @@ different models (the `model` level; `config` is unchanged).
   `output_dir`; and the engine version. The fit level hashes the problem alone,
   so two files that differ only in `[method]` share it. Model and data _paths_
   stay in the blob — a rename over-invalidates harmlessly.
-- `method` — `StageLevel` = `StageConfig` folded with `deps`. `StageConfig`
+- `method` — `MethodLevel` = `MethodConfig` folded with `deps`. `MethodConfig`
   carries the digest of `Method::identity_payload()` — the algorithm block and
   the resolved `starts` rule — re-augmented with `n_trajectories`, plus
   `target_length` and the **resolved** (not requested) observation-time
   alignment (`Exact` vs `Snap`). Folding `deps` here is what makes a posterior
   file re-key when the scout its `starts` names changes. The label is the
-  algorithm's name. (The `runid` input types keep their `Stage*` names: they are
-  that crate's vocabulary for the level below the fit.)
+  algorithm's name.
 - `seed` — the resolved fit RNG seed.
 
 `Method::identity_payload()` deliberately omits the _extension dimension_ (PGAS

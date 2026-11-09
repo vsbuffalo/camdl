@@ -848,6 +848,15 @@ order. Every handle now names one run, or is refused with the runs listed.
 
 ## Run identity
 
+- **Every stored fit and every stored `camdl profile` run re-keys** (the
+  `[stages]` → `[method]` vocabulary). The run-identity input types for a fit's
+  method level and a profile's method level were still named after stages, and a
+  type's name is part of its hash, so renaming them gives every fit and profile
+  leaf a new `run_id`. The hashed values are unchanged; nothing a fit or profile
+  computes changes. A re-run recomputes rather than reusing a stored leaf, and
+  an in-flight PGAS or PMMH fit cannot `--resume` across the change.
+  Simulations, `pfilter` and `survey` runs and simulate ensembles keep their
+  keys.
 - **Every stored `camdl profile` run re-keys** (the method level now carries
   only the knobs its cell reads, plus IF2's `cooling_target_iters` and `nl-*`'s
   `tolerance` / `max_evals`); a `pfilter` fit whose every parameter declares a

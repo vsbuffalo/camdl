@@ -4063,7 +4063,7 @@ starts     = "{starts}"
     /// `identity_payload` omits it on purpose (see
     /// `pgas_identity_payload_omits_n_trajectories`) because it shapes output
     /// rather than the statistical fit, and it reaches the key by the separate
-    /// `cas_n_trajectories` route that `StageConfig` folds in. It gets its own
+    /// `cas_n_trajectories` route that `MethodConfig` folds in. It gets its own
     /// test below rather than a row here that would assert the wrong thing.
     /// `--starts` is not a `CliMethodOverrides` field at all — it writes
     /// `Method::starts` directly; `cli_starts_override_changes_the_method_identity`

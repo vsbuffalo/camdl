@@ -18,7 +18,7 @@
 use runid::float::FiniteF64;
 use runid::inputs::{
     ArtifactRef, Deps, EngineVersion, ModelDigest, ParamId, ProfileBase,
-    ProfilePointConfig, ProfileStage, Seed, StartLevel,
+    ProfilePointConfig, ProfileMethod, Seed, StartLevel,
 };
 use runid::{run_id, ArtifactKind, ContentHash, LevelId};
 
@@ -112,7 +112,7 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
         focal.push((ParamId(name.clone()), fv));
     }
     let point = ProfilePointConfig { focal };
-    let method = ProfileStage { config: ctx.method_config.into_inner() };
+    let method = ProfileMethod { config: ctx.method_config.into_inner() };
     let seed = Seed { process_seed: ctx.seed, base_seed: ctx.seed };
     let start = StartLevel { index: ctx.start_index };
 

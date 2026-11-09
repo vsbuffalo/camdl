@@ -767,12 +767,20 @@ fn cas_identity_pins() {
         // The `ir` hash policy going to SV = 4 then moved EVERY kind: the
         // model's `name` (the source file's stem) left `Model::hash_into`, and
         // the SV header is folded into every kind's `model` level.
+        //
+        // The `[stages]` -> `[method]` rename of the `runid` input types then
+        // moved `fit` and `profile` ALONE: `StageConfig`, `StageLevel` and
+        // `FitStageInput` became `MethodConfig`, `MethodLevel` and
+        // `FitMethodInput`, and `ProfileStage` became `ProfileMethod`. The
+        // derive hashes each type's fully-qualified name as its domain tag, so
+        // the same field bytes take a new tag. Only fits hash the first three
+        // and only profiles hash the fourth; the other four kinds stay.
         ("sim", "0cb90e9d50e5d13bdcdb36e828c0320af7ca10621f52ea29da79b7e448c06f27"),
-        ("fit", "c73bb2ca8ad5fcdab69e20e164190676bee92f932cd74165af272d9b8170b54e"),
+        ("fit", "b1071aaa6daf3c80dec2c186428724a91ae88833acbad8899d27d1d1e128d6a1"),
         ("pfilter", "102b4f4ef0dd5597fa47d76e00f08e4d39c44543cc624f5aea1795973269fb49"),
         ("survey", "4eb4ef1dd2afee1d9caf470af7bc7007865a6e01e8e83ce69f59d0431897bf28"),
         ("sim_ensemble", "cd676c8d39d167318e7985e9e65eafd9a463aee8449218e4e60e568913f1a4bb"),
-        ("profile", "5470055605e9e56d1991c503ec42724589bbba9f4df619f6570063e4438f67d6"),
+        ("profile", "a0d8a04942256abbc702c36bd6b0a224e37bafb1e1eb7bdeb9909eeb77d0da38"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.

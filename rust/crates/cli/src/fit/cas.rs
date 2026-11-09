@@ -10,7 +10,7 @@
 //!   training data digests + per-stream `[data.holdout]` content digests
 //!   (gh#190) + the canonicalized problem half of the config (`output_dir`
 //!   normalized out) + engine version.
-//! - **method level** = [`StageLevel`] = [`StageConfig`] (the method's
+//! - **method level** = [`MethodLevel`] = [`MethodConfig`] (the method's
 //!   `identity_payload` — its algorithm's fields plus `starts` — +
 //!   `n_trajectories` + obs/flow + `target_length` + the resolved
 //!   `obs_alignment`, gh#189) folded with its `deps` (the content of a
@@ -26,10 +26,6 @@
 //! `run_id` could serve a different trajectory count's output. So each value
 //! yields a distinct leaf (count-in-the-key), at the cost of re-fitting when it
 //! changes.
-//!
-//! The `runid` input types keep their `Stage*` names: they are the crate's
-//! vocabulary for "the level below the fit", and renaming them would re-key
-//! nothing and touch a crate this change otherwise leaves alone.
 
 use indexmap::IndexMap;
 
@@ -37,7 +33,7 @@ use std::path::Path;
 
 use runid::inputs::{
     ArtifactRef, DataDigest, Deps, EngineVersion, FitDigest, ModelDigest, ResolvedObsAlignment,
-    Seed, StageConfig, StageLevel,
+    Seed, MethodConfig, MethodLevel,
 };
 use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId, RunRecord};
 
@@ -114,7 +110,7 @@ pub(crate) struct LevelHash(ContentHash);
 
 impl LevelHash {
     /// Unwrap for embedding INSIDE another structurally-hashed input (profile
-    /// folds its base/method level hashes into `ProfileBase`/`ProfileStage`).
+    /// folds its base/method level hashes into `ProfileBase`/`ProfileMethod`).
     ///
     /// This direction is safe and deliberately one-way: the guarantee is about
     /// what may BECOME a level, so there is no `From<ContentHash>` going back.
@@ -619,7 +615,7 @@ fn fit_method_levels(ctx: &FitMethodCtx, target_length: u64) -> Result<Vec<Level
         ctx.data_paths,
     )?;
 
-    let method_config = StageConfig {
+    let method_config = MethodConfig {
         config: method_config_hash(ctx.method)?,
         // Fits select observation streams via `[data]` (captured in
         // `FitDigest.data`); there is no fit-level `--obs`/`--flow`.
@@ -629,7 +625,7 @@ fn fit_method_levels(ctx: &FitMethodCtx, target_length: u64) -> Result<Vec<Level
         // gh#189: the resolved (not requested) obs alignment, keyed per method.
         obs_alignment: resolved_obs_alignment(&ctx.method.algorithm, ctx.problem),
     };
-    let method_level = StageLevel { config: method_config, deps: Deps(ctx.deps.clone()) };
+    let method_level = MethodLevel { config: method_config, deps: Deps(ctx.deps.clone()) };
 
     // Fits have no grid-cell seed mixing (each sweep point is a distinct fit
     // leaf via FitDigest); the seed level hashes the resolved fit RNG seed.
@@ -1028,7 +1024,7 @@ mod tests {
     /// gh#189: the *resolved* obs alignment is folded into the method identity,
     /// and resolution is per-algorithm. A PGAS method resolves to `Snap`; an
     /// IF2 method resolves to `Exact`. The two must therefore produce distinct
-    /// `StageConfig`s (so a snap and an exact fit never collide in the store).
+    /// `MethodConfig`s (so a snap and an exact fit never collide in the store).
     #[test]
     fn resolved_obs_alignment_is_keyed_per_method() {
         let if2 = if2_method(4000);
@@ -1046,10 +1042,10 @@ mod tests {
         );
 
         // The resolved value is folded into the method-level identity. Holding
-        // every other StageConfig field fixed, flipping ONLY the resolved
+        // every other MethodConfig field fixed, flipping ONLY the resolved
         // alignment must change the method hash (snap and exact can't collide).
         let mk = |align: ResolvedObsAlignment| -> ContentHash {
-            StageConfig {
+            MethodConfig {
                 config: ContentHash::from_bytes([0; 32]),
                 obs_block: String::new(),
                 flow_indices: Vec::new(),

@@ -21,7 +21,7 @@ catalogue that drifts.
   segment is `{label}-{hash8}`; the label is provenance, the `hash8` is
   identity. `store_path(root, kind, levels)` builds the nested path.
 - **Identity inputs** (`inputs.rs`) — the per-level content types (`FitDigest`,
-  `DataDigest`, `StageConfig`/`StageLevel`, `Seed`, `EngineVersion`, `Deps`,
+  `DataDigest`, `MethodConfig`/`MethodLevel`, `Seed`, `EngineVersion`, `Deps`,
   `ArtifactRef`, …) and their canonical hashing.
 - **The store** (`store.rs`) — the filesystem-backed CAS rooted at `results/`:
   streaming claim (staging dir + atomic finalize), prefix-collision
@@ -37,9 +37,7 @@ Each CAS-emitting command resolves CLI inputs into `runid` levels at one site:
 - `cli/src/resolve.rs` — `resolve_trajectory`: `simulate` → `ArtifactKind::Sim`
   levels (`model` / `config` / `params` / `scenario` / `seed`).
 - `cli/src/fit/cas.rs` — `resolve_fit_method`: one method leaf of a fit →
-  `ArtifactKind::FitMethod` levels (`fit` / `method` / `seed`). The `Stage*`
-  `runid` input type names are kept; their names are hashed into every fit's
-  identity.
+  `ArtifactKind::FitMethod` levels (`fit` / `method` / `seed`).
 - `cli/src/profile_cas.rs` — `resolve_profile_point`:
   `ArtifactKind::ProfilePoint` levels (`profile` / `point` / `method` / `seed` /
   `start`).
