@@ -273,7 +273,7 @@ pub(crate) fn rhat_run_table(diag: &PosteriorDiagnostics) -> Vec<Line> {
             "R̂ (rank-normalized split, Vehtari et al. 2021) / ESS — R̂ threshold {RHAT_CONVERGED_THRESHOLD}:"),
     })];
     for (name, p) in &diag.per_param {
-        let ParamConvergence::Scored { rhat, ess_bulk, ess_tail, rhat_withheld, .. } = p else {
+        let ParamConvergence::Scored { rhat, ess_bulk, ess_tail, rhat_withheld, all_chains_frozen, .. } = p else {
             let why = p.why_no_rhat().unwrap_or_default();
             out.push(plain(format!("  {:12} not reported — {}", name, why)));
             continue;
@@ -290,9 +290,16 @@ pub(crate) fn rhat_run_table(diag: &PosteriorDiagnostics) -> Vec<Line> {
             out.push(plain(format!("  {:12} {}", name, ess_text)));
             continue;
         }
-        let r = stat_f64(*rhat);
-        let drew_finding = r > RHAT_REPORT_THRESHOLD;
-        let band = RhatBand::of(r);
+        // Every chain frozen at its own value has no finite R̂, and the
+        // summary records it as that refusal rather than as a number: the
+        // worst band, with no number to print.
+        let (r_text, band, drew_finding) = match (*rhat, *all_chains_frozen) {
+            (Stat::Undefined, true) => ("—".to_string(), RhatBand::Severe, true),
+            (stat, _) => {
+                let r = stat_f64(stat);
+                (format!("{r:.3}"), RhatBand::of(r), r > RHAT_REPORT_THRESHOLD)
+            }
+        };
         let glyph = match band.glyph_with_finding(drew_finding) {
             "✓" => Span::styled("✓", Style::Ok),
             "~" => Span::styled("~", Style::Warn),
@@ -300,7 +307,7 @@ pub(crate) fn rhat_run_table(diag: &PosteriorDiagnostics) -> Vec<Line> {
             other => Span::plain(other),
         };
         out.push(Line(vec![
-            Span::plain(format!("  {:12} Rhat={:.3} ", name, r)),
+            Span::plain(format!("  {:12} Rhat={} ", name, r_text)),
             glyph,
             Span::plain(format!(" {ess_text}")),
         ]));
