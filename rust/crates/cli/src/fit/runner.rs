@@ -3146,8 +3146,9 @@ impl MethodConvergence {
 
     /// The `RhatHigh` findings the run draws: one per parameter whose R̂ is
     /// above `rhat_threshold`, in parameter order, and none when the R̂ is
-    /// `withheld` (a point start, gh#890). [`report`](Self::report) glyphs
-    /// against the same predicate, so the table and the findings agree.
+    /// `withheld` (a point start, gh#890). The run's R̂ table
+    /// (`report::render::rhat_run_table`) glyphs no greener than the same
+    /// bar, so the table and the findings agree.
     pub fn rhat_findings(
         &self,
         rhat_threshold: f64,
@@ -3163,125 +3164,6 @@ impl MethodConvergence {
                 param: name.to_string(), rhat, threshold: rhat_threshold,
             })
             .collect()
-    }
-
-    /// The end-of-run convergence block. Returns the text so the caller
-    /// decides where it lands; the findings that go with it are
-    /// [`rhat_findings`](Self::rhat_findings).
-    ///
-    /// Every line carries bulk-ESS **and** ESS/N. The ratio is not decoration:
-    /// Geyer's truncation destabilizes as the integrated autocorrelation time
-    /// approaches the run length, so bulk-ESS 11 out of 11200 draws is the
-    /// estimator telling you it summed autocorrelations out to nearly the whole
-    /// run (gh#84). A parameter that could not be scored at all names the
-    /// reason instead of printing a dash.
-    ///
-    /// A parameter ABOVE the band gets a second line decomposing its R̂ into
-    /// `max(rhat_bulk, rhat_folded)` and naming which half is larger. The
-    /// headline says a fit did not converge; the decomposition says what to do
-    /// about it — a location disagreement is a warm-up/drift problem, a spread
-    /// disagreement points at per-chain effective diversity
-    /// (`docs/dev/proposals/2026-08-22-reporting-two-rhat-estimators.md`).
-    ///
-    /// `withheld` is the refusal, when the run's shape means no R̂ of it may
-    /// be read as a verdict — today only a point start (gh#890). The block
-    /// then prints the refusal and the ESS, no R̂ number and no glyph, and
-    /// draws no `RhatHigh` finding: `fit summary` withholds R̂ for such a run
-    /// (proposal 2026-09-08 §3.4), and a method that printed `Rhat=1.42 ✗` at
-    /// the end of the same run said a thing the summary of that run declines
-    /// to say. The ESS is unaffected by how the chains were started and is
-    /// reported either way.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the run's R̂ table is drawn from the report \
-        now (`report::render::rhat_run_table`); deleted in its own commit"))]
-    pub fn report(
-        &self,
-        rhat_threshold: f64,
-        withheld: Option<&sim::inference::convergence::ConvergenceError>,
-    ) -> String {
-        use crate::fit::method_result::{RhatBand, RHAT_CONVERGED_THRESHOLD};
-        let mut out = match withheld {
-            Some(why) => format!("\nR̂ — not assessed: {why}. ESS:\n"),
-            None => format!(
-                "\nR̂ (rank-normalized split, Vehtari et al. 2021) / ESS — \
-                 R̂ threshold {RHAT_CONVERGED_THRESHOLD}:\n"
-            ),
-        };
-        for (name, d) in self.iter() {
-            let Some(r) = d.rank() else {
-                // `rank()` is `None` exactly when `refusal()` is `Some`.
-                let why = d.refusal().expect("an unscored param carries its refusal");
-                out.push_str(&format!("  {:12} not reported — {}\n", name, why));
-                continue;
-            };
-            // The glyph is the CERTIFICATION band — the same one `fit summary`
-            // uses — so one R̂ cannot print ✓ when the fit finishes and ✗ when
-            // the user runs `fit summary` on the same directory. `rhat_threshold`
-            // is a different bar: it draws the FINDING. `glyph_with_finding`
-            // keeps the glyph from ever being greener than the finding allows.
-            let drew_finding = r.rhat > rhat_threshold;
-            let band = RhatBand::of(r.rhat);
-            let p = crate::out::paint::stderr();
-            let status = match band.glyph_with_finding(drew_finding) {
-                "✓" => p.paint("✓", Style::Ok),
-                "~" => p.paint("~", Style::Warn),
-                "✗" => p.paint("✗", Style::Err),
-                other => other.to_string(),
-            };
-            let tail = if r.ess_tail.is_finite() {
-                format!("{:.0}", r.ess_tail)
-            } else {
-                "—".to_string()
-            };
-            if withheld.is_some() {
-                // No number, no glyph, no decomposition and no finding: each
-                // of those is a reading of an R̂ this run's shape does not
-                // support. The ESS is a within-cloud measurement and stands.
-                out.push_str(&format!(
-                    "  {:12} ESS bulk={:.0} tail={} ({:.1}% of {} draws)\n",
-                    name, r.ess_bulk, tail,
-                    100.0 * r.ess_bulk_ratio(), r.n_draws_total,
-                ));
-                continue;
-            }
-            out.push_str(&format!(
-                "  {:12} Rhat={:.3} {} ESS bulk={:.0} tail={} ({:.1}% of {} draws)\n",
-                name, r.rhat, status, r.ess_bulk, tail,
-                100.0 * r.ess_bulk_ratio(), r.n_draws_total,
-            ));
-            // The decomposition follows the GLYPH, not the finding: it is the
-            // "so what do I do" line for anything not certified converged.
-            if band != RhatBand::Converged || drew_finding {
-                if let Some(driver) = r.rhat_driver() {
-                    // The whole ladder on one line. `rhat_classic` is here
-                    // because the rank statistic is BOUNDED (ceiling ≈1.85 at
-                    // two chains) and cannot express severity, while the
-                    // classic one can — it is the only number that separates
-                    // "the sampler is dead" from "the sampler mixes badly".
-                    out.push_str(&format!(
-                        "  {:12}   R̂ = max(bulk {:.3}, folded {:.3}), classic {}; \
-                         the {} half is larger — {}\n",
-                        "", r.rhat_bulk, r.rhat_folded,
-                        crate::fit::method_result::Stat::from_f64(d.rhat_classic())
-                            .cell(3, "—"),
-                        driver.half(), driver.describe(),
-                    ));
-                }
-                // And whether each chain is mixing well inside its OWN mode,
-                // which no cross-chain statistic can say. Similar large values
-                // point at multimodality; one small value points at a stuck
-                // chain. Different fixes.
-                let per_chain = d.ess_per_chain();
-                if per_chain.len() >= 2 {
-                    let cells: Vec<String> = per_chain
-                        .iter()
-                        .map(|e| if e.is_finite() { format!("{e:.0}") } else { "—".into() })
-                        .collect();
-                    out.push_str(&format!(
-                        "  {:12}   per-chain ESS [{}]\n", "", cells.join(", ")));
-                }
-            }
-        }
-        out
     }
 }
 
@@ -5891,20 +5773,19 @@ dt = 1.0
         let conv = MethodConvergence::compute([("ar1_mixed".to_string(),
             chains["ar1_mixed"].clone())]);
 
-        let lenient = conv.report(1.1, None);
-        let findings = conv.rhat_findings(1.1, None);
-        assert!(lenient.contains("✓"), "1.027 is inside a 1.1 band: {lenient}");
+        let table = run_table(&conv, None);
+        let findings = conv.rhat_findings(RHAT_REPORT_THRESHOLD, None);
+        assert!(table.contains("✓"), "1.027 is inside both bands: {table}");
         assert!(!findings.iter().any(|d|
             matches!(d, DiagnosticKind::RhatHigh { .. })),
             "and draws no finding there");
 
-        let strict = conv.report(1.01, None);
-        let findings = conv.rhat_findings(1.01, None);
-        assert!(!strict.contains("✓"),
-            "the same R̂ must NOT print green under a 1.01 band: {strict}");
-        assert!(findings.iter().any(|d|
-            matches!(d, DiagnosticKind::RhatHigh { .. })),
-            "and must draw the finding that goes with the glyph");
+        // A finding bar below the certification bar is the case where the
+        // two could disagree: the glyph must then follow the finding.
+        assert_eq!(
+            crate::fit::method_result::RhatBand::Converged.glyph_with_finding(true),
+            crate::fit::method_result::RhatBand::NotConverged.glyph(),
+            "a parameter that draws a finding must not print green");
     }
 
     /// Four pseudo-iid chains, two of them offset by `offset`. R̂ rises
@@ -5982,11 +5863,6 @@ dt = 1.0
         );
 
         let conv = MethodConvergence::compute([("beta".to_string(), frozen)]);
-        let out = conv.report(RHAT_REPORT_THRESHOLD, None);
-        assert!(
-            out.contains('✗'),
-            "and the method block must say so loudly:\n{out}"
-        );
         // The table `fit run` draws reads the R̂ back from the summary, which
         // records a non-finite R̂ as a refusal, not as a number; the glyph
         // must still be the worst one.
@@ -6018,7 +5894,7 @@ dt = 1.0
         );
 
         let conv = MethodConvergence::compute([("beta".to_string(), chains)]);
-        let out = conv.report(RHAT_REPORT_THRESHOLD, None);
+        let out = run_table(&conv, None);
         let findings = conv.rhat_findings(RHAT_REPORT_THRESHOLD, None);
 
         assert!(
@@ -6077,14 +5953,14 @@ dt = 1.0
         // Premise: with no refusal this block prints a number, a glyph and
         // (above the certification bar) a decomposition. Without this the
         // assertions below could pass on a fixture that never had an R̂.
-        let assessed = conv.report(RHAT_REPORT_THRESHOLD, None);
+        let assessed = run_table(&conv, None);
         assert!(assessed.contains("Rhat="), "fixture premise:\n{assessed}");
 
         let withheld = ConvergenceError::PointStart {
             n_chains: 4,
             starts: "from_mle @scout".to_string(),
         };
-        let out = conv.report(RHAT_REPORT_THRESHOLD, Some(&withheld));
+        let out = run_table(&conv, Some(&withheld));
         let findings = conv.rhat_findings(RHAT_REPORT_THRESHOLD, Some(&withheld));
 
         assert!(
@@ -6135,7 +6011,7 @@ dt = 1.0
             "within_chain_drift".to_string(),
             chains["within_chain_drift"].clone(),
         )]);
-        let out = conv.report(1.05, None);
+        let out = run_table(&conv, None);
 
         assert!(
             out.contains("classic 1.001"),
@@ -6173,7 +6049,7 @@ dt = 1.0
             "scale_disagree".to_string(),
             chains["scale_disagree"].clone(),
         )]);
-        let out = conv.report(1.05, None);
+        let out = run_table(&conv, None);
 
         assert!(
             out.contains("folded"),
@@ -6202,7 +6078,7 @@ dt = 1.0
             "within_chain_drift".to_string(),
             chains["within_chain_drift"].clone(),
         )]);
-        let out = conv.report(1.05, None);
+        let out = run_table(&conv, None);
         assert!(
             out.contains("where the posterior sits"),
             "drifting chains disagree about WHERE the posterior sits:\n{out}"

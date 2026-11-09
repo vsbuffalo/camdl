@@ -6,7 +6,7 @@
 //! The count line counts findings, not entries, so merging never changes it.
 
 use sim::inference::diagnostic::{
-    render_entry, Diagnostic, DiagnosticCollector, DiagnosticKind, HintContext, MergeKey, Severity,
+    render_entry, Diagnostic, DiagnosticKind, HintContext, MergeKey, Severity,
 };
 
 use crate::out::paint::{Line, Span, Style};
@@ -68,19 +68,10 @@ pub fn render(diags: &[Diagnostic], ctx: HintContext) -> Vec<Line> {
     lines
 }
 
-/// Print the collector's findings to stderr.
-#[expect(dead_code, reason = "every run prints its findings in its run-end block now; deleted \
-    in its own commit")]
-pub fn print(collector: &DiagnosticCollector, ctx: HintContext) {
-    let lines = render(&collector.snapshot(), ctx);
-    // stderr is unbuffered and a failed write to it has nowhere to be reported.
-    let _ = crate::out::paint::stderr().write(&mut std::io::stderr(), &lines);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sim::inference::diagnostic::{acceptance_diagnostic, AcceptanceKernel};
+    use sim::inference::diagnostic::{acceptance_diagnostic, AcceptanceKernel, DiagnosticCollector};
 
     fn text(lines: &[Line]) -> String {
         lines.iter().map(|l| l.text()).collect::<Vec<_>>().join("\n")
