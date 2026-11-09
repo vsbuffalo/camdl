@@ -853,8 +853,8 @@ The layout the reporting code lands in:
 
 | Path                                        | Holds                                                                                      |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `cli/src/out/`                              | the stream layer: how anything reaches the terminal; knows nothing about fits              |
-| `out/mod.rs`                                | `Out`, `LiveHandle`, `CommandError`                                                        |
+| `cli/src/out/`                              | the stream layer: how anything reaches the terminal, and the running method's record       |
+| `out/mod.rs`                                | `Out`, `LiveHandle`, `CommandError`, `ExitCode`                                            |
 | `out/paint.rs`                              | `Style`, `Span`, `Line`, `Painter`, `Stream`; `style.rs` keeps only the `--help` colouring |
 | `out/notice.rs`, `progress.rs`, `status.rs` | moved from `cli/src/`                                                                      |
 | `cli/src/fit/report/`                       | the fit report: what a method run shows; never writes, returns `Line`s                     |
@@ -863,6 +863,7 @@ The layout the reporting code lands in:
 | `report/render.rs`                          | `render_report`, `View`                                                                    |
 | `report/findings.rs`                        | the diagnostics block                                                                      |
 | `report/export.rs`                          | `fit summary`'s md and LaTeX projections                                                   |
+| `report/exact.rs`                           | the report as JSON with exact non-finite numbers, and `CAMDL_REPORT_CAPTURE`               |
 
 `fit_summary.rs` ends as loading plus choosing a view, with no rendering of its
 own. `DiagnosticKind`, `merge_key`, `render_entry` and `fmt_rate` stay in `sim`.
@@ -928,8 +929,98 @@ Steps 7 and 8 as landed:
   instead of a leaf failing to load. `ProvenanceReport` gains two unserialized
   flags saying which params file was absent, which the text names.
 
-Not yet landed from step 7 (the run side): `Out` itself and `CommandError`,
-`View::RunEnd` with the verdict section and R̂ legend in `fit run`, `fit run`
-building `MethodFacts` from memory and constructing `MethodOutcome`, the
-run-equals-loader test, and the deletion of `ConvergenceDiagnostics::report`'s
-printing and the PGAS acceptance printer.
+Step 7's run side, as landed:
+
+- **`Out` is the stream layer and the running method's record.** It holds the
+  two painters, the notices, and, from `begin_method` to `end_method`, the
+  running method's opening block, the checks it showed, its collector and its
+  heartbeat. The record names two fit types (`RunHeader`, `Check`), so `out/` is
+  no longer free of the fit layer; the alternative, a second handle for the
+  method's record beside `Out`, would have split one call site's state across
+  two objects. `Out::error` marks the heartbeat failed, as the proposal says.
+- **`ExitCode` is camdl's own `ExitCode(i32)`**, with `exit()`, since
+  `std::process::ExitCode` cannot be handed to `std::process::exit` from deep in
+  a command. `CommandError::message` is the whole first line as each site
+  printed it (`error: …`, `error running pmmh: …`): the sites word their lead
+  differently, and the type moves them without rewording them.
+- **`Out::check` records; the check printers still write.** The noise check
+  (`pf_noise::report`), the observation streams
+  (`util::print_observations_summary`, shared with `pfilter`), the caveat banner
+  and the starts note keep writing their own lines, and the run records each
+  check on `Out` beside them. Their text depends on context the `Check` does not
+  carry (the parameter count and series length the noise check reads, the
+  scheduled-actions block printed between them), and `pfilter` prints the same
+  observation block without `Out`; moving them is step 9's.
+- **Progress stays with `out::progress::Reporter`/`Task`**, which own the bar,
+  the plain line and the throttle and write through `LiveHandle`; an
+  `Out::progress` beside them would have been a second answer to the same
+  question. Chain workers reach the terminal through `out::live()`.
+- **`Out::notice` and `Out::data`.** `data` carries `fit summary`'s json, md,
+  latex and `--params-only` output, where a closed pipe now exits 0. `notice`
+  lands as the foundation for step 9, with an `expect(dead_code)` until the
+  commands that collect notices move onto `Out`.
+- **The report `fit run` builds.** After `finalize`, `fit run` builds
+  `MethodFacts` from the header, checks, findings and warm-up it holds, the wall
+  time it measured, and the typed result `MethodResult::load_from` reads from
+  the leaf. `ChainDetail` (the verdict's outlier and forkable counts) is
+  gathered from the files the run wrote, by the function `fit summary` uses,
+  rather than from memory with the writer's rounding applied: those files are
+  the record the proposal names for these facts, and reading them is the
+  rounding.
+- **`View::RunEnd` draws** the verdict section `fit summary` draws, the R̂
+  legend, the acceptance table, the R̂ table (`rhat_run_table`, from the report's
+  `PosteriorDiagnostics`), the findings, and for PMMH and `mh` the completion
+  and highest-posterior lines; `Out::milestone` prints `stored` after it. The
+  completion line and PGAS's acceptance table needed records:
+  `pmmh_summary.json`'s `cost` and `fit_state.toml`'s `best_chain` are now
+  carried by `PmmhRun` (`cost`, `map_chain`), and `pgas_summary.json` gains
+  `acceptance_chains` and `acceptance_kernel`, carried by `PgasRun`
+  (`acceptance_per_chain`, `acceptance_kernel`). All are additive and omitted
+  when absent; the schema version is unchanged.
+- **Two sections move.** The runner writes `draws.tsv` and prints its line
+  before the report exists, so `draws.tsv: N posterior samples` now precedes the
+  verdict rather than following the R̂ table. PGAS's other run-end blocks (path
+  renewal, filter ESS, latent paths, the cross-chain matrix, the completion
+  line) are still printed by `pgas::run_method`, so its verdict, acceptance and
+  R̂ tables follow them; step 9 moves PGAS's prints.
+- **A frozen R̂ prints `Rhat=— ✗`.** The summary the table is drawn from records
+  a non-finite R̂ as the refusal `NonFiniteRhat`, not as `+∞`, so the table no
+  longer has the number it printed as `inf`; it keeps the worst band.
+- **A failed run** builds `MethodOutcome::Failed` in `abandon_method`, which
+  draws its findings (`View::RunEnd`) and reports the error through
+  `Out::error`. The runners no longer print findings on their way out. `Failed`
+  carries no `checks`: nothing reads them, since the run's end has shown them
+  and `fit summary` does not render a failed leaf, which it still refuses as no
+  completed method (the proposal does not ask it to render one). A failed run's
+  hints are rendered with no completed-chain count, so the BadInit hint "Other
+  chains in this run completed normally; treat the surviving chains as the
+  result" no longer prints on a run that produced no result. The failed fixture
+  lost its empty acceptance table and its R̂ table over zero chains.
+- **The IF2 runner and NLopt keep a heartbeat-only `abandon_method_on`.** One
+  IF2 site is a chain worker's thread, and neither runner holds `Out`.
+- **IF2 printed `stored` twice**, once from its dispatch arm before the leaf was
+  finalized; it prints it once, after `finalize`, with its `best ll=` hint under
+  it.
+- **The run-equals-loader test** is part of `reporting_facts`: both commands
+  append the report they built to the file `CAMDL_REPORT_CAPTURE` names,
+  serialized by `report::exact::exact_json`, which is the proposal's normalizer
+  built into the serializer (a non-finite float becomes `"NaN"`, `"inf"` or
+  `"-inf"` as it is written, since `serde_json` has already collapsed them to
+  `null` by the time a value exists). It compares every completed fixture
+  method; the failed fit has no report on either side. It found that the loader
+  ordered PMMH's checks as the run did before step 8 (caveat before the starts
+  note); the loader now follows the run. The variable is the test's seam until
+  `events.jsonl` carries `method_report`.
+- **Two small fixes rode with the step.** `fit summary`'s point-mass and `-inf`
+  chain notes advised `--exclude-chains <method>:k`, which `fit summary`'s
+  parser refuses; they now advise `--exclude-chains k`, the form the parser and
+  the run spec document (the `@fit:ids` form is `compare`'s). And the IF2
+  section and its refusals no longer speak of a "scout": the gate is the
+  "compound convergence gate".
+- **What of `fit run` is on `Out` and what is not.** The method's record, its
+  end-of-run block, its `stored` milestone, and every exit inside the method's
+  dispatch (`abandon_method`, the finalize error) go through `Out`. The exits
+  before a method starts (config resolution, the cache-hit and label checks,
+  about a hundred `eprintln!` and `process::exit` pairs) and the runners' own
+  progress and preflight prints do not yet; they move with step 9's no-print
+  test, which is what makes "commands print through nothing else" checkable.
