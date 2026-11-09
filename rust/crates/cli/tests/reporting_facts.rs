@@ -151,7 +151,8 @@ fn every_recorded_fact_is_shown() {
     };
 
     // In order: the resumed run reads the converged run's leaf, `compare`
-    // and `pfilter` read the IF2 and converged fits.
+    // and `pfilter` read the IF2 and converged fits. Each fit's `fit summary`
+    // follows its run.
     let mut runs: Vec<(&str, Output)> = Vec::new();
     runs.push(("stuck", run(&fit("pmmh_stuck.toml", "8", &[]))));
     let stuck_fit = only_child(&work.join("results/fits"), "pmmh_stuck-");
@@ -161,10 +162,22 @@ fn every_recorded_fact_is_shown() {
     runs.push(("converged.summary", run(&a(&["fit", "summary", converged_fit.to_str().unwrap()]))));
     let base = leaf(&work, "pmmh_converged", "pmmh");
     runs.push(("resumed", run(&fit("pmmh_resumed.toml", "1", &["--resume", base.to_str().unwrap()]))));
+    runs.push(("stuck.excluded", run(&a(&["fit", "summary", stuck_fit.to_str().unwrap(), "--exclude-chains", "2"]))));
     runs.push(("pgas", run(&fit("pgas.toml", "1", &[]))));
+    let pgas_fit = only_child(&work.join("results/fits"), "pgas-");
+    runs.push(("pgas.summary", run(&a(&["fit", "summary", pgas_fit.to_str().unwrap()]))));
+    runs.push(("pgas.explain", run(&a(&["fit", "summary", pgas_fit.to_str().unwrap(), "--explain", "--parameters"]))));
     runs.push(("if2", run(&fit("if2.toml", "1", &["--label", "if2"]))));
+    runs.push(("if2.summary", run(&a(&["fit", "summary", "@if2"]))));
     runs.push(("nlopt", run(&fit("nlopt.toml", "1", &[]))));
+    let nlopt_fit = only_child(&work.join("results/fits"), "nlopt-");
+    runs.push(("nlopt.summary", run(&a(&["fit", "summary", nlopt_fit.to_str().unwrap()]))));
     runs.push(("fail", run(&fit("fail.toml", "1", &[]))));
+    let fail_fit = only_child(&work.join("results/fits"), "fail-");
+    runs.push(("fail.summary", run(&a(&["fit", "summary", fail_fit.to_str().unwrap()]))));
+    runs.push(("pfilter_fit", run(&fit("pfilter.toml", "1", &[]))));
+    let pfilter_fit = only_child(&work.join("results/fits"), "pfilter-");
+    runs.push(("pfilter_fit.summary", run(&a(&["fit", "summary", pfilter_fit.to_str().unwrap()]))));
     runs.push(("compare", run(&a(&["compare", "@if2", "@converged", "--draws", "1"]))));
     let mle = leaf(&work, "if2", "if2").join("mle_params.toml");
     runs.push(("pfilter", run(&a(&[
