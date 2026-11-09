@@ -8,6 +8,7 @@ use crate::style::Style;
 use crate::chain_index::ChainIndex;
 use crate::fit::state::FitState;
 use crate::fit::pf_noise;
+use crate::fit::report::{ChainWarmup, SamplingCost, SamplingPlan};
 use crate::fit::loglik::LoglikType;
 use crate::fit::runner::{self, FitRunConfig, MethodConvergence};
 use crate::cas::iso8601_utc;
@@ -97,6 +98,10 @@ pub fn run_method(
     // `pgas::run_method`.
     resume_guard: &str,
     starts: &super::chain_starts::ResolvedStarts,
+    // The base leaf's warm-up record when resuming (`fit::base_warmup`): a
+    // resumed chain adapts only over what warm-up its base had left, so its
+    // record adds to the base's.
+    base_warmup: &[ChainWarmup],
     // Post-fit deterministic ODE dt-check config (gh#52, gh#227). `Some` only on
     // the `mh` (ODE) dispatch; PMMH passes `None` (its dt-check is PF-based and
     // wired on the IF2 path). `--dt-check-strict` is resolved into the config's
@@ -244,7 +249,7 @@ pub fn run_method(
         match pf_noise::summarize(&base_lls, &proposed_lls, n_particles) {
             Some(check) => {
                 eprint!("{}", pf_noise::report(
-                    &check, ll_mean,
+                    &check,
                     config.estimated_params.len(),
                     config.observations.len(),
                 ));
@@ -772,6 +777,17 @@ pub fn run_method(
 
     // Traces already written by streaming callback — no post-hoc write needed.
 
+    // What each chain's warm-up did, recorded beside the draws so the
+    // condition a stuck chain leaves is readable without its stderr.
+    let warmup = chain_warmups(&results, adapt, resume, base_warmup);
+    let plan = SamplingPlan {
+        n_chains, n_steps, n_particles, burn_in, thin, adapt,
+        proposal_sd: config.estimated_params.iter().zip(&proposal_sd)
+            .map(|(p, &sd)| (p.name.clone(), sd))
+            .collect(),
+    };
+    let cost = sampling_cost(elapsed.as_secs_f64(), n_chains, n_steps);
+
     // Compute diagnostics
     let diagnostics = compute_diagnostics(&results, &config.estimated_params);
 
@@ -874,7 +890,7 @@ pub fn run_method(
     } else {
         crate::run_meta::FitAlgorithm::Pmmh
     };
-    write_summary(method_dir, &results, &config, thin, &diagnostics, algo)?;
+    write_summary(method_dir, &results, &config, &diagnostics, algo, &warmup, &plan, &cost)?;
 
     // Write fit_state.toml
     let mut start_values = std::collections::BTreeMap::new();
@@ -1049,8 +1065,7 @@ pub fn run_method(
     collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
     super::write_diagnostics(&collector, method_dir)?;
 
-    eprintln!("\n{}", completion_line(
-        method_name, is_ode_mh, elapsed.as_secs_f64(), n_chains, n_steps, method_dir));
+    eprintln!("\n{}", completion_line(method_name, is_ode_mh, &cost, method_dir));
     eprintln!("  loglik at the highest log-posterior draw (natural-scale prior, no Jacobian): {:.1} (chain {})", map_result.map_loglik, ChainIndex(*map_chain));
 
     Ok(())
@@ -1081,14 +1096,63 @@ fn compute_diagnostics(
 // write_chain_traces removed — streaming callback now handles trace output
 // with correct log_posterior and burn-in/thin filtering.
 
+/// Each chain's warm-up record, in chain order; empty when `adapt = false`.
+///
+/// A resumed chain's record continues its base's
+/// ([`ChainWarmup::continued_from`]). A resumed chain whose base carries no
+/// record (written before it existed) gets none: its own call saw only the
+/// tail of the warm-up, and reporting that as the whole would understate it.
+fn chain_warmups(
+    results: &[(usize, PMMHResult)],
+    adapt: bool,
+    resumed: bool,
+    base: &[ChainWarmup],
+) -> Vec<ChainWarmup> {
+    if !adapt {
+        return Vec::new();
+    }
+    results.iter()
+        .filter_map(|(chain, r)| {
+            let this_call = ChainWarmup {
+                chain: *chain,
+                warmup_steps: r.warmup_steps,
+                steps_at_scale_floor: r.steps_at_scale_floor,
+                final_scale: r.final_scale,
+                target_accept: r.target_accept,
+            };
+            if !resumed {
+                return Some(this_call);
+            }
+            base.iter().find(|b| b.chain == *chain)
+                .map(|b| ChainWarmup::continued_from(b, &this_call))
+        })
+        .collect()
+}
+
+/// The sampling cost the completion line reports: evaluations counted as
+/// `n_chains × n_steps`, and wall time per evaluation within one chain, the
+/// chains running in parallel.
+fn sampling_cost(wall_secs: f64, n_chains: usize, n_steps: usize) -> SamplingCost {
+    let evaluations = n_chains * n_steps;
+    SamplingCost {
+        sampling_seconds: wall_secs,
+        evaluations,
+        ms_per_evaluation: wall_secs * 1000.0 / evaluations as f64 * n_chains as f64,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn write_summary(
     dir: &Path,
     results: &[(usize, PMMHResult)],
     config: &FitRunConfig,
-    thin: usize,
     diagnostics: &MethodConvergence,
     algo: crate::run_meta::FitAlgorithm,
+    warmup: &[ChainWarmup],
+    plan: &SamplingPlan,
+    cost: &SamplingCost,
 ) -> Result<(), String> {
+    let thin = plan.thin;
     let acceptance_rates: Vec<f64> = results.iter().map(|(_, r)| r.acceptance_rate).collect();
 
     let (map_chain, map_result) = results.iter()
@@ -1118,6 +1182,9 @@ fn write_summary(
         "map_params": map_params,
         // n_samples (kept) × thin = raw sampling iterations → ESS/iteration.
         "thin": thin,
+        "warmup": warmup,
+        "plan": plan,
+        "cost": cost,
     });
     // Every convergence key comes from one producer, so a statistic cannot be
     // live in this summary and silently absent from pgas's or nuts's.
@@ -1141,16 +1208,12 @@ fn write_summary(
 fn completion_line(
     method_name: &str,
     is_ode_mh: bool,
-    wall_secs: f64,
-    n_chains: usize,
-    n_steps: usize,
+    cost: &SamplingCost,
     method_dir: &Path,
 ) -> String {
-    let total_evals = n_chains * n_steps;
     let what = if is_ode_mh { "ODE likelihood evaluations" } else { "PF evaluations" };
     format!("{method_name} complete in {:.1}s ({} {what}, {:.1}ms/eval): {}/",
-        wall_secs, total_evals,
-        wall_secs * 1000.0 / total_evals as f64 * n_chains as f64,
+        cost.sampling_seconds, cost.evaluations, cost.ms_per_evaluation,
         method_dir.display())
 }
 
@@ -1193,12 +1256,12 @@ mod tests {
     #[test]
     fn completion_line_names_the_method_and_its_evaluations() {
         let dir = Path::new("out/mh-1");
-        let mh = completion_line("mh", true, 0.3, 1, 3000, dir);
+        let mh = completion_line("mh", true, &sampling_cost(0.3, 1, 3000), dir);
         assert!(mh.starts_with("mh complete in 0.3s"), "{mh}");
         assert!(!mh.contains("pmmh") && !mh.contains("PF"), "{mh}");
         assert!(mh.contains("3000 ODE likelihood evaluations"), "{mh}");
 
-        let pmmh = completion_line("pmmh", false, 2.0, 2, 500, dir);
+        let pmmh = completion_line("pmmh", false, &sampling_cost(2.0, 2, 500), dir);
         assert!(pmmh.starts_with("pmmh complete in 2.0s"), "{pmmh}");
         assert!(pmmh.contains("1000 PF evaluations"), "{pmmh}");
     }

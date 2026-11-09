@@ -116,6 +116,15 @@ pub struct PMMHResult {
     /// the condition rather than scrape stderr. 1.0 when `adapt = false`,
     /// where no scale multiplies the configured diagonal.
     pub final_scale: f64,
+    /// Steps on which this call adapted the scale: the part of the warm-up
+    /// window ([`PMMHConfig::adapt_stop`]) it covered. The denominator of
+    /// `steps_at_scale_floor`. 0 when `adapt = false`, and for a call resumed
+    /// past the end of warm-up.
+    pub warmup_steps: usize,
+    /// The acceptance rate the Robbins–Monro adaptation drives toward at this
+    /// dimension ([`target_acceptance`]). The adaptation chases it only when
+    /// `adapt = true`.
+    pub target_accept: f64,
 }
 
 /// Serializable chain state for `--resume`. Saved to `chain_N/resume_state.bin`
@@ -265,6 +274,13 @@ pub fn scale_is_far_from_optimum(lambda: f64) -> bool {
     !(1.0 / SCALE_DEVIATION_FACTOR..=SCALE_DEVIATION_FACTOR).contains(&lambda)
 }
 
+/// The acceptance rate the Robbins–Monro scale adaptation targets for `d`
+/// estimated parameters: `0.234 + 0.206/d` ([`AdaptiveProposal::target_accept`]
+/// explains the interpolation).
+pub fn target_acceptance(d: usize) -> f64 {
+    0.234 + 0.206 / d.max(1) as f64
+}
+
 /// Running mean + covariance via Welford's online algorithm, a Cholesky factor
 /// for sampling N(0, Σ) (the Haario *shape* term), and a Robbins–Monro global
 /// scale (the `log_scale` term — see [`AdaptiveProposal::adapt_scale`]).
@@ -318,7 +334,7 @@ impl AdaptiveProposal {
     /// to ≈0.44 for d = 1. Interpolate `0.234 + 0.206/d` so a 1–2 parameter fit
     /// targets the higher low-dimensional optimum.
     fn target_accept(&self) -> f64 {
-        0.234 + 0.206 / self.d.max(1) as f64
+        target_acceptance(self.d)
     }
 
     /// Robbins–Monro update of the global scale from one accept/reject outcome.
@@ -906,6 +922,8 @@ pub fn run_pmmh(
     Ok(PMMHResult {
         steps_at_scale_floor,
         final_scale,
+        warmup_steps: adapt_steps,
+        target_accept: target_acceptance(d),
         steps,
         acceptance_rate,
         n_steps: config.n_steps,

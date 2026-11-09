@@ -116,6 +116,15 @@ pub struct PfNoiseCheck {
     pub n_particles: usize,
     /// Evaluation pairs behind both spreads.
     pub pairs: usize,
+    /// Mean of the `log L̂` evaluations at the base θ — the `log L̂ mean` the
+    /// check prints. NaN in a `fit_state.toml` written before it was recorded,
+    /// so an old record cannot show a mean it never had.
+    #[serde(default = "f64_nan")]
+    pub ll_mean: f64,
+}
+
+fn f64_nan() -> f64 {
+    f64::NAN
 }
 
 impl PfNoiseCheck {
@@ -242,6 +251,7 @@ pub fn summarize(
         s: sample_sd(&diffs),
         n_particles,
         pairs: n,
+        ll_mean: base_lls.iter().sum::<f64>() / n as f64,
     })
 }
 
@@ -320,7 +330,7 @@ pub fn measure(
 /// capturing stderr, as `preflight_specs` in `runner.rs` is. `n_obs` is the
 /// number of observation times the log-likelihood sums over, which is what
 /// decides whether the Gaussian assumption behind the ceiling is tight.
-pub fn report(check: &PfNoiseCheck, ll_mean: f64, d: usize, n_obs: usize) -> String {
+pub fn report(check: &PfNoiseCheck, d: usize, n_obs: usize) -> String {
     let se = check.s_standard_error();
     let ceiling = check.ceiling();
     let target = target_acceptance(d);
@@ -330,7 +340,7 @@ pub fn report(check: &PfNoiseCheck, ll_mean: f64, d: usize, n_obs: usize) -> Str
     let mut out = String::new();
     out.push_str(&format!(
         "  log L̂ mean = {:.1}, sd σ = {:.2} ({} particles, {} pairs)\n",
-        ll_mean, check.sigma, check.n_particles, check.pairs));
+        check.ll_mean, check.sigma, check.n_particles, check.pairs));
     out.push_str(&format!(
         "  log L̂ ratio spread s = {:.2} ±{:.2} (1 SE, ~68%; ±{:.2} for a 95% read)\n",
         check.s, se, 2.0 * se));
@@ -537,7 +547,7 @@ mod tests {
     }
 
     fn check_at(s: f64, sigma: f64) -> PfNoiseCheck {
-        PfNoiseCheck { sigma, s, n_particles: 19_200, pairs: NOISE_PAIRS }
+        PfNoiseCheck { sigma, s, n_particles: 19_200, pairs: NOISE_PAIRS, ll_mean: -100.0 }
     }
 
     /// The defect this replaces: `σ = 2` printed a green "PF variance OK
@@ -545,7 +555,7 @@ mod tests {
     #[test]
     fn a_sigma_of_two_is_reported_as_below_the_target_not_as_ok() {
         let c = check_at(2.0 * std::f64::consts::SQRT_2, 2.0);
-        let out = report(&c, -1234.5, 17, 84);
+        let out = report(&PfNoiseCheck { ll_mean: -1234.5, ..c }, 17, 84);
         assert!(!out.contains("OK"), "must not bless the run: {out}");
         assert!(out.contains("2·Φ(-s/2) = 15.7%"), "ceiling missing: {out}");
         assert!(out.contains("24.6%"), "target missing: {out}");
@@ -560,7 +570,7 @@ mod tests {
     #[test]
     fn a_quiet_filter_clears_the_target_and_states_the_assumption() {
         let c = check_at(0.5 * std::f64::consts::SQRT_2, 0.5);
-        let out = report(&c, -1234.5, 17, 84);
+        let out = report(&PfNoiseCheck { ll_mean: -1234.5, ..c }, 17, 84);
         assert!(out.contains("ceiling above target"), "{out}");
         assert!(out.contains("approximately Gaussian"), "{out}");
         assert!(out.contains("84 observation"), "{out}");
@@ -573,12 +583,12 @@ mod tests {
     fn the_halving_hint_is_derived_from_the_crossover_not_a_band() {
         // σ = 0.5 → doubling s to 1.41 still clears the d = 17 crossover of 2.32.
         let quiet = check_at(0.5 * std::f64::consts::SQRT_2, 0.5);
-        let out = report(&quiet, -1.0, 17, 84);
+        let out = report(&PfNoiseCheck { ll_mean: -1.0, ..quiet }, 17, 84);
         assert!(out.contains("Halving particles to 9600"), "{out}");
         // σ = 1.2 → halving would put s at 2.40, past the crossover: no hint,
         // even though the run itself clears the target.
         let borderline = check_at(1.2 * std::f64::consts::SQRT_2, 1.2);
-        let out = report(&borderline, -1.0, 17, 84);
+        let out = report(&PfNoiseCheck { ll_mean: -1.0, ..borderline }, 17, 84);
         assert!(out.contains("ceiling above target"), "{out}");
         assert!(!out.contains("Halving particles"), "{out}");
     }
@@ -588,7 +598,7 @@ mod tests {
     #[test]
     fn a_short_series_downgrades_the_ceiling_to_an_upper_bound() {
         let c = check_at(0.5 * std::f64::consts::SQRT_2, 0.5);
-        let out = report(&c, -12.0, 17, 4);
+        let out = report(&PfNoiseCheck { ll_mean: -12.0, ..c }, 17, 4);
         assert!(out.contains("upper bound"), "{out}");
         assert!(out.contains("reads high"), "{out}");
     }
@@ -600,7 +610,7 @@ mod tests {
         let s = crossover_s(17);
         let c = check_at(s, s / std::f64::consts::SQRT_2);
         assert_eq!(ceiling_verdict(c.s, c.s_standard_error(), 17), CeilingVerdict::Unresolved);
-        let out = report(&c, -12.0, 17, 84);
+        let out = report(&PfNoiseCheck { ll_mean: -12.0, ..c }, 17, 84);
         assert!(out.contains("unresolved"), "{out}");
         assert!(out.contains("crossover"), "{out}");
         // Both reads are printed and labelled.
@@ -613,7 +623,7 @@ mod tests {
     /// which buys nothing against an estimator-level ceiling.
     #[test]
     fn a_vanishing_ceiling_and_its_remedy_are_stated_plainly() {
-        let out = report(&check_at(9.4, 4.07), -72.6, 2, 20);
+        let out = report(&PfNoiseCheck { ll_mean: -72.6, ..check_at(9.4, 4.07) }, 2, 20);
         assert!(out.contains("2·Φ(-s/2) = <0.1%"), "{out}");
         assert!(out.contains("a longer chain does not help"), "{out}");
         assert!(out.contains("Raise particles"), "{out}");
@@ -626,10 +636,10 @@ mod tests {
     /// measurement does not have.
     #[test]
     fn the_ceiling_is_reported_as_a_bound_not_as_the_limit() {
-        let below = report(&check_at(2.0 * std::f64::consts::SQRT_2, 2.0), -1.0, 17, 84);
-        let above = report(&check_at(0.5 * std::f64::consts::SQRT_2, 0.5), -1.0, 17, 84);
+        let below = report(&PfNoiseCheck { ll_mean: -1.0, ..check_at(2.0 * std::f64::consts::SQRT_2, 2.0) }, 17, 84);
+        let above = report(&PfNoiseCheck { ll_mean: -1.0, ..check_at(0.5 * std::f64::consts::SQRT_2, 0.5) }, 17, 84);
         let s = crossover_s(17);
-        let at = report(&check_at(s, s / std::f64::consts::SQRT_2), -1.0, 17, 84);
+        let at = report(&PfNoiseCheck { ll_mean: -1.0, ..check_at(s, s / std::f64::consts::SQRT_2) }, 17, 84);
         for (label, out) in [("below", &below), ("above", &above), ("at", &at)] {
             assert!(out.contains("not the λ→0 limit the formula derives"),
                 "{label}: the scope of s must be stated:\n{out}");
@@ -643,7 +653,7 @@ mod tests {
     /// knows which spread `s` is.
     #[test]
     fn the_report_names_the_scheme_it_measured_under() {
-        let plain = report(&check_at(2.0, 1.41), -1.0, 6, 30);
+        let plain = report(&PfNoiseCheck { ll_mean: -1.0, ..check_at(2.0, 1.41) }, 6, 30);
         assert!(plain.contains("independent evaluations"), "{plain}");
     }
 
