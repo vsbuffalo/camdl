@@ -13,7 +13,7 @@
 //! Use these instead of ad-hoc `eprintln!("✓ …")` so the look stays unified;
 //! when you add a new milestone, reach for `step`/`done`/`hint` first.
 
-use owo_colors::OwoColorize;
+use crate::style::{self, Style};
 
 /// Width the verb column is right-aligned to (cargo uses ~12; we use 9 to fit
 /// `compiled`/`storing`/`stored`/`ensemble` without truncation).
@@ -23,7 +23,8 @@ const VERB_W: usize = 9;
 /// `  compiled  sir.camdl → /tmp/sir.ir.json   3.3s (1.0 MB)`. (Pad before
 /// coloring so the ANSI bytes don't break the alignment.)
 pub fn step(verb: &str, detail: impl std::fmt::Display) {
-    eprintln!("{} {}", format!("{verb:>VERB_W$}").green().bold(), detail);
+    let p = style::stderr();
+    eprintln!("{} {}", p.paint(&p.paint(&format!("{verb:>VERB_W$}"), Style::Bold), Style::Ok), detail);
 }
 
 /// A terminal success milestone — same as [`step`] (the verb already carries
@@ -36,7 +37,7 @@ pub fn done(verb: &str, detail: impl std::fmt::Display) {
 /// A dimmed continuation under a milestone — a hint or next-step command,
 /// aligned under the detail column, e.g. `           camdl cat <id>`.
 pub fn hint(detail: impl std::fmt::Display) {
-    eprintln!("{:>VERB_W$} {}", "", detail.to_string().dimmed());
+    eprintln!("{:>VERB_W$} {}", "", style::stderr().paint(&detail.to_string(), Style::Dim));
 }
 
 /// A concise display path: relative to the current directory when the path is

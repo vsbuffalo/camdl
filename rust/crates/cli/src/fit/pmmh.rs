@@ -4,6 +4,7 @@
 //! filter as an unbiased likelihood estimator. Outputs per-chain trace files,
 //! convergence diagnostics (R̂, ESS), and a summary JSON.
 
+use crate::style::Style;
 use crate::chain_index::ChainIndex;
 use crate::fit::state::FitState;
 use crate::fit::pf_noise;
@@ -263,11 +264,12 @@ pub fn run_method(
                     _             => "the proposed θ'",
                 };
                 eprintln!("  log L̂ mean = {:.1}", ll_mean);
-                eprintln!("  \x1b[33m⚠ no noise measurement\x1b[0m — the filter ruled out {} \
+                eprintln!("  {tag} — the filter ruled out {} \
                     (log L̂ = -inf),\n    so there is no spread to take and no acceptance \
                     ceiling to report. The chain\n    still runs; its acceptance rate is then \
                     the only evidence on whether it moves.",
-                    which);
+                    which,
+                    tag = crate::style::stderr().paint("⚠ no noise measurement", Style::Warn));
             }
         }
     }
@@ -276,8 +278,9 @@ pub fn run_method(
     if !force && !resume {
         let state_path = method_dir.join("fit_state.toml");
         if state_path.exists() {
-            eprintln!("\x1b[33m{method_name} results already exist in {}. Use --force to re-run or --resume to continue.\x1b[0m",
-                method_dir.display());
+            eprintln!("{}", crate::style::stderr().paint(&format!(
+                "{method_name} results already exist in {}. Use --force to re-run or --resume to continue.",
+                method_dir.display()), Style::Warn));
             return Ok(());
         }
     }
@@ -463,7 +466,7 @@ pub fn run_method(
                         // is within proposal reach; a persistent 0% acceptance
                         // means the start itself is the problem.
                         eprintln!(
-                            "  \x1b[33mwarning\x1b[0m: chain {} starts at a θ with \
+                            "  {w}: chain {} starts at a θ with \
                              -inf log-likelihood — the start predicts a trajectory that \
                              can't explain the data (e.g. an epidemic that goes extinct \
                              where the data has cases). The chain can only mix if a \
@@ -471,7 +474,8 @@ pub fn run_method(
                              acceptance rate stays 0%, propose a better start (a \
                              multi-start `init`, or adjust the start toward a θ that \
                              sustains the epidemic).",
-                            ChainIndex(chain_id));
+                            ChainIndex(chain_id),
+                            w = crate::style::stderr().paint("warning", Style::Warn));
                     }
                     _ => {
                         // Ok(finite) or a recoverable Err (ruled-out θ) — MH
@@ -554,8 +558,9 @@ pub fn run_method(
                             chain_id, params, reason: reason.clone(),
                             attempts: Vec::new(),
                         });
-                        eprintln!("  chain {}: \x1b[31m✗ BadInit\x1b[0m — {}",
-                            ChainIndex(chain_id), reason);
+                        eprintln!("  chain {}: {} — {}",
+                            ChainIndex(chain_id),
+                            crate::style::stderr().paint("✗ BadInit", Style::Err), reason);
                         // The bar is cleared in the post-loop finish; the skip
                         // is already loud on stderr above.
                         return Ok(None);
@@ -757,9 +762,10 @@ pub fn run_method(
     // were tolerated rather than silently dropped.
     let n_good_chains = results.len();
     if n_good_chains < n_chains {
-        eprintln!("\n\x1b[33mran {} of {} chains\x1b[0m \
+        eprintln!("\n{} \
                    ({} skipped via BadInit; see diagnostics below)",
-            n_good_chains, n_chains, n_chains - n_good_chains);
+            crate::style::stderr().paint(&format!("ran {n_good_chains} of {n_chains} chains"), Style::Warn),
+            n_chains - n_good_chains);
     }
 
     let elapsed = t0.elapsed();
@@ -777,12 +783,13 @@ pub fn run_method(
     let (lo, hi) = kernel.healthy_band();
     eprintln!("\nacceptance rates:");
     for (chain_id, result) in &results {
+        let p = crate::style::stderr();
         let status = if result.acceptance_rate < lo {
-            "\x1b[31m✗ too low\x1b[0m"
+            p.paint("✗ too low", Style::Err)
         } else if result.acceptance_rate > hi {
-            "\x1b[33m~ high\x1b[0m"
+            p.paint("~ high", Style::Warn)
         } else {
-            "\x1b[32m✓\x1b[0m"
+            p.paint("✓", Style::Ok)
         };
         eprintln!("  chain {}: {:.1}% {}", ChainIndex(*chain_id), result.acceptance_rate * 100.0, status);
         if let Some(d) = sim::inference::diagnostic::acceptance_diagnostic(
@@ -811,7 +818,7 @@ pub fn run_method(
     // Render diagnostics, persist them, and bail with a clear error
     // rather than panicking on .unwrap() of an empty results vec.
     if results.is_empty() {
-        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
+        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
         let diag_path = method_dir.join("diagnostics.json");
         let _ = collector.write_json(&diag_path.to_string_lossy());
         // gh#880, gh#885. The reason and the remedies come from the one
@@ -841,7 +848,7 @@ pub fn run_method(
     // predicate is false → no fire).
     if results.iter().all(|(_, r)| sim::inference::no_finite_anchor(r.map_loglik)) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
+        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
         let diag_path = method_dir.join("diagnostics.json");
         let _ = collector.write_json(&diag_path.to_string_lossy());
         return Err(format!(
@@ -1043,7 +1050,7 @@ pub fn run_method(
     }
 
     // Render and persist diagnostics
-    collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
+    collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) }, crate::style::enabled());
     let diag_path = method_dir.join("diagnostics.json");
     let _ = collector.write_json(&diag_path.to_string_lossy());
 

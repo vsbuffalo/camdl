@@ -4,6 +4,7 @@
 //! obs_loglik construction from IR observation model, chain execution,
 //! chain-agreement (Â) computation, and MAD-based auto rw_sd calibration.
 
+use crate::style::Style;
 use crate::chain_index::ChainIndex;
 use crate::fit::loglik_eval;
 use crate::params_resolver::resolved_bounds;
@@ -985,10 +986,11 @@ pub fn preflight_spread_starts(
                             });
                             if attempt + 1 >= MAX_START_ATTEMPTS {
                                 eprintln!(
-                                    "  chain {}: \x1b[31m✗ refused\x1b[0m — none of {} starts drawn \
+                                    "  chain {}: {} — none of {} starts drawn \
                                      under `starts = {}` could be scored by the filter (last: {}); \
                                      see chain_starts.tsv for every attempt",
-                                    ChainIndex(chain_id), MAX_START_ATTEMPTS, starts.rule.spelled(), reason);
+                                    ChainIndex(chain_id), crate::style::stderr().paint("✗ refused", Style::Err),
+                                    MAX_START_ATTEMPTS, starts.rule.spelled(), reason);
                                 return Ok((Some(current), rejected, true));
                             }
                             eprintln!(
@@ -1169,8 +1171,9 @@ pub fn print_preflight(
         .count();
 
     if starts_differ {
-        eprintln!("\ntransforms \x1b[2m(chain 1 of {}; chains start at different \
-                   points — see chain_starts.tsv)\x1b[0m:", config.n_chains);
+        eprintln!("\ntransforms {}:", crate::style::stderr().paint(&format!(
+            "(chain 1 of {}; chains start at different points — see chain_starts.tsv)",
+            config.n_chains), Style::Dim));
     } else {
         eprintln!("\ntransforms:");
     }
@@ -1188,12 +1191,20 @@ pub fn print_preflight(
                 param: spec.name.clone(), z,
             });
         }
-        let mark = if compressed { " \x1b[33m⚠ compressed\x1b[0m" } else { "" };
+        let mark = if compressed {
+            format!(" {}", crate::style::stderr().paint("⚠ compressed", Style::Warn))
+        } else {
+            String::new()
+        };
         let pos = format!("start={:.4} z={:.2}{}", spec.initial, z, mark);
         // The step in z, the same for every chain and particle, and the
         // natural-scale step it is at the reference point (the box's
         // midpoint, else the start), the unit an explicit rw_sd is written in.
-        let source = if spec.rw_sd_auto { "\x1b[33mauto\x1b[0m" } else { "explicit" };
+        let source = if spec.rw_sd_auto {
+            crate::style::stderr().paint("auto", Style::Warn)
+        } else {
+            "explicit".to_string()
+        };
         let at = if matches!(spec.transform, Transform::Interval { .. } | Transform::LogInterval { .. }) {
             "midpoint"
         } else {
@@ -1212,8 +1223,9 @@ pub fn print_preflight(
     }
 
     if n_auto > 0 {
-        eprintln!("\n  \x1b[33m⚠ {}/{} parameters using auto rw_sd. Check traces and set explicit values.\x1b[0m",
-            n_auto, specs.len());
+        eprintln!("\n  {}", crate::style::stderr().paint(&format!(
+            "⚠ {}/{} parameters using auto rw_sd. Check traces and set explicit values.",
+            n_auto, specs.len()), Style::Warn));
     }
 
     // Cooling schedule preview — uses the SAME per-iteration multiplier the run
@@ -2000,9 +2012,10 @@ pub(crate) fn apply_holdout_declaration(
             s.retain_rows(&keep);
         }
         eprintln!(
-            "  \x1b[36mholdout:\x1b[0m training window [{t_start}, {tau}]; \
+            "  {h} training window [{t_start}, {tau}]; \
              {withheld} observation row(s) at t > {tau} withheld from \
-             training (scored out-of-sample by `camdl compare`)");
+             training (scored out-of-sample by `camdl compare`)",
+            h = crate::style::stderr().paint("holdout:", Style::Info));
         return Ok(Some(TrainingWindow { train_end: tau }));
     }
 
@@ -2042,9 +2055,10 @@ pub(crate) fn apply_holdout_declaration(
             train_end = train_end.max(last_train);
         }
         eprintln!(
-            "  \x1b[36mholdout:\x1b[0m training window [{t_start}, {train_end}]; \
+            "  {h} training window [{t_start}, {train_end}]; \
              {n_holdout} held-out observation row(s) bound as the tail \
-             (scored out-of-sample by `camdl compare`)");
+             (scored out-of-sample by `camdl compare`)",
+            h = crate::style::stderr().paint("holdout:", Style::Info));
         return Ok(Some(TrainingWindow { train_end }));
     }
 
@@ -2409,8 +2423,9 @@ pub fn run_chains_with_per_chain_params(
                         chain_id, params, reason: reason.clone(),
                         attempts: Vec::new(),
                     });
-                    eprintln!("  chain {}: \x1b[31m✗ skipped\x1b[0m — {} ({})",
-                        ChainIndex(chain_id), label, reason);
+                    eprintln!("  chain {}: {} — {} ({})",
+                        ChainIndex(chain_id), crate::style::stderr().paint("✗ skipped", Style::Err),
+                        label, reason);
                     // The bar is cleared in the post-loop finish; the skip
                     // is already loud on stderr above. The chain and its
                     // reason are kept, so the fit's record can say which
@@ -2534,7 +2549,7 @@ pub fn run_chains_with_per_chain_params(
             collector.push(DiagnosticKind::PerturbedSwarmInfeasible {
                 start_loglik, steps: steps.clone(),
             });
-            collector.render_to_stderr(HintContext { chains_completed: Some(results.len()) });
+            collector.render_to_stderr(HintContext { chains_completed: Some(results.len()) }, crate::style::enabled());
             if let Some(dir) = method_dir {
                 let _ = collector.write_json(&format!("{}/diagnostics.json", dir));
             }
@@ -2546,7 +2561,7 @@ pub fn run_chains_with_per_chain_params(
                  (`rw_sd = …` in its [estimate] entry).", steps.join(", ")));
         }
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        collector.render_to_stderr(HintContext { chains_completed: Some(results.len()) });
+        collector.render_to_stderr(HintContext { chains_completed: Some(results.len()) }, crate::style::enabled());
         if let Some(dir) = method_dir {
             let _ = collector.write_json(&format!("{}/diagnostics.json", dir));
         }
@@ -2614,11 +2629,11 @@ pub fn run_chains_with_per_chain_params(
                 match chain_agreement.get(&spec.name) {
                     Some(&r) if r.is_finite() => {
                         let status = match config.gate.a_band(r) {
-                            super::gating::AgreementBand::Pass => "\x1b[32m✓\x1b[0m",
-                            super::gating::AgreementBand::SoftWarn => "\x1b[33m~\x1b[0m",
-                            super::gating::AgreementBand::Fail => "\x1b[31m✗\x1b[0m",
+                            super::gating::AgreementBand::Pass => crate::style::stderr().paint("✓", Style::Ok),
+                            super::gating::AgreementBand::SoftWarn => crate::style::stderr().paint("~", Style::Warn),
+                            super::gating::AgreementBand::Fail => crate::style::stderr().paint("✗", Style::Err),
                             // Unreachable: `r.is_finite()` is the match guard.
-                            super::gating::AgreementBand::NotAssessed => "n/a",
+                            super::gating::AgreementBand::NotAssessed => "n/a".to_string(),
                         };
                         eprintln!("  {:12} Â={:.3} {}", spec.name, r, status);
                     }
@@ -3190,11 +3205,12 @@ impl MethodConvergence {
             // keeps the glyph from ever being greener than the finding allows.
             let drew_finding = r.rhat > rhat_threshold;
             let band = RhatBand::of(r.rhat);
+            let p = crate::style::stderr();
             let status = match band.glyph_with_finding(drew_finding) {
-                "✓" => "\x1b[32m✓\x1b[0m",
-                "~" => "\x1b[33m~\x1b[0m",
-                "✗" => "\x1b[31m✗\x1b[0m",
-                other => other,
+                "✓" => p.paint("✓", Style::Ok),
+                "~" => p.paint("~", Style::Warn),
+                "✗" => p.paint("✗", Style::Err),
+                other => other.to_string(),
             };
             let tail = if r.ess_tail.is_finite() {
                 format!("{:.0}", r.ess_tail)

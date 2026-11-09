@@ -347,7 +347,7 @@ pub fn report(check: &PfNoiseCheck, ll_mean: f64, d: usize, n_obs: usize) -> Str
     match verdict {
         CeilingVerdict::Unreachable => {
             out.push_str(&format!(
-                "  \x1b[33m⚠ ceiling below target\x1b[0m — no proposal scale reaches {:.1}%, \
+                "  {tag} — no proposal scale reaches {:.1}%, \
                  so the Robbins-Monro\n    \
                  scale adaptation has no root and λ falls for the whole run. The chain \
                  under-mixes\n    \
@@ -355,23 +355,26 @@ pub fn report(check: &PfNoiseCheck, ll_mean: f64, d: usize, n_obs: usize) -> Str
                  target.\n    {}\n    \
                  Proceeding anyway — a diagnosis, not a refusal, and a conservative \
                  one: a\n    bound below the limit can warn where a root does exist.\n",
-                target * 100.0, cross, REMEDY));
+                target * 100.0, cross, REMEDY,
+                tag = crate::style::stderr().paint("⚠ ceiling below target", crate::style::Style::Warn)));
         }
         CeilingVerdict::Reachable => {
             out.push_str(&format!(
-                "  \x1b[32m✓ ceiling above target\x1b[0m — a proposal scale reaching {:.1}% \
+                "  {tag} — a proposal scale reaching {:.1}% \
                  exists (s would have to\n    exceed {:.2} for it not to).\n",
-                target * 100.0, cross));
+                target * 100.0, cross,
+                tag = crate::style::stderr().paint("✓ ceiling above target", crate::style::Style::Ok)));
             out.push_str(&halving_hint(check, se, cross));
             out.push_str(&gaussian_caveat(n_obs));
         }
         CeilingVerdict::Unresolved => {
             out.push_str(&format!(
-                "  \x1b[33m? verdict unresolved\x1b[0m — s = {:.2} ± {:.2} (1 SE) straddles \
+                "  {tag} — s = {:.2} ± {:.2} (1 SE) straddles \
                  the crossover s* = {:.2},\n    \
                  where the ceiling equals the target. {} pairs cannot separate the two; \
                  more pairs\n    narrow the interval, more particles move s itself.\n",
-                check.s, se, cross, check.pairs));
+                check.s, se, cross, check.pairs,
+                tag = crate::style::stderr().paint("? verdict unresolved", crate::style::Style::Warn)));
             out.push_str(&gaussian_caveat(n_obs));
         }
     }

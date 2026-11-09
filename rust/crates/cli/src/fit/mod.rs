@@ -644,7 +644,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // gh#71: a point-started multi-chain sampler's R̂ is uninformative;
         // the summary will report it as not assessed. A note, not an error —
         // the sample is still valid.
-        eprintln!("\x1b[33mnote:\x1b[0m {}", msg);
+        eprintln!("{} {}", crate::style::note_tag(), msg);
     }
 
     // ── Validate sweeps ───────────────────────────────────────────────────
@@ -808,7 +808,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     (a.diagonal_mass, "--diagonal-mass"),
                 ].into_iter().filter_map(|(on, name)| on.then_some(name)).collect();
                 match config_v2::nuts_unavailable(declared, &tuning) {
-                    Ok(note) => eprintln!("\x1b[33mnote:\x1b[0m {note}"),
+                    Ok(note) => eprintln!("{} {note}", crate::style::note_tag()),
                     Err(e) => {
                         eprintln!("error: {fit_path}: {e}");
                         std::process::exit(1);
@@ -944,7 +944,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             .filter(|(_, spec)| spec.perturb_only_at_t0)
             .map(|(n, _)| n.as_str())
             .collect();
-        eprintln!("\n  \x1b[36mic-free inference:\x1b[0m conditioning on y₁");
+        eprintln!("\n  {} conditioning on y₁",
+            crate::style::stderr().paint("ic-free inference:", crate::style::Style::Info));
         // Name every ACTUAL source of the t=0 spread. There are two — a
         // declared `init { }` law, which every filter draws per particle
         // (gh#732), and, under IF2, a `perturb_only_at_t0` parameter (gh#364).
@@ -1502,8 +1503,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         if a.resume.is_none() {
             match crate::resolve::check_reuse(&store, &cas_root, &resolved_artifact, policy) {
                 Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
-                    eprintln!("  \x1b[33mcache hit — reusing {}\x1b[0m",
-                        dir.strip_prefix(&cas_root).unwrap_or(&dir).display());
+                    eprintln!("  {}", crate::style::stderr().paint(
+                        &format!("cache hit — reusing {}",
+                            dir.strip_prefix(&cas_root).unwrap_or(&dir).display()),
+                        crate::style::Style::Warn));
                     crate::resolve::note_leaf_from_another_model_file(
                         &dir, &sweep_config.model.camdl);
                     // This config now names the stored run too.
@@ -1604,11 +1607,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     ""
                 };
                 eprintln!(
-                    "  \x1b[33mnote:\x1b[0m `starts = \"{}\"` draws every chain's \
+                    "  {n} `starts = \"{}\"` draws every chain's \
                      start, so `[estimate].start` does not set where the chains \
                      begin for: {}.{still_read} Use `starts = \"single\"` to start \
                      every chain at the declared values.",
-                    starts_rule.tag(), declared.join(", "));
+                    starts_rule.tag(), declared.join(", "), n = crate::style::note_tag());
             }
         }
 
@@ -1876,7 +1879,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 
                 collector.render_to_stderr(sim::inference::diagnostic::HintContext {
                     chains_completed: Some(chain_results.results.len()),
-                });
+                }, crate::style::enabled());
 
                 method_best_loglik = Some(chain_results.best_loglik);
                 method_best_chain = Some(chain_results.best_chain);

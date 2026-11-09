@@ -809,11 +809,12 @@ fn draw_from_prior(
     }
     if !no_prior_names.is_empty() {
         eprintln!(
-            "\x1b[33mwarning:\x1b[0m starts = \"from_prior\": no sampleable prior for \
+            "{w} starts = \"from_prior\": no sampleable prior for \
              {}; drawing those parameter(s) uniformly within their bounds instead. \
              Declare a `~ <dist>` prior in the model or a `prior = {{ ... }}` in \
              [estimate] to draw them from one.",
             no_prior_names.join(", "),
+            w = crate::style::warning_tag(),
         );
     }
     let base = estimate_values_from_resolved(resolved);
@@ -860,12 +861,13 @@ fn draw_from_prior(
     }
     if !box_fallbacks.is_empty() {
         eprintln!(
-            "\x1b[33mwarning:\x1b[0m starts = \"from_prior\": {} draws from the prior \
+            "{w} starts = \"from_prior\": {} draws from the prior \
              of {} all fell outside the search bounds; drew uniformly within the bounds \
              instead. The prior puts almost no mass inside the bounds — check that they \
              agree.",
             MAX_PRIOR_BOX_REDRAWS,
             box_fallbacks.join(", "),
+            w = crate::style::warning_tag(),
         );
     }
     Ok(starts)
@@ -1156,10 +1158,10 @@ where F: Fn(PathBuf) -> InitSource,
         .collect();
     if !missing.is_empty() {
         eprintln!(
-            "\x1b[33mwarning:\x1b[0m starts source `{}` is missing \
+            "{w} starts source `{}` is missing \
              parameter(s): {}. Falling back to bounds-uniform for \
              those parameter(s).",
-            path.display(), missing.join(", "));
+            path.display(), missing.join(", "), w = crate::style::warning_tag());
     }
     let path_buf: PathBuf = path.to_path_buf();
     // Build the per-chain values once — all chains share the point;

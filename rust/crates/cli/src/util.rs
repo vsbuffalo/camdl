@@ -1,3 +1,4 @@
+use crate::style::Style;
 use std::collections::HashMap;
 use ir::intervention::Intervention;
 use sim::{
@@ -2680,7 +2681,8 @@ pub fn print_scheduled_actions_summary(
         eprintln!("  interventions ({} active of {} declared):", active_count, decl_interv.len());
         for iv in &decl_interv {
             let on = active_names.contains(iv.name.as_str());
-            let glyph = if on { "\x1b[32m✓\x1b[0m" } else { "\x1b[2m✗\x1b[0m" };
+            let p = crate::style::stderr();
+            let glyph = if on { p.paint("✓", Style::Ok) } else { p.paint("✗", Style::Dim) };
             let note = if on { "" } else { "  (off — not enabled)" };
             eprintln!("    {} {}{}", glyph, iv.name, note);
         }
@@ -2690,7 +2692,8 @@ pub fn print_scheduled_actions_summary(
         eprintln!("  events ({} declared, {} active):", decl_events.len(), active_count);
         for iv in &decl_events {
             let on = active_names.contains(iv.name.as_str());
-            let glyph = if on { "\x1b[32m✓\x1b[0m" } else { "\x1b[2m✗\x1b[0m" };
+            let p = crate::style::stderr();
+            let glyph = if on { p.paint("✓", Style::Ok) } else { p.paint("✗", Style::Dim) };
             let note = if on { "" } else { "  (disabled)" };
             eprintln!("    {} {}{}", glyph, iv.name, note);
         }
@@ -2737,15 +2740,17 @@ pub fn print_observations_summary(model: &ir::Model) {
             ir::observation::Likelihood::Bernoulli(_)    => "Bernoulli",
             ir::observation::Likelihood::ZeroInflatedNegBinomial(_) => "ZeroInflatedNegBinomial",
         };
-        eprintln!("    \x1b[32m✓\x1b[0m {:<16} {:<28} {}", obs.name, kind_label, lik_label);
+        eprintln!("    {} {:<16} {:<28} {}",
+            crate::style::stderr().paint("✓", Style::Ok), obs.name, kind_label, lik_label);
         if is_snapshot && matches!(obs.likelihood, ir::observation::Likelihood::NegBinomial(_)) {
             warn_negbin_on_snapshot = true;
         }
     }
     if warn_negbin_on_snapshot {
-        eprintln!("    \x1b[2mnote: NegBinomial on a prevalence / snapshot projection is valid");
-        eprintln!("          but uncommon. Binomial or Poisson is the typical choice for");
-        eprintln!("          point-in-time counts. See camdl-run-spec.md §14.4.\x1b[0m");
+        let p = crate::style::stderr();
+        eprintln!("    {}", p.paint("note: NegBinomial on a prevalence / snapshot projection is valid", Style::Dim));
+        eprintln!("{}", p.paint("          but uncommon. Binomial or Poisson is the typical choice for", Style::Dim));
+        eprintln!("{}", p.paint("          point-in-time counts. See camdl-run-spec.md §14.4.", Style::Dim));
     }
 }
 
@@ -3940,8 +3945,9 @@ pub fn simulate_compiled(
     if let ir::model::OutputSchedule::AtTimes(ts) = &compiled.model.output.times {
         let t_end = compiled.model.simulation.t_end;
         if !ts.is_empty() && ts.iter().all(|&t| t > t_end) {
+            let w = crate::style::stderr().paint("warning:", Style::Warn);
             eprintln!(
-                "\x1b[33mwarning:\x1b[0m every `at = [...]` output time is beyond the \
+                "{w} every `at = [...]` output time is beyond the \
                  simulation horizon (t_end = {t_end}); the trajectory will have no rows \
                  (gh#125). Add output times within [t_start, t_end], raise t_end, \
                  or drop a shortening `--to` (gh#626)."
