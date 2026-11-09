@@ -25,6 +25,13 @@ pub fn live() -> LiveHandle {
 impl LiveHandle {
     /// A plain progress line (`chain 1 1/3000  ll=-319.5  acc=0%`), written
     /// whole.
+    /// A chain that finished with something the end of the run will report
+    /// in full (`chain 0: proposal scale at its floor …`), so a long run does
+    /// not hide it until it ends.
+    pub fn chain_finished(&self, line: &str) {
+        self.progress(line);
+    }
+
     pub fn progress(&self, line: &str) {
         use std::io::Write;
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
