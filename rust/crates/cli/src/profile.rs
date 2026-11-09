@@ -302,6 +302,9 @@ pub(crate) fn profile_if2_config(
 }
 
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
+    // profile has no `--no-color`: its painters follow the environment and
+    // whether each stream is a terminal.
+    let out = crate::out::Out::new(false);
     // The `--pmmh-*` flags went with per-cell PMMH. They are trapped so a
     // stale script is answered with the reason rather than clap's
     // "unexpected argument", before any file is read.
@@ -311,8 +314,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         ("--pmmh-rho", a._removed_pmmh_rho.as_deref()),
     ] {
         if let Some(raw) = given {
-            eprintln!("error: {flag} {raw} is no longer accepted: {PROFILE_PMMH_REMOVED}");
-            std::process::exit(1);
+            out.fail(format!("error: {flag} {raw} is no longer accepted: {PROFILE_PMMH_REMOVED}"));
         }
     }
     // Parse the CLI strings into the typed registry entry (the string boundary);
@@ -324,14 +326,12 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     if crate::fit::methods::parse_algorithm(algo_name)
         == Some(crate::run_meta::FitAlgorithm::Pmmh)
     {
-        eprintln!("error: --algorithm pmmh is not accepted: {PROFILE_PMMH_REMOVED}");
-        std::process::exit(1);
+        out.fail(format!("error: --algorithm pmmh is not accepted: {PROFILE_PMMH_REMOVED}"));
     }
     let method = match crate::fit::methods::parse_combo(algo_name, backend_name) {
         Ok(m) => m,
         Err(msg) => {
-            eprintln!("error: {}", msg);
-            std::process::exit(1);
+            out.fail(format!("error: {}", msg));
         }
     };
     let profile_algo = match method.algorithm {
@@ -349,13 +349,12 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         crate::run_meta::FitAlgorithm::NlLbfgs =>
             ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Lbfgs),
         other => {
-            eprintln!(
+            out.fail(format!(
                 "error: --algorithm = \"{}\" is not yet supported for `camdl profile`. \
                  Currently supported: if2 (chain_binomial), \
                  nl-sbplx (ode), nl-bobyqa (ode), nl-lbfgs (ode).",
                 other
-            );
-            std::process::exit(1);
+            ));
         }
     };
     // Registry-driven caveat for methods carrying a status_note (Beta methods,
@@ -368,13 +367,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // required on an IF2 one; past this point each cell reads only its own.
     let n_particles = match profile_algo {
         ProfileAlgo::If2 => a.particles.unwrap_or_else(|| {
-            eprintln!("error: --particles is required for an if2 profile");
-            std::process::exit(1);
+            out.fail("error: --particles is required for an if2 profile");
         }),
         ProfileAlgo::Nlopt(_) => {
             if let Err(e) = refuse_if2_flags_for_nlopt(a, algo_name) {
-                eprintln!("error: {e}");
-                std::process::exit(1);
+                out.fail(format!("error: {e}"));
             }
             0
         }
@@ -390,8 +387,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         Some(raw) => match crate::fit::validate_label(raw) {
             Ok(l) => Some(l),
             Err(e) => {
-                eprintln!("error: invalid --label: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: invalid --label: {}", e));
             }
         },
         None => None,
@@ -410,8 +406,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             a._removed_params.as_deref(),
         ),
     ) {
-        eprintln!("error: {msg}");
-        std::process::exit(2);
+        out.error(crate::out::CommandError { code: crate::out::ExitCode(2), ..crate::out::CommandError::new(format!("error: {msg}")) }).exit();
     }
     // `--fixed NAME=VALUE` → `fixed_cli`, `--fixed-file <toml>`
     // (repeatable, layered) → `fixed_files`. Both feed into the
@@ -434,8 +429,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let mut focal_grids: Vec<FocalGrid> = Vec::new();
 
     let rw_sd = a.rw_sd.as_ref().unwrap_or_else(|| {
-        eprintln!("error: --rw-sd required (e.g., --rw-sd \"sigma=0.01\" or --rw-sd auto)");
-        std::process::exit(1);
+        out.fail("error: --rw-sd required (e.g., --rw-sd \"sigma=0.01\" or --rw-sd auto)");
     });
     let rw_sd_auto = matches!(rw_sd, crate::args::types::RwSd::Auto);
     let rw_sd_map_raw: HashMap<String, Option<f64>> = match rw_sd {
@@ -448,7 +442,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // `model_pre.parameters[i].value` before the resolver call —
     // same pattern as `fit/runner.rs:144-180`.
     let (mut model_pre, model_json) = crate::util::load_model(&ir_path)
-        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+        .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     // The model before any value is written into it, for the partition.
     let model_declared = model_pre.clone();
 
@@ -478,9 +472,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let fit_path_str = fit_path.to_string_lossy().into_owned();
         let fit_cfg = crate::fit::config_v2::Problem::load(&fit_path_str)
             .unwrap_or_else(|e| {
-                eprintln!("error: failed to load --fit toml '{}': {}",
-                    fit_path_str, e);
-                std::process::exit(1);
+                out.fail(format!("error: failed to load --fit toml '{}': {}",
+                    fit_path_str, e));
             });
         // How each [fixed] name reached the config, for the partition.
         let fixed_via = fit_cfg.fixed.declarations(&model_pre);
@@ -489,25 +482,22 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let mut fixed_cfg = fit_cfg.fixed.clone();
         fixed_cfg.expand_from_scenario(&model_pre, &fit_cfg.estimate)
             .unwrap_or_else(|e| {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: {}", e));
             });
         let fixed_resolved = fixed_cfg.resolve_with_model(&model_pre)
             .unwrap_or_else(|e| {
-                eprintln!("error: --fit toml [fixed].resolve_with_model: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: --fit toml [fixed].resolve_with_model: {}", e));
             });
         // Hash the bytes for provenance. Path-independent — only the
         // contents participate, matching the `data_hash` convention.
         let bytes = std::fs::read(fit_path)
             .unwrap_or_else(|e| {
-                eprintln!("error: cannot read --fit toml '{}': {}",
-                    fit_path_str, e);
-                std::process::exit(1);
+                out.fail(format!("error: cannot read --fit toml '{}': {}",
+                    fit_path_str, e));
             });
         let hash = crate::hashing::sha256_hex(&bytes);
-        eprintln!("profile: using --fit '{}' for priors / bounds / [fixed]",
-            fit_path_str);
+        out.say(format_args!("profile: using --fit '{}' for priors / bounds / [fixed]",
+            fit_path_str));
         // The likelihood every cell scores is the fit's own (`ic_free`), read
         // through the same function `fit run` uses, so a profile curve is on
         // the scale of the fit it profiles.
@@ -528,7 +518,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         crate::fit::config_v2::written_config_dt(&raw)
     });
     let dt = crate::dt_rule::effective_dt_for_command(a.inference.dt, fit_written_dt, model_pre.simulation.dt)
-        .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+        .unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
 
     // An nl-* cell's optimizer budget: the `--fit` file's own, when its
     // [method] is an nl-* optimizer (so a profile of that fit optimizes each
@@ -538,8 +528,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         Some(fit_path) => {
             let cfg = crate::fit::config_v2::FitConfig::load(&fit_path.to_string_lossy())
                 .unwrap_or_else(|e| {
-                    eprintln!("error: failed to load --fit toml '{}': {}", fit_path.display(), e);
-                    std::process::exit(1);
+                    out.fail(format!("error: failed to load --fit toml '{}': {}", fit_path.display(), e));
                 });
             nlopt_cell_budget(cfg.inference.method.as_ref().map(|m| &m.algorithm))
         }
@@ -564,7 +553,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             enable: &fit_scenario.1,
             disable: &fit_scenario.2,
         },
-    ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+    ).unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
     // The rules `fit run` applies to the same file: a scenario (from the fit
     // config or `--scenario`) that sets or scales an estimated parameter, or
     // moves a [fixed] parameter to another value, is refused, not resolved.
@@ -586,11 +575,10 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 &model_pre, scenario, &fit_toml_fixed_indexmap, &fit_path_str,
             ),
         ].into_iter()
-            .filter_map(|r| r.unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); }))
+            .filter_map(|r| r.unwrap_or_else(|e| { out.fail(format!("error: {e}")); }))
             .collect();
         if !refusals.is_empty() {
-            eprintln!("error: {}", refusals.join("\n\nerror: "));
-            std::process::exit(1);
+            out.fail(format!("error: {}", refusals.join("\n\nerror: ")));
         }
     }
 
@@ -599,8 +587,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     if let Err(msg) = crate::params_resolver::refuse_fixed_flag_over_scenario(
         &model_pre, scenario_name.as_deref(), &fixed_cli_vec,
     ) {
-        eprintln!("error: {msg}");
-        std::process::exit(1);
+        out.fail(format!("error: {msg}"));
     }
 
     // A single-point starts rule (`--starts from_params=<toml>`,
@@ -616,7 +603,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // carrying it. See `starts_values_from_init_method`.
     let starts_values: Option<(crate::params_resolver::StartsOrigin, Vec<(String, f64)>)> =
         starts_values_from_init_method(&init_method)
-            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+            .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
 
     // The `[estimate]` start fall-back, by the function `fit run` uses
     // (run-spec §1.4): an entry with a `start` carries it, one without
@@ -674,21 +661,20 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let cli_data_specs: Vec<crate::args::types::DataSpec> = a.data.clone();
     let bound_streams: Option<Vec<(String, std::path::PathBuf)>> = if cli_data_specs.is_empty() {
         a.fit.as_ref().map(|fit_path| {
-            eprintln!("profile: no --data flags supplied, reading bindings \
+            out.say("profile: no --data flags supplied, reading bindings \
                 from --fit toml [data.observations]");
             crate::pfilter::load_data_observations_from_fit_toml(
                 fit_path.as_path(), &model_obs_names,
             ).unwrap_or_else(|e| {
-                eprintln!("error: --fit toml fallback for --data: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: --fit toml fallback for --data: {}", e));
             })
         })
     } else {
         if a.fit.is_some() {
-            eprintln!("profile: --data on CLI overrides --fit toml [data.observations]");
+            out.say("profile: --data on CLI overrides --fit toml [data.observations]");
         }
         Some(crate::util::resolve_data_specs(&cli_data_specs, &model_obs_names, obs_name_arg.as_deref())
-            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); }))
+            .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); }))
     };
 
     // gh#616: profile binds observation data, so it RESOLVES a model's
@@ -707,13 +693,12 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // it. An unanchored model falls through untouched.
     let moved_any_anchor = match &bound_streams {
         Some(bound) => crate::obs_anchor::resolve_from_bindings(&mut model_pre, bound, dt)
-            .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); }),
+            .unwrap_or_else(|e| { out.fail(format!("error: {e}")); }),
         None => {
             if let Some(msg) =
                 crate::obs_anchor::refuse_without_data(&model_pre, PROFILE_SUPPLY)
             {
-                eprintln!("error: {msg}");
-                std::process::exit(1);
+                out.fail(format!("error: {msg}"));
             }
             crate::obs_anchor::spline_hold_notices(&model_pre, &[], model_pre.simulation.t_end)
                 .emit_stderr();
@@ -740,8 +725,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             }
         }
         ir::to_string_pretty(&ident_model).unwrap_or_else(|e| {
-            eprintln!("error: re-emitting the anchor-resolved IR: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: re-emitting the anchor-resolved IR: {e}"));
         })
     } else {
         model_json
@@ -761,8 +745,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         "each profile point scores through a particle filter at the observation \
          times, so the window comes from the data, not the model horizon",
     ) {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+        out.fail(format!("error: {e}"));
     }
 
     // Run the unified resolver.
@@ -787,7 +770,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         },
         starts_values.as_ref().map(|(origin, values)|
             crate::params_resolver::StartsValues { origin, values }),
-    ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let mut resolved = resolved;
     resolved.attribute_seeded_starts(&seeded);
     crate::params_resolver::emit_notices(&[&resolved]);
@@ -798,7 +781,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         Some(scenario) => {
             let focal: Vec<&str> = focal_names.iter().map(|s| s.as_str()).collect();
             crate::params_resolver::scenario_focal_notices(&model_pre, scenario, &focal)
-                .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); })
+                .unwrap_or_else(|e| { out.fail(format!("error: {e}")); })
                 .into_iter()
                 .collect()
         }
@@ -813,7 +796,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         .iter().map(|(k, &v)| (k.clone(), v)).collect();
 
     let compiled = Arc::new(CompiledModel::new(model.clone())
-        .unwrap_or_else(|e| { eprintln!("{:?}", e); std::process::exit(1); }));
+        .unwrap_or_else(|e| { out.fail(format!("{:?}", e)); }));
     let base_params = compiled.default_params.clone();
 
     // Reject overdispersed models on the ODE backend (and any other
@@ -822,8 +805,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     if let Err(msg) = crate::fit::methods::check_model_capabilities(
         method.backend, &compiled,
     ) {
-        eprintln!("error: {}", msg);
-        std::process::exit(1);
+        out.fail(format!("error: {}", msg));
     }
 
     // A conditional objective (`ic_free = true`) is admitted per method by the
@@ -839,22 +821,19 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         if let Err(msg) =
             crate::fit::methods::validate_ic_free(profile_algo.method_kind(), init_law)
         {
-            eprintln!("error: the --fit config sets ic_free = true. {msg}");
-            std::process::exit(1);
+            out.fail(format!("error: the --fit config sets ic_free = true. {msg}"));
         }
-        eprintln!("profile: ic_free = true — every cell scores log p(y₂:T | y₁, θ), \
+        out.say("profile: ic_free = true — every cell scores log p(y₂:T | y₁, θ), \
             the fit's conditional likelihood");
     }
 
     // The missing-data refusal, reported here rather than where the binding was
     // resolved, so every gate above keeps first say (see the binding block).
     let bound_streams = bound_streams.unwrap_or_else(|| {
-        eprintln!("error: profile needs observation data to score: {PROFILE_SUPPLY}");
-        std::process::exit(1);
+        out.fail(format!("error: profile needs observation data to score: {PROFILE_SUPPLY}"));
     });
     if bound_streams.is_empty() {
-        eprintln!("error: zero streams resolved from --data / --fit toml.");
-        std::process::exit(1);
+        out.fail("error: zero streams resolved from --data / --fit toml.");
     }
 
     // Resolve the bound observation streams (BY SOURCE) and load each one's
@@ -877,21 +856,21 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         format: a.inference.time_format,
     };
     let effective = crate::fit::runner::data_bindings_to_effective(&model, &bound_streams)
-        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+        .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let streams = crate::fit::runner::resolve_and_load_obs_streams(
         &model, &compiled, &effective, dt, &time_opts,
-    ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
 
     if streams.len() > 1 {
-        eprintln!(
+        out.say(format_args!(
             "profile: {} streams bound (joint loglik = sum across all): {}",
             streams.len(),
             streams.iter().map(|s| s.name.as_str())
                 .collect::<Vec<_>>().join(", "),
-        );
+        ));
     } else {
-        eprintln!("profile: using observation model '{}' from IR",
-            streams[0].name);
+        out.say(format_args!("profile: using observation model '{}' from IR",
+            streams[0].name));
     }
 
     // gh#90: silent-wrong-answer warning. If the model declares N>1 observation
@@ -906,7 +885,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         if let Some(w) = crate::util::format_unbound_streams_warning(
             "profile", &model_obs_names, &bound_names,
         ) {
-            eprint!("{}", w);
+            out.say_raw(format_args!("{}", w));
         }
     }
 
@@ -922,8 +901,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
         let (bound, _report) = BoundObs::bind(compiled.model.simulation.t_start, specs)
             .unwrap_or_else(|report| {
-                eprintln!("error: observation data invalid:\n{}", report.render());
-                std::process::exit(1);
+                out.fail(format!("error: observation data invalid:\n{}", report.render()));
             });
         bound.times().iter().map(|&time| Observation { time, value: 0.0 }).collect()
     };
@@ -932,9 +910,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     for sw in &a.sweep {
         let idx = compiled.param_index.get(sw.name.as_str()).copied()
             .unwrap_or_else(|| {
-                eprintln!("focal parameter '{}' not found{}", sw.name,
-                    crate::util::constant_hints(&compiled.model, [sw.name.as_str()]));
-                std::process::exit(1);
+                out.fail(format!("focal parameter '{}' not found{}", sw.name,
+                    crate::util::constant_hints(&compiled.model, [sw.name.as_str()])));
             });
         let values = sw.grid.expand();
         // A grid value outside the parameter's range would be written straight
@@ -957,14 +934,13 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 .map(|v| v.to_string())
                 .collect();
             if !outside.is_empty() {
-                eprintln!(
+                out.fail(format!(
                     "error: --sweep {}: value(s) {} outside the parameter's bounds [{}, {}]{}. \
                      Sweep only inside the bounds.",
                     sw.name, outside.join(", "), lo, hi,
                     if fit_bounds.is_some() { " (the model's, narrowed by --fit [estimate])" }
                     else { " (the model's)" },
-                );
-                std::process::exit(1);
+                ));
             }
         }
         focal_grids.push(FocalGrid {
@@ -1018,7 +994,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 (false, true) => "the fit toml's [fixed] block",
                 (false, false) => unreachable!(),
             };
-            eprintln!(
+            out.fail(format!(
                 "error: parameter '{}' is in both `--sweep` and {}. \
                  A swept parameter is pinned per cell at the sweep value; \
                  listing it as fixed is contradictory. Drop it from {}.",
@@ -1026,8 +1002,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 if in_cli && !in_toml { "`--fixed`" }
                 else if in_toml && !in_cli { "the fit toml's [fixed]" }
                 else { "both" },
-            );
-            std::process::exit(1);
+            ));
         }
     }
     let exclude: std::collections::HashSet<String> = focal_names.iter()
@@ -1056,10 +1031,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let clash = crate::params_resolver::scenario_estimate_collision(
             &model_pre, scenario, &estimated,
             crate::params_resolver::EstimatedBy::RwSd { auto: rw_sd_auto },
-        ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+        ).unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
         if let Some(msg) = clash {
-            eprintln!("error: {msg}");
-            std::process::exit(1);
+            out.fail(format!("error: {msg}"));
         }
     }
 
@@ -1100,15 +1074,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 
     let if2_params = crate::fit::runner::build_if2_params_from_specs(
         &model, &compiled, &base_params, &specs,
-    ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     // Each IF2 cell perturbs by `rw_sd`, and a derived one must be able to
     // move the parameter.
     if matches!(profile_algo, ProfileAlgo::If2) {
         if let Err(e) = crate::fit::runner::refuse_degenerate_auto_rw_sd(
             &if2_params, "`--rw-sd NAME=SD`, or `rw_sd = …` in the fit config's [estimate]",
         ) {
-            eprintln!("error: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: {e}"));
         }
     }
 
@@ -1128,15 +1101,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         if let Err(e) = sim::inference::gradient_capability::preflight_gradient_ode(
             &compiled, &base_params, &estimated,
         ) {
-            eprintln!(
+            out.fail(format!(
                 "error: --algorithm nl-lbfgs takes each cell's optimum with the ODE \
                  forward-sensitivity gradient, and the gradient capability check refuses \
                  this model. The check's reason below still names `nuts`, the removed ODE \
                  sampler, for the same requirement (gh#917):\n\n  {e}\n\n  \
                  `--algorithm nl-sbplx` profiles the same ODE marginal likelihood without \
                  a gradient."
-            );
-            std::process::exit(1);
+            ));
         }
     }
 
@@ -1155,23 +1127,22 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     let why = if focal_names.contains(name) { "it is swept (--sweep)" }
                         else if fixed_names.contains(name) { "it is pinned" }
                         else { "it is not in --rw-sd" };
-                    eprintln!(
+                    out.fail(format!(
                         "error: simplex_groups[{gi}] member '{name}' is not estimated by this \
                          profile: {why}. The members of a simplex group sum to one and are \
                          estimated jointly, so every member must be estimated: profile a \
-                         parameter outside the group, or drop the group from the fit config.");
-                    std::process::exit(1);
+                         parameter outside the group, or drop the group from the fit config."));
                 }
             }
         }
         if !matches!(profile_algo, ProfileAlgo::If2) {
-            eprintln!("warning: the fit config declares simplex_groups, but `{}` does not \
+            out.say(format_args!("warning: the fit config declares simplex_groups, but `{}` does not \
                 honour the simplex constraint: members are optimised independently.",
-                format!("{:?}", profile_algo).to_lowercase());
+                format!("{:?}", profile_algo).to_lowercase()));
         }
         crate::fit::runner::resolve_simplex_groups(
             &fit_simplex_groups, &fit_estimate, &compiled.param_index, &if2_params,
-        ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); })
+        ).unwrap_or_else(|e| { out.fail(format!("error: {e}")); })
     };
     // Member names per group, in order, for the method identity.
     let simplex_names: Vec<Vec<String>> =
@@ -1200,7 +1171,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     if let Some(w) =
         crate::fit::priors_precedence::format_prior_override_warning(&prior_overrides)
     {
-        eprint!("{}", w);
+        out.say_raw(format_args!("{}", w));
     }
 
     // Per-start init draws across non-focal estimated params (gh#42).
@@ -1215,8 +1186,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // starts from.
     let resolved_starts = crate::fit::chain_starts::resolve_starts(&init_method, true)
         .unwrap_or_else(|e| {
-            eprintln!("error: profile --starts {}: {}", init_method, e);
-            std::process::exit(1);
+            out.fail(format!("error: profile --starts {}: {}", init_method, e));
         });
     let drawn_starts = {
         let priors: Vec<(String, sim::inference::pmmh::Prior)> = if2_params
@@ -1230,8 +1200,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         };
         crate::fit::chain_starts::draw_chain_starts(&ctx, &resolved_starts, n_starts, seed_base)
             .unwrap_or_else(|e| {
-                eprintln!("error: profile --starts {}: {}", init_method, e);
-                std::process::exit(1);
+                out.fail(format!("error: profile --starts {}: {}", init_method, e));
             })
     };
     let per_start_params: Option<Arc<Vec<Vec<sim::inference::if2::EstimatedParam>>>> =
@@ -1259,20 +1228,18 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let stream_specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
         let (bound, report) = BoundObs::bind(compiled.model.simulation.t_start, stream_specs)
             .unwrap_or_else(|report| {
-            eprintln!("error: observation data invalid:\n{}", report.render());
-            std::process::exit(1);
+            out.fail(format!("error: observation data invalid:\n{}", report.render()));
         });
 
         // gh#812: a non-fatal bind report was previously discarded, so the
         // Warn channel was write-only. Surface it — a zero denominator scores
         // as zero, and the user must be told which rows and why.
         if !report.findings().is_empty() {
-            eprintln!("{}", report.render());
+            out.say(format_args!("{}", report.render()));
         }
         Arc::new(MultiStreamObsModel::new(bound, compiled.clone())
             .unwrap_or_else(|e| {
-                eprintln!("error: observation model construction failed: {:?}", e);
-                std::process::exit(1);
+                out.fail(format!("error: observation model construction failed: {:?}", e));
             }))
     };
 
@@ -1311,8 +1278,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         None => vec![seed_base],
     };
     if seeds.is_empty() {
-        eprintln!("error: --seeds expanded to empty list");
-        std::process::exit(1);
+        out.fail("error: --seeds expanded to empty list");
     }
 
     let root = output_root(None, None);
@@ -1348,9 +1314,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             h.clone()
         } else {
             let bytes = std::fs::read(spath).unwrap_or_else(|e| {
-                eprintln!("error: cannot read --data file '{}': {}",
-                    spath.display(), e);
-                std::process::exit(1);
+                out.fail(format!("error: cannot read --data file '{}': {}",
+                    spath.display(), e));
             });
             let h = crate::hashing::sha256_hex(&bytes);
             file_cache.insert(spath.clone(), h.clone());
@@ -1467,8 +1432,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         priors: &priors_blob,
         objective,
     }, &[]).unwrap_or_else(|e| {
-        eprintln!("error: profile base identity: {e}");
-        std::process::exit(1);
+        out.fail(format!("error: profile base identity: {e}"));
     });
     // Gate the RAW floats before `json!` sees them: the macro collapses
     // NaN/Inf to `Null`, so `resolve_profile_point`'s gate on the built blob
@@ -1518,8 +1482,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         init: init_method.identity_value(),
         pf_max_substeps: a.inference.pf_max_substeps,
     }, &[]).unwrap_or_else(|e| {
-        eprintln!("error: profile method identity: {e}");
-        std::process::exit(1);
+        out.fail(format!("error: profile method identity: {e}"));
     });
     // The base fit's `starts_from` lineage would fold into the base as
     // a dep (guardrail 3-base). `camdl profile` does not currently
@@ -1553,16 +1516,16 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Bobyqa) => "nl-bobyqa",
         ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Lbfgs) => "nl-lbfgs",
     };
-    eprintln!("profile: {} grid ({}) × {} starts × {} seeds = {} {} runs",
-        grid_points.len(), dim_str, n_starts, seeds.len(), total_jobs, algo_label);
+    out.say(format_args!("profile: {} grid ({}) × {} starts × {} seeds = {} {} runs",
+        grid_points.len(), dim_str, n_starts, seeds.len(), total_jobs, algo_label));
     match profile_algo {
-        ProfileAlgo::If2 => eprintln!(
-            "profile: IF2 per cell = {} particles × {} iterations", n_particles, n_iterations),
-        ProfileAlgo::Nlopt(_) => eprintln!(
+        ProfileAlgo::If2 => out.say(format_args!(
+            "profile: IF2 per cell = {} particles × {} iterations", n_particles, n_iterations)),
+        ProfileAlgo::Nlopt(_) => out.say(format_args!(
             "profile: deterministic ODE MLE per cell (no particle filter), tolerance {:e}, \
              at most {} evaluations{}",
             nl_tolerance, nl_max_evals,
-            if nl_from_fit { " (the --fit method's)" } else { "" }),
+            if nl_from_fit { " (the --fit method's)" } else { "" })),
     }
 
     // ── Progress + cache scan ─────────────────────────────────────────
@@ -1619,8 +1582,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         crate::profile_cas::ResolvedProfilePoint, std::path::PathBuf)> =
         jobs.iter().map(|&(seed_idx, gi, si)| {
             let resolved = resolve_pt(gi, si, seeds[seed_idx]).unwrap_or_else(|e| {
-                eprintln!("error: profile-point identity: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: profile-point identity: {}", e));
             });
             let cas_path = runid::store_path(
                 &root, runid::ArtifactKind::ProfilePoint, &resolved.levels);
@@ -1665,8 +1627,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         if let Err(e) = crate::run_meta::write_fit_sidecar(
             &base_seg, &archive_src, &sidecar)
         {
-            eprintln!("warning: cannot write profile sidecar {}: {}",
-                base_seg.display(), e);
+            out.say(format_args!("warning: cannot write profile sidecar {}: {}",
+                base_seg.display(), e));
         }
     }
 
@@ -1685,8 +1647,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         }
     }
     if !cached.is_empty() {
-        eprintln!("profile: {} of {} starts already cached — resuming",
-            cached.len(), total_jobs);
+        out.say(format_args!("profile: {} of {} starts already cached — resuming",
+            cached.len(), total_jobs));
         bar.inc(cached.len() as u64);
     }
 
@@ -1704,8 +1666,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 .num_threads(parallel)
                 .build()
                 .unwrap_or_else(|e| {
-                    eprintln!("error: failed to build thread pool (--parallel {}): {}", parallel, e);
-                    std::process::exit(1);
+                    out.fail(format!("error: failed to build thread pool (--parallel {}): {}", parallel, e));
                 }),
         )
     } else {
@@ -1920,10 +1881,10 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                         (r.loglik, mle)
                     }
                     Err(e) => {
-                        eprintln!(
+                        out.say(format_args!(
                             "warning: nlopt optimize_cell failed at grid {}/start {}: {}",
                             grid_idx, start_idx, e
-                        );
+                        ));
                         (f64::NEG_INFINITY, params.clone())
                     }
                 }
@@ -1968,14 +1929,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // score a θ far from the optimum (the swarm dies and the estimate is
         // −inf); `--particles` is the lever.
         if !final_loglik.is_finite() {
-            eprintln!(
+            out.say(format_args!(
                 "warning: profile grid point {} (start {}) produced a non-finite \
                  log-likelihood ({}); its `best_loglik` is recorded as null and the \
                  point will be MISSING from the profile curve. This is usually a \
                  particle filter too small to score a θ this far from the optimum — \
                  re-run with more `--particles`.",
                 grid_idx, start_idx, final_loglik,
-            );
+            ));
         }
         // The run's provenance, with this cell's partition.
         let mut provenance = run_provenance_json.clone();
@@ -2024,15 +1985,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             Err(runid::CasError::AlreadyCompleted { .. }) => return,
             // Another process holds this point right now; its result stands.
             Err(e @ runid::CasError::FitInProgress { .. }) => {
-                eprintln!("warning: not storing profile point {} — {}",
-                    cas_path.display(), e);
+                out.say(format_args!("warning: not storing profile point {} — {}",
+                    cas_path.display(), e));
                 return;
             }
             // Anything else means this point was NOT recorded: fail loudly
             // rather than leaving a gap in the landscape the user never sees.
             Err(e) => {
-                eprintln!("error: claim profile point {}: {}", cas_path.display(), e);
-                std::process::exit(1);
+                out.fail(format!("error: claim profile point {}: {}", cas_path.display(), e));
             }
         };
 
@@ -2042,12 +2002,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // Through the claim (fsync'd), error fatal: a discarded write error
         // could finalize a Completed point with no mle.toml in it.
         if let Err(e) = write.write("mle.toml", mle_toml.as_bytes()) {
-            eprintln!("error: writing mle.toml into {}: {}", cas_path.display(), e);
-            std::process::exit(1);
+            out.fail(format!("error: writing mle.toml into {}: {}", cas_path.display(), e));
         }
 
         if let Err(e) = write.finalize(inputs_json) {
-            eprintln!("warning: finalize profile point {}: {}", cas_path.display(), e);
+            out.say(format_args!("warning: finalize profile point {}: {}", cas_path.display(), e));
         }
 
         // Passive progress tick. `Task` handles Pretty (redraw) / Plain
@@ -2114,16 +2073,16 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // per-cell leaves (same as the grid summary). gh#154 restores them via
     // `reindex`. Until then a profile run writes per-cell leaves but no curve.
     let n_cells = resolved_jobs.len();
-    eprintln!(
+    out.say(format_args!(
         "profile: {} cell{} written under {}; the profile curve / summary is \
          a derived view (gh#154 / reindex) and lands in M4.",
         n_cells, if n_cells == 1 { "" } else { "s" },
-        root.join("profiles").display());
+        root.join("profiles").display()));
     if let Some(ref path) = output_tsv_path {
-        eprintln!(
+        out.say(format_args!(
             "note: --output {} not written — the profile curve is an M4 derived \
              view (gh#154); the per-cell leaves carry each point's loglik.",
-            path);
+            path));
     }
 }
 
