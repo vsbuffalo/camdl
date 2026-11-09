@@ -20,8 +20,9 @@ project:
     - install.md
     - intro.md
     - guide/dimensions.qmd
-    - workflow.md
+    - guide/first-fit.qmd
     # Guides (how-to)
+    - workflow.md
     - dates.md
     - camdl-data-spec.md
     - diagnosing-fits.md
@@ -83,9 +84,11 @@ website:
           - text: "Dimensions and stratification"
             href: guide/dimensions.qmd
           - text: "Your first fit"
-            href: workflow.md
+            href: guide/first-fit.qmd
       - section: "Guides"
         contents:
+          - text: "The fit workflow"
+            href: workflow.md
           - text: "Dates and calendar time"
             href: dates.md
           - text: "Getting data into a model"

@@ -1,0 +1,22 @@
+[model]
+camdl = "sir-negbin.camdl"
+
+[data.observations]
+in_bed = "data/in_bed.tsv"
+
+[estimate]
+R0    = { start = 3.75 }
+gamma = { start = 0.4 }
+k     = { start = 20 }
+
+[fixed]
+N0 = 763
+I0 = 3
+
+[method]
+algorithm  = "pmmh"
+backend    = "chain_binomial"
+chains     = 4
+particles  = 1000
+iterations = 3000
+burn_in    = 1000

@@ -1,0 +1,61 @@
+#' SIR model of the 1978 influenza outbreak at an English boarding school.
+#'
+#' Susceptible boys (S) are infected (I) by contact with infected boys and
+#' recover (R). The school is a closed population of N0 = 763. The model is
+#' fitted to one stream: the number of boys confined to bed each day.
+#'
+#' The prior is on R0; negative-binomial counts around the number infected,
+#' with variance mean + mean^2 / k, so the dispersion k lets the counts
+#' scatter more than Poisson noise allows.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  #' basic reproduction number: boys one case infects in a fully susceptible school
+  R0    : positive ~ log_normal(mu = 1.0, sigma = 0.5)
+  #' recovery rate; a boy stays infected 1 / gamma days on average
+  gamma : rate ~ log_normal(mu = -0.69, sigma = 0.42)
+  #' dispersion of the daily count: variance = mean + mean^2 / k
+  k     : positive ~ log_normal(mu = 3.0, sigma = 1.0)
+  #' boys at risk
+  N0    : count
+  #' boys ill on day 0
+  I0    : count
+}
+
+let N = S + I + R
+let beta = R0 * gamma
+
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+observations {
+  in_bed {
+    columns       { time : time, in_bed : count }
+    projected     = I
+    emit_schedule = every 1 'days
+    in_bed        ~ neg_binomial(mean = projected, r = k)
+  }
+}
+
+quantities {
+  days_ill    = final(1 / gamma)           # mean time infected
+  attack_rate = final((N0 - S) / N0)       # fraction of the school infected
+  peak_in_bed = max(I)
+  peak_day    = time_of_max(I)
+}
+
+simulate {
+  from = 0 'days
+  to   = 13 'days
+  dt   = 0.1 'days
+}

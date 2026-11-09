@@ -635,7 +635,7 @@ install-nvim-ts:
 # documented. Deployed to GitHub Pages by .github/workflows/docs-site.yml.
 # Requires `quarto` on PATH.
 
-.PHONY: docs-site docs-site-preview
+.PHONY: docs-site docs-site-preview docs-first-fit-screenshots
 
 DOCS_SITE_PORT ?= 4321
 DOCS_SITE_ENV  := PATH="$(CURDIR)/rust/target/release:$$PATH" CAMDLC="$(CURDIR)/$(CAMDLC)"
@@ -645,6 +645,12 @@ docs-site: build
 
 docs-site-preview: build
 	cd docs && $(DOCS_SITE_ENV) quarto preview --port $(DOCS_SITE_PORT) --host 0.0.0.0 --no-browser
+
+# The camdl-scope screenshots on guide/first-fit.qmd need a running viewer, so
+# they are committed images rather than render output. Re-run after a change
+# to that page's fits or to camdl-scope. Needs camdl-watch, uv and Chrome.
+docs-first-fit-screenshots: build
+	$(DOCS_SITE_ENV) scripts/docs_first_fit_screenshots.sh
 
 # ── Housekeeping ──────────────────────────────────────────────────────────────
 
