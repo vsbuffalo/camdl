@@ -115,6 +115,49 @@ pub struct CrossChainCompat {
     pub asymmetry: f64,
 }
 
+/// The two derived numbers of a written `cross_chain_compat.json`, as the end
+/// of `fit run` shows them. Read back from the file rather than kept from
+/// memory, so what the run shows is what the artifact records: a number the
+/// writer could not represent (non-finite, which JSON writes as `null`) is
+/// `None` here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrossChainReading {
+    /// Chains `M` spans.
+    pub n_chains: usize,
+    pub diagonal_dominance: Option<f64>,
+    pub asymmetry: Option<f64>,
+}
+
+/// The artifact's file name in a PGAS method directory.
+pub const CROSS_CHAIN_COMPAT_JSON: &str = "cross_chain_compat.json";
+
+impl CrossChainReading {
+    /// `None` when the method wrote no matrix (fewer than two chains sampled,
+    /// or the matrix could not be computed or written) or the file does not
+    /// parse.
+    pub fn read(method_dir: &std::path::Path) -> Option<Self> {
+        let text = std::fs::read_to_string(method_dir.join(CROSS_CHAIN_COMPAT_JSON)).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+        Some(CrossChainReading {
+            n_chains: v.get("chains")?.as_array()?.len(),
+            diagonal_dominance: v.get("diagonal_dominance").and_then(|x| x.as_f64()),
+            asymmetry: v.get("asymmetry").and_then(|x| x.as_f64()),
+        })
+    }
+
+    /// The two lines, each number to one decimal; one the file does not hold
+    /// prints `—`.
+    pub fn report(&self) -> String {
+        let nats = |x: Option<f64>| x.map_or("—".to_string(), |v| format!("{v:.1}"));
+        format!(
+            "  cross-chain diagonal dominance: {} nats \
+             (mean own-path − mean cross-path, {} chains)\n  \
+             cross-chain asymmetry: {} nats (max |M[i][j] − M[j][i]|)\n",
+            nats(self.diagonal_dominance), self.n_chains, nats(self.asymmetry),
+        )
+    }
+}
+
 /// What [`CrossChainCompat::terms`] says. A constant so the producer and any
 /// test asserting the artifact's contract cannot drift.
 pub const TERMS: &str = "transition + initial_state";
@@ -221,15 +264,6 @@ impl CrossChainCompat {
     }
 
     /// The two lines printed beside the end-of-run diagnostics.
-    pub fn report(&self) -> String {
-        format!(
-            "  cross-chain diagonal dominance: {:.1} nats \
-             (mean own-path − mean cross-path, {} chains)\n  \
-             cross-chain asymmetry: {:.1} nats (max |M[i][j] − M[j][i]|)\n",
-            self.diagonal_dominance, self.chains.len(), self.asymmetry,
-        )
-    }
-
     /// Write the artifact. Errors are returned rather than swallowed so the
     /// caller decides — a diagnostic that silently fails to be written is a
     /// diagnostic nobody knows to look for.

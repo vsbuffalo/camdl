@@ -1630,6 +1630,9 @@ mod tests {
             acceptance_per_param: BTreeMap::new(),
             acceptance_per_chain: BTreeMap::new(),
             acceptance_kernel: None,
+            sampling_seconds: None,
+            best_chain: None,
+            best_loglik: None,
         };
         let out = block(&fmt, "pgas", "pgas", no_traces, BayesianView::Pgas(&r),
             crate::fit::loglik::LoglikType::CompleteData);
@@ -1677,6 +1680,9 @@ mod tests {
             acceptance_per_param: BTreeMap::new(),
             acceptance_per_chain: BTreeMap::new(),
             acceptance_kernel: None,
+            sampling_seconds: None,
+            best_chain: None,
+            best_loglik: None,
         };
 
         // `tau` reports no ESS → no efficiency headline, and `tau` is named.
@@ -1808,6 +1814,9 @@ mod tests {
             acceptance_per_param: BTreeMap::new(),
             acceptance_per_chain: BTreeMap::new(),
             acceptance_kernel: None,
+            sampling_seconds: None,
+            best_chain: None,
+            best_loglik: None,
         };
         let out = block(&fmt, "posterior", "pgas", no_traces, BayesianView::Pgas(&r),
             LoglikType::CompleteData);
@@ -1861,6 +1870,9 @@ mod tests {
             acceptance_per_param: BTreeMap::new(),
             acceptance_per_chain: BTreeMap::new(),
             acceptance_kernel: None,
+            sampling_seconds: None,
+            best_chain: None,
+            best_loglik: None,
         };
         // No chain traces on disk for this in-memory result → the per-chain
         // table degrades to "unavailable"; the ESS lines under test are unaffected.
@@ -2402,6 +2414,9 @@ mod tests {
             acceptance_per_param: BTreeMap::new(),
             acceptance_per_chain: BTreeMap::new(),
             acceptance_kernel: None,
+            sampling_seconds: None,
+            best_chain: None,
+            best_loglik: None,
         }
     }
 
@@ -2846,6 +2861,9 @@ mod tests {
             acceptance_per_param: BTreeMap::new(),
             acceptance_per_chain: BTreeMap::new(),
             acceptance_kernel: None,
+            sampling_seconds: None,
+            best_chain: None,
+            best_loglik: None,
         }
     }
 
@@ -3483,6 +3501,9 @@ mod tests {
             acceptance_per_param: BTreeMap::new(),
             acceptance_per_chain: BTreeMap::new(),
             acceptance_kernel: None,
+            sampling_seconds: None,
+            best_chain: None,
+            best_loglik: None,
         })
     }
 

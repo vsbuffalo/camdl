@@ -1397,9 +1397,8 @@ pub fn run_method(
         }
         acc.finish()
     };
-    if let Some(pr) = &path_renewal {
-        eprint!("{}", pr.report());
-    }
+    // Drawn at the end of the run from `pgas_summary.json`'s copy
+    // (`report::render`), after the verdict and the tables.
 
     // gh#685. The conditional filter's ESS at every observation, pooled over
     // the same retained sweeps. Printed directly under the renewal profile:
@@ -1419,16 +1418,16 @@ pub fn run_method(
         acc.finish()
     };
     if let Some(fe) = &filter_ess {
-        eprint!("{}", fe.summary.report());
         fe.write_tsv(&method_dir.join(super::filter_ess::FILTER_ESS_TSV))?;
     }
 
     // R̂/ESS of every latent state at every substep across the chains' saved
-    // paths, printed directly under the renewal profile so the two rows of
-    // tenths read together: renewal says where the sampler did not move, this
-    // says whether the chains disagree about the states it did not move. A
-    // refusal (one chain with paths, fewer than four saved paths) is reported
-    // on stderr and the block is omitted, never nulled.
+    // paths, drawn at the end of the run directly under the renewal profile so
+    // the two rows of tenths read together: renewal says where the sampler did
+    // not move, this says whether the chains disagree about the states it did
+    // not move. A refusal (one chain with paths, fewer than four saved paths)
+    // omits the block from the summary, never nulls it; the end of the run
+    // says why.
     let latent_convergence = {
         let blocks: Vec<super::latent_convergence::ChainPaths> =
             chain_paths.into_inner().unwrap().into_iter().flatten().collect();
@@ -1436,14 +1435,10 @@ pub fn run_method(
             &blocks, &traj_columns.data_column_names(),
         ) {
             Ok(lc) => {
-                eprint!("{}", lc.report());
                 lc.write_tsv(&method_dir.join(super::latent_convergence::LATENT_CONVERGENCE_TSV))?;
                 Some(lc)
             }
-            Err(e) => {
-                eprintln!("  latent-path convergence not computed: {e}");
-                None
-            }
+            Err(_) => None,
         }
     };
 
@@ -1567,7 +1562,7 @@ pub fn run_method(
         })
         .collect();
     let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
-    write_summary(method_dir, &all_results, kernel, thin, &traj_plan, &saved_paths,
+    write_summary(method_dir, &all_results, kernel, thin, elapsed.as_secs_f64(), &traj_plan, &saved_paths,
         n_trajectories, &diagnostics, path_renewal.as_ref(),
         filter_ess.as_ref().map(|fe| &fe.summary), latent_convergence.as_ref())?;
 
@@ -1760,10 +1755,9 @@ pub fn run_method(
     write_cross_chain_compat(
         &config, dt, &all_results, chain_final_draw.into_inner().unwrap(), method_dir);
 
-    let wall_secs = elapsed.as_secs_f64();
-    eprintln!("\npgas complete in {:.1}s: {}/", wall_secs, method_dir.display());
-    eprintln!("  best complete-data ll: {:.1} (chain {})",
-        best_sweep.log_complete_data_ll, ChainIndex(best_chain.0));
+    // The completion line and the best sweep's log-likelihood are drawn at
+    // the end of the run from `pgas_summary.json`'s `cost` and
+    // `fit_state.toml`'s `best_loglik` / `best_chain` (`report::render`).
 
     // gh#278: clean terminal — all output (pgas_summary.json with R̂/ESS,
     // diagnostics.json, draws.tsv) is written above, so the heartbeat's `Done`
@@ -1954,8 +1948,8 @@ fn chain_event_text(chain: ChainIndex, event: &PgasEvent) -> String {
 
 // ── Cross-chain path/parameter compatibility (gh#785) ────────────
 
-/// Compute and write `cross_chain_compat.json`, then print the two derived
-/// numbers.
+/// Compute and write `cross_chain_compat.json`; the end of the run shows its
+/// two derived numbers from the file (`report::render`).
 ///
 /// Written for **PGAS and cSMC only** — a path-augmented sampler is the only
 /// one that has an `x` to score. PMMH stores no path, so it writes no file at
@@ -2026,11 +2020,9 @@ fn write_cross_chain_compat(
             return;
         }
     };
-    if let Err(e) = compat.write(&method_dir.join("cross_chain_compat.json")) {
+    if let Err(e) = compat.write(&method_dir.join(super::cross_chain_compat::CROSS_CHAIN_COMPAT_JSON)) {
         eprintln!("warning: {e}");
-        return;
     }
-    eprint!("{}", compat.report());
 }
 
 // ── Diagnostics ──────────────────────────────────────────────────
@@ -2130,6 +2122,7 @@ fn write_summary(
     results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
     kernel: sim::inference::diagnostic::AcceptanceKernel,
     thin: usize,
+    sampling_seconds: f64,
     traj_plan: &TrajectoryStridePlan,
     saved_paths: &SavedPathCounts,
     n_trajectories: usize,
@@ -2154,6 +2147,10 @@ fn write_summary(
         // leave no row, so a row's position is not its chain.
         "acceptance_chains": results.iter().map(|(c, _, _)| *c).collect::<Vec<usize>>(),
         "acceptance_kernel": kernel,
+        // What sampling cost: the chains' wall time, which the end of the
+        // run reports (`pgas complete in …`). The key PMMH's `cost` block
+        // opens with, so a consumer reads both alike.
+        "cost": { "sampling_seconds": sampling_seconds },
         // Thinning factor: `n_samples` (kept draws) × `thin` = raw sampling
         // iterations, the thinning-invariant denominator for ESS/iteration.
         "thin": thin,

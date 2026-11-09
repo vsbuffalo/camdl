@@ -521,6 +521,12 @@ pub struct ChainDetail {
     /// The conditional filter's ESS by observation (`pgas_summary.json`'s
     /// `filter_ess` block); `None` for a method that wrote none.
     pub filter_ess: Option<crate::fit::filter_ess::FilterEss>,
+    /// Trajectory renewal by tenth of the series (`pgas_summary.json`'s
+    /// `path_renewal` block); `None` for a method that wrote none.
+    pub path_renewal: Option<crate::fit::path_renewal::PathRenewal>,
+    /// The cross-chain path/parameter compatibility numbers
+    /// (`cross_chain_compat.json`); `None` when the method wrote none.
+    pub cross_chain: Option<crate::fit::cross_chain_compat::CrossChainReading>,
     /// Per-chain count of retained draws whose log-posterior is `-inf`.
     pub neginf: Option<Vec<crate::fit::chain_diagnostics::ChainNegInf>>,
     /// Per-chain count of distinct parameter vectors among the retained draws.
@@ -591,6 +597,8 @@ impl ChainDetail {
             latent_table_written: None,
             n_chains_with_paths: 0,
             filter_ess: None,
+            path_renewal: None,
+            cross_chain: None,
             neginf: cd::read_chain_neginf(method_dir),
             unique_draws: cd::read_chain_unique_draws(method_dir),
             forkable,
@@ -621,6 +629,10 @@ impl ChainDetail {
             .and_then(crate::fit::pgas::read_saved_path_counts)
             .filter(|r| !r.per_chain.is_empty());
         detail.filter_ess = summary.as_ref().and_then(crate::fit::filter_ess::FilterEss::read);
+        detail.path_renewal = summary.as_ref()
+            .and_then(|s| s.get(crate::fit::path_renewal::PATH_RENEWAL_KEY))
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        detail.cross_chain = crate::fit::cross_chain_compat::CrossChainReading::read(method_dir);
         let (latent, n_chains_with_paths) =
             match crate::fit::latent_convergence::read_method_paths(method_dir) {
                 Ok(Some((chains, columns))) => {
