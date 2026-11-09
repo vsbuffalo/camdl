@@ -294,6 +294,25 @@ impl MethodView {
             MethodResult::Pgas(pgas) => Self::from_pgas(pgas),
             MethodResult::Pmmh(pmmh) => Self::from_pmmh(pmmh),
             MethodResult::Nlopt(nl) => Self::from_nlopt(nl),
+            MethodResult::Pfilter(pf) => Self::from_pfilter(pf),
+        }
+    }
+
+    /// A likelihood at fixed parameters: no convergence to judge, no
+    /// parameters estimated.
+    fn from_pfilter(r: &super::method_result::PfilterRun) -> Self {
+        Self {
+            converged: false,
+            gate_verdict: "n/a".into(),
+            best_loglik: Some(r.ll_mean),
+            max_chain_agreement: None,
+            max_rhat: None,
+            acceptance_rate: None,
+            ess_at_mle: None,
+            ess_posterior: None,
+            ess_per_iter: None,
+            ess_per_sec: None,
+            params: BTreeMap::new(),
         }
     }
 
@@ -395,7 +414,7 @@ fn pick_terminal_method<'a>(
     view: &FitView,
     nodes: &'a [MethodNode],
 ) -> Option<&'a MethodNode> {
-    let has_result = |n: &&MethodNode| MethodResult::has_result(n.view.method);
+    let has_result = |n: &&MethodNode| MethodResult::is_fitted(n.view.method);
     for method_name in view.methods_declared.iter().rev() {
         if let Some(node) = best_node_for_method(method_name, nodes).filter(has_result) {
             return Some(node);

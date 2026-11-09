@@ -1224,6 +1224,9 @@ fn write_summary(
         "n_chains": results.len(),
         "steps_per_chain": results.first().map(|(_, r)| r.n_steps).unwrap_or(0),
         "acceptance_rate": acceptance_rates,
+        // The chain each rate belongs to: refused chains leave gaps, so a
+        // position in `acceptance_rate` is not a chain number.
+        "acceptance_chains": results.iter().map(|(c, _)| *c).collect::<Vec<usize>>(),
         "map_loglik": map_result.map_loglik,
         "map_chain": ChainIndex(*map_chain),
         "map_params": map_params,

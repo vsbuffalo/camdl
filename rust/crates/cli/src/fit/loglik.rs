@@ -202,6 +202,8 @@ impl From<&MethodResult> for LoglikType {
             MethodResult::Pgas(_) => LoglikType::CompleteData,
             MethodResult::Pmmh(_) => LoglikType::Marginal,
             MethodResult::Nlopt(_) => LoglikType::OdeMarginal,
+            // A bootstrap filter's estimate of the marginal likelihood.
+            MethodResult::Pfilter(_) => LoglikType::Marginal,
         }
     }
 }

@@ -127,6 +127,173 @@ pub fn read_warmup(summary_path: &Path) -> Vec<ChainWarmup> {
         .unwrap_or_default()
 }
 
+/// A check made before sampling, shown in the run's opening section. Checks
+/// are not findings: the findings count does not count them.
+///
+/// Derived, not stored twice: `FilterNoise` from `fit_state.toml`'s
+/// `pf_noise`, `ObsStream` from the model, `MethodCaveat` from the method
+/// registry, `Starts` from the run's header.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Check {
+    /// One observation stream the fit scores: its name, what it projects
+    /// (`incidence(infection)`), and its likelihood family.
+    ObsStream { name: String, carrier: String, family: String },
+    /// The particle-filter noise measurement before PMMH samples. The record
+    /// carries its own `log L̂` mean (`PfNoiseCheck::ll_mean`).
+    FilterNoise { check: crate::fit::pf_noise::PfNoiseCheck },
+    /// The method registry's caveat for this method and backend.
+    MethodCaveat { method: String, note: String },
+    /// A starts rule that discards the declared `[estimate].start` values of
+    /// `params`, with the note the run prints.
+    Starts { mode: String, params: Vec<String>, note: String },
+}
+
+/// Whether a projection reads the state at an instant (a prevalence or
+/// snapshot) rather than accumulating a flow.
+pub fn projection_is_snapshot(p: &ir::observation::Projection) -> bool {
+    use ir::observation::Projection as P;
+    match p {
+        P::CumulativeFlow(_) | P::CumulativeFlowSum(_) | P::FlowRatio { .. } => false,
+        P::CurrentPop(_) | P::CurrentPopSum(_) | P::DerivedExpr(_) => true,
+    }
+}
+
+/// One `ObsStream` check per observation stream the model scores, in
+/// declaration order: what the run's `observations (…)` block lists.
+pub fn obs_stream_checks(model: &ir::Model) -> Vec<Check> {
+    use ir::observation::{Likelihood as L, Projection as P};
+    model.observations.iter().map(|obs| {
+        let carrier = match &obs.projection {
+            P::CumulativeFlow(name) => format!("incidence({})", name),
+            P::CumulativeFlowSum(names) => format!("incidence({})", names.join(" + ")),
+            P::FlowRatio { numerator, denominator } => format!("incidence({}) / incidence({})",
+                numerator.join(" + "), denominator.join(" + ")),
+            P::CurrentPop(name) => name.to_string(),
+            P::CurrentPopSum(names) => names.join(" + "),
+            P::DerivedExpr(_) => "derived expression".to_string(),
+        };
+        let family = match &obs.likelihood {
+            L::NegBinomial(_) => "NegBinomial",
+            L::Poisson(_) => "Poisson",
+            L::Normal(_) => "Normal",
+            L::Binomial(_) => "Binomial",
+            L::BetaBinomial(_) => "BetaBinomial",
+            L::Beta(_) => "Beta",
+            L::Bernoulli(_) => "Bernoulli",
+            L::ZeroInflatedNegBinomial(_) => "ZeroInflatedNegBinomial",
+        };
+        Check::ObsStream { name: obs.name.clone(), carrier, family: family.to_string() }
+    }).collect()
+}
+
+/// The verdict on a method, decided by its R̂ alone ([`verdict`]). Serialized
+/// with the report so a consumer reads it rather than recomputing it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Verdict {
+    Converged { max_rhat: f64, param: Option<String> },
+    NotConverged { max_rhat: f64, param: Option<String>, band: crate::fit::method_result::RhatBand },
+    /// R̂ could not be computed for these parameters for a reason that is a
+    /// problem: not converged, with no number to show.
+    Unassessable { params: Vec<String> },
+    /// R̂ was never computable for a structural reason (too few chains, a
+    /// point start): not assessed.
+    NotAssessed { reason: String },
+    /// IF2, NLopt and pfilter: no chains to compare.
+    NotApplicable,
+}
+
+/// The verdict on `result`, from its max R̂ and the band `fit summary`
+/// glyphs it in (`RhatBand`).
+pub fn verdict(result: &crate::fit::method_result::MethodResult) -> Verdict {
+    use crate::fit::method_result::{MaxRhat, MethodResult, RhatBand};
+    let diag = match result {
+        MethodResult::Pgas(r) => &r.diagnostics,
+        MethodResult::Pmmh(r) => &r.diagnostics,
+        MethodResult::If2(_) | MethodResult::Nlopt(_) | MethodResult::Pfilter(_) => {
+            return Verdict::NotApplicable;
+        }
+    };
+    let param = diag.per_param.iter()
+        .filter_map(|(n, p)| p.rhat().finite().map(|r| (n, r)))
+        .chain(diag.per_param.iter()
+            .filter(|(_, p)| matches!(p.rhat(), crate::fit::method_result::Stat::Infinite))
+            .map(|(n, _)| (n, f64::INFINITY)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(n, _)| n.clone());
+    match diag.max_rhat_status() {
+        MaxRhat::Reported(v) => match RhatBand::of(v) {
+            RhatBand::Converged => Verdict::Converged { max_rhat: v, param },
+            band => Verdict::NotConverged { max_rhat: v, param, band },
+        },
+        MaxRhat::Unassessable { params } => Verdict::Unassessable { params },
+        MaxRhat::NotApplicable { reason } => Verdict::NotAssessed { reason: reason.describe().to_string() },
+        MaxRhat::NoParams => Verdict::NotAssessed { reason: "no parameter was assessed".to_string() },
+    }
+}
+
+/// Where the leaf landed and what it took in all. `None` until the leaf is
+/// finalized.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Stored {
+    /// The leaf directory, for display ([`display_path`]).
+    pub leaf: String,
+    /// Wall time of the whole method, `run.json`'s `inputs.wall_time_seconds`.
+    pub total_seconds: Option<f64>,
+}
+
+/// Everything a method's report is built from. Two producers fill it: the end
+/// of the method's run, from memory, and `fit summary`'s loader, from the leaf
+/// (`fit_summary::load_method_facts`). Nothing else builds a `MethodReport`
+/// ([`crate::fit::fit_summary::build_method_report`]).
+#[derive(Debug, Clone)]
+pub struct MethodFacts {
+    /// The method leaf's label, its method (`pmmh`, `nl-sbplx`, …) and
+    /// directory.
+    pub name: String,
+    pub method: String,
+    pub method_dir: std::path::PathBuf,
+    pub header: Option<RunHeader>,
+    pub result: crate::fit::method_result::MethodResult,
+    pub checks: Vec<Check>,
+    /// One record per chain; empty when nothing adapted.
+    pub warmup: Vec<ChainWarmup>,
+    /// One record per finding, as `diagnostics.json` holds them.
+    pub findings: Vec<sim::inference::diagnostic::Diagnostic>,
+    pub stored: Option<Stored>,
+}
+
+/// The findings a leaf recorded (`diagnostics.json`), or none when it holds no
+/// such file. A file that exists and does not read is an error: reading it as
+/// "no findings" would show a fit with problems as one without.
+pub fn read_findings(method_dir: &Path) -> Result<Vec<sim::inference::diagnostic::Diagnostic>, String> {
+    let path = method_dir.join("diagnostics.json");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// The note a starts rule that discards declared starts prints, for the
+/// parameters in `params`. `still_read` is said for the methods (PMMH, `mh`)
+/// whose pre-run likelihood check and initial proposal still read the
+/// declared values.
+pub fn unused_starts_note(rule_tag: &str, params: &[String], still_read: bool) -> String {
+    let still = if still_read {
+        " It still sets the point of the pre-run likelihood check and the \
+         scale of the initial proposal."
+    } else {
+        ""
+    };
+    format!(
+        "`starts = \"{rule_tag}\"` draws every chain's start, so `[estimate].start` does \
+         not set where the chains begin for: {}.{still} Use `starts = \"single\"` to \
+         start every chain at the declared values.",
+        params.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
