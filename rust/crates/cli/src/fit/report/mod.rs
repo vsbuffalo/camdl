@@ -5,6 +5,7 @@
 //! `export` the Markdown and LaTeX projections of `fit summary`.
 
 pub mod build;
+pub mod exact;
 pub mod export;
 pub mod facts;
 pub mod findings;

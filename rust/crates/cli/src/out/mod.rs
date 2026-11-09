@@ -194,6 +194,9 @@ impl Out {
     pub fn method_report(&mut self, o: &crate::fit::report::build::MethodOutcome) {
         use crate::fit::report::render::{render_report, View};
         self.stderr_lines(&render_report(o, View::RunEnd));
+        if let crate::fit::report::build::MethodOutcome::Completed(report) = o {
+            crate::fit::report::exact::capture("run", report);
+        }
     }
 
     /// A notice, printed once and kept with the command's others.

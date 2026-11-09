@@ -77,7 +77,9 @@ fn every_method_has_a_report_with_its_verdict_checks_warmup_and_findings() {
     assert_eq!(m["verdict"]["band"], "severe");
     assert_eq!(m["verdict"]["param"], "beta");
     let kinds: Vec<&str> = m["checks"].as_array().unwrap().iter().map(|c| c["kind"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["method_caveat", "starts", "filter_noise", "obs_stream"]);
+    // In the order the run shows them: PMMH says its caveat after the starts
+    // note, once its data are bound.
+    assert_eq!(kinds, ["starts", "method_caveat", "filter_noise", "obs_stream"]);
     assert_eq!(m["warmup"].as_array().unwrap().len(), 4);
     let floors: Vec<u64> = m["findings"].as_array().unwrap().iter()
         .filter(|f| f["kind"]["type"] == "scale_at_floor")

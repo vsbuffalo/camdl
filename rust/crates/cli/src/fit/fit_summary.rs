@@ -539,7 +539,11 @@ fn format_text(
             MethodResult::Nlopt(_) | MethodResult::Pfilter(_) => None,
         };
         let report = match load_method_facts(resolved, typed, model, chain_detail) {
-            Ok(facts) => build_method_report(facts, &cal),
+            Ok(facts) => {
+                let report = build_method_report(facts, &cal);
+                crate::fit::report::exact::capture("summary", &report);
+                report
+            }
             Err(e) => {
                 eprintln!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e);
                 failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
@@ -743,7 +747,11 @@ fn build_summary_doc(
         // A leaf whose typed result did not load is already in `failures`.
         let Some(typed) = typed else { continue };
         match load_method_facts(resolved, typed, model.as_ref(), None) {
-            Ok(facts) => method_reports.push(build_method_report(facts, &cal)),
+            Ok(facts) => {
+                let report = build_method_report(facts, &cal);
+                crate::fit::report::exact::capture("summary", &report);
+                method_reports.push(report);
+            }
             Err(e) => {
                 eprintln!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e);
                 failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
@@ -843,9 +851,11 @@ fn load_method_facts(
     let backend = inputs.get("backend").and_then(|v| v.as_str()).unwrap_or("");
 
     // In the order the run shows them: the method's caveat, the starts note,
-    // the noise check, the observation streams.
+    // the noise check, the observation streams — except that PMMH says its
+    // caveat after the starts note, once its data are bound, so the caveat
+    // can carry the series length (`pmmh::run_method`).
     let mut checks = Vec::new();
-    if let Some(note) = crate::fit::methods::status_note_for(method, backend) {
+    let caveat = crate::fit::methods::status_note_for(method, backend).map(|note| {
         // PMMH records the series length it said its caveat with
         // (`pmmh_summary.json` `plan.series_len`).
         let series_len = (method == "pmmh").then(|| {
@@ -855,7 +865,11 @@ fn load_method_facts(
                 .map(|n| n as usize)
                 .filter(|&n| n > 0)
         }).flatten();
-        checks.push(Check::MethodCaveat { method: method.to_string(), note: note.to_string(), series_len });
+        Check::MethodCaveat { method: method.to_string(), note: note.to_string(), series_len }
+    });
+    let caveat_after_starts = method == "pmmh";
+    if !caveat_after_starts {
+        checks.extend(caveat.clone());
     }
     let unused = inputs.get("unused_starts");
     let params: Vec<String> = unused.and_then(|u| u.get("params")).and_then(|v| v.as_array())
@@ -865,6 +879,9 @@ fn load_method_facts(
         let mode = unused.and_then(|u| u.get("rule")).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let note = crate::fit::report::unused_starts_note(&mode, &params, matches!(method, "pmmh" | "mh"));
         checks.push(Check::Starts { mode, params, note });
+    }
+    if caveat_after_starts {
+        checks.extend(caveat);
     }
     if let MethodResult::Pmmh(r) = &result {
         if let Some(check) = r.pf_noise {
