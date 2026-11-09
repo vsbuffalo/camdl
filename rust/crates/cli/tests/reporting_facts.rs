@@ -129,9 +129,13 @@ fn every_recorded_fact_is_shown() {
         std::fs::copy(entry.path(), work.join(entry.file_name())).unwrap();
     }
 
-    let run = |args: &[String]| -> Output {
+    // Every report a command builds is appended here (`CAMDL_REPORT_CAPTURE`),
+    // for the run-equals-loader check below.
+    let captured = work.join("captured_reports.jsonl");
+    let run_capturing = |args: &[String], capture: &Path| -> Output {
         let out = Command::new(&camdl)
             .env_remove("CLICOLOR_FORCE")
+            .env("CAMDL_REPORT_CAPTURE", capture)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", &camdlc)
             .current_dir(&work)
@@ -143,6 +147,7 @@ fn every_recorded_fact_is_shown() {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         }
     };
+    let run = |args: &[String]| run_capturing(args, &captured);
     let a = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     let fit = |toml: &str, seed: &str, extra: &[&str]| {
         let mut v = a(&["fit", "run", toml, "--seed", seed, "--progress", "none"]);
@@ -185,6 +190,8 @@ fn every_recorded_fact_is_shown() {
         "--particles", "200", "--seed", "1",
     ]))));
 
+    run_equals_loader(&work, &captured, |args, capture| run_capturing(&a(args), capture));
+
     let facts = read_facts();
     assert!(facts.len() > 100, "facts.tsv holds {} facts; the reader is broken", facts.len());
     let mut missing = Vec::new();
@@ -210,6 +217,67 @@ fn every_recorded_fact_is_shown() {
             .map(|(name, o)| format!("──── {name} stdout ────\n{}\n──── {name} stderr ────\n{}", o.stdout, o.stderr))
             .collect();
         panic!("{} recorded fact(s) not shown:\n{}\n\n{}", missing.len(), missing.join("\n"), shown.join("\n"));
+    }
+}
+
+/// The report `fit run` built from memory equals the one `fit summary` builds
+/// from the leaf the run wrote (proposal
+/// `docs/dev/proposals/2026-11-08-cli-reporting.md`, "the run-equals-loader
+/// test"). Both are captured as their serialized `MethodReport`, with
+/// non-finite numbers spelled out so NaN cannot equal ∞; equality is exact.
+/// Every method the fixtures run is compared, the resumed PMMH leaf included.
+/// The failed fit has no completed report on either side.
+fn run_equals_loader(work: &Path, captured: &Path, run: impl Fn(&[&str], &Path) -> Output) {
+    let read = |path: &Path| -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .lines().map(|l| serde_json::from_str(l).expect("one JSON report per line")).collect()
+    };
+    let from_runs: Vec<serde_json::Value> =
+        read(captured).into_iter().filter(|c| c["by"] == "run").collect();
+    let mut methods: Vec<String> = from_runs.iter()
+        .map(|c| c["report"]["method"].as_str().unwrap().to_string()).collect();
+    methods.sort();
+    assert_eq!(methods, ["if2", "nl-sbplx", "pfilter", "pgas", "pmmh", "pmmh", "pmmh"],
+        "every fixture method's run captured its report");
+
+    let summary_capture = work.join("captured_summary.jsonl");
+    let mut mismatched = Vec::new();
+    for from_run in &from_runs {
+        let leaf = from_run["leaf"].as_str().expect("a completed report names its leaf");
+        let _ = std::fs::remove_file(&summary_capture);
+        let out = run(&["fit", "summary", leaf, "--format", "json"], &summary_capture);
+        let from_leaf = read(&summary_capture);
+        assert_eq!(from_leaf.len(), 1, "one report from {leaf}: {}", out.stderr);
+        let (a, b) = (&from_run["report"], &from_leaf[0]["report"]);
+        if a != b {
+            let mut diffs = Vec::new();
+            json_diff("", a, b, &mut diffs);
+            mismatched.push(format!("{leaf}:\n  {}", diffs.join("\n  ")));
+        }
+    }
+    assert!(mismatched.is_empty(),
+        "the report `fit run` built differs from the one `fit summary` builds from its leaf \
+         (run ≠ leaf):\n{}", mismatched.join("\n"));
+}
+
+/// Each JSON pointer where `a` and `b` differ, with both values.
+fn json_diff(at: &str, a: &serde_json::Value, b: &serde_json::Value, out: &mut Vec<String>) {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            let keys: std::collections::BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+            for k in keys {
+                json_diff(&format!("{at}/{k}"), x.get(k).unwrap_or(&Value::Null),
+                    y.get(k).unwrap_or(&Value::Null), out);
+            }
+        }
+        (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+            for (i, (p, q)) in x.iter().zip(y).enumerate() {
+                json_diff(&format!("{at}/{i}"), p, q, out);
+            }
+        }
+        _ if a != b => out.push(format!("{at}: run {a} ≠ leaf {b}")),
+        _ => {}
     }
 }
 
