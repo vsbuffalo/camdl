@@ -2057,6 +2057,20 @@ mod tests {
     /// flagged DEGENERATE next to the per-chain table — with the count, the
     /// contamination statement, and the explicit exclusion fix — and its mean
     /// renders as -inf, never the "missing data" em-dash.
+    /// The `--exclude-chains` value the table advises, read across the line
+    /// wrap, must be one `fit summary --exclude-chains` accepts, and must name
+    /// `chain`: advice the parser refuses sends the reader to an error.
+    fn assert_advised_exclusion_parses(table: &str, chain: usize) {
+        let flat = table.split_whitespace().collect::<Vec<_>>().join(" ");
+        let value = flat.split("--exclude-chains ").nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or_else(|| panic!("the flag names the explicit exclusion fix:\n{table}"));
+        let sel = ChainSelection::parse_exclude(value).unwrap_or_else(|e| {
+            panic!("the advised `--exclude-chains {value}` is refused by the parser: {e}\n{table}")
+        });
+        assert_eq!(sel.excluded_csv(), chain.to_string(), "it excludes the flagged chain");
+    }
+
     #[test]
     fn bayesian_chain_table_flags_neginf_chain_loudly() {
         let dir = crate::test_support::unique_temp_dir("summary_neginf_chain");
@@ -2090,8 +2104,7 @@ mod tests {
         assert!(table.contains("chain 2") && table.contains("66.7%")
                 && table.contains("(2/3)"),
             "the flag names the chain and the -inf fraction:\n{table}");
-        assert!(table.contains("--exclude-chains"),
-            "the flag names the explicit exclusion fix:\n{table}");
+        assert_advised_exclusion_parses(&table, 2);
         assert!(table.contains("draws.tsv"),
             "the flag states the contamination (draws are pooled):\n{table}");
 
@@ -2147,8 +2160,7 @@ mod tests {
             "the frozen chain gets the loud flag:\n{table}");
         assert!(table.contains("chain 2") && table.contains("across 3 retained"),
             "the flag names the chain and the draw count:\n{table}");
-        assert!(table.contains("--exclude-chains"),
-            "the flag names the explicit fix:\n{table}");
+        assert_advised_exclusion_parses(&table, 2);
         // Exactly one flagged chain — mixing chains stay clean.
         assert_eq!(table.matches("point-mass").count(), 1,
             "only the frozen chain is flagged:\n{table}");

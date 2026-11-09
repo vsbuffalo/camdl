@@ -1429,7 +1429,7 @@ pub(crate) fn chains_section(
                 "⚠ chain {}: log-posterior -inf on {:.1}% of retained draws \
                  ({}/{}) — a DEGENERATE chain; its draws are in draws.tsv \
                  and every pooled number in this block. View without it: \
-                 --exclude-chains <method>:{} (exclusion stays explicit — \
+                 --exclude-chains {} (exclusion stays explicit — \
                  gh#419).",
                 d.chain,
                 100.0 * d.n_neginf as f64 / d.n_retained as f64,
@@ -1448,7 +1448,7 @@ pub(crate) fn chains_section(
                 "⚠ chain {}: ONE distinct parameter vector across {} retained \
                  draws (zero accepted moves) — a point-mass chain; its draws \
                  are in draws.tsv and every pooled number in this block. View \
-                 without it: --exclude-chains <method>:{} (exclusion stays \
+                 without it: --exclude-chains {} (exclusion stays \
                  explicit — gh#419).",
                 u.chain, u.n_draws, u.chain,
             )));
