@@ -34,7 +34,7 @@ camdl 'scope is a browser viewer for fits. Start it now, in a second terminal in
 the same directory, and leave it running:
 
 ```sh
-camdl-watch --port 8800
+camdl-scope --port 8800
 ```
 
 Open <http://127.0.0.1:8800>. Each fit appears in its list as soon as it starts

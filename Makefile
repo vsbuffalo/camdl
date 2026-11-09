@@ -648,7 +648,7 @@ docs-site-preview: build
 
 # The camdl-scope screenshots on guide/first-fit.qmd need a running viewer, so
 # they are committed images rather than render output. Re-run after a change
-# to that page's fits or to camdl-scope. Needs camdl-watch, uv and Chrome.
+# to that page's fits or to camdl-scope. Needs camdl-scope, uv and Chrome.
 docs-first-fit-screenshots: build
 	$(DOCS_SITE_ENV) scripts/docs_first_fit_screenshots.sh
 

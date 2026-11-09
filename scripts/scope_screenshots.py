@@ -2,7 +2,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["playwright>=1.45"]
 # ///
-"""Screenshot tabs of a running camdl-scope viewer (`camdl-watch`).
+"""Screenshot tabs of a running camdl-scope viewer.
 
 Drives the installed Google Chrome headlessly (no browser download) and saves
 one PNG per (run, tab) as OUT_DIR/scope-<name>-<tab>.png. Each SHOT is

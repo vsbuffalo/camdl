@@ -4,13 +4,13 @@
 # The page runs its commands at render time, but its screenshots need a
 # running viewer, so they are committed images made here instead. This runs
 # the page's fits (same files, same seeds) in a temporary copy of
-# docs/guide/first-fit/, serves the result with camdl-watch, and saves the
+# docs/guide/first-fit/, serves the result with camdl-scope, and saves the
 # tabs the page shows to docs/guide/first-fit/img/. The posterior predictive
 # plots are drawn at render time instead (plot_predictive.py): camdl-scope
 # reads `fit predict` output from its pre-0.2 location (camdl-scope#9).
 #
 # Needs: this checkout's camdl first on PATH (`make docs-first-fit-screenshots`
-# arranges it), camdl-watch (docs/agents.md, "camdl 'scope"), uv, and Google
+# arranges it), camdl-scope (docs/agents.md, "camdl 'scope"), uv, and Google
 # Chrome.
 set -euo pipefail
 
@@ -34,7 +34,7 @@ camdl fit run fit-beta.toml --label beta --seed 4
 camdl fit run fit-synthetic.toml --label synthetic --seed 1
 camdl fit run fit-r0.toml --label r0 --seed 4
 
-camdl-watch --store results/fits --port "$port" >watch.log 2>&1 &
+camdl-scope --store results/fits --port "$port" >watch.log 2>&1 &
 watch_pid=$!
 up=""
 for _ in $(seq 120); do
@@ -42,7 +42,7 @@ for _ in $(seq 120); do
   sleep 0.5
 done
 if [ -z "$up" ]; then
-  echo "camdl-watch did not answer on port $port:" >&2
+  echo "camdl-scope did not answer on port $port:" >&2
   cat watch.log >&2
   exit 1
 fi
