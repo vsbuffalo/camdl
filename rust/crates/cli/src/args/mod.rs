@@ -2038,6 +2038,7 @@ pub struct SurveyArgs {
     pub model: PathBuf,
 
     /// fit.toml supplying [estimate] bounds and [data] (fit-aware mode).
+    /// The model scored is MODEL; the config's [model] is not read.
     /// Mutually exclusive with --estimate / --data; pass exactly one.
     #[arg(long, conflicts_with_all = ["estimate", "data"])]
     pub fit: Option<PathBuf>,

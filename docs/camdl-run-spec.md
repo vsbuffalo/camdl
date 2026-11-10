@@ -6943,7 +6943,9 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 
 ```
 --fit FIT                   fit.toml supplying [estimate] bounds and [data].
-                            Mutually exclusive with --estimate/--data
+                            The model scored is MODEL; the config's [model]
+                            is not read. Mutually exclusive with
+                            --estimate/--data
 --estimate NAME=LO:HI       inline LHS bounds (repeatable). With --fit, an
                             estimated parameter whose box has an infinite end
                             (no `bounds`, no `in [lo, hi]`) is refused
