@@ -1901,10 +1901,9 @@ pub fn complete_data_loglik(
             // Unreachable via `td` above, which now refuses a state that cannot
             // consume the record. Kept as the divergence detector between that
             // walk and this one.
-            log::warn!(
-                "gamma index mismatch at substep {}: tracked {} but trajectory recorded {} gammas",
-                s, gamma_consumed, rec.gammas.len()
-            );
+            crate::run_notes::record(crate::run_notes::RunNote::GammaIndexMismatch {
+                substep: s, tracked: gamma_consumed, recorded: rec.gammas.len(),
+            });
         }
 
         // Accumulate flows

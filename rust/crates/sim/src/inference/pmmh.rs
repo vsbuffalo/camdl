@@ -432,9 +432,12 @@ impl AdaptiveProposal {
         }
 
         // Cholesky decomposition
-        if let Some(l) = super::linalg::cholesky_lower(&a, d) {
-            self.chol.copy_from_slice(&l);
-            self.chol_valid = true;
+        match super::linalg::cholesky_lower(&a, d) {
+            Ok(l) => {
+                self.chol.copy_from_slice(&l);
+                self.chol_valid = true;
+            }
+            Err(e) => crate::run_notes::record(crate::run_notes::RunNote::NotPositiveDefinite(e)),
         }
         // If Cholesky fails (shouldn't with eps regularization), keep old factor.
 

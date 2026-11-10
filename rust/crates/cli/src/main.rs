@@ -523,6 +523,9 @@ fn main() {
     // `--no-progress` is the discoverable shorthand for `--progress none` and
     // wins when both are given.
     out::progress::init(if cli.no_progress { args::types::ProgressMode::None } else { cli.progress });
+    // What the engine meets mid-run and records once (`sim::run_notes`) is
+    // said as it is first recorded, as a warning.
+    sim::run_notes::set_reporter(util::report_run_note);
     util::set_ir_cache_disabled(cli.no_ir_cache);
     util::set_licm_disabled(cli.no_licm);
 

@@ -12,6 +12,7 @@ pub mod quantity;  // generated-quantities evaluator (proposal 2026-06-25)
 pub mod flat_eval;
 pub mod eval_stats;
 pub mod trace;     // env-gated developer traces: the one place the engine writes to stderr
+pub mod run_notes; // what a run met that the user is told once: recorded, said by the command
 pub mod boundary_times;
 pub mod output;
 pub mod rng;

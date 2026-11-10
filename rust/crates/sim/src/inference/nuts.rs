@@ -141,8 +141,9 @@ fn solve_upper_triangular_from_lower(l: &[f64], b: &[f64], d: usize) -> Vec<f64>
 /// if the matrix is not positive definite.
 fn cholesky_lower(a: &[f64], d: usize) -> Vec<f64> {
     match super::linalg::cholesky_lower(a, d) {
-        Some(l) => l,
-        None => {
+        Ok(l) => l,
+        Err(e) => {
+            crate::run_notes::record(crate::run_notes::RunNote::NotPositiveDefinite(e));
             // Fallback: use a small diagonal factor so NUTS doesn't crash.
             // The mass matrix geometry will be wrong, but the sampler will
             // self-correct via step-size adaptation.
