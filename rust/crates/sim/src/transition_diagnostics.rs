@@ -62,26 +62,8 @@ pub fn write_tsv(path: &str, diags: &[TransitionDiagnostics]) -> std::io::Result
     Ok(zero_count)
 }
 
-/// Print a zero-firing warning to stderr.
-pub fn warn_zero_firings(diags: &[TransitionDiagnostics]) {
-    let zeros: Vec<&TransitionDiagnostics> = diags.iter()
-        .filter(|d| d.total_firings == 0)
-        .collect();
-    if zeros.is_empty() { return; }
-    if zeros.len() > 20 {
-        eprintln!(
-            "warning: {} transitions never fired during simulation",
-            zeros.len()
-        );
-        eprintln!("  (run `camdl inspect MODEL --transition \"...*\" --rate` to debug)");
-    } else {
-        eprintln!(
-            "warning: {} transition{} never fired during simulation:",
-            zeros.len(),
-            if zeros.len() == 1 { "" } else { "s" }
-        );
-        for d in &zeros {
-            eprintln!("  {}    (propensity always 0.0)", d.name);
-        }
-    }
+/// The transitions that never fired, in model order. The command reports them
+/// as a notice.
+pub fn never_fired(diags: &[TransitionDiagnostics]) -> Vec<&str> {
+    diags.iter().filter(|d| d.total_firings == 0).map(|d| d.name.as_str()).collect()
 }

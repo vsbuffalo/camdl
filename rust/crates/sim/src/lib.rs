@@ -38,7 +38,7 @@ pub use simulate::Simulate;
 pub use gillespie::GillespieSim;
 pub use chain_binomial::ChainBinomialSim;
 pub use ode::OdeSim;
-pub use transition_diagnostics::{TransitionDiagnostics, write_tsv as write_diagnostics_tsv, warn_zero_firings};
+pub use transition_diagnostics::{TransitionDiagnostics, write_tsv as write_diagnostics_tsv, never_fired};
 
 // ── Backend capability constraints ────────────────────────────────────────
 
