@@ -1013,7 +1013,8 @@ pub fn run_method(
         // missing chain dirs.
         n_good_chains: if n_good_chains < n_chains { Some(n_good_chains) } else { None },
         start_values,
-        loglik_type: Some(LoglikType::Marginal),
+        // A filter's marginal for PMMH, the ODE skeleton's for `mh`.
+        loglik_type: Some(loglik_kind),
         acceptance_rate: Some(map_result.acceptance_rate),
         // Bayesian methods don't produce an IF2-style Â table; the
         // refine-gates proposal only gates on scout→refine handoffs.

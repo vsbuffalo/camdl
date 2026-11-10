@@ -991,6 +991,10 @@ pub struct PmmhRun {
     /// deterministic `mh` path and when the check had no spread to measure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pf_noise: Option<crate::fit::pf_noise::PfNoiseCheck>,
+    /// The class of `map_loglik`: a filter's `marginal` for `pmmh`, the ODE
+    /// skeleton's `ode_marginal` for `mh`, which shares this result shape.
+    /// `LoglikType::from(FitAlgorithm)` decides it, as for the run.
+    pub loglik_type: crate::fit::loglik::LoglikType,
 }
 
 /// Errors loading a `MethodResult` from a method directory.
@@ -1535,6 +1539,7 @@ impl PmmhRun {
             map_chain,
             cost,
             pf_noise,
+            loglik_type: crate::fit::loglik::LoglikType::from(algo),
             diagnostics: posterior_diagnostics(
                 method_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
             )?,

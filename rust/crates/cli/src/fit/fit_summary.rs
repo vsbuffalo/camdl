@@ -2612,6 +2612,7 @@ mod tests {
             map_chain: None,
             cost: None,
             pf_noise: None,
+            loglik_type: LoglikType::Marginal,
         };
         let out = block(&fmt, "posterior", "pmmh", no_traces,
             BayesianView::Pmmh(&r), LoglikType::Marginal);
@@ -3533,6 +3534,7 @@ mod tests {
             map_chain: None,
             cost: None,
             pf_noise: None,
+            loglik_type: crate::fit::loglik::LoglikType::Marginal,
         })
     }
 
