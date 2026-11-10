@@ -134,6 +134,7 @@ fn apply_selection_to_typed(
 /// outlier signal is strong — gh#406), then the loud, non-quietable exclusion
 /// warning. The flag is the second thing the user reads, not the first.
 fn chain_selection_advisory(
+    out: &crate::out::Out,
     method_dir: &Path,
     info: &SubsetInfo,
     kind: super::loglik::LoglikType,
@@ -144,12 +145,12 @@ fn chain_selection_advisory(
         let scores = cd::chain_loglik_mod_zscores(&means.scored_by_chain());
         let outliers = cd::outlier_labels(&scores);
         if !outliers.is_empty() {
-            eprintln!(
+            out.say(format_args!(
                 "{n} {} disagree strongly with the others on `{}` — before \
                  excluding, ask whether a parameter is unidentified (a flat likelihood ridge). \
                  The per-chain table below names them; the primary fix is the model, not the flag.",
                 outliers.join(", "), means.scored_column, n = stderr.paint("note:", Style::Warn)
-            );
+            ));
         }
     }
     warn_active_selection(info, stderr);
@@ -206,7 +207,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     // dates can't be rendered and the omission is otherwise silent.
     // stderr keeps the warning out of the JSON/stdout payload.
     if let Some(msg) = load_calendar_context(Path::new(&dir)).missing_origin_warning() {
-        eprintln!("{} {}", stderr.paint("warning:", Style::Warn), msg);
+        out.say(format_args!("{} {}", stderr.paint("warning:", Style::Warn), msg));
     }
 
     if args.params_only {
@@ -482,17 +483,17 @@ fn format_text(
         // anything on it is read: its per-chain table would label chain_N/ as
         // chain N while its draws.tsv keys the same chain N - 1 (gh#990).
         if let Err(e) = crate::chain_index::refuse_one_based_layout(&resolved.method_dir) {
-            eprintln!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e);
+            out.say(format_args!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e));
             failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
             continue;
         }
         let mut typed = match MethodResult::load_from(&resolved.method_dir, &resolved.method) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!(
+                out.say(format_args!(
                     "warning: cannot load {} ({}): {}",
                     method_dir_str, resolved.method, e
-                );
+                ));
                 failures.push(LoadFailure {
                     leaf: method_dir_str.clone(),
                     reason: e.to_string(),
@@ -515,7 +516,7 @@ fn format_text(
                 match apply_selection_to_typed(&mut typed, &resolved.method_dir, sel) {
                     Ok(info) => {
                         if !warned {
-                            chain_selection_advisory(&resolved.method_dir, &info, ll_kind, stderr);
+                            chain_selection_advisory(out, &resolved.method_dir, &info, ll_kind, stderr);
                             warned = true;
                         }
                         subset_info = Some(info);
@@ -545,7 +546,7 @@ fn format_text(
                 report
             }
             Err(e) => {
-                eprintln!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e);
+                out.say(format_args!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e));
                 failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
                 continue;
             }
@@ -700,7 +701,7 @@ fn build_summary_doc(
         // per-chain rows and the `--exclude-chains` advisory would otherwise
         // label chain_N/ as chain N while draws.tsv keys it N - 1 (gh#990).
         if let Err(e) = crate::chain_index::refuse_one_based_layout(&resolved.method_dir) {
-            eprintln!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e);
+            out.say(format_args!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e));
             failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
             continue;
         }
@@ -709,10 +710,10 @@ fn build_summary_doc(
         // reader with an empty `methods` array and nothing at all saying why
         // (gh#905).
         if let Err(e) = &typed_loaded {
-            eprintln!(
+            out.say(format_args!(
                 "warning: cannot load {} ({}): {}",
                 method_dir_str, resolved.method, e
-            );
+            ));
             failures.push(LoadFailure {
                 leaf: method_dir_str.clone(),
                 reason: e.to_string(),
@@ -734,7 +735,7 @@ fn build_summary_doc(
                     match apply_selection_to_typed(t, &resolved.method_dir, sel) {
                         Ok(info) => {
                             if !advised {
-                                chain_selection_advisory(&resolved.method_dir, &info, ll_kind, stderr);
+                                chain_selection_advisory(out, &resolved.method_dir, &info, ll_kind, stderr);
                                 advised = true;
                             }
                             chain_selection_json = Some(info.to_json());
@@ -753,7 +754,7 @@ fn build_summary_doc(
                 method_reports.push(report);
             }
             Err(e) => {
-                eprintln!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e);
+                out.say(format_args!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e));
                 failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
             }
         }
@@ -766,7 +767,7 @@ fn build_summary_doc(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let table_row = build_summary_table_row(Path::new(dir), now_unix);
+    let table_row = build_summary_table_row(out, Path::new(dir), now_unix);
 
     FitSummaryDoc {
         schema: SchemaInfo {
@@ -785,7 +786,7 @@ fn build_summary_doc(
 /// `delta_ll_vs_best = 0.0` (single-fit scope). On error,
 /// substitutes a placeholder row whose `fit_id` reflects the failure
 /// so JSON consumers see something rather than a crash.
-fn build_summary_table_row(fit_dir: &Path, now_unix: i64) -> TableRow {
+fn build_summary_table_row(out: &crate::out::Out, fit_dir: &Path, now_unix: i64) -> TableRow {
     let fit_hash = FitView::read(fit_dir).map(|v| v.fit_hash).unwrap_or_default();
     let diff = ConfigDiff::identity(&fit_hash);
     match table_row::build_row(fit_dir, diff, 0.0, now_unix) {
@@ -795,7 +796,7 @@ fn build_summary_table_row(fit_dir: &Path, now_unix: i64) -> TableRow {
             // schema discriminator is correct; everything else is
             // empty/zero. Loud-via-stderr so tests don't silently
             // pass on a broken fit.
-            eprintln!("warning: cannot build table_row for {}: {}", fit_dir.display(), e);
+            out.say(format_args!("warning: cannot build table_row for {}: {}", fit_dir.display(), e));
             TableRow {
                 schema: table_row::TableRowSchema::current(),
                 fit_id: String::new(),
