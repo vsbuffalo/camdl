@@ -16,7 +16,7 @@ use crate::inference::obs_loglik::{
     negbin_logpmf, zi_negbin_logpmf, zi_negbin_logpmf_grad, discretized_normal_logpmf_tol,
     poisson_logpmf, DEFAULT_TOL,
     negbin_logpmf_grad, discretized_normal_logpmf_grad, poisson_logpmf_grad,
-    beta_binomial_logpmf_grad, beta_logpdf, beta_logpdf_grad, is_probability,
+    beta_binomial_logpmf_grad, beta_logpdf, beta_logpdf_grad, is_probability, is_trial_count,
 };
 use crate::inference::obs_attempt::NegInfCause;
 use crate::inference::types::LOG_PROB_FLOOR;
@@ -159,6 +159,11 @@ pub(crate) fn eval_likelihood_resolved(
             if observed.is_nan() { return f64::NEG_INFINITY; }
             let n_val = eval_resolved(n, &ctx(projected));
             let p_val = eval_resolved(p, &ctx(projected));
+            // A trial count that is NaN or negative is out of the domain:
+            // `NaN.round().max(0.0)` and `(-5.0).round().max(0.0)` are both
+            // `0.0`, which would score the row as a zero-trial observation
+            // (exactly 0 for k = 0) instead of refusing it.
+            if !is_trial_count(n_val) { return f64::NEG_INFINITY; }
             let k = observed.round().max(0.0) as u64;
             let n_int = n_val.round().max(0.0) as u64;
             // gh#925 sibling: `binom_logpmf` scores `p >= 1` as `p = 1` and
@@ -186,6 +191,8 @@ pub(crate) fn eval_likelihood_resolved(
             let n_val = eval_resolved(n, &ctx(projected));
             let alpha_val = eval_resolved(alpha, &ctx(projected));
             let beta_val = eval_resolved(beta, &ctx(projected));
+            // See the Binomial arm: a NaN or negative `n` is not zero trials.
+            if !is_trial_count(n_val) { return f64::NEG_INFINITY; }
             let k = observed.round().max(0.0) as u64;
             let n_int = n_val.round().max(0.0) as u64;
             crate::inference::obs_loglik::beta_binomial_logpmf(k, n_int, alpha_val, beta_val)
@@ -336,6 +343,8 @@ pub(crate) fn explain_likelihood_neg_inf(
                 // denominator reaches the value function's `n == 0` branch and
                 // would otherwise be reported as a data-only zero-trials row.
                 nan("n")
+            } else if !is_trial_count(n_val) {
+                domain("n", n_val)
             } else if n_int == 0 && k != 0 {
                 NegInfCause::ZeroTrialsPositiveCount
             } else if p_val.is_nan() {
@@ -359,6 +368,8 @@ pub(crate) fn explain_likelihood_neg_inf(
             let n_int = k_of(n_val);
             if n_val.is_nan() {
                 nan("n")
+            } else if !is_trial_count(n_val) {
+                domain("n", n_val)
             } else if n_int == 0 && k != 0 {
                 NegInfCause::ZeroTrialsPositiveCount
             } else if a.is_nan() {
@@ -497,6 +508,9 @@ pub(crate) fn eval_likelihood_resolved_grad(
             if observed.is_nan() { return; }
             let n_val = eval_resolved(n, &ctx);
             let p_val = eval_resolved(p, &ctx);
+            // The zero gradient of the value arm's `-inf` for a NaN or
+            // negative `n`.
+            if !is_trial_count(n_val) { return; }
             let n_int = n_val.round().max(0.0) as u64;
             let k_obs = observed.round().max(0.0) as u64;
             if p_val > 0.0 && p_val < 1.0 && k_obs <= n_int {
@@ -519,6 +533,9 @@ pub(crate) fn eval_likelihood_resolved_grad(
             let n_val = eval_resolved(n, &ctx);
             let alpha_val = eval_resolved(alpha, &ctx);
             let beta_val = eval_resolved(beta, &ctx);
+            // The zero gradient of the value arm's `-inf` for a NaN or
+            // negative `n`.
+            if !is_trial_count(n_val) { return; }
             let n_round = n_val.round().max(0.0);
             let (d_alpha, d_beta) =
                 beta_binomial_logpmf_grad(observed, n_round, alpha_val, beta_val);
@@ -662,6 +679,7 @@ pub(crate) fn dlogp_dprojected(
             if observed.is_nan() { return 0.0; }
             let n_val = eval_resolved(n, &ctx);
             let p_val = eval_resolved(p, &ctx);
+            if !is_trial_count(n_val) { return 0.0; }
             let n_int = n_val.round().max(0.0) as u64;
             let k_obs = observed.round().max(0.0) as u64;
             if p_val > 0.0 && p_val < 1.0 && k_obs <= n_int {
@@ -675,6 +693,7 @@ pub(crate) fn dlogp_dprojected(
             let n_val = eval_resolved(n, &ctx);
             let alpha_val = eval_resolved(alpha, &ctx);
             let beta_val = eval_resolved(beta, &ctx);
+            if !is_trial_count(n_val) { return 0.0; }
             let n_round = n_val.round().max(0.0);
             let (d_alpha, d_beta) =
                 beta_binomial_logpmf_grad(observed, n_round, alpha_val, beta_val);
@@ -1483,6 +1502,57 @@ mod tests {
         );
         assert!(matches!(cause, NegInfCause::ObservationNotFinite),
             "the report must name the observation, got {cause:?}");
+    }
+
+    /// A trial count of `-5` or NaN was read as zero trials: both round and
+    /// clamp to `0`, and zero trials against `k = 0` scores exactly 0. A
+    /// negative or NaN `n` is outside the family's domain, so it scores `-inf`
+    /// on the value arm, contributes nothing on the gradient arms, and is
+    /// named as the `n` argument by the collapse report.
+    #[test]
+    fn binomial_refuses_a_negative_or_nan_trial_count_instead_of_scoring_zero_trials() {
+        // Non-vacuity control: zero trials against zero successes is a real
+        // observation that scores exactly 0.
+        let (v, _, _) = binomial_arms(0.0, 0.5, 0.0);
+        assert_eq!(v, 0.0, "zero trials, zero successes scores 0, got {v}");
+
+        for n in [-5.0, -0.25, f64::NAN] {
+            let (v, d_theta, d_proj) = binomial_arms(n, 0.5, 0.0);
+            assert_eq!(v, f64::NEG_INFINITY, "n = {n} must score -inf, got {v}");
+            assert_eq!(d_theta, 0.0, "n = {n}: no ∂/∂θ from a rejected term, got {d_theta}");
+            assert_eq!(d_proj, 0.0, "n = {n}: no ∂/∂projected from a rejected term, got {d_proj}");
+        }
+
+        let compiled = compiled_bernoulli_fixture();
+        let int_s = IntState::from_vec(vec![0; compiled.int_local_to_global.len()]);
+        let real_s = RealState::new(compiled.real_local_to_global.len());
+        let params = vec![0.0; compiled.param_index.len()];
+        let cause = explain_likelihood_neg_inf(
+            &binomial_likelihood(-5.0, 0.5), 0.0, 0.0, 0.0, &[], &params,
+            &compiled, &int_s, &real_s,
+        );
+        assert!(
+            matches!(&cause, NegInfCause::ArgumentOutOfDomain { arg, .. } if arg == "n"),
+            "the report must name the trial count, got {cause:?}"
+        );
+    }
+
+    /// The count above its trials is `-inf` on the value arm and is named
+    /// `CountExceedsTrials` by the report: a trajectory whose `n` is too small
+    /// cannot produce the count.
+    #[test]
+    fn binomial_count_above_a_runtime_trial_count_scores_neg_inf_and_is_named() {
+        let (v, _, _) = binomial_arms(10.0, 0.5, 11.0);
+        assert_eq!(v, f64::NEG_INFINITY, "k = 11 > n = 10 must score -inf, got {v}");
+        let compiled = compiled_bernoulli_fixture();
+        let int_s = IntState::from_vec(vec![0; compiled.int_local_to_global.len()]);
+        let real_s = RealState::new(compiled.real_local_to_global.len());
+        let params = vec![0.0; compiled.param_index.len()];
+        let cause = explain_likelihood_neg_inf(
+            &binomial_likelihood(10.0, 0.5), 0.0, 0.0, 11.0, &[], &params,
+            &compiled, &int_s, &real_s,
+        );
+        assert!(matches!(cause, NegInfCause::CountExceedsTrials), "got {cause:?}");
     }
 
     // ── gh#893: the same hole in BetaBinomial's value arm ──

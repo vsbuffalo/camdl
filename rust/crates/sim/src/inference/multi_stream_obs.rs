@@ -128,20 +128,69 @@ fn collect_obs_column_refs(e: &ir::expr::Expr, out: &mut Vec<String>) {
     }
 }
 
-/// If the likelihood's trial denominator `n` is a single `ObsColumnRef`, return
-/// that aux column's name (for the `value ≤ n` / `n > 0` per-row data check,
-/// §3.2). Only the binomial / beta-binomial families have a capping `n`;
-/// everything else returns `None` (no cap to check at bind).
-fn denominator_aux_name(lik: &ir::observation::Likelihood) -> Option<&str> {
+/// The trial count `n` of a binomial / beta-binomial likelihood, if the
+/// family has one (§3.2). Everything else has no capping `n` to check at bind.
+fn trials_expr(lik: &ir::observation::Likelihood) -> Option<&ir::expr::Expr> {
     use ir::observation::Likelihood as L;
-    let n_expr = match lik {
-        L::Binomial(b) => &b.n,
-        L::BetaBinomial(bb) => &bb.n,
-        _ => return None,
-    };
-    match n_expr {
-        ir::expr::Expr::ObsColumnRef(w) => Some(w.obs_column_ref.as_str()),
+    match lik {
+        L::Binomial(b) => Some(&b.n),
+        L::BetaBinomial(bb) => Some(&bb.n),
         _ => None,
+    }
+}
+
+/// Evaluate a trial-count expression from what the data file alone supplies:
+/// numeric literals and the row's aux columns, combined by arithmetic.
+///
+/// `Some(n)` means `n` is the same for every particle and every parameter
+/// vector, so `value <= n` is decidable at bind. `None` means `n` reads
+/// something that varies (a compartment, a parameter, time, a table, a named
+/// constant) or an operator this evaluator does not reproduce; that `n` is
+/// scored per particle at run time and is not judged here. The operator set is
+/// deliberately small: a node it does not know returns `None`, which leaves the
+/// check to the run-time scoring rather than guessing a value.
+fn static_trials(e: &ir::expr::Expr, aux_row: &[(String, f64)]) -> Option<f64> {
+    use ir::expr::{BinOp, Expr, UnOp};
+    match e {
+        Expr::Const(c) => Some(c.value),
+        Expr::ObsColumnRef(w) => aux_row
+            .iter()
+            .find(|(k, _)| k == &w.obs_column_ref)
+            .map(|(_, v)| *v),
+        Expr::BinOp(w) => {
+            let l = static_trials(&w.bin_op.left, aux_row)?;
+            let r = static_trials(&w.bin_op.right, aux_row)?;
+            match w.bin_op.op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                BinOp::Div => Some(l / r),
+                BinOp::Min => Some(l.min(r)),
+                BinOp::Max => Some(l.max(r)),
+                _ => None,
+            }
+        }
+        Expr::UnOp(w) => {
+            let a = static_trials(&w.un_op.arg, aux_row)?;
+            match w.un_op.op {
+                UnOp::Neg => Some(-a),
+                UnOp::Abs => Some(a.abs()),
+                UnOp::Floor => Some(a.floor()),
+                UnOp::Ceil => Some(a.ceil()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// How a finding names the trial count: the column when `n` is one bare aux
+/// column, otherwise "trial count n" (an expression of the row's data and
+/// constants).
+fn trials_label(e: &ir::expr::Expr) -> String {
+    match e {
+        ir::expr::Expr::ObsColumnRef(w) => format!("denominator '{}'", w.obs_column_ref),
+        _ => "trial count n".to_string(),
     }
 }
 
@@ -1066,7 +1115,8 @@ impl BoundObs {
         for spec in &streams {
             let stream_name = &spec.ir_model.name;
             let required = aux_refs_in_likelihood(&spec.ir_model.likelihood);
-            let denom = denominator_aux_name(&spec.ir_model.likelihood);
+            let trials = trials_expr(&spec.ir_model.likelihood);
+            let close_times = spec.times.closes();
             // gh#812: reported ONCE per stream with the row list, not per row.
             // A file full of zero denominators is still worth shouting about;
             // 5 of 49 is a fact about the testing programme.
@@ -1126,41 +1176,60 @@ impl BoundObs {
                 // The `value <= n` half of this check is the load-bearing one and
                 // still applies at n = 0, where it rejects a positive count
                 // against zero trials. Only the `n > 0` half is relaxed.
-                if let Some(dn) = denom {
-                    if let Some((_, n)) = aux_row.iter().find(|(k, _)| k == dn) {
-                        // NaN arm explicit: `*n < 0.0` alone is false for NaN,
-                        // which would let a NaN denominator past this error and
+                if let Some(n_expr) = trials {
+                    if let Some(n) = static_trials(n_expr, aux_row) {
+                        let dn = trials_label(n_expr);
+                        // The row's closing time, so a finding can be read
+                        // against the data file by date as well as by index.
+                        let at = match close_times.get(i) {
+                            Some(t) => format!(" (t = {t})"),
+                            None => String::new(),
+                        };
+                        // NaN arm explicit: `n < 0.0` alone is false for NaN,
+                        // which would let a NaN count past this error and
                         // into the `value <= n` comparisons below.
-                        if n.is_nan() || *n < 0.0 {
+                        if n.is_nan() || n < 0.0 {
                             findings.push(Finding {
                                 severity: Severity::Error,
                                 message: format!(
-                                    "observation stream '{}' row {}: denominator '{}' = {} \
-                                     must be >= 0",
-                                    stream_name, i, dn, n
+                                    "observation stream '{}' row {}{}: {} = {} must be >= 0",
+                                    stream_name, i, at, dn, n
                                 ),
                             });
-                        } else if *n == 0.0 {
+                        } else if n.fract() != 0.0 {
+                            // The likelihood scores `round(n)` trials; a
+                            // fractional count would silently become a
+                            // different integer than the one written.
+                            findings.push(Finding {
+                                severity: Severity::Error,
+                                message: format!(
+                                    "observation stream '{}' row {}{}: {} = {} is not an \
+                                     integer; a trial count must be a whole number (wrap the \
+                                     expression in floor() or ceil() to choose the rounding)",
+                                    stream_name, i, at, dn, n
+                                ),
+                            });
+                        } else if n == 0.0 {
                             zero_denom_rows.push(i);
                             if observed > 0.0 {
                                 findings.push(Finding {
                                     severity: Severity::Error,
                                     message: format!(
-                                        "observation stream '{}' row {}: scored value {} \
-                                         against denominator '{}' = 0 — no trials cannot \
+                                        "observation stream '{}' row {}{}: scored value {} \
+                                         against {} = 0 — no trials cannot \
                                          yield a positive count",
-                                        stream_name, i, observed, dn
+                                        stream_name, i, at, observed, dn
                                     ),
                                 });
                             }
-                        } else if observed > *n {
+                        } else if observed > n {
                             findings.push(Finding {
                                 severity: Severity::Error,
                                 message: format!(
-                                    "observation stream '{}' row {}: scored value {} exceeds \
-                                     denominator '{}' = {} (value ≤ n required) — check the \
+                                    "observation stream '{}' row {}{}: scored value {} exceeds \
+                                     {} = {} (value ≤ n required) — check the \
                                      data file (a transposed row?)",
-                                    stream_name, i, observed, dn, n
+                                    stream_name, i, at, observed, dn, n
                                 ),
                             });
                         }
@@ -1184,14 +1253,14 @@ impl BoundObs {
                 findings.push(Finding {
                     severity: Severity::Warn,
                     message: format!(
-                        "observation stream '{}': {} of {} rows have denominator '{}' = 0 \
+                        "observation stream '{}': {} of {} rows have {} = 0 \
                          (rows {}{}). These score as zero — with no trials there is one \
                          possible outcome, so the term is non-identifying, not invalid. \
                          If those rows are MISSING rather than zero-effort, write them as NA.",
                         stream_name,
                         zero_denom_rows.len(),
                         spec.observations.len(),
-                        denom.unwrap_or("?"),
+                        trials.map(trials_label).unwrap_or_else(|| "?".to_string()),
                         shown.join(", "),
                         more,
                     ),
