@@ -1728,7 +1728,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     &chain_results.loglik_eval, &run_config.estimated_params,
                     &param_names, &run_config.base_params, &run_config.compiled,
                 ).unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
-                runner::write_diagnostics(&method_dir.to_string_lossy(), &chain_results.results)
+                runner::write_iteration_trace(&method_dir.to_string_lossy(), &chain_results.results)
                     .unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
 
                 // Write fit_state.toml — the leaf's result record.
@@ -2042,6 +2042,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         abandon_method(&out, format!("error running {method_name}: {e}"),
                         )
                     });
+                    // Recorded as every other method's findings are. The
+                    // optimiser raises none of the sampler diagnostics, so the
+                    // file holds what the run pushed (possibly nothing): an
+                    // empty `diagnostics.json` says the run raised no
+                    // findings, where no file says only that nobody asked.
+                    write_diagnostics(&out.collector(), &method_dir)
+                        .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
                     let fs = load_method_result_or_exit(&mut out, method_name, &method_dir);
                     method_best_loglik = Some(fs.best_loglik);
                     method_best_chain = Some(fs.best_chain);

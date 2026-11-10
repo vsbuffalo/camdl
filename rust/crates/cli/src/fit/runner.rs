@@ -3383,8 +3383,9 @@ pub fn format_param_value(v: f64) -> String {
     }
 }
 
-/// Write diagnostics.tsv: per-iteration loglik for all chains.
-pub fn write_diagnostics(dir: &str, results: &[(usize, IF2Result)]) -> Result<(), String> {
+/// Write diagnostics.tsv: per-iteration loglik for all chains. Not the
+/// method's findings, which are `fit::write_diagnostics`'s `diagnostics.json`.
+pub fn write_iteration_trace(dir: &str, results: &[(usize, IF2Result)]) -> Result<(), String> {
     use std::io::Write;
     let path = format!("{}/diagnostics.tsv", dir);
     let mut f = std::fs::File::create(&path)
