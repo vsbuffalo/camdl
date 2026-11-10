@@ -201,6 +201,7 @@ impl Reporter {
             throttle: std::sync::Mutex::new(Throttle::default()),
             metric: std::sync::Mutex::new(None),
             label,
+            events: None,
         }
     }
 }
@@ -229,9 +230,39 @@ pub struct Task {
     /// The last metric, kept so Plain-mode lines carry it too.
     metric: std::sync::Mutex<Option<Metric>>,
     label: String,
+    /// Where a fit chain's progress is recorded, and the chain's number.
+    events: Option<ChainEvents>,
+}
+
+/// A fit chain's progress record: the method's event log, the chain, and the
+/// cadence its progress events are written at.
+struct ChainEvents {
+    log: super::events::EventLog,
+    chain: usize,
+    throttle: std::sync::Mutex<Throttle>,
 }
 
 impl Task {
+    /// Record this chain's progress in the method's event log, when the run
+    /// has one: at the plain progress line's cadence ([`DEFAULT_THROTTLE`]),
+    /// whatever the display mode, and at the chain's last step.
+    pub fn recording(mut self, log: Option<super::events::EventLog>, chain: usize) -> Self {
+        self.events = log.map(|log| ChainEvents { log, chain, throttle: std::sync::Mutex::new(Throttle::default()) });
+        self
+    }
+
+    /// The progress event `inc` has just reached, when one is due.
+    fn record_progress(&self) {
+        let Some(ev) = &self.events else { return };
+        let (step, of) = (self.pb.position(), self.pb.length().unwrap_or(0));
+        let due = ev.throttle.lock().map(|mut t| t.ready()).unwrap_or(false) || step == of;
+        if due {
+            let metric = self.metric.lock().ok().and_then(|m| *m);
+            ev.log.record(&super::events::Event::Progress(
+                super::events::Progress::of_chain(ev.chain, step, of, metric)));
+        }
+    }
+
     /// A whole line said while the task runs (a chain that finished with
     /// something to report). Above the bars on a terminal, so it does not tear
     /// them; through [`crate::out::LiveHandle`] off one.
@@ -246,12 +277,16 @@ impl Task {
 
     /// Advance by `n`. `Pretty`: redraw. `Plain`: a throttled
     /// `label pos/len <metric>` log line (position is tracked even against a
-    /// hidden target). `None`: no-op.
+    /// hidden target). `None`: nothing shown. A recorded chain's progress
+    /// event is written in every mode ([`recording`](Self::recording)).
     pub fn inc(&self, n: u64) {
+        // The position is kept in every mode (the bar is hidden off Pretty),
+        // so a recorded chain's step is right whatever the display shows.
+        self.pb.inc(n);
+        self.record_progress();
         match self.mode {
-            Resolved::Pretty => self.pb.inc(n),
+            Resolved::Pretty => {}
             Resolved::Plain => {
-                self.pb.inc(n);
                 let ready = self.throttle.lock().map(|mut t| t.ready()).unwrap_or(false);
                 if ready {
                     let m = self.metric.lock().ok().and_then(|m| *m)
@@ -296,9 +331,10 @@ pub enum Metric {
     Loglik { value: f64, kind: crate::fit::loglik::LoglikType },
     /// The best log-likelihood so far, for search-style work: `best ll=…`.
     BestLoglik(f64),
-    /// An MCMC chain's current marginal log-likelihood and its acceptance
+    /// An MCMC chain's current log-likelihood, a marginal of class `kind`
+    /// (PMMH's filter estimate, `mh`'s ODE value), and its acceptance
     /// fraction in `[0, 1]`: `ll=…  acc=…%`.
-    Mcmc { loglik: f64, accept: f64 },
+    Mcmc { loglik: f64, kind: crate::fit::loglik::LoglikType, accept: f64 },
 }
 
 impl std::fmt::Display for Metric {
@@ -311,7 +347,9 @@ impl std::fmt::Display for Metric {
             Metric::BestLoglik(x) => {
                 if x.is_finite() { write!(f, "best ll={x:.1}") } else { write!(f, "best ll=-inf") }
             }
-            Metric::Mcmc { loglik, accept } => write!(f, "{}  acc={:.0}%", ll(loglik), accept * 100.0),
+            Metric::Mcmc { loglik, kind, accept } => {
+                write!(f, "{}  acc={:.0}%", ll_kind(loglik, kind), accept * 100.0)
+            }
         }
     }
 }
@@ -343,10 +381,11 @@ pub fn ll(x: f64) -> Metric {
 
 /// Standard MCMC metric carrying the current log-likelihood and the
 /// acceptance fraction (PMMH / PGAS-MCMC), e.g. `"ll=-12.3  acc=24%"`. The
-/// `accept` argument is a fraction in `[0, 1]`. Reuses [`ll`] for the
-/// log-likelihood term and its -inf handling.
-pub fn mcmc(loglik: f64, accept: f64) -> Metric {
-    Metric::Mcmc { loglik, accept }
+/// `accept` argument is a fraction in `[0, 1]`, and `kind` the class of
+/// `loglik`. Renders the log-likelihood term as [`ll_kind`] does, -inf
+/// handling included.
+pub fn mcmc(loglik: f64, kind: crate::fit::loglik::LoglikType, accept: f64) -> Metric {
+    Metric::Mcmc { loglik, kind, accept }
 }
 
 #[cfg(test)]
@@ -383,9 +422,10 @@ mod tests {
 
     #[test]
     fn mcmc_reuses_ll_and_formats_accept() {
-        assert_eq!(mcmc(-12.34, 0.24).to_string(), "ll=-12.3  acc=24%");
-        assert_eq!(mcmc(f64::NEG_INFINITY, 0.0).to_string(), "ll=-inf  acc=0%");
-        assert_eq!(mcmc(-1.0, 1.0).to_string(), "ll=-1.0  acc=100%");
+        use crate::fit::loglik::LoglikType::{Marginal, OdeMarginal};
+        assert_eq!(mcmc(-12.34, Marginal, 0.24).to_string(), "ll=-12.3  acc=24%");
+        assert_eq!(mcmc(f64::NEG_INFINITY, Marginal, 0.0).to_string(), "ll=-inf  acc=0%");
+        assert_eq!(mcmc(-1.0, OdeMarginal, 1.0).to_string(), "ll=-1.0  acc=100%");
     }
 
     #[test]

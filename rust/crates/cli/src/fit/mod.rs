@@ -314,6 +314,11 @@ pub(crate) fn abandon_method(out: &mut crate::out::Out, message: String) -> ! {
             header: r.header, findings: r.findings, error: message.clone(),
         });
     }
+    // As for `diagnostics.json`, the run's own error stays first.
+    let message = match out.close_events() {
+        Ok(()) => message,
+        Err(e) => format!("{message}\n  and its events were not recorded: {e}"),
+    };
     out.error(crate::out::CommandError::new(message)).exit()
 }
 
@@ -1577,9 +1582,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // `abandon_method` (through `Out::error`) on every fatal path, its
         // `Drop` on a panic. Built here, before the dispatch, so no method can
         // silently be the one without a heartbeat. `Out` records the method
-        // from here: the checks it shows and the findings it draws.
+        // from here: the checks it shows and the findings it draws, in memory
+        // and in the leaf's `events.jsonl`.
         let heartbeat = std::sync::Arc::new(method_heartbeat(&method_dir, &method.algorithm));
-        let collector = out.begin_method(run_header.clone(), method_name, heartbeat.clone());
+        let collector = out.begin_method(run_header.clone(), method_name, heartbeat.clone(), &method_dir)
+            .unwrap_or_else(|e| abandon_method_on(&heartbeat, format!("error: {e}")));
 
         // Surface the registry caveat for Beta/Experimental methods, once per
         // executing method (after the cache-hit skip above, so reused leaves
@@ -2198,7 +2205,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // through `abandon_method`. The terminal write goes down BEFORE
         // `finalize` below, so the timer thread is stopped before the leaf's
         // manifest is taken over its files — a `progress.json` rewritten during
-        // the manifest walk would be hashed mid-flight.
+        // the manifest walk would be hashed mid-flight. An event that was not
+        // recorded fails the run here, before it is called done.
+        if let Err(e) = out.events_result() {
+            // Closed first, so the failure is said once, not again as the
+            // abandoned run's unrecorded events.
+            let _ = out.close_events();
+            abandon_method(&mut out, format!("error: {e}"));
+        }
         out.method_done();
 
         // ── finalize the CAS fit-method leaf ──
@@ -2290,6 +2304,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             format!("{} \u{b7} {} \u{b7} {:.1}s", method_name, dest.display(), method_elapsed.as_secs_f64()));
         if let Some(hint) = stored_hint {
             out.hint(hint);
+        }
+        // The report was the event log's last line; a write that failed since
+        // the method was called done fails the command, its leaf committed.
+        if let Err(e) = out.close_events() {
+            out.fail(format!("error: {e}"));
         }
 
     } // end sweep_points

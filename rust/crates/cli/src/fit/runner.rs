@@ -2278,7 +2278,7 @@ fn run_one_chain(
         // Pretty (redraw) / Plain (throttled log line) / None (no-op) — no
         // mode branching here.
         if let Some(t) = task {
-            t.set(crate::out::progress::ll(loglik));
+            t.set(crate::out::progress::ll_kind(loglik, crate::fit::loglik::LoglikType::If2));
             t.inc(1);
         }
         // gh#900: and to the run's heartbeat, whose step is one cooling
@@ -2336,7 +2336,7 @@ fn run_one_chain(
     // (`Task::finish` consumes, so it can't be called on the borrowed Task
     // here). The post-loop `out.say("best chain: …")` carries the summary.
     if let Some(t) = task {
-        t.set(crate::out::progress::ll(result.final_loglik));
+        t.set(crate::out::progress::ll_kind(result.final_loglik, crate::fit::loglik::LoglikType::If2));
     }
 
     Ok(result)
@@ -2363,7 +2363,8 @@ pub fn run_chains_with_per_chain_params(
     let bars: Vec<crate::out::progress::Task> = (0..config.n_chains)
         .map(|chain_id| reporter.task(
             config.if2_config.n_iterations as u64,
-            format!("chain {}", ChainIndex(chain_id)), "it"))
+            format!("chain {}", ChainIndex(chain_id)), "it")
+            .recording(out.events(), chain_id))
         .collect();
 
     // Preflight transform report
