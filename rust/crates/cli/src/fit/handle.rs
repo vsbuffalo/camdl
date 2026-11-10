@@ -313,7 +313,7 @@ fn folder_label_hint(root: &Path, name: &str) -> String {
         .flatten()
         .map(|e| e.path())
         .filter(|seg| {
-            crate::run_meta::read_fit_sidecar(seg).and_then(|s| s.label).as_deref() == Some(name)
+            crate::run_meta::read_fit_sidecar(seg).ok().flatten().and_then(|s| s.label).as_deref() == Some(name)
         })
         .collect();
     folders.sort();
@@ -491,24 +491,31 @@ pub fn resolve_fit_run(s: &str) -> Result<ResolvedFit, ResolveError> {
 /// What the archive cannot carry is its own *location*. Data archival is not yet
 /// part of the sealed packet (Phase 1 archives only the model IR), so the data
 /// still lives where the config says — at paths written relative to the
-/// **original fit.toml directory**, not to the segment. Anchoring them at the
+/// **source config's directory**, not to the segment. Anchoring them at the
 /// archive's own location turned `../data/streams/x.tsv` into
 /// `results/fits/data/streams/x.tsv` and broke `compare` for every project whose
-/// configs use relative paths (gh#652). The sidecar records `fit_toml_path`, so
-/// that directory is known even when the file itself is gone or changed, and
-/// [`FitConfig::load_anchored_at`] resolves against it.
+/// configs use relative paths (gh#652). The sidecar records `source_config`,
+/// relative to the segment, so that directory is known even when the file
+/// itself is gone or changed — and known from any working directory, which a
+/// path recorded relative to where `fit run` was started was not (gh#1009).
+/// [`FitConfig::load_anchored_at`] resolves against `<segment>/<source_config>`.
+///
+/// A data file the recovered config names but that is not there is refused
+/// here, naming the stream, the path it was looked for at, the rule that put it
+/// there, and the content hash the fit recorded for it — so the reader can find
+/// the file it needs rather than a downstream verb failing on a bare path.
 ///
 /// A fit run entirely from the CLI has no `fit.toml` at all: `write_fit_sidecar`
-/// records an empty `fit_toml_path` and archives nothing. That is a real gap, not
-/// a lookup miss, so it gets its own named error rather than a wrong path.
+/// records no `source_config` and archives nothing. That is a real gap, not a
+/// lookup miss, so it gets its own named error rather than a wrong path.
 fn load_config_for_segment(segment: &Path) -> Result<FitConfig, String> {
-    let side = crate::run_meta::read_fit_sidecar(segment).ok_or_else(|| {
+    let side = crate::run_meta::read_fit_sidecar(segment)?.ok_or_else(|| {
         format!(
             "{} is not a complete fit directory: no fit.meta.json",
             segment.display()
         )
     })?;
-    if side.fit_toml_path.is_empty() {
+    let Some(source_config) = side.source_config.as_deref() else {
         return Err(format!(
             "{} was produced without a fit.toml (a CLI-only run), so it carries \
              no config to recover: no archived config and no recorded config \
@@ -516,16 +523,70 @@ fn load_config_for_segment(segment: &Path) -> Result<FitConfig, String> {
              Pass the fit toml, or re-run the fit from one.",
             segment.display()
         ));
-    }
-    let archived = segment.join("fit.toml.original");
-    FitConfig::load_anchored_at(&archived, Path::new(&side.fit_toml_path)).map_err(|e| {
+    };
+    let archived = segment.join(crate::run_meta::ARCHIVED_CONFIG);
+    let anchor = segment.join(source_config);
+    let config = FitConfig::load_anchored_at(&archived, &anchor).map_err(|e| {
         format!(
             "{} is a fit directory but its archived config could not be read: {e}\n  \
              (expected {})",
             segment.display(),
             archived.display()
         )
-    })
+    })?;
+    refuse_missing_data(&config, &side, &anchor)?;
+    Ok(config)
+}
+
+/// `Err` naming every data file the recovered config binds that is not on
+/// disk: the stream, where it was looked for, and the hash `fit.meta.json`
+/// recorded for it (`data_hashes`, keyed by stream).
+fn refuse_missing_data(
+    config: &FitConfig,
+    side: &crate::run_meta::FitSidecar,
+    anchor: &Path,
+) -> Result<(), String> {
+    let Some(data) = &config.problem.data else { return Ok(()) };
+    let hash_of = |streams: &[&str]| -> String {
+        let hashes: std::collections::BTreeSet<&str> = streams.iter()
+            .filter_map(|s| side.data_hashes.get(*s).map(String::as_str))
+            .collect();
+        if hashes.is_empty() {
+            "no hash recorded".to_string()
+        } else {
+            format!("recorded hash {}", hashes.into_iter().collect::<Vec<_>>().join(", "))
+        }
+    };
+    let mut missing: Vec<String> = Vec::new();
+    if let Some(file) = &data.file {
+        if !Path::new(file).is_file() {
+            // The shorthand binds every stream to the one file; each stream's
+            // recorded hash is that file's.
+            let streams: Vec<&str> = side.data_hashes.keys().map(String::as_str).collect();
+            missing.push(format!("[data] file: looked for {file} ({})", hash_of(&streams)));
+        }
+    }
+    for (stream, path) in &data.observations {
+        if !Path::new(path).is_file() {
+            missing.push(format!("stream `{stream}`: looked for {path} ({})", hash_of(&[stream])));
+        }
+    }
+    for (stream, path) in data.holdout.iter().flatten() {
+        if !Path::new(path).is_file() {
+            missing.push(format!("holdout stream `{stream}`: looked for {path} (no hash recorded)"));
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "the fit's data is not where its config says:\n  {}\n  \
+         The config's relative data paths resolve against the source config's \
+         directory, {} (`source_config` in fit.meta.json, relative to the fit folder). \
+         Restore the file there, or pass a fit.toml whose paths name it.",
+        missing.join("\n  "),
+        anchor.parent().unwrap_or(anchor).display()
+    ))
 }
 
 /// The canonical identity of a fit.toml's text — what the config MEANS, with
@@ -702,7 +763,6 @@ cooling = 0.7
         // reason `compare <run-dir>` could not derive a prequential.
         let (tmp, toml_path, seg) = portable_project("anchor");
         let side = crate::run_meta::FitSidecar {
-            fit_toml_path: toml_path.to_string_lossy().into_owned(),
             ..Default::default()
         };
         crate::run_meta::write_fit_sidecar(&seg, &toml_path, &side).unwrap();
@@ -726,15 +786,61 @@ cooling = 0.7
         // The model path anchors the same way.
         assert_eq!(
             Path::new(&cfg.problem.model.camdl),
-            tmp.join("fits/../models/sir.camdl"),
+            seg.join("../../../fits/../models/sir.camdl"),
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// gh#1009: the source config is recorded relative to the fit folder, so
+    /// it names the same file from any working directory — `fits/a.toml` is
+    /// three levels up from `results/fits/sir-0000beef/`.
+    #[test]
+    fn the_source_config_is_recorded_relative_to_the_fit_folder() {
+        let (tmp, toml_path, seg) = portable_project("relative");
+        crate::run_meta::write_fit_sidecar(&seg, &toml_path, &Default::default()).unwrap();
+        let side = crate::run_meta::read_fit_sidecar(&seg).unwrap().unwrap();
+        assert_eq!(side.source_config.as_deref(), Some("../../../fits/a.toml"));
+        assert_eq!(side.schema_version, crate::run_meta::FIT_META_SCHEMA_VERSION);
+        assert_eq!(std::fs::canonicalize(seg.join("../../../fits/a.toml")).unwrap(),
+            std::fs::canonicalize(&toml_path).unwrap());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A data file the recovered config binds but that is gone is refused
+    /// with the stream, the path looked for, and the hash the fit recorded.
+    #[test]
+    fn a_missing_data_file_is_named_with_where_it_was_looked_for_and_its_hash() {
+        let (tmp, toml_path, seg) = portable_project("missing_data");
+        let side = crate::run_meta::FitSidecar {
+            data_hashes: std::collections::BTreeMap::from([("cases".to_string(), "b39b0a43".to_string())]),
+            ..Default::default()
+        };
+        crate::run_meta::write_fit_sidecar(&seg, &toml_path, &side).unwrap();
+        std::fs::remove_file(tmp.join("data/streams/cases.tsv")).unwrap();
+        let err = resolve_fit(&seg.to_string_lossy()).err().expect("the data is gone").to_string();
+        assert!(err.contains("stream `cases`"), "{err}");
+        assert!(err.contains("data/streams/cases.tsv"), "names where it looked: {err}");
+        assert!(err.contains("recorded hash b39b0a43"), "{err}");
+        assert!(err.contains("source_config"), "says how the path was resolved: {err}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// An older `fit.meta.json` is refused with its version named, never read
+    /// as if its `fit_toml_path` were a `source_config`.
+    #[test]
+    fn an_older_fit_meta_is_refused_naming_its_version() {
+        let (tmp, _toml, seg) = portable_project("old_schema");
+        std::fs::write(seg.join("fit.meta.json"),
+            r#"{"model_path":"sir.camdl","fit_toml_path":"fits/a.toml"}"#).unwrap();
+        let err = resolve_fit(&seg.to_string_lossy()).err().expect("an old record").to_string();
+        assert!(err.contains("schema version 1") && err.contains("reads version 2"), "{err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn cli_only_fit_has_a_named_error_not_a_wrong_path() {
         // A fit run with no fit.toml archives no config and records no config
-        // directory (`fit_toml_path` is ""), so there is nothing to anchor. That
+        // location (`source_config` is absent), so there is nothing to anchor. That
         // is a named gap, not a silent miss or a plausible-looking wrong path.
         let (tmp, _toml, seg) = portable_project("clionly");
         crate::run_meta::write_fit_sidecar(
@@ -785,7 +891,6 @@ cooling = 0.7
         let (tmp, toml_path, seg) = portable_project(slug);
         std::fs::write(&toml_path, archived).unwrap();
         let side = crate::run_meta::FitSidecar {
-            fit_toml_path: toml_path.to_string_lossy().into_owned(),
             fit_toml_hash: crate::hashing::sha256_hex(archived.as_bytes()),
             ..Default::default()
         };
@@ -915,7 +1020,6 @@ cooling    = 0.70
         let older = ARCHIVED.replace("particles = 10", "particles = 20");
         std::fs::write(&toml_path, &older).unwrap();
         let side = crate::run_meta::FitSidecar {
-            fit_toml_path: toml_path.to_string_lossy().into_owned(),
             ..Default::default()
         };
         crate::run_meta::write_fit_sidecar(&seg, &toml_path, &side).unwrap();

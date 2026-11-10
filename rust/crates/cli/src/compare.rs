@@ -962,7 +962,7 @@ fn detect_sealed_holdout(resolved: &ResolvedFit) -> Result<Option<SealedHoldout>
     if !declares {
         return Ok(None);
     }
-    let window = crate::run_meta::read_fit_sidecar(&resolved.segment)
+    let window = crate::run_meta::read_fit_sidecar(&resolved.segment)?
         .and_then(|s| s.training_window);
     let Some(window) = window else {
         return Err(format!(
@@ -1002,11 +1002,12 @@ fn mc_se_delta(row: &Row, base: &Row) -> Option<f64> {
 
 fn fit_data_identity(resolved: &ResolvedFit) -> DataIdentity {
     match crate::run_meta::read_fit_sidecar(&resolved.segment) {
-        Some(s) if !s.data_hashes.is_empty() => DataIdentity::Digests(s.data_hashes),
-        Some(_) => DataIdentity::Unknown(
+        Ok(Some(s)) if !s.data_hashes.is_empty() => DataIdentity::Digests(s.data_hashes),
+        Ok(Some(_)) => DataIdentity::Unknown(
             "its fit.meta.json records no data hashes".into()),
-        None => DataIdentity::Unknown(format!(
+        Ok(None) => DataIdentity::Unknown(format!(
             "no fit.meta.json under {}", resolved.segment.display())),
+        Err(e) => DataIdentity::Unknown(e),
     }
 }
 

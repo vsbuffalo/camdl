@@ -358,7 +358,7 @@ pub fn stored_fit_simulator(
     };
     let (model, _) = crate::util::load_model(&model_src)
         .map_err(|e| format!("reading the model the fit ran on, {model_src}: {e}"))?;
-    let sidecar = crate::run_meta::read_fit_sidecar(&resolved.segment);
+    let sidecar = crate::run_meta::read_fit_sidecar(&resolved.segment)?;
     let backend = resolved
         .leaf
         .as_ref()

@@ -528,7 +528,7 @@ mod tests {
             argv: Vec::new(),
             model: "sir.camdl".into(),
             model_identity: model_identity.into(),
-            fit_toml_path: "fit.toml".into(),
+            source_config: Some("fit.toml".into()),
             fit_toml_hash: "h".repeat(64),
             data_hashes: HashMap::new(),
             estimated: Vec::new(),

@@ -618,7 +618,6 @@ impl ObsSchema {
 /// (`resolved_priors` = gh#75 per-parameter prior source,
 /// `estimated`/`fixed`/`data_hashes`, `model_identity`, paths).
 ///
-/// It is **derived provenance, not a source of truth**: a faithful readable
 /// The applied training window (gh#585): training excluded every
 /// observation with `t > train_end`. Value type for
 /// [`FitSidecar::training_window`]; produced by
@@ -630,6 +629,24 @@ pub struct TrainingWindow {
     pub train_end: f64,
 }
 
+/// The `schema_version` [`write_fit_sidecar`] stamps on `fit.meta.json`, and
+/// the only one [`read_fit_sidecar`] accepts. A record without the field was
+/// written before it existed and is version 1.
+///
+/// v2: the producing config's location is `source_config`, relative to the fit
+/// folder that holds the sidecar, replacing v1's `fit_toml_path`, which was
+/// relative to whatever directory `fit run` was started from and so resolved
+/// wrongly from anywhere else (gh#1009).
+pub const FIT_META_SCHEMA_VERSION: u32 = 2;
+
+/// The fit-level provenance sidecar (`fits/{stem}-{h8}/fit.meta.json`). A CAS
+/// fit's fit level is a path segment with no `RunRecord`; this sidecar is the
+/// single authoritative home for the fit-wide attributes that are NOT carried
+/// on the method leaves — the user `--label` and the fit-wide provenance
+/// (`resolved_priors` = gh#75 per-parameter prior source,
+/// `estimated`/`fixed`/`data_hashes`, `model_identity`, paths).
+///
+/// It is **derived provenance, not a source of truth**: a faithful readable
 /// projection of inputs already hashed into the leaf identity (the `FitDigest`
 /// — different priors already produce a different fit identity). It is written
 /// post-identity and is never fed back into any hash. The producing `fit.toml`
@@ -643,6 +660,10 @@ pub struct TrainingWindow {
 /// default).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FitSidecar {
+    /// [`FIT_META_SCHEMA_VERSION`], stamped by [`write_fit_sidecar`] whatever
+    /// the caller set; [`read_fit_sidecar`] refuses any other.
+    #[serde(default)]
+    pub schema_version: u32,
     /// A profile's label. A fit segment's sidecar carries none: a fit's label
     /// names one run and lives on that run's `run.json` (gh#896).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -651,15 +672,22 @@ pub struct FitSidecar {
     pub model_path: String,
     #[serde(default)]
     pub model_identity: String,
-    /// Where the producing `fit.toml` lived when the fit ran. Load-bearing, not
-    /// decorative: the archived `fit.toml.original` beside this sidecar carries
-    /// the config's text but not its location, and its relative `[model]` /
-    /// `[data]` paths were written against THIS directory — so recovering the
-    /// config from the segment resolves them here (gh#652,
-    /// [`crate::fit::config_v2::FitConfigV2::load_anchored_at`]). Empty for a
-    /// CLI-only fit, which has no config to archive and no directory to anchor.
-    #[serde(default)]
-    pub fit_toml_path: String,
+    /// The producing config file (the user's `fit.toml`, which may since have
+    /// moved or changed), as a path **relative to the fit folder holding this
+    /// sidecar** (`fits/{stem}-{h8}/`), e.g. `../../../fits/sir.toml`; set by
+    /// [`write_fit_sidecar`]. Not the archived copy: that is
+    /// `fit.toml.original` in the same folder ([`ARCHIVED_CONFIG`]), which
+    /// carries the config's text but not its location.
+    ///
+    /// Load-bearing: the archive's relative `[model]` / `[data]` paths were
+    /// written against the source config's directory, so recovering the config
+    /// from the segment anchors them at `<fit folder>/<source_config>` (gh#652,
+    /// [`crate::fit::config_v2::FitConfigV2::load_anchored_at`]) — from any
+    /// working directory, and after the project directory moves as a whole
+    /// (gh#1009). `None` for a CLI-only fit, which has no config to archive and
+    /// no directory to anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_config: Option<String>,
     /// SHA-256 of the producing config's raw bytes — **provenance**: which exact
     /// bytes produced this fit, down to the whitespace. Nothing looks a fit up
     /// by it.
@@ -745,10 +773,16 @@ pub struct FitSidecar {
     pub docs: ir::ModelDocs,
 }
 
+/// The producing config's archived copy inside a fit folder.
+pub const ARCHIVED_CONFIG: &str = "fit.toml.original";
+
 /// Write the fit-level sidecar and archive the producing `fit.toml`
-/// (`fit.toml.original`, the config-diff source `fit table` loads). The archive
+/// ([`ARCHIVED_CONFIG`], the config-diff source `fit table` loads). The archive
 /// is best-effort: a CLI-only fit (no `.toml`) has none and config-diff degrades
 /// to identity. Idempotent; the caller writes it once per fit segment.
+///
+/// `source_config` is recorded from `fit_toml_path` here, relative to
+/// `fit_segment`, when `fit_toml_path` is a file; `None` otherwise.
 ///
 /// A profile's `label` is **sticky** (gh#29): when `sidecar.label` is `None`,
 /// a non-`None` label already on disk at `fit_segment` is preserved; an
@@ -763,8 +797,11 @@ pub fn write_fit_sidecar(
     sidecar: &FitSidecar,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(fit_segment)?;
+    let mut sidecar = sidecar.clone();
+    sidecar.source_config = None;
     if fit_toml_path.is_file() {
-        std::fs::copy(fit_toml_path, fit_segment.join("fit.toml.original"))?;
+        std::fs::copy(fit_toml_path, fit_segment.join(ARCHIVED_CONFIG))?;
+        sidecar.source_config = Some(relative_path(fit_segment, fit_toml_path)?);
         // gh#353: archive the model `.camdl` source too, symmetric with
         // fit.toml.original, so the leaf is self-contained (source + config +
         // IR) and a viewer/reproduction doesn't depend on the original checkout
@@ -784,33 +821,53 @@ pub fn write_fit_sidecar(
             }
         }
     }
+    store_fit_sidecar(fit_segment, &sidecar)
+}
+
+/// Write `sidecar` as the folder's `fit.meta.json`, stamped with
+/// [`FIT_META_SCHEMA_VERSION`], keeping the sticky fields an on-disk record of
+/// the current version carries when `sidecar` has none (see
+/// [`write_fit_sidecar`]). Archives nothing and records `source_config` as
+/// given: the call for rewriting a sidecar that was read back.
+pub fn store_fit_sidecar(fit_segment: &std::path::Path, sidecar: &FitSidecar) -> std::io::Result<()> {
     // gh#29: keep a profile's label sticky. gh#585: the applied training window is
     // sticky the same way — it is recorded after the data load, and a rerun
     // that never loads (all-cache-hit short-circuit) writes the sidecar with
-    // `None`, which must not erase the recorded proof. The on-disk sidecar is
-    // read only when a sticky field is absent from this write; we clone only
-    // when a merge actually changes something.
+    // `None`, which must not erase the recorded proof. A record of an older
+    // schema carries nothing forward: it is replaced whole.
     let on_disk = if sidecar.label.is_none() || sidecar.training_window.is_none() {
-        read_fit_sidecar(fit_segment)
+        read_fit_sidecar(fit_segment).ok().flatten()
     } else {
         None
     };
-    let effective_label = sidecar.label.clone()
+    let mut merged = sidecar.clone();
+    merged.schema_version = FIT_META_SCHEMA_VERSION;
+    merged.label = sidecar.label.clone()
         .or_else(|| on_disk.as_ref().and_then(|s| s.label.clone()));
-    let effective_window = sidecar.training_window
+    merged.training_window = sidecar.training_window
         .or(on_disk.as_ref().and_then(|s| s.training_window));
-    let bytes = if effective_label == sidecar.label
-        && effective_window == sidecar.training_window
-    {
-        serde_json::to_vec_pretty(sidecar)
-    } else {
-        let mut merged = sidecar.clone();
-        merged.label = effective_label;
-        merged.training_window = effective_window;
-        serde_json::to_vec_pretty(&merged)
-    }
-    .map_err(std::io::Error::other)?;
+    let bytes = serde_json::to_vec_pretty(&merged).map_err(std::io::Error::other)?;
     std::fs::write(fit_segment.join("fit.meta.json"), bytes)
+}
+
+/// `to` as a path relative to the directory `from`, computed between the two
+/// canonical (symlink-resolved, absolute) paths, so joining it back onto `from`
+/// reaches `to` whatever directory the process runs in. Both must exist.
+fn relative_path(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<String> {
+    use std::path::Component;
+    let from = std::fs::canonicalize(from)?;
+    let to = std::fs::canonicalize(to)?;
+    let a: Vec<Component> = from.components().collect();
+    let b: Vec<Component> = to.components().collect();
+    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let mut rel = std::path::PathBuf::new();
+    for _ in common..a.len() {
+        rel.push("..");
+    }
+    for c in &b[common..] {
+        rel.push(c.as_os_str());
+    }
+    Ok(rel.to_string_lossy().into_owned())
 }
 
 /// gh#585: record the applied training window into an existing fit
@@ -826,34 +883,53 @@ pub fn record_training_window(
     window: Option<TrainingWindow>,
 ) {
     let Some(window) = window else { return };
-    let Some(mut sidecar) = read_fit_sidecar(fit_segment) else {
-        crate::out::detached().say(format_args!(
-            "warning: cannot record training window: no fit.meta.json under {}",
-            fit_segment.display()));
-        return;
-    };
-    if sidecar.training_window == Some(window) {
-        return;
-    }
-    sidecar.training_window = Some(window);
-    let bytes = match serde_json::to_vec_pretty(&sidecar) {
-        Ok(b) => b,
+    let mut sidecar = match read_fit_sidecar(fit_segment) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            crate::out::detached().say(format_args!(
+                "warning: cannot record training window: no fit.meta.json under {}",
+                fit_segment.display()));
+            return;
+        }
         Err(e) => {
             crate::out::detached().say(format_args!("warning: cannot record training window: {e}"));
             return;
         }
     };
-    if let Err(e) = std::fs::write(fit_segment.join("fit.meta.json"), bytes) {
+    if sidecar.training_window == Some(window) {
+        return;
+    }
+    sidecar.training_window = Some(window);
+    if let Err(e) = store_fit_sidecar(fit_segment, &sidecar) {
         crate::out::detached().say(format_args!("warning: cannot record training window: {e}"));
     }
 }
 
-/// Read the fit-level sidecar; `None` when absent (an incomplete segment —
+/// Read the fit-level sidecar; `Ok(None)` when absent (an incomplete segment —
 /// [`crate::fit::fit_view::FitView`] treats that as a malformed fit and skips
-/// it loudly rather than fabricating empty provenance).
-pub fn read_fit_sidecar(fit_segment: &std::path::Path) -> Option<FitSidecar> {
-    let bytes = std::fs::read(fit_segment.join("fit.meta.json")).ok()?;
-    serde_json::from_slice(&bytes).ok()
+/// it loudly rather than fabricating empty provenance). `Err` names the file
+/// when it cannot be parsed, or when its `schema_version` is not
+/// [`FIT_META_SCHEMA_VERSION`]: an older record is refused, never read with
+/// its fields reinterpreted.
+pub fn read_fit_sidecar(fit_segment: &std::path::Path) -> Result<Option<FitSidecar>, String> {
+    let path = fit_segment.join("fit.meta.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let version = value.get("schema_version").and_then(|v| v.as_u64()).unwrap_or(1);
+    if version != u64::from(FIT_META_SCHEMA_VERSION) {
+        return Err(format!(
+            "{} is fit.meta.json schema version {version}; this camdl reads version \
+             {FIT_META_SCHEMA_VERSION} only (version 2 records the source config relative to \
+             the fit folder, where version 1 recorded it relative to the directory the fit \
+             was run from). Re-run the fit with this camdl.",
+            path.display()));
+    }
+    serde_json::from_value(value).map(Some).map_err(|e| format!("{}: {e}", path.display()))
 }
 
     /// gh#542: `fit.meta.json` must be byte-reproducible. serde emits a map in
@@ -934,12 +1010,12 @@ mod tests {
         let bare = FitSidecar::default();
         write_fit_sidecar(&dir, std::path::Path::new("nonexistent.toml"), &bare)
             .unwrap();
-        assert_eq!(read_fit_sidecar(&dir).unwrap().training_window, None);
+        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().training_window, None);
 
         // The post-load recording (from the build that applied the window).
         record_training_window(&dir, Some(TrainingWindow { train_end: 21.0 }));
         assert_eq!(
-            read_fit_sidecar(&dir).unwrap().training_window,
+            read_fit_sidecar(&dir).unwrap().unwrap().training_window,
             Some(TrainingWindow { train_end: 21.0 }));
 
         // A cache-hit rerun's sidecar write carries no window — the recorded
@@ -947,7 +1023,7 @@ mod tests {
         write_fit_sidecar(&dir, std::path::Path::new("nonexistent.toml"), &bare)
             .unwrap();
         assert_eq!(
-            read_fit_sidecar(&dir).unwrap().training_window,
+            read_fit_sidecar(&dir).unwrap().unwrap().training_window,
             Some(TrainingWindow { train_end: 21.0 }),
             "a windowless rewrite must not erase the recorded training window");
 
@@ -955,7 +1031,7 @@ mod tests {
         record_training_window(&dir, Some(TrainingWindow { train_end: 21.0 }));
         record_training_window(&dir, None);
         assert_eq!(
-            read_fit_sidecar(&dir).unwrap().training_window,
+            read_fit_sidecar(&dir).unwrap().unwrap().training_window,
             Some(TrainingWindow { train_end: 21.0 }));
 
         std::fs::remove_dir_all(&dir).ok();
@@ -1355,7 +1431,7 @@ mod tests {
         let tmp = crate::test_support::unique_temp_dir("sidecar_sticky_label");
         let seg = tmp.join("fits").join("demo-5091d4a8");
         let toml = std::path::Path::new("nonexistent.toml");
-        let label = |seg: &std::path::Path| read_fit_sidecar(seg).unwrap().label;
+        let label = |seg: &std::path::Path| read_fit_sidecar(seg).unwrap().unwrap().label;
 
         // Fresh segment, no prior label, no incoming label → stays `None`.
         write_fit_sidecar(&seg, toml,

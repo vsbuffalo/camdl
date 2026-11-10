@@ -497,13 +497,13 @@ hash. Its keys serialize in sorted order (the maps are `BTreeMap`s) so two
 identical runs produce byte-identical sidecars and a diff of two runs' metadata
 is meaningful.
 
-Fields: `label` (a profile's label only; a fit's label names one run and lives
-on that run's `run.json`, see §6.8), `model_path`, `model_identity` (the hex
-structural model hash), `fit_toml_path` (where the producing config lived — the
-directory its relative `[model]` / `[data]` paths resolve against when the
-config is recovered from the segment), `fit_toml_hash` (SHA-256 of the producing
-config's raw bytes — provenance, i.e. which exact bytes produced this fit; a
-`fit.toml` handle is NOT looked up by it, see below), `data_hashes`,
+Fields: `schema_version` (2; below), `label` (a profile's label only; a fit's
+label names one run and lives on that run's `run.json`, see §6.8), `model_path`,
+`model_identity` (the hex structural model hash), `source_config` (the producing
+config file, as a path relative to the fit folder that holds this
+`fit.meta.json`, below; absent for a CLI-only fit), `fit_toml_hash` (SHA-256 of
+the producing config's raw bytes — provenance, i.e. which exact bytes produced
+this fit; a `fit.toml` handle is NOT looked up by it, see below), `data_hashes`,
 `estimated`, `fixed`, `partition` (the run's parameter roles, below),
 `resolved_priors` (one `{param, source}` entry per estimated parameter,
 `source ∈ {fit_toml, model_ir, flat_explicit, flat_fallback}`, plus
@@ -525,16 +525,48 @@ observation/dimension schema below), and `docs` (the model's `#'` documentation
 dictionary, keyed by declaration name, so a consumer can label any output
 column).
 
-Two caveats a consumer must know. `data_hashes` is built from the explicit
-`[data.observations]` map only, so a fit that uses the `[data] file = "..."`
-shorthand records an empty map here even though the identity path digests the
-expanded per-stream set — read the leaf's identity, not this field, to answer
-"which data". And `fixed` is projected from the base configuration, so under
-`fit run --sweep` every swept segment records the _unswept_ value of the swept
-parameter; the segment's fit-level hash, not this field, distinguishes the sweep
-points. `estimated`, `fixed`, `partition` and `parameters_provenance` are
-written per segment from that segment's own resolution; the fit-level record
-before any segment has run leaves them empty.
+**`source_config` and the archived config are two different files.**
+`fit.toml.original`, beside `fit.meta.json`, is the archived copy of the
+config's text, and is what every reader of a stored fit parses. `source_config`
+names the user's own config file — which may since have changed or gone — and is
+recorded only for its location: the archive's relative `[model]` and `[data]`
+paths were written against the source config's directory, so a reader resolves
+them against `<fit folder>/<source_config>`, exactly as `fit run` resolved them
+against the config file. `fit run` computes the relative path between the
+canonical (symlink-resolved) fit folder and config, e.g.
+`../../../fits/sir.toml` for `fits/sir.toml` and `results/fits/sir-1a2b3c4d/`,
+so it names the same file from any working directory and after the project
+directory moves as a whole. A fit whose `results/` is moved apart from its
+configs and data no longer finds its data: the data are not archived in the fit
+(the store-lifecycle proposal's `pack` takes that on). A data file the recovered
+config names but that is not there is refused with the stream, the path it was
+looked for at and the hash recorded for it in `data_hashes`:
+
+```
+error: the fit's data is not where its config says:
+  stream `cases`: looked for results/fits/sir-1a2b3c4d/../../../fits/../data/cases.tsv (recorded hash b39b0a43)
+  The config's relative data paths resolve against the source config's directory, …
+```
+
+**`schema_version`.** `fit run` writes 2, and every reader refuses any other
+value, naming it, rather than reading an older record's fields as if they meant
+the same thing. A record without the key is version 1, whose `fit_toml_path` was
+relative to the directory `fit run` was started from:
+
+```
+error: …/fit.meta.json is fit.meta.json schema version 1; this camdl reads version 2 only (…). Re-run the fit with this camdl.
+```
+
+Two caveats a consumer must know. `data_hashes` holds, per observation stream
+the fit binds, the first eight hex digits of the SHA-256 of the stream's data
+file, over the resolved stream set — so the `[data] file = "..."` shorthand
+records one entry per stream it binds, each the one file's hash (gh#771); a
+holdout file is not hashed here. And `fixed` is projected from the base
+configuration, so under `fit run --sweep` every swept segment records the
+_unswept_ value of the swept parameter; the segment's fit-level hash, not this
+field, distinguishes the sweep points. `estimated`, `fixed`, `partition` and
+`parameters_provenance` are written per segment from that segment's own
+resolution; the fit-level record before any segment has run leaves them empty.
 
 `partition` is the authoritative record of the run's roles. Its `parameters` map
 holds, per parameter, `role` (`estimated` or `fixed`), `declared_by`
@@ -2082,8 +2114,9 @@ JSON Lines (one object per line) and the survey section as a pretty-printed JSON
 array. The stream is therefore not a single JSON document; parse it per section
 or filter with `--kind`.
 
-A fit row carries `schema = {"name": "fit_list_row", "version": 1}`, the
-fit-level provenance, `methods_declared` (the algorithms that ran on this
+A fit row carries `schema = {"name": "fit_list_row", "version": 2}`, the
+fit-level provenance (its `source_config` is `fit.meta.json`'s, relative to the
+fit folder, §2.2.1), `methods_declared` (the algorithms that ran on this
 problem), and `methods` — one entry per method leaf:
 
 ```json
@@ -5037,7 +5070,7 @@ Sub-artifacts that are _not_ `RunRecord`s:
   `SHA256("{run_id}:{obs_seed}:{obs_hash}")` and appears nowhere inside the
   child.
 - `fits/{fit_stem}-{h8}/fit.meta.json` — the fit-wide sidecar:
-  `{model_path, model_identity, fit_toml_path, fit_toml_hash, data_hashes,
+  `{schema_version, model_path, model_identity, source_config, fit_toml_hash, data_hashes,
   estimated, fixed, resolved_priors, parameters_provenance, schema}`,
   where `schema` describes each observation stream (`name`, `index_dims`,
   `value_column`, `value_kind`, `likelihood`).
@@ -5355,14 +5388,14 @@ first is not an orphan.
 Fit-wide, at `fits/{fit_stem}-{h8}/` (outside any leaf, so not exact-set
 checked):
 
-| file                   | content                                                                                                                                                                     |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fit.meta.json`        | model path + `model_identity`, fit.toml path + hash, per-stream data hashes, estimated/fixed sets, resolved priors, parameter provenance, and the observation-stream schema |
-| `fit.toml.original`    | verbatim copy of the config as run                                                                                                                                          |
-| `model.camdl.original` | verbatim copy of the model source                                                                                                                                           |
-| `model.ir.json`        | the compiled IR the fit ran against                                                                                                                                         |
-| `model.graph.json`     | the model flow graph                                                                                                                                                        |
-| `model.render.json`    | the display/LaTeX rendering payload                                                                                                                                         |
+| file                   | content                                                                                                                                                                                                  |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fit.meta.json`        | model path + `model_identity`, source config (relative to the fit folder) + hash, per-stream data hashes, estimated/fixed sets, resolved priors, parameter provenance, and the observation-stream schema |
+| `fit.toml.original`    | verbatim copy of the config as run                                                                                                                                                                       |
+| `model.camdl.original` | verbatim copy of the model source                                                                                                                                                                        |
+| `model.ir.json`        | the compiled IR the fit ran against                                                                                                                                                                      |
+| `model.graph.json`     | the model flow graph                                                                                                                                                                                     |
+| `model.render.json`    | the display/LaTeX rendering payload                                                                                                                                                                      |
 
 Per method leaf, alongside `run.json`. The set is method-dependent; every file
 present is listed in `run.json.artifacts` and subject to the exact-set gate,
