@@ -231,7 +231,7 @@ thin = 1
     );
     let meta = String::from_utf8_lossy(&out.stdout);
     assert!(
-        meta.contains("\"model_path\"") && meta.contains("\"estimated\""),
+        meta.contains("\"source_model\"") && meta.contains("\"estimated\""),
         "default cat emits the fit.meta.json sidecar; got:\n{meta}"
     );
 

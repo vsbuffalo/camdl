@@ -278,7 +278,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
 }
 
 /// Load the calendar context from a fit dir: read the model path from the
-/// fit-level view (`FitView.model`, sidecar-sourced), falling back to any method
+/// fit-level view (`FitView::model_path`, sidecar-sourced), falling back to any method
 /// leaf's `provenance.source_paths`; load that model and extract `origin`,
 /// `time_unit`, and the `instant`-kind parameter set. Any failure (no fit view,
 /// model moved/unparseable) degrades to an empty context (numeric-only
@@ -289,8 +289,8 @@ pub(crate) fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
     // level is a path segment — so recover the model path from any method
     // leaf's `run.json` `provenance.source_paths`.
     let model_path = FitView::read(fit_dir)
-        .map(|v| v.model)
-        .filter(|m| !m.is_empty())
+        .and_then(|v| v.model_path())
+        .map(|p| p.to_string_lossy().into_owned())
         .or_else(|| {
             crate::cas_read::walk_records(fit_dir)
                 .into_iter()
@@ -319,8 +319,8 @@ pub(crate) fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
 /// The fit's model, compiled from the source path its records name.
 fn load_fit_envelope(fit_dir: &Path) -> Option<ir::IrEnvelope> {
     let model_path = FitView::read(fit_dir)
-        .map(|v| v.model)
-        .filter(|m| !m.is_empty())
+        .and_then(|v| v.model_path())
+        .map(|p| p.to_string_lossy().into_owned())
         .or_else(|| {
             crate::cas_read::walk_records(fit_dir)
                 .into_iter()
@@ -3208,7 +3208,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
             dir.join("fit.meta.json"),
-            r#"{"model_path":"sir.camdl","model_identity":"f00d","schema_version":2,"source_config":"fit.toml","estimated":["R0","sigma","gamma"]}"#,
+            r#"{"source_model":"sir.camdl","model_identity":"f00d","schema_version":2,"source_config":"fit.toml","estimated":["R0","sigma","gamma"]}"#,
         )
         .unwrap();
     }

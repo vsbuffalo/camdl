@@ -668,8 +668,14 @@ pub struct FitSidecar {
     /// names one run and lives on that run's `run.json` (gh#896).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(default)]
-    pub model_path: String,
+    /// The model file the fit ran on (`[model] camdl`, a `.camdl` or
+    /// `.ir.json`), as a path **relative to the fit folder holding this
+    /// sidecar**, by the same rule and computation as [`Self::source_config`];
+    /// set by [`write_fit_sidecar`]. The archived copies are this folder's
+    /// `model.camdl.original` (a `.camdl` source) and `model.ir.json`. `None`
+    /// when the model was not a file at write time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_model: Option<String>,
     #[serde(default)]
     pub model_identity: String,
     /// The producing config file (the user's `fit.toml`, which may since have
@@ -781,8 +787,10 @@ pub const ARCHIVED_CONFIG: &str = "fit.toml.original";
 /// is best-effort: a CLI-only fit (no `.toml`) has none and config-diff degrades
 /// to identity. Idempotent; the caller writes it once per fit segment.
 ///
-/// `source_config` is recorded from `fit_toml_path` here, relative to
-/// `fit_segment`, when `fit_toml_path` is a file; `None` otherwise.
+/// `source_config` and `source_model` are recorded from `fit_toml_path` and
+/// `model_path` here, each relative to `fit_segment`, when it is a file;
+/// `None` otherwise. `model_path` is the model as the fit loaded it (a relative
+/// path resolves against the working directory, as the loader resolved it).
 ///
 /// A profile's `label` is **sticky** (gh#29): when `sidecar.label` is `None`,
 /// a non-`None` label already on disk at `fit_segment` is preserved; an
@@ -794,11 +802,17 @@ pub const ARCHIVED_CONFIG: &str = "fit.toml.original";
 pub fn write_fit_sidecar(
     fit_segment: &std::path::Path,
     fit_toml_path: &std::path::Path,
+    model_path: &std::path::Path,
     sidecar: &FitSidecar,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(fit_segment)?;
     let mut sidecar = sidecar.clone();
     sidecar.source_config = None;
+    sidecar.source_model = if model_path.is_file() {
+        Some(relative_path(fit_segment, model_path)?)
+    } else {
+        None
+    };
     if fit_toml_path.is_file() {
         std::fs::copy(fit_toml_path, fit_segment.join(ARCHIVED_CONFIG))?;
         sidecar.source_config = Some(relative_path(fit_segment, fit_toml_path)?);
@@ -807,18 +821,15 @@ pub fn write_fit_sidecar(
         // IR) and a viewer/reproduction doesn't depend on the original checkout
         // layout. Best-effort and .camdl-only: a model supplied directly as
         // `.ir.json` is already captured by the leaf's `model.ir.json`, and a
-        // missing/unreadable source must not fail the fit. The recorded
-        // `model_path` is `config.model.camdl`, resolved exactly as the fit
-        // loaded it — via `resolve_ir_path` / `std::fs::read`, i.e. against the
-        // process CWD (a relative path resolves against CWD; an absolute path
-        // stays absolute). Resolving it against the fit.toml's directory would
+        // missing/unreadable source must not fail the fit. `model_path` is
+        // `config.model.camdl`, resolved exactly as the fit loaded it — via
+        // `resolve_ir_path` / `std::fs::read`, i.e. against the process CWD (a
+        // relative path resolves against CWD; an absolute path stays
+        // absolute). Resolving it against the fit.toml's directory would
         // disagree with the loader and silently skip the archive whenever the
         // fit is run from a directory other than the fit.toml's parent.
-        if sidecar.model_path.ends_with(".camdl") {
-            let src = std::path::Path::new(&sidecar.model_path);
-            if src.is_file() {
-                let _ = std::fs::copy(src, fit_segment.join("model.camdl.original"));
-            }
+        if model_path.extension().is_some_and(|e| e == "camdl") && model_path.is_file() {
+            let _ = std::fs::copy(model_path, fit_segment.join("model.camdl.original"));
         }
     }
     store_fit_sidecar(fit_segment, &sidecar)
@@ -1008,7 +1019,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let bare = FitSidecar::default();
-        write_fit_sidecar(&dir, std::path::Path::new("nonexistent.toml"), &bare)
+        write_fit_sidecar(&dir, std::path::Path::new("nonexistent.toml"), std::path::Path::new(""), &bare)
             .unwrap();
         assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().training_window, None);
 
@@ -1020,7 +1031,7 @@ mod tests {
 
         // A cache-hit rerun's sidecar write carries no window — the recorded
         // proof must survive.
-        write_fit_sidecar(&dir, std::path::Path::new("nonexistent.toml"), &bare)
+        write_fit_sidecar(&dir, std::path::Path::new("nonexistent.toml"), std::path::Path::new(""), &bare)
             .unwrap();
         assert_eq!(
             read_fit_sidecar(&dir).unwrap().unwrap().training_window,
@@ -1396,7 +1407,7 @@ mod tests {
             ..Default::default()
         };
         // No fit.toml on disk → archive step is skipped; the sidecar still writes.
-        write_fit_sidecar(&seg, std::path::Path::new("nonexistent.toml"), &sidecar).unwrap();
+        write_fit_sidecar(&seg, std::path::Path::new("nonexistent.toml"), std::path::Path::new(""), &sidecar).unwrap();
 
         let view = FitView::read(&seg).expect("FitView::read must derive a fit entry");
         let source = |p: &str| -> Option<&str> {
@@ -1434,24 +1445,24 @@ mod tests {
         let label = |seg: &std::path::Path| read_fit_sidecar(seg).unwrap().unwrap().label;
 
         // Fresh segment, no prior label, no incoming label → stays `None`.
-        write_fit_sidecar(&seg, toml,
+        write_fit_sidecar(&seg, toml, toml,
             &FitSidecar { label: None, ..Default::default() }).unwrap();
         assert_eq!(label(&seg), None,
             "a fresh segment with no --label must stay unlabeled");
 
         // `fit run mle.toml --label "smoke test scout"`.
-        write_fit_sidecar(&seg, toml,
+        write_fit_sidecar(&seg, toml, toml,
             &FitSidecar { label: Some("smoke test scout".into()), ..Default::default() }).unwrap();
         assert_eq!(label(&seg), Some("smoke test scout".into()));
 
         // `fit run posterior.toml` (no --label): the earlier label must stick.
-        write_fit_sidecar(&seg, toml,
+        write_fit_sidecar(&seg, toml, toml,
             &FitSidecar { label: None, ..Default::default() }).unwrap();
         assert_eq!(label(&seg), Some("smoke test scout".into()),
             "gh#29: a method-only re-run without --label must not clobber the label");
 
         // A later invocation with an explicit --label overrides the sticky one.
-        write_fit_sidecar(&seg, toml,
+        write_fit_sidecar(&seg, toml, toml,
             &FitSidecar { label: Some("validate run".into()), ..Default::default() }).unwrap();
         assert_eq!(label(&seg), Some("validate run".into()),
             "an explicit --label must override the sticky label");
@@ -1501,8 +1512,15 @@ mod tests {
         let write_result = write_fit_sidecar(
             &seg,
             &toml,
-            &FitSidecar { model_path: rel_model_path.clone(), ..Default::default() },
+            std::path::Path::new(&rel_model_path),
+            &FitSidecar::default(),
         );
+        // `source_model` is recorded relative to the fit folder and names the
+        // model file from there.
+        let recorded_model = read_fit_sidecar(&seg).ok().flatten()
+            .and_then(|s| s.source_model)
+            .and_then(|m| std::fs::canonicalize(seg.join(m)).ok());
+        let model_file = std::fs::canonicalize(model_dir.join("m.camdl")).ok();
 
         // A non-.camdl model has no source to archive — the leaf's model.ir.json
         // already captures it, so no stray file. Base-independent.
@@ -1510,7 +1528,8 @@ mod tests {
         let ir_write_result = write_fit_sidecar(
             &seg_ir,
             &toml,
-            &FitSidecar { model_path: "m.ir.json".into(), ..Default::default() },
+            std::path::Path::new("m.ir.json"),
+            &FitSidecar::default(),
         );
 
         // Gather every fact, then clean up BOTH the CWD subdir and the temp dir
@@ -1524,6 +1543,9 @@ mod tests {
 
         write_result.unwrap();
         ir_write_result.unwrap();
+        assert!(recorded_model.is_some() && recorded_model == model_file,
+            "source_model resolves against the fit folder to the model file: \
+             {recorded_model:?} vs {model_file:?}");
         assert!(
             archived_is_file,
             "gh#353: the model source must be archived beside fit.toml.original \

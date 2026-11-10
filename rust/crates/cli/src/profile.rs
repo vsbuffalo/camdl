@@ -1601,7 +1601,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         );
         let sidecar = crate::run_meta::FitSidecar {
             label: label_arg.clone(),
-            model_path: ir_path.clone(),
             model_identity: model_identity.clone(),
             fit_toml_hash: fit_toml_hash.clone().unwrap_or_default(),
             data_hashes: data_hashes.iter().cloned().collect(),
@@ -1621,7 +1620,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // skips when the path isn't a file, i.e. a CLI-only profile).
         let archive_src = a.fit.clone().unwrap_or_else(|| std::path::PathBuf::from(""));
         if let Err(e) = crate::run_meta::write_fit_sidecar(
-            &base_seg, &archive_src, &sidecar)
+            &base_seg, &archive_src, std::path::Path::new(&ir_path), &sidecar)
         {
             out.say(format_args!("warning: cannot write profile sidecar {}: {}",
                 base_seg.display(), e));

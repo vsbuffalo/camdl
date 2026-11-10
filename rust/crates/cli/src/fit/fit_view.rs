@@ -88,8 +88,15 @@ pub struct FitView {
     /// argv that produced the fit (first leaf).
     pub argv: Vec<String>,
 
+    /// The fit folder (`fits/<stem>-<h8>/`) this view was read from: the
+    /// directory `source_config` and `source_model` are relative to.
+    pub segment: PathBuf,
+
     // ── sidecar provenance (never defaulted on a well-formed segment) ──
-    pub model: String,
+    /// The model file, relative to [`Self::segment`]
+    /// ([`crate::run_meta::FitSidecar::source_model`]); `None` when it was not
+    /// a file when the fit ran. [`Self::model_path`] resolves it.
+    pub source_model: Option<String>,
     pub model_identity: String,
     /// The producing config, relative to the fit folder
     /// ([`crate::run_meta::FitSidecar::source_config`]); `None` for a
@@ -242,6 +249,13 @@ impl FitMethodView {
 }
 
 impl FitView {
+    /// The model file the fit ran on, resolved against the fit folder, so it
+    /// names the same file from any working directory; `None` when none was
+    /// recorded.
+    pub fn model_path(&self) -> Option<PathBuf> {
+        self.source_model.as_deref().map(|m| self.segment.join(m))
+    }
+
     /// The labels of this problem's runs, in run order, joined for display —
     /// `None` when no run is labelled. A label names one run, not the problem
     /// (gh#896), so a folder with several labelled runs shows each.
@@ -365,7 +379,8 @@ impl FitView {
             engine_version,
             created_at,
             argv,
-            model: side.model_path,
+            segment: seg.to_path_buf(),
+            source_model: side.source_model,
             model_identity: side.model_identity,
             source_config: side.source_config,
             fit_toml_hash: side.fit_toml_hash,
@@ -435,10 +450,10 @@ mod tests {
         }
         let sidecar = FitSidecar {
             label: Some("a fit".into()),
-            model_path: "sir.camdl".into(),
             model_identity: "f00d".repeat(16),
             schema_version: crate::run_meta::FIT_META_SCHEMA_VERSION,
             source_config: None,
+            source_model: None,
             fit_toml_hash: "cafe".repeat(16),
             data_hashes: std::collections::BTreeMap::from([("cases".to_string(), "d4ta".repeat(2))]),
             estimated: vec!["beta".into(), "gamma".into()],
@@ -456,8 +471,12 @@ mod tests {
             dt: None,
             integrator: None,
         };
-        // No fit.toml on disk → archive step is skipped; the sidecar still writes.
-        write_fit_sidecar(seg, Path::new("nonexistent.toml"), &sidecar).unwrap();
+        // The model file two levels above the fit folder (`<root>/sir.camdl`
+        // for `<root>/fits/<stem>-<h8>/`). No fit.toml on disk → the archive
+        // step is skipped; the sidecar still writes.
+        let model = seg.parent().unwrap().parent().unwrap().join("sir.camdl");
+        std::fs::write(&model, "compartments { S }\n").unwrap();
+        write_fit_sidecar(seg, Path::new("nonexistent.toml"), &model, &sidecar).unwrap();
     }
 
     /// Pins the N→1 aggregation `FitView` performs over a realistic
@@ -483,7 +502,11 @@ mod tests {
         assert_eq!(view.label(), None, "no run is labelled; the sidecar's label is not a run's");
 
         // Sidecar provenance.
-        assert_eq!(view.model, "sir.camdl", "model");
+        assert_eq!(view.source_model.as_deref(), Some("../../sir.camdl"),
+            "the model, relative to the fit folder");
+        assert_eq!(std::fs::canonicalize(view.model_path().unwrap()).unwrap(),
+            std::fs::canonicalize(tmp.join("sir.camdl")).unwrap(),
+            "and resolved against it, whatever the working directory");
         assert_eq!(view.model_identity, "f00d".repeat(16), "model_identity");
         assert!(!view.model_identity.is_empty(), "model_identity must be non-empty");
         assert_eq!(view.source_config, None, "no config file was given to the writer");
@@ -529,7 +552,7 @@ mod tests {
         assert_eq!(view.methods_declared, vec!["if2"]);
         assert_eq!(view.created_at, "2026-04-27T00:00:01Z", "this run's time, not the latest");
         // Problem provenance is the segment's.
-        assert_eq!(view.model, "sir.camdl");
+        assert_eq!(view.source_model.as_deref(), Some("../../sir.camdl"));
         assert_eq!(view.estimated, vec!["beta", "gamma"]);
         assert_eq!(view.fit_hash, "abcd1234".to_string() + &"0".repeat(56));
 

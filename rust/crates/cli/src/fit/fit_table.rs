@@ -972,7 +972,7 @@ particles = 100\nsweeps = 10\nuse_nuts = false\nmax_tree_depth = 8\n").unwrap();
         std::fs::write(leaf.join("run.json"), rec).unwrap();
         std::fs::write(
             seg.join("fit.meta.json"),
-            r#"{"model_identity":"f00d","model_path":"sir.camdl","schema_version":2,"source_config":"fit.toml"}"#,
+            r#"{"model_identity":"f00d","source_model":"sir.camdl","schema_version":2,"source_config":"fit.toml"}"#,
         )
         .unwrap();
     }
