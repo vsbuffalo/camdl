@@ -79,12 +79,14 @@ pub use hash::{CanonicalHasher, ContentAddressed, ContentHash, HexError, HASH_VE
 pub use kind::{run_id, ArtifactKind};
 pub use layout::{path_label, segment, store_path};
 pub use record::{
-    renamed_kind, FileChecksum, LevelId, Provenance, RunRecord, RunStatus, FORMAT_VERSION,
+    renamed_kind, Failure, FileChecksum, LevelId, Provenance, RecordedOutcome, RunRecord,
+    RunStatus, FORMAT_VERSION,
 };
 pub use runid_derive::RunInput;
 pub use store::{
-    find_leaf, update_record, Artifacts, CasError, CasStore, FsCasStore, LeafIdentity, Lookup,
-    StaleReason, EVENT_LOG,
+    find_leaf, leaf_state, lock_owner, update_record, Artifacts, CasError, CasStore, FsCasStore, LeafIdentity,
+    LeafState, LockOwner, Lookup, StaleReason, ATTEMPTS_DIR, ATTEMPT_RECORD, EVENT_LOG,
+    MAX_PRESERVED_ATTEMPTS,
 };
 
 #[cfg(test)]

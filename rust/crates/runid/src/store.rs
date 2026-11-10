@@ -30,7 +30,11 @@
 //! `finalize`, so its `.lock` + `Running` `run.json` linger. A re-run reclaims
 //! such a leaf: the claim liveness-checks the lock's recorded PID
 //! (`kill(pid, 0)` on unix). A **dead** holder is a stale lock — removed and
-//! re-claimed, clearing the dead run's orphan contents. A **live** holder is a
+//! re-claimed. The prior attempt's leaf-root records (its `run.json`, as
+//! `attempt.json`, event log, findings) move to `.attempts/<n>/`, bounded by
+//! `MAX_PRESERVED_ATTEMPTS`, and its other contents are cleared; its record
+//! is moved as it stands, never rewritten `Failed` (an interrupted run is
+//! not a recorded failure). A **live** holder is a
 //! genuine concurrent claim and still returns `FitInProgress`. An
 //! unreadable/zero PID we can't verify is treated conservatively as live. On
 //! non-unix the PID can't be checked, so a held lock is always `FitInProgress`
@@ -63,7 +67,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::hash::{ContentHash, HASH_VERSION};
 use crate::kind::{run_id, ArtifactKind};
 use crate::layout::store_path;
-use crate::record::{FileChecksum, LevelId, RunRecord, RunStatus, FORMAT_VERSION};
+use crate::record::{Failure, FileChecksum, LevelId, RecordedOutcome, RunRecord, RunStatus, FORMAT_VERSION};
 
 /// The identity a lookup/commit expects to find at a path. Identity is the
 /// `run_id` (a function of kind + level hashes); a path may hold a *different*
@@ -160,6 +164,21 @@ pub enum CasError {
     /// record is left as it was.
     #[error("{reason}")]
     EditRefused { path: String, reason: String },
+    /// A leaf's `run.json` exists but cannot be read (permission denied, an
+    /// IO error). Its identity and state are unknown, so the claim refuses
+    /// rather than quarantine or clear a leaf that may hold another run's
+    /// record or the evidence of a failure.
+    #[error("cannot read {path}: {error}; refusing to claim or clear the leaf")]
+    RecordUnreadable { path: String, error: String },
+    /// The leaf's `.lock` is held by a process on another host, which this
+    /// host cannot check. Never reclaimed automatically.
+    #[error(
+        "{path} is held by pid {pid} on host {host}, whose liveness this host cannot \
+         check, so it is not reclaimed. If that run is no longer running, re-run with \
+         `--force` (`camdl fit run --force`, `camdl survey --force`): the leaf, its \
+         records included, moves to the store's .quarantine/ and the run starts clean"
+    )]
+    OwnedOnOtherHost { path: String, pid: u32, host: String },
 }
 
 /// A bundle of named output files (e.g. `{traj.tsv, event_log.tsv}`).
@@ -224,6 +243,10 @@ impl FsCasStore {
     pub fn lookup(&self, path: &Path, expected: &LeafIdentity) -> Lookup {
         let record = match read_record(path) {
             ReadResult::Absent => return Lookup::Miss,
+            // A record that exists but cannot be read is not absent: its
+            // identity is unknown. The claim path refuses it
+            // (`CasError::RecordUnreadable`) before anything is moved.
+            ReadResult::Unreadable(_) => return Lookup::Stale(StaleReason::Corrupt),
             // A run.json that exists but does not parse is corruption (e.g. a
             // truncated write), not absence. Its identity is unknown, so the
             // commit path quarantines rather than blind-clears.
@@ -251,8 +274,9 @@ impl FsCasStore {
     /// Mode A: write the leaf into staging with the fsync ordering, then
     /// rename into place — collision-aware, never clobbering a different
     /// identity. Returns the destination (possibly disambiguated).
-    /// The overwrite door: displace a `Completed` leaf so the next claim or
-    /// commit at this identity starts clean.
+    /// The overwrite door (`--force`): displace a `Completed` leaf, or one
+    /// held by a process on another host, so the next claim or commit at
+    /// this identity starts clean.
     ///
     /// The store had no such operation, which is why `--force` meant four
     /// different things at five call sites and "overwrite" at none of them:
@@ -265,16 +289,41 @@ impl FsCasStore {
     /// **quarantines** rather than deletes, so a forced recompute never
     /// destroys the result it replaces.
     ///
-    /// A no-op when the leaf is absent, incomplete, or holds a different
-    /// identity: those already recompute without help.
-    pub fn displace_completed(&self, path: &Path, expected: &LeafIdentity) -> Result<(), CasError> {
-        if matches!(self.lookup(path, expected), Lookup::Hit(_)) {
-            // Never displace a leaf a live process is holding.
-            if held_by_live_lock(path) {
-                let pid = read_lock_pid(&path.join(".lock")).unwrap_or(0);
-                return Err(CasError::FitInProgress { path: path.display().to_string(), pid });
+    /// A leaf held from another host is the second case: the claim never
+    /// reclaims it ([`CasError::OwnedOnOtherHost`]), because this host cannot
+    /// tell whether its owner still runs, and the refusal names this door.
+    ///
+    /// A no-op when the leaf is absent, incomplete and reclaimable, or holds
+    /// a different identity: those already recompute without help. A leaf a
+    /// process on this host holds, or one whose lock cannot be read, is
+    /// refused.
+    pub fn displace(&self, path: &Path, expected: &LeafIdentity) -> Result<(), CasError> {
+        for cand in disambiguation_candidates(path, &expected.run_id) {
+            if !cand.exists() {
+                return Ok(());
             }
-            self.quarantine(path)?;
+            let owner = lock_owner(&cand);
+            match self.lookup(&cand, expected) {
+                Lookup::Collision(_) => continue,
+                Lookup::Hit(_) => {
+                    // Never displace a leaf a process is holding.
+                    if owner.holds() {
+                        return Err(held_error(&cand, owner));
+                    }
+                    return self.quarantine(&cand);
+                }
+                // A leaf of this identity held from another host: its owner
+                // cannot be checked, so the claim never reclaims it, and this
+                // is the one way to clear it.
+                Lookup::Stale(_) if same_identity_on_disk(&cand, &expected.run_id)
+                    && matches!(owner, LockOwner::OtherHost { .. }) =>
+                {
+                    return self.quarantine(&cand);
+                }
+                // Absent, stale or incomplete: the claim recomputes it without
+                // help (preserving its record as an attempt).
+                _ => return Ok(()),
+            }
         }
         Ok(())
     }
@@ -506,7 +555,7 @@ impl FsCasStore {
                         ReadResult::Ok(r) => r,
                         // The incumbent vanished or tore between resolve and
                         // read (e.g. a concurrent reclaim): re-resolve.
-                        ReadResult::Absent | ReadResult::Unparseable => continue,
+                        ReadResult::Absent | ReadResult::Unparseable | ReadResult::Unreadable(_) => continue,
                     };
                     for (name, ours) in staged_manifest {
                         if let Some(theirs) = incumbent.artifacts.get(name) {
@@ -620,8 +669,11 @@ impl FsCasStore {
             }
         }
 
-        // Clear any stale orphan contents (a prior crashed run's chain files +
-        // stale run.json), preserving only our fresh `.lock`.
+        // A prior attempt at this identity (failed, interrupted, or a stale
+        // record) keeps its leaf-root records under `.attempts/`; then its
+        // other contents (chain files, the stale run.json) are cleared,
+        // leaving our fresh `.lock` and the preserved attempts.
+        preserve_prior_attempt(&dir)?;
         clear_except_lock(&dir)?;
 
         // TEST-ONLY: fire at the instant the leaf holds our live `.lock` but no
@@ -637,7 +689,7 @@ impl FsCasStore {
         rec.artifacts = BTreeMap::new();
         write_record_atomic(&dir, &rec)?;
         fsync_dir(&dir)?;
-        Ok(StreamClaim { dir, _lock: lock, finalized: false })
+        Ok(StreamClaim { dir, _lock: lock, settled: false })
     }
 
     /// Walk the disambiguation candidates for `path`, classifying each by a
@@ -652,6 +704,15 @@ impl FsCasStore {
         for cand in disambiguation_candidates(path, &expected.run_id) {
             if !cand.exists() {
                 return Ok(ClaimOutcome::Fresh(cand));
+            }
+            // Absent is not unreadable: a record that exists and cannot be
+            // read (permission denied, an IO error) is refused, never
+            // quarantined or cleared as if the leaf held nothing.
+            if let ReadResult::Unreadable(e) = read_record(&cand) {
+                return Err(CasError::RecordUnreadable {
+                    path: cand.join("run.json").display().to_string(),
+                    error: e.to_string(),
+                });
             }
             match self.lookup(&cand, expected) {
                 Lookup::Hit(_) => return Ok(ClaimOutcome::AlreadyCompleted(cand)),
@@ -831,10 +892,12 @@ pub struct StreamClaim {
     /// [`Drop::drop`] runs, so an abandoned claim is marked `Failed` before
     /// the lock is released, never after.
     _lock: LeafLock,
-    /// Set by [`finalize`](Self::finalize) once the leaf is `Completed`. While
-    /// false, [`Drop`] treats the claim as abandoned and marks the leaf
-    /// `Failed` — see the impl below.
-    finalized: bool,
+    /// Set once the leaf has its terminal status: by
+    /// [`finalize`](Self::finalize) once it is `Completed`, by
+    /// [`fail`](Self::fail) once it is `Failed`. While false, [`Drop`]
+    /// treats the claim as abandoned and marks the leaf `Failed` — see the
+    /// impl below.
+    settled: bool,
 }
 
 impl StreamClaim {
@@ -867,8 +930,40 @@ impl StreamClaim {
         fsync_dir(&self.dir)?;
         // Only now is the leaf durably Completed; `Drop` must not touch it.
         // Set AFTER the commit point so a failure above still drops as Failed.
-        self.finalized = true;
+        self.settled = true;
         Ok(self.dir.clone())
+    }
+
+    /// Commit `Running → Failed`, recording `failure` — why the run
+    /// stopped — in the record, and release the lock.
+    /// [`Drop`] does the same for a claim that is never finalized, without a
+    /// reason to give; this is the explicit commit, with its error returned.
+    ///
+    /// A process that ends through `std::process::exit` runs no destructor,
+    /// so a claim it still holds would leave its leaf `Running`, with a
+    /// `.lock` naming a dead pid, while the run's own records (its event
+    /// log, `progress.json`) say it failed. A caller about to exit on an
+    /// error hands the claim here first.
+    pub fn fail(mut self, failure: Failure) -> Result<(), CasError> {
+        let marked = self.mark_failed(Some(failure));
+        // One attempt: a failed write is reported here rather than retried
+        // silently by `Drop`.
+        self.settled = true;
+        marked
+    }
+
+    /// Rewrite the claimed leaf's `run.json` with status `Failed` and
+    /// `failure`. The record is the claimed one (this process holds the
+    /// `.lock`), so nothing else in it changes.
+    fn mark_failed(&self, failure: Option<Failure>) -> Result<(), CasError> {
+        let mut record = match read_record(&self.dir) {
+            ReadResult::Ok(r) => *r,
+            _ => return Err(CasError::SchemaDrift { path: self.dir.display().to_string() }),
+        };
+        record.status = RunStatus::Failed;
+        record.failure = failure;
+        write_record_atomic(&self.dir, &record)?;
+        fsync_dir(&self.dir)
     }
 }
 
@@ -880,18 +975,17 @@ impl StreamClaim {
 /// and a `kill -9` were indistinguishable on disk, and the next same-identity
 /// claimant had to wait for PID-liveness reclaim to clear it.
 ///
-/// Best-effort by necessity (`Drop` cannot report): every step is `.ok()`'d.
-/// PID reclaim remains the backstop for the paths `Drop` cannot see — a
-/// `kill -9`, and `process::exit` (which runs no destructors).
+/// Best-effort by necessity (`Drop` cannot report): the write's error is
+/// dropped. A caller that can report it calls [`StreamClaim::fail`]
+/// instead, which is also the route for a process about to
+/// `process::exit` (which runs no destructors). PID reclaim remains the
+/// backstop for a `kill -9`.
 impl Drop for StreamClaim {
     fn drop(&mut self) {
-        if self.finalized {
+        if self.settled {
             return;
         }
-        if let ReadResult::Ok(mut record) = read_record(&self.dir) {
-            record.status = RunStatus::Failed;
-            write_record_atomic(&self.dir, &record).ok();
-        }
+        self.mark_failed(None).ok();
         // `_lock` is released when the fields drop, after this.
     }
 }
@@ -908,7 +1002,11 @@ enum ClaimOutcome {
 }
 
 enum ReadResult {
+    /// No `run.json`.
     Absent,
+    /// A `run.json` exists and cannot be read: permission denied, an IO
+    /// error. Not absent — its contents are unknown.
+    Unreadable(std::io::Error),
     Unparseable,
     Ok(Box<RunRecord>),
 }
@@ -973,16 +1071,143 @@ fn is_reserved(name: &str) -> bool {
 /// never an input to anything a run computes, and enters no hash.
 pub const EVENT_LOG: &str = "events.jsonl";
 
-/// Leaf-root files the manifest and the orphan scan pass over: the reserved
-/// files and the event log. Unlike the reserved files, the event log is a dead
-/// run's debris and a stale-lock reclaim clears it (`clear_except_lock`).
+/// Leaf-root entries the manifest and the orphan scan pass over: the
+/// reserved files, the event log and the preserved attempts. Unlike the
+/// reserved files, the event log is a dead run's debris, which a reclaim
+/// moves into the preserved attempts (`preserve_prior_attempt`).
 fn is_unmanifested(name: &str) -> bool {
-    is_reserved(name) || name == EVENT_LOG
+    is_reserved(name) || name == EVENT_LOG || name == ATTEMPTS_DIR
+}
+
+/// The leaf-root directory holding earlier attempts at this leaf's identity:
+/// `.attempts/<n>/`, one per reclaimed attempt, numbered in the order they
+/// were preserved, the attempt's record as [`ATTEMPT_RECORD`]. Outside the exact-set manifest and the orphan scan, so a
+/// retried leaf that completes is a clean `Completed` leaf beside them, and
+/// never hashed. A `--force` displacement moves the leaf, attempts included,
+/// into the store's quarantine.
+pub const ATTEMPTS_DIR: &str = ".attempts";
+
+/// The name a preserved attempt's `run.json` is kept under in its
+/// `.attempts/<n>/`: unchanged in content, renamed so that nothing walking
+/// the store for `run.json` finds a second leaf of the same identity.
+pub const ATTEMPT_RECORD: &str = "attempt.json";
+
+/// How many earlier attempts a leaf keeps. When a reclaim would preserve
+/// one more, the oldest is deleted. An attempt holds only the leaf-root files
+/// of the run — its `run.json`, event log, findings, progress record, chain
+/// starts — not its per-chain directories, so each is small; three is enough
+/// to see whether a retried run failed the same way each time.
+pub const MAX_PRESERVED_ATTEMPTS: usize = 3;
+
+/// Move the prior attempt's leaf-root files into `.attempts/<n>/`, before a
+/// claim clears the leaf, so the evidence of how it ended survives the retry.
+///
+/// Only a leaf with a `run.json` is an attempt; a dir without one is debris
+/// and is cleared as before. Directories (per-chain outputs, trajectories)
+/// are bulk outputs, not the record of the attempt, and are cleared. The
+/// record is moved as it stands: a `Running` record whose owner died stays
+/// `Running`, never rewritten `Failed`. The oldest attempts beyond
+/// [`MAX_PRESERVED_ATTEMPTS`] are deleted.
+///
+/// The caller holds the leaf's `.lock`.
+fn preserve_prior_attempt(dir: &Path) -> Result<(), CasError> {
+    if !dir.join("run.json").is_file() {
+        return Ok(());
+    }
+    let attempts = dir.join(ATTEMPTS_DIR);
+    let mut kept = preserved_attempts(&attempts);
+    let next = kept.last().map_or(1, |n| n + 1);
+    let dest = attempts.join(next.to_string());
+    fs::create_dir_all(&dest)?;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str != "run.json" && (is_reserved(&name_str) || name == ATTEMPTS_DIR) {
+            continue;
+        }
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        if ft.is_file() {
+            // The attempt's record is kept as `attempt.json`, so no walk of
+            // the store mistakes a preserved attempt for a second leaf of
+            // this identity.
+            let kept_as = if name_str == "run.json" { ATTEMPT_RECORD.into() } else { name.clone() };
+            fs::rename(entry.path(), dest.join(kept_as))?;
+        }
+    }
+    fsync_dir(&dest)?;
+    kept.push(next);
+    while kept.len() > MAX_PRESERVED_ATTEMPTS {
+        let oldest = kept.remove(0);
+        fs::remove_dir_all(attempts.join(oldest.to_string()))?;
+    }
+    fsync_dir(&attempts)?;
+    fsync_dir(dir)
+}
+
+/// The attempt numbers under `attempts`, ascending.
+fn preserved_attempts(attempts: &Path) -> Vec<u64> {
+    let mut ns: Vec<u64> = fs::read_dir(attempts)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| e.file_name().to_string_lossy().parse().ok())
+        .collect();
+    ns.sort_unstable();
+    ns
+}
+
+/// A leaf's state as a reader should report it: the record's outcome, and,
+/// for a `Running` record, the `.lock` evidence that tells a live run from an
+/// interrupted one. Read-only — an interrupted run's record is never
+/// rewritten.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LeafState {
+    Completed,
+    /// camdl stopped the run and recorded why.
+    Failed { failure: Failure },
+    /// `Failed` with no recorded reason: the claim's drop guard (a panic), or
+    /// a camdl that predates the `failure` field.
+    FailedReasonUnknown,
+    /// `Running`, and the `.lock` names a live process on this host (or a pid
+    /// camdl cannot read, `None`): the run is in flight.
+    Running { pid: Option<u32> },
+    /// `Running`, held by a process on another host, whose liveness this
+    /// host cannot check: neither in flight nor interrupted as far as camdl
+    /// can tell.
+    OwnerUnknown { pid: u32, host: String },
+    /// `Running`, but no process holds the leaf: the `.lock` is absent, or
+    /// names a process on this host that is not alive. The run was killed or crashed and
+    /// recorded no outcome; nothing is known about why.
+    Interrupted { pid: Option<u32> },
+}
+
+/// [`LeafState`] of the leaf at `dir` whose record is `record`.
+pub fn leaf_state(dir: &Path, record: &RunRecord) -> LeafState {
+    match record.outcome() {
+        RecordedOutcome::Completed => LeafState::Completed,
+        RecordedOutcome::Failed(f) => LeafState::Failed { failure: f.clone() },
+        RecordedOutcome::FailedReasonUnknown => LeafState::FailedReasonUnknown,
+        RecordedOutcome::Running => match lock_owner(dir) {
+            LockOwner::Live { pid } => LeafState::Running { pid: Some(pid) },
+            LockOwner::Unverifiable => LeafState::Running { pid: None },
+            LockOwner::OtherHost { pid, host } => LeafState::OwnerUnknown { pid, host },
+            LockOwner::Dead { pid } => LeafState::Interrupted { pid: Some(pid) },
+            LockOwner::Absent => LeafState::Interrupted { pid: None },
+        },
+    }
 }
 
 fn read_record(dir: &Path) -> ReadResult {
     match fs::read(dir.join("run.json")) {
-        Err(_) => ReadResult::Absent,
+        Err(e) if e.kind() == ErrorKind::NotFound => ReadResult::Absent,
+        Err(e) => ReadResult::Unreadable(e),
         Ok(bytes) => match serde_json::from_slice::<RunRecord>(&bytes) {
             Ok(r) => ReadResult::Ok(Box::new(r)),
             Err(_) => ReadResult::Unparseable,
@@ -1077,8 +1302,8 @@ fn scan_orphans(
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
-            if dir == root && record.children.contains_key(&name) {
-                continue; // declared child boundary — its own leaf
+            if dir == root && (record.children.contains_key(&name) || name == ATTEMPTS_DIR) {
+                continue; // declared child boundary, or earlier attempts
             }
             // An undeclared dir is only legitimate if a manifested file lives
             // under it; an empty/stray dir is debris → orphan.
@@ -1190,9 +1415,107 @@ fn pid_is_alive(_pid: u32) -> bool {
     true
 }
 
-/// The PID recorded in a `.lock`, if present and parseable.
+/// The PID recorded in a `.lock` (or `.reclaim`), if present and parseable:
+/// the first line.
 fn read_lock_pid(lock: &Path) -> Option<u32> {
-    fs::read_to_string(lock).ok().and_then(|s| s.trim().parse().ok())
+    fs::read_to_string(lock).ok().and_then(|s| s.lines().next()?.trim().parse().ok())
+}
+
+/// What a lock file holds, as written: `"{pid}\n{host}\n"`. A lock written
+/// before the host was recorded holds the pid alone and is read as this
+/// host's.
+fn lock_contents() -> String {
+    format!("{}\n{}\n", std::process::id(), this_host())
+}
+
+/// This machine's host name, as a lock records it.
+fn this_host() -> &'static str {
+    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HOST.get_or_init(host_name)
+}
+
+#[cfg(unix)]
+fn host_name() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is valid for its length; gethostname NUL-terminates
+    // on success when the name fits, and we stop at the first NUL regardless.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return String::new();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+#[cfg(not(unix))]
+fn host_name() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_default()
+}
+
+/// Who holds a leaf's `.lock` (or its `.reclaim` serializer), as this process
+/// can tell. The one definition of lock liveness: the claim's reclaim, the
+/// `--force` displacement and the readers' [`leaf_state`] all decide from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LockOwner {
+    /// No lock file.
+    Absent,
+    /// A lock whose pid cannot be read (or is 0): treated as held, since its
+    /// holder cannot be shown to be gone.
+    Unverifiable,
+    /// A process on this host that is alive.
+    Live { pid: u32 },
+    /// A process on this host that is not alive: the lock is stale.
+    Dead { pid: u32 },
+    /// A process on another host, whose liveness this host cannot check. Never
+    /// reclaimed automatically and never called dead; `--force` clears it.
+    OtherHost { pid: u32, host: String },
+}
+
+impl LockOwner {
+    /// Whether the lock holds the leaf: everything but no lock and a dead
+    /// holder on this host.
+    pub fn holds(&self) -> bool {
+        !matches!(self, LockOwner::Absent | LockOwner::Dead { .. })
+    }
+}
+
+/// [`LockOwner`] of the lock file at `lock`.
+fn lock_owner_of(lock: &Path) -> LockOwner {
+    let text = match fs::read_to_string(lock) {
+        Ok(t) => t,
+        Err(e) if e.kind() == ErrorKind::NotFound => return LockOwner::Absent,
+        Err(_) => return LockOwner::Unverifiable,
+    };
+    let mut lines = text.lines();
+    let pid = match lines.next().and_then(|l| l.trim().parse::<u32>().ok()) {
+        Some(p) if p != 0 => p,
+        _ => return LockOwner::Unverifiable,
+    };
+    match lines.next().map(str::trim).filter(|h| !h.is_empty()) {
+        Some(host) if host != this_host() => LockOwner::OtherHost { pid, host: host.to_string() },
+        _ if pid_is_alive(pid) => LockOwner::Live { pid },
+        _ => LockOwner::Dead { pid },
+    }
+}
+
+/// The refusal for a leaf `owner` holds.
+fn held_error(dir: &Path, owner: LockOwner) -> CasError {
+    match owner {
+        LockOwner::OtherHost { pid, host } => {
+            CasError::OwnedOnOtherHost { path: dir.display().to_string(), pid, host }
+        }
+        LockOwner::Live { pid } | LockOwner::Dead { pid } => {
+            CasError::FitInProgress { path: dir.display().to_string(), pid }
+        }
+        LockOwner::Absent | LockOwner::Unverifiable => {
+            CasError::FitInProgress { path: dir.display().to_string(), pid: 0 }
+        }
+    }
+}
+
+/// Who holds the `.lock` of the leaf at `dir`.
+pub fn lock_owner(dir: &Path) -> LockOwner {
+    lock_owner_of(&dir.join(".lock"))
 }
 
 /// How long a short read-modify-write of `run.json` waits for a live holder
@@ -1243,7 +1566,7 @@ impl LeafLock {
                     // Hold the guard before anything fallible, so a failed
                     // pid write still releases the lock we created.
                     let lock = LeafLock { path };
-                    write!(f, "{}", std::process::id())?;
+                    write!(f, "{}", lock_contents())?;
                     f.sync_all()?;
                     return Ok(lock);
                 }
@@ -1279,7 +1602,7 @@ impl Drop for LeafLock {
 /// written) dir away — racing the holder's own writes to a `NotFound` error.
 /// A live `.lock` means "not orphan debris, route to the lock gate instead".
 fn held_by_live_lock(dir: &Path) -> bool {
-    matches!(read_lock_pid(&dir.join(".lock")), Some(p) if p != 0 && pid_is_alive(p))
+    lock_owner(dir).holds()
 }
 
 /// A `.lock` already exists at claim time. Reclaim it iff its holder PID is
@@ -1291,10 +1614,16 @@ fn held_by_live_lock(dir: &Path) -> bool {
 fn reclaim_or_refuse(dir: &Path, lock: &Path) -> Result<(), CasError> {
     let fail = |pid: u32| CasError::FitInProgress { path: dir.display().to_string(), pid };
     let holder = read_lock_pid(lock);
-    // Only reclaim what we can PROVE is stale. An unreadable/zero PID we can't
-    // verify, or a live one, is a genuine concurrent claim.
-    if !matches!(holder, Some(p) if p != 0 && !pid_is_alive(p)) {
-        return Err(fail(holder.unwrap_or(0)));
+    // Only reclaim what we can PROVE is stale: a dead process on this host. An
+    // unreadable/zero PID we can't verify, or a live one, is a genuine
+    // concurrent claim; a process on another host cannot be checked from
+    // here, so it is refused with what it would take to clear it.
+    match lock_owner_of(lock) {
+        LockOwner::Dead { .. } => {}
+        LockOwner::OtherHost { pid, host } => {
+            return Err(CasError::OwnedOnOtherHost { path: dir.display().to_string(), pid, host });
+        }
+        _ => return Err(fail(holder.unwrap_or(0))),
     }
     // TEST-ONLY: fire after the dead-check, before acquiring `.reclaim`. A test
     // parks the losing reclaimer here while a concurrent winner completes a full
@@ -1309,7 +1638,7 @@ fn reclaim_or_refuse(dir: &Path, lock: &Path) -> Result<(), CasError> {
     let reclaim = dir.join(".reclaim");
     match OpenOptions::new().write(true).create_new(true).open(&reclaim) {
         Ok(mut rf) => {
-            let _ = write!(rf, "{}", std::process::id());
+            let _ = write!(rf, "{}", lock_contents());
         }
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {
             // A live serializer means a genuine concurrent reclaim — refuse.
@@ -1324,14 +1653,14 @@ fn reclaim_or_refuse(dir: &Path, lock: &Path) -> Result<(), CasError> {
             // that governs `.lock` governs it. If two processes both find it
             // stranded, both remove and retry: one wins `create_new`, the
             // other sees a LIVE holder and refuses correctly.
-            let stranded = read_lock_pid(&reclaim).is_some_and(|p| !pid_is_alive(p));
+            let stranded = matches!(lock_owner_of(&reclaim), LockOwner::Dead { .. });
             if !stranded {
                 return Err(fail(holder.unwrap_or(0)));
             }
             let _ = fs::remove_file(&reclaim);
             match OpenOptions::new().write(true).create_new(true).open(&reclaim) {
                 Ok(mut rf) => {
-                    let _ = write!(rf, "{}", std::process::id());
+                    let _ = write!(rf, "{}", lock_contents());
                 }
                 // Lost the retry to another claimant — it holds the gate now.
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {
@@ -1376,7 +1705,7 @@ fn reclaim_or_refuse(dir: &Path, lock: &Path) -> Result<(), CasError> {
             .create(true)
             .truncate(true)
             .open(&lock_new)?;
-        write!(f, "{}", std::process::id())?;
+        write!(f, "{}", lock_contents())?;
         f.sync_all()?;
         drop(f);
         fs::rename(&lock_new, lock)?;
@@ -1395,8 +1724,9 @@ fn clear_except_lock(dir: &Path) -> Result<(), CasError> {
         let name = entry.file_name();
         // Never touch the lock serializers: a concurrent claimant legitimately
         // churns `.reclaim`/`.lock.new` in this leaf, and `.lock` is ours.
-        // These are not crashed-run debris for us to clear.
-        if is_reserved(&name.to_string_lossy()) {
+        // These are not crashed-run debris for us to clear. Nor the preserved
+        // attempts, which are kept on purpose (`preserve_prior_attempt`).
+        if is_reserved(&name.to_string_lossy()) || name == ATTEMPTS_DIR {
             continue;
         }
         let p = entry.path();

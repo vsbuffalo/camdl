@@ -327,7 +327,8 @@ nlopt.summary	stdout	line	loglik:	-43.14 (ode_marginal)     converged chains: 2/
 nlopt.summary	stdout	line	chain-agreement:	max rel range = 0.00% bound
 nlopt.summary	stdout	block	θ̂ (2 estimated params):	beta           = 0.4594461659761758
 nlopt.summary	stdout	block	θ̂ (2 estimated params):	gamma          = 0.05243062755769633
-fail.summary	stderr	line	warning: skipping fit leaf	its run.json has no `inputs` object
+fail.summary	stderr	line	pmmh failed: 	seed_1-
+fail.summary	stderr	line	error: error running pmmh	all 2 chains failed init-eval with PFDegenerate
 fail.summary	stderr	line	error: no completed method leaf under	so there is nothing to summarise
 pfilter_fit	stderr	line	── method:	pfilter
 pfilter_fit	stderr	line	loglik =	-64.5 ± 0.5 (3 reps, 200 particles

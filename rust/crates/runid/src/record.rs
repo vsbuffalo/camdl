@@ -42,16 +42,49 @@ pub fn renamed_kind(bytes: &[u8]) -> Option<String> {
     })
 }
 
-/// Run lifecycle state. Wire form is the snake-case string
-/// (`"running"`/`"completed"`/`"failed"`), matching the `run.json` example.
-/// A cache hit requires `Completed`; `Running` is an in-flight (or crashed)
-/// streamed run; `Failed` records a run that ran to a definite failure.
+/// Run lifecycle state, as the record states it. Wire form is the
+/// snake-case string (`"running"`/`"completed"`/`"failed"`), matching the
+/// `run.json` example.
+///
+/// A cache hit requires `Completed`. `Failed` is written only by camdl
+/// stopping the run (`StreamClaim::fail`, or the claim's drop guard), never
+/// inferred. `Running` is what the record says while the run holds its
+/// leaf, and also what a killed or crashed run leaves behind: whether a
+/// `Running` record is live or interrupted is read from its `.lock`
+/// (`store::leaf_state`), and the record is never rewritten to say so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     Running,
     Completed,
     Failed,
+}
+
+/// Why a run failed, as the camdl that stopped it recorded it in `run.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Failure {
+    /// The error camdl reported when it stopped the run: the sentence it
+    /// printed, which the event log's `failed` report also carries.
+    pub message: String,
+    /// What was running when it failed: the fit method (`pmmh`, `if2`, …)
+    /// or the command (`pfilter`, `survey`, `profile`).
+    pub operation: String,
+}
+
+/// What a record says about how its run ended, read off its fields alone.
+/// [`store::leaf_state`](crate::store::leaf_state) adds the `.lock` evidence
+/// that tells a live `Running` record from an interrupted one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordedOutcome<'a> {
+    Completed,
+    /// camdl stopped the run and recorded why.
+    Failed(&'a Failure),
+    /// `Failed` with no reason: written by the claim's drop guard (a panic)
+    /// or by a camdl that predates `failure`. Readable; the reason is
+    /// unknown.
+    FailedReasonUnknown,
+    /// The record says the run holds its leaf.
+    Running,
 }
 
 /// One factored identity level, in path order: a readable label
@@ -202,6 +235,12 @@ pub struct RunRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deps: Vec<ArtifactRef>,
     pub status: RunStatus,
+    /// Why the run failed (`StreamClaim::fail`). Present only on a `Failed`
+    /// record that camdl failed explicitly; absent on every other record, on
+    /// a `Failed` one the claim's drop guard marked (a panic, which has no
+    /// error to give), and on one an older camdl wrote. Recorded, not hashed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<Failure>,
     /// EXACT-SET over the leaf's OWN files only (not the declared children).
     pub artifacts: BTreeMap<String, FileChecksum>,
     /// Column schema for the leaf's tabular outputs, keyed by leaf-relative
@@ -224,6 +263,16 @@ pub struct RunRecord {
 }
 
 impl RunRecord {
+    /// How the record says its run ended.
+    pub fn outcome(&self) -> RecordedOutcome<'_> {
+        match (self.status, &self.failure) {
+            (RunStatus::Completed, _) => RecordedOutcome::Completed,
+            (RunStatus::Failed, Some(f)) => RecordedOutcome::Failed(f),
+            (RunStatus::Failed, None) => RecordedOutcome::FailedReasonUnknown,
+            (RunStatus::Running, _) => RecordedOutcome::Running,
+        }
+    }
+
     /// `true` iff `self`'s identity (run_id) matches `other`'s — the identity
     /// gate. A path may hold a record whose full hashes differ from the
     /// expected identity (a short-hash path collision); that is a
@@ -271,6 +320,7 @@ mod output_schema_tests {
             levels: vec![],
             deps: vec![],
             status: RunStatus::Completed,
+            failure: None,
             artifacts: BTreeMap::new(),
             output_schema: BTreeMap::new(),
             children: BTreeMap::new(),
@@ -297,6 +347,7 @@ mod output_schema_tests {
             levels: vec![],
             deps: vec![],
             status: RunStatus::Completed,
+            failure: None,
             artifacts: BTreeMap::new(),
             output_schema: BTreeMap::new(),
             children: BTreeMap::new(),

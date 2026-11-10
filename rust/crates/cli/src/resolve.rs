@@ -383,8 +383,8 @@ pub enum ReuseVerdict {
 /// stored ad-hoc leaf the same way. A store that renamed nothing answers
 /// exactly as before: the exact-label path is tried first.
 ///
-/// Under [`WritePolicy::Force`] a matching `Completed` leaf is quarantined
-/// first, so the caller always gets `MustRun` and the recompute lands on a
+/// Under [`WritePolicy::Force`] a matching `Completed` leaf, or one held by a
+/// process on another host, is quarantined first, so the caller always gets `MustRun` and the recompute lands on a
 /// clean leaf rather than colliding with the incumbent at commit time.
 pub fn check_reuse(
     store: &FsCasStore,
@@ -394,9 +394,12 @@ pub fn check_reuse(
 ) -> Result<ReuseVerdict, CasError> {
     let found = runid::find_leaf(root, resolved.kind, &resolved.levels);
     if policy == WritePolicy::Force {
-        if let Some(dir) = &found {
-            store.displace_completed(dir, &runid::LeafIdentity::new(resolved.run_id))?;
-        }
+        // A completed leaf is found by its hashes; a leaf held from another
+        // host is not complete, so it is looked for where the claim will
+        // write (`begin_resolved_write`).
+        let dir = found.clone()
+            .unwrap_or_else(|| store_path(root, resolved.kind, &resolved.levels));
+        store.displace(&dir, &runid::LeafIdentity::new(resolved.run_id))?;
         return Ok(ReuseVerdict::MustRun);
     }
     Ok(match found {
@@ -491,6 +494,13 @@ impl ResolvedClaim {
         self.record.inputs = display_inputs;
         self.claim.finalize(self.record)
     }
+
+    /// Commit Running → Failed with `failure`, the error that stopped the
+    /// run, recorded in `run.json`, and release the lock
+    /// (`StreamClaim::fail`). For a run about to exit on an error.
+    pub fn fail(self, failure: runid::Failure) -> Result<(), CasError> {
+        self.claim.fail(failure)
+    }
 }
 
 /// Assemble the `RunRecord` for `resolved` + `meta` at `status`. The single
@@ -506,6 +516,7 @@ fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatu
         levels: resolved.levels.clone(),
         deps: meta.deps.clone(),
         status,
+        failure: None,
         artifacts: Default::default(),
         output_schema: meta.output_schema.clone(),
         children: meta.children.clone(),
