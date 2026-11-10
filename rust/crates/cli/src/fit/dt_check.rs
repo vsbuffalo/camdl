@@ -391,22 +391,25 @@ pub fn run_richardson_ladder_ode(
 /// Render the dt-check verdict to stderr in the proposal's
 /// terminal-output format. Pass case is one line; fail/marginal is
 /// the ladder + verdict + the synth-recovery warning text.
-pub fn print_terminal_report(result: &DtCheckResult) {
-    use std::io::Write as _;
-    let stderr = std::io::stderr();
-    let mut w = stderr.lock();
-    let p = crate::out::paint::stderr();
+pub fn print_terminal_report(out: &crate::out::Out, result: &DtCheckResult) {
+    out.say_raw(render_terminal_report(result, out.stderr_painter()));
+}
+
+/// The lines [`print_terminal_report`] writes, painted by `p`.
+fn render_terminal_report(result: &DtCheckResult, p: crate::out::paint::Painter) -> String {
+    use std::fmt::Write as _;
+    let mut w = String::new();
 
     if matches!(result.verdict, DtCheckVerdict::Skipped) {
         // Don't shout when the user explicitly opted out.
         let _ = writeln!(w, "\ndt-convergence at θ̂: skipped");
-        return;
+        return w;
     }
     if matches!(result.verdict, DtCheckVerdict::Pass) {
         let _ = writeln!(w,
             "\ndt-convergence at θ̂: {}  ({})",
             p.paint("PASS", Style::Ok), result.notes);
-        return;
+        return w;
     }
 
     let _ = writeln!(w);
@@ -484,6 +487,7 @@ pub fn print_terminal_report(result: &DtCheckResult) {
         let _ = writeln!(w,
             "    trajectories are improbable under finer dynamics.");
     }
+    w
 }
 
 fn build_notes(

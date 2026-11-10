@@ -253,7 +253,7 @@ pub fn run_method(
         dt_check_cfg,
     )
     .unwrap_or_else(|e| super::abandon_method_on(heartbeat, format!("error: {e}")));
-    dt_check::print_terminal_report(&dt_check_result);
+    dt_check::print_terminal_report(out, &dt_check_result);
 
     // Persist the winner's full parameter vector via fit_state.toml so
     // a later fit can start from it.
