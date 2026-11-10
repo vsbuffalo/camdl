@@ -1322,7 +1322,7 @@ pub fn run_method(
         // reason is now enough: the heartbeat's owner records it as the method's
         // terminal `failed` state, beside the per-chain block that already
         // shows every chain refused.
-        return Err(super::write_diagnostics_then_fail(&collector, method_dir, reason));
+        return Err(reason);
     }
 
     let elapsed = t0.elapsed();
@@ -1612,7 +1612,7 @@ pub fn run_method(
     // starts finite and walks into a `-inf` region it cannot leave.
     if sim::inference::no_finite_anchor(best_sweep.log_complete_data_ll) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        return Err(super::write_diagnostics_then_fail(&collector, method_dir, format!(
+        return Err(format!(
             "pgas: all {} chain(s) reached no finite complete-data \
              log-likelihood (best = {}). The reachable surface is `-inf` at \
              every evaluated θ. Most often the starting values sit in an \
@@ -1621,7 +1621,7 @@ pub fn run_method(
              often the data are impossible under this model, or a recoverable \
              error fires at every θ (gh#226). Also check the observation \
              model and parameter bounds.",
-            n_chains, best_sweep.log_complete_data_ll)));
+            n_chains, best_sweep.log_complete_data_ll));
     }
 
     let mut start_values = std::collections::BTreeMap::new();

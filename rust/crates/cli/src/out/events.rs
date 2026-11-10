@@ -55,8 +55,7 @@ pub enum Event<'a> {
     Finding { finding: &'a Diagnostic },
     /// How the method ended: the end-of-run report it showed, or the error
     /// that stopped it. The last line of a run that camdl ended; a log with
-    /// none was cut off (the process was killed), or the run stopped where
-    /// the handle cannot reach (an IF2 or NLopt runner's own exit).
+    /// none was cut off (the process was killed).
     MethodReport(Outcome<'a>),
 }
 

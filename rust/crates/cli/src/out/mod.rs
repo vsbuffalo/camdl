@@ -75,13 +75,14 @@ pub struct Out {
 }
 
 /// What `Out` keeps for the method that is running: the run's opening block,
-/// the checks it has shown, the collector its findings go to, and its
-/// heartbeat, which an error marks failed.
+/// the checks it has shown, the collector its findings go to, its heartbeat,
+/// which an error marks failed, and its leaf, where its records are written.
 struct RunningMethod {
     header: crate::fit::report::RunHeader,
     checks: Vec<crate::fit::report::Check>,
     collector: Arc<DiagnosticCollector>,
     heartbeat: Arc<io::HeartbeatGuard>,
+    leaf: std::path::PathBuf,
 }
 
 /// A method's record as it ended: what a failed run's report is built from,
@@ -174,6 +175,7 @@ impl Out {
         });
         self.method = Some(RunningMethod {
             header, checks: Vec::new(), collector: collector.clone(), heartbeat,
+            leaf: leaf.to_path_buf(),
         });
         self.events = Some(log);
         Ok(collector)
@@ -223,6 +225,12 @@ impl Out {
             .expect("a method's collector is asked for only while it runs (`Out::begin_method`)")
     }
 
+    /// The running method's leaf, where its `diagnostics.json` and event
+    /// log go; `None` when no method is running.
+    pub fn method_leaf(&self) -> Option<&std::path::Path> {
+        self.method.as_ref().map(|m| m.leaf.as_path())
+    }
+
     /// Record a finding, from the command's thread.
     pub fn finding(&self, kind: sim::inference::diagnostic::DiagnosticKind) {
         if let Some(m) = &self.method {
@@ -258,7 +266,7 @@ impl Out {
     /// The end-of-run block, drawn once from the method's outcome
     /// (`View::RunEnd`), on stderr, and recorded as the event log's
     /// `method_report` line.
-    pub fn method_report(&mut self, o: &crate::fit::report::build::MethodOutcome) {
+    pub fn method_report(&self, o: &crate::fit::report::build::MethodOutcome) {
         use crate::fit::report::build::MethodOutcome;
         use crate::fit::report::render::{render_report, View};
         self.stderr_lines(&render_report(o, View::RunEnd));

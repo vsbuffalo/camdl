@@ -2438,8 +2438,8 @@ pub fn run_chains_with_per_chain_params(
                 // Any non-degeneracy error is structural (config bug,
                 // unknown compartment, …) — every chain would hit it, so
                 // there is no survivor to fall back to. Fail loudly.
-                Err(other) => super::abandon_method_on(
-                    heartbeat,
+                Err(other) => super::abandon_method(
+                    out,
                     format!("chain {} error: {:?}", ChainIndex(chain_id), other),
                 ),
             }
@@ -2464,8 +2464,8 @@ pub fn run_chains_with_per_chain_params(
         // though the bounds were the lever; they are, but only in the
         // direction the shared sentence names, and the cause is the start the
         // filter cannot score.
-        super::abandon_method_on(
-            heartbeat,
+        super::abandon_method(
+            out,
             format!(
                 "error: all {} IF2 chain(s) bailed via the PF degeneracy watchdog — no usable \
                  chain. This is sustained ESS collapse: the swarm lost support and did not \
@@ -2524,8 +2524,8 @@ pub fn run_chains_with_per_chain_params(
         results.len(), config.loglik_eval.n_replicates, config.loglik_eval.n_particles));
     let loglik_eval_outcome = loglik_eval::run_loglik_eval(
         config, &results, &config.loglik_eval, config.seed,
-    ).unwrap_or_else(|e| super::abandon_method_on(
-        heartbeat, format!("error: loglik-eval failed: {e}")));
+    ).unwrap_or_else(|e| super::abandon_method(
+        out, format!("error: loglik-eval failed: {e}")));
 
     let (best_chain, best_loglik, best_se) =
         select_winner_summary(&loglik_eval_outcome);
@@ -2552,15 +2552,15 @@ pub fn run_chains_with_per_chain_params(
             collector.push(DiagnosticKind::PerturbedSwarmInfeasible {
                 start_loglik, steps: steps.clone(),
             });
-            return Err(fail_recording_findings(collector, method_dir, format!(
+            return Err(format!(
                 "if2: every chain's final estimate has log-likelihood -inf (best = {best_loglik}), \
                  but a chain's start scores {start_loglik:.1}: the start is feasible and the \
                  perturbed swarm is not, so the perturbation is too large. The steps at the \
                  start, in each parameter's transformed coordinate, were {}. Give a smaller explicit rw_sd \
-                 (`rw_sd = …` in its [estimate] entry).", steps.join(", "))));
+                 (`rw_sd = …` in its [estimate] entry).", steps.join(", ")));
         }
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        return Err(fail_recording_findings(collector, method_dir, format!(
+        return Err(format!(
             "if2: all {} surviving chain(s) reached no finite log-likelihood \
              (best = {}). The likelihood surface is `-inf` at every evaluated \
              θ. Most often the starting values sit in an impossible region — \
@@ -2569,7 +2569,7 @@ pub fn run_chains_with_per_chain_params(
              impossible under this model, or a recoverable \
              error fires at every θ (gh#226). Also check the observation model \
              and parameter bounds.",
-            config.n_chains, best_loglik)));
+            config.n_chains, best_loglik));
     }
 
     // Report. `best_se` is derived locally; we log it here but don't
@@ -3167,19 +3167,6 @@ impl MethodConvergence {
                 param: name.to_string(), rhat, threshold: rhat_threshold,
             })
             .collect()
-    }
-}
-
-/// The error a failing IF2 run returns, with its findings written first when
-/// it has a method directory to write them to (`fit::write_diagnostics_then_fail`).
-fn fail_recording_findings(
-    collector: &sim::inference::diagnostic::DiagnosticCollector,
-    method_dir: Option<&str>,
-    reason: String,
-) -> String {
-    match method_dir {
-        Some(dir) => super::write_diagnostics_then_fail(collector, std::path::Path::new(dir), reason),
-        None => reason,
     }
 }
 
