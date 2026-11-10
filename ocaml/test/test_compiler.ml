@@ -4606,6 +4606,13 @@ let test_rate_state_grad_counts_repeated_popsum_member () =
    | gs -> Alcotest.failf "expected exactly d/dI = Const 2, got %d entries"
              (List.length gs))
 
+let test_simplify_fixpoint_terminates_on_nan () =
+  (* (0 - 8) ^ 0.5 folds to Const nan; nan <> nan under (=). *)
+  let e = Ir.BinOp { op = Ir.Mul; left = Ir.Pop "S";
+                     right = Ir.BinOp { op = Ir.Pow; left = Ir.Const (-8.0);
+                                        right = Ir.Const 0.5 } } in
+  ignore (Autodiff.simplify_fixpoint e)
+
 let test_rate_state_grad_nonsmooth_refused () =
   (* Rate = floor(S) * beta. ∂/∂S reaches floor(state) — nonsmooth (a step at
      each integer) — so it must be a loud DEUnsupported (URNonsmoothState), never
@@ -15762,6 +15769,7 @@ let () =
       Alcotest.test_case "rate_state_grad: ∂/∂compartment emits nonzero comps (gh#275)" `Quick test_rate_state_grad_smooth;
       Alcotest.test_case "rate_state_grad: nonsmooth-of-state (floor) is refused (gh#275)" `Quick test_rate_state_grad_nonsmooth_refused;
       Alcotest.test_case "state grad counts a repeated PopSum member" `Quick test_rate_state_grad_counts_repeated_popsum_member;
+      Alcotest.test_case "simplify_fixpoint terminates on a NaN constant" `Quick test_simplify_fixpoint_terminates_on_nan;
       Alcotest.test_case "rate_state_grad: BindingRef inverts to state-bearing (gh#275)" `Quick test_rate_state_grad_through_binding;
       Alcotest.test_case "autodiff: ∂(x^c) is finite at a zero base (gh#952)" `Quick test_pow_grad_constant_exponent_at_zero_base;
       Alcotest.test_case "autodiff: ∂(I^α) is finite at a zero base (gh#952)" `Quick test_pow_grad_parameter_exponent_at_zero_base;

@@ -954,11 +954,14 @@ let rec simplify (e : expr) : expr =
   e
 
 
-(** Apply simplify to a fixed point — repeat until the expression stops changing. *)
+(** Apply simplify to a fixed point — repeat until the expression stops changing.
+    "Stops changing" is [compare], not [=]: constant folding can produce
+    [Const nan] (`(0 - 8) ^ 0.5`), and under [=] a tree holding a NaN never
+    equals itself, so the loop would not terminate. *)
 let simplify_fixpoint (e : expr) : expr =
   let rec go e =
     let e' = simplify e in
-    if e' = e then e' else go e'
+    if compare e' e = 0 then e' else go e'
   in
   go e
 
