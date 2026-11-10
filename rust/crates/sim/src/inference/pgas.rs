@@ -1112,7 +1112,9 @@ pub struct PGASResult {
     pub resume_state: ChainResumeState,
     /// gh#audit-C7. NUTS divergent transitions across the full run
     /// (burn-in + sampling). Stan-style diagnostic: any post-burn-in
-    /// divergence is a correctness signal worth gating on.
+    /// divergence is a correctness signal worth gating on. On a resumed
+    /// chain this and the three counts below cover the whole chain, the
+    /// base's sweeps included ([`NutsCounts`] rides in the resume state).
     pub n_divergent_total: usize,
     /// gh#audit-C7. NUTS divergent transitions accumulated only over
     /// post-burn-in sweeps. The Stan-canonical surface — burn-in
@@ -1153,11 +1155,26 @@ pub struct ChainResumeState {
     pub log_proposal_sd: Vec<f64>,
     /// Running acceptance counts per parameter.
     pub total_accepted: Vec<usize>,
+    /// The NUTS divergence and tree-depth counts so far. A resumed run's
+    /// findings judge them against every post-burn-in sweep of the chain,
+    /// the base's included, so they continue from here as `total_accepted`
+    /// does.
+    pub nuts_counts: NutsCounts,
     /// Estimated parameter names in the same order as `transformed`.
     /// Used to match z-values to the correct parameters on resume,
     /// since HashMap iteration order is non-deterministic.
     /// Empty for legacy states (before this field was added).
     pub param_names: Vec<String>,
+}
+
+/// A chain's NUTS divergences and sweeps at the tree-depth cap, over the
+/// whole run and over its post-burn-in sweeps only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NutsCounts {
+    pub n_divergent: usize,
+    pub n_divergent_post_burn: usize,
+    pub n_max_treedepth: usize,
+    pub n_max_treedepth_post_burn: usize,
 }
 
 /// Where each observation is scored on the PGAS substep grid: the substep whose
@@ -3835,6 +3852,7 @@ pub fn run_pgas(
         s.mass_matrix.clone(), s.nuts_step_size,
         s.log_proposal_sd.clone(), s.total_accepted.clone(),
     ));
+    let mut nuts_counts = resume_from.as_ref().map_or(NutsCounts::default(), |s| s.nuts_counts);
 
     if let Some(state) = resume_from {
         current_params.copy_from_slice(&state.params);
@@ -4061,12 +4079,9 @@ pub fn run_pgas(
 
     let mut sweeps = Vec::new();
 
-    let mut n_max_treedepth: usize = 0;
-    let mut n_divergent: usize = 0;
-    // gh#audit-C7. Post-burn-in counters (Stan-canonical surface;
-    // burn-in counts are expected during step-size adaptation).
-    let mut n_max_treedepth_post_burn: usize = 0;
-    let mut n_divergent_post_burn: usize = 0;
+    // gh#audit-C7. `nuts_counts` (above) also counts post-burn-in sweeps
+    // alone, the Stan-canonical surface: burn-in counts are expected during
+    // step-size adaptation.
 
     // gh#180 P5 — the `DerivEntry::Unsupported` preflight (proposal §4.4).
     //
@@ -4284,15 +4299,15 @@ pub fn run_pgas(
                 energy: result.energy,
             };
             if result.tree_depth >= config.max_tree_depth {
-                n_max_treedepth += 1;
+                nuts_counts.n_max_treedepth += 1;
                 if sweep >= config.burn_in {
-                    n_max_treedepth_post_burn += 1;
+                    nuts_counts.n_max_treedepth_post_burn += 1;
                 }
             }
             if result.divergent {
-                n_divergent += 1;
+                nuts_counts.n_divergent += 1;
                 if sweep >= config.burn_in {
-                    n_divergent_post_burn += 1;
+                    nuts_counts.n_divergent_post_burn += 1;
                 }
             }
 
@@ -4519,10 +4534,10 @@ pub fn run_pgas(
                 trajectory_renewal: csmc_diag.trajectory_renewal,
                 // NUTS diagnostics (Stan-style warnings)
                 nuts: has_gradients.then_some(NutsBurnIn {
-                    n_max_treedepth,
+                    n_max_treedepth: nuts_counts.n_max_treedepth,
                     sweeps: sweep + 1,
                     max_tree_depth: config.max_tree_depth,
-                    n_divergent,
+                    n_divergent: nuts_counts.n_divergent,
                 }),
             });
         }
@@ -4570,6 +4585,7 @@ pub fn run_pgas(
         nuts_step_size: chain.nuts_step_size,
         log_proposal_sd: chain.log_proposal_sd.clone(),
         total_accepted: chain.total_accepted.clone(),
+        nuts_counts,
     };
 
     Ok(PGASResult {
@@ -4577,10 +4593,10 @@ pub fn run_pgas(
         final_trajectory: chain.trajectory.clone(),
         acceptance_rates,
         resume_state,
-        n_divergent_total: n_divergent,
-        n_divergent_post_burn,
-        n_max_treedepth_total: n_max_treedepth,
-        n_max_treedepth_post_burn,
+        n_divergent_total: nuts_counts.n_divergent,
+        n_divergent_post_burn: nuts_counts.n_divergent_post_burn,
+        n_max_treedepth_total: nuts_counts.n_max_treedepth,
+        n_max_treedepth_post_burn: nuts_counts.n_max_treedepth_post_burn,
         init_source,
     })
 }
