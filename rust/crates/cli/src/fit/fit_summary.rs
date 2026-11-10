@@ -541,11 +541,7 @@ fn format_text(
             MethodResult::Nlopt(_) | MethodResult::Pfilter(_) => None,
         };
         let report = match load_method_facts(resolved, typed, model, chain_detail) {
-            Ok(facts) => {
-                let report = build_method_report(facts, &cal);
-                crate::fit::report::exact::capture("summary", &report);
-                report
-            }
+            Ok(facts) => build_method_report(facts, &cal),
             Err(e) => {
                 out.say(format_args!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e));
                 failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
@@ -760,9 +756,7 @@ fn build_summary_doc(
         let Some(typed) = typed else { continue };
         match load_method_facts(resolved, typed, model.as_ref(), None) {
             Ok(facts) => {
-                let report = build_method_report(facts, &cal);
-                crate::fit::report::exact::capture("summary", &report);
-                method_reports.push(report);
+                method_reports.push(build_method_report(facts, &cal));
             }
             Err(e) => {
                 out.say(format_args!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e));

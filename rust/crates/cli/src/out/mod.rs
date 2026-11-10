@@ -269,9 +269,6 @@ impl Out {
             };
             log.record(&events::Event::MethodReport(outcome));
         }
-        if let MethodOutcome::Completed(report) = o {
-            crate::fit::report::exact::capture("run", report);
-        }
     }
 
     /// A notice (`info: …`, `warning: …`), on stderr. The run's record of
