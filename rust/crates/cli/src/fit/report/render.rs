@@ -195,7 +195,7 @@ fn run_end_block(report: &MethodReport) -> Vec<Line> {
         Some(MethodResult::Pmmh(r)) => {
             out.extend(verdict_section(&r.diagnostics, detail));
             out.extend(rhat_legend());
-            out.extend(acceptance_table(&r.acceptance_per_chain, &report.warmup, AcceptanceKernel::RandomWalk));
+            out.extend(acceptance_table(&r.acceptance_per_chain, &report.warmup, crate::fit::pmmh::THETA_MOVE_KERNEL));
             if r.diagnostics.n_chains > 1 {
                 out.extend(rhat_run_table(&r.diagnostics));
             }

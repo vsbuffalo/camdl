@@ -900,6 +900,23 @@ pub fn render_matrix() -> String {
     out
 }
 
+/// The kernel behind `algorithm`'s acceptance diagnostics — whose healthy
+/// band its acceptance findings apply — or `None` for a method that accepts
+/// nothing (IF2, NLopt, `pfilter`). Each sampler's own choice, not a copy of
+/// it: PMMH and `mh` use `pmmh::THETA_MOVE_KERNEL`, PGAS
+/// `pgas::theta_move_kernel` on the model it will run.
+pub(crate) fn acceptance_kernel(
+    algorithm: &super::config_v2::Algorithm,
+    compiled: &sim::CompiledModel,
+) -> Option<sim::inference::diagnostic::AcceptanceKernel> {
+    use super::config_v2::Algorithm as A;
+    match algorithm {
+        A::PMMH { .. } | A::Mh { .. } => Some(super::pmmh::THETA_MOVE_KERNEL),
+        A::PGAS { use_nuts, .. } => Some(super::pgas::theta_move_kernel(*use_nuts, compiled)),
+        A::IF2 { .. } | A::NlSbplx(_) | A::NlBobyqa(_) | A::NlLbfgs(_) | A::PFilter { .. } => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
