@@ -641,22 +641,19 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                 out.say(format_args!("warning: not storing this pfilter leaf — {}", e));
                 return;
             }
-            // Anything else means the result was NOT recorded. Say so
-            // unmistakably — the old bare "warning: claim …" left the user
-            // with a printed number they reasonably believed had been saved —
-            // but do NOT abort: the filter has already finished and delivered
-            // its outputs (the loglik above, `--save-final-state`, the trace
-            // files). The leaf is a cache/provenance artifact, so a store
-            // failure costs a cache entry, not an answer, and killing the
-            // process here would discard completed work over it. A missing
-            // leaf is an honest miss downstream (`camdl cat` reports not
-            // found); it can never be read as a wrong number.
+            // Anything else means the result was NOT recorded, and the run
+            // fails: the filter's outputs already delivered (the loglik
+            // above, `--save-final-state`, the trace files) are valid and
+            // stay on disk, but a caller that asked for a stored leaf (a
+            // script that follows with `camdl cat`, `compare`, a pipeline)
+            // must not read exit 0 as "stored". Exit 1, not `FILTER_FAILED`:
+            // the filter did not fail, and `compare` reads status 3 as the
+            // filter rejecting a posterior draw.
             Err(e) => {
-                out.say(format_args!("warning: this pfilter result was NOT stored in the \
+                out.fail(format!("error: this pfilter result was NOT stored in the \
                            run cache — {}\n  (the log-likelihood above is \
                            valid; only the cached leaf at {} is missing)",
                     e, cas_path.display()));
-                return;
             }
         };
         let mut body = format!("loglik = {}\nn_replicates = {}\nn_particles = {}\n",
