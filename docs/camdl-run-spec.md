@@ -3573,8 +3573,10 @@ take `--force` with the same meaning (`WritePolicy::Force`,
 read read-only and the longer chain is written to a new content-addressed leaf
 keyed on the new `sweeps` / `iterations` with a dependency on the base — a
 distinct deterministic artifact, not bit-identical to an uninterrupted fit of
-the same length. The file's `starts` (or `--starts`) is resolved as on any run,
-so a file that starts from another fit resumes like any other:
+the same length. Running the same resume again, of the same base to the same
+length, is a cache hit on that leaf, as any identical invocation is. The file's
+`starts` (or `--starts`) is resolved as on any run, so a file that starts from
+another fit resumes like any other:
 
 ```
 $ camdl fit run fits/09_pgas_only.toml --starts from_mle=@mle
