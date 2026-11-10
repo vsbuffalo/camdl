@@ -1024,3 +1024,58 @@ Step 7's run side, as landed:
   about a hundred `eprintln!` and `process::exit` pairs) and the runners' own
   progress and preflight prints do not yet; they move with step 9's no-print
   test, which is what makes "commands print through nothing else" checkable.
+
+Step 9's library half, as landed:
+
+- **PGAS's chain events are values handed over live, not returned.** `run_pgas`
+  takes an `on_event` callback and hands it a `PgasEvent` for each thing it used
+  to print (the reference trajectory's draw and density check, the starting
+  log-likelihood, NUTS's mass matrix and step size, the end of burn-in, a
+  recovered start, and CSMC's degenerate-ancestor and weight-collapse readings).
+  The CLI prints each word for word with `chain k:` on its first line, through
+  the chain's progress task. They are not fields of `PGASResult` because they
+  arise during runs that can last hours, and a chain refused at its start has no
+  result to carry them. As for PMMH, the library's resume line goes and the
+  already-completed warning moves to the CLI's resume loader.
+- **PGAS's run end is drawn from the report, in PMMH's order**: the verdict, the
+  R̂ legend, the acceptance and R̂ tables, then the path-renewal, filter-ESS,
+  latent-path and cross-chain blocks, the findings, and the completion line
+  (without the leaf path, as PMMH's) and the best sweep's log-likelihood. Each
+  block is read back from the record the run wrote, by `ChainDetail::gather`;
+  `pgas_summary.json` gains `cost.sampling_seconds` and `PgasRun` carries it
+  with `fit_state.toml`'s `best_chain` and `best_loglik`. Reading back exposed
+  that `serde_json`'s default float parser is not exact: it reads
+  `0.9724999999999999` as `0.9725`, so the fixture's renewal prefix, a tie at
+  the third decimal, now prints `0.973` where the run computed `0.972`
+  (facts.tsv edited). Enabling `serde_json`'s `float_roundtrip` feature would
+  fix it, but features unify across the workspace, so it would also change how
+  every other JSON file parses, the model IR among them; it is left as its own
+  issue. A cross-chain number the file cannot hold (non-finite, which JSON
+  writes as `null`) prints `—`.
+- **What a run meets deep in the engine is recorded once, in `sim::run_notes`,
+  and said by the command.** The effect-snapped note, the non-integer Normal
+  observation, a failed Cholesky factorisation and the gamma-index divergence
+  detector arise where nothing can be returned (inside a likelihood evaluation
+  repeated thousands of times, or a plan built once per evaluation), so the
+  engine records a `RunNote`; its first occurrence in the process goes to the
+  reporter `main` installs, which prints it as a warning notice, and repeats are
+  dropped as before. `cholesky_lower` returns `Result<_, NotPositiveDefinite>`,
+  so the condition is a value its callers hold. The sentences are unchanged;
+  they lose `env_logger`'s timestamp and module path.
+- **A negative balance compartment is counted, not logged.** It fired once per
+  particle per substep under inference; it is now `balance_negative` in the
+  eval-stats summary the command prints at its end.
+- **`eval_stats::report_if_nonzero` became `nonzero_since`**, which returns the
+  counters that moved; the CLI's `EvalStatsReportGuard` prints them.
+- **`restore_z_values` is silent**; `z_restore_gaps` says what it will
+  recompute, and the PGAS and PMMH resume loaders print it, word for word, under
+  each chain's resume line.
+- **`warn_zero_firings` became `never_fired`**, and `simulate` reports the
+  transitions as one warning `Notice` whose message keeps today's lines.
+- **The no-print test is `sim/tests/sim_prints_nothing.rs`.** It blanks comments
+  and every `#[cfg(test)]` item before searching, so test modules and test-only
+  helpers may print; `src/trace.rs` is the one exempt module.
+- **What of PGAS still prints from the CLI.** `pgas::run_method`'s own lines
+  (the priors, the sampling plan, `chain k done`, the live `BadInit` line, the
+  `draws.tsv` line) and the chain-event renderer write directly; they move onto
+  `Out` with the CLI's no-print test.
