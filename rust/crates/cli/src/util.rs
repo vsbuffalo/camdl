@@ -51,7 +51,12 @@ impl EvalStatsReportGuard {
     pub fn start() -> Self { Self(sim::eval_stats::EvalStats::snapshot()) }
 }
 impl Drop for EvalStatsReportGuard {
-    fn drop(&mut self) { sim::eval_stats::report_if_nonzero(&self.0); }
+    fn drop(&mut self) {
+        if let Some(diff) = sim::eval_stats::nonzero_since(&self.0) {
+            eprintln!();
+            eprint!("{}", diff);
+        }
+    }
 }
 
 /// How the CLI says a note the engine records mid-run

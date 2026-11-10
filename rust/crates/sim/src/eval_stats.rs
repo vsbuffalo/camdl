@@ -131,17 +131,13 @@ impl std::fmt::Display for EvalStats {
     }
 }
 
-/// gh#audit-H5. Convenience helper used by every CLI entry point that
-/// runs simulation or inference. Snapshot at the start of `cmd_*`, call
-/// `report_if_nonzero(start)` at the end. Prints a compact summary to
-/// stderr if any counter incremented during the run; silent otherwise.
-/// Does not write JSON — `eval_stats.json` was the audit's recommendation
-/// for fit runs with a results dir; left as future work for now.
-pub fn report_if_nonzero(start: &EvalStats) {
-    let end  = EvalStats::snapshot();
-    let diff = end.diff_since(start);
-    if diff.total() > 0 {
-        eprintln!();
-        eprint!("{}", diff);
-    }
+/// gh#audit-H5. What every CLI entry point that runs simulation or
+/// inference reports at its end: snapshot at the start of `cmd_*`, then the
+/// counters that moved since, or `None` when none did. The caller prints it
+/// (its `Display` is the summary). Does not write JSON — `eval_stats.json`
+/// was the audit's recommendation for fit runs with a results dir; left as
+/// future work for now.
+pub fn nonzero_since(start: &EvalStats) -> Option<EvalStats> {
+    let diff = EvalStats::snapshot().diff_since(start);
+    (diff.total() > 0).then_some(diff)
 }
