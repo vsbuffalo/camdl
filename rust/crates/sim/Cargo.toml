@@ -68,7 +68,6 @@ lineage-parquet = ["dep:arrow", "dep:parquet"]
 ode = ["dep:nlopt"]
 
 [dev-dependencies]
-approx = "0.5"
 criterion = { version = "0.5", features = ["html_reports"] }
 # Property-based testing for the scheduling-spine invariants (firing-invariance
 # over generated schedules — the generated-combination class that hid gh#216).

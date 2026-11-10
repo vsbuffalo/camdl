@@ -26,7 +26,6 @@ name = "camdl"
 path = "src/main.rs"
 
 [dependencies]
-axum = "0.7"
 bincode = "1"
 clap = { version = "4", features = ["derive", "env"] }
 # Table formatting for `camdl list` — automatic width/wrapping, preserves
@@ -56,9 +55,7 @@ sha2 = "0.10"
 sim = { path = "../sim", default-features = false }
 tar = "0.4"
 tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
 toml = { version = "0.8", features = ["parse", "display"] }
-tower-http = { version = "0.5", features = ["fs", "cors"] }
 # HTTP client for `camdl check-update` (and the future binary updater).
 # rustls backend = no system OpenSSL to locate at build/runtime, serving the
 # no-admin / self-contained-binary goals; blocking, so no async runtime.
