@@ -97,6 +97,11 @@ fn failed_run() -> (String, PathBuf, tempfile::TempDir) {
     (stderr, leaves[0].clone(), tmp)
 }
 
+fn json(path: &Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
 fn events(leaf: &Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(leaf.join("events.jsonl")).unwrap()
         .lines().map(|l| serde_json::from_str(l).unwrap()).collect()
@@ -117,3 +122,44 @@ fn the_begin_event_publishes_the_acceptance_band() {
         "PMMH's θ-move is random-walk MH: {begin}");
 }
 
+/// A refused chain is named by one number everywhere: a `bad_init` finding's
+/// sentence ("Chain N starting parameters …"), its `chain_id`, the stderr
+/// refusal line, `chain_starts.tsv`'s `chain_id` column and the `chain_N/`
+/// directory all carry the runner's own index, counted from 0 (gh#990,
+/// `chain_index.rs`), in `diagnostics.json` and in the event log alike.
+#[test]
+fn a_refused_chains_number_agrees_across_its_records() {
+    let (stderr, leaf, _tmp) = failed_run();
+    let findings: Vec<serde_json::Value> =
+        serde_json::from_value(json(&leaf.join("diagnostics.json"))).unwrap();
+    let logged: Vec<serde_json::Value> = events(&leaf).into_iter()
+        .filter(|e| e["event"] == "finding").map(|e| e["finding"].clone()).collect();
+    assert_eq!(findings, logged, "the log records the findings diagnostics.json holds");
+    let starts = std::fs::read_to_string(leaf.join("chain_starts.tsv")).unwrap();
+    let mut header: Option<Vec<&str>> = None;
+    let mut start_ids = std::collections::BTreeSet::new();
+    for line in starts.lines().filter(|l| !l.starts_with('#')) {
+        let cells: Vec<&str> = line.split('\t').collect();
+        match &header {
+            None => header = Some(cells),
+            Some(h) => {
+                let col = h.iter().position(|c| *c == "chain_id").expect("a chain_id column");
+                start_ids.insert(cells[col].parse::<u64>().unwrap());
+            }
+        }
+    }
+
+    let mut ids = Vec::new();
+    for f in findings.iter().filter(|f| f["kind"]["type"] == "bad_init") {
+        let id = f["kind"]["chain_id"].as_u64().expect("an integer chain_id");
+        let message = f["message"].as_str().unwrap();
+        assert!(message.starts_with(&format!("Chain {id} starting parameters")),
+            "the sentence names the chain the record names: chain_id {id}, {message:?}");
+        assert!(leaf.join(format!("chain_{id}")).is_dir(), "chain_{id}/ is that chain's directory");
+        assert!(stderr.contains(&format!("chain {id}: ✗ BadInit")), "and stderr names it so:\n{stderr}");
+        assert!(start_ids.contains(&id), "and chain_starts.tsv: {start_ids:?}");
+        ids.push(id);
+    }
+    ids.sort();
+    assert_eq!(ids, [0, 1], "both chains are refused, numbered from 0");
+}
