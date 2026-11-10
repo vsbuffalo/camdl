@@ -494,6 +494,68 @@ fn finalized_claim_is_untouched_by_the_guard() {
     cleanup(&root);
 }
 
+/// A fit method's event log is written before and after its leaf commits
+/// (the end-of-run report is its last line), so it is outside the exact set:
+/// the committed leaf stays a hit however the log grows, the manifest does
+/// not list it, and the record of the run's identity does not see it.
+#[test]
+fn the_event_log_is_outside_the_exact_set() {
+    let root = tmp_root("eventlog");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("fit-aaaaaaaa").join("pmmh-bbbbbbbb");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    claim.write("draws.tsv", b"beta\n0.5\n").unwrap();
+    fs::write(leaf.join(EVENT_LOG), b"{\"event\":\"check\"}\n").unwrap();
+    let dest = claim.finalize(record(id(0xaa))).unwrap();
+    let committed = match store.lookup(&dest, &LeafIdentity::new(id(0xaa))) {
+        Lookup::Hit(r) => r,
+        other => panic!("expected Hit after finalize, got {other:?}"),
+    };
+    assert!(!committed.artifacts.contains_key(EVENT_LOG), "the manifest lists the event log");
+    assert!(committed.artifacts.contains_key("draws.tsv"));
+
+    // The report appended after the commit leaves the leaf a hit.
+    let mut log = fs::OpenOptions::new().append(true).open(dest.join(EVENT_LOG)).unwrap();
+    std::io::Write::write_all(&mut log, b"{\"event\":\"method_report\"}\n").unwrap();
+    drop(log);
+    match store.lookup(&dest, &LeafIdentity::new(id(0xaa))) {
+        Lookup::Hit(r) => assert_eq!(r.run_id, id(0xaa)),
+        other => panic!("an appended event log made the committed leaf {other:?}"),
+    }
+    // It is the event log by name at the leaf root, not any file: a stray
+    // file still makes the leaf an orphan.
+    fs::write(dest.join("events.json"), b"{}").unwrap();
+    assert!(matches!(
+        store.lookup(&dest, &LeafIdentity::new(id(0xaa))),
+        Lookup::Stale(StaleReason::OrphanFiles)
+    ));
+    cleanup(&root);
+}
+
+/// A run killed mid-method leaves its event log behind; the reclaim that
+/// recomputes the leaf clears it with the rest of the dead run's files, so the
+/// new run's log does not continue the dead one's.
+#[test]
+fn a_reclaim_clears_a_dead_runs_event_log() {
+    let _serial = super::RECLAIM_HOOK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tmp_root("eventlogreclaim");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("fit-aaaaaaaa").join("pmmh-bbbbbbbb");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    fs::write(leaf.join(EVENT_LOG), b"{\"event\":\"check\"}\n").unwrap();
+    std::mem::forget(claim); // the process died: no `Drop`, no finalize
+    let mut child = std::process::Command::new("true").spawn().expect("spawn true");
+    let dead_pid = child.id();
+    child.wait().expect("reap");
+    fs::write(leaf.join(".lock"), dead_pid.to_string()).unwrap();
+
+    let claim2 = store.claim_streaming(&leaf, record(id(0xaa)))
+        .expect("a lock held by a dead PID is reclaimed");
+    assert!(!leaf.join(EVENT_LOG).exists(), "the dead run's event log survived the reclaim");
+    drop(claim2);
+    cleanup(&root);
+}
+
 // ── S1: divergence check at commit ──────────────────────────────────────────
 // Proposal: docs/dev/proposals/2026-08-23-run-identity-and-store-contract.md
 

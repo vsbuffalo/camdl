@@ -965,6 +965,21 @@ fn is_reserved(name: &str) -> bool {
     matches!(name, "run.json" | "run.json.tmp" | ".lock" | ".lock.new" | ".reclaim")
 }
 
+/// A fit method leaf's event log: one JSON line per event the run reports
+/// (`docs/camdl-run-spec.md` §10.11). The run appends its end-of-run report
+/// after the leaf commits, because that report is built from the committed
+/// record, so the log cannot be in the exact-set manifest: an append after
+/// `finalize` would make a completed leaf `Corrupt`. It is a display record,
+/// never an input to anything a run computes, and enters no hash.
+pub const EVENT_LOG: &str = "events.jsonl";
+
+/// Leaf-root files the manifest and the orphan scan pass over: the reserved
+/// files and the event log. Unlike the reserved files, the event log is a dead
+/// run's debris and a stale-lock reclaim clears it (`clear_except_lock`).
+fn is_unmanifested(name: &str) -> bool {
+    is_reserved(name) || name == EVENT_LOG
+}
+
 fn read_record(dir: &Path) -> ReadResult {
     match fs::read(dir.join("run.json")) {
         Err(_) => ReadResult::Absent,
@@ -991,8 +1006,8 @@ fn rel_key(root: &Path, file: &Path) -> String {
 }
 
 /// The leaf's OWN files must exactly match the manifest — no missing and no
-/// orphan — across its **whole subtree**, EXCEPT the reserved files and the
-/// declared `children` subdirs. A fit method nests per-chain files
+/// orphan — across its **whole subtree**, EXCEPT the reserved files, the
+/// event log ([`EVENT_LOG`]) and the declared `children` subdirs. A fit method nests per-chain files
 /// (`chain_1/trace.tsv`) plus method-root outputs (`fit_state.toml`,
 /// `draws.tsv`), so the walk recurses; but it **stops at a declared child**
 /// (`obs/`, `trajectories/`, `dt_check/`) — those are separate artifacts with
@@ -1072,7 +1087,7 @@ fn scan_orphans(
             }
             scan_orphans(root, &entry.path(), record, expected)?;
         } else {
-            if dir == root && is_reserved(&name) {
+            if dir == root && is_unmanifested(&name) {
                 continue;
             }
             if !record.artifacts.contains_key(&rel_key(root, &entry.path())) {
@@ -1085,7 +1100,7 @@ fn scan_orphans(
 
 /// Build the exact-set manifest of the leaf's OWN files by walking its whole
 /// subtree (Mode B `finalize`): every file keyed by its `/`-joined relative
-/// path, EXCEPT reserved files and the contents of declared `children`
+/// path, EXCEPT reserved files, the event log and the contents of declared `children`
 /// subdirs (separate artifacts, manifested by their own commit).
 fn build_manifest(
     root: &Path,
@@ -1109,7 +1124,7 @@ fn collect_own_files(
         // claimant churns `.reclaim`/`.lock.new` in this same leaf; if such a
         // transient is enumerated by `read_dir` then removed before our
         // `metadata()`, the `?` would bubble `Io(NotFound)` out of finalize.
-        if dir == root && is_reserved(&name) {
+        if dir == root && is_unmanifested(&name) {
             continue;
         }
         let meta = entry.metadata()?;
