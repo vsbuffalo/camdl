@@ -303,8 +303,7 @@ pub(crate) fn write_diagnostics_then_fail(
 /// the error and the heartbeat's terminal record, as before `Out` existed.
 pub(crate) fn abandon_method_on(heartbeat: &io::HeartbeatGuard, message: String) -> ! {
     heartbeat.failed(message.as_str());
-    eprintln!("{}", message);
-    std::process::exit(1);
+    crate::out::detached().fail(message)
 }
 
 pub(crate) fn abandon_method(out: &mut crate::out::Out, message: String) -> ! {
@@ -344,33 +343,30 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // (alpha posture: a redirect, not a shim). Every one present is reported,
     // so `--stage posterior --init from_prior` is answered in one message.
     if let Some(msg) = removed_flag_message(a) {
-        eprintln!("error: {}", msg);
-        std::process::exit(1);
+        out.fail(format!("error: {}", msg));
     }
     // PGAS parallel tempering was removed (gh#789); the flag is trapped so a
     // stale script is answered with the fix rather than clap's "unexpected
     // argument".
     if let Some(raw) = a._removed_tempering.as_deref() {
-        eprintln!(
+        out.fail(format!(
             "error: --tempering is no longer accepted on `camdl fit run`: PGAS parallel \
              tempering was removed (gh#789), and every PGAS chain samples the posterior \
              directly, as the ladder's cold rung did. Drop `--tempering {raw}`; a \
              `tempering = [...]` line under [method] must be deleted too. Fits stored \
              before the removal are not reused and cannot be resumed; they run again."
-        );
-        std::process::exit(1);
+        ));
     }
     // Correlated pseudo-marginal PMMH was removed; `--rho` is trapped the same
     // way.
     if let Some(raw) = a._removed_rho.as_deref() {
-        eprintln!(
+        out.fail(format!(
             "error: --rho is no longer accepted on `camdl fit run`: correlated \
              pseudo-marginal PMMH was removed, and `pmmh` runs the bootstrap particle \
              filter with independent likelihood evaluations. Drop `--rho {raw}`; a \
              `rho = ...` line under [method] must be deleted too. PMMH fits stored \
              before the removal are not reused and cannot be resumed; they run again."
-        );
-        std::process::exit(1);
+        ));
     }
     let fit_path              = a.config.to_string_lossy().into_owned();
     let base_seed             = a.seed.unwrap_or(1);
@@ -405,26 +401,22 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 
     // Load the file: the problem half and the one `[method]`.
     let mut config = FitConfig::load(&fit_path).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
     // `fit run` runs the file's one method and refuses a file that has none,
     // naming the table. Every other reader takes the problem alone.
     if let Err(e) = config.method() {
-        eprintln!("error: {}: {}", fit_path, e);
-        std::process::exit(1);
+        out.fail(format!("error: {}: {}", fit_path, e));
     }
     // `[method]` keys the method's own settings leave inert. Here and not in
     // the shared parser, which also reads stored fits' archived configs.
     {
         let contents = std::fs::read_to_string(&fit_path).unwrap_or_else(|e| {
-            eprintln!("error: cannot read {fit_path}: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: cannot read {fit_path}: {e}"));
         });
         let method = config.inference.method.as_ref().expect("checked above");
         if let Err(e) = config_v2::refuse_inert_method_keys_in(&contents, method) {
-            eprintln!("error: {fit_path}: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: {fit_path}: {e}"));
         }
     }
     // gh#audit-C6 / gh#189: degenerate-rate handling is a keyed `[config]` field
@@ -446,11 +438,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // data's bytes, which `FitDigest.data` already hashes.
     let emit_every = crate::emit_every::EmitEvery::from_cli_specs(&a.emit_every)
         .unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
     if emit_every.is_some() && !config.problem.is_synthetic_fit() {
-        eprintln!(
+        out.fail(format!(
             "error: --emit-every sets the cadence at which SYNTHETIC \
              observations are generated, and {} {}.\n  \
              A fit against real data scores each stream at its own data file's \
@@ -463,8 +454,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             } else {
                 "declares no `[synthetic]` block"
             }
-        );
-        std::process::exit(1);
+        ));
     }
 
     // gh#896: the method as the file alone spells it, before any CLI override,
@@ -483,8 +473,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             // A flag the method does not read is refused here, before any
             // work, rather than dropped (`OverrideFlag::methods`).
             if let Err(e) = method.algorithm.apply_cli_overrides(&cli_overrides) {
-                eprintln!("error: {e}");
-                std::process::exit(1);
+                out.fail(format!("error: {e}"));
             }
         }
         if let Some(starts) = &a.starts {
@@ -503,8 +492,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         match &method.starts {
             Some(rule) if rule.source().is_some() => Some(
                 chain_starts::resolve_starts(rule, a.allow_nonconverged_source).unwrap_or_else(|e| {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
+                    out.fail(format!("error: {}", e));
                 }),
             ),
             _ => None,
@@ -530,8 +518,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     let needs_state_grad = config.needs_state_grad();
     let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(&config.problem.model.camdl, needs_state_grad)
         .unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
     config.problem.compiled_ir = Some(compiled_ir.clone());
 
@@ -552,15 +539,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // of any fit do.
     let compiled_ir = resolve_anchors_into_temp_ir(&compiled_ir, &config.problem)
         .unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
     config.problem.compiled_ir = Some(compiled_ir.clone());
 
     // Load model and validate completeness (from the pre-compiled IR).
     let (model, _) = crate::util::load_model(&compiled_ir).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
     // The one dt rule (`crate::dt_rule`): the model's declared step is the
     // integration step for every method; a `[config] dt` the file writes that
@@ -569,16 +554,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // runner, and the fit identity, which so keys on the step the fit ran at.
     {
         let contents = std::fs::read_to_string(&fit_path).unwrap_or_else(|e| {
-            eprintln!("error: cannot read {fit_path}: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: cannot read {fit_path}: {e}"));
         });
         let written = config_v2::table_declares_key(&contents, "config", "dt")
             .then_some(config.problem.config.dt);
         match crate::dt_rule::effective_dt(model.simulation.dt, written) {
             Ok(dt) => config.problem.config.dt = dt,
             Err(m) => {
-                eprintln!("error: {fit_path}: {}", m.message("[config] dt"));
-                std::process::exit(1);
+                out.fail(format!("error: {fit_path}: {}", m.message("[config] dt")));
             }
         }
     }
@@ -591,8 +574,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // happen after model load but before validate, so the every-param-
     // resolved check sees the expanded values.
     config.problem.expand_fixed_from_scenario(&model).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
     let model_params: Vec<String> = model.parameters.iter().map(|p| p.name.clone()).collect();
     // The one model fact `validate` needs beyond the parameter names: does
@@ -609,8 +591,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // parameter; the hint says how to make it configurable.
         let fixed = config.problem.fixed.resolve().unwrap_or_default();
         let named = config.problem.estimate.keys().chain(fixed.keys()).map(|s| s.as_str());
-        eprintln!("error: {}{}", e, crate::util::constant_hints(&model, named));
-        std::process::exit(1);
+        out.fail(format!("error: {}{}", e, crate::util::constant_hints(&model, named)));
     });
     // gh#75: prior-presence check honoring the IR fallback. Has to run
     // after partition validation but with the model IR in scope.
@@ -619,8 +600,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         .map(|p| p.name.as_str())
         .collect();
     config.validate_priors_present(&ir_prior_params).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
     // gh#369: a fit.toml prior that displaces a model `~` prior is said once,
     // here, before the grid — a property of the config, not of a cell/chain.
@@ -629,30 +609,25 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         &crate::fit::priors_precedence::prior_overrides(
             &estimated_names, &config.problem.estimate, &model),
     ) {
-        eprint!("{}", w);
+        out.say_raw(format_args!("{}", w));
     }
     // `nl-lbfgs` is the one method whose objective needs a gradient of this
     // model. Ask the gradient capability gate now, before a leaf is claimed, so
     // a model it refuses costs a message rather than a half-run method.
     config.validate_gradient_capability(&model).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
     config.validate_held_hierarchical_leaves(&model).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
     config.validate_hierarchical_leaf_boxes(&model).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
     config.validate_smooth_scale(&model).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
     config.validate_smooth_coordinates(&model).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
 
     // The chain-starts rule, resolved against the problem before the identity
@@ -663,8 +638,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     let starts_resolution = {
         let method = config.inference.method.as_mut().expect("checked above");
         method.resolve_starts(&config.problem, &model).unwrap_or_else(|e| {
-            eprintln!("error: {}: {e}", starts_origin(a, &fit_path));
-            std::process::exit(1);
+            out.fail(format!("error: {}: {e}", starts_origin(a, &fit_path)));
         })
     };
     // From here the method is read-only: the identity below sees exactly what
@@ -679,21 +653,20 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // Only a fit source carries a convergence verdict to lift.
     if allow_nonconverged_source {
         use crate::fit::starts::{ChainStarts, Point, Spread};
-        let rule = method.starts().unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1) });
+        let rule = method.starts().unwrap_or_else(|e| { out.fail(format!("error: {e}")) });
         if !matches!(rule, ChainStarts::Point(Point::FromMle { .. })
                          | ChainStarts::Spread(Spread::FromPosterior { .. })) {
-            eprintln!("error: --allow-nonconverged-source lifts the refusal of a `from_mle` or \
+            out.fail(format!("error: --allow-nonconverged-source lifts the refusal of a `from_mle` or \
                        `from_posterior` source whose stored verdict is not converged, and this \
                        fit starts from `{}`, which has no such verdict, so the flag would change \
-                       nothing. Drop the flag.", rule.tag());
-            std::process::exit(1);
+                       nothing. Drop the flag.", rule.tag()));
         }
     }
     if let Some(msg) = config.point_start_multichain_note() {
         // gh#71: a point-started multi-chain sampler's R̂ is uninformative;
         // the summary will report it as not assessed. A note, not an error —
         // the sample is still valid.
-        eprintln!("{} {}", crate::out::paint::note_tag(), msg);
+        out.say(format_args!("{} {}", crate::out::paint::note_tag(), msg));
     }
 
     // ── Validate sweeps ───────────────────────────────────────────────────
@@ -701,16 +674,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     let fixed_resolved = config.problem.fixed.resolve().unwrap_or_default();
     for (name, _) in &sweep_specs {
         if config.problem.estimate.contains_key(name) {
-            eprintln!("error: cannot sweep '{}' — it is in [estimate].\n  \
+            out.fail(format!("error: cannot sweep '{}' — it is in [estimate].\n  \
                        Sweeps override [fixed] parameters. Move '{}' to [fixed] first.",
-                name, name);
-            std::process::exit(1);
+                name, name));
         }
         if !fixed_resolved.contains_key(name) {
-            eprintln!("error: sweep parameter '{}' not found in [fixed].\n  \
+            out.fail(format!("error: sweep parameter '{}' not found in [fixed].\n  \
                        Available fixed params: {}",
-                name, fixed_resolved.keys().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
-            std::process::exit(1);
+                name, fixed_resolved.keys().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
         }
     }
 
@@ -732,16 +703,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             crate::params_resolver::EstimatedBy::FitToml(&fit_path),
         )
         .unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
         refusals.extend(estimate_clash);
         let fixed_clash = crate::params_resolver::scenario_fixed_collision(
             &model, scenario, &fixed_resolved, &fit_path,
         )
         .unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
         refusals.extend(fixed_clash);
         if !sweep_specs.is_empty() {
@@ -755,14 +724,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 &varied,
             )
             .unwrap_or_else(|e| {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: {}", e));
             });
             refusals.extend(sweep_clash);
         }
         if !refusals.is_empty() {
-            eprintln!("error: {}", refusals.join("\n\nerror: "));
-            std::process::exit(1);
+            out.fail(format!("error: {}", refusals.join("\n\nerror: ")));
         }
     }
 
@@ -791,7 +758,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     };
     let has_sweep = sweep_points.len() > 1;
     if has_sweep {
-        eprintln!("sweep: {} points", sweep_points.len());
+        out.say(format_args!("sweep: {} points", sweep_points.len()));
     }
 
     // Validate --resume requires a PGAS or PMMH method. Other methods
@@ -801,9 +768,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     if a.resume.is_some()
         && !matches!(method.algorithm, Algorithm::PGAS { .. } | Algorithm::PMMH { .. })
     {
-        eprintln!("error: --resume is only supported for PGAS and PMMH methods; \
-                   this fit's method is '{}'.", method.algorithm.method_name());
-        std::process::exit(1);
+        out.fail(format!("error: --resume is only supported for PGAS and PMMH methods; \
+                   this fit's method is '{}'.", method.algorithm.method_name()));
     }
 
     // gh#191: gate the model's required capabilities against the method's
@@ -833,12 +799,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
         }
         let compiled = sim::CompiledModel::new(cap_model).unwrap_or_else(|e| {
-            eprintln!("error: {:?}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {:?}", e));
         });
         if let Err(msg) = gate_run_method_against_model(&method.algorithm, &compiled, config.problem.config.dt) {
-            eprintln!("error: {}", msg);
-            std::process::exit(1);
+            out.fail(format!("error: {}", msg));
         }
         // PGAS runs NUTS only where the compiler emitted rate gradients
         // (`nuts_active`, the predicate the sampler itself uses); elsewhere it
@@ -857,10 +821,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     (a.diagonal_mass, "--diagonal-mass"),
                 ].into_iter().filter_map(|(on, name)| on.then_some(name)).collect();
                 match config_v2::nuts_unavailable(declared, &tuning) {
-                    Ok(note) => eprintln!("{} {note}", crate::out::paint::note_tag()),
+                    Ok(note) => out.say(format_args!("{} {note}", crate::out::paint::note_tag())),
                     Err(e) => {
-                        eprintln!("error: {fit_path}: {e}");
-                        std::process::exit(1);
+                        out.fail(format!("error: {fit_path}: {e}"));
                     }
                 }
             }
@@ -882,8 +845,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         ] {
             let Some(table) = table else { continue };
             if let Err(e) = runner::check_bound_sources(&model, origin, table) {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: {}", e));
             }
         }
     }
@@ -902,8 +864,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         Some(raw) => match validate_label(raw) {
             Ok(l) => Some(l),
             Err(e) => {
-                eprintln!("error: invalid --label: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: invalid --label: {}", e));
             }
         },
         None => None,
@@ -947,8 +908,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         &fit_data_paths,
     )
     .unwrap_or_else(|e| {
-        eprintln!("error: fit-level identity: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: fit-level identity: {}", e));
     });
     let announced_fit_dir = cas::fit_segment_dir(
         &announce_cas_root, &announce_stem, &parent_fit_hash_ch);
@@ -978,15 +938,15 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         starts: starts_resolution.describe(),
         output: report::display_path(&announced_fit_dir),
     };
-    eprintln!("fit: {} (method={})", run_header.config, run_header.method);
-    eprintln!("  model:    {}", run_header.model);
-    eprintln!("  estimate: {}", run_header.estimate.join(", "));
-    eprintln!("  fixed:    {}", run_header.fixed.join(", "));
-    eprintln!("  starts:   {}", run_header.starts);
+    out.say(format_args!("fit: {} (method={})", run_header.config, run_header.method));
+    out.say(format_args!("  model:    {}", run_header.model));
+    out.say(format_args!("  estimate: {}", run_header.estimate.join(", ")));
+    out.say(format_args!("  fixed:    {}", run_header.fixed.join(", ")));
+    out.say(format_args!("  starts:   {}", run_header.starts));
     // Relative to the working directory when the fit lands under it, else
     // absolute (`report::display_path`): either way there is one base to
     // read it against, which is what gh#507 asked of this line.
-    eprintln!("  output:   {}", run_header.output);
+    out.say(format_args!("  output:   {}", run_header.output));
 
     // IC-free inference diagnostic: when ic_free = true, make it
     // visible on the startup block so the user can confirm the PF is
@@ -998,8 +958,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             .filter(|(_, spec)| spec.perturb_only_at_t0)
             .map(|(n, _)| n.as_str())
             .collect();
-        eprintln!("\n  {} conditioning on y₁",
-            crate::out::paint::stderr().paint("ic-free inference:", crate::out::paint::Style::Info));
+        out.say(format_args!("\n  {} conditioning on y₁",
+            crate::out::paint::stderr().paint("ic-free inference:", crate::out::paint::Style::Info)));
         // Name every ACTUAL source of the t=0 spread. There are two — a
         // declared `init { }` law, which every filter draws per particle
         // (gh#732), and, under IF2, a `perturb_only_at_t0` parameter (gh#364).
@@ -1018,8 +978,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             sources.push(format!("perturb_only_at_t0 params [{}] (if2 only)",
                 perturb_only_at_t0_params.join(", ")));
         }
-        eprintln!("    - initial state spread from: {}", sources.join("; "));
-        eprintln!("    - log-likelihood accumulation from t = 2 (y₁ reweights and resamples only)");
+        out.say(format_args!("    - initial state spread from: {}", sources.join("; ")));
+        out.say("    - log-likelihood accumulation from t = 2 (y₁ reweights and resamples only)");
     }
 
     // ── Build the replicate grid: (dataset_idx, fit_seed) cells ──────────
@@ -1046,10 +1006,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // `fit_seeds` in the file replaces the single base seed, so `--seed`
     // beside it would be read nowhere.
     if a.seed.is_some() && config.inference.fit_seeds.is_some() {
-        eprintln!("error: --seed sets the single seed of a fit, and {fit_path} declares \
+        out.fail(format!("error: --seed sets the single seed of a fit, and {fit_path} declares \
                    `fit_seeds`, which replaces it, so the flag would change nothing. Drop \
-                   --seed, or delete `fit_seeds` from the file.");
-        std::process::exit(1);
+                   --seed, or delete `fit_seeds` from the file."));
     }
     let fit_seeds: Vec<u64> = match &config.inference.fit_seeds {
         Some(list) => list.clone(),
@@ -1067,13 +1026,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 config.problem.config.dt,
                 emit_every.as_ref(),
             ).unwrap_or_else(|e| {
-                eprintln!("error: synthetic-data generation failed: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: synthetic-data generation failed: {}", e));
             });
-            eprintln!("synthetic: generated {} dataset{} under {}/synthetic/data/",
+            out.say(format_args!("synthetic: generated {} dataset{} under {}/synthetic/data/",
                 datasets.len(),
                 if datasets.len() == 1 { "" } else { "s" },
-                fit_dir.display());
+                fit_dir.display()));
             datasets
         }
         _ => Vec::new(),
@@ -1128,7 +1086,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     if let Some(label) = &validated_label {
         let n_leaves = total_cells * sweep_points.len();
         if n_leaves > 1 {
-            eprintln!(
+            out.fail(format!(
                 "error: --label \"{label}\" names one run, but this invocation writes {n_leaves} \
                  method leaves ({} fit seed(s) × {} dataset(s) × {} sweep point(s)).\n  \
                  Run without --label, then label the run you mean: \
@@ -1136,13 +1094,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 fit_seeds.len(),
                 synthetic_datasets.len().max(1),
                 sweep_points.len(),
-            );
-            std::process::exit(1);
+            ));
         }
     }
     if total_cells > 1 {
-        eprintln!("grid: {} cell{}", total_cells,
-            if total_cells == 1 { "" } else { "s" });
+        out.say(format_args!("grid: {} cell{}", total_cells,
+            if total_cells == 1 { "" } else { "s" }));
     }
 
     // ── gh#147 (M3.2): content-addressed store root + fit-level label ──
@@ -1164,13 +1121,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // The rule every cell draws from and folds into its identity: the sourced
     // resolution taken above, or the bare rule (declared or defaulted) now.
     let starts_rule = method.starts().cloned().unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
     let resolved_starts = early_resolved_starts.unwrap_or_else(|| {
         chain_starts::resolve_starts(&starts_rule, allow_nonconverged_source).unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         })
     });
     // gh#896: the deps the file's own starts rule folds — the same as this
@@ -1203,12 +1158,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     };
     if let Some(src) = &resolved_starts.source {
         match &src.leaf_dir {
-            Some(leaf) => eprintln!(
+            Some(leaf) => out.say(format_args!(
                 "  starts source: {} ({})",
                 leaf.display(),
                 src.file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-            ),
-            None => eprintln!("  starts source: {}", src.file.display()),
+            )),
+            None => out.say(format_args!("  starts source: {}", src.file.display())),
         }
     }
 
@@ -1219,8 +1174,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         if let Some(src) = &resolved_starts.source {
             let estimated: Vec<&str> = config.problem.estimate.keys().map(|k| k.as_str()).collect();
             if let Err(e) = refuse_pfilter_point_source_missing(&resolved_starts.rule, &src.file, &estimated) {
-                eprintln!("error: {}: {e}", starts_origin(a, &fit_path));
-                std::process::exit(1);
+                out.fail(format!("error: {}: {e}", starts_origin(a, &fit_path)));
             }
         }
     }
@@ -1237,10 +1191,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let seed = cell.fit_seed;
         if total_cells > 1 {
             match cell.dataset_idx {
-                Some(idx) => eprintln!("\n━━━ cell {}/{}: ds_{:02} × fit_seed={} ━━━",
-                    cell_i + 1, total_cells, idx, seed),
-                None      => eprintln!("\n━━━ cell {}/{}: fit_seed={} ━━━",
-                    cell_i + 1, total_cells, seed),
+                Some(idx) => out.say(format_args!("\n━━━ cell {}/{}: ds_{:02} × fit_seed={} ━━━",
+                    cell_i + 1, total_cells, idx, seed)),
+                None      => out.say(format_args!("\n━━━ cell {}/{}: fit_seed={} ━━━",
+                    cell_i + 1, total_cells, seed)),
             }
         }
 
@@ -1263,8 +1217,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // equivalent to a one-shot check at config load, but
         // putting it here means every cell sees its own validation.
         if let Err(e) = runner::validate_prior_transform_compat(&sweep_config.estimate, &model) {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         }
 
         if has_sweep {
@@ -1273,18 +1226,17 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 .collect::<Vec<_>>()
                 .join("__");
             if pt_idx == 0 {
-                eprintln!();
+                out.say("");
             }
-            eprintln!("═══ sweep point {}/{}: {} ═══", pt_idx + 1, sweep_points.len(), slug);
+            out.say(format_args!("═══ sweep point {}/{}: {} ═══", pt_idx + 1, sweep_points.len(), slug));
         }
 
         let method_name = method.algorithm.method_name();
-        eprintln!("\n── method: {} ──", method_name);
+        out.say(format_args!("\n── method: {} ──", method_name));
 
         // Resolve data the runners load from (also feeds the data digests).
         let data_spec = sweep_config.data_spec().unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
         // Expand the [data] shorthand (`file = "..."`) into the canonical
         // per-stream map before hashing, so the shorthand and the
@@ -1294,8 +1246,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             model.observations.iter().map(|o| o.name.clone()).collect();
         let effective_obs = data_spec.effective_observations(&model_obs_names)
             .unwrap_or_else(|e| {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: {}", e));
             });
         // The method level's `deps`: the content of a sourced `starts` rule's
         // file, so a regenerated source re-keys this run (gh#541), plus the
@@ -1312,16 +1263,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // chain state is copied into the new leaf after the claim below.
         let resume_base: Option<std::path::PathBuf> = a.resume.as_deref().map(|r| {
             let base = resolve_base_ref(r, &cas_root).unwrap_or_else(|| {
-                eprintln!("error: --resume base '{}' not found (run_id prefix or leaf path)", r);
-                std::process::exit(1);
+                out.fail(format!("error: --resume base '{}' not found (run_id prefix or leaf path)", r));
             });
             // A base whose chain directories count from 1 would hand chain k
             // the state of chain k - 1 and find none for the last chain.
             // Refused here, naming the base, before a new leaf is claimed or
             // any chain state is copied into one (gh#990).
             if let Err(e) = crate::chain_index::refuse_one_based_layout(&base) {
-                eprintln!("error: --resume: {e}");
-                std::process::exit(1);
+                out.fail(format!("error: --resume: {e}"));
             }
             if let Some(dep) = cas::cas_dep_from_dir(&base) {
                 deps.push(dep);
@@ -1343,8 +1292,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             deps: deps.clone(),
         };
         let resolved = cas::resolve_fit_method(&ctx).unwrap_or_else(|e| {
-            eprintln!("error: fit-method identity: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: fit-method identity: {}", e));
         });
         // gh#896: the config identity is recorded on this run only when it is
         // the run `fit run <file>` with no CLI options keys: this cell's
@@ -1383,8 +1331,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // extension dimension — the same levels, not a second hand-listed hash.
         let resume_guard = cas::resume_guard(&cas::FitMethodCtx { deps: starts_deps, ..ctx })
             .unwrap_or_else(|e| {
-                eprintln!("error: fit-method resume key: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: fit-method resume key: {}", e));
             });
         let cas_path = runid::store_path(&cas_root, runid::ArtifactKind::FitMethod, &resolved.levels);
         // gh#147 (M3.2): write the fit-level sidecar once per fit segment
@@ -1438,7 +1385,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     std::path::Path::new(&fit_path),
                     &seg_sidecar,
                 ) {
-                    eprintln!("warning: cannot write fit-level sidecar {}: {}", seg.display(), e);
+                    out.say(format_args!("warning: cannot write fit-level sidecar {}: {}", seg.display(), e));
                 }
                 // gh#322: archive the compiled base-model IR in the fit segment so
                 // downstream verbs (`fit predict`) are self-contained and the run
@@ -1453,12 +1400,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     match std::fs::read(ir_src) {
                         Ok(bytes) => {
                             if let Err(e) = std::fs::write(&dest, &bytes) {
-                                eprintln!("warning: cannot archive model IR {}: {}",
-                                    dest.display(), e);
+                                out.say(format_args!("warning: cannot archive model IR {}: {}",
+                                    dest.display(), e));
                             }
                         }
-                        Err(e) => eprintln!(
-                            "warning: cannot read compiled IR {} to archive: {}", ir_src, e),
+                        Err(e) => out.say(format_args!(
+                            "warning: cannot read compiled IR {} to archive: {}", ir_src, e)),
                     }
                 }
                 // Archive the model's display render (`model.render.json`) and
@@ -1477,20 +1424,18 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // source by construction"; it is not. One guard over both
                 // blocks, since they share the precondition.
                 if !crate::util::model_is_camdl_source(&config.problem.model.camdl) {
-                    eprintln!(
-                        "note: model given as compiled IR; skipping model.render.json / \
-                         model.graph.json (pass the .camdl source to archive the display render)"
-                    );
+                    out.say("note: model given as compiled IR; skipping model.render.json / \
+                         model.graph.json (pass the .camdl source to archive the display render)");
                 } else {
                 match crate::util::render_model_json(std::path::Path::new(&config.problem.model.camdl)) {
                     Ok(json) => {
                         let dest = seg.join("model.render.json");
                         if let Err(e) = std::fs::write(&dest, &json) {
-                            eprintln!("warning: cannot archive model render {}: {}",
-                                dest.display(), e);
+                            out.say(format_args!("warning: cannot archive model render {}: {}",
+                                dest.display(), e));
                         }
                     }
-                    Err(e) => eprintln!("warning: cannot render model for archive: {}", e),
+                    Err(e) => out.say(format_args!("warning: cannot render model for archive: {}", e)),
                 }
                 // Archive the structured flow graph (`model.graph.json`) beside
                 // the display render so a viewer can draw the compartmental flow
@@ -1499,11 +1444,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     Ok(json) => {
                         let dest = seg.join("model.graph.json");
                         if let Err(e) = std::fs::write(&dest, &json) {
-                            eprintln!("warning: cannot archive model graph {}: {}",
-                                dest.display(), e);
+                            out.say(format_args!("warning: cannot archive model graph {}: {}",
+                                dest.display(), e));
                         }
                     }
-                    Err(e) => eprintln!("warning: cannot render model graph for archive: {}", e),
+                    Err(e) => out.say(format_args!("warning: cannot render model graph for archive: {}", e)),
                 }
                 }
             }
@@ -1542,13 +1487,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let label_lock: Option<crate::cas_sink::LabelLock> = match &validated_label {
             Some(label) => {
                 let lock = crate::cas_sink::fit_label_lock(&cas_root).unwrap_or_else(|e| {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
+                    out.fail(format!("error: {e}"));
                 });
                 if let Err(e) = check_label_is_free(&cas_root, label, &resolved.run_id) {
                     drop(lock);
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
+                    out.fail(format!("error: {e}"));
                 }
                 Some(lock)
             }
@@ -1557,10 +1500,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         if a.resume.is_none() {
             match crate::resolve::check_reuse(&store, &cas_root, &resolved_artifact, policy) {
                 Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
-                    eprintln!("  {}", crate::out::paint::stderr().paint(
+                    out.say(format_args!("  {}", crate::out::paint::stderr().paint(
                         &format!("cache hit — reusing {}",
                             dir.strip_prefix(&cas_root).unwrap_or(&dir).display()),
-                        crate::out::paint::Style::Warn));
+                        crate::out::paint::Style::Warn)));
                     crate::resolve::note_leaf_from_another_model_file(
                         &dir, &sweep_config.model.camdl);
                     // This config now names the stored run too.
@@ -1568,7 +1511,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         if let Err(e) =
                             crate::cas_sink::ensure_input_listed(&dir, "config_identities", id)
                         {
-                            eprintln!("warning: record this config on {}: {e}", dir.display());
+                            out.say(format_args!("warning: record this config on {}: {e}", dir.display()));
                         }
                     }
                     // A label given to an unlabelled stored run is recorded on
@@ -1577,8 +1520,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         let written = crate::cas_sink::set_fit_label(&dir, label);
                         drop(label_lock);
                         if let Err(e) = written {
-                            eprintln!("error: label the stored run {}: {e}", dir.display());
-                            std::process::exit(1);
+                            out.fail(format!("error: label the stored run {}: {e}", dir.display()));
                         }
                     }
                     continue;
@@ -1586,8 +1528,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 Ok(crate::resolve::ReuseVerdict::MustRun) => {}
                 Err(e) => {
                     drop(label_lock);
-                    eprintln!("error: fit method cache check {}: {}", cas_path.display(), e);
-                    std::process::exit(1);
+                    out.fail(format!("error: fit method cache check {}: {}", cas_path.display(), e));
                 }
             }
         }
@@ -1601,8 +1542,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
             Err(e) => {
                 drop(label_lock);
-                eprintln!("error: claim fit method {}: {}", cas_path.display(), e);
-                std::process::exit(1);
+                out.fail(format!("error: claim fit method {}: {}", cas_path.display(), e));
             }
         };
         let method_dir = write.dir().to_path_buf();
@@ -1615,8 +1555,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // the base is never written.
         if let Some(base) = &resume_base {
             copy_resume_carryover(base, &method_dir).unwrap_or_else(|e| {
-                eprintln!("error: staging resume carry-over from {}: {}", base.display(), e);
-                std::process::exit(1);
+                out.fail(format!("error: staging resume carry-over from {}: {}", base.display(), e));
             });
         }
 
@@ -1681,7 +1620,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             // ignores it.
             let note = report::unused_starts_note(starts_rule.tag(), &unused_starts,
                 still_reads_declared_starts(&method.algorithm));
-            eprintln!("  {} {}", crate::out::paint::note_tag(), note);
+            out.say(format_args!("  {} {}", crate::out::paint::note_tag(), note));
             out.check(report::Check::Starts {
                 mode: starts_rule.tag().to_string(), params: unused_starts.clone(), note,
             });
@@ -1773,18 +1712,18 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     &run_config.estimated_params, &param_names,
                     &run_config.base_params, &run_config.compiled,
                     Some(&chain_results.loglik_eval),
-                ).unwrap_or_else(|e| eprintln!("warning: {}", e));
+                ).unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
                 runner::write_clean_eval_tsv(
                     &method_dir.to_string_lossy(),
                     &chain_results.loglik_eval, &run_config.estimated_params,
-                ).unwrap_or_else(|e| eprintln!("warning: {}", e));
+                ).unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
                 runner::write_run_root_final_params(
                     &method_dir.to_string_lossy(),
                     &chain_results.loglik_eval, &run_config.estimated_params,
                     &param_names, &run_config.base_params, &run_config.compiled,
-                ).unwrap_or_else(|e| eprintln!("warning: {}", e));
+                ).unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
                 runner::write_diagnostics(&method_dir.to_string_lossy(), &chain_results.results)
-                    .unwrap_or_else(|e| eprintln!("warning: {}", e));
+                    .unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
 
                 // Write fit_state.toml — the leaf's result record.
                 // Source params from the clean-eval winner θ̂ (GH #16) so
@@ -1879,7 +1818,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     optimizer_convergence: None,
                 };
                 fit_state.save(&method_dir.to_string_lossy()).unwrap_or_else(|e| {
-                    eprintln!("warning: could not save fit_state: {}", e);
+                    out.say(format_args!("warning: could not save fit_state: {}", e));
                 });
 
                 // Write mle_params.toml — clean-eval winner θ̂ (GH #16).
@@ -1940,7 +1879,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     timestamp: fit_state.timestamp.clone(),
                 };
                 provenance::write_mle_params(&mle_path, &all_params, &metadata)
-                    .unwrap_or_else(|e| eprintln!("warning: {}", e));
+                    .unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
 
                 // Recorded, as every other method's are, so `fit summary`
                 // shows the findings this run printed; the end of the run
@@ -2213,14 +2152,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     }
                     logliks.push(result.log_likelihood);
                     if n_reps <= 10 || r % (n_reps / 10) == 0 {
-                        eprintln!("  pfilter rep {}/{}: loglik={:.1}", r + 1, n_reps, result.log_likelihood);
+                        out.say(format_args!("  pfilter rep {}/{}: loglik={:.1}", r + 1, n_reps, result.log_likelihood));
                     }
                 }
                 let elapsed = t0.elapsed();
 
                 let result = crate::fit::method_result::PfilterRun::from_run(&logliks, *particles);
-                eprintln!("\n  loglik = {:.1} ± {:.1} ({} reps, {} particles, {:.1}s)",
-                    result.ll_mean, result.ll_sd, n_reps, particles, elapsed.as_secs_f64());
+                out.say(format_args!("\n  loglik = {:.1} ± {:.1} ({} reps, {} particles, {:.1}s)",
+                    result.ll_mean, result.ll_sd, n_reps, particles, elapsed.as_secs_f64()));
 
                 // Write logliks.tsv
                 {
@@ -2245,9 +2184,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                             abandon_method(&mut out, format!("error writing prequential: {e}"),
                             )
                         });
-                    eprintln!("  prequential: elpd={:.2}, mean_crps={:.3}, PIT 90% cov={:.2}",
-                        trace.elpd(), trace.mean_crps(), trace.pit_coverage(0.90));
-                    eprint!("{}", crate::prequential_out::surprise_table(trace));
+                    out.say(format_args!("  prequential: elpd={:.2}, mean_crps={:.3}, PIT 90% cov={:.2}",
+                        trace.elpd(), trace.mean_crps(), trace.pit_coverage(0.90)));
+                    out.say_raw(format_args!("{}", crate::prequential_out::surprise_table(trace)));
                 }
                 method_best_loglik = Some(result.ll_mean);
             }
@@ -2342,13 +2281,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             method_elapsed.as_secs_f64())
         {
             Ok(outcome) => out.method_report(&outcome),
-            Err(e) => eprintln!("warning: the run's report could not be built from {}: {e}",
-                dest.display()),
+            Err(e) => out.say(format_args!("warning: the run's report could not be built from {}: {e}",
+                dest.display())),
         }
         out.milestone("stored",
             format!("{} \u{b7} {} \u{b7} {:.1}s", method_name, dest.display(), method_elapsed.as_secs_f64()));
         if let Some(hint) = stored_hint {
-            crate::out::status::hint(hint);
+            out.hint(hint);
         }
 
     } // end sweep_points
@@ -2364,7 +2303,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // (gh#150 / gh#154), where coverage gains a truth-within-interval
     // correctness check.
     if cells.len() > 1 || config.problem.is_synthetic_fit() {
-        eprintln!("note: grid summary / coverage are derived views — \
+        out.say("note: grid summary / coverage are derived views — \
                    owed by `fit recovery` (gh#150 / gh#154)");
     }
 
