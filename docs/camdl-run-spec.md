@@ -506,21 +506,24 @@ config's raw bytes — provenance, i.e. which exact bytes produced this fit; a
 `fit.toml` handle is NOT looked up by it, see below), `data_hashes`,
 `estimated`, `fixed`, `partition` (the run's parameter roles, below),
 `resolved_priors` (one `{param, source}` entry per estimated parameter,
-`source ∈ {fit_toml, model_ir, flat_explicit}`, plus `overridden_model_prior`
-when the fit.toml's prior displaced a model `~` prior; the key is always present
-but the list is empty unless the method is a posterior sampler — an IF2 or NLopt
-fit reads no prior, so records none), `parameters_provenance` (per parameter:
-resolved value, the tier that supplied it, and its role), `training_window`
-(`{train_end}`, present only when a `[data]` holdout declaration was applied,
-§6.2), `dt` (the integration step every run in the segment ran at — the model's
-declared `simulate { dt }`, else the config's `[config] dt`, else 1.0) and
-`integrator` (the ODE integrator the model declares, `{"method": "rk4"}` when it
-declares none — what an ODE-backend run integrated with), which a replay of the
-fit's parameters runs on by default (§3.4; a sidecar written before these were
-recorded lacks them, and a replay recovers them from the archived config and
-model), `schema` (the observation/dimension schema below), and `docs` (the
-model's `#'` documentation dictionary, keyed by declaration name, so a consumer
-can label any output column).
+`source ∈ {fit_toml, model_ir, flat_explicit, flat_fallback}`, plus
+`overridden_model_prior` when the fit.toml's prior displaced a model `~` prior;
+recorded whichever method ran, because every method run on the problem shares
+this segment and the resolution is a fact about the problem, not the method —
+`flat_fallback` appears only on a problem no posterior sampler can run on, since
+a sampler refuses an implicit flat prior before it starts),
+`parameters_provenance` (per parameter: resolved value, the tier that supplied
+it, and its role), `training_window` (`{train_end}`, present only when a
+`[data]` holdout declaration was applied, §6.2), `dt` (the integration step
+every run in the segment ran at — the model's declared `simulate { dt }`, else
+the config's `[config] dt`, else 1.0) and `integrator` (the ODE integrator the
+model declares, `{"method": "rk4"}` when it declares none — what an ODE-backend
+run integrated with), which a replay of the fit's parameters runs on by default
+(§3.4; a sidecar written before these were recorded lacks them, and a replay
+recovers them from the archived config and model), `schema` (the
+observation/dimension schema below), and `docs` (the model's `#'` documentation
+dictionary, keyed by declaration name, so a consumer can label any output
+column).
 
 Two caveats a consumer must know. `data_hashes` is built from the explicit
 `[data.observations]` map only, so a fit that uses the `[data] file = "..."`
@@ -538,9 +541,8 @@ holds, per parameter, `role` (`estimated` or `fixed`), `declared_by`
 (`fit_estimate` or `fit_fixed`), and for an estimated parameter its `support`,
 its `search` box, the `transform`, and the `prior` that resolved (`dist` and
 `from ∈ {fit_toml, model_ir, flat_explicit, flat_fallback}`). `estimated` and
-`fixed` are generated from it. An IF2 fit's `partition` records the flat prior
-as `flat_fallback` even though `resolved_priors` is empty: the method does not
-read it.
+`fixed` are generated from it. An IF2 fit records its priors in both places even
+though the method does not read them.
 
 A third thing to know, because it is the one field whose name invites the wrong
 inference. `fit_toml_hash` answers _provenance_ — which exact bytes produced
@@ -5971,9 +5973,9 @@ keys the profile's base identity. `--starts from_prior` draws starting points
 from the resolved priors.
 
 Per-parameter prior provenance is written to `fit.meta.json` under
-`resolved_priors` (sources `fit_toml`, `model_ir`, `flat_explicit`; present for
-sampler methods) and, for every method, under `partition.parameters.<p>.prior`
-(which also uses `flat_fallback`). A profile writes `resolved_priors` to its
+`resolved_priors` and under `partition.parameters.<p>.prior`, for every method
+(sources `fit_toml`, `model_ir`, `flat_explicit`, and `flat_fallback` on a
+problem no sampler can run on). A profile writes `resolved_priors` to its
 profile-base sidecar.
 
 ### 12.2 When priors are used at all
