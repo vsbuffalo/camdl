@@ -2832,12 +2832,14 @@ impl DiffSide {
 /// `camdl fit diff A.toml B.toml`
 pub fn cmd_fit_diff(args: &crate::args::FitDiffArgs) {
     use config_v2::FitConfig;
+    // fit diff has no `--no-color`: its painters follow the environment and
+    // whether each stream is a terminal.
+    let out = crate::out::Out::new(false);
 
     let a_path = args.a.to_string_lossy().into_owned();
     let b_path = args.b.to_string_lossy().into_owned();
     let load = |path: &str| FitConfig::load(path).unwrap_or_else(|e| {
-        eprintln!("error loading {}: {}", path, e);
-        std::process::exit(1);
+        out.fail(format!("error loading {}: {}", path, e));
     });
     let a_cfg = load(&a_path);
     let b_cfg = load(&b_path);
@@ -2863,66 +2865,66 @@ pub fn cmd_fit_diff(args: &crate::args::FitDiffArgs) {
         &config_diff::ResolvedInputs { model_identity: &a_id, data_hashes: &a_side.data_hashes },
     );
 
-    println!("diff: {} → {}", a_path, b_path);
-    println!();
+    out.report_line(format_args!("diff: {} → {}", a_path, b_path));
+    out.report_line("");
 
-    println!("Model:");
+    out.report_line("Model:");
     let (a_model, b_model) = (&a_cfg.problem.model.camdl, &b_cfg.problem.model.camdl);
     if unresolved {
         for (path, side) in [(&a_path, &a_side), (&b_path, &b_side)] {
             if let Err(e) = &side.model_identity {
-                println!("  not compared — the model of {path} did not load: {e}");
+                out.report_line(format_args!("  not compared — the model of {path} did not load: {e}"));
             }
         }
         if a_model != b_model {
-            println!("  {a_model} → {b_model}");
+            out.report_line(format_args!("  {a_model} → {b_model}"));
         }
     } else if diff.model_changed {
         if a_model == b_model {
-            println!("  {a_model}: compiled model differs");
+            out.report_line(format_args!("  {a_model}: compiled model differs"));
         } else {
-            println!("  {a_model} → {b_model} (compiled model differs)");
+            out.report_line(format_args!("  {a_model} → {b_model} (compiled model differs)"));
         }
     } else if a_model != b_model {
-        println!("  {a_model} → {b_model} (same compiled model)");
+        out.report_line(format_args!("  {a_model} → {b_model} (same compiled model)"));
     } else {
-        println!("  (no model changes)");
+        out.report_line("  (no model changes)");
     }
 
-    println!("Data:");
+    out.report_line("Data:");
     let dh = &diff.data_hashes;
-    for name in &dh.added { println!("  {name}: (added)"); }
-    for name in &dh.removed { println!("  {name}: (removed)"); }
-    for name in &dh.modified { println!("  {name}: content differs"); }
+    for name in &dh.added { out.report_line(format_args!("  {name}: (added)")); }
+    for name in &dh.removed { out.report_line(format_args!("  {name}: (removed)")); }
+    for name in &dh.modified { out.report_line(format_args!("  {name}: content differs")); }
     if dh.added.is_empty() && dh.removed.is_empty() && dh.modified.is_empty() {
-        println!("  (no data changes)");
+        out.report_line("  (no data changes)");
     }
 
-    println!("Parameters:");
+    out.report_line("Parameters:");
     let fixed = |cfg: &FitConfig| cfg.problem.fixed.resolve().unwrap_or_default()
         .into_iter().collect::<std::collections::BTreeMap<String, f64>>();
     let lines = diff.problem_lines(&fixed(&a_cfg), &fixed(&b_cfg));
     if lines.is_empty() {
-        println!("  (no parameter changes)");
+        out.report_line("  (no parameter changes)");
     }
     for line in lines {
-        println!("  {line}");
+        out.report_line(format_args!("  {line}"));
     }
 
     let (a_method, b_method) = (a_cfg.inference.method, b_cfg.inference.method);
-    println!();
-    println!("Method:");
+    out.report_line("");
+    out.report_line("Method:");
     match (&a_method, &b_method) {
-        (None, None) => println!("  (neither file declares a [method])"),
-        (None, Some(m)) => println!("  [method]: (new) {}", m.algorithm.method_name()),
-        (Some(_), None) => println!("  [method]: (removed)"),
+        (None, None) => out.report_line("  (neither file declares a [method])"),
+        (None, Some(m)) => out.report_line(format_args!("  [method]: (new) {}", m.algorithm.method_name())),
+        (Some(_), None) => out.report_line("  [method]: (removed)"),
         (Some(ma), Some(mb)) => {
             let changes = config_diff::method_setting_changes(ma, mb);
             if changes.is_empty() {
-                println!("  (no method changes)");
+                out.report_line("  (no method changes)");
             } else {
                 for c in changes {
-                    println!("  {}: {} → {}", c.key, c.from, c.to);
+                    out.report_line(format_args!("  {}: {} → {}", c.key, c.from, c.to));
                 }
             }
         }
