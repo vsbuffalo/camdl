@@ -6859,6 +6859,12 @@ camdl fit predict [FIT]
 `$CAMDL_OUTPUT_DIR` (there is no `--output-dir` flag; `--output` is the TSV
 mirror).
 
+When the filter itself fails at the given parameters (its weights collapse, or
+the state goes negative), `pfilter` exits 3; every other error exits 1.
+`camdl compare`, which derives a prequential by running `pfilter` at each
+posterior draw, reads that status: only a 3 is reported as a draw the filter
+could not score, and any other failure is reported as itself.
+
 With `--fit`, `pfilter` scores the likelihood that fit config defines: under the
 config's own `scenario` / `enable` / `disable` (the interventions `fit run`
 fired), and under `ic_free = true` it weights and resamples at `y₁` but leaves

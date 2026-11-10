@@ -1038,6 +1038,16 @@ fn try_load_explicit_prequential(path: &str) -> Result<Option<PrequentialTrace>,
     Ok(Some(trace))
 }
 
+/// Why one `camdl pfilter` pass of [`derive_prequential`] failed.
+enum PassError {
+    /// The filter ran and failed at this θ ([`crate::pfilter::FILTER_FAILED`]):
+    /// a statement about the draw.
+    FilterRejected(String),
+    /// Anything else (the fit's inputs, the temp files, the child process):
+    /// it would fail at every θ, so it says nothing about the draw.
+    Other(String),
+}
+
 /// Derive a prequential trace from a sealed fit by invoking the canonical
 /// `camdl pfilter` at the fit's winning θ̂. This routes through the one
 /// production filter + obs-model assembly rather than rebuilding it, so a
@@ -1179,7 +1189,8 @@ fn derive_prequential(
     // (common random numbers across draws and across compared fits).
     let exe = std::env::current_exe()
         .map_err(|e| format!("cannot locate the running camdl binary: {e}"))?;
-    let run_pass = |pass: usize, params_toml: &str, seed: u64| -> Result<PrequentialTrace, String> {
+    let run_pass = |pass: usize, params_toml: &str, seed: u64| -> Result<PrequentialTrace, PassError> {
+        let other = PassError::Other;
         let theta_path = base.with_extension(format!("theta{pass}.toml"));
         let preq_stem = format!("{}_preq{pass}", base.to_string_lossy());
         let preq_json = format!("{preq_stem}.json");
@@ -1191,7 +1202,7 @@ fn derive_prequential(
         };
         if let Err(e) = std::fs::write(&theta_path, params_toml) {
             cleanup();
-            return Err(format!("writing temp params {}: {}", theta_path.display(), e));
+            return Err(other(format!("writing temp params {}: {}", theta_path.display(), e)));
         }
         let mut cmd = std::process::Command::new(&exe);
         cmd.arg("pfilter")
@@ -1217,7 +1228,7 @@ fn derive_prequential(
         }
         let output = match cmd.output() {
             Ok(o) => o,
-            Err(e) => { cleanup(); return Err(format!("spawning `camdl pfilter`: {e}")); }
+            Err(e) => { cleanup(); return Err(other(format!("spawning `camdl pfilter`: {e}"))); }
         };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1225,19 +1236,26 @@ fn derive_prequential(
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "signal".into());
             cleanup();
-            return Err(format!(
+            let message = format!(
                 "deriving prequential via `camdl pfilter` failed (exit {code}) for fit {}:\n{}",
                 segment.display(),
-                stderr.trim()));
+                stderr.trim());
+            // Only a filter that ran and failed at θ says anything about the
+            // draw; a missing data file or a version mismatch fails every θ.
+            return Err(if output.status.code() == Some(crate::pfilter::FILTER_FAILED.0) {
+                PassError::FilterRejected(message)
+            } else {
+                PassError::Other(message)
+            });
         }
         // (e) read back the trace.
         let text = match std::fs::read_to_string(&preq_json) {
             Ok(t) => t,
-            Err(e) => { cleanup(); return Err(format!(
-                "`camdl pfilter` succeeded but its prequential output {preq_json} could not be read: {e}")); }
+            Err(e) => { cleanup(); return Err(other(format!(
+                "`camdl pfilter` succeeded but its prequential output {preq_json} could not be read: {e}"))); }
         };
         let trace = serde_json::from_str::<PrequentialTrace>(&text)
-            .map_err(|e| format!("parsing derived prequential {preq_json}: {e}"));
+            .map_err(|e| other(format!("parsing derived prequential {preq_json}: {e}")));
         cleanup();
         trace
     };
@@ -1257,8 +1275,8 @@ fn derive_prequential(
         let seed_r = derive.seed + rep as u64;
         let mut component_traces = Vec::with_capacity(n_theta);
         for (i, params_toml) in theta_tomls.iter().enumerate() {
-            let r = run_pass(rep * n_theta + i, params_toml, seed_r).map_err(|e| {
-                if is_mixture {
+            let r = run_pass(rep * n_theta + i, params_toml, seed_r).map_err(|e| match e {
+                PassError::FilterRejected(e) if is_mixture => {
                     // A degenerate mixture component is informative, not
                     // repairable: dropping it would bias the mixture toward
                     // well-behaved θ, misrepresenting the predictive.
@@ -1270,9 +1288,8 @@ fn derive_prequential(
                          --exclude-chains; --draws 1 scores the plug-in posterior \
                          mean instead.\n  {}",
                         i + 1, n_theta, e)
-                } else {
-                    e
                 }
+                PassError::FilterRejected(e) | PassError::Other(e) => e,
             });
             if r.is_err() {
                 for p in &merged_paths { let _ = std::fs::remove_file(p); }
