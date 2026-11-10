@@ -46,7 +46,9 @@
 //! likelihood estimate came out high by chance. The Robbins–Monro scale
 //! adaptation drives toward `0.234 + 0.206/d`, the optimal-scaling target for
 //! an *exact* likelihood. When the ceiling sits below that target the
-//! recursion has no root and `log λ` falls for the whole run.
+//! recursion has no root, and `log λ` falls for as long as the chain stays
+//! where the filter is that noisy. The noise varies with θ, so a chain that
+//! moves somewhere quieter can find a root again (gh#1010).
 //!
 //! So the preflight computes both numbers and says which side of the ceiling
 //! the run sits on. It does not compare `sigma` against a hand-tuned band.
@@ -357,12 +359,15 @@ pub fn report(check: &PfNoiseCheck, d: usize, n_obs: usize) -> String {
     match verdict {
         CeilingVerdict::Unreachable => {
             out.push_str(&format!(
-                "  {tag} — no proposal scale reaches {:.1}%, \
-                 so the Robbins-Monro\n    \
-                 scale adaptation has no root and λ falls for the whole run. The chain \
-                 under-mixes\n    \
-                 however long it runs; s would have to fall below {:.2} to clear the \
-                 target.\n    {}\n    \
+                "  {tag} — at this point the filter noise caps \
+                 acceptance below {:.1}%,\n    \
+                 so no proposal scale reaches it; s would have to fall below {:.2} to \
+                 clear the target.\n    \
+                 If the chains stay where the filter is this noisy, the Robbins-Monro \
+                 adaptation\n    \
+                 shrinks λ and they under-mix. The noise varies with θ, so chains that \
+                 move can\n    \
+                 settle at the target: check acceptance after warm-up.\n    {}\n    \
                  Proceeding anyway — a diagnosis, not a refusal, and a conservative \
                  one: a\n    bound below the limit can warn where a root does exist.\n",
                 target * 100.0, cross, REMEDY,
@@ -404,11 +409,18 @@ fn percent(p: f64) -> String {
     }
 }
 
-/// What actually moves `s`, named rather than listed.
+/// What moves `s` at the start point, and the other cause the check cannot
+/// tell apart from noise.
 ///
 /// A longer chain is not on the list: the ceiling is a property of the
-/// estimator, so more steps at the same noise level buy nothing.
-const REMEDY: &str = "Raise particles (σ ∝ 1/√N); a longer chain does not help.";
+/// estimator, so more steps at the same noise level buy nothing. Particles are
+/// one remedy, not the only one: chains that start where the model fits badly
+/// see a noisier filter there, and are moved by their starts or the prior they
+/// are drawn from (gh#1010).
+const REMEDY: &str = "Raise particles (σ ∝ 1/√N) if acceptance stays low, which is one \
+                      remedy;\n    at this noise a longer chain does not help. Chains \
+                      started in a low-likelihood\n    region may need other starts or \
+                      another prior instead.";
 
 /// Whether the run is buying precision the acceptance ceiling does not need.
 ///
@@ -560,7 +572,8 @@ mod tests {
         assert!(out.contains("2·Φ(-s/2) = 15.7%"), "ceiling missing: {out}");
         assert!(out.contains("24.6%"), "target missing: {out}");
         assert!(out.contains("ceiling below target"), "verdict missing: {out}");
-        assert!(out.contains("λ falls for the whole run"), "consequence missing: {out}");
+        assert!(out.contains("If the chains stay where the filter is this noisy"),
+            "consequence missing: {out}");
         assert_eq!(ceiling_verdict(c.s, c.s_standard_error(), 17),
             CeilingVerdict::Unreachable);
     }
@@ -647,6 +660,23 @@ mod tests {
         }
         assert!(below.contains("can warn where a root does exist"),
             "the below-target branch must own its false-alarm mode:\n{below}");
+    }
+
+    /// gh#1010: the check measures the noise at the start point, so its
+    /// warning may say what follows if the chains stay there, not that the
+    /// whole run under-mixes. On the tutorial fit it warned with s = 11.37,
+    /// and the chains then mixed at 34–38% acceptance once they moved.
+    #[test]
+    fn the_below_target_warning_claims_only_what_the_start_point_supports() {
+        let out = report(&PfNoiseCheck { ll_mean: -74.8, ..check_at(11.37, 1.95) }, 2, 14);
+        assert_eq!(ceiling_verdict(11.37, check_at(11.37, 1.95).s_standard_error(), 2),
+            CeilingVerdict::Unreachable);
+        for overclaim in ["however long it runs", "has no root and λ falls for the whole run"] {
+            assert!(!out.contains(overclaim), "states {overclaim:?} as certain:\n{out}");
+        }
+        assert!(out.contains("at this point the filter noise caps acceptance"), "{out}");
+        assert!(out.contains("check acceptance after warm-up"), "{out}");
+        assert!(out.contains("which is one remedy"), "{out}");
     }
 
     /// The report says the pairs were independent evaluations, so a reader
