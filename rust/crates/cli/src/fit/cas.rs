@@ -638,12 +638,55 @@ fn fit_method_levels(ctx: &FitMethodCtx, target_length: u64) -> Result<Vec<Level
     ])
 }
 
-/// The lineage dep for a `from_mle` source: the leaf's `fit_state.toml` —
-/// prefer the leaf's CAS `run_id` (from its `run.json`); if it isn't a CAS
-/// leaf, use the consumed file's digest as a stand-in identity (content still
-/// re-keys).
-pub fn cas_dep_from_dir(dir: &Path) -> Option<ArtifactRef> {
-    cas_leaf_file_dep(dir, "fit_state.toml")
+/// The lineage dep for a `--resume` base: the leaf's `run_id` plus one digest
+/// over every chain's `resume_state.bin`, in chain order — the files a resume
+/// continues from (gh#1015).
+///
+/// Not the base's `fit_state.toml`: a resume does not read it, and it records
+/// the time the base finished, so its digest changed on every run of an
+/// otherwise identical base, and with it the resumed leaf's `run_id`. Two
+/// runs of one fixed-seed base write the same chain states, so they now
+/// address one resumed leaf, wherever the store lives.
+///
+/// `None` when the base has no `chain_*/resume_state.bin`: the resume itself
+/// then refuses, naming the missing file.
+pub fn cas_resume_dep(leaf: &Path) -> Option<ArtifactRef> {
+    let mut chains: Vec<(crate::chain_index::ChainIndex, Vec<u8>)> = std::fs::read_dir(leaf)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let chain = crate::chain_index::ChainIndex::parse_dir_name(&e.file_name().to_string_lossy())?;
+            Some((chain, std::fs::read(e.path().join("resume_state.bin")).ok()?))
+        })
+        .collect();
+    if chains.is_empty() {
+        return None;
+    }
+    chains.sort_by_key(|(c, _)| c.0);
+    // Each chain's number and length before its bytes, so no two layouts of
+    // states concatenate to the same input.
+    let mut framed = Vec::new();
+    for (chain, bytes) in &chains {
+        framed.extend_from_slice(&(chain.0 as u64).to_le_bytes());
+        framed.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        framed.extend_from_slice(bytes);
+    }
+    let digest = ContentHash::digest_bytes(&framed);
+    Some(ArtifactRef {
+        run_id: leaf_run_id(leaf).unwrap_or(digest),
+        kind: ArtifactKind::FitMethod,
+        artifact: "chain_*/resume_state.bin".to_string(),
+        digest,
+    })
+}
+
+/// The `run_id` a CAS leaf's `run.json` records, or `None` when the
+/// directory is not a CAS leaf.
+fn leaf_run_id(leaf: &Path) -> Option<ContentHash> {
+    std::fs::read(leaf.join("run.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<RunRecord>(&b).ok())
+        .map(|r| r.run_id)
 }
 
 /// The lineage dep for a named artifact under a method leaf — `draws.tsv`
@@ -654,13 +697,8 @@ pub fn cas_dep_from_dir(dir: &Path) -> Option<ArtifactRef> {
 pub fn cas_leaf_file_dep(leaf: &Path, artifact: &str) -> Option<ArtifactRef> {
     let bytes = std::fs::read(leaf.join(artifact)).ok()?;
     let digest = ContentHash::digest_bytes(&bytes);
-    let run_id = std::fs::read(leaf.join("run.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<RunRecord>(&b).ok())
-        .map(|r| r.run_id)
-        .unwrap_or(digest);
     Some(ArtifactRef {
-        run_id,
+        run_id: leaf_run_id(leaf).unwrap_or(digest),
         kind: ArtifactKind::FitMethod,
         artifact: artifact.to_string(),
         digest,
@@ -673,7 +711,7 @@ pub fn cas_leaf_file_dep(leaf: &Path, artifact: &str) -> Option<ArtifactRef> {
 /// A path answers WHICH FILE; the starting values are WHAT IS IN IT. Rewrite
 /// `draws.tsv` in place with different draws, re-run, and a path-keyed
 /// identity serves the previous file's fit. `from_mle` folds the leaf's
-/// `fit_state.toml` digest through `cas_dep_from_dir` for the same reason.
+/// `fit_state.toml` digest through `cas_leaf_file_dep` for the same reason.
 ///
 /// Missing or unreadable file → `None`, and the run proceeds unkeyed on it. The
 /// loader downstream fails with a real message naming the path; refusing here
@@ -1102,5 +1140,33 @@ mod tests {
         // path with a real message; failing here would replace it with a worse
         // one from the identity layer.
         assert!(cas_file_dep(&d.path().join("nope.tsv"), "draws.tsv").is_none());
+    }
+
+    /// gh#1015: a `--resume` base is keyed by its chains' resume states, the
+    /// files a resume continues from — not by `fit_state.toml`, whose
+    /// timestamp differs on every run, and not by where the base lives.
+    #[test]
+    fn cas_resume_dep_keys_on_the_chain_states_alone() {
+        let write_base = |dir: &Path, finished_at: &str, chain_1: &[u8]| {
+            std::fs::write(dir.join("fit_state.toml"), format!("timestamp = \"{finished_at}\"\n")).unwrap();
+            for (chain, bytes) in [("chain_0", b"state 0".as_slice()), ("chain_1", chain_1)] {
+                std::fs::create_dir_all(dir.join(chain)).unwrap();
+                std::fs::write(dir.join(chain).join("resume_state.bin"), bytes).unwrap();
+            }
+        };
+        let a = tempfile::tempdir().unwrap();
+        write_base(a.path(), "2026-11-10T02:17:08Z", b"state 1");
+        let b = tempfile::tempdir().unwrap();
+        write_base(b.path(), "2026-11-10T02:17:19Z", b"state 1");
+        let dep_a = cas_resume_dep(a.path()).expect("a base with chain states");
+        let dep_b = cas_resume_dep(b.path()).expect("a base with chain states");
+        assert_eq!(dep_a, dep_b, "the same chain states, finished at another time and in another directory");
+        assert_eq!(dep_a.artifact, "chain_*/resume_state.bin");
+
+        write_base(b.path(), "2026-11-10T02:17:19Z", b"state 1, one step further");
+        assert_ne!(dep_a.digest, cas_resume_dep(b.path()).unwrap().digest,
+            "a different chain state is a different base");
+
+        assert!(cas_resume_dep(tempfile::tempdir().unwrap().path()).is_none(), "no chain states, no dep");
     }
 }
