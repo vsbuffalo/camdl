@@ -328,3 +328,29 @@ fn mh_ode_recovers_known_beta_rk45() {
          posterior mean {mean:.3} (truth {TRUE_BETA}, start {START_BETA}). A failure \
          here means rk45 is not honored on the fit path (compute_ode_loglik).");
 }
+
+/// `mh` scores the deterministic ODE skeleton, so every record of its
+/// log-likelihood names that class, `ode_marginal`: `fit_state.toml`, and the
+/// report `fit summary` builds from the leaf, as the chains' progress already
+/// does (`LoglikType::from(FitAlgorithm::Mh)`). A filter's `marginal` would
+/// read as comparable to a PMMH or pfilter estimate on the chain-binomial
+/// model, which it is not.
+#[test]
+fn mh_records_its_loglik_as_the_ode_marginal() {
+    let Some((_, out, _tmp, _)) = recover_beta("loglik_type", "I") else { return };
+    let states = find_named(&out, "fit_state.toml");
+    assert_eq!(states.len(), 1, "one mh leaf under {}", out.display());
+    let state: toml::Value = toml::from_str(&std::fs::read_to_string(&states[0]).unwrap()).unwrap();
+    assert_eq!(state.get("loglik_type").and_then(|v| v.as_str()), Some("ode_marginal"),
+        "fit_state.toml's loglik_type");
+
+    let leaf = states[0].parent().unwrap();
+    let summary = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
+        .args(["fit", "summary"]).arg(leaf).args(["--format", "json"])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output().unwrap();
+    assert!(summary.status.success(), "fit summary: {}", String::from_utf8_lossy(&summary.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&summary.stdout).unwrap();
+    assert_eq!(doc["methods"][0]["loglik_type"], serde_json::json!("ode_marginal"),
+        "the report's loglik_type");
+}

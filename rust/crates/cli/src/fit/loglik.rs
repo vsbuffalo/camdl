@@ -200,7 +200,7 @@ impl From<&MethodResult> for LoglikType {
         match r {
             MethodResult::If2(_) => LoglikType::If2,
             MethodResult::Pgas(_) => LoglikType::CompleteData,
-            MethodResult::Pmmh(_) => LoglikType::Marginal,
+            MethodResult::Pmmh(r) => r.loglik_type,
             MethodResult::Nlopt(_) => LoglikType::OdeMarginal,
             // A bootstrap filter's estimate of the marginal likelihood.
             MethodResult::Pfilter(_) => LoglikType::Marginal,
