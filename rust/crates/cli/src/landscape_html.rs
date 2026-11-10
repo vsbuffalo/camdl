@@ -90,7 +90,7 @@ pub fn render(html_path: &Path, meta: &LandscapeMeta) -> Result<(), String> {
 
 /// JSON schema posted into `<script type="application/json" id="landscape-data">`.
 #[derive(serde::Serialize)]
-struct LandscapeJson {
+pub(crate) struct LandscapeJson {
     /// Parameter names, matching the TSV's leading columns.
     estimated: Vec<String>,
     /// Whether each estimated param uses a log scale by default
@@ -117,30 +117,28 @@ struct LandscapeRowJson {
     n_replicates: usize,
 }
 
-fn parse_landscape_tsv(text: &str) -> Result<LandscapeJson, String> {
+pub(crate) fn parse_landscape_tsv(text: &str) -> Result<LandscapeJson, String> {
     // Skip leading comment lines.
     let mut lines = text.lines().filter(|l| !l.trim_start().starts_with('#'));
     let header_line = lines.next().ok_or("empty TSV (no header)")?;
     let header: Vec<&str> = header_line.split('\t').collect();
     let n = header.len();
-    if n < 4 {
-        return Err(format!("expected at least 4 columns in header, got {}", n));
+    // Columns are read by name, not position: the parameters are every
+    // column before `loglik`, and anything the writer appends after the
+    // columns read here (`loglik_type`, gh#280) is not this page's.
+    let column = |name: &str| header.iter().position(|c| *c == name);
+    let required = |name: &str| column(name)
+        .ok_or_else(|| format!("no '{name}' column in header: {}", header.join(", ")));
+    let loglik_idx = required("loglik")?;
+    let loglik_se_idx = required("loglik_se")?;
+    let nrep_idx = required("n_replicates")?;
+    let point_idx = required("point_id")?;
+    let mean_ess_idx = column("mean_ess");
+    let has_mean_ess = mean_ess_idx.is_some();
+    if loglik_idx == 0 {
+        return Err("not enough param columns; need >=1 before 'loglik', got 0".to_string());
     }
-    // Trailing required columns: loglik, loglik_se, [mean_ess], n_replicates, point_id.
-    let last = header[n - 1];
-    if last != "point_id" {
-        return Err(format!("expected last column 'point_id', got '{}'", last));
-    }
-    let pen = header[n - 2];
-    if pen != "n_replicates" {
-        return Err(format!("expected second-to-last column 'n_replicates', got '{}'", pen));
-    }
-    let has_mean_ess = header[n - 3] == "mean_ess";
-    let trailing_cols = if has_mean_ess { 5 } else { 4 };
-    if n < trailing_cols + 1 {
-        return Err(format!("not enough param columns; need >=1, got {}", n - trailing_cols));
-    }
-    let estimated: Vec<String> = header[..n - trailing_cols].iter()
+    let estimated: Vec<String> = header[..loglik_idx].iter()
         .map(|s| s.to_string()).collect();
 
     let mut rows: Vec<LandscapeRowJson> = Vec::new();
@@ -152,17 +150,12 @@ fn parse_landscape_tsv(text: &str) -> Result<LandscapeJson, String> {
                 "row {}: expected {} columns, got {}", line_idx + 2, n, fields.len()));
         }
         let mut params = Vec::with_capacity(estimated.len());
-        for c in 0..estimated.len() {
-            params.push(parse_f64_field(fields[c])?);
+        for field in &fields[..loglik_idx] {
+            params.push(parse_f64_field(field)?);
         }
-        let loglik = parse_f64_field(fields[n - trailing_cols])?;
-        let loglik_se = parse_f64_field(fields[n - trailing_cols + 1])?;
-        let (mean_ess, nrep_idx, point_idx) = if has_mean_ess {
-            let me = parse_f64_field(fields[n - 3])?;
-            (Some(me), n - 2, n - 1)
-        } else {
-            (None, n - 2, n - 1)
-        };
+        let loglik = parse_f64_field(fields[loglik_idx])?;
+        let loglik_se = parse_f64_field(fields[loglik_se_idx])?;
+        let mean_ess = mean_ess_idx.map(|i| parse_f64_field(fields[i])).transpose()?;
         let n_replicates: usize = fields[nrep_idx].trim().parse()
             .map_err(|_| format!("row {}: invalid n_replicates '{}'", line_idx + 2, fields[nrep_idx]))?;
         let point_id: usize = fields[point_idx].trim().parse()
