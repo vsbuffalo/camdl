@@ -100,7 +100,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
         // has not completed, or whose method has no tabulated result
         // (pfilter), has no row.
         for method in &entry.view.methods {
-            if !method.completed
+            if !method.completed()
                 || !crate::fit::method_result::MethodResult::is_fitted(method.method)
             {
                 continue;

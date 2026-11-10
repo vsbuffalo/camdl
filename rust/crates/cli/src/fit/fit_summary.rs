@@ -27,7 +27,6 @@ use crate::fit::report::build::{build_method_report, CalendarContext, MethodOutc
 use crate::args::{FitSummaryArgs, FitSummaryFormat};
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
 use crate::fit::config_diff::ConfigDiff;
-use crate::fit::fit_tree::{self, DataKind};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::MethodResult;
 use crate::fit::table_row::{self, TableRow};
@@ -196,14 +195,28 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     // summary on stdout.
     let stderr = out.stderr_painter();
 
-    // The full set of completed method leaves, walker-discovered, in label
-    // order (see `discover_methods`).
+    // Every method leaf, walker-discovered, in label order — failed and
+    // running ones included, so a failed run is never hidden behind a
+    // completed one (see `discover_methods`).
     let discovered = discover_methods(Path::new(&dir));
-    if discovered.is_empty() {
-        out.error(CommandError::new(format!(
-            "error: no completed method leaf under {dir}, so there is nothing to summarise.\n  \
-             Pass a fit's directory, a leaf directory, @label, a run-id prefix, or its fit.toml."
-        ))).exit();
+    let completed: Vec<ResolvedMethod> =
+        discovered.iter().filter(|m| m.status == runid::RunStatus::Completed).cloned().collect();
+    if completed.is_empty() {
+        let mut message = format!(
+            "error: no completed method leaf under {dir}, so there is nothing to summarise."
+        );
+        if discovered.is_empty() {
+            message.push_str("\n  Pass a fit's directory, a leaf directory, @label, a run-id \
+                prefix, or its fit.toml.");
+        }
+        for m in &discovered {
+            message.push_str(&format!("\n  {} {}: {}", m.method, status_word(m.status),
+                m.method_dir.display()));
+            if let Some(e) = recorded_failure(&m.method_dir) {
+                message.push_str(&format!("\n    error: {e}"));
+            }
+        }
+        out.error(CommandError::new(message)).exit();
     }
 
     // gh#103 (H17): warn (once, to stderr) when the fit has instant-kind
@@ -215,7 +228,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     }
 
     if args.params_only {
-        match dump_params_only(&dir, &discovered) {
+        match dump_params_only(&dir, &completed) {
             Ok(s) => {
                 write_data(&mut out, &s);
                 return;
@@ -232,7 +245,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     let selection: Option<ChainSelection> = match args.exclude_chains.as_deref() {
         Some(raw) => match ChainSelection::parse_exclude(raw) {
             Ok(sel) => {
-                let has_bayesian = selected.iter().any(|s| {
+                let has_bayesian = completed.iter().any(|s| {
                     matches!(s.method.as_str(), "pgas" | "pmmh" | "mh")
                 });
                 if !has_bayesian {
@@ -257,7 +270,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
 
     // One exit decision for all four formats: an unreadable leaf is reported
     // the same way whatever was being rendered (gh#905).
-    exit_if_nothing_loaded(&mut out, &dir, &discovered, &failures);
+    exit_if_nothing_loaded(&mut out, &dir, &completed, &failures);
 }
 
 /// Load the calendar context from a fit dir: read the model path from the
@@ -312,14 +325,175 @@ fn load_fit_envelope(fit_dir: &Path) -> Option<ir::IrEnvelope> {
     crate::util::load_model_envelope(&model_path?).ok()
 }
 
-/// One resolved fit-method leaf to render: its name, on-disk directory,
-/// and method (so consumers can pattern-match on `MethodResult` once
-/// the typed payload is loaded).
+/// One fit-method leaf to report: its name, on-disk directory, method (so
+/// consumers can pattern-match on `MethodResult` once the typed payload is
+/// loaded), run and status.
 #[derive(Debug, Clone)]
 struct ResolvedMethod {
     name: String,
     method: String,
     method_dir: PathBuf,
+    algorithm: crate::run_meta::FitAlgorithm,
+    run_id: String,
+    /// What the leaf's `run.json` says: only a completed leaf has a result;
+    /// a failed or running one is listed with its status.
+    status: runid::RunStatus,
+}
+
+/// One method leaf as the summary lists it: which run, what state it is in,
+/// and what it concluded. Every leaf under the handle has one — a fit folder
+/// holding an IF2 run and a PMMH run lists both, and a failed run is listed
+/// beside the completed ones rather than left out (gh#896).
+#[derive(Debug, Clone, Serialize)]
+pub struct LeafEntry {
+    /// The leaf directory.
+    pub leaf: String,
+    pub method: String,
+    pub run_id: String,
+    /// `completed`, `running` (or stopped without recording an outcome) or
+    /// `failed`.
+    pub status: runid::RunStatus,
+    /// The completed run's verdict (`methods[].verdict`); `null` for a run
+    /// that did not complete or could not be read.
+    pub verdict: Option<crate::fit::report::Verdict>,
+    /// The verdict, or the state, in a few words — what the text index shows.
+    pub verdict_text: String,
+    /// Why the run has no result: the error a failed run recorded in its
+    /// `events.jsonl`, or why a completed leaf could not be read. Omitted
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A run status as one word.
+pub(crate) fn status_word(status: runid::RunStatus) -> &'static str {
+    match status {
+        runid::RunStatus::Completed => "completed",
+        runid::RunStatus::Running => "running",
+        runid::RunStatus::Failed => "failed",
+    }
+}
+
+/// The error a failed run recorded: the last line of its `events.jsonl`, when
+/// that is a `method_report` with a `failed` outcome. `None` when the log is
+/// missing or was cut off (a killed process records no outcome).
+fn recorded_failure(leaf: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(leaf.join(runid::EVENT_LOG)).ok()?;
+    let last: serde_json::Value = serde_json::from_str(text.lines().last()?).ok()?;
+    (last["event"] == "method_report" && last["outcome"] == "failed")
+        .then(|| last["error"].as_str().map(str::to_string))
+        .flatten()
+}
+
+/// The verdict of a completed run in a few words, for the leaf index.
+fn verdict_text(report: &MethodReport) -> String {
+    use crate::fit::report::Verdict;
+    match &report.verdict {
+        Verdict::Converged { max_rhat, .. } => format!("converged (max R̂ {max_rhat:.3})"),
+        Verdict::NotConverged { max_rhat, .. } => format!("not converged (max R̂ {max_rhat:.3})"),
+        Verdict::Unassessable { .. } => "not converged (R̂ not computable)".into(),
+        Verdict::NotAssessed { .. } => "R̂ not assessed".into(),
+        Verdict::NotApplicable => match report.gate.as_ref().map(|g| g.overall_pass) {
+            Some(Some(true)) => "IF2 gate passed".into(),
+            Some(Some(false)) => "IF2 gate failed".into(),
+            Some(None) => "IF2 gate incomplete".into(),
+            None => "no convergence verdict".into(),
+        },
+    }
+}
+
+impl LeafEntry {
+    fn of(r: &ResolvedMethod) -> Self {
+        let (verdict_text, error) = match r.status {
+            runid::RunStatus::Completed => (String::new(), None),
+            runid::RunStatus::Running => {
+                ("still running, or stopped without recording an outcome".into(), None)
+            }
+            runid::RunStatus::Failed => ("failed".into(), recorded_failure(&r.method_dir)),
+        };
+        LeafEntry {
+            leaf: r.method_dir.to_string_lossy().into_owned(),
+            method: r.method.clone(),
+            run_id: r.run_id.clone(),
+            status: r.status,
+            verdict: None,
+            verdict_text,
+            error,
+        }
+    }
+
+    fn completed(r: &ResolvedMethod, report: &MethodReport) -> Self {
+        LeafEntry { verdict: Some(report.verdict.clone()), verdict_text: verdict_text(report), ..Self::of(r) }
+    }
+
+    fn unreadable(r: &ResolvedMethod, reason: &str) -> Self {
+        LeafEntry {
+            verdict_text: "could not be read".into(),
+            error: Some(reason.to_string()),
+            ..Self::of(r)
+        }
+    }
+}
+
+/// The leaf index `fit summary` opens with when the handle holds more than
+/// one leaf: one row per leaf, with its method, status and verdict, so no
+/// leaf is read for the reader by an ordering rule and a failed one is not
+/// hidden behind a completed one (gh#896).
+fn leaf_index(entries: &[LeafEntry]) -> Vec<crate::out::paint::Line> {
+    use crate::out::paint::{Line, Span};
+    let mut out = vec![Line::default(), Line(vec![Span::plain(format!(
+        "  {} runs in this fit, each reported below:", entries.len()))])];
+    let w_method = entries.iter().map(|e| e.method.len()).max().unwrap_or(0).max(6);
+    let w_verdict = entries.iter().map(|e| e.verdict_text.chars().count()).max().unwrap_or(0);
+    for e in entries {
+        let style = match e.status {
+            runid::RunStatus::Completed if e.error.is_none() => Style::Ok,
+            runid::RunStatus::Running => Style::Warn,
+            _ => Style::Err,
+        };
+        out.push(Line(vec![
+            Span::plain(format!("    {:<w_method$}  ", e.method)),
+            Span::styled(format!("{:<9}", status_word(e.status)), style),
+            Span::plain(format!("  {:<w_verdict$}  {}", e.verdict_text, e.leaf)),
+        ]));
+    }
+    out
+}
+
+/// The section for a leaf that has no result: its status and leaf, then —
+/// for a failed run — the run's opening block, its findings and its error,
+/// as `fit run` showed them.
+fn not_completed_section(
+    r: &ResolvedMethod,
+    entry: &LeafEntry,
+    view: View,
+) -> Vec<crate::out::paint::Line> {
+    use crate::out::paint::{Line, Span};
+    let style = if r.status == runid::RunStatus::Running { Style::Warn } else { Style::Err };
+    let mut out = vec![Line::default(), Line(vec![
+        Span::plain(format!("  {} · ", r.method)),
+        Span::styled(status_word(r.status), style),
+        Span::plain(format!(" · {}", r.method_dir.display())),
+    ])];
+    let header: Option<crate::fit::report::RunHeader> = std::fs::read(r.method_dir.join("run.json")).ok()
+        .and_then(|b| serde_json::from_slice::<runid::RunRecord>(&b).ok())
+        .and_then(|rec| rec.inputs.get("header").cloned())
+        .and_then(|h| serde_json::from_value(h).ok());
+    match (r.status, header) {
+        (runid::RunStatus::Failed, Some(header)) => {
+            let findings = crate::fit::report::read_findings(&r.method_dir)
+                .map(|f| f.findings).unwrap_or_default();
+            let error = entry.error.clone().unwrap_or_else(|| {
+                "the run failed without recording its error (its events.jsonl has no outcome)".into()
+            });
+            out.extend(render_report(&MethodOutcome::Failed { header, findings, error }, view));
+        }
+        _ => out.push(crate::out::paint::Line(vec![Span::plain(format!("    {}", match &entry.error {
+            Some(e) => format!("error: {e}"),
+            None => entry.verdict_text.clone(),
+        }))])),
+    }
+    out
 }
 
 /// A method leaf the walker found but whose stored result could not be read
@@ -375,75 +549,27 @@ fn exit_if_nothing_loaded(out: &mut Out, dir: &str, discovered: &[ResolvedMethod
     out.error(CommandError::new(message)).exit();
 }
 
-/// Walk the fit_dir and return one `ResolvedMethod` per completed method
-/// leaf. Order matches `FitView.methods_declared` (label order); leaves that
-/// didn't complete are dropped; leaves that completed but aren't in
-/// `methods_declared` (shouldn't happen in v2 layouts, but the walker is
-/// permissive) are appended at the end in walker order so they're still
-/// visible.
-///
-/// When the same method name appears in multiple cells (synthetic
-/// replicates, sweep cells), prefers Real over Synthetic, lowest
-/// `fit_seed`, then lex-first method_dir — same priority as
-/// [`crate::fit::table_row::build_row`]'s terminal-method picker.
+/// Walk the fit_dir and return one `ResolvedMethod` per method leaf, in the
+/// fit view's order (method label, then seed) — every leaf, whatever its
+/// status. Nothing is chosen here: a folder holding an IF2 run and a PMMH
+/// run reports both, and a failed leaf is listed beside a completed one of
+/// the same method. A folder holding two completed runs of one method is
+/// refused before this, with the runs listed
+/// (`handle::refuse_several_runs_of_one_method`).
 fn discover_methods(fit_dir: &Path) -> Vec<ResolvedMethod> {
-    // Read the fit-level view for `methods_declared`; if missing, fall back to
-    // walker-order (covers user-built non-canonical fits).
-    let methods_declared: Vec<String> = FitView::read(fit_dir)
-        .map(|v| v.methods_declared)
-        .unwrap_or_default();
-    let nodes = fit_tree::walk_fit_dir(fit_dir).unwrap_or_default();
-
-    // Best (method_name, method, dir) per method name, by (data_kind,
-    // fit_seed, method_dir) priority.
-    type Rank = (u8, u64, PathBuf);
-    let mut best: BTreeMap<String, (String, Rank, PathBuf)> = BTreeMap::new();
-    for node in &nodes {
-        let method = node.view.method.as_str().to_string();
-        let name = method.clone();
-        let rank: Rank = match &node.view.axes {
-            Some(axes) => {
-                let kind_rank = match axes.data_kind {
-                    DataKind::Real => 0,
-                    DataKind::Synthetic { .. } => 1,
-                };
-                (kind_rank, axes.fit_seed, node.method_dir.clone())
-            }
-            None => (2, u64::MAX, node.method_dir.clone()),
-        };
-        best.entry(name)
-            .and_modify(|(meth, cur, dir)| {
-                if rank < *cur {
-                    *meth = method.clone();
-                    *cur = rank.clone();
-                    *dir = node.method_dir.clone();
-                }
-            })
-            .or_insert_with(|| (method.clone(), rank, node.method_dir.clone()));
-    }
-
-    let mut out: Vec<ResolvedMethod> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for name in &methods_declared {
-        if let Some((method, _, dir)) = best.get(name) {
-            out.push(ResolvedMethod {
-                name: name.clone(),
-                method: method.clone(),
-                method_dir: dir.clone(),
-            });
-            seen.insert(name.clone());
-        }
-    }
-    for (name, (method, _, dir)) in best {
-        if !seen.contains(&name) {
-            out.push(ResolvedMethod {
-                name,
-                method,
-                method_dir: dir,
-            });
-        }
-    }
-    out
+    FitView::read(fit_dir)
+        .map(|v| v.methods)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| ResolvedMethod {
+            name: m.method.as_str().to_string(),
+            method: m.method.as_str().to_string(),
+            method_dir: m.method_dir,
+            algorithm: m.method,
+            run_id: m.run_id,
+            status: m.status,
+        })
+        .collect()
 }
 
 /// `fit summary`'s text: every method leaf loaded into its report, each
@@ -479,15 +605,27 @@ fn format_text(
     // identity line and is not repeated on the others'. A fit with no method at
     // all still has to report it, below.
     let mut first = true;
+    // Every leaf's index row and section, in leaf order; written after the
+    // loop so the index (which needs every verdict) comes first.
+    let mut entries: Vec<LeafEntry> = Vec::new();
+    let mut sections: Vec<Vec<crate::out::paint::Line>> = Vec::new();
 
     for resolved in methods {
         let version_lead = std::mem::replace(&mut first, false);
         let method_dir_str = resolved.method_dir.to_string_lossy().into_owned();
+        if resolved.status != runid::RunStatus::Completed {
+            let entry = LeafEntry::of(resolved);
+            let view = View::Summary(SummaryView { explain: args.explain, version_lead });
+            sections.push(not_completed_section(resolved, &entry, view));
+            entries.push(entry);
+            continue;
+        }
         // A leaf whose chain directories count from 1 is refused before
         // anything on it is read: its per-chain table would label chain_N/ as
         // chain N while its draws.tsv keys the same chain N - 1 (gh#990).
         if let Err(e) = crate::chain_index::refuse_one_based_layout(&resolved.method_dir) {
             out.say(format_args!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e));
+            entries.push(LeafEntry::unreadable(resolved, &e));
             failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
             continue;
         }
@@ -498,6 +636,7 @@ fn format_text(
                     "warning: cannot load {} ({}): {}",
                     method_dir_str, resolved.method, e
                 ));
+                entries.push(LeafEntry::unreadable(resolved, &e.to_string()));
                 failures.push(LoadFailure {
                     leaf: method_dir_str.clone(),
                     reason: e.to_string(),
@@ -547,15 +686,23 @@ fn format_text(
             Ok(facts) => build_method_report(facts, &cal),
             Err(e) => {
                 out.say(format_args!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e));
+                entries.push(LeafEntry::unreadable(resolved, &e));
                 failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
                 continue;
             }
         };
         had_provenance_failure |= report.provenance_failed();
+        entries.push(LeafEntry::completed(resolved, &report));
         let view = View::Summary(SummaryView { explain: args.explain, version_lead });
-        out.report(&render_report(&MethodOutcome::Completed(report), view));
+        sections.push(render_report(&MethodOutcome::Completed(report), view));
     }
 
+    if methods.len() > 1 {
+        out.report(&leaf_index(&entries));
+    }
+    for section in &sections {
+        out.report(section);
+    }
     if methods.is_empty() {
         out.report(&summary_no_methods(dir));
     }
@@ -669,10 +816,14 @@ fn ci_env_set() -> bool {
 pub struct FitSummaryDoc {
     pub schema: SchemaInfo,
     pub fit_dir: String,
-    /// Embedded `table_row` block. The single source of truth for the
-    /// cross-fit schema: any field added here must also appear in
-    /// `fit table`'s row output, enforced by Deliverable C.
-    pub table_row: TableRow,
+    /// Every method leaf under the handle, completed or not, in leaf order:
+    /// its method, run, status and verdict (gh#896). `methods` holds the
+    /// reports of the completed ones.
+    pub leaves: Vec<LeafEntry>,
+    /// One `table_row` per completed run with a tabulated result, each
+    /// byte-equal to that run's `fit table --format json` row (Deliverable
+    /// C). A folder holding several runs has several rows; none is chosen.
+    pub table_rows: Vec<TableRow>,
     pub methods: Vec<MethodReport>,
     /// Method leaves the walker found but could not read back (gh#905). Always
     /// present, empty when every leaf loaded — so a consumer that sees an empty
@@ -710,13 +861,27 @@ fn build_summary_doc(
     let mut chain_selection_json: Option<serde_json::Value> = None;
     let mut failures: Vec<LoadFailure> = Vec::new();
     let mut advised = false;
+    let mut leaves: Vec<LeafEntry> = Vec::new();
+    let mut table_rows: Vec<TableRow> = Vec::new();
+    // For a single-fit summary each row is alone in scope, so config_diff is
+    // the identity diff (empty diff vs self) and `delta_ll_vs_best` is 0.0.
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let fit_hash = FitView::read(Path::new(dir)).map(|v| v.fit_hash).unwrap_or_default();
     for resolved in methods {
         let method_dir_str = resolved.method_dir.to_string_lossy().into_owned();
+        if resolved.status != runid::RunStatus::Completed {
+            leaves.push(LeafEntry::of(resolved));
+            continue;
+        }
         // The same refusal the text loop makes, before anything is read: the
         // per-chain rows and the `--exclude-chains` advisory would otherwise
         // label chain_N/ as chain N while draws.tsv keys it N - 1 (gh#990).
         if let Err(e) = crate::chain_index::refuse_one_based_layout(&resolved.method_dir) {
             out.say(format_args!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e));
+            leaves.push(LeafEntry::unreadable(resolved, &e));
             failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
             continue;
         }
@@ -729,6 +894,7 @@ fn build_summary_doc(
                 "warning: cannot load {} ({}): {}",
                 method_dir_str, resolved.method, e
             ));
+            leaves.push(LeafEntry::unreadable(resolved, &e.to_string()));
             failures.push(LoadFailure {
                 leaf: method_dir_str.clone(),
                 reason: e.to_string(),
@@ -764,23 +930,27 @@ fn build_summary_doc(
         let Some(typed) = typed else { continue };
         match load_method_facts(resolved, typed, model.as_ref(), None) {
             Ok(facts) => {
-                method_reports.push(build_method_report(facts, &cal));
+                let report = build_method_report(facts, &cal);
+                leaves.push(LeafEntry::completed(resolved, &report));
+                method_reports.push(report);
             }
             Err(e) => {
                 out.say(format_args!("warning: cannot load {} ({}): {}", method_dir_str, resolved.method, e));
+                leaves.push(LeafEntry::unreadable(resolved, &e));
                 failures.push(LoadFailure { leaf: method_dir_str.clone(), reason: e });
+                continue;
+            }
+        }
+        // The run's `fit table` row, built from the leaf alone. A run with no
+        // tabulated result (pfilter) has no row, as in `fit table`.
+        if MethodResult::is_fitted(resolved.algorithm) {
+            match table_row::build_row(&resolved.method_dir, ConfigDiff::identity(&fit_hash), 0.0, now_unix) {
+                Ok(row) => table_rows.push(row),
+                Err(e) => out.say(format_args!(
+                    "warning: cannot build the table row for {}: {}", method_dir_str, e)),
             }
         }
     }
-
-    // Build the table_row block. For single-fit summary the row is
-    // alone in scope, so config_diff is the identity diff (empty
-    // diff vs self) and `delta_ll_vs_best` is 0.0.
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let table_row = build_summary_table_row(out, Path::new(dir), now_unix);
 
     FitSummaryDoc {
         schema: SchemaInfo {
@@ -788,61 +958,14 @@ fn build_summary_doc(
             camdl_version: version::VERSION_SHORT.to_string(),
         },
         fit_dir: dir.to_string(),
-        table_row,
+        leaves,
+        table_rows,
         methods: method_reports,
         failures,
         chain_selection: chain_selection_json,
     }
 }
 
-/// Project the fit_dir to a `TableRow`, using the identity diff and
-/// `delta_ll_vs_best = 0.0` (single-fit scope). On error,
-/// substitutes a placeholder row whose `fit_id` reflects the failure
-/// so JSON consumers see something rather than a crash.
-fn build_summary_table_row(out: &crate::out::Out, fit_dir: &Path, now_unix: i64) -> TableRow {
-    let fit_hash = FitView::read(fit_dir).map(|v| v.fit_hash).unwrap_or_default();
-    let diff = ConfigDiff::identity(&fit_hash);
-    match table_row::build_row(fit_dir, diff, 0.0, now_unix) {
-        Ok(r) => r,
-        Err(e) => {
-            // Placeholder so the JSON shape stays stable on errors. The
-            // schema discriminator is correct; everything else is
-            // empty/zero. Loud-via-stderr so tests don't silently
-            // pass on a broken fit.
-            out.say(format_args!("warning: cannot build table_row for {}: {}", fit_dir.display(), e));
-            TableRow {
-                schema: table_row::TableRowSchema::current(),
-                fit_id: String::new(),
-                fit_hash: String::new(),
-                label: None,
-                stem: String::new(),
-                model_identity: String::new(),
-                methods: Vec::new(),
-                method: String::new(),
-                run_id: String::new(),
-                config_diff_from_baseline: ConfigDiff::identity(""),
-                converged: false,
-                gate_verdict: "n/a".into(),
-                best_loglik: None,
-                loglik_type: None,
-                max_chain_agreement: None,
-                max_rhat: None,
-                acceptance_rate: None,
-                ess_at_mle: None,
-                ess_posterior: None,
-                ess_per_iter: None,
-                ess_per_sec: None,
-                params: BTreeMap::new(),
-                delta_ll_vs_best: 0.0,
-                age_seconds: 0,
-                created_at: String::new(),
-                stale: false,
-                stale_reason: None,
-                quantities: BTreeMap::new(),
-            }
-        }
-    }
-}
 
 /// `fit summary`'s producer of [`MethodFacts`]: everything the report needs,
 /// read from the method leaf. `result` is the typed result already loaded
@@ -941,33 +1064,44 @@ fn load_method_facts(
     })
 }
 
-/// The winning method's point estimate (θ̂) as a flat params TOML — the same
-/// payload `fit summary --params-only` prints. A `pub(crate)` seam over
+/// The run's point estimate (θ̂) as a flat params TOML — the same payload
+/// `fit summary --params-only` prints. A `pub(crate)` seam over
 /// [`discover_methods`] + [`dump_params_only`] so `compare` can derive a
 /// prequential at θ̂ from a sealed fit without touching the private
-/// `ResolvedMethod` type. The last completed method leaf's winner.
-pub(crate) fn winner_params_toml(segment: &Path) -> Result<String, String> {
-    let dir = segment.to_string_lossy();
-    let discovered = discover_methods(segment);
-    dump_params_only(&dir, &discovered)
+/// `ResolvedMethod` type. `run_dir` must hold one completed run.
+pub(crate) fn winner_params_toml(run_dir: &Path) -> Result<String, String> {
+    let dir = run_dir.to_string_lossy();
+    let completed: Vec<ResolvedMethod> = discover_methods(run_dir)
+        .into_iter()
+        .filter(|m| m.status == runid::RunStatus::Completed)
+        .collect();
+    dump_params_only(&dir, &completed)
 }
 
-/// Dump the chosen method's winner params as a flat TOML, pipeable
-/// into `camdl pfilter --params`. No header, no metadata, no
-/// provenance — just `name = value` lines the standard params loader
-/// will accept.
+/// Dump one run's winner params as a flat TOML, pipeable into
+/// `camdl pfilter --params`. No header, no metadata, no provenance — just
+/// `name = value` lines the standard params loader will accept.
 ///
-/// Reads the last leaf `discover_methods` returned, i.e. the last in
-/// declaration order (`FitView.methods_declared`).
+/// `completed` must hold exactly one run: a folder holding several (an IF2
+/// run beside an NLopt one) is refused with them listed, since printing one
+/// would choose it for the reader (gh#896).
 fn dump_params_only(
     dir: &str,
-    discovered: &[ResolvedMethod],
+    completed: &[ResolvedMethod],
 ) -> Result<String, String> {
-    let target = discovered
-        .iter()
-        .next_back()
-        .cloned()
-        .ok_or_else(|| format!("no completed method leaves found in {}", dir))?;
+    let target = match completed {
+        [] => return Err(format!("no completed method leaves found in {}", dir)),
+        [one] => one.clone(),
+        several => {
+            let mut msg = format!(
+                "{dir} holds {} completed runs and --params-only prints one; pass the run's \
+                 directory (or its @label or run-id prefix):", several.len());
+            for m in several {
+                msg.push_str(&format!("\n  {} {}", m.method, m.method_dir.display()));
+            }
+            return Err(msg);
+        }
+    };
     let target_method = target.name.clone();
     let method_path = target.method_dir.clone();
     let path = format!("{}/final_params.toml", method_path.to_string_lossy());
@@ -3664,6 +3798,9 @@ mod tests {
             name: name.to_string(),
             method: "pgas".to_string(),
             method_dir: PathBuf::from(format!("/nonexistent/{name}")),
+            algorithm: crate::run_meta::FitAlgorithm::Pgas,
+            run_id: String::new(),
+            status: runid::RunStatus::Completed,
         }
     }
 

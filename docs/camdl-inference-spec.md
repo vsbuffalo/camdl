@@ -1051,6 +1051,12 @@ Top-level shape:
 {
   "schema": {"version": 5, "camdl_version": "0.1.0+abc1234"},
   "fit_dir": "fit/he2010",
+  "leaves": [
+    {"leaf": "fit/he2010/if2-1a2b3c4d/seed_1-5e6f7a8b", "method": "if2",
+     "run_id": "…", "status": "completed", "verdict": {"kind": "not_applicable"},
+     "verdict_text": "IF2 gate failed"}
+  ],
+  "table_rows": [{"schema": {"name": "table_row", "version": 4}, "method": "if2", …}],
   "methods": [
     {
       "name": "if2",
@@ -1125,6 +1131,27 @@ Schema-stability rules:
   `"default_fallback"` for legacy fit_state files written before Phase 3 — in
   which case the rendered thresholds come from `GateConfig::default()` and may
   differ from what the run was actually judged against.
+- **`leaves` lists every method leaf under the handle**, completed or not, in
+  leaf order (method label, then seed): `leaf`, `method`, `run_id`, `status`
+  (`completed`, `running` — or stopped without recording an outcome — or
+  `failed`), `verdict` (the completed run's `methods[].verdict`, else `null`),
+  `verdict_text` (the verdict or state in a few words) and, when the run has no
+  result, `error` (the error a failed run recorded in its `events.jsonl`, or why
+  a completed leaf could not be read). A folder holding an IF2 run and a PMMH
+  run lists both; nothing is chosen between them, and a failed run is never
+  hidden behind a completed one. The text output opens with the same list, one
+  row per leaf, whenever the handle holds more than one. `methods` holds the
+  reports of the completed leaves.
+- **`table_rows` holds one row per completed run with a tabulated result**, each
+  byte-equal to that run's `fit table --format json` row. A `pfilter` run has
+  none.
+- **`method_result.method` names the method that ran**: `mh` (which shares
+  PMMH's result shape) is `"mh"`, and the three NLopt algorithms are
+  `"nl-sbplx"`, `"nl-bobyqa"` and `"nl-lbfgs"`.
+- **A reader that needs one run refuses a folder holding several**, listing
+  them: `--params-only`, and `fit predict`, `compare` and `simulate --fit` of a
+  folder. Pass the run's directory, `@label` or run-id prefix. A folder holding
+  two completed runs of one method is refused by `fit summary` too.
 - **`failures` is always present**, one entry per method leaf the walker found
   and could not read back. Each entry carries `leaf` (the method-leaf directory)
   and `reason` (which file, and what was wrong with it), and is also warned

@@ -4137,10 +4137,10 @@ fitted	7	free_forward	posterior	2.0652
 `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred` channels, `n_draws`, and the
 `q05…q95` band.)
 
-> **Current limitation.** A `pfilter` leaf is dropped from `camdl fit table`
-> with a `unknown fit method 'pfilter'` warning, and `fit summary --format json`
-> emits an empty `table_row` for it. The text `fit summary` still renders the
-> IF2 and PGAS leaves correctly.
+> **Current limitation.** A `pfilter` leaf has no row in `camdl fit table`, and
+> no entry in `fit summary --format json`'s `table_rows`; it is listed in
+> `leaves`. The text `fit summary` still renders the IF2 and PGAS leaves
+> correctly.
 
 ### 8.3 Deterministic ODE backend
 
@@ -6067,9 +6067,9 @@ prior whose support covers the box), and the resolved prior's source
 
 Walks a results tree and renders one row per run — its run id, method,
 convergence verdict, best log-likelihood and its type, age. Rows of one problem
-share a `fit_id`; the JSON row carries the full `run_id` (table_row schema v3),
-the CSV appends it as the last fixed column. The `<ROOT>` argument is
-**required**.
+share a `fit_id`; the JSON row carries the full `run_id` (table_row schema v4,
+in which a non-finite number is the string `"NaN"`, `"inf"` or `"-inf"`), the
+CSV appends it as the last fixed column. The `<ROOT>` argument is **required**.
 
 ```
 $ camdl fit table results/fits
