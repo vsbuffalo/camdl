@@ -1612,12 +1612,16 @@ pub(crate) fn load_observations(
         // and `scored` is the value column.
         let time_col = crate::pfilter::obs_time_column(obs_model)?;
         let value_col = &obs_model.scored;
+        let domain = crate::pfilter::CellDomain::of(obs_model, value_col);
         let (times, cells) =
-            crate::pfilter::load_data_tsv_column_cells(path, time_col, value_col, opts)?;
+            crate::pfilter::load_data_tsv_column_cells(path, time_col, value_col, domain, opts)?;
         // Per-observation auxiliary data (binomial `n = tested`, person-time
         // offset; §3, §6.1). A row where the scored value OR any referenced aux
         // is `NA` is a hole (present-together-or-hole).
-        let aux_cols = crate::pfilter::stream_aux_columns(obs_model);
+        let aux_cols: Vec<(String, crate::pfilter::CellDomain)> =
+            crate::pfilter::stream_aux_columns(obs_model).into_iter()
+                .map(|c| { let d = crate::pfilter::CellDomain::of(obs_model, &c); (c, d) })
+                .collect();
         let (aux, force_hole) =
             crate::pfilter::load_stream_aux(path, &aux_cols, cells.len())?;
         let mut cells = cells;
