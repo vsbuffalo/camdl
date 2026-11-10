@@ -706,6 +706,7 @@ impl FitResult {
     /// itself — and `segment` is the problem folder whose sidecar names the
     /// estimated parameters.
     pub fn resolve(
+        out: &crate::out::Out,
         segment: &Path,
         run_dir: &Path,
         selection: Option<ChainSelection>,
@@ -742,7 +743,7 @@ impl FitResult {
                 // uses, so the two agree on the same fit + selection (gh#409).
                 let convergence = match &pref.chain_selection {
                     Some(sel) => subset_convergence(segment, &pref.draws_path, sel)?,
-                    None => read_convergence(&method_dir, pref.method),
+                    None => read_convergence(out, &method_dir, pref.method),
                 };
                 // Replay on the SAME backend the method ran on; default only when
                 // a bare method dir was passed (no fit view to read it from).
@@ -787,7 +788,7 @@ impl FitResult {
 /// classification** ([`min_ess_over`]) rather than a bare fold. Returns
 /// [`ConvergenceStatus::NotAssessed`] when no summary or no R̂ is present (a
 /// single-chain method), so a band is never silently "converged".
-fn read_convergence(method_dir: &Path, method: Option<FitAlgorithm>) -> ConvergenceStatus {
+fn read_convergence(out: &crate::out::Out, method_dir: &Path, method: Option<FitAlgorithm>) -> ConvergenceStatus {
     // Chains that began at one point agree by construction; the leaf's R̂
     // is not a verdict (proposal 2026-09-08, §3.4), so the band carries no
     // number — the same demotion `fit summary` applies.
@@ -803,7 +804,7 @@ fn read_convergence(method_dir: &Path, method: Option<FitAlgorithm>) -> Converge
         // band with them would be labelling something else. Say so once and
         // report the band as not assessed rather than carrying the number.
         if let Err(why) = crate::run_meta::check_fit_summary_schema(&v, name) {
-            eprintln!("warning: {why}");
+            out.say(format_args!("warning: {why}"));
             return None;
         }
         // Reduce through the SAME classification `fit summary` uses, over the
@@ -1370,33 +1371,34 @@ struct PredictOutcome {
 
 /// `camdl fit predict` — write the free-forward posterior predictive artifact.
 pub fn cmd_fit_predict(args: &crate::args::FitPredictArgs) {
-    match run_predict(args) {
+    // fit predict has no `--no-color`: its painters follow the environment
+    // and whether each stream is a terminal.
+    let out = crate::out::Out::new(false);
+    match run_predict(&out, args) {
         Ok(outcome) => {
             for p in &outcome.written {
-                println!("wrote {}", p.display());
+                out.data_line(format_args!("wrote {}", p.display()));
             }
             if !outcome.failures.is_empty() {
                 // What failed, then what was written — in that order, because
                 // the first is why the exit status is 1 and the second is what
                 // the reader still has.
-                eprintln!(
+                out.say(format_args!(
                     "fit predict: {} deterministic failure(s); this predictive is incomplete:",
                     outcome.failures.len()
-                );
+                ));
                 for f in &outcome.failures {
-                    eprintln!("  ✗ {}", f.describe());
+                    out.say(format_args!("  ✗ {}", f.describe()));
                 }
-                eprintln!(
+                out.fail(format!(
                     "fit predict: wrote {} file(s) anyway — every object that computed is on \
                      disk, and `report.json` lists what did not. Exit status 1.",
                     outcome.written.len()
-                );
-                std::process::exit(1);
+                ));
             }
         }
         Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: {e}"));
         }
     }
 }
@@ -1420,7 +1422,7 @@ struct LeafObs {
     aux: Vec<Vec<(String, f64)>>,
 }
 
-fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, String> {
+fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, String> {
     // 1. Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) →
     //    its segment + config.
     let resolved = crate::fit::handle::resolve_fit_run(args.fit()?).map_err(|e| e.to_string())?;
@@ -1448,7 +1450,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
         .as_deref()
         .map(ChainSelection::parse_exclude)
         .transpose()?;
-    let fit_result = FitResult::resolve(&segment, &run_dir, selection.clone())?;
+    let fit_result = FitResult::resolve(out, &segment, &run_dir, selection.clone())?;
     let treatment = fit_result.into_treatment();
     // The label the artifact carries, derived from the treatment before we
     // unwrap the cloud (v1 only ever reaches `posterior` here, but the label is
@@ -1626,11 +1628,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     // which interventions the `fitted` row carries.
     let fit_base = crate::util::FitBase::of(&config)?;
     if !fit_base.is_empty() {
-        eprintln!(
+        out.say(format_args!(
             "fit predict: the fitted model runs the fit's own {}; every scenario \
              arm applies its changes on top of it",
             fit_base.describe()
-        );
+        ));
     }
     // Layer 1 supports param-overlay scenarios cleanly; an intervention-toggling
     // scenario (enable/disable) replays correctly through the engine — the engine
@@ -1924,7 +1926,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                 let aux_cols = crate::pfilter::stream_aux_columns(obs_ir);
                 if !aux_cols.is_empty() {
                     if noted.insert(obs_ir.source.clone()) {
-                        eprintln!(
+                        out.say(format_args!(
                             "fit predict: stream '{}' stops at its last observation \
                              (t = {last_obs}) even though the model horizon is {}: its \
                              likelihood reads the observed data column(s) [{}], which \
@@ -1937,14 +1939,14 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                             obs_ir.source,
                             model.simulation.t_end,
                             aux_cols.join(", "),
-                        );
+                        ));
                     }
                     continue;
                 }
                 let extension = forecast_times(times, &horizon_output_times);
                 if extension.is_empty() {
                     if noted.insert(obs_ir.source.clone()) {
-                        eprintln!(
+                        out.say(format_args!(
                             "fit predict: stream '{}' stops at its last observation \
                              (t = {last_obs}) even though the model horizon is {}: no \
                              trajectory output time past the data continues this \
@@ -1955,7 +1957,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                              reporting cadence.",
                             obs_ir.source,
                             model.simulation.t_end,
-                        );
+                        ));
                     }
                     continue;
                 }
@@ -2041,7 +2043,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                 required_output_times.push(stop);
                 // One note per logical stream, not per stratum leaf.
                 if extended.insert(obs_ir.source.clone()) {
-                    eprintln!(
+                    out.say(format_args!(
                         "fit predict: stream '{}': the last forecast row (t = {label}) \
                          covers [{start}, {stop}) under its `covers` declaration, \
                          which closes past the declared horizon t = {}. Integrating \
@@ -2050,7 +2052,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                          keeps its declared value and the fit is unchanged.",
                         obs_ir.source,
                         model.simulation.t_end,
-                    );
+                    ));
                 }
             }
             // Every other time the projection reads, inside the declared window.
@@ -2083,14 +2085,12 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                 }
             }
             if n_between_grid > 0 {
-                eprintln!(
-                    "fit predict: recording extra trajectory snapshots at the \
+                out.say("fit predict: recording extra trajectory snapshots at the \
                      observation and row-boundary times that fall between the \
                      model's output times, so each row can be projected off the \
                      trajectory the fit scored from integrator state. They are \
                      internal to the projection: `quantities/` stays on the \
-                     declared output grid, and the fit is unchanged."
-                );
+                     declared output grid, and the fit is unchanged.");
             }
             required_output_times.sort_by(f64::total_cmp);
             required_output_times.dedup_by(|a, b| (*a - *b).abs() <= crate::OBS_SNAP_EPS);
@@ -2132,26 +2132,22 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                 *ff_draws_per_chain.entry(*c).or_insert(0) += 1;
             }
             if ff_chain_of_point.iter().all(Option::is_none) {
-                eprintln!(
-                    "fit predict: this fit's draws.tsv carries no chain column, so the \
+                out.say("fit predict: this fit's draws.tsv carries no chain column, so the \
                      per-row convergence columns (rhat_mean / ess_mean / rhat_pred / \
                      ess_pred) are left empty — a between-chain statistic needs to know \
-                     which chain each draw came from."
-                );
+                     which chain each draw came from.");
                 if args.by_chain {
-                    eprintln!(
-                        "fit predict: --by-chain has nothing to split on for the same \
+                    out.say("fit predict: --by-chain has nothing to split on for the same \
                          reason, so no `chain` column is written and the file carries \
-                         the pooled band only."
-                    );
+                         the pooled band only.");
                 }
             }
             if ff_n_draws < posterior.n_draws() {
-                eprintln!(
+                out.say(format_args!(
                     "fit predict: free_forward horizon — subsampling {ff_n_draws} of {} \
                      posterior draws (raise with --n-draws)",
                     posterior.n_draws()
-                );
+                ));
             }
 
             // ── The conditioned read for in-window quantities (gh#722) ─────────
@@ -2176,7 +2172,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                     quantity_obs_anchors,
                 );
                 if !unconditioned.is_empty() {
-                    eprintln!(
+                    out.say(format_args!(
                         "fit predict: quantity `{}` reduces `observations.<stream>` at an \
                          anchor inside the observed record, and is reported on the \
                          free-forward replay. The saved smoothing path carries the \
@@ -2187,7 +2183,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                          (`value_at(<state expr>, last_obs)`), which IS read on the \
                          smoothing path.",
                         unconditioned.join("`, `"),
-                    );
+                    ));
                 }
             }
             // The saved subset is resolved only when a quantity needs it — the scan
@@ -2227,7 +2223,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                     .unwrap_or_default();
                 match (&ff_saved, &conditioned_scenario) {
                     (Some(s), Some(_)) if s.n_saved > 0 => {
-                        eprintln!(
+                        out.say(format_args!(
                             "fit predict: quantity `{names}` is anchored at or before \
                              last_obs — reported on the conditioned smoothing path \
                              p(x|y), not on the free-forward replay (gh#722). \
@@ -2237,19 +2233,19 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                             s.n_saved,
                             ff_n_draws,
                             ff_n_draws - s.n_saved,
-                        );
+                        ));
                     }
                     (_, None) => {
-                        eprintln!(
+                        out.say(format_args!(
                             "fit predict: quantity `{names}` is anchored at or before \
                              last_obs, but `--enable`/`--disable` makes every arm of this \
                              run a counterfactual, for which no conditioned path exists. \
                              They are reported on the free-forward replay, which ignores \
                              the observations they are anchored inside (gh#722)."
-                        );
+                        ));
                     }
                     _ => {
-                        eprintln!(
+                        out.say(format_args!(
                             "fit predict: quantity `{names}` is anchored at or before \
                              last_obs, but this fit saved no latent path for any replayed \
                              draw — there is nothing conditioned to read them on. They are \
@@ -2259,7 +2255,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                              Fix: re-fit with `n_trajectories` set on the posterior method \
                              (PGAS/PMMH save the smoothing paths), then re-run \
                              `fit predict`."
-                        );
+                        ));
                     }
                 }
             }
@@ -2267,12 +2263,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             // in the same file as the fitted arm's, under a `scenario` column, so a
             // reader comparing them must know they are two different objects.
             if any_smoothed && scenario_refs.iter().any(|s| s.name() != crate::args::FITTED) {
-                eprintln!(
-                    "fit predict: the scenario arms report their anchored quantities on \
+                out.say("fit predict: the scenario arms report their anchored quantities on \
                      their OWN free-forward replay — the smoothing path was inferred under \
                      the fitted model, and the data a counterfactual would have generated \
-                     do not exist. `quantities.json` tags each entry with `evaluated_on`."
-                );
+                     do not exist. `quantities.json` tags each entry with `evaluated_on`.");
             }
             // Fan the (draws × scenarios) replay grid across Rayon. The engine seeds
             // each cell by its planned `point_idx`/`rep` (`process_seed_for`),
@@ -2467,11 +2461,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                 for f in &rendered.failures {
                     // The fact here; the reason travels with the failure and is
                     // printed once, at the end, beside the exit status.
-                    eprintln!(
+                    out.say(format_args!(
                         "fit predict: quantity `{}` refused and is dropped from the \
                          table — the reason is below and in report.json.",
                         f.name
-                    );
+                    ));
                     failures.push(DeterministicFailure::NonFinite {
                         at: Site::Quantity(f.name.clone()),
                         draw: f.draw,
@@ -2487,10 +2481,8 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
         if let Err(reason) = outcome {
             // Only the fact, here: the reason travels with the failure and is
             // printed once, at the end, beside the exit status it explains.
-            eprintln!(
-                "fit predict: the free-forward tail refused — continuing with what is \
-                 computable; the reason is below and in report.json."
-            );
+            out.say("fit predict: the free-forward tail refused — continuing with what is \
+                 computable; the reason is below and in report.json.");
             failures.push(DeterministicFailure::EvaluationFailed {
                 at: Site::FreeForward,
                 reason,
@@ -2513,6 +2505,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     let n_draws_cap = args.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS);
     let one_step: Option<OneStepBands> = match &one_step_fit {
         Some(fit) => Some(one_step_bands(
+            out,
             // The fitted model — the fit's intervention selection applied —
             // not `compiled`, which carries every declared intervention so
             // the free-forward sink can read any arm's trajectory.
@@ -2878,7 +2871,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
         horizons.push(format!("one_step({one_step_n} draws)"));
     }
     let scenario_labels: Vec<&str> = scenario_refs.iter().map(|s| s.name()).collect();
-    eprintln!(
+    out.say(format_args!(
         "fit predict: horizon={} treatment=posterior, {} scenario(s) [{}], {} stream(s), \
          {} draws from {} method '{}'",
         horizons.join("+"),
@@ -2888,7 +2881,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
         posterior.n_draws(),
         method_label,
         posterior.name,
-    );
+    ));
     Ok(PredictOutcome { written, failures })
 }
 
@@ -3536,6 +3529,7 @@ struct OneStepBands {
 /// `n_draws` column, so the band never claims more draws than it used. If
 /// EVERY draw degenerates there is nothing to pool and the run errors.
 fn pool_one_step_draws(
+    out: &crate::out::Out,
     param_sets: &[Vec<f64>],
     chain_of_draw: &[Option<usize>],
     base_seed: u64,
@@ -3617,7 +3611,7 @@ fn pool_one_step_draws(
     }
     if !skipped.is_empty() {
         let (first_idx, first_err) = &skipped[0];
-        eprintln!(
+        out.say(format_args!(
             "fit predict: one_step horizon — skipped {}/{} posterior draws whose one-step \
              filter degenerated (a small tail of degenerate draws is expected in a \
              converging posterior; first: draw {first_idx}: {first_err}); bands pool the \
@@ -3625,7 +3619,7 @@ fn pool_one_step_draws(
             skipped.len(),
             n_total,
             n_total - skipped.len(),
-        );
+        ));
     }
     // A chain that lost *some* of its draws still bands, but its `n_draws` cell
     // reports what it actually pooled -- and the loss is named here, because a
@@ -3646,21 +3640,21 @@ fn pool_one_step_draws(
             continue;
         }
         if n_pooled == 0 {
-            eprintln!(
+            out.say(format_args!(
                 "fit predict: one_step horizon -- chain {} contributed no band: all \
                  {n_offered} of its replayed draws degenerated. It is omitted from the \
                  per-chain rows rather than banded over nothing.",
                 ChainIndex(*id)
-            );
+            ));
         } else {
-            eprintln!(
+            out.say(format_args!(
                 "fit predict: one_step horizon -- chain {} bands over {n_pooled} of the \
                  {n_offered} draws it was given ({} degenerated); its rows report \
                  n_draws = {n_pooled}, so a narrower band there may be a thinner \
                  sample rather than a more certain chain.",
                 ChainIndex(*id),
                 n_offered - n_pooled,
-            );
+            ));
         }
     }
 
@@ -3721,6 +3715,7 @@ fn fitted_compiled(
 }
 
 fn one_step_bands(
+    out: &crate::out::Out,
     compiled: std::sync::Arc<sim::CompiledModel>,
     model: &ir::Model,
     config: &crate::fit::config_v2::Problem,
@@ -3837,10 +3832,10 @@ fn one_step_bands(
     let chosen: Vec<&IndexMap<String, f64>> = idx.iter().map(|&i| &draws[i]).collect();
     let n_used = chosen.len();
     if n_used < total {
-        eprintln!(
+        out.say(format_args!(
             "fit predict: one_step horizon — subsampling {n_used} of {total} posterior \
              draws (raise with --n-draws)"
-        );
+        ));
     }
     // The chain behind each replayed draw. Every entry is `None` when the
     // cloud's `draws.tsv` carries no chain column; the pool then has a single
@@ -3877,7 +3872,7 @@ fn one_step_bands(
         })
         .collect();
 
-    let pool = pool_one_step_draws(&param_sets, &chain_of_draw, base_seed, |_, params, seed| {
+    let pool = pool_one_step_draws(out, &param_sets, &chain_of_draw, base_seed, |_, params, seed| {
         bootstrap_filter(&process, &obs_model, params, &smc_config, seed)
     })?;
     let PooledOneStep { stream_names, obs_times, n_pooled, .. } = &pool;
@@ -3886,10 +3881,8 @@ fn one_step_bands(
     // report. Empty without `--by-chain`, and empty on an unkeyed cloud.
     let chain_ids: Vec<usize> = if by_chain { pool.bandable_chains() } else { Vec::new() };
     if by_chain && chain_ids.is_empty() {
-        eprintln!(
-            "fit predict: one_step horizon — --by-chain wrote no per-chain rows: this \
-             fit's draws.tsv carries no chain column, so no chain can be named."
-        );
+        out.say("fit predict: one_step horizon — --by-chain wrote no per-chain rows: this \
+             fit's draws.tsv carries no chain column, so no chain can be named.");
     }
     let n_pooled_by_chain: BTreeMap<usize, usize> = chain_ids
         .iter()
@@ -4151,7 +4144,7 @@ mod tests {
         )
         .unwrap();
 
-        match read_convergence(&dir, Some(FitAlgorithm::Mh)) {
+        match read_convergence(&crate::out::Out::new(true), &dir, Some(FitAlgorithm::Mh)) {
             ConvergenceStatus::Reported { rhat_max, ess_min } => {
                 assert!((rhat_max - 1.03).abs() < 1e-9, "rhat_max from mh_summary.json");
                 assert!((ess_min - 250.0).abs() < 1e-9, "ess_min from mh_summary.json");
@@ -4197,7 +4190,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            read_convergence(&dir, Some(FitAlgorithm::Pgas)),
+            read_convergence(&crate::out::Out::new(true), &dir, Some(FitAlgorithm::Pgas)),
             ConvergenceStatus::NotAssessed
         ), "chains that began together agree by construction; the band must not be stamped");
         // The spread counterpart of the same leaf reports its R̂.
@@ -4205,7 +4198,7 @@ mod tests {
             .replace("chain_starts_kind = \"point\"", "chain_starts_kind = \"spread\"");
         std::fs::write(dir.join("fit_state.toml"), state).unwrap();
         assert!(matches!(
-            read_convergence(&dir, Some(FitAlgorithm::Pgas)),
+            read_convergence(&crate::out::Out::new(true), &dir, Some(FitAlgorithm::Pgas)),
             ConvergenceStatus::Reported { .. }
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -4225,7 +4218,7 @@ mod tests {
         )
         .unwrap();
         if let ConvergenceStatus::Reported { rhat_max, .. } =
-            read_convergence(&dir, Some(FitAlgorithm::Pgas))
+            read_convergence(&crate::out::Out::new(true), &dir, Some(FitAlgorithm::Pgas))
         {
             panic!(
                 "a fit with a refused parameter must not report a band off the \
@@ -4248,7 +4241,7 @@ mod tests {
                 "ess":  {"a2": 145.0, "tau": null}}"#,
         )
         .unwrap();
-        match read_convergence(&dir, Some(FitAlgorithm::Pgas)) {
+        match read_convergence(&crate::out::Out::new(true), &dir, Some(FitAlgorithm::Pgas)) {
             ConvergenceStatus::Reported { rhat_max, ess_min } => {
                 assert!((rhat_max - 2.639).abs() < 1e-9,
                     "the worst R̂ is still reported: {rhat_max}");
@@ -4266,7 +4259,7 @@ mod tests {
                 "ess":  {"a2": 145.0, "tau": 9.0}}"#,
         )
         .unwrap();
-        match read_convergence(&dir, Some(FitAlgorithm::Pgas)) {
+        match read_convergence(&crate::out::Out::new(true), &dir, Some(FitAlgorithm::Pgas)) {
             ConvergenceStatus::Reported { ess_min, .. } => assert!((ess_min - 9.0).abs() < 1e-9,
                 "a complete map reports the slowest parameter: {ess_min}"),
             other => panic!("expected Reported, got {other:?}"),
@@ -4289,7 +4282,7 @@ mod tests {
         .unwrap();
         assert!(
             matches!(
-                read_convergence(&dir, Some(FitAlgorithm::Mh)),
+                read_convergence(&crate::out::Out::new(true), &dir, Some(FitAlgorithm::Mh)),
                 ConvergenceStatus::NotAssessed
             ),
             "an mh fit must not fall back to pmmh_summary.json (clean break)"
@@ -4470,7 +4463,7 @@ mod tests {
         // n_pooled says 2 — the artifact must not claim 3 draws (F11: one
         // pathological draw of 200 used to abort the whole predictive).
         let param_sets = vec![vec![0.0]; 3];
-        let out = pool_one_step_draws(&param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, _seed| {
+        let out = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, _seed| {
             if draw_idx == 1 { Err(degenerate()) } else { Ok(fake_pf_result(10.0)) }
         })
         .expect("a single degenerate draw must not abort the pool");
@@ -4502,7 +4495,7 @@ mod tests {
         // Six draws, three per chain, two particles each.
         let param_sets = vec![vec![0.0]; 6];
         let chains = keyed(&[0, 0, 0, 1, 1, 1]);
-        let out = pool_one_step_draws(&param_sets, &chains, 42, |_, _, _| Ok(fake_pf_result(10.0)))
+        let out = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &chains, 42, |_, _, _| Ok(fake_pf_result(10.0)))
             .expect("nothing degenerates here");
 
         assert_eq!(out.bandable_chains(), vec![0, 1]);
@@ -4535,7 +4528,7 @@ mod tests {
         // degenerate. Chain 2: draw 5 — survives.
         let param_sets = vec![vec![0.0]; 6];
         let chains = keyed(&[0, 0, 0, 1, 1, 2]);
-        let out = pool_one_step_draws(&param_sets, &chains, 42, |draw_idx, _, _| {
+        let out = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &chains, 42, |draw_idx, _, _| {
             if matches!(draw_idx, 1 | 3 | 4) { Err(degenerate()) } else { Ok(fake_pf_result(10.0)) }
         })
         .expect("a partially degenerate pool must not abort");
@@ -4560,7 +4553,7 @@ mod tests {
         // for every draw — it must abort on first occurrence, naming the draw,
         // not be skipped 200 times.
         let param_sets = vec![vec![0.0]; 3];
-        let err = pool_one_step_draws(&param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, _seed| {
+        let err = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, _seed| {
             if draw_idx == 1 {
                 Err(sim::SimError::NumericalCollapse { kind: sim::CollapseKind::UnOpNan, t: 3.0 })
             } else {
@@ -4576,7 +4569,7 @@ mod tests {
         // Nothing pooled → no band to emit; the run must error loudly, not
         // return an empty artifact.
         let param_sets = vec![vec![0.0]; 3];
-        let err = pool_one_step_draws(&param_sets, &unkeyed(&param_sets), 42, |_, _, _| Err(degenerate()))
+        let err = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &unkeyed(&param_sets), 42, |_, _, _| Err(degenerate()))
             .expect_err("an all-degenerate pool must error");
         assert!(err.contains("ALL 3"), "must say every draw degenerated: {err}");
     }
@@ -4588,12 +4581,12 @@ mod tests {
         use std::cell::RefCell;
         let param_sets = vec![vec![0.0]; 3];
         let seeds_with_skip = RefCell::new(Vec::new());
-        let _ = pool_one_step_draws(&param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, seed| {
+        let _ = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, seed| {
             seeds_with_skip.borrow_mut().push((draw_idx, seed));
             if draw_idx == 0 { Err(degenerate()) } else { Ok(fake_pf_result(10.0)) }
         });
         let seeds_no_skip = RefCell::new(Vec::new());
-        let _ = pool_one_step_draws(&param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, seed| {
+        let _ = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, seed| {
             seeds_no_skip.borrow_mut().push((draw_idx, seed));
             Ok(fake_pf_result(10.0))
         });
