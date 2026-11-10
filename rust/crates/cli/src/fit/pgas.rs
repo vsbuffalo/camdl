@@ -215,6 +215,22 @@ pub struct PgasMethodOpts {
     pub binomial: sim::rng::BinomialAlgorithm,
 }
 
+/// The kernel behind PGAS's θ-move acceptance rates: NUTS where the sampler
+/// runs it (`nuts_active`, the predicate the sampler itself uses), random-walk
+/// Metropolis-within-Gibbs otherwise. One function for the band the run
+/// publishes when it begins and the band its findings apply when it ends.
+pub(crate) fn theta_move_kernel(
+    use_nuts: bool,
+    compiled: &sim::CompiledModel,
+) -> sim::inference::diagnostic::AcceptanceKernel {
+    use sim::inference::diagnostic::AcceptanceKernel;
+    if sim::inference::pgas::nuts_active(use_nuts, compiled) {
+        AcceptanceKernel::Nuts
+    } else {
+        AcceptanceKernel::RandomWalk
+    }
+}
+
 pub(crate) const DEFAULT_BURN_IN: usize = 2000;
 const DEFAULT_THIN: usize = 5;
 
@@ -1338,12 +1354,7 @@ pub fn run_method(
     // the same `nuts_active` predicate the sampler used picks the kernel. A
     // BLOCK update (identical rate on every parameter) is reported once per
     // chain, not once per parameter.
-    let nuts = sim::inference::pgas::nuts_active(use_nuts, config.compiled.as_ref());
-    let kernel = if nuts {
-        sim::inference::diagnostic::AcceptanceKernel::Nuts
-    } else {
-        sim::inference::diagnostic::AcceptanceKernel::RandomWalk
-    };
+    let kernel = theta_move_kernel(use_nuts, config.compiled.as_ref());
     // The table is drawn at the end of the run from the recorded rates
     // (`report::render::pgas_acceptance_table`); the findings are pushed here.
     for &(chain_id, _, ref rates) in &all_results {
