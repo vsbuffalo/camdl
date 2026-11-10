@@ -91,9 +91,14 @@ fn eval_ode_derivs(
     dt: f64,
 ) -> Result<Vec<f64>, SimError> {
     let ctx = EvalCtx { model, int_s, real_s, params, t, dt, projected: None, aux: None, int_float_override: None, per_eval: None };
-    let mut derivs = vec![0.0; model.ode_real_indices.len()];
-    for (i, _eq) in model.model.ode_equations.iter().enumerate() {
-        derivs[i] = eval_resolved(&model.resolved.ode_derivatives[i], &ctx);
+    // Indexed by REAL-COMPARTMENT position, which is what `rk4_step_raw`
+    // applies them by. Equations are in `ode {}` block order, which need not be
+    // compartment declaration order, so each goes through `ode_real_indices`
+    // (equation → real local index), as in `ode::ode_derivs`. A real
+    // compartment with no equation keeps derivative 0.
+    let mut derivs = vec![0.0; real_s.values.len()];
+    for (eq_idx, &local) in model.ode_real_indices.iter().enumerate() {
+        derivs[local] = eval_resolved(&model.resolved.ode_derivatives[eq_idx], &ctx);
     }
     Ok(derivs)
 }
