@@ -982,14 +982,6 @@ fn detect_sealed_holdout(resolved: &ResolvedFit) -> Result<Option<SealedHoldout>
     Ok(Some(SealedHoldout { train_end: window.train_end, holdout_files }))
 }
 
-/// The per-stream data digests a resolved fit recorded when it ran, read from
-/// its provenance sidecar (`fit.meta.json`). Not re-hashed here: the files may
-/// have moved or changed since, and the question is what the FIT was bound to.
-///
-/// The sidecar is derived provenance rather than a source of truth, which is
-/// the right strength for a preflight — it is a faithful projection of inputs
-/// already hashed into the fit's identity. A fit without one (an older run, a
-/// hand-assembled directory) is reported as unchecked rather than refused.
 /// The pair's combined filter-noise SE for a Δ against the baseline,
 /// `√(mc_a² + mc_b²)` (§3.4 remedy 4); `None` unless both rows carry a
 /// replicate-derived MC SE. Conservative under common random numbers.
@@ -1000,6 +992,15 @@ fn mc_se_delta(row: &Row, base: &Row) -> Option<f64> {
     }
 }
 
+/// The per-stream data digests a resolved fit recorded when it ran, read from
+/// its provenance sidecar (`fit.meta.json`). Not re-hashed here: the files may
+/// have moved or changed since, and the question is what the FIT was bound to.
+///
+/// The sidecar is derived provenance rather than a source of truth, which is
+/// the right strength for a preflight — it is a faithful projection of inputs
+/// already hashed into the fit's identity. A fit without one (a
+/// hand-assembled directory), or whose sidecar cannot be read, is reported as
+/// unchecked rather than refused.
 fn fit_data_identity(resolved: &ResolvedFit) -> DataIdentity {
     match crate::run_meta::read_fit_sidecar(&resolved.segment) {
         Ok(Some(s)) if !s.data_hashes.is_empty() => DataIdentity::Digests(s.data_hashes),
