@@ -678,8 +678,9 @@ Priors (Bayesian methods: PGAS, PMMH):
        a hard error — `fit run`'s chain is treated authoritatively
        downstream, so silent demotion is not allowed.
 
-  Per-parameter provenance is recorded in `run.json` under
-  `resolved_priors` (sources: fit_toml, model_ir, flat_explicit).
+  Per-parameter provenance is recorded in the fit folder's
+  `fit.meta.json` under `resolved_priors` (sources: fit_toml,
+  model_ir, flat_explicit).
   See `docs/inference.md` § \"Priors and precedence\" for the full
   spec including the asymmetry with `camdl profile`.
 "))]
