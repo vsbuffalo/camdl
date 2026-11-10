@@ -655,6 +655,74 @@ fn a_data_column_denominator_smaller_than_its_count_is_refused_at_bind() {
     );
 }
 
+/// Bind one dense binomial cell against the trial count `n` (with an optional
+/// `tested` aux value) and return the rendered refusal, or `None` if it binds.
+fn bind_binomial_with(n: Expr, aux: Vec<(String, f64)>, observed: f64) -> Option<String> {
+    let aux_names: Vec<&str> = if aux.is_empty() { vec![] } else { vec!["tested"] };
+    let block = obs_block(
+        "survey",
+        Projection::CumulativeFlow("infection".into()),
+        Likelihood::Binomial(ir::observation::BinomialLikelihood {
+            n,
+            p: ir::Diffable::new(konst(0.5)),
+        }),
+        &aux_names,
+    );
+    BoundObs::bind(0.0, vec![StreamSpec {
+        projection: StreamProjection::FlowSum(vec![0]),
+        ir_model: block,
+        observations: dense_cells(vec![observed]),
+        times: StreamTimes::contiguous_for(&StreamProjection::FlowSum(vec![0]), 0.0, vec![5.0]).unwrap(),
+        aux: vec![aux],
+    }])
+    .err()
+    .map(|report| report.render())
+}
+
+/// `n` written as a literal, or as arithmetic on a data column and literals,
+/// is the same for every particle and every parameter vector, so a count above
+/// it is a data error found at bind, with the row, the time and both values.
+/// Before this only a bare `n = tested` was checked; `n = 50` with a count of
+/// 90 bound, and every particle then scored `-inf`.
+#[test]
+fn a_count_above_a_static_trial_count_is_refused_at_bind_with_row_time_and_values() {
+    // Controls: the same shapes with the count at or below `n` bind.
+    assert_eq!(bind_binomial_with(konst(50.0), vec![], 50.0), None);
+    let tested2 = bin(BinOp::Mul, Expr::obs_column_ref("tested"), konst(2.0));
+    assert_eq!(bind_binomial_with(tested2.clone(), vec![("tested".into(), 40.0)], 80.0), None);
+
+    let msg = bind_binomial_with(konst(50.0), vec![], 90.0).expect("literal n must be checked");
+    assert!(msg.contains("row 0 (t = 5)") && msg.contains("90") && msg.contains("n = 50"),
+        "must locate the row and give both values: {msg}");
+
+    let msg = bind_binomial_with(tested2, vec![("tested".into(), 40.0)], 81.0)
+        .expect("an expression of a data column must be checked");
+    assert!(msg.contains("exceeds trial count n = 80") && msg.contains("81"), "{msg}");
+}
+
+/// The likelihood scores `round(n)` trials, so a static `n` that is not a whole
+/// number would silently be a different integer than the one written; a
+/// negative static `n` would be read as zero trials. Both are refused.
+#[test]
+fn a_fractional_or_negative_static_trial_count_is_refused_at_bind() {
+    let half = bin(BinOp::Div, Expr::obs_column_ref("tested"), konst(2.0));
+    let msg = bind_binomial_with(half, vec![("tested".into(), 91.0)], 3.0)
+        .expect("a fractional n must be refused");
+    assert!(msg.contains("n = 45.5 is not an integer"), "{msg}");
+
+    let msg = bind_binomial_with(konst(-3.0), vec![], 0.0).expect("a negative n must be refused");
+    assert!(msg.contains("n = -3 must be >= 0"), "{msg}");
+}
+
+/// An `n` that reads state is not decidable at bind: a count above it is a
+/// property of the trajectory, and the run-time guard names it
+/// (`CountExceedsTrials`, tested above), so bind must not refuse it.
+#[test]
+fn a_state_dependent_trial_count_is_not_judged_at_bind() {
+    let n = Expr::pop_sum(vec!["S".into(), "I".into(), "R".into()]);
+    assert_eq!(bind_binomial_with(n, vec![], 1.0e6), None);
+}
+
 // ── 3. dead particles are not an observation refusal ───────────────────────
 
 /// A mixture of dead and `-inf`-scoring particles reports the two separately.
