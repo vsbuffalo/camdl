@@ -2878,6 +2878,20 @@ impl FitConfig {
             }
         }
 
+        // A sampler keeps every `thin`-th post-burn-in draw. `thin = 0` has no
+        // such reading: PGAS divides by it in its startup banner, after the
+        // leaf is claimed, and PMMH/MH keep a single draw per chain.
+        if let Algorithm::PGAS { thin: Some(0), .. }
+            | Algorithm::PMMH { thin: Some(0), .. }
+            | Algorithm::Mh { thin: Some(0), .. } = algorithm
+        {
+            return Err(
+                "[method]: thin must be ≥ 1 (got 0). `thin = k` keeps every k-th \
+                 post-burn-in draw; `thin = 1` keeps them all."
+                    .to_string(),
+            );
+        }
+
         // gh#347: a sampler retains only its post-burn-in draws. A
         // burn_in ≥ the run length discards EVERY sample, so the fit produces
         // no posterior no matter how well the chain mixes — and the reported
@@ -7400,6 +7414,41 @@ burn_in = 3000
             .expect_err("burn_in ≥ iterations must be rejected: no retained samples");
         assert!(err.contains("burn_in"), "error must name burn_in: {err}");
         assert!(err.contains("iterations"), "error must name iterations: {err}");
+    }
+
+    // `thin = 0` keeps no well-defined set of draws: PGAS divided by it in its
+    // startup banner (a panic after the leaf was claimed) and PMMH/MH kept one
+    // draw per chain. It is refused at validation for all three.
+    #[test]
+    fn thin_zero_is_rejected() {
+        for (algorithm, len_field) in [("mh", "iterations"), ("pmmh", "iterations"), ("pgas", "sweeps")] {
+            let backend = if algorithm == "mh" {
+                "backend = \"ode\"\n"
+            } else {
+                "backend = \"chain_binomial\"\nparticles = 100\n"
+            };
+            let src = format!(r#"[model]
+camdl = "models/sir.camdl"
+[data.observations]
+cases = "data/cases.tsv"
+[estimate]
+beta = {{ bounds = [0.01, 2.0] }}
+[fixed]
+N0 = 1000
+I0 = 5
+gamma = 0.1
+[method]
+algorithm = "{algorithm}"
+{backend}chains = 2
+{len_field} = 8000
+burn_in = 1000
+thin = 0
+"#);
+            let config = parse(&src).unwrap_or_else(|e| panic!("{algorithm}: {e}"));
+            let err = config.validate(&ic_free_model_params(), InitLaw::Absent)
+                .expect_err("thin = 0 must be rejected");
+            assert!(err.contains("thin must be ≥ 1"), "{algorithm}: error must name thin: {err}");
+        }
     }
 
     /// The exact gh#347 repro config: `iterations` below the *default* burn_in
