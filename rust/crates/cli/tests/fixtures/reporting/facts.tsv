@@ -361,7 +361,6 @@ predict	stdout	line	wrote	/predictive/cases.tsv
 predict	stdout	line	wrote	/observed/cases.tsv
 predict	stdout	line	wrote	/report.json
 predict.refused	stderr	line	error:	no completed fit run labelled @nope under results/fits
-simulate	stderr	line	compiling	sir.camdl...
 simulate	stderr	line	simulate · chain_binomial:	running …
 simulate	stderr	line	stored	./results/sims/sir-
 simulate	stderr	line	camdl cat	camdl cat
