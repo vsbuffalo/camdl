@@ -821,9 +821,11 @@ probability : ∈ [0, 1], dimensionless. Default transform: logit. The [0, 1] is
               is searched over [0, 1] by inference, and a supplied value outside
               [0, 1] is rejected. It is the only kind whose type pins a finite
               interval — see §4.4.
-positive    : > 0, dimensionless. Default transform: as `rate` — θ = eᶻ on
-              [0, ∞), θ = lo + eᶻ on [lo, ∞), log-interval on [lo, hi] with
-              lo > 0, interval on [0, hi].
+positive    : > 0. The kind fixes no dimension: it is inferred from the
+              parameter's uses unless a `dim` clause states it (§4.1.1).
+              Default transform: as `rate` — θ = eᶻ on [0, ∞), θ = lo + eᶻ on
+              [lo, ∞), log-interval on [lo, hi] with lo > 0, interval on
+              [0, hi].
 count       : dimension P (a population count). Integrality is not enforced —
               `let iota : count = 1e-6` compiles; the type carries the [P]
               dimension, not an integer constraint.
