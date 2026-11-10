@@ -1,12 +1,17 @@
 //! gh#1009 — when `camdl compare` cannot derive a prequential because the
 //! `camdl pfilter` it runs failed for a reason unrelated to the posterior draw
-//! it was scoring (here, the fit's data file is gone), the error says so. It
+//! it was scoring (here, the fit's data file cannot be read), the error says so. It
 //! must not lead with the diagnosis that belongs to a draw the filter rejected
 //! ("the posterior holds θ the filter cannot track"), which sends the reader
 //! to drop chains from a good fit.
 //!
 //! The rejected-draw diagnosis itself stays, for the case it describes:
 //! `compare_auto_prequential.rs` pins it on a deliberately stuck chain.
+//!
+//! The file is made unreadable rather than removed: a data file that is not
+//! there at all is refused before any filter runs, when the fit's config is
+//! recovered (`gh1009_stored_paths_resolve_from_any_directory.rs`), so only a
+//! file that exists but cannot be read still reaches `camdl pfilter`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -121,8 +126,10 @@ fn a_missing_data_file_is_reported_as_itself_not_as_an_unscorable_draw() {
         );
     }
 
-    // The fits are sound; only their data has gone.
-    std::fs::remove_file(tmp.join("data/weekly_cases.tsv")).unwrap();
+    // The fits are sound; only their data cannot be read.
+    use std::os::unix::fs::PermissionsExt;
+    let data = tmp.join("data/weekly_cases.tsv");
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o000)).unwrap();
 
     let out = run(
         &bin,
@@ -130,9 +137,10 @@ fn a_missing_data_file_is_reported_as_itself_not_as_an_unscorable_draw() {
         &["compare", "@a", "@b", "--draws", "4", "--replicates", "1", "--particles", "100"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(!out.status.success(), "compare cannot score without data:\n{stderr}");
     assert!(
-        stderr.contains("data/weekly_cases.tsv: No such file or directory"),
+        stderr.contains("data/weekly_cases.tsv: Permission denied"),
         "the cause is named:\n{stderr}"
     );
     for blame in ["could not be scored", "the posterior holds θ", "--exclude-chains"] {
