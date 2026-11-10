@@ -863,7 +863,8 @@ The layout the reporting code lands in:
 | `report/render.rs`                          | `render_report`, `View`                                                                    |
 | `report/findings.rs`                        | the diagnostics block                                                                      |
 | `report/export.rs`                          | `fit summary`'s md and LaTeX projections                                                   |
-| `report/exact.rs`                           | the report as JSON with exact non-finite numbers, and `CAMDL_REPORT_CAPTURE`               |
+| `report/exact.rs`                           | the report as JSON with exact non-finite numbers                                           |
+| `out/events.rs`                             | the event schema and the `events.jsonl` writer                                             |
 
 `fit_summary.rs` ends as loading plus choosing a view, with no rendering of its
 own. `DiagnosticKind`, `merge_key`, `render_entry` and `fmt_rate` stay in `sim`.
@@ -1154,3 +1155,68 @@ Step 9's command half, as landed:
   log, the lineage verbs, list, show, cat, fit diff, fit table, and one refusal
   each) and runs every command with its own `CAMDL_IR_CACHE_DIR`, so whether a
   run prints `compiling` or `cached IR` no longer depends on `~/.cache`.
+
+Step 10's event sink, as landed:
+
+- **`events.jsonl` is in the leaf, the seed directory.** "The method directory"
+  in "Live consumers" is the leaf `progress.json` and `diagnostics.json` sit in;
+  a directory above it is shared by every seed. The schema (`out::events`,
+  `camdl.events/v1`) and the file's rules are `docs/camdl-run-spec.md` §10.11.
+- **The log is outside the leaf's exact set**, not only out of its identity. The
+  end-of-run report is built after `finalize`, from the committed record, so its
+  line is appended after the commit; a manifested log would make every completed
+  leaf `Corrupt` and the next identical run a recompute. The store passes over
+  the file by name (`runid::EVENT_LOG`) in the manifest and the orphan scan, and
+  a stale-lock reclaim clears it with a dead run's other files. Nothing
+  classifies it either: `fit_output_schema` reads only the files it names, so
+  the list of known non-tabular outputs the proposal mentions does not exist and
+  was not needed.
+- **A `begin` event opens the log**, beside the four the proposal lists. It
+  carries the method and the `RunHeader`, which no file in the leaf holds until
+  the commit writes `run.json`'s inputs, so a reader that attaches while the
+  method runs knows what it is watching.
+- **Findings are recorded at the collector**, not in `Out::finding`. Most
+  findings are pushed straight into the running collector from the chain workers
+  and the runners (IF2's runner holds the collector, not `Out`), so
+  `begin_method` builds it with an observer
+  (`DiagnosticCollector::with_observer`), called in push order under the
+  collector's lock: the log's findings are `diagnostics.json`'s, in its order.
+- **Progress is recorded by the chain's progress task**, which already owns the
+  count and the throttle: `Task::recording(out.events(), chain)` writes a
+  `progress` event at the plain line's 30-second cadence and at the chain's last
+  step, whatever `--progress` says. The task's metric became a value
+  (`progress::Metric`) rendered where it is shown, so the event carries the
+  log-likelihood with its class; `mh` reports `ode_marginal` and IF2 `if2`,
+  which the bar renders as `ll=` as before. There is still no `Out::progress`
+  (step 7's note).
+- **Write failures.** The log keeps its first failure and writes nothing after
+  it. `fit run` checks it before calling the method done, and abandons the
+  method if it failed (exit 1, the leaf not committed); it checks again when it
+  closes the log after the `stored` line (exit 1, the leaf committed, since the
+  report is written after the commit). On a run already failing, the run's error
+  stays first and `and its events were not recorded: …` is appended, as for
+  `diagnostics.json`. Lines are written whole and not synced.
+- **A cache hit writes nothing**: no method runs, and the stored leaf keeps the
+  log of the run that computed it, which the facts fixture checks byte for byte.
+- **The run-equals-loader test reads the run's report from the log's
+  `method_report` line**, and `CAMDL_REPORT_CAPTURE` is gone. The loader's
+  report comes from `fit summary --format exact-json`, a hidden format: the
+  `json` document with non-finite numbers spelled as the log spells them.
+  `--format json` writes NaN, ±∞ and a missing value all as `null`, so comparing
+  the log's report with it would let a run's `None` equal a loader's NaN, which
+  the exact capture did not.
+- **Findings this step surfaced, not fixed here.** A resumed chain's progress
+  bar and plain line count from 1 (`chain 0 1/2500` after
+  `resuming from step 2000`), and the `progress` event carries the same count.
+  The run-equals-loader comparison parses both sides with `serde_json`, whose
+  default float parser is not exact (step 9's note). Read with an exact parser
+  (Python's `json`), the loader's report differs from the run's in the last
+  digit on four fixtures (IF2's `max_chain_agreement` 1.1711500840266063 against
+  …065; PMMH's `final_scale` 1.0490102849883987 against …989, three resumed-run
+  acceptance rates, and the stuck run's γ R̂ 2.1570056096991594 against …159),
+  since the loader reads them back from files `serde_json` parsed; the test,
+  which parses both with `serde_json`, is green. Its equality is exact up to
+  that parser, which enabling `float_roundtrip` would make it.
+- **The facts fixture reads events.** `facts.tsv`'s stream column takes
+  `events`, the leaf's `events.jsonl`, for the stuck PMMH run and the failed
+  fit, and a `stuck.cached` run records the cache hit.
