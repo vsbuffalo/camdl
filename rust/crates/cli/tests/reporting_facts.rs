@@ -141,6 +141,10 @@ fn every_recorded_fact_is_shown() {
         let out = Command::new(&camdl)
             .env_remove("CLICOLOR_FORCE")
             .env("CAMDL_REPORT_CAPTURE", capture)
+            // The compiled-IR cache is the work directory's own, so whether a
+            // run prints `compiling` or `cached IR` depends on the runs before
+            // it here, not on what other processes left in `~/.cache`.
+            .env("CAMDL_IR_CACHE_DIR", work.join(".ir-cache"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", &camdlc)
             .current_dir(&work)
