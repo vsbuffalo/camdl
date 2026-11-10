@@ -1,12 +1,16 @@
 # Proposal: one reporting path for command output
 
-**Status:** Proposal **Date:** 2026-11-08 **Motivation:** `camdl fit run`
-repeats warnings once per chain, prints per-chain values without saying which
-chain they belong to, writes colour codes into files, prints facts that are
-recorded nowhere, and draws its end-of-run block with code separate from
-`fit summary`'s. The cause is that output is printed wherever a fact is noticed,
-through five mechanisms, instead of being built into a typed report and rendered
-once.
+**Status:** Implemented on `main`: steps 1–8 in PR #1014, step 9's library half
+in #1017 and its command half in #1019, step 10's event sink in #1021. Step 10's
+documentation colour filter (`docs/_web/camdl-run.lua`) lands on the
+`docs/website` branch. Where the implementation differs from the design is under
+[Implementation notes](#implementation-notes). **Date:** 2026-11-08
+**Motivation:** `camdl fit run` repeats warnings once per chain, prints
+per-chain values without saying which chain they belong to, writes colour codes
+into files, prints facts that are recorded nowhere, and draws its end-of-run
+block with code separate from `fit summary`'s. The cause is that output is
+printed wherever a fact is noticed, through five mechanisms, instead of being
+built into a typed report and rendered once.
 
 **Prerequisite:** the stage → method rename (branch `refactor/stage-to-method`):
 the names below (`method_dir`, `run_method`, `PmmhRun`, …) are the renamed ones.
