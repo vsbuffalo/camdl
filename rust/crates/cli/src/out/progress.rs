@@ -290,23 +290,34 @@ impl Task {
     /// hidden target). `None`: nothing shown. A recorded chain's progress
     /// event is written in every mode ([`recording`](Self::recording)).
     pub fn inc(&self, n: u64) {
-        // The position is kept in every mode (the bar is hidden off Pretty),
-        // so a recorded chain's step is right whatever the display shows.
-        self.pb.inc(n);
-        self.record_progress();
         match self.mode {
-            Resolved::Pretty => {}
             Resolved::Plain => {
-                let ready = self.throttle.lock().map(|mut t| t.ready()).unwrap_or(false);
-                if ready {
+                // The increment is taken under the throttle's lock so each
+                // call reads the position its own increment reached: with
+                // several workers ticking one bar, exactly one of them sees
+                // the last count, and the total is printed once however soon
+                // after the previous line it arrives.
+                let line = {
+                    let mut t = self.throttle.lock().unwrap_or_else(|e| e.into_inner());
+                    self.pb.inc(n);
+                    let (pos, len) = (self.pb.position(), self.pb.length().unwrap_or(0));
+                    (pos == len || t.ready()).then_some((pos, len))
+                };
+                self.record_progress();
+                if let Some((pos, len)) = line {
                     let m = self.metric.lock().ok().and_then(|m| *m)
                         .map(|m| m.to_string()).unwrap_or_default();
                     let sep = if m.is_empty() { "" } else { "  " };
                     crate::out::live().progress(&format!("{} {}/{}{}{}", self.label,
-                        self.pb.position(), self.pb.length().unwrap_or(0), sep, m));
+                        pos, len, sep, m));
                 }
             }
-            Resolved::None => {}
+            // The position is kept in every mode (the bar is hidden off Pretty),
+            // so a recorded chain's step is right whatever the display shows.
+            Resolved::Pretty | Resolved::None => {
+                self.pb.inc(n);
+                self.record_progress();
+            }
         }
     }
 
