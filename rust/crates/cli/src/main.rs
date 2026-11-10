@@ -2480,7 +2480,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         let leaf_event_log = sink.cas.completed_runs.last()
             .map(|e| format!("{}/{}/event_log.tsv", cas_root, e.run_path))
             .filter(|p| std::path::Path::new(p).exists());
-        lineage::finish_event_log(a, &event_log, exact, leaf_event_log.as_deref());
+        lineage::finish_event_log(&crate::out::Out::new(false), a, &event_log, exact, leaf_event_log.as_deref());
     }
 
     // ── Reactive-log mirror (gh#204) ─────────────────────────────────────────
