@@ -1049,7 +1049,7 @@ Top-level shape:
 
 ```json
 {
-  "schema": {"version": 3, "camdl_version": "0.1.0+abc1234"},
+  "schema": {"version": 5, "camdl_version": "0.1.0+abc1234"},
   "fit_dir": "fit/he2010",
   "methods": [
     {
@@ -1094,6 +1094,22 @@ Top-level shape:
   "failures": []
 }
 ```
+
+Every number in the document is one of five values:
+
+| written       | means                                 |
+| ------------- | ------------------------------------- |
+| a JSON number | a finite value                        |
+| `"NaN"`       | computed, and not a number            |
+| `"inf"`       | computed, and +∞                      |
+| `"-inf"`      | computed, and −∞                      |
+| `null`        | not computed (the field has no value) |
+
+The three strings are how `events.jsonl` and `diagnostics.json` spell non-finite
+numbers too. JSON has no token for NaN or an infinity (RFC 8259 §6), and writing
+all three as `null` would make "the R̂ was NaN" and "no R̂ was computed" the same
+document, so a consumer reading a numeric field accepts a number, one of the
+three strings, or `null`. Object keys are written in alphabetical order.
 
 Schema-stability rules:
 
