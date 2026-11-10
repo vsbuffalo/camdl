@@ -970,7 +970,7 @@ verdict, then four sections —
 
   posterior      the estimates, worst R̂ first
   convergence    both R̂ halves, the classic statistic, per-chain ESS
-  chains         per-chain log-likelihood, outlier score, saved latent paths
+  chains         per-chain log-likelihood against the others, saved latent paths
   latent paths   whether the sampled paths themselves mixed (PGAS only)
 
 Nothing is hidden behind a verbosity flag: every section carries its full

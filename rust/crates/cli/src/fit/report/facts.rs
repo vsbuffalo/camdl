@@ -501,9 +501,11 @@ pub struct ChainDetail {
     /// Per-chain mean log-likelihood and the trace column it was read from.
     /// `None` when no per-chain trace is readable at all.
     pub logliks: Option<crate::fit::chain_diagnostics::ChainLoglikMeans>,
-    /// Robust modified z per chain. Empty when no cross-chain comparison was
-    /// possible — fewer than two chains with traces, or no scored column.
-    pub scores: Vec<crate::fit::chain_diagnostics::ChainZScore>,
+    /// Each chain's comparison of its mean log-likelihood with the other
+    /// chains' ([`crate::fit::chain_diagnostics::assess_chain_logliks`]).
+    /// Empty when no cross-chain comparison was possible — fewer than two
+    /// chains with traces, or no scored column.
+    pub scores: Vec<crate::fit::chain_diagnostics::ChainLoglikScore>,
     /// Per-chain saved / forkable latent-path counts. `None` for a method that
     /// saved none, and for one whose `trajectories` block predates the chain
     /// ids that key the rows (gh#727 follow-up: a row's position is not an
@@ -583,12 +585,9 @@ impl ChainDetail {
         forkable: Option<Forkable>,
     ) -> Self {
         use crate::fit::chain_diagnostics as cd;
-        let logliks = cd::read_chain_mean_logliks(method_dir, ll_kind);
-        let scores = match &logliks {
-            Some(m) if !m.scored_column_absent && m.scored.len() >= 2 => {
-                cd::chain_loglik_mod_zscores(&m.scored_by_chain())
-            }
-            _ => Vec::new(),
+        let (logliks, scores) = match cd::read_chain_loglik_scores(method_dir, ll_kind) {
+            Some((means, scores)) => (Some(means), scores),
+            None => (None, Vec::new()),
         };
         let mut detail = Self {
             logliks,

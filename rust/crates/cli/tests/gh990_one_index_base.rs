@@ -311,10 +311,10 @@ fn a_pgas_leaf_numbers_its_chains_from_zero_on_every_surface() {
     let best = stderr_chain(&stderr, "best complete-data ll:");
     assert!(leaf.join(format!("chain_{best}")).is_dir(), "chain_{best}/ exists");
 
-    // The per-chain table's header carries `mod-z` whatever the sampler's
+    // The per-chain table's header carries `Δ others` whatever the sampler's
     // loglik class (`obs ll` for PGAS, `mean loglik` for the marginal samplers).
     let text = String::from_utf8(camdl(dir, &["fit", "summary", &seg_s]).stdout).unwrap();
-    assert_eq!(table_chain_ids(&text, "mod-z"), zero_one(),
+    assert_eq!(table_chain_ids(&text, "Δ others"), zero_one(),
         "the per-chain table names chains 0 and 1:\n{text}");
 
     // `--exclude-chains 1` drops the second chain: the one whose draws carry

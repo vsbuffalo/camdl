@@ -481,7 +481,7 @@ camdl fit summary <fit-dir> --parameters   # + the model's parameter legend
 section's terms — R̂ and its bulk/folded halves, the per-chain log-likelihood
 columns, what a forkable draw is, what a frozen latent cell is. Each term is
 defined once, under the section it is read in. **Use it when you are unsure what
-a column means rather than guessing from the name**; several of these (`mod-z`,
+a column means rather than guessing from the name**; several of these (`Z`,
 `frozen-disagree`, `chains frozen`) mean something narrower than they sound. It
 interleaves prose with the tables, so under `--explain` the text output is no
 longer cleanly machine-readable — use `--format json` for that.
