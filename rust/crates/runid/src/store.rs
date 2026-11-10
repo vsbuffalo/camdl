@@ -121,6 +121,11 @@ pub enum StaleReason {
 pub enum CasError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// A filesystem operation failed, with what was being done and to which
+    /// path: an `io error: No such file or directory` alone does not say
+    /// which of a claim's dozen steps failed.
+    #[error("cannot {op} {path}: {source}")]
+    IoAt { op: &'static str, path: String, source: std::io::Error },
     #[error("checksum mismatch for {file}")]
     ChecksumMismatch { file: String },
     #[error("orphan files in leaf at {path}")]
@@ -179,6 +184,17 @@ pub enum CasError {
          records included, moves to the store's .quarantine/ and the run starts clean"
     )]
     OwnedOnOtherHost { path: String, pid: u32, host: String },
+}
+
+/// Attach the operation and the path to an IO error ([`CasError::IoAt`]).
+trait At<T> {
+    fn at(self, op: &'static str, path: impl AsRef<Path>) -> Result<T, CasError>;
+}
+
+impl<T> At<T> for std::io::Result<T> {
+    fn at(self, op: &'static str, path: impl AsRef<Path>) -> Result<T, CasError> {
+        self.map_err(|source| CasError::IoAt { op, path: path.as_ref().display().to_string(), source })
+    }
 }
 
 /// A bundle of named output files (e.g. `{traj.tsv, event_log.tsv}`).
@@ -425,15 +441,15 @@ impl FsCasStore {
 
         let fp = path.join(name);
         if let Some(parent) = fp.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).at("create directory", parent)?;
         }
         write_file_synced(&fp, bytes)?;
-        let meta = fs::metadata(&fp)?;
+        let meta = fs::metadata(&fp).at("stat", &fp)?;
         record.artifacts.insert(
             name.to_string(),
             FileChecksum {
                 bytes: bytes.len() as u64,
-                mtime: fmt_mtime(meta.modified()?),
+                mtime: fmt_mtime(meta.modified().at("read mtime of", &fp)?),
                 digest,
             },
         );
@@ -454,7 +470,7 @@ impl FsCasStore {
         digest: &ContentHash,
     ) -> Result<PathBuf, CasError> {
         let q = self.quarantine_root();
-        fs::create_dir_all(&q)?;
+        fs::create_dir_all(&q).at("create directory", &q)?;
         let leaf_name = leaf
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -489,24 +505,24 @@ impl FsCasStore {
         // process that reused our pid+nonce — never a live concurrent attempt —
         // so clearing it is safe.
         if staging.exists() {
-            fs::remove_dir_all(&staging)?;
+            fs::remove_dir_all(&staging).at("remove directory", &staging)?;
         }
-        fs::create_dir_all(&staging)?;
+        fs::create_dir_all(&staging).at("create directory", &staging)?;
 
         // Write artifacts + build the exact-set manifest, fsync each file.
         let mut manifest = BTreeMap::new();
         for (name, bytes) in &artifacts.files {
             let fp = staging.join(name);
             if let Some(parent) = fp.parent() {
-                fs::create_dir_all(parent)?;
+                fs::create_dir_all(parent).at("create directory", parent)?;
             }
             write_file_synced(&fp, bytes)?;
-            let meta = fs::metadata(&fp)?;
+            let meta = fs::metadata(&fp).at("stat", &fp)?;
             manifest.insert(
                 name.clone(),
                 FileChecksum {
                     bytes: bytes.len() as u64,
-                    mtime: fmt_mtime(meta.modified()?),
+                    mtime: fmt_mtime(meta.modified().at("read mtime of", &fp)?),
                     digest: ContentHash::digest_bytes(bytes),
                 },
             );
@@ -584,7 +600,7 @@ impl FsCasStore {
                     // tolerate it already being gone.
                     if let Err(e) = fs::remove_dir_all(&dest) {
                         if e.kind() != ErrorKind::NotFound {
-                            return Err(e.into());
+                            return Err(e).at("remove stale leaf", &dest);
                         }
                     }
                     if self.try_rename(staging, &dest)? {
@@ -608,7 +624,7 @@ impl FsCasStore {
     /// `dest` first (caller re-resolves), or an error for any other failure.
     fn try_rename(&self, staging: &Path, dest: &Path) -> Result<bool, CasError> {
         if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).at("create directory", parent)?;
         }
         match fs::rename(staging, dest) {
             Ok(()) => {
@@ -624,7 +640,7 @@ impl FsCasStore {
                 if dest.exists() {
                     Ok(false)
                 } else {
-                    Err(e.into())
+                    Err(e).at("move staged leaf into place", dest)
                 }
             }
         }
@@ -645,7 +661,7 @@ impl FsCasStore {
             }
             ClaimOutcome::Fresh(d) | ClaimOutcome::Reclaim(d) => d,
         };
-        fs::create_dir_all(&dir)?;
+        fs::create_dir_all(&dir).at("create directory", &dir)?;
 
         // The O_EXCL `.lock` is the authoritative race guard: whoever creates
         // it holds the leaf. If it already exists, `reclaim_or_refuse` decides
@@ -701,7 +717,10 @@ impl FsCasStore {
         path: &Path,
         expected: &LeafIdentity,
     ) -> Result<ClaimOutcome, CasError> {
-        for cand in disambiguation_candidates(path, &expected.run_id) {
+        'cands: for cand in disambiguation_candidates(path, &expected.run_id) {
+            // Re-entered (`continue 'cand`) when the candidate changed under
+            // `quarantine_debris`: a record appeared, so it is looked at again.
+            'cand: loop {
             if !cand.exists() {
                 return Ok(ClaimOutcome::Fresh(cand));
             }
@@ -724,31 +743,31 @@ impl FsCasStore {
                     if same_identity_on_disk(&cand, &expected.run_id) {
                         return Ok(ClaimOutcome::Reclaim(cand));
                     }
-                    // Never quarantine a leaf a live process is holding: route
-                    // it to the `.lock` gate (`reclaim_or_refuse`) instead.
-                    if held_by_live_lock(&cand) {
-                        return Ok(ClaimOutcome::Fresh(cand));
+                    // Identity unknown: debris, quarantined only if it is
+                    // still debris under its lock (`quarantine_debris`).
+                    if self.quarantine_debris(&cand)? {
+                        continue 'cand;
                     }
-                    self.quarantine(&cand)?;
                     return Ok(ClaimOutcome::Fresh(cand));
                 }
                 // A different full identity shares this short-hash segment:
                 // advance to the disambiguated candidate, never touch it.
-                Lookup::Collision(_) => continue,
-                // Dir exists with no run.json: an orphaned partial → quarantine.
-                // But a live `.lock` holder transiently shows no run.json while
-                // it runs `clear_except_lock` then rewrites it; quarantining
-                // there would rip the dir out from under the active holder and
-                // race its writes to a `NotFound`. A live lock ⇒ not orphan
-                // debris: route to the `.lock` gate, which refuses with
-                // `FitInProgress` (live) or reclaims (dead) — never quarantines.
+                Lookup::Collision(_) => continue 'cands,
+                // Dir exists with no run.json: an orphaned partial, or a claim
+                // in progress — a claimant's dir between `create_dir_all` and
+                // its first `run.json`, or one clearing it under its `.lock`.
+                // Deciding that from outside the lock raced: a claimant that
+                // saw the dir before its owner's `.lock` existed quarantined
+                // it from under the owner, whose next write failed `NotFound`
+                // (two `pfilter` runs of one identity in one results
+                // directory). `quarantine_debris` decides under the lock.
                 Lookup::Miss => {
-                    if held_by_live_lock(&cand) {
-                        return Ok(ClaimOutcome::Fresh(cand));
+                    if self.quarantine_debris(&cand)? {
+                        continue 'cand;
                     }
-                    self.quarantine(&cand)?;
                     return Ok(ClaimOutcome::Fresh(cand));
                 }
+            }
             }
         }
         // The full-64 candidate is unique, so the loop always terminates with
@@ -756,11 +775,46 @@ impl FsCasStore {
         unreachable!("disambiguation escalates to the unique full-64 segment")
     }
 
+    /// Under the leaf's `.lock`, quarantine `cand` if it is debris: a dir
+    /// with entries beside our lock and no readable record. Returns `true`
+    /// when a record appeared meanwhile, so the caller looks again; `false`
+    /// when the leaf can be claimed as fresh — quarantined, empty, or held by
+    /// another claimant, which the claim's own lock gate then refuses.
+    ///
+    /// Taking the lock first is what makes the decision safe. Without it, a
+    /// claimant whose `.lock` did not exist yet, or one that had just
+    /// finished, lost its directory to a concurrent quarantine.
+    fn quarantine_debris(&self, cand: &Path) -> Result<bool, CasError> {
+        let lock = match LeafLock::acquire(cand, LockWait::Refuse) {
+            Ok(l) => l,
+            // Held (live, unverifiable or another host's), or gone: the
+            // claim's own lock gate decides and reports.
+            Err(_) => return Ok(false),
+        };
+        match read_record(cand) {
+            ReadResult::Absent => {}
+            ReadResult::Unparseable => {}
+            ReadResult::Ok(_) | ReadResult::Unreadable(_) => return Ok(true),
+        }
+        let debris = fs::read_dir(cand)
+            .at("list", cand)?
+            .flatten()
+            .any(|e| e.file_name() != ".lock");
+        if debris {
+            self.quarantine(cand)?;
+            // Our `.lock` moved into the quarantine with the dir. Its guard
+            // must not remove `cand/.lock` on drop: by then that path may be
+            // a new claimant's lock.
+            std::mem::forget(lock);
+        }
+        Ok(false)
+    }
+
     /// Move an unclaimable leaf aside for manual repair rather than clearing
     /// it (its identity is unknown or it is an orphaned partial).
     fn quarantine(&self, cand: &Path) -> Result<(), CasError> {
         let q = self.quarantine_root();
-        fs::create_dir_all(&q)?;
+        fs::create_dir_all(&q).at("create directory", &q)?;
         let name = cand.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "leaf".into());
         let mut dest = q.join(&name);
         let mut n = 0;
@@ -768,7 +822,7 @@ impl FsCasStore {
             n += 1;
             dest = q.join(format!("{name}.{n}"));
         }
-        fs::rename(cand, &dest)?;
+        fs::rename(cand, &dest).at("move into the quarantine", cand)?;
         Ok(())
     }
 }
@@ -909,7 +963,7 @@ impl StreamClaim {
     pub fn write(&self, name: &str, bytes: &[u8]) -> Result<(), CasError> {
         let fp = self.dir.join(name);
         if let Some(parent) = fp.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).at("create directory", parent)?;
         }
         write_file_synced(&fp, bytes)?;
         Ok(())
@@ -1118,9 +1172,9 @@ fn preserve_prior_attempt(dir: &Path) -> Result<(), CasError> {
     let mut kept = preserved_attempts(&attempts);
     let next = kept.last().map_or(1, |n| n + 1);
     let dest = attempts.join(next.to_string());
-    fs::create_dir_all(&dest)?;
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    fs::create_dir_all(&dest).at("create directory", &dest)?;
+    for entry in fs::read_dir(dir).at("list", dir)? {
+        let entry = entry.at("list", dir)?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if name_str != "run.json" && (is_reserved(&name_str) || name == ATTEMPTS_DIR) {
@@ -1129,21 +1183,21 @@ fn preserve_prior_attempt(dir: &Path) -> Result<(), CasError> {
         let ft = match entry.file_type() {
             Ok(ft) => ft,
             Err(e) if e.kind() == ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e).at("stat", entry.path()),
         };
         if ft.is_file() {
             // The attempt's record is kept as `attempt.json`, so no walk of
             // the store mistakes a preserved attempt for a second leaf of
             // this identity.
             let kept_as = if name_str == "run.json" { ATTEMPT_RECORD.into() } else { name.clone() };
-            fs::rename(entry.path(), dest.join(kept_as))?;
+            fs::rename(entry.path(), dest.join(kept_as)).at("move into the preserved attempts", entry.path())?;
         }
     }
     fsync_dir(&dest)?;
     kept.push(next);
     while kept.len() > MAX_PRESERVED_ATTEMPTS {
         let oldest = kept.remove(0);
-        fs::remove_dir_all(attempts.join(oldest.to_string()))?;
+        fs::remove_dir_all(attempts.join(oldest.to_string())).at("remove the oldest attempt", attempts.join(oldest.to_string()))?;
     }
     fsync_dir(&attempts)?;
     fsync_dir(dir)
@@ -1342,8 +1396,8 @@ fn collect_own_files(
     children: &BTreeMap<String, Vec<ContentHash>>,
     out: &mut BTreeMap<String, FileChecksum>,
 ) -> Result<(), CasError> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    for entry in fs::read_dir(dir).at("list", dir)? {
+        let entry = entry.at("list", dir)?;
         let name = entry.file_name().to_string_lossy().into_owned();
         // Skip the reserved lock siblings BEFORE stat'ing them. A concurrent
         // claimant churns `.reclaim`/`.lock.new` in this same leaf; if such a
@@ -1352,19 +1406,19 @@ fn collect_own_files(
         if dir == root && is_unmanifested(&name) {
             continue;
         }
-        let meta = entry.metadata()?;
+        let meta = entry.metadata().at("stat", entry.path())?;
         if meta.is_dir() {
             if dir == root && children.contains_key(&name) {
                 continue; // declared child boundary — its own leaf's bytes
             }
             collect_own_files(root, &entry.path(), children, out)?;
         } else {
-            let bytes = fs::read(entry.path())?;
+            let bytes = fs::read(entry.path()).at("read", entry.path())?;
             out.insert(
                 rel_key(root, &entry.path()),
                 FileChecksum {
                     bytes: meta.len(),
-                    mtime: fmt_mtime(meta.modified()?),
+                    mtime: fmt_mtime(meta.modified().at("read mtime of", entry.path())?),
                     digest: ContentHash::digest_bytes(&bytes),
                 },
             );
@@ -1566,8 +1620,8 @@ impl LeafLock {
                     // Hold the guard before anything fallible, so a failed
                     // pid write still releases the lock we created.
                     let lock = LeafLock { path };
-                    write!(f, "{}", lock_contents())?;
-                    f.sync_all()?;
+                    write!(f, "{}", lock_contents()).at("write lock", &lock.path)?;
+                    f.sync_all().at("sync lock", &lock.path)?;
                     return Ok(lock);
                 }
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {
@@ -1581,7 +1635,7 @@ impl LeafLock {
                         Err(e) => return Err(e),
                     }
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e).at("create lock", &path),
             }
         }
     }
@@ -1591,18 +1645,6 @@ impl Drop for LeafLock {
     fn drop(&mut self) {
         fs::remove_file(&self.path).ok();
     }
-}
-
-/// Whether `dir` is currently held by a live `.lock` holder — i.e. some
-/// process is actively claiming/reclaiming this leaf right now. Used to keep
-/// `resolve_claim_dir` from quarantining a leaf out from under its legitimate
-/// holder: while the holder runs `clear_except_lock` it transiently removes
-/// `run.json`, and a concurrent claimant that read the leaf in that window
-/// would otherwise see `Lookup::Miss` and `rename` the whole (actively
-/// written) dir away — racing the holder's own writes to a `NotFound` error.
-/// A live `.lock` means "not orphan debris, route to the lock gate instead".
-fn held_by_live_lock(dir: &Path) -> bool {
-    lock_owner(dir).holds()
 }
 
 /// A `.lock` already exists at claim time. Reclaim it iff its holder PID is
@@ -1666,10 +1708,10 @@ fn reclaim_or_refuse(dir: &Path, lock: &Path) -> Result<(), CasError> {
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                     return Err(fail(holder.unwrap_or(0)));
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e).at("create reclaim lock", &reclaim),
             }
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(e).at("create reclaim lock", &reclaim),
     }
     // Re-confirm the holder is STILL the dead PID we saw, now that we hold
     // `.reclaim`. Between the dead-check above and acquiring `.reclaim`, a
@@ -1704,11 +1746,12 @@ fn reclaim_or_refuse(dir: &Path, lock: &Path) -> Result<(), CasError> {
             .write(true)
             .create(true)
             .truncate(true)
-            .open(&lock_new)?;
-        write!(f, "{}", lock_contents())?;
-        f.sync_all()?;
+            .open(&lock_new)
+            .at("create lock", &lock_new)?;
+        write!(f, "{}", lock_contents()).at("write lock", &lock_new)?;
+        f.sync_all().at("sync lock", &lock_new)?;
         drop(f);
-        fs::rename(&lock_new, lock)?;
+        fs::rename(&lock_new, lock).at("take over lock", lock)?;
         Ok(())
     })();
     if outcome.is_err() {
@@ -1719,8 +1762,8 @@ fn reclaim_or_refuse(dir: &Path, lock: &Path) -> Result<(), CasError> {
 }
 
 fn clear_except_lock(dir: &Path) -> Result<(), CasError> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    for entry in fs::read_dir(dir).at("list", dir)? {
+        let entry = entry.at("list", dir)?;
         let name = entry.file_name();
         // Never touch the lock serializers: a concurrent claimant legitimately
         // churns `.reclaim`/`.lock.new` in this leaf, and `.lock` is ours.
@@ -1736,7 +1779,7 @@ fn clear_except_lock(dir: &Path) -> Result<(), CasError> {
         let ft = match entry.file_type() {
             Ok(ft) => ft,
             Err(e) if e.kind() == ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e).at("stat", entry.path()),
         };
         let r = if ft.is_dir() {
             fs::remove_dir_all(&p)
@@ -1745,7 +1788,7 @@ fn clear_except_lock(dir: &Path) -> Result<(), CasError> {
         };
         if let Err(e) = r {
             if e.kind() != ErrorKind::NotFound {
-                return Err(e.into());
+                return Err(e).at("clear", &p);
             }
         }
     }
@@ -1762,14 +1805,14 @@ fn fmt_mtime(t: SystemTime) -> String {
 fn fsync_dir(path: &Path) -> Result<(), CasError> {
     // On Unix a directory can be opened read-only and `sync_all`'d to make
     // its entries durable.
-    File::open(path)?.sync_all()?;
+    File::open(path).and_then(|f| f.sync_all()).at("sync directory", path)?;
     Ok(())
 }
 
 fn write_file_synced(path: &Path, bytes: &[u8]) -> Result<(), CasError> {
-    let mut f = File::create(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
+    let mut f = File::create(path).at("create", path)?;
+    f.write_all(bytes).at("write", path)?;
+    f.sync_all().at("sync", path)?;
     Ok(())
 }
 
@@ -1786,7 +1829,7 @@ fn write_record_atomic(dir: &Path, record: &RunRecord) -> Result<(), CasError> {
     let json = serde_json::to_vec_pretty(record).map_err(std::io::Error::other)?;
     let tmp = dir.join("run.json.tmp");
     write_file_synced(&tmp, &json)?;
-    fs::rename(&tmp, dir.join("run.json"))?;
+    fs::rename(&tmp, dir.join("run.json")).at("commit record", dir.join("run.json"))?;
     Ok(())
 }
 
