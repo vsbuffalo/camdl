@@ -551,7 +551,6 @@ pub fn run_method(
     let can_redraw = super::chain_starts::can_redraw(&starts.rule, n_chains);
 
     let t0 = std::time::Instant::now();
-    let _is_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
 
     // gh#audit-C7. Per-chain NUTS diagnostics surfaced from PGASResult.
     // Indexed by chain_id, populated inside the parallel closure via Mutex
