@@ -569,10 +569,10 @@ mod tests {
         // larger, with the path that beta actually produces.
         let (_, split) = matrix_for(&[(0, 0.300, 21), (1, 0.303, 22), (2, 1.200, 23)]);
 
-        eprintln!("near-identical: dominance {:.1} nats, asymmetry {:.1} nats",
-            near.diagonal_dominance, near.asymmetry);
-        eprintln!("one displaced:  dominance {:.1} nats, asymmetry {:.1} nats",
-            split.diagonal_dominance, split.asymmetry);
+        crate::out::detached().say(format_args!("near-identical: dominance {:.1} nats, asymmetry {:.1} nats",
+            near.diagonal_dominance, near.asymmetry));
+        crate::out::detached().say(format_args!("one displaced:  dominance {:.1} nats, asymmetry {:.1} nats",
+            split.diagonal_dominance, split.asymmetry));
 
         for c in [&near, &split] {
             assert_eq!(c.chains, ChainIndex::all(3).collect::<Vec<_>>(),

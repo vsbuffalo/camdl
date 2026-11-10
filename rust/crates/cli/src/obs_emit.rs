@@ -1318,7 +1318,7 @@ mod tests {
             ));
             gaps.push(gap);
         }
-        eprintln!("window fraction vs instant ratio, weekly windows on the ODE backend:{table}");
+        crate::out::detached().say(format_args!("window fraction vs instant ratio, weekly windows on the ODE backend:{table}"));
 
         // The divergence. Every week's instant ratio sits below the window
         // fraction, and at the worst week by more than a tenth: a modeller

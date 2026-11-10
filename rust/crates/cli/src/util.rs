@@ -5339,14 +5339,14 @@ mod tests {
         let cold = t0.elapsed();
 
         match &result {
-            Ok(out) => eprintln!(
+            Ok(out) => crate::out::detached().say(format_args!(
                 "camdlc --camdl-version (cold):  {:>6.1?}  status={}  hash={:?}",
                 cold, out.status,
                 String::from_utf8_lossy(&out.stdout).trim()
-            ),
-            Err(e) => eprintln!(
+            )),
+            Err(e) => crate::out::detached().say(format_args!(
                 "camdlc --camdl-version (cold):  {:>6.1?}  error: {}", cold, e
-            ),
+            )),
         }
 
         // Warm OnceLock: initialise the lock, then measure a subsequent call
@@ -5355,18 +5355,18 @@ mod tests {
         let t1 = std::time::Instant::now();
         flag.get_or_init(|| ());
         let warm = t1.elapsed();
-        eprintln!("OnceLock short-circuit (warm): {:>6.1?}", warm);
+        crate::out::detached().say(format_args!("OnceLock short-circuit (warm): {:>6.1?}", warm));
 
         // Verdict
-        eprintln!();
+        crate::out::detached().say("");
         if cold.as_millis() < 20 {
-            eprintln!("verdict: subprocess is fast (<20ms) — OnceLock path is fine");
+            crate::out::detached().say("verdict: subprocess is fast (<20ms) — OnceLock path is fine");
         } else {
-            eprintln!(
+            crate::out::detached().say(format_args!(
                 "verdict: subprocess is slow ({}ms) — prefer `make install` so \
                  `camdlc-<hash>` is present next to camdl for zero-overhead path",
                 cold.as_millis()
-            );
+            ));
         }
     }
 
