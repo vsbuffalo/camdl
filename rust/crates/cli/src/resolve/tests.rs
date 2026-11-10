@@ -775,12 +775,19 @@ fn cas_identity_pins() {
         // derive hashes each type's fully-qualified name as its domain tag, so
         // the same field bytes take a new tag. Only fits hash the first three
         // and only profiles hash the fourth; the other four kinds stay.
-        ("sim", "0cb90e9d50e5d13bdcdb36e828c0320af7ca10621f52ea29da79b7e448c06f27"),
-        ("fit", "b1071aaa6daf3c80dec2c186428724a91ae88833acbad8899d27d1d1e128d6a1"),
-        ("pfilter", "102b4f4ef0dd5597fa47d76e00f08e4d39c44543cc624f5aea1795973269fb49"),
-        ("survey", "4eb4ef1dd2afee1d9caf470af7bc7007865a6e01e8e83ce69f59d0431897bf28"),
-        ("sim_ensemble", "cd676c8d39d167318e7985e9e65eafd9a463aee8449218e4e60e568913f1a4bb"),
-        ("profile", "a0d8a04942256abbc702c36bd6b0a224e37bafb1e1eb7bdeb9909eeb77d0da38"),
+        //
+        // HASH_VERSION 1 -> 2 (gh#1018) then moved EVERY kind: the version is
+        // folded into every root hash and every `run_id`, so no kind can stay.
+        // It declares two changes to what feeds identity — IR floats parsed
+        // exactly, and a `from_mle` source keyed on its `start_values` — and
+        // neither changes the bytes this fixture hashes (`tiny_model()` is
+        // built in code, not parsed, and no fit here starts from_mle).
+        ("sim", "620b719c7c64cdeb20d6d43b6d1e28939aaa884eedce027303c163717950cfe7"),
+        ("fit", "1cdc1bf4e816f6d366b2506625c7770f35d0172080211894f3dca5a140db2868"),
+        ("pfilter", "ba2021fb7775e581c57694621ee990e47c49b1d8580e68751c699eaffad3a1e8"),
+        ("survey", "77fd279f2e78936b0db1d981eb6c2e612f6caafa16e5c041e3d104299338d371"),
+        ("sim_ensemble", "f28885bb455c4c99385ddcaed14230ec41d477696cc997d764bf1d11c24edef6"),
+        ("profile", "c9060dfb10853e3df3d93b89fba7d38c7c6611c2daeed3bca37b2ff84ef8b16e"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.
