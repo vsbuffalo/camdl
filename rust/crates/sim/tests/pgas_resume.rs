@@ -1,6 +1,6 @@
 //! Tests for PGAS chain resume: bincode serialization, config hash.
 
-use sim::inference::pgas::{ChainResumeState, PGASTrajectory, SubstepRecord};
+use sim::inference::pgas::{ChainResumeState, NutsCounts, PGASTrajectory, SubstepRecord};
 use sim::inference::nuts::MassMatrix;
 
 /// T1: Bincode round-trip — serialize and deserialize a ChainResumeState
@@ -44,6 +44,10 @@ fn test_resume_state_bincode_roundtrip() {
         nuts_step_size: 0.0234,
         log_proposal_sd: vec![-5.0, -6.0, -3.0],
         total_accepted: vec![2200, 1800, 2500],
+        nuts_counts: NutsCounts {
+            n_divergent: 7, n_divergent_post_burn: 2,
+            n_max_treedepth: 40, n_max_treedepth_post_burn: 11,
+        },
     };
 
     // Serialize
@@ -66,6 +70,7 @@ fn test_resume_state_bincode_roundtrip() {
     assert!((decoded.nuts_step_size - 0.0234).abs() < 1e-10);
     assert_eq!(decoded.log_proposal_sd, vec![-5.0, -6.0, -3.0]);
     assert_eq!(decoded.total_accepted, vec![2200, 1800, 2500]);
+    assert_eq!(decoded.nuts_counts, state.nuts_counts);
 
     // Verify mass matrix round-trips (dense)
     match &decoded.mass_matrix {
@@ -88,6 +93,7 @@ fn test_resume_state_diagonal_mass_roundtrip() {
         nuts_step_size: 0.1,
         log_proposal_sd: vec![-3.0],
         total_accepted: vec![50],
+        nuts_counts: NutsCounts::default(),
     };
 
     let encoded = bincode::serialize(&state).unwrap();
@@ -162,6 +168,7 @@ fn test_resume_hash_mismatch_detection() {
         nuts_step_size: 0.1,
         log_proposal_sd: vec![-3.0],
         total_accepted: vec![500],
+        nuts_counts: NutsCounts::default(),
     };
 
     let current_hash = "different_hash_xyz789";
@@ -201,6 +208,7 @@ fn test_resume_state_large_trajectory() {
         nuts_step_size: 0.015,
         log_proposal_sd: vec![-4.0; 4],
         total_accepted: vec![4500; 4],
+        nuts_counts: NutsCounts::default(),
     };
 
     let encoded = bincode::serialize(&state).unwrap();
@@ -251,6 +259,7 @@ fn test_resume_trace_file_safety() {
         nuts_step_size: 0.1,
         log_proposal_sd: vec![-3.0],
         total_accepted: vec![50],
+        nuts_counts: NutsCounts::default(),
     };
     let encoded = bincode::serialize(&state).unwrap();
     std::fs::write(&resume_path, &encoded).unwrap();
@@ -307,6 +316,7 @@ fn test_resume_param_names_roundtrip() {
         nuts_step_size: 0.1,
         log_proposal_sd: vec![-3.0; 3],
         total_accepted: vec![50; 3],
+        nuts_counts: NutsCounts::default(),
     };
 
     let encoded = bincode::serialize(&state).unwrap();
@@ -333,6 +343,7 @@ fn test_resume_reorder_z_by_name() {
         nuts_step_size: 0.1,
         log_proposal_sd: vec![-3.0; 3],
         total_accepted: vec![50; 3],
+        nuts_counts: NutsCounts::default(),
     };
 
     // Build name→z lookup (same logic as run_pgas resume path)
@@ -367,6 +378,7 @@ fn test_resume_param_names_mismatch_detected() {
         nuts_step_size: 0.1,
         log_proposal_sd: vec![-3.0; 3],
         total_accepted: vec![50; 3],
+        nuts_counts: NutsCounts::default(),
     };
 
     // Build name→z lookup
