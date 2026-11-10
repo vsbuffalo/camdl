@@ -159,9 +159,10 @@ pub enum ScoutGateVerdict {
 /// and only `Named` can name a chain.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SpreadChains {
-    /// `(chain, clean-eval loglik)`, the chain carried from
-    /// `FitState::chain_eval_ids`.
-    Named(Vec<(ChainIndex, f64)>),
+    /// `(chain, clean-eval loglik, its standard error)`, the chain carried
+    /// from `FitState::chain_eval_ids` and the standard error of the
+    /// replicate mean from `FitState::chain_eval_ses`.
+    Named(Vec<(ChainIndex, f64, f64)>),
     /// The logliks only: `fit_state.toml` has no `chain_eval_ids`, or a count
     /// that disagrees with the logliks', so no loglik can be attributed.
     Unnamed(Vec<f64>),
@@ -433,9 +434,13 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
                 delta_db: leg.delta_db,
                 threshold_db: leg.threshold_db,
                 sigma_max: leg.sigma_max,
+                // The leg only runs with one standard error per loglik.
                 chain_logliks: if scout.chain_eval_ids.len() == scout.chain_eval_logliks.len() {
                     SpreadChains::Named(scout.chain_eval_ids.iter().copied()
-                        .zip(scout.chain_eval_logliks.iter().copied()).collect())
+                        .zip(scout.chain_eval_logliks.iter().copied())
+                        .zip(scout.chain_eval_ses.iter().copied())
+                        .map(|((c, ll), se)| (c, ll, se))
+                        .collect())
                 } else {
                     SpreadChains::Unnamed(scout.chain_eval_logliks.clone())
                 },
@@ -505,31 +510,61 @@ pub fn format_decibans_spread_verdict(
             return msg;
         }
     };
-    let lo = chain_logliks.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
-    let mut sorted: Vec<(ChainIndex, f64)> = chain_logliks.to_vec();
+    let lo = chain_logliks.iter().map(|(_, v, _)| *v).fold(f64::INFINITY, f64::min);
+    let mut sorted: Vec<(ChainIndex, f64, f64)> = chain_logliks.to_vec();
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    for (chain, ll) in &sorted {
-        msg.push_str(&format!("    chain {:<2}  ℓ = {:>9.2}  ({:+.2} dB from worst)\n",
-            chain, ll, (ll - lo) * NATS_TO_DB));
+    for (chain, ll, se) in &sorted {
+        msg.push_str(&format!("    chain {:<2}  ℓ = {:>9.2} ± {:.2}  ({:+.2} dB from worst)\n",
+            chain, ll, se, (ll - lo) * NATS_TO_DB));
     }
 
-    // Name the chains DRIVING the spread, so the fix points at a chain index —
-    // not just "the spread is wide". Same robust seam the `fit summary` per-chain
-    // table uses (a modified z-score on per-chain clean loglik, centred on the
-    // median and scaled by the MAD), so co-stuck chains are all flagged rather
-    // than masking each other. The worst-chain fallback is belt-and-suspenders
-    // for a smooth spread with no single robust outlier.
-    let scores = super::chain_diagnostics::chain_loglik_mod_zscores(chain_logliks);
-    let flagged = super::chain_diagnostics::outlier_labels(&scores);
-    if !flagged.is_empty() {
-        msg.push_str(&format!(
-            "\n  Outlier chains (|modified z| > {:.1} on per-chain clean loglik): {}\n",
-            super::chain_diagnostics::CHAIN_LOGLIK_OUTLIER_MODZ, flagged.join(", ")));
-    } else if let Some((worst, _)) = chain_logliks.iter()
+    // Name the chains driving the spread, so the fix points at a chain index —
+    // not just "the spread is wide". The same comparison the `fit summary`
+    // per-chain table makes: each start's clean loglik against the pooled
+    // mean of the others, over the evaluation noise of both (the standard
+    // error of the clean-eval replicate mean). IF2 is an optimiser, so a
+    // start that differs beyond that noise reached a different optimum. The
+    // worst-chain fallback names the low end of a spread no single start
+    // explains.
+    use super::chain_diagnostics as cd;
+    let estimates: Vec<cd::ChainLoglikEstimate> = chain_logliks.iter()
+        .map(|&(chain, mean, se)| cd::ChainLoglikEstimate { chain, mean, weight: 1.0, se: Ok(se) })
+        .collect();
+    let scores = cd::assess_chain_logliks(&estimates);
+    let flagged = cd::flagged_chains(&scores);
+    let not_assessed: Vec<String> = scores.iter()
+        .filter_map(|s| match &s.outcome {
+            cd::ChainLoglikOutcome::NotAssessed(why) => Some(format!("chain {}, {}", s.chain, why.describe())),
+            cd::ChainLoglikOutcome::Assessed(_) => None,
+        })
+        .collect();
+    // An optimiser's starts are not symmetric: one above the others reached a
+    // better optimum, one below a worse one. Both are named, apart.
+    let side = |below: bool| -> Vec<String> {
+        flagged.iter()
+            .filter(|s| s.test().is_some_and(|t| (t.diff < 0.0) == below))
+            .map(|s| format!("chain {}", s.chain))
+            .collect()
+    };
+    if let Some(cutoff) = flagged.first().and_then(|s| s.test()).map(|t| t.cutoff) {
+        msg.push('\n');
+        for (below, word) in [(false, "above"), (true, "below")] {
+            let chains = side(below);
+            if !chains.is_empty() {
+                msg.push_str(&format!(
+                    "  Clean loglik {word} the other chains' beyond its evaluation noise \
+                     (Z > {cutoff:.2}): {}\n",
+                    chains.join(", ")));
+            }
+        }
+    } else if let Some((worst, _, _)) = chain_logliks.iter()
         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
     {
         msg.push_str(&format!(
             "\n  Chain driving the spread (lowest clean loglik): chain {worst}\n"));
+    }
+    for line in &not_assessed {
+        msg.push_str(&format!("  Not compared: {line}.\n"));
     }
 
     msg.push_str(PICK_ONE);
@@ -1141,12 +1176,14 @@ decibans_failed = true
         }
     }
 
-    /// gh#406: the DecibansSpread message must NAME the outlier chain, not just
-    /// report the aggregate spread. A single clear low outlier among six chains
-    /// clears the modified-z threshold, so the "Outlier chains" line names it.
-    /// `(chain, loglik)` pairs for contiguous chains counted from 0.
+    /// `(chain, loglik, se)` triples for contiguous chains counted from 0,
+    /// every clean-eval loglik known to standard error 0.5.
     fn indexed(logliks: &[f64]) -> SpreadChains {
-        SpreadChains::Named(logliks.iter().enumerate().map(|(i, &v)| (ChainIndex(i), v)).collect())
+        indexed_se(logliks, 0.5)
+    }
+
+    fn indexed_se(logliks: &[f64], se: f64) -> SpreadChains {
+        SpreadChains::Named(logliks.iter().enumerate().map(|(i, &v)| (ChainIndex(i), v, se)).collect())
     }
 
     /// The refusals a user reads name no stage of the retired staged
@@ -1167,31 +1204,33 @@ decibans_failed = true
         }
     }
 
+    /// gh#406: the DecibansSpread message names the chain that differs, not
+    /// just the aggregate spread. A start 240 nats below five that agree
+    /// within their evaluation noise is named.
     #[test]
     fn decibans_message_names_a_clear_outlier_chain() {
-        // Five chains near -60, chain 5 stuck at -300.
-        let chain_logliks = indexed(&[-60.0, -61.0, -59.0, -60.5, -60.2, -300.0]);
+        // Five chains near -60, chain 5 stuck at -300; six chains → z* = 3.76.
+        let chain_logliks = indexed(&[-60.0, -60.4, -59.6, -60.5, -60.2, -300.0]);
         let msg = format_decibans_spread_verdict(240.0, 30.0, 0.5, &chain_logliks);
         assert!(
-            msg.contains("Outlier chains"),
-            "message must flag the outlier chain, not just the spread:\n{msg}"
+            msg.contains("Clean loglik below the other chains' beyond its evaluation noise \
+                          (Z > 3.76): chain 5\n"),
+            "message must name chain 5, and only it:\n{msg}"
         );
-        assert!(
-            msg.contains("Outlier chains (|modified z| > 3.5 on per-chain clean loglik): chain 5"),
-            "message must name chain 5 as the outlier:\n{msg}"
-        );
+        assert!(!msg.contains("Clean loglik above"), "{msg}");
+        assert!(msg.contains("chain 5   ℓ =   -300.00 ± 0.50"), "the noise is printed:\n{msg}");
     }
 
-    /// gh#406 (robust upgrade): two co-stuck chains among six are BOTH named now
-    /// — the classic mean/SD z masked them, the robust median/MAD modified z does
-    /// not. Good chains carry realistic jitter (real chain means never coincide).
+    /// gh#406: two co-stuck chains among six are both named, and the four
+    /// that agree are not.
     #[test]
     fn decibans_message_names_both_co_stuck_chains() {
         // Four good (jittered) near -60, two stuck near -400 (chains 4 and 5).
-        let chain_logliks = indexed(&[-60.0, -61.0, -59.0, -60.5, -400.0, -401.0]);
+        let chain_logliks = indexed(&[-60.0, -60.4, -59.6, -60.5, -400.0, -401.0]);
         let msg = format_decibans_spread_verdict(340.0, 30.0, 0.5, &chain_logliks);
-        assert!(msg.contains("Outlier chains"), "both co-stuck chains must be flagged:\n{msg}");
-        let outliers = msg.lines().find(|l| l.contains("Outlier chains")).unwrap();
+        let outliers = msg.lines().find(|l| l.contains("beyond its evaluation noise"))
+            .unwrap_or_else(|| panic!("both co-stuck chains must be flagged:\n{msg}"));
+        assert!(!outliers.contains("chain 0") && !outliers.contains("chain 3"), "{msg}");
         assert!(outliers.contains("chain 4"), "must name chain 4:\n{msg}");
         assert!(outliers.contains("chain 5"), "must name chain 5:\n{msg}");
         assert!(
@@ -1200,25 +1239,28 @@ decibans_failed = true
         );
     }
 
-    /// gh#406: the belt-and-suspenders fallback. A smooth spread (a gradient of
-    /// chains, no single robust outlier) still triggers the gate, so the message
-    /// names the single worst chain driving the low end — always actionable.
+    /// gh#406: the fallback. A spread that no single start explains beyond
+    /// its evaluation noise (here each clean loglik is uncertain to 15 nats)
+    /// still triggers the gate, so the message names the single worst chain
+    /// driving the low end — always actionable.
     #[test]
     fn decibans_message_fallback_names_worst_on_smooth_spread() {
-        let chain_logliks = indexed(&[-60.0, -70.0, -80.0, -90.0, -100.0, -110.0]);
+        let chain_logliks = indexed_se(&[-60.0, -70.0, -80.0, -90.0, -100.0, -110.0], 15.0);
         let SpreadChains::Named(named) = &chain_logliks else { unreachable!() };
-        let scores = super::super::chain_diagnostics::chain_loglik_mod_zscores(named);
+        use super::super::chain_diagnostics as cd;
+        let scores = cd::assess_chain_logliks(&named.iter()
+            .map(|&(chain, mean, se)| cd::ChainLoglikEstimate { chain, mean, weight: 1.0, se: Ok(se) })
+            .collect::<Vec<_>>());
         assert!(
-            scores.iter().all(|s| !s.is_outlier),
-            "precondition: a smooth gradient has no single robust outlier: {:?}",
-            scores.iter().map(|s| s.mod_z).collect::<Vec<_>>()
+            scores.iter().all(|s| s.test().is_some_and(|t| !t.flagged)),
+            "precondition: no start differs beyond its noise: {scores:?}"
         );
-        let msg = format_decibans_spread_verdict(150.0, 30.0, 0.5, &chain_logliks);
+        let msg = format_decibans_spread_verdict(150.0, 30.0, 15.0, &chain_logliks);
         assert!(
             msg.contains("Chain driving the spread (lowest clean loglik): chain 5"),
             "fallback must name the worst chain (-110 → chain 5):\n{msg}"
         );
-        assert!(!msg.contains("Outlier chains"), "no robust outlier line on a smooth spread:\n{msg}");
+        assert!(!msg.contains("beyond its evaluation noise"), "no flagged-chain line on a smooth spread:\n{msg}");
     }
 
     /// gh#978: the refusal names chains by their id, not by their position in
@@ -1240,9 +1282,12 @@ decibans_failed = true
             other => panic!("expected DecibansSpread, got {other:?}"),
         };
         assert!(
-            msg.contains("lowest clean loglik): chain 2"),
+            msg.contains("Clean loglik below the other chains' beyond its evaluation noise \
+                          (Z > 3.48): chain 2\n"),
             "the low chain is chain 2 (its directory is chain_2/), not row 1:\n{msg}"
         );
+        assert!(msg.contains("Clean loglik above the other chains' beyond its evaluation noise \
+                              (Z > 3.48): chain 0\n"), "{msg}");
         assert!(
             !msg.contains("chain 1"),
             "chain 1 never reached the eval and must not be named:\n{msg}"

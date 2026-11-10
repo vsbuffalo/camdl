@@ -135,9 +135,10 @@ fn apply_selection_to_typed(
 }
 
 /// Print the read-side chain-selection advisory to STDERR (so it never pollutes
-/// the stdout summary): the identifiability nudge FIRST (when the per-chain
-/// outlier signal is strong — gh#406), then the loud, non-quietable exclusion
-/// warning. The flag is the second thing the user reads, not the first.
+/// the stdout summary): first what the per-chain log-likelihood comparison
+/// observed, when it flagged a chain (gh#406), then the loud, non-quietable
+/// exclusion warning. The flag is the second thing the user reads, not the
+/// first.
 fn chain_selection_advisory(
     out: &crate::out::Out,
     method_dir: &Path,
@@ -146,15 +147,13 @@ fn chain_selection_advisory(
     stderr: Painter,
 ) {
     use super::chain_diagnostics as cd;
-    if let Some(means) = cd::read_chain_mean_logliks(method_dir, kind) {
-        let scores = cd::chain_loglik_mod_zscores(&means.scored_by_chain());
-        let outliers = cd::outlier_labels(&scores);
-        if !outliers.is_empty() {
+    if let Some((means, scores)) = cd::read_chain_loglik_scores(method_dir, kind) {
+        for observed in cd::describe_flagged(&scores, means.scored_column) {
             out.say(format_args!(
-                "{n} {} disagree strongly with the others on `{}` — before \
-                 excluding, ask whether a parameter is unidentified (a flat likelihood ridge). \
-                 The per-chain table below names them; the primary fix is the model, not the flag.",
-                outliers.join(", "), means.scored_column, n = stderr.paint("note:", Style::Warn)
+                "{n} {observed}. Before excluding it, ask why: a chain sampling another \
+                 region of the posterior (a side mode, or a ridge along a weakly identified \
+                 parameter) is a fact about the model, and excluding it hides that.",
+                n = stderr.paint("note:", Style::Warn)
             ));
         }
     }
@@ -1186,6 +1185,53 @@ mod tests {
         }
     }
 
+    /// `n` iid normal draws with standard deviation `sd`, shifted so their
+    /// sample mean is exactly `mean`: a trace whose chain comparison has
+    /// `n` effective draws to work with.
+    fn noisy(seed: u64, n: usize, mean: f64, sd: f64) -> Vec<f64> {
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, StandardNormal};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut v: Vec<f64> = (0..n)
+            .map(|_| {
+                let z: f64 = StandardNormal.sample(&mut rng);
+                sd * z
+            })
+            .collect();
+        let shift = mean - v.iter().sum::<f64>() / n as f64;
+        v.iter_mut().for_each(|x| *x += shift);
+        v
+    }
+
+    /// `n` kept rows per chain in `draws.tsv`.
+    fn write_draws(dir: &Path, n_chains: usize, n: usize) {
+        let mut draws = String::from("chain\tdraw\tbeta\n");
+        for c in 0..n_chains {
+            for d in 0..n {
+                draws.push_str(&format!("{c}\t{d}\t0.{c}{d}\n"));
+            }
+        }
+        std::fs::write(dir.join("draws.tsv"), draws).unwrap();
+    }
+
+    /// A PGAS trace: two warm-up sweeps the last-K_c rule must strip, then
+    /// `n` sweeps whose `obs_ll` scatters around `obs` (sd 3) and whose
+    /// transition term is `trans`.
+    fn write_pgas_trace(dir: &Path, chain: usize, trans: f64, obs: f64, n: usize) {
+        let cd = dir.join(format!("chain_{chain}"));
+        std::fs::create_dir_all(&cd).unwrap();
+        let mut body = String::from(
+            "sweep\tlog_complete_data_ll\tlog_posterior\ttransition_ll\tobs_ll\n");
+        for s in 0..2 {
+            body.push_str(&format!("{s}\t-9000\t-9100\t-8000\t-1000\n"));
+        }
+        for (s, o) in noisy(100 + chain as u64, n, obs, 3.0).into_iter().enumerate() {
+            let complete = trans + o;
+            body.push_str(&format!("{}\t{complete}\t{}\t{trans}\t{o}\n", s + 2, complete - 1.0));
+        }
+        std::fs::write(cd.join("trace.tsv"), body).unwrap();
+    }
+
     fn plain_formatter() -> TextView {
         TextView { cal: CalendarContext::default(), explain: false }
     }
@@ -1924,42 +1970,37 @@ mod tests {
     }
 
     /// gh#406: the per-chain loglik table names the stuck chain in a Bayesian
-    /// summary. Six-chain method dir (five near -50, chain 5 stuck at -300) with
-    /// per-chain traces + a draws.tsv manifest → the table flags chain 5 and the
-    /// nudge fires.
+    /// summary. Six-chain method dir (five near -50, chain 5 stuck at -300),
+    /// 40 noisy retained draws per chain behind two warm-up rows, and a
+    /// draws.tsv manifest → the table flags chain 5, and only it, and says
+    /// what was observed.
     #[test]
     fn bayesian_chain_loglik_table_names_the_stuck_chain() {
         let dir = crate::test_support::unique_temp_dir("summary_chain_diag");
         std::fs::create_dir_all(&dir).unwrap();
-        let write_trace = |c: usize, kept: &str| {
+        for (c, mean) in [-50.0, -50.2, -49.9, -50.1, -49.8, -300.0].into_iter().enumerate() {
             let cd = dir.join(format!("chain_{c}"));
             std::fs::create_dir_all(&cd).unwrap();
-            // Two warm-up rows (must be stripped by the last-K_c rule) + 3 kept.
-            let body = format!(
-                "step\tlog_likelihood\tlog_posterior\n1\t-900.0\t-905.0\n2\t-880.0\t-885.0\n{kept}");
-            std::fs::write(cd.join("trace.tsv"), body).unwrap();
-        };
-        // Good chains carry realistic jitter (distinct means ≈ -50) so the robust
-        // MAD is non-zero; chain 5 is the lone stuck chain at ≈ -300.
-        write_trace(0, "3\t-50.0\t-52.0\n4\t-50.0\t-52.0\n5\t-50.0\t-52.0\n"); // mean -50.0
-        write_trace(1, "3\t-50.5\t-52.0\n4\t-50.5\t-52.0\n5\t-50.5\t-52.0\n"); // mean -50.5
-        write_trace(2, "3\t-49.5\t-51.0\n4\t-49.5\t-51.0\n5\t-49.5\t-51.0\n"); // mean -49.5
-        write_trace(3, "3\t-50.2\t-52.0\n4\t-50.2\t-52.0\n5\t-50.2\t-52.0\n"); // mean -50.2
-        write_trace(4, "3\t-49.8\t-51.0\n4\t-49.8\t-51.0\n5\t-49.8\t-51.0\n"); // mean -49.8
-        write_trace(5, "3\t-300.0\t-302.0\n4\t-301.0\t-303.0\n5\t-299.0\t-301.0\n"); // stuck -300
-        let mut draws = String::from("chain\tdraw\tbeta\n");
-        for c in 0..6 {
-            for d in 0..3 {
-                draws.push_str(&format!("{c}\t{d}\t0.5\n"));
+            // Two warm-up rows (must be stripped by the last-K_c rule) + 40 kept.
+            let mut body = String::from(
+                "step\tlog_likelihood\tlog_posterior\n1\t-900.0\t-905.0\n2\t-880.0\t-885.0\n");
+            for (k, ll) in noisy(c as u64, 40, mean, 1.0).into_iter().enumerate() {
+                body.push_str(&format!("{}\t{ll}\t{}\n", k + 3, ll - 2.0));
             }
+            std::fs::write(cd.join("trace.tsv"), body).unwrap();
         }
-        std::fs::write(dir.join("draws.tsv"), draws).unwrap();
+        write_draws(&dir, 6, 40);
 
         let fmt = plain_formatter();
         let table = chain_table(&fmt, &dir, 6, LoglikType::Marginal);
         assert!(table.contains("── chains "), "the section rule is present:\n{table}");
-        assert!(table.contains("← outlier"), "stuck chain must be flagged:\n{table}");
-        assert!(table.contains("chains disagree (chain 5"), "nudge must name chain 5:\n{table}");
+        let flagged: Vec<&str> = table.lines().filter(|l| l.contains("← differs"))
+            .map(|l| l.split_whitespace().next().unwrap_or("")).collect();
+        assert_eq!(flagged, vec!["5"], "the stuck chain, and only it:\n{table}");
+        assert!(table.contains("chain 5's mean log_likelihood differs from the other chains' by"),
+            "the note says what was observed:\n{table}");
+        assert!(!table.contains("weakly identified?") && table.contains("can indicate"),
+            "and does not assert a cause:\n{table}");
         // The stuck chain's mean must reflect the post-burn-in draws (≈ -300),
         // not the stripped warm-up (≈ -900).
         assert!(table.contains("-300.00"), "chain 5 mean ≈ -300 (warm-up stripped):\n{table}");
@@ -1988,26 +2029,9 @@ mod tests {
             (-3000.0, -1400.0),
         ];
         for (i, (trans, obs)) in chains.iter().enumerate() {
-            let cd = dir.join(format!("chain_{i}"));
-            std::fs::create_dir_all(&cd).unwrap();
-            let complete = trans + obs;
-            let mut body = String::from(
-                "sweep\tlog_complete_data_ll\tlog_posterior\ttransition_ll\tobs_ll\n");
-            for s in 0..2 {
-                body.push_str(&format!("{s}\t-9000\t-9100\t-8000\t-1000\n"));
-            }
-            for s in 2..5 {
-                body.push_str(&format!("{s}\t{complete}\t{}\t{trans}\t{obs}\n", complete - 1.0));
-            }
-            std::fs::write(cd.join("trace.tsv"), body).unwrap();
+            write_pgas_trace(&dir, i, *trans, *obs, 40);
         }
-        let mut draws = String::from("chain\tdraw\tbeta\n");
-        for c in 0..6 {
-            for d in 0..3 {
-                draws.push_str(&format!("{c}\t{d}\t0.{c}{d}\n"));
-            }
-        }
-        std::fs::write(dir.join("draws.tsv"), draws).unwrap();
+        write_draws(&dir, 6, 40);
 
         let fmt = plain_formatter();
         let table = chain_table(&fmt, &dir, 6, LoglikType::CompleteData);
@@ -2015,13 +2039,13 @@ mod tests {
         // The flag lands on the chain that reproduces the data worst…
         let flagged: Vec<&str> = table
             .lines()
-            .filter(|l| l.contains("← outlier"))
+            .filter(|l| l.contains("← differs"))
             .map(|l| l.split_whitespace().next().unwrap_or(""))
             .collect();
         assert_eq!(flagged, vec!["5"],
-            "only chain 5 (the bad DATA fit) may be flagged:\n{table}");
-        assert!(table.contains("chains disagree (chain 5"),
-            "the nudge must name chain 5:\n{table}");
+            "only chain 5 (the bad data fit) may be flagged:\n{table}");
+        assert!(table.contains("chain 5's mean obs_ll differs"),
+            "the note must name chain 5:\n{table}");
 
         // …and the ranked column is obs_ll, not the complete-data target.
         assert!(table.contains("-1400.00"),
@@ -2074,7 +2098,7 @@ mod tests {
         let table = chain_table(&fmt, &dir, 3, LoglikType::CompleteData);
         assert!(table.contains("no `obs_ll` column"),
             "the missing comparison column is named, not silently substituted:\n{table}");
-        assert!(!table.contains("← outlier"),
+        assert!(!table.contains("← differs"),
             "nothing may be ranked without the comparison column:\n{table}");
         assert!(table.contains("DEGENERATE") && table.contains("chain 2"),
             "the -inf screen still names chain 2:\n{table}");
@@ -2565,41 +2589,27 @@ mod tests {
         // (transition_ll, obs_ll); chain 2 fits the data far worse.
         let chains = [(-2832.6, -952.0), (-2933.0, -952.8), (-3000.0, -1400.0)];
         for (i, (trans, obs)) in chains.iter().enumerate() {
-            let cd = dir.join(format!("chain_{i}"));
-            std::fs::create_dir_all(&cd).unwrap();
-            let complete = trans + obs;
-            let mut body = String::from(
-                "sweep\tlog_complete_data_ll\tlog_posterior\ttransition_ll\tobs_ll\n");
-            for s in 0..2 {
-                body.push_str(&format!("{s}\t-9000\t-9100\t-8000\t-1000\n"));
-            }
-            for s in 2..5 {
-                body.push_str(&format!("{s}\t{complete}\t{}\t{trans}\t{obs}\n", complete - 1.0));
-            }
-            std::fs::write(cd.join("trace.tsv"), body).unwrap();
+            write_pgas_trace(&dir, i, *trans, *obs, 40);
         }
-        let mut draws = String::from("chain\tdraw\tbeta\n");
-        for c in 0..3 {
-            for d in 0..3 {
-                draws.push_str(&format!("{c}\t{d}\t0.{c}{d}\n"));
-            }
-        }
-        std::fs::write(dir.join("draws.tsv"), draws).unwrap();
+        write_draws(&dir, 3, 40);
         write_traj_summary(&dir, 40, 1, &[(0, 10, 10), (1, 10, 8), (2, 10, 10)]);
 
         let fmt = plain_formatter();
         let out = chain_table(&fmt, &dir, 3, LoglikType::CompleteData);
         assert_eq!(section_of(&out, SECTION_CHAINS), concat!(
-"  chain         obs ll    mod-z   transition ll    complete ll   paths   forkable   flag\n",
-"      0        -952.00     0.67        -2832.60       -3784.60      10         10   \n",
-"      1        -952.80     0.00        -2933.00       -3885.80      10          8   \n",
-"      2       -1400.00  -377.05        -3000.00       -4400.00      10         10   ← outlier\n",
+"  chain         obs ll  Δ others       Z   transition ll    complete ll   paths   forkable   flag\n",
+"      0        -952.00     +0.80    1.25        -2832.60       -3784.60      10         10   \n",
+"      1        -952.80     -0.80    1.25        -2933.00       -3885.80      10          8   \n",
+"      2       -1400.00   -447.60  945.33        -3000.00       -4400.00      10         10   ← differs\n",
 "  2 of 30 written paths cannot be joined to a posterior draw\n",
 "  a path is written on every 40 retained draw (thin 1), so every one should\n",
 "  be joinable; the shortfall is paths that were written outside this leaf's\n",
 "  retained set or skipped as incoherent records\n",
-"  ⚠ chains disagree (chain 2 — obs_ll far from the rest) — is a parameter\n",
-"  weakly identified? Inspect its per-chain posterior.\n",
+"  ⚠ chain 2's mean obs_ll differs from the other chains' by -447.60 nats (Z\n",
+"  = 945.3 > 3.59), beyond what Monte Carlo error explains.\n",
+"  This can indicate a chain sampling another region of the posterior (a side\n",
+"  mode, or a ridge along a weakly identified parameter) or one that has not\n",
+"  mixed; compare its per-chain posterior with the others'.\n",
         ));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2750,8 +2760,8 @@ mod tests {
     ///
     /// R̂, ESS and the posterior means above them are recomputed over the
     /// retained chains; the per-chain table is read from the traces on disk,
-    /// which the selection does not filter, and the modified z-score is scaled
-    /// by all of them. Listing every chain is deliberate — inspecting the
+    /// which the selection does not filter, and every chain is compared with
+    /// all the others. Listing every chain is deliberate — inspecting the
     /// chain you dropped is usually why you dropped it — but standing
     /// unlabelled beside recomputed numbers it reads as though it shared their
     /// scope. That is the silent-wrong reading this labelling exists to stop.
@@ -2763,8 +2773,8 @@ mod tests {
             let cd = dir.join(format!("chain_{i}"));
             std::fs::create_dir_all(&cd).unwrap();
             let mut body = String::from("sweep\tlog_likelihood\tlog_posterior\n");
-            for sw in 0..5 {
-                body.push_str(&format!("{sw}\t{ll}\t{}\n", ll - 1.0));
+            for (sw, v) in noisy(i as u64, 30, *ll, 1.0).into_iter().enumerate() {
+                body.push_str(&format!("{sw}\t{v}\t{}\n", v - 1.0));
             }
             std::fs::write(cd.join("trace.tsv"), body).unwrap();
         }
@@ -2778,7 +2788,7 @@ mod tests {
 
         assert!(section.contains("including the excluded 2"),
             "the table must say whose rows it is still showing:\n{section}");
-        assert!(section.contains("the outlier score is over all of them"),
+        assert!(section.contains("the chains are compared over all of them"),
             "and that the score was not recomputed over the subset:\n{section}");
         assert!(section.lines().any(|l| l.trim_start().starts_with("2 ")),
             "chain 2 keeps its row — dropping it would hide the evidence for \

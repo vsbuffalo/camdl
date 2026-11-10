@@ -117,7 +117,7 @@ impl LoglikType {
 
     /// The `chain_N/trace.tsv` column whose per-chain mean may be compared
     /// ACROSS chains for a sampler of this class — the input the per-chain
-    /// outlier score is entitled to (gh#667).
+    /// log-likelihood comparison is entitled to (gh#667).
     ///
     /// - The three marginal kinds stream `log p(y | θ)` in
     ///   [`TRACE_COL_LOG_LIKELIHOOD`]. It is a function of θ alone, so two

@@ -79,7 +79,7 @@ pub mod pgas;
 pub mod trace_writer;
 pub mod synthetic;
 pub mod gating;
-pub mod chain_diagnostics;  // gh#406: per-chain loglik outlier z-scores (read-side)
+pub mod chain_diagnostics;  // gh#406, gh#1008: per-chain loglik comparison (read-side)
 pub mod cross_chain_compat; // gh#785: log p(x_j | θ_i) across the path-augmented chains
 pub mod path_renewal;       // gh#791: trajectory renewal resolved in time, and its two scalars
 pub mod latent_convergence; // gh#822: R̂/ESS of every latent state at every substep across chains

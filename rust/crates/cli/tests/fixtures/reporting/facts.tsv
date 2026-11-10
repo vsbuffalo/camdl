@@ -66,7 +66,8 @@ stuck	stderr	line	chain 2: proposal scale at its floor	for 331 of 1000 warm-up s
 stuck	stderr	line	R̂ (rank-normalized split, Vehtari et al. 2021) / ESS	R̂ threshold 1.05
 stuck	stderr	line	✗ NOT converged	the chains are in different places
 stuck	stderr	line	max R̂	3.479 (beta), threshold 1.05
-stuck	stderr	line	parameters above threshold	2 of 2 parameters above threshold · 1 outlier chain · 0/200 forkable
+stuck	stderr	line	parameters above threshold	2 of 2 parameters above threshold
+stuck	stderr	line	chains' log-likelihoods compared	2 of 4 chains' log-likelihoods compared, none differs · 0/200 forkable
 stuck	stderr	line	R̂: below 1.05 counts as converged	above 1.1 draws a finding, a warning up to 1.5
 stuck	stderr	line	beta         Rhat=	3.479 ✗ ESS bulk=5 tail=— (2.7% of 200 draws)
 stuck	stderr	line	gamma        Rhat=	2.157 ✗ ESS bulk=6 tail=5 (3.2% of 200 draws)
@@ -103,20 +104,21 @@ stuck.summary	stdout	line	pmmh · pmmh	4 chains · 200 draws · loglik -44.3 at 
 stuck.summary	stdout	line	seeded from:	from_prior (one independent draw per chain)
 stuck.summary	stdout	line	✗ NOT converged	the chains are in different places
 stuck.summary	stdout	line	max R̂	3.479 (beta), threshold 1.05
-stuck.summary	stdout	line	parameters above threshold	2 of 2 parameters above threshold · 1 outlier chain · 0/200 forkable
+stuck.summary	stdout	line	parameters above threshold	2 of 2 parameters above threshold
+stuck.summary	stdout	line	chains' log-likelihoods compared	2 of 4 chains' log-likelihoods compared, none differs · 0/200 forkable
 stuck.summary	stdout	line	beta                   0.7425	5          —    3.479
 stuck.summary	stdout	line	gamma                  0.1317	6          5    2.157
 stuck.summary	stdout	line	beta              3.479	2.317    16.647   bulk   50 1 1 24
 stuck.summary	stdout	line	gamma             2.157	1.610     2.675   bulk   50 1 1 27
 stuck.summary	stdout	line	acceptance =	0.180 (mean across chains)
 stuck.summary	stdout	line	ESS/iter =	0.00274  (min-param ESS 5 / 2000 raw sampling iters)
-stuck.summary	stdout	line	      0  	-44.66     0.67
-stuck.summary	stdout	line	      1  	-158.12    -0.67
-stuck.summary	stdout	line	      2  	-679.42    -6.85   ← outlier
-stuck.summary	stdout	line	      3  	-44.22     0.68
+stuck.summary	stdout	line	      0  	-44.66     -0.44    1.96
+stuck.summary	stdout	line	      1  	-158.12         —       —   not assessed
+stuck.summary	stdout	line	      2  	-679.42         —       —   not assessed
+stuck.summary	stdout	line	      3  	-44.22     +0.44    1.96
 stuck.summary	stdout	line	⚠ chain 1:	ONE distinct parameter vector across 50 retained draws
 stuck.summary	stdout	line	⚠ chain 2:	ONE distinct parameter vector across 50 retained draws
-stuck.summary	stdout	line	⚠ chains disagree	(chain 2 — log_likelihood far from the rest)
+stuck.summary	stdout	line	chains 1, 2 not compared:	the trace has 1.0 effective draws
 converged	stderr	line	fit:	pmmh_converged.toml (method=pmmh)
 converged	stderr	line	log L̂ mean	-65.6
 converged	stderr	line	log L̂ mean	sd σ = 2.05
@@ -142,14 +144,15 @@ converged	stderr	line	stored pmmh	results/fits/pmmh_converged-
 converged.summary	stdout	line	pmmh · pmmh	4 chains · 400 draws · loglik -44.3
 converged.summary	stdout	line	✓ converged	✓ converged
 converged.summary	stdout	line	max R̂	1.001 (gamma), threshold 1.05
-converged.summary	stdout	line	parameters above threshold	0 of 2 parameters above threshold · no outlier chains · 0/400 forkable
+converged.summary	stdout	line	parameters above threshold	0 of 2 parameters above threshold · chains' log-likelihoods agree
+converged.summary	stdout	line	forkable	0/400 forkable
 converged.summary	stdout	line	gamma                  0.1172	344        337    1.001
 converged.summary	stdout	line	beta                   0.5795	324        342    0.998
 converged.summary	stdout	line	gamma             1.001	1.000     0.997   bulk   69 100 100 85
 converged.summary	stdout	line	beta              0.998	0.997     0.996   bulk   49 87 79 66
 converged.summary	stdout	line	acceptance =	0.322 (mean across chains)
 converged.summary	stdout	line	ESS/iter =	0.0811  (min-param ESS 324 / 4000 raw sampling iters)
-converged.summary	stdout	line	      1  	-44.59     2.95
+converged.summary	stdout	line	      1  	-44.59     +0.22    2.89
 resumed	stderr	line	fit:	pmmh_resumed.toml (method=pmmh)
 resumed	stderr	line	chain 0:	resuming from step 2000
 resumed	stderr	line	chain 3:	resuming from step 2000
@@ -191,7 +194,8 @@ pgas	stderr	line	of 14 observations starved	0 of 14
 pgas	stderr	line	no frozen-disagree cell	the chains' paths mix everywhere
 pgas	stderr	line	draws.tsv:	40 posterior samples (all 4 params)
 pgas	stderr	line	✗ NOT converged	the chains are in different places
-pgas	stderr	line	parameters above threshold	2 of 2 parameters above threshold · no outlier chains · 40/40 forkable
+pgas	stderr	line	parameters above threshold	2 of 2 parameters above threshold · chains' log-likelihoods agree
+pgas	stderr	line	forkable	40/40 forkable
 pgas	stderr	line	rank-normalized split R̂ for 'beta'	1.753 (threshold 1.100)
 pgas	stderr	line	rank-normalized split R̂ for 'gamma'	2.150 (threshold 1.100)
 pgas	stderr	line	error(s)	2 error(s), 0 warning(s), 0 info
@@ -258,29 +262,29 @@ pfilter	stderr	line	stored	results/pfilters/sir-
 stuck.excluded	stdout	line	pmmh · pmmh	3 of 4 chains (excluded 2) · 150 draws
 stuck.excluded	stdout	line	max R̂	1.765 (beta), threshold 1.05
 stuck.excluded	stdout	line	parameters above threshold	2 of 2 parameters above threshold
-stuck.excluded	stdout	line	1 outlier chain	(over every chain, not the retained subset)
+stuck.excluded	stdout	line	none differs	(over every chain, not the retained subset)
 stuck.excluded	stdout	line	0/150 forkable	over the retained chains (chain(s) 2 excluded)
 stuck.excluded	stdout	line	beta                   0.4763	6          4    1.765
 stuck.excluded	stdout	line	beta              1.765	1.751     4.586   bulk   50 1 24
 stuck.excluded	stdout	line	ESS/iter =	0.00383  (min-param ESS 6 / 1500 raw sampling iters)
-stuck.excluded	stdout	block	(every chain is listed, including the excluded 2	the outlier score is over all of them)
-stuck.excluded	stdout	line	      2  	-679.42    -6.85   ← outlier
-stuck.excluded	stderr	line	note: chain 2 disagree strongly with the others	on `log_likelihood`
+stuck.excluded	stdout	block	(every chain is listed, including the excluded 2	the chains are compared over all of them)
+stuck.excluded	stdout	line	      2  	-679.42         —       —   not assessed
 stuck.excluded	stderr	line	warning: --exclude-chains dropped chain(s) 2	(3 of 4 chains kept)
 pgas.summary	stdout	line	results/fits/pgas-	/
 pgas.summary	stdout	line	pgas · pgas	2 chains · 40 draws · 2 chains saved paths
 pgas.summary	stdout	line	seeded from:	from_prior (one independent draw per chain)
 pgas.summary	stdout	line	✗ NOT converged	the chains are in different places
 pgas.summary	stdout	line	max R̂	2.150 (gamma), threshold 1.05
-pgas.summary	stdout	line	parameters above threshold	2 of 2 parameters above threshold · no outlier chains · 40/40 forkable
+pgas.summary	stdout	line	parameters above threshold	2 of 2 parameters above threshold · chains' log-likelihoods agree
+pgas.summary	stdout	line	forkable	40/40 forkable
 pgas.summary	stdout	line	gamma                  0.1079	4         28    2.150
 pgas.summary	stdout	line	beta                   0.5754	5         50    1.753
 pgas.summary	stdout	line	gamma             2.150	4.477   bulk   10 5
 pgas.summary	stdout	line	beta              1.753	1.042     2.394   bulk   17 20
 pgas.summary	stdout	line	ESS/iter =	0.0211  (min-param ESS 4 / 200 raw sampling iters)
-pgas.summary	stdout	line	chain         obs ll    mod-z	transition ll    complete ll   paths   forkable   flag
-pgas.summary	stdout	line	      0         -41.80	-0.67          -82.74        -124.54      20         20
-pgas.summary	stdout	line	      1         -41.27	0.67          -80.20        -121.47      20         20
+pgas.summary	stdout	line	chain         obs ll  Δ others	Z   transition ll    complete ll   paths   forkable   flag
+pgas.summary	stdout	line	      0         -41.80	-0.54    0.78          -82.74        -124.54      20         20
+pgas.summary	stdout	line	      1         -41.27	+0.54    0.78          -80.20        -121.47      20         20
 pgas.summary	stdout	line	filter ESS (gh#685;	over 40 retained post-burn-in sweep(s) across 2 chain(s), 50 particles
 pgas.summary	stdout	line	mean ESS over sweeps, by observation:	min 22.4   10% quantile 27.3   median 39.1
 pgas.summary	stdout	line	observations starved	0 of 14 observations starved (mean ESS below 0, 1% of the particle count)
@@ -296,7 +300,7 @@ pgas.summary	stdout	line	--parameters for priors and provenance	--explain for ho
 pgas.explain	stdout	block	parameters	beta  —  per-capita transmission rate
 pgas.explain	stdout	block	parameters	gamma  —  recovery rate; mean infectious period is 1/gamma
 pgas.explain	stdout	block	R̂ compares within-chain to between-chain variance	`classic` is the unnormalized statistic
-pgas.explain	stdout	block	Ranked on `obs ll` = log p(y | X)	|mod-z| > 3.5 flags
+pgas.explain	stdout	block	Compared on `obs ll` = log p(y | X)	so a fit whose chains agree is flagged
 pgas.explain	stdout	block	`frozen-disagree`: cells where every chain sits constant	so this is the honest denominator
 if2.summary	stdout	line	if2 · if2	4 chains
 if2.summary	stdout	line	seeded from:	from_prior (one independent draw per chain)
