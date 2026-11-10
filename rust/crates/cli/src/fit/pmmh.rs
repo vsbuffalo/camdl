@@ -367,6 +367,11 @@ pub fn run_method(
                                 chain));
                         }
                         eprintln!("  chain {}: resuming from step {}", chain, state.completed_steps);
+                        if let Some(gap) = sim::inference::types::z_restore_gaps(
+                            &state.param_names, &state.transformed, &config.estimated_params)
+                        {
+                            eprintln!("{gap}");
+                        }
                         if state.completed_steps >= n_steps {
                             eprintln!("  warning: chain already completed {} steps (requested {}). \
                                        Increase steps in fit.toml to continue.",
