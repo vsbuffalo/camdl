@@ -28,6 +28,10 @@ pub static OBS_SAMPLE_NAN:    AtomicU64 = AtomicU64::new(0);
 /// the run hard-errors at the `eval_propensities` boundary — but it is counted
 /// here for the same end-of-run summary so a user sees an OOB happened.
 pub static TABLE_OOB:         AtomicU64 = AtomicU64::new(0);
+/// A `balance {}` target the substep left negative (`lifecycle.rs`): the
+/// model is inconsistent at these parameters. The run continues with the
+/// negative count, so the summary is where the user learns it happened.
+pub static BALANCE_NEGATIVE:  AtomicU64 = AtomicU64::new(0);
 
 /// gh#audit-C6 / S1. Process-global opt-in for the legacy silent-zero
 /// behaviour in eval_expr. Default false → numerical-collapse paths
@@ -58,6 +62,7 @@ pub struct EvalStats {
     pub binomial_fallback: u64,
     pub obs_sample_nan:    u64,
     pub table_oob:         u64,
+    pub balance_negative:  u64,
 }
 
 impl EvalStats {
@@ -70,6 +75,7 @@ impl EvalStats {
             binomial_fallback: BINOMIAL_FALLBACK.load(Ordering::Relaxed),
             obs_sample_nan:    OBS_SAMPLE_NAN.load(Ordering::Relaxed),
             table_oob:         TABLE_OOB.load(Ordering::Relaxed),
+            balance_negative:  BALANCE_NEGATIVE.load(Ordering::Relaxed),
         }
     }
 
@@ -82,13 +88,14 @@ impl EvalStats {
             binomial_fallback: self.binomial_fallback.saturating_sub(earlier.binomial_fallback),
             obs_sample_nan:    self.obs_sample_nan.saturating_sub(earlier.obs_sample_nan),
             table_oob:         self.table_oob.saturating_sub(earlier.table_oob),
+            balance_negative:  self.balance_negative.saturating_sub(earlier.balance_negative),
         }
     }
 
     pub fn total(&self) -> u64 {
         self.div_by_zero + self.pow_nan_inf + self.unop_nan
             + self.neg_binomial_pois + self.binomial_fallback
-            + self.obs_sample_nan + self.table_oob
+            + self.obs_sample_nan + self.table_oob + self.balance_negative
     }
 }
 
@@ -106,6 +113,8 @@ pub fn inc_binomial_fallback() { BINOMIAL_FALLBACK.fetch_add(1, Ordering::Relaxe
 pub fn inc_obs_sample_nan()    { OBS_SAMPLE_NAN.fetch_add(1, Ordering::Relaxed); }
 #[inline]
 pub fn inc_table_oob()         { TABLE_OOB.fetch_add(1, Ordering::Relaxed); }
+#[inline]
+pub fn inc_balance_negative()  { BALANCE_NEGATIVE.fetch_add(1, Ordering::Relaxed); }
 
 impl std::fmt::Display for EvalStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -117,6 +126,7 @@ impl std::fmt::Display for EvalStats {
         if self.binomial_fallback > 0 { writeln!(f, "  binomial_fallback: {}", self.binomial_fallback)?; }
         if self.obs_sample_nan    > 0 { writeln!(f, "  obs_sample_nan:    {}", self.obs_sample_nan)?; }
         if self.table_oob         > 0 { writeln!(f, "  table_oob:         {}", self.table_oob)?; }
+        if self.balance_negative  > 0 { writeln!(f, "  balance_negative:  {}", self.balance_negative)?; }
         Ok(())
     }
 }
