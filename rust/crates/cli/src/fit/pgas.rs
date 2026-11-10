@@ -361,8 +361,8 @@ pub fn run_method(
     // Active interventions + events — makes the scenario/enable default
     // visible before sampling, so a forgotten `scenario = "..."` doesn't
     // hide as "0 of N firing" behind a 6-hour chain.
-    crate::util::print_scheduled_actions_summary(&config.model_declared, &config.model);
-    crate::util::print_observations_summary(&config.model);
+    crate::util::print_scheduled_actions_summary(out, &config.model_declared, &config.model);
+    crate::util::print_observations_summary(out, &config.model);
     for c in super::report::obs_stream_checks(&config.model) {
         out.check(c);
     }

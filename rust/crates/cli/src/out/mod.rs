@@ -162,10 +162,11 @@ impl Out {
         collector
     }
 
-    /// Record a check the run has just shown. The check's own printer writes
-    /// its lines today (`pf_noise::report`, `util::print_observations_summary`,
-    /// the caveat banner, the starts note); this keeps the value, so the
-    /// run's report carries what it showed.
+    /// Record a check the run has just shown. The check's own renderer draws
+    /// its lines (`pf_noise::report`, `util::print_observations_summary`, the
+    /// caveat banner, the starts note), from context the `Check` does not
+    /// carry, and the run writes them through this `Out`; this keeps the
+    /// value, so the run's report carries what it showed.
     pub fn check(&mut self, c: crate::fit::report::Check) {
         if let Some(m) = self.method.as_mut() {
             m.checks.push(c);
