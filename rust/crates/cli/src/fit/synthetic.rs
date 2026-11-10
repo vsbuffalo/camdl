@@ -276,7 +276,7 @@ simulate { from = 0 'days  to = 10 'days }
     #[test]
     fn generates_one_dataset_directory_per_sim_seed() {
         let Some(camdlc) = camdlc_path() else {
-            eprintln!("skipping: camdlc.exe not built; run `cd ocaml && dune build` first");
+            crate::out::detached().say("skipping: camdlc.exe not built; run `cd ocaml && dune build` first");
             return;
         };
         let tmp = tempdir("one_per");
