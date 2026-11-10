@@ -50,7 +50,12 @@ use std::path::{Path, PathBuf};
 /// compared successive stages of the removed `[stages]` pipeline; leaves under
 /// one fit directory are now independent runs whose log-likelihoods can be of
 /// different kinds, so the difference compared unlike quantities.
-const SCHEMA_VERSION: u32 = 4;
+///
+/// v5: a number is a JSON number, or the string `"NaN"`, `"inf"` or `"-inf"`;
+/// `null` means "not computed" and nothing else. v4 wrote all three non-finite
+/// values as `null` (`serde_json`'s default), so a consumer could not tell a
+/// NaN R̂ from an infinite one or from one never computed.
+const SCHEMA_VERSION: u32 = 5;
 
 /// Recompute a Bayesian method's diagnostics + posterior means over a
 /// chain-filtered draws cloud, mutating `diag`/`posterior_mean` in place, and
@@ -246,8 +251,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
 
     let failures = match args.format {
         FitSummaryFormat::Text => format_text(&mut out, &dir, args, &selected, strict, selection.as_ref()),
-        FitSummaryFormat::Json => format_json(&mut out, &dir, &selected, strict, selection.as_ref(), false),
-        FitSummaryFormat::ExactJson => format_json(&mut out, &dir, &selected, strict, selection.as_ref(), true),
+        FitSummaryFormat::Json => format_json(&mut out, &dir, &selected, strict, selection.as_ref()),
         FitSummaryFormat::Md => format_md(&mut out, &dir, &selected, strict, selection.as_ref()),
         FitSummaryFormat::Latex => format_latex(&mut out, &dir, &selected, strict, selection.as_ref()),
     };
@@ -598,25 +602,30 @@ pub(crate) fn forkability(
         .map(|j| crate::fit::report::Forkable { n_forkable: j.n_forkable, n_total: j.n_total, selection: j.selection })
 }
 
-/// The JSON document; with `exact`, its non-finite numbers spelled
-/// ([`FitSummaryFormat::ExactJson`]).
+/// The JSON document. Every number is written exactly: a non-finite one is
+/// the string `"NaN"`, `"inf"` or `"-inf"` ([`exact_json`]), so `null` is
+/// left meaning only "not computed". `serde_json` alone writes all three
+/// non-finite values as `null`, which made a NaN R̂, an infinite one and an
+/// absent one the same document.
+///
+/// [`exact_json`]: crate::fit::report::exact::exact_json
 fn format_json(
     out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>,
-    exact: bool,
 ) -> Vec<LoadFailure> {
     let doc = build_summary_doc(out, dir, methods, selection);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
-    let s = if exact {
-        crate::fit::report::exact::exact_json(&doc).and_then(|v| serde_json::to_string_pretty(&v))
-    } else {
-        serde_json::to_string_pretty(&doc)
-    }
-    .expect("FitSummaryDoc must serialize");
-    write_data(out, &format!("{s}\n"));
+    write_data(out, &format!("{}\n", summary_json(&doc)));
     if strict && any_failed {
         out.error(CommandError::new("error: provenance cross-checks failed (--strict).")).exit();
     }
     doc.failures
+}
+
+/// The document as `--format json` writes it.
+fn summary_json(doc: &FitSummaryDoc) -> String {
+    crate::fit::report::exact::exact_json(doc)
+        .and_then(|v| serde_json::to_string_pretty(&v))
+        .expect("FitSummaryDoc must serialize")
 }
 
 fn format_md(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
@@ -3114,6 +3123,30 @@ mod tests {
     ///
     /// v3: `method_progression` is gone. A Δ against the leaf listed before
     /// this one compared runs whose log-likelihoods may be of different kinds.
+    /// v5: NaN, +∞ and −∞ are three different documents, and none of them is
+    /// the document of a value never computed.
+    #[test]
+    fn json_spells_each_non_finite_number_and_keeps_null_for_not_computed() {
+        let state = synthetic_fit_state();
+        let params = [("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)];
+        let dir = make_fit_dir("if2", &state, &params);
+        let methods = discover_methods(&dir);
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None);
+        let with = |v: Option<f64>| {
+            let mut d = doc.clone();
+            d.methods[0].initial_loglik = v;
+            let parsed: serde_json::Value = serde_json::from_str(&summary_json(&d)).unwrap();
+            parsed["methods"][0]["initial_loglik"].clone()
+        };
+        assert_eq!(with(Some(f64::NAN)), serde_json::json!("NaN"));
+        assert_eq!(with(Some(f64::INFINITY)), serde_json::json!("inf"));
+        assert_eq!(with(Some(f64::NEG_INFINITY)), serde_json::json!("-inf"));
+        assert_eq!(with(None), serde_json::Value::Null);
+        assert_eq!(with(Some(-12.5)), serde_json::json!(-12.5));
+        assert!(!summary_json(&doc).contains("NaN,") && !summary_json(&doc).contains(": NaN"),
+            "never a bare NaN token");
+    }
+
     #[test]
     fn json_format_round_trips_and_carries_schema_version() {
         let state = synthetic_fit_state();
@@ -3123,11 +3156,11 @@ mod tests {
         let methods = discover_methods(&dir);
         let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None);
         let json = serde_json::to_string_pretty(&doc).unwrap();
-        assert!(json.contains("\"version\": 4"),
-            "schema.version must be present and = 4: {}", json);
+        assert!(json.contains("\"version\": 5"),
+            "schema.version must be present and = 5: {}", json);
         // Reparse and pin the load-bearing fields.
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["schema"]["version"], 4);
+        assert_eq!(parsed["schema"]["version"], 5);
         assert_eq!(parsed["fit_dir"], dir.to_string_lossy().as_ref());
         assert_eq!(parsed["methods"][0]["name"], "if2");
         assert!(parsed.get("stages").is_none(),

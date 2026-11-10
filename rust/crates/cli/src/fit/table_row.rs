@@ -37,7 +37,13 @@ pub const SCHEMA_NAME: &str = "table_row";
 /// v3 (gh#896): `run_id`, the run the row reports. `fit predict` writes each
 /// run's quantities under `<segment>/predict/<run id>/`, so a row's
 /// `quantities` are read from its run's directory, not the folder's.
-pub const SCHEMA_VERSION: u32 = 3;
+///
+/// v4: a number is a JSON number or the string `"NaN"`, `"inf"` or `"-inf"`,
+/// and `null` means "not computed" — both `fit table --format json` and the
+/// rows `fit summary --format json` embeds are written by
+/// [`crate::fit::report::exact::exact_json`]. v3 wrote every non-finite
+/// number as `null`.
+pub const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct TableRowSchema {
@@ -56,9 +62,10 @@ impl TableRowSchema {
 
 /// One fit, projected to a single row.
 ///
-/// Field ordering matches proposal §3 (table_row schema v1) and is
-/// deliberately preserved so JSON-pretty rendering reads top-to-bottom
-/// in the documented order.
+/// Field ordering matches proposal §3 (table_row schema v1). The JSON
+/// writers go through [`crate::fit::report::exact::exact_json`], whose
+/// `serde_json::Value` maps are key-sorted, so the JSON lists the keys
+/// alphabetically rather than in this order.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct TableRow {
     pub schema: TableRowSchema,
@@ -613,12 +620,13 @@ mod tests {
     /// The discriminator every consumer keys on. v2 is the `methods` →
     /// `methods` rename (gh#890): a key that changes name under an unchanged
     /// version is the vintage problem gh#728 describes, one file later. v3
-    /// adds `run_id` (gh#896).
+    /// adds `run_id` (gh#896). v4 spells non-finite numbers rather than
+    /// writing them `null`.
     #[test]
-    fn schema_pin_is_v3() {
+    fn schema_pin_is_v4() {
         let s = TableRowSchema::current();
         assert_eq!(s.name, "table_row");
-        assert_eq!(s.version, 3);
+        assert_eq!(s.version, 4);
     }
 
     #[test]

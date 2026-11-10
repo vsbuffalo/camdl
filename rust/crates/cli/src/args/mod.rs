@@ -924,22 +924,15 @@ pub struct FitRunArgs {
 
 /// Output format for `camdl fit summary`. `text` is the default
 /// rendered terminal block with ANSI colour; `json` is a versioned
-/// machine-readable schema (`schema.version`); `md` and `latex` are
-/// document-friendly outputs for the book pipeline.
+/// machine-readable schema (`schema.version`) in which a number is a JSON
+/// number, `"NaN"`, `"inf"` or `"-inf"`, and `null` means "not computed";
+/// `md` and `latex` are document-friendly outputs for the book pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum FitSummaryFormat {
     Text,
     Json,
     Md,
     Latex,
-    /// The `json` document with each non-finite number spelled `"NaN"`,
-    /// `"inf"` or `"-inf"`, where `json` writes `null` for all three: the
-    /// encoding `events.jsonl` writes a run's report in, so the report the
-    /// run built and the one `fit summary` builds from its leaf can be
-    /// compared exactly (`tests/reporting_facts.rs`). Hidden: it exists for
-    /// that comparison.
-    #[value(hide = true)]
-    ExactJson,
 }
 
 #[derive(Args)]
