@@ -57,7 +57,8 @@ pub enum Origin {
 /// One effect whose firing step the shortened-last-step rule chose, not the
 /// nominal grid key: the run's length rather than the grid decided the instant,
 /// so the modeller is told. Carried on the plan (so a test can read it) and
-/// logged once per process by [`EffectPlan::build`].
+/// recorded once per process by [`EffectPlan::build`]
+/// ([`crate::run_notes::RunNote::EffectSnapped`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SnapNote {
     /// The effect's name.
@@ -197,7 +198,7 @@ impl EffectPlan {
             plan.at_origin.clear();
         }
         for note in &plan.notes {
-            warn_once(note);
+            crate::run_notes::record(crate::run_notes::RunNote::EffectSnapped(note.clone()));
         }
         Ok(plan)
     }
@@ -356,23 +357,6 @@ pub fn refuse_data_past_end(model: &CompiledModel, last_obs: f64) -> Result<(), 
          does `to = last_obs` (or `to = last_obs + 8 'weeks`) where the model has no \
          recurring schedule that needs a literal end."
     )))
-}
-
-/// Log `note` once per process: a particle filter builds its plan once per
-/// likelihood evaluation, and PMMH evaluates thousands of times.
-fn warn_once(note: &SnapNote) {
-    use std::collections::HashSet;
-    use std::sync::{Mutex, OnceLock};
-    static SEEN: OnceLock<Mutex<HashSet<(String, u64, u64)>>> = OnceLock::new();
-    let key = (note.effect.clone(), note.declared.to_bits(), note.fires_at.to_bits());
-    let first = SEEN
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-        .map(|mut seen| seen.insert(key))
-        .unwrap_or(true);
-    if first {
-        log::warn!("{note}");
-    }
 }
 
 #[cfg(test)]

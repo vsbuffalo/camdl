@@ -229,7 +229,7 @@ impl Whitening {
             }
         }
         let l = crate::inference::linalg::cholesky_lower(&qoq, d)
-            .ok_or_else(|| "the curvature penalty restricted to its range is not positive definite".to_string())?;
+            .map_err(|_| "the curvature penalty restricted to its range is not positive definite".to_string())?;
         // M Lᵀ = Q₊  ⇔  L Mᵀ = Q₊ᵀ: forward substitution, one row of M at a time.
         let mut m = Mat::zeros(k, d);
         for i in 0..k {

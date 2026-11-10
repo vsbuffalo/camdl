@@ -54,6 +54,19 @@ impl Drop for EvalStatsReportGuard {
     fn drop(&mut self) { sim::eval_stats::report_if_nonzero(&self.0); }
 }
 
+/// How the CLI says a note the engine records mid-run
+/// (`sim::run_notes::RunNote`): as a warning notice, written whole through
+/// the live handle, since the engine may record one from any worker thread.
+/// Installed once, at start-up, by `main`.
+pub fn report_run_note(note: &sim::run_notes::RunNote) {
+    let notice = crate::out::notice::Notice {
+        severity: crate::out::notice::Severity::Warning,
+        code: note.code(),
+        message: note.to_string(),
+    };
+    crate::out::live().notice(&notice);
+}
+
 /// Derive an independent RNG seed for chain `id` from a base seed.
 /// XOR with `id * 2^64 * φ` (golden-ratio fractional bits) decorrelates
 /// consecutive-chain streams cheaply. Canonical helper for PGAS/PMMH/IF2;

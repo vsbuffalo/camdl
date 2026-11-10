@@ -299,6 +299,12 @@ impl LiveHandle {
         self.progress(line);
     }
 
+    /// A notice said while the command runs, rendered (`warning: …`) and
+    /// written whole.
+    pub fn notice(&self, n: &notice::Notice) {
+        self.progress(&n.render());
+    }
+
     /// A plain progress line (`chain 1 1/3000  ll=-319.5  acc=0%`), written
     /// whole.
     pub fn progress(&self, line: &str) {
