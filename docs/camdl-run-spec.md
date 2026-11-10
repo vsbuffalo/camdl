@@ -3575,10 +3575,12 @@ take `--force` with the same meaning (`WritePolicy::Force`,
 read read-only and the longer chain is written to a new content-addressed leaf
 keyed on the new `sweeps` / `iterations` with a dependency on the base — a
 distinct deterministic artifact, not bit-identical to an uninterrupted fit of
-the same length. Running the same resume again, of the same base to the same
-length, is a cache hit on that leaf, as any identical invocation is. The file's
-`starts` (or `--starts`) is resolved as on any run, so a file that starts from
-another fit resumes like any other:
+the same length. The new leaf holds the whole chain, the base's rows and the new
+ones, and records where each segment begins (§9.5, "A resumed leaf"). Running
+the same resume again, of the same base to the same length, is a cache hit on
+that leaf, as any identical invocation is. The file's `starts` (or `--starts`)
+is resolved as on any run, so a file that starts from another fit resumes like
+any other:
 
 ```
 $ camdl fit run fits/09_pgas_only.toml --starts from_mle=@mle
@@ -4784,10 +4786,12 @@ re-keys the fit.
 PMMH or PGAS run (the two methods `--resume` accepts) extends its base's chains,
 so it lands in a leaf of its own: its `method` level carries the new target
 length and a dep on the base. That dep, `cas::cas_resume_dep`, is the base
-leaf's `run_id` plus one digest over every chain's `resume_state.bin` in chain
-order, the files the resume continues from. It is not the base's
-`fit_state.toml`, which records when the base finished, so two runs of one
-fixed-seed base address one resumed leaf (gh#1015).
+leaf's `run_id` plus one digest over every chain's carried files in chain order
+(`artifact` `chain_*/{resume_state.bin,trace.tsv,trajectories.tsv}`): the chain
+state the resume continues from and the rows the resumed leaf copies, so a base
+whose rows differ is a different base. It is not the base's `fit_state.toml`,
+which records when the base finished, so two runs of one fixed-seed base address
+one resumed leaf (gh#1015).
 
 Continuing a base's chain state is sound only if every other input is the one
 the base ran under. The key that checks this, `cas::resume_guard`, hashes the
@@ -4945,6 +4949,54 @@ number of a `chain_N/` directory on this leaf, the same value the leaf's
 `chain_<best_chain>/` opens with no arithmetic. It is `null` for a method with
 replicates rather than competing chains (`pfilter`). `camdl show` and
 `camdl list --format json` print it as recorded.
+
+**A resumed leaf.** A `--resume` run's leaf is the complete artifact for the
+longer chain; no reader follows the lineage back. Before the new segment runs,
+each `chain_N/resume_state.bin`, `chain_N/trace.tsv` and (PGAS, when the base
+saved paths) `chain_N/trajectories.tsv` is copied from the base with
+`std::fs::copy` — a copy-on-write clone on APFS, a `copy_file_range` (a reflink
+where the filesystem supports one) on Linux — and the new segment's rows are
+appended to it. The index (`step` for PMMH, `sweep` for PGAS) continues from the
+base's: the new segment's first row is one past the base's last, never a repeat
+of it and never a restart from 0, and `fit run` refuses a trace whose index does
+not increase strictly. Everything a reader takes as the posterior is over the
+whole chain: `draws.tsv` (PGAS keyed by sweep, the base's draws first in each
+chain), the summary's R̂ and ESS, `trajectories.json`'s `n_draws` and the
+summary's saved-path counts, `latent_convergence`, PMMH's acceptance rate and
+MAP, PGAS's NUTS divergence counts, and `fit_state.toml`'s best (PGAS takes the
+better of the base's best and the new segment's). ESS per second divides by the
+segments' summed wall time.
+
+Four PGAS outputs are computed from per-sweep sampler internals that the leaf
+does not keep for the base's sweeps, and cover the new segment's retained sweeps
+only: the `path_renewal` and `filter_ess` summary blocks with `filter_ess.tsv`,
+the conditional-SMC findings in `diagnostics.json`
+(`degenerate_ancestor_sampling`, `low_trajectory_renewal`,
+`filter_weight_collapse`, `path_renewal_coalesced`, `filter_starved`), and
+`fit_state.toml`'s `acceptance_rate`. The `cost` block of either summary is this
+execution's.
+
+`inputs.resume` records the lineage, and is absent on a fresh run:
+
+```json
+"resume": {
+  "parent_run_id": "f2aea3c8…ad4f",
+  "index_column": "step",
+  "segments": [
+    { "run_id": "f2aea3c8…ad4f", "first_index": [0, 0],   "wall_time_seconds": 0.257 },
+    { "run_id": "2673d934…e150", "first_index": [60, 60], "wall_time_seconds": 0.252 }
+  ]
+}
+```
+
+`segments` lists every run that contributed rows, oldest first, ending with this
+leaf's own; `first_index` is indexed by chain number. A row of chain `c` whose
+index is `i` — `index_column` in `chain_c/trace.tsv`, `draw` in
+`trajectories.tsv`, the sweep in PGAS's `draws.tsv` — belongs to the last
+segment whose `first_index[c] <= i`, so the last segment's `first_index` is the
+resume boundary. A leaf resumed from a resumed leaf copies its parent's segments
+forward. PMMH's `draws.tsv` carries no step: draw `k` of chain `c` is the `k`-th
+retained row of `chain_c/trace.tsv`, which carries it.
 
 **Fields.**
 
@@ -5227,7 +5279,8 @@ IF2 and the NLopt optimizers write `parameter_traces.tsv` instead, e.g.
 iteration	loglik	if2_perturbed_loglik	beta	gamma
 ```
 
-`--resume` opens the existing file in append mode and writes no second header.
+A resumed leaf's `trace.tsv` starts as a copy of its base's and the new segment
+is appended under the base's header (§9.5, "A resumed leaf").
 
 ### 10.5 Observation draws
 

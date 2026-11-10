@@ -162,9 +162,9 @@ resumed	stderr	block	acceptance rates:	0           30.9% ✓                   8
 resumed	stderr	block	acceptance rates:	1           31.7% ✓                   7.449e-1        0 / 1000
 resumed	stderr	block	acceptance rates:	2           36.0% ✓                   9.223e-1        0 / 1000
 resumed	stderr	block	acceptance rates:	3           30.5% ✓                    1.049e0        0 / 1000
-resumed	stderr	line	beta         Rhat=	1.001 ✓ ESS bulk=187 tail=192 (93.7% of 200 draws)
-resumed	stderr	line	gamma        Rhat=	1.019 ✓ ESS bulk=173 tail=194 (86.4% of 200 draws)
-resumed	stderr	line	draws.tsv:	200 posterior samples (all 4 params)
+resumed	stderr	line	beta         Rhat=	0.998 ✓ ESS bulk=498 tail=521 (83.1% of 600 draws)
+resumed	stderr	line	gamma        Rhat=	1.000 ✓ ESS bulk=510 tail=540 (85.1% of 600 draws)
+resumed	stderr	line	draws.tsv:	600 posterior samples (all 4 params)
 resumed	stderr	line	pmmh complete in	(2000 PF evaluations
 resumed	stderr	line	stored pmmh	results/fits/pmmh_resumed-
 pgas	stderr	line	fit:	pgas.toml (method=pgas)

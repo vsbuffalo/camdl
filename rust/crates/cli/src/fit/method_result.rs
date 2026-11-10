@@ -545,8 +545,10 @@ pub struct PosteriorDiagnostics {
     /// ESS/iteration.
     #[serde(default = "default_thin")]
     pub thin: usize,
-    /// Method wall-clock (seconds), from `run.json inputs.wall_time_seconds`.
-    /// `None` on older runs that predate the field. Denominator for ESS/second.
+    /// Method wall-clock (seconds) behind every draw the leaf holds: `run.json
+    /// inputs.wall_time_seconds`, or for a resumed leaf the sum over the
+    /// chain's segments (`resumed_chain::chain_wall_time_seconds`). `None`
+    /// when unknown. Denominator for ESS/second.
     #[serde(default)]
     pub wall_time_secs: Option<f64>,
     /// Number of chains. R̂ requires ≥2; part of "how this posterior was
@@ -1419,7 +1421,7 @@ impl PgasRun {
     pub fn load(method_dir: &Path) -> Result<Self, MethodResultError> {
         let inputs = read_method_inputs(method_dir)?;
         let n_chains = inputs_n_chains(&inputs);
-        let wall_time_secs = inputs.get("wall_time_seconds").and_then(|v| v.as_f64());
+        let wall_time_secs = crate::fit::resumed_chain::chain_wall_time_seconds(&inputs);
 
         // Estimated parameter names from algorithm config — pgas
         // doesn't store them directly. Fall back to "every column in
@@ -1530,7 +1532,7 @@ impl PmmhRun {
     ) -> Result<Self, MethodResultError> {
         let inputs = read_method_inputs(method_dir)?;
         let n_chains = inputs_n_chains(&inputs);
-        let wall_time_secs = inputs.get("wall_time_seconds").and_then(|v| v.as_f64());
+        let wall_time_secs = crate::fit::resumed_chain::chain_wall_time_seconds(&inputs);
         let summary = read_summary_json(method_dir, &algo.summary_filename())?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 

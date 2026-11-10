@@ -639,8 +639,12 @@ fn fit_method_levels(ctx: &FitMethodCtx, target_length: u64) -> Result<Vec<Level
 }
 
 /// The lineage dep for a `--resume` base: the leaf's `run_id` plus one digest
-/// over every chain's `resume_state.bin`, in chain order — the files a resume
-/// continues from (gh#1015).
+/// over every chain's carried files, in chain order — the files a resume
+/// continues from and copies into its own leaf
+/// ([`resumed_chain::CARRIED_CHAIN_FILES`](crate::fit::resumed_chain::CARRIED_CHAIN_FILES):
+/// the chain state, and the trace and saved paths the resumed leaf extends)
+/// (gh#1015). A base whose rows differ is a different base, since the
+/// resumed leaf holds those rows.
 ///
 /// Not the base's `fit_state.toml`: a resume does not read it, and it records
 /// the time the base finished, so its digest changed on every run of an
@@ -651,34 +655,47 @@ fn fit_method_levels(ctx: &FitMethodCtx, target_length: u64) -> Result<Vec<Level
 /// `None` when the base has no `chain_*/resume_state.bin`: the resume itself
 /// then refuses, naming the missing file.
 pub fn cas_resume_dep(leaf: &Path) -> Option<ArtifactRef> {
-    let mut chains: Vec<(crate::chain_index::ChainIndex, Vec<u8>)> = std::fs::read_dir(leaf)
+    use crate::fit::resumed_chain::CARRIED_CHAIN_FILES;
+    let mut chains: Vec<(crate::chain_index::ChainIndex, std::path::PathBuf)> = std::fs::read_dir(leaf)
         .ok()?
         .flatten()
         .filter_map(|e| {
             let chain = crate::chain_index::ChainIndex::parse_dir_name(&e.file_name().to_string_lossy())?;
-            Some((chain, std::fs::read(e.path().join("resume_state.bin")).ok()?))
+            e.path().join("resume_state.bin").is_file().then(|| (chain, e.path()))
         })
         .collect();
     if chains.is_empty() {
         return None;
     }
     chains.sort_by_key(|(c, _)| c.0);
-    // Each chain's number and length before its bytes, so no two layouts of
-    // states concatenate to the same input.
+    // Each chain's number, then per carried file a presence byte and, when
+    // present, its length before its bytes, so no two layouts of files
+    // concatenate to the same input.
     let mut framed = Vec::new();
-    for (chain, bytes) in &chains {
+    for (chain, dir) in &chains {
         framed.extend_from_slice(&(chain.0 as u64).to_le_bytes());
-        framed.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-        framed.extend_from_slice(bytes);
+        for f in CARRIED_CHAIN_FILES {
+            match std::fs::read(dir.join(f)) {
+                Ok(bytes) => {
+                    framed.push(1);
+                    framed.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+                    framed.extend_from_slice(&bytes);
+                }
+                Err(_) => framed.push(0),
+            }
+        }
     }
     let digest = ContentHash::digest_bytes(&framed);
     Some(ArtifactRef {
         run_id: leaf_run_id(leaf).unwrap_or(digest),
         kind: ArtifactKind::FitMethod,
-        artifact: "chain_*/resume_state.bin".to_string(),
+        artifact: RESUME_DEP_ARTIFACT.to_string(),
         digest,
     })
 }
+
+/// The `artifact` a `--resume` dep names: the carried files of every chain.
+pub const RESUME_DEP_ARTIFACT: &str = "chain_*/{resume_state.bin,trace.tsv,trajectories.tsv}";
 
 /// The `run_id` a CAS leaf's `run.json` records, or `None` when the
 /// directory is not a CAS leaf.
@@ -1239,9 +1256,9 @@ mod tests {
         assert!(cas_mle_start_dep(&a.path().join("missing").join("fit_state.toml")).is_none());
     }
 
-    /// gh#1015: a `--resume` base is keyed by its chains' resume states, the
-    /// files a resume continues from — not by `fit_state.toml`, whose
-    /// timestamp differs on every run, and not by where the base lives.
+    /// gh#1015: a `--resume` base is keyed by its chains' carried files, the
+    /// ones a resume continues from and copies — not by `fit_state.toml`,
+    /// whose timestamp differs on every run, and not by where the base lives.
     #[test]
     fn cas_resume_dep_keys_on_the_chain_states_alone() {
         let write_base = |dir: &Path, finished_at: &str, chain_1: &[u8]| {
@@ -1258,11 +1275,18 @@ mod tests {
         let dep_a = cas_resume_dep(a.path()).expect("a base with chain states");
         let dep_b = cas_resume_dep(b.path()).expect("a base with chain states");
         assert_eq!(dep_a, dep_b, "the same chain states, finished at another time and in another directory");
-        assert_eq!(dep_a.artifact, "chain_*/resume_state.bin");
+        assert_eq!(dep_a.artifact, RESUME_DEP_ARTIFACT);
 
         write_base(b.path(), "2026-11-10T02:17:19Z", b"state 1, one step further");
         assert_ne!(dep_a.digest, cas_resume_dep(b.path()).unwrap().digest,
             "a different chain state is a different base");
+
+        // The rows the resumed leaf copies are part of the base too.
+        write_base(b.path(), "2026-11-10T02:17:19Z", b"state 1");
+        assert_eq!(dep_a.digest, cas_resume_dep(b.path()).unwrap().digest);
+        std::fs::write(b.path().join("chain_1").join("trace.tsv"), "step\tbeta\n0\t0.5\n").unwrap();
+        assert_ne!(dep_a.digest, cas_resume_dep(b.path()).unwrap().digest,
+            "a different trace is a different base");
 
         assert!(cas_resume_dep(tempfile::tempdir().unwrap().path()).is_none(), "no chain states, no dep");
     }

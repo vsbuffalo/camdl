@@ -283,7 +283,10 @@ pub fn run_method(
     pgas_opts: PgasMethodOpts,
     seed: u64,
     force: bool,
-    resume: bool,
+    // The leaf `--resume` continues, whose chain files the dispatcher has
+    // copied into `method_dir` (`resumed_chain::copy_parent_chains`); `None`
+    // for a fresh run.
+    resume_base: Option<&Path>,
     // The leaf's resume-compatibility key (`cas::resume_guard`): recorded in
     // each chain's `resume_state.bin`, and checked against the base's under
     // `--resume`.
@@ -295,8 +298,9 @@ pub fn run_method(
     // The command's output handle: the checks the run shows are recorded on
     // it, and its findings go to the collector it holds.
     out: &mut crate::out::Out,
-) -> Result<(), String> {
+) -> Result<Vec<usize>, String> {
     let method_name = method.algorithm.method_name();
+    let resume = resume_base.is_some();
     let estimate = &fit.estimate;
     let n_chains = pgas_opts.n_chains;
     let n_sweeps = pgas_opts.n_sweeps;
@@ -313,7 +317,7 @@ pub fn run_method(
             out.say(format_args!("{}", crate::out::paint::stderr().paint(&format!(
                 "pgas results already exist in {}. Use --force to re-run or --resume to continue.",
                 method_dir.display()), Style::Warn)));
-            return Ok(());
+            return Ok(Vec::new());
         }
     }
 
@@ -512,6 +516,11 @@ pub fn run_method(
     } else {
         vec![None; n_chains]
     };
+    // The sweep each resumed chain begins this call at: its base's completed
+    // sweeps. The rows below it in the chain's files are the base's.
+    let boundary: Vec<usize> = resume_states.iter()
+        .map(|s| s.as_ref().map_or(0, |s| s.completed_sweeps))
+        .collect();
 
     // Per-chain starting parameters, through the one seam every runner
     // draws from (`chain_starts::draw_chain_starts`), under the resolved
@@ -1178,24 +1187,45 @@ pub fn run_method(
             // time [date]` id columns) + a `trajectories.json` manifest. Replaces
             // the per-draw `trajectory_NNNNNN.tsv` wide files.
             let draws = saved_draws.into_inner();
+            let tsv_path = chain_dir.join("trajectories.tsv");
+            // A resumed chain's file already holds its base's paths; the new
+            // segment's are appended under the same header, so the file is the
+            // whole chain's (`resumed_chain`).
+            let inherited_saved = if is_resuming {
+                super::resumed_chain::inherited_saved_sweeps(&tsv_path, boundary[chain_id])
+                    .map_err(|e| format!("pgas chain {}: {}", chain, e))?
+            } else {
+                Vec::new()
+            };
             // gh#727: the sweeps a path was actually written for (the adapter
             // skips an incoherent record, so this is not the stride re-derived).
-            chain_saved_sweeps.lock().unwrap()[chain_id] =
-                draws.iter().map(|d| d.draw).collect();
+            chain_saved_sweeps.lock().unwrap()[chain_id] = inherited_saved.iter().copied()
+                .chain(draws.iter().map(|d| d.draw)).collect();
+            let date_origin = traj_date_origin.as_ref()
+                .map(|(o, u)| (o.as_str(), u.as_str()));
             if !draws.is_empty() {
-                let date_origin = traj_date_origin.as_ref()
-                    .map(|(o, u)| (o.as_str(), u.as_str()));
-                let tsv_path = chain_dir.join("trajectories.tsv");
-                write_trajectories_tsv(
+                let write = if is_resuming && tsv_path.is_file() {
+                    io::trajectories::append_trajectories_tsv
+                } else {
+                    write_trajectories_tsv
+                };
+                write(
                     &tsv_path, &draws, traj_columns, date_origin,
                     &traj_model_hash, "pgas", Granularity::Substep,
                 ).map_err(|e| format!("pgas chain {}: {}", chain, e))?;
 
+                // The writer above already validated every draw's shape, so a
+                // refusal here is a defect, not a data condition.
+                let flat = super::latent_convergence::ChainPaths::from_draws(&draws, traj_columns)
+                    .map_err(|e| format!("pgas chain {}: {}", chain, e))?;
+                chain_paths.lock().unwrap()[chain_id] = flat;
+            }
+            if tsv_path.is_file() {
                 let manifest = TrajManifest {
                     method: "pgas".to_string(),
                     granularity: Granularity::Substep,
                     n_chains: 1,
-                    n_draws: draws.len(),
+                    n_draws: inherited_saved.len() + draws.len(),
                     columns: {
                         // Id + time columns, then data columns, in emit order.
                         let mut cols = io::trajectories::id_column_names(date_origin.is_some());
@@ -1220,12 +1250,6 @@ pub fn run_method(
                     calendar: traj_calendar.clone(),
                 };
                 let _ = manifest.write(&chain_dir.join("trajectories.json"));
-
-                // The writer above already validated every draw's shape, so a
-                // refusal here is a defect, not a data condition.
-                let flat = super::latent_convergence::ChainPaths::from_draws(&draws, traj_columns)
-                    .map_err(|e| format!("pgas chain {}: {}", chain, e))?;
-                chain_paths.lock().unwrap()[chain_id] = flat;
             }
 
             let chain_elapsed = chain_start.elapsed();
@@ -1343,8 +1367,25 @@ pub fn run_method(
 
     let elapsed = t0.elapsed();
 
+    // A resumed chain's retained draws from its base, read back from the
+    // leaf's own trace (`resumed_chain`): R̂, ESS, `draws.tsv` and the
+    // saved-path counts are over the whole chain the leaf holds, not the
+    // sweeps this call ran. `None` for a chain that did not resume.
+    let param_names: Vec<String> = config.estimated_params.iter().map(|s| s.name.clone()).collect();
+    let inherited: Vec<Option<super::resumed_chain::InheritedDraws>> = all_results.iter()
+        .map(|(chain_id, _, _)| -> Result<_, String> {
+            if resume_states[*chain_id].is_none() {
+                return Ok(None);
+            }
+            super::resumed_chain::inherited_draws(
+                &ChainIndex(*chain_id).dir_in(method_dir).join("trace.tsv"),
+                "sweep", boundary[*chain_id], burn_in, thin, &param_names,
+            ).map(Some)
+        })
+        .collect::<Result<_, String>>()?;
+
     // Compute diagnostics
-    let diagnostics = compute_diagnostics(&all_results, &config.estimated_params);
+    let diagnostics = compute_diagnostics(&all_results, &inherited, &config.estimated_params);
 
     // Report. The healthy band is KERNEL-specific (gh#631): NUTS targets
     // ~0.8, so applying the random-walk band to it reported every well-tuned
@@ -1446,8 +1487,15 @@ pub fn run_method(
     // omits the block from the summary, never nulls it; the end of the run
     // says why.
     let latent_convergence = {
-        let blocks: Vec<super::latent_convergence::ChainPaths> =
-            chain_paths.into_inner().unwrap().into_iter().flatten().collect();
+        // A resumed leaf's paths span its base's sweeps too, so they are read
+        // back from the whole-chain files rather than taken from this call's.
+        let blocks: Vec<super::latent_convergence::ChainPaths> = if resume {
+            super::latent_convergence::read_method_paths(method_dir)?
+                .map(|(blocks, _)| blocks)
+                .unwrap_or_default()
+        } else {
+            chain_paths.into_inner().unwrap().into_iter().flatten().collect()
+        };
         match super::latent_convergence::latent_convergence(
             &blocks, &traj_columns.data_column_names(),
         ) {
@@ -1573,9 +1621,10 @@ pub fn run_method(
     // stride, so the artifact records what happened.
     let saved_sweeps = chain_saved_sweeps.into_inner()
         .expect("no chain panicked while holding the saved-sweeps lock");
-    let retained_sweeps: Vec<(usize, Vec<usize>)> = all_results.iter()
-        .map(|(chain_id, sweeps, _)| {
-            (*chain_id, sweeps.iter().map(|s| s.sweep).collect())
+    let retained_sweeps: Vec<(usize, Vec<usize>)> = all_results.iter().zip(&inherited)
+        .map(|((chain_id, sweeps, _), base)| {
+            (*chain_id, base.iter().flat_map(|b| b.index.iter().copied())
+                .chain(sweeps.iter().map(|s| s.sweep)).collect())
         })
         .collect();
     let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
@@ -1591,7 +1640,7 @@ pub fn run_method(
     if !any_new_sweeps {
         out.say("\npgas: --resume found all chains at the target sweep \
             count. Nothing to do.");
-        return Ok(());
+        return Ok(boundary);
     }
 
     // Write fit_state.toml with best params
@@ -1646,6 +1695,20 @@ pub fn run_method(
             }
         }
     }
+    let mut best_loglik = best_sweep.log_complete_data_ll;
+    let mut best_chain_id = best_chain.0;
+    // A resumed chain's best retained sweep may be its base's: the base's
+    // `fit_state.toml` records the best over every sweep it retained, so the
+    // larger of the two is the best over the whole chain.
+    if let Some(base) = resume_base {
+        let prior = FitState::load(&base.to_string_lossy())
+            .map_err(|e| format!("--resume: cannot read the base's fit_state.toml: {e}"))?;
+        if prior.best_loglik > best_loglik {
+            best_loglik = prior.best_loglik;
+            best_chain_id = prior.best_chain.0;
+            start_values = prior.start_values;
+        }
+    }
 
     let state = FitState {
         method: method_name.to_string(),
@@ -1653,9 +1716,9 @@ pub fn run_method(
         timestamp: iso8601_utc(std::time::SystemTime::now()),
         input_hash: None,
         camdl_version: Some(crate::version::VERSION_SHORT.into()),
-        best_loglik: best_sweep.log_complete_data_ll,
+        best_loglik,
         initial_loglik: f64::NEG_INFINITY,
-        best_chain: ChainIndex(best_chain.0),
+        best_chain: ChainIndex(best_chain_id),
         n_chains,
         // gh#607: `None` unless a chain was skipped, so a healthy fit's
         // `fit_state.toml` is unchanged. Same convention as PMMH.
@@ -1725,7 +1788,17 @@ pub fn run_method(
         }).collect();
 
         let mut n_draws = 0usize;
-        for (chain_id, sweeps, _) in &all_results {
+        for ((chain_id, sweeps, _), base) in all_results.iter().zip(&inherited) {
+            // A resumed chain's base draws first, in sweep order, then this
+            // call's: the chain's rows are the whole chain, numbered by sweep.
+            if let Some(base) = base {
+                for (sweep, est) in base.index.iter().zip(&base.values) {
+                    let mut vals: Vec<String> = est.iter().map(|v| format!("{:.17e}", v)).collect();
+                    vals.extend(fixed_vals.iter().map(|v| format!("{:.17e}", v)));
+                    writeln!(f, "{}\t{}\t{}", chain_id, sweep, vals.join("\t")).unwrap();
+                    n_draws += 1;
+                }
+            }
             // `sweeps` is ALREADY the post-burn-in, thinned set — the sim-side
             // recorder applies `burn_in` + `thin` when it builds it
             // (`sim/inference/pgas.rs`: `sweep >= burn_in && (sweep - burn_in) %
@@ -1782,7 +1855,7 @@ pub fn run_method(
     // is the consumer's cue that the final stats are ready to read.
     heartbeat.done();
 
-    Ok(())
+    Ok(if resume { boundary } else { Vec::new() })
 }
 
 /// What a chain's [`PgasEvent`] says, as the lines `fit run` shows while the
@@ -2046,13 +2119,21 @@ fn write_cross_chain_compat(
 
 // ── Diagnostics ──────────────────────────────────────────────────
 
+/// R̂ / ESS over each chain's retained draws: a resumed chain's `inherited`
+/// rows from its base (parallel to `results`, in `estimated_params` order),
+/// then the sweeps this call kept.
 fn compute_diagnostics(
     results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
+    inherited: &[Option<super::resumed_chain::InheritedDraws>],
     estimated_params: &[EstimatedParam],
 ) -> MethodConvergence {
-    MethodConvergence::compute(estimated_params.iter().map(|spec| {
-        let chains: Vec<Vec<f64>> = results.iter()
-            .map(|(_, sweeps, _)| sweeps.iter().map(|s| s.params[spec.index]).collect())
+    MethodConvergence::compute(estimated_params.iter().enumerate().map(|(p, spec)| {
+        let chains: Vec<Vec<f64>> = results.iter().zip(inherited)
+            .map(|((_, sweeps, _), base)| {
+                base.iter().flat_map(|b| b.column(p))
+                    .chain(sweeps.iter().map(|s| s.params[spec.index]))
+                    .collect()
+            })
             .collect();
         (spec.name.clone(), chains)
     }))
