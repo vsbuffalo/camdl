@@ -86,7 +86,7 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
     let at_points: Option<Vec<f64>> = if a.at.is_empty() { None } else { Some(a.at.clone()) };
 
     let (model_in, _model_json) = crate::util::load_model(&ir_path)
-        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+        .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
 
     // Unified parameter resolver (2026-05-25 CLI UX rev 2). Maps the
     // legacy `--params FILE` (repeatable) → `fixed_files`, and
@@ -120,8 +120,7 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
         fit_toml_estimate: &fte,
         table_files: &table_files,
     }).unwrap_or_else(|e| {
-        eprintln!("error: {}", e.with_flags(crate::params_resolver::FlagStyle::Params));
-        std::process::exit(1);
+        out.fail(format!("error: {}", e.with_flags(crate::params_resolver::FlagStyle::Params)));
     });
     emit_notices(&out, &[&resolved]);
     if log::log_enabled!(log::Level::Debug) {
@@ -144,7 +143,7 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
     }
 
     let compiled = CompiledModel::new(model.clone())
-        .unwrap_or_else(|e| { eprintln!("compile error: {:?}", e); std::process::exit(1); });
+        .unwrap_or_else(|e| { out.fail(format!("compile error: {:?}", e)); });
     let params = compiled.default_params.clone();
 
     let mut resolved: Vec<(String, Expr)> = Vec::new();
@@ -152,14 +151,13 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
         match resolve_named_expr(&model, &compiled, name) {
             Ok(expr) => {
                 if let Some(comp) = references_compartments(&expr) {
-                    eprintln!("error: expression '{}' references compartment '{}'.", name, comp);
-                    eprintln!("  Compartment state requires a running simulation.");
-                    eprintln!("  Run 'camdl simulate <model> -o traj.tsv' instead (compartment + flow_* columns).");
-                    std::process::exit(1);
+                    out.say(format_args!("error: expression '{}' references compartment '{}'.", name, comp));
+                    out.say("  Compartment state requires a running simulation.");
+                    out.fail("  Run 'camdl simulate <model> -o traj.tsv' instead (compartment + flow_* columns).");
                 }
                 resolved.push((name.clone(), expr));
             }
-            Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
+            Err(e) => { out.fail(format!("error: {}", e)); }
         }
     }
 
@@ -179,38 +177,37 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
     let real_s = RealState::new(compiled.real_local_to_global.len());
 
     use std::io::Write;
-    let mut out: Box<dyn Write> = match &a.output {
+    let mut w: Box<dyn Write> = match &a.output {
         Some(path) => {
             let f = std::fs::File::create(path)
-                .unwrap_or_else(|e| { eprintln!("cannot create {}: {}", path.display(), e); std::process::exit(1); });
+                .unwrap_or_else(|e| { out.fail(format!("cannot create {}: {}", path.display(), e)); });
             Box::new(std::io::BufWriter::new(f))
         }
-        None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
+        None => Box::new(std::io::BufWriter::new(out.data())),
     };
 
-    write!(out, "t").unwrap();
+    write!(w, "t").unwrap();
     for (name, _) in &resolved {
-        write!(out, "\t{}", name).unwrap();
+        write!(w, "\t{}", name).unwrap();
     }
-    writeln!(out).unwrap();
+    writeln!(w).unwrap();
 
     for &t in &times {
-        write!(out, "{}", t).unwrap();
+        write!(w, "{}", t).unwrap();
         let ctx = EvalCtx { model: &compiled, int_s: &int_s, real_s: &real_s, params: &params, t, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
         for (name, expr) in &resolved {
             match eval_expr(expr, &ctx) {
-                Ok(val) => write!(out, "\t{:.6}", val).unwrap(),
+                Ok(val) => write!(w, "\t{:.6}", val).unwrap(),
                 Err(e) => {
-                    eprintln!("error evaluating '{}' at t={}: {:?}", name, t, e);
-                    std::process::exit(1);
+                    out.fail(format!("error evaluating '{}' at t={}: {:?}", name, t, e));
                 }
             }
         }
-        writeln!(out).unwrap();
+        writeln!(w).unwrap();
     }
-    drop(out);
+    drop(w);
 
     if let Some(ref path) = a.output {
-        eprintln!("eval written to {}", path.display());
+        out.say(format_args!("eval written to {}", path.display()));
     }
 }
