@@ -85,7 +85,8 @@ burn_in    = 100
         serde_json::from_slice(&std::fs::read(seg_a.join("fit.meta.json")).unwrap()).unwrap();
     assert_eq!(meta["schema_version"], 2, "{meta}");
     assert_eq!(meta["source_config"], "../../../fits/a.toml", "relative to the fit folder: {meta}");
-    assert!(meta.get("fit_toml_path").is_none(), "{meta}");
+    assert_eq!(meta["source_model"], "../../../model.ir.json", "relative to the fit folder: {meta}");
+    assert!(meta.get("fit_toml_path").is_none() && meta.get("model_path").is_none(), "{meta}");
 
     // From the project's parent: the leaves named as `proj/results/…`.
     let rel = |seg: &Path| -> String {

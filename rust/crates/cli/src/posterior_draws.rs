@@ -408,7 +408,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        crate::run_meta::write_fit_sidecar(&seg, Path::new("nonexistent.toml"), &sidecar).unwrap();
+        crate::run_meta::write_fit_sidecar(&seg, Path::new("nonexistent.toml"), Path::new(""), &sidecar).unwrap();
         seg
     }
 
@@ -565,7 +565,7 @@ mod tests {
             fixed: std::collections::BTreeMap::from([("N0".to_string(), 1000.0), ("sigma".to_string(), 0.11)]),
             ..Default::default()
         };
-        crate::run_meta::write_fit_sidecar(&tmp, Path::new("nonexistent.toml"), &sidecar).unwrap();
+        crate::run_meta::write_fit_sidecar(&tmp, Path::new("nonexistent.toml"), Path::new(""), &sidecar).unwrap();
         let mut got = resolve_fixed_for_backfill(tmp.to_str().unwrap(), &crate::test_support::tiny_model())
             .expect("reads sidecar");
         got.sort_by(|a, b| a.0.cmp(&b.0));

@@ -493,19 +493,25 @@ The fit segment carries a `fit.meta.json` holding the fit-wide provenance that
 has no `RunRecord` of its own. It is **derived provenance, never a source of
 truth**: everything in it is a readable projection of inputs already hashed into
 the leaf identities, written after identity is fixed and never fed back into any
-hash. Its keys serialize in sorted order (the maps are `BTreeMap`s) so two
-identical runs produce byte-identical sidecars and a diff of two runs' metadata
-is meaningful.
+hash. Its top-level keys serialize in a fixed order (the writer's field order,
+which is not alphabetical), and the keys inside each map (`data_hashes`,
+`fixed`, `parameters_provenance`, …) in sorted order (the maps are `BTreeMap`s),
+so two identical runs produce byte-identical sidecars and a diff of two runs'
+metadata is meaningful.
 
 Fields: `schema_version` (2; below), `label` (a profile's label only; a fit's
-label names one run and lives on that run's `run.json`, see §6.8), `model_path`,
-`model_identity` (the hex structural model hash), `source_config` (the producing
-config file, as a path relative to the fit folder that holds this
-`fit.meta.json`, below; absent for a CLI-only fit), `fit_toml_hash` (SHA-256 of
-the producing config's raw bytes — provenance, i.e. which exact bytes produced
-this fit; a `fit.toml` handle is NOT looked up by it, see below), `data_hashes`,
-`estimated`, `fixed`, `partition` (the run's parameter roles, below),
-`resolved_priors` (one `{param, source}` entry per estimated parameter,
+label names one run and lives on that run's `run.json`, see §6.8),
+`source_model` (the model file the fit ran on, a `.camdl` or `.ir.json`, as a
+path relative to the fit folder by the same rule as `source_config`; absent when
+the model was not a file; the archived copies are the folder's
+`model.camdl.original` and `model.ir.json`), `model_identity` (the hex
+structural model hash), `source_config` (the producing config file, as a path
+relative to the fit folder that holds this `fit.meta.json`, below; absent for a
+CLI-only fit), `fit_toml_hash` (SHA-256 of the producing config's raw bytes —
+provenance, i.e. which exact bytes produced this fit; a `fit.toml` handle is NOT
+looked up by it, see below), `data_hashes`, `estimated`, `fixed`, `partition`
+(the run's parameter roles, below), `resolved_priors` (one `{param, source}`
+entry per estimated parameter,
 `source ∈ {fit_toml, model_ir, flat_explicit, flat_fallback}`, plus
 `overridden_model_prior` when the fit.toml's prior displaced a model `~` prior;
 recorded whichever method ran, because every method run on the problem shares
@@ -550,8 +556,8 @@ error: the fit's data is not where its config says:
 
 **`schema_version`.** `fit run` writes 2, and every reader refuses any other
 value, naming it, rather than reading an older record's fields as if they meant
-the same thing. A record without the key is version 1, whose `fit_toml_path` was
-relative to the directory `fit run` was started from:
+the same thing. A record without the key is version 1, whose `fit_toml_path` and
+`model_path` were relative to the directory `fit run` was started from:
 
 ```
 error: …/fit.meta.json is fit.meta.json schema version 1; this camdl reads version 2 only (…). Re-run the fit with this camdl.
@@ -2115,8 +2121,8 @@ array. The stream is therefore not a single JSON document; parse it per section
 or filter with `--kind`.
 
 A fit row carries `schema = {"name": "fit_list_row", "version": 2}`, the
-fit-level provenance (its `source_config` is `fit.meta.json`'s, relative to the
-fit folder, §2.2.1), `methods_declared` (the algorithms that ran on this
+fit-level provenance (its `source_config` and `source_model` are
+`fit.meta.json`'s, relative to the fit folder, §2.2.1), `methods_declared` (the algorithms that ran on this
 problem), and `methods` — one entry per method leaf:
 
 ```json
@@ -5070,7 +5076,7 @@ Sub-artifacts that are _not_ `RunRecord`s:
   `SHA256("{run_id}:{obs_seed}:{obs_hash}")` and appears nowhere inside the
   child.
 - `fits/{fit_stem}-{h8}/fit.meta.json` — the fit-wide sidecar:
-  `{schema_version, model_path, model_identity, source_config, fit_toml_hash, data_hashes,
+  `{schema_version, source_model, model_identity, source_config, fit_toml_hash, data_hashes,
   estimated, fixed, resolved_priors, parameters_provenance, schema}`,
   where `schema` describes each observation stream (`name`, `index_dims`,
   `value_column`, `value_kind`, `likelihood`).
@@ -5388,14 +5394,14 @@ first is not an orphan.
 Fit-wide, at `fits/{fit_stem}-{h8}/` (outside any leaf, so not exact-set
 checked):
 
-| file                   | content                                                                                                                                                                                                  |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fit.meta.json`        | model path + `model_identity`, source config (relative to the fit folder) + hash, per-stream data hashes, estimated/fixed sets, resolved priors, parameter provenance, and the observation-stream schema |
-| `fit.toml.original`    | verbatim copy of the config as run                                                                                                                                                                       |
-| `model.camdl.original` | verbatim copy of the model source                                                                                                                                                                        |
-| `model.ir.json`        | the compiled IR the fit ran against                                                                                                                                                                      |
-| `model.graph.json`     | the model flow graph                                                                                                                                                                                     |
-| `model.render.json`    | the display/LaTeX rendering payload                                                                                                                                                                      |
+| file                   | content                                                                                                                                                                                                         |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fit.meta.json`        | source model + `model_identity`, source config (both relative to the fit folder) + hash, per-stream data hashes, estimated/fixed sets, resolved priors, parameter provenance, and the observation-stream schema |
+| `fit.toml.original`    | verbatim copy of the config as run                                                                                                                                                                              |
+| `model.camdl.original` | verbatim copy of the model source                                                                                                                                                                               |
+| `model.ir.json`        | the compiled IR the fit ran against                                                                                                                                                                             |
+| `model.graph.json`     | the model flow graph                                                                                                                                                                                            |
+| `model.render.json`    | the display/LaTeX rendering payload                                                                                                                                                                             |
 
 Per method leaf, alongside `run.json`. The set is method-dependent; every file
 present is listed in `run.json.artifacts` and subject to the exact-set gate,
