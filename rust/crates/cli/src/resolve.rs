@@ -436,12 +436,12 @@ pub(crate) fn note_leaf_from_another_model_file(leaf: &Path, model_path: &str) {
     }
     let mut warned = WARNED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
     if warned.insert((stored.clone(), current.clone())) {
-        eprintln!(
+        crate::out::detached().say(format_args!(
             "warning: reusing stored runs computed from `{stored}`: `{current}` is the same \
              model under another file name (the file name is a label, not part of the run \
              identity). The stored runs keep `{stored}`'s directory names; first: {}",
             leaf.display()
-        );
+        ));
     }
 }
 

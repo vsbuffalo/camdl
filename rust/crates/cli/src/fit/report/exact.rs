@@ -48,8 +48,8 @@ pub fn capture(by: &str, report: &super::build::MethodReport) {
                 .map_err(|e| e.to_string())
         });
     if let Err(e) = written {
-        eprintln!("warning: {CAPTURE_ENV}: cannot record the report in {}: {e}",
-            std::path::Path::new(&path).display());
+        crate::out::detached().say(format_args!("warning: {CAPTURE_ENV}: cannot record the report in {}: {e}",
+            std::path::Path::new(&path).display()));
     }
 }
 

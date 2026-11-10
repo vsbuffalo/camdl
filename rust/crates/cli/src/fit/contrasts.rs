@@ -195,14 +195,14 @@ pub fn emit_contrasts(
                 model.contrasts.len(),
             ));
         }
-        eprintln!(
+        out.say(format_args!(
             "fit predict: skipping {} contrast(s) — this fit has no forkable posterior \
              draws (0/{} have a usable latent state X(T*)). A conditioned contrast needs \
              a stochastic fit that saved smoothed latent paths (PGAS), or a deterministic \
              (ODE) fit. PMMH/PF fits do not yet save paths.",
             model.contrasts.len(),
             joint.n_total,
-        );
+        ));
         return Ok(Vec::new());
     }
 
@@ -210,13 +210,13 @@ pub fn emit_contrasts(
     // ODE (Deterministic) is a named, valid case in the proposal but its post-fork
     // re-integration seam is not wired here — surface it loudly, never silently.
     if backend != ForwardBackend::ChainBinomial {
-        eprintln!(
+        out.say(format_args!(
             "fit predict: skipping {} contrast(s) — counterfactual contrasts fork only \
              chain_binomial posterior fits in this build; this fit ran on {}. (ODE \
              deterministic forking is a named gh#325 follow-up.)",
             model.contrasts.len(),
             backend.as_str(),
-        );
+        ));
         return Ok(Vec::new());
     }
 
@@ -234,7 +234,7 @@ pub fn emit_contrasts(
     // the retained-chain scope is stated whenever a selection is active, not
     // only when draws were also skipped for want of a path.
     if let Some(info) = &joint.selection {
-        eprintln!(
+        out.say(format_args!(
             "fit predict: contrasts band over the RETAINED chains — chain(s) {} excluded, \
              {} of {} chains kept; {} of the {} retained draws carry a saved latent path \
              X(T*).",
@@ -243,18 +243,18 @@ pub fn emit_contrasts(
             info.n_total,
             joint.n_forkable,
             joint.n_total,
-        );
+        ));
     }
 
     // Honest denominator, part 2: a contrast bands over the forkable subset only.
     if joint.n_forkable < joint.n_total {
-        eprintln!(
+        out.say(format_args!(
             "fit predict: contrasts band over the forkable subset — {}/{} draws have a \
              saved latent path X(T*); the remaining {} are skipped.",
             joint.n_forkable,
             joint.n_total,
             joint.n_total - joint.n_forkable,
-        );
+        ));
     }
 
     // The forkable draws, in file order: (params θ_i, the saved-path locator).
@@ -308,7 +308,7 @@ pub fn emit_contrasts(
     for c in &model.contrasts {
         match validate_contrast(c, model) {
             Ok(()) => to_emit.push(c),
-            Err(reason) => eprintln!("fit predict: skipping contrast '{}' — {reason}", c.name),
+            Err(reason) => out.say(format_args!("fit predict: skipping contrast '{}' — {reason}", c.name)),
         }
     }
     if to_emit.is_empty() {
@@ -373,13 +373,13 @@ pub fn emit_contrasts(
     if obs_anchors.is_none() {
         if let Some(arm) = runs_union.first().and_then(|r| arms.get(r)) {
             if arm.quant_eval.references_obs_anchor() {
-                eprintln!(
+                out.say(format_args!(
                     "fit predict: skipping {} contrast(s) — quantity `{}` reads \
                      `value_at` at an observation anchor, and this fit binds no \
                      observation times to resolve it against.",
                     model.contrasts.len(),
                     arm.quant_eval.obs_anchor_quantity_names().join("`, `"),
-                );
+                ));
                 return Ok(Vec::new());
             }
         }
@@ -419,11 +419,11 @@ pub fn emit_contrasts(
         let plan = match derive_fork(model, &arms, &runs_c, &snapshot_times, (model.simulation.t_start, dt, run_end)) {
             Ok(p) => p,
             Err(reason) => {
-                eprintln!("fit predict: skipping contrast '{}' — {reason}", c.name);
+                out.say(format_args!("fit predict: skipping contrast '{}' — {reason}", c.name));
                 continue;
             }
         };
-        eprintln!(
+        out.say(format_args!(
             "fit predict: contrast '{}' — fork at t={} (last saved snapshot before '{}' \
              fires at t={}, declared at t={}); arms run [{}, {}].{}",
             c.name,
@@ -442,7 +442,7 @@ pub fn emit_contrasts(
             } else {
                 String::new()
             },
-        );
+        ));
 
         // gh#694: an observation anchor is resolved from the fit's DATA, so it
         // can land outside the window the arms replayed — before the fork (a
@@ -457,14 +457,14 @@ pub fn emit_contrasts(
                 for (qname, a) in quantity_obs_anchor_reads(model, m) {
                     let t = w.at(a);
                     if t < plan.fork_t - SNAPSHOT_TIME_TOL || t > run_end + SNAPSHOT_TIME_TOL {
-                        eprintln!(
+                        out.say(format_args!(
                             "fit predict: contrast '{}' — quantity `{qname}` reads at \
                              `{a}` = t {t}, outside the arms' replay window [{}, {run_end}]; \
                              it is right-censored in every draw, so the band is empty \
                              (n_used = 0). An anchor is read off the FIT's data, which \
                              need not overlap the window the arms replayed.",
                             c.name, plan.fork_t,
-                        );
+                        ));
                     }
                 }
             }
@@ -490,12 +490,12 @@ pub fn emit_contrasts(
         // many draws that took, so a smaller `n_used` is not a mystery.
         let undefined = shaped.iter().filter(|sv| sv.div0).count();
         if undefined > 0 {
-            eprintln!(
+            out.say(format_args!(
                 "fit predict: contrast '{}': {undefined} of {} draws undefined \
                  (denominator 0); excluded from the band, see n_used",
                 c.name,
                 shaped.len(),
-            );
+            ));
         }
 
         let content = band_and_render(&c.name, &shaped)?;
