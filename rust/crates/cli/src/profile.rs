@@ -692,7 +692,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // deferred: it has no horizon at all, so nothing later can be computed from
     // it. An unanchored model falls through untouched.
     let moved_any_anchor = match &bound_streams {
-        Some(bound) => crate::obs_anchor::resolve_from_bindings(&mut model_pre, bound, dt)
+        Some(bound) => crate::obs_anchor::resolve_from_bindings(&out, &mut model_pre, bound, dt)
             .unwrap_or_else(|e| { out.fail(format!("error: {e}")); }),
         None => {
             if let Some(msg) =
@@ -700,8 +700,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             {
                 out.fail(format!("error: {msg}"));
             }
-            crate::obs_anchor::spline_hold_notices(&model_pre, &[], model_pre.simulation.t_end)
-                .emit_stderr();
+            out.notices(&crate::obs_anchor::spline_hold_notices(&model_pre, &[], model_pre.simulation.t_end));
             false
         }
     };
@@ -773,7 +772,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let mut resolved = resolved;
     resolved.attribute_seeded_starts(&seeded);
-    crate::params_resolver::emit_notices(&[&resolved]);
+    crate::params_resolver::emit_notices(&out, &[&resolved]);
     // The grid writes each focal value straight over the parameter, so a
     // scenario's value for a focal parameter is replaced at every point: said
     // once here, for the run, not per grid point.
@@ -787,7 +786,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         }
         None => crate::out::notice::Notices::default(),
     };
-    focal_notices.emit_stderr();
+    out.notices(&focal_notices);
     let model = resolved.model.clone();
 
     // Maintain the downstream `fit_toml_fixed: HashMap` view that the

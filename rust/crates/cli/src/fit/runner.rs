@@ -265,7 +265,7 @@ pub(crate) fn resolve_fit_parameters(
             format!("resolving this model's observation anchors from [data]: {e}")
         })?;
         let moved = crate::obs_anchor::substitute(&mut model_pre, window)?;
-        crate::obs_anchor::report(&moved, &model_pre);
+        crate::obs_anchor::report(&crate::out::detached(), &moved, &model_pre);
     }
     // Keep a copy of the unfiltered model so the startup diagnostic
     // can show what was declared vs what's active. Cheap clone — the

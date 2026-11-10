@@ -17,7 +17,7 @@
 /// documentation dictionary survives; a fit sidecar's parameter legend reads it
 /// back off this path.
 fn resolve_anchors_into_temp_ir(
-    ir_path: &str,
+    out: &crate::out::Out, ir_path: &str,
     config: &config_v2::Problem,
 ) -> Result<String, String> {
     let src = std::fs::read_to_string(ir_path)
@@ -25,16 +25,14 @@ fn resolve_anchors_into_temp_ir(
     let mut env = ir::envelope_from_str(&src)
         .map_err(|e| format!("IR load error from {ir_path}: {e}"))?;
     if !crate::obs_anchor::model_is_anchored(&env.model) {
-        crate::obs_anchor::spline_hold_notices(&env.model, &[], env.model.simulation.t_end)
-            .emit_stderr();
+        out.notices(&crate::obs_anchor::spline_hold_notices(&env.model, &[], env.model.simulation.t_end));
         return Ok(ir_path.to_string());
     }
     let window = crate::obs_anchor::fit_window(&env.model, config)
         .map_err(|e| format!("resolving this model's observation anchors from [data]: {e}"))?;
     let moved = crate::obs_anchor::substitute(&mut env.model, window)?;
-    crate::obs_anchor::report(&moved, &env.model);
-    crate::obs_anchor::spline_hold_notices(&env.model, &moved, env.model.simulation.t_end)
-        .emit_stderr();
+    crate::obs_anchor::report(out, &moved, &env.model);
+    out.notices(&crate::obs_anchor::spline_hold_notices(&env.model, &moved, env.model.simulation.t_end));
 
     // A fresh temp, never the input path: `resolve_ir_path` returns a
     // user-supplied `.ir.json` unchanged, and a command must not rewrite the
@@ -537,7 +535,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // `.camdl` source plus the data digests, so two data vintages against one
     // anchored model key differently through the data, exactly as two vintages
     // of any fit do.
-    let compiled_ir = resolve_anchors_into_temp_ir(&compiled_ir, &config.problem)
+    let compiled_ir = resolve_anchors_into_temp_ir(&out, &compiled_ir, &config.problem)
         .unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));
         });
@@ -1363,7 +1361,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // at, so what is recorded is what the chains start from.
                 let fp = runner::resolve_fit_parameters(&sweep_config, seed);
                 if let Ok(fp) = &fp {
-                    crate::params_resolver::emit_notices(&[&fp.resolved]);
+                    crate::params_resolver::emit_notices(&out, &[&fp.resolved]);
                     seg_sidecar.parameters_provenance =
                         crate::run_meta::ParameterProvenance::of_all(&fp.resolved.params);
                 }

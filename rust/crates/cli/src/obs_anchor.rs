@@ -83,11 +83,11 @@ pub fn model_is_anchored(model: &ir::Model) -> bool {
 /// observation times, the error names each anchored construct — "resolve it" is
 /// not actionable without knowing which construct needs the data.
 pub fn resolve_from_bindings(
-    model: &mut ir::Model,
+    out: &crate::out::Out, model: &mut ir::Model,
     bound: &[(String, std::path::PathBuf)],
     dt: f64,
 ) -> Result<bool, String> {
-    resolve_with(model, |m| crate::obs_anchors_from_bindings(m, bound, dt))
+    resolve_with(out, model, |m| crate::obs_anchors_from_bindings(m, bound, dt))
 }
 
 /// As [`resolve_from_bindings`], for a command holding a fit config rather than
@@ -96,11 +96,11 @@ pub fn resolve_from_bindings(
 /// refusal wording are shared, so the two commands cannot drift on what a
 /// resolved anchor means or on what an unresolvable one says.
 pub fn resolve_from_config(
-    model: &mut ir::Model,
+    out: &crate::out::Out, model: &mut ir::Model,
     config: &crate::fit::config_v2::Problem,
     dt: f64,
 ) -> Result<bool, String> {
-    resolve_with(model, |m| crate::obs_anchors_from_config(m, config, dt))
+    resolve_with(out, model, |m| crate::obs_anchors_from_config(m, config, dt))
 }
 
 /// The observed window a FIT anchors `model` to: the fold over the fit
@@ -128,11 +128,11 @@ pub fn fit_window(
 /// through here (`pfilter`, `profile`, `survey`) report a hold exactly as
 /// `simulate` and `fit` do.
 fn resolve_with(
-    model: &mut ir::Model,
+    out: &crate::out::Out, model: &mut ir::Model,
     read_window: impl FnOnce(&ir::Model) -> Result<(f64, f64), String>,
 ) -> Result<bool, String> {
     if !model_is_anchored(model) {
-        spline_hold_notices(model, &[], model.simulation.t_end).emit_stderr();
+        out.notices(&spline_hold_notices(model, &[], model.simulation.t_end));
         return Ok(false);
     }
     let (first, last) = read_window(model).map_err(|e| {
@@ -143,8 +143,8 @@ fn resolve_with(
         )
     })?;
     let moved = substitute(model, ObsAnchorTimes { first, last })?;
-    report(&moved, model);
-    spline_hold_notices(model, &moved, model.simulation.t_end).emit_stderr();
+    report(out, &moved, model);
+    out.notices(&spline_hold_notices(model, &moved, model.simulation.t_end));
     Ok(true)
 }
 
@@ -560,7 +560,7 @@ pub fn spline_hold_notices(
 /// see which number a run actually used — the same posture `--to` already has.
 /// The calendar date is appended when the model is anchored to an origin,
 /// because "t = 91" is not something a modeller can check against a data file.
-pub fn report(resolved: &[ResolvedAnchor], model: &ir::Model) {
+pub fn report(out: &crate::out::Out, resolved: &[ResolvedAnchor], model: &ir::Model) {
     for r in resolved {
         let cal = model
             .origin
@@ -568,7 +568,7 @@ pub fn report(resolved: &[ResolvedAnchor], model: &ir::Model) {
             .and_then(|o| ir::caltime::internal_to_date(o, r.resolved, &model.time_unit).ok())
             .map(|d| format!(" ({d})"))
             .unwrap_or_default();
-        eprintln!("{}: {} → t = {}{}", r.site, r.anchor, r.resolved, cal);
+        out.say(format_args!("{}: {} → t = {}{}", r.site, r.anchor, r.resolved, cal));
     }
 }
 

@@ -235,7 +235,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // computed from it. An unanchored model falls through untouched.
     match &bound_streams {
         Some(bound) => {
-            if let Err(e) = crate::obs_anchor::resolve_from_bindings(&mut model_in, bound, dt) {
+            if let Err(e) = crate::obs_anchor::resolve_from_bindings(&out, &mut model_in, bound, dt) {
                 out.fail(format!("error: {e}"));
             }
         }
@@ -243,8 +243,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             if let Some(msg) = crate::obs_anchor::refuse_without_data(&model_in, PFILTER_SUPPLY) {
                 out.fail(format!("error: {msg}"));
             }
-            crate::obs_anchor::spline_hold_notices(&model_in, &[], model_in.simulation.t_end)
-                .emit_stderr();
+            out.notices(&crate::obs_anchor::spline_hold_notices(&model_in, &[], model_in.simulation.t_end));
         }
     }
 
@@ -300,7 +299,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     }).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e.with_flags(crate::params_resolver::FlagStyle::Params)));
     });
-    emit_notices(&[&resolved]);
+    emit_notices(&out, &[&resolved]);
     let model = resolved.model.clone();
 
     let compiled = CompiledModel::new(model.clone())

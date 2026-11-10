@@ -171,7 +171,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         None
     };
 
-    let resolved = match resolve_survey_inputs(a) {
+    let resolved = match resolve_survey_inputs(&out, a) {
         Ok(r) => r,
         Err(e) => {
             out.fail(format!("error: {}", e));
@@ -678,7 +678,7 @@ fn refuse_survey_without_finite_boxes(estimated: &[EstimatedParam]) -> Result<()
         open.join(", ")))
 }
 
-fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
+fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
     -> Result<ResolvedSurveyInputs, String>
 {
     use crate::fit::config_v2::Problem;
@@ -711,7 +711,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         // the compiled IR would re-introduce the unresolved marker (gh#616
         // regression, commit 7af5c9fa).
         let moved_any_anchor =
-            crate::obs_anchor::resolve_from_config(&mut model_pre, &config, SURVEY_DT)?;
+            crate::obs_anchor::resolve_from_config(out, &mut model_pre, &config, SURVEY_DT)?;
         // The run is content-addressed by the IR TEXT
         // (`resolve::model_identity_from_ir`), not by `model_pre`, so the
         // substitution has to reach the text too — else two data vintages that
@@ -831,7 +831,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         ).map_err(|e| e.to_string())?;
         let mut resolved = resolved;
         resolved.attribute_seeded_starts(&seeded);
-        crate::params_resolver::emit_notices(&[&resolved]);
+        crate::params_resolver::emit_notices(out, &[&resolved]);
         let parameters_provenance =
             crate::run_meta::ParameterProvenance::of_all(&resolved.params);
         let notices = crate::params_resolver::notices(&[&resolved]);
@@ -1013,7 +1013,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             .iter()
             .map(|o| (o.name.clone(), std::path::PathBuf::from(&data_path)))
             .collect();
-        let moved_any_anchor = crate::obs_anchor::resolve_from_bindings(
+        let moved_any_anchor = crate::obs_anchor::resolve_from_bindings(out,
             &mut model_pre, &inline_bindings, SURVEY_DT,
         )?;
         let model_ir_json = if moved_any_anchor {
@@ -1087,7 +1087,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
                 table_files: &table_files,
             },
         ).map_err(|e| e.to_string())?;
-        crate::params_resolver::emit_notices(&[&resolved]);
+        crate::params_resolver::emit_notices(out, &[&resolved]);
         let parameters_provenance =
             crate::run_meta::ParameterProvenance::of_all(&resolved.params);
         let notices = crate::params_resolver::notices(&[&resolved]);
