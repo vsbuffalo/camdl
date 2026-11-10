@@ -339,7 +339,7 @@ pub fn resolve_fixed_for_backfill(
 ) -> Result<Vec<(String, f64)>, String> {
     let path = Path::new(fit_ref);
     if path.is_dir() {
-        let side = crate::run_meta::read_fit_sidecar(path).ok_or_else(|| {
+        let side = crate::run_meta::read_fit_sidecar(path)?.ok_or_else(|| {
             format!("no fit.meta.json under {fit_ref} to read the fit's [fixed] block from")
         })?;
         let mut out: Vec<(String, f64)> = side.fixed.into_iter().collect();

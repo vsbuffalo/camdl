@@ -91,7 +91,10 @@ pub struct FitView {
     // ── sidecar provenance (never defaulted on a well-formed segment) ──
     pub model: String,
     pub model_identity: String,
-    pub fit_toml_path: String,
+    /// The producing config, relative to the fit folder
+    /// ([`crate::run_meta::FitSidecar::source_config`]); `None` for a
+    /// CLI-only fit.
+    pub source_config: Option<String>,
     pub fit_toml_hash: String,
     pub data_hashes: HashMap<String, String>,
     pub estimated: Vec<String>,
@@ -315,8 +318,12 @@ impl FitView {
         // no sidecar is malformed — skip it loudly (the writer always writes
         // one).
         let side = match crate::run_meta::read_fit_sidecar(seg) {
-            Some(s) => s,
-            None => {
+            Ok(Some(s)) => s,
+            Err(e) => {
+                crate::out::detached().say(format_args!("warning: skipping fit {}: {e}", seg.display()));
+                return None;
+            }
+            Ok(None) => {
                 crate::out::detached().say(format_args!(
                     "warning: fit {} has method leaves but no fit.meta.json provenance \
                      sidecar — skipping (provenance missing)",
@@ -360,7 +367,7 @@ impl FitView {
             argv,
             model: side.model_path,
             model_identity: side.model_identity,
-            fit_toml_path: side.fit_toml_path,
+            source_config: side.source_config,
             fit_toml_hash: side.fit_toml_hash,
             data_hashes: side.data_hashes.into_iter().collect(),
             estimated: side.estimated,
@@ -430,7 +437,8 @@ mod tests {
             label: Some("a fit".into()),
             model_path: "sir.camdl".into(),
             model_identity: "f00d".repeat(16),
-            fit_toml_path: "fit.toml".into(),
+            schema_version: crate::run_meta::FIT_META_SCHEMA_VERSION,
+            source_config: None,
             fit_toml_hash: "cafe".repeat(16),
             data_hashes: std::collections::BTreeMap::from([("cases".to_string(), "d4ta".repeat(2))]),
             estimated: vec!["beta".into(), "gamma".into()],
@@ -478,7 +486,7 @@ mod tests {
         assert_eq!(view.model, "sir.camdl", "model");
         assert_eq!(view.model_identity, "f00d".repeat(16), "model_identity");
         assert!(!view.model_identity.is_empty(), "model_identity must be non-empty");
-        assert_eq!(view.fit_toml_path, "fit.toml", "fit_toml_path");
+        assert_eq!(view.source_config, None, "no config file was given to the writer");
         assert_eq!(view.fit_toml_hash, "cafe".repeat(16), "fit_toml_hash");
         assert_eq!(view.data_hashes.get("cases").map(String::as_str), Some("d4tad4ta"), "data_hashes");
         assert_eq!(view.estimated, vec!["beta", "gamma"], "estimated");

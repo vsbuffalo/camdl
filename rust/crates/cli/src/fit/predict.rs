@@ -877,7 +877,7 @@ fn subset_convergence(
     // estimated parameter behind the same filter that legitimately hides a
     // pinned one. Without the sidecar the two cannot be told apart, so the band
     // says "not assessed" rather than inventing a verdict.
-    let Some(estimated) = crate::run_meta::read_fit_sidecar(segment).map(|s| s.estimated) else {
+    let Some(estimated) = crate::run_meta::read_fit_sidecar(segment)?.map(|s| s.estimated) else {
         return Ok(ConvergenceStatus::NotAssessed);
     };
     // A subset of chains that began at one point still began at one point.
@@ -1762,7 +1762,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                     --stream (if given) names a real stream".into());
     }
 
-    let schema = crate::run_meta::read_fit_sidecar(&segment).and_then(|s| s.schema);
+    let schema = crate::run_meta::read_fit_sidecar(&segment)?.and_then(|s| s.schema);
     let seed = args.seed.unwrap_or(1);
 
     // Build the generated-quantities evaluator once (the IR is fixed across draws);

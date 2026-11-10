@@ -3208,7 +3208,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
             dir.join("fit.meta.json"),
-            r#"{"model_path":"sir.camdl","model_identity":"f00d","fit_toml_path":"fit.toml","estimated":["R0","sigma","gamma"]}"#,
+            r#"{"model_path":"sir.camdl","model_identity":"f00d","schema_version":2,"source_config":"fit.toml","estimated":["R0","sigma","gamma"]}"#,
         )
         .unwrap();
     }

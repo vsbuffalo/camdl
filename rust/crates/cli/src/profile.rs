@@ -1603,9 +1603,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             label: label_arg.clone(),
             model_path: ir_path.clone(),
             model_identity: model_identity.clone(),
-            fit_toml_path: a.fit.as_ref()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default(),
             fit_toml_hash: fit_toml_hash.clone().unwrap_or_default(),
             data_hashes: data_hashes.iter().cloned().collect(),
             estimated: roles.estimated,
