@@ -213,10 +213,10 @@ pub fn run_method(
     // no PF). Measures the spread that governs acceptance and reports it
     // against this run's own target; see `pf_noise`.
     if is_ode_mh {
-        eprintln!("\nODE marginal-likelihood check at base θ (deterministic)...");
+        out.say("\nODE marginal-likelihood check at base θ (deterministic)...");
     } else {
-        eprintln!("\npfilter noise check ({} particles, {} evaluation pairs)...",
-            n_particles, pf_noise::NOISE_PAIRS);
+        out.say(format_args!("\npfilter noise check ({} particles, {} evaluation pairs)...",
+            n_particles, pf_noise::NOISE_PAIRS));
     }
     let base = config.base_params.clone();
 
@@ -249,7 +249,7 @@ pub fn run_method(
                     "mh: structural error during ODE loglik check at base θ: {}", e)),
             Err(_) => f64::NEG_INFINITY,
         };
-        eprintln!("  ODE log L = {:.1} (deterministic; no PF variance)", ll_mean);
+        out.say(format_args!("  ODE log L = {:.1} (deterministic; no PF variance)", ll_mean));
     } else {
         // What governs acceptance is the spread of the log-likelihood
         // *difference* between the two θ a Metropolis step compares, so the
@@ -268,11 +268,11 @@ pub fn run_method(
 
         match pf_noise::summarize(&base_lls, &proposed_lls, n_particles) {
             Some(check) => {
-                eprint!("{}", pf_noise::report(
+                out.say_raw(format_args!("{}", pf_noise::report(
                     &check,
                     config.estimated_params.len(),
                     config.observations.len(),
-                ));
+                )));
                 out.check(super::report::Check::FilterNoise { check });
                 pf_noise_check = Some(check);
             }
@@ -289,13 +289,13 @@ pub fn run_method(
                     (true, false) => "the base θ",
                     _             => "the proposed θ'",
                 };
-                eprintln!("  log L̂ mean = {:.1}", ll_mean);
-                eprintln!("  {tag} — the filter ruled out {} \
+                out.say(format_args!("  log L̂ mean = {:.1}", ll_mean));
+                out.say(format_args!("  {tag} — the filter ruled out {} \
                     (log L̂ = -inf),\n    so there is no spread to take and no acceptance \
                     ceiling to report. The chain\n    still runs; its acceptance rate is then \
                     the only evidence on whether it moves.",
                     which,
-                    tag = crate::out::paint::stderr().paint("⚠ no noise measurement", Style::Warn));
+                    tag = crate::out::paint::stderr().paint("⚠ no noise measurement", Style::Warn)));
             }
         }
     }
@@ -304,9 +304,9 @@ pub fn run_method(
     if !force && !resume {
         let state_path = method_dir.join("fit_state.toml");
         if state_path.exists() {
-            eprintln!("{}", crate::out::paint::stderr().paint(&format!(
+            out.say(format_args!("{}", crate::out::paint::stderr().paint(&format!(
                 "{method_name} results already exist in {}. Use --force to re-run or --resume to continue.",
-                method_dir.display()), Style::Warn));
+                method_dir.display()), Style::Warn)));
             return Ok(Vec::new());
         }
     }
@@ -366,29 +366,29 @@ pub fn run_method(
                                 with --force.",
                                 chain));
                         }
-                        eprintln!("  chain {}: resuming from step {}", chain, state.completed_steps);
+                        out.say(format_args!("  chain {}: resuming from step {}", chain, state.completed_steps));
                         if let Some(gap) = sim::inference::types::z_restore_gaps(
                             &state.param_names, &state.transformed, &config.estimated_params)
                         {
-                            eprintln!("{gap}");
+                            out.say(gap);
                         }
                         if state.completed_steps >= n_steps {
-                            eprintln!("  warning: chain already completed {} steps (requested {}). \
+                            out.say(format_args!("  warning: chain already completed {} steps (requested {}). \
                                        Increase steps in fit.toml to continue.",
-                                state.completed_steps, n_steps);
+                                state.completed_steps, n_steps));
                         }
                         states.push(Some(state));
                     }
                     Err(e) => {
-                        eprintln!("error: cannot deserialize resume state for chain {}: {}. \
-                            Resume state format may have changed — re-run with --force.", chain, e);
+                        out.say(format_args!("error: cannot deserialize resume state for chain {}: {}. \
+                            Resume state format may have changed — re-run with --force.", chain, e));
                         any_failed = true;
                         states.push(None);
                     }
                 }
                 Err(_) => {
-                    eprintln!("error: no resume state file for chain {} ({})",
-                        chain, path.display());
+                    out.say(format_args!("error: no resume state file for chain {} ({})",
+                        chain, path.display()));
                     any_failed = true;
                     states.push(None);
                 }
@@ -408,12 +408,12 @@ pub fn run_method(
 
     // The ODE path runs no particle filter, so it has no particle count.
     let particles = if is_ode_mh { String::new() } else { format!(" × {n_particles} particles") };
-    eprintln!("\n{method_name}: {n_chains} chains × {n_steps} steps{particles}, \
-               burn_in={burn_in}, thin={thin}, adapt={adapt}");
-    eprintln!("  proposal_sd (transformed): [{}]",
+    out.say(format_args!("\n{method_name}: {n_chains} chains × {n_steps} steps{particles}, \
+               burn_in={burn_in}, thin={thin}, adapt={adapt}"));
+    out.say(format_args!("  proposal_sd (transformed): [{}]",
         config.estimated_params.iter().zip(&proposal_sd)
             .map(|(p, &sd)| format!("{}={:.4}", p.name, sd))
-            .collect::<Vec<_>>().join(", "));
+            .collect::<Vec<_>>().join(", ")));
 
     // One `Reporter` hands out a per-chain `Task` rendered as a coordinated
     // stack. The Reporter honors --progress (Pretty=bars, Plain=throttled
@@ -504,7 +504,7 @@ pub fn run_method(
                         // chain CAN still recover if a finite-likelihood region
                         // is within proposal reach; a persistent 0% acceptance
                         // means the start itself is the problem.
-                        eprintln!(
+                        out.say(format_args!(
                             "  {w}: chain {} starts at a θ with \
                              -inf log-likelihood — the start predicts a trajectory that \
                              can't explain the data (e.g. an epidemic that goes extinct \
@@ -514,7 +514,7 @@ pub fn run_method(
                              multi-start `init`, or adjust the start toward a θ that \
                              sustains the epidemic).",
                             ChainIndex(chain_id),
-                            w = crate::out::paint::stderr().paint("warning", Style::Warn));
+                            w = crate::out::paint::stderr().paint("warning", Style::Warn)));
                     }
                     _ => {
                         // Ok(finite) or a recoverable Err (ruled-out θ) — MH
@@ -544,10 +544,10 @@ pub fn run_method(
                             chain_id, attempt, values, reason: reason.clone(),
                             ess: runner::ess_at_refusal(&e),
                         });
-                        eprintln!(
+                        out.say(format_args!(
                             "  chain {}: start {} of {} refused by the filter ({}); drawing another",
                             ChainIndex(chain_id), attempt + 1, super::chain_starts::MAX_START_ATTEMPTS,
-                            reason);
+                            reason));
                         attempt += 1;
                         let cs = super::runner::redraw_chain_start_for(
                             &config, estimate, starts, n_chains, chain_id, seed, attempt,
@@ -597,9 +597,9 @@ pub fn run_method(
                             chain_id, params, reason: reason.clone(),
                             attempts: Vec::new(),
                         });
-                        eprintln!("  chain {}: {} — {}",
+                        out.say(format_args!("  chain {}: {} — {}",
                             ChainIndex(chain_id),
-                            crate::out::paint::stderr().paint("✗ BadInit", Style::Err), reason);
+                            crate::out::paint::stderr().paint("✗ BadInit", Style::Err), reason));
                         // The bar is cleared in the post-loop finish; the skip
                         // is already loud on stderr above.
                         return Ok(None);
@@ -810,10 +810,10 @@ pub fn run_method(
     // were tolerated rather than silently dropped.
     let n_good_chains = results.len();
     if n_good_chains < n_chains {
-        eprintln!("\n{} \
+        out.say(format_args!("\n{} \
                    ({} skipped via BadInit; see diagnostics below)",
             crate::out::paint::stderr().paint(&format!("ran {n_good_chains} of {n_chains} chains"), Style::Warn),
-            n_chains - n_good_chains);
+            n_chains - n_good_chains));
     }
 
     let elapsed = t0.elapsed();
@@ -1085,14 +1085,14 @@ pub fn run_method(
                     let fields: Vec<&str> = line.split('\t').collect();
                     let step: usize = match fields.get(step_col).and_then(|s| s.parse().ok()) {
                         Some(s) => s,
-                        None => { eprintln!("warning: trace.tsv row missing step index; skipping"); continue; }
+                        None => { out.say("warning: trace.tsv row missing step index; skipping"); continue; }
                     };
                     if step < burn_in { continue; }  // warm-up: not a posterior draw
                     let mut vals: Vec<String> = param_col_indices.iter().map(|&col_idx| {
                         if col_idx < fields.len() {
                             fields[col_idx].to_string()
                         } else {
-                            eprintln!("warning: trace.tsv missing column at index {}", col_idx);
+                            out.say(format_args!("warning: trace.tsv missing column at index {}", col_idx));
                             "NaN".to_string()
                         }
                     }).collect();
@@ -1105,7 +1105,7 @@ pub fn run_method(
             }
         }
         drop(f);
-        eprintln!("  draws.tsv: {} posterior samples (all {} params)", n_draws, all_names.len());
+        out.say(format_args!("  draws.tsv: {} posterior samples (all {} params)", n_draws, all_names.len()));
     }
 
     // Persist the findings. The end of the run prints them once, merged,
