@@ -122,25 +122,25 @@ struct BundlePlan {
 // ── entry points ─────────────────────────────────────────────────────────────
 
 pub(crate) fn cmd_mre_fit(args: &MreFitArgs) {
-    let out = args
+    let out = crate::out::Out::new(false);
+    let bundle = args
         .bundle
         .clone()
         .unwrap_or_else(|| default_bundle_path(&args.config));
-    if let Err(e) = collect_fit(args).and_then(|plan| write_bundle(&plan, &out)) {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+    if let Err(e) = collect_fit(args).and_then(|plan| write_bundle(&out, &plan, &bundle)) {
+        out.fail(format!("error: {e}"));
     }
 }
 
 pub(crate) fn cmd_mre_simulate(args: &MreSimulateArgs) {
     let argv: Vec<String> = std::env::args().collect();
-    let out = args
+    let out = crate::out::Out::new(false);
+    let bundle = args
         .bundle
         .clone()
         .unwrap_or_else(|| default_bundle_path(&args.sim.model));
-    if let Err(e) = collect_simulate(args, &argv).and_then(|plan| write_bundle(&plan, &out)) {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+    if let Err(e) = collect_simulate(args, &argv).and_then(|plan| write_bundle(&out, &plan, &bundle)) {
+        out.fail(format!("error: {e}"));
     }
 }
 
@@ -340,7 +340,7 @@ fn shell_join(tokens: &[String]) -> String {
 /// layout, write `manifest.toml` + `README.md`, tar+gzip to `out`, and print the
 /// report (+ a consent banner if observed data is included). Command-agnostic:
 /// it consumes a [`BundlePlan`] and never inspects how the closure was found.
-fn write_bundle(plan: &BundlePlan, out: &Path) -> Result<(), String> {
+fn write_bundle(out: &crate::out::Out, plan: &BundlePlan, bundle: &Path) -> Result<(), String> {
     let staging = tempfile::tempdir()
         .map_err(|e| format!("cannot create staging dir: {e}"))?;
     let method_root = staging.path();
@@ -381,11 +381,11 @@ fn write_bundle(plan: &BundlePlan, out: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot write README: {e}"))?;
 
     // ── tarball ──
-    let bundle_name = out
+    let bundle_name = bundle
         .file_name()
         .map(|n| n.to_string_lossy().trim_end_matches(".tar.gz").to_string())
         .unwrap_or_else(|| "mre".to_string());
-    write_tarball(out, &bundle_name, method_root)?;
+    write_tarball(bundle, &bundle_name, method_root)?;
 
     // ── report + consent banner ──
     if data_included {
@@ -394,11 +394,11 @@ fn write_bundle(plan: &BundlePlan, out: &Path) -> Result<(), String> {
             .map(|(name, rows)| format!("{name} ({rows} rows)"))
             .collect::<Vec<_>>()
             .join(", ");
-        eprintln!("\u{26a0}  This bundle contains observed data: {listed}.");
-        eprintln!("   Share only with the maintainer. (Use --no-data for a structure-only bundle.)");
+        out.say(format_args!("\u{26a0}  This bundle contains observed data: {listed}."));
+        out.say("   Share only with the maintainer. (Use --no-data for a structure-only bundle.)");
     }
-    println!("\u{2713} wrote {} ({} files)", out.display(), plan.inputs.len());
-    println!("  reproduce: {}", plan.reproduce);
+    out.data_line(format_args!("\u{2713} wrote {} ({} files)", bundle.display(), plan.inputs.len()));
+    out.data_line(format_args!("  reproduce: {}", plan.reproduce));
     Ok(())
 }
 
