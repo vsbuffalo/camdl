@@ -64,13 +64,12 @@ fn no_color_holds_on_stderr_under_clicolor_force() {
     };
     camdl(&["fit", "run", "pmmh_stuck.toml", "--seed", "8", "--progress", "none"], false);
     let fit = only_fit(&work, "pmmh_stuck-");
-    // `--exclude-chains 2` drops the outlier chain, so the summary's stderr
-    // carries both the identifiability note and the exclusion warning.
+    // `--exclude-chains 2` drops a frozen chain, so the summary's stderr
+    // carries the exclusion warning.
     let (stdout, stderr) = camdl(
         &["fit", "summary", fit.to_str().unwrap(), "--exclude-chains", "2", "--no-color"], true);
     let esc = char::from(0x1b);
     assert!(stderr.contains("warning: --exclude-chains dropped chain(s) 2"), "{stderr}");
-    assert!(stderr.contains("note: chain 2 disagree strongly"), "{stderr}");
     assert!(!stdout.contains(esc), "stdout carries colour under --no-color:\n{stdout:?}");
     assert!(!stderr.contains(esc), "stderr carries colour under --no-color:\n{stderr:?}");
 

@@ -769,12 +769,25 @@ impl FitResult {
             // (gh#990) among them — is the answer, not a reason to reclassify.
             Err(posterior_draws::PosteriorDrawsError::Other(e)) => Err(e),
             Err(posterior_draws::PosteriorDrawsError::NoPosterior(e)) => {
+                // `run_dir` is one run (`resolve_fit_run`), so the view holds
+                // one leaf; more than one is never resolved by picking.
                 if let Some(view) = crate::fit::fit_view::FitView::read(run_dir) {
-                    if let Some(s) = view.methods.last() {
-                        return Ok(FitResult::PointEstimate {
-                            method: Some(s.method),
-                            name: s.method.as_str().to_string(),
-                        });
+                    match view.methods.as_slice() {
+                        [s] => {
+                            return Ok(FitResult::PointEstimate {
+                                method: Some(s.method),
+                                name: s.method.as_str().to_string(),
+                            })
+                        }
+                        [] => {}
+                        several => {
+                            let list: Vec<String> = several.iter()
+                                .map(|s| format!("  {} {}", s.method.as_str(), s.method_dir.display()))
+                                .collect();
+                            return Err(format!(
+                                "{} holds {} runs and this reads one; pass the run's directory:\n{}",
+                                run_dir.display(), several.len(), list.join("\n")));
+                        }
                     }
                 }
                 Err(e)

@@ -37,6 +37,20 @@ pub fn render_markdown(doc: &FitSummaryDoc) -> String {
             render_id_csv(&cs["excluded"]),
         ));
     }
+    // Every leaf, completed or not, when there is more than one, so no run
+    // is read for the reader and a failed one is not left out (gh#896).
+    if doc.leaves.len() > 1 || doc.leaves.iter().any(|l| l.error.is_some() || l.verdict.is_none()) {
+        s.push_str("| method | status | verdict | leaf |\n|---|---|---|---|\n");
+        for l in &doc.leaves {
+            let verdict = match &l.error {
+                Some(e) => format!("{} — {}", l.verdict_text, e),
+                None => l.verdict_text.clone(),
+            };
+            s.push_str(&format!("| `{}` | {} | {} | `{}` |\n",
+                l.method, crate::fit::fit_summary::status_word(l.status), verdict.replace('|', "\\|"), l.leaf));
+        }
+        s.push('\n');
+    }
     if doc.methods.is_empty() {
         s.push_str("_(no completed methods found)_\n");
         return s;
@@ -46,6 +60,7 @@ pub fn render_markdown(doc: &FitSummaryDoc) -> String {
     }
     s
 }
+
 
 pub(crate) fn render_md_method(method: &MethodReport) -> String {
     let mut s = String::new();
@@ -198,6 +213,13 @@ pub fn render_latex(doc: &FitSummaryDoc) -> String {
             cs["n_total"].as_u64().unwrap_or(0),
             render_id_csv(&cs["excluded"]),
         ));
+    }
+    if doc.leaves.len() > 1 || doc.leaves.iter().any(|l| l.error.is_some() || l.verdict.is_none()) {
+        for l in &doc.leaves {
+            s.push_str(&format!("% run: {} {} ({}) {}\n",
+                l.method, crate::fit::fit_summary::status_word(l.status), l.verdict_text, l.leaf));
+        }
+        s.push('\n');
     }
     for method in &doc.methods {
         s.push_str(&render_latex_method(method));

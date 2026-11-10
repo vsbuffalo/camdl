@@ -4139,10 +4139,10 @@ fitted	7	free_forward	posterior	2.0652
 `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred` channels, `n_draws`, and the
 `q05…q95` band.)
 
-> **Current limitation.** A `pfilter` leaf is dropped from `camdl fit table`
-> with a `unknown fit method 'pfilter'` warning, and `fit summary --format json`
-> emits an empty `table_row` for it. The text `fit summary` still renders the
-> IF2 and PGAS leaves correctly.
+> **Current limitation.** A `pfilter` leaf has no row in `camdl fit table`, and
+> no entry in `fit summary --format json`'s `table_rows`; it is listed in
+> `leaves`. The text `fit summary` still renders the IF2 and PGAS leaves
+> correctly.
 
 ### 8.3 Deterministic ODE backend
 
@@ -5626,13 +5626,13 @@ writes it, `pfilter` included, from the moment the method begins.
 
 **The events:**
 
-| `event`         | when                                                                              | its fields                                                                                                                                                                                                                                                                                                             |
-| --------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `begin`         | first, as the method starts                                                       | `method`; `header`, the run's opening block (`config`, `method`, `model`, `estimate`, `fixed`, `starts`, `output`), which no other file in the leaf holds until the leaf commits                                                                                                                                       |
-| `check`         | as each check before sampling is shown                                            | `check`, tagged by `kind`: `obs_stream` (`name`, `carrier`, `family`), `filter_noise` (`check`: `n_particles`, `pairs`, `sigma`, `s`, `ll_mean`), `method_caveat` (`method`, `note`, `series_len`), `starts` (`mode`, `params`, `note`)                                                                                |
-| `progress`      | per chain, at its first step, then at most every 30 seconds, and at its last step | `chain`; `step` of `of`, the chain's progress bar's count, which is the chain's own step (a chain resumed from step 2000 of 2500 reports 2001 first); `loglik` (`value`, and `kind`: `marginal`, `if2`, `ode_marginal` or `complete_data` — PGAS's, not comparable with the others) or `null`; `accept` or `null`      |
-| `finding`       | as each finding is pushed                                                         | `finding`, the record `diagnostics.json` holds for it (`kind`, tagged by `type`; `severity`; `message`; `method`; `timestamp`)                                                                                                                                                                                         |
-| `method_report` | last, as the end-of-run block is shown                                            | `outcome`: `completed`, with `report`, the method's report: the object `fit summary --format json` gives for it under `methods`, built from the run's memory rather than its files, and with non-finite numbers spelled where that document writes `null`; or `failed`, with `error`, the sentence the command printed |
+| `event`         | when                                                                              | its fields                                                                                                                                                                                                                                                                                                                                 |
+| --------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `begin`         | first, as the method starts                                                       | `method`; `header`, the run's opening block (`config`, `method`, `model`, `estimate`, `fixed`, `starts`, `output`), which no other file in the leaf holds until the leaf commits                                                                                                                                                           |
+| `check`         | as each check before sampling is shown                                            | `check`, tagged by `kind`: `obs_stream` (`name`, `carrier`, `family`), `filter_noise` (`check`: `n_particles`, `pairs`, `sigma`, `s`, `ll_mean`), `method_caveat` (`method`, `note`, `series_len`), `starts` (`mode`, `params`, `note`)                                                                                                    |
+| `progress`      | per chain, at its first step, then at most every 30 seconds, and at its last step | `chain`; `step` of `of`, the chain's progress bar's count, which is the chain's own step (a chain resumed from step 2000 of 2500 reports 2001 first); `loglik` (`value`, and `kind`: `marginal`, `if2`, `ode_marginal` or `complete_data` — PGAS's, not comparable with the others) or `null`; `accept` or `null`                          |
+| `finding`       | as each finding is pushed                                                         | `finding`, the record `diagnostics.json` holds for it (`kind`, tagged by `type`; `severity`; `message`; `method`; `timestamp`)                                                                                                                                                                                                             |
+| `method_report` | last, as the end-of-run block is shown                                            | `outcome`: `completed`, with `report`, the method's report: the object `fit summary --format json` gives for it under `methods`, built from the run's memory rather than its files, with non-finite numbers spelled as that document spells them (`"NaN"`, `"inf"`, `"-inf"`); or `failed`, with `error`, the sentence the command printed |
 
 `progress` is written whatever `--progress` says; the display mode governs only
 the terminal. A step is what `progress.json`'s step counts for the method
@@ -6120,9 +6120,9 @@ prior whose support covers the box), and the resolved prior's source
 
 Walks a results tree and renders one row per run — its run id, method,
 convergence verdict, best log-likelihood and its type, age. Rows of one problem
-share a `fit_id`; the JSON row carries the full `run_id` (table_row schema v3),
-the CSV appends it as the last fixed column. The `<ROOT>` argument is
-**required**.
+share a `fit_id`; the JSON row carries the full `run_id` (table_row schema v4,
+in which a non-finite number is the string `"NaN"`, `"inf"` or `"-inf"`), the
+CSV appends it as the last fixed column. The `<ROOT>` argument is **required**.
 
 ```
 $ camdl fit table results/fits

@@ -318,7 +318,7 @@ fn every_recorded_fact_is_shown() {
 /// from the leaf the run wrote (proposal
 /// `docs/dev/proposals/2026-11-08-cli-reporting.md`, "the run-equals-loader
 /// test"). The run's is the `method_report` line of the leaf's
-/// `events.jsonl`; the loader's is `fit summary --format exact-json`'s. Both
+/// `events.jsonl`; the loader's is `fit summary --format json`'s. Both
 /// spell non-finite numbers out, so NaN cannot equal ∞ or a missing value;
 /// equality is exact. Every completed method the fixtures run is compared,
 /// the resumed PMMH leaf included. The failed fit's log ends in a `failed`
@@ -361,9 +361,9 @@ fn run_equals_loader(work: &Path, run: impl Fn(&[&str]) -> Output) {
         let leaf = a["stored"]["leaf"].as_str()
             .unwrap_or_else(|| panic!("{}: a completed report names its leaf", path.display()));
         assert!(work.join(leaf) == *path, "{} names its leaf {leaf}", path.display());
-        let out = run(&["fit", "summary", leaf, "--format", "exact-json"]);
+        let out = run(&["fit", "summary", leaf, "--format", "json"]);
         let doc: serde_json::Value = serde_json::from_str(&out.stdout)
-            .unwrap_or_else(|e| panic!("fit summary {leaf} --format exact-json: {e}\n{}", out.stderr));
+            .unwrap_or_else(|e| panic!("fit summary {leaf} --format json: {e}\n{}", out.stderr));
         let from_leaf = doc["methods"].as_array().expect("the document's methods");
         assert_eq!(from_leaf.len(), 1, "one report from {leaf}: {}", out.stderr);
         let b = &from_leaf[0];

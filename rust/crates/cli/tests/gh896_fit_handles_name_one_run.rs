@@ -918,3 +918,94 @@ fn simulate_posterior_draws_narrow_to_runs_with_draws() {
         "--seed", "1", "--output-dir", "sims"]);
     assert!(all.contains(&pgas_leaf.display().to_string()), "the PGAS run is used and named:\n{all}");
 }
+
+/// One folder holding an IF2 run and a PGAS run: the IF2 run, then the PGAS
+/// run, from one file whose `[method]` changed.
+fn an_if2_and_a_pgas_run(p: &Project) -> (PathBuf, PathBuf, PathBuf) {
+    p.config("mix.toml", &if2(2));
+    p.ok(&["fit", "run", "mix.toml", "--seed", "1"]);
+    p.config("mix.toml", &pgas(4));
+    p.ok(&["fit", "run", "mix.toml", "--seed", "1"]);
+    let leaves = p.leaves();
+    assert_eq!(leaves.len(), 2);
+    let segment = segment_of(&leaves[0]);
+    assert_eq!(segment, segment_of(&leaves[1]), "premise: one folder");
+    let pgas_leaf = leaves.iter().find(|l| l.join("draws.tsv").is_file()).unwrap().clone();
+    let if2_leaf = leaves.iter().find(|l| !l.join("draws.tsv").is_file()).unwrap().clone();
+    (segment, if2_leaf, pgas_leaf)
+}
+
+/// `fit summary` of a folder holding runs of two methods reports every run —
+/// one index row and one section each, in text and JSON — instead of
+/// building its single table row from the one that sorts last.
+#[test]
+fn summary_of_a_folder_with_two_methods_reports_each_run() {
+    let p = Project::new();
+    let (segment, if2_leaf, pgas_leaf) = an_if2_and_a_pgas_run(&p);
+    let seg = segment.to_string_lossy().into_owned();
+
+    let out = p.run(&["fit", "summary", &seg, "--no-color"]);
+    let all = text(&out);
+    assert!(out.status.success(), "{all}");
+    assert!(all.contains("2 runs in this fit, each reported below:"), "{all}");
+    for leaf in [&if2_leaf, &pgas_leaf] {
+        let row = all.lines().find(|l| l.contains(&leaf.display().to_string()) && l.contains("completed"))
+            .unwrap_or_else(|| panic!("an index row for {}:\n{all}", leaf.display()));
+        assert!(row.trim_start().starts_with(if leaf == &if2_leaf { "if2" } else { "pgas" }), "{row}");
+    }
+
+    let out = p.run(&["fit", "summary", &seg, "--format", "json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["schema"]["version"], 5);
+    let leaves = doc["leaves"].as_array().unwrap();
+    let methods: Vec<&str> = leaves.iter().map(|l| l["method"].as_str().unwrap()).collect();
+    assert_eq!(methods, vec!["if2", "pgas"], "{doc}");
+    assert!(leaves.iter().all(|l| l["status"] == "completed" && !l["verdict"].is_null()), "{doc}");
+    assert_eq!(doc["methods"].as_array().unwrap().len(), 2);
+    let rows: Vec<&str> = doc["table_rows"].as_array().unwrap().iter()
+        .map(|r| r["method"].as_str().unwrap()).collect();
+    assert_eq!(rows, vec!["if2", "pgas"], "one table row per run: {doc}");
+    assert!(doc.get("table_row").is_none(), "no single row chosen for the folder: {doc}");
+
+    // A reader that needs one run's estimate refuses, listing both.
+    let out = p.run(&["fit", "summary", &seg, "--params-only"]);
+    let all = text(&out);
+    assert!(!out.status.success(), "--params-only prints one run, so the choice is the user's:\n{all}");
+    for leaf in [&if2_leaf, &pgas_leaf] {
+        assert!(all.contains(&leaf.display().to_string()), "lists {}:\n{all}", leaf.display());
+    }
+    p.ok(&["fit", "summary", &if2_leaf.to_string_lossy(), "--params-only"]);
+}
+
+/// A failed run beside a completed one is listed, with its status, in the
+/// index, the sections and the JSON — not hidden behind the completed run.
+#[test]
+fn a_failed_run_is_listed_beside_a_completed_one() {
+    let p = Project::new();
+    let (segment, if2_leaf, pgas_leaf) = an_if2_and_a_pgas_run(&p);
+    let mut rec = record(&pgas_leaf).2;
+    rec["status"] = serde_json::json!("failed");
+    std::fs::write(pgas_leaf.join("run.json"), serde_json::to_string_pretty(&rec).unwrap()).unwrap();
+    let seg = segment.to_string_lossy().into_owned();
+
+    let out = p.run(&["fit", "summary", &seg, "--no-color"]);
+    let all = text(&out);
+    assert!(out.status.success(), "the IF2 run still answers:\n{all}");
+    let row = all.lines().find(|l| l.contains(&pgas_leaf.display().to_string()) && l.contains("failed"))
+        .unwrap_or_else(|| panic!("the failed run has an index row:\n{all}"));
+    assert!(row.trim_start().starts_with("pgas"), "{row}");
+    assert!(all.contains(&format!("pgas · failed · {}", pgas_leaf.display())),
+        "and a section of its own:\n{all}");
+
+    let out = p.run(&["fit", "summary", &seg, "--format", "json"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let failed: Vec<&serde_json::Value> = doc["leaves"].as_array().unwrap().iter()
+        .filter(|l| l["status"] == "failed").collect();
+    assert_eq!(failed.len(), 1, "{doc}");
+    assert_eq!(failed[0]["method"], "pgas");
+    assert!(failed[0]["verdict"].is_null(), "a failed run has no verdict: {doc}");
+    let rows: Vec<&str> = doc["table_rows"].as_array().unwrap().iter()
+        .map(|r| r["run_id"].as_str().unwrap()).collect();
+    assert_eq!(rows, vec![record(&if2_leaf).0.as_str()], "only the completed run has a row: {doc}");
+}

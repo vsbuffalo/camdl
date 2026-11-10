@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 use runid::{ArtifactKind, RunRecord};
 
 use crate::chain_index::ChainIndex;
-use crate::fit::fit_tree::{derive_axes, MethodAxes};
 use crate::run_meta::{InferenceBackend, FitAlgorithm, ParameterProvenance, ResolvedPriorEntry};
 
 /// One fit-method leaf, projected to the headline numbers the fit consumers
@@ -54,9 +53,10 @@ pub struct FitMethodView {
     pub label: Option<String>,
     /// When the run was written (`provenance.created_at`, ISO 8601 UTC).
     pub created_at: String,
-    /// Whether the run's record says `completed` (not still running, nor
-    /// failed): only a completed run is reported as a result.
-    pub completed: bool,
+    /// What the run's record says it is: `completed`, `running` (or stopped
+    /// without recording an outcome) or `failed`. Only a completed run has a
+    /// result; every reader that lists runs lists the others too, by status.
+    pub status: runid::RunStatus,
     /// Simulation backend the method ran on. Defaults to `ChainBinomial` when
     /// absent.
     pub backend: InferenceBackend,
@@ -69,9 +69,6 @@ pub struct FitMethodView {
     /// competing chains (pfilter), and on a leaf written before the field
     /// existed.
     pub best_chain: Option<ChainIndex>,
-    /// Path-derived `(data_kind, fit_seed, sweep_slug)` axes — `None` for a
-    /// method outside the canonical `{real,synthetic}/...` layout.
-    pub axes: Option<MethodAxes>,
 }
 
 /// Fit-level view of a CAS fit segment: the fit-wide identity + provenance plus
@@ -141,7 +138,7 @@ fn skipped_leaf_line(dir: &Path, why: &str) -> String {
 /// lacks a `method` this camdl knows — a leaf written by a removed algorithm
 /// (`nuts` on the ODE backend) is the case that matters. The caller says so
 /// on stderr ([`skipped_leaf_line`]) rather than dropping the leaf silently.
-fn method_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<FitMethodView, String> {
+fn method_view_from_record(dir: &Path, rec: &RunRecord) -> Result<FitMethodView, String> {
     if rec.kind != ArtifactKind::FitMethod {
         return Err("not a fit-method record".into());
     }
@@ -174,7 +171,7 @@ fn method_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<Fi
         run_id: rec.run_id.to_hex(),
         label: rec.provenance.label.clone(),
         created_at: rec.provenance.created_at.clone().unwrap_or_default(),
-        completed: rec.status == runid::RunStatus::Completed,
+        status: rec.status,
         backend,
         seed: inputs.get("seed").and_then(|v| v.as_u64()).unwrap_or(0),
         n_chains: inputs.get("n_chains").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
@@ -183,7 +180,6 @@ fn method_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<Fi
             .get("best_chain")
             .and_then(|v| v.as_u64())
             .map(|x| ChainIndex(x as usize)),
-        axes: derive_axes(seg, dir),
     })
 }
 
@@ -233,6 +229,13 @@ fn same_dir(a: &Path, b: &Path) -> bool {
             (Ok(x), Ok(y)) => x == y,
             _ => false,
         }
+}
+
+impl FitMethodView {
+    /// Whether the run completed, so has a result to report.
+    pub fn completed(&self) -> bool {
+        self.status == runid::RunStatus::Completed
+    }
 }
 
 impl FitView {
@@ -341,7 +344,7 @@ impl FitView {
 
         let methods: Vec<FitMethodView> = leaves
             .iter()
-            .filter_map(|(dir, r)| match method_view_from_record(seg, dir, r) {
+            .filter_map(|(dir, r)| match method_view_from_record(dir, r) {
                 Ok(v) => Some(v),
                 Err(why) => {
                     crate::out::detached().say(format_args!("{}", skipped_leaf_line(dir, &why)));
@@ -390,7 +393,7 @@ mod tests {
             run_id = "ab".repeat(32),
         ))
         .unwrap();
-        let why = method_view_from_record(&dir, &leaf, &rec)
+        let why = method_view_from_record(&leaf, &rec)
             .expect_err("`nuts` is not a FitAlgorithm any more");
         let line = skipped_leaf_line(&leaf, &why);
         assert!(line.starts_with("warning: skipping fit leaf "), "{line}");

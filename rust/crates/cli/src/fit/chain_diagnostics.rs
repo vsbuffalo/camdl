@@ -1,26 +1,28 @@
-//! Per-chain log-likelihood outlier diagnostics for the Bayesian samplers.
+//! Per-chain log-likelihood comparison for the samplers and for IF2's starts.
 //!
 //! `fit summary`'s aggregate R̂/ESS answer "did the chains agree?" but not
-//! "WHICH chain disagreed." When a minority of MCMC chains wander into a
-//! non-representative side mode (a near-unidentified parameter carving out a
-//! flat ridge), the user is left to open each `chain_N/trace.tsv` by hand to
-//! find the stragglers. A per-chain robust z-score names them.
+//! "which chain differs?". This module compares each chain's mean
+//! log-likelihood with the pooled mean of the other chains, and scales the
+//! difference by its own Monte Carlo uncertainty, so a chain is named only when
+//! its difference from the others is larger than the chains' sampling error can
+//! explain. It corroborates R̂ and ESS; it is not the convergence verdict.
 //!
 //! Read-side only. Everything here is computed at `fit summary` time from the
-//! committed trace files; nothing flows into a `run_id` / CAS key. Adding a
-//! diagnostic does not re-key any fit.
+//! committed trace files (or, for IF2, from `fit_state.toml`'s clean-eval
+//! record); nothing flows into a `run_id` / CAS key.
 //!
 //! One shared seam, and one obligation on everyone who feeds it. The scout
 //! gate message (`gating::format_decibans_spread_verdict`) and the summary
-//! table (`fit_summary`) both name outliers via the same
-//! [`chain_loglik_mod_zscores`] / [`outlier_labels`], so "what counts as an
-//! outlier" is defined in exactly one place. That function scores whatever
-//! numbers it is handed: **the caller owns the claim that they are comparable
-//! across chains.** The scout gate hands it IF2 clean-eval marginals
-//! `log p(y | θ)`; this module's reader hands it whatever
-//! [`LoglikType::chain_agreement_column`] nominates. Anything else — most of
-//! all a per-chain quantity evaluated at that chain's own latent path — is not
-//! an input to this statistic.
+//! table both score chains through [`assess_chain_logliks`], so "what counts
+//! as a chain that differs" is defined in exactly one place. That function
+//! scores whatever estimates it is handed: **the caller owns the claim that
+//! they are comparable across chains, and that each standard error is the
+//! uncertainty of its estimate.** The scout gate hands it IF2 clean-eval
+//! marginals `log p(y | θ)` with the standard error of their replicate mean;
+//! this module's reader hands it the mean of whatever column
+//! [`LoglikType::chain_agreement_column`] nominates, with that mean's Monte
+//! Carlo standard error. Anything else — most of all a per-chain quantity
+//! evaluated at that chain's own latent path — is not an input.
 //!
 //! ## Which column, and why not by position (gh#667)
 //!
@@ -45,39 +47,82 @@
 //! [`LoglikType::chain_agreement_column`]: `obs_ll` (`log p(y | X, θ)`) for
 //! PGAS, `log_likelihood` for the marginal samplers. PGAS's own target and its
 //! transition term are still read and displayed — see
-//! [`CompleteDataMeans`] — they are just never ranked on.
+//! [`CompleteDataMeans`] — they are just never compared.
 //!
-//! ## The statistic: robust modified z-score (Iglewicz & Hoaglin 1993)
+//! ## The statistic: leave-one-out difference over its Monte Carlo error
 //!
-//! We flag on the **modified z-score**
-//!
-//! ```text
-//!   M_i = 0.6745 · (x_i − median(x)) / MAD ,    MAD = median(|x_i − median(x)|)
-//! ```
-//!
-//! centred on the **median** and scaled by the **median absolute deviation**,
-//! both of which ignore the outliers themselves. This is deliberately *not* the
-//! classic `(x − mean)/SD` z-score: mean/SD let a minority of co-stuck chains
-//! inflate the spread and mask their own flag (and cap a single outlier's |z|
-//! at √(N−1), unreachable for small N). The robust version has neither problem
-//! — a handful of chains in a side mode are flagged no matter how many share
-//! it, because the median/MAD describe the *bulk*, not the whole set. The
-//! `0.6745` (≈ Φ⁻¹(0.75)) rescales MAD to a consistent σ-estimator, so the
-//! threshold stays comparable to a normal-theory z.
-//!
-//! `MAD == 0` (≥ half the chains share a numeric value, so the median has zero
-//! robust spread — a degenerate case that does not arise for real MCMC means
-//! but can in synthetic inputs) falls back to Iglewicz–Hoaglin's documented
-//! alternate, the **mean absolute deviation**:
+//! For chain `i` among the `k` chains that can be assessed,
 //!
 //! ```text
-//!   M_i = (x_i − mean(x)) / (1.253314 · MeanAD) ,   MeanAD = mean(|x_i − mean(x)|)
+//!   Z_i = |m_i − m_{−i}| / sqrt(se_i² + se_{−i}²)
 //! ```
 //!
-//! and if `MeanAD` is also 0 (every chain identical) there are no outliers.
-//! Non-finite chain means (an unreadable trace) never poison the median/MAD —
-//! they are excluded from the centre/scale and rendered as `—`, so a broken
-//! chain is visible rather than silently reading as "clean."
+//! where `m_i` is chain `i`'s mean log-likelihood over its retained draws,
+//! `m_{−i}` is the mean over the retained draws of the other chains in the
+//! comparison — every assessed chain not already flagged, see below — each
+//! chain's mean weighted by its number of draws, `se_i` is the Monte
+//! Carlo standard error of `m_i`, and `se_{−i}² = Σ_{j≠i} w_j² se_j²` with
+//! `w_j = n_j / Σ_{l≠i} n_l` is the standard error of the pooled mean — the
+//! chains are independent, so the variances of a weighted mean add with the
+//! weights squared. A chain is flagged when `Z_i` exceeds
+//! [`chain_loglik_cutoff`]`(k)`, a Bonferroni two-sided normal cutoff at
+//! family-wise `α` = [`CHAIN_LOGLIK_FAMILY_ALPHA`].
+//!
+//! `se_i = sd_i / sqrt(ESS_i)`, where `sd_i` is the sample standard deviation
+//! of chain `i`'s retained log-likelihood trace and `ESS_i` is its effective
+//! sample size from [`sim::inference::pmmh::mcmc_ess`] — Geyer's (1992)
+//! initial-positive-sequence estimator over the trace's autocorrelation, the
+//! per-chain ESS `compute_rhat_ess` reports. The trace's own autocorrelation
+//! is what makes this an MCMC standard error rather than an iid one: a sticky
+//! chain has few effective draws and a correspondingly wide `se_i`.
+//!
+//! ### Why this statistic, and not a robust z-score of the chain means
+//!
+//! The earlier statistic was the Iglewicz–Hoaglin (1993) modified z-score of
+//! the chain means, scaled by their median absolute deviation. With four
+//! chains that scale is the median of four numbers' deviations, unstable and
+//! unrelated to how precisely each mean is known: when the chains agree
+//! closely the scale is a few hundredths of a nat and any chain 0.1 nat away
+//! scores beyond the cutoff. It flagged a chain on a converged PMMH fit
+//! (R̂ 1.002, bulk ESS ≈ 470) for a 0.13-nat difference (gh#1008). The
+//! leave-one-out `Z_i` compares a discrepancy with its own uncertainty, so it
+//! needs no scale estimated from the chains' spread. No median/MAD guard is
+//! kept beside it: its only job was to supply that scale.
+//!
+//! ### What it can and cannot say
+//!
+//! A flagged chain's mean log-likelihood differs from the other chains' by
+//! more than Monte Carlo error explains. That is consistent with a chain
+//! sampling another region of the posterior (a side mode, a ridge along a
+//! weakly identified parameter) or one that has not yet mixed; the statistic
+//! alone does not say which, and the message never claims either as fact.
+//!
+//! - **A PMMH trace includes the particle filter's noise.** The recorded
+//!   log-likelihood of an accepted state is a particle-filter estimate, and
+//!   its error is frozen into the chain until the next acceptance. The trace's
+//!   autocorrelation, and so `se_i`, reflects that noise as the chain sees it:
+//!   long runs of a lucky overestimate make the chain sticky and widen `se_i`.
+//! - **One chain off does not flag the rest.** A chain far from the others
+//!   moves the pooled mean every other chain is compared with: with five
+//!   chains at −100 and one at −400, each good chain's "others" average −160,
+//!   and every chain would score far beyond the cutoff. So the chain with the
+//!   largest `Z` is flagged and removed, and the rest are compared again
+//!   without it, until no remaining chain exceeds the cutoff (backward
+//!   elimination, as in Rosner's (1983) generalized ESD procedure, here with
+//!   the cutoff held at its Bonferroni value for the original `k`). The first
+//!   step is the test above over all `k` chains, so a fit whose chains all
+//!   agree is flagged with probability at most `α`. When two chains remain and
+//!   differ, both are flagged: neither is the odd one out.
+//! - **Chains that cannot be assessed are said to be.** A chain with no
+//!   readable trace, a non-finite mean, or fewer than
+//!   [`CHAIN_LOGLIK_MIN_ESS`] effective draws (a chain that never moved has
+//!   one) is reported "not assessed", neither passed nor flagged, and is left
+//!   out of the other chains' pooled mean. A chain frozen at one state is
+//!   caught by the point-mass and `-inf` screens of this module instead.
+//! - **IF2 is an optimiser.** Its chains' final log-likelihoods are evaluated
+//!   at different θ; the gate compares them with their evaluation noise (the
+//!   standard error of the clean-eval replicate mean) to ask whether one start
+//!   reached a better optimum than the others beyond that noise.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -91,130 +136,280 @@ use super::loglik::{LoglikType, TRACE_COL_COMPLETE_DATA_LL, TRACE_COL_TRANSITION
 /// is itself read by the degeneracy screen (gh#608).
 const TRACE_COL_LOG_POSTERIOR: &str = "log_posterior";
 
-/// Flag a chain when its **modified z-score** exceeds this in magnitude. 3.5 is
-/// the Iglewicz–Hoaglin (1993) recommended cutoff: with the 0.6745 rescaling,
-/// MAD is a consistent σ-estimator, so 3.5 modified-SDs is the robust analogue
-/// of a 3.5-σ classic z. Named (not inlined) so the gate and the summary share
-/// one threshold.
-pub const CHAIN_LOGLIK_OUTLIER_MODZ: f64 = 3.5;
+/// Family-wise false-alarm rate of the per-chain log-likelihood comparison:
+/// the probability, over all `k` chains of a well-mixed fit, that any one of
+/// them is flagged by Monte Carlo error alone. One in a thousand fits.
+pub const CHAIN_LOGLIK_FAMILY_ALPHA: f64 = 0.001;
 
-/// One chain's mean log-likelihood and its robust modified z-score against the
-/// between-chain spread.
+/// The fewest effective draws a chain's trace must carry for its Monte Carlo
+/// standard error to be estimated. Below this the autocorrelation sum behind
+/// the ESS rests on a handful of effective draws and the standard error is
+/// itself too uncertain to scale a test by, so the chain is not assessed
+/// rather than passed or flagged.
+pub const CHAIN_LOGLIK_MIN_ESS: f64 = 10.0;
+
+/// The two-sided cutoff on `Z_i` when `k` chains are compared:
+/// `z* = Φ⁻¹(1 − α / (2k))` with `α` = [`CHAIN_LOGLIK_FAMILY_ALPHA`].
+///
+/// Bonferroni over the `k` leave-one-out tests, each two-sided: each test is
+/// run at level `α / k`, split `α / (2k)` per tail, so the chance that any
+/// chain of a well-mixed fit is flagged is at most `α` whatever the
+/// dependence between the tests (they share chains, so they are dependent).
+/// `k = 2` gives 3.48, `k = 4` gives 3.66, `k = 8` gives 3.84. Computed as
+/// `−Φ⁻¹(α / (2k))`, the lower tail, which keeps full precision where
+/// `1 − α / (2k)` would round.
+pub fn chain_loglik_cutoff(k: usize) -> f64 {
+    -sim::inference::normal_quantile(CHAIN_LOGLIK_FAMILY_ALPHA / (2.0 * k.max(1) as f64))
+}
+
+/// Why a chain was neither passed nor flagged.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NotAssessed {
+    /// The chain has no readable trace, or its mean log-likelihood is not
+    /// finite (a trace with `-inf` rows, gh#608).
+    NonFiniteMean,
+    /// The chain's trace carries fewer than [`CHAIN_LOGLIK_MIN_ESS`]
+    /// effective draws, too few to estimate the standard error of its mean.
+    TooFewEffectiveDraws { ess: f64 },
+    /// No usable standard error was supplied (IF2: `fit_state.toml` records
+    /// no clean-eval standard error for the chain, or one that is zero or not
+    /// finite).
+    NoStandardError,
+    /// Fewer than two chains could be assessed, so there are no others to
+    /// compare it with.
+    TooFewChains,
+}
+
+impl NotAssessed {
+    /// The reason, as a clause the per-chain table's note prints.
+    pub fn describe(&self) -> String {
+        match self {
+            NotAssessed::NonFiniteMean => "the mean log-likelihood is not a finite number".into(),
+            NotAssessed::TooFewEffectiveDraws { ess } => format!(
+                "the trace has {ess:.1} effective draws, fewer than the {CHAIN_LOGLIK_MIN_ESS:.0} \
+                 needed to estimate the Monte Carlo error of the mean"
+            ),
+            NotAssessed::NoStandardError => {
+                "no usable standard error of the log-likelihood is recorded".into()
+            }
+            NotAssessed::TooFewChains => "fewer than two chains could be assessed".into(),
+        }
+    }
+}
+
+/// One chain's mean log-likelihood and the standard error of that mean: the
+/// input [`assess_chain_logliks`] compares.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ChainZScore {
+pub struct ChainLoglikEstimate {
+    /// The chain's number, as its `chain_N/` directory carries it (gh#990).
+    pub chain: ChainIndex,
+    /// The mean log-likelihood. `NaN` when the chain has no readable trace.
+    pub mean: f64,
+    /// How much the mean counts in the other chains' pooled mean: its number
+    /// of retained draws for a sampler, 1 for an IF2 start.
+    pub weight: f64,
+    /// The standard error of `mean`, or why there is none.
+    pub se: Result<f64, NotAssessed>,
+}
+
+/// One chain's leave-one-out comparison, when it could be made.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChainLoglikTest {
+    /// `m_i − m_{−i}`: the chain's mean minus the pooled mean of the others,
+    /// in nats. Negative when the chain sits below the others.
+    pub diff: f64,
+    /// `sqrt(se_i² + se_{−i}²)`, the standard error of `diff`.
+    pub se: f64,
+    /// `|diff| / se`.
+    pub z: f64,
+    /// The cutoff `z` was compared with, [`chain_loglik_cutoff`] for the
+    /// number of chains assessed.
+    pub cutoff: f64,
+    /// `z > cutoff`.
+    pub flagged: bool,
+}
+
+/// The outcome for one chain: compared, or why not.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChainLoglikOutcome {
+    Assessed(ChainLoglikTest),
+    NotAssessed(NotAssessed),
+}
+
+/// One chain's mean log-likelihood and its comparison with the other chains.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChainLoglikScore {
     /// The chain's number — the one its `chain_N/` directory and every other
     /// artifact carry (gh#990), read from the directory, never from a row's
     /// position (gh#913).
     pub chain: ChainIndex,
-    /// Mean log-likelihood over this chain's post-burn-in draws. `NaN` when the
-    /// chain had no readable trace rows (rendered `—`, never counted "clean").
+    /// The chain's mean log-likelihood. `NaN` when the chain had no readable
+    /// trace rows (rendered `—`, never counted as agreeing).
     pub mean_loglik: f64,
-    /// Modified z-score (median/MAD, or mean/MeanAD when MAD == 0). `0.0` for a
-    /// single chain or perfect agreement; `NaN` when `mean_loglik` is non-finite.
-    pub mod_z: f64,
-    /// `|mod_z| > CHAIN_LOGLIK_OUTLIER_MODZ`. Always `false` for a non-finite
-    /// `mod_z` (a NaN is surfaced as `—`, not swallowed as "not an outlier").
-    pub is_outlier: bool,
+    pub outcome: ChainLoglikOutcome,
 }
 
-/// Per-chain robust modified z-scores from `(chain, mean loglik)` pairs, in
-/// the order given. The chain travels with its mean, so a leaf with a gap
-/// (a chain that never wrote a trace) labels every score with its own chain
-/// rather than renumbering the survivors by position (gh#913). See the module
-/// docs for the statistic. A single chain, or perfect agreement, yields
-/// all-zero scores and nothing flagged — the negative-control path.
-pub fn chain_loglik_mod_zscores(means: &[(ChainIndex, f64)]) -> Vec<ChainZScore> {
-    let n = means.len();
-    if n == 0 {
-        return Vec::new();
+impl ChainLoglikScore {
+    /// The comparison, when it was made.
+    pub fn test(&self) -> Option<&ChainLoglikTest> {
+        match &self.outcome {
+            ChainLoglikOutcome::Assessed(t) => Some(t),
+            ChainLoglikOutcome::NotAssessed(_) => None,
+        }
     }
-    // Robust centre + scale from the FINITE means only: a NaN from an unreadable
-    // trace must neither poison the median/MAD nor read as "clean."
-    let finite: Vec<f64> = means.iter().map(|(_, m)| *m).filter(|m| m.is_finite()).collect();
-    let (center, scale) = robust_center_scale(&finite);
-    means
+
+    /// Whether this chain's difference from the others exceeds the cutoff.
+    /// `false` for a chain not assessed — which is not a pass; see
+    /// [`ChainLoglikOutcome::NotAssessed`].
+    pub fn is_flagged(&self) -> bool {
+        self.test().is_some_and(|t| t.flagged)
+    }
+}
+
+/// The Monte Carlo standard error of the mean of one chain's log-likelihood
+/// trace: `sd / sqrt(ESS)`, with `ESS` from
+/// [`sim::inference::pmmh::mcmc_ess`] (Geyer's initial-positive-sequence
+/// estimator, the per-chain ESS `compute_rhat_ess` reports) and `sd` the
+/// sample standard deviation. A trace with a non-finite value has no finite
+/// mean; one with fewer than [`CHAIN_LOGLIK_MIN_ESS`] effective draws has no
+/// trustworthy standard error.
+pub fn mcse_of_mean(series: &[f64]) -> Result<f64, NotAssessed> {
+    if series.is_empty() || series.iter().any(|v| !v.is_finite()) {
+        return Err(NotAssessed::NonFiniteMean);
+    }
+    let n = series.len();
+    let ess = sim::inference::pmmh::mcmc_ess(series);
+    if !ess.is_finite() || ess < CHAIN_LOGLIK_MIN_ESS || n < 2 {
+        return Err(NotAssessed::TooFewEffectiveDraws { ess });
+    }
+    let mean = series.iter().sum::<f64>() / n as f64;
+    let var = series.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
+    Ok((var / ess).sqrt())
+}
+
+/// Compare each chain's mean log-likelihood with the pooled mean of the
+/// others, as the module docs define, in the order given.
+///
+/// Only chains with a finite mean, a finite positive standard error and a
+/// finite positive weight take part; the rest are [`NotAssessed`] and do not
+/// enter the others' pooled mean. With fewer than two such chains no chain
+/// is assessed.
+///
+/// Flagged chains are removed one at a time, largest `Z` first, and the rest
+/// re-compared without them (see "One chain off does not flag the rest" in
+/// the module docs). Each flagged chain carries the comparison it was flagged
+/// on; each chain left unflagged carries its comparison with the other
+/// unflagged chains.
+pub fn assess_chain_logliks(estimates: &[ChainLoglikEstimate]) -> Vec<ChainLoglikScore> {
+    let usable = |e: &ChainLoglikEstimate| -> Result<f64, NotAssessed> {
+        if !e.mean.is_finite() {
+            return Err(NotAssessed::NonFiniteMean);
+        }
+        let se = e.se?;
+        if !(se.is_finite() && se > 0.0) {
+            return Err(NotAssessed::NoStandardError);
+        }
+        if !(e.weight.is_finite() && e.weight > 0.0) {
+            return Err(NotAssessed::NonFiniteMean);
+        }
+        Ok(se)
+    };
+    let mut outcomes: Vec<ChainLoglikOutcome> = estimates
         .iter()
-        .map(|&(chain, m)| {
-            // Finite mean + a positive, finite scale → a genuine z. Otherwise
-            // (non-finite mean, or every finite chain identical so scale == 0)
-            // there is no z to compute: NaN mean → NaN z (rendered `—`);
-            // identical finite chains → 0.0.
-            let mod_z = if m.is_finite() && scale.is_finite() && scale > 0.0 {
-                (m - center) / scale
-            } else if m.is_finite() {
-                0.0
-            } else {
-                f64::NAN
-            };
-            // Explicit finiteness guard: a NaN z is NOT an outlier verdict, it is
-            // "could not assess" — surfaced via `mean_loglik`/`mod_z` = `—`, never
-            // silently passed as "not an outlier."
-            let is_outlier = mod_z.is_finite() && mod_z.abs() > CHAIN_LOGLIK_OUTLIER_MODZ;
-            ChainZScore {
-                chain,
-                mean_loglik: m,
-                mod_z,
-                is_outlier,
+        .map(|e| match usable(e) {
+            Ok(_) => ChainLoglikOutcome::NotAssessed(NotAssessed::TooFewChains),
+            Err(why) => ChainLoglikOutcome::NotAssessed(why),
+        })
+        .collect();
+    let mut active: Vec<usize> =
+        (0..estimates.len()).filter(|&i| usable(&estimates[i]).is_ok()).collect();
+    let k = active.len();
+    if k >= 2 {
+        let cutoff = chain_loglik_cutoff(k);
+        let se_of = |i: usize| usable(&estimates[i]).expect("active chains are usable");
+        // Chain `i` against the pooled mean of the other active chains.
+        let compare = |i: usize, active: &[usize]| -> ChainLoglikTest {
+            let w_total: f64 =
+                active.iter().filter(|&&j| j != i).map(|&j| estimates[j].weight).sum();
+            let (mut m_rest, mut var_rest) = (0.0, 0.0);
+            for &j in active.iter().filter(|&&j| j != i) {
+                let w = estimates[j].weight / w_total;
+                m_rest += w * estimates[j].mean;
+                var_rest += w * w * se_of(j).powi(2);
             }
+            let diff = estimates[i].mean - m_rest;
+            let se = (se_of(i).powi(2) + var_rest).sqrt();
+            let z = diff.abs() / se;
+            ChainLoglikTest { diff, se, z, cutoff, flagged: z > cutoff }
+        };
+        loop {
+            let tests: Vec<(usize, ChainLoglikTest)> =
+                active.iter().map(|&i| (i, compare(i, &active))).collect();
+            let worst = tests
+                .iter()
+                .max_by(|a, b| a.1.z.partial_cmp(&b.1.z).unwrap_or(std::cmp::Ordering::Equal))
+                .copied()
+                .expect("at least two active chains");
+            if !worst.1.flagged {
+                for (i, t) in tests {
+                    outcomes[i] = ChainLoglikOutcome::Assessed(t);
+                }
+                break;
+            }
+            outcomes[worst.0] = ChainLoglikOutcome::Assessed(worst.1);
+            active.retain(|&i| i != worst.0);
+            if active.len() < 2 {
+                // The last chain left differs from the one just removed by the
+                // same amount, so neither is the odd one out.
+                for &i in &active {
+                    outcomes[i] = ChainLoglikOutcome::Assessed(worst.1.mirrored());
+                }
+                break;
+            }
+        }
+    }
+    estimates
+        .iter()
+        .zip(outcomes)
+        .map(|(e, outcome)| ChainLoglikScore { chain: e.chain, mean_loglik: e.mean, outcome })
+        .collect()
+}
+
+impl ChainLoglikTest {
+    /// The same comparison seen from the other chain of a pair.
+    fn mirrored(self) -> Self {
+        ChainLoglikTest { diff: -self.diff, ..self }
+    }
+}
+
+/// The flagged chains, largest `Z` first. Empty when no chain exceeds the
+/// cutoff.
+pub fn flagged_chains(scores: &[ChainLoglikScore]) -> Vec<&ChainLoglikScore> {
+    let mut flagged: Vec<&ChainLoglikScore> = scores.iter().filter(|s| s.is_flagged()).collect();
+    let z = |s: &ChainLoglikScore| s.test().map_or(0.0, |t| t.z);
+    flagged.sort_by(|a, b| z(b).partial_cmp(&z(a)).unwrap_or(std::cmp::Ordering::Equal));
+    flagged
+}
+
+/// What was observed for each flagged chain, one sentence each: the
+/// difference in nats, its `Z` and the cutoff. Says nothing about cause.
+pub fn describe_flagged(scores: &[ChainLoglikScore], column: &str) -> Vec<String> {
+    flagged_chains(scores)
+        .into_iter()
+        .filter_map(|s| {
+            let t = s.test()?;
+            Some(format!(
+                "chain {}'s mean {column} differs from the other chains' by {:+.2} nats \
+                 (Z = {:.1} > {:.2}), beyond what Monte Carlo error explains",
+                s.chain, t.diff, t.z, t.cutoff
+            ))
         })
         .collect()
 }
 
-/// `(center, scale)` for the modified z-score over the finite chain means.
-/// Primary: `(median, MAD/0.6745)`. Fallback when `MAD == 0`:
-/// `(mean, 1.253314·MeanAD)`. `scale == 0.0` (all values identical, or fewer
-/// than one finite value) means "no spread" → every z is 0, nothing flagged.
-fn robust_center_scale(finite: &[f64]) -> (f64, f64) {
-    let n = finite.len();
-    if n == 0 {
-        return (0.0, 0.0);
-    }
-    let med = median_of(finite);
-    let mad = median_of(&finite.iter().map(|x| (x - med).abs()).collect::<Vec<_>>());
-    if mad > 0.0 {
-        // M_i = 0.6745·(x − med)/MAD  ⇔  center = med, scale = MAD / 0.6745.
-        (med, mad / 0.6745)
-    } else {
-        // MAD == 0: ≥ half the means share a value. Iglewicz–Hoaglin's alternate
-        // scale is the mean absolute deviation: M_i = (x − mean)/(1.253314·MeanAD).
-        let mean = finite.iter().sum::<f64>() / n as f64;
-        let mean_ad = finite.iter().map(|x| (x - mean).abs()).sum::<f64>() / n as f64;
-        (mean, 1.253314 * mean_ad)
-    }
-}
-
-/// Median of a set of finite values (clones + sorts; the chain count is tiny).
-/// Even length averages the two central order statistics. `NaN` for an empty set.
-fn median_of(vals: &[f64]) -> f64 {
-    let n = vals.len();
-    if n == 0 {
-        return f64::NAN;
-    }
-    let mut sorted = vals.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    if n % 2 == 1 {
-        sorted[n / 2]
-    } else {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-    }
-}
-
-/// The flagged chains as `"chain N"` labels, worst-|mod_z| first. Empty when no
-/// chain exceeds the threshold.
-pub fn outlier_labels(scores: &[ChainZScore]) -> Vec<String> {
-    let mut flagged: Vec<&ChainZScore> = scores.iter().filter(|s| s.is_outlier).collect();
-    flagged.sort_by(|a, b| {
-        b.mod_z
-            .abs()
-            .partial_cmp(&a.mod_z.abs())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    flagged.iter().map(|s| format!("chain {}", s.chain)).collect()
-}
-
 /// What the per-chain table shows, and what it is allowed to rank on.
 ///
-/// [`scored`](Self::scored) is the ONLY field the outlier statistic sees; the
+/// [`scored`](Self::scored) is the only column the chain comparison reads; the
 /// rest is display. Splitting them in the type is the point — it is what stops
 /// the sampler's own objective from being mistaken for a cross-chain
 /// comparison again (gh#667).
@@ -241,13 +436,6 @@ pub struct ChainLoglikMeans {
     pub complete_data: Option<CompleteDataMeans>,
 }
 
-impl ChainLoglikMeans {
-    /// `(chain, scored mean)` pairs — the input the outlier statistic takes.
-    pub fn scored_by_chain(&self) -> Vec<(ChainIndex, f64)> {
-        self.chain_ids.iter().copied().zip(self.scored.iter().copied()).collect()
-    }
-}
-
 /// PGAS's complete-data target and its latent-path term, per chain — the two
 /// quantities gh#667 removed from the ranking but deliberately kept visible.
 /// `log_complete_data_ll` is the sampler's own Gibbs target, so a chain that
@@ -262,9 +450,30 @@ pub struct CompleteDataMeans {
     pub transition: Vec<f64>,
 }
 
-/// Read every `chain_*/trace.tsv` under `method_dir` and return the per-chain
-/// post-burn-in means the summary table needs, ordered by ascending chain
-/// number.
+/// One chain's retained log-likelihood series, by column: `None` where its
+/// trace is unreadable or lacks the column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChainSeries {
+    pub chain: ChainIndex,
+    pub scored: Option<Vec<f64>>,
+    pub complete: Option<Vec<f64>>,
+    pub transition: Option<Vec<f64>>,
+}
+
+/// Every chain's retained log-likelihood series, as the traces store them —
+/// the data the per-chain means and the outlier scores are computed from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChainLoglikSeries {
+    pub scored_column: &'static str,
+    pub chains: Vec<ChainSeries>,
+    /// PGAS's complete-data split is carried ([`CompleteDataMeans`]).
+    pub wants_split: bool,
+    /// A readable trace exists and none names the scored column.
+    pub scored_column_absent: bool,
+}
+
+/// Read every `chain_*/trace.tsv` under `method_dir`, keeping each chain's
+/// post-burn-in tail, ordered by ascending chain number.
 ///
 /// `kind` is the method's log-likelihood class, which decides *by name* which
 /// column the chains may be compared on — see
@@ -296,35 +505,6 @@ pub struct CompleteDataMeans {
 /// fall back to the whole trace: without the posterior manifest we cannot strip
 /// warm-up, so the mean is noisier but still honest. This never contaminates a
 /// well-formed fit.
-pub fn read_chain_mean_logliks(method_dir: &Path, kind: LoglikType) -> Option<ChainLoglikMeans> {
-    read_chain_loglik_series(method_dir, kind).map(|s| chain_mean_logliks(&s))
-}
-
-/// One chain's retained log-likelihood series, by column: `None` where its
-/// trace is unreadable or lacks the column.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChainSeries {
-    pub chain: ChainIndex,
-    pub scored: Option<Vec<f64>>,
-    pub complete: Option<Vec<f64>>,
-    pub transition: Option<Vec<f64>>,
-}
-
-/// Every chain's retained log-likelihood series, as the traces store them —
-/// the data the per-chain means and the outlier scores are computed from.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChainLoglikSeries {
-    pub scored_column: &'static str,
-    pub chains: Vec<ChainSeries>,
-    /// PGAS's complete-data split is carried ([`CompleteDataMeans`]).
-    pub wants_split: bool,
-    /// A readable trace exists and none names the scored column.
-    pub scored_column_absent: bool,
-}
-
-/// Read every `chain_*/trace.tsv` under `method_dir`, keeping each chain's
-/// post-burn-in tail (the "Post-burn-in selection" of
-/// [`read_chain_mean_logliks`]). `None` when no chain trace exists.
 pub fn read_chain_loglik_series(method_dir: &Path, kind: LoglikType) -> Option<ChainLoglikSeries> {
     let chain_dirs = discover_chain_dirs(method_dir);
     if chain_dirs.is_empty() {
@@ -401,6 +581,50 @@ pub fn chain_mean_logliks(series: &ChainLoglikSeries) -> ChainLoglikMeans {
             transition: series.chains.iter().map(|c| mean(&c.transition)).collect(),
         }),
     }
+}
+
+/// Each chain's mean of the scored column with its Monte Carlo standard error
+/// ([`mcse_of_mean`]), weighted by its retained draws — the input
+/// [`assess_chain_logliks`] takes. A chain whose trace lacks the column has a
+/// `NaN` mean and is not assessed.
+pub fn chain_loglik_estimates(series: &ChainLoglikSeries) -> Vec<ChainLoglikEstimate> {
+    series
+        .chains
+        .iter()
+        .map(|c| match c.scored.as_deref() {
+            Some(v) => ChainLoglikEstimate {
+                chain: c.chain,
+                mean: mean_or_nan(v),
+                weight: v.len() as f64,
+                se: mcse_of_mean(v),
+            },
+            None => ChainLoglikEstimate {
+                chain: c.chain,
+                mean: f64::NAN,
+                weight: 0.0,
+                se: Err(NotAssessed::NonFiniteMean),
+            },
+        })
+        .collect()
+}
+
+/// The per-chain means the table shows, and each chain's comparison with the
+/// others, from one read of the traces. `None` when no chain trace exists.
+/// The comparison is empty when it cannot be made at all — the scored column
+/// is absent from every trace, or fewer than two chains have traces — which
+/// the caller says rather than rendering as a table of chains that agree.
+pub fn read_chain_loglik_scores(
+    method_dir: &Path,
+    kind: LoglikType,
+) -> Option<(ChainLoglikMeans, Vec<ChainLoglikScore>)> {
+    let series = read_chain_loglik_series(method_dir, kind)?;
+    let means = chain_mean_logliks(&series);
+    let scores = if !means.scored_column_absent && means.scored.len() >= 2 {
+        assess_chain_logliks(&chain_loglik_estimates(&series))
+    } else {
+        Vec::new()
+    };
+    Some((means, scores))
 }
 
 /// The retained tail of one chain's column: the last `k` rows when
@@ -502,7 +726,7 @@ fn read_trace_cols(trace_path: &Path, names: &[&str]) -> Option<Vec<Option<Vec<f
 }
 
 /// One chain's stuck-state screen (gh#608, ebola F8): over the RETAINED
-/// draws (the same last-K_c rule as [`read_chain_mean_logliks`]), how many
+/// draws (the same last-K_c rule as [`read_chain_loglik_series`]), how many
 /// rows record a non-finite log-posterior as the chain's CURRENT state. A
 /// Metropolis-within-Gibbs chain whose current state has zero posterior
 /// density is incoherent (gh#607) — ANY such retained row marks the chain
@@ -629,124 +853,256 @@ fn read_draw_counts(draws_path: &Path) -> BTreeMap<ChainIndex, usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
+    use rand_distr::{Distribution, StandardNormal};
 
-    /// `(chain, mean)` pairs for contiguous chains counted from 0.
-    fn indexed(means: &[f64]) -> Vec<(ChainIndex, f64)> {
-        means.iter().enumerate().map(|(i, &m)| (ChainIndex(i), m)).collect()
+    /// Estimates for contiguous chains counted from 0, one draw's weight each,
+    /// every mean known to the same standard error.
+    fn estimates(means: &[f64], se: f64) -> Vec<ChainLoglikEstimate> {
+        means
+            .iter()
+            .enumerate()
+            .map(|(i, &m)| ChainLoglikEstimate { chain: ChainIndex(i), mean: m, weight: 1.0, se: Ok(se) })
+            .collect()
     }
 
-    /// `means`'s chains paired with another per-chain column of the same reader.
-    fn paired(means: &ChainLoglikMeans, column: &[f64]) -> Vec<(ChainIndex, f64)> {
-        means.chain_ids.iter().copied().zip(column.iter().copied()).collect()
+    /// The per-chain means the table shows, as `fit summary` reads them.
+    fn means_of(dir: &std::path::Path, kind: LoglikType) -> Option<ChainLoglikMeans> {
+        read_chain_loglik_scores(dir, kind).map(|(m, _)| m)
+    }
+
+    /// The flagged chains' numbers, largest `Z` first.
+    fn flagged(scores: &[ChainLoglikScore]) -> Vec<usize> {
+        flagged_chains(scores).iter().map(|s| s.chain.0).collect()
+    }
+
+    fn zs(scores: &[ChainLoglikScore]) -> Vec<f64> {
+        scores.iter().map(|s| s.test().map_or(f64::NAN, |t| t.z)).collect()
+    }
+
+    /// A stationary AR(1) trace of length `n` with lag-one autocorrelation
+    /// `phi` and marginal standard deviation `sd`, shifted so its sample mean
+    /// is exactly `mean`. Its integrated autocorrelation time is
+    /// `(1 + phi) / (1 − phi)`, so its ESS is near `n (1 − phi) / (1 + phi)`.
+    fn ar1_trace(seed: u64, n: usize, phi: f64, sd: f64, mean: f64) -> Vec<f64> {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let innov = sd * (1.0 - phi * phi).sqrt();
+        let z0: f64 = StandardNormal.sample(&mut rng);
+        let mut x = sd * z0;
+        let mut v: Vec<f64> = (0..n)
+            .map(|_| {
+                let e: f64 = StandardNormal.sample(&mut rng);
+                x = phi * x + innov * e;
+                x
+            })
+            .collect();
+        let shift = mean - v.iter().sum::<f64>() / n as f64;
+        v.iter_mut().for_each(|x| *x += shift);
+        v
+    }
+
+    fn trace_estimates(traces: &[Vec<f64>]) -> Vec<ChainLoglikEstimate> {
+        traces
+            .iter()
+            .enumerate()
+            .map(|(i, v)| ChainLoglikEstimate {
+                chain: ChainIndex(i),
+                mean: v.iter().sum::<f64>() / v.len() as f64,
+                weight: v.len() as f64,
+                se: mcse_of_mean(v),
+            })
+            .collect()
+    }
+
+    /// The cutoff is the Bonferroni two-sided normal quantile at family-wise
+    /// α = 0.001: Φ⁻¹(1 − 0.001 / (2k)). Reference values from Python's
+    /// `statistics.NormalDist().inv_cdf`.
+    #[test]
+    fn the_cutoff_is_bonferroni_at_one_in_a_thousand() {
+        for (k, want) in [(2, 3.480756), (3, 3.587915), (4, 3.662260), (8, 3.836107)] {
+            let got = chain_loglik_cutoff(k);
+            assert!((got - want).abs() < 1e-5, "k = {k}: {got} vs {want}");
+        }
+    }
+
+    /// The standard error of a trace's mean follows its autocorrelation: an
+    /// iid trace's is close to sd/√n, and an AR(1) trace at φ = 0.9 (ESS ≈
+    /// n/19) has one about √19 ≈ 4.4 times larger.
+    #[test]
+    fn mcse_follows_the_traces_autocorrelation() {
+        let n = 20_000;
+        let iid = ar1_trace(1, n, 0.0, 2.0, -50.0);
+        let se_iid = mcse_of_mean(&iid).unwrap();
+        let naive = 2.0 / (n as f64).sqrt();
+        assert!((se_iid / naive - 1.0).abs() < 0.1, "iid: {se_iid} vs {naive}");
+        let sticky = ar1_trace(2, n, 0.9, 2.0, -50.0);
+        let ratio = mcse_of_mean(&sticky).unwrap() / naive;
+        assert!((ratio - 19f64.sqrt()).abs() < 0.8, "AR(1) φ = 0.9: ratio {ratio}");
+    }
+
+    /// The four retained log-likelihood traces of the gh#1008 fit, by chain.
+    fn gh1008_traces() -> Vec<Vec<f64>> {
+        let text = include_str!("../../tests/fixtures/gh1008_pmmh_chain_logliks.tsv");
+        let mut traces: Vec<Vec<f64>> = vec![Vec::new(); 4];
+        for line in text.lines().filter(|l| !l.starts_with('#')).skip(1) {
+            let (c, v) = line.split_once('\t').expect("chain<TAB>log_likelihood");
+            traces[c.parse::<usize>().unwrap()].push(v.parse().unwrap());
+        }
+        traces
+    }
+
+    /// gh#1008, on the fit itself: four PMMH chains whose mean
+    /// log-likelihoods are −59.47, −59.60, −59.44 and −59.48 (R̂ 1.002, bulk
+    /// ESS ≈ 470), the traces from `tests/fixtures/`. The 0.13-nat difference
+    /// of chain 1 is ordinary Monte Carlo error and nothing is flagged.
+    #[test]
+    fn gh1008_a_013_nat_difference_on_a_converged_fit_is_not_flagged() {
+        let traces = gh1008_traces();
+        assert!(traces.iter().all(|t| t.len() == 200), "fixture premise: 200 draws per chain");
+        let scores = assess_chain_logliks(&trace_estimates(&traces));
+        let means: Vec<f64> = scores.iter().map(|s| s.mean_loglik).collect();
+        for (got, want) in means.iter().zip([-59.47, -59.60, -59.44, -59.48]) {
+            assert!((got - want).abs() < 0.005, "fixture premise: the issue's means, {means:?}");
+        }
+        assert!(scores.iter().all(|s| s.test().is_some()), "every chain is assessed: {scores:?}");
+        assert!(flagged(&scores).is_empty(), "no chain flagged; Z = {:?}", zs(&scores));
+        let t1 = scores[1].test().unwrap();
+        assert!((t1.diff - (-0.13)).abs() < 0.01, "chain 1 sits 0.13 nats below the rest: {t1:?}");
+        assert!(t1.z < 2.0 && (t1.cutoff - 3.662).abs() < 1e-3, "{t1:?}");
+    }
+
+    /// The same fit with chain 1's trace moved 15 nats down — a chain sampling
+    /// another region of the likelihood surface. It is flagged, and only it:
+    /// set aside, the other three agree.
+    #[test]
+    fn a_clearly_stuck_chain_is_flagged_and_only_it() {
+        let mut traces = gh1008_traces();
+        traces[1].iter_mut().for_each(|v| *v -= 15.0);
+        let scores = assess_chain_logliks(&trace_estimates(&traces));
+        assert_eq!(flagged(&scores), vec![1], "Z = {:?}", zs(&scores));
+        let t = scores[1].test().unwrap();
+        assert!((t.diff - (-15.13)).abs() < 0.01 && t.z > 30.0, "{t:?}");
+        let msg = describe_flagged(&scores, "log_likelihood");
+        assert_eq!(msg.len(), 1);
+        assert!(msg[0].starts_with("chain 1's mean log_likelihood differs from the other chains' by -15.13 nats"),
+            "{msg:?}");
+        assert!(msg[0].contains("beyond what Monte Carlo error explains"), "{msg:?}");
+    }
+
+    /// A chain whose trace has fewer than ten effective draws is not
+    /// assessed — neither flagged nor passed — and is left out of the others'
+    /// pooled mean, so the three chains that can be compared still are.
+    #[test]
+    fn a_chain_with_too_few_effective_draws_is_not_assessed() {
+        let mut traces: Vec<Vec<f64>> = [-59.47, -59.44, -59.48]
+            .iter()
+            .enumerate()
+            .map(|(i, &m)| ar1_trace(7 + i as u64, 200, 0.26, 1.95, m))
+            .collect();
+        // Eight draws far from the rest: a mean that would flag, on too little
+        // evidence to say so.
+        traces.push(ar1_trace(99, 8, 0.0, 1.95, -90.0));
+        let scores = assess_chain_logliks(&trace_estimates(&traces));
+        assert!(
+            matches!(scores[3].outcome,
+                ChainLoglikOutcome::NotAssessed(NotAssessed::TooFewEffectiveDraws { ess }) if ess < 10.0),
+            "{:?}", scores[3]
+        );
+        assert!(!scores[3].is_flagged());
+        assert!(scores[..3].iter().all(|s| s.test().is_some_and(|t| !t.flagged)), "{scores:?}");
+        // A chain that never moved has one effective draw.
+        assert!(matches!(mcse_of_mean(&[-60.0; 50]),
+            Err(NotAssessed::TooFewEffectiveDraws { ess }) if ess == 1.0));
     }
 
     #[test]
-    fn flags_a_single_clear_outlier() {
-        // Five well-mixed chains near -100 (jittered, as real chains are), one
-        // stuck far below at -400.
-        let means = indexed(&[-100.0, -101.0, -99.0, -100.5, -100.2, -400.0]);
-        let scores = chain_loglik_mod_zscores(&means);
-        assert_eq!(scores.len(), 6);
-        let stuck = &scores[5];
-        assert_eq!(stuck.chain, ChainIndex(5));
-        assert!(stuck.is_outlier, "stuck chain must flag: mod_z = {}", stuck.mod_z);
-        assert!(stuck.mod_z < -CHAIN_LOGLIK_OUTLIER_MODZ, "mod_z strongly negative: {}", stuck.mod_z);
-        for sc in &scores[..5] {
-            assert!(!sc.is_outlier, "well-mixed chain {} wrongly flagged (mod_z={})", sc.chain, sc.mod_z);
-        }
-        assert_eq!(outlier_labels(&scores), vec!["chain 5"]);
+    fn flags_a_single_clear_outlier_and_not_the_chains_it_pulls() {
+        // Five chains near −100, one stuck far below at −400. Without
+        // elimination each good chain's "others" would average −160.
+        let scores = assess_chain_logliks(&estimates(&[-100.0, -101.0, -99.0, -100.5, -100.2, -400.0], 0.5));
+        assert_eq!(flagged(&scores), vec![5], "Z = {:?}", zs(&scores));
+        assert!(scores[..5].iter().all(|s| s.test().is_some()), "the rest are compared among themselves");
     }
 
-    /// THE point of the robust upgrade: two co-stuck chains among six now BOTH
-    /// flag (the classic mean/SD z masked them — they inflated the SD and pulled
-    /// their own |z| below threshold). Good chains carry realistic jitter so the
-    /// MAD is non-zero (real MCMC means are never numerically identical).
+    /// Two co-stuck chains among six are both flagged and the four good ones
+    /// are not: removing the worst first keeps the pair from masking each
+    /// other or condemning the rest.
     #[test]
     fn four_good_two_stuck_flags_both_stuck_chains() {
-        // 4 good (jittered) at ≈ -1204, 2 stuck at ≈ -1461.
-        let means = indexed(&[-1204.0, -1205.0, -1203.0, -1206.0, -1461.0, -1462.0]);
-        let scores = chain_loglik_mod_zscores(&means);
-        assert!(scores[4].is_outlier, "stuck chain 4 must flag: mod_z={}", scores[4].mod_z);
-        assert!(scores[5].is_outlier, "stuck chain 5 must flag: mod_z={}", scores[5].mod_z);
-        assert!(
-            scores[..4].iter().all(|s| !s.is_outlier),
-            "good chains must not flag: {:?}",
-            scores[..4].iter().map(|s| s.mod_z).collect::<Vec<_>>()
-        );
-        let labels = outlier_labels(&scores);
-        assert!(labels.contains(&"chain 4".to_string()), "must name chain 4: {labels:?}");
-        assert!(labels.contains(&"chain 5".to_string()), "must name chain 5: {labels:?}");
-        assert_eq!(labels.len(), 2, "exactly the two stuck chains: {labels:?}");
+        let scores = assess_chain_logliks(&estimates(&[-1204.0, -1205.0, -1203.0, -1206.0, -1461.0, -1462.0], 1.0));
+        let mut f = flagged(&scores);
+        f.sort();
+        assert_eq!(f, vec![4, 5], "Z = {:?}", zs(&scores));
+    }
+
+    /// Two chains that differ are both flagged: with two there is no odd one
+    /// out, and the comparison is the same from either side.
+    #[test]
+    fn two_chains_that_differ_are_both_flagged() {
+        let scores = assess_chain_logliks(&estimates(&[-50.0, -80.0], 1.0));
+        let mut f = flagged(&scores);
+        f.sort();
+        assert_eq!(f, vec![0, 1]);
+        let (a, b) = (scores[0].test().unwrap(), scores[1].test().unwrap());
+        assert_eq!(a.z, b.z);
+        assert_eq!(a.diff, -b.diff);
+        assert!(a.diff > 0.0, "chain 0 sits above chain 1: {a:?}");
     }
 
     #[test]
     fn flags_nothing_when_well_mixed() {
-        // Negative control: all chains agree — no outlier, and the scores are
-        // small and finite (not a vacuous "everything is NaN" pass).
-        let means = indexed(&[-100.0, -100.3, -99.8, -100.1, -99.9, -100.2]);
-        let scores = chain_loglik_mod_zscores(&means);
-        assert!(scores.iter().all(|s| !s.is_outlier), "well-mixed set must flag nothing");
-        assert!(scores.iter().all(|s| s.mod_z.is_finite()), "scores must be finite");
-        assert!(scores.iter().all(|s| s.mod_z.abs() < CHAIN_LOGLIK_OUTLIER_MODZ));
-        assert!(outlier_labels(&scores).is_empty());
+        // Negative control: the chains agree within their standard errors, and
+        // every Z is finite and small — not a vacuous "nothing assessed" pass.
+        let scores = assess_chain_logliks(&estimates(&[-100.0, -100.3, -99.8, -100.1, -99.9, -100.2], 0.5));
+        assert!(flagged(&scores).is_empty());
+        assert!(scores.iter().all(|s| s.test().is_some_and(|t| t.z.is_finite() && t.z < 1.5)), "{:?}", zs(&scores));
     }
 
     #[test]
-    fn single_chain_has_no_spread() {
-        let scores = chain_loglik_mod_zscores(&indexed(&[-42.0]));
-        assert_eq!(scores.len(), 1);
-        assert_eq!(scores[0].mod_z, 0.0);
-        assert!(!scores[0].is_outlier);
-    }
-
-    /// MAD == 0 (majority of chains numerically identical) must not divide by
-    /// zero: it falls back to the MeanAD scale, which flags the lone outlier
-    /// with a FINITE score (never NaN).
-    #[test]
-    fn mad_zero_meanad_fallback_flags_outlier_without_nan() {
-        // Nine identical good chains at -50, one outlier at -500 → MAD = 0.
-        let mut means = vec![-50.0; 9];
-        means.push(-500.0);
-        let scores = chain_loglik_mod_zscores(&indexed(&means));
-        assert!(scores.iter().all(|s| s.mod_z.is_finite()), "MeanAD fallback must yield finite scores, not NaN");
-        assert!(scores[9].is_outlier, "the outlier must flag via MeanAD: mod_z={}", scores[9].mod_z);
-        assert!(scores[..9].iter().all(|s| !s.is_outlier), "identical good chains must not flag");
-        assert_eq!(outlier_labels(&scores), vec!["chain 9"]);
+    fn identical_chains_score_zero() {
+        let scores = assess_chain_logliks(&estimates(&[-10.0; 4], 0.5));
+        assert!(scores.iter().all(|s| s.test().is_some_and(|t| t.z == 0.0 && !t.flagged)));
     }
 
     #[test]
-    fn all_identical_chains_yield_zero_not_nan() {
-        // Both MAD and MeanAD are 0 → scale 0 → z = 0, no outliers, no NaN.
-        let scores = chain_loglik_mod_zscores(&indexed(&[-10.0, -10.0, -10.0, -10.0]));
-        assert!(scores.iter().all(|s| s.mod_z == 0.0), "identical chains → mod_z = 0, not NaN");
-        assert!(scores.iter().all(|s| !s.is_outlier));
+    fn a_single_chain_has_nothing_to_be_compared_with() {
+        let scores = assess_chain_logliks(&estimates(&[-42.0], 0.5));
+        assert_eq!(scores[0].outcome, ChainLoglikOutcome::NotAssessed(NotAssessed::TooFewChains));
     }
 
-    /// A chain with an unreadable trace (NaN mean) must not read as a clean
-    /// "not an outlier" with a real score — its mod_z is NaN (rendered `—`), and
-    /// it does not poison the finite chains' median/MAD.
+    /// A chain with an unreadable trace (NaN mean) is not assessed rather than
+    /// read as agreeing, and does not enter the others' pooled mean; the real
+    /// outlier among the finite chains is still flagged.
     #[test]
-    fn non_finite_mean_is_not_silently_clean() {
-        let means = indexed(&[-50.0, -51.0, -49.0, f64::NAN, -400.0]);
-        let scores = chain_loglik_mod_zscores(&means);
-        assert!(scores[3].mod_z.is_nan(), "broken chain's mod_z must be NaN, not a fake number");
-        assert!(!scores[3].is_outlier, "a NaN score is not an outlier VERDICT (it is 'unassessable')");
-        // The real outlier among the finite chains is still flagged.
-        assert!(scores[4].is_outlier, "the -400 outlier must still flag: mod_z={}", scores[4].mod_z);
+    fn a_non_finite_mean_is_not_assessed_and_not_pooled() {
+        let scores = assess_chain_logliks(&estimates(&[-50.0, -51.0, -49.0, f64::NAN, -400.0], 0.5));
+        assert_eq!(scores[3].outcome, ChainLoglikOutcome::NotAssessed(NotAssessed::NonFiniteMean));
+        assert_eq!(flagged(&scores), vec![4], "Z = {:?}", zs(&scores));
     }
 
-    /// End-to-end reader: synthesize a six-chain method dir (`chain_N/trace.tsv`,
-    /// one stuck) + a `draws.tsv` manifest, with a warm-up prefix in each trace
-    /// that MUST be stripped. Good chains carry jitter (distinct means) so the
-    /// robust MAD is non-zero.
+    /// IF2's replicate standard errors: a zero or missing one is "no standard
+    /// error", not an infinitely precise estimate.
     #[test]
-    fn reader_strips_warmup_and_names_the_stuck_chain() {
+    fn a_zero_standard_error_is_not_assessed() {
+        let mut est = estimates(&[-60.0, -61.0, -300.0], 0.5);
+        est[0].se = Ok(0.0);
+        let scores = assess_chain_logliks(&est);
+        assert_eq!(scores[0].outcome, ChainLoglikOutcome::NotAssessed(NotAssessed::NoStandardError));
+        assert_eq!(flagged(&scores), vec![1, 2], "the two remaining chains differ: {:?}", zs(&scores));
+    }
+
+    /// The reader: a six-chain method dir (`chain_N/trace.tsv`, one chain far
+    /// off) plus a `draws.tsv` manifest, with a warm-up prefix in each trace
+    /// that must be stripped. Three retained rows per chain are too few
+    /// effective draws to compare on, so every chain reads "not assessed" —
+    /// said, not passed.
+    #[test]
+    fn reader_strips_warmup_and_does_not_assess_three_draws() {
         let dir = crate::test_support::unique_temp_dir("chain_diag_reader");
         std::fs::create_dir_all(&dir).unwrap();
 
         let warmup = "1\t-900.0\t-905.0\n2\t-880.0\t-885.0\n";
         // Directories count from 0 (every sampler's convention, gh#990).
-        // Distinct good means.
         let write_trace = |c: usize, kept: &str| {
             let cd = dir.join(format!("chain_{c}"));
             std::fs::create_dir_all(&cd).unwrap();
@@ -758,7 +1114,7 @@ mod tests {
         write_trace(2, "3\t-49.5\t-51.0\n4\t-49.5\t-51.0\n5\t-49.5\t-51.0\n"); // mean -49.5
         write_trace(3, "3\t-50.2\t-52.0\n4\t-50.2\t-52.0\n5\t-50.2\t-52.0\n"); // mean -50.2
         write_trace(4, "3\t-49.8\t-51.0\n4\t-49.8\t-51.0\n5\t-49.8\t-51.0\n"); // mean -49.8
-        write_trace(5, "3\t-300.0\t-302.0\n4\t-301.0\t-303.0\n5\t-299.0\t-301.0\n"); // stuck ≈ -300
+        write_trace(5, "3\t-300.0\t-302.0\n4\t-301.0\t-303.0\n5\t-299.0\t-301.0\n"); // ≈ -300
 
         let mut draws = String::from("chain\tdraw\tbeta\n");
         for c in 0..6 {
@@ -770,24 +1126,21 @@ mod tests {
 
         // A marginal sampler: trace column 1 is `log_likelihood` = log p(y | θ),
         // already comparable across chains, so gh#667 leaves this path alone.
-        let means = read_chain_mean_logliks(&dir, LoglikType::Marginal)
+        let (means, scores) = read_chain_loglik_scores(&dir, LoglikType::Marginal)
             .expect("chain traces present");
         assert_eq!(means.scored_column, "log_likelihood");
         assert!(means.complete_data.is_none(), "no latent-path split for a marginal sampler");
         assert_eq!(means.chain_ids, ChainIndex::all(6).collect::<Vec<_>>());
-        let by_chain = means.scored_by_chain();
-        let means = means.scored;
-        assert_eq!(means.len(), 6);
+        let m = &means.scored;
+        assert_eq!(m.len(), 6);
         // Warm-up (-900/-880) excluded → good chains ≈ -50, not dragged to -890.
-        for (i, m) in means.iter().take(5).enumerate() {
-            assert!((m - (-50.0)).abs() < 1.0, "chain {} mean {} ≈ -50 (warm-up stripped)", i, m);
+        for (i, v) in m.iter().take(5).enumerate() {
+            assert!((v - (-50.0)).abs() < 1.0, "chain {i} mean {v} ≈ -50 (warm-up stripped)");
         }
-        assert!((means[5] - (-300.0)).abs() < 1.0, "chain 5 (stuck) mean {} ≈ -300", means[5]);
-
-        let scores = chain_loglik_mod_zscores(&by_chain);
-        assert!(scores[5].is_outlier, "stuck chain 5 must flag: mod_z={}", scores[5].mod_z);
-        assert!(scores[..5].iter().all(|s| !s.is_outlier), "good chains must not flag");
-        assert_eq!(outlier_labels(&scores), vec!["chain 5"]);
+        assert!((m[5] - (-300.0)).abs() < 1.0, "chain 5 mean {} ≈ -300", m[5]);
+        assert_eq!(scores.len(), 6);
+        assert!(scores.iter().all(|s| matches!(s.outcome,
+            ChainLoglikOutcome::NotAssessed(NotAssessed::TooFewEffectiveDraws { .. }))), "{scores:?}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -796,7 +1149,7 @@ mod tests {
     fn reader_returns_none_without_chain_dirs() {
         let dir = crate::test_support::unique_temp_dir("chain_diag_empty");
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(read_chain_mean_logliks(&dir, LoglikType::Marginal).is_none(),
+        assert!(means_of(&dir, LoglikType::Marginal).is_none(),
             "no chain_* dirs → None");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -809,8 +1162,8 @@ mod tests {
     /// - chain 5 has an ordinary latent path and reproduces the data ≈450 nats
     ///   worse than every other chain.
     ///
-    /// Ranking on `log_complete_data_ll` flags chain 2 — a chain that fits the
-    /// data as well as any other. Ranking on `obs_ll` flags chain 5.
+    /// Compared on `log_complete_data_ll`, chain 2 stands out — a chain that
+    /// fits the data as well as any other. Compared on `obs_ll`, chain 5 does.
     fn write_disagreeing_pgas_method(dir: &std::path::Path) {
         std::fs::create_dir_all(dir).unwrap();
         // (transition_ll, obs_ll) per chain; complete = transition + obs.
@@ -850,8 +1203,9 @@ mod tests {
         std::fs::write(dir.join("draws.tsv"), draws).unwrap();
     }
 
+
     /// gh#667: a PGAS chain is scored on `obs_ll` = `log p(y | X, θ)` — "does
-    /// this chain reproduce the data" — NOT on `log_complete_data_ll`, whose
+    /// this chain reproduce the data" — not on `log_complete_data_ll`, whose
     /// latent-path term is a density at one sampled path and rewards a
     /// concentrated path distribution rather than a better fit.
     #[test]
@@ -859,41 +1213,43 @@ mod tests {
         let dir = crate::test_support::unique_temp_dir("chain_diag_gh667");
         write_disagreeing_pgas_method(&dir);
 
-        let means = read_chain_mean_logliks(&dir, LoglikType::CompleteData)
+        let means = means_of(&dir, LoglikType::CompleteData)
             .expect("six chain traces");
         assert_eq!(means.scored_column, "obs_ll",
             "PGAS chains are compared on log p(y | X, θ)");
         assert!(!means.scored_column_absent);
         assert_eq!(means.scored.len(), 6);
 
-        // The scored quantity IS obs_ll (warm-up stripped: −1000 never enters).
+        // The scored quantity is obs_ll (warm-up stripped: −1000 never enters).
         assert!((means.scored[5] - (-1400.0)).abs() < 1e-6,
             "chain 5 must be scored on its obs_ll (−1400), got {}", means.scored[5]);
         assert!((means.scored[2] - (-951.7)).abs() < 1e-6,
             "chain 2 must be scored on its obs_ll (−951.7), got {}", means.scored[2]);
 
-        // …and the flag follows it: the chain that fits the DATA worst.
-        let scores = chain_loglik_mod_zscores(&means.scored_by_chain());
-        assert_eq!(outlier_labels(&scores), vec!["chain 5"],
-            "the badly-fitting chain is the outlier: {:?}",
-            scores.iter().map(|s| s.mod_z).collect::<Vec<_>>());
-        assert!(!scores[2].is_outlier,
-            "chain 2 fits the data like every other chain and must NOT flag \
-             (mod_z = {})", scores[2].mod_z);
+        // …and the flag follows it: the chain that fits the data worst. The
+        // fixture's three draws per chain carry no standard error, so one is
+        // supplied here; the column, not the error model, is under test.
+        let on = |column: &[f64]| {
+            let est: Vec<ChainLoglikEstimate> = means.chain_ids.iter().zip(column)
+                .map(|(&chain, &mean)| ChainLoglikEstimate { chain, mean, weight: 3.0, se: Ok(2.0) })
+                .collect();
+            assess_chain_logliks(&est)
+        };
+        let scores = on(&means.scored);
+        assert_eq!(flagged(&scores), vec![5], "the badly-fitting chain: {:?}", zs(&scores));
 
-        // The fixture genuinely discriminates: the complete-data column the old
-        // reader ranked on flags the OTHER chain, and only it. It is still READ
-        // (kept visible in the table) — it is just no longer the ranking key.
+        // The fixture discriminates: on the complete-data column the old
+        // reader ranked on, the chain that stands out is the other one. It is
+        // still read (kept visible in the table), just never compared.
         let split = means.complete_data.as_ref().expect("PGAS carries the split");
         assert!((split.complete[2] - (-1751.7)).abs() < 1e-6,
             "chain 2's complete-data target is still read: {}", split.complete[2]);
         assert!((split.transition[2] - (-800.0)).abs() < 1e-6,
             "chain 2's transition term is still read: {}", split.transition[2]);
-        let cd_scores = chain_loglik_mod_zscores(&paired(&means, &split.complete));
-        assert_eq!(outlier_labels(&cd_scores), vec!["chain 2"],
-            "precondition: ranking on log_complete_data_ll flags the \
-             concentrated-path chain, not the badly-fitting one: {:?}",
-            cd_scores.iter().map(|s| s.mod_z).collect::<Vec<_>>());
+        let cd = on(&split.complete);
+        assert_eq!(flagged(&cd).first(), Some(&2),
+            "precondition: the complete-data column singles out the concentrated-path chain \
+             first, not the badly-fitting one: {:?}", zs(&cd));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -902,8 +1258,8 @@ mod tests {
     /// decomposition — 522 nats of between-chain spread in `transition_ll`
     /// against 9 in `obs_ll` is what makes "this is an entropy effect, not a
     /// fit difference" legible. Uses the six chains of the real 60,000-sweep
-    /// fit in the issue, whose complete-data spread is genuinely dominated by
-    /// the latent-path term.
+    /// fit in the issue, whose complete-data spread is dominated by the
+    /// latent-path term.
     #[test]
     fn transition_and_obs_spreads_are_read_separately() {
         let dir = crate::test_support::unique_temp_dir("chain_diag_gh667_split");
@@ -921,7 +1277,7 @@ mod tests {
                 "sweep\tlog_complete_data_ll\tlog_posterior\ttransition_ll\tobs_ll\n\
                  0\t{complete}\t{}\t{trans}\t{obs}\n", complete - 1.0)).unwrap();
         }
-        let means = read_chain_mean_logliks(&dir, LoglikType::CompleteData).expect("traces");
+        let means = means_of(&dir, LoglikType::CompleteData).expect("traces");
         let split = means.complete_data.as_ref().expect("PGAS split");
         let range = |v: &[f64]| {
             v.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
@@ -931,35 +1287,21 @@ mod tests {
             "latent-path spread ≈ 522 nats, got {}", range(&split.transition));
         assert!((range(&means.scored) - 8.7).abs() < 0.1,
             "observation spread ≈ 9 nats, got {}", range(&means.scored));
-
-        // The two columns rank the chains differently on the REAL fit too, not
-        // only on a constructed cohort: chain 5 is 8.7 nats below best on data
-        // fit and 522 below best on the latent path, and only the observation
-        // column names it.
-        let obs_flagged = outlier_labels(&chain_loglik_mod_zscores(&means.scored_by_chain()));
-        let cd_flagged = outlier_labels(&chain_loglik_mod_zscores(&paired(&means, &split.complete)));
-        assert_eq!(obs_flagged, vec!["chain 5"], "obs_ll names the worst DATA fit");
-        assert!(cd_flagged.is_empty(),
-            "the complete-data column, whose spread is 60× larger, names NOBODY \
-             — its own scale swamps the differences it would flag: {cd_flagged:?}");
-        // NOTE (gh#664): that obs_ll flag fires at |mod-z| = 5.09 on a spread of
-        // 8.7 nats, because the modified z-score is scale-free — it has no
-        // notion of how many nats matter. gh#667 fixes WHICH quantity is
-        // scored; making the threshold mean something is gh#664, and this
-        // assertion pins the pre-gh#664 behaviour so that change shows up here.
+        // One sweep per chain has no Monte Carlo error to compare on.
+        let (_, scores) = read_chain_loglik_scores(&dir, LoglikType::CompleteData).unwrap();
+        assert!(scores.iter().all(|s| s.test().is_none()), "{scores:?}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Negative control for gh#667: when the two rankings AGREE — one chain is
-    /// off on the latent path AND reproduces the data far worse — the flag
-    /// still lands on it. Narrowing the scored quantity must not cost the
-    /// diagnostic the cases it already caught.
+    /// Negative control for gh#667: when one chain is off on the latent path
+    /// and also reproduces the data far worse, comparing on `obs_ll` still
+    /// names it. Narrowing the compared quantity must not cost the diagnostic
+    /// the cases it already caught.
     #[test]
     fn a_chain_bad_on_both_terms_is_still_flagged() {
         let dir = crate::test_support::unique_temp_dir("chain_diag_gh667_agree");
         std::fs::create_dir_all(&dir).unwrap();
-        // Five chains agree; chain 5 is worse on BOTH terms.
         let chains = [
             (-2900.0, -952.0), (-2910.0, -952.8), (-2890.0, -951.7),
             (-2905.0, -952.9), (-2895.0, -952.3), (-3900.0, -1400.0),
@@ -972,15 +1314,11 @@ mod tests {
                 "sweep\tlog_complete_data_ll\tlog_posterior\ttransition_ll\tobs_ll\n\
                  0\t{complete}\t{}\t{trans}\t{obs}\n", complete - 1.0)).unwrap();
         }
-        let means = read_chain_mean_logliks(&dir, LoglikType::CompleteData).expect("traces");
-        let split = means.complete_data.as_ref().expect("PGAS split");
-        // Precondition: this cohort is one both columns agree on…
-        assert_eq!(outlier_labels(&chain_loglik_mod_zscores(&paired(&means, &split.complete))),
-            vec!["chain 5"]);
-        // …and the scored column still names it.
-        assert_eq!(outlier_labels(&chain_loglik_mod_zscores(&means.scored_by_chain())),
-            vec!["chain 5"]);
-
+        let means = means_of(&dir, LoglikType::CompleteData).expect("traces");
+        let est: Vec<ChainLoglikEstimate> = means.chain_ids.iter().zip(&means.scored)
+            .map(|(&chain, &mean)| ChainLoglikEstimate { chain, mean, weight: 1.0, se: Ok(1.0) })
+            .collect();
+        assert_eq!(flagged(&assess_chain_logliks(&est)), vec![5]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -999,7 +1337,7 @@ mod tests {
              0\t-77.0\t-79.0\t-55.0\t-22.0\n1\t-77.0\t-79.0\t-55.0\t-22.0\n",
         )
         .unwrap();
-        let means = read_chain_mean_logliks(&dir, LoglikType::CompleteData).expect("one chain");
+        let means = means_of(&dir, LoglikType::CompleteData).expect("one chain");
         assert!((means.scored[0] - (-22.0)).abs() < 1e-9,
             "must score obs_ll (-22), not the position-1 column (-77): {}", means.scored[0]);
         let split = means.complete_data.as_ref().expect("PGAS split");
@@ -1021,7 +1359,7 @@ mod tests {
             "sweep\tlog_complete_data_ll\tlog_posterior\n0\t-77.0\t-79.0\n1\t-77.0\t-79.0\n",
         )
         .unwrap();
-        let means = read_chain_mean_logliks(&dir, LoglikType::CompleteData).expect("one chain");
+        let means = means_of(&dir, LoglikType::CompleteData).expect("one chain");
         assert!(means.scored_column_absent, "the absence must be REPORTED");
         assert!(means.scored[0].is_nan(),
             "no obs_ll → no score; never the complete-data value: {}", means.scored[0]);
@@ -1036,7 +1374,7 @@ mod tests {
         let cd = dir.join("chain_1");
         std::fs::create_dir_all(&cd).unwrap();
         std::fs::write(cd.join("trace.tsv"), "a\tb\tc\n1\t2\t3\n").unwrap();
-        let means = read_chain_mean_logliks(&dir, LoglikType::Marginal).expect("one chain dir");
+        let means = means_of(&dir, LoglikType::Marginal).expect("one chain dir");
         assert!(!means.scored_column_absent,
             "an unreadable trace is not evidence about which columns a trace has");
         assert!(means.scored[0].is_nan());
@@ -1051,7 +1389,7 @@ mod tests {
     fn chain_means_are_labelled_by_directory_number_not_position() {
         let dir = crate::test_support::unique_temp_dir("chain_diag_gap");
         std::fs::create_dir_all(&dir).unwrap();
-        // chain_1 never ran; chains 0 and 2 did, and 2 is the stuck one.
+        // chain_1 never ran; chains 0 and 2 did.
         for (c, ll) in [(0usize, -50.0), (2usize, -300.0)] {
             let cd = dir.join(format!("chain_{c}"));
             std::fs::create_dir_all(&cd).unwrap();
@@ -1066,9 +1404,8 @@ mod tests {
             "chain\tdraw\tbeta\n0\t0\t0.5\n0\t1\t0.5\n2\t0\t0.5\n2\t1\t0.5\n",
         )
         .unwrap();
-        let means = read_chain_mean_logliks(&dir, LoglikType::Marginal).expect("traces");
+        let (means, scores) = read_chain_loglik_scores(&dir, LoglikType::Marginal).expect("traces");
         assert_eq!(means.chain_ids, vec![ChainIndex(0), ChainIndex(2)]);
-        let scores = chain_loglik_mod_zscores(&means.scored_by_chain());
         let labels: Vec<ChainIndex> = scores.iter().map(|s| s.chain).collect();
         assert_eq!(labels, vec![ChainIndex(0), ChainIndex(2)],
             "each mean carries its own directory's number");
