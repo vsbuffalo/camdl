@@ -190,7 +190,16 @@ fn check_scalar(
     label: &str,
 ) -> (bool, String) {
     let diff = (actual - expected).abs();
-    let rel = if expected.abs() > 1e-30 { diff / expected.abs() } else { 0.0 };
+    // A reference of exactly zero has no relative scale: the relative error is
+    // 0 when the value matches it and unbounded otherwise. Reporting 0 here
+    // let any value pass a `tol_rel`-only check against a zero reference.
+    let rel = if expected.abs() > 1e-30 {
+        diff / expected.abs()
+    } else if diff == 0.0 {
+        0.0
+    } else {
+        f64::INFINITY
+    };
     let abs_pass = tol_abs.map(|t| diff <= t);
     let rel_pass = tol_rel.map(|t| rel <= t);
     let pass = match (abs_pass, rel_pass) {
@@ -236,6 +245,19 @@ mod tests {
     #[test]
     fn scalar_rel_pass() {
         let (pass, _) = check_scalar(100.0, 102.0, None, Some(0.05), "mean");
+        assert!(pass);
+    }
+
+    #[test]
+    fn scalar_rel_against_zero_reference() {
+        // A zero reference is matched only by zero; no relative tolerance
+        // makes 5.0 close to it.
+        let (pass, _) = check_scalar(5.0, 0.0, None, Some(0.01), "mean");
+        assert!(!pass);
+        let (pass, _) = check_scalar(0.0, 0.0, None, Some(0.01), "mean");
+        assert!(pass);
+        // With an absolute tolerance as well, either still passes.
+        let (pass, _) = check_scalar(1e-9, 0.0, Some(1e-6), Some(0.01), "mean");
         assert!(pass);
     }
 
