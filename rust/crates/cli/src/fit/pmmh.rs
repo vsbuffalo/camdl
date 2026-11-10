@@ -903,14 +903,14 @@ pub fn run_method(
         // gh#880, gh#885. The reason and the remedies come from the one
         // string the other two all-chains-refused errors also carry, so they
         // cannot drift apart again.
-        return Err(super::write_diagnostics_then_fail(&collector, method_dir, format!(
+        return Err(format!(
             "pmmh method `{}`: all {} chains failed init-eval with \
              PFDegenerate — the particle filter could not score any chain's \
              starting parameters. See `diagnostics.json` for the per-chain \
              BadInit entries and `chain_starts.tsv` for the starts they name. \
              {}",
             method_name, n_chains,
-            crate::fit::chain_starts::UNSCOREABLE_START_ADVICE)));
+            crate::fit::chain_starts::UNSCOREABLE_START_ADVICE));
     }
 
     // gh#226. Whole-fit backstop: every surviving (non-skipped) chain
@@ -927,7 +927,7 @@ pub fn run_method(
     // predicate is false → no fire).
     if results.iter().all(|(_, r)| sim::inference::no_finite_anchor(r.map_loglik)) {
         out.finding(DiagnosticKind::InitialLoglikInfinite);
-        return Err(super::write_diagnostics_then_fail(&collector, method_dir, format!(
+        return Err(format!(
             "pmmh method `{}`: all {} surviving chain(s) reached no finite \
              log-likelihood anchor — every evaluated θ scored -inf, so the \
              MH chain never moves (-inf - (-inf) = NaN, never accepted) and \
@@ -939,7 +939,7 @@ pub fn run_method(
              error fires at every θ (gh#226). Also check the observation model \
              and parameter bounds; run with --verbosity debug for per-substep \
              diagnostics.",
-            method_name, results.len())));
+            method_name, results.len()));
     }
 
     // Find MAP across surviving chains

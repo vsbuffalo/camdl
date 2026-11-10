@@ -5581,9 +5581,9 @@ Numbers follow §10.7's rule: a non-finite number is the string `"inf"`, `"-inf"
 or `"NaN"`, and `null` means no value.
 
 **How a log ends.** A run camdl finished or stopped ends its log with
-`method_report`. A log whose last line is something else was cut off: the
-process was killed, or an IF2 or NLopt run failed inside its runner, where the
-error is reported without the method's report. `progress.json` says which
+`method_report`, whichever method failed and wherever, its findings recorded in
+`diagnostics.json` beside it. A log whose last line is something else was cut
+off: the process was killed or panicked, and `progress.json` says which
 (§10.10).
 
 **Writing.** Each line is written whole, in one write, so a reader following the
