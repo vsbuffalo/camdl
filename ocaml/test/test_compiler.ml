@@ -4451,6 +4451,87 @@ let test_meanfield_grad_drops_unrelated_params () =
     "rate_grad carries exactly the parameters the rate depends on"
     [ "beta_w"; "beta_b" ] (List.map fst inf.rate_grad)
 
+(* ── A `let` that reaches a parameter through a table or a forcing ──────────
+
+   Hoisting a `let` into [model.bindings] is sound only when its body is
+   param-free, because autodiff differentiates [BindingRef] to 0. A table cell
+   and a forcing coefficient can each be a parameter, so a `let` reading either
+   reaches that parameter and must stay inlined; hoisting it drops the
+   parameter from [rate_grad], which the runtime reads as a derivative of
+   exactly zero. *)
+
+let grad_params (m : Ir.model) tname =
+  match List.find_opt (fun (t : Ir.transition) -> t.Ir.name = tname) m.Ir.transitions with
+  | Some t -> List.sort compare (List.map fst t.Ir.rate_grad)
+  | None -> Alcotest.failf "transition %s missing" tname
+
+let test_let_reading_param_valued_table_keeps_its_gradient () =
+  let m = compile_expect_ok {|
+time_unit = 'days
+dimensions { age = [child, adult] }
+compartments { S, I, R }
+stratify(by = age)
+parameters {
+  beta  : rate
+  gamma : rate
+  sigma : positive dim 1
+  I0    : count
+}
+tables { rel_inf : age = [1.0, sigma] }
+let N = sum(a in age, S[a] + I[a] + R[a])
+let wI = sum(a in age, rel_inf[a] * I[a])
+transitions {
+  infection[a in age] : S[a] --> I[a]  @ beta * S[a] * wI / N
+  recovery[a in age]  : I[a] --> R[a]  @ gamma * I[a]
+}
+init {
+  S[a in age] = 500 - I0
+  I[a in age] = I0
+}
+simulate { from = 0 'days to = 80 'days }
+|} in
+  Alcotest.(check (list string))
+    "d(infection)/d(sigma) is present: wI reads sigma through rel_inf"
+    [ "beta"; "sigma" ] (grad_params m "infection_child");
+  Alcotest.(check bool) "wI is not hoisted" false
+    (List.exists (fun (b : Ir.binding) -> b.Ir.bname = "wI") m.Ir.bindings)
+
+let test_let_reading_param_coefficient_forcing_keeps_its_gradient () =
+  let m = compile_expect_ok {|
+time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R
+parameters {
+  beta  : rate
+  gamma : rate
+  alpha : probability
+  I0    : count
+}
+forcing {
+  seasonal : sinusoidal 'ratio {
+    amplitude = alpha
+    period    = 365.25
+    phase     = 0.0
+    baseline  = 1.0
+  }
+}
+let pressure = seasonal(t) * I / N
+transitions {
+  infection : S --> I  @ beta * S * pressure
+  recovery  : I --> R  @ gamma * I
+}
+init {
+  S = 1000 - I0
+  I = I0
+}
+simulate { from = 0 'days to = 80 'days }
+|} in
+  Alcotest.(check (list string))
+    "d(infection)/d(alpha) is present: pressure reads alpha through seasonal"
+    [ "alpha"; "beta" ] (grad_params m "infection");
+  Alcotest.(check bool) "pressure is not hoisted" false
+    (List.exists (fun (b : Ir.binding) -> b.Ir.bname = "pressure") m.Ir.bindings)
+
 (* ── Reduce-zero folding: d(Σ tᵢ)/dp with every dtᵢ = 0 is a genuine zero ── *)
 
 let test_reduce_of_zeros_folds_to_genuine_zero () =
@@ -15613,6 +15694,8 @@ let () =
       Alcotest.test_case "mean-field: param-free global sum hoists to a binding" `Quick test_meanfield_global_sum_is_hoisted;
       Alcotest.test_case "mean-field: param-bearing let still refuses to hoist" `Quick test_param_bearing_let_still_refuses_to_hoist;
       Alcotest.test_case "mean-field: rate_grad drops params absent from the rate" `Quick test_meanfield_grad_drops_unrelated_params;
+      Alcotest.test_case "a let reading a param-valued table keeps its gradient" `Quick test_let_reading_param_valued_table_keeps_its_gradient;
+      Alcotest.test_case "a let reading a param-coefficient forcing keeps its gradient" `Quick test_let_reading_param_coefficient_forcing_keeps_its_gradient;
       Alcotest.test_case "autodiff: Σ of zero derivatives folds to a genuine zero" `Quick test_reduce_of_zeros_folds_to_genuine_zero;
       Alcotest.test_case "autodiff: Σ with a live summand is not over-folded" `Quick test_reduce_partial_zeros_keeps_live_terms;
       Alcotest.test_case "rate_state_grad: ∂/∂compartment emits nonzero comps (gh#275)" `Quick test_rate_state_grad_smooth;

@@ -3367,8 +3367,12 @@ let splice_date_ranges ctx (es : expr list) : expr list =
 
 (* Does a `let` body transitively reach a parameter? A parameter disqualifies it
    from hoisting: the body would have d/dp ≠ 0, but the BindingRef autodiff arm
-   yields 0 — a silent zero gradient. Compartments, tables, forcings, time, and
-   constants are all fine — param-free, so d/dp ≡ 0.
+   yields 0 — a silent zero gradient. Compartments, time and constants are
+   param-free, so d/dp ≡ 0. A table or a forcing is param-free only when its own
+   definition is: an inline table cell is an arbitrary expression
+   (`rel_inf : age = [1.0, sigma]`) and a forcing coefficient may be a
+   parameter (an estimated seasonal amplitude), so a name of either kind is
+   followed into its definition the way a `let` is.
 
    A reference to another `let` is disqualifying only if THAT let transitively
    reaches a parameter, so we recurse into its body rather than reject on sight.
@@ -3438,6 +3442,22 @@ let body_refs_param_or_let ctx (e : expr) : bool =
           | Some lb ->
             if Hashtbl.mem visited n then false
             else begin Hashtbl.replace visited n (); go lb.lbody end)
+      || (match List.find_opt (fun td -> List.mem n td.tnames) ctx.table_decls with
+          | None -> false
+          | Some td ->
+            let key = "table:" ^ n in
+            if Hashtbl.mem visited key then false
+            else begin Hashtbl.replace visited key (); go td.tvalue end)
+      || (match List.find_opt (fun (fd : func_decl) -> fd.fname = n) ctx.func_decls with
+          | None -> false
+          | Some fd ->
+            let key = "forcing:" ^ n in
+            if Hashtbl.mem visited key then false
+            else begin
+              Hashtbl.replace visited key ();
+              List.exists (fun (_, a) ->
+                match farg_expr_opt a with Some e -> go e | None -> false) fd.fargs
+            end)
     in
     match e with
     | EConst _ | EUnit _ -> false
@@ -3449,7 +3469,7 @@ let body_refs_param_or_let ctx (e : expr) : bool =
     | EUnOp (_, e)     -> go e
     | ESum (_, _, _, b, _) -> go b
     | ECond (p, t, f)  -> go p || go t || go f
-    | EFuncCall (_, args) -> List.exists (fun (_, e) -> go e) args
+    | EFuncCall (f, args) -> bad f || List.exists (fun (_, e) -> go e) args
     | EList es            -> List.exists go es
     | ERange (lo, hi)     -> go lo || go hi
     | EObsAccess _        -> false
