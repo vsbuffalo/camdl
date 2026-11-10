@@ -96,6 +96,24 @@ fn a_successful_nlopt_leaf_holds_diagnostics_json() {
 }
 
 #[test]
+fn a_pfilter_run_that_cannot_claim_its_output_exits_non_zero() {
+    let tmp = workdir();
+    // The run store's root is a path under a regular file, so no leaf can be
+    // claimed there.
+    std::fs::write(tmp.path().join("not_a_dir"), "x").unwrap();
+    std::fs::write(tmp.path().join("p.toml"), "beta = 0.5\ngamma = 0.2\nrho = 0.5\nN0 = 2000\n").unwrap();
+    let out = command(tmp.path())
+        .args(["pfilter", "sir.camdl", "--data=cases.tsv", "--particles", "100",
+               "--seed", "1", "--params", "p.toml"])
+        .env("CAMDL_OUTPUT_DIR", tmp.path().join("not_a_dir/store"))
+        .output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("NOT stored"), "the failure says the result was not stored:\n{stderr}");
+    assert_eq!(out.status.code(), Some(1),
+        "an unstored result is an error (status 1, not the filter-failed status 3):\n{stderr}");
+}
+
+#[test]
 fn an_observation_file_that_does_not_bind_abandons_the_fit_with_its_record() {
     let tmp = workdir();
     // Two rows at one time: the schedule is not strictly increasing.
