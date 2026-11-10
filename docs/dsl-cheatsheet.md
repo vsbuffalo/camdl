@@ -332,7 +332,7 @@ The compiler issues E-codes with source locations and fix-hints.
 - **Parser (grammar):** `ocaml/lib/compiler/parser.mly`
 - **AST:** `ocaml/lib/compiler/ast.ml`
 - **Expander (stratification + IR emission):** `ocaml/lib/compiler/expander.ml`
-- **Dimensional checker:** `ocaml/lib/compiler/dimcheck.ml`
+- **Dimensional checker:** `ocaml/lib/ir/dimcheck.ml`
 - **IR types (Rust):** `rust/crates/ir/src/`
 - **Calendar conversion (Rust):** `rust/crates/ir/src/caltime.rs`
 - **IR schema (the OCaml↔Rust contract):** `ir/schema.json`

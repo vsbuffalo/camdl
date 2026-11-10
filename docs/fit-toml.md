@@ -168,13 +168,13 @@ The rules fall into two kinds, and the kind is what R̂ needs to know.
 **Spread** rules give each chain its own start, so the between-chain R̂ can say
 whether the chains found the same posterior:
 
-| `starts`                          | where the chains start                                                                                                                            |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `from_prior`                      | one draw from the declared priors per chain, restricted to `bounds`; base point unused                                                            |
-| `uniform_unconstrained`           | Stan-style boundary-avoiding draws on the unconstrained scale; base point unused                                                                  |
-| `lhs`                             | Latin-hypercube stratified over `bounds`; base point unused                                                                                       |
-| `uniform`                         | chain 0 at the base point; the rest uniform within `bounds`                                                                                       |
-| `{ from_posterior = "<handle>" }` | one row of a stored fit's posterior per chain (or of a draws TSV named directly); a parameter absent from the source falls back to bounds-uniform |
+| `starts`                          | where the chains start                                                                                                                               |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `from_prior`                      | one draw from the declared priors per chain, restricted to `bounds`; base point unused                                                               |
+| `uniform_unconstrained`           | Stan-style boundary-avoiding draws on the unconstrained scale; base point unused                                                                     |
+| `lhs`                             | Latin-hypercube stratified over `bounds`; base point unused                                                                                          |
+| `uniform`                         | chain 0 at the base point; the rest uniform within `bounds`                                                                                          |
+| `{ from_posterior = "<handle>" }` | one row of a stored fit's posterior per chain (or of a draws TSV named directly); a source that lacks a column for an estimated parameter is refused |
 
 **Point** rules put every chain at one point. R̂ is then _not assessed_ — chains
 that began together agree by construction, and the summary says so instead of

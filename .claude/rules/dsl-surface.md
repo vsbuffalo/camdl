@@ -23,7 +23,7 @@ DSL constant positions:
   orientation.
 - The grammar itself: `ocaml/lib/compiler/lexer.mll` (unit literals + tokens),
   `ocaml/lib/compiler/parser.mly` (the rule for whatever you're changing),
-  `ocaml/lib/compiler/dimcheck.ml` (dimensional behaviour).
+  `ocaml/lib/ir/dimcheck.ml` (dimensional behaviour).
 
 ## No loose semantics
 

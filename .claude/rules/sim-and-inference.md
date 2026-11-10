@@ -24,7 +24,7 @@ reports in `docs/dev/incidents/`.
 - `pmmh.rs` — Particle Marginal Metropolis-Hastings (production; prefer PGAS for
   long observation series)
 - `particle_filter.rs` — Bootstrap particle filter
-- `dmeasure.rs` — Observation likelihood compilation
+- `obs_model.rs` — Observation likelihood compilation
 - `obs_loglik.rs` — Distribution log-PMFs + analytical gradients (incl. digamma)
 
 The OCaml compiler (`ocaml/lib/ir/autodiff.ml`) performs source-to-source
