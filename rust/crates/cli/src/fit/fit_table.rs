@@ -942,8 +942,8 @@ particles = 100\nsweeps = 10\nuse_nuts = false\nmax_tree_depth = 8\n").unwrap();
             "and so does the JSON key consumers parse: {json}");
         // The tag a consumer keys on to know which of the two contracts it is
         // holding. A rename under an unchanged version is the gh#728 problem.
-        assert!(table_row::SCHEMA_VERSION >= 2,
-            "a renamed key bumps the row schema version");
+        const { assert!(table_row::SCHEMA_VERSION >= 2,
+            "a renamed key bumps the row schema version") };
     }
 
     /// Cohort filtering on `--with-method` keeps only the requested
