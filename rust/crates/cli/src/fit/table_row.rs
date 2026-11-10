@@ -1,9 +1,9 @@
 //! `table_row` — the schema shared by `fit summary --format json` and
 //! `fit table --format json`.
 //!
-//! One fit projects to one `TableRow`. `fit summary` embeds a
-//! `table_row` block in its top-level JSON; `fit table` produces a
-//! list of them. **Deliverable C** asserts these are byte-equal for
+//! One completed run projects to one `TableRow`. `fit summary` embeds one
+//! per completed run in its top-level JSON (`table_rows`); `fit table`
+//! produces a list of them. **Deliverable C** asserts these are byte-equal for
 //! the same fit (`docs/dev/proposals/2026-04-28-fit-experiment-management.md` §3).
 //!
 //! Map fields (`params`, `ess_posterior`) use [`BTreeMap<String, _>`]
@@ -37,7 +37,13 @@ pub const SCHEMA_NAME: &str = "table_row";
 /// v3 (gh#896): `run_id`, the run the row reports. `fit predict` writes each
 /// run's quantities under `<segment>/predict/<run id>/`, so a row's
 /// `quantities` are read from its run's directory, not the folder's.
-pub const SCHEMA_VERSION: u32 = 3;
+///
+/// v4: a number is a JSON number or the string `"NaN"`, `"inf"` or `"-inf"`,
+/// and `null` means "not computed" — both `fit table --format json` and the
+/// rows `fit summary --format json` embeds are written by
+/// [`crate::fit::report::exact::exact_json`]. v3 wrote every non-finite
+/// number as `null`.
+pub const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct TableRowSchema {
@@ -56,9 +62,10 @@ impl TableRowSchema {
 
 /// One fit, projected to a single row.
 ///
-/// Field ordering matches proposal §3 (table_row schema v1) and is
-/// deliberately preserved so JSON-pretty rendering reads top-to-bottom
-/// in the documented order.
+/// Field ordering matches proposal §3 (table_row schema v1). The JSON
+/// writers go through [`crate::fit::report::exact::exact_json`], whose
+/// `serde_json::Value` maps are key-sorted, so the JSON lists the keys
+/// alphabetically rather than in this order.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct TableRow {
     pub schema: TableRowSchema,
@@ -74,17 +81,13 @@ pub struct TableRow {
     /// trailing `.fit.toml` / `.toml` extension.
     pub stem: String,
     pub model_identity: String,
-    /// The methods that completed under this fit, by the label of each
-    /// `method` store level, in the order the leaves carry. A fit whose
-    /// results directory holds an IF2 leaf and a PGAS leaf reads
-    /// `["if2", "pgas"]`; a PGAS-only fit reads `["pgas"]`. A method whose
-    /// leaf has no `run.json` did not complete and is excluded.
+    /// The method of the row's run, as a one-element list: a row reports one
+    /// run (gh#896), so a folder holding an IF2 run and a PGAS run has two
+    /// rows, `["if2"]` and `["pgas"]`.
     pub methods: Vec<String>,
-    /// The *terminal* completed method — the last of [`Self::methods`] with
-    /// a `run.json` on disk. `methods` is what ran; this is the one whose
-    /// numbers the rest of the row reports.
+    /// The method of the one run whose numbers the row reports.
     pub method: String,
-    /// The terminal run's `run_id` (full hex): the one run whose numbers the
+    /// The row's run's `run_id` (full hex): the one run whose numbers the
     /// row reports, and whose predictions directory `quantities` come from.
     pub run_id: String,
     pub config_diff_from_baseline: ConfigDiff,
@@ -168,7 +171,10 @@ pub enum TableRowError {
     },
     /// The walker found no completed methods under this fit_dir.
     NoMethods { fit_dir: std::path::PathBuf },
-    /// Loading the terminal method's `MethodResult` failed.
+    /// The directory holds more than one completed run with a result, and a
+    /// row reports one run: it names them rather than choosing (gh#896).
+    SeveralRuns { fit_dir: std::path::PathBuf, runs: Vec<std::path::PathBuf> },
+    /// Loading the run's `MethodResult` failed.
     Method(MethodResultError),
 }
 
@@ -186,6 +192,14 @@ impl std::fmt::Display for TableRowError {
                 "no completed method leaves found under {}",
                 fit_dir.display()
             ),
+            TableRowError::SeveralRuns { fit_dir, runs } => {
+                write!(f, "{} holds {} completed runs and a row reports one; pass one of:",
+                    fit_dir.display(), runs.len())?;
+                for r in runs {
+                    write!(f, "\n  {}", r.display())?;
+                }
+                Ok(())
+            }
             TableRowError::Method(e) => write!(f, "{}", e),
         }
     }
@@ -220,12 +234,22 @@ pub fn build_row(
         fit_dir: fit_dir.to_path_buf(),
         message: format!("walker: {}", e),
     })?;
-    let terminal = pick_terminal_method(&view, &nodes).ok_or_else(|| {
-        TableRowError::NoMethods {
+    // The one completed run with a result. A row reports one run, so a
+    // directory holding several is refused with them listed, never resolved
+    // by an ordering rule (gh#896). A `pfilter` leaf has no `MethodResult`
+    // shape and is not a candidate (gh#590).
+    let mut candidates: Vec<&MethodNode> = nodes.iter()
+        .filter(|n| n.view.completed() && MethodResult::is_fitted(n.view.method))
+        .collect();
+    let terminal = match candidates.len() {
+        0 => return Err(TableRowError::NoMethods { fit_dir: fit_dir.to_path_buf() }),
+        1 => candidates.remove(0),
+        _ => return Err(TableRowError::SeveralRuns {
             fit_dir: fit_dir.to_path_buf(),
-        }
-    })?;
-    let completed_methods = completed_method_names(&view, &nodes);
+            runs: candidates.iter().map(|n| n.method_dir.clone()).collect(),
+        }),
+    };
+    let completed_methods = vec![terminal.view.method.as_str().to_string()];
 
     let method = terminal.view.method.as_str().to_string();
     let method_result = MethodResult::load_from(&terminal.method_dir, &method)?;
@@ -399,68 +423,6 @@ impl MethodView {
     }
 }
 
-/// Find the terminal completed method. Walks `methods_declared` in
-/// reverse and returns the first node whose method name matches a
-/// completed run. Picks Real over Synthetic, lowest `fit_seed`, then
-/// lex-first method_dir — same priority as
-/// `fit_summary::discover_methods`.
-///
-/// Only a leaf whose method has a [`MethodResult`] shape is a candidate
-/// (gh#590). A `pfilter` leaf has none; picking it made the row builder fail
-/// with `UnknownMethod`, and the whole fit vanished from `fit table` because
-/// one of its leaves could not be a row. Such a leaf is skipped, and the row
-/// comes from the next declared method that has a result.
-fn pick_terminal_method<'a>(
-    view: &FitView,
-    nodes: &'a [MethodNode],
-) -> Option<&'a MethodNode> {
-    let has_result = |n: &&MethodNode| MethodResult::is_fitted(n.view.method);
-    for method_name in view.methods_declared.iter().rev() {
-        if let Some(node) = best_node_for_method(method_name, nodes).filter(has_result) {
-            return Some(node);
-        }
-    }
-    // Falls back to whatever the walker found in lex order.
-    nodes.iter().find(has_result)
-}
-
-fn best_node_for_method<'a>(method_name: &str, nodes: &'a [MethodNode]) -> Option<&'a MethodNode> {
-    use crate::fit::fit_tree::DataKind;
-    let mut best: Option<(&'a MethodNode, (u8, u64))> = None;
-    for node in nodes {
-        if node.view.method.as_str() != method_name {
-            continue;
-        }
-        let rank: (u8, u64) = match &node.view.axes {
-            Some(axes) => {
-                let kind_rank = match axes.data_kind {
-                    DataKind::Real => 0,
-                    DataKind::Synthetic { .. } => 1,
-                };
-                (kind_rank, axes.fit_seed)
-            }
-            None => (2, u64::MAX),
-        };
-        match best {
-            Some((_, br)) if rank >= br => {}
-            _ => best = Some((node, rank)),
-        }
-    }
-    best.map(|(n, _)| n)
-}
-
-/// The label of every `method` level under this fit whose leaf completed, in
-/// the order the fit view lists them.
-fn completed_method_names(view: &FitView, nodes: &[MethodNode]) -> Vec<String> {
-    let completed: std::collections::HashSet<&str> =
-        nodes.iter().map(|n| n.view.method.as_str()).collect();
-    view.methods_declared
-        .iter()
-        .filter(|s| completed.contains(s.as_str()))
-        .cloned()
-        .collect()
-}
-
 fn short_hash(full: &str) -> String {
     full.chars().take(8).collect()
 }
@@ -613,12 +575,13 @@ mod tests {
     /// The discriminator every consumer keys on. v2 is the `methods` →
     /// `methods` rename (gh#890): a key that changes name under an unchanged
     /// version is the vintage problem gh#728 describes, one file later. v3
-    /// adds `run_id` (gh#896).
+    /// adds `run_id` (gh#896). v4 spells non-finite numbers rather than
+    /// writing them `null`.
     #[test]
-    fn schema_pin_is_v3() {
+    fn schema_pin_is_v4() {
         let s = TableRowSchema::current();
         assert_eq!(s.name, "table_row");
-        assert_eq!(s.version, 3);
+        assert_eq!(s.version, 4);
     }
 
     #[test]

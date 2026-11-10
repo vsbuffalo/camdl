@@ -8,6 +8,7 @@ use sim::inference::diagnostic::{fmt_rate, AcceptanceKernel};
 
 use super::build::{MethodOutcome, MethodReport, ParameterReport, ProvenanceReport};
 use super::{ChainDetail, ChainWarmup, RefusedChains, RunHeader};
+use crate::fit::chain_diagnostics::ChainLoglikOutcome;
 use crate::fit::config_v2::GateConfig;
 use crate::fit::method_result::{If2Record, If2Run, MethodResult, NloptRun, PfilterRun};
 use crate::fit::method_result::{PosteriorDiagnostics, Stat};
@@ -1098,26 +1099,33 @@ fn not_assessed_headline() -> Line {
 /// The verdict's third line: the counts that qualify it, dot-separated.
 ///
 /// A fact with nothing to report is dropped rather than printed as a zero —
-/// "0 outlier chains" and "outliers were never scored" are different
+/// "no chain differs" and "the chains were never compared" are different
 /// statements and must not share a rendering.
 ///
-/// Under `--exclude-chains` its job is also to say what the outlier count is
-/// NOT. R̂ and the parameter counts on the lines above are recomputed over
-/// the retained chains; the outlier score is read from the per-chain traces
-/// on disk, which the selection does not filter. Standing unlabelled beside
-/// recomputed numbers, it would read as though it shared their scope.
+/// Under `--exclude-chains` its job is also to say what the chain count is
+/// not. R̂ and the parameter counts on the lines above are recomputed over
+/// the retained chains; the log-likelihood comparison is read from the
+/// per-chain traces on disk, which the selection does not filter. Standing
+/// unlabelled beside recomputed numbers, it would read as though it shared
+/// their scope.
 fn verdict_facts(lead: Option<String>, detail: &ChainDetail) -> Vec<Line> {
     let mut parts: Vec<String> = lead.into_iter().collect();
     if !detail.scores.is_empty() {
-        let n = detail.scores.iter().filter(|s| s.is_outlier).count();
+        let n = detail.scores.iter().filter(|s| s.is_flagged()).count();
+        let n_assessed = detail.scores.iter().filter(|s| s.test().is_some()).count();
         let scope = match detail.subset {
             Some(_) => " (over every chain, not the retained subset)",
             None => "",
         };
-        parts.push(match n {
-            0 => format!("no outlier chains{scope}"),
-            1 => format!("1 outlier chain{scope}"),
-            n => format!("{n} outlier chains{scope}"),
+        let n_all = detail.scores.len();
+        parts.push(match (n_assessed, n) {
+            (0, _) => format!("chains' log-likelihoods not assessed{scope}"),
+            (a, 0) if a == n_all => format!("chains' log-likelihoods agree{scope}"),
+            (a, 0) => format!("{a} of {n_all} chains' log-likelihoods compared, none differs{scope}"),
+            (a, 1) if a == n_all => format!("1 chain's log-likelihood differs{scope}"),
+            (a, n) if a == n_all => format!("{n} chains' log-likelihoods differ{scope}"),
+            (a, 1) => format!("{a} of {n_all} chains' log-likelihoods compared, 1 differs{scope}"),
+            (a, n) => format!("{a} of {n_all} chains' log-likelihoods compared, {n} differ{scope}"),
         });
     }
     if let Some(j) = &detail.forkable {
@@ -1324,12 +1332,12 @@ pub(crate) fn efficiency_lines(diag: &PosteriorDiagnostics) -> Vec<Line> {
     out
 }
 
-/// Per-chain log-likelihood, the robust outlier score, and — for PGAS — how
-/// many latent paths each chain left behind.
+/// Per-chain log-likelihood, its comparison with the other chains, and — for
+/// PGAS — how many latent paths each chain left behind.
 ///
 /// One table, because both halves are keyed on the chain id and answer halves
-/// of one question: chain 7 is the outlier, and chain 7 is also where ten of
-/// the forkable paths came from.
+/// of one question: chain 7 differs from the rest, and chain 7 is also where
+/// ten of the forkable paths came from.
 ///
 /// The scored column is decided by the method's log-likelihood class, by
 /// name: `obs_ll` (`log p(y | X, θ)`) for PGAS, `log_likelihood`
@@ -1348,15 +1356,15 @@ pub(crate) fn chains_section(
     // `--exclude-chains` recomputes the posterior diagnostics over the
     // retained chains, but this table is read from the per-chain traces on
     // disk and the selection does not filter them. Every excluded chain still
-    // has a row, and the mod-z scale is still set by all of them. That is
+    // has a row and is still compared with the others. That is
     // deliberate — inspecting the chain you dropped is the reason you dropped
     // it — but it must be SAID, or the rows read as though they shared the
     // recomputed scope of the tables above.
     if let Some(info) = &detail.subset {
         out.extend(note(Style::Dim, &format!(
             "(every chain is listed, including the excluded {} — this table \
-             is read from the traces on disk, and the outlier score is over \
-             all of them)",
+             is read from the traces on disk, and the chains are compared \
+             over all of them)",
             info.excluded_csv())));
     }
 
@@ -1397,7 +1405,7 @@ pub(crate) fn chains_section(
             means.scored_column), Style::Dim));
         out.extend(path_only_table(&paths));
     } else if means.scored.len() < 2 {
-        out.push(indented("  ", "(need ≥2 chains with traces for a cross-chain outlier score)", Style::Dim));
+        out.push(indented("  ", "(need ≥2 chains with traces to compare chains)", Style::Dim));
         out.extend(path_only_table(&paths));
     } else {
         // Under a selection `n_chains_expected` is the RETAINED count while
@@ -1417,17 +1425,16 @@ pub(crate) fn chains_section(
             String::new()
         };
         out.push(plain(match &means.complete_data {
-            Some(_) => format!("  {:5} {:>14}  {:>7}  {:>14} {:>14}{}   {}",
-                "chain", "obs ll", "mod-z", "transition ll", "complete ll", path_head, "flag"),
-            None => format!("  {:5} {:>14}  {:>7}{}   {}",
-                "chain", "mean loglik", "mod-z", path_head, "flag"),
+            Some(_) => format!("  {:5} {:>14}  {:>8}  {:>6}  {:>14} {:>14}{}   {}",
+                "chain", "obs ll", "Δ others", "Z", "transition ll", "complete ll", path_head, "flag"),
+            None => format!("  {:5} {:>14}  {:>8}  {:>6}{}   {}",
+                "chain", "mean loglik", "Δ others", "Z", path_head, "flag"),
         }));
         for (i, sc) in detail.scores.iter().enumerate() {
-            // A non-finite mod-z (unreadable trace) renders `—`, never a fake 0.
-            let z = if sc.mod_z.is_finite() {
-                format!("{:>7.2}", sc.mod_z)
-            } else {
-                format!("{:>7}", "—")
+            // A chain not assessed renders `—`, never a fake 0.
+            let z = match sc.test() {
+                Some(t) => format!("{:>+8.2}  {:>6.2}", t.diff, t.z),
+                None => format!("{:>8}  {:>6}", "—", "—"),
             };
             let path_cells = if show_paths {
                 match paths.get(&(sc.chain.0 as u64)) {
@@ -1450,10 +1457,34 @@ pub(crate) fn chains_section(
                 row.extend(chain_loglik_cell(cd_means.complete.get(i).copied().unwrap_or(f64::NAN), 14));
             }
             row.push(Span::plain(format!("{path_cells}   ")));
-            if sc.is_outlier {
-                row.push(Span::styled("← outlier", Style::Err));
+            match &sc.outcome {
+                ChainLoglikOutcome::Assessed(t) if t.flagged => {
+                    row.push(Span::styled("← differs", Style::Warn));
+                }
+                ChainLoglikOutcome::Assessed(_) => {}
+                ChainLoglikOutcome::NotAssessed(_) => {
+                    row.push(Span::styled("not assessed", Style::Dim));
+                }
             }
             out.push(Line(row));
+        }
+        // Why the chains not assessed were not, one line per reason.
+        let mut reasons: Vec<(String, Vec<String>)> = Vec::new();
+        for sc in &detail.scores {
+            if let ChainLoglikOutcome::NotAssessed(why) = &sc.outcome {
+                let why = why.describe();
+                match reasons.iter_mut().find(|(w, _)| *w == why) {
+                    Some((_, chains)) => chains.push(sc.chain.to_string()),
+                    None => reasons.push((why, vec![sc.chain.to_string()])),
+                }
+            }
+        }
+        for (why, chains) in reasons {
+            let who = match chains.len() {
+                1 => format!("chain {}", chains[0]),
+                _ => format!("chains {}", chains.join(", ")),
+            };
+            out.extend(note(Style::Dim, &format!("{who} not compared: {why}.")));
         }
     }
 
@@ -1461,8 +1492,8 @@ pub(crate) fn chains_section(
 
     // gh#608 (ebola F8): the stuck-state screen. A chain recording a
     // non-finite log-posterior as its CURRENT state is degenerate (gh#607);
-    // the robust mod-z above cannot flag it (a -inf mean is excluded from the
-    // centre/scale), so it gets its own loud line, right where the reader is
+    // the comparison above cannot assess it (a -inf mean has no standard
+    // error), so it gets its own loud line, right where the reader is
     // told the pooled numbers include it.
     if let Some(neginf) = &detail.neginf {
         for d in neginf.iter().filter(|d| d.n_neginf > 0 && d.n_retained > 0) {
@@ -1480,8 +1511,9 @@ pub(crate) fn chains_section(
     }
 
     // gh#635 (ebola item 1): a POINT-MASS chain — one distinct parameter
-    // vector across all retained draws (zero accepted θ-moves) — evades both
-    // the mod-z score and the −inf screen when its start has finite density.
+    // vector across all retained draws (zero accepted θ-moves) — is not
+    // assessed by the comparison (one effective draw) and evades the −inf
+    // screen when its start has finite density.
     // Same loud treatment.
     if let Some(uniq) = &detail.unique_draws {
         for u in uniq.iter().filter(|u| u.n_unique == 1 && u.n_draws > 1) {
@@ -1496,15 +1528,17 @@ pub(crate) fn chains_section(
         }
     }
 
-    let flagged = crate::fit::chain_diagnostics::outlier_labels(&detail.scores);
-    if !flagged.is_empty() {
-        // The one-line nudge: chains in a distinctly different part of the
-        // likelihood surface is the near-unidentified-parameter (flat-ridge)
-        // signature.
-        out.extend(note(Style::Warn, &format!(
-            "⚠ chains disagree ({} — {} far from the rest) — is a parameter \
-             weakly identified? Inspect its per-chain posterior.",
-            flagged.join(", "), means.scored_column)));
+    // What was observed, and what it can indicate — never a cause stated as
+    // fact. R̂ and ESS above are the convergence verdict; this corroborates.
+    let observed = crate::fit::chain_diagnostics::describe_flagged(&detail.scores, means.scored_column);
+    for o in &observed {
+        out.extend(note(Style::Warn, &format!("⚠ {o}.")));
+    }
+    if !observed.is_empty() {
+        out.extend(note(Style::Warn,
+            "This can indicate a chain sampling another region of the posterior (a side \
+             mode, or a ridge along a weakly identified parameter) or one that has not \
+             mixed; compare its per-chain posterior with the others'."));
     }
     out.extend(explain(explain_on, SECTION_CHAINS));
     out
@@ -1822,11 +1856,16 @@ pub(crate) const EXPLAIN: &[(&str, &str)] = &[
     ),
     (
         SECTION_CHAINS,
-        "Ranked on `obs ll` = log p(y | X): does this chain reproduce the data. \
+        "Compared on `obs ll` = log p(y | X): does this chain reproduce the data. \
          Transition and complete ll are path densities at each chain's own \
-         path, so they are shown but not ranked. `mod-z` is a \
-         median-absolute-deviation z-score — robust, so one bad chain cannot \
-         inflate the scale that judges it; |mod-z| > 3.5 flags. `forkable` \
+         path, so they are shown but not compared. `Δ others` is the chain's \
+         mean minus the pooled mean of the other chains, in nats; `Z` divides \
+         it by its Monte Carlo standard error, from each chain's own trace \
+         (sd / √ESS). A chain is flagged when Z exceeds Φ⁻¹(1 − 0.001/2k) for \
+         k chains (3.66 for four), so a fit whose chains agree is flagged once \
+         in a thousand; a flagged chain is set aside and the rest compared \
+         again. A chain with fewer than 10 effective draws is not assessed. \
+         `forkable` \
          counts draws whose latent path was saved, so a counterfactual can be \
          branched from them; only path-saved draws qualify.",
     ),

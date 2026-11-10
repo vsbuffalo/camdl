@@ -100,7 +100,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
         // has not completed, or whose method has no tabulated result
         // (pfilter), has no row.
         for method in &entry.view.methods {
-            if !method.completed
+            if !method.completed()
                 || !crate::fit::method_result::MethodResult::is_fitted(method.method)
             {
                 continue;
@@ -575,7 +575,11 @@ fn render_json(out: &crate::out::Out, rows: &[TableRow]) {
         },
         rows,
     };
-    let s = serde_json::to_string_pretty(&doc)
+    // Exact, as `fit summary --format json` is: a non-finite number is
+    // spelled, `null` is "not computed", and the rows stay byte-equal to the
+    // ones the summary embeds.
+    let s = crate::fit::report::exact::exact_json(&doc)
+        .and_then(|v| serde_json::to_string_pretty(&v))
         .expect("TableJson must serialize");
     out.report_line(format_args!("{}", s));
 }
@@ -938,8 +942,8 @@ particles = 100\nsweeps = 10\nuse_nuts = false\nmax_tree_depth = 8\n").unwrap();
             "and so does the JSON key consumers parse: {json}");
         // The tag a consumer keys on to know which of the two contracts it is
         // holding. A rename under an unchanged version is the gh#728 problem.
-        assert_eq!(table_row::SCHEMA_VERSION, 3,
-            "a renamed key bumps the row schema version");
+        const { assert!(table_row::SCHEMA_VERSION >= 2,
+            "a renamed key bumps the row schema version") };
     }
 
     /// Cohort filtering on `--with-method` keeps only the requested

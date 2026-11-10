@@ -528,6 +528,18 @@ pub(crate) fn is_probability(p: f64) -> bool {
     (0.0..=1.0).contains(&p)
 }
 
+/// True iff `n` can be a trial count: a number that is not negative. NaN is
+/// not. Rounding to an integer happens after this test, so a negative `n`
+/// is not read as zero trials.
+///
+/// The one domain test for the `n` of the binomial and beta-binomial
+/// observation families: the value function, the gradients and the `-inf`
+/// classifier all ask it, so they cannot disagree about which `n` is
+/// impossible.
+pub(crate) fn is_trial_count(n: f64) -> bool {
+    n >= 0.0
+}
+
 /// Bernoulli log-PMF: `log P(Y = y)` where `Y ~ Bernoulli(p)` and any `y > 0.5`
 /// counts as a success.
 ///

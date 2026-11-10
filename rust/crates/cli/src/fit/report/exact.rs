@@ -11,7 +11,7 @@
 //! spelling `sim::inference::json_f64` already writes.
 //!
 //! The comparison sees the run's report as `events.jsonl` writes it and the
-//! loader's as `fit summary --format exact-json` does; both serialize here.
+//! loader's as `fit summary --format json` does; both serialize here.
 
 use serde::ser::{self, Serialize};
 use serde_json::{Map, Value};

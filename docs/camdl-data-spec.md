@@ -830,6 +830,42 @@ This is about the file, not the fit. A trajectory that cannot produce a row's
 count — a nonzero count in a window where the model made no flow — is the model
 disagreeing with valid data, and is scored as impossible for that trajectory.
 
+## A binomial count cannot exceed its trial count
+
+For `binomial` and `beta_binomial`, the scored count is the number of successes
+out of `n` trials, so each observed row must have `count <= n`, and `n` must be
+a non-negative whole number. Whether that is checked when the file is loaded
+depends on what `n` reads.
+
+| `n` is                                                                               | checked                                  |
+| ------------------------------------------------------------------------------------ | ---------------------------------------- |
+| a column (`n = tested`), a literal (`n = 50`), or arithmetic on columns and literals | at load, for every row with both present |
+| anything that reads a compartment, a parameter, time, a table or a named constant    | at run time, per trajectory              |
+
+At load, a row with `count > n`, a negative `n`, or an `n` that is not a whole
+number (`n = tested / 2` with `tested = 91`) is refused. The refusal gives the
+stream, the row, the time and both values; nothing is scored. A row where `n` is
+`0` and the count is `0` is valid and scores exactly zero; a positive count
+against `n = 0` is refused. A row with `NA` in the count or in a column `n`
+reads is a hole and is not checked. Wrap a fractional expression in `floor()` or
+`ceil()` to choose the rounding yourself; the likelihood would otherwise round
+it, and the trial count scored would not be the one written.
+
+At run time, `n` takes a different value on each trajectory, so `count > n` is
+the model disagreeing with valid data, and that trajectory is scored as
+impossible (log-likelihood `-inf`), exactly as for any other family. When PGAS
+initialization finds every particle impossible at a step, its report names the
+cause as the count exceeding the trial count; `pfilter` reports the resulting
+log-likelihood of `-inf` without naming the cause. An `n` that evaluates to a
+negative number or to NaN is not read as zero trials: it is outside the family's
+domain and also scores `-inf`, reported as the `n` argument being out of domain.
+A fractional `n` at run time (an `n` built from a real-valued compartment) is
+rounded to the nearest whole number.
+
+`camdl survey` reads the same `n = <column>` as `camdl fit` and applies the same
+rules. Survey scores every row, so an `NA` in a column the likelihood reads is
+refused rather than made a hole.
+
 ## Missing observations: `NA` is a hole, not a zero
 
 In an **observation** file, the token `NA` in a value column marks a **hole**: a

@@ -37,25 +37,6 @@ pub struct MethodNode {
     pub view: FitMethodView,
 }
 
-/// (data_kind, fit_seed, sweep_slug) triple extracted from a method's
-/// path relative to its fit_dir.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MethodAxes {
-    pub data_kind: DataKind,
-    pub fit_seed: u64,
-    /// `None` when no `--sweep` was active for this fit. When the sweep
-    /// produced a single point with no slug, also `None`.
-    pub sweep_slug: Option<String>,
-}
-
-/// Whether this method fit a real-data dataset or one of N synthetic
-/// replicates.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DataKind {
-    Real,
-    Synthetic { ds_idx: usize },
-}
-
 /// One fit segment returned by [`walk_fits_root`]. The `view` field is
 /// pre-parsed so `fit table`'s outer loop can filter by model_identity / label /
 /// declared methods without re-reading the leaves per row.
@@ -131,80 +112,6 @@ pub fn walk_fits_root(root: &Path) -> io::Result<Vec<FitDirEntry>> {
     }
     out.sort_by(|a, b| a.fit_dir.cmp(&b.fit_dir));
     Ok(out)
-}
-
-// ── internals ───────────────────────────────────────────────────────
-
-/// Extract `MethodAxes` from a method path relative to its fit_dir.
-/// Canonical v2 layouts:
-///
-/// ```text
-/// <fit_dir>/real/fit_<seed>/<method>/
-/// <fit_dir>/real/fit_<seed>/<sweep_slug>/<method>/
-/// <fit_dir>/synthetic/ds_<NN>/fit_<seed>/<method>/
-/// <fit_dir>/synthetic/ds_<NN>/fit_<seed>/<sweep_slug>/<method>/
-/// ```
-///
-/// Returns `None` when the path doesn't fit either shape (e.g. a non-canonical
-/// user layout or a profile sub-tree). The walker still surfaces those methods —
-/// `axes` is None on the view and consumers that need axis grouping skip them.
-pub(crate) fn derive_axes(fit_dir: &Path, method_dir: &Path) -> Option<MethodAxes> {
-    let rel = method_dir.strip_prefix(fit_dir).ok()?;
-    let parts: Vec<&str> = rel
-        .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect();
-
-    // The last component is the method name; we don't need it for axes
-    // (it's already on the method view's `method`). What precedes it must match
-    // one of the four shapes above.
-    if parts.len() < 3 {
-        return None;
-    }
-    let body = &parts[..parts.len() - 1];
-
-    // Real layouts: ["real", "fit_<seed>"] or ["real", "fit_<seed>", "<slug>"]
-    if body.first() == Some(&"real") {
-        let fit_seed = parse_fit_seed(body.get(1)?)?;
-        let sweep_slug = match body.len() {
-            2 => None,
-            3 => Some(body[2].to_string()),
-            _ => return None,
-        };
-        return Some(MethodAxes {
-            data_kind: DataKind::Real,
-            fit_seed,
-            sweep_slug,
-        });
-    }
-
-    // Synthetic layouts:
-    //   ["synthetic", "ds_<NN>", "fit_<seed>"]
-    //   ["synthetic", "ds_<NN>", "fit_<seed>", "<slug>"]
-    if body.first() == Some(&"synthetic") {
-        let ds_idx = parse_ds_idx(body.get(1)?)?;
-        let fit_seed = parse_fit_seed(body.get(2)?)?;
-        let sweep_slug = match body.len() {
-            3 => None,
-            4 => Some(body[3].to_string()),
-            _ => return None,
-        };
-        return Some(MethodAxes {
-            data_kind: DataKind::Synthetic { ds_idx },
-            fit_seed,
-            sweep_slug,
-        });
-    }
-
-    None
-}
-
-fn parse_fit_seed(s: &str) -> Option<u64> {
-    s.strip_prefix("fit_")?.parse().ok()
-}
-
-fn parse_ds_idx(s: &str) -> Option<usize> {
-    s.strip_prefix("ds_")?.parse().ok()
 }
 
 #[cfg(test)]
@@ -293,13 +200,6 @@ mod tests {
 
         let nodes = walk_fit_dir(&fit_dir).unwrap();
         assert_eq!(nodes.len(), 2);
-        // Both nodes carry the canonical real/fit_1 axes, no sweep.
-        for node in &nodes {
-            let axes = node.view.axes.as_ref().expect("real fit must produce axes");
-            assert_eq!(axes.data_kind, DataKind::Real);
-            assert_eq!(axes.fit_seed, 1);
-            assert_eq!(axes.sweep_slug, None);
-        }
         let method_names: Vec<&str> = nodes.iter().map(|n| n.view.method.as_str()).collect();
         assert!(method_names.contains(&"if2"));
         assert!(method_names.contains(&"pgas"));
@@ -320,15 +220,6 @@ mod tests {
         }
         let nodes = walk_fit_dir(&fit_dir).unwrap();
         assert_eq!(nodes.len(), 4, "2 datasets × 2 seeds = 4 nodes");
-        // Spot-check one cell's axes.
-        let ds01_22 = nodes
-            .iter()
-            .find(|n| {
-                let axes = n.view.axes.as_ref().unwrap();
-                matches!(axes.data_kind, DataKind::Synthetic { ds_idx: 1 }) && axes.fit_seed == 22
-            })
-            .expect("ds_01 × fit_22 cell");
-        assert_eq!(ds01_22.view.axes.as_ref().unwrap().sweep_slug, None);
     }
 
     #[test]
@@ -340,12 +231,6 @@ mod tests {
         place_method(&fit_dir, "real/fit_1/R0_2.000/mle", 2, "mle", "if2", 1);
         let nodes = walk_fit_dir(&fit_dir).unwrap();
         assert_eq!(nodes.len(), 2);
-        let slugs: Vec<String> = nodes
-            .iter()
-            .map(|n| n.view.axes.as_ref().unwrap().sweep_slug.clone().unwrap())
-            .collect();
-        assert!(slugs.iter().any(|s| s == "R0_1.000"));
-        assert!(slugs.iter().any(|s| s == "R0_2.000"));
     }
 
     #[test]
@@ -387,20 +272,15 @@ mod tests {
     }
 
     #[test]
-    fn surfaces_non_canonical_layout_with_axes_none() {
+    fn surfaces_non_canonical_layout() {
         // A user might park a fit-method leaf under a one-off path (e.g. for a
-        // debugging copy). The walker should still surface it — `axes` is None
-        // signals "not in canonical layout."
+        // debugging copy). The walker should still surface it.
         let tmp = tempdir("noncanon");
         let fit_dir = tmp.path().join("fit_x-aabbccdd");
         write_sidecar(&fit_dir);
         place_method(&fit_dir, "weird_layout/scout", 1, "scout", "if2", 1);
         let nodes = walk_fit_dir(&fit_dir).unwrap();
         assert_eq!(nodes.len(), 1);
-        assert!(
-            nodes[0].view.axes.is_none(),
-            "non-canonical layout must produce axes=None"
-        );
     }
 
     #[test]

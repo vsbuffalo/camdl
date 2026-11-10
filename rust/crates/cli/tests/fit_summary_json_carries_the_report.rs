@@ -66,7 +66,7 @@ fn every_method_has_a_report_with_its_verdict_checks_warmup_and_findings() {
         let dir = fit_dir(&work, fit);
         let json = run(&["fit", "summary", dir.to_str().unwrap(), "--format", "json"]);
         let doc: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(doc["schema"]["version"], 4);
+        assert_eq!(doc["schema"]["version"], 5);
         assert_eq!(doc["methods"].as_array().unwrap().len(), 1, "{fit}: one method report:\n{json}");
         doc["methods"][0].clone()
     };
