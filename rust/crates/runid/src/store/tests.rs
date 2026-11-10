@@ -754,6 +754,58 @@ fn a_dead_lock_on_this_host_is_reclaimed_and_its_attempt_preserved() {
     cleanup(&root);
 }
 
+/// Concurrent claims of one fresh leaf (the shape of `pfilter` runs of one
+/// identity racing in one results directory) each either win, find it in
+/// progress, or find it completed. None may fail with an IO error. A
+/// claimant that found the leaf's directory created but not yet locked (or
+/// just released) quarantined it as orphan debris from outside the lock,
+/// pulling it from under its owner, whose next write failed `NotFound`; the
+/// decision is now made under the lock (`quarantine_debris`). Before that
+/// fix this failed within the first few dozen rounds on macOS, and on Linux
+/// CI in `gh90_multi_stream_data`.
+#[test]
+fn concurrent_claims_of_one_fresh_leaf_never_fail_with_io() {
+    for round in 0..200 {
+        let root = tmp_root(&format!("claim_race_{round}"));
+        let leaf = root.join("pfilters").join("m-aaaaaaaa").join("seed_1-bbbbbbbb");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(6));
+        let handles: Vec<_> = (0..6).map(|_| {
+            let (root, leaf, barrier) = (root.clone(), leaf.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                let store = FsCasStore::new(&root);
+                barrier.wait();
+                match store.claim_streaming(&leaf, record(id(0xaa))) {
+                    Ok(claim) => claim.finalize(record(id(0xaa))).map(|_| ()),
+                    Err(e) => Err(e),
+                }
+            })
+        }).collect();
+        for h in handles {
+            match h.join().unwrap() {
+                Ok(()) | Err(CasError::FitInProgress { .. }) | Err(CasError::AlreadyCompleted { .. }) => {}
+                Err(e) => panic!("round {round}: a racing claim failed: {e}"),
+            }
+        }
+        assert!(!root.join(".quarantine").exists(), "round {round}: nothing was quarantined");
+        cleanup(&root);
+    }
+}
+
+/// An empty leaf directory is what a claimant leaves between creating it and
+/// taking its lock: not orphan debris. Another claim takes it as fresh rather
+/// than quarantining it.
+#[test]
+fn an_empty_leaf_directory_is_claimed_not_quarantined() {
+    let root = tmp_root("empty_dir");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("f-aaaaaaaa").join("seed_1-bbbbbbbb");
+    fs::create_dir_all(&leaf).unwrap();
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    assert!(!root.join(".quarantine").exists());
+    claim.finalize(record(id(0xaa))).unwrap();
+    cleanup(&root);
+}
+
 /// The guard must not touch a finalized leaf.
 #[test]
 fn finalized_claim_is_untouched_by_the_guard() {

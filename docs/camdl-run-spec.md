@@ -943,7 +943,10 @@ finds a `Completed` record refuses to clear it (`ReclaimRaceCompleted`) rather
 than blind-wiping a finished result, and a claimant that finds a `run.json` it
 cannot read (permission denied, an IO error) refuses the leaf
 (`RecordUnreadable`) rather than quarantine or clear it: an unreadable record is
-not an absent one.
+not an absent one. A leaf directory with no record is quarantined as debris only
+by a claimant holding its `.lock`, and only if it still has no record and holds
+something besides the lock: from outside the lock, a directory a concurrent
+claimant has just created, or has just finished, looks the same as debris.
 
 **A run's end is recorded, never inferred.** A run that completes is committed
 `Completed`. A run camdl stops on an error is committed `Failed` before the
