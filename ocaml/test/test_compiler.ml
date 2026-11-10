@@ -4596,6 +4596,16 @@ let test_rate_state_grad_smooth () =
     | Ir.DEUnsupported _ ->
       Alcotest.failf "∂rate/∂%s was refused; expected a real gradient" c) grads
 
+let test_rate_state_grad_counts_repeated_popsum_member () =
+  (* `I + I` normalises to PopSum ["I"; "I"], which the runtime evaluates as
+     2·I. Its derivative w.r.t. I is therefore 2, and w.r.t. S is 0. *)
+  let rate = Ir.PopSum [ "I"; "I" ] in
+  (match Autodiff.differentiate_rate_state rate [ "S"; "I" ] [] [] [] with
+   | [ ("I", Ir.DEGrad (Ir.Const k)) ] ->
+     Alcotest.(check (float 0.0)) "d(I + I)/dI" 2.0 k
+   | gs -> Alcotest.failf "expected exactly d/dI = Const 2, got %d entries"
+             (List.length gs))
+
 let test_rate_state_grad_nonsmooth_refused () =
   (* Rate = floor(S) * beta. ∂/∂S reaches floor(state) — nonsmooth (a step at
      each integer) — so it must be a loud DEUnsupported (URNonsmoothState), never
@@ -15751,6 +15761,7 @@ let () =
       Alcotest.test_case "autodiff: Σ with a live summand is not over-folded" `Quick test_reduce_partial_zeros_keeps_live_terms;
       Alcotest.test_case "rate_state_grad: ∂/∂compartment emits nonzero comps (gh#275)" `Quick test_rate_state_grad_smooth;
       Alcotest.test_case "rate_state_grad: nonsmooth-of-state (floor) is refused (gh#275)" `Quick test_rate_state_grad_nonsmooth_refused;
+      Alcotest.test_case "state grad counts a repeated PopSum member" `Quick test_rate_state_grad_counts_repeated_popsum_member;
       Alcotest.test_case "rate_state_grad: BindingRef inverts to state-bearing (gh#275)" `Quick test_rate_state_grad_through_binding;
       Alcotest.test_case "autodiff: ∂(x^c) is finite at a zero base (gh#952)" `Quick test_pow_grad_constant_exponent_at_zero_base;
       Alcotest.test_case "autodiff: ∂(I^α) is finite at a zero base (gh#952)" `Quick test_pow_grad_parameter_exponent_at_zero_base;

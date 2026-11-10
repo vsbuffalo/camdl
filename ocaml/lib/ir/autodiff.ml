@@ -431,7 +431,10 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
     | PopSum members ->
       (match target with
        | WrtParam _ | WrtProjected -> Known (Const 0.0)
-       | WrtPop c -> Known (Const (if List.mem c members then 1.0 else 0.0)))
+       (* A member may repeat (`I + I` normalises to [PopSum ["I"; "I"]]) and the
+          runtime sums every occurrence, so the derivative is the multiplicity. *)
+       | WrtPop c ->
+         Known (Const (float_of_int (List.length (List.filter (( = ) c) members)))))
 
     (* Parameter reference — 1 if it's the target param (WrtParam); constant
        w.r.t. state (WrtPop) and w.r.t. the projection output (WrtProjected). *)
