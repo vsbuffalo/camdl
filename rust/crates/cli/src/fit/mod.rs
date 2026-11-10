@@ -1551,8 +1551,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         drop(label_lock);
 
         // gh#147 (M3.2): seed the resumed leaf with the base chain's state
-        // (resume_state.bin + parameter_traces.tsv per chain), copied from the
-        // read-only base. The runner then loads/extends these in the new leaf;
+        // (resume_state.bin per chain), copied from the read-only base. The runner then loads/extends these in the new leaf;
         // the base is never written.
         if let Some(base) = &resume_base {
             copy_resume_carryover(base, &method_dir).unwrap_or_else(|e| {
@@ -2548,9 +2547,9 @@ fn base_warmup(
     base.map(|b| report::read_warmup(&b.join(summary))).unwrap_or_default()
 }
 
-/// Copy the base leaf's per-chain resume state (`chain_*/resume_state.bin` +
-/// `parameter_traces.tsv`) into the resumed leaf so the runner extends them
-/// there. The base is read-only.
+/// Copy the base leaf's per-chain resume state (`chain_*/resume_state.bin`)
+/// into the resumed leaf so the runner continues from it there. The base is
+/// read-only.
 fn copy_resume_carryover(base: &std::path::Path, new_leaf: &std::path::Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(base)? {
         let entry = entry?;
@@ -2561,11 +2560,9 @@ fn copy_resume_carryover(base: &std::path::Path, new_leaf: &std::path::Path) -> 
         }
         let dst = new_leaf.join(name.as_ref());
         std::fs::create_dir_all(&dst)?;
-        for f in ["resume_state.bin", "parameter_traces.tsv"] {
-            let src = entry.path().join(f);
-            if src.is_file() {
-                std::fs::copy(&src, dst.join(f))?;
-            }
+        let src = entry.path().join("resume_state.bin");
+        if src.is_file() {
+            std::fs::copy(&src, dst.join("resume_state.bin"))?;
         }
     }
     Ok(())
