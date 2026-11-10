@@ -28,17 +28,56 @@ use crate::fit::state::FitState;
 /// payload appropriate to its inference method (point estimate +
 /// gates for IF2; posterior summaries + R̂ for Bayesian; status +
 /// per-chain spread for NLopt deterministic MLE).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "method", rename_all = "kebab-case")]
+///
+/// Serialized as the payload's fields plus `method`, the name of the method
+/// that ran ([`MethodResult::method_name`]): `mh` shares PMMH's shape and the
+/// three NLopt algorithms share one, so a tag taken from the variant would
+/// call an `mh` fit `pmmh` and every NLopt fit `nl-sbplx`.
+#[derive(Debug, Clone)]
 pub enum MethodResult {
     If2(If2Run),
     Pgas(PgasRun),
+    /// `pmmh`, or `mh` (deterministic Metropolis–Hastings), which runs
+    /// through the PMMH runner; [`PmmhRun::algorithm`] says which.
     Pmmh(PmmhRun),
-    #[serde(rename = "nl-sbplx", alias = "nl-bobyqa", alias = "nl-lbfgs")]
+    /// `nl-sbplx`, `nl-bobyqa` or `nl-lbfgs`; [`NloptRun::algorithm`] says
+    /// which.
     Nlopt(NloptRun),
     /// `algorithm = "pfilter"` as a fit method: the log-likelihood at fixed
     /// parameters, over replicate filters.
     Pfilter(PfilterRun),
+}
+
+impl MethodResult {
+    /// The name of the method that ran, as `run.json` records it.
+    pub fn method_name(&self) -> &str {
+        match self {
+            MethodResult::If2(_) => "if2",
+            MethodResult::Pgas(_) => "pgas",
+            MethodResult::Pmmh(r) => r.algorithm.as_str(),
+            MethodResult::Nlopt(r) => &r.algorithm,
+            MethodResult::Pfilter(_) => "pfilter",
+        }
+    }
+}
+
+impl Serialize for MethodResult {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Tagged<'a, T: Serialize> {
+            method: &'a str,
+            #[serde(flatten)]
+            run: &'a T,
+        }
+        let method = self.method_name();
+        match self {
+            MethodResult::If2(run) => Tagged { method, run }.serialize(serializer),
+            MethodResult::Pgas(run) => Tagged { method, run }.serialize(serializer),
+            MethodResult::Pmmh(run) => Tagged { method, run }.serialize(serializer),
+            MethodResult::Nlopt(run) => Tagged { method, run }.serialize(serializer),
+            MethodResult::Pfilter(run) => Tagged { method, run }.serialize(serializer),
+        }
+    }
 }
 
 /// One replicate's log-likelihood as `logliks.tsv` stores it: four decimals.
@@ -965,8 +1004,12 @@ pub struct NloptRun {
 
 /// PMMH-method result: posterior approximation + scalar acceptance. Convergence
 /// + efficiency diagnostics live in the shared [`PosteriorDiagnostics`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PmmhRun {
+    /// `Pmmh` or `Mh`: the method that ran. Serialized as the result's
+    /// `method` tag, not as a field of its own.
+    #[serde(skip)]
+    pub algorithm: crate::run_meta::FitAlgorithm,
     pub diagnostics: PosteriorDiagnostics,
     pub posterior_mean: BTreeMap<String, f64>,
     /// Scalar across chains (mean of per-chain rates). PGAS reports
@@ -1535,6 +1578,7 @@ impl PmmhRun {
         let cost = summary.get("cost").and_then(|v| serde_json::from_value(v.clone()).ok());
 
         Ok(PmmhRun {
+            algorithm: algo,
             acceptance_per_chain,
             map_chain,
             cost,

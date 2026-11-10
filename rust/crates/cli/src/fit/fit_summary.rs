@@ -53,7 +53,11 @@ use std::path::{Path, PathBuf};
 /// v5: a number is a JSON number, or the string `"NaN"`, `"inf"` or `"-inf"`;
 /// `null` means "not computed" and nothing else. v4 wrote all three non-finite
 /// values as `null` (`serde_json`'s default), so a consumer could not tell a
-/// NaN R̂ from an infinite one or from one never computed.
+/// NaN R̂ from an infinite one or from one never computed. Also in v5:
+/// `leaves` lists every method leaf with its status and verdict, the single
+/// `table_row` is `table_rows` (one per completed run, none chosen, gh#896),
+/// and `method_result.method` names the method that ran (`mh`, `nl-bobyqa`,
+/// `nl-lbfgs` rather than `pmmh` / `nl-sbplx`).
 const SCHEMA_VERSION: u32 = 5;
 
 /// Recompute a Bayesian method's diagnostics + posterior means over a
@@ -2757,6 +2761,7 @@ mod tests {
         let no_traces = std::path::Path::new("/nonexistent/method_dir");
         let pgas = layout_pgas_result();
         let r = PmmhRun {
+            algorithm: crate::run_meta::FitAlgorithm::Pmmh,
             diagnostics: pgas.diagnostics.clone(),
             posterior_mean: pgas.posterior_mean.clone(),
             acceptance_rate: 0.234,
@@ -3691,8 +3696,35 @@ mod tests {
         })
     }
 
+    /// Each method's result names the method that ran: an `mh` fit is not
+    /// reported as `pmmh` because it shares PMMH's shape, nor an NLopt fit as
+    /// `nl-sbplx` because the three share one.
+    #[test]
+    fn each_method_result_is_tagged_with_the_method_that_ran() {
+        let tag = |r: &MethodResult| {
+            crate::fit::report::exact::exact_json(r).unwrap()["method"].as_str().unwrap().to_string()
+        };
+        let MethodResult::Pmmh(pmmh) = synthetic_pmmh_result() else { unreachable!() };
+        let mh = PmmhRun { algorithm: crate::run_meta::FitAlgorithm::Mh, ..pmmh.clone() };
+        assert_eq!(tag(&MethodResult::Pmmh(pmmh)), "pmmh");
+        assert_eq!(tag(&MethodResult::Pmmh(mh)), "mh");
+        for algorithm in ["nl-sbplx", "nl-bobyqa", "nl-lbfgs"] {
+            let r = MethodResult::Nlopt(crate::fit::method_result::NloptRun {
+                best_loglik: -10.0, best_chain: ChainIndex(0), theta_hat: BTreeMap::new(),
+                algorithm: algorithm.into(), n_converged: 1, max_rel_range: 0.0, n_chains: 1,
+                optimizer_convergence: None,
+            });
+            assert_eq!(tag(&r), algorithm);
+            assert_eq!(r.method_name(), algorithm);
+        }
+        // The payload's fields sit beside the tag, as the derived tagging put them.
+        let j = crate::fit::report::exact::exact_json(&synthetic_pmmh_result()).unwrap();
+        assert!(j.get("map_loglik").is_some() && j.get("algorithm").is_none(), "{j}");
+    }
+
     fn synthetic_pmmh_result() -> MethodResult {
         MethodResult::Pmmh(PmmhRun {
+            algorithm: crate::run_meta::FitAlgorithm::Pmmh,
             diagnostics: PosteriorDiagnostics {
                 per_param: crate::fit::method_result::per_param_from_maps(
                     BTreeMap::from([("R0".to_string(), 1.03)]),
