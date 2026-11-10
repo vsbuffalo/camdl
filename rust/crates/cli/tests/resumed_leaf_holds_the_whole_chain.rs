@@ -131,6 +131,18 @@ fn assert_whole_chain(base: &Path, resumed: &Path, fresh: &Path, index: &str, ch
         assert_eq!(rows.len(), chain_draw_rows(fresh, c).len(),
             "chain {c}: as many draws as an uninterrupted run of the same length");
 
+        // Precondition for the ESS checks below: the sampler moved in both
+        // segments. A chain whose θ never changes has an ESS at its floor over
+        // any span, so the whole chain and the segment could not be told
+        // apart — and a frozen sampler is a defect to report, not a pass.
+        for p in ["beta", "gamma"] {
+            let whole = chain_draws(resumed, c, p);
+            let moved = |span: &[f64]| span.windows(2).any(|w| w[0] != w[1]);
+            assert!(moved(&whole[..parent_rows.len()]) && moved(&whole[parent_rows.len()..]),
+                "chain {c} {p}: θ must move in the base's draws and in the new ones; \
+                 a frozen chain makes the ESS checks uninformative");
+        }
+
         // The stored per-chain ESS is the one over every draw of the chain —
         // the base's included — not over the ones this call sampled.
         for p in ["beta", "gamma"] {
@@ -145,10 +157,9 @@ fn assert_whole_chain(base: &Path, resumed: &Path, fresh: &Path, index: &str, ch
             }
         }
     }
-    // The negative control: the equality above must be able to fail. A short
-    // chain's ESS can sit at its floor of 1 over both spans, where the two
-    // cannot be told apart, so at least one chain and parameter must give
-    // different values over the whole chain and over the new segment.
+    // The negative control: the equality above must be able to fail, so at
+    // least one chain and parameter must give different values over the whole
+    // chain and over the new segment (the chains moved, checked above).
     assert!(distinguished > 0, "no ESS distinguishes the whole chain from the new segment");
 
     // The lineage: the base, and where each segment begins.
@@ -236,15 +247,18 @@ thin       = 1
 #[test]
 fn a_resumed_pgas_leaf_holds_the_whole_chain() {
     let (_guard, work) = workdir("pgas");
-    let (n1, n2) = (60, 120);
+    // A warm-up long enough for NUTS's step size to adapt: at `burn_in = 10`
+    // the frozen step size made every post-burn-in NUTS step diverge and θ
+    // never moved.
+    let (n1, n2) = (150, 250);
     for (stem, n) in [("base", n1), ("longer", n2), ("fresh", n2)] {
         std::fs::write(work.join(format!("{stem}.toml")), format!("{MODEL}[method]
 algorithm = \"pgas\"
 backend   = \"chain_binomial\"
 chains    = 2
-particles = 20
+particles = 50
 sweeps    = {n}
-burn_in   = 10
+burn_in   = 100
 thin      = 1
 n_trajectories = 4
 ")).unwrap();
