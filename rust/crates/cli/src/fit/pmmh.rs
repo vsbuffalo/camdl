@@ -829,7 +829,15 @@ pub fn run_method(
             .map(|(p, &sd)| (p.name.clone(), sd))
             .collect(),
     };
-    let cost = sampling_cost(elapsed.as_secs_f64(), n_chains, n_steps);
+    // The steps each chain that ran took in this call: a resumed chain starts
+    // where its base stopped, and a refused chain ran none (gh#1012).
+    let steps_run: Vec<usize> = results.iter()
+        .map(|(chain_id, _)| {
+            // A base already at or past `n_steps` runs none (a warning above).
+            n_steps.saturating_sub(resume_states[*chain_id].as_ref().map_or(0, |s| s.completed_steps))
+        })
+        .collect();
+    let cost = sampling_cost(elapsed.as_secs_f64(), &steps_run);
 
     // Compute diagnostics
     let diagnostics = compute_diagnostics(&results, &config.estimated_params);
@@ -1194,15 +1202,21 @@ fn chain_warmups(
         .collect()
 }
 
-/// The sampling cost the completion line reports: evaluations counted as
-/// `n_chains × n_steps`, and wall time per evaluation within one chain, the
-/// chains running in parallel.
-fn sampling_cost(wall_secs: f64, n_chains: usize, n_steps: usize) -> SamplingCost {
-    let evaluations = n_chains * n_steps;
+/// The sampling cost of this call, which the completion line reports, from
+/// the MCMC steps each chain that ran took in it (`steps_run`, one entry per
+/// chain): one likelihood evaluation per step, summed over the chains, and
+/// wall time per evaluation within one chain, the chains running in parallel.
+///
+/// The cost is this call's, not the chain's since its first step: a resumed
+/// run counts the steps it added, since `wall_secs` is the time of this call
+/// alone and a per-evaluation time needs both from the same call (gh#1012).
+/// The start check and the MAP re-evaluations are not counted.
+fn sampling_cost(wall_secs: f64, steps_run: &[usize]) -> SamplingCost {
+    let evaluations: usize = steps_run.iter().sum();
     SamplingCost {
         sampling_seconds: wall_secs,
         evaluations,
-        ms_per_evaluation: wall_secs * 1000.0 / evaluations as f64 * n_chains as f64,
+        ms_per_evaluation: wall_secs * 1000.0 / evaluations as f64 * steps_run.len() as f64,
     }
 }
 
@@ -1320,16 +1334,25 @@ mod tests {
     /// did.
     #[test]
     fn completion_line_names_the_method_and_its_evaluations() {
-        let mh = completion_line("mh", true, &sampling_cost(0.3, 1, 3000));
+        let mh = completion_line("mh", true, &sampling_cost(0.3, &[3000]));
         assert!(mh.starts_with("mh complete in 0.3s"), "{mh}");
         assert!(!mh.contains("pmmh") && !mh.contains("PF"), "{mh}");
         assert!(mh.contains("3000 ODE likelihood evaluations"), "{mh}");
 
-        let pmmh = completion_line("pmmh", false, &sampling_cost(2.0, 2, 500));
+        let pmmh = completion_line("pmmh", false, &sampling_cost(2.0, &[500, 500]));
         assert!(pmmh.starts_with("pmmh complete in 2.0s"), "{pmmh}");
         assert!(pmmh.contains("1000 PF evaluations"), "{pmmh}");
         assert!(pmmh.ends_with("ms/eval)"), "the leaf's path is the `stored` line's: {pmmh}");
     }
+    /// gh#1012: a resumed call costs the steps it ran, not the chain's length,
+    /// and its time per evaluation divides this call's time by them.
+    #[test]
+    fn a_resumed_call_costs_the_steps_it_ran() {
+        let cost = sampling_cost(1.0, &[500, 500, 500, 500]);
+        assert_eq!(cost.evaluations, 2000);
+        assert_eq!(cost.ms_per_evaluation, 2.0);
+    }
+
     /// A hierarchical prior whose argument is out of its domain at the start
     /// (sigma = s_h with s_h = -1) has zero density there; the guard names the
     /// parameter. The same prior at s_h = 0.5 passes.

@@ -108,7 +108,8 @@ pub struct SamplingCost {
     /// Wall time of the chains, start of the first to end of the last.
     #[serde(with = "sim::inference::json_f64")]
     pub sampling_seconds: f64,
-    /// Likelihood evaluations, as the completion line counts them.
+    /// Likelihood evaluations this call ran, as the completion line counts
+    /// them: one per MCMC step, so a resumed run counts only its own steps.
     pub evaluations: usize,
     /// Wall time per evaluation within one chain, the chains running in
     /// parallel.
