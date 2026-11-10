@@ -977,11 +977,15 @@ pub fn render_entry(group: &[&DiagnosticKind]) -> String {
     }
 }
 
+/// Hands each finding to its observer as it is pushed.
+type Observer = Box<dyn Fn(&Diagnostic) + Send + Sync>;
+
 /// Accumulates diagnostics during an inference run.
 /// Thread-safe via Mutex.
 pub struct DiagnosticCollector {
     diagnostics: std::sync::Mutex<Vec<Diagnostic>>,
     method: String,
+    observer: Option<Observer>,
 }
 
 impl DiagnosticCollector {
@@ -991,7 +995,17 @@ impl DiagnosticCollector {
         DiagnosticCollector {
             diagnostics: std::sync::Mutex::new(Vec::new()),
             method: method.into(),
+            observer: None,
         }
+    }
+
+    /// A collector that also hands each finding to `observer` as it is
+    /// pushed, from whichever thread pushes it: how a run records its
+    /// findings live (the CLI's `events.jsonl`) without the library knowing
+    /// where they go. The observer is called in push order, under the same
+    /// lock that orders [`snapshot`](Self::snapshot), so the two agree.
+    pub fn with_observer(method: &str, observer: impl Fn(&Diagnostic) + Send + Sync + 'static) -> Self {
+        DiagnosticCollector { observer: Some(Box::new(observer)), ..Self::new(method) }
     }
 
     pub fn push(&self, kind: DiagnosticKind) {
@@ -1004,7 +1018,11 @@ impl DiagnosticCollector {
             method: self.method.clone(),
             timestamp: chrono_now(),
         };
-        self.diagnostics.lock().unwrap().push(diag);
+        let mut held = self.diagnostics.lock().unwrap();
+        if let Some(observe) = &self.observer {
+            observe(&diag);
+        }
+        held.push(diag);
     }
 
     /// The findings so far, in push order, without removing them.
@@ -1059,6 +1077,28 @@ fn chrono_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An observer sees every finding, from every pushing thread, in the
+    /// order `snapshot` keeps them.
+    #[test]
+    fn an_observer_sees_each_finding_in_push_order() {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let c = {
+            let seen = seen.clone();
+            DiagnosticCollector::with_observer("pmmh", move |d| seen.lock().unwrap().push(d.message.clone()))
+        };
+        std::thread::scope(|s| {
+            for chain_id in 0..4 {
+                let c = &c;
+                s.spawn(move || c.push(DiagnosticKind::ScaleFarFromOptimum { chain_id, final_scale: 9.0 }));
+            }
+        });
+        c.push(DiagnosticKind::InitialLoglikInfinite);
+        let kept: Vec<String> = c.snapshot().into_iter().map(|d| d.message).collect();
+        assert_eq!(kept.len(), 5);
+        assert_eq!(*seen.lock().unwrap(), kept);
+    }
 
     fn bad_init(param: &str, value: f64) -> DiagnosticKind {
         DiagnosticKind::BadInit {

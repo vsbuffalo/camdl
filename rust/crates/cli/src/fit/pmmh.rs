@@ -137,6 +137,13 @@ pub fn run_method(
     // deterministic `compute_ode_loglik` instead of the bootstrap particle
     // filter. With no PF the PF-variance preflight is skipped entirely.
     let is_ode_mh = matches!(method.algorithm, super::config_v2::Algorithm::Mh { .. });
+    // The class of the log-likelihood the chains' progress reports: a
+    // filter's marginal estimate, or the ODE skeleton's.
+    let loglik_kind = LoglikType::from(if is_ode_mh {
+        crate::run_meta::FitAlgorithm::Mh
+    } else {
+        crate::run_meta::FitAlgorithm::Pmmh
+    });
 
     // Build FitRunConfig (reuse existing builder). iterations,
     // cooling, cooling_target_iters are IF2-specific and never read
@@ -421,7 +428,8 @@ pub fn run_method(
     // no longer branches on mode.
     let reporter = crate::out::progress::Reporter::new();
     let bars: Vec<crate::out::progress::Task> = (0..n_chains)
-        .map(|chain_id| reporter.task(n_steps as u64, format!("chain {}", ChainIndex(chain_id)), "it"))
+        .map(|chain_id| reporter.task(n_steps as u64, format!("chain {}", ChainIndex(chain_id)), "it")
+            .recording(out.events(), chain_id))
         .collect();
 
     // Pre-create chain directories
@@ -739,7 +747,7 @@ pub fn run_method(
                 // so `inc(1)` tracks position = step+1 exactly. `Task` handles
                 // Pretty (redraw) / Plain (throttled `chain N pos/len ll=… acc=…%`
                 // line) / None (no-op) — no mode branching here.
-                task.set(crate::out::progress::mcmc(loglik, acc));
+                task.set(crate::out::progress::mcmc(loglik, loglik_kind, acc));
                 task.inc(1);
 
                 // gh#900: and to the run's heartbeat, whose step is one MCMC
@@ -764,7 +772,7 @@ pub fn run_method(
             // it after the fan-out (`Task::finish` consumes, so it can't run
             // on the borrowed Task here). The `acceptance rates:` report below
             // carries the per-chain summary.
-            task.set(crate::out::progress::mcmc(result.map_loglik, result.acceptance_rate));
+            task.set(crate::out::progress::mcmc(result.map_loglik, loglik_kind, result.acceptance_rate));
             // Said now, by the same predicate that pushes the finding after the
             // join, so a line here is exactly a floor finding at the end.
             if let Some(DiagnosticKind::ScaleAtFloor { steps_at_floor, warmup_steps, .. }) =

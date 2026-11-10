@@ -5298,7 +5298,8 @@ checked):
 | `model.render.json`    | the display/LaTeX rendering payload                                                                                                                                         |
 
 Per method leaf, alongside `run.json`. The set is method-dependent; every file
-present is listed in `run.json.artifacts` and subject to the exact-set gate.
+present is listed in `run.json.artifacts` and subject to the exact-set gate,
+except `events.jsonl`, which the run appends to after the leaf commits (§10.11).
 
 Common to both families:
 
@@ -5307,6 +5308,7 @@ Common to both families:
 | `fit_state.toml`   | θ̂ + run state, with `method` naming the algorithm that wrote it, `best_chain` as the number of the `chain_N/` directory that won, plus `chain_init_source` and `chain_starts_kind`; the artifact a `from_mle` start consumes as a `deps` edge |
 | `chain_starts.tsv` | one row per start attempt — the point each chain ran from, and every draw a retry rejected with its `ess` and `reason` — under a header naming the `starts` rule, its kind and the rejected count (§6.6)                                      |
 | `progress.json`    | the run's liveness/progress heartbeat, written live, and the terminal state it ends on; every method but `pfilter` writes it (§10.10)                                                                                                         |
+| `events.jsonl`     | what the run reported — its checks, chain progress, findings and end-of-run report — one JSON line per event, as it happened; every method writes it; outside the manifest and the run's identity (§10.11)                                    |
 
 An optimizer leaf (IF2, NLopt) additionally holds:
 
@@ -5537,6 +5539,73 @@ run leaves when it is SIGKILLed or panics, and **deadness is the reader's
 inference from staleness, never a self-claim** — a killed process cannot write
 "I died". Treat a `running` record older than a few refresh intervals as
 presumed dead, and a `failed` record as a failure camdl saw and explained.
+
+### 10.11 `events.jsonl`: what a method run reported, as values
+
+The terminal shows a method run's checks, progress, findings and end-of-run
+block as text. `events.jsonl` records the same values, one JSON object per line
+in the order the run reported them, so a reader that is not the terminal — camdl
+'scope, a terminal UI — reads values and never parses the text. Every method
+writes it, `pfilter` included, from the moment the method begins.
+
+**Every line** carries four fields beside the event's own:
+
+| field     | what it holds                                                                                           |
+| --------- | ------------------------------------------------------------------------------------------------------- |
+| `schema`  | `"camdl.events/v1"`. A changed meaning or a removed field is a new version; a new event or field is not |
+| `seq`     | the line's place in the file, from 0                                                                    |
+| `elapsed` | seconds since the method began                                                                          |
+| `event`   | which event: `begin`, `check`, `progress`, `finding` or `method_report`                                 |
+
+**The events:**
+
+| `event`         | when                                                                              | its fields                                                                                                                                                                                                                                                                                                             |
+| --------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `begin`         | first, as the method starts                                                       | `method`; `header`, the run's opening block (`config`, `method`, `model`, `estimate`, `fixed`, `starts`, `output`), which no other file in the leaf holds until the leaf commits                                                                                                                                       |
+| `check`         | as each check before sampling is shown                                            | `check`, tagged by `kind`: `obs_stream` (`name`, `carrier`, `family`), `filter_noise` (`check`: `n_particles`, `pairs`, `sigma`, `s`, `ll_mean`), `method_caveat` (`method`, `note`, `series_len`), `starts` (`mode`, `params`, `note`)                                                                                |
+| `progress`      | per chain, at its first step, then at most every 30 seconds, and at its last step | `chain`; `step` of `of`, the chain's progress bar's count, which counts the steps this run took (a resumed chain starts again from 1); `loglik` (`value`, and `kind`: `marginal`, `if2`, `ode_marginal` or `complete_data` — PGAS's, not comparable with the others) or `null`; `accept` or `null`                     |
+| `finding`       | as each finding is pushed                                                         | `finding`, the record `diagnostics.json` holds for it (`kind`, tagged by `type`; `severity`; `message`; `method`; `timestamp`)                                                                                                                                                                                         |
+| `method_report` | last, as the end-of-run block is shown                                            | `outcome`: `completed`, with `report`, the method's report: the object `fit summary --format json` gives for it under `methods`, built from the run's memory rather than its files, and with non-finite numbers spelled where that document writes `null`; or `failed`, with `error`, the sentence the command printed |
+
+`progress` is written whatever `--progress` says; the display mode governs only
+the terminal. A step is what `progress.json`'s step counts for the method
+(§10.10). PGAS, PMMH, `mh` and IF2 chains report progress; NLopt and `pfilter`
+report none.
+
+A finding's line is written when the run pushes the finding: a refused chain's
+`bad_init` as the chain is refused, and a sampler's per-chain and R̂ findings
+after its chains join, in chain order, after the last chain's `progress`.
+Numbers follow §10.7's rule: a non-finite number is the string `"inf"`, `"-inf"`
+or `"NaN"`, and `null` means no value.
+
+**How a log ends.** A run camdl finished or stopped ends its log with
+`method_report`. A log whose last line is something else was cut off: the
+process was killed, or an IF2 or NLopt run failed inside its runner, where the
+error is reported without the method's report. `progress.json` says which
+(§10.10).
+
+**Writing.** Each line is written whole, in one write, so a reader following the
+file sees whole lines; the file is not synced to disk line by line. A line that
+cannot be written fails the run, as an unwritten `diagnostics.json` does (exit
+status 1, `error: cannot write …/events.jsonl: …`): before the method is
+recorded `done` if the failure came while it ran, after the end-of-run block if
+it came at the report, the leaf then already committed.
+
+**Outside the manifest and the identity.** The end-of-run report is built from
+the committed leaf, so it is appended after the commit; the store's exact-set
+check and manifest pass over `events.jsonl` by name (`runid::EVENT_LOG`), and it
+is never listed in `run.json.artifacts`. It enters no hash: it is a record of
+what one execution showed, not an input to anything a run computes. In
+consequence:
+
+- **A cache hit writes nothing.** The method does not run, so the stored leaf
+  keeps the log of the run that computed it, and the cache-hit line on stderr is
+  not an event.
+- **A resumed run** writes its own log in its new leaf; the base leaf's log is
+  not copied or touched.
+- **A recomputed leaf** (`--force`, or a stale `Running` leaf reclaimed after a
+  killed run) starts a new log: the reclaim clears the dead run's log with its
+  other files, and the log is created empty when the method begins.
 
 ## 11. Predictive Workflows
 

@@ -6,6 +6,7 @@
 //! else — progress, milestones, notices, warnings, errors and `fit run`'s
 //! end-of-run block. "out" names the layer, not the stream.
 
+pub mod events;
 pub mod notice;
 pub mod paint;
 pub mod progress;
@@ -66,6 +67,11 @@ pub struct Out {
     /// The method running now, from [`begin_method`](Self::begin_method) to
     /// [`end_method`](Self::end_method).
     method: Option<RunningMethod>,
+    /// The running method's event log, from `begin_method` to
+    /// [`close_events`](Self::close_events): it outlives `end_method`, since
+    /// the end-of-run report, its last line, is built after the method's
+    /// record is handed back.
+    events: Option<events::EventLog>,
 }
 
 /// What `Out` keeps for the method that is running: the run's opening block,
@@ -94,6 +100,7 @@ impl Out {
             stdout: Painter::for_stream(Stream::Stdout, no_color),
             stderr: Painter::for_stream(Stream::Stderr, no_color),
             method: None,
+            events: None,
         }
     }
 
@@ -143,21 +150,52 @@ impl Out {
         let _ = write!(std::io::stderr().lock(), "{text}");
     }
 
-    /// Start recording a method: its opening block and its heartbeat. Returns
-    /// the collector its findings go to, for the chain workers that push from
-    /// their own threads; the command's own thread pushes through
-    /// [`finding`](Self::finding).
+    /// Start recording a method: its opening block and its heartbeat, and
+    /// its event log, `leaf/events.jsonl`, which starts with a `begin` line.
+    /// Returns the collector its findings go to, for the chain workers that
+    /// push from their own threads; the command's own thread pushes through
+    /// [`finding`](Self::finding). Every finding pushed is also an event.
+    ///
+    /// # Errors
+    /// The event log cannot be created or its first line written.
     pub fn begin_method(
         &mut self,
         header: crate::fit::report::RunHeader,
         method: &str,
         heartbeat: Arc<io::HeartbeatGuard>,
-    ) -> Arc<DiagnosticCollector> {
-        let collector = Arc::new(DiagnosticCollector::new(method));
+        leaf: &std::path::Path,
+    ) -> Result<Arc<DiagnosticCollector>, String> {
+        let log = events::EventLog::create(leaf)?;
+        log.record(&events::Event::Begin { method, header: &header });
+        log.result()?;
+        let collector = Arc::new({
+            let log = log.clone();
+            DiagnosticCollector::with_observer(method, move |d| log.record(&events::Event::Finding { finding: d }))
+        });
         self.method = Some(RunningMethod {
             header, checks: Vec::new(), collector: collector.clone(), heartbeat,
         });
-        collector
+        self.events = Some(log);
+        Ok(collector)
+    }
+
+    /// The running method's event log, for the chain tasks that record their
+    /// progress in it ([`progress::Task::recording`]); `None` when no method
+    /// is running.
+    pub fn events(&self) -> Option<events::EventLog> {
+        self.events.clone()
+    }
+
+    /// Whether every event so far was written: the first failure, if one
+    /// was not. A run checks this before it calls its method done.
+    pub fn events_result(&self) -> Result<(), String> {
+        self.events.as_ref().map_or(Ok(()), events::EventLog::result)
+    }
+
+    /// Close the method's event log after its last line, and say whether
+    /// every event was written.
+    pub fn close_events(&mut self) -> Result<(), String> {
+        self.events.take().map_or(Ok(()), |log| log.result())
     }
 
     /// Record a check the run has just shown. The check's own renderer draws
@@ -167,6 +205,9 @@ impl Out {
     /// value, so the run's report carries what it showed.
     pub fn check(&mut self, c: crate::fit::report::Check) {
         if let Some(m) = self.method.as_mut() {
+            if let Some(log) = &self.events {
+                log.record(&events::Event::Check { check: &c });
+            }
             m.checks.push(c);
         }
     }
@@ -215,11 +256,20 @@ impl Out {
     }
 
     /// The end-of-run block, drawn once from the method's outcome
-    /// (`View::RunEnd`), on stderr.
+    /// (`View::RunEnd`), on stderr, and recorded as the event log's
+    /// `method_report` line.
     pub fn method_report(&mut self, o: &crate::fit::report::build::MethodOutcome) {
+        use crate::fit::report::build::MethodOutcome;
         use crate::fit::report::render::{render_report, View};
         self.stderr_lines(&render_report(o, View::RunEnd));
-        if let crate::fit::report::build::MethodOutcome::Completed(report) = o {
+        if let Some(log) = &self.events {
+            let outcome = match o {
+                MethodOutcome::Completed(report) => events::Outcome::Completed { report },
+                MethodOutcome::Failed { error, .. } => events::Outcome::Failed { error },
+            };
+            log.record(&events::Event::MethodReport(outcome));
+        }
+        if let MethodOutcome::Completed(report) = o {
             crate::fit::report::exact::capture("run", report);
         }
     }
@@ -408,7 +458,10 @@ mod tests {
             output: "results/fits/f".into(),
         };
         let mut out = Out::new(true);
-        let worker = out.begin_method(header.clone(), "pmmh", Arc::new(io::HeartbeatGuard::inert()));
+        let leaf = std::env::temp_dir().join(format!("camdl_out_record_{}", std::process::id()));
+        std::fs::create_dir_all(&leaf).unwrap();
+        let worker = out.begin_method(header.clone(), "pmmh", Arc::new(io::HeartbeatGuard::inert()), &leaf)
+            .expect("the event log is created");
         out.check(Check::Starts { mode: "lhs".into(), params: vec!["beta".into()], note: "n".into() });
         out.finding(DiagnosticKind::InitialLoglikInfinite);
         std::thread::scope(|s| {
@@ -421,5 +474,12 @@ mod tests {
         assert!(out.end_method().is_none());
         out.finding(DiagnosticKind::InitialLoglikInfinite);
         assert_eq!(worker.snapshot().len(), 2, "a finding after the method ended went nowhere");
+        // The log holds the opening, the check and both findings, in order.
+        assert_eq!(out.close_events(), Ok(()));
+        let events: Vec<String> = std::fs::read_to_string(leaf.join("events.jsonl")).unwrap().lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["event"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(events, ["begin", "check", "finding", "finding"]);
+        std::fs::remove_dir_all(&leaf).ok();
     }
 }

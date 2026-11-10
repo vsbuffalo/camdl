@@ -606,7 +606,8 @@ pub fn run_method(
     // log-likelihood the sampler already reports each sweep — no new compute.
     let reporter = crate::out::progress::Reporter::new();
     let bars: Vec<crate::out::progress::Task> = (0..n_chains)
-        .map(|chain_id| reporter.task(n_sweeps as u64, format!("chain {}", ChainIndex(chain_id)), "sweeps"))
+        .map(|chain_id| reporter.task(n_sweeps as u64, format!("chain {}", ChainIndex(chain_id)), "sweeps")
+            .recording(out.events(), chain_id))
         .collect();
 
     // gh#278: the run's liveness/progress heartbeat, built by the runner
