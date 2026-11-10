@@ -14,8 +14,12 @@
 /// Print the migration message and exit non-zero. `camdl if2` no longer
 /// runs anything.
 pub fn cmd_if2(_a: &crate::args::If2Args) {
-    eprintln!("{}", DEPRECATION);
-    std::process::exit(2);
+    let out = crate::out::Out::new(false);
+    out.error(crate::out::CommandError {
+        code: crate::out::ExitCode(2),
+        message: DEPRECATION.to_string(),
+        hint: None,
+    }).exit();
 }
 
 const DEPRECATION: &str = r#"error: `camdl if2` has been removed.
