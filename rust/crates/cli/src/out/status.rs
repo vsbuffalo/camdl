@@ -11,7 +11,7 @@
 //! silences the *bars*, not these milestone lines.
 //!
 //! Use these instead of ad-hoc `eprintln!("✓ …")` so the look stays unified;
-//! when you add a new milestone, reach for `step`/`done`/`hint` first.
+//! when you add a new milestone, reach for `Out::milestone`/`Out::hint` first.
 
 use crate::out::paint::{self as style, Style};
 
@@ -29,13 +29,6 @@ pub fn step(verb: &str, detail: impl std::fmt::Display) {
 /// The milestone line [`step`] prints, painted by `p`, without its newline.
 pub fn step_text(p: style::Painter, verb: &str, detail: impl std::fmt::Display) -> String {
     format!("{} {}", p.paint(&p.paint(&format!("{verb:>VERB_W$}"), Style::Bold), Style::Ok), detail)
-}
-
-/// A terminal success milestone — same as [`step`] (the verb already carries
-/// the meaning, e.g. `stored`); kept as a separate name so call sites read
-/// intention-first. Reserved for the last line a command prints.
-pub fn done(verb: &str, detail: impl std::fmt::Display) {
-    step(verb, detail);
 }
 
 /// A dimmed continuation under a milestone — a hint or next-step command,

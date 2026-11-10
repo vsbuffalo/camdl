@@ -659,13 +659,12 @@ impl InitStateSourceArg {
 /// back to `init {}`, which would look like a forecast and be a free-forward
 /// replay.
 fn resolve_paired_posterior(
-    fit_ref: &str,
+    out: &crate::out::Out, fit_ref: &str,
     ir_path_compiled: &str,
     n_draws: Option<usize>,
 ) -> (Vec<HashMap<String, f64>>, crate::sim_job::InitStateSource) {
     let (model, _) = util::load_model(ir_path_compiled).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
     let columns = io::trajectories::TrajColumnSpec::from_model(&model, &[]);
     // The draws authority for this fit. `simulate` surfaces no `--exclude-chains`
@@ -673,17 +672,15 @@ fn resolve_paired_posterior(
     // attaching one here is the entire change if the flag ever lands (gh#695).
     let pref = crate::posterior_draws::resolve_posterior_draws(fit_ref, None)
         .unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
     let ens = crate::fit::joint::resolve_forecast_ensemble(&pref, &columns)
         .unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
 
     if ens.draws.is_empty() {
-        eprintln!(
+        out.fail(format!(
             "error: --init-state fit: {fit_ref} has no forkable posterior draws \
              (0/{} carry a saved latent path). The paired (θ_i, X_i(T)) origin comes \
              from the smoothed latent paths a PGAS method writes to \
@@ -694,12 +691,11 @@ fn resolve_paired_posterior(
              (or raise `n_trajectories`), or forecast at a single θ with \
              `camdl pfilter --save-final-state` + `--init-state <file>`.",
             ens.n_total,
-        );
-        std::process::exit(1);
+        ));
     }
 
     let n_forkable = ens.draws.len();
-    eprintln!(
+    out.say(format_args!(
         "simulate: --init-state fit → {n_forkable}/{} posterior draws have a saved \
          latent path; forecasting that paired (θ_i, X_i) subset from t = {}{}\n  \
          method '{}' ({})",
@@ -712,28 +708,28 @@ fn resolve_paired_posterior(
         },
         ens.name,
         ens.draws_path.display(),
-    );
+    ));
 
     // Same strided cap as the unpaired posterior path (never front-biased): a
     // large forkable subset is still hours of forward solves.
     let cap = n_draws.unwrap_or(crate::fit::predict::DEFAULT_PREDICT_DRAWS);
     if let Some(asked) = n_draws {
         if asked > n_forkable {
-            eprintln!(
+            out.say(format_args!(
                 "simulate: --init-state fit → -n {asked} exceeds the {n_forkable} \
                  forkable draws; forecasting all {n_forkable}."
-            );
+            ));
         }
     }
     let selected: Vec<crate::fit::joint::ForecastDraw> = if n_forkable > cap {
         let picked: Vec<crate::fit::joint::ForecastDraw> =
             crate::fit::predict::subsample_draws(&ens.draws, cap)
                 .into_iter().cloned().collect();
-        eprintln!(
+        out.say(format_args!(
             "simulate: --init-state fit → subsampling {} of {n_forkable} forkable \
              draws (strided across the subset; raise with --n-draws)",
             picked.len()
-        );
+        ));
         picked
     } else {
         ens.draws
@@ -745,8 +741,7 @@ fn resolve_paired_posterior(
     // means enumerating every knob that changes the selection, and a missed one
     // is two different clouds sharing a cache entry.
     let origin_t = runid::FiniteF64::new(ens.origin_t).unwrap_or_else(|e| {
-        eprintln!("error: --init-state fit: non-finite forecast origin ({e})");
-        std::process::exit(1);
+        out.fail(format!("error: --init-state fit: non-finite forecast origin ({e})"));
     });
     let rows: Vec<runid::inputs::InitStateRow> = selected
         .iter()
@@ -756,12 +751,11 @@ fn resolve_paired_posterior(
             counts: d.counts.clone(),
             reals: d.reals.iter()
                 .map(|&v| runid::FiniteF64::new(v).unwrap_or_else(|e| {
-                    eprintln!(
+                    out.fail(format!(
                         "error: --init-state fit: (chain {}, draw {}) has a non-finite \
                          real compartment at the origin ({e})",
                         d.chain, d.draw
-                    );
-                    std::process::exit(1);
+                    ));
                 }))
                 .collect(),
         })
@@ -788,6 +782,9 @@ fn resolve_paired_posterior(
 }
 
 fn run_simulate(a: &args::SimulateArgs) {
+    // simulate has no `--no-color`: its painters follow the environment and
+    // whether each stream is a terminal.
+    let out = crate::out::Out::new(false);
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();
     sim::eval_stats::set_allow_degenerate_rates(a.allow_degenerate_rates);  // gh#audit-C6
     // ── Extract typed args into locals that match the rest of the function ─
@@ -818,8 +815,7 @@ fn run_simulate(a: &args::SimulateArgs) {
             None => None,
             Some(Ok(q)) => Some(q),
             Some(Err(e)) => {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: {}", e));
             }
         };
     // `ir_path_given` is the model as named, before any run-time rewrite: a
@@ -829,8 +825,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     let (ir_path_given, _ir_tmp) =
         util::resolve_ir_path_with_quantities(&ir_path, false, quantities_override.as_ref())
             .unwrap_or_else(|e| {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: {}", e));
             });
     // gh#156: `--output-every` rewrites the compiled IR's output schedule once,
     // so BOTH the engine (loads by path) and the CAS identity (`base_model`,
@@ -839,8 +834,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     let (ir_path_compiled, _every_tmp) =
         util::rematerialize_with_output_every(&ir_path_given, a.output_view.every)
             .unwrap_or_else(|e| {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: {}", e));
             });
     // gh#156: resolve + validate the trajectory output view (`--no-flows` /
     // `--columns`) against the compiled model, once. Folded into the CAS
@@ -864,8 +858,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         }
     };
     // Track explicit vs default flags for the backend-provenance guardrail.
@@ -907,8 +900,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         .map(|pv| (pv.prefix.clone(), pv.file.clone())).collect();
     let scenario_names: Vec<String> = crate::args::split_scenario_names(&a.scenarios)
         .unwrap_or_else(|e| {
-            eprintln!("error: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: {e}"));
         });
     let adhoc_enable: Vec<String>  = a.enable.clone();
     let adhoc_disable: Vec<String> = a.disable.clone();
@@ -936,8 +928,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     // --obs-only implies --obs or --obs-dir (infer from path: trailing / or existing dir → obs-dir)
     if let Some(ref path) = obs_only {
         if obs_path.is_some() || obs_dir.is_some() {
-            eprintln!("error: --obs-only cannot be combined with --obs or --obs-dir");
-            std::process::exit(1);
+            out.fail("error: --obs-only cannot be combined with --obs or --obs-dir");
         }
         if path.ends_with('/') || std::path::Path::new(path).is_dir() {
             obs_dir = Some(path.clone());
@@ -950,16 +941,14 @@ fn run_simulate(a: &args::SimulateArgs) {
     // the path: one TSV per stream, always, and trajectory suppressed.
     if let Some(ref path) = obs_only_dir {
         if obs_path.is_some() || obs_dir.is_some() {
-            eprintln!("error: --obs-only-dir cannot be combined with --obs, --obs-dir, or --obs-only");
-            std::process::exit(1);
+            out.fail("error: --obs-only-dir cannot be combined with --obs, --obs-dir, or --obs-only");
         }
         obs_dir = Some(path.clone());
     }
     let suppress_trajectory = obs_only.is_some() || obs_only_dir.is_some();
 
     if replicates < 1 {
-        eprintln!("error: --replicates must be >= 1");
-        std::process::exit(1);
+        out.fail("error: --replicates must be >= 1");
     }
 
     let want_obs = obs_path.is_some() || obs_dir.is_some();
@@ -969,31 +958,28 @@ fn run_simulate(a: &args::SimulateArgs) {
     // quantity. A run that emits none would silently ignore it, so refuse and
     // name what would make it do something.
     if emit_every.is_some() && !want_obs && a.quantities_out.is_none() {
-        eprintln!(
+        out.fail(
             "error: --emit-every sets the cadence of EMITTED synthetic \
              observations, but this run emits none.\n  \
              Add --obs/--obs-dir/--obs-only/--obs-only-dir to write them, or \
              --quantities-out for an `observations.<stream>` quantity."
         );
-        std::process::exit(1);
     }
 
     if seeds_spec_given && replicates > 1 {
-        eprintln!("error: --seeds and --replicates are mutually exclusive.\n  \
+        out.fail("error: --seeds and --replicates are mutually exclusive.\n  \
                    --seeds provides explicit seed values.\n  \
                    --replicates generates N deterministic seeds from --seed.");
-        std::process::exit(1);
     }
     // If using --seeds, replicates tracks seed count
     let replicates = if seeds_spec_given { seeds.len() } else { replicates };
 
     // Validate mutually exclusive σ flags
     if !scenario_names.is_empty() && (!adhoc_enable.is_empty() || !adhoc_disable.is_empty()) {
-        eprintln!("error: --scenario and --enable/--disable are mutually exclusive.");
-        eprintln!("  --scenario selects a named scenario from the model file.");
-        eprintln!("  --enable/--disable compose an ad-hoc scenario.");
-        eprintln!("  To combine both, define a composed scenario in the model file.");
-        std::process::exit(1);
+        out.say("error: --scenario and --enable/--disable are mutually exclusive.");
+        out.say("  --scenario selects a named scenario from the model file.");
+        out.say("  --enable/--disable compose an ad-hoc scenario.");
+        out.fail("  To combine both, define a composed scenario in the model file.");
     }
 
     // If no scenarios specified, use a single None (the implicit `(none)` arm)
@@ -1018,8 +1004,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     // ordering, the `--to` conflict rule) reads resolved numbers rather than the
     // NaN the compiler baked.
     let (model_raw, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
     let model_is_anchored = crate::obs_anchor::model_is_anchored(&model_raw);
     let to_is_anchored = matches!(
@@ -1036,18 +1021,16 @@ fn run_simulate(a: &args::SimulateArgs) {
                 } else {
                     "--to is anchored to observed data".to_string()
                 };
-                eprintln!(
+                out.fail(format!(
                     "error: {what}, but a forward simulation binds none.\n  \
                      Fix: pass --fit <fit.toml | fit run dir> — its \
                      [data.observations] supplies the observed times the anchor \
                      resolves against."
-                );
-                std::process::exit(1);
+                ));
             };
             let (first, last) = resolve_simulate_obs_anchors(&model_raw, fit_ref, dt)
                 .unwrap_or_else(|e| {
-                    eprintln!("error: resolving observation anchors: {e}");
-                    std::process::exit(1);
+                    out.fail(format!("error: resolving observation anchors: {e}"));
                 });
             Some(ir::anchor::ObsAnchorTimes { first, last })
         } else {
@@ -1060,8 +1043,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         let mut m = model_raw;
         if let Some(w) = obs_anchors {
             let moved = crate::obs_anchor::substitute(&mut m, w).unwrap_or_else(|e| {
-                eprintln!("error: {e}");
-                std::process::exit(1);
+                out.fail(format!("error: {e}"));
             });
             crate::obs_anchor::report(&moved, &m);
         }
@@ -1083,8 +1065,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     let design: Option<(Vec<(usize, crate::sweep::DesignPoint)>, crate::sim_ensemble_cas::ResolvedDesign)> =
         if !a.sweep.is_empty() {
             crate::sweep::check_swept_names(&a.sweep, &model_to).unwrap_or_else(|e| {
-                eprintln!("error: {e}");
-                std::process::exit(1);
+                out.fail(format!("error: {e}"));
             });
             Some((
                 crate::sweep::expand_sweep_specs(&a.sweep).into_iter().enumerate().collect(),
@@ -1092,8 +1073,7 @@ fn run_simulate(a: &args::SimulateArgs) {
             ))
         } else if let Some(file) = a.sweep_file.as_deref() {
             let f = crate::sweep::read_sweep_file(file, &model_to).unwrap_or_else(|e| {
-                eprintln!("error: {e}");
-                std::process::exit(1);
+                out.fail(format!("error: {e}"));
             });
             Some((f.points, f.design))
         } else {
@@ -1104,15 +1084,14 @@ fn run_simulate(a: &args::SimulateArgs) {
             points.iter().flat_map(|(_, pt)| pt.iter().map(|(k, _)| k.as_str())).collect();
         for p in &a.model_overrides.param {
             if swept.contains(p.name.as_str()) {
-                eprintln!(
+                out.fail(format!(
                     "error: parameter `{0}` is both swept and pinned by `--param {0}={1}`.\n  \
                      A `--param` outranks every other tier, so the sweep would not vary `{0}`: \
                      every design point would run at {1} while its label and `sweep:{0}` \
                      column said otherwise.\n  \
                      Fix: drop `--param {0}=…`, or remove `{0}` from the sweep.",
                     p.name, p.value
-                );
-                std::process::exit(1);
+                ));
             }
         }
         // `--param-vec PREFIX=FILE` is `--param`'s bulk form and shares its
@@ -1122,13 +1101,12 @@ fn run_simulate(a: &args::SimulateArgs) {
         // reader; a file it cannot read fails now with that reader's message.
         for (prefix, file) in &set_vec_entries {
             let rows = util::load_keyed_tsv(file).unwrap_or_else(|e| {
-                eprintln!("error: --param-vec {prefix}: {e}");
-                std::process::exit(1);
+                out.fail(format!("error: --param-vec {prefix}: {e}"));
             });
             for (key, value) in rows {
                 let name = util::param_vec_name(prefix, &key);
                 if swept.contains(name.as_str()) {
-                    eprintln!(
+                    out.fail(format!(
                         "error: parameter `{name}` is both swept and pinned by \
                          `--param-vec {prefix}={file}` (row `{key}` = {value}).\n  \
                          A `--param-vec` row shares `--param`'s rank above every other tier, so \
@@ -1136,8 +1114,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                          {value} while its label and `sweep:{name}` column said otherwise.\n  \
                          Fix: drop the `{key}` row from {file} (or the `--param-vec {prefix}=…` \
                          flag), or remove `{name}` from the sweep."
-                    );
-                    std::process::exit(1);
+                    ));
                 }
             }
         }
@@ -1149,7 +1126,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         Some(raw) => {
             let spec = crate::fit::runner::parse_time_spec(
                 "--to", raw, model_to.origin.as_deref(), &model_to.time_unit,
-            ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+            ).unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
             let resolved = match spec {
                 crate::fit::runner::TimeSpec::Absolute(v) => v,
                 // The observed window was folded once above, for the model
@@ -1163,13 +1140,12 @@ fn run_simulate(a: &args::SimulateArgs) {
             // reads t_end); an inverted horizon would otherwise be a silent
             // header-only TSV.
             if resolved <= model_to.simulation.t_start {
-                eprintln!(
+                out.fail(format!(
                     "error: --to \"{raw}\" resolves to t = {resolved}, which is at or \
                      before the model's t_start = {}. The horizon must lie after \
                      the simulation start.",
                     model_to.simulation.t_start
-                );
-                std::process::exit(1);
+                ));
             }
             // Conflict rule (gh#561: never silently discard a declared
             // horizon): a scenario whose composed horizon differs from BOTH
@@ -1177,19 +1153,18 @@ fn run_simulate(a: &args::SimulateArgs) {
             // the resolved --to is the no-op precedent and allowed.
             for sname in scenario_list.iter().flatten() {
                 let h = crate::params_resolver::effective_horizon(&model_to, Some(sname))
-                    .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                    .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
                 if h != model_to.simulation.t_end && h != resolved {
-                    eprintln!(
+                    out.fail(format!(
                         "error: scenario '{sname}' declares its own horizon \
                          (t = {h}) and --to \"{raw}\" resolves to t = {resolved} — \
                          refusing to pick one silently.\n  Fix: drop the \
                          scenario's `simulate {{ to }}` (keep it as a label-only \
                          preset) or run it without --to."
-                    );
-                    std::process::exit(1);
+                    ));
                 }
             }
-            eprintln!("simulate: --to \"{raw}\" → t_end = {resolved}");
+            out.say(format_args!("simulate: --to \"{raw}\" → t_end = {resolved}"));
             Some(resolved)
         }
     };
@@ -1203,7 +1178,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     if matches!(init_state_arg, Some(InitStateSourceArg::Fit))
         && draws_path.as_deref() != Some("posterior")
     {
-        eprintln!(
+        out.fail(
             "error: --init-state fit needs the posterior it pairs against: add \
              --draws posterior --fit <fit results dir>.\n  \
              The fit source restores draw i's OWN terminal latent state X_i(T) \
@@ -1213,15 +1188,13 @@ fn run_simulate(a: &args::SimulateArgs) {
              --draws posterior, or pass a `camdl pfilter --save-final-state` file \
              to forecast at a single θ."
         );
-        std::process::exit(1);
     }
 
     // `--fit` without `--draws` is only meaningful when something needs the
     // fit's DATA rather than its posterior: an anchored `--to` (gh#626) or an
     // anchored model (gh#616). Otherwise keep the old ergonomics.
     if a.fit.is_some() && a.draws.is_none() && !to_was_anchored && !model_is_anchored {
-        eprintln!("error: --fit requires --draws (or an anchored --to, or an anchored model).");
-        std::process::exit(1);
+        out.fail("error: --fit requires --draws (or an anchored --to, or an anchored model).");
     }
 
     let cas_root = output_dir_arg.clone()
@@ -1251,13 +1224,12 @@ fn run_simulate(a: &args::SimulateArgs) {
             Ok(Some(p)) => p,
             Ok(None) => continue,
             Err(e) => {
-                eprintln!(
+                out.fail(format!(
                     "error: cannot read the [provenance] block of {pf}: {e}\n  \
                      Re-run the fit to rewrite the block, or remove the [provenance] block \
                      from {pf} to run the file as plain params (no backend or dt is matched \
                      from it, and no fit lineage is recorded)."
-                );
-                std::process::exit(1);
+                ));
             }
         };
         // The block's `content_hash` is a tamper hash over the parameter
@@ -1268,7 +1240,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         match crate::fit::provenance::verify_content_hash(pf, &prov.content_hash) {
             Ok(crate::fit::provenance::ContentVerification::Valid) => {}
             Ok(crate::fit::provenance::ContentVerification::Modified { declared, computed }) => {
-                eprintln!(
+                out.fail(format!(
                     "error: params file {pf} was edited after the fit that produced it.\n  \
                      Its [provenance] block declares content_hash = \"{declared}\", but the \
                      parameter values in the file now hash to \"{computed}\".\n  \
@@ -1277,12 +1249,10 @@ fn run_simulate(a: &args::SimulateArgs) {
                      To run the edited values knowingly, remove the [provenance] block from \
                      {pf}: the file is then a plain params file (no backend or dt is matched \
                      from it, and no fit lineage is recorded)."
-                );
-                std::process::exit(1);
+                ));
             }
             Err(e) => {
-                eprintln!("error: {e}");
-                std::process::exit(1);
+                out.fail(format!("error: {e}"));
             }
         }
         from_fit_hash = prov.fit_hash.clone();
@@ -1290,25 +1260,25 @@ fn run_simulate(a: &args::SimulateArgs) {
 
         if !backend_explicit {
             // Auto-match path.
-            eprintln!("[info] backend auto-matched to {} (dt={}) from fit \
+            out.say(format_args!("[info] backend auto-matched to {} (dt={}) from fit \
                       provenance in {}. Pass --backend explicitly to override; \
                       the fit's backend is the consistent default for forward \
                       sims of the MLE.",
-                prov.backend, prov.dt, pf);
+                prov.backend, prov.dt, pf));
             backend = prov.backend;
             if !dt_explicit { dt = prov.dt; }
         } else if backend != prov.backend {
             // Explicit-differs path — warn.
-            eprintln!("warning: backend mismatch.");
-            eprintln!("  {} was produced by a fit that used {} (dt={}).",
-                pf, prov.backend, prov.dt);
-            eprintln!("  You passed --backend {}, which is a different \
-                       dynamical model at the same parameters.", backend);
-            eprintln!("  The resulting trajectories will NOT reproduce the \
+            out.say("warning: backend mismatch.");
+            out.say(format_args!("  {} was produced by a fit that used {} (dt={}).",
+                pf, prov.backend, prov.dt));
+            out.say(format_args!("  You passed --backend {}, which is a different \
+                       dynamical model at the same parameters.", backend));
+            out.say("  The resulting trajectories will NOT reproduce the \
                        fit's behavior — this combination has caused real \
                        confusion; see");
-            eprintln!("  docs/dev/incidents/2026-04-19-backend-default-mismatch.md.");
-            eprintln!("  If this is intentional (e.g. cross-backend \
+            out.say("  docs/dev/incidents/2026-04-19-backend-default-mismatch.md.");
+            out.say("  If this is intentional (e.g. cross-backend \
                        comparison), ignore this warning.");
         }
         // If backend_explicit and matches: silent. Normal case.
@@ -1341,11 +1311,10 @@ fn run_simulate(a: &args::SimulateArgs) {
             } else {
                 let (leaf, note) = crate::fit::handle::resolve_run_with_draws(fit_handle)
                     .unwrap_or_else(|e| {
-                        eprintln!("error: --fit {fit_handle}: {e}");
-                        std::process::exit(1);
+                        out.fail(format!("error: --fit {fit_handle}: {e}"));
                     });
                 if let Some(note) = note {
-                    eprintln!("draws: {note}");
+                    out.say(format_args!("draws: {note}"));
                 }
                 leaf.dir.to_string_lossy().into_owned()
             })
@@ -1362,8 +1331,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                     .map(|r| crate::fit::fitted_model::stored_fit_simulator(&r))
                     .transpose()
                     .unwrap_or_else(|e| {
-                        eprintln!("error: --fit {fit_handle}: {e}");
-                        std::process::exit(1);
+                        out.fail(format!("error: --fit {fit_handle}: {e}"));
                     })
                     .map(|s| (fit_handle.clone(), s))
             }
@@ -1380,8 +1348,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 Some((
                     fit_ref.clone(),
                     sim.unwrap_or_else(|e| {
-                        eprintln!("error: --fit {fit_ref}: {e}");
-                        std::process::exit(1);
+                        out.fail(format!("error: --fit {fit_ref}: {e}"));
                     }),
                 ))
             }
@@ -1396,11 +1363,10 @@ fn run_simulate(a: &args::SimulateArgs) {
         };
         let replay = crate::fit::fitted_model::replay_simulator(fit_name, fitted, flags, backend)
             .unwrap_or_else(|e| {
-                eprintln!("error: {e}");
-                std::process::exit(1);
+                out.fail(format!("error: {e}"));
             });
         if let Some(notice) = &replay.notice {
-            eprintln!("{notice}");
+            out.say(format_args!("{notice}"));
         }
         backend = replay.backend;
         dt = replay.dt;
@@ -1462,8 +1428,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     let mut init_state_source: Option<std::sync::Arc<crate::sim_job::InitStateSource>> = None;
     if init_state_arg.is_some() {
         let (model_is, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
         // The seam refuses a reactive model too (`chain_binomial.rs`), but by
         // then the user has waited for a compile; name the policy here.
@@ -1472,7 +1437,7 @@ fn run_simulate(a: &args::SimulateArgs) {
             .map(|iv| iv.name.as_str())
             .collect();
         if !reactive.is_empty() {
-            eprintln!(
+            out.fail(format!(
                 "error: --init-state cannot restart a model with reactive \
                  intervention(s) [{}]. A reactive policy carries mid-run state \
                  the origin state does not hold — the observation history its \
@@ -1482,29 +1447,25 @@ fn run_simulate(a: &args::SimulateArgs) {
                  run the scenario without the reactive policy, or simulate \
                  continuously from the model's own t_start.",
                 reactive.join(", ")
-            );
-            std::process::exit(1);
+            ));
         }
         if !matches!(backend, crate::args::types::ForwardBackend::ChainBinomial) {
-            eprintln!("error: {}", util::unseamed_backend_msg(backend.as_str()));
-            std::process::exit(1);
+            out.fail(format!("error: {}", util::unseamed_backend_msg(backend.as_str())));
         }
 
         if let Some(InitStateSourceArg::File(path)) = init_state_arg.as_ref() {
             let columns = io::trajectories::TrajColumnSpec::from_model(&model_is, &[]);
             let bytes = std::fs::read(path).unwrap_or_else(|e| {
-                eprintln!("error: cannot read --init-state {}: {e}", path.display());
-                std::process::exit(1);
+                out.fail(format!("error: cannot read --init-state {}: {e}", path.display()));
             });
             let states = io::read_final_states(path, &columns).unwrap_or_else(|e| {
-                eprintln!("error: --init-state: {e}");
-                std::process::exit(1);
+                out.fail(format!("error: --init-state: {e}"));
             });
             // `--save-final-state` is p(x_T | y_{1:T}) at ONE θ. Pairing those
             // rows with unrelated posterior draws would form an incoherent
             // (θ, x_T) product and read as a legitimate forecast cloud.
             if draws_path.is_some() {
-                eprintln!(
+                out.fail(
                     "error: --init-state <file> cannot be combined with --draws. The \
                      saved particle states are the filtering distribution at the ONE θ \
                      the filter ran at, so pairing row i with an unrelated posterior \
@@ -1514,27 +1475,25 @@ fn run_simulate(a: &args::SimulateArgs) {
                      results dir>`, which restores draw i's own state under draw i's \
                      own θ."
                 );
-                std::process::exit(1);
             }
             // Replicate i restores row i. Not "the first N rows": a
             // post-resampling swarm is ancestor-ordered, so a prefix is not an
             // exchangeable subsample of the filtering distribution.
             let want = if seeds_spec_given { seeds.len() } else { replicates };
             if want != states.len() {
-                eprintln!(
+                out.fail(format!(
                     "error: --init-state {} holds {} particle rows but this run has {} \
                      replicate(s). Each replicate restores its own row, and a prefix of \
                      a post-resampling swarm is not an exchangeable subsample of the \
                      filtering distribution — so the counts must match.\n  Fix: pass \
                      --replicates {}, or re-run the filter with --particles {}.",
                     path.display(), states.len(), want, states.len(), want
-                );
-                std::process::exit(1);
+                ));
             }
-            eprintln!(
+            out.say(format_args!(
                 "simulate: --init-state {} → {} particle states at t = {}",
                 path.display(), states.len(), states.origin_t
-            );
+            ));
             let digest = runid::ContentHash::digest_bytes(&bytes);
             init_state_source = Some(std::sync::Arc::new(crate::sim_job::InitStateSource {
                 origin_t: states.origin_t,
@@ -1560,8 +1519,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         // model. The substitution happened above; this block must see it.
         let model_check = &model_to;
         if model_check.observations.is_empty() {
-            eprintln!("error: --obs/--obs-dir requested but model has no observations blocks");
-            std::process::exit(1);
+            out.fail("error: --obs/--obs-dir requested but model has no observations blocks");
         }
         // gh#829: both the mirror file and the store's per-leaf `obs/` subtree
         // draw every stream with no data columns, so a stream whose likelihood
@@ -1574,8 +1532,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 if let Err(e) = crate::obs_emit::check_data_columns_supplied(
                     o, crate::obs_emit::ColumnSupply::Nothing,
                 ) {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
+                    out.fail(format!("error: {e}"));
                 }
             }
         }
@@ -1596,8 +1553,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 Some(v) => v,
                 None => crate::params_resolver::effective_horizon(model_check, s.as_deref())
                     .unwrap_or_else(|e| {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
+                        out.fail(format!("error: {}", e));
                     }),
             };
             horizons.push((
@@ -1608,15 +1564,14 @@ fn run_simulate(a: &args::SimulateArgs) {
         if horizons.iter().any(|(_, h)| *h != horizons[0].1) {
             let list: Vec<String> =
                 horizons.iter().map(|(n, h)| format!("{n} → t = {h}")).collect();
-            eprintln!(
+            out.fail(format!(
                 "error: --obs/--obs-dir cannot combine scenarios with different \
                  horizons ({}): the combined file has one time axis, so the \
                  shorter scenario's rows past its own trajectory would be \
                  fabricated.\n  Fix: run each scenario in its own invocation, or \
                  read the per-cell obs/ artifacts from the store (`camdl cat`).",
                 list.join(", ")
-            );
-            std::process::exit(1);
+            ));
         }
         // gh#626: an `at [...]` emit schedule cannot grow with the horizon —
         // an extending --to would run longer and emit nothing past the listed
@@ -1629,15 +1584,14 @@ fn run_simulate(a: &args::SimulateArgs) {
                     {
                         let max_t = ts.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                         if max_t < new_end {
-                            eprintln!(
+                            out.fail(format!(
                                 "error: --to extends the horizon to t = {new_end}, but \
                                  stream '{}' emits at a fixed list ending at t = {max_t} \
                                  — no synthetic observations would be emitted past it.\n  \
                                  Fix: use a recurring emit schedule (`every …`), extend \
                                  the `at [...]` list, or run without --to.",
                                 o.name
-                            );
-                            std::process::exit(1);
+                            ));
                         }
                     }
                 }
@@ -1660,8 +1614,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 .map(|o| obs_emit_schedule_times(
                     o, obs_origin, obs_end, emit_every.as_ref(),
                 ).unwrap_or_else(|e| {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
+                    out.fail(format!("error: {}", e));
                 }))
                 .collect();
             let all_same = schedules.windows(2).all(|w| w[0] == w[1]);
@@ -1675,12 +1628,11 @@ fn run_simulate(a: &args::SimulateArgs) {
                     .map(|(o, times)| format!(
                         "{}: {:?} ({} emit times)", o.name, o.emit_schedule, times.len()))
                     .collect();
-                eprintln!("error: observation streams have different schedules ({}).\n\
+                out.fail(format!("error: observation streams have different schedules ({}).\n\
                            A single wide TSV cannot hold multi-cadence streams.\n\
                            Use --obs-dir (one file per stream, keeps trajectory) or\n\
                            --obs-only-dir (one file per stream, suppresses trajectory).",
-                    descs.join(", "));
-                std::process::exit(1);
+                    descs.join(", ")));
             }
         }
     }
@@ -1688,8 +1640,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     // ── Prepare obs-dir output directory ────────────────────────────────────
     if let Some(ref dir) = obs_dir {
         std::fs::create_dir_all(dir).unwrap_or_else(|e| {
-            eprintln!("error: cannot create obs directory '{}': {}", dir, e);
-            std::process::exit(1);
+            out.fail(format!("error: cannot create obs directory '{}': {}", dir, e));
         });
     }
 
@@ -1698,8 +1649,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         Some(raw) => match crate::fit::validate_label(raw) {
             Ok(l) => Some(l),
             Err(e) => {
-                eprintln!("error: invalid --label: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: invalid --label: {}", e));
             }
         },
         None => None,
@@ -1743,42 +1693,36 @@ fn run_simulate(a: &args::SimulateArgs) {
     let draws: Vec<HashMap<String, f64>> = if let Some(ref source) = draws_path {
         if source == "uniform" {
             let n = n_draws_arg.unwrap_or_else(|| {
-                eprintln!("error: --draws uniform requires -n N");
-                std::process::exit(1);
+                out.fail("error: --draws uniform requires -n N");
             });
-            generate_uniform_draws(&ir_path_compiled, n, seed).unwrap_or_else(|e| {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
+            generate_uniform_draws(&out, &ir_path_compiled, n, seed).unwrap_or_else(|e| {
+                out.fail(format!("error: {}", e));
             })
         } else if source == "prior" {
             let n = n_draws_arg.unwrap_or_else(|| {
-                eprintln!("error: --draws prior requires -n N");
-                std::process::exit(1);
+                out.fail("error: --draws prior requires -n N");
             });
             match fit_path_for_draws.as_ref() {
                 Some(fit_path) => {
-                    report_replay_check(check_replay_model(fit_path, &ir_path_given, &ir_path));
+                    report_replay_check(&out, check_replay_model(fit_path, &ir_path_given, &ir_path));
                     // fit.toml prior source (overrides or supplements
                     // model priors). gh#86: the model IR is the
                     // tier-2 fallback when the fit toml omits a prior
                     // for a parameter that declares `~ <dist>` in the
                     // model file.
                     let (draws_model, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
-                        eprintln!("error loading model for --draws prior: {}", e);
-                        std::process::exit(1);
+                        out.fail(format!("error loading model for --draws prior: {}", e));
                     });
-                    let (rows, fixed) = generate_prior_draws(fit_path, n, seed, &draws_model)
+                    let (rows, fixed) = generate_prior_draws(&out, fit_path, n, seed, &draws_model)
                         .unwrap_or_else(|e| {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
+                            out.fail(format!("error: {}", e));
                         });
                     // gh#949: the config's [fixed] block resolves at its own
                     // tier (below --params and the scenario), not in the rows.
                     base_sim_run.fit_fixed = fixed;
-                    base_sim_run.fit_base = fit_base_for_draws(fit_path, "prior")
+                    base_sim_run.fit_base = fit_base_for_draws(&out, fit_path, "prior")
                         .unwrap_or_else(|e| {
-                            eprintln!("error: --fit {fit_path}: {e}");
-                            std::process::exit(1);
+                            out.fail(format!("error: --fit {fit_path}: {e}"));
                         });
                     rows
                 }
@@ -1786,9 +1730,8 @@ fn run_simulate(a: &args::SimulateArgs) {
                     // Priors embedded in the model IR. The rows carry only the
                     // sampled parameters; every other parameter resolves per
                     // cell, against that cell's own scenario (gh#949).
-                    generate_prior_draws_from_ir(&ir_path_compiled, n, seed).unwrap_or_else(|e| {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
+                    generate_prior_draws_from_ir(&out, &ir_path_compiled, n, seed).unwrap_or_else(|e| {
+                        out.fail(format!("error: {}", e));
                     })
                 }
             }
@@ -1797,9 +1740,8 @@ fn run_simulate(a: &args::SimulateArgs) {
             // terminal Bayesian method's draws.tsv). --fit names the fit results
             // directory here, not a config TOML.
             let fit_handle = fit_path_for_draws.as_ref().unwrap_or_else(|| {
-                eprintln!("error: --draws posterior requires --fit <fit results dir> \
+                out.fail("error: --draws posterior requires --fit <fit results dir> \
                     (the directory `camdl fit run` printed)");
-                std::process::exit(1);
             });
             // The run the handle names, resolved with the fit's simulator above.
             let fit_ref: &String = posterior_fit_ref.as_ref().expect("resolved with --fit");
@@ -1811,7 +1753,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 Ok(resolved) => {
                     // The draws are this fit's model's: refuse a different
                     // model before anything runs.
-                    report_replay_check(util::load_model(&ir_path_given).and_then(|(given, _)| {
+                    report_replay_check(&out, util::load_model(&ir_path_given).and_then(|(given, _)| {
                         crate::fit::fitted_model::check_stored_fit(
                             fit_handle,
                             &resolved.segment,
@@ -1822,31 +1764,30 @@ fn run_simulate(a: &args::SimulateArgs) {
                     }));
                     base_sim_run.fit_base = util::FitBase::of(&resolved.config.problem)
                         .unwrap_or_else(|e| {
-                            eprintln!("error: --fit {fit_handle}: {e}");
-                            std::process::exit(1);
+                            out.fail(format!("error: --fit {fit_handle}: {e}"));
                         });
                     if !base_sim_run.fit_base.is_empty() {
-                        eprintln!(
+                        out.say(format_args!(
                             "draws: posterior — every arm runs the fit's own {}; a \
                              scenario applies its changes on top of it",
                             base_sim_run.fit_base.describe()
-                        );
+                        ));
                     }
                 }
                 // A bare directory holding a `draws.tsv` outside any fit
                 // carries no fit config, so there is no selection to apply.
                 // Said rather than assumed, since a fitted selection may be
                 // what is missing.
-                Err(e) => eprintln!(
+                Err(e) => out.say(format_args!(
                     "draws: {fit_ref} is not a stored fit run ({e}); no fit \
                      scenario/enable/disable is applied, the model runs as written, \
                      on {} at dt = {}",
                     backend.as_str(),
                     dt
-                ),
+                )),
             }
             if matches!(init_state_arg, Some(InitStateSourceArg::Fit)) {
-                let (rows, source) = resolve_paired_posterior(
+                let (rows, source) = resolve_paired_posterior(&out, 
                     fit_ref, &ir_path_compiled, a.n_draws,
                 );
                 init_state_source = Some(std::sync::Arc::new(source));
@@ -1854,14 +1795,12 @@ fn run_simulate(a: &args::SimulateArgs) {
             } else {
             let resolved = posterior_draws::resolve_posterior_draws(fit_ref, None)
                 .unwrap_or_else(|e| {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
+                    out.fail(format!("error: {}", e));
                 });
             let loaded = load_draws_tsv(&resolved.draws_path.to_string_lossy())
                 .unwrap_or_else(|e| {
-                    eprintln!("error loading posterior draws {}: {}",
-                        resolved.draws_path.display(), e);
-                    std::process::exit(1);
+                    out.fail(format!("error loading posterior draws {}: {}",
+                        resolved.draws_path.display(), e));
                 });
             let method_label = resolved.method
                 .map(|m| m.as_str())
@@ -1876,17 +1815,17 @@ fn run_simulate(a: &args::SimulateArgs) {
                 let picked: Vec<HashMap<String, f64>> =
                     crate::fit::predict::subsample_draws(&loaded, cap)
                         .into_iter().cloned().collect();
-                eprintln!(
+                out.say(format_args!(
                     "draws: posterior — subsampling {} of {total} draws (strided \
                      across the cloud; raise with --n-draws)",
                     picked.len()
-                );
+                ));
                 picked
             } else {
                 loaded
             };
-            eprintln!("draws: posterior — {} draws from {} method '{}' ({})",
-                loaded.len(), method_label, resolved.name, resolved.draws_path.display());
+            out.say(format_args!("draws: posterior — {} draws from {} method '{}' ({})",
+                loaded.len(), method_label, resolved.name, resolved.draws_path.display()));
             loaded
             }
         } else {
@@ -1898,34 +1837,30 @@ fn run_simulate(a: &args::SimulateArgs) {
             // and would discard --params (run spec §1.3). A column the file
             // carries is a row value and outranks it.
             let loaded = load_draws_tsv(source).unwrap_or_else(|e| {
-                eprintln!("error loading draws: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error loading draws: {}", e));
             });
             if let Some(fit_ref) = fit_path_for_draws.as_ref() {
-                report_replay_check(check_replay_model(fit_ref, &ir_path_given, &ir_path));
+                report_replay_check(&out, check_replay_model(fit_ref, &ir_path_given, &ir_path));
                 let (fixed_model, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
+                    out.fail(format!("error: {e}"));
                 });
                 let fixed = posterior_draws::resolve_fixed_for_backfill(fit_ref, &fixed_model)
                     .unwrap_or_else(|e| {
-                        eprintln!("error: --fit [fixed]: {}", e);
-                        std::process::exit(1);
+                        out.fail(format!("error: --fit [fixed]: {}", e));
                     });
                 let lacking: Vec<&str> = fixed.iter()
                     .map(|(name, _)| name.as_str())
                     .filter(|name| loaded.iter().any(|row| !row.contains_key(*name)))
                     .collect();
                 if !lacking.is_empty() {
-                    eprintln!("draws: {} fixed parameter(s) the draws file lacks take the \
+                    out.say(format_args!("draws: {} fixed parameter(s) the draws file lacks take the \
                                fit's [fixed] value from {} (below --params): {}",
-                        lacking.len(), fit_ref, lacking.join(", "));
+                        lacking.len(), fit_ref, lacking.join(", ")));
                 }
                 base_sim_run.fit_fixed = fixed.into_iter().collect();
-                base_sim_run.fit_base = fit_base_for_draws(fit_ref, "file")
+                base_sim_run.fit_base = fit_base_for_draws(&out, fit_ref, "file")
                     .unwrap_or_else(|e| {
-                        eprintln!("error: --fit {fit_ref}: {e}");
-                        std::process::exit(1);
+                        out.fail(format!("error: --fit {fit_ref}: {e}"));
                     });
             }
             loaded
@@ -1955,7 +1890,7 @@ fn run_simulate(a: &args::SimulateArgs) {
             if n_scenarios > 1 { Some(format!("{} scenarios", n_scenarios)) } else { None },
             if replicates > 1 { Some(format!("{} replicates", replicates)) } else { None },
         ].iter().flatten().cloned().collect();
-        eprintln!("{} = {} runs", parts.join(" × "), total_runs);
+        out.say(format_args!("{} = {} runs", parts.join(" × "), total_runs));
     }
 
     // ── Build the SimulateJob and route through the unified engine ──────────
@@ -2082,8 +2017,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     // before any branch: `--dry-run` and `--event-log` do not reach
     // `engine::run_job`, which checks again.
     engine::check_scenario_coordinate_collision(&job).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
 
     // ── Pre-flight: every generated-draws cell has a value for every parameter
@@ -2097,8 +2031,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         if let Err(e) = refuse_unresolvable_generated_cells(
             &job, measure, !scenario_names.is_empty(), fit_path_for_draws.is_some(),
         ) {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         }
     }
 
@@ -2107,18 +2040,17 @@ fn run_simulate(a: &args::SimulateArgs) {
     // `--draws PATH` loader reads back (one row per draw, one column per
     // parameter the draw source carries). Opt-in only: absent the flag nothing
     // is written, so the content-addressed store leaves are untouched.
-    if let Some(ref out) = a.draws_out {
-        let out = out.to_string_lossy().into_owned();
-        if let Err(e) = write_draws_tsv(&out, &draws) {
-            eprintln!("error writing --draws-out {}: {}", out, e);
-            std::process::exit(1);
+    if let Some(ref draws_out) = a.draws_out {
+        let draws_out = draws_out.to_string_lossy().into_owned();
+        if let Err(e) = write_draws_tsv(&draws_out, &draws) {
+            out.fail(format!("error writing --draws-out {}: {}", draws_out, e));
         }
-        eprintln!("draws.tsv: wrote {} draws to {}", n_draws, out);
+        out.say(format_args!("draws.tsv: wrote {} draws to {}", n_draws, draws_out));
     }
 
     // ── Dry run ─────────────────────────────────────────────────────────────
     if dry_run {
-        print_dry_run(
+        print_dry_run(&out, 
             &ir_path, &ir_path_compiled, base_sim_run.backend, dt, seed,
             &base_sim_run.params_files, &base_sim_run.overrides,
             &scenario_list, &seeds, &draws_path,
@@ -2135,10 +2067,9 @@ fn run_simulate(a: &args::SimulateArgs) {
                 want_obs, a.force, label_arg.clone(), fit_dep.clone(),
                 a.allow_degenerate_rates, output_cols.clone(), emit_every.clone(), total_runs,
             ).unwrap_or_else(|e| {
-                eprintln!("error preparing CAS: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error preparing CAS: {}", e));
             });
-            print_store_view(&cas, &job, a.force, a.quantities_out.is_some());
+            print_store_view(&out, &cas, &job, a.force, a.quantities_out.is_some());
         }
         return;
     }
@@ -2152,20 +2083,18 @@ fn run_simulate(a: &args::SimulateArgs) {
     // a user passed is silently dropped here.
     if let Some(ref design_toml) = a.design_from {
         if obs_dir.is_none() && a.projected_out.is_none() {
-            eprintln!(
+            out.fail(
                 "error: --design-from writes one file per observation stream, so it \
                  needs a directory: pass --obs-only-dir DIR (dataset only), \
                  --obs-dir DIR, or --projected-out DIR (each stream's projected value)."
             );
-            std::process::exit(1);
         }
-        if let Err(e) = simulate_on_bound_design(
+        if let Err(e) = simulate_on_bound_design(&out, 
             design_toml, &base_sim_run, &draws, draws_path.is_some(),
             obs_dir.as_ref().map(std::path::Path::new),
             a.projected_out.as_deref(), dt,
         ) {
-            eprintln!("error: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: {e}"));
         }
         return;
     }
@@ -2196,8 +2125,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     ) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("error preparing CAS: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error preparing CAS: {}", e));
         }
     };
 
@@ -2262,8 +2190,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     // a `--draws`/multi-cell run → band), not the cell count alone.
     let quant: Option<SimQuantities> = {
         let (q_model, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
         if q_model.quantities.is_empty() {
             None
@@ -2305,10 +2232,10 @@ fn run_simulate(a: &args::SimulateArgs) {
             })
         } else {
             let n = q_model.quantities.len();
-            eprintln!(
+            out.say(format_args!(
                 "note: model declares {n} quantit{}; pass --quantities-out <dir> to emit them",
                 if n == 1 { "y" } else { "ies" }
-            );
+            ));
             None
         }
     };
@@ -2345,34 +2272,29 @@ fn run_simulate(a: &args::SimulateArgs) {
     let recorded: Option<(sim::lineage::EventLog, bool)> = if a.event_log.is_some() {
         let (specs, grid) = engine::plan_grid(&job);
         if specs.len() != 1 {
-            eprintln!("error: --event-log is single-run only (no --seeds / \
+            out.fail("error: --event-log is single-run only (no --seeds / \
                        --replicates / --draws / multiple --scenario)");
-            std::process::exit(1);
         }
         let spec = specs.into_iter().next().expect("len checked == 1");
         util::emit_run_notices(&[&spec.sim_run]);
         sink.on_start(&grid);
         let (traj, model, event_log, exact) =
             util::run_simulation_event_log(&spec.sim_run).unwrap_or_else(|e| {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: {}", e));
             });
         let cell = engine::CellResult { spec, traj, model, event_log: Some(event_log) };
         sink.merge_cell(&cell).unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
         sink.on_finish(&grid).unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
         // Recover the log for the optional mirror + realize hint (merge_cell
         // only borrowed the cell, so we can move it back out here).
         cell.event_log.map(|el| (el, exact))
     } else {
         engine::run_job(&job, &mut sink).unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
         None
     };
@@ -2391,13 +2313,12 @@ fn run_simulate(a: &args::SimulateArgs) {
     // to render then exits with nothing on stdout (gh#574).
     if a.stdout {
         if let Some(q) = &sink.quant {
-            write_quantities_sidecar(q);
+            write_quantities_sidecar(&out, q);
         }
         if let Some(ref bytes) = combined_traj {
             use std::io::Write;
-            if let Err(e) = std::io::stdout().write_all(bytes) {
-                eprintln!("error writing trajectory to stdout: {}", e);
-                std::process::exit(1);
+            if let Err(e) = out.data().write_all(bytes) {
+                out.fail(format!("error writing trajectory to stdout: {}", e));
             }
         }
         return;
@@ -2406,10 +2327,9 @@ fn run_simulate(a: &args::SimulateArgs) {
     if let (Some(ref path), Some(ref bytes)) = (&output_path, &combined_traj) {
         if !suppress_trajectory {
             std::fs::write(path, bytes).unwrap_or_else(|e| {
-                eprintln!("cannot write {}: {}", path, e);
-                std::process::exit(1);
+                out.fail(format!("cannot write {}: {}", path, e));
             });
-            eprintln!("trajectory written to {}", path);
+            out.say(format_args!("trajectory written to {}", path));
         }
     }
 
@@ -2417,9 +2337,9 @@ fn run_simulate(a: &args::SimulateArgs) {
     // record; a failed commit is fatal to the run's purpose).
     if !sink.cas.errors.is_empty() {
         for e in &sink.cas.errors {
-            eprintln!("error: {}", e);
+            out.say(format_args!("error: {}", e));
         }
-        std::process::exit(1);
+        crate::out::ExitCode(1).exit();
     }
 
     // ── Store the combined-across-cells TSV as a `SimEnsemble` artifact ──────
@@ -2437,10 +2357,10 @@ fn run_simulate(a: &args::SimulateArgs) {
             // The post-bar pause the user sees is this: writing + fsyncing the
             // combined wide-format TSV as the ensemble leaf. Announce it so a
             // multi-MB ensemble doesn't look like a hang.
-            crate::out::status::step("storing",
+            out.milestone("storing",
                 format!("ensemble \u{b7} {} cells ({})",
                     total_runs, crate::out::status::human_bytes(bytes.len() as u64)));
-            write_sim_ensemble(
+            write_sim_ensemble(&out, 
                 &sink.cas, bytes, &cas_root, label_arg.clone(), design.as_ref().map(|(_, d)| d),
             );
         }
@@ -2448,19 +2368,19 @@ fn run_simulate(a: &args::SimulateArgs) {
 
     // Report what the store supplied and where the leaves landed.
     if sink.n_reused > 0 {
-        crate::out::status::step("cached", format!(
+        out.milestone("cached", format!(
             "{} of {} cells read from the store; simulated {}",
             sink.n_reused, total_runs, total_runs - sink.n_reused
         ));
     }
-    report_cas_leaves(&sink.cas.completed_runs, &cas_root);
+    report_cas_leaves(&out, &sink.cas.completed_runs, &cas_root);
 
     // ── Write the combined observation mirror ───────────────────────────────
-    sink.stream.write_obs_output();
+    sink.stream.write_obs_output(&out);
 
     // ── Write generated quantities (regenerated sidecar, NOT in the CAS leaf) ─
     if let Some(q) = &sink.quant {
-        write_quantities_sidecar(q);
+        write_quantities_sidecar(&out, q);
     }
 
     // ── Event-log mirror + realize hint (Layer 1 → Layer 2) ─────────────────
@@ -2480,7 +2400,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         let leaf_event_log = sink.cas.completed_runs.last()
             .map(|e| format!("{}/{}/event_log.tsv", cas_root, e.run_path))
             .filter(|p| std::path::Path::new(p).exists());
-        lineage::finish_event_log(&crate::out::Out::new(false), a, &event_log, exact, leaf_event_log.as_deref());
+        lineage::finish_event_log(&out, a, &event_log, exact, leaf_event_log.as_deref());
     }
 
     // ── Reactive-log mirror (gh#204) ─────────────────────────────────────────
@@ -2497,13 +2417,11 @@ fn run_simulate(a: &args::SimulateArgs) {
         match leaf_log {
             Some(src) => {
                 if let Err(e) = std::fs::copy(&src, dest) {
-                    eprintln!("warning: --reactive-log mirror to {}: {}", dest.display(), e);
+                    out.say(format_args!("warning: --reactive-log mirror to {}: {}", dest.display(), e));
                 }
             }
-            None => eprintln!(
-                "warning: --reactive-log: this run has no active reactive policy \
-                 (enable one with a scenario or --enable); nothing to mirror"
-            ),
+            None => out.say("warning: --reactive-log: this run has no active reactive policy \
+                 (enable one with a scenario or --enable); nothing to mirror"),
         }
     }
 }
@@ -2511,7 +2429,7 @@ fn run_simulate(a: &args::SimulateArgs) {
 /// Write `simulate --quantities-out`'s sidecar: the rendered tables plus the
 /// `quantities.json` manifest. Regenerated, never part of the CAS leaf, so it
 /// is written whether or not the run stored one — `--stdout` included (gh#574).
-fn write_quantities_sidecar(q: &SimQuantities) {
+fn write_quantities_sidecar(out: &crate::out::Out, q: &SimQuantities) {
     if !q.by_group.is_empty() {
         // One design cell per (design point, scenario), each banded over ITS
         // OWN replicates. The `scenario` column is emitted iff the run has a
@@ -2531,13 +2449,11 @@ fn write_quantities_sidecar(q: &SimQuantities) {
                 // manifest is byte-identical.
                 .push_group(&q.quantities, coords, &acc.draws, &acc.times, None, None, &q.calendar)
                 .unwrap_or_else(|e| {
-                    eprintln!("error rendering quantities: {}", e);
-                    std::process::exit(1);
+                    out.fail(format!("error rendering quantities: {}", e));
                 });
         }
         let rendered = stacked.finish(&q.calendar).unwrap_or_else(|e| {
-            eprintln!("error rendering quantities: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error rendering quantities: {}", e));
         });
         // gh#715 partitions a non-finite quantity out of the render rather
         // than raising it, so that `fit predict` can keep the rest of its
@@ -2546,14 +2462,13 @@ fn write_quantities_sidecar(q: &SimQuantities) {
         // named, with nothing written.
         if !rendered.failures.is_empty() {
             for f in &rendered.failures {
-                eprintln!("error: quantity '{}': {}", f.name, f.reason());
+                out.say(format_args!("error: quantity '{}': {}", f.name, f.reason()));
             }
-            std::process::exit(1);
+            crate::out::ExitCode(1).exit();
         }
         let (outs, manifest) = (rendered.files, rendered.manifest);
         std::fs::create_dir_all(&q.out_dir).unwrap_or_else(|e| {
-            eprintln!("error: cannot create quantities dir {}: {}", q.out_dir.display(), e);
-            std::process::exit(1);
+            out.fail(format!("error: cannot create quantities dir {}: {}", q.out_dir.display(), e));
         });
         // The vocabulary's content digest keys the artifact (proposal
         // 2026-08-19): the model's own block keeps writing `quantities/`,
@@ -2562,10 +2477,9 @@ fn write_quantities_sidecar(q: &SimQuantities) {
         let sub_dir = crate::quantities_file::quantities_dir_name(q.vocabulary.as_ref());
         for (name, content) in &outs {
             match crate::fit::predict::write_tsv(&q.out_dir, &sub_dir, name, content) {
-                Ok(p) => eprintln!("quantities: wrote {}", p.display()),
+                Ok(p) => out.say(format_args!("quantities: wrote {}", p.display())),
                 Err(e) => {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
+                    out.fail(format!("error: {}", e));
                 }
             }
         }
@@ -2574,17 +2488,15 @@ fn write_quantities_sidecar(q: &SimQuantities) {
         {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
+                out.fail(format!("error: {}", e));
             }
         };
         let manifest_path = q.out_dir.join(
             crate::quantities_file::quantities_manifest_name(q.vocabulary.as_ref()));
         std::fs::write(&manifest_path, &manifest).unwrap_or_else(|e| {
-            eprintln!("error: cannot write {}: {}", manifest_path.display(), e);
-            std::process::exit(1);
+            out.fail(format!("error: cannot write {}: {}", manifest_path.display(), e));
         });
-        eprintln!("quantities: wrote {}", manifest_path.display());
+        out.say(format_args!("quantities: wrote {}", manifest_path.display()));
     }
 }
 
@@ -3190,7 +3102,7 @@ fn build_simulate_cas_sink(
 /// derived convenience view, so a write hiccup must not fail the whole run
 /// (mirrors the obs-child non-fatal posture).
 fn write_sim_ensemble(
-    cas: &crate::cas_sink::CasSink,
+    out: &crate::out::Out, cas: &crate::cas_sink::CasSink,
     combined_bytes: &[u8],
     cas_root: &str,
     label: Option<String>,
@@ -3217,9 +3129,9 @@ fn write_sim_ensemble(
         })
         .collect();
     if cells.len() != cas.completed_runs.len() {
-        eprintln!("warning: ensemble: {} of {} cells lacked a resolved identity; \
+        out.say(format_args!("warning: ensemble: {} of {} cells lacked a resolved identity; \
                    skipping ensemble artifact",
-            cas.completed_runs.len() - cells.len(), cas.completed_runs.len());
+            cas.completed_runs.len() - cells.len(), cas.completed_runs.len()));
         return;
     }
 
@@ -3236,7 +3148,7 @@ fn write_sim_ensemble(
     let resolved = match crate::sim_ensemble_cas::resolve_sim_ensemble(&ctx) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("warning: ensemble identity: {}", e);
+            out.say(format_args!("warning: ensemble identity: {}", e));
             return;
         }
     };
@@ -3299,12 +3211,12 @@ fn write_sim_ensemble(
         Ok(crate::resolve::ResolvedWrite::Committed(dest)) => {
             // Full rooted path (e.g. `./results/ensembles/…`), matching the
             // `stored` banner — not the bare store-relative `ensembles/…`.
-            crate::out::status::step("ensemble", dest.to_string_lossy());
+            out.milestone("ensemble", dest.to_string_lossy());
         }
         Ok(crate::resolve::ResolvedWrite::Streaming(_)) => {
             unreachable!("Atomic write mode never returns a streaming claim")
         }
-        Err(e) => eprintln!("warning: ensemble commit failed: {}", e),
+        Err(e) => out.say(format_args!("warning: ensemble commit failed: {}", e)),
     }
 }
 
@@ -3316,20 +3228,20 @@ fn write_sim_ensemble(
 /// store-relative `sims/…` tail. (Whether a leaf was freshly written or a
 /// cache hit is not distinguished here — `commit_atomic` is idempotent and
 /// does not report which; that is a follow-up.)
-fn report_cas_leaves(runs: &[crate::cas_sink::RunEntry], cas_root: &str) {
+fn report_cas_leaves(out: &crate::out::Out, runs: &[crate::cas_sink::RunEntry], cas_root: &str) {
     let root = cas_root.trim_end_matches('/');
     match runs.len() {
         0 => {}
         1 => {
             let r = &runs[0];
-            crate::out::status::done("stored", format!("{}/{}", root, r.run_path));
+            out.milestone("stored", format!("{}/{}", root, r.run_path));
             if let Some(id) = r.run_id {
-                crate::out::status::hint(format!("camdl cat {}", id.to_hex()));
+                out.hint(format!("camdl cat {}", id.to_hex()));
             }
         }
         n => {
-            crate::out::status::done("stored", format!("{} leaves \u{b7} {}/sims/", n, root));
-            crate::out::status::hint("camdl list");
+            out.milestone("stored", format!("{} leaves \u{b7} {}/sims/", n, root));
+            out.hint("camdl list");
         }
     }
 }
@@ -3620,7 +3532,7 @@ impl engine::RunSink for StreamSink {
                         }
                     }
                 }
-                Err(e) => eprintln!("warning: could not write diagnostics.tsv: {}", e),
+                Err(e) => crate::out::detached().say(format_args!("warning: could not write diagnostics.tsv: {}", e)),
             }
         }
 
@@ -3885,7 +3797,7 @@ impl StreamSink {
 
     /// Write the combined synthetic-observation output after all cells are
     /// merged. Reproduces the pre-unification post-loop obs writers.
-    fn write_obs_output(&self) {
+    fn write_obs_output(&self, out: &crate::out::Out) {
         use std::io::Write;
         if (self.obs_path.is_none() && self.obs_dir.is_none()) || self.obs_data.is_empty() {
             return;
@@ -3896,35 +3808,35 @@ impl StreamSink {
         // --obs / --obs-only: single wide-format file.
         if let Some(ref path) = self.obs_path {
             let f = std::fs::File::create(path)
-                .unwrap_or_else(|e| { eprintln!("cannot create {}: {}", path, e); std::process::exit(1); });
-            let mut out = std::io::BufWriter::new(f);
+                .unwrap_or_else(|e| { out.fail(format!("cannot create {}: {}", path, e)); });
+            let mut w = std::io::BufWriter::new(f);
 
-            self.shape.write_coord_header(&mut out).unwrap();
-            write!(out, "time").unwrap();
-            if date_render.is_some() { write!(out, "\tdate").unwrap(); }
-            for name in &self.obs_stream_names { write!(out, "\t{}", name).unwrap(); }
-            writeln!(out).unwrap();
+            self.shape.write_coord_header(&mut w).unwrap();
+            write!(w, "time").unwrap();
+            if date_render.is_some() { write!(w, "\tdate").unwrap(); }
+            for name in &self.obs_stream_names { write!(w, "\t{}", name).unwrap(); }
+            writeln!(w).unwrap();
 
             let n_times = self.obs_plans[0].rows.len();
             for run in 0..total_runs {
                 for ti in 0..n_times {
                     let row_idx = run * n_times + ti;
-                    self.shape.write_coord_cells(&mut out, &self.obs_data[0][row_idx].coords).unwrap();
+                    self.shape.write_coord_cells(&mut w, &self.obs_data[0][row_idx].coords).unwrap();
                     let t_val = self.obs_data[0][row_idx].time;
-                    write!(out, "{}", t_val).unwrap();
+                    write!(w, "{}", t_val).unwrap();
                     if let Some((o, tu)) = date_render {
                         let d = ir::caltime::internal_to_date_hires(o, t_val, tu)
-                            .unwrap_or_else(|e| { eprintln!("error rendering date: {}", e); std::process::exit(1); });
-                        write!(out, "\t{}", d).unwrap();
+                            .unwrap_or_else(|e| { out.fail(format!("error rendering date: {}", e)); });
+                        write!(w, "\t{}", d).unwrap();
                     }
                     for si in 0..self.obs_stream_names.len() {
-                        write!(out, "\t{}", self.obs_data[si][row_idx].value.render()).unwrap();
+                        write!(w, "\t{}", self.obs_data[si][row_idx].value.render()).unwrap();
                     }
-                    writeln!(out).unwrap();
+                    writeln!(w).unwrap();
                 }
             }
-            drop(out);
-            eprintln!("observations written to {}", path);
+            drop(w);
+            out.say(format_args!("observations written to {}", path));
         }
 
         // --obs-dir / --obs-only-dir: one file per observation `source`, under
@@ -3946,29 +3858,29 @@ impl StreamSink {
                 };
                 let path = format!("{}/{}.tsv", dir, stem);
                 let f = std::fs::File::create(&path)
-                    .unwrap_or_else(|e| { eprintln!("cannot create {}: {}", path, e); std::process::exit(1); });
-                let mut out = std::io::BufWriter::new(f);
+                    .unwrap_or_else(|e| { out.fail(format!("cannot create {}: {}", path, e)); });
+                let mut w = std::io::BufWriter::new(f);
                 let render_date = |t: f64| -> String {
                     let (o, tu) = date_render.expect("dated only when --dates");
                     ir::caltime::internal_to_date_hires(o, t, tu)
-                        .unwrap_or_else(|e| { eprintln!("error rendering date: {}", e); std::process::exit(1); })
+                        .unwrap_or_else(|e| { out.fail(format!("error rendering date: {}", e)); })
                 };
 
-                self.shape.write_coord_header(&mut out).unwrap();
+                self.shape.write_coord_header(&mut w).unwrap();
                 match &plan.columns {
                     crate::obs_emit::TemporalColumns::Time(t) => {
-                        write!(out, "{t}").unwrap();
-                        if date_render.is_some() { write!(out, "\tdate").unwrap(); }
+                        write!(w, "{t}").unwrap();
+                        if date_render.is_some() { write!(w, "\tdate").unwrap(); }
                     }
                     crate::obs_emit::TemporalColumns::Window { start, stop } => {
-                        write!(out, "{start}\t{stop}").unwrap();
-                        if date_render.is_some() { write!(out, "\tdate_start\tdate_stop").unwrap(); }
+                        write!(w, "{start}\t{stop}").unwrap();
+                        if date_render.is_some() { write!(w, "\tdate_start\tdate_stop").unwrap(); }
                     }
                 }
                 for (header, _) in &self.obs_files[first].dims {
-                    write!(out, "\t{header}").unwrap();
+                    write!(w, "\t{header}").unwrap();
                 }
-                writeln!(out, "\t{}", plan.scored).unwrap();
+                writeln!(w, "\t{}", plan.scored).unwrap();
 
                 // Row-major over the shared obs axis with the leaves
                 // interleaved: one long-format row per (row, leaf), which is
@@ -3976,30 +3888,30 @@ impl StreamSink {
                 for ri in 0..self.obs_data[first].len() {
                     for &si in &group {
                         let row = &self.obs_data[si][ri];
-                        self.shape.write_coord_cells(&mut out, &row.coords).unwrap();
+                        self.shape.write_coord_cells(&mut w, &row.coords).unwrap();
                         match (&plan.columns, row.coverage) {
                             (crate::obs_emit::TemporalColumns::Window { .. },
                              sim::inference::Coverage::Interval { start, stop }) => {
-                                write!(out, "{start}\t{stop}").unwrap();
+                                write!(w, "{start}\t{stop}").unwrap();
                                 if date_render.is_some() {
-                                    write!(out, "\t{}\t{}", render_date(start), render_date(stop)).unwrap();
+                                    write!(w, "\t{}\t{}", render_date(start), render_date(stop)).unwrap();
                                 }
                             }
                             _ => {
-                                write!(out, "{}", row.time).unwrap();
+                                write!(w, "{}", row.time).unwrap();
                                 if date_render.is_some() {
-                                    write!(out, "\t{}", render_date(row.time)).unwrap();
+                                    write!(w, "\t{}", render_date(row.time)).unwrap();
                                 }
                             }
                         }
                         for (_, level) in &self.obs_files[si].dims {
-                            write!(out, "\t{level}").unwrap();
+                            write!(w, "\t{level}").unwrap();
                         }
-                        writeln!(out, "\t{}", row.value.render()).unwrap();
+                        writeln!(w, "\t{}", row.value.render()).unwrap();
                     }
                 }
-                drop(out);
-                eprintln!("observations written to {}", path);
+                drop(w);
+                out.say(format_args!("observations written to {}", path));
             }
         }
     }
@@ -4038,7 +3950,7 @@ impl StreamSink {
 /// `--draws`) write one `ds_NN/` subdirectory each, so every dataset stays a
 /// file set the loader can bind on its own.
 fn simulate_on_bound_design(
-    design_toml: &std::path::Path,
+    out: &crate::out::Out, design_toml: &std::path::Path,
     base_run: &util::SimRun,
     draws: &[HashMap<String, f64>],
     draws_given: bool,
@@ -4111,12 +4023,12 @@ fn simulate_on_bound_design(
                 &run, obs_emit::ObservationDesign::Bound(&design), &per_point(dir, i),
             )?;
             for f in &written {
-                eprintln!("observations written to {}", f.path.display());
+                out.say(format_args!("observations written to {}", f.path.display()));
             }
         }
         if let Some(pdir) = projected_dir {
             for path in obs_emit::write_projected_dataset(&run, &design, &per_point(pdir, i))? {
-                eprintln!("projections written to {}", path.display());
+                out.say(format_args!("projections written to {}", path.display()));
             }
         }
     }
@@ -4519,14 +4431,12 @@ pub(crate) fn project_coverages(
             use sim::state::RealState;
             let compiled = sim::CompiledModel::new(model.clone())
                 .unwrap_or_else(|e| {
-                    eprintln!("error: DerivedExpr projection — model compile: {:?}", e);
-                    std::process::exit(1);
+                    crate::out::detached().fail(format!("error: DerivedExpr projection — model compile: {:?}", e));
                 });
             let stream_proj = StreamProjection::from_ir(
                 &obs_ir.projection, &compiled, &obs_ir.name,
             ).unwrap_or_else(|e| {
-                eprintln!("error: DerivedExpr projection — resolve: {}", e);
-                std::process::exit(1);
+                crate::out::detached().fail(format!("error: DerivedExpr projection — resolve: {}", e));
             });
             let real_s = RealState::new(compiled.real_local_to_global.len());
             let params = compiled.default_params.clone();
@@ -4646,17 +4556,15 @@ fn resolve_comp_local(model: &ir::Model, obs_name: &str, comp_name: &str) -> Com
             ir::model::CompartmentKind::Real => real_idx += 1,
         }
     }
-    eprintln!("error: observation '{}' projects compartment '{}' which doesn't exist",
-        obs_name, comp_name);
-    std::process::exit(1);
+    crate::out::detached().fail(format!("error: observation '{}' projects compartment '{}' which doesn't exist",
+        obs_name, comp_name));
 }
 
 pub(crate) fn snap_at(traj: &sim::Trajectory, obs_t: f64) -> &sim::Snapshot {
     traj.snapshots.iter().rev()
         .find(|s| s.t <= obs_t + OBS_SNAP_EPS)
         .unwrap_or_else(|| {
-            eprintln!("error: no snapshot at or before t={}", obs_t);
-            std::process::exit(1);
+            crate::out::detached().fail(format!("error: no snapshot at or before t={}", obs_t));
         })
 }
 
@@ -4790,7 +4698,7 @@ fn unset_generated_parameter_message(
 /// at the draw tier, above `--params`. `run_simulate` refuses up front a cell
 /// in which such a parameter gets no value from any tier.
 fn generate_uniform_draws(
-    ir_path: &str,
+    out: &crate::out::Out, ir_path: &str,
     n: usize,
     seed: u64,
 ) -> Result<Vec<HashMap<String, f64>>, String> {
@@ -4828,9 +4736,9 @@ fn generate_uniform_draws(
             .collect();
         draws.push(row);
     }
-    eprintln!("generated {} uniform draws over {} bounded parameter(s); {} other \
+    out.say(format_args!("generated {} uniform draws over {} bounded parameter(s); {} other \
                parameter(s) resolve per cell from --params, the scenario's set or --param",
-        n, bounded.len(), model.parameters.len() - bounded.len());
+        n, bounded.len(), model.parameters.len() - bounded.len()));
     Ok(draws)
 }
 
@@ -4919,13 +4827,12 @@ fn check_replay_model(
 
 /// Act on a replay model check: a refusal exits before anything runs; a
 /// reporting-only difference is said on stderr and the run proceeds.
-fn report_replay_check(outcome: Result<Option<String>, String>) {
+fn report_replay_check(out: &crate::out::Out, outcome: Result<Option<String>, String>) {
     match outcome {
         Ok(None) => {}
-        Ok(Some(notice)) => eprintln!("{notice}"),
+        Ok(Some(notice)) => out.say(format_args!("{notice}")),
         Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: {e}"));
         }
     }
 }
@@ -4934,7 +4841,7 @@ fn report_replay_check(outcome: Result<Option<String>, String>) {
 /// --fit`: the same [`util::FitBase`] the posterior path reads, so every arm
 /// replays on the fit's `scenario` / `enable` / `disable` and a flag applies
 /// on top of it. `--fit` here is a fit config or any stored-fit handle.
-fn fit_base_for_draws(fit_ref: &str, source: &str) -> Result<util::FitBase, String> {
+fn fit_base_for_draws(out: &crate::out::Out, fit_ref: &str, source: &str) -> Result<util::FitBase, String> {
     let base = if std::path::Path::new(fit_ref).is_file() {
         let problem = fit::config_v2::Problem::load(fit_ref)
             .map_err(|e| wrap_fit_load_error(fit_ref, e))?;
@@ -4944,11 +4851,11 @@ fn fit_base_for_draws(fit_ref: &str, source: &str) -> Result<util::FitBase, Stri
         util::FitBase::of(&resolved.config.problem)?
     };
     if !base.is_empty() {
-        eprintln!(
+        out.say(format_args!(
             "draws: {source} — every arm runs the fit's own {}; a scenario \
              applies its changes on top of it",
             base.describe()
-        );
+        ));
     }
     Ok(base)
 }
@@ -4960,7 +4867,7 @@ fn fit_base_for_draws(fit_ref: &str, source: &str) -> Result<util::FitBase, Stri
 /// while `[fixed]` belongs at the `fit.toml [fixed]` tier below it. The
 /// caller routes them there via `SimRun::fit_fixed`.
 fn generate_prior_draws(
-    fit_path: &str,
+    out: &crate::out::Out, fit_path: &str,
     n: usize,
     seed: u64,
     model: &ir::Model,
@@ -4995,7 +4902,7 @@ fn generate_prior_draws(
     if let Some(w) = fit::priors_precedence::format_prior_override_warning(
         &fit::priors_precedence::prior_overrides(&names, &config.estimate, model),
     ) {
-        eprint!("{}", w);
+        out.say_raw(format_args!("{}", w));
     }
 
     // Identify params with no usable prior in either source. The two
@@ -5105,10 +5012,10 @@ fn generate_prior_draws(
         .filter(|r| r.source == PriorSource::FitToml).count();
     let n_model_ir = resolved.iter()
         .filter(|r| r.source == PriorSource::ModelIr).count();
-    eprintln!(
+    out.say(format_args!(
         "generated {} prior draws from {} ({} estimated [{} fit-toml + {} model-IR] + {} fixed params)",
         n, fit_path, config.estimate.len(), n_fit_toml, n_model_ir, fixed.len()
-    );
+    ));
     Ok((draws, fixed))
 }
 
@@ -5122,7 +5029,7 @@ fn generate_prior_draws(
 /// arm's scenario value to every other arm. `run_simulate` refuses up front a
 /// cell in which such a parameter gets no value from any tier.
 fn generate_prior_draws_from_ir(
-    ir_path: &str,
+    out: &crate::out::Out, ir_path: &str,
     n: usize,
     seed: u64,
 ) -> Result<Vec<HashMap<String, f64>>, String> {
@@ -5181,18 +5088,18 @@ fn generate_prior_draws_from_ir(
         let total = accept + rej;
         let pct = 100.0 * (*rej as f64) / (total as f64);
         if pct >= 10.0 {
-            eprintln!(
+            out.say(format_args!(
                 "warning: prior for '{}' placed {:.1}% mass outside declared bounds \
                  ({} rejected / {} accepted). Consider widening bounds or tightening \
                  the prior.",
                 name, pct, rej, accept
-            );
+            ));
         }
     }
 
-    eprintln!("generated {} prior draws from model IR ({} sampled params; {} other \
+    out.say(format_args!("generated {} prior draws from model IR ({} sampled params; {} other \
                parameter(s) resolve per cell from --params, the scenario's set or --param)",
-        n, with_prior.len(), model.parameters.len() - with_prior.len());
+        n, with_prior.len(), model.parameters.len() - with_prior.len()));
     Ok(draws)
 }
 
@@ -5427,7 +5334,7 @@ pub(crate) fn load_draws_tsv(path: &str) -> Result<Vec<HashMap<String, f64>>, St
 /// Print a dry run summary: resolved parameters with provenance.
 #[allow(clippy::too_many_arguments)]
 fn print_dry_run(
-    ir_path: &str,
+    out: &crate::out::Out, ir_path: &str,
     ir_path_compiled: &str,
     backend: args::types::ForwardBackend,
     dt: f64,
@@ -5448,31 +5355,31 @@ fn print_dry_run(
     let d = out::paint::dim;
     let b = out::paint::bold;
 
-    eprintln!("{}", b("camdl simulate (dry run)"));
-    eprintln!();
+    out.say(format_args!("{}", b("camdl simulate (dry run)")));
+    out.say("");
 
     // Header info
-    eprintln!("  {} {}", d("model:"), ir_path);
-    eprintln!("  {} {}", d("backend:"), backend);
-    eprintln!("  {} {}", d("dt:"), dt);
+    out.say(format_args!("  {} {}", d("model:"), ir_path));
+    out.say(format_args!("  {} {}", d("backend:"), backend));
+    out.say(format_args!("  {} {}", d("dt:"), dt));
 
     // The design axis: what the grid declaration resolved to.
     let swept_names: Vec<String> = match design {
         Some(crate::sim_ensemble_cas::ResolvedDesign::Sweep { params, n_points }) => {
             for p in params {
                 let vals: Vec<String> = p.values.iter().map(|v| v.to_string()).collect();
-                eprintln!("  {} {} = [{}]", d("sweep:"), p.name, vals.join(", "));
+                out.say(format_args!("  {} {} = [{}]", d("sweep:"), p.name, vals.join(", ")));
             }
-            eprintln!("  {} {} design point(s)", d("design:"), n_points);
+            out.say(format_args!("  {} {} design point(s)", d("design:"), n_points));
             params.iter().map(|p| p.name.clone()).collect()
         }
         Some(crate::sim_ensemble_cas::ResolvedDesign::File { params, digest, n_points, point_ids }) => {
-            eprintln!("  {} {} design point(s) over {} (file digest {})",
-                d("sweep-file:"), n_points, params.join(", "), &digest[..8]);
+            out.say(format_args!("  {} {} design point(s) over {} (file digest {})",
+                d("sweep-file:"), n_points, params.join(", "), &digest[..8]));
             // The file's own ids are worth a line; row numbering is the default.
             if point_ids.iter().enumerate().any(|(row, id)| row != *id) {
                 let ids: Vec<String> = point_ids.iter().map(|i| i.to_string()).collect();
-                eprintln!("  {} {}", d("point_id:"), ids.join(", "));
+                out.say(format_args!("  {} {}", d("point_id:"), ids.join(", ")));
             }
             params.clone()
         }
@@ -5480,16 +5387,16 @@ fn print_dry_run(
     };
 
     if seeds.len() > 1 {
-        eprintln!("  {} {}:{} ({} seeds)", d("seeds:"), seeds[0], seeds[seeds.len()-1], seeds.len());
+        out.say(format_args!("  {} {}:{} ({} seeds)", d("seeds:"), seeds[0], seeds[seeds.len()-1], seeds.len()));
     } else {
-        eprintln!("  {} {}", d("seed:"), seed);
+        out.say(format_args!("  {} {}", d("seed:"), seed));
     }
 
     if let Some(ref dp) = draws_path {
-        eprintln!("  {} {}", d("draws:"), dp);
+        out.say(format_args!("  {} {}", d("draws:"), dp));
     }
     if replicates > 1 && draws_path.is_none() {
-        eprintln!("  {} {}", d("replicates:"), replicates);
+        out.say(format_args!("  {} {}", d("replicates:"), replicates));
     }
 
     let implicit = crate::sim_job::IMPLICIT_ARM_LABEL;
@@ -5497,17 +5404,17 @@ fn print_dry_run(
         .map(|s| s.as_deref().unwrap_or(implicit))
         .collect();
     if scenarios.len() > 1 || scenarios[0] != implicit {
-        eprintln!("  {} {}", d("scenarios:"), scenarios.join(", "));
+        out.say(format_args!("  {} {}", d("scenarios:"), scenarios.join(", ")));
     } else {
-        eprintln!("  {} {implicit}", d("scenario:"));
+        out.say(format_args!("  {} {implicit}", d("scenario:")));
     }
 
     // Obs output
-    if let Some(ref p) = obs_path { eprintln!("  {} {}", d("obs:"), p); }
-    if let Some(ref p) = obs_dir { eprintln!("  {} {}", d("obs-dir:"), p); }
-    if let Some(ref p) = obs_only { eprintln!("  {} {}", d("obs-only:"), p); }
+    if let Some(ref p) = obs_path { out.say(format_args!("  {} {}", d("obs:"), p)); }
+    if let Some(ref p) = obs_dir { out.say(format_args!("  {} {}", d("obs-dir:"), p)); }
+    if let Some(ref p) = obs_only { out.say(format_args!("  {} {}", d("obs-only:"), p)); }
 
-    eprintln!();
+    out.say("");
 
     // Parameter provenance — load model and trace where each value comes from
     if draws_path.is_some() && n_draws > 1 {
@@ -5522,8 +5429,8 @@ fn print_dry_run(
                             .filter(|s| !s.is_empty())
                             .collect();
                         let n_rows = content.lines().count() - 1;
-                        eprintln!("  {} {} rows × {} params",
-                            d("draws file:"), n_rows, cols.len());
+                        out.say(format_args!("  {} {} rows × {} params",
+                            d("draws file:"), n_rows, cols.len()));
                     }
                 }
             }
@@ -5593,7 +5500,7 @@ fn print_dry_run(
 
                 // Print
                 let max_name_len = provs.keys().map(|k| k.len()).max().unwrap_or(0);
-                eprintln!("Parameters ({}):", provs.len());
+                out.say(format_args!("Parameters ({}):", provs.len()));
                 for (name, prov) in &provs {
                     let val_str = b(&format_param_value(prov.value));
                     let source_str = if prov.overrides.is_empty() {
@@ -5604,19 +5511,19 @@ fn print_dry_run(
                             .collect();
                         d(&format!("{} (was {})", prov.source, chain.join(" → ")))
                     };
-                    eprintln!("  {:width$} = {:>14}  {}",
-                        name, val_str, source_str, width = max_name_len);
+                    out.say(format_args!("  {:width$} = {:>14}  {}",
+                        name, val_str, source_str, width = max_name_len));
                 }
             }
             Err(e) => {
-                eprintln!("  {} {}", d("(could not load model for parameter resolution:"), e);
+                out.say(format_args!("  {} {}", d("(could not load model for parameter resolution:"), e));
             }
         }
     }
 
     // Total runs
     if total_runs > 1 {
-        eprintln!();
+        out.say("");
         let n_design_points = match design {
             Some(crate::sim_ensemble_cas::ResolvedDesign::Sweep { n_points, .. })
             | Some(crate::sim_ensemble_cas::ResolvedDesign::File { n_points, .. }) => *n_points,
@@ -5629,7 +5536,7 @@ fn print_dry_run(
             if seeds.len() > 1 { Some(format!("{} seeds", seeds.len())) } else { None },
             if replicates > 1 && seeds.len() == 1 { Some(format!("{} replicates", replicates)) } else { None },
         ].iter().flatten().cloned().collect();
-        eprintln!("  {} {} = {} runs", d("total:"), parts.join(" × "), total_runs);
+        out.say(format_args!("  {} {} = {} runs", d("total:"), parts.join(" × "), total_runs));
     }
 }
 
@@ -5639,7 +5546,7 @@ fn print_dry_run(
 /// cell's identity, so this is the view, not new computation; nothing is
 /// displaced or written.
 fn print_store_view(
-    cas: &crate::cas_sink::CasSink,
+    out: &crate::out::Out, cas: &crate::cas_sink::CasSink,
     job: &crate::sim_job::SimulateJob,
     force: bool,
     quantities: bool,
@@ -5664,22 +5571,22 @@ fn print_store_view(
         cells.push(entry);
     }
     let misses = cells.len() - hits;
-    eprintln!();
-    eprintln!("{} {}", d("store:"), root.display());
+    out.say("");
+    out.say(format_args!("{} {}", d("store:"), root.display()));
     for (hit, rel) in &cells {
-        eprintln!("  [{}] {}", if *hit { "hit " } else { "miss" }, rel);
+        out.say(format_args!("  [{}] {}", if *hit { "hit " } else { "miss" }, rel));
     }
     if force {
-        eprintln!("  {} in the store; --force recomputes every cell ({} runs)", hits, cells.len());
+        out.say(format_args!("  {} in the store; --force recomputes every cell ({} runs)", hits, cells.len()));
     } else if quantities {
-        eprintln!(
+        out.say(format_args!(
             "  {} cache hits, {} misses; quantities requested: {} cells recomputed",
             hits, misses, cells.len()
-        );
+        ));
     } else {
-        eprintln!("  {} cache hits → read back, {} misses → would simulate", hits, misses);
+        out.say(format_args!("  {} cache hits → read back, {} misses → would simulate", hits, misses));
     }
-    eprintln!("(dry run — no simulation, no files written.)");
+    out.say("(dry run — no simulation, no files written.)");
 }
 
 fn format_param_value(v: f64) -> String {
@@ -5750,7 +5657,7 @@ mod obs_grid_guard_tests {
 
     /// An empty trajectory is an ERROR, not silently Ok. The previous version
     /// returned Ok claiming "a separate error path covers this"; there is none
-    /// — `snap_at` calls `process::exit(1)` after partial artifacts are written.
+    /// — `snap_at` calls `crate::out::ExitCode(1).exit()` after partial artifacts are written.
     #[test]
     fn empty_trajectory_is_an_error_not_a_pass() {
         let tr = traj(&[]);
@@ -5964,7 +5871,7 @@ mod tests {
         // should get 5 prior samples for each of the N draws.
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let path = format!("{}/../../../ocaml/golden/sir_priors.ir.json", manifest);
-        let draws = generate_prior_draws_from_ir(&path, 7, 42).unwrap();
+        let draws = generate_prior_draws_from_ir(&crate::out::Out::new(true), &path, 7, 42).unwrap();
         assert_eq!(draws.len(), 7, "should produce N draws");
         for row in &draws {
             for name in ["beta", "gamma", "rho", "N0", "I0"] {
@@ -5978,7 +5885,7 @@ mod tests {
         }
 
         // Same seed → identical draws (reproducibility)
-        let draws2 = generate_prior_draws_from_ir(&path, 7, 42).unwrap();
+        let draws2 = generate_prior_draws_from_ir(&crate::out::Out::new(true), &path, 7, 42).unwrap();
         for (a, b) in draws.iter().zip(draws2.iter()) {
             for (k, va) in a {
                 assert_eq!(va, &b[k], "seed={} {} should be reproducible", 42, k);
@@ -5993,7 +5900,7 @@ mod tests {
         // draws (run spec §3.4: no usable prior is a hard error).
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let path = format!("{}/../../../ocaml/golden/sir_basic.ir.json", manifest);
-        let err = generate_prior_draws_from_ir(&path, 3, 1).unwrap_err();
+        let err = generate_prior_draws_from_ir(&crate::out::Out::new(true), &path, 3, 1).unwrap_err();
         assert!(err.starts_with("--draws prior: no parameter of the model has a prior"),
             "unexpected error: {err}");
         assert!(err.contains("parameters {}") && err.contains("~ log_normal("),
@@ -6008,7 +5915,7 @@ mod tests {
         // parameter vector reported as N uniform draws.
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let path = format!("{}/../../../ocaml/golden/death_fraction_window.ir.json", manifest);
-        let err = generate_uniform_draws(&path, 3, 1).unwrap_err();
+        let err = generate_uniform_draws(&crate::out::Out::new(true), &path, 3, 1).unwrap_err();
         assert!(err.starts_with("--draws uniform: no parameter of the model declares bounds"),
             "unexpected error: {err}");
         assert!(err.contains("`lo + (hi - lo)\u{b7}U`") && err.contains("declared bounds"),
@@ -6029,7 +5936,7 @@ mod tests {
         std::fs::write(&fit, format!(
             "output_dir = \"res\"\n[model]\ncamdl = \"{ir}\"\n[estimate]\n[fixed]\n\
              beta = 0.3\ngamma = 0.1\nN0 = 1000\nI0 = 10\n")).unwrap();
-        let err = generate_prior_draws(fit.to_str().unwrap(), 3, 1, &model).unwrap_err();
+        let err = generate_prior_draws(&crate::out::Out::new(true), fit.to_str().unwrap(), 3, 1, &model).unwrap_err();
         assert!(err.starts_with("--draws prior: the fit config's [estimate] is empty"),
             "unexpected error: {err}");
     }
@@ -6087,7 +5994,7 @@ mod tests {
         let ir = ir_with_prior("beta", "[0.01, 2.0]",
             r#"{ "log_normal": { "mu": -1.0, "sigma": 0.5 } }"#, "");
         let (_dir, path) = write_ir_fixture(&ir);
-        let draws = generate_prior_draws_from_ir(&path, 100, 42).unwrap();
+        let draws = generate_prior_draws_from_ir(&crate::out::Out::new(true), &path, 100, 42).unwrap();
         assert_eq!(draws.len(), 100);
         for row in &draws {
             let v = row["beta"];
@@ -6103,7 +6010,7 @@ mod tests {
         let ir = ir_with_prior("beta", "[0.01, 2.0]",
             r#"{ "log_normal": { "mu": 5.0, "sigma": 0.1 } }"#, "");
         let (_dir, path) = write_ir_fixture(&ir);
-        let err = generate_prior_draws_from_ir(&path, 1, 42).unwrap_err();
+        let err = generate_prior_draws_from_ir(&crate::out::Out::new(true), &path, 1, 42).unwrap_err();
         assert!(err.contains("beta"), "error should name 'beta': {}", err);
         assert!(err.contains("[0.01, 2]") || err.contains("[0.01, 2.0]"),
             "error should cite bounds: {}", err);
@@ -6119,7 +6026,7 @@ mod tests {
         let ir = ir_with_prior("beta", "[0.0, 1.0]",
             r#"{ "normal": { "mean": 0.0, "sd": 1.0 } }"#, "");
         let (_dir, path) = write_ir_fixture(&ir);
-        let draws = generate_prior_draws_from_ir(&path, 50, 42).unwrap();
+        let draws = generate_prior_draws_from_ir(&crate::out::Out::new(true), &path, 50, 42).unwrap();
         for row in &draws {
             let v = row["beta"];
             assert!((0.0..=1.0).contains(&v),
@@ -6170,7 +6077,7 @@ mod tests {
         // gh#949: the row carries the sampled `beta` and never `N0`. N0 is
         // the scenario's to set, per cell — a row value would sit at the draw
         // tier and hand one arm's scenario value to every other arm.
-        let draws = generate_prior_draws_from_ir(&path, 5, 42).unwrap();
+        let draws = generate_prior_draws_from_ir(&crate::out::Out::new(true), &path, 5, 42).unwrap();
         assert_eq!(draws.len(), 5);
         for row in &draws {
             assert!(!row.contains_key("N0"), "N0 has no prior; the row must omit it: {:?}", row);
@@ -6299,8 +6206,8 @@ mod tests {
         let ir = ir_with_prior("beta", "[0.01, 10.0]",
             r#"{ "log_normal": { "mu": 0.0, "sigma": 1.0 } }"#, "");
         let (_dir, path) = write_ir_fixture(&ir);
-        let a = generate_prior_draws_from_ir(&path, 5, 42).unwrap();
-        let b = generate_prior_draws_from_ir(&path, 5, 137).unwrap();
+        let a = generate_prior_draws_from_ir(&crate::out::Out::new(true), &path, 5, 42).unwrap();
+        let b = generate_prior_draws_from_ir(&crate::out::Out::new(true), &path, 5, 137).unwrap();
         // At least one row must differ — the probability of two independent
         // 5-draw sequences from a continuous prior being bit-identical is
         // vanishingly small (and would indicate a seeding bug).
@@ -6385,7 +6292,7 @@ gamma = { bounds = [0.05, 1.0] }
 ";
         let fit_path = write_fit_toml_for_prior_draws(
             dir.path(), &ir_path, estimate, "I0 = 10.0\nN0 = 5000.0");
-        let (draws, fixed) = generate_prior_draws(&fit_path, 4, 42, &model).unwrap();
+        let (draws, fixed) = generate_prior_draws(&crate::out::Out::new(true), &fit_path, 4, 42, &model).unwrap();
         assert_eq!(draws.len(), 4);
         for row in &draws {
             let mut cols: Vec<&str> = row.keys().map(|k| k.as_str()).collect();
@@ -6424,7 +6331,7 @@ I0    = { bounds = [1, 1000] }
         let fit_path = write_fit_toml_for_prior_draws(
             dir.path(), &ir_path, estimate, "");
 
-        let (draws, _fixed) = generate_prior_draws(&fit_path, 7, 42, &model)
+        let (draws, _fixed) = generate_prior_draws(&crate::out::Out::new(true), &fit_path, 7, 42, &model)
             .expect("after gh#86: should fall back to IR priors");
         assert_eq!(draws.len(), 7);
         for row in &draws {
@@ -6458,7 +6365,7 @@ I0    = { bounds = [1, 1000] }
         let bad = dir.path().join("bad.toml");
         std::fs::write(&bad, "beta = 0.4\ngamma = 0.2\n").unwrap();
 
-        let err = generate_prior_draws(&bad.to_string_lossy(), 5, 1, &model)
+        let err = generate_prior_draws(&crate::out::Out::new(true), &bad.to_string_lossy(), 5, 1, &model)
             .expect_err("a fit file with no [model] table must fail to load");
         assert!(err.contains("simulate --fit") && err.contains("fit-config TOML"),
             "wrapped error must explain what simulate --fit expects: {}", err);
@@ -6490,7 +6397,7 @@ I0    = { bounds = [1, 1000] }
             dir.path(), &ir_path, estimate, "");
 
         // Loads and draws — the wrapper's hint never enters this path.
-        let (draws, _fixed) = generate_prior_draws(&fit_path, 3, 7, &model)
+        let (draws, _fixed) = generate_prior_draws(&crate::out::Out::new(true), &fit_path, 3, 7, &model)
             .expect("well-formed fit-config must load");
         assert_eq!(draws.len(), 3);
     }
@@ -6542,7 +6449,7 @@ gamma = { bounds = [0.05, 1.0] }
         let fit_path = write_fit_toml_for_prior_draws(
             dir.path(), &ir_path, estimate, "");
 
-        let err = generate_prior_draws(&fit_path, 3, 1, &model).unwrap_err();
+        let err = generate_prior_draws(&crate::out::Out::new(true), &fit_path, 3, 1, &model).unwrap_err();
         // After fix: only gamma is missing (beta resolves via IR ~).
         assert!(err.contains("gamma"),
             "error must name gamma (no prior in either source). Got:\n{}", err);
@@ -6598,7 +6505,7 @@ beta = { bounds = [-1000.0, 1000.0], \
         // has E[X] = exp(mu + sigma^2/2) ≈ exp(5.00005) ≈ 148.42 and
         // SD ≈ E[X] * sigma ≈ 1.48. With N=200 the SE on the mean is
         // ~0.1, so a tolerance of 1.0 is well outside chance.
-        let (draws, _fixed) = generate_prior_draws(&fit_path, 200, 42, &model)
+        let (draws, _fixed) = generate_prior_draws(&crate::out::Out::new(true), &fit_path, 200, 42, &model)
             .expect("fit-toml prior should sample successfully");
         let mean: f64 = draws.iter().map(|r| r["beta"]).sum::<f64>()
             / (draws.len() as f64);

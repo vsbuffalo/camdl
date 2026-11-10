@@ -293,6 +293,15 @@ impl Out {
     }
 }
 
+/// An `Out` for code that holds no handle: a helper below every command's
+/// handle that warns or exits where it stands (an observation projecting a
+/// compartment the model lacks, a sink's failed side file). It writes what
+/// the command's own `Out` would, painted by the environment's policy; a
+/// function that can be handed the command's `Out` takes it instead.
+pub fn detached() -> Out {
+    Out::new(false)
+}
+
 /// stdout for data. A closed pipe ends the command with status 0; any other
 /// failed write is fatal, as it is for `print!`.
 pub struct Data(std::io::StdoutLock<'static>);
