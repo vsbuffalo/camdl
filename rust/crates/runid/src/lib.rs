@@ -84,7 +84,7 @@ pub use record::{
 pub use runid_derive::RunInput;
 pub use store::{
     find_leaf, update_record, Artifacts, CasError, CasStore, FsCasStore, LeafIdentity, Lookup,
-    StaleReason,
+    StaleReason, EVENT_LOG,
 };
 
 #[cfg(test)]
