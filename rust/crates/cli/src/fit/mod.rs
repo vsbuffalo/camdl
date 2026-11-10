@@ -1471,13 +1471,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let meta = crate::resolve::RecordMeta::new(
             &ir_version_str, &sweep_config.model.camdl, validated_label.clone())
             .with_deps(deps.clone());
-        // Reuse decision through the one policy seam. `--resume` deliberately
-        // does NOT reuse: it extends a base run into a NEW leaf keyed on the
-        // longer chain, so this method must run even when its own identity is
-        // already stored. `--force` displaces the incumbent (quarantined) —
-        // previously it skipped the lookup only to die at the claim with
-        // "artifact already completed", which is why the flag never worked
-        // on a completed leaf.
+        // Reuse decision through the one policy seam. A resumed run is no
+        // exception: its identity carries the longer chain's length and a dep
+        // on the base leaf, so it never names the base or a fresh run of the
+        // same file, and the same resume run again names the same inputs, whose
+        // completed leaf is reused like any other. `--force` displaces the
+        // incumbent (quarantined); clap refuses it beside `--resume`.
         let policy = if force {
             crate::resolve::WritePolicy::Force
         } else {
@@ -1501,39 +1500,37 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
             None => None,
         };
-        if a.resume.is_none() {
-            match crate::resolve::check_reuse(&store, &cas_root, &resolved_artifact, policy) {
-                Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
-                    out.say(format_args!("  {}", crate::out::paint::stderr().paint(
-                        &format!("cache hit — reusing {}",
-                            dir.strip_prefix(&cas_root).unwrap_or(&dir).display()),
-                        crate::out::paint::Style::Warn)));
-                    crate::resolve::note_leaf_from_another_model_file(
-                        &dir, &sweep_config.model.camdl);
-                    // This config now names the stored run too.
-                    if let Some(id) = cell_config_identity {
-                        if let Err(e) =
-                            crate::cas_sink::ensure_input_listed(&dir, "config_identities", id)
-                        {
-                            out.say(format_args!("warning: record this config on {}: {e}", dir.display()));
-                        }
+        match crate::resolve::check_reuse(&store, &cas_root, &resolved_artifact, policy) {
+            Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
+                out.say(format_args!("  {}", crate::out::paint::stderr().paint(
+                    &format!("cache hit — reusing {}",
+                        dir.strip_prefix(&cas_root).unwrap_or(&dir).display()),
+                    crate::out::paint::Style::Warn)));
+                crate::resolve::note_leaf_from_another_model_file(
+                    &dir, &sweep_config.model.camdl);
+                // This config now names the stored run too.
+                if let Some(id) = cell_config_identity {
+                    if let Err(e) =
+                        crate::cas_sink::ensure_input_listed(&dir, "config_identities", id)
+                    {
+                        out.say(format_args!("warning: record this config on {}: {e}", dir.display()));
                     }
-                    // A label given to an unlabelled stored run is recorded on
-                    // it (`check_label_is_free` refused every other case).
-                    if let Some(label) = &validated_label {
-                        let written = crate::cas_sink::set_fit_label(&dir, label);
-                        drop(label_lock);
-                        if let Err(e) = written {
-                            out.fail(format!("error: label the stored run {}: {e}", dir.display()));
-                        }
-                    }
-                    continue;
                 }
-                Ok(crate::resolve::ReuseVerdict::MustRun) => {}
-                Err(e) => {
+                // A label given to an unlabelled stored run is recorded on
+                // it (`check_label_is_free` refused every other case).
+                if let Some(label) = &validated_label {
+                    let written = crate::cas_sink::set_fit_label(&dir, label);
                     drop(label_lock);
-                    out.fail(format!("error: fit method cache check {}: {}", cas_path.display(), e));
+                    if let Err(e) = written {
+                        out.fail(format!("error: label the stored run {}: {e}", dir.display()));
+                    }
                 }
+                continue;
+            }
+            Ok(crate::resolve::ReuseVerdict::MustRun) => {}
+            Err(e) => {
+                drop(label_lock);
+                out.fail(format!("error: fit method cache check {}: {}", cas_path.display(), e));
             }
         }
         let mut write = match crate::resolve::begin_resolved_write(
