@@ -1775,7 +1775,7 @@ fn print_fits_table(out: &crate::out::Out, fits: &[FitEntry], now: SystemTime) {
         ]);
     }
     out.report_line(format_args!("{table}"));
-    crate::fit::fit_table::emit_unlabelled_warning(unlabelled);
+    crate::fit::fit_table::emit_unlabelled_warning(out, unlabelled);
 }
 
 fn print_profiles_json(out: &crate::out::Out, profiles: &[ProfileEntry]) {
