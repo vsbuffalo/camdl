@@ -251,6 +251,16 @@ impl Task {
         self
     }
 
+    /// Start the count at `done` units already done: a resumed chain's
+    /// completed steps, so its bar, its plain line and its recorded progress
+    /// read the chain's own step (`2001/2500`), as `progress.json` does, not
+    /// this run's count from 1. The rate and ETA measure from here.
+    pub fn starting_at(self, done: u64) -> Self {
+        self.pb.set_position(done);
+        self.pb.reset_eta();
+        self
+    }
+
     /// The progress event `inc` has just reached, when one is due.
     fn record_progress(&self) {
         let Some(ev) = &self.events else { return };
