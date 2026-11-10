@@ -460,3 +460,52 @@ fn pmmh_tolerates_ruled_out_neg_inf() {
     );
     assert!(result.is_ok(), "Ok(−∞) is a valid ruled-out loglik, must not error");
 }
+
+/// Run `config` from `resume` (or fresh), counting the accepted proposals at
+/// or past `config.burn_in` as the sampler reports them step by step.
+fn run_counting_post_burn(
+    config: &PMMHConfig,
+    resume: Option<sim::inference::pmmh::PMMHResumeState>,
+) -> (sim::inference::pmmh::PMMHResult, usize) {
+    // A deterministic Gaussian log-likelihood in log μ: cheap, and enough to
+    // give the chain a mix of accepts and rejects.
+    let eval = |p: &[f64], _seed: u64| -> Result<f64, SimError> {
+        let z = (p[0].ln() - 0.01f64.ln()) / 0.3;
+        Ok(-0.5 * z * z)
+    };
+    let accepted = std::cell::Cell::new(0usize);
+    let burn_in = config.burn_in;
+    let on_step = |step: usize, _ll: f64, acc: bool, _p: &[f64]| {
+        if acc && step >= burn_in {
+            accepted.set(accepted.get() + 1);
+        }
+    };
+    let result = run_pmmh(
+        &[mu_param()], &[Prior::Fixed(sim::inference::prior::Density::Flat)], &[0.01], &[],
+        config, &eval, 7, Some(&on_step), resume, String::new(),
+    ).unwrap();
+    (result, accepted.get())
+}
+
+/// gh#1011. A resumed chain's acceptance rate is the post-burn-in accepts of
+/// the whole chain over its post-burn-in steps: the base's accepts count as
+/// well as this segment's, because the denominator counts the base's steps.
+/// Checked for a base that ended past burn-in and for one that ended inside
+/// it, where the base contributes no post-burn-in accepts.
+#[test]
+fn a_resumed_chain_counts_its_bases_post_burn_in_accepts() {
+    let config = |n_steps| PMMHConfig {
+        n_steps, n_particles: 1, dt: 1.0, proposal_sd: vec![0.5],
+        adapt: false, adapt_start: 0, adapt_stop: 0, thin: 1, burn_in: 100,
+    };
+    for base_steps in [300, 50] {
+        let (base, base_accepted) = run_counting_post_burn(&config(base_steps), None);
+        let (resumed, resumed_accepted) =
+            run_counting_post_burn(&config(600), Some(base.resume_state));
+        assert!(resumed_accepted > 0, "the segment accepted nothing; the test cannot tell");
+        let expected = (base_accepted + resumed_accepted) as f64 / 500.0;
+        assert_eq!(resumed.acceptance_rate, expected,
+            "base of {base_steps} steps: {base_accepted} post-burn-in accepts in the base, \
+             {resumed_accepted} in the resumed segment, over 500 post-burn-in steps");
+    }
+}

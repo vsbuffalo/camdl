@@ -148,6 +148,10 @@ pub struct PMMHResumeState {
     pub current_log_prior: f64,
     /// Number of accepted proposals so far.
     pub n_accepted: usize,
+    /// Of `n_accepted`, those at or past `burn_in`: the numerator of
+    /// [`PMMHResult::acceptance_rate`], whose denominator counts every
+    /// post-burn-in step of the chain, the base's included (gh#1011).
+    pub n_accepted_post_burn: usize,
     /// Adaptive proposal state (None if adapt=false).
     pub adaptive: Option<AdaptiveProposal>,
     /// MAP parameter values.
@@ -571,13 +575,14 @@ pub fn run_pmmh(
     let mut map_loglik: f64;
     let mut adaptive: Option<AdaptiveProposal>;
     let mut n_accepted: usize;
-    let mut n_accepted_post_burn: usize = 0;  // gh#audit-M4
+    let mut n_accepted_post_burn: usize;  // gh#audit-M4
     let mut rng: StatefulRng;
 
     if let Some(state) = resume_from {
         start_step = state.completed_steps;
         current_params = state.params;
         n_accepted = state.n_accepted;
+        n_accepted_post_burn = state.n_accepted_post_burn;
         current_ll = state.current_ll;
         current_log_prior = state.current_log_prior;
         adaptive = state.adaptive;
@@ -639,6 +644,7 @@ pub fn run_pmmh(
         };
 
         n_accepted = 0;
+        n_accepted_post_burn = 0;
     }
 
     let mut current_log_jacobian: f64 = if2_params.iter()
@@ -806,7 +812,10 @@ pub fn run_pmmh(
     // count so it reports the rate over the *sampling* phase, not
     // the exploration phase. The struct field name is unchanged so
     // downstream readers don't need to migrate, but the semantics
-    // are now Stan-canonical (post-warmup acceptance).
+    // are now Stan-canonical (post-warmup acceptance). On a resumed chain
+    // both counts cover the whole chain: the numerator starts from the
+    // base's post-burn-in accepts (gh#1011), as the denominator counts the
+    // base's post-burn-in steps.
     let post_burn_steps = config.n_steps.saturating_sub(config.burn_in);
     let acceptance_rate = if post_burn_steps > 0 {
         n_accepted_post_burn as f64 / post_burn_steps as f64
@@ -823,6 +832,7 @@ pub fn run_pmmh(
         current_ll,
         current_log_prior,
         n_accepted,
+        n_accepted_post_burn,
         adaptive,
         map_params: map_params.clone(),
         map_loglik,
