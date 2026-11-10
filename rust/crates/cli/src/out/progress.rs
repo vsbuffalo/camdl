@@ -199,7 +199,7 @@ impl Reporter {
             _mp: self.mp.clone(),
             mode: self.mode,
             throttle: std::sync::Mutex::new(Throttle::default()),
-            metric: std::sync::Mutex::new(String::new()),
+            metric: std::sync::Mutex::new(None),
             label,
         }
     }
@@ -226,8 +226,8 @@ pub struct Task {
     _mp: MultiProgress,
     mode: Resolved,
     throttle: std::sync::Mutex<Throttle>,
-    /// Last metric string, kept so Plain-mode lines carry it too.
-    metric: std::sync::Mutex<String>,
+    /// The last metric, kept so Plain-mode lines carry it too.
+    metric: std::sync::Mutex<Option<Metric>>,
     label: String,
 }
 
@@ -254,7 +254,8 @@ impl Task {
                 self.pb.inc(n);
                 let ready = self.throttle.lock().map(|mut t| t.ready()).unwrap_or(false);
                 if ready {
-                    let m = self.metric.lock().map(|s| s.clone()).unwrap_or_default();
+                    let m = self.metric.lock().ok().and_then(|m| *m)
+                        .map(|m| m.to_string()).unwrap_or_default();
                     let sep = if m.is_empty() { "" } else { "  " };
                     crate::out::live().progress(&format!("{} {}/{}{}{}", self.label,
                         self.pb.position(), self.pb.length().unwrap_or(0), sep, m));
@@ -266,15 +267,14 @@ impl Task {
 
     /// Attach a researcher-facing metric (e.g. [`best_ll`]). `Pretty` shows it
     /// on the bar as `{msg}`; `Plain` folds it into the next throttled line;
-    /// `None` is a no-op. Callers format the string (standard forms documented
-    /// in the progress-system proposal).
-    pub fn set(&self, metric: impl Into<String>) {
-        let m = metric.into();
+    /// `None` is a no-op. The metric is a value, rendered here (standard forms
+    /// documented in the progress-system proposal).
+    pub fn set(&self, metric: Metric) {
         if self.mode == Resolved::Pretty {
-            self.pb.set_message(m.clone());
+            self.pb.set_message(metric.to_string());
         }
         if let Ok(mut g) = self.metric.lock() {
-            *g = m;
+            *g = Some(metric);
         }
     }
 
@@ -286,38 +286,67 @@ impl Task {
     }
 }
 
-/// Standard "best log-likelihood so far" metric string for search-style work
-/// (`survey`, `profile`). Kept here so the live bar reads identically across
-/// subcommands.
-pub fn best_ll(x: f64) -> String {
-    if x.is_finite() { format!("best ll={:.1}", x) } else { "best ll=-inf".to_string() }
+/// The figure a progress bar shows beside its count, as a value, so the bar,
+/// the plain line and a fit's recorded progress (`events.jsonl`) read one
+/// number. Rendered by `Display` in the standard forms below.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Metric {
+    /// A current log-likelihood of class `kind`: `ll=…` for a marginal,
+    /// `ll(complete)=…` for PGAS's complete-data value (gh#280).
+    Loglik { value: f64, kind: crate::fit::loglik::LoglikType },
+    /// The best log-likelihood so far, for search-style work: `best ll=…`.
+    BestLoglik(f64),
+    /// An MCMC chain's current marginal log-likelihood and its acceptance
+    /// fraction in `[0, 1]`: `ll=…  acc=…%`.
+    Mcmc { loglik: f64, accept: f64 },
 }
 
-/// Current log-likelihood metric string, prefixed by the loglik *class*:
+impl std::fmt::Display for Metric {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Metric::Loglik { value, kind } => {
+                let prefix = kind.metric_prefix();
+                if value.is_finite() { write!(f, "{prefix}={value:.1}") } else { write!(f, "{prefix}=-inf") }
+            }
+            Metric::BestLoglik(x) => {
+                if x.is_finite() { write!(f, "best ll={x:.1}") } else { write!(f, "best ll=-inf") }
+            }
+            Metric::Mcmc { loglik, accept } => write!(f, "{}  acc={:.0}%", ll(loglik), accept * 100.0),
+        }
+    }
+}
+
+/// Standard "best log-likelihood so far" metric for search-style work
+/// (`survey`, `profile`). Kept here so the live bar reads identically across
+/// subcommands.
+pub fn best_ll(x: f64) -> Metric {
+    Metric::BestLoglik(x)
+}
+
+/// Current log-likelihood metric, prefixed by the loglik *class*:
 /// `ll(complete)=` for PGAS's complete-data value, `ll=` for a marginal
 /// `log p(y | θ)` (gh#280). This is the live-feed analogue of the
 /// `log_complete_data_ll` trace column — it stops a complete-data value being
 /// read as a marginal on the bar a human or agent watches mid-run. Mirrors
 /// [`best_ll`]'s finite / -inf handling.
-pub fn ll_kind(x: f64, kind: crate::fit::loglik::LoglikType) -> String {
-    let prefix = kind.metric_prefix();
-    if x.is_finite() { format!("{prefix}={:.1}", x) } else { format!("{prefix}=-inf") }
+pub fn ll_kind(x: f64, kind: crate::fit::loglik::LoglikType) -> Metric {
+    Metric::Loglik { value: x, kind }
 }
 
-/// Standard "current log-likelihood" metric string for marginal-reporting
+/// Standard "current log-likelihood" metric for marginal-reporting
 /// iterative fitters (`fit` IF2, `pfilter`). A thin [`ll_kind`] wrapper
 /// fixing the class to marginal (`ll=`); PGAS passes `CompleteData` to
 /// [`ll_kind`] directly so its feed reads `ll(complete)=`.
-pub fn ll(x: f64) -> String {
+pub fn ll(x: f64) -> Metric {
     ll_kind(x, crate::fit::loglik::LoglikType::Marginal)
 }
 
-/// Standard MCMC metric string carrying the current log-likelihood and the
+/// Standard MCMC metric carrying the current log-likelihood and the
 /// acceptance fraction (PMMH / PGAS-MCMC), e.g. `"ll=-12.3  acc=24%"`. The
 /// `accept` argument is a fraction in `[0, 1]`. Reuses [`ll`] for the
 /// log-likelihood term and its -inf handling.
-pub fn mcmc(loglik: f64, accept: f64) -> String {
-    format!("{}  acc={:.0}%", ll(loglik), accept * 100.0)
+pub fn mcmc(loglik: f64, accept: f64) -> Metric {
+    Metric::Mcmc { loglik, accept }
 }
 
 #[cfg(test)]
@@ -326,31 +355,37 @@ mod tests {
 
     #[test]
     fn ll_finite_and_neg_inf() {
-        assert_eq!(ll(-12.34), "ll=-12.3");
-        assert_eq!(ll(f64::NEG_INFINITY), "ll=-inf");
+        assert_eq!(ll(-12.34).to_string(), "ll=-12.3");
+        assert_eq!(ll(f64::NEG_INFINITY).to_string(), "ll=-inf");
         // NaN / +inf are not finite → the -inf label (matches best_ll).
-        assert_eq!(ll(f64::NAN), "ll=-inf");
+        assert_eq!(ll(f64::NAN).to_string(), "ll=-inf");
     }
 
     #[test]
     fn ll_kind_carries_the_class_prefix() {
         use crate::fit::loglik::LoglikType;
         // Marginal class → `ll=`; complete-data → `ll(complete)=` (gh#280).
-        assert_eq!(ll_kind(-12.34, LoglikType::Marginal), "ll=-12.3");
-        assert_eq!(ll_kind(-12.34, LoglikType::If2), "ll=-12.3");
-        assert_eq!(ll_kind(-12.34, LoglikType::CompleteData), "ll(complete)=-12.3");
+        assert_eq!(ll_kind(-12.34, LoglikType::Marginal).to_string(), "ll=-12.3");
+        assert_eq!(ll_kind(-12.34, LoglikType::If2).to_string(), "ll=-12.3");
+        assert_eq!(ll_kind(-12.34, LoglikType::CompleteData).to_string(), "ll(complete)=-12.3");
         // -inf / NaN / +inf all fall to the `<prefix>=-inf` label.
-        assert_eq!(ll_kind(f64::NEG_INFINITY, LoglikType::CompleteData), "ll(complete)=-inf");
-        assert_eq!(ll_kind(f64::NAN, LoglikType::Marginal), "ll=-inf");
+        assert_eq!(ll_kind(f64::NEG_INFINITY, LoglikType::CompleteData).to_string(), "ll(complete)=-inf");
+        assert_eq!(ll_kind(f64::NAN, LoglikType::Marginal).to_string(), "ll=-inf");
         // `ll` is exactly the marginal-default wrapper.
         assert_eq!(ll(-12.34), ll_kind(-12.34, LoglikType::Marginal));
     }
 
     #[test]
+    fn best_ll_finite_and_neg_inf() {
+        assert_eq!(best_ll(-12.34).to_string(), "best ll=-12.3");
+        assert_eq!(best_ll(f64::NAN).to_string(), "best ll=-inf");
+    }
+
+    #[test]
     fn mcmc_reuses_ll_and_formats_accept() {
-        assert_eq!(mcmc(-12.34, 0.24), "ll=-12.3  acc=24%");
-        assert_eq!(mcmc(f64::NEG_INFINITY, 0.0), "ll=-inf  acc=0%");
-        assert_eq!(mcmc(-1.0, 1.0), "ll=-1.0  acc=100%");
+        assert_eq!(mcmc(-12.34, 0.24).to_string(), "ll=-12.3  acc=24%");
+        assert_eq!(mcmc(f64::NEG_INFINITY, 0.0).to_string(), "ll=-inf  acc=0%");
+        assert_eq!(mcmc(-1.0, 1.0).to_string(), "ll=-1.0  acc=100%");
     }
 
     #[test]

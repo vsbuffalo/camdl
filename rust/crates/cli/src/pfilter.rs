@@ -731,7 +731,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                     if let Ok(mut g) = acc.lock() {
                         g.0 += result.log_likelihood;
                         g.1 += 1;
-                        bar.set(format!("ll={:.1}", g.0 / g.1 as f64));
+                        // Finite: only finite replicates are summed.
+                        bar.set(crate::out::progress::ll(g.0 / g.1 as f64));
                     }
                 }
                 result.log_likelihood
