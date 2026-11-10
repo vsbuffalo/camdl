@@ -269,6 +269,12 @@ impl Out {
         stdout_written(written);
     }
 
+    /// One line of a report command's report, on stdout, as text already
+    /// painted for stdout where it is coloured (`camdl show`'s fields).
+    pub fn report_line(&self, text: impl std::fmt::Display) {
+        self.report_raw(format_args!("{text}\n"));
+    }
+
     /// Text of a report command's report, on stdout, written as given: a
     /// rendered table or page that ends in its own newline.
     pub fn report_raw(&self, text: impl std::fmt::Display) {
