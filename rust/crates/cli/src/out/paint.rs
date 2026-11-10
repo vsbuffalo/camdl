@@ -110,6 +110,13 @@ impl Painter {
         Painter { color: false }
     }
 
+    /// A painter that always writes escape codes, for a test of text a
+    /// coloured stream carries.
+    #[cfg(test)]
+    pub fn coloured() -> Self {
+        Painter { color: true }
+    }
+
     pub fn color(&self) -> bool {
         self.color
     }
@@ -157,6 +164,19 @@ pub fn stdout() -> Painter {
 }
 
 /// `warning:` as a stderr message's leading tag.
+/// `s` past any SGR escapes (`ESC [ … m`) it opens with: where the text a
+/// painter, or camdlc's own policy, coloured begins.
+pub fn without_leading_sgr(s: &str) -> &str {
+    let mut rest = s;
+    while let Some(after) = rest.strip_prefix("\x1b[") {
+        match after.find('m') {
+            Some(end) => rest = &after[end + 1..],
+            None => break,
+        }
+    }
+    rest
+}
+
 pub fn warning_tag() -> String { stderr().paint("warning:", Style::Warn) }
 
 /// `note:` as a stderr message's leading tag.

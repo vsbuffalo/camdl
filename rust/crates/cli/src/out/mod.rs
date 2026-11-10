@@ -302,7 +302,7 @@ impl Out {
             // only `progress.json`.
             m.heartbeat.failed(e.message.as_str());
         }
-        self.say(&e.message);
+        self.say(one_head(&e.message));
         if let Some(hint) = &e.hint {
             for line in hint.lines() {
                 self.say(format_args!("  {line}"));
@@ -351,6 +351,26 @@ impl Out {
     pub fn data_raw(&self, text: impl std::fmt::Display) {
         let written = write!(std::io::stdout().lock(), "{text}");
         stdout_written(written);
+    }
+}
+
+/// `message` without its leading `error: ` when what follows is itself a
+/// headed error report, so it is headed once.
+///
+/// Commands head the cause their helpers return (`error: {e}`), and every
+/// helper returns an unheaded cause except one: a compile that camdlc refused
+/// returns camdlc's own report, which opens with `error: …` or `error[E310]: …`
+/// (painted, when camdl passes its colour decision on). Collapsing it here,
+/// where every command's error is written, covers every site that relays a
+/// compile error, rather than each of them sniffing the cause.
+fn one_head(message: &str) -> &str {
+    let Some(rest) = message.strip_prefix("error: ") else { return message };
+    // Past any colour camdlc painted its head with.
+    let unpainted = paint::without_leading_sgr(rest);
+    if unpainted.starts_with("error:") || unpainted.starts_with("error[") {
+        rest
+    } else {
+        message
     }
 }
 
@@ -486,5 +506,31 @@ mod tests {
             .collect();
         assert_eq!(events, ["begin", "check", "finding", "finding"]);
         std::fs::remove_dir_all(&leaf).ok();
+    }
+}
+
+#[cfg(test)]
+mod one_head_tests {
+    use super::one_head;
+
+    #[test]
+    fn a_relayed_report_keeps_only_its_own_head() {
+        assert_eq!(one_head("error: error: nope.camdl: No such file or directory"),
+            "error: nope.camdl: No such file or directory");
+        assert_eq!(one_head("error: error[E310]: transition 'x' has no net effect"),
+            "error[E310]: transition 'x' has no net effect");
+        // Two escapes before the head, as camdlc paints it (red, then bold).
+        use super::paint::{Painter, Style};
+        let p = Painter::coloured();
+        let painted = format!("{}: x", p.paint(&p.paint("error[E310]", Style::Bold), Style::Err));
+        assert_eq!(one_head(&format!("error: {painted}")), painted);
+    }
+
+    #[test]
+    fn any_other_message_is_unchanged() {
+        for m in ["error: cannot read nope.toml", "error running pmmh: error: x",
+                  "error: errors in fit.toml", "warning: error: x", "error loading trace"] {
+            assert_eq!(one_head(m), m);
+        }
     }
 }
