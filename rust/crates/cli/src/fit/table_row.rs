@@ -77,7 +77,7 @@ pub struct TableRow {
     /// `fit run --label "..."` or post-hoc by `camdl label <run_id> "<text>"`.
     /// None when no run is labelled.
     pub label: Option<String>,
-    /// fit.toml stem — the basename of `FitView.fit_toml_path` minus
+    /// fit.toml stem — the basename of `FitView.source_config` minus
     /// trailing `.fit.toml` / `.toml` extension.
     pub stem: String,
     pub model_identity: String,
@@ -255,7 +255,7 @@ pub fn build_row(
     let method_result = MethodResult::load_from(&terminal.method_dir, &method)?;
     let mview = MethodView::from(&method_result);
 
-    let stem = stem_from_fit_toml_path(&view.fit_toml_path);
+    let stem = stem_from_fit_toml_path(view.source_config.as_deref().unwrap_or(""));
     let created = parse_iso8601_to_unix(&terminal.view.created_at);
     let age_seconds = match created {
         Some(c) => now_unix - c,

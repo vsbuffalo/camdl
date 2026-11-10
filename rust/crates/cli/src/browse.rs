@@ -652,10 +652,12 @@ fn show_profile_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &
     out.report_line(format_args!("{}", style::stdout().paint("kind", Style::Dim))); out.report_line("  profile_point");
     // The label lives once on the profile-base sidecar; walk up the leaf's
     // ancestors to the first segment carrying a `fit.meta.json`.
-    if let Some(sc) = leaf.dir.ancestors().find_map(crate::run_meta::read_fit_sidecar) {
-        if let Some(ref l) = sc.label {
+    match leaf.dir.ancestors().find_map(|d| crate::run_meta::read_fit_sidecar(d).transpose()) {
+        Some(Ok(sc)) => if let Some(ref l) = sc.label {
             out.report_line(format_args!("{}", style::stdout().paint("label", Style::Dim))); out.report_line(format_args!("  {}", l));
-        }
+        },
+        Some(Err(e)) => out.say(format_args!("warning: {e}")),
+        None => {}
     }
     for lvl_name in ["profile", "point", "method", "seed", "start"] {
         out.report_line(format_args!("{}", style::stdout().paint(lvl_name, Style::Dim)));
@@ -1096,7 +1098,14 @@ fn discover_profiles(root: &str) -> Result<Vec<ProfileEntry>, String> {
                 base_seg = leaf.dir.ancestors().nth(4).map(|p| p.to_path_buf());
             }
         }
-        let sidecar = base_seg.as_deref().and_then(crate::run_meta::read_fit_sidecar);
+        let sidecar = match base_seg.as_deref().map(crate::run_meta::read_fit_sidecar) {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => {
+                crate::out::detached().say(format_args!("warning: {e}"));
+                None
+            }
+            None => None,
+        };
         let label = sidecar.as_ref().and_then(|s| s.label.clone());
         let model = sidecar.as_ref()
             .map(|s| s.model_path.clone())
@@ -1652,8 +1661,11 @@ fn print_ensemble_json(out: &crate::out::Out, rows: &[EnsembleRow]) {
 /// array is `methods`, and each entry carries the leaf's `method_hash`,
 /// `run_id` and `path` so two leaves of one algorithm in one segment are
 /// distinguishable and addressable.
+///
+/// v2: `fit_toml_path` (relative to the directory the fit was run from) is
+/// `source_config`, relative to the fit folder, or `null` (gh#1009).
 const FIT_LIST_ROW_SCHEMA_NAME: &str = "fit_list_row";
-const FIT_LIST_ROW_SCHEMA_VERSION: u32 = 1;
+const FIT_LIST_ROW_SCHEMA_VERSION: u32 = 2;
 
 fn print_fits_json(out: &crate::out::Out, fits: &[FitEntry]) {
     for f in fits {
@@ -1706,7 +1718,9 @@ fn print_fits_json(out: &crate::out::Out, fits: &[FitEntry]) {
             "label": v.label(),
             "model": v.model,
             "model_identity": v.model_identity,
-            "fit_toml_path": v.fit_toml_path,
+            // The producing config, relative to the fit folder (`hash`'s
+            // directory); `null` for a CLI-only fit.
+            "source_config": v.source_config,
             "fit_toml_hash": v.fit_toml_hash,
             "data_hashes": v.data_hashes,
             "estimated": v.estimated,

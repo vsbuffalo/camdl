@@ -1233,7 +1233,10 @@ pub(crate) fn estimated_names(
             .ancestors()
             .skip(1)
             .take(4)
-            .find_map(crate::run_meta::read_fit_sidecar)
+            .find_map(|d| crate::run_meta::read_fit_sidecar(d).transpose())
+            // An unreadable or older-schema sidecar is reported where the fit
+            // is read (`FitView::read`); here it is no record.
+            .and_then(Result::ok)
             // A sidecar written before `estimated` was recorded carries an
             // empty list: no record, not "nothing estimated".
             .filter(|side| !side.estimated.is_empty())
@@ -2110,7 +2113,7 @@ mod tests {
         let tmp = tempdir("theta_hat_fixed");
         let seg = tmp.path();
         std::fs::write(seg.join("fit.meta.json"),
-            serde_json::json!({"estimated": ["R0", "sigma"]}).to_string()).unwrap();
+            serde_json::json!({"schema_version": 2, "estimated": ["R0", "sigma"]}).to_string()).unwrap();
         let dir = seg.join("if2-abcd").join("seed_1-ef01");
         std::fs::create_dir_all(&dir).unwrap();
         write_method_run(&dir, crate::run_meta::FitAlgorithm::If2, 1,

@@ -2727,7 +2727,9 @@ fn build_fit_sidecar(
         label: None,
         model_path: problem.model.camdl.clone(),
         model_identity,
-        fit_toml_path: fit_path.to_string(),
+        // Recorded by `write_fit_sidecar`, relative to the segment it writes.
+        source_config: None,
+        schema_version: crate::run_meta::FIT_META_SCHEMA_VERSION,
         fit_toml_hash,
         // gh#542: the in-memory maps stay `HashMap`; the ARTIFACT is ordered.
         // Same seam gh#519 used for `FitState` — the ordering requirement
@@ -3187,12 +3189,14 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
     // A profile: rewrite the base sidecar's label (its authoritative home),
     // leaving the archived `fit.toml.original` untouched.
     if let Some(seg) = profile_segments.into_iter().next() {
-        let mut side = crate::run_meta::read_fit_sidecar(&seg).unwrap_or_default();
+        let mut side = match crate::run_meta::read_fit_sidecar(&seg) {
+            Ok(Some(side)) => side,
+            Ok(None) => out.fail(format!("error: {} has no fit.meta.json to label", seg.display())),
+            Err(e) => out.fail(format!("error: {e}")),
+        };
         let prior = side.label.clone();
         side.label = Some(new_label.clone());
-        if let Err(e) = crate::run_meta::write_fit_sidecar(
-            &seg, std::path::Path::new(&side.fit_toml_path), &side,
-        ) {
+        if let Err(e) = crate::run_meta::store_fit_sidecar(&seg, &side) {
             out.fail(format!("error: cannot write profile sidecar {}: {}", seg.display(), e));
         }
         match prior {

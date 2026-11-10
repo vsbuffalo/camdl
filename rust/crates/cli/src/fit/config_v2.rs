@@ -2722,9 +2722,10 @@ impl FitConfig {
     /// `[data.observations]` paths were written against the *original* fit.toml
     /// directory, so anchoring them at the archive's own location resolves
     /// `../data/x.tsv` to `results/fits/data/x.tsv` — a path that never existed
-    /// (gh#652). The segment's sidecar records `fit_toml_path`, so the original
-    /// directory is known even when that file has moved or changed; pass it here
-    /// and every path resolves exactly as it did at fit time.
+    /// (gh#652). The segment's sidecar records `source_config`, the original
+    /// file's path relative to the segment, so its directory is known even when
+    /// that file has moved or changed; pass `<segment>/<source_config>` here and
+    /// every path resolves as it did at fit time.
     pub fn load_anchored_at(
         read_path: &std::path::Path,
         anchor_toml: &std::path::Path,

@@ -324,8 +324,8 @@ mod unlabelled_hint_tests {
 /// Load the fit.toml archived inside `<fit_dir>/fit.toml.original`.
 /// Hard-cut on a missing archive: per the back-compat-is-a-non-goal
 /// posture the reader errors with an actionable message rather than
-/// silently falling back to `FitView.fit_toml_path` (which can
-/// move/change).
+/// silently falling back to the source config (`FitView.source_config`,
+/// which can move or change).
 fn load_archived_fit_toml(fit_dir: &std::path::Path) -> Result<FitConfig, String> {
     let archive = fit_dir.join("fit.toml.original");
     if !archive.exists() {
@@ -972,7 +972,7 @@ particles = 100\nsweeps = 10\nuse_nuts = false\nmax_tree_depth = 8\n").unwrap();
         std::fs::write(leaf.join("run.json"), rec).unwrap();
         std::fs::write(
             seg.join("fit.meta.json"),
-            r#"{"model_identity":"f00d","model_path":"sir.camdl","fit_toml_path":"fit.toml"}"#,
+            r#"{"model_identity":"f00d","model_path":"sir.camdl","schema_version":2,"source_config":"fit.toml"}"#,
         )
         .unwrap();
     }
