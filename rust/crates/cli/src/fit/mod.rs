@@ -104,7 +104,8 @@ pub mod contrasts; // gh#322: counterfactual `contrasts {}` two-arm replay reduc
 /// `camdl fit methods` — print the supported (algorithm, backend) pairs.
 /// Reads from `methods::METHODS`, the single source of truth.
 pub fn cmd_fit_methods() {
-    print!("{}", methods::render_matrix());
+    let out = crate::out::Out::new(false);
+    out.report_raw(format_args!("{}", methods::render_matrix()));
 }
 
 // ─── New `camdl fit run` entry point (config_v2) ────────────────────────────
@@ -2874,18 +2875,17 @@ pub fn cmd_fit_diff(args: &crate::args::FitDiffArgs) {
 // ─── camdl fit new ──────────────────────────────────────────────────────────
 
 pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
+    let out = crate::out::Out::new(false);
     let from = a.from.to_string_lossy().into_owned();
     let to   = a.dest.to_string_lossy().into_owned();
 
     if std::path::Path::new(&to).exists() {
-        eprintln!("error: {} already exists. Choose a different name.", to);
-        std::process::exit(1);
+        out.fail(format!("error: {} already exists. Choose a different name.", to));
     }
 
     // Read source, inject provenance
     let mut content = std::fs::read_to_string(&from).unwrap_or_else(|e| {
-        eprintln!("error reading {}: {}", from, e);
-        std::process::exit(1);
+        out.fail(format!("error reading {}: {}", from, e));
     });
 
     // Check if [provenance] already exists
@@ -2904,7 +2904,7 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
     } else {
         // Update existing provenance
         // Simple approach: just warn
-        eprintln!("note: {} already has [provenance]. Update derived_from manually.", to);
+        out.say(format_args!("note: {} already has [provenance]. Update derived_from manually.", to));
     }
 
     // Best-effort: name the source fit's content-addressed segment, so the
@@ -2931,22 +2931,21 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
                 })
         });
         if let Some(seg) = seg {
-            eprintln!("  [provenance] derived_from = \"{}\"", from);
-            eprintln!("  hint: to warm-start the derived fit from {}, write under its \
-                       [method]", seg.display());
-            eprintln!("        starts = {{ from_posterior = \"@<label>\" }}   # one draw per chain");
-            eprintln!("        starts = {{ from_mle = \"@<label>\" }}         # every chain at its estimate");
-            eprintln!("        (a handle is @label, a fit-id prefix, or the leaf directory; \
+            out.say(format_args!("  [provenance] derived_from = \"{}\"", from));
+            out.say(format_args!("  hint: to warm-start the derived fit from {}, write under its \
+                       [method]", seg.display()));
+            out.say(format_args!("        starts = {{ from_posterior = \"@<label>\" }}   # one draw per chain"));
+            out.say(format_args!("        starts = {{ from_mle = \"@<label>\" }}         # every chain at its estimate"));
+            out.say("        (a handle is @label, a fit-id prefix, or the leaf directory; \
                        `camdl list` shows them)");
         }
     }
 
     std::fs::write(&to, &content).unwrap_or_else(|e| {
-        eprintln!("error writing {}: {}", to, e);
-        std::process::exit(1);
+        out.fail(format!("error writing {}: {}", to, e));
     });
 
-    eprintln!("created {}", to);
+    out.say(format_args!("created {}", to));
 }
 
 // ─── Labels (proposal §5) ─────────────────────────────────────────────
@@ -3048,18 +3047,17 @@ pub fn validate_label(raw: &str) -> Result<String, String> {
 /// label edits ever become a concern, a flock on run.json is the
 /// minimal extension.
 pub fn cmd_label(args: &crate::args::LabelArgs) {
+    let out = crate::out::Out::new(false);
     let new_label = match validate_label(&args.label) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("error: invalid label: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: invalid label: {}", e));
         }
     };
 
     let root = args.root.clone();
     if !root.exists() {
-        eprintln!("error: no results root at {}", root.display());
-        std::process::exit(1);
+        out.fail(format!("error: no results root at {}", root.display()));
     }
 
     // Match by hash prefix. Two homes for the label, by kind:
@@ -3118,56 +3116,52 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
             .collect();
         if let Some(seg) = folders.first() {
             let view = crate::fit::fit_view::FitView::read(seg);
-            eprintln!(
+            out.say(format_args!(
                 "error: `{}` is the fit id of {}, a problem folder, not a run; a label \
                  names one run. Label one of its runs by its run_id:",
-                args.hash, seg.display());
+                args.hash, seg.display()));
             for st in view.iter().flat_map(|v| v.methods.iter()) {
-                eprintln!("    camdl label {} \"{}\"    # {}", &st.run_id[..12], new_label,
-                    st.method_dir.display());
+                out.say(format_args!("    camdl label {} \"{}\"    # {}", &st.run_id[..12], new_label,
+                    st.method_dir.display()));
             }
-            std::process::exit(1);
+            crate::out::ExitCode(1).exit();
         }
-        eprintln!("error: no run found with hash prefix `{}` under {}",
-            args.hash, root.display());
-        std::process::exit(1);
+        out.fail(format!("error: no run found with hash prefix `{}` under {}",
+            args.hash, root.display()));
     }
     if total > 1 {
-        eprintln!("error: hash prefix `{}` matches {} runs — \
-                   use a longer prefix", args.hash, total);
+        out.say(format_args!("error: hash prefix `{}` matches {} runs — \
+                   use a longer prefix", args.hash, total));
         for p in matches.iter()
             .chain(fit_runs.iter().map(|l| &l.dir))
             .chain(profile_segments.iter())
             .take(8)
         {
-            eprintln!("  {}", p.display());
+            out.say(format_args!("  {}", p.display()));
         }
-        std::process::exit(1);
+        crate::out::ExitCode(1).exit();
     }
 
     // A fit run: its label is written once and never moves (gh#896).
     if let Some(run) = fit_runs.into_iter().next() {
         if run.record.status == runid::RunStatus::Running {
-            eprintln!("error: {} is still running; label it when it has finished",
-                run.dir.display());
-            std::process::exit(1);
+            out.fail(format!("error: {} is still running; label it when it has finished",
+                run.dir.display()));
         }
         // Check and write under the store-wide label lock, compare-and-set.
         let lock = crate::cas_sink::fit_label_lock(&root).unwrap_or_else(|e| {
-            eprintln!("error: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: {e}"));
         });
         let written = check_label_is_free(&root, &new_label, &run.record.run_id)
             .and_then(|()| crate::cas_sink::set_fit_label(&run.dir, &new_label));
         drop(lock); // released before any `exit`, which runs no destructors
         let prior = run.record.provenance.label.clone();
         if let Err(e) = written {
-            eprintln!("error: {e}");
-            std::process::exit(1);
+            out.fail(format!("error: {e}"));
         }
         match prior {
-            Some(_) => eprintln!("ok: label unchanged (\"{}\") on {}", new_label, run.dir.display()),
-            None => eprintln!("ok: label set to \"{}\" on {}", new_label, run.dir.display()),
+            Some(_) => out.say(format_args!("ok: label unchanged (\"{}\") on {}", new_label, run.dir.display())),
+            None => out.say(format_args!("ok: label set to \"{}\" on {}", new_label, run.dir.display())),
         }
         return;
     }
@@ -3181,14 +3175,13 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
         if let Err(e) = crate::run_meta::write_fit_sidecar(
             &seg, std::path::Path::new(&side.fit_toml_path), &side,
         ) {
-            eprintln!("error: cannot write profile sidecar {}: {}", seg.display(), e);
-            std::process::exit(1);
+            out.fail(format!("error: cannot write profile sidecar {}: {}", seg.display(), e));
         }
         match prior {
             Some(p) if p != new_label =>
-                eprintln!("ok: label updated from \"{}\" to \"{}\" on {}", p, new_label, seg.display()),
-            Some(_) => eprintln!("ok: label unchanged (\"{}\") on {}", new_label, seg.display()),
-            None => eprintln!("ok: label set to \"{}\" on {}", new_label, seg.display()),
+                out.say(format_args!("ok: label updated from \"{}\" to \"{}\" on {}", p, new_label, seg.display())),
+            Some(_) => out.say(format_args!("ok: label unchanged (\"{}\") on {}", new_label, seg.display())),
+            None => out.say(format_args!("ok: label set to \"{}\" on {}", new_label, seg.display())),
         }
         return;
     }
@@ -3204,14 +3197,13 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
         if let Ok(rec) = serde_json::from_str::<runid::RunRecord>(&txt) {
             let prior = rec.provenance.label.clone();
             if let Err(e) = crate::cas_sink::ensure_provenance_label(&run_dir, &new_label) {
-                eprintln!("error: cannot write {}: {}", run_json_path.display(), e);
-                std::process::exit(1);
+                out.fail(format!("error: cannot write {}: {}", run_json_path.display(), e));
             }
             match prior {
                 Some(p) if p != new_label =>
-                    eprintln!("ok: label updated from \"{}\" to \"{}\" on {}", p, new_label, run_dir.display()),
-                Some(_) => eprintln!("ok: label unchanged (\"{}\") on {}", new_label, run_dir.display()),
-                None => eprintln!("ok: label set to \"{}\" on {}", new_label, run_dir.display()),
+                    out.say(format_args!("ok: label updated from \"{}\" to \"{}\" on {}", p, new_label, run_dir.display())),
+                Some(_) => out.say(format_args!("ok: label unchanged (\"{}\") on {}", new_label, run_dir.display())),
+                None => out.say(format_args!("ok: label set to \"{}\" on {}", new_label, run_dir.display())),
             }
             return;
         }
@@ -3221,10 +3213,9 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
     // holding a parseable `RunRecord` `run.json` (handled above). A match
     // whose `run.json` failed to re-parse here is malformed — surface it
     // rather than fabricating a label write.
-    eprintln!(
+    out.fail(format!(
         "error: {} is not a recognized (new-format) run.json — cannot relabel",
-        run_json_path.display());
-    std::process::exit(1);
+        run_json_path.display()));
 }
 
 #[cfg(test)]
