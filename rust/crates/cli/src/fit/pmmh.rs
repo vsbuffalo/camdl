@@ -319,7 +319,7 @@ pub fn run_method(
     // final record once they finish (gh#887, gh#904). The pre-run write can
     // only say `accepted` — no chain has been refused yet — so the rewrite is
     // what makes the file true, and it is unconditional.
-    super::runner::record_chain_starts(method_dir, &config, &drawn);
+    super::runner::record_chain_starts(out, method_dir, &config, &drawn);
     let retry_accepted: std::sync::Mutex<Vec<Option<super::chain_starts::ChainStart>>> =
         std::sync::Mutex::new(vec![None; n_chains]);
     let retry_rejected: std::sync::Mutex<Vec<super::chain_starts::RejectedStart>> =
@@ -802,7 +802,7 @@ pub fn run_method(
         retry_rejected.into_inner().unwrap(),
         retry_refused.into_inner().unwrap(),
     );
-    super::runner::record_chain_starts(method_dir, &config, &drawn);
+    super::runner::record_chain_starts(out, method_dir, &config, &drawn);
 
     // gh#110. Skip + continue: surface "ran K of N chains" so the
     // user knows downstream R̂/ESS exclude skipped chains. This

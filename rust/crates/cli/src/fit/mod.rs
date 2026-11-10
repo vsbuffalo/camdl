@@ -1682,16 +1682,18 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // up to MAX_START_ATTEMPTS, before any chain runs; every
                 // attempt is on the record below.
                 let drawn = runner::preflight_spread_starts(
+                    &out,
                     &run_config, &sweep_config.estimate, &resolved_starts, drawn, seed,
                 ).unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")));
                 let per_chain_params: Vec<Vec<sim::inference::types::EstimatedParam>> =
                     drawn.to_estimated_params(&run_config.estimated_params);
                 // The audit sidecar, captured before the first filter pass.
-                runner::record_chain_starts(&method_dir, &run_config, &drawn);
+                runner::record_chain_starts(&out, &method_dir, &run_config, &drawn);
                 let chain_init_source = drawn.rule.spelled();
                 let chain_starts_kind = drawn.rule.kind();
                 let method_dir_str = method_dir.to_string_lossy();
                 let chain_results = runner::run_chains_with_per_chain_params(
+                    &out,
                     &run_config, Some(&per_chain_params), &collector,
                     Some(method_dir_str.as_ref()), &heartbeat)
                     .unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")));
@@ -1702,7 +1704,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // record of what every chain did.
                 if !chain_results.skipped.is_empty() {
                     let drawn = drawn.clone().with_skipped(chain_results.skipped.clone());
-                    runner::record_chain_starts(&method_dir, &run_config, &drawn);
+                    runner::record_chain_starts(&out, &method_dir, &run_config, &drawn);
                 }
 
                 // Write outputs
