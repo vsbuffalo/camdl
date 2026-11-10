@@ -1,12 +1,12 @@
 //! The `── diagnostics ──` block: a method's findings, printed once and merged.
 //!
 //! Findings whose [`MergeKey`]s are equal print as one entry naming every
-//! chain, each chain's value beside its id ([`render_entry`]); every other
+//! chain, each chain's value beside its id ([`render_findings_entry`]); every other
 //! finding prints on its own. Entries keep the order of their first finding.
 //! The count line counts findings, not entries, so merging never changes it.
 
 use sim::inference::diagnostic::{
-    render_entry, Diagnostic, DiagnosticKind, HintContext, MergeKey, Severity,
+    render_findings_entry, Diagnostic, DiagnosticKind, HintContext, MergeKey, Severity,
 };
 
 use crate::out::paint::{Line, Span, Style};
@@ -49,7 +49,7 @@ pub fn render(diags: &[Diagnostic], ctx: HintContext) -> Vec<Line> {
             Severity::Error => ("x", Style::Err),
         };
         let kinds: Vec<&DiagnosticKind> = group.iter().map(|d| &d.kind).collect();
-        let text = render_entry(&kinds);
+        let text = render_findings_entry(&group);
         for (i, part) in text.lines().enumerate() {
             lines.push(if i == 0 {
                 Line(vec![Span::plain("  "), Span::styled(icon, style), Span::plain(format!(" {part}"))])
