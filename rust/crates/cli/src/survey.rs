@@ -696,11 +696,13 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         let fit_path_str = fit_path.to_string_lossy().into_owned();
         let config = Problem::load(&fit_path_str)?;
 
-        // Load model from fit.toml's `model.camdl` (already path-
-        // resolved by Problem::load). `mut` because the gh#92
+        // The model is MODEL, the positional argument: `--fit` supplies the
+        // bounds, data and fixed values (as for `pfilter --fit` and `profile
+        // --fit`), and the store leaf and `run.json` are named after MODEL.
+        // The config's own `[model]` is not read. `mut` because the gh#92
         // [estimate].start fall-back below seeds values into
         // `model_pre.parameters[i].value` before the resolver call.
-        let (mut model_pre, model_ir_json) = crate::util::load_model(&config.model.camdl)?;
+        let (mut model_pre, model_ir_json) = crate::util::load_model(&model_path)?;
 
         // gh#616: survey binds the fit config's `[data.observations]`, so it
         // RESOLVES a model's observation anchors instead of letting
