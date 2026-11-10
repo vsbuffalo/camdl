@@ -35,6 +35,7 @@ use crate::fit::provenance;
 /// if the algorithm is anything else — caller's job to dispatch correctly.
 #[allow(clippy::too_many_arguments)]
 pub fn run_method(
+    out: &crate::out::Out,
     fit: &Problem,
     method: &Method,
     method_dir: &Path,
@@ -60,16 +61,16 @@ pub fn run_method(
             NloptAlgorithm::Lbfgs =>
                 "Quasi-Newton on the forward-sensitivity gradient; differentiable models only",
         });
-    eprintln!(
+    out.say(format_args!(
         "{} deterministic MLE on the ODE-skeleton likelihood.",
         crate::out::paint::stderr().paint(&head, Style::Warn)
-    );
-    eprintln!(
+    ));
+    out.say(format_args!(
         "  camdl computes p(y|θ, ODE_skeleton) under {algorithm}, not the \
          stochastic-process p(y|θ) IF2/PGAS/PMMH compute. In low-noise \
          regimes the two converge empirically; verify rather than assume.",
         algorithm = algorithm.as_str()
-    );
+    ));
 
     let n_chains = knobs.chains;
     if n_chains == 0 {
@@ -125,13 +126,13 @@ pub fn run_method(
     // exploration, and the chain-agreement gate then becomes informative.
     let effective_chains = if starts.rule.is_point() { 1 } else { n_chains };
     if effective_chains < n_chains {
-        eprintln!(
+        out.say(format_args!(
             "  starts = {} with chains={}: collapsing to 1 chain \
              ({} is deterministic, redundant chains would produce \
              identical output). Set `starts = \"lhs\"` for multi-start \
              basin exploration.",
             starts.rule.spelled(), n_chains, algorithm.as_str()
-        );
+        ));
     }
     let drawn = crate::fit::runner::draw_chain_starts_for(
         &run_config, &fit.estimate, starts, effective_chains, seed,
@@ -159,7 +160,7 @@ pub fn run_method(
     let t0 = std::time::Instant::now();
     // At most one chain per worker (gh#821, `chain_fanout`).
     let mut chain_outcomes: Vec<(usize, ChainOutcome)> = super::chain_fanout::run_chains(n_chains, |chain_idx| {
-            let outcome = run_one_chain(
+            let outcome = run_one_chain(out,
                 algorithm,
                 knobs,
                 &arc_config.compiled,
@@ -225,7 +226,7 @@ pub fn run_method(
         &knobs.gate,
         knobs.tolerance,
     );
-    print_verdict(
+    print_verdict(out,
         &convergence,
         elapsed.as_secs_f64(),
         n_chains,
@@ -355,7 +356,7 @@ pub fn run_method(
     if let Err(e) = provenance::write_mle_params(
         &mle_path.to_string_lossy(), &all_params, &mle_meta,
     ) {
-        eprintln!("warning: writing mle_params.toml failed: {e}");
+        out.say(format_args!("warning: writing mle_params.toml failed: {e}"));
     }
 
     Ok(())
@@ -387,6 +388,7 @@ struct ChainOutcome {
 
 #[allow(clippy::too_many_arguments)]
 fn run_one_chain(
+    out: &crate::out::Out,
     algorithm: NloptAlgorithm,
     knobs: &NloptConfig,
     compiled: &Arc<sim::CompiledModel>,
@@ -431,7 +433,7 @@ fn run_one_chain(
             // structural: this chain has no optimum to report, so it carries
             // `Failed` and a `-inf` loglik, which loses the winner comparison
             // to any chain that did converge.
-            eprintln!("{} {}: {e}", crate::out::paint::stderr().paint("✗", Style::Err), algorithm.as_str());
+            out.say(format_args!("{} {}: {e}", crate::out::paint::stderr().paint("✗", Style::Err), algorithm.as_str()));
             ChainOutcome {
                 params: est_indices.iter().map(|&i| full_start[i]).collect(),
                 loglik: f64::NEG_INFINITY,
@@ -838,6 +840,7 @@ fn chain_agreement_line(painter: &crate::out::paint::Painter, v: &ConvergenceVer
 }
 
 fn print_verdict(
+    out: &crate::out::Out,
     v: &ConvergenceVerdict,
     wall_secs: f64,
     n_chains: usize,
@@ -846,19 +849,19 @@ fn print_verdict(
     let p = crate::out::paint::stderr();
     let ok = p.paint("✓", Style::Ok);
     let bad = p.paint("✗", Style::Err);
-    eprintln!();
-    eprintln!(
+    out.say("");
+    out.say(format_args!(
         "  status: {} converged, {} max-eval, {} failed (of {})",
         v.n_converged, v.n_maxeval, v.n_failed, n_chains
-    );
-    eprintln!("{}", chain_agreement_line(&p, v));
-    eprintln!(
+    ));
+    out.say(format_args!("{}", chain_agreement_line(&p, v)));
+    out.say(format_args!(
         "  loglik-eval:     Δ = {:.1} dB / threshold {:.0} dB                {}",
         v.delta_loglik * NATS_TO_DB,
         decibans_thresh,
         if v.decibans_failed { bad } else { ok }
-    );
-    eprintln!("  wall: {:.2}s ({} chains)", wall_secs, n_chains);
+    ));
+    out.say(format_args!("  wall: {:.2}s ({} chains)", wall_secs, n_chains));
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────
