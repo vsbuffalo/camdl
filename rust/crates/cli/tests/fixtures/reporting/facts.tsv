@@ -373,9 +373,9 @@ survey.refused	stderr	block	error: camdl survey requires either --fit FIT.toml	G
 compare.refused	stderr	line	error:	compare requires either --config FILE or ≥2 fit leaf paths
 predict	stderr	line	fit predict: free_forward horizon	subsampling 5 of 400 posterior draws (raise with --n-draws)
 predict	stderr	line	fit predict: horizon=free_forward	treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 400 draws from pmmh method 'pmmh'
-predict	stdout	line	wrote	/predictive/cases.tsv
-predict	stdout	line	wrote	/observed/cases.tsv
-predict	stdout	line	wrote	/report.json
+predict	stderr	line	wrote	/predictive/cases.tsv
+predict	stderr	line	wrote	/observed/cases.tsv
+predict	stderr	line	wrote	/report.json
 predict.refused	stderr	line	error:	no completed fit run labelled @nope under results/fits
 simulate	stderr	line	simulate · chain_binomial:	running …
 simulate	stderr	line	stored	./results/sims/sir-

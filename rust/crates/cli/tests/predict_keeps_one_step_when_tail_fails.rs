@@ -248,10 +248,13 @@ fn a_refused_tail_still_writes_the_one_step_artifact_and_records_the_failure() {
         stderr.contains("the free-forward tail"),
         "stderr names what failed:\n{stderr}"
     );
+    // The written files are listed on stderr: `fit predict` is not a report
+    // command, so its stdout carries nothing (the CLI reporting rule).
     assert!(
-        stdout.lines().any(|l| l.starts_with("wrote ")),
-        "stdout still lists the files written:\n{stdout}"
+        stderr.lines().any(|l| l.starts_with("wrote ")),
+        "stderr still lists the files written:\n{stderr}"
     );
+    assert!(stdout.is_empty(), "nothing on stdout:\n{stdout}");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
