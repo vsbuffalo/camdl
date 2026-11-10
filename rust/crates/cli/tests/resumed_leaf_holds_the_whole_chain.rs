@@ -167,6 +167,14 @@ fn assert_whole_chain(base: &Path, resumed: &Path, fresh: &Path, index: &str, ch
     assert!(run_json(fresh)["inputs"].get("resume").is_none(), "a fresh run records no lineage");
 }
 
+/// A `fit_state.toml` number (`best_chain`, `acceptance_rate`, `best_loglik`).
+fn state_number(leaf: &Path, key: &str) -> f64 {
+    let t = std::fs::read_to_string(leaf.join("fit_state.toml")).unwrap();
+    t.lines().find_map(|l| l.strip_prefix(&format!("{key} = ")))
+        .unwrap_or_else(|| panic!("no `{key}` in {}/fit_state.toml", leaf.display()))
+        .trim().parse().unwrap()
+}
+
 const MODEL: &str = r#"
 [model]
 camdl = "sir.ir.json"
@@ -199,7 +207,30 @@ thin       = 1
     let base = leaf(&work, "base");
     camdl(&work, &["fit", "run", "longer.toml", "--seed", "1", "--resume", base.to_str().unwrap()]);
     camdl(&work, &["fit", "run", "fresh.toml", "--seed", "1"]);
-    assert_whole_chain(&base, &leaf(&work, "longer"), &leaf(&work, "fresh"), "step", 2, n1, n2);
+    let resumed = leaf(&work, "longer");
+    assert_whole_chain(&base, &resumed, &leaf(&work, "fresh"), "step", 2, n1, n2);
+
+    // `fit_state.toml`'s acceptance rate is the best chain's over every
+    // post-burn-in step of the whole chain — at `thin = 1` the `accepted`
+    // column of the steps at or past `burn_in` in its trace.
+    let burn_in = 10;
+    let trace_rate = |leaf: &Path, n: usize| -> f64 {
+        let chain = state_number(leaf, "best_chain") as usize;
+        let text = std::fs::read_to_string(leaf.join(format!("chain_{chain}/trace.tsv"))).unwrap();
+        let mut lines = text.lines();
+        let cols: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        let (step, acc) = (cols.iter().position(|c| *c == "step").unwrap(),
+            cols.iter().position(|c| *c == "accepted").unwrap());
+        let accepted = lines.map(|l| l.split('\t').collect::<Vec<_>>())
+            .filter(|f| f[step].parse::<usize>().unwrap() >= burn_in && f[acc] == "1")
+            .count();
+        accepted as f64 / (n - burn_in) as f64
+    };
+    for (leaf, n) in [(&base, n1), (&resumed, n2)] {
+        let (stored, counted) = (state_number(leaf, "acceptance_rate"), trace_rate(leaf, n));
+        assert!((stored - counted).abs() < 1e-12,
+            "{}: acceptance_rate {stored} is the whole chain's {counted}", leaf.display());
+    }
 }
 
 #[test]
@@ -249,9 +280,22 @@ n_trajectories = 4
     }
 
     // The best sweep is the whole chain's: never below the base's.
-    let best = |leaf: &Path| -> f64 {
-        let t = std::fs::read_to_string(leaf.join("fit_state.toml")).unwrap();
-        t.lines().find_map(|l| l.strip_prefix("best_loglik = ")).unwrap().parse().unwrap()
-    };
+    let best = |leaf: &Path| state_number(leaf, "best_loglik");
     assert!(best(&resumed) >= best(&base), "{} < {}", best(&resumed), best(&base));
+
+    // The acceptance rate. The base records its best chain's rate only, so
+    // when the resumed leaf's best chain is that chain its rate combines the
+    // base's with the new segment's by count; the new segment's rate it
+    // implies is then a rate, in [0, 1]. (The combination's arithmetic is
+    // pinned exactly by the `count_weighted` unit test; the new segment's own
+    // rate is not in any file.)
+    let chain = state_number(&resumed, "best_chain") as usize;
+    if state_number(&base, "best_chain") as usize == chain {
+        let n_base = chain_draw_rows(&base, chain).len() as f64;
+        let n_whole = chain_draw_rows(&resumed, chain).len() as f64;
+        let implied = (state_number(&resumed, "acceptance_rate") * n_whole
+            - state_number(&base, "acceptance_rate") * n_base) / (n_whole - n_base);
+        assert!((-1e-9..=1.0 + 1e-9).contains(&implied),
+            "the new segment's implied acceptance rate {implied} is not a rate");
+    }
 }

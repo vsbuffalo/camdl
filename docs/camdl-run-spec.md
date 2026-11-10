@@ -5006,14 +5006,21 @@ MAP, PGAS's NUTS divergence counts, and `fit_state.toml`'s best (PGAS takes the
 better of the base's best and the new segment's). ESS per second divides by the
 segments' summed wall time.
 
-Four PGAS outputs are computed from per-sweep sampler internals that the leaf
+`fit_state.toml`'s `acceptance_rate` is the best chain's over its post-burn-in
+steps or retained sweeps. PMMH's covers the whole chain, its accept count
+carried in the chain state. PGAS's is the count-weighted combination of the
+base's recorded rate, over the chain's retained sweeps below the boundary, and
+the new segment's — exact, because both are means over sweeps. The base records
+its best chain's rate only, so when the resumed leaf's best chain is another
+chain, PGAS's rate covers the new segment's sweeps alone.
+
+Three PGAS outputs are computed from per-sweep sampler internals that the leaf
 does not keep for the base's sweeps, and cover the new segment's retained sweeps
 only: the `path_renewal` and `filter_ess` summary blocks with `filter_ess.tsv`,
-the conditional-SMC findings in `diagnostics.json`
+and the conditional-SMC findings in `diagnostics.json`
 (`degenerate_ancestor_sampling`, `low_trajectory_renewal`,
-`filter_weight_collapse`, `path_renewal_coalesced`, `filter_starved`), and
-`fit_state.toml`'s `acceptance_rate`. The `cost` block of either summary is this
-execution's.
+`filter_weight_collapse`, `path_renewal_coalesced`, `filter_starved`). The
+`cost` block of either summary is this execution's.
 
 `inputs.resume` records the lineage, and is absent on a fresh run:
 

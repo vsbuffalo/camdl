@@ -1700,15 +1700,20 @@ pub fn run_method(
     // A resumed chain's best retained sweep may be its base's: the base's
     // `fit_state.toml` records the best over every sweep it retained, so the
     // larger of the two is the best over the whole chain.
-    if let Some(base) = resume_base {
-        let prior = FitState::load(&base.to_string_lossy())
-            .map_err(|e| format!("--resume: cannot read the base's fit_state.toml: {e}"))?;
+    let prior: Option<FitState> = match resume_base {
+        Some(base) => Some(FitState::load(&base.to_string_lossy())
+            .map_err(|e| format!("--resume: cannot read the base's fit_state.toml: {e}"))?),
+        None => None,
+    };
+    if let Some(prior) = &prior {
         if prior.best_loglik > best_loglik {
             best_loglik = prior.best_loglik;
             best_chain_id = prior.best_chain.0;
-            start_values = prior.start_values;
+            start_values = prior.start_values.clone();
         }
     }
+    let acceptance_rate = best_chain_acceptance(
+        best_chain_id, &all_results, &inherited, prior.as_ref());
 
     let state = FitState {
         method: method_name.to_string(),
@@ -1725,9 +1730,7 @@ pub fn run_method(
         n_good_chains: if n_good_chains < n_chains { Some(n_good_chains) } else { None },
         start_values,
         loglik_type: Some(LoglikType::CompleteData),
-        acceptance_rate: Some(best_chain.1.iter()
-            .map(|s| s.accepted.iter().filter(|&&a| a).count() as f64 / s.accepted.len().max(1) as f64)
-            .sum::<f64>() / best_chain.1.len().max(1) as f64),
+        acceptance_rate,
         // Bayesian method, no IF2-style Â (chain agreement).
         tail_chain_agreement: std::collections::BTreeMap::new(),
         perturb_only_at_t0_params: Vec::new(),
@@ -2119,6 +2122,44 @@ fn write_cross_chain_compat(
 
 // ── Diagnostics ──────────────────────────────────────────────────
 
+/// `fit_state.toml`'s `acceptance_rate`: over chain `chain`'s retained
+/// sweeps, the mean fraction of parameters whose update was accepted.
+///
+/// On a resumed leaf the whole chain's rate is the count-weighted combination
+/// of the base's rate over its retained sweeps (`prior.acceptance_rate`, the
+/// count being the chain's `inherited` rows) and this call's over its own. The
+/// base records the rate of its best chain only, so the combination is made
+/// when that is `chain`; otherwise the rate is this call's sweeps' alone (the
+/// run spec says so). `None` when `chain` did not sample in this call.
+fn best_chain_acceptance(
+    chain: usize,
+    results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
+    inherited: &[Option<super::resumed_chain::InheritedDraws>],
+    prior: Option<&FitState>,
+) -> Option<f64> {
+    let at = results.iter().position(|(c, _, _)| *c == chain)?;
+    let sweeps = &results[at].1;
+    let n_new = sweeps.len();
+    let new_rate = sweeps.iter()
+        .map(|s| s.accepted.iter().filter(|&&a| a).count() as f64 / s.accepted.len().max(1) as f64)
+        .sum::<f64>() / n_new.max(1) as f64;
+    let n_base = inherited[at].as_ref().map_or(0, |b| b.index.len());
+    Some(match prior.filter(|p| p.best_chain.0 == chain).and_then(|p| p.acceptance_rate) {
+        Some(base_rate) => count_weighted((base_rate, n_base), (new_rate, n_new)),
+        None => new_rate,
+    })
+}
+
+/// Two rates, each a mean over its own count of items, as the one mean over
+/// all of them. `new`'s rate when there are no items at all.
+fn count_weighted(base: (f64, usize), new: (f64, usize)) -> f64 {
+    let n = base.1 + new.1;
+    if n == 0 {
+        return new.0;
+    }
+    (base.0 * base.1 as f64 + new.0 * new.1 as f64) / n as f64
+}
+
 /// R̂ / ESS over each chain's retained draws: a resumed chain's `inherited`
 /// rows from its base (parallel to `results`, in `estimated_params` order),
 /// then the sweeps this call kept.
@@ -2314,6 +2355,16 @@ fn write_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole chain's acceptance rate is the mean over every retained
+    /// sweep: 30 base sweeps at 0.4 and 10 new at 0.8 are 40 sweeps at 0.5.
+    #[test]
+    fn a_resumed_rate_is_the_count_weighted_mean_of_the_two_segments() {
+        assert_eq!(count_weighted((0.4, 30), (0.8, 10)), 0.5);
+        assert_eq!(count_weighted((0.4, 0), (0.8, 10)), 0.8, "no base sweeps: the new rate");
+        assert_eq!(count_weighted((0.4, 30), (0.8, 0)), 0.4, "no new sweeps: the base rate");
+        assert_eq!(count_weighted((0.4, 0), (0.8, 0)), 0.8);
+    }
 
     /// The `trajectories` reader's contract on chain ids. Rendering cannot
     /// test this: an empty `per_chain` and no report at all both render as
