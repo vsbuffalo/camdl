@@ -213,10 +213,13 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
             message.push_str("\n  Pass a fit's directory, a leaf directory, @label, a run-id \
                 prefix, or its fit.toml.");
         }
+        // Each leaf in its state as `run.json` and `.lock` give it: a
+        // `running` record no live process holds is interrupted, not failed.
         for m in &discovered {
-            message.push_str(&format!("\n  {} {}: {}", m.method, status_word(m.status),
+            let entry = LeafEntry::of(m);
+            message.push_str(&format!("\n  {} {}: {}", m.method, entry.verdict_text,
                 m.method_dir.display()));
-            if let Some(e) = recorded_failure(&m.method_dir) {
+            if let Some(e) = &entry.error {
                 message.push_str(&format!("\n    error: {e}"));
             }
         }
@@ -363,10 +366,17 @@ pub struct LeafEntry {
     /// The verdict, or the state, in a few words — what the text index shows.
     pub verdict_text: String,
     /// Why the run has no result: the error a failed run recorded in its
-    /// `events.jsonl`, or why a completed leaf could not be read. Omitted
-    /// otherwise.
+    /// `run.json` (`failure.message`), or why a completed leaf could not be
+    /// read. Omitted otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The leaf's state as its `run.json` and `.lock` give it
+    /// (`runid::LeafState`): `completed`; `failed` with the recorded
+    /// `failure`; `failed_reason_unknown`; `running` with the owner's pid; or
+    /// `interrupted`, a `running` record no live process holds. Omitted when
+    /// the record cannot be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<runid::LeafState>,
 }
 
 /// A run status as one word.
@@ -378,16 +388,14 @@ pub(crate) fn status_word(status: runid::RunStatus) -> &'static str {
     }
 }
 
-/// The error a failed run recorded: the last line of its `events.jsonl`, when
-/// that is a `method_report` with a `failed` outcome. `None` when the log is
-/// missing or was cut off (a killed process records no outcome).
-fn recorded_failure(leaf: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(leaf.join(runid::EVENT_LOG)).ok()?;
-    let last: serde_json::Value = serde_json::from_str(text.lines().last()?).ok()?;
-    (last["event"] == "method_report" && last["outcome"] == "failed")
-        .then(|| last["error"].as_str().map(str::to_string))
-        .flatten()
+/// The leaf's state from its `run.json` (authoritative for status and
+/// failure) and its `.lock` (whether a `running` record is live).
+fn recorded_state(leaf: &Path) -> Option<runid::LeafState> {
+    let rec: runid::RunRecord =
+        serde_json::from_slice(&std::fs::read(leaf.join("run.json")).ok()?).ok()?;
+    Some(runid::leaf_state(leaf, &rec))
 }
+
 
 /// The verdict of a completed run in a few words, for the leaf index.
 fn verdict_text(report: &MethodReport) -> String {
@@ -408,12 +416,22 @@ fn verdict_text(report: &MethodReport) -> String {
 
 impl LeafEntry {
     fn of(r: &ResolvedMethod) -> Self {
-        let (verdict_text, error) = match r.status {
-            runid::RunStatus::Completed => (String::new(), None),
-            runid::RunStatus::Running => {
-                ("still running, or stopped without recording an outcome".into(), None)
+        use runid::LeafState as S;
+        let state = recorded_state(&r.method_dir);
+        let (verdict_text, error) = match &state {
+            Some(S::Completed) => (String::new(), None),
+            Some(S::Failed { failure }) => ("failed".into(), Some(failure.message.clone())),
+            Some(S::FailedReasonUnknown) => ("failed (no reason recorded)".into(), None),
+            Some(S::Running { pid: Some(pid) }) => (format!("running (pid {pid})"), None),
+            Some(S::Running { pid: None }) => ("running".into(), None),
+            Some(S::OwnerUnknown { pid, host }) => (
+                format!("running on host {host} (pid {pid}), whose liveness this host cannot check"),
+                None,
+            ),
+            Some(S::Interrupted { .. }) => {
+                ("interrupted: no live process holds it, and it recorded no outcome".into(), None)
             }
-            runid::RunStatus::Failed => ("failed".into(), recorded_failure(&r.method_dir)),
+            None => (status_word(r.status).into(), None),
         };
         LeafEntry {
             leaf: r.method_dir.to_string_lossy().into_owned(),
@@ -423,6 +441,7 @@ impl LeafEntry {
             verdict: None,
             verdict_text,
             error,
+            state,
         }
     }
 

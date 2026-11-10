@@ -920,16 +920,56 @@ its files, and commits by flipping status to `Completed` and building the file
 manifest from what it actually wrote. A concurrent claimant that finds a live
 `.lock` gets `CasError::FitInProgress` naming the holding pid.
 
+A `.lock` holds its owner's pid and host name, one per line (a lock holding the
+pid alone, as camdl wrote before the host was recorded, is read as this host's).
+Whether its owner is alive is decided in one place (`runid::store::lock_owner`):
+absent; unreadable (treated as held); alive or dead on this host; or on another
+host, whose liveness this host cannot check.
+
 A crashed writer leaves its `.lock` and a `Running` `run.json` behind. A re-run
-reclaims such a leaf: it liveness-checks the recorded pid (`kill(pid, 0)` on
-unix), and a dead holder's lock is removed and the leaf re-claimed. Reclaim is
-serialized through a second `.reclaim` lock — only the `.reclaim` holder may
-remove `.lock`, and it re-confirms the holder is dead while holding `.reclaim`,
-so two processes can never both delete the lock and both proceed. On a non-unix
+reclaims such a leaf when its owner is a dead process on this host (keeping its
+record, below). A leaf held from another host is never reclaimed automatically
+and never reported as interrupted: the claim refuses it (`OwnedOnOtherHost`),
+naming the host and pid, and `--force` (`fit run`, `survey`) is the way to clear
+it, moving the leaf, records included, into the store's `.quarantine/`. The
+reclaim: it liveness-checks the recorded pid (`kill(pid, 0)` on unix), and a
+dead holder's lock is removed and the leaf re-claimed. Reclaim is serialized
+through a second `.reclaim` lock — only the `.reclaim` holder may remove
+`.lock`, and it re-confirms the holder is dead while holding `.reclaim`, so two
+processes can never both delete the lock and both proceed. On a non-unix
 platform the pid cannot be checked, so a held lock always reports
 `FitInProgress`. As defense in depth, a claimant that wins the lock and then
 finds a `Completed` record refuses to clear it (`ReclaimRaceCompleted`) rather
-than blind-wiping a finished result.
+than blind-wiping a finished result, and a claimant that finds a `run.json` it
+cannot read (permission denied, an IO error) refuses the leaf
+(`RecordUnreadable`) rather than quarantine or clear it: an unreadable record is
+not an absent one.
+
+**A run's end is recorded, never inferred.** A run that completes is committed
+`Completed`. A run camdl stops on an error is committed `Failed` before the
+process exits, with a `failure` record — `{"message": …, "operation": …}`, the
+error camdl printed and the method or command that was running — and its `.lock`
+released. Nothing else writes `Failed`: a `Running` record whose owner died is
+an _interrupted_ run, and stays `Running`. A reader tells the two apart from the
+`.lock` alone — `Running` with a `.lock` naming a live process is in flight;
+`Running` with no `.lock`, or one naming a dead process on this host, is
+interrupted; `Running` held from another host is of unknown liveness — and never
+rewrites the record to say so. A `Failed` record with no `failure` is one a
+camdl before the field wrote, or one the claim's drop guard wrote on a panic:
+readable, its reason unknown.
+
+**A retry keeps the prior attempt's record.** A re-run that reclaims a leaf of
+its own identity (failed, interrupted, or stale) first moves the prior attempt's
+leaf-root files into `.attempts/<n>/` inside the leaf, `n` counting attempts in
+the order they were preserved: its `run.json` (renamed `attempt.json`, so no
+walk of the store finds a second leaf of one identity), `events.jsonl`,
+`diagnostics.json`, `progress.json`, `chain_starts.tsv` and any other file at
+the leaf root. Its directories (`chain_N/`, `trajectories/`) are bulk output,
+not the record of the attempt, and are cleared with the rest. A leaf keeps at
+most three attempts (`MAX_PRESERVED_ATTEMPTS`); preserving a fourth deletes the
+oldest. `.attempts/` is outside the exact-set manifest and the orphan scan, so a
+retry that completes is a clean `Completed` leaf, a cache hit, beside its
+preserved attempts. `--force` quarantines the whole leaf, attempts included.
 
 **Cache semantics.** `lookup` reports one of four outcomes for a path against an
 expected identity: `Hit` (identity matches, status `Completed`, file manifest
@@ -4901,7 +4941,10 @@ A real `sims/` leaf record (hashes and paths abbreviated):
 
 A `fits/` method leaf adds `deps` (when its `starts` consumed a source), nests
 artifact keys (`chain_0/trace.tsv`), keys per-chain schema entries under a `{n}`
-wildcard, and carries a populated `inputs`:
+wildcard, and carries a populated `inputs`. A fit leaf's `inputs` are written
+with its claim — what the run was asked to do — so a failed or running leaf
+carries them too; `finalize` adds the three only the run can tell
+(`best_loglik`, `best_chain`, `wall_time_seconds`):
 
 ```json
 "inputs": {
@@ -4959,6 +5002,7 @@ replicates rather than competing chains (`pfilter`). `camdl show` and
 | `levels`         | `[{name, label, hash, schema_version}]`    | the factored identity in path order                                                            |
 | `deps`           | `[{run_id, kind, artifact, digest}]`       | consumed upstreams; omitted when empty                                                         |
 | `status`         | `"running"` \| `"completed"` \| `"failed"` | a plain string, not an object                                                                  |
+| `failure`        | `{message, operation}`                     | on a `"failed"` record camdl stopped: its error, and what was running; omitted otherwise       |
 | `artifacts`      | map path → `{bytes, mtime, digest}`        | EXACT SET over the leaf's own files; `mtime` is `"{secs}.{nanos:09}"`                          |
 | `output_schema`  | map path → `{role, columns}`               | declared column roles (§10.9); omitted when empty                                              |
 | `children`       | map namespace → `[hash]`                   | declared child sub-artifact dirs (`obs`); omitted when empty                                   |
@@ -4970,8 +5014,12 @@ replicates rather than competing chains (`pfilter`). `camdl show` and
 discoverable in-flight record. `fit_method`, `pfilter`, `survey` and
 `profile_point` **stream**: they claim the directory, write a `"running"` record
 and an exclusive `.lock`, stream output in, then finalize to `"completed"` with
-the exact-set manifest and the post-run `inputs`. A stale `.lock` whose PID is
-dead is reclaimed; a live one refuses with `fit in progress`.
+the exact-set manifest and the post-run `inputs`. A run camdl stops on an error
+records `"failed"`, with its `failure`, before it exits, and releases the
+`.lock`; a `"running"` record left behind is what a killed or crashed run
+leaves, and stays `"running"` (§2.3.1, "A run's end is recorded, never
+inferred"). A stale `.lock` whose PID is dead is reclaimed, the prior attempt's
+record preserved under `.attempts/`; a live one refuses with `fit in progress`.
 
 Three `provenance` fields — `finished_at`, `host`, `thread_count` — exist in the
 schema and are never populated by any writer.
