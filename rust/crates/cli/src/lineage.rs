@@ -67,17 +67,15 @@ fn resolve_format_with_path(
 /// content-addressed, so there is no system-of-record artifact behind them:
 /// `--output PATH` is the only sink. With no path, exit with a clear error
 /// rather than dumping a TSV/Newick stream to stdout.
-fn open_required_output(sub: &str, output: Option<&Path>) -> Box<dyn Write> {
+fn open_required_output(out: &crate::out::Out, sub: &str, output: Option<&Path>) -> Box<dyn Write> {
     match output {
         Some(p) => Box::new(std::io::BufWriter::new(
             std::fs::File::create(p).unwrap_or_else(|e| {
-                eprintln!("error: cannot create {}: {}", p.display(), e);
-                std::process::exit(1);
+                out.fail(format!("error: cannot create {}: {}", p.display(), e));
             }),
         )),
         None => {
-            eprintln!("error: `camdl lineage {sub}` requires --output PATH");
-            std::process::exit(1);
+            out.fail(format!("error: `camdl lineage {sub}` requires --output PATH"));
         }
     }
 }
@@ -130,14 +128,13 @@ fn build_writer(
 /// `exact` is true for Gillespie (each event is a single transition) and false
 /// for batched backends (sub-dt batching introduces a bias that
 /// `lineage realize` quantifies).
-pub fn finish_event_log(a: &SimulateArgs, event_log: &EventLog, exact: bool, leaf_event_log: Option<&str>) {
+pub fn finish_event_log(out: &crate::out::Out, a: &SimulateArgs, event_log: &EventLog, exact: bool, leaf_event_log: Option<&str>) {
     // A real `--event-log PATH` (anything but the bare `auto` sentinel) is
     // mirrored to disk in the format implied by --tsv / --format / extension.
     let mirror = a.event_log.clone().filter(|p| p.as_os_str() != "auto");
     let format = resolve_format_with_path(a.tsv, &a.format, mirror.as_deref())
         .unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
     let fmt_ext = match format {
         LineListFormat::Tsv => "tsv",
@@ -152,28 +149,27 @@ pub fn finish_event_log(a: &SimulateArgs, event_log: &EventLog, exact: bool, lea
 
     if let Some(ref path) = mirror {
         sim::lineage::event_log_io::write(event_log, path, format).unwrap_or_else(|e| {
-            eprintln!("error: writing event log mirror: {:?}", e);
-            std::process::exit(1);
+            out.fail(format!("error: writing event log mirror: {:?}", e));
         });
-        eprintln!(
+        out.say(format_args!(
             "event log: {} events ({} lineage); stored as event_log.tsv in the run leaf, mirrored to {} ({}); {}",
             event_log.events.len(), n_lineage, path.display(), fmt_ext, exactness,
-        );
-        eprintln!(
+        ));
+        out.say(format_args!(
             "  next: camdl lineage realize {} --identity-seed <N> -o line_list.{}",
             path.display(), fmt_ext,
-        );
+        ));
     } else {
         match leaf_event_log {
             // Fresh run: the event log was stored in the leaf alongside traj.tsv.
             Some(path) => {
-                eprintln!(
+                out.say(format_args!(
                     "event log: {} events ({} lineage) stored as event_log.tsv in the run leaf; {}",
                     event_log.events.len(), n_lineage, exactness,
-                );
-                eprintln!(
+                ));
+                out.say(format_args!(
                     "  next: camdl lineage realize {} --identity-seed <N> -o line_list.tsv", path
-                );
+                ));
             }
             // Cache HIT (gh#241): the trajectory leaf already existed, so
             // commit_atomic discarded our freshly-staged event_log.tsv — the
@@ -182,15 +178,13 @@ pub fn finish_event_log(a: &SimulateArgs, event_log: &EventLog, exact: bool, lea
             // fix — event log as a child sub-artifact like obs, or
             // augment-on-recommit — is a store-protocol follow-up.)
             None => {
-                eprintln!(
+                out.say(format_args!(
                     "event log: {} events ({} lineage) recorded, but the trajectory was already \
                      cached so it was not stored in the leaf; {}",
                     event_log.events.len(), n_lineage, exactness,
-                );
-                eprintln!(
-                    "  to capture it: re-run with `--event-log <PATH>` (writes the log to PATH), \
-                     or `--force` to recompute and store it in the leaf"
-                );
+                ));
+                out.say("  to capture it: re-run with `--event-log <PATH>` (writes the log to PATH), \
+                     or `--force` to recompute and store it in the leaf");
             }
         }
     }
@@ -201,10 +195,10 @@ pub fn finish_event_log(a: &SimulateArgs, event_log: &EventLog, exact: bool, lea
 /// the recorded per-pool weights. Different `--identity-seed`s give i.i.d.
 /// draws from `P(identities | event log)`.
 pub fn cmd_lineage_realize(a: &LineageRealizeArgs) {
+    let out = crate::out::Out::new(false);
     let format = resolve_format_with_path(a.tsv, &a.format, a.output.as_deref())
         .unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         });
     let out_path = a
         .output
@@ -212,17 +206,15 @@ pub fn cmd_lineage_realize(a: &LineageRealizeArgs) {
         .unwrap_or_else(|| default_out("line_list", format));
 
     let mut writer = build_writer(format, &out_path).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
 
     let summary = sim::lineage::realize_from_path(&a.event_log, a.identity_seed, writer.as_mut())
         .unwrap_or_else(|e| {
-            eprintln!("error: realize: {:?}", e);
-            std::process::exit(1);
+            out.fail(format!("error: realize: {:?}", e));
         });
 
-    eprintln!(
+    out.say(format_args!(
         "lineage realize: wrote line list to {} ({}); identity-seed {}, {} edges, \
          log P(line list | event log) = {:.6}",
         out_path.display(),
@@ -233,15 +225,15 @@ pub fn cmd_lineage_realize(a: &LineageRealizeArgs) {
         a.identity_seed,
         summary.edges,
         summary.total_logprob,
-    );
+    ));
     if summary.exact {
-        eprintln!("  sub-dt bias: 0.000 (exact — Gillespie event log)");
+        out.say("  sub-dt bias: 0.000 (exact — Gillespie event log)");
     } else {
-        eprintln!(
+        out.say(format_args!(
             "  sub-dt bias: {:.3} (batched event log; shrink --dt or use \
              --backend gillespie at record time for trustworthy trees)",
             summary.sub_dt_fraction
-        );
+        ));
     }
 }
 
@@ -351,21 +343,19 @@ fn read_line_list(path: &Path) -> Result<Vec<sim::lineage::LineListEntry>, Strin
 /// sampled individual's pendant tip is placed at its removal time (or the
 /// simulation horizon if never removed).
 pub fn cmd_lineage_tree(a: &LineageTreeArgs) {
+    let out = crate::out::Out::new(false);
     let entries = read_line_list(&a.line_list).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
 
     // Per-individual summaries (deme + removal time) and the horizon — the
     // candidate set is every individual.
     let (summaries, sim_end) = summarize(&entries).unwrap_or_else(|e| {
-        eprintln!("error: {:?}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {:?}", e));
     });
 
     let scheme = parse_scheme(&a.scheme, sim_end).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
 
     let forest = TransmissionForest::from_entries(&entries);
@@ -373,49 +363,49 @@ pub fn cmd_lineage_tree(a: &LineageTreeArgs) {
     let sampled = select_samples(scheme.as_ref(), &summaries, &mut rng);
 
     if sampled.is_empty() {
-        eprintln!(
+        out.say(format_args!(
             "warning: sampling scheme selected 0 tips from {} candidate \
              individuals; no tree to emit",
             summaries.len()
-        );
+        ));
     }
 
     let trees = forest.prune_to(&sampled);
 
     // Emit one Newick line per pruned tree (forest → multiple roots possible).
-    let mut out = open_required_output("tree", a.output.as_deref());
+    let mut w = open_required_output(&out, "tree", a.output.as_deref());
     for t in &trees {
-        writeln!(out, "{}", t.to_newick()).ok();
+        writeln!(w, "{}", t.to_newick()).ok();
     }
-    out.flush().ok();
+    w.flush().ok();
 
-    eprintln!(
+    out.say(format_args!(
         "lineage tree: {} candidate individuals, {} sampled tips, {} tree(s)",
         summaries.len(),
         sampled.len(),
         trees.len()
-    );
+    ));
 }
 
 /// `camdl lineage sojourn LINE_LIST --compartment ID` — dwell-time distribution.
 pub fn cmd_lineage_sojourn(a: &LineageSojournArgs) {
+    let out = crate::out::Out::new(false);
     let entries = read_line_list(&a.line_list).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
 
     let result = sim::lineage::project::sojourn(&entries, CompartmentId(a.compartment));
 
     // Per-individual sojourns to --output (TSV).
-    let mut out = open_required_output("sojourn", a.output.as_deref());
-    writeln!(out, "individual\tentry\texit\tdwell").ok();
+    let mut w = open_required_output(&out, "sojourn", a.output.as_deref());
+    writeln!(w, "individual\tentry\texit\tdwell").ok();
     for s in &result.completed {
-        writeln!(out, "{}\t{}\t{}\t{}", s.individual, s.entry, s.exit, s.dwell).ok();
+        writeln!(w, "{}\t{}\t{}\t{}", s.individual, s.entry, s.exit, s.dwell).ok();
     }
-    out.flush().ok();
+    w.flush().ok();
 
     // Summary to stderr (always).
-    eprintln!(
+    out.say(format_args!(
         "lineage sojourn (compartment {}): {} completed, {} right-censored; \
          mean dwell {:.4}, median {:.4}, p90 {:.4}",
         a.compartment,
@@ -424,21 +414,20 @@ pub fn cmd_lineage_sojourn(a: &LineageSojournArgs) {
         result.mean_dwell(),
         result.dwell_quantile(0.5),
         result.dwell_quantile(0.9),
-    );
+    ));
 }
 
 /// `camdl lineage cohort LINE_LIST --event infection` — per-time-window summary.
 pub fn cmd_lineage_cohort(a: &LineageCohortArgs) {
+    let out = crate::out::Out::new(false);
     use sim::lineage::project::CohortEvent;
 
     let entries = read_line_list(&a.line_list).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
 
     if a.window <= 0.0 {
-        eprintln!("error: --window must be positive, got {}", a.window);
-        std::process::exit(1);
+        out.fail(format!("error: --window must be positive, got {}", a.window));
     }
 
     // `infection` (the model-independent lineage-event filter) or a transition id.
@@ -448,11 +437,10 @@ pub fn cmd_lineage_cohort(a: &LineageCohortArgs) {
         match a.event.parse::<usize>() {
             Ok(t) => CohortEvent::Transition(t),
             Err(_) => {
-                eprintln!(
+                out.fail(format!(
                     "error: --event must be 'infection' or a transition id (integer), got '{}'",
                     a.event
-                );
-                std::process::exit(1);
+                ));
             }
         }
     };
@@ -460,21 +448,21 @@ pub fn cmd_lineage_cohort(a: &LineageCohortArgs) {
     // `cohort` takes `align_zero`; the CLI flag is its inverse opt-in.
     let bins = sim::lineage::project::cohort(&entries, event, a.window, !a.align_first_event);
 
-    let mut out = open_required_output("cohort", a.output.as_deref());
+    let mut w = open_required_output(&out, "cohort", a.output.as_deref());
     // Half-open windows `[window_start, window_stop)`, named as every other
     // table camdl writes names a window's boundaries (gh#833).
-    writeln!(out, "window_start\twindow_stop\tincidence\tcumulative").ok();
+    writeln!(w, "window_start\twindow_stop\tincidence\tcumulative").ok();
     for b in &bins {
-        writeln!(out, "{}\t{}\t{}\t{}", b.start, b.end, b.incidence, b.cumulative).ok();
+        writeln!(w, "{}\t{}\t{}\t{}", b.start, b.end, b.incidence, b.cumulative).ok();
     }
-    out.flush().ok();
+    w.flush().ok();
 
     let total: u64 = bins.last().map_or(0, |b| b.cumulative);
-    eprintln!(
+    out.say(format_args!(
         "lineage cohort: {} window(s), {} total events",
         bins.len(),
         total
-    );
+    ));
 }
 
 #[cfg(test)]
