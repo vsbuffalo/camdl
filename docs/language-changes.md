@@ -13,6 +13,25 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-09 — an unknown name in a `where` guard is an error
+
+**What.** A `where` guard compares index variables with each other or with a
+dimension level. A name that was neither — in practice a misspelled level — was
+compared as a string that equals no level, so `where b != adlut` was true for
+every instance and `where a == chld` for none. The first emitted the instances
+the guard was written to exclude, with no diagnostic; the second emitted
+nothing, under warning W200 only. Both are now **E217**, on a declaration's
+guard and on a `sum(… where …)` predicate alike.
+
+**Migration.** Correct the spelling of the level: `where b != adlut` →
+`where b != adult`. A model whose guards name only index variables and declared
+levels is unaffected.
+
+**Diagnostic.**
+`error[E217]: infection: where guard references 'adlut', which is neither one of this declaration's index variables nor a level of any dimension`
+
+---
+
 ## 2026-11-06 — an observation may not pool a population stratum by a bare name
 
 **What.** Where a value is scored against data, pooling a stratum declared in

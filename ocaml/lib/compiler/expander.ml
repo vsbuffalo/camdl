@@ -4929,10 +4929,11 @@ let expand_transition_name ctx tname : string list option =
     in
     Some names
 
-(** Validate that every identifier in a guard is either a loop variable,
-    a dimension level value, or an unknown name — but NOT a parameter or
-    compartment name (which cannot be meaningfully compared at compile time).
-    Emits E217 for each bad identifier found. *)
+(** Validate that every identifier in a guard is a loop variable or a
+    dimension level. A parameter or compartment cannot be compared at compile
+    time, and any other name is a misspelling: left alone it is compared as a
+    string that equals no level, so `where b != adlut` is always true and
+    `where a == chld` never is. Emits E217 for each bad identifier found. *)
 let check_guard_compile_time ?(loc = Diagnostics.no_loc)
     ?(advice = "use it in the rate expression instead") ctx decl_name loop_vars guard =
   let all_dim_levels = List.concat_map snd ctx.dim_registry in
@@ -4955,6 +4956,15 @@ let check_guard_compile_time ?(loc = Diagnostics.no_loc)
         ~message:(Printf.sprintf
           "%s: where guard references '%s', which is a compartment; %s"
           decl_name ident advice) ()
+    else
+      Diagnostics.error ctx.diags
+        ~code:"E217" ~loc
+        ~message:(Printf.sprintf
+          "%s: where guard references '%s', which is neither one of this \
+           declaration's index variables nor a level of any dimension"
+          decl_name ident)
+        ~hint:"a guard compares index variables with each other or with a \
+               dimension level; check the spelling of the level name" ()
   in
   let rec walk = function
     | GEq (a, b) | GNeq (a, b) -> check_ident a; check_ident b

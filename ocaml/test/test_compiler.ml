@@ -5794,6 +5794,57 @@ let test_where_param_in_guard () =
   let found_e217 = List.exists (fun d -> d.Diagnostics.code = "E217") errors in
   Alcotest.(check bool) "E217 emitted for param in where guard" true found_e217
 
+let unknown_guard_name_src guard = Printf.sprintf {|
+time_unit = 'days
+dimensions { age = [child, adult] }
+compartments { S, I, R }
+stratify(by = age)
+parameters { beta : rate  gamma : rate  I0 : count }
+let N = sum(a in age, S[a] + I[a] + R[a])
+transitions {
+  infection[a in age, b in age] : S[a] --> I[a]  @ beta * S[a] * I[b] / N where %s
+  recovery[a in age]  : I[a] --> R[a]  @ gamma * I[a]
+}
+init {
+  S[a in age] = 500 - I0
+  I[a in age] = I0
+}
+simulate { from = 0 'days to = 80 'days }
+|} guard
+
+let test_where_unknown_name_in_guard () =
+  (* A misspelled level is compared as a string that equals no level, so
+     `b != adlut` kept all four instances and `a == chld` kept none, with no
+     error. The correctly spelled guard still compiles. *)
+  compile_expect_error_code ~code:"E217" ~contains:"adlut"
+    (unknown_guard_name_src "b != adlut");
+  compile_expect_error_code ~code:"E217" ~contains:"chld"
+    (unknown_guard_name_src "a == chld");
+  let m = compile_expect_ok (unknown_guard_name_src "b != adult") in
+  Alcotest.(check int) "b != adult keeps the two instances with b = child" 2
+    (List.length (List.filter (fun (t : Ir.transition) ->
+       String.length t.Ir.name >= 9 && String.sub t.Ir.name 0 9 = "infection")
+       m.Ir.transitions))
+
+let test_sum_predicate_unknown_name () =
+  compile_expect_error_code ~code:"E217" ~contains:"adlut" {|
+time_unit = 'days
+dimensions { age = [child, adult] }
+compartments { S, I, R }
+stratify(by = age)
+parameters { beta : rate  gamma : rate  I0 : count }
+let N = sum(a in age, S[a] + I[a] + R[a])
+transitions {
+  infection[a in age] : S[a] --> I[a]  @ beta * S[a] * sum(b in age where b != adlut, I[b]) / N
+  recovery[a in age]  : I[a] --> R[a]  @ gamma * I[a]
+}
+init {
+  S[a in age] = 500 - I0
+  I[a in age] = I0
+}
+simulate { from = 0 'days to = 80 'days }
+|}
+
 let test_where_compartment_in_guard () =
   (* 'S' is a compartment — must not appear in a where guard *)
   let src = {|
@@ -15764,6 +15815,8 @@ let () =
     "where_guards", [
       Alcotest.test_case "param in where guard → E217"        `Quick test_where_param_in_guard;
       Alcotest.test_case "compartment in where guard → E217"  `Quick test_where_compartment_in_guard;
+      Alcotest.test_case "unknown name in where guard → E217"  `Quick test_where_unknown_name_in_guard;
+      Alcotest.test_case "unknown name in sum predicate → E217" `Quick test_sum_predicate_unknown_name;
       Alcotest.test_case "param in event where guard → E217"        `Quick test_where_param_in_event_guard;
       Alcotest.test_case "compartment in event where guard → E217"  `Quick test_where_compartment_in_event_guard;
       Alcotest.test_case "param in reactive where guard → E217"     `Quick test_where_param_in_reactive_guard;
