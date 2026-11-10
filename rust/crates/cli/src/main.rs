@@ -69,7 +69,7 @@ const HELP_STYLES: Styles = Styles::styled()
     .usage    (AnsiColor::Yellow.on_default().effects(Effects::BOLD))
     .literal  (AnsiColor::Cyan  .on_default())
     .placeholder(AnsiColor::Cyan.on_default());
-use sim::{write_diagnostics_tsv, warn_zero_firings};
+use sim::{write_diagnostics_tsv, never_fired};
 use std::collections::HashMap;
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -3574,6 +3574,30 @@ impl WideTrajBlock<'_> {
     }
 }
 
+/// The transitions a simulation never fired, as one warning: each by name
+/// when there are at most twenty, else the count and how to look.
+fn never_fired_notice(names: &[&str]) -> Option<out::notice::Notice> {
+    if names.is_empty() {
+        return None;
+    }
+    let message = if names.len() > 20 {
+        format!("{} transitions never fired during simulation\n  \
+                 (run `camdl inspect MODEL --transition \"...*\" --rate` to debug)", names.len())
+    } else {
+        let mut m = format!("{} transition{} never fired during simulation:",
+            names.len(), if names.len() == 1 { "" } else { "s" });
+        for name in names {
+            m.push_str(&format!("\n  {}    (propensity always 0.0)", name));
+        }
+        m
+    };
+    Some(out::notice::Notice {
+        severity: out::notice::Severity::Warning,
+        code: "transitions-never-fired",
+        message,
+    })
+}
+
 impl engine::RunSink for StreamSink {
     fn on_start(&mut self, grid: &engine::Grid) {
         self.shape.total_runs = grid.total_runs;
@@ -3590,7 +3614,11 @@ impl engine::RunSink for StreamSink {
         if run_idx == 0 && !traj.transition_diagnostics.is_empty() {
             match write_diagnostics_tsv("diagnostics.tsv", &traj.transition_diagnostics) {
                 Ok(zero_count) => {
-                    if zero_count > 0 { warn_zero_firings(&traj.transition_diagnostics); }
+                    if zero_count > 0 {
+                        if let Some(n) = never_fired_notice(&never_fired(&traj.transition_diagnostics)) {
+                            eprintln!("{}", n.render());
+                        }
+                    }
                 }
                 Err(e) => eprintln!("warning: could not write diagnostics.tsv: {}", e),
             }
