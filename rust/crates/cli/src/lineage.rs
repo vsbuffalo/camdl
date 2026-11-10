@@ -62,21 +62,27 @@ fn resolve_format_with_path(
     Ok(LineListFormat::Parquet)
 }
 
-/// Open the `--output` path of a `lineage` projection (`tree`/`sojourn`/
-/// `cohort`) as a buffered writer. The lineage projections are NOT
-/// content-addressed, so there is no system-of-record artifact behind them:
-/// `--output PATH` is the only sink. With no path, exit with a clear error
-/// rather than dumping a TSV/Newick stream to stdout.
-fn open_required_output(out: &crate::out::Out, sub: &str, output: Option<&Path>) -> Box<dyn Write> {
-    match output {
-        Some(p) => Box::new(std::io::BufWriter::new(
-            std::fs::File::create(p).unwrap_or_else(|e| {
-                out.fail(format!("error: cannot create {}: {}", p.display(), e));
-            }),
-        )),
-        None => {
-            out.fail(format!("error: `camdl lineage {sub}` requires --output PATH"));
-        }
+/// Write the `--output` file of a `lineage` projection (`tree`/`sojourn`/
+/// `cohort`): create it, let `body` write it, and flush. The projections are
+/// not content-addressed, so `--output PATH` is the only sink; with no path,
+/// exit with a clear error rather than dumping a TSV/Newick stream to stdout. Every create, write and flush error ends the command naming
+/// the file, so a write that fails part-way never exits 0 beside a truncated
+/// table that reads as the whole result.
+fn write_required_output(
+    out: &crate::out::Out,
+    sub: &str,
+    output: Option<&Path>,
+    body: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
+) {
+    let Some(p) = output else {
+        out.fail(format!("error: `camdl lineage {sub}` requires --output PATH"));
+    };
+    let file = std::fs::File::create(p).unwrap_or_else(|e| {
+        out.fail(format!("error: cannot create {}: {}", p.display(), e));
+    });
+    let mut w = std::io::BufWriter::new(file);
+    if let Err(e) = body(&mut w).and_then(|()| w.flush()) {
+        out.fail(format!("error: writing {}: {}", p.display(), e));
     }
 }
 
@@ -373,11 +379,12 @@ pub fn cmd_lineage_tree(a: &LineageTreeArgs) {
     let trees = forest.prune_to(&sampled);
 
     // Emit one Newick line per pruned tree (forest → multiple roots possible).
-    let mut w = open_required_output(&out, "tree", a.output.as_deref());
-    for t in &trees {
-        writeln!(w, "{}", t.to_newick()).ok();
-    }
-    w.flush().ok();
+    write_required_output(&out, "tree", a.output.as_deref(), |w| {
+        for t in &trees {
+            writeln!(w, "{}", t.to_newick())?;
+        }
+        Ok(())
+    });
 
     out.say(format_args!(
         "lineage tree: {} candidate individuals, {} sampled tips, {} tree(s)",
@@ -397,12 +404,13 @@ pub fn cmd_lineage_sojourn(a: &LineageSojournArgs) {
     let result = sim::lineage::project::sojourn(&entries, CompartmentId(a.compartment));
 
     // Per-individual sojourns to --output (TSV).
-    let mut w = open_required_output(&out, "sojourn", a.output.as_deref());
-    writeln!(w, "individual\tentry\texit\tdwell").ok();
-    for s in &result.completed {
-        writeln!(w, "{}\t{}\t{}\t{}", s.individual, s.entry, s.exit, s.dwell).ok();
-    }
-    w.flush().ok();
+    write_required_output(&out, "sojourn", a.output.as_deref(), |w| {
+        writeln!(w, "individual\tentry\texit\tdwell")?;
+        for s in &result.completed {
+            writeln!(w, "{}\t{}\t{}\t{}", s.individual, s.entry, s.exit, s.dwell)?;
+        }
+        Ok(())
+    });
 
     // Summary to stderr (always).
     out.say(format_args!(
@@ -448,14 +456,15 @@ pub fn cmd_lineage_cohort(a: &LineageCohortArgs) {
     // `cohort` takes `align_zero`; the CLI flag is its inverse opt-in.
     let bins = sim::lineage::project::cohort(&entries, event, a.window, !a.align_first_event);
 
-    let mut w = open_required_output(&out, "cohort", a.output.as_deref());
     // Half-open windows `[window_start, window_stop)`, named as every other
     // table camdl writes names a window's boundaries (gh#833).
-    writeln!(w, "window_start\twindow_stop\tincidence\tcumulative").ok();
-    for b in &bins {
-        writeln!(w, "{}\t{}\t{}\t{}", b.start, b.end, b.incidence, b.cumulative).ok();
-    }
-    w.flush().ok();
+    write_required_output(&out, "cohort", a.output.as_deref(), |w| {
+        writeln!(w, "window_start\twindow_stop\tincidence\tcumulative")?;
+        for b in &bins {
+            writeln!(w, "{}\t{}\t{}\t{}", b.start, b.end, b.incidence, b.cumulative)?;
+        }
+        Ok(())
+    });
 
     let total: u64 = bins.last().map_or(0, |b| b.cumulative);
     out.say(format_args!(
