@@ -667,12 +667,14 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         if let Err(e) = write.write("loglik.toml", body.as_bytes()) {
             out.fail(format!("error: writing pfilter loglik.toml into {}: {}", cas_path.display(), e));
         }
+        // A leaf that did not commit is not stored (the abandoned claim drops
+        // as `Failed`), so this is an error, like the `loglik.toml` write
+        // above, and not a warning under exit 0.
         if let Err(e) = write.finalize(inputs_json) {
-            out.say(format_args!("warning: finalize pfilter leaf {}: {}", cas_path.display(), e));
-        } else {
-            out.milestone("stored", cas_path.display());
-            out.hint(format_args!("camdl cat {}", resolved_id.run_id.to_hex()));
+            out.fail(format!("error: finalize pfilter leaf {}: {}", cas_path.display(), e));
         }
+        out.milestone("stored", cas_path.display());
+        out.hint(format_args!("camdl cat {}", resolved_id.run_id.to_hex()));
     };
 
     // gh#audit-H13: --parallel / CAMDL_PARALLEL throttles the rayon thread
