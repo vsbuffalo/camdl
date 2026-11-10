@@ -556,21 +556,21 @@ fn main() {
             let mut refs = vec!["check"];
             refs.extend(a.args.iter().map(String::as_str));
             util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
-                eprintln!("error: {}", e); std::process::exit(1);
+                out::Out::new(false).fail(format!("error: {}", e));
             });
         }
         Command::Inspect(a) => {
             let mut refs = vec!["inspect"];
             refs.extend(a.args.iter().map(String::as_str));
             util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
-                eprintln!("error: {}", e); std::process::exit(1);
+                out::Out::new(false).fail(format!("error: {}", e));
             });
         }
         Command::Render(a) => {
             let mut refs = vec!["render"];
             refs.extend(a.args.iter().map(String::as_str));
             util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
-                eprintln!("error: {}", e); std::process::exit(1);
+                out::Out::new(false).fail(format!("error: {}", e));
             });
         }
         Command::Docs(a)                => docs::cmd_docs(&a),
@@ -582,14 +582,14 @@ fn main() {
         Command::Dev(DevCmd::Compile(a)) => {
             let refs: Vec<&str> = a.args.iter().map(String::as_str).collect();
             util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
-                eprintln!("error: {}", e); std::process::exit(1);
+                out::Out::new(false).fail(format!("error: {}", e));
             });
         }
         Command::Dev(DevCmd::Doctest(a)) => {
             let mut refs = vec!["doctest"];
             refs.extend(a.args.iter().map(String::as_str));
             util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
-                eprintln!("error: {}", e); std::process::exit(1);
+                out::Out::new(false).fail(format!("error: {}", e));
             });
         }
     }
@@ -606,11 +606,11 @@ const SEED_MIX_PRIOR: u64  = 0x0014_b1ce;      // prior draws RNG
 /// every `run.json` under the store. Drops entries for leaves no longer on
 /// disk and adds every leaf found.
 fn cmd_reindex(a: &args::ReindexArgs) {
+    let out = out::Out::new(false);
     match cas_index::rebuild(&a.root) {
-        Ok(n) => println!("reindexed {} run(s) under {}", n, a.root.display()),
+        Ok(n) => out.report_line(format_args!("reindexed {} run(s) under {}", n, a.root.display())),
         Err(e) => {
-            eprintln!("error: failed to write index at {}: {}", a.root.display(), e);
-            std::process::exit(1);
+            out.fail(format!("error: failed to write index at {}: {}", a.root.display(), e));
         }
     }
 }
@@ -3530,7 +3530,7 @@ impl engine::RunSink for StreamSink {
                 Ok(zero_count) => {
                     if zero_count > 0 {
                         if let Some(n) = never_fired_notice(&never_fired(&traj.transition_diagnostics)) {
-                            eprintln!("{}", n.render());
+                            crate::out::detached().notice(&n);
                         }
                     }
                 }
