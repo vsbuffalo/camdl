@@ -178,7 +178,12 @@ let () =
     let spec = [
       ("--set", Arg.String (fun s ->
         match String.split_on_char '=' s with
-        | [k; v] -> set_kvs := (k, float_of_string v) :: !set_kvs
+        | [k; v] ->
+          (match float_of_string_opt v with
+           | Some x -> set_kvs := (k, x) :: !set_kvs
+           | None ->
+             Printf.eprintf "bad --set %s: '%s' is not a number (want NAME=VALUE)\n" s v;
+             exit 1)
         | _ -> Printf.eprintf "bad --set %s (want NAME=VALUE)\n" s; exit 1
        ), "NAME=VALUE  override a parameter value");
       ("--json-errors", Arg.Unit (fun () ->
