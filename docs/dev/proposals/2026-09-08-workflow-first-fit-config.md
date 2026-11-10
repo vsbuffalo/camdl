@@ -2,12 +2,17 @@
 
 **Amended by:** 2026-10-29-method-scoped-settings.md §13.2 (rw_sd and
 perturb_only_at_t0 move under [method]; the §9 follow-up is done). **Status:**
-Proposal **Date:** 2026-09-08 **Motivation:** the `[stages]` half of `fit.toml`
-is a pipeline engine whose one composition primitive, `init_mle`, destroys the
-property that convergence diagnostics need, and whose vocabulary (an algorithm
-per entry) cannot express the workflow steps the Bayesian workflow literature
-treats as core. Replace it with a problem/method split, one method per file, and
-workflow steps as `fit` subcommands.
+Partly implemented. Landed: increment 1, the `[method]` / `starts` split
+(b44ec300) and its docs (d6fe3b75); increment 4's failure rules for
+`fit predict` (4733e067, e2fa8189). Not built: increment 2, `fit preflight`;
+increment 3, `fit recovery`; increment 4's evaluation label (`in_sample` or
+`held_out`) on the predictive; and increment 5's worked `Makefile` in
+`workflow.md`. **Date:** 2026-09-08 **Motivation:** the `[stages]` half of
+`fit.toml` is a pipeline engine whose one composition primitive, `init_mle`,
+destroys the property that convergence diagnostics need, and whose vocabulary
+(an algorithm per entry) cannot express the workflow steps the Bayesian workflow
+literature treats as core. Replace it with a problem/method split, one method
+per file, and workflow steps as `fit` subcommands.
 
 **Scope:** `rust/crates/cli/src/fit/config_v2.rs` (`FitConfigV2`, `Stage`,
 `StartsFrom`), `fit/init.rs` (`InitMethod`), the `fit run` stage loop in
