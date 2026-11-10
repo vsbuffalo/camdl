@@ -19,6 +19,18 @@ members = [
 ]
 resolver = "2"
 
+# One serde_json for the whole workspace, with `float_roundtrip`: without it
+# serde_json's float parser can land one ULP away from the decimal it reads
+# (`0.9724999999999999` parses as 0.9725), so a value written to JSON and read
+# back is not the value written (gh#1018). Every JSON read path — IR load,
+# summary JSON, diagnostics, events, fit.meta — relies on
+# `bits(parse(serialize(x))) == bits(x)`. Declared here once, and every crate
+# takes it with `serde_json.workspace = true`, so a crate built alone
+# (`cargo test -p ir`) parses exactly too, not only a build where feature
+# unification happens to switch it on.
+[workspace.dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
 [[test]]
 name = "golden_deser"
 path = "tests/golden_deser.rs"
