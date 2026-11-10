@@ -1376,8 +1376,10 @@ pub fn cmd_fit_predict(args: &crate::args::FitPredictArgs) {
     let out = crate::out::Out::new(false);
     match run_predict(&out, args) {
         Ok(outcome) => {
+            // What it wrote is the command's account of itself, not data:
+            // stderr, like every other command's `wrote` lines.
             for p in &outcome.written {
-                out.data_line(format_args!("wrote {}", p.display()));
+                out.say(format_args!("wrote {}", p.display()));
             }
             if !outcome.failures.is_empty() {
                 // What failed, then what was written — in that order, because
