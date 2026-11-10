@@ -1185,7 +1185,10 @@ fn fit_list_json_names_methods_and_can_tell_two_leaves_apart() {
     assert!(row.get("stages_declared").is_none(), "no `stages_declared`: {line}");
     // Tagged, in `table_row`'s form, so a consumer keys on the contract.
     assert_eq!(row["schema"]["name"], "fit_list_row", "{line}");
-    assert_eq!(row["schema"]["version"], 1, "{line}");
+    assert_eq!(row["schema"]["version"], 2, "{line}");
+    // v2 (gh#1009): the source config relative to the fit folder.
+    assert_eq!(row["source_config"], "demo.toml", "{line}");
+    assert!(row.get("fit_toml_path").is_none(), "{line}");
 
     // The two entries, and what tells them apart.
     let methods = row["methods"].as_array().expect("a `methods` array");
