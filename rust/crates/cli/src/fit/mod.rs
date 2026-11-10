@@ -2023,6 +2023,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     let nl_dt_check = nl_cfg.dt_check.clone();
 
                     nlopt_method::run_method(
+                        &out,
                         &sweep_config,
                         &method,
                         &method_dir,
