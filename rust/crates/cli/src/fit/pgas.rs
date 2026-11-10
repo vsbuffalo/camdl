@@ -294,9 +294,9 @@ pub fn run_method(
     if !force && !resume {
         let state_path = method_dir.join("fit_state.toml");
         if state_path.exists() {
-            eprintln!("{}", crate::out::paint::stderr().paint(&format!(
+            out.say(format_args!("{}", crate::out::paint::stderr().paint(&format!(
                 "pgas results already exist in {}. Use --force to re-run or --resume to continue.",
-                method_dir.display()), Style::Warn));
+                method_dir.display()), Style::Warn)));
             return Ok(());
         }
     }
@@ -370,43 +370,43 @@ pub fn run_method(
     // Report priors
     let any_non_flat = priors.iter().any(|p| !matches!(p, Prior::Fixed(Density::Flat)));
     if any_non_flat {
-        eprintln!("  priors:");
+        out.say("  priors:");
         for (spec, prior) in config.estimated_params.iter().zip(&priors) {
             match prior {
                 Prior::Fixed(Density::Flat) => {},
                 Prior::Fixed(Density::Uniform { lower, upper }) => {
-                    eprintln!("    {:12} Uniform({:.4}, {:.4})", spec.name, lower, upper);
+                    out.say(format_args!("    {:12} Uniform({:.4}, {:.4})", spec.name, lower, upper));
                 }
                 Prior::Fixed(Density::Normal { mean, sd }) => {
-                    eprintln!("    {:12} Normal({:.4}, {:.4})", spec.name, mean, sd);
+                    out.say(format_args!("    {:12} Normal({:.4}, {:.4})", spec.name, mean, sd));
                 }
                 Prior::Fixed(Density::TransformedNormal { mean, sd }) => {
-                    eprintln!("    {:12} LogNormal(mu={:.4}, sigma={:.4}) → median={:.1}",
-                        spec.name, mean, sd, mean.exp());
+                    out.say(format_args!("    {:12} LogNormal(mu={:.4}, sigma={:.4}) → median={:.1}",
+                        spec.name, mean, sd, mean.exp()));
                 }
                 Prior::Fixed(Density::HalfNormal { sigma }) => {
-                    eprintln!("    {:12} HalfNormal(sigma={:.4})", spec.name, sigma);
+                    out.say(format_args!("    {:12} HalfNormal(sigma={:.4})", spec.name, sigma));
                 }
                 Prior::Fixed(Density::Beta { alpha, beta }) => {
                     let mode = if *alpha > 1.0 && *beta > 1.0 {
                         (alpha - 1.0) / (alpha + beta - 2.0)
                     } else { 0.5 };
-                    eprintln!("    {:12} Beta({:.2}, {:.2}) → mode={:.3}",
-                        spec.name, alpha, beta, mode);
+                    out.say(format_args!("    {:12} Beta({:.2}, {:.2}) → mode={:.3}",
+                        spec.name, alpha, beta, mode));
                 }
                 Prior::Fixed(Density::Gamma { shape, rate }) => {
-                    eprintln!("    {:12} Gamma(shape={:.4}, rate={:.4})",
-                        spec.name, shape, rate);
+                    out.say(format_args!("    {:12} Gamma(shape={:.4}, rate={:.4})",
+                        spec.name, shape, rate));
                 }
                 Prior::Fixed(Density::Exponential { rate }) => {
-                    eprintln!("    {:12} Exponential(rate={:.4})", spec.name, rate);
+                    out.say(format_args!("    {:12} Exponential(rate={:.4})", spec.name, rate));
                 }
                 Prior::Fixed(Density::LogUniform { lower, upper }) => {
-                    eprintln!("    {:12} LogUniform({:.4e}, {:.4e})", spec.name, lower, upper);
+                    out.say(format_args!("    {:12} LogUniform({:.4e}, {:.4e})", spec.name, lower, upper));
                 }
                 Prior::Fixed(Density::TruncatedNormal { mean, sd, lower, upper }) => {
-                    eprintln!("    {:12} TruncatedNormal(mean={:.4}, sd={:.4}) on [{:.4}, {:.4}]",
-                        spec.name, mean, sd, lower, upper);
+                    out.say(format_args!("    {:12} TruncatedNormal(mean={:.4}, sd={:.4}) on [{:.4}, {:.4}]",
+                        spec.name, mean, sd, lower, upper));
                 }
                 Prior::Hierarchical(d) => {
                     // The full hierarchical metadata (pool_over, named args) lives
@@ -422,10 +422,10 @@ pub fn run_method(
                                     Some(p.param.clone())
                                 } else { None })
                                 .collect();
-                            eprintln!("    {:12} Hierarchical {}(...) | pool_over={} | parents=[{}]",
-                                spec.name, h.kind, h.pool_over, parents.join(", "));
+                            out.say(format_args!("    {:12} Hierarchical {}(...) | pool_over={} | parents=[{}]",
+                                spec.name, h.kind, h.pool_over, parents.join(", ")));
                         }
-                        None => eprintln!("    {:12} Hierarchical {}(...)", spec.name, d.kind_str()),
+                        None => out.say(format_args!("    {:12} Hierarchical {}(...)", spec.name, d.kind_str())),
                     }
                 }
             }
@@ -457,29 +457,29 @@ pub fn run_method(
                                 with --force.",
                                 chain));
                         }
-                        eprintln!("  chain {}: resuming from sweep {}", chain, state.completed_sweeps);
+                        out.say(format_args!("  chain {}: resuming from sweep {}", chain, state.completed_sweeps));
                         if let Some(gap) = sim::inference::types::z_restore_gaps(
                             &state.param_names, &state.transformed, &config.estimated_params)
                         {
-                            eprintln!("{gap}");
+                            out.say(format_args!("{gap}"));
                         }
                         if state.completed_sweeps >= n_sweeps {
-                            eprintln!("  warning: chain already completed {} sweeps (requested {}). \
+                            out.say(format_args!("  warning: chain already completed {} sweeps (requested {}). \
                                        Increase sweeps in fit.toml to continue.",
-                                state.completed_sweeps, n_sweeps);
+                                state.completed_sweeps, n_sweeps));
                         }
                         states.push(Some(state));
                     }
                     Err(e) => {
-                        eprintln!("error: cannot deserialize resume state for chain {}: {}. \
-                            Resume state format may have changed — re-run with --force.", chain, e);
+                        out.say(format_args!("error: cannot deserialize resume state for chain {}: {}. \
+                            Resume state format may have changed — re-run with --force.", chain, e));
                         any_failed = true;
                         states.push(None);
                     }
                 }
                 Err(_) => {
-                    eprintln!("error: no resume state file for chain {} ({})",
-                        chain, path.display());
+                    out.say(format_args!("error: no resume state file for chain {} ({})",
+                        chain, path.display()));
                     any_failed = true;
                     states.push(None);
                 }
@@ -506,29 +506,29 @@ pub fn run_method(
     let chain_starts: Vec<Vec<f64>> =
         drawn.to_param_vecs(&config.estimated_params, &config.base_params);
 
-    eprintln!("\npgas: {} chains × {} sweeps × {} particles, burn_in={}, thin={}",
-        n_chains, n_sweeps, n_particles, burn_in, thin);
-    eprintln!("  chain starts: starts = {} (per-parameter ranges below)",
-        starts.rule.spelled());
+    out.say(format_args!("\npgas: {} chains × {} sweeps × {} particles, burn_in={}, thin={}",
+        n_chains, n_sweeps, n_particles, burn_in, thin));
+    out.say(format_args!("  chain starts: starts = {} (per-parameter ranges below)",
+        starts.rule.spelled()));
     for spec in &config.estimated_params {
         let vals: Vec<f64> = chain_starts.iter().map(|p| p[spec.index]).collect();
-        eprintln!("    {:12} [{:.4} .. {:.4}]", spec.name,
+        out.say(format_args!("    {:12} [{:.4} .. {:.4}]", spec.name,
             vals.iter().cloned().fold(f64::INFINITY, f64::min),
-            vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+            vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max)));
     }
-    eprintln!("  estimated output: {} posterior samples per chain",
-        (n_sweeps.saturating_sub(burn_in)) / thin);
+    out.say(format_args!("  estimated output: {} posterior samples per chain",
+        (n_sweeps.saturating_sub(burn_in)) / thin));
 
     // gh#727. Latent paths are spaced over the RETAINED DRAWS, not over the
     // sweeps, so every written path lands on a draw a consumer can join it to.
     // Resolved HERE — before a single sweep runs — so the counts reported at
     // configuration time and the sweeps actually written come from one place.
     let traj_plan = TrajectoryStridePlan::resolve(n_sweeps, burn_in, n_trajectories, thin);
-    eprintln!("  saved latent paths: {} per chain, {} of them forkable \
+    out.say(format_args!("  saved latent paths: {} per chain, {} of them forkable \
         (one every {} of {} retained draws, thin {})",
         traj_plan.n_saved, traj_plan.n_forkable,
         traj_plan.draw_stride.map_or("—".to_string(), |s| s.to_string()),
-        traj_plan.n_draws, thin);
+        traj_plan.n_draws, thin));
 
     // Pre-create chain directories (must happen before parallel spawn)
     for chain in ChainIndex::all(n_chains) {
@@ -993,7 +993,7 @@ pub fn run_method(
                     && writes_path(sweep - burn_in, thin, draw_stride)
                 {
                     match traj.to_trajectory(&incidence_streams) {
-                        Err(e) => crate::out::status::step("pgas-traj",
+                        Err(e) => out.milestone("pgas-traj",
                             format!("skipping trajectory {sweep} (incoherent record): {e}")),
                         Ok((path_traj, incidence)) => {
                             saved_draws.borrow_mut().push(PosteriorDraw {
@@ -1062,10 +1062,10 @@ pub fn run_method(
                     retry_rejected.lock().unwrap().push(super::chain_starts::RejectedStart {
                         chain_id, attempt, values, reason: reason.clone(), ess: None,
                     });
-                    eprintln!(
+                    out.say(format_args!(
                         "  chain {}: start {} of {} refused ({}); drawing another",
                         chain, attempt + 1, super::chain_starts::MAX_START_ATTEMPTS,
-                        reason);
+                        reason));
                     attempt += 1;
                     let cs = super::runner::redraw_chain_start_for(
                         &config, estimate, starts, n_chains, chain_id, seed, attempt,
@@ -1131,8 +1131,8 @@ pub fn run_method(
                         // every other artifact name it (gh#990).
                         chain_id, params, reason: reason.clone(), attempts,
                     });
-                    eprintln!("  chain {}: {} — {}",
-                        chain, crate::out::paint::stderr().paint("✗ BadInit", Style::Err), reason);
+                    out.say(format_args!("  chain {}: {} — {}",
+                        chain, crate::out::paint::stderr().paint("✗ BadInit", Style::Err), reason));
                     // gh#751: and in `progress.json`, where a watcher sees it
                     // now rather than when the method ends. The short tag is the
                     // machine-readable half of the same finding the `BadInit`
@@ -1211,12 +1211,12 @@ pub fn run_method(
             }
 
             let chain_elapsed = chain_start.elapsed();
-            eprintln!("  chain {} done: {:.1}s, acceptance: [{}]",
+            out.say(format_args!("  chain {} done: {:.1}s, acceptance: [{}]",
                 chain,
                 chain_elapsed.as_secs_f64(),
                 config.estimated_params.iter().zip(&result.acceptance_rates)
                     .map(|(p, &r)| format!("{}={:.0}%", p.name, r * 100.0))
-                    .collect::<Vec<_>>().join(", "));
+                    .collect::<Vec<_>>().join(", ")));
 
             // gh#audit-C7. Surface per-chain NUTS diagnostics so the post-loop
             // diagnostic-collector pass can construct DivergentTransitions /
@@ -1284,10 +1284,10 @@ pub fn run_method(
     // than silently dropped. Mirrors PMMH (`pmmh.rs`).
     let n_good_chains = all_results.len();
     if n_good_chains < n_chains {
-        eprintln!("\n{} \
+        out.say(format_args!("\n{} \
                    ({} skipped via BadInit; see diagnostics below)",
             crate::out::paint::stderr().paint(&format!("ran {n_good_chains} of {n_chains} chains"), Style::Warn),
-            n_chains - n_good_chains);
+            n_chains - n_good_chains));
     }
 
     // gh#607. Every chain was refused at its start — there is no posterior to
@@ -1576,7 +1576,7 @@ pub fn run_method(
     // still authoritative. Exit cleanly without re-aggregating.
     let any_new_sweeps = all_results.iter().any(|(_, sweeps, _)| !sweeps.is_empty());
     if !any_new_sweeps {
-        eprintln!("\npgas: --resume found all chains at the target sweep \
+        out.say("\npgas: --resume found all chains at the target sweep \
             count. Nothing to do.");
         return Ok(());
     }
@@ -1744,7 +1744,7 @@ pub fn run_method(
         f.flush()
             .map_err(|e| format!("cannot write {}: {}", draws_path.display(), e))?;
         drop(f);
-        eprintln!("  draws.tsv: {} posterior samples (all {} params)", n_draws, all_names.len());
+        out.say(format_args!("  draws.tsv: {} posterior samples (all {} params)", n_draws, all_names.len()));
     }
 
     // Persist the findings; the end of the run prints them once, merged.
@@ -1757,6 +1757,7 @@ pub fn run_method(
     // read-only — k² evaluations of the density the sampler already ran, after
     // every draw is written, consuming no randomness.
     write_cross_chain_compat(
+        out,
         &config, dt, &all_results, chain_final_draw.into_inner().unwrap(), method_dir);
 
     // The completion line and the best sweep's log-likelihood are drawn at
@@ -1968,6 +1969,7 @@ fn chain_event_text(chain: ChainIndex, event: &PgasEvent) -> String {
 /// on disk, so a failure here reports itself on stderr and leaves the fit
 /// intact rather than failing a completed run.
 fn write_cross_chain_compat(
+    out: &crate::out::Out,
     config: &FitRunConfig,
     dt: f64,
     all_results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
@@ -2009,7 +2011,7 @@ fn write_cross_chain_compat(
     {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("warning: cross-chain compatibility matrix skipped: {e}");
+            out.say(format_args!("warning: cross-chain compatibility matrix skipped: {e}"));
             return;
         }
     };
@@ -2020,12 +2022,12 @@ fn write_cross_chain_compat(
         Ok(Some(c)) => c,
         Ok(None) => return,
         Err(e) => {
-            eprintln!("warning: cross-chain compatibility matrix skipped: {e}");
+            out.say(format_args!("warning: cross-chain compatibility matrix skipped: {e}"));
             return;
         }
     };
     if let Err(e) = compat.write(&method_dir.join(super::cross_chain_compat::CROSS_CHAIN_COMPAT_JSON)) {
-        eprintln!("warning: {e}");
+        out.say(format_args!("warning: {e}"));
     }
 }
 
