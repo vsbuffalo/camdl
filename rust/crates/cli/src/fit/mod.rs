@@ -2877,7 +2877,9 @@ pub fn cmd_fit_diff(args: &crate::args::FitDiffArgs) {
         (None, Some(m)) => out.report_line(format_args!("  [method]: (new) {}", m.algorithm.method_name())),
         (Some(_), None) => out.report_line("  [method]: (removed)"),
         (Some(ma), Some(mb)) => {
-            let changes = config_diff::method_setting_changes(ma, mb);
+            // `b` is the side being described, `a` its baseline: the
+            // header reads `a → b`, and so does every line under it.
+            let changes = config_diff::method_setting_changes(mb, ma);
             if changes.is_empty() {
                 out.report_line("  (no method changes)");
             } else {

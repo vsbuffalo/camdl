@@ -414,8 +414,8 @@ cat	stdout	line	1076	619
 show.refused	stderr	line	error:	no run matches 'zzzzzzzz' in ./results
 fit.diff	stdout	line	diff:	if2.toml → pmmh_converged.toml
 fit.diff	stdout	block	Model:	(no model changes)
-fit.diff	stdout	line	algorithm:	"pmmh" → "if2"
-fit.diff	stdout	line	particles:	100 → 200
+fit.diff	stdout	line	algorithm:	"if2" → "pmmh"
+fit.diff	stdout	line	particles:	200 → 100
 fit.diff.refused	stderr	line	error loading nope.toml:	cannot read nope.toml
 fit.table	stdout	line	fit_id	best_ll
 fit.table	stdout	line	converged	pmmh     pmmh    yes             -44.3 marginal
