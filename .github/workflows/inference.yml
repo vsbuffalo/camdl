@@ -14,6 +14,10 @@ on:
     paths:
       - "rust/crates/sim/**"
       - "rust/crates/ir/**"
+      - "rust/crates/numerics/**"
+      - "rust/Cargo.lock"
+      - "rust/rust-toolchain.toml"
+      - "tests/fixtures/**"
       - "ir/**"
       - "ocaml/**"
       - ".github/workflows/inference.yml"
@@ -22,6 +26,10 @@ on:
     paths:
       - "rust/crates/sim/**"
       - "rust/crates/ir/**"
+      - "rust/crates/numerics/**"
+      - "rust/Cargo.lock"
+      - "rust/rust-toolchain.toml"
+      - "tests/fixtures/**"
       - "ir/**"
       - "ocaml/**"
       - ".github/workflows/inference.yml"
