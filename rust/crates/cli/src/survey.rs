@@ -116,7 +116,7 @@ struct ResolvedSurveyInputs {
 pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // survey has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
-    let out = crate::out::Out::new(false);
+    let mut out = crate::out::Out::new(false);
     // Validate input mode mutual exclusion at the boundary.
     if a.fit.is_none() {
         if a.data.is_none() {
@@ -429,6 +429,9 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         }
     };
     let staging = write.dir().to_path_buf();
+    // `Out` holds the claim until the finalize below, so every error it
+    // reports while the survey runs marks the leaf `failed` (`Out::error`).
+    out.hold_claim(write, "survey");
     let landscape_path = staging.join("landscape.tsv");
     let summary_path = staging.join("summary.json");
     let html_path = staging.join("landscape.html");
@@ -652,6 +655,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // `stored` is said once it is true: after every point is evaluated and
     // the leaf is committed. A leaf that did not commit is not stored, and
     // the survey fails rather than exiting 0 on a warning.
+    let write = out.take_claim().expect("the claim is held from the claim to here");
     if let Err(e) = write.finalize(inputs_json) {
         out.fail(format!("error: finalize survey leaf {}: {}", run_dir.display(), e));
     }

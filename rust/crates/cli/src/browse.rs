@@ -2007,6 +2007,7 @@ mod tests {
             levels,
             deps: vec![],
             status: runid::RunStatus::Completed,
+            failure: None,
             artifacts: Default::default(),
             output_schema: Default::default(),
             children: Default::default(),

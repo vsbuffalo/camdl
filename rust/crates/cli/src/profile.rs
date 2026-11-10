@@ -2001,7 +2001,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // Through the claim (fsync'd), error fatal: a discarded write error
         // could finalize a Completed point with no mle.toml in it.
         if let Err(e) = write.write("mle.toml", mle_toml.as_bytes()) {
-            out.fail(format!("error: writing mle.toml into {}: {}", cas_path.display(), e));
+            out.fail_with_claim(write, "profile", format!(
+                "error: writing mle.toml into {}: {}", cas_path.display(), e));
         }
 
         if let Err(e) = write.finalize(inputs_json) {

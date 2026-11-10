@@ -662,7 +662,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         // Through the claim (fsync'd), and the error is fatal: a discarded
         // write error could finalize a Completed leaf with no loglik.toml in it.
         if let Err(e) = write.write("loglik.toml", body.as_bytes()) {
-            out.fail(format!("error: writing pfilter loglik.toml into {}: {}", cas_path.display(), e));
+            out.fail_with_claim(write, "pfilter", format!(
+                "error: writing pfilter loglik.toml into {}: {}", cas_path.display(), e));
         }
         // A leaf that did not commit is not stored (the abandoned claim drops
         // as `Failed`), so this is an error, like the `loglik.toml` write
