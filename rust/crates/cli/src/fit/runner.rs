@@ -604,7 +604,7 @@ impl FitRunConfig {
 
         let param_names: Vec<String> =
             model.parameters.iter().map(|p| p.name.clone()).collect();
-        Ok(FitRunConfig {
+        let config = FitRunConfig {
             compiled: Arc::new(compiled),
             model,
             model_declared,
@@ -621,7 +621,14 @@ impl FitRunConfig {
             loglik_eval: super::config_v2::LoglikEvalConfig::default(),
             gate: super::config_v2::GateConfig::default(),
             applied_training_window,
-        })
+        };
+        // The one place bound observation data can be refused. Every later
+        // `build_obs_model` (per chain, per filter call) binds the same
+        // streams to the same model, so a config that binds here binds there.
+        // The refusal returns to the caller, which abandons the method with
+        // its record; the later builds have no error path to take.
+        config.try_build_obs_model()?;
+        Ok(config)
     }
 
     /// Build the inference process. The integrator `dt` is supplied per call to
@@ -631,24 +638,33 @@ impl FitRunConfig {
     pub fn build_process(&self) -> sim::inference::ChainBinomialProcess {
         sim::inference::ChainBinomialProcess::new(self.compiled.clone())
     }
-    pub fn build_obs_model(&self) -> sim::inference::MultiStreamObsModel {
+    /// The observation model and the text of a non-fatal bind report (empty
+    /// when it found nothing), or the refusal as the message the command
+    /// prints.
+    fn try_build_obs_model(&self) -> Result<(sim::inference::MultiStreamObsModel, String), String> {
         let specs = stream_specs_from_obs_streams(&self.streams);
         let (bound, report) = sim::inference::BoundObs::bind(
             self.compiled.model.simulation.t_start, specs,
-        ).unwrap_or_else(|report| {
-            crate::out::detached().fail(format!("error: observation data invalid:\n{}", report.render()));
-        });
+        ).map_err(|report| format!("error: observation data invalid:\n{}", report.render()))?;
 
+        let warning = if report.findings().is_empty() { String::new() } else { report.render() };
+        sim::inference::MultiStreamObsModel::new(bound, self.compiled.clone())
+            .map(|m| (m, warning))
+            .map_err(|e| format!("error: observation model construction failed: {:?}", e))
+    }
+    /// The observation model of a built config. [`FitRunConfig::build`] has
+    /// already bound these streams once, so the refusal is not reachable here.
+    pub fn build_obs_model(&self) -> sim::inference::MultiStreamObsModel {
+        let (model, warning) = self.try_build_obs_model().unwrap_or_else(|e| {
+            unreachable!("a built FitRunConfig's observation data bind: {e}")
+        });
         // gh#812: a non-fatal bind report was previously discarded, so the
         // Warn channel was write-only. Surface it — a zero denominator scores
         // as zero, and the user must be told which rows and why.
-        if !report.findings().is_empty() {
-            crate::out::detached().say(format_args!("{}", report.render()));
+        if !warning.is_empty() {
+            crate::out::detached().say(format_args!("{warning}"));
         }
-        sim::inference::MultiStreamObsModel::new(bound, self.compiled.clone())
-            .unwrap_or_else(|e| {
-                crate::out::detached().fail(format!("error: observation model construction failed: {:?}", e));
-            })
+        model
     }
     pub fn smc_config(&self) -> sim::inference::traits::SMCConfig {
         sim::inference::traits::SMCConfig {

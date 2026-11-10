@@ -95,3 +95,20 @@ fn a_successful_nlopt_leaf_holds_diagnostics_json() {
     assert!(findings.iter().all(|f| f["kind"]["type"] != "rhat_high"), "{findings:?}");
 }
 
+#[test]
+fn an_observation_file_that_does_not_bind_abandons_the_fit_with_its_record() {
+    let tmp = workdir();
+    // Two rows at one time: the schedule is not strictly increasing.
+    std::fs::write(tmp.path().join("cases.tsv"), "time\tcases\n1\t1\n2\t4\n2\t5\n3\t11\n").unwrap();
+    let out = command(tmp.path())
+        .args(["fit", "run", "if2.toml", "--seed", "1", "--progress", "none"])
+        .output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    let leaf = the_leaf(tmp.path());
+    let log = std::fs::read_to_string(leaf.join("events.jsonl")).unwrap();
+    let last: serde_json::Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_eq!(last["event"], "method_report", "{log}");
+    assert_eq!(last["outcome"], "failed", "{last}");
+    let _ = findings_of(&leaf);
+}
