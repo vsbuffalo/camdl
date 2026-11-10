@@ -864,7 +864,7 @@ pub fn store_fit_sidecar(fit_segment: &std::path::Path, sidecar: &FitSidecar) ->
 /// `to` as a path relative to the directory `from`, computed between the two
 /// canonical (symlink-resolved, absolute) paths, so joining it back onto `from`
 /// reaches `to` whatever directory the process runs in. Both must exist.
-fn relative_path(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<String> {
+pub(crate) fn relative_path(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<String> {
     use std::path::Component;
     let from = std::fs::canonicalize(from)?;
     let to = std::fs::canonicalize(to)?;

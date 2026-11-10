@@ -473,19 +473,24 @@ post-warm-up cloud), `diagnostics.json`, and per chain `chain_N/trace.tsv`,
 so a bare `toml` reader still sees the parameters at the top level. The block
 records `camdl_version`, `timestamp`, `content_hash` (a tamper hash over the
 numeric values only, at 12-decimal precision, so editing a provenance field does
-not invalidate it), `fit_hash`, `backend`, `dt`, `model`, `model_identity`,
-per-stream `[provenance.data]` path+hash entries, `seed`, `method`, `chain`
-(counted from 0, §2), `log_likelihood`, `loglik_sd`, `n_particles`, and optional
-`ess_mean`/`ess_min`. For IF2, `log_likelihood` is the loglik-eval re-score of
-the winning chain, so `loglik_sd` is that re-score's Monte Carlo standard error
-(the `±` on the stderr line), `n_particles` its particles per replicate (not the
-IF2 swarm's size), and `ess_mean`/`ess_min` its effective sample size; an
-ODE-backend NLopt fit has no particle filter and records `loglik_sd = 0` and
-`n_particles = 0`. `camdl simulate --params` reads `backend`/`dt` back to warn
-when a downstream simulation would run under different dynamics than the fit,
-and refuses the file when its parameter values no longer hash to `content_hash`
-(they were edited after the fit), naming the file: re-run the fit, or remove the
-`[provenance]` block to run the edited values as a plain params file.
+not invalidate it), `fit_hash`, `backend`, `dt`, `source_model`,
+`model_identity`, per-stream `[provenance.data]` entries of `source` and `hash`,
+`seed`, `method`, `chain` (counted from 0, §2), `log_likelihood`, `loglik_sd`,
+`n_particles`, and optional `ess_mean`/`ess_min`. `source_model` and each data
+`source` are paths relative to the fit folder (`fits/<stem>-<h8>/`, two levels
+above the leaf holding the file), by the rule `fit.meta.json`'s `source_model`
+follows (§2.2.1), so neither depends on the directory the fit was run from; each
+is absent when its file did not exist when the fit ran. For IF2,
+`log_likelihood` is the loglik-eval re-score of the winning chain, so
+`loglik_sd` is that re-score's Monte Carlo standard error (the `±` on the stderr
+line), `n_particles` its particles per replicate (not the IF2 swarm's size), and
+`ess_mean`/`ess_min` its effective sample size; an ODE-backend NLopt fit has no
+particle filter and records `loglik_sd = 0` and `n_particles = 0`.
+`camdl simulate --params` reads `backend`/`dt` back to warn when a downstream
+simulation would run under different dynamics than the fit, and refuses the file
+when its parameter values no longer hash to `content_hash` (they were edited
+after the fit), naming the file: re-run the fit, or remove the `[provenance]`
+block to run the edited values as a plain params file.
 
 #### 2.2.1 `fit.meta.json` — fit-level sidecar
 

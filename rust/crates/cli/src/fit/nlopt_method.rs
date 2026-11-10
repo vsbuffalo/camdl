@@ -336,6 +336,10 @@ pub fn run_method(
     let mle_path = method_dir.join("mle_params.toml");
     let mle_meta = provenance::MleMetadata {
         input_hash: parent_fit_hash.to_string(),
+        // The leaf is `<fit folder>/<method>-<h8>/seed_<n>-<h8>`.
+        fit_folder: method_dir.ancestors().nth(2)
+            .expect("a method leaf sits two levels below its fit folder")
+            .to_path_buf(),
         model_path: fit.model.camdl.clone(),
         model_identity: model_identity.to_string(),
         data_hashes: data_hashes.to_vec(),
