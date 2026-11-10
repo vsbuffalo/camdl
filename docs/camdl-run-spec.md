@@ -4778,23 +4778,33 @@ source's `draws.tsv`, a `from_mle` source's `fit_state.toml` and a `from_params`
 TOML each enter `deps` as their file digest, so rewriting the file in place
 re-keys the fit.
 
-**A separate, narrower hash guards `--resume`.**
-`fit::provenance::fit_stage_hash` digests
-`model_ir_json ++ data bytes ++ [estimate] specs ++ resolved [fixed] ++
-simplex groups ++ Method::identity_payload() ++ seed ++
-camdl version`,
-and is stored in each chain's `resume_state.bin`. PMMH and PGAS refuse to resume
-when it differs:
+**`--resume` is guarded by the run's own identity, less its length.** A resumed
+PMMH or PGAS run (the two methods `--resume` accepts) extends its base's chains,
+so it lands in a leaf of its own: its `method` level carries the new target
+length and a dep on the base. That dep, `cas::cas_resume_dep`, is the base
+leaf's `run_id` plus one digest over every chain's `resume_state.bin` in chain
+order, the files the resume continues from. It is not the base's
+`fit_state.toml`, which records when the base finished, so two runs of one
+fixed-seed base address one resumed leaf (gh#1015).
+
+Continuing a base's chain state is sound only if every other input is the one
+the base ran under. The key that checks this, `cas::resume_guard`, hashes the
+same three levels (`fit` / `method` / `seed`) as the leaf's `run_id`, with the
+target length set to zero and the method level's deps taken without the resume
+base's dep, so only a sourced start's dep remains. Each chain's
+`resume_state.bin` records the key as `config_hash`, and a resume refuses a
+chain whose recorded key differs:
 
 ```
-error: config hash mismatch for chain 0 — model/data/priors have changed
-since the original run. Cannot resume. Re-run from scratch with --force.
+error: config hash mismatch for chain 0 — cannot resume. Either the
+model/data/priors changed since the original run, or this chain predates a
+camdl version that changed how a method's identity is computed (…). Re-run
+from scratch with --force.
 ```
 
-This hash is **not** the CAS fit identity and covers a strictly narrower input
-set (no `[data.holdout]` contents, no `[config]` block, no resolved
-`obs_alignment`, no `n_trajectories`, and no presentation normalization of the
-model IR).
+Because the key is the run's identity, it covers every input that re-keys a fit
+(`[config]` with its `dt`, the scenario, `ic_free`, the holdout,
+`n_trajectories`, the resolved observation alignment) and nothing else.
 
 ### 9.5 run.json — the per-run metadata contract
 
