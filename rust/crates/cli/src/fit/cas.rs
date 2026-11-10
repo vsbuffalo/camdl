@@ -690,8 +690,8 @@ fn leaf_run_id(leaf: &Path) -> Option<ContentHash> {
 }
 
 /// The lineage dep for a named artifact under a method leaf — `draws.tsv`
-/// for a `from_posterior` source, `fit_state.toml` for `from_mle`: the
-/// leaf's `run_id` (its identity, from `run.json`; the file's digest when the
+/// for a `from_posterior` source (a `from_mle` source keys on less than its
+/// whole file: [`cas_mle_start_dep`]): the leaf's `run_id` (its identity, from `run.json`; the file's digest when the
 /// directory is not a CAS leaf) plus the consumed file's content digest, so a
 /// regenerated leaf re-keys the run that starts from it.
 pub fn cas_leaf_file_dep(leaf: &Path, artifact: &str) -> Option<ArtifactRef> {
@@ -705,13 +705,55 @@ pub fn cas_leaf_file_dep(leaf: &Path, artifact: &str) -> Option<ArtifactRef> {
     })
 }
 
+/// The lineage dep for a `from_mle` source: the source leaf's `run_id` plus a
+/// digest of the `start_values` its `fit_state.toml` records — the point
+/// estimate every chain of the consuming fit starts from, and the only part of
+/// that file the consuming fit reads as an input.
+///
+/// The rest of `fit_state.toml` is a record of how the source run went: its
+/// finish `timestamp` and `camdl_version`, per-chain log-likelihoods,
+/// convergence diagnostics. None of it changes the starting point, so none of
+/// it may key the consumer. Digesting the whole file did: re-running the source
+/// with `--force` rewrote its timestamp, and every fit started from it
+/// re-keyed and re-ran from identical starts. (The convergence gate reads those
+/// diagnostics, but it decides only whether the consumer runs at all, never
+/// what it computes.)
+///
+/// The values are hashed by their raw `f64` bits, sorted by name and
+/// count-prefixed ([`runid::CanonicalHasher::write_str_f64_map`]), under a
+/// type tag of their own. `artifact` names the field, not the file, so a
+/// reader of `run.json` sees what was keyed.
+///
+/// `fit_state` is the source's `fit_state.toml`; its directory is the leaf.
+/// Unreadable → `None`, as for [`cas_file_dep`]: the draw downstream fails with
+/// the real message.
+pub fn cas_mle_start_dep(fit_state: &Path) -> Option<ArtifactRef> {
+    let leaf = fit_state.parent()?;
+    let state = super::state::FitState::load(&leaf.to_string_lossy()).ok()?;
+    let mut h = runid::CanonicalHasher::new();
+    h.write_type_tag("camdl::fit::from_mle::start_values");
+    h.write_schema_version(1);
+    h.write_str_f64_map(state.start_values.iter());
+    let digest = h.finalize();
+    Some(ArtifactRef {
+        run_id: leaf_run_id(leaf).unwrap_or(digest),
+        kind: ArtifactKind::FitMethod,
+        artifact: MLE_START_ARTIFACT.to_string(),
+        digest,
+    })
+}
+
+/// The `artifact` a `from_mle` dep records: the field of `fit_state.toml` the
+/// digest covers.
+pub const MLE_START_ARTIFACT: &str = "fit_state.toml:start_values";
+
 /// Content dependency on a chain-start source file named directly — a
 /// `from_posterior` draws TSV or a `from_params` TOML (gh#541).
 ///
 /// A path answers WHICH FILE; the starting values are WHAT IS IN IT. Rewrite
 /// `draws.tsv` in place with different draws, re-run, and a path-keyed
-/// identity serves the previous file's fit. `from_mle` folds the leaf's
-/// `fit_state.toml` digest through `cas_leaf_file_dep` for the same reason.
+/// identity serves the previous file's fit. `from_mle` folds the digest of the
+/// `start_values` it reads through [`cas_mle_start_dep`] for the same reason.
 ///
 /// Missing or unreadable file → `None`, and the run proceeds unkeyed on it. The
 /// loader downstream fails with a real message naming the path; refusing here
@@ -1140,6 +1182,61 @@ mod tests {
         // path with a real message; failing here would replace it with a worse
         // one from the identity layer.
         assert!(cas_file_dep(&d.path().join("nope.tsv"), "draws.tsv").is_none());
+    }
+
+    /// A `from_mle` source keys the consuming fit on the `start_values` it
+    /// reads, and on nothing else in `fit_state.toml`. The digest covered the
+    /// whole file, so re-running the source (a new `timestamp`, a new
+    /// `camdl_version`, other per-chain log-likelihoods) re-keyed every fit
+    /// started from it although its starting point was unchanged.
+    #[test]
+    fn cas_mle_start_dep_keys_on_the_start_values_alone() {
+        let write_state = |dir: &Path, finished_at: &str, best_loglik: f64, beta: f64| {
+            let path = dir.join("fit_state.toml");
+            std::fs::write(
+                &path,
+                format!(
+                    "method = \"if2\"\nseed = 1\ntimestamp = \"{finished_at}\"\n\
+                     camdl_version = \"0.3.0+{finished_at}\"\n\
+                     best_loglik = {best_loglik}\ninitial_loglik = -20.0\nbest_chain = 1\n\
+                     n_chains = 2\nchain_logliks = [{best_loglik}, -11.0]\n\n\
+                     [start_values]\nbeta = {beta}\ngamma = 0.15\n"
+                ),
+            )
+            .unwrap();
+            path
+        };
+        let a = tempfile::tempdir().unwrap();
+        let dep_a = cas_mle_start_dep(&write_state(a.path(), "2026-11-10T02:17:08Z", -10.0, 0.3))
+            .expect("a readable fit_state.toml");
+        let b = tempfile::tempdir().unwrap();
+        let dep_b = cas_mle_start_dep(&write_state(b.path(), "2026-11-10T09:41:55Z", -10.5, 0.3))
+            .expect("a readable fit_state.toml");
+        assert_eq!(dep_a, dep_b,
+            "the same start_values, recorded at another time with other diagnostics, \
+             are the same starting point");
+        assert_eq!(dep_a.artifact, MLE_START_ARTIFACT);
+
+        // The load-bearing direction: a different point estimate re-keys.
+        let moved = cas_mle_start_dep(&write_state(b.path(), "2026-11-10T09:41:55Z", -10.5, 0.30000000000000004))
+            .unwrap();
+        assert_ne!(dep_a.digest, moved.digest,
+            "a start value one ULP away is a different start and must re-key");
+
+        // A source leaf's identity is the dep's `run_id`, read from its run.json.
+        let leaf_id = "ab".repeat(32);
+        std::fs::write(
+            b.path().join("run.json"),
+            format!(
+                r#"{{"format_version":1,"kind":"fit_method","run_id":"{leaf_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[],"status":"completed","artifacts":{{}},"inputs":null,"provenance":{{}}}}"#
+            ),
+        )
+        .unwrap();
+        let from_leaf = cas_mle_start_dep(&b.path().join("fit_state.toml")).unwrap();
+        assert_eq!(from_leaf.run_id.to_hex(), leaf_id);
+        assert_eq!(from_leaf.digest, moved.digest, "the leaf's identity does not enter the digest");
+
+        assert!(cas_mle_start_dep(&a.path().join("missing").join("fit_state.toml")).is_none());
     }
 
     /// gh#1015: a `--resume` base is keyed by its chains' resume states, the
