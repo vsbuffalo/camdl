@@ -515,9 +515,9 @@ impl FitRunConfig {
         }
 
         if streams.len() > 1 {
-            eprintln!("  {} observation streams: {}",
+            crate::out::detached().say(format_args!("  {} observation streams: {}",
                 streams.len(),
-                streams.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
+                streams.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")));
         }
 
         let ic_free = fit.likelihood_objective().skips_first_observation();
@@ -636,20 +636,18 @@ impl FitRunConfig {
         let (bound, report) = sim::inference::BoundObs::bind(
             self.compiled.model.simulation.t_start, specs,
         ).unwrap_or_else(|report| {
-            eprintln!("error: observation data invalid:\n{}", report.render());
-            std::process::exit(1);
+            crate::out::detached().fail(format!("error: observation data invalid:\n{}", report.render()));
         });
 
         // gh#812: a non-fatal bind report was previously discarded, so the
         // Warn channel was write-only. Surface it — a zero denominator scores
         // as zero, and the user must be told which rows and why.
         if !report.findings().is_empty() {
-            eprintln!("{}", report.render());
+            crate::out::detached().say(format_args!("{}", report.render()));
         }
         sim::inference::MultiStreamObsModel::new(bound, self.compiled.clone())
             .unwrap_or_else(|e| {
-                eprintln!("error: observation model construction failed: {:?}", e);
-                std::process::exit(1);
+                crate::out::detached().fail(format!("error: observation model construction failed: {:?}", e));
             })
     }
     pub fn smc_config(&self) -> sim::inference::traits::SMCConfig {
@@ -945,7 +943,7 @@ pub fn ess_at_refusal(e: &sim::error::SimError) -> Option<f64> {
 /// scored once, as before, by the chain itself. Runs the chains' pre-flight in
 /// parallel; a structural error (the model cannot run) aborts the fit.
 pub fn preflight_spread_starts(
-    config: &FitRunConfig,
+    out: &crate::out::Out, config: &FitRunConfig,
     estimate: &indexmap::IndexMap<String, super::config_v2::EstimateSpecV2>,
     starts: &super::chain_starts::ResolvedStarts,
     drawn: super::chain_starts::DrawnStarts,
@@ -985,17 +983,17 @@ pub fn preflight_spread_starts(
                                 reason: reason.clone(), ess,
                             });
                             if attempt + 1 >= MAX_START_ATTEMPTS {
-                                eprintln!(
+                                out.say(format_args!(
                                     "  chain {}: {} — none of {} starts drawn \
                                      under `starts = {}` could be scored by the filter (last: {}); \
                                      see chain_starts.tsv for every attempt",
                                     ChainIndex(chain_id), crate::out::paint::stderr().paint("✗ refused", Style::Err),
-                                    MAX_START_ATTEMPTS, starts.rule.spelled(), reason);
+                                    MAX_START_ATTEMPTS, starts.rule.spelled(), reason));
                                 return Ok((Some(current), rejected, true));
                             }
-                            eprintln!(
+                            out.say(format_args!(
                                 "  chain {}: start {} of {} refused by the filter ({}); drawing another",
-                                ChainIndex(chain_id), attempt + 1, MAX_START_ATTEMPTS, reason);
+                                ChainIndex(chain_id), attempt + 1, MAX_START_ATTEMPTS, reason));
                             attempt += 1;
                             current = redraw_chain_start_for(
                                 config, estimate, starts, n_chains, chain_id, seed, attempt,
@@ -1027,7 +1025,7 @@ pub fn preflight_spread_starts(
 /// multi-chain sampler calls. Best-effort: a failure is reported, never
 /// fatal, since the file is an audit artifact and not an input.
 pub fn record_chain_starts(
-    method_dir: &std::path::Path,
+    out: &crate::out::Out, method_dir: &std::path::Path,
     config: &FitRunConfig,
     drawn: &super::chain_starts::DrawnStarts,
 ) {
@@ -1035,7 +1033,7 @@ pub fn record_chain_starts(
     if let Err(e) = super::chain_starts::write_chain_starts_tsv(
         method_dir, &config.estimated_params, &drawn.rule, &records,
     ) {
-        eprintln!("warning: could not write chain_starts.tsv: {}", e);
+        out.say(format_args!("warning: could not write chain_starts.tsv: {}", e));
     }
 }
 
@@ -1160,7 +1158,7 @@ fn preflight_specs<'a>(
 /// run from (`None` when every chain uses `config.estimated_params`). It is
 /// reported rather than the config, per gh#513.
 pub fn print_preflight(
-    config: &FitRunConfig,
+    out: &crate::out::Out, config: &FitRunConfig,
     per_chain_params: Option<&[Vec<EstimatedParam>]>,
     collector: &DiagnosticCollector,
 ) {
@@ -1171,11 +1169,11 @@ pub fn print_preflight(
         .count();
 
     if starts_differ {
-        eprintln!("\ntransforms {}:", crate::out::paint::stderr().paint(&format!(
+        out.say(format_args!("\ntransforms {}:", crate::out::paint::stderr().paint(&format!(
             "(chain 1 of {}; chains start at different points — see chain_starts.tsv)",
-            config.n_chains), Style::Dim));
+            config.n_chains), Style::Dim)));
     } else {
-        eprintln!("\ntransforms:");
+        out.say("\ntransforms:");
     }
     for spec in specs {
         // Each map's position is its own z (`to_transformed`). A start far
@@ -1210,9 +1208,9 @@ pub fn print_preflight(
         } else {
             "start"
         };
-        eprintln!("  {:12} {}  {}  step(z)={:.3} ≈ rw_sd {} at the {at} ({})",
+        out.say(format_args!("  {:12} {}  {}  step(z)={:.3} ≈ rw_sd {} at the {at} ({})",
             spec.name, tname, pos, spec.rw_sd,
-            sim::inference::diagnostic::format_start_value(spec.natural_step()), source);
+            sim::inference::diagnostic::format_start_value(spec.natural_step()), source));
 
         // Push auto rw_sd info diagnostic
         if spec.rw_sd_auto {
@@ -1223,9 +1221,9 @@ pub fn print_preflight(
     }
 
     if n_auto > 0 {
-        eprintln!("\n  {}", crate::out::paint::stderr().paint(&format!(
+        out.say(format_args!("\n  {}", crate::out::paint::stderr().paint(&format!(
             "⚠ {}/{} parameters using auto rw_sd. Check traces and set explicit values.",
-            n_auto, specs.len()), Style::Warn));
+            n_auto, specs.len()), Style::Warn)));
     }
 
     // Cooling schedule preview — uses the SAME per-iteration multiplier the run
@@ -1237,13 +1235,13 @@ pub fn print_preflight(
 
     let rw_at = |iter: usize| schedule.multiplier_at_iter(n_obs, iter);
 
-    eprintln!(
+    out.say(format_args!(
         "\ncooling: cf50={:.2}, reached at iter {} (target), over a {}-iteration run × {} observations",
         frac, target_iters, iters, n_obs
-    );
-    eprintln!("  iter {:3}: rw_sd at {:.1}%", 1, rw_at(1) * 100.0);
-    eprintln!("  iter {:3}: rw_sd at {:.1}% (cf50 reached)", target_iters, rw_at(target_iters) * 100.0);
-    eprintln!("  iter {:3}: rw_sd at {:.1}% (run end)", iters, rw_at(iters) * 100.0);
+    ));
+    out.say(format_args!("  iter {:3}: rw_sd at {:.1}%", 1, rw_at(1) * 100.0));
+    out.say(format_args!("  iter {:3}: rw_sd at {:.1}% (cf50 reached)", target_iters, rw_at(target_iters) * 100.0));
+    out.say(format_args!("  iter {:3}: rw_sd at {:.1}% (run end)", iters, rw_at(iters) * 100.0));
 
     // Warn if cooling exhausts well before the run ends
     let two_thirds = (iters * 2 / 3).max(1);
@@ -1255,7 +1253,7 @@ pub fn print_preflight(
             rw_fraction_at_exhaustion: rw_at_two_thirds,
         });
     }
-    eprintln!();
+    out.say("");
 }
 
 /// The kind of an estimated parameter, or a refusal naming it.
@@ -2011,11 +2009,11 @@ pub(crate) fn apply_holdout_declaration(
             withheld += keep.iter().filter(|k| !**k).count();
             s.retain_rows(&keep);
         }
-        eprintln!(
+        crate::out::detached().say(format_args!(
             "  {h} training window [{t_start}, {tau}]; \
              {withheld} observation row(s) at t > {tau} withheld from \
              training (scored out-of-sample by `camdl compare`)",
-            h = crate::out::paint::stderr().paint("holdout:", Style::Info));
+            h = crate::out::paint::stderr().paint("holdout:", Style::Info)));
         return Ok(Some(TrainingWindow { train_end: tau }));
     }
 
@@ -2054,11 +2052,11 @@ pub(crate) fn apply_holdout_declaration(
             n_holdout += hold_obs.len();
             train_end = train_end.max(last_train);
         }
-        eprintln!(
+        crate::out::detached().say(format_args!(
             "  {h} training window [{t_start}, {train_end}]; \
              {n_holdout} held-out observation row(s) bound as the tail \
              (scored out-of-sample by `camdl compare`)",
-            h = crate::out::paint::stderr().paint("holdout:", Style::Info));
+            h = crate::out::paint::stderr().paint("holdout:", Style::Info)));
         return Ok(Some(TrainingWindow { train_end }));
     }
 
@@ -2333,7 +2331,7 @@ fn run_one_chain(
 
     // Final metric on the bar; the driver clears it after the fan-out
     // (`Task::finish` consumes, so it can't be called on the borrowed Task
-    // here). The post-loop `eprintln!("best chain: …")` carries the summary.
+    // here). The post-loop `out.say("best chain: …")` carries the summary.
     if let Some(t) = task {
         t.set(crate::out::progress::ll(result.final_loglik));
     }
@@ -2343,15 +2341,15 @@ fn run_one_chain(
 
 /// Run N chains with optional per-chain EstimatedParam overrides (for scout random starts).
 pub fn run_chains_with_per_chain_params(
-    config: &FitRunConfig,
+    out: &crate::out::Out, config: &FitRunConfig,
     per_chain_params: Option<&[Vec<EstimatedParam>]>,
     collector: &DiagnosticCollector,
     method_dir: Option<&str>,
     heartbeat: &io::HeartbeatGuard,
 ) -> Result<ChainResults, String> {
-    eprintln!("running {} chains × {} particles × {} iterations, cooling={}, dt={}",
+    out.say(format_args!("running {} chains × {} particles × {} iterations, cooling={}, dt={}",
         config.n_chains, config.if2_config.n_particles, config.if2_config.n_iterations,
-        config.if2_config.cooling.fraction, config.if2_config.dt);
+        config.if2_config.cooling.fraction, config.if2_config.dt));
 
     // GH #14: one `Reporter` hands out a per-chain `Task` rendered as a
     // coordinated stack. The Reporter honors --progress (Pretty=bars,
@@ -2365,7 +2363,7 @@ pub fn run_chains_with_per_chain_params(
         .collect();
 
     // Preflight transform report
-    print_preflight(config, per_chain_params, collector);
+    print_preflight(out, config, per_chain_params, collector);
 
     // At most one chain per worker, so a started chain is never displaced by
     // another (gh#821, `chain_fanout`).
@@ -2423,9 +2421,9 @@ pub fn run_chains_with_per_chain_params(
                         chain_id, params, reason: reason.clone(),
                         attempts: Vec::new(),
                     });
-                    eprintln!("  chain {}: {} — {} ({})",
+                    out.say(format_args!("  chain {}: {} — {} ({})",
                         ChainIndex(chain_id), crate::out::paint::stderr().paint("✗ skipped", Style::Err),
-                        label, reason);
+                        label, reason));
                     // The bar is cleared in the post-loop finish; the skip
                     // is already loud on stderr above. The chain and its
                     // reason are kept, so the fit's record can say which
@@ -2478,8 +2476,8 @@ pub fn run_chains_with_per_chain_params(
     let mut results = results;
     {
         let n_eval_particles = config.if2_config.n_particles.min(500); // cap at 500 for speed
-        eprintln!("\nevaluating loglik (every {} iterations, all {} chains)...",
-            eval_interval, results.len());
+        out.say(format_args!("\nevaluating loglik (every {} iterations, all {} chains)...",
+            eval_interval, results.len()));
 
         for (chain_id, result) in results.iter_mut() {
             for it in &mut result.iterations {
@@ -2500,9 +2498,9 @@ pub fn run_chains_with_per_chain_params(
             let true_ll = result.iterations.last()
                 .map(|it| it.loglik).unwrap_or(f64::NEG_INFINITY);
             result.final_loglik = true_ll;
-            eprint!("\r  chain {}: ll={:.1}    ", ChainIndex(*chain_id), true_ll);
+            out.say_raw(format_args!("\r  chain {}: ll={:.1}    ", ChainIndex(*chain_id), true_ll));
         }
-        eprintln!();
+        out.say("");
     }
 
     // Compute chain agreement (Â) on the per-iteration param-mean
@@ -2517,8 +2515,8 @@ pub fn run_chains_with_per_chain_params(
     // driven by 500-particle in-run PF noise and exhibited a ~40-nat
     // extraction bias on production runs. The in-run trace above is
     // preserved for diagnostics (Unit B territory).
-    eprintln!("\nloglik-eval: re-scoring final-iter θ̂ ({} chains × {} replicates @ {} particles)...",
-        results.len(), config.loglik_eval.n_replicates, config.loglik_eval.n_particles);
+    out.say(format_args!("\nloglik-eval: re-scoring final-iter θ̂ ({} chains × {} replicates @ {} particles)...",
+        results.len(), config.loglik_eval.n_replicates, config.loglik_eval.n_particles));
     let loglik_eval_outcome = loglik_eval::run_loglik_eval(
         config, &results, &config.loglik_eval, config.seed,
     ).unwrap_or_else(|e| super::abandon_method_on(
@@ -2572,13 +2570,13 @@ pub fn run_chains_with_per_chain_params(
     // Report. `best_se` is derived locally; we log it here but don't
     // store it on `ChainResults` — readers that need it go to
     // `loglik_eval.per_chain[overall_winner_idx]`.
-    eprintln!("\nbest chain: {} (loglik={:.2} ± {:.2})",
-        best_chain, best_loglik, best_se);
+    out.say(format_args!("\nbest chain: {} (loglik={:.2} ± {:.2})",
+        best_chain, best_loglik, best_se));
     if config.n_chains > 1 {
         let logliks: Vec<f64> = loglik_eval_outcome.per_chain.iter()
             .map(|s| s.loglik).collect();
-        eprintln!("chain clean logliks: [{}]",
-            logliks.iter().map(|l| format!("{:.1}", l)).collect::<Vec<_>>().join(", "));
+        out.say(format_args!("chain clean logliks: [{}]",
+            logliks.iter().map(|l| format!("{:.1}", l)).collect::<Vec<_>>().join(", ")));
     }
 
     // Report Â (chain agreement) with diagnostic warnings.
@@ -2606,7 +2604,7 @@ pub fn run_chains_with_per_chain_params(
         // entries when only some collapsed. An unavailable Â is never a pass
         // (`gating::assess_if2`): the verdict is incomplete.
         if n_finite == 0 {
-            eprintln!("\nÂ: unavailable — within-chain variance below numerical \
+            out.say("\nÂ: unavailable — within-chain variance below numerical \
                        threshold for every estimated parameter, so the \
                        convergence verdict is incomplete (not a pass).");
         } else {
@@ -2615,8 +2613,8 @@ pub fn run_chains_with_per_chain_params(
             // judge this method — a literal here diverged from `a_thresh` the
             // moment the default moved to 1.01, so the same number printed ✓
             // at the end of the method and ✗ in `fit summary`'s gate block.
-            eprintln!("\nÂ (IF2 chain agreement), threshold {:.2}:",
-                config.gate.a_thresh);
+            out.say(format_args!("\nÂ (IF2 chain agreement), threshold {:.2}:",
+                config.gate.a_thresh));
             for spec in &config.estimated_params {
                 match chain_agreement.get(&spec.name) {
                     Some(&r) if r.is_finite() => {
@@ -2627,10 +2625,10 @@ pub fn run_chains_with_per_chain_params(
                             // Unreachable: `r.is_finite()` is the match guard.
                             super::gating::AgreementBand::NotAssessed => "n/a".to_string(),
                         };
-                        eprintln!("  {:12} Â={:.3} {}", spec.name, r, status);
+                        out.say(format_args!("  {:12} Â={:.3} {}", spec.name, r, status));
                     }
                     Some(_) => {
-                        eprintln!("  {:12} Â unavailable (W ≈ 0) — verdict incomplete", spec.name);
+                        out.say(format_args!("  {:12} Â unavailable (W ≈ 0) — verdict incomplete", spec.name));
                     }
                     None => {}
                 }
