@@ -3,9 +3,9 @@
 use std::io::Write;
 
 pub fn cmd_data_split(a: &crate::args::DataSplitArgs) {
+    let out = crate::out::Out::new(false);
     if a.at_time.is_none() && a.fraction.is_none() {
-        eprintln!("error: specify --at-time T or --fraction F (e.g., --fraction 0.7)");
-        std::process::exit(1);
+        out.fail("error: specify --at-time T or --fraction F (e.g., --fraction 0.7)");
     }
 
     let stem = a.file.to_str().unwrap_or_default().trim_end_matches(".tsv");
@@ -15,26 +15,24 @@ pub fn cmd_data_split(a: &crate::args::DataSplitArgs) {
         .unwrap_or_else(|| std::path::PathBuf::from(format!("{}_holdout.tsv", stem)));
 
     let content = std::fs::read_to_string(&a.file)
-        .unwrap_or_else(|e| { eprintln!("cannot read {}: {}", a.file.display(), e); std::process::exit(1); });
+        .unwrap_or_else(|e| { out.fail(format!("cannot read {}: {}", a.file.display(), e)); });
     let mut lines = content.lines();
     let header = lines.next().unwrap_or_else(|| {
-        eprintln!("error: empty file"); std::process::exit(1);
+        out.fail("error: empty file");
     });
 
     // Find time column index
     let cols: Vec<&str> = header.split('\t').collect();
     let time_idx = if let Some(ref name) = a.time_col {
         cols.iter().position(|&c| c == name).unwrap_or_else(|| {
-            eprintln!("error: column '{}' not found. Available: {}", name, cols.join(", "));
-            std::process::exit(1);
+            out.fail(format!("error: column '{}' not found. Available: {}", name, cols.join(", ")));
         })
     } else {
         // Auto-detect: look for "time" or "t"
         cols.iter().position(|&c| c == "time" || c == "t")
             .unwrap_or_else(|| {
-                eprintln!("error: no 'time' or 't' column found. Use --time-col to specify.");
-                eprintln!("  Available columns: {}", cols.join(", "));
-                std::process::exit(1);
+                out.say("error: no 'time' or 't' column found. Use --time-col to specify.");
+                out.fail(format!("  Available columns: {}", cols.join(", ")));
             })
     };
 
@@ -45,8 +43,7 @@ pub fn cmd_data_split(a: &crate::args::DataSplitArgs) {
             let time: f64 = line.split('\t').nth(time_idx)
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or_else(|| {
-                    eprintln!("error: cannot parse time from column {} of line: {}", time_idx, line);
-                    std::process::exit(1);
+                    out.fail(format!("error: cannot parse time from column {} of line: {}", time_idx, line));
                 });
             (line, time)
         })
@@ -58,14 +55,12 @@ pub fn cmd_data_split(a: &crate::args::DataSplitArgs) {
     } else {
         let f = a.fraction.unwrap();
         if f <= 0.0 || f >= 1.0 {
-            eprintln!("error: --fraction must be between 0 and 1 (e.g., 0.7)");
-            std::process::exit(1);
+            out.fail("error: --fraction must be between 0 and 1 (e.g., 0.7)");
         }
         let n_train = (rows.len() as f64 * f).round() as usize;
         if n_train == 0 || n_train >= rows.len() {
-            eprintln!("error: --fraction {} gives {} train rows out of {} total",
-                f, n_train, rows.len());
-            std::process::exit(1);
+            out.fail(format!("error: --fraction {} gives {} train rows out of {} total",
+                f, n_train, rows.len()));
         }
         // Threshold = time of the last training row
         rows[n_train - 1].1
@@ -83,14 +78,14 @@ pub fn cmd_data_split(a: &crate::args::DataSplitArgs) {
 
     {
         let mut f = std::fs::File::create(&train_path)
-            .unwrap_or_else(|e| { eprintln!("cannot create {}: {}", train_path.display(), e); std::process::exit(1); });
+            .unwrap_or_else(|e| { out.fail(format!("cannot create {}: {}", train_path.display(), e)); });
         writeln!(f, "{}", header).unwrap();
         for row in &train_rows { writeln!(f, "{}", row).unwrap(); }
     }
 
     {
         let mut f = std::fs::File::create(&holdout_path)
-            .unwrap_or_else(|e| { eprintln!("cannot create {}: {}", holdout_path.display(), e); std::process::exit(1); });
+            .unwrap_or_else(|e| { out.fail(format!("cannot create {}: {}", holdout_path.display(), e)); });
         writeln!(f, "{}", header).unwrap();
         for row in &holdout_rows { writeln!(f, "{}", row).unwrap(); }
     }
@@ -104,8 +99,8 @@ pub fn cmd_data_split(a: &crate::args::DataSplitArgs) {
         }
     };
 
-    eprintln!("Split at t = {} (column '{}')", threshold, cols[time_idx]);
-    eprintln!("  Train:   {} observations, t ∈ {}", train_rows.len(), fmt_range(&train_rows));
-    eprintln!("  Holdout: {} observations, t ∈ {}", holdout_rows.len(), fmt_range(&holdout_rows));
-    eprintln!("  Written: {}, {}", train_path.display(), holdout_path.display());
+    out.say(format_args!("Split at t = {} (column '{}')", threshold, cols[time_idx]));
+    out.say(format_args!("  Train:   {} observations, t ∈ {}", train_rows.len(), fmt_range(&train_rows)));
+    out.say(format_args!("  Holdout: {} observations, t ∈ {}", holdout_rows.len(), fmt_range(&holdout_rows)));
+    out.say(format_args!("  Written: {}, {}", train_path.display(), holdout_path.display()));
 }
