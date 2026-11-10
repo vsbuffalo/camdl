@@ -943,7 +943,8 @@ pub fn ess_at_refusal(e: &sim::error::SimError) -> Option<f64> {
 /// scored once, as before, by the chain itself. Runs the chains' pre-flight in
 /// parallel; a structural error (the model cannot run) aborts the fit.
 pub fn preflight_spread_starts(
-    out: &crate::out::Out, config: &FitRunConfig,
+    out: &crate::out::Out,
+    config: &FitRunConfig,
     estimate: &indexmap::IndexMap<String, super::config_v2::EstimateSpecV2>,
     starts: &super::chain_starts::ResolvedStarts,
     drawn: super::chain_starts::DrawnStarts,
@@ -1025,7 +1026,8 @@ pub fn preflight_spread_starts(
 /// multi-chain sampler calls. Best-effort: a failure is reported, never
 /// fatal, since the file is an audit artifact and not an input.
 pub fn record_chain_starts(
-    out: &crate::out::Out, method_dir: &std::path::Path,
+    out: &crate::out::Out,
+    method_dir: &std::path::Path,
     config: &FitRunConfig,
     drawn: &super::chain_starts::DrawnStarts,
 ) {
@@ -1158,7 +1160,8 @@ fn preflight_specs<'a>(
 /// run from (`None` when every chain uses `config.estimated_params`). It is
 /// reported rather than the config, per gh#513.
 pub fn print_preflight(
-    out: &crate::out::Out, config: &FitRunConfig,
+    out: &crate::out::Out,
+    config: &FitRunConfig,
     per_chain_params: Option<&[Vec<EstimatedParam>]>,
     collector: &DiagnosticCollector,
 ) {
@@ -2341,7 +2344,8 @@ fn run_one_chain(
 
 /// Run N chains with optional per-chain EstimatedParam overrides (for scout random starts).
 pub fn run_chains_with_per_chain_params(
-    out: &crate::out::Out, config: &FitRunConfig,
+    out: &crate::out::Out,
+    config: &FitRunConfig,
     per_chain_params: Option<&[Vec<EstimatedParam>]>,
     collector: &DiagnosticCollector,
     method_dir: Option<&str>,

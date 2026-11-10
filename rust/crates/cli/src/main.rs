@@ -659,7 +659,8 @@ impl InitStateSourceArg {
 /// back to `init {}`, which would look like a forecast and be a free-forward
 /// replay.
 fn resolve_paired_posterior(
-    out: &crate::out::Out, fit_ref: &str,
+    out: &crate::out::Out,
+    fit_ref: &str,
     ir_path_compiled: &str,
     n_draws: Option<usize>,
 ) -> (Vec<HashMap<String, f64>>, crate::sim_job::InitStateSource) {
@@ -1787,7 +1788,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                 )),
             }
             if matches!(init_state_arg, Some(InitStateSourceArg::Fit)) {
-                let (rows, source) = resolve_paired_posterior(&out, 
+                let (rows, source) = resolve_paired_posterior(&out,
                     fit_ref, &ir_path_compiled, a.n_draws,
                 );
                 init_state_source = Some(std::sync::Arc::new(source));
@@ -2050,7 +2051,7 @@ fn run_simulate(a: &args::SimulateArgs) {
 
     // ── Dry run ─────────────────────────────────────────────────────────────
     if dry_run {
-        print_dry_run(&out, 
+        print_dry_run(&out,
             &ir_path, &ir_path_compiled, base_sim_run.backend, dt, seed,
             &base_sim_run.params_files, &base_sim_run.overrides,
             &scenario_list, &seeds, &draws_path,
@@ -2089,7 +2090,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                  --obs-dir DIR, or --projected-out DIR (each stream's projected value)."
             );
         }
-        if let Err(e) = simulate_on_bound_design(&out, 
+        if let Err(e) = simulate_on_bound_design(&out,
             design_toml, &base_sim_run, &draws, draws_path.is_some(),
             obs_dir.as_ref().map(std::path::Path::new),
             a.projected_out.as_deref(), dt,
@@ -2360,7 +2361,7 @@ fn run_simulate(a: &args::SimulateArgs) {
             out.milestone("storing",
                 format!("ensemble \u{b7} {} cells ({})",
                     total_runs, crate::out::status::human_bytes(bytes.len() as u64)));
-            write_sim_ensemble(&out, 
+            write_sim_ensemble(&out,
                 &sink.cas, bytes, &cas_root, label_arg.clone(), design.as_ref().map(|(_, d)| d),
             );
         }
@@ -3102,7 +3103,8 @@ fn build_simulate_cas_sink(
 /// derived convenience view, so a write hiccup must not fail the whole run
 /// (mirrors the obs-child non-fatal posture).
 fn write_sim_ensemble(
-    out: &crate::out::Out, cas: &crate::cas_sink::CasSink,
+    out: &crate::out::Out,
+    cas: &crate::cas_sink::CasSink,
     combined_bytes: &[u8],
     cas_root: &str,
     label: Option<String>,
@@ -3950,7 +3952,8 @@ impl StreamSink {
 /// `--draws`) write one `ds_NN/` subdirectory each, so every dataset stays a
 /// file set the loader can bind on its own.
 fn simulate_on_bound_design(
-    out: &crate::out::Out, design_toml: &std::path::Path,
+    out: &crate::out::Out,
+    design_toml: &std::path::Path,
     base_run: &util::SimRun,
     draws: &[HashMap<String, f64>],
     draws_given: bool,
@@ -4698,7 +4701,8 @@ fn unset_generated_parameter_message(
 /// at the draw tier, above `--params`. `run_simulate` refuses up front a cell
 /// in which such a parameter gets no value from any tier.
 fn generate_uniform_draws(
-    out: &crate::out::Out, ir_path: &str,
+    out: &crate::out::Out,
+    ir_path: &str,
     n: usize,
     seed: u64,
 ) -> Result<Vec<HashMap<String, f64>>, String> {
@@ -4867,7 +4871,8 @@ fn fit_base_for_draws(out: &crate::out::Out, fit_ref: &str, source: &str) -> Res
 /// while `[fixed]` belongs at the `fit.toml [fixed]` tier below it. The
 /// caller routes them there via `SimRun::fit_fixed`.
 fn generate_prior_draws(
-    out: &crate::out::Out, fit_path: &str,
+    out: &crate::out::Out,
+    fit_path: &str,
     n: usize,
     seed: u64,
     model: &ir::Model,
@@ -5029,7 +5034,8 @@ fn generate_prior_draws(
 /// arm's scenario value to every other arm. `run_simulate` refuses up front a
 /// cell in which such a parameter gets no value from any tier.
 fn generate_prior_draws_from_ir(
-    out: &crate::out::Out, ir_path: &str,
+    out: &crate::out::Out,
+    ir_path: &str,
     n: usize,
     seed: u64,
 ) -> Result<Vec<HashMap<String, f64>>, String> {
@@ -5334,7 +5340,8 @@ pub(crate) fn load_draws_tsv(path: &str) -> Result<Vec<HashMap<String, f64>>, St
 /// Print a dry run summary: resolved parameters with provenance.
 #[allow(clippy::too_many_arguments)]
 fn print_dry_run(
-    out: &crate::out::Out, ir_path: &str,
+    out: &crate::out::Out,
+    ir_path: &str,
     ir_path_compiled: &str,
     backend: args::types::ForwardBackend,
     dt: f64,
@@ -5546,7 +5553,8 @@ fn print_dry_run(
 /// cell's identity, so this is the view, not new computation; nothing is
 /// displaced or written.
 fn print_store_view(
-    out: &crate::out::Out, cas: &crate::cas_sink::CasSink,
+    out: &crate::out::Out,
+    cas: &crate::cas_sink::CasSink,
     job: &crate::sim_job::SimulateJob,
     force: bool,
     quantities: bool,

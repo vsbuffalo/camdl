@@ -324,7 +324,8 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
 /// `ProfilePoint` leaves under `<root>/profiles/` and prints those whose base
 /// hash matches, in (point, seed, start) order.
 fn list_profile_children(
-    out: &crate::out::Out, root: &str,
+    out: &crate::out::Out,
+    root: &str,
     parent_hash_prefix: &str,
     a: &crate::args::ListArgs,
 ) {
