@@ -32,12 +32,8 @@ pub fn step_text(p: style::Painter, verb: &str, detail: impl std::fmt::Display) 
 }
 
 /// A dimmed continuation under a milestone — a hint or next-step command,
-/// aligned under the detail column, e.g. `           camdl cat <id>`.
-pub fn hint(detail: impl std::fmt::Display) {
-    eprintln!("{}", hint_text(style::stderr(), detail));
-}
-
-/// The line [`hint`] prints, painted by `p`, without its newline.
+/// aligned under the detail column (`           camdl cat <id>`), painted by
+/// `p`, without its newline. `Out::hint` writes it.
 pub fn hint_text(p: style::Painter, detail: impl std::fmt::Display) -> String {
     format!("{:>VERB_W$} {}", "", p.paint(&detail.to_string(), Style::Dim))
 }
