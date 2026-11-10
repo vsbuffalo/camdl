@@ -90,36 +90,36 @@ fn fetch_release_tags() -> Result<Vec<String>, Box<dyn std::error::Error>> {
 /// in every reachable case (an unreachable network is not an error — the user
 /// asked and we simply couldn't answer).
 pub fn cmd_check_update() {
+    let out = crate::out::Out::new(false);
     let current = match semver::Version::parse(env!("CARGO_PKG_VERSION")) {
         Ok(v) => v,
         Err(e) => {
             // camdl's own version string is malformed — a build-time bug, not a
             // user error; surface it loudly rather than printing a wrong answer.
-            eprintln!(
+            out.fail(format!(
                 "error: camdl's own version ({}) is not valid semver: {e}",
                 env!("CARGO_PKG_VERSION")
-            );
-            std::process::exit(1);
+            ));
         }
     };
 
     let tags = match fetch_release_tags() {
         Ok(tags) => tags,
         Err(_) => {
-            println!("couldn't reach GitHub to check for updates (offline?).");
+            out.data_line("couldn't reach GitHub to check for updates (offline?).");
             return;
         }
     };
 
     match decide(&current, &tags) {
         UpdateStatus::Available { current, latest } => {
-            println!("camdl {latest} is available (you have {current}). {RELEASES_PAGE_URL}");
+            out.data_line(format_args!("camdl {latest} is available (you have {current}). {RELEASES_PAGE_URL}"));
         }
         UpdateStatus::UpToDate { current } => {
-            println!("camdl {current} is up to date.");
+            out.data_line(format_args!("camdl {current} is up to date."));
         }
         UpdateStatus::NoReleases => {
-            println!("no camdl releases published yet.");
+            out.data_line("no camdl releases published yet.");
         }
     }
 }
