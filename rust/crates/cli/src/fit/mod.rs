@@ -1460,15 +1460,62 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
         }
         let store = runid::FsCasStore::new(&cas_root);
+        // The run's inputs (`run.json` `inputs`, recorded, never hashed): what
+        // the run was asked to do, written with the claim so a leaf that fails
+        // or is still running records them too. `finalize` adds what only the
+        // run can tell (best log-likelihood and chain, wall time).
+        //
+        // A declared `start` that the chosen starts rule discards (gh#506
+        // follow-up, gh#881) is recorded here and said below, once the method
+        // is recorded (`report::Check::Starts`).
+        let unused_starts: Vec<String> = if starts_rule.ignores_base_point(method.algorithm.chains()) {
+            sweep_config.estimate.iter()
+                .filter(|(_, spec)| spec.start.is_some())
+                .map(|(n, _)| n.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let algo_tag = method.algorithm.method_name();
+        let backend_tag = method.algorithm.backend().as_str();
+        let algo_json = match &method.algorithm {
+            Algorithm::IF2 { chains, particles, iterations, cooling, .. } =>
+                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "iterations": iterations, "cooling": cooling }),
+            Algorithm::PGAS { chains, particles, sweeps, .. } =>
+                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "sweeps": sweeps }),
+            Algorithm::PMMH { chains, particles, iterations, .. } =>
+                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "iterations": iterations }),
+            Algorithm::Mh { chains, iterations, .. } =>
+                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "iterations": iterations }),
+            Algorithm::PFilter { particles, replicates, .. } =>
+                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "particles": particles, "replicates": replicates }),
+            Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c) =>
+                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": c.chains, "tolerance": c.tolerance, "max_evals": c.max_evals }),
+        };
+        // gh#901: no `stage` key. It held exactly `algo_tag` — the method's
+        // own name — so the leaf carried the same string twice under two
+        // vocabularies, and `FitMethodView` now reads the label off `method`.
+        let run_inputs = serde_json::json!({
+            "method": algo_tag,
+            "backend": backend_tag,
+            "seed": seed,
+            "n_chains": method.algorithm.chains(),
+            "algorithm": algo_json,
+            "starts": starts_rule.spelled(),
+            "chain_starts_kind": starts_rule.kind().as_str(),
+            "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
+            "config_identities": cell_config_identity.into_iter().collect::<Vec<_>>(),
+            "starts_source": starts_source_record,
+            "header": run_header,
+            "unused_starts": { "rule": starts_rule.tag(), "params": unused_starts },
+        });
         // Streaming write through the one resolved-writer seam (gh#241 PR D).
-        // The running record carries Null inputs (the method's loglik summary
-        // is a post-run result); the final inputs are supplied to `finalize`.
         // The upstream lineage deps ride in `RecordMeta`.
         let resolved_artifact = crate::resolve::ResolvedArtifact {
             kind: runid::ArtifactKind::FitMethod,
             levels: resolved.levels.clone(),
             run_id: resolved.run_id,
-            display_inputs: serde_json::Value::Null,
+            display_inputs: run_inputs.clone(),
         };
         let meta = crate::resolve::RecordMeta::new(
             &ir_version_str, &sweep_config.model.camdl, validated_label.clone())
@@ -1535,7 +1582,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 out.fail(format!("error: fit method cache check {}: {}", cas_path.display(), e));
             }
         }
-        let mut write = match crate::resolve::begin_resolved_write(
+        let write = match crate::resolve::begin_resolved_write(
             &store, &cas_root, &resolved_artifact, &meta,
             crate::resolve::WriteMode::Streaming,
         ) {
@@ -1551,6 +1598,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let method_dir = write.dir().to_path_buf();
         // The claimed record carries the label; another run's check now sees it.
         drop(label_lock);
+        // `Out` holds the claim until the finalize below, so every error it
+        // reports on the way — `abandon_method` from the dispatch, the
+        // runners and the chain workers, and each `out.fail` — marks the
+        // leaf `failed` before the process exits (`Out::error`).
+        out.hold_claim(write, method_name);
 
         // gh#147 (M3.2): seed the resumed leaf with the base chain's files —
         // its resume state and the rows it has written — copied from the
@@ -1620,14 +1672,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // this runs once here, before the dispatch.
         // Recorded (`run.json` `inputs.unused_starts`) so `fit summary` can
         // show the same check (`report::Check::Starts`).
-        let unused_starts: Vec<String> = if starts_rule.ignores_base_point(method.algorithm.chains()) {
-            sweep_config.estimate.iter()
-                .filter(|(_, spec)| spec.start.is_some())
-                .map(|(n, _)| n.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // (`unused_starts` is computed before the claim, as part of the
+        // record's inputs.)
         if !unused_starts.is_empty() {
             // PMMH and MH still read the declared point: their pre-run
             // likelihood check is evaluated there, and the initial proposal
@@ -2243,46 +2289,17 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // commits Running→Completed. The display fields ride in `run.json`
         // `inputs` (recorded, never hashed) for show/status.
         let method_elapsed = method_t0.elapsed();
-        let algo_tag = method.algorithm.method_name();
-        let backend_tag = method.algorithm.backend().as_str();
-        let algo_json = match &method.algorithm {
-            Algorithm::IF2 { chains, particles, iterations, cooling, .. } =>
-                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "iterations": iterations, "cooling": cooling }),
-            Algorithm::PGAS { chains, particles, sweeps, .. } =>
-                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "sweeps": sweeps }),
-            Algorithm::PMMH { chains, particles, iterations, .. } =>
-                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "iterations": iterations }),
-            Algorithm::Mh { chains, iterations, .. } =>
-                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "iterations": iterations }),
-            Algorithm::PFilter { particles, replicates, .. } =>
-                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "particles": particles, "replicates": replicates }),
-            Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c) =>
-                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": c.chains, "tolerance": c.tolerance, "max_evals": c.max_evals }),
-        };
-        // gh#901: no `stage` key. It held exactly `algo_tag` — the method's
-        // own name — so the leaf carried the same string twice under two
-        // vocabularies, and `FitMethodView` now reads the label off `method`.
-        let inputs_json = serde_json::json!({
-            "method": algo_tag,
-            "backend": backend_tag,
-            "seed": seed,
-            "n_chains": method.algorithm.chains(),
-            "best_loglik": method_best_loglik,
-            "best_chain": method_best_chain,
-            "algorithm": algo_json,
-            "starts": starts_rule.spelled(),
-            "chain_starts_kind": starts_rule.kind().as_str(),
-            "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
-            "config_identities": cell_config_identity.into_iter().collect::<Vec<_>>(),
-            "starts_source": starts_source_record,
-            "wall_time_seconds": method_elapsed.as_secs_f64(),
-            "header": run_header,
-            "unused_starts": { "rule": starts_rule.tag(), "params": unused_starts },
-        });
+        // The run's inputs, written at the claim, gain what only the run
+        // could tell: its best log-likelihood and chain, and its wall time.
+        let mut inputs_json = run_inputs;
+        if let Some(fields) = inputs_json.as_object_mut() {
+            fields.insert("best_loglik".into(), serde_json::json!(method_best_loglik));
+            fields.insert("best_chain".into(), serde_json::json!(method_best_chain));
+            fields.insert("wall_time_seconds".into(), serde_json::json!(method_elapsed.as_secs_f64()));
+        }
         // A resumed leaf names its parent and where each segment of the chain
         // it holds begins (`resumed_chain::ResumeLineage`); a fresh run
         // records no `resume` key.
-        let mut inputs_json = inputs_json;
         if let Some(base) = &resume_base {
             let index_column = match &method.algorithm {
                 Algorithm::PGAS { .. } => "sweep",
@@ -2295,6 +2312,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             inputs_json[resumed_chain::RESUME_KEY] = serde_json::to_value(&lineage)
                 .unwrap_or_else(|e| abandon_method(&out, format!("error: --resume lineage: {e}")));
         }
+        let mut write = out.take_claim().expect("the claim is held from the claim to here");
         // Declare the tabular outputs' column schema in run.json (proposal
         // 2026-07-15): classify each written file's real header so a consumer
         // reads roles instead of reverse-engineering columns. Recorded, not
@@ -2322,10 +2340,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 crate::output_schema::fit_output_schema(write.dir(), &all_params, &estimated);
             write.set_output_schema(schema);
         }
+        // A finalize that fails leaves the leaf `failed` (the claim's guard),
+        // and the run records its failure as every other fatal path does.
         let dest = match write.finalize(inputs_json) {
             Ok(d) => d,
-            Err(e) => out.error(crate::out::CommandError::new(format!(
-                "error: could not finalize fit method leaf {}: {}", cas_path.display(), e))).exit(),
+            Err(e) => abandon_method(&out, format!(
+                "error: could not finalize fit method leaf {}: {}", cas_path.display(), e)),
         };
         // The end-of-run block, from the report built over what the run kept
         // in memory and the leaf it finalized; then the `stored` milestone.

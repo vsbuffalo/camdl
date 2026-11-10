@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::*;
 use crate::hash::{ContentHash, HASH_VERSION};
 use crate::kind::ArtifactKind;
-use crate::record::{Provenance, RunStatus, FORMAT_VERSION};
+use crate::record::{Failure, Provenance, RecordedOutcome, RunStatus, FORMAT_VERSION};
 
 fn nanos() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
@@ -42,6 +42,7 @@ fn record(run_id: ContentHash) -> RunRecord {
         levels: vec![],
         deps: vec![],
         status: RunStatus::Running,
+        failure: None,
         artifacts: BTreeMap::new(),
         output_schema: BTreeMap::new(),
         children: BTreeMap::new(),
@@ -422,18 +423,18 @@ fn augment_on_a_missing_leaf_is_a_no_op() {
 /// `--force` had no store-level meaning: there was no path that replaced a
 /// Completed leaf, so the grid writer recomputed and had its bytes discarded at
 /// commit,
-/// while fit and survey died with AlreadyCompleted. `displace_completed`
+/// while fit and survey died with AlreadyCompleted. `displace`
 /// quarantines the incumbent so the recompute lands on a clean leaf — and
 /// quarantine, not delete, so a forced rerun never destroys what it replaces.
 #[test]
-fn displace_completed_quarantines_the_incumbent_and_frees_the_path() {
+fn displace_quarantines_the_incumbent_and_frees_the_path() {
     let root = tmp_root("displace");
     let store = FsCasStore::new(&root);
     let leaf = root.join("sims").join("sir-aaaaaaaa");
     let a = id(0xaa);
     store.commit_atomic(&leaf, record(a), arts(b"FIRST")).unwrap();
 
-    store.displace_completed(&leaf, &LeafIdentity::new(a)).unwrap();
+    store.displace(&leaf, &LeafIdentity::new(a)).unwrap();
     assert!(matches!(store.lookup(&leaf, &LeafIdentity::new(a)), Lookup::Miss),
         "the displaced leaf must no longer be a cache hit");
     // Preserved as evidence, not deleted.
@@ -452,13 +453,13 @@ fn displace_completed_quarantines_the_incumbent_and_frees_the_path() {
 /// Forcing must never displace somebody else's artifact: a leaf holding a
 /// DIFFERENT identity at this path is left untouched.
 #[test]
-fn displace_completed_leaves_a_different_identity_alone() {
+fn displace_leaves_a_different_identity_alone() {
     let root = tmp_root("displaceother");
     let store = FsCasStore::new(&root);
     let leaf = root.join("sims").join("sir-aaaaaaaa");
     store.commit_atomic(&leaf, record(id(0xaa)), arts(b"THEIRS")).unwrap();
     // Force under a different identity — a no-op.
-    store.displace_completed(&leaf, &LeafIdentity::new(id(0xbb))).unwrap();
+    store.displace(&leaf, &LeafIdentity::new(id(0xbb))).unwrap();
     assert_eq!(fs::read(leaf.join("traj.tsv")).unwrap(), b"THEIRS",
         "a different identity's leaf must survive a force");
     cleanup(&root);
@@ -466,14 +467,14 @@ fn displace_completed_leaves_a_different_identity_alone() {
 
 /// And never displace a leaf a live process is holding.
 #[test]
-fn displace_completed_refuses_a_live_holder() {
+fn displace_refuses_a_live_holder() {
     let root = tmp_root("displacelive");
     let store = FsCasStore::new(&root);
     let leaf = root.join("sims").join("sir-aaaaaaaa");
     let a = id(0xaa);
     store.commit_atomic(&leaf, record(a), arts(b"FIRST")).unwrap();
     fs::write(leaf.join(".lock"), std::process::id().to_string()).unwrap();
-    let err = store.displace_completed(&leaf, &LeafIdentity::new(a)).unwrap_err();
+    let err = store.displace(&leaf, &LeafIdentity::new(a)).unwrap_err();
     assert!(matches!(err, CasError::FitInProgress { .. }), "got {err:?}");
     cleanup(&root);
 }
@@ -498,15 +499,258 @@ fn abandoned_claim_marks_the_leaf_failed_and_drops_the_lock() {
         ReadResult::Ok(r) => r,
         ReadResult::Absent => panic!("run.json missing after an abandoned claim"),
         ReadResult::Unparseable => panic!("run.json unparseable after an abandoned claim"),
+        ReadResult::Unreadable(e) => panic!("run.json unreadable after an abandoned claim: {e}"),
     };
     assert_eq!(rec.status, RunStatus::Failed,
         "an abandoned claim must record Failed, not leave Running");
+    assert_eq!(rec.failure, None, "the guard has no error to record");
     assert!(!leaf.join(".lock").exists(), "the lock must be released");
     // And the leaf is reclaimable: a later run of the same identity recomputes.
     assert!(matches!(
         store.lookup(&leaf, &LeafIdentity::new(id(0xaa))),
         Lookup::Stale(StaleReason::Incomplete)
     ));
+    cleanup(&root);
+}
+
+/// `fail` is the guard made explicit, for a caller about to `process::exit`
+/// (which runs no destructor): the leaf is `Failed` with the error that
+/// stopped it recorded, and the lock released, when it returns.
+#[test]
+fn a_failed_claim_records_why_and_is_unlocked() {
+    let root = tmp_root("fail_explicit");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    claim.write("partial.tsv", b"half").unwrap();
+    let failure = Failure { message: "error: every chain was refused".into(), operation: "pmmh".into() };
+    claim.fail(failure.clone()).expect("the claimed record is rewritten Failed");
+    match read_record(&leaf) {
+        ReadResult::Ok(r) => {
+            assert_eq!(r.status, RunStatus::Failed);
+            assert_eq!(r.failure.as_ref(), Some(&failure));
+            assert_eq!(leaf_state(&leaf, &r), LeafState::Failed { failure: failure.clone() });
+        }
+        _ => panic!("run.json unreadable after fail"),
+    }
+    assert!(!leaf.join(".lock").exists(), "the lock must be released");
+    cleanup(&root);
+}
+
+/// A `Running` record whose owner is gone is interrupted, not failed: the
+/// reader learns it from the `.lock`, and nothing rewrites the record.
+#[test]
+fn a_running_record_with_no_live_owner_reads_as_interrupted_and_is_not_rewritten() {
+    let root = tmp_root("interrupted");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("f-aaaaaaaa").join("seed_1-bbbbbbbb");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    let rec = match read_record(&leaf) { ReadResult::Ok(r) => *r, _ => unreachable!() };
+    assert_eq!(leaf_state(&leaf, &rec), LeafState::Running { pid: Some(std::process::id()) });
+    // The process "dies": its claim is forgotten (no destructor), its lock
+    // now names a pid that is not alive.
+    std::mem::forget(claim);
+    let mut child = std::process::Command::new("true").spawn().expect("spawn");
+    let dead_pid = child.id();
+    child.wait().expect("reap");
+    fs::write(leaf.join(".lock"), dead_pid.to_string()).unwrap();
+    assert_eq!(leaf_state(&leaf, &rec), LeafState::Interrupted { pid: Some(dead_pid) });
+    fs::remove_file(leaf.join(".lock")).unwrap();
+    assert_eq!(leaf_state(&leaf, &rec), LeafState::Interrupted { pid: None });
+    let _ = store.lookup(&leaf, &LeafIdentity::new(id(0xaa)));
+    match read_record(&leaf) {
+        ReadResult::Ok(r) => assert_eq!(r.status, RunStatus::Running, "a lookup rewrites nothing"),
+        _ => panic!(),
+    }
+    cleanup(&root);
+}
+
+/// A record an older camdl wrote `failed`, with no `failure`, reads, and says
+/// its reason is unknown.
+#[test]
+fn an_old_failed_record_without_a_reason_reads() {
+    let mut v = serde_json::to_value(record(id(0xaa))).unwrap();
+    v["status"] = "failed".into();
+    assert!(v.get("failure").is_none());
+    let r: RunRecord = serde_json::from_value(v).expect("an old failed record reads");
+    assert_eq!(r.outcome(), RecordedOutcome::FailedReasonUnknown);
+}
+
+/// A retry keeps the prior attempt's leaf-root records under `.attempts/<n>/`,
+/// its record as it stood (an interrupted `Running` stays `Running`), clears
+/// its bulk outputs, and completes as a clean `Completed` hit whose manifest
+/// does not list the preserved attempt. Beyond `MAX_PRESERVED_ATTEMPTS` the
+/// oldest is dropped.
+#[test]
+fn a_retry_preserves_the_prior_attempt_and_completes_clean() {
+    let root = tmp_root("attempts");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("f-aaaaaaaa").join("seed_1-bbbbbbbb");
+    let id_ = LeafIdentity::new(id(0xaa));
+    // Attempt 1 fails with a reason; attempt 2 is interrupted (no lock).
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    claim.write("diagnostics.json", b"[1]").unwrap();
+    claim.write("chain_0/trace.tsv", b"x").unwrap();
+    claim.fail(Failure { message: "first".into(), operation: "pmmh".into() }).unwrap();
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    claim.write("diagnostics.json", b"[2]").unwrap();
+    std::mem::forget(claim);
+    fs::remove_file(leaf.join(".lock")).unwrap();
+    // Attempt 3 completes.
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    assert!(!leaf.join("chain_0").exists(), "the prior attempt's bulk outputs are cleared");
+    claim.write("traj.tsv", b"S\tI\n9\t1\n").unwrap();
+    let dest = claim.finalize(record(id(0xaa))).unwrap();
+    let rec = match store.lookup(&dest, &id_) {
+        Lookup::Hit(r) => r,
+        other => panic!("the retried leaf is a clean hit beside its attempts: {other:?}"),
+    };
+    assert!(rec.artifacts.keys().all(|k| !k.starts_with(ATTEMPTS_DIR)), "{:?}", rec.artifacts);
+    let attempt = |n: u64| -> RunRecord {
+        serde_json::from_slice(&fs::read(leaf.join(ATTEMPTS_DIR).join(n.to_string()).join(ATTEMPT_RECORD)).unwrap()).unwrap()
+    };
+    assert_eq!(attempt(1).failure.map(|f| f.message).as_deref(), Some("first"));
+    assert_eq!(attempt(2).status, RunStatus::Running, "an interrupted record is kept as it was");
+    assert_eq!(fs::read(leaf.join(ATTEMPTS_DIR).join("2").join("diagnostics.json")).unwrap(), b"[2]");
+    assert!(!leaf.join(ATTEMPTS_DIR).join("1").join("chain_0").exists());
+
+    cleanup(&root);
+}
+
+/// Retries past [`MAX_PRESERVED_ATTEMPTS`] keep only the newest attempts.
+#[test]
+fn retries_keep_at_most_the_bound_of_attempts() {
+    let root = tmp_root("attempts_bound");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("f-aaaaaaaa").join("seed_1-bbbbbbbb");
+    let total = MAX_PRESERVED_ATTEMPTS as u64 + 2;
+    for n in 1..=total {
+        let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+        claim.fail(Failure { message: format!("attempt {n}"), operation: "pmmh".into() }).unwrap();
+    }
+    // The last attempt is the leaf itself; the ones before it are preserved,
+    // the newest MAX_PRESERVED_ATTEMPTS of them.
+    let kept = preserved_attempts(&leaf.join(ATTEMPTS_DIR));
+    assert_eq!(kept.len(), MAX_PRESERVED_ATTEMPTS);
+    assert_eq!(kept, ((total - MAX_PRESERVED_ATTEMPTS as u64)..total).collect::<Vec<_>>());
+    for n in kept {
+        let r: RunRecord = serde_json::from_slice(
+            &fs::read(leaf.join(ATTEMPTS_DIR).join(n.to_string()).join(ATTEMPT_RECORD)).unwrap()).unwrap();
+        assert_eq!(r.failure.unwrap().message, format!("attempt {n}"));
+    }
+    cleanup(&root);
+}
+
+/// A `run.json` that exists but cannot be read is not absent: a claim
+/// refuses the leaf instead of quarantining or clearing it, so an IO error
+/// cannot destroy a record or the evidence of a failure.
+#[cfg(unix)]
+#[test]
+fn a_claim_refuses_a_leaf_whose_record_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tmp_root("unreadable");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("f-aaaaaaaa").join("seed_1-bbbbbbbb");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    claim.write("diagnostics.json", b"[1]").unwrap();
+    claim.fail(Failure { message: "m".into(), operation: "pmmh".into() }).unwrap();
+    let rj = leaf.join("run.json");
+    fs::set_permissions(&rj, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&rj).is_ok() {
+        // Running as a user that reads through permissions (root): the
+        // condition cannot be staged here.
+        fs::set_permissions(&rj, fs::Permissions::from_mode(0o644)).unwrap();
+        cleanup(&root);
+        return;
+    }
+    let err = store.claim_streaming(&leaf, record(id(0xaa))).unwrap_err();
+    fs::set_permissions(&rj, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(matches!(err, CasError::RecordUnreadable { .. }), "got {err:?}");
+    assert!(leaf.join("diagnostics.json").exists(), "nothing was cleared");
+    assert!(!root.join(".quarantine").exists(), "nothing was quarantined");
+    cleanup(&root);
+}
+
+/// A lock records its host beside its pid, and a lock written before the
+/// host was recorded (the pid alone) is this host's.
+#[test]
+fn a_lock_records_its_host_and_a_pid_only_lock_is_this_hosts() {
+    let root = tmp_root("lock_host");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("f-aaaaaaaa").join("seed_1-bbbbbbbb");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    let text = fs::read_to_string(leaf.join(".lock")).unwrap();
+    assert_eq!(text, format!("{}\n{}\n", std::process::id(), this_host()));
+    assert_eq!(lock_owner(&leaf), LockOwner::Live { pid: std::process::id() });
+    fs::write(leaf.join(".lock"), std::process::id().to_string()).unwrap();
+    assert_eq!(lock_owner(&leaf), LockOwner::Live { pid: std::process::id() },
+        "an old pid-only lock reads as this host's");
+    drop(claim);
+    cleanup(&root);
+}
+
+/// A leaf held from another host is neither reclaimed nor called interrupted:
+/// its owner cannot be checked from here. The claim refuses it naming the host,
+/// the pid and `--force`; `displace` (`--force`) clears it into the
+/// quarantine, records included.
+#[test]
+fn a_lock_from_another_host_is_not_reclaimed_or_called_interrupted() {
+    let root = tmp_root("lock_foreign");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("f-aaaaaaaa").join("seed_1-bbbbbbbb");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    claim.write("diagnostics.json", b"[1]").unwrap();
+    std::mem::forget(claim);
+    // A pid that is not alive here, so only the host keeps it from reading
+    // as dead.
+    let mut child = std::process::Command::new("true").spawn().expect("spawn");
+    let pid = child.id();
+    child.wait().expect("reap");
+    fs::write(leaf.join(".lock"), format!("{pid}\nsome-other-host\n")).unwrap();
+    let owner = LockOwner::OtherHost { pid, host: "some-other-host".into() };
+    assert_eq!(lock_owner(&leaf), owner);
+    let rec = match read_record(&leaf) { ReadResult::Ok(r) => *r, _ => unreachable!() };
+    assert_eq!(leaf_state(&leaf, &rec),
+        LeafState::OwnerUnknown { pid, host: "some-other-host".into() });
+
+    let err = store.claim_streaming(&leaf, record(id(0xaa))).unwrap_err();
+    let said = err.to_string();
+    assert!(matches!(err, CasError::OwnedOnOtherHost { .. }), "got {err:?}");
+    assert!(said.contains(&format!("pid {pid}")) && said.contains("some-other-host")
+        && said.contains("--force"), "{said}");
+    assert!(leaf.join("diagnostics.json").exists(), "nothing was cleared");
+    assert_eq!(lock_owner(&leaf), owner, "the lock was not taken over");
+
+    store.displace(&leaf, &LeafIdentity::new(id(0xaa))).unwrap();
+    assert!(!leaf.exists(), "--force moves the leaf aside");
+    let q: Vec<_> = fs::read_dir(root.join(".quarantine")).unwrap().flatten().collect();
+    assert_eq!(q.len(), 1);
+    assert!(q[0].path().join("diagnostics.json").exists(), "its records go with it");
+    store.claim_streaming(&leaf, record(id(0xaa))).expect("then the leaf claims clean");
+    cleanup(&root);
+}
+
+/// A lock left by a dead process on this host is reclaimed, and the prior
+/// attempt's records are preserved.
+#[test]
+fn a_dead_lock_on_this_host_is_reclaimed_and_its_attempt_preserved() {
+    let root = tmp_root("lock_dead_here");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("f-aaaaaaaa").join("seed_1-bbbbbbbb");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    claim.write("diagnostics.json", b"[1]").unwrap();
+    std::mem::forget(claim);
+    let mut child = std::process::Command::new("true").spawn().expect("spawn");
+    let pid = child.id();
+    child.wait().expect("reap");
+    fs::write(leaf.join(".lock"), format!("{pid}\n{}\n", this_host())).unwrap();
+    assert_eq!(lock_owner(&leaf), LockOwner::Dead { pid });
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).expect("a dead lock is reclaimed");
+    assert_eq!(fs::read(leaf.join(ATTEMPTS_DIR).join("1").join("diagnostics.json")).unwrap(), b"[1]");
+    let kept: RunRecord = serde_json::from_slice(
+        &fs::read(leaf.join(ATTEMPTS_DIR).join("1").join(ATTEMPT_RECORD)).unwrap()).unwrap();
+    assert_eq!(kept.status, RunStatus::Running, "kept as it stood, not rewritten failed");
+    drop(claim);
     cleanup(&root);
 }
 

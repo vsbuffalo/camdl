@@ -717,7 +717,9 @@ pub struct FitRunArgs {
     #[arg(long)]
     pub seed: Option<u64>,
 
-    /// Re-run and overwrite stale cache
+    /// Re-run even if the run is stored: the stored leaf moves to the
+    /// store's .quarantine/. Also clears a leaf held by a run on another
+    /// host, which camdl cannot check and never reclaims on its own.
     #[arg(long)]
     pub force: bool,
 
@@ -2124,7 +2126,9 @@ pub struct SurveyArgs {
     pub label: Option<String>,
 
     /// Force re-evaluation of all LHS points; bypass the cache (the
-    /// CAS layout still applies — same hash, fresh artifacts).
+    /// CAS layout still applies — same hash, fresh artifacts). Also clears a
+    /// leaf held by a survey on another host, which camdl never reclaims on
+    /// its own.
     #[arg(long)]
     pub force: bool,
 
