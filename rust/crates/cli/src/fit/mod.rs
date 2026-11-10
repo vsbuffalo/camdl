@@ -2678,19 +2678,16 @@ fn build_fit_sidecar(
     // With no model in scope (`fit where`) the shorthand cannot be expanded,
     // and `effective_observations` errors — the map stays empty, as before.
     let data_hashes = resolved_data_hashes(problem, model);
-    // gh#75: resolve per-parameter prior provenance. We only emit
-    // entries when the method is Bayesian (an IF2 fit doesn't consume
-    // priors, and surfacing `model_ir` for a bunch of params the fit will
-    // never read from is misleading noise). `validate_priors_present` has
-    // already rejected any silent flat-fallback by the time we get here, so
-    // any entry we emit is one of {fit_toml, model_ir, flat_explicit}.
-    let any_bayesian = config
-        .inference
-        .method
-        .as_ref()
-        .is_some_and(|m| m.algorithm.requires_priors());
+    // gh#75: resolve per-parameter prior provenance. This sidecar belongs to
+    // the fit segment, which every method run on the problem shares
+    // (`[method]` is not in the fit-level hash), so it records the problem's
+    // prior resolution whichever method is running. Gating it on the method
+    // made an if2 run after a pmmh run empty the record the pmmh leaf needs.
+    // A sampler's `validate_priors_present` refuses an implicit flat prior
+    // before it starts, so `flat_fallback` appears only on a problem no
+    // sampler could run on.
     let resolved_priors: Vec<crate::run_meta::ResolvedPriorEntry> = match model {
-        Some(model) if any_bayesian => {
+        Some(model) => {
             let names: Vec<String> = problem.estimate.keys().cloned().collect();
             let overrides = crate::fit::priors_precedence::prior_overrides(
                 &names, &problem.estimate, model,
@@ -2704,9 +2701,6 @@ fn build_fit_sidecar(
                     crate::fit::priors_precedence::PriorSource::FitToml      => "fit_toml",
                     crate::fit::priors_precedence::PriorSource::ModelIr      => "model_ir",
                     crate::fit::priors_precedence::PriorSource::FlatExplicit => "flat_explicit",
-                    // FlatFallback shouldn't reach here — validate_priors_present
-                    // rejects it. If it does, surface it so reviewers can
-                    // see the contract was broken.
                     crate::fit::priors_precedence::PriorSource::FlatFallback => "flat_fallback",
                 };
                 // gh#369: the model prior the fit toml displaced, if any.
@@ -2720,7 +2714,7 @@ fn build_fit_sidecar(
             })
             .collect()
         }
-        _ => Vec::new(),
+        None => Vec::new(),
     };
     crate::run_meta::FitSidecar {
         // A fit's label is its run's, on the leaf (gh#896); the sidecar
@@ -3638,6 +3632,53 @@ cooling = 0.7
                 "stream `{name}` should carry the wide file's digest; got {:?}",
                 sidecar.data_hashes);
         }
+    }
+
+    /// `fit.meta.json` belongs to the fit segment, which every method run on
+    /// the problem shares (`[method]` is not in the fit-level hash). Its prior
+    /// resolution is a fact about the problem — `[estimate]` and the model —
+    /// so a pmmh run and an if2 run on the same problem must write the same
+    /// `resolved_priors`. When it was written only for a sampler, an if2 run
+    /// after a pmmh run emptied it, and every later `fit table` / `fit
+    /// summary` reported the pmmh leaf as a dropped-provenance bug (gh#75).
+    #[test]
+    fn resolved_priors_do_not_depend_on_the_method() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let model = golden_model("ocaml/golden/seir_observations.ir.json");
+        let sidecar_for = |method: &str| {
+            let toml_src = format!(r#"
+[model]
+camdl = "no-such-model.ir.json"
+
+[data.observations]
+
+[estimate]
+beta = {{ bounds = [0.01, 2.0], prior = {{ log_normal = {{ mu = -1.0, sigma = 0.5 }} }} }}
+
+[fixed]
+N0 = 1000
+
+[method]
+{method}
+"#);
+            let fit_path = tmp.path().join("fit.toml");
+            std::fs::write(&fit_path, &toml_src).expect("write fit.toml");
+            let config = config_v2::FitConfig::from_toml_str(&toml_src)
+                .expect("fixture fit.toml should parse");
+            build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model))
+        };
+        let pmmh = sidecar_for(
+            "algorithm = \"pmmh\"\nbackend = \"chain_binomial\"\nchains = 1\n\
+             particles = 10\niterations = 10\nburn_in = 5");
+        let if2 = sidecar_for(
+            "algorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\n\
+             particles = 10\niterations = 1\ncooling = 0.7");
+        let entries = |s: &crate::run_meta::FitSidecar| s.resolved_priors.iter()
+            .map(|e| (e.param.clone(), e.source.clone())).collect::<Vec<_>>();
+        assert_eq!(entries(&pmmh), vec![("beta".to_string(), "fit_toml".to_string())],
+            "a sampler's problem records each estimated parameter's prior source");
+        assert_eq!(entries(&if2), entries(&pmmh),
+            "the fit-level record is the problem's, whichever method wrote it last");
     }
 }
 
