@@ -124,13 +124,19 @@ pub fn resolve_posterior_draws(
             .collect();
 
         if let Some(want) = method {
-            let chosen = view.methods.iter().find(|s| s.method.as_str() == want).ok_or_else(|| {
-                let names: Vec<&str> = view.methods.iter().map(|s| s.method.as_str()).collect();
-                Other(format!(
-                    "no method named '{want}' in {fit_ref}\n  available methods: {}",
-                    names.join(", ")
-                ))
-            })?;
+            let named: Vec<&crate::fit::fit_view::FitMethodView> =
+                view.methods.iter().filter(|s| s.method.as_str() == want).collect();
+            let chosen = match named.as_slice() {
+                [] => {
+                    let names: Vec<&str> = view.methods.iter().map(|s| s.method.as_str()).collect();
+                    return Err(Other(format!(
+                        "no method named '{want}' in {fit_ref}\n  available methods: {}",
+                        names.join(", ")
+                    )));
+                }
+                [one] => *one,
+                several => return Err(Other(several_runs(fit_ref, &format!("'{want}' runs"), several))),
+            };
             let draws_path = chosen.method_dir.join(DRAWS_FILE);
             if !draws_path.is_file() {
                 return Err(NoPosterior(no_draws_for_method(want, chosen.method)));
@@ -145,10 +151,18 @@ pub fn resolve_posterior_draws(
             });
         }
 
-        // No selector: the last leaf that wrote a posterior cloud. A leaf whose
-        // chain directories count from 1 is refused here, before any reader
-        // follows a draw's `chain` key into `chain_<key>/` (gh#990).
-        let chosen = with_draws.last().ok_or_else(|| NoPosterior(no_posterior_error(fit_ref, &view)))?;
+        // No selector: the one leaf that wrote a posterior cloud. Several are
+        // refused with them listed rather than one chosen by label order
+        // (gh#896). A leaf whose chain directories count from 1 is refused
+        // here, before any reader follows a draw's `chain` key into
+        // `chain_<key>/` (gh#990).
+        let chosen = match with_draws.as_slice() {
+            [] => return Err(NoPosterior(no_posterior_error(fit_ref, &view))),
+            [one] => *one,
+            several => {
+                return Err(Other(several_runs(fit_ref, "runs with posterior draws", several)))
+            }
+        };
         let draws_path = chosen.method_dir.join(DRAWS_FILE);
         refuse_old_layout(&chosen.method_dir)?;
         return Ok(PosteriorDrawsRef {
@@ -246,20 +260,33 @@ fn no_draws_for_method(name: &str, method: FitAlgorithm) -> String {
     }
 }
 
-/// Build the actionable "no posterior cloud here" error, framed by the terminal
-/// leaf's algorithm. A terminal Bayesian sampler with no `draws.tsv` is incomplete
-/// / still running — never an "optimizer fit" (gh#343); only a genuine optimizer
-/// is redirected to the plug-in-simulate workflow.
+/// A refusal naming every candidate run, for a reader that needs one (gh#896).
+fn several_runs(fit_ref: &str, what: &str, runs: &[&crate::fit::fit_view::FitMethodView]) -> String {
+    let mut msg = format!(
+        "{fit_ref} holds {} {what}, and this reads one; pass the run's directory (or its \
+         @label or run-id prefix):",
+        runs.len()
+    );
+    for r in runs {
+        msg.push_str(&format!("\n  {} {}", r.method.as_str(), r.method_dir.display()));
+    }
+    msg
+}
+
+/// Build the actionable "no posterior cloud here" error. A Bayesian sampler
+/// leaf with no `draws.tsv` is incomplete / still running — never an
+/// "optimizer fit" (gh#343); only a folder of genuine optimizers is
+/// redirected to the plug-in-simulate workflow.
 fn no_posterior_error(fit_ref: &str, view: &FitView) -> String {
     let methods: Vec<String> = view
         .methods
         .iter()
         .map(|s| format!("{} ({})", s.method.as_str(), fit_algorithm_label(s.method)))
         .collect();
-    if let Some(term) = view.methods.last().filter(|s| s.method.is_posterior_sampler()) {
+    if let Some(term) = view.methods.iter().find(|s| s.method.is_posterior_sampler()) {
         let label = fit_algorithm_label(term.method);
         return format!(
-            "no {DRAWS_FILE} under {fit_ref}: the terminal Bayesian method '{}' \
+            "no {DRAWS_FILE} under {fit_ref}: the Bayesian method '{}' \
              ({label}) has not written its posterior draws cloud.\n  \
              methods found: {}\n  \
              {DRAWS_FILE} is written at method completion — if the fit is still \
@@ -427,8 +454,11 @@ mod tests {
             ("pgas",  "pgas", Some("beta\n0.1\n")),
             ("pmmh",  "pmmh", Some(TWO_DRAWS)),
         ]);
-        // Without a selector, the last leaf in label order (pmmh) wins...
-        assert_eq!(resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap().name, "pmmh");
+        // Without a selector, two runs with draws are refused, both listed,
+        // rather than the last in label order read silently (gh#896)...
+        let err = resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap_err().to_string();
+        assert!(err.contains("holds 2 runs with posterior draws"), "{err}");
+        assert!(err.contains("pgas-") && err.contains("pmmh-"), "both runs are listed: {err}");
         // ...with the selector naming pgas, that leaf is chosen.
         let r = resolve_posterior_draws(seg.to_str().unwrap(), Some("pgas")).unwrap();
         assert_eq!(r.name, "pgas");

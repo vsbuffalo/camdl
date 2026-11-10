@@ -17,7 +17,7 @@
 //!   doesn't produce), the test fails immediately.
 //!
 //! - **C — `summary ⊆ table` byte-equality.** Asserts that
-//!   `summary_json["table_row"]` is byte-equal to
+//!   `summary_json["table_rows"][0]` is byte-equal to
 //!   `table_json["rows"][0]` for the same fit. The two surfaces
 //!   share one schema; any field added to one without the other
 //!   makes this fail.
@@ -501,7 +501,7 @@ fn spec_layout_diagrams_match_fit_run_v2_output() {
 
 // ── Deliverable C — `summary ⊆ table` byte-equality ────────────────
 
-/// Force `fit summary --format json`'s `table_row` block to be
+/// Force `fit summary --format json`'s `table_rows` entry to be
 /// byte-equal to a `fit table --hash <h> --format json` row for the
 /// same fit. Lands live (no `#[ignore]`) per proposal §3 + Tests/CI
 /// commitments.
@@ -530,10 +530,10 @@ fn summary_table_row_equals_table_first_row() {
     let hash_prefix: String = full_hash.chars().take(8).collect();
 
     let summary_json = exec_fit_summary_json(&camdl, &fit_dir);
-    let summary_row = summary_json
-        .get("table_row")
-        .cloned()
-        .unwrap_or_else(|| panic!("summary JSON missing `table_row`: {}", summary_json));
+    let summary_rows = summary_json["table_rows"].as_array()
+        .unwrap_or_else(|| panic!("summary JSON missing `table_rows`: {}", summary_json));
+    assert_eq!(summary_rows.len(), 1, "one completed run, one row: {summary_json}");
+    let summary_row = summary_rows[0].clone();
 
     // Run `fit table` against the parent of fit_dir (results/fits/),
     // filtered to a single row by --hash.
@@ -614,7 +614,7 @@ fn summary_table_row_equals_table_first_row() {
     let table_bytes = serde_json::to_string(&table_row).unwrap();
     assert_eq!(
         summary_bytes, table_bytes,
-        "summary[\"table_row\"] is not byte-equal to table[\"rows\"][0] \
+        "summary[\"table_rows\"][0] is not byte-equal to table[\"rows\"][0] \
          (after normalizing the wall-clock `age_seconds` field).\n\
          summary: {}\n\
          table:   {}",
@@ -623,7 +623,7 @@ fn summary_table_row_equals_table_first_row() {
 }
 
 /// gh#590: a `pfilter` leaf beside another method's leaf must not remove the
-/// fit from `fit table`, nor blank `fit summary`'s `table_row`.
+/// fit from `fit table`, nor leave `fit summary` without the IF2 run's row.
 ///
 /// `pfilter` has no `MethodResult` shape. The row builder used to pick the
 /// terminal method by declared order alone, so a segment whose last leaf was a
@@ -695,10 +695,9 @@ fn a_pfilter_leaf_does_not_remove_the_fit_from_fit_table() {
         "the row is built from the method that has a result: {}", rows[0]);
 
     let summary = exec_fit_summary_json(&camdl, &fit_dir);
-    assert!(
-        summary.get("table_row").is_some_and(|r| r.is_object()),
-        "fit summary's `table_row` must not be blank: {summary}"
-    );
+    let rows = summary["table_rows"].as_array().expect("table_rows");
+    assert_eq!(rows.len(), 1, "the IF2 run has a row and the pfilter run has none: {summary}");
+    assert_eq!(rows[0]["method"].as_str(), Some("if2"), "{summary}");
 }
 
 /// gh#587: a swept fit records each segment's own `[fixed]` values in its
