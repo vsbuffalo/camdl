@@ -429,6 +429,7 @@ pub fn run_method(
     let reporter = crate::out::progress::Reporter::new();
     let bars: Vec<crate::out::progress::Task> = (0..n_chains)
         .map(|chain_id| reporter.task(n_steps as u64, format!("chain {}", ChainIndex(chain_id)), "it")
+            .starting_at(resume_states[chain_id].as_ref().map_or(0, |s| s.completed_steps as u64))
             .recording(out.events(), chain_id))
         .collect();
 

@@ -76,8 +76,9 @@ pub enum Outcome<'a> {
 pub struct Progress {
     /// The chain's number, as its `chain_N/` directory carries it.
     pub chain: usize,
-    /// Steps taken in this run, of `of`. One step is what `progress.json`'s
-    /// step counts for the method (§10.10).
+    /// The chain's step, of `of`, counting a resumed chain's base steps
+    /// too. One step is what `progress.json`'s step counts for the method
+    /// (§10.10).
     pub step: u64,
     pub of: u64,
     /// The chain's current log-likelihood and its class; absent until the
