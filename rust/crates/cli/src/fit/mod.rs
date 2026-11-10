@@ -1768,7 +1768,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     dt_check_seed,
                 )
                 .unwrap_or_else(|e| abandon_method(&mut out, format!("error: {e}")));
-                dt_check::print_terminal_report(&dt_check_result);
+                dt_check::print_terminal_report(&out, &dt_check_result);
                 let fit_state = state::FitState {
                     method: method_name.to_string(),
                     seed,

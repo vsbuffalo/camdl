@@ -971,7 +971,7 @@ pub fn run_method(
                 ode_dt,
                 cfg,
             )?;
-            super::dt_check::print_terminal_report(&result);
+            super::dt_check::print_terminal_report(out, &result);
             if matches!(result.verdict, super::dt_check::DtCheckVerdict::Skipped) {
                 None
             } else {
