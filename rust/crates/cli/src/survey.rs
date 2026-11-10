@@ -2064,6 +2064,51 @@ mod tests {
         assert_eq!(row[7], "marginal");
     }
 
+    /// `survey --render` reads back the landscape this writer wrote. It read
+    /// by position and expected `point_id` last, so the appended
+    /// `loglik_type` column failed every render: "expected last column
+    /// 'point_id', got 'loglik_type'".
+    #[test]
+    fn the_html_render_reads_the_landscape_this_writer_writes() {
+        use sim::inference::types::{Transform, EstimatedParam};
+        let param = |name: &str, index| EstimatedParam {
+            name: name.into(), index, initial: 0.5, rw_sd: 0.1,
+            transform: Transform::Identity,
+            rw_sd_auto: false, perturb_only_at_t0: false,
+        };
+        let estimated = vec![param("beta", 0), param("gamma", 1)];
+        let rows = vec![LandscapeRow {
+            point_id: 4,
+            param_values: vec![0.3, 0.15],
+            loglik: -123.4,
+            loglik_se: 0.5,
+            mean_ess: 180.0,
+            n_replicates: 3,
+            infeasible: None,
+        }];
+        for eval in [SurveyEvalMethod::Pfilter, SurveyEvalMethod::Simulate] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("landscape.tsv");
+            write_landscape_tsv(&path, &rows, &estimated, eval, "h").unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let parsed = crate::landscape_html::parse_landscape_tsv(&text)
+                .unwrap_or_else(|e| panic!("{eval:?}: {e}\n{text}"));
+            let json = serde_json::to_value(&parsed).unwrap();
+            assert_eq!(json["estimated"], serde_json::json!(["beta", "gamma"]), "{eval:?}");
+            let row = &json["rows"][0];
+            assert_eq!(row["point_id"], 4, "{eval:?}");
+            assert_eq!(row["params"], serde_json::json!([0.3, 0.15]), "{eval:?}");
+            assert_eq!(row["loglik"], -123.4, "{eval:?}");
+            assert_eq!(row["loglik_se"], 0.5, "{eval:?}");
+            assert_eq!(row["n_replicates"], 3, "{eval:?}");
+            if eval == SurveyEvalMethod::Pfilter {
+                assert_eq!(row["mean_ess"], 180.0);
+            } else {
+                assert!(row["mean_ess"].is_null());
+            }
+        }
+    }
+
     #[test]
     fn landscape_tsv_simulate_omits_mean_ess() {
         use sim::inference::types::{Transform, EstimatedParam};
