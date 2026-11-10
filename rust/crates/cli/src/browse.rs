@@ -1539,7 +1539,7 @@ fn print_sim_table(out: &crate::out::Out, rows: &[SimRow], now: SystemTime) {
 }
 
 /// Compact model identifier for the list's MODEL column. Full absolute
-/// paths (`/Users/vsb/projects/work/camdl/ocaml/golden/sir_basic.ir.json`)
+/// paths (`/home/x/camdl/ocaml/golden/sir_basic.ir.json`)
 /// are unreadable at table width. Strip the directory and the standard
 /// extensions — a reader recognizes the model by its basename.
 fn model_display_name(path: &str) -> String {
@@ -1973,7 +1973,7 @@ mod tests {
     fn model_display_name_strips_dir_and_extension() {
         // Absolute path + .ir.json → basename without extension
         assert_eq!(
-            model_display_name("/Users/vsb/projects/work/camdl/ocaml/golden/sir_basic.ir.json"),
+            model_display_name("/home/x/camdl/ocaml/golden/sir_basic.ir.json"),
             "sir_basic"
         );
         // .camdl extension also stripped
