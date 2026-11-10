@@ -119,7 +119,11 @@ fn days_in_month(y: i64, m: i64) -> i64 {
 pub fn parse_iso_date(s: &str) -> Result<(i64, i64, i64), CalError> {
     let s = s.trim();
     // The date portion is the first 10 chars: YYYY-MM-DD.
-    if s.len() < 10 {
+    // The first 10 bytes must be ASCII before they are split off and sliced by
+    // byte offset below: a date typed with non-ASCII dashes (`2020–01–01`, as
+    // a spreadsheet or word processor writes it) puts a multi-byte character
+    // across one of those offsets, and slicing through it would panic.
+    if s.len() < 10 || !s.as_bytes()[..10].is_ascii() {
         return Err(CalError::BadFormat(s.to_string()));
     }
     let (date_part, rest) = s.split_at(10);
@@ -276,6 +280,14 @@ pub fn internal_to_date_hires(origin: &str, t: f64, time_unit: &str) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_ascii_date_is_bad_format_not_a_panic() {
+        // En dashes: byte 10 falls inside the second dash.
+        assert!(matches!(parse_iso_date("2020–01–01"), Err(CalError::BadFormat(_))));
+        // Here byte 10 is a character boundary but byte 4 is not.
+        assert!(matches!(parse_iso_date("20–01–01"), Err(CalError::BadFormat(_))));
+    }
 
     #[test]
     fn leap_and_century_rules() {
