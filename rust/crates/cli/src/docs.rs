@@ -147,20 +147,20 @@ pub(crate) fn topic_body(name: &str) -> Option<&'static str> {
     resolve(name).map(|t| t.body)
 }
 
-fn print_index() {
-    println!("camdl docs — usage guides embedded in this binary (offline, version-matched).\n");
+fn print_index(out: &crate::out::Out) {
+    out.report_line("camdl docs — usage guides embedded in this binary (offline, version-matched).\n");
     let w = TOPICS.iter().map(|t| t.slug.len()).max().unwrap_or(0);
     for t in TOPICS {
-        println!("  {:<w$}  {}", t.slug, t.summary, w = w);
+        out.report_line(format_args!("  {:<w$}  {}", t.slug, t.summary, w = w));
     }
-    println!();
-    println!("  camdl docs <topic>        print a guide");
-    println!("  camdl docs --search TERM  find where a term is discussed");
-    println!("  camdl docs --all          print every guide (full corpus)");
-    println!("  camdl docs --json         machine-readable topic index");
+    out.report_line("");
+    out.report_line("  camdl docs <topic>        print a guide");
+    out.report_line("  camdl docs --search TERM  find where a term is discussed");
+    out.report_line("  camdl docs --all          print every guide (full corpus)");
+    out.report_line("  camdl docs --json         machine-readable topic index");
 }
 
-fn print_json() {
+fn print_json(out: &crate::out::Out) {
     let topics: Vec<serde_json::Value> = TOPICS
         .iter()
         .map(|t| {
@@ -171,18 +171,18 @@ fn print_json() {
             })
         })
         .collect();
-    let out = serde_json::json!({ "topics": topics });
-    println!("{}", serde_json::to_string_pretty(&out).expect("serialize topic index"));
+    let index = serde_json::json!({ "topics": topics });
+    out.report_line(serde_json::to_string_pretty(&index).expect("serialize topic index"));
 }
 
-fn print_all() {
+fn print_all(out: &crate::out::Out) {
     for t in TOPICS {
-        println!("<!-- camdl docs: {} -->", t.slug);
-        print!("{}", t.body);
+        out.report_line(format_args!("<!-- camdl docs: {} -->", t.slug));
+        out.report_raw(format_args!("{}", t.body));
         if !t.body.ends_with('\n') {
-            println!();
+            out.report_line("");
         }
-        println!();
+        out.report_line("");
     }
 }
 
@@ -190,11 +190,10 @@ fn print_all() {
 /// case-insensitive, multi-term AND, line-oriented: a line matches if it
 /// contains every whitespace-separated term. Output is `slug:lineno: line`,
 /// grouped by topic ordered by hit count — greppable, agent-friendly.
-fn search(query: &str) {
+fn search(out: &crate::out::Out, query: &str) {
     let terms: Vec<String> = query.to_lowercase().split_whitespace().map(String::from).collect();
     if terms.is_empty() {
-        eprintln!("error: empty search query");
-        std::process::exit(1);
+        out.fail("error: empty search query");
     }
 
     let mut results: Vec<(&Topic, Vec<(usize, String)>)> = Vec::new();
@@ -218,40 +217,39 @@ fn search(query: &str) {
     results.sort_by_key(|(_, hits)| std::cmp::Reverse(hits.len()));
 
     if results.is_empty() {
-        eprintln!("no matches for '{}'", query);
-        std::process::exit(1);
+        out.fail(format!("no matches for '{}'", query));
     }
     for (t, hits) in &results {
         for (lineno, line) in hits {
-            println!("{}:{}: {}", t.slug, lineno, line);
+            out.report_line(format_args!("{}:{}: {}", t.slug, lineno, line));
         }
     }
 }
 
 pub fn cmd_docs(a: &crate::args::DocsArgs) {
+    let out = crate::out::Out::new(false);
     if let Some(q) = &a.search {
-        search(q);
+        search(&out, q);
         return;
     }
     if a.all {
-        print_all();
+        print_all(&out);
         return;
     }
     if a.json {
-        print_json();
+        print_json(&out);
         return;
     }
     match &a.topic {
-        None => print_index(),
+        None => print_index(&out),
         Some(name) => match resolve(name) {
-            Some(t) => print!("{}", t.body),
+            Some(t) => out.report_raw(format_args!("{}", t.body)),
             None => {
-                eprintln!("error: unknown topic '{}'", name);
-                eprintln!(
+                out.say(format_args!("error: unknown topic '{}'", name));
+                out.fail(format!(
                     "available topics: {}",
                     TOPICS.iter().map(|t| t.slug).collect::<Vec<_>>().join(", ")
-                );
-                std::process::exit(1);
+                ));
             }
         },
     }
