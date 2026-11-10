@@ -53,8 +53,8 @@ impl EvalStatsReportGuard {
 impl Drop for EvalStatsReportGuard {
     fn drop(&mut self) {
         if let Some(diff) = sim::eval_stats::nonzero_since(&self.0) {
-            eprintln!();
-            eprint!("{}", diff);
+            crate::out::detached().say("");
+            crate::out::detached().say_raw(format_args!("{}", diff));
         }
     }
 }
@@ -194,7 +194,7 @@ static CAMDLC_CHECKED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 /// `camdlc` (the mismatch silently changes compiled IR). It has no meaning
 /// during the crate's own unit tests, where there is no install to be stale
 /// against — and there it is actively harmful: the mismatch path calls
-/// `std::process::exit(1)`, which aborts the *entire test binary* (every
+/// `crate::out::ExitCode(1).exit()`, which aborts the *entire test binary* (every
 /// subsequent test in the process is skipped, masking real results) the
 /// moment a stale `camdlc` sits on PATH ahead of the build under test. So
 /// `cfg!(test)` short-circuits the check for the bin's unit tests, exactly
@@ -221,8 +221,7 @@ fn check_camdlc_version_once(camdlc: &std::path::Path) {
                 &camdlc.display().to_string(),
                 hint.as_deref(),
             ) {
-                eprintln!("{msg}");
-                std::process::exit(1);
+                crate::out::detached().fail(msg.to_string());
             }
         }
     });
@@ -294,8 +293,7 @@ fn find_camdlc() -> Result<std::path::PathBuf, String> {
                 "on PATH",
                 hint.as_deref(),
             ) {
-                eprintln!("{msg}");
-                std::process::exit(1);
+                crate::out::detached().fail(msg.to_string());
             }
         });
         return Ok(p);
@@ -465,7 +463,7 @@ pub(crate) fn run_camdlc_compile(
     // stderr keeps it off stdout (the IR JSON), and a plain line with no
     // carriage returns is safe under `tee`/CI.
     if crate::out::progress::is_plain() {
-        eprintln!("compiling {model_name}...");
+        crate::out::detached().say(format_args!("compiling {model_name}..."));
     }
 
     // Pretty mode draws to stderr; plain/none resolve to a hidden target, so
@@ -850,7 +848,7 @@ fn note_version_mismatched_entry(cache_path: &std::path::Path, model_path: &str)
     if !cache_path.exists() || entry_ir_version_matches(cache_path) {
         return;
     }
-    crate::out::status::step(
+    crate::out::detached().milestone(
         "ir-cache",
         format!(
             "entry for {} was compiled at a different IR schema version than {} — \
@@ -1221,7 +1219,7 @@ pub fn resolve_ir_path_with_quantities(
     if let Some((cache_path, key)) = &cache_target {
         note_version_mismatched_entry(cache_path, path);
         if cache_entry_servable(cache_path, path) {
-            crate::out::status::step("cached",
+            crate::out::detached().milestone("cached",
                 format!("IR for {} ({})", crate::out::status::concise_path(path), &key[..8.min(key.len())]));
             return Ok((cache_path.to_string_lossy().into_owned(), None));
         }
@@ -1238,7 +1236,7 @@ pub fn resolve_ir_path_with_quantities(
         let is_cached = || cache_entry_servable(cache_path, path);
         match single_flight::acquire(cache_path, &is_cached) {
             single_flight::Lease::AlreadyCached => {
-                crate::out::status::step("cached",
+                crate::out::detached().milestone("cached",
                     format!("IR for {} ({})", crate::out::status::concise_path(path), &key[..8.min(key.len())]));
                 return Ok((cache_path.to_string_lossy().into_owned(), None));
             }
@@ -1270,7 +1268,7 @@ pub fn resolve_ir_path_with_quantities(
                     // Should not happen after a successful compile (camdlc writes
                     // the depfile before the IR); surface it so a "why is my IR
                     // cache always missing?" is diagnosable rather than silent.
-                    crate::out::status::step("ir-cache",
+                    crate::out::detached().milestone("ir-cache",
                         format!("read()-dependency capture failed ({e}); not caching this compile"));
                     None
                 }
@@ -1284,7 +1282,7 @@ pub fn resolve_ir_path_with_quantities(
     // for stratified models; ~JSON-verbosity for tiny ones). Source size via
     // metadata (cheap, no read).
     let src_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    crate::out::status::step("compiled", format!(
+    crate::out::detached().milestone("compiled", format!(
         "{}   {} IR in {:.1}s{}",
         crate::out::status::concise_path(path),
         crate::out::status::human_bytes(json.len() as u64),
@@ -2709,24 +2707,24 @@ pub fn print_scheduled_actions_summary(
 
     if !decl_interv.is_empty() {
         let active_count = decl_interv.iter().filter(|iv| active_names.contains(iv.name.as_str())).count();
-        out.say(format_args!("  interventions ({} active of {} declared):", active_count, decl_interv.len()));
+        crate::out::detached().say(format_args!("  interventions ({} active of {} declared):", active_count, decl_interv.len()));
         for iv in &decl_interv {
             let on = active_names.contains(iv.name.as_str());
             let p = out.stderr_painter();
             let glyph = if on { p.paint("✓", Style::Ok) } else { p.paint("✗", Style::Dim) };
             let note = if on { "" } else { "  (off — not enabled)" };
-            out.say(format_args!("    {} {}{}", glyph, iv.name, note));
+            crate::out::detached().say(format_args!("    {} {}{}", glyph, iv.name, note));
         }
     }
     if !decl_events.is_empty() {
         let active_count = decl_events.iter().filter(|iv| active_names.contains(iv.name.as_str())).count();
-        out.say(format_args!("  events ({} declared, {} active):", decl_events.len(), active_count));
+        crate::out::detached().say(format_args!("  events ({} declared, {} active):", decl_events.len(), active_count));
         for iv in &decl_events {
             let on = active_names.contains(iv.name.as_str());
             let p = out.stderr_painter();
             let glyph = if on { p.paint("✓", Style::Ok) } else { p.paint("✗", Style::Dim) };
             let note = if on { "" } else { "  (disabled)" };
-            out.say(format_args!("    {} {}{}", glyph, iv.name, note));
+            crate::out::detached().say(format_args!("    {} {}{}", glyph, iv.name, note));
         }
     }
 }
@@ -2741,12 +2739,12 @@ pub fn print_scheduled_actions_summary(
 /// `pfilter` right after the interventions/events summary.
 pub fn print_observations_summary(out: &crate::out::Out, model: &ir::Model) {
     if model.observations.is_empty() { return; }
-    out.say(format_args!("  observations ({} stream{}):",
+    crate::out::detached().say(format_args!("  observations ({} stream{}):",
         model.observations.len(),
         if model.observations.len() == 1 { "" } else { "s" }));
     for check in crate::fit::report::obs_stream_checks(model) {
         if let crate::fit::report::Check::ObsStream { name, carrier, family } = check {
-            out.say(format_args!("    {} {:<16} {:<28} {}",
+            crate::out::detached().say(format_args!("    {} {:<16} {:<28} {}",
                 out.stderr_painter().paint("✓", Style::Ok), name, carrier, family));
         }
     }
@@ -2756,9 +2754,9 @@ pub fn print_observations_summary(out: &crate::out::Out, model: &ir::Model) {
     });
     if warn_negbin_on_snapshot {
         let p = out.stderr_painter();
-        out.say(format_args!("    {}", p.paint("note: NegBinomial on a prevalence / snapshot projection is valid", Style::Dim)));
-        out.say(format_args!("{}", p.paint("          but uncommon. Binomial or Poisson is the typical choice for", Style::Dim)));
-        out.say(format_args!("{}", p.paint("          point-in-time counts. See camdl-run-spec.md §14.4.", Style::Dim)));
+        crate::out::detached().say(format_args!("    {}", p.paint("note: NegBinomial on a prevalence / snapshot projection is valid", Style::Dim)));
+        crate::out::detached().say(format_args!("{}", p.paint("          but uncommon. Binomial or Poisson is the typical choice for", Style::Dim)));
+        crate::out::detached().say(format_args!("{}", p.paint("          point-in-time counts. See camdl-run-spec.md §14.4.", Style::Dim)));
     }
 }
 
@@ -3953,12 +3951,12 @@ pub fn simulate_compiled(
         let t_end = compiled.model.simulation.t_end;
         if !ts.is_empty() && ts.iter().all(|&t| t > t_end) {
             let w = crate::out::paint::stderr().paint("warning:", Style::Warn);
-            eprintln!(
+            crate::out::detached().say(format_args!(
                 "{w} every `at = [...]` output time is beyond the \
                  simulation horizon (t_end = {t_end}); the trajectory will have no rows \
                  (gh#125). Add output times within [t_start, t_end], raise t_end, \
                  or drop a shortening `--to` (gh#626)."
-            );
+            ));
         }
     }
 

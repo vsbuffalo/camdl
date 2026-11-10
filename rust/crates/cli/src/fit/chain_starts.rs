@@ -808,14 +808,14 @@ fn draw_from_prior(
         });
     }
     if !no_prior_names.is_empty() {
-        eprintln!(
+        crate::out::detached().say(format_args!(
             "{w} starts = \"from_prior\": no sampleable prior for \
              {}; drawing those parameter(s) uniformly within their bounds instead. \
              Declare a `~ <dist>` prior in the model or a `prior = {{ ... }}` in \
              [estimate] to draw them from one.",
             no_prior_names.join(", "),
             w = crate::out::paint::warning_tag(),
-        );
+        ));
     }
     let base = estimate_values_from_resolved(resolved);
     let mut box_fallbacks: Vec<String> = Vec::new();
@@ -860,7 +860,7 @@ fn draw_from_prior(
         });
     }
     if !box_fallbacks.is_empty() {
-        eprintln!(
+        crate::out::detached().say(format_args!(
             "{w} starts = \"from_prior\": {} draws from the prior \
              of {} all fell outside the search bounds; drew uniformly within the bounds \
              instead. The prior puts almost no mass inside the bounds — check that they \
@@ -868,7 +868,7 @@ fn draw_from_prior(
             MAX_PRIOR_BOX_REDRAWS,
             box_fallbacks.join(", "),
             w = crate::out::paint::warning_tag(),
-        );
+        ));
     }
     Ok(starts)
 }
@@ -1157,11 +1157,11 @@ where F: Fn(PathBuf) -> InitSource,
         .map(|s| (*s).to_string())
         .collect();
     if !missing.is_empty() {
-        eprintln!(
+        crate::out::detached().say(format_args!(
             "{w} starts source `{}` is missing \
              parameter(s): {}. Falling back to bounds-uniform for \
              those parameter(s).",
-            path.display(), missing.join(", "), w = crate::out::paint::warning_tag());
+            path.display(), missing.join(", "), w = crate::out::paint::warning_tag()));
     }
     let path_buf: PathBuf = path.to_path_buf();
     // Build the per-chain values once — all chains share the point;

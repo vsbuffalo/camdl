@@ -131,14 +131,13 @@ impl InferenceModelOverrides {
     /// any other work. Matches the wording in the proposal §"Migration".
     pub fn check_removed_flags(&self, subcmd: &str) {
         if !self._removed_param.is_empty() {
-            eprintln!(
+            crate::out::detached().fail(format!(
                 "error: --param is no longer accepted on `camdl {}`. \
                  Replacement:\n  \
                  --fixed NAME=VALUE             (set & freeze a single value)\n  \
                  --fixed-file <toml>            (load fixed values from a TOML file)\n\
                  See `camdl {} --help` (SET PARAMETER VALUES section).",
-                subcmd, subcmd);
-            std::process::exit(1);
+                subcmd, subcmd));
         }
     }
 }

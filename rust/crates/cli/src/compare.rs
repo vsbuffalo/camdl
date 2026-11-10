@@ -318,7 +318,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     let cohort = parse_cohort_exclude(&a.exclude_chains, &model_names).unwrap_or_else(|e| {
         out.fail(format!("error: {e}"));
     });
-    cohort.warn();
+    cohort.warn(&out);
 
     // Load traces, each filtered by its own fit's selection (if any).
     let rows: Vec<Row> = models.into_iter().map(|m| {
@@ -1570,20 +1570,20 @@ impl CohortChainSelection {
     /// The loud, non-quietable bias warning, once, before derivations run.
     /// Cohort-wide reuses the shared `each fit` phrasing; the per-fit form names
     /// each targeted fit and states the bias caveat a single time.
-    fn warn(&self) {
+    fn warn(&self, out: &crate::out::Out) {
         if self.per_fit.is_empty() {
             return;
         }
         if self.cohort_wide {
             // Every entry carries the same drop set — warn once.
             if let Some(sel) = self.per_fit.values().next() {
-                sel.warn_requested();
+                sel.warn_requested(out, );
             }
         } else {
             for (fit, sel) in &self.per_fit {
-                sel.warn_requested_for_fit(fit);
+                sel.warn_requested_for_fit(out, fit);
             }
-            crate::chain_selection::eprint_bias_caveat();
+            crate::chain_selection::eprint_bias_caveat(out, );
         }
     }
 }

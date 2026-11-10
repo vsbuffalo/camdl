@@ -2739,7 +2739,7 @@ impl FitConfig {
         // the as-written paths, before the relative-path resolution below turns
         // every relative path absolute.
         for w in config.problem.absolute_path_warnings() {
-            eprintln!("{w}");
+            crate::out::detached().say(format_args!("{w}"));
         }
 
         config.problem.anchor_paths_at(anchor_toml);
@@ -2915,11 +2915,11 @@ impl FitConfig {
         // groups.
         if !self.problem.simplex_groups.is_empty() && !matches!(algorithm, Algorithm::IF2 { .. }) {
             let tag = crate::out::paint::warning_tag();
-            eprintln!("{} fit declares simplex_groups, \
+            crate::out::detached().say(format_args!("{} fit declares simplex_groups, \
                 but the `{}` method does not currently honour the \
                 simplex constraint — members will be perturbed \
                 independently and rely on the model to enforce sum = 1 \
-                indirectly.", tag, algorithm.method_name());
+                indirectly.", tag, algorithm.method_name()));
         }
 
         // Bayesian prior presence is checked separately by

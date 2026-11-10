@@ -142,7 +142,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
         let selection = match args.exclude_chains.as_deref() {
             Some(raw) => match crate::chain_selection::ChainSelection::parse_exclude(raw) {
                 Ok(sel) => {
-                    sel.warn_requested();
+                    sel.warn_requested(&out, );
                     Some(sel)
                 }
                 Err(e) => {

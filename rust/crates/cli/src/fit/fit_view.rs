@@ -314,11 +314,11 @@ impl FitView {
         let side = match crate::run_meta::read_fit_sidecar(seg) {
             Some(s) => s,
             None => {
-                eprintln!(
+                crate::out::detached().say(format_args!(
                     "warning: fit {} has method leaves but no fit.meta.json provenance \
                      sidecar — skipping (provenance missing)",
                     seg.display()
-                );
+                ));
                 return None;
             }
         };
@@ -332,11 +332,11 @@ impl FitView {
             )
         });
         if is_bayesian && side.resolved_priors.is_empty() {
-            eprintln!(
+            crate::out::detached().say(format_args!(
                 "error: Bayesian fit {} has empty resolved_priors in its sidecar — \
                  prior-source provenance was dropped (gh#75)",
                 seg.display()
-            );
+            ));
         }
 
         let methods: Vec<FitMethodView> = leaves
@@ -344,7 +344,7 @@ impl FitView {
             .filter_map(|(dir, r)| match method_view_from_record(seg, dir, r) {
                 Ok(v) => Some(v),
                 Err(why) => {
-                    eprintln!("{}", skipped_leaf_line(dir, &why));
+                    crate::out::detached().say(format_args!("{}", skipped_leaf_line(dir, &why)));
                     None
                 }
             })

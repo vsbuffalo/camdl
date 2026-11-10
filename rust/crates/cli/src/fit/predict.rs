@@ -1464,7 +1464,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // A chain selection actually dropped chains — warn loudly (non-quietable),
     // naming the dropped chains and the bias direction, before any output.
     if let Some(info) = posterior.selection() {
-        warn_active_selection(info, crate::out::paint::stderr());
+        warn_active_selection(out, info, crate::out::paint::stderr());
     }
 
     // 2b. Resolve which horizon(s) to emit. The one-step horizon is gated by a

@@ -154,7 +154,7 @@ pub fn run_method(
     // method does.
     let series_len = config.observations.len();
     if !is_ode_mh {
-        super::methods::emit_status_banner(
+        super::methods::emit_status_banner(out,
             crate::run_meta::FitAlgorithm::Pmmh, method.algorithm.backend(), Some(series_len));
         if let Some(note) = super::methods::status_note(
             crate::run_meta::FitAlgorithm::Pmmh, method.algorithm.backend())

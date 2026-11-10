@@ -221,7 +221,7 @@ pub fn convert_time_column(
         // an empty file shouldn't warn.
         let any_cell = cells.iter().any(|c| !c.trim().is_empty());
         if any_cell {
-            eprintln!(
+            crate::out::detached().say(format_args!(
                 "[warn W326] --data time column is numeric and the model \
                  declares `origin = date(\"{}\")` — values are interpreted \
                  as internal-time units from origin. \
@@ -229,7 +229,7 @@ pub fn convert_time_column(
                  to suppress this warning; if you meant calendar dates, \
                  switch the column to ISO YYYY-MM-DD form.",
                 opts.origin.unwrap_or("…"),
-            );
+            ));
         }
     }
 
@@ -339,19 +339,19 @@ pub fn check_substeps_and_grid(
             (t - r).abs() > 1e-9
         });
         if off_grid {
-            eprintln!(
+            crate::out::detached().say(format_args!(
                 "[warn] some converted observation times don't align to dt={} \
                  (snapped within dt). Common under time_unit = '{}'.",
                 opts.dt, opts.time_unit
-            );
+            ));
         }
         if opts.time_unit == "months" || opts.time_unit == "years" {
-            eprintln!(
+            crate::out::detached().say(format_args!(
                 "[warn] dated data under time_unit = '{}': months/years are *average* \
                  calendar lengths, so monthly/yearly dates land off the integer grid. \
                  The integrator snaps within dt; verify this is intended.",
                 opts.time_unit
-            );
+            ));
         }
     }
 

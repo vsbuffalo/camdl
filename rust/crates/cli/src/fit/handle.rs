@@ -590,11 +590,11 @@ fn resolve_config(path: &Path) -> Result<(LeafRef, FitConfig), ResolveError> {
             .into_iter()
             .partition(|l| l.record.engine_version == crate::version::VERSION_SHORT);
         if this_build.len() == 1 {
-            eprintln!(
+            crate::out::detached().say(format_args!(
                 "note: {} also matches {} run(s) by other camdl builds; using this build's",
                 path.display(),
                 other.len()
-            );
+            ));
         }
         matches = if this_build.is_empty() { other } else { this_build };
     }

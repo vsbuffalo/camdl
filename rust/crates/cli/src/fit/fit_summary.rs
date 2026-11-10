@@ -153,7 +153,7 @@ fn chain_selection_advisory(
             ));
         }
     }
-    warn_active_selection(info, stderr);
+    warn_active_selection(out, info, stderr);
 }
 
 /// Top-level entry point. Resolves `args.fit` (the fit handle) to its segment

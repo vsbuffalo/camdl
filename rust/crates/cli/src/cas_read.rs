@@ -181,7 +181,7 @@ fn warn_if_renamed_kind(run_json: &Path, bytes: &[u8]) {
         .map(|mut seen| seen.insert(run_json.to_path_buf()))
         .unwrap_or(true);
     if first {
-        eprintln!("warning: skipping {}: {why}.", run_json.display());
+        crate::out::detached().say(format_args!("warning: skipping {}: {why}.", run_json.display()));
     }
 }
 

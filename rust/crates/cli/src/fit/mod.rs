@@ -1587,7 +1587,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // PMMH says its caveat itself, once its data is bound, so the caveat
         // can carry the series length it is about (`pmmh::run_method`).
         if !matches!(method.algorithm, Algorithm::PMMH { .. }) {
-            methods::emit_status_banner(method.algorithm.method_kind(), method.algorithm.backend(), None);
+            methods::emit_status_banner(&out, method.algorithm.method_kind(), method.algorithm.backend(), None);
             if let Some(note) = methods::status_note(method.algorithm.method_kind(), method.algorithm.backend()) {
                 out.check(report::Check::MethodCaveat {
                     method: method_name.to_string(), note: note.to_string(), series_len: None,

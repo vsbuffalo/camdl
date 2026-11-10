@@ -118,25 +118,25 @@ impl ChainSelection {
     /// The cohort-level warning (`fit table`, `compare`): the same drop set is
     /// applied to every fit, so there is no single kept/total to report — name
     /// the requested ids. Printed once, to stderr, before the derivations run.
-    pub fn warn_requested(&self) {
-        eprintln!(
+    pub fn warn_requested(&self, out: &crate::out::Out, ) {
+        out.say(format_args!(
             "{w} --exclude-chains will drop chain(s) {} from each fit's \
              posterior cloud.",
             self.excluded_csv(), w = crate::out::paint::warning_tag()
-        );
-        eprintln!("         {BIAS_CAVEAT_A}");
-        eprintln!("         {BIAS_CAVEAT_B}");
+        ));
+        out.say(format_args!("         {BIAS_CAVEAT_A}"));
+        out.say(format_args!("         {BIAS_CAVEAT_B}"));
     }
 
     /// The per-fit warning (`compare --exclude-chains @fit:ids`): this drop set
     /// targets one named fit, so name it. Printed once per fit, to stderr,
     /// before the derivations run. The bias caveat is left to the caller so it
     /// prints once for a multi-fit selection.
-    pub fn warn_requested_for_fit(&self, fit: &str) {
-        eprintln!(
+    pub fn warn_requested_for_fit(&self, out: &crate::out::Out, fit: &str) {
+        out.say(format_args!(
             "{w} --exclude-chains will drop chain(s) {} from fit '{fit}'.",
             self.excluded_csv(), w = crate::out::paint::warning_tag()
-        );
+        ));
     }
 
     /// Drop the selected chains from a keyed draws cloud.
@@ -371,9 +371,9 @@ const BIAS_CAVEAT_B: &str =
 /// Print the two-line bias caveat once. For the per-fit `compare` form, which
 /// names each fit's drop set separately ([`ChainSelection::warn_requested_for_fit`])
 /// and then states the shared bias risk a single time.
-pub fn eprint_bias_caveat() {
-    eprintln!("         {BIAS_CAVEAT_A}");
-    eprintln!("         {BIAS_CAVEAT_B}");
+pub fn eprint_bias_caveat(out: &crate::out::Out, ) {
+    out.say(format_args!("         {BIAS_CAVEAT_A}"));
+    out.say(format_args!("         {BIAS_CAVEAT_B}"));
 }
 
 /// The artifact address for a report derived from a chain-selected cloud:
@@ -427,17 +427,17 @@ pub fn artifact_name(base: &str, selection: Option<&ChainSelection>) -> String {
 /// the dropped chains and states the bias direction (toward the retained mode),
 /// and points at `fit summary` for the per-chain diagnostics (gh#406). `stderr`
 /// paints the tag under the command's own colour policy (its `--no-color`).
-pub fn warn_active_selection(info: &SubsetInfo, stderr: crate::out::paint::Painter) {
-    eprintln!(
+pub fn warn_active_selection(out: &crate::out::Out, info: &SubsetInfo, stderr: crate::out::paint::Painter) {
+    out.say(format_args!(
         "{w} --exclude-chains dropped chain(s) {} \
          ({} of {} chains kept).",
         info.excluded_csv(),
         info.kept.len(),
         info.n_total,
         w = stderr.paint("warning:", crate::out::paint::Style::Warn)
-    );
-    eprintln!("         {BIAS_CAVEAT_A}");
-    eprintln!("         {BIAS_CAVEAT_B}");
+    ));
+    out.say(format_args!("         {BIAS_CAVEAT_A}"));
+    out.say(format_args!("         {BIAS_CAVEAT_B}"));
 }
 
 #[cfg(test)]

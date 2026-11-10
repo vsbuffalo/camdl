@@ -827,9 +827,9 @@ pub fn record_training_window(
 ) {
     let Some(window) = window else { return };
     let Some(mut sidecar) = read_fit_sidecar(fit_segment) else {
-        eprintln!(
+        crate::out::detached().say(format_args!(
             "warning: cannot record training window: no fit.meta.json under {}",
-            fit_segment.display());
+            fit_segment.display()));
         return;
     };
     if sidecar.training_window == Some(window) {
@@ -839,12 +839,12 @@ pub fn record_training_window(
     let bytes = match serde_json::to_vec_pretty(&sidecar) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("warning: cannot record training window: {e}");
+            crate::out::detached().say(format_args!("warning: cannot record training window: {e}"));
             return;
         }
     };
     if let Err(e) = std::fs::write(fit_segment.join("fit.meta.json"), bytes) {
-        eprintln!("warning: cannot record training window: {e}");
+        crate::out::detached().say(format_args!("warning: cannot record training window: {e}"));
     }
 }
 

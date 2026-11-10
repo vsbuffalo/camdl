@@ -19,14 +19,10 @@ use crate::out::paint::{self as style, Style};
 /// `compiled`/`storing`/`stored`/`ensemble` without truncation).
 const VERB_W: usize = 9;
 
-/// An intermediate milestone: bold-green right-aligned `verb` + `detail`, e.g.
-/// `  compiled  sir.camdl → /tmp/sir.ir.json   3.3s (1.0 MB)`. (Pad before
-/// coloring so the ANSI bytes don't break the alignment.)
-pub fn step(verb: &str, detail: impl std::fmt::Display) {
-    eprintln!("{}", step_text(style::stderr(), verb, detail));
-}
-
-/// The milestone line [`step`] prints, painted by `p`, without its newline.
+/// A milestone line: bold-green right-aligned `verb` + `detail`, e.g.
+/// `  compiled  sir.camdl → /tmp/sir.ir.json   3.3s (1.0 MB)`, painted by
+/// `p`, without its newline (pad before colouring so the codes do not break
+/// the alignment). `Out::milestone` writes it.
 pub fn step_text(p: style::Painter, verb: &str, detail: impl std::fmt::Display) -> String {
     format!("{} {}", p.paint(&p.paint(&format!("{verb:>VERB_W$}"), Style::Bold), Style::Ok), detail)
 }
