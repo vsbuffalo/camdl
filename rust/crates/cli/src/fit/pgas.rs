@@ -458,6 +458,11 @@ pub fn run_method(
                                 chain));
                         }
                         eprintln!("  chain {}: resuming from sweep {}", chain, state.completed_sweeps);
+                        if let Some(gap) = sim::inference::types::z_restore_gaps(
+                            &state.param_names, &state.transformed, &config.estimated_params)
+                        {
+                            eprintln!("{gap}");
+                        }
                         if state.completed_sweeps >= n_sweeps {
                             eprintln!("  warning: chain already completed {} sweeps (requested {}). \
                                        Increase sweeps in fit.toml to continue.",

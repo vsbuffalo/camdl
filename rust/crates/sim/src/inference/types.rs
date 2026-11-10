@@ -527,9 +527,10 @@ pub fn init_particle_rngs(
 /// The resume state stores `param_names` alongside `transformed` z-values.
 /// Because HashMap iteration order is non-deterministic, the current run's
 /// `if2_params` may be in a different order than when the state was saved.
-/// Parameters missing from the saved state are recomputed from `current_params`
-/// with a warning. If `saved_names` is empty (legacy state before param_names
-/// was added), all z-values are recomputed from `current_params`.
+/// Parameters missing from the saved state are recomputed from `current_params`.
+/// If `saved_names` is empty (legacy state before param_names was added), all
+/// z-values are recomputed from `current_params`. [`z_restore_gaps`] says which
+/// of the two happens, for the caller to report.
 pub fn restore_z_values(
     saved_names: &[String],
     saved_z: &[f64],
@@ -537,7 +538,6 @@ pub fn restore_z_values(
     current_params: &[f64],
 ) -> Vec<f64> {
     if saved_names.is_empty() || saved_names.len() != saved_z.len() {
-        eprintln!("  warning: resume state lacks param_names — recomputing z from params.");
         return if2_params.iter()
             .map(|spec| spec.to_transformed(current_params[spec.index]))
             .collect();
@@ -552,10 +552,56 @@ pub fn restore_z_values(
         if let Some(&z) = saved.get(spec.name.as_str()) {
             z
         } else {
-            eprintln!("  warning: param '{}' not found in resume state, computing from theta", spec.name);
             spec.to_transformed(current_params[spec.index])
         }
     }).collect()
+}
+
+/// Where [`restore_z_values`] cannot restore a saved z-value and recomputes it
+/// from the parameter instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ZRestoreGap {
+    /// The resume state carries no usable `param_names`: every z-value is
+    /// recomputed.
+    NoNames,
+    /// These estimated parameters are absent from the resume state.
+    Missing(Vec<String>),
+}
+
+impl std::fmt::Display for ZRestoreGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ZRestoreGap::NoNames => {
+                write!(f, "  warning: resume state lacks param_names — recomputing z from params.")
+            }
+            ZRestoreGap::Missing(names) => {
+                for (i, name) in names.iter().enumerate() {
+                    if i > 0 {
+                        writeln!(f)?;
+                    }
+                    write!(f, "  warning: param '{}' not found in resume state, computing from theta", name)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// What [`restore_z_values`] will recompute for this saved state, or `None`
+/// when it restores every z-value. The same conditions it branches on.
+pub fn z_restore_gaps(
+    saved_names: &[String],
+    saved_z: &[f64],
+    if2_params: &[EstimatedParam],
+) -> Option<ZRestoreGap> {
+    if saved_names.is_empty() || saved_names.len() != saved_z.len() {
+        return Some(ZRestoreGap::NoNames);
+    }
+    let missing: Vec<String> = if2_params.iter()
+        .filter(|spec| !saved_names.iter().any(|n| n == &spec.name))
+        .map(|spec| spec.name.clone())
+        .collect();
+    (!missing.is_empty()).then_some(ZRestoreGap::Missing(missing))
 }
 
 /// State of one particle: compartment counts + flow accumulators.
@@ -755,6 +801,30 @@ pub fn normalize_log_weights(log_weights: &[f64]) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `z_restore_gaps` names exactly what `restore_z_values` recomputes: a
+    /// saved z-value comes back as saved, a missing parameter's is computed
+    /// from its value, and a state without names recomputes every one.
+    #[test]
+    fn z_restore_gaps_names_what_restore_recomputes() {
+        let param = |name: &str, index: usize| EstimatedParam {
+            name: name.to_string(), index, initial: 1.0, rw_sd: 0.1,
+            transform: Transform::Identity, rw_sd_auto: false, perturb_only_at_t0: false,
+        };
+        let specs = [param("beta", 0), param("gamma", 1)];
+        let current = [0.5, 0.25];
+        let names = vec!["beta".to_string()];
+        assert_eq!(restore_z_values(&names, &[9.0], &specs, &current), vec![9.0, 0.25]);
+        assert_eq!(z_restore_gaps(&names, &[9.0], &specs),
+            Some(ZRestoreGap::Missing(vec!["gamma".to_string()])));
+        let both = vec!["gamma".to_string(), "beta".to_string()];
+        assert_eq!(restore_z_values(&both, &[7.0, 9.0], &specs, &current), vec![9.0, 7.0]);
+        assert_eq!(z_restore_gaps(&both, &[7.0, 9.0], &specs), None);
+        assert_eq!(restore_z_values(&[], &[], &specs, &current), vec![0.5, 0.25]);
+        assert_eq!(z_restore_gaps(&[], &[], &specs), Some(ZRestoreGap::NoNames));
+        assert_eq!(ZRestoreGap::NoNames.to_string(),
+            "  warning: resume state lacks param_names — recomputing z from params.");
+    }
 
     fn approx_eq(a: f64, b: f64) -> bool { (a - b).abs() < 1e-12 }
 
