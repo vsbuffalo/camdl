@@ -1029,8 +1029,8 @@ implicit arm as `baseline`) is found by hash and reused.
 Because a level hash is a structural digest of typed values rather than of a
 string, the empty scenario is a **constant**: a scenario with no overrides, no
 scale factors, no enables and no disables always hashes to the same value, so
-`_none_-037ee3b0` identifies the unmodified model in every project.
-`seed_1-06cbd6b3` and `base-...` are constants in the same way.
+`_none_-e93c95fd` identifies the unmodified model in every project.
+`seed_1-e6a47b86` and `base-...` are constants in the same way.
 
 A **multi-cell** `simulate` (`--replicates`, `--seeds`, several `--scenario`, or
 `--draws`) writes the N per-cell `sim` leaves _and_ one `sim_ensemble` leaf
@@ -1455,7 +1455,7 @@ A `--backend`, `--dt` or `--integrator` that differs from the fit's still runs,
 with one stderr line naming both simulators:
 
 ```
-note: results/fits/cb-3e073494/pmmh-b7a0a81d/seed_1-06cbd6b3 was fitted on chain_binomial at dt = 0.5; this replay runs on chain_binomial at dt = 1 (--dt as given), so the parameters drive a different simulator from the one they were estimated on
+note: results/fits/cb-3e073494/pmmh-b7a0a81d/seed_1-e6a47b86 was fitted on chain_binomial at dt = 0.5; this replay runs on chain_binomial at dt = 1 (--dt as given), so the parameters drive a different simulator from the one they were estimated on
 ```
 
 Each flag replaces its own setting and nothing else. `dt` is a `[config]`
@@ -1677,7 +1677,7 @@ results/sims/
   sir_basic-cd37d79d/                 # model:    IR digest + ir_version + engine
     chain_binomial-dt1-9fe90ef5/      # config:   backend, dt, schedule, output view
       base-b912ced1/                  # params:   resolved base values (+ table digests)
-        _none_-037ee3b0/              # scenario: the (here empty) delta
+        _none_-e93c95fd/              # scenario: the (here empty) delta
           seed_7-d0aef62a/            # seed:     the resolved process_seed
             traj.tsv
             run.json
@@ -1718,7 +1718,7 @@ camdl simulate seir_vaccine.camdl --params params.toml --seed 42
 ```
 
 ```
-   stored ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/_none_-037ee3b0/seed_42-dd2fb524
+   stored ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/_none_-e93c95fd/seed_42-dd2fb524
           camdl cat 18bd7a09b098c20c22fd478abd331b5475d213c57f5505ead75088f35a523c27
 ```
 
@@ -2055,7 +2055,7 @@ camdl list --format json           # machine-readable; see the caveat below
 
 # Full metadata for one run (short-hash prefix resolves git-style)
 camdl show 18bd7a09
-camdl show ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/_none_-037ee3b0/seed_42-dd2fb524
+camdl show ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/_none_-e93c95fd/seed_42-dd2fb524
 
 # Emit the trajectory, or a named stream from the leaf
 camdl cat 18bd7a09
@@ -2121,7 +2121,7 @@ problem), and `methods` — one entry per method leaf:
 
 ```json
 {"method":"pgas","method_hash":"0727792d…","run_id":"b99e1710…",
- "path":"./results/fits/pgas-50e0eb11/pgas-0727792d/seed_1-06cbd6b3",
+ "path":"./results/fits/pgas-50e0eb11/pgas-0727792d/seed_1-e6a47b86",
  "backend":"chain_binomial","seed":1,"n_chains":2,
  "best_loglik":-35405.944659607965,"loglik_type":"complete_data","best_chain":1}
 ```
@@ -2636,10 +2636,10 @@ Parameters (3):
   total: 2 design points × 2 replicates = 4 runs
 
 store: results
-  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.2-65985320/_none_-037ee3b0/seed_1-06cbd6b3
-  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.2-65985320/_none_-037ee3b0/seed_5871781006564002452-f483e20c
-  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.5-ee1882a0/_none_-037ee3b0/seed_1-06cbd6b3
-  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.5-ee1882a0/_none_-037ee3b0/seed_5871781006564002452-f483e20c
+  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.2-65985320/_none_-e93c95fd/seed_1-e6a47b86
+  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.2-65985320/_none_-e93c95fd/seed_5871781006564002452-f483e20c
+  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.5-ee1882a0/_none_-e93c95fd/seed_1-e6a47b86
+  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.5-ee1882a0/_none_-e93c95fd/seed_5871781006564002452-f483e20c
   0 cache hits → read back, 4 misses → would simulate
 (dry run — no simulation, no files written.)
 ```
@@ -3467,7 +3467,7 @@ camdl fit run fits/01_mle.toml --label mle
 camdl fit run fits/09_pgas_only.toml --starts from_mle=@mle
 camdl fit run fits/09_pgas_only.toml --starts from_posterior=@short-run
 camdl fit run fits/09_pgas_only.toml \
-    --starts from_mle=results/fits/01_mle-2030ba2b/if2-fee126b1/seed_1-06cbd6b3
+    --starts from_mle=results/fits/01_mle-2030ba2b/if2-fee126b1/seed_1-e6a47b86
 
 # Read side.
 camdl fit summary results/fits/01_mle-2030ba2b
@@ -3517,7 +3517,7 @@ from the content-addressed store, so re-running the first file is a cache hit:
 ```
 $ camdl fit run fits/01_scout.toml --label scout
 ── method: if2 ──
-  cache hit — reusing fits/01_scout-77595169/if2-fee126b1/seed_1-06cbd6b3
+  cache hit — reusing fits/01_scout-77595169/if2-fee126b1/seed_1-e6a47b86
 ```
 
 **The flags the split removed are parsed only to reject them**, so the error
@@ -3617,14 +3617,14 @@ any other:
 
 ```
 $ camdl fit run fits/09_pgas_only.toml --starts from_mle=@mle
-   stored pgas · …/09_pgas_only-649b2ecc/pgas-7107153d/seed_1-06cbd6b3/
+   stored pgas · …/09_pgas_only-649b2ecc/pgas-7107153d/seed_1-e6a47b86/
 
 # raise `sweeps` in the toml, then extend that leaf
 $ camdl fit run fits/09_pgas_only.toml --starts from_mle=@mle \
-    --resume results/fits/09_pgas_only-649b2ecc/pgas-7107153d/seed_1-06cbd6b3
+    --resume results/fits/09_pgas_only-649b2ecc/pgas-7107153d/seed_1-e6a47b86
   chain 0: resuming from sweep 100
   chain 1: resuming from sweep 100
-   stored pgas · …/09_pgas_only-649b2ecc/pgas-05ea6411/seed_1-06cbd6b3/
+   stored pgas · …/09_pgas_only-649b2ecc/pgas-05ea6411/seed_1-e6a47b86/
 ```
 
 **Chain starts.** `--starts <SPEC>` overrides the file's `starts` with the same
@@ -3698,7 +3698,7 @@ fit_seeds = [1, 2]
 
 ```
 ━━━ cell 1/2: fit_seed=1 ━━━
-   stored if2 · …/if2-fee126b1/seed_1-06cbd6b3/
+   stored if2 · …/if2-fee126b1/seed_1-e6a47b86/
 ━━━ cell 2/2: fit_seed=2 ━━━
    stored if2 · …/if2-fee126b1/seed_2-f69dd668/
 ```
@@ -3906,7 +3906,7 @@ dt-convergence at θ̂: PASS  (|Δ_leg1| = 0.65, |Δ_leg2| = 1.16 nats (vs τ = 
   ! 1/2 parameters have Â > 1.1 (max 1.15).
   0 error(s), 1 warning(s), 2 info
 
-   stored if2 · fits/../results/fits/01_mle-2030ba2b/if2-fee126b1/seed_1-06cbd6b3/
+   stored if2 · fits/../results/fits/01_mle-2030ba2b/if2-fee126b1/seed_1-e6a47b86/
           best ll=-58.4 (chain 1) in 8.5s
 ```
 
@@ -4066,7 +4066,7 @@ The PGAS file resolves its source first, then runs NUTS on θ given the
 conditioned trajectory:
 
 ```
-  starts source: …/02_scout-77595169/if2-fee126b1/seed_1-06cbd6b3 (fit_state.toml)
+  starts source: …/02_scout-77595169/if2-fee126b1/seed_1-e6a47b86 (fit_state.toml)
 ── method: pgas ──
   chain 0: NUTS enabled (gradient expressions found in IR)
   chain 0: dense mass matrix estimated (sweep 35):
@@ -4320,7 +4320,7 @@ cooling = 0.7
 $ camdl fit run fits/08_holdoutfiles.toml --seed 1
 cooling: cf50=0.70, reached at iter 50 (target), over a 5-iteration run × 9 observations
 best chain: 1 (loglik=-48.01 ± 0.01)
-   stored if2 · …/results/fits/08_holdoutfiles-812b33c5/if2-c3b8cbc0/seed_1-06cbd6b3/
+   stored if2 · …/results/fits/08_holdoutfiles-812b33c5/if2-c3b8cbc0/seed_1-e6a47b86/
 ```
 
 Nine observations, as the split promised. `fit summary --params-only` emits θ̂ as
@@ -4330,7 +4330,7 @@ is scored in two commands:
 ```
 $ camdl fit summary results/fits/08_holdoutfiles-812b33c5 --params-only
 # camdl fit summary --params-only (if2)
-# source: results/fits/08_holdoutfiles-812b33c5/if2-c3b8cbc0/seed_1-06cbd6b3/final_params.toml
+# source: results/fits/08_holdoutfiles-812b33c5/if2-c3b8cbc0/seed_1-e6a47b86/final_params.toml
 # camdl: 0.1.0+3e2b2888
 
 I0 = 10.0
@@ -4426,7 +4426,7 @@ afterwards, addressed by the run's `run_id` (a label names one run, §6.8):
 
 ```
 $ camdl label 4b1e0c9a2f77 mle
-ok: label set to "mle" on ./results/fits/01_mle-2030ba2b/if2-6c1d8e02/seed_1-06cbd6b3
+ok: label set to "mle" on ./results/fits/01_mle-2030ba2b/if2-6c1d8e02/seed_1-e6a47b86
 ```
 
 Filters: `--converged` / `--gate-failed`, `--with-method if2|pgas|pmmh`,
@@ -4892,7 +4892,7 @@ A real `sims/` leaf record (hashes and paths abbreviated):
     {
       "name": "seed",
       "label": "seed_1",
-      "hash": "06cbd6b3…c5b4",
+      "hash": "e6a47b86…c5b4",
       "schema_version": 1
     }
   ],
@@ -5799,7 +5799,7 @@ camdl simulate models/sir.camdl \
 It prints what it resolved:
 
 ```
-draws: posterior — 2 draws from pgas method 'pgas' (…/pgas-a0b1da4f/seed_1-06cbd6b3/draws.tsv)
+draws: posterior — 2 draws from pgas method 'pgas' (…/pgas-a0b1da4f/seed_1-e6a47b86/draws.tsv)
 ```
 
 Resolution is **by artifact, not by method name**: a leaf has a posterior iff it

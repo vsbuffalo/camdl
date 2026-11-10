@@ -87,6 +87,38 @@ fn commit_then_lookup_hit() {
     cleanup(&root);
 }
 
+/// A leaf written under an earlier `HASH_VERSION` stays readable — its
+/// `run.json` parses — but is never served as a cache hit, neither by
+/// `lookup` nor by `find_leaf`'s walk: a version bump turns the store over
+/// without losing a result.
+#[test]
+fn a_leaf_from_an_earlier_hash_version_is_readable_but_not_a_hit() {
+    const { assert!(HASH_VERSION > 1, "this test pins the turnover of a bumped HASH_VERSION") };
+    let root = tmp_root("old-hash-version");
+    let store = FsCasStore::new(&root);
+    let (levels, a) = sim_levels(["m", "c", "p", "baseline", "seed_1"], [1, 2, 3, 4, 5]);
+    let leaf = crate::layout::store_path(&root, ArtifactKind::Sim, &levels);
+    let mut old = record(a);
+    old.hash_version = HASH_VERSION - 1;
+    old.levels = levels.clone();
+    let dest = store.commit_atomic(&leaf, old, arts(b"S\tI\n999\t1\n")).unwrap();
+
+    match read_record(&dest) {
+        ReadResult::Ok(r) => {
+            assert_eq!(r.hash_version, HASH_VERSION - 1);
+            assert_eq!(r.status, RunStatus::Completed);
+        }
+        _ => panic!("an earlier-version run.json must still parse"),
+    }
+    assert_eq!(find_leaf(&root, ArtifactKind::Sim, &levels), None,
+        "find_leaf names only leaves a run may reuse");
+    assert!(
+        matches!(store.lookup(&dest, &LeafIdentity::new(a)), Lookup::Stale(StaleReason::SchemaDrift)),
+        "an earlier-version leaf must not be a cache hit"
+    );
+    cleanup(&root);
+}
+
 // ── S4: the augment door ────────────────────────────────────────────────────
 
 /// A completed leaf can gain an artifact. Before this the store had no such

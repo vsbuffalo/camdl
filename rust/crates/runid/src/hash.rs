@@ -53,7 +53,28 @@ use sha2::{Digest, Sha256};
 /// every cached artifact.
 ///
 /// [`run_id`]: crate::run_id
-pub const HASH_VERSION: u16 = 1;
+///
+/// ## History
+///
+/// - **2** (gh#1018) — one deliberate re-key for two changes to what feeds a
+///   run's identity:
+///   1. *Exact float parsing.* serde_json's default float parser could land
+///      one ULP away from the decimal it read; with `float_roundtrip` on
+///      (`rust/Cargo.toml`) every IR constant now reads as the double the
+///      compiler wrote. A model's IR hash folds those constants' bits, so a
+///      model holding one of the moved constants (39 constants in 6 of the
+///      135 committed IR files) hashes differently than it did.
+///   2. *`from_mle` keys on the source's `start_values`*, not on the bytes of
+///      its whole `fit_state.toml` (`cli` `fit::cas::cas_mle_start_dep`).
+///
+///   Neither change needed this bump to be sound: each changes the hashed
+///   bytes exactly where the computation changed. The bump makes the turnover
+///   one explicit, store-wide event instead of a scatter of cache misses
+///   nobody declared. Leaves written at version 1 stay readable (`run.json`
+///   still parses, `fit summary` and the browsers read them); they are never
+///   served as a cache hit for a version-2 run.
+/// - **1** — the initial encoding.
+pub const HASH_VERSION: u16 = 2;
 
 // ─── ContentHash ─────────────────────────────────────────────────────────────
 

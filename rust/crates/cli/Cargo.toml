@@ -51,7 +51,7 @@ runid = { path = "../runid" }
 # Semver parse + compare for `camdl check-update` (release tag vs this binary).
 semver = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json.workspace = true
 sha2 = "0.10"
 sim = { path = "../sim", default-features = false }
 tar = "0.4"
