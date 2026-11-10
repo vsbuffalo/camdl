@@ -23,11 +23,13 @@ use crate::fit::table_row::{self, TableRow};
 /// Top-level entry point. Walks the root, applies filters, builds
 /// rows, renders in the requested format.
 pub fn cmd_fit_table(args: &FitTableArgs) {
+    // fit table has no `--no-color`: its painters follow the environment
+    // and whether each stream is a terminal.
+    let out = crate::out::Out::new(false);
     let entries = match fit_tree::walk_fits_root(&args.root) {
         Ok(es) => es,
         Err(e) => {
-            eprintln!("error: cannot walk fits root {}: {}", args.root.display(), e);
-            std::process::exit(1);
+            out.fail(format!("error: cannot walk fits root {}: {}", args.root.display(), e));
         }
     };
 
@@ -111,8 +113,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
                     // dropping one would answer for fewer runs than were asked
                     // about.
                     if !args.quantities.is_empty() {
-                        eprintln!("error: {}: {}", method.method_dir.display(), e);
-                        std::process::exit(1);
+                        out.fail(format!("error: {}: {}", method.method_dir.display(), e));
                     }
                     errors.push(format!("{}: {}", method.method_dir.display(), e))
                 }
@@ -145,8 +146,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
                     Some(sel)
                 }
                 Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
+                    out.fail(format!("error: {e}"));
                 }
             },
             None => None,
@@ -178,8 +178,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
                 Ok(_) => true,
                 Err(crate::posterior_draws::PosteriorDrawsError::NoPosterior(_)) => false,
                 Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
+                    out.fail(format!("error: {e}"));
                 }
             };
             for name in &args.quantities {
@@ -211,14 +210,14 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
     for err in &errors {
-        eprintln!("warning: {}", err);
+        out.say(format_args!("warning: {}", err));
     }
 
     match args.format {
-        FitTableFormat::Text => print!("{}", render_text(&rows, &args.quantities)),
-        FitTableFormat::Json => render_json(&rows),
-        FitTableFormat::Md => print!("{}", render_md(&rows, &args.quantities)),
-        FitTableFormat::Csv => print!("{}", render_csv(&rows, &args.quantities)),
+        FitTableFormat::Text => out.report_raw(format_args!("{}", render_text(&rows, &args.quantities))),
+        FitTableFormat::Json => render_json(&out, &rows),
+        FitTableFormat::Md => out.report_raw(format_args!("{}", render_md(&rows, &args.quantities))),
+        FitTableFormat::Csv => out.report_raw(format_args!("{}", render_csv(&rows, &args.quantities))),
     }
 
     // Unlabelled-fits nudge: if ≥ N rows have no label, print a
@@ -228,7 +227,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     // Suppressed for non-text formats so JSON/CSV/md outputs remain
     // shell-pipe-friendly.
     if matches!(args.format, FitTableFormat::Text) {
-        emit_unlabelled_warning(rows.iter().filter(|r| r.label.is_none()).count());
+        emit_unlabelled_warning(&out, rows.iter().filter(|r| r.label.is_none()).count());
     }
 }
 
@@ -252,7 +251,7 @@ pub(crate) const UNLABELLED_HINT_COMMANDS: [&str; 2] = [
 /// reads from `CAMDL_UNLABELED_THRESHOLD` (default 5). Setting the
 /// var to `0` disables the warning entirely; setting it to a value
 /// less than the actual count suppresses it for that invocation.
-pub(crate) fn emit_unlabelled_warning(unlabelled_count: usize) {
+pub(crate) fn emit_unlabelled_warning(out: &crate::out::Out, unlabelled_count: usize) {
     let threshold: usize = std::env::var("CAMDL_UNLABELED_THRESHOLD")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -260,13 +259,13 @@ pub(crate) fn emit_unlabelled_warning(unlabelled_count: usize) {
     if threshold == 0 || unlabelled_count < threshold {
         return;
     }
-    eprintln!();
-    eprintln!("note: {} unlabelled fit{} in output. Add labels with:",
-        unlabelled_count, if unlabelled_count == 1 { "" } else { "s" });
+    out.say("");
+    out.say(format_args!("note: {} unlabelled fit{} in output. Add labels with:",
+        unlabelled_count, if unlabelled_count == 1 { "" } else { "s" }));
     for cmd in UNLABELLED_HINT_COMMANDS {
-        eprintln!("        {cmd}");
+        out.say(format_args!("        {cmd}"));
     }
-    eprintln!("      Set CAMDL_UNLABELED_THRESHOLD=0 to disable this hint.");
+    out.say("      Set CAMDL_UNLABELED_THRESHOLD=0 to disable this hint.");
 }
 
 #[cfg(test)]
@@ -567,7 +566,7 @@ struct TableJsonSchema {
     row_schema: super::table_row::TableRowSchema,
 }
 
-fn render_json(rows: &[TableRow]) {
+fn render_json(out: &crate::out::Out, rows: &[TableRow]) {
     let doc = TableJson {
         schema: TableJsonSchema {
             name: "fit_table".into(),
@@ -578,7 +577,7 @@ fn render_json(rows: &[TableRow]) {
     };
     let s = serde_json::to_string_pretty(&doc)
         .expect("TableJson must serialize");
-    println!("{}", s);
+    out.report_line(format_args!("{}", s));
 }
 
 fn render_text(rows: &[TableRow], quantities: &[String]) -> String {
