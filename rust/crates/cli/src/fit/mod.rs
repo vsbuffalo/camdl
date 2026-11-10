@@ -1868,6 +1868,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // The fit hash (not a model-only digest) so it pins
                     // the model+data+config triple, not just the model.
                     input_hash: parent_fit_hash.clone(),
+                    // The leaf is `<fit folder>/<method>-<h8>/seed_<n>-<h8>`.
+                    fit_folder: method_dir.ancestors().nth(2)
+                        .expect("a method leaf sits two levels below its fit folder")
+                        .to_path_buf(),
                     model_path: sweep_config.model.camdl.clone(),
                     model_identity: model_identity.clone(),
                     data_hashes: data_hashes.clone(),
