@@ -246,7 +246,8 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
 
     let failures = match args.format {
         FitSummaryFormat::Text => format_text(&mut out, &dir, args, &selected, strict, selection.as_ref()),
-        FitSummaryFormat::Json => format_json(&mut out, &dir, &selected, strict, selection.as_ref()),
+        FitSummaryFormat::Json => format_json(&mut out, &dir, &selected, strict, selection.as_ref(), false),
+        FitSummaryFormat::ExactJson => format_json(&mut out, &dir, &selected, strict, selection.as_ref(), true),
         FitSummaryFormat::Md => format_md(&mut out, &dir, &selected, strict, selection.as_ref()),
         FitSummaryFormat::Latex => format_latex(&mut out, &dir, &selected, strict, selection.as_ref()),
     };
@@ -601,10 +602,20 @@ pub(crate) fn forkability(
         .map(|j| crate::fit::report::Forkable { n_forkable: j.n_forkable, n_total: j.n_total, selection: j.selection })
 }
 
-fn format_json(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
+/// The JSON document; with `exact`, its non-finite numbers spelled
+/// ([`FitSummaryFormat::ExactJson`]).
+fn format_json(
+    out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>,
+    exact: bool,
+) -> Vec<LoadFailure> {
     let doc = build_summary_doc(out, dir, methods, selection);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
-    let s = serde_json::to_string_pretty(&doc).expect("FitSummaryDoc must serialize");
+    let s = if exact {
+        crate::fit::report::exact::exact_json(&doc).and_then(|v| serde_json::to_string_pretty(&v))
+    } else {
+        serde_json::to_string_pretty(&doc)
+    }
+    .expect("FitSummaryDoc must serialize");
     write_data(out, &format!("{s}\n"));
     if strict && any_failed {
         out.error(CommandError::new("error: provenance cross-checks failed (--strict).")).exit();
