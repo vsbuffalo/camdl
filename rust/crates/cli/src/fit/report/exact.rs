@@ -10,47 +10,15 @@
 //! non-finite float becomes the string `"NaN"`, `"inf"` or `"-inf"`, the
 //! spelling `sim::inference::json_f64` already writes.
 //!
-//! [`capture`] is how the comparison sees both reports: when
-//! `CAMDL_REPORT_CAPTURE` names a file, `fit run` and `fit summary` each append
-//! the report they built to it, one JSON line per method. Nothing else reads
-//! the variable, and it changes nothing a run computes or writes.
+//! The comparison sees the run's report as `events.jsonl` writes it and the
+//! loader's as `fit summary --format exact-json` does; both serialize here.
 
 use serde::ser::{self, Serialize};
 use serde_json::{Map, Value};
 
-/// The environment variable naming the file [`capture`] appends to.
-pub const CAPTURE_ENV: &str = "CAMDL_REPORT_CAPTURE";
-
 /// `value` as JSON, with non-finite floats spelled as strings.
 pub fn exact_json<T: Serialize + ?Sized>(value: &T) -> Result<Value, serde_json::Error> {
     value.serialize(Exact)
-}
-
-/// Append `report` to the file `CAMDL_REPORT_CAPTURE` names, as one line
-/// `{"by": by, "leaf": …, "report": …}`; nothing when the variable is unset. A
-/// capture that cannot be written is said on stderr and does not stop the
-/// command: it is a check's input, not the command's output.
-pub fn capture(by: &str, report: &super::build::MethodReport) {
-    use std::io::Write;
-    let Some(path) = std::env::var_os(CAPTURE_ENV) else { return };
-    let line = exact_json(report).map(|r| {
-        serde_json::json!({
-            "by": by,
-            "leaf": report.stored.as_ref().map(|s| s.leaf.clone()),
-            "report": r,
-        })
-    });
-    let written = line
-        .map_err(|e| e.to_string())
-        .and_then(|line| {
-            std::fs::OpenOptions::new().create(true).append(true).open(&path)
-                .and_then(|mut f| writeln!(f, "{line}"))
-                .map_err(|e| e.to_string())
-        });
-    if let Err(e) = written {
-        crate::out::detached().say(format_args!("warning: {CAPTURE_ENV}: cannot record the report in {}: {e}",
-            std::path::Path::new(&path).display()));
-    }
 }
 
 fn float(v: f64) -> Value {
