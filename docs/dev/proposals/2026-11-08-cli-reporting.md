@@ -1079,3 +1079,78 @@ Step 9's library half, as landed:
   (the priors, the sampling plan, `chain k done`, the live `BadInit` line, the
   `draws.tsv` line) and the chain-event renderer write directly; they move onto
   `Out` with the CLI's no-print test.
+
+Step 9's command half, as landed:
+
+- **Every command writes through one `Out`.** `pfilter`, `profile`, `survey`,
+  `compare`, `fit predict`, `simulate`, the four `lineage` verbs, `list`,
+  `show`, `cat`, `fit diff`, `fit table`, `fit run` before its method starts,
+  the PMMH, PGAS, IF2 and NLopt runners, and the remaining commands (`docs`,
+  `data split`, `dev eval`, `mre`, `check-update`, the removed `if2`, `fit new`,
+  `label`, `fit methods`, `dev reindex`, and the camdlc-delegated `check`,
+  `inspect`, `render`, `dev compile`, `dev doctest`) create one at their entry
+  point and pass it to the helpers that print. Each command's text, streams and
+  exit codes are unchanged; the evidence per commit is a 55-invocation snapshot
+  of the reporting fixture, byte-identical on both streams with and without
+  `CLICOLOR_FORCE` after masking hashes and timings, and, for the paths it does
+  not reach, each command's refusals run against the previous binary.
+- **`Out` gained what the sites needed, and nothing speculative.** `say` and
+  `say_raw` (a stderr line, after flushing stdout and under the live lock, so a
+  chain worker's line never splits one), `fail` (`error` then `exit 1`, the pair
+  every error site was written as), `hint`, `report_line` and `report_raw` (a
+  report command's report as text already painted for stdout), `data_line` and
+  `data_raw`, and `stdout_painter`. `error` takes `&self`: reporting an error
+  changes nothing `Out` holds, so a closure passed to `unwrap_or_else` can
+  borrow the handle beside the command's other uses. The proposal's
+  `report(&[Line])` and `data()` stay; most reports are still built as strings,
+  which `report_line` carries without rebuilding them as spans.
+- **`out::detached()` is an `Out` for code below every command's handle.** It
+  writes what the command's own `Out` would. It serves helpers that warn or exit
+  where they stand and are reached from several commands or off the command's
+  thread: the camdlc handshake and compile milestones in `util`, the observation
+  projection's invariant exits, `FitRunConfig::build` and `build_obs_model`, the
+  run-store readers, `abandon_method_on` (IF2 and NLopt hold the heartbeat, not
+  the handle), simulate's stream sink, the engine's grid notices, and the unit
+  tests that print measurements. Threading the handle through the engine's
+  `RunSink` trait and every method's setup would have touched six modules for
+  messages that are invariant failures or one-off warnings. A function that can
+  be handed the command's `Out` takes it.
+- **`Out::notice` writes and does not keep.** The run's record of its notices is
+  `run.json`'s display inputs, which `cas_sink` builds from the same resolution
+  (`params_resolver::notices`, `obs_anchor::spline_hold_notices`), so the list
+  step 7 kept on `Out` had no reader and went with its `expect(dead_code)`.
+  `params_resolver::emit_notices`, `obs_anchor`'s resolvers and anchor report,
+  profile and fit predict hand their notices to the command's handle;
+  `Notices::emit_stderr` is gone.
+- **`Out::check` still only records.** The check printers write through `Out`
+  now (`util::print_observations_summary` and `print_scheduled_actions_summary`
+  take it, the noise check's `pf_noise::report` and the dt-convergence ladder
+  are rendered to text and written with `say_raw`), but each check's text is
+  still drawn where its context is (the parameter count and series length the
+  noise check reads, the scheduled-actions block between the checks), which the
+  `Check` value does not carry.
+- **Chain workers write through the same `&Out`.** `Out` is `Sync`, and every
+  write takes the live lock, so the IF2 chain loop's `chain k: ✗ skipped` line
+  is whole beside the progress lines without a separate `LiveHandle` call.
+  PGAS's chain-event renderer writes through its progress task's `live_line`,
+  which is the stream layer's own.
+- **A closed stdout is a normal exit** for every command, as "Ordering" sets:
+  `camdl list --format json | head -1` panicked (status 101) and now exits 0;
+  `simulate --stdout` into a closed pipe printed an error and exited 1, and now
+  exits 0.
+- **PGAS's own lines moved.** `pgas::run_method`'s priors, plan, `chain k done`
+  and `draws.tsv` lines and the live `BadInit` line go through `Out` like every
+  other method's; simulate's never-fired-transition notice goes through
+  `out::detached().notice` from inside its stream sink.
+- **The cli no-print test is `cli/tests/no_print_outside_out.rs`.** It fails on
+  `println!`, `print!`, `eprintln!`, `eprint!`, `dbg!`, `io::stdout()` and
+  `io::stderr()` anywhere under `cli/src/` outside `out/`, test modules included
+  (stricter than `sim`'s, which blanks them); `style.rs` needs no entry, since
+  clap prints the help it colours. Two `process::exit` calls stay outside `out/`
+  by design: the hidden `--check-args` mode's status and camdlc's own status
+  when camdl hands it a command; neither prints.
+- **The facts fixture covers the other commands** (pfilter's replicates and
+  files, profile and survey fresh and cached, simulate's four shapes and event
+  log, the lineage verbs, list, show, cat, fit diff, fit table, and one refusal
+  each) and runs every command with its own `CAMDL_IR_CACHE_DIR`, so whether a
+  run prints `compiling` or `cached IR` no longer depends on `~/.cache`.
