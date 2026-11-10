@@ -168,12 +168,18 @@ in its own commit first.
 ## Diagnostics that already exist — check before inventing new logging
 
 - `CAMDL_TRACE_STEPS=1` — one TSV row per substep to **stderr** from the
-  chain-binomial backend (`t`, compartments, `flow_<name>`, `rate_<name>`,
-  `total_pop`). Redirect stderr to a file; stdout carries the normal output.
-  Also active in `intervention.rs` (logs intervention firings).
-- `RUST_LOG=camdl_sim=debug` — inference diagnostics in `pgas.rs`,
-  `particle_filter.rs`, `if2.rs` (-inf logliks, skipped observations, density
-  mismatches).
+  chain-binomial backend (`t`, compartments, `flow_<name>`, `total_pop`,
+  `rate_<name>`), and one line per intervention or event action that fires.
+  Redirect stderr to a file; stdout carries the normal output.
+  `CAMDL_EVAL_UNRESOLVED` routes propensities through the slow string-keyed
+  evaluator. Both live in `sim::trace` (`sim/src/trace.rs`), the one module
+  of `sim` allowed to write to stderr (`sim/tests/sim_prints_nothing.rs`).
+- `RUST_LOG=sim=debug` — the `log::debug!` inference diagnostics in `pgas.rs`
+  and `if2.rs` (-inf logliks, density mismatches, refused proposals). The log
+  target is the crate name, `sim`; `camdl_sim` matches nothing.
+- Anything else `sim` has to say goes through a value: a `PgasEvent` (PGAS
+  chain events), a `RunNote` (`sim::run_notes`, said once as a warning), an
+  `eval_stats` counter, or a finding.
 
 ## Alpha posture
 
