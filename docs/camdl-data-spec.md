@@ -807,6 +807,29 @@ all is refused for that trajectory — the data recorded classified deaths where
 the model made none — and the refusal names the argument. That is the model
 disagreeing with the row, not a data error, so it is not softened.
 
+## Observed values must be in the family's support
+
+Every value in an observation file is read in the support of the likelihood that
+scores it, and a value outside it is refused when the file is loaded. The
+refusal names the file, the line, the column and the value; nothing is scored.
+
+| column                                                                                       | must be                |
+| -------------------------------------------------------------------------------------------- | ---------------------- |
+| the scored column of `poisson`, `neg_binomial`, `zero_inflated`, `binomial`, `beta_binomial` | a non-negative integer |
+| the trial count of `binomial` / `beta_binomial`, when `n` names a column (`n = tested`)      | a non-negative integer |
+| the scored column of `bernoulli`                                                             | `0` or `1`             |
+| the scored column of `normal` or `beta`, and any other column the likelihood reads           | a finite number        |
+
+A row that breaks the rule is a data error, so it cannot be scored as something
+nearby: a `-4` read as a count would have to become some count, and any choice
+(`0`, `4`) is an observation nobody made. Correct the row, or write `NA` if the
+value was not observed — a hole is never checked, because it has no value. An
+integer written with a decimal point (`4.0`) is the integer.
+
+This is about the file, not the fit. A trajectory that cannot produce a row's
+count — a nonzero count in a window where the model made no flow — is the model
+disagreeing with valid data, and is scored as impossible for that trajectory.
+
 ## Missing observations: `NA` is a hole, not a zero
 
 In an **observation** file, the token `NA` in a value column marks a **hole**: a

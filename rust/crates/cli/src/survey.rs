@@ -1257,7 +1257,8 @@ fn load_observations_from_tsv(
     opts: &crate::caltime_load::TimeOpts,
 ) -> Result<Vec<Observation>, String> {
     let time_col = crate::pfilter::obs_time_column(obs)?;
-    let raw = crate::pfilter::load_data_tsv_column(path, time_col, &obs.scored, opts)?;
+    let domain = crate::pfilter::CellDomain::of(obs, &obs.scored);
+    let raw = crate::pfilter::load_data_tsv_column(path, time_col, &obs.scored, domain, opts)?;
     Ok(raw.into_iter().map(|o| Observation { time: o.time, value: o.value }).collect())
 }
 
