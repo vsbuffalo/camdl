@@ -1223,7 +1223,7 @@ mod tests {
     "timestamp": "2026-10-20T00:00:00Z"
   },
   {
-    "kind": { "type": "acceptance_rate_unhealthy", "rate": null, "param": null, "kernel": "random_walk", "band_lo": 0.15, "band_hi": 0.5 },
+    "kind": { "type": "acceptance_rate_unhealthy", "rate": null, "param": null, "kernel": "random_walk" },
     "severity": "error",
     "message": "chain acceptance rate NaN% is outside healthy range [15%, 50%] (random-walk MH).",
     "method": "pmmh",

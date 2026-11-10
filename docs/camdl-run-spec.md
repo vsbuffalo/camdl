@@ -5596,6 +5596,9 @@ methods and `pfilter`. The bounds are fractions, inclusive at both ends. An
 `acceptance_rate_unhealthy` finding carries the same `kernel`, `band_lo` and
 `band_hi` beside its `rate`, so a reader has the band whether or not a finding
 fires and never parses it from the message, which is rendered from those fields.
+An entry written before the band was recorded has neither field: it is read, its
+band is not recorded (no number is assumed for it), and `fit summary` prints the
+message it stored, as written.
 
 A finding's line is written when the run pushes the finding: a refused chain's
 `bad_init` as the chain is refused, and a sampler's per-chain and R̂ findings
