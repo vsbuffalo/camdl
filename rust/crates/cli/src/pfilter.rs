@@ -62,6 +62,17 @@ fn check_per_run_outputs(a: &crate::args::PfilterArgs) -> Result<(), String> {
     ))
 }
 
+/// The status `pfilter` exits with when the particle filter itself failed at
+/// the parameters it was given (its weights collapsed, the state went
+/// negative): the inputs were read and the filter ran. Every other error exits
+/// with status 1. `camdl compare` reads it to tell a posterior draw the filter
+/// rejected from a failure of the fit's inputs (gh#1009).
+pub const FILTER_FAILED: crate::out::ExitCode = crate::out::ExitCode(3);
+
+fn filter_failed(message: String) -> crate::out::CommandError {
+    crate::out::CommandError { code: FILTER_FAILED, message, hint: None }
+}
+
 pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // pfilter has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
@@ -724,7 +735,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                 let result = bootstrap_filter(
                     &process, &obs_model, &params, &smc_config, rep_seed,
                 ).unwrap_or_else(|e| {
-                    out.fail(format!("pfilter replicate {} error: {:?}", rep + 1, e));
+                    out.error(filter_failed(format!("pfilter replicate {} error: {:?}", rep + 1, e))).exit();
                 });
                 bar.inc(1);
                 if result.log_likelihood.is_finite() {
@@ -776,7 +787,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         bootstrap_filter(
             &process, &obs_model, &params, &smc_config, seed,
         ).unwrap_or_else(|e| {
-            out.fail(format!("pfilter error: {}", crate::util::sim_error_text(&e)));
+            out.error(filter_failed(format!("pfilter error: {}", crate::util::sim_error_text(&e)))).exit();
         })
     });
 
