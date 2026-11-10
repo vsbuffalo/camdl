@@ -140,15 +140,13 @@ resumed	stderr	line	chain 0:	resuming from step 2000
 resumed	stderr	line	chain 3:	resuming from step 2000
 resumed	stderr	line	pmmh:	4 chains × 2500 steps × 100 particles
 resumed	stderr	line	chain 1: resuming from step	2000
-resumed	stderr	block	acceptance rates:	0           10.5% ✗ too low           8.949e-1        0 / 1000
-resumed	stderr	block	acceptance rates:	1           10.9% ✗ too low           7.449e-1        0 / 1000
-resumed	stderr	block	acceptance rates:	2           11.9% ✗ too low           9.223e-1        0 / 1000
-resumed	stderr	block	acceptance rates:	3           10.1% ✗ too low            1.049e0        0 / 1000
+resumed	stderr	block	acceptance rates:	0           30.9% ✓                   8.949e-1        0 / 1000
+resumed	stderr	block	acceptance rates:	1           31.7% ✓                   7.449e-1        0 / 1000
+resumed	stderr	block	acceptance rates:	2           36.0% ✓                   9.223e-1        0 / 1000
+resumed	stderr	block	acceptance rates:	3           30.5% ✓                    1.049e0        0 / 1000
 resumed	stderr	line	beta         Rhat=	1.001 ✓ ESS bulk=187 tail=192 (93.7% of 200 draws)
 resumed	stderr	line	gamma        Rhat=	1.019 ✓ ESS bulk=173 tail=194 (86.4% of 200 draws)
 resumed	stderr	line	draws.tsv:	200 posterior samples (all 4 params)
-resumed	stderr	line	! chains 0, 1, 2, 3:	chain acceptance rates 10.5%, 10.9%, 11.9% and 10.1% are outside healthy range [15%, 50%]
-resumed	stderr	line	error(s)	0 error(s), 4 warning(s), 0 info
 resumed	stderr	line	pmmh complete in	(10000 PF evaluations
 resumed	stderr	line	stored pmmh	results/fits/pmmh_resumed-
 pgas	stderr	line	fit:	pgas.toml (method=pgas)
