@@ -932,6 +932,14 @@ pub enum FitSummaryFormat {
     Json,
     Md,
     Latex,
+    /// The `json` document with each non-finite number spelled `"NaN"`,
+    /// `"inf"` or `"-inf"`, where `json` writes `null` for all three: the
+    /// encoding `events.jsonl` writes a run's report in, so the report the
+    /// run built and the one `fit summary` builds from its leaf can be
+    /// compared exactly (`tests/reporting_facts.rs`). Hidden: it exists for
+    /// that comparison.
+    #[value(hide = true)]
+    ExactJson,
 }
 
 #[derive(Args)]

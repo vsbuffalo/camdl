@@ -64,6 +64,9 @@ fn leaf(work: &Path, fit: &str, method: &str) -> PathBuf {
 struct Output {
     stdout: String,
     stderr: String,
+    /// The `events.jsonl` of the leaf a fit run wrote, for the runs whose
+    /// recorded facts include their events; empty otherwise.
+    events: String,
 }
 
 struct Fact {
@@ -91,7 +94,7 @@ fn read_facts() -> Vec<Fact> {
             header_seen = true;
             continue;
         }
-        assert!(cols[1] == "stdout" || cols[1] == "stderr", "facts.tsv:{}: stream {}", i + 1, cols[1]);
+        assert!(matches!(cols[1], "stdout" | "stderr" | "events"), "facts.tsv:{}: stream {}", i + 1, cols[1]);
         assert!(cols[2] == "line" || cols[2] == "block", "facts.tsv:{}: scope {}", i + 1, cols[2]);
         facts.push(Fact {
             line_no: i + 1,
@@ -134,13 +137,9 @@ fn every_recorded_fact_is_shown() {
         std::fs::copy(entry.path(), work.join(entry.file_name())).unwrap();
     }
 
-    // Every report a command builds is appended here (`CAMDL_REPORT_CAPTURE`),
-    // for the run-equals-loader check below.
-    let captured = work.join("captured_reports.jsonl");
-    let run_capturing = |args: &[String], capture: &Path| -> Output {
+    let run = |args: &[String]| -> Output {
         let out = Command::new(&camdl)
             .env_remove("CLICOLOR_FORCE")
-            .env("CAMDL_REPORT_CAPTURE", capture)
             // The compiled-IR cache is the work directory's own, so whether a
             // run prints `compiling` or `cached IR` depends on the runs before
             // it here, not on what other processes left in `~/.cache`.
@@ -154,9 +153,15 @@ fn every_recorded_fact_is_shown() {
         Output {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            events: String::new(),
         }
     };
-    let run = |args: &[String]| run_capturing(args, &captured);
+    // A fit run's output with its leaf's event log beside it.
+    let with_events = |mut o: Output, leaf: &Path| -> Output {
+        o.events = std::fs::read_to_string(leaf.join("events.jsonl"))
+            .unwrap_or_else(|e| panic!("{}/events.jsonl: {e}", leaf.display()));
+        o
+    };
     let a = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     let fit = |toml: &str, seed: &str, extra: &[&str]| {
         let mut v = a(&["fit", "run", toml, "--seed", seed, "--progress", "none"]);
@@ -168,7 +173,15 @@ fn every_recorded_fact_is_shown() {
     // and `pfilter` read the IF2 and converged fits. Each fit's `fit summary`
     // follows its run.
     let mut runs: Vec<(&str, Output)> = Vec::new();
-    runs.push(("stuck", run(&fit("pmmh_stuck.toml", "8", &[]))));
+    let stuck = run(&fit("pmmh_stuck.toml", "8", &[]));
+    let stuck_leaf = leaf(&work, "pmmh_stuck", "pmmh");
+    runs.push(("stuck", with_events(stuck, &stuck_leaf)));
+    // The same run again is a cache hit: no method runs, and the stored
+    // leaf's event log is the one the run that computed it wrote.
+    let log_before = std::fs::read(stuck_leaf.join("events.jsonl")).unwrap();
+    runs.push(("stuck.cached", run(&fit("pmmh_stuck.toml", "8", &[]))));
+    assert_eq!(std::fs::read(stuck_leaf.join("events.jsonl")).unwrap(), log_before,
+        "a cache hit rewrote the stored leaf's events.jsonl");
     let stuck_fit = only_child(&work.join("results/fits"), "pmmh_stuck-");
     runs.push(("stuck.summary", run(&a(&["fit", "summary", stuck_fit.to_str().unwrap()]))));
     runs.push(("converged", run(&fit("pmmh_converged.toml", "1", &["--label", "converged"]))));
@@ -186,7 +199,8 @@ fn every_recorded_fact_is_shown() {
     runs.push(("nlopt", run(&fit("nlopt.toml", "1", &[]))));
     let nlopt_fit = only_child(&work.join("results/fits"), "nlopt-");
     runs.push(("nlopt.summary", run(&a(&["fit", "summary", nlopt_fit.to_str().unwrap()]))));
-    runs.push(("fail", run(&fit("fail.toml", "1", &[]))));
+    let failed = run(&fit("fail.toml", "1", &[]));
+    runs.push(("fail", with_events(failed, &leaf(&work, "fail", "pmmh"))));
     let fail_fit = only_child(&work.join("results/fits"), "fail-");
     runs.push(("fail.summary", run(&a(&["fit", "summary", fail_fit.to_str().unwrap()]))));
     runs.push(("pfilter_fit", run(&fit("pfilter.toml", "1", &[]))));
@@ -265,7 +279,7 @@ fn every_recorded_fact_is_shown() {
     runs.push(("fit.table", run(&a(&["fit", "table", "results/fits"]))));
     runs.push(("fit.table.md", run(&a(&["fit", "table", "results/fits", "--format", "md"]))));
 
-    run_equals_loader(&work, &captured, |args, capture| run_capturing(&a(args), capture));
+    run_equals_loader(&work, |args| run(&a(args)));
 
     let facts = read_facts();
     assert!(facts.len() > 100, "facts.tsv holds {} facts; the reader is broken", facts.len());
@@ -275,7 +289,11 @@ fn every_recorded_fact_is_shown() {
         let Some((_, out)) = runs.iter().find(|(name, _)| *name == f.run) else {
             panic!("facts.tsv:{}: no run named `{}`", f.line_no, f.run);
         };
-        let text = if f.stream == "stdout" { &out.stdout } else { &out.stderr };
+        let text = match f.stream.as_str() {
+            "stdout" => &out.stdout,
+            "stderr" => &out.stderr,
+            _ => &out.events,
+        };
         if !holds(text, &f.label, &f.value, f.block) {
             missing.push(format!(
                 "facts.tsv:{}: {} {}: `{}` under `{}` ({})",
@@ -289,7 +307,8 @@ fn every_recorded_fact_is_shown() {
     if !missing.is_empty() {
         let shown: Vec<String> = runs.iter()
             .filter(|(name, _)| failed_runs.contains(*name))
-            .map(|(name, o)| format!("──── {name} stdout ────\n{}\n──── {name} stderr ────\n{}", o.stdout, o.stderr))
+            .map(|(name, o)| format!("──── {name} stdout ────\n{}\n──── {name} stderr ────\n{}\n──── {name} events ────\n{}",
+                o.stdout, o.stderr, o.events))
             .collect();
         panic!("{} recorded fact(s) not shown:\n{}\n\n{}", missing.len(), missing.join("\n"), shown.join("\n"));
     }
@@ -298,32 +317,56 @@ fn every_recorded_fact_is_shown() {
 /// The report `fit run` built from memory equals the one `fit summary` builds
 /// from the leaf the run wrote (proposal
 /// `docs/dev/proposals/2026-11-08-cli-reporting.md`, "the run-equals-loader
-/// test"). Both are captured as their serialized `MethodReport`, with
-/// non-finite numbers spelled out so NaN cannot equal ∞; equality is exact.
-/// Every method the fixtures run is compared, the resumed PMMH leaf included.
-/// The failed fit has no completed report on either side.
-fn run_equals_loader(work: &Path, captured: &Path, run: impl Fn(&[&str], &Path) -> Output) {
-    let read = |path: &Path| -> Vec<serde_json::Value> {
-        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-            .lines().map(|l| serde_json::from_str(l).expect("one JSON report per line")).collect()
-    };
-    let from_runs: Vec<serde_json::Value> =
-        read(captured).into_iter().filter(|c| c["by"] == "run").collect();
+/// test"). The run's is the `method_report` line of the leaf's
+/// `events.jsonl`; the loader's is `fit summary --format exact-json`'s. Both
+/// spell non-finite numbers out, so NaN cannot equal ∞ or a missing value;
+/// equality is exact. Every completed method the fixtures run is compared,
+/// the resumed PMMH leaf included. The failed fit's log ends in a `failed`
+/// outcome, with no report on either side.
+fn run_equals_loader(work: &Path, run: impl Fn(&[&str]) -> Output) {
+    let mut from_runs: Vec<(PathBuf, serde_json::Value)> = Vec::new();
+    let mut failed = 0;
+    let fits = work.join("results/fits");
+    for fit in std::fs::read_dir(&fits).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        for method in std::fs::read_dir(&fit).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+            // A method leaf is `seed_*`; `predict/` and other derived
+            // outputs under a fit are not method runs.
+            let leaves = std::fs::read_dir(&method).unwrap().flatten().map(|e| e.path())
+                .filter(|p| p.is_dir() && p.file_name().unwrap().to_string_lossy().starts_with("seed_"));
+            for leaf in leaves {
+                let log = leaf.join("events.jsonl");
+                let text = std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("{}: {e}", log.display()));
+                let last: serde_json::Value = serde_json::from_str(text.lines().last().expect("a non-empty log"))
+                    .expect("one JSON event per line");
+                assert_eq!(last["event"], "method_report", "{} ends with its report", log.display());
+                match last["outcome"].as_str() {
+                    Some("completed") => from_runs.push((leaf, last["report"].clone())),
+                    Some("failed") => failed += 1,
+                    other => panic!("{}: outcome {other:?}", log.display()),
+                }
+            }
+        }
+    }
     let mut methods: Vec<String> = from_runs.iter()
-        .map(|c| c["report"]["method"].as_str().unwrap().to_string()).collect();
+        .map(|(_, r)| r["method"].as_str().unwrap().to_string()).collect();
     methods.sort();
     assert_eq!(methods, ["if2", "nl-sbplx", "pfilter", "pgas", "pmmh", "pmmh", "pmmh"],
-        "every fixture method's run captured its report");
+        "every fixture method's run recorded its report");
+    assert_eq!(failed, 1, "the failed fit's log ends in its failure");
 
-    let summary_capture = work.join("captured_summary.jsonl");
     let mut mismatched = Vec::new();
-    for from_run in &from_runs {
-        let leaf = from_run["leaf"].as_str().expect("a completed report names its leaf");
-        let _ = std::fs::remove_file(&summary_capture);
-        let out = run(&["fit", "summary", leaf, "--format", "json"], &summary_capture);
-        let from_leaf = read(&summary_capture);
+    for (path, a) in &from_runs {
+        // The leaf as the run's report names it (relative to the work
+        // directory), so `stored.leaf` is spelled alike on both sides.
+        let leaf = a["stored"]["leaf"].as_str()
+            .unwrap_or_else(|| panic!("{}: a completed report names its leaf", path.display()));
+        assert!(work.join(leaf) == *path, "{} names its leaf {leaf}", path.display());
+        let out = run(&["fit", "summary", leaf, "--format", "exact-json"]);
+        let doc: serde_json::Value = serde_json::from_str(&out.stdout)
+            .unwrap_or_else(|e| panic!("fit summary {leaf} --format exact-json: {e}\n{}", out.stderr));
+        let from_leaf = doc["methods"].as_array().expect("the document's methods");
         assert_eq!(from_leaf.len(), 1, "one report from {leaf}: {}", out.stderr);
-        let (a, b) = (&from_run["report"], &from_leaf[0]["report"]);
+        let b = &from_leaf[0];
         if a != b {
             let mut diffs = Vec::new();
             json_diff("", a, b, &mut diffs);

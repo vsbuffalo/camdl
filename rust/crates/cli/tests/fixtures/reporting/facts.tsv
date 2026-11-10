@@ -8,7 +8,8 @@
 #
 # Columns, tab-separated:
 #   run     the command that shows the fact (the list is in the test file)
-#   stream  stdout or stderr
+#   stream  stdout or stderr; or events, the events.jsonl of the leaf the
+#           run wrote (one JSON object per line, docs/camdl-run-spec.md §10.11)
 #   scope   line: the value is on a line that contains the label
 #           block: the value is on a line containing the label, or on a later
 #                  line before the next blank line (the label heads a section)
@@ -82,6 +83,20 @@ stuck	stderr	line	pmmh complete in	(6000 PF evaluations
 stuck	stderr	line	loglik at the highest log-posterior draw	-44.3 (chain 0)
 stuck	stderr	line	stored pmmh	results/fits/pmmh_stuck-
 stuck	stderr	block	pfilter noise check	⚠ ceiling below target
+stuck	events	line	"event":"begin"	"method":"pmmh"
+stuck	events	line	"event":"begin"	"config":"pmmh_stuck.toml"
+stuck	events	line	"kind":"method_caveat"	"series_len":14
+stuck	events	line	"kind":"filter_noise"	"n_particles":20
+stuck	events	line	"kind":"obs_stream"	"family":"Poisson"
+stuck	events	line	"event":"progress"	"of":1500
+stuck	events	line	"event":"progress"	"step":1500
+stuck	events	line	"event":"progress"	"kind":"marginal"
+stuck	events	line	"type":"acceptance_rate_unhealthy"	"severity":"error"
+stuck	events	line	"type":"rhat_high"	"param":"beta"
+stuck	events	line	"type":"scale_at_floor"	"steps_at_floor":415
+stuck	events	line	"type":"scale_at_floor"	"steps_at_floor":331
+stuck	events	line	"event":"method_report"	"outcome":"completed"
+stuck.cached	stderr	line	cache hit	reusing fits/pmmh_stuck-
 stuck.summary	stdout	line	results/fits/pmmh_stuck-	/
 stuck.summary	stdout	line	Closed SIR with daily reported cases	Fitted to one stream
 stuck.summary	stdout	line	pmmh · pmmh	4 chains · 200 draws · loglik -44.3 at the highest log-posterior draw
@@ -225,6 +240,9 @@ fail	stderr	line	Chain 0 starting parameters were pathological	Init: [beta=0.500
 fail	stderr	line	Chain 1 starting parameters were pathological	Init: [beta=0.5000, gamma=0.2000]
 fail	stderr	line	error(s)	2 error(s), 0 warning(s), 0 info
 fail	stderr	line	error running pmmh:	all 2 chains failed init-eval with PFDegenerate
+fail	events	line	"type":"bad_init"	"severity":"error"
+fail	events	line	"event":"method_report"	"outcome":"failed"
+fail	events	line	"event":"method_report"	all 2 chains failed init-eval
 compare	stdout	line	@converged	14   -44.24   -0.03   0.967    0.34   -0.1 dB, within noise   3.583   +0.061        1.00
 compare	stdout	line	@if2	14   -44.20       —       —       —                       —   3.521        —        0.93
 compare	stdout	line	Scored steps:	14 (t0=0).  Baseline: @if2.
