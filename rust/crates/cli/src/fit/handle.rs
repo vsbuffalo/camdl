@@ -765,7 +765,7 @@ cooling = 0.7
         let side = crate::run_meta::FitSidecar {
             ..Default::default()
         };
-        crate::run_meta::write_fit_sidecar(&seg, &toml_path, &side).unwrap();
+        crate::run_meta::write_fit_sidecar(&seg, &toml_path, Path::new(""), &side).unwrap();
         // The live original is GONE — the archive is all that is left, which is
         // exactly the case the segment-anchored resolution got wrong.
         std::fs::remove_file(&toml_path).unwrap();
@@ -797,7 +797,7 @@ cooling = 0.7
     #[test]
     fn the_source_config_is_recorded_relative_to_the_fit_folder() {
         let (tmp, toml_path, seg) = portable_project("relative");
-        crate::run_meta::write_fit_sidecar(&seg, &toml_path, &Default::default()).unwrap();
+        crate::run_meta::write_fit_sidecar(&seg, &toml_path, Path::new(""), &Default::default()).unwrap();
         let side = crate::run_meta::read_fit_sidecar(&seg).unwrap().unwrap();
         assert_eq!(side.source_config.as_deref(), Some("../../../fits/a.toml"));
         assert_eq!(side.schema_version, crate::run_meta::FIT_META_SCHEMA_VERSION);
@@ -815,7 +815,7 @@ cooling = 0.7
             data_hashes: std::collections::BTreeMap::from([("cases".to_string(), "b39b0a43".to_string())]),
             ..Default::default()
         };
-        crate::run_meta::write_fit_sidecar(&seg, &toml_path, &side).unwrap();
+        crate::run_meta::write_fit_sidecar(&seg, &toml_path, Path::new(""), &side).unwrap();
         std::fs::remove_file(tmp.join("data/streams/cases.tsv")).unwrap();
         let err = resolve_fit(&seg.to_string_lossy()).err().expect("the data is gone").to_string();
         assert!(err.contains("stream `cases`"), "{err}");
@@ -845,6 +845,7 @@ cooling = 0.7
         let (tmp, _toml, seg) = portable_project("clionly");
         crate::run_meta::write_fit_sidecar(
             &seg,
+            Path::new(""),
             Path::new(""),
             &crate::run_meta::FitSidecar::default(),
         )
@@ -894,7 +895,7 @@ cooling = 0.7
             fit_toml_hash: crate::hashing::sha256_hex(archived.as_bytes()),
             ..Default::default()
         };
-        crate::run_meta::write_fit_sidecar(&seg, &toml_path, &side).unwrap();
+        crate::run_meta::write_fit_sidecar(&seg, &toml_path, Path::new(""), &side).unwrap();
         let leaf = plant_run(&seg, Some(&[config_identity(archived).unwrap()]));
         std::fs::write(&toml_path, live).unwrap();
         (resolve_config(&toml_path).map(|r| r.0.dir), leaf, tmp)
@@ -1022,7 +1023,7 @@ cooling    = 0.70
         let side = crate::run_meta::FitSidecar {
             ..Default::default()
         };
-        crate::run_meta::write_fit_sidecar(&seg, &toml_path, &side).unwrap();
+        crate::run_meta::write_fit_sidecar(&seg, &toml_path, Path::new(""), &side).unwrap();
         let a = plant_run(&seg, Some(&[config_identity(ARCHIVED).unwrap()]));
         let b = seg.join("if2-11111111").join("seed_1-00000000");
         std::fs::create_dir_all(&b).unwrap();
@@ -1092,7 +1093,7 @@ cooling    = 0.70
         let leaf = seg.join("if2-11111111").join("seed_1-22222222");
         std::fs::create_dir_all(&leaf).unwrap();
         crate::run_meta::write_fit_sidecar(
-            &seg, Path::new("nonexistent.toml"), &crate::run_meta::FitSidecar::default()).unwrap();
+            &seg, Path::new("nonexistent.toml"), Path::new(""), &crate::run_meta::FitSidecar::default()).unwrap();
         let rec = serde_json::json!({
             "format_version": 1, "kind": "fit_method", "run_id": format!("abcd9{}", "0".repeat(59)),
             "hash_version": 1, "ir_version": "0.7", "engine_version": "0.1.0+test",

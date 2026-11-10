@@ -1102,7 +1102,7 @@ fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, methods: &[&str], mod
     }
     std::fs::write(
         seg.join("fit.meta.json"),
-        format!(r#"{{"model_identity":"{model_identity}","model_path":"demo.camdl","schema_version":2,"source_config":"demo.toml"}}"#),
+        format!(r#"{{"model_identity":"{model_identity}","source_model":"demo.camdl","schema_version":2,"source_config":"demo.toml"}}"#),
     )
     .unwrap();
     seg
@@ -1147,7 +1147,7 @@ fn write_two_leaves_of_one_method(output: &Path, method: &str) -> (PathBuf, [Str
     }
     std::fs::write(
         seg.join("fit.meta.json"),
-        r#"{"model_identity":"m000","model_path":"demo.camdl","schema_version":2,"source_config":"demo.toml"}"#,
+        r#"{"model_identity":"m000","source_model":"demo.camdl","schema_version":2,"source_config":"demo.toml"}"#,
     )
     .unwrap();
     (seg, hashes)

@@ -1388,6 +1388,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 if let Err(e) = crate::run_meta::write_fit_sidecar(
                     seg,
                     std::path::Path::new(&fit_path),
+                    std::path::Path::new(&sweep_config.model.camdl),
                     &seg_sidecar,
                 ) {
                     out.say(format_args!("warning: cannot write fit-level sidecar {}: {}", seg.display(), e));
@@ -2731,10 +2732,10 @@ fn build_fit_sidecar(
         // A fit's label is its run's, on the leaf (gh#896); the sidecar
         // describes the problem.
         label: None,
-        model_path: problem.model.camdl.clone(),
         model_identity,
         // Recorded by `write_fit_sidecar`, relative to the segment it writes.
         source_config: None,
+        source_model: None,
         schema_version: crate::run_meta::FIT_META_SCHEMA_VERSION,
         fit_toml_hash,
         // gh#542: the in-memory maps stay `HashMap`; the ARTIFACT is ordered.

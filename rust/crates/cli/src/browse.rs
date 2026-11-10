@@ -216,7 +216,7 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     filtered_runs.sort_by(|x, y| y.created.cmp(&x.created));
 
     let mut filtered_fits: Vec<FitEntry> = fits.into_iter()
-        .filter(|f| a.model.as_deref().is_none_or(|m| f.view.model.contains(m)))
+        .filter(|f| a.model.as_deref().is_none_or(|m| f.view.source_model.as_deref().is_some_and(|s| s.contains(m))))
         .filter(|_| a.scenario.is_none())
         .filter(|f| match filter_since {
             Some(dur) => now.duration_since(f.created).is_ok_and(|d| d <= dur),
@@ -1108,8 +1108,7 @@ fn discover_profiles(root: &str) -> Result<Vec<ProfileEntry>, String> {
         };
         let label = sidecar.as_ref().and_then(|s| s.label.clone());
         let model = sidecar.as_ref()
-            .map(|s| s.model_path.clone())
-            .filter(|s| !s.is_empty())
+            .and_then(|s| s.source_model.clone())
             .unwrap_or_else(|| "?".to_string());
         let (focal, shape) = summarize_grid(&point_labels, start_hashes.len());
         let rel_path = base_seg.as_deref()
@@ -1662,8 +1661,9 @@ fn print_ensemble_json(out: &crate::out::Out, rows: &[EnsembleRow]) {
 /// `run_id` and `path` so two leaves of one algorithm in one segment are
 /// distinguishable and addressable.
 ///
-/// v2: `fit_toml_path` (relative to the directory the fit was run from) is
-/// `source_config`, relative to the fit folder, or `null` (gh#1009).
+/// v2: `fit_toml_path` and `model` (relative to the directory the fit was run
+/// from) are `source_config` and `source_model`, relative to the fit folder,
+/// or `null` (gh#1009).
 const FIT_LIST_ROW_SCHEMA_NAME: &str = "fit_list_row";
 const FIT_LIST_ROW_SCHEMA_VERSION: u32 = 2;
 
@@ -1716,7 +1716,9 @@ fn print_fits_json(out: &crate::out::Out, fits: &[FitEntry]) {
             // Display only: every run's label, joined with ", " (gh#896). A
             // label names one run; read `methods[].label` to address it.
             "label": v.label(),
-            "model": v.model,
+            // The model file, relative to the fit folder; `null` when it was
+            // not a file when the fit ran.
+            "source_model": v.source_model,
             "model_identity": v.model_identity,
             // The producing config, relative to the fit folder (`hash`'s
             // directory); `null` for a CLI-only fit.
@@ -1767,7 +1769,7 @@ fn print_fits_table(out: &crate::out::Out, fits: &[FitEntry], now: SystemTime) {
     let mut unlabelled = 0usize;
     for f in fits {
         let rel_time = fmt_relative_time(f.created, now);
-        let model    = model_display_name(&f.view.model);
+        let model    = model_display_name(f.view.source_model.as_deref().unwrap_or("?"));
         let estimate = {
             let joined = f.view.estimated.join(",");
             if joined.chars().count() > 30 {

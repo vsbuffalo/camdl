@@ -153,7 +153,7 @@ mod tests {
         std::fs::create_dir_all(seg).unwrap();
         std::fs::write(
             seg.join("fit.meta.json"),
-            r#"{"model_path":"sir.camdl","model_identity":"f00d","schema_version":2,"source_config":"fit.toml"}"#,
+            r#"{"source_model":"sir.camdl","model_identity":"f00d","schema_version":2,"source_config":"fit.toml"}"#,
         )
         .unwrap();
     }
@@ -185,7 +185,7 @@ mod tests {
         std::fs::write(leaf.join("run.json"), rec).unwrap();
         std::fs::write(
             seg.join("fit.meta.json"),
-            r#"{"model_identity":"f00d","model_path":"sir.camdl","schema_version":2,"source_config":"fit.toml"}"#,
+            r#"{"model_identity":"f00d","source_model":"sir.camdl","schema_version":2,"source_config":"fit.toml"}"#,
         )
         .unwrap();
     }
