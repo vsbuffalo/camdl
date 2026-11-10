@@ -63,7 +63,6 @@ impl CommandError {
 pub struct Out {
     stdout: Painter,
     stderr: Painter,
-    notices: Vec<notice::Notice>,
     /// The method running now, from [`begin_method`](Self::begin_method) to
     /// [`end_method`](Self::end_method).
     method: Option<RunningMethod>,
@@ -94,7 +93,6 @@ impl Out {
         Out {
             stdout: Painter::for_stream(Stream::Stdout, no_color),
             stderr: Painter::for_stream(Stream::Stderr, no_color),
-            notices: Vec::new(),
             method: None,
         }
     }
@@ -226,19 +224,20 @@ impl Out {
         }
     }
 
-    /// A notice, printed once and kept with the command's others.
-    #[cfg_attr(not(test), expect(dead_code, reason = "foundation for proposal step 9; wired when \
-        the commands that collect notices (profile, survey, the parameter resolver) move onto Out"))]
-    pub fn notice(&mut self, n: notice::Notice) {
-        let _ = std::io::stdout().flush();
-        eprintln!("{}", n.render());
-        self.notices.push(n);
+    /// A notice (`info: …`, `warning: …`), on stderr. The run's record of
+    /// its notices is `run.json`'s display inputs, which the store's sink
+    /// builds from the same resolution (`params_resolver::notices`,
+    /// `obs_anchor::spline_hold_notices`), so `Out` writes them and does not
+    /// keep them.
+    pub fn notice(&self, n: &notice::Notice) {
+        self.say(n.render());
     }
 
-    /// The notices this command has printed, in order.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read with `notice`, proposal step 9"))]
-    pub fn notices(&self) -> &[notice::Notice] {
-        &self.notices
+    /// Each of `notices`, in order, through [`notice`](Self::notice).
+    pub fn notices(&self, notices: &notice::Notices) {
+        for n in notices.iter() {
+            self.notice(n);
+        }
     }
 
     /// Report `e` on stderr and return the status the command exits with.
@@ -422,13 +421,5 @@ mod tests {
         assert!(out.end_method().is_none());
         out.finding(DiagnosticKind::InitialLoglikInfinite);
         assert_eq!(worker.snapshot().len(), 2, "a finding after the method ended went nowhere");
-    }
-
-    #[test]
-    fn a_notice_is_kept_after_it_is_printed() {
-        let mut out = Out::new(true);
-        out.notice(notice::Notice::info("param-override", "x"));
-        assert_eq!(out.notices().len(), 1);
-        assert_eq!(out.notices()[0].code, "param-override");
     }
 }

@@ -68,13 +68,6 @@ impl Notices {
     pub fn iter(&self) -> std::slice::Iter<'_, Notice> {
         self.0.iter()
     }
-
-    /// Print every notice to stderr, one rendered line each.
-    pub fn emit_stderr(&self) {
-        for n in self.iter() {
-            eprintln!("{}", n.render());
-        }
-    }
 }
 
 impl FromIterator<Notice> for Notices {

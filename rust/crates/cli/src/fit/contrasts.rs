@@ -152,7 +152,7 @@ struct ArmDrawResult {
 ///
 /// `run_dir` is the run whose draws are banded: the leaf the handle named.
 pub fn emit_contrasts(
-    out_dir: &Path,
+    out: &crate::out::Out, out_dir: &Path,
     run_dir: &Path,
     method: Option<&str>,
     selection: Option<&ChainSelection>,
@@ -360,7 +360,7 @@ pub fn emit_contrasts(
                 parts.push(resolve_arm(model, fit_base, run, &overrides)?.into_notice_parts());
             }
         }
-        crate::params_resolver::emit_notices_from_parts(&parts);
+        crate::params_resolver::emit_notices_from_parts(out, &parts);
     }
 
     // Every arm evaluates the WHOLE quantity list (the evaluator is built from

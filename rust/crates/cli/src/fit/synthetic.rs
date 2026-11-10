@@ -94,7 +94,7 @@ pub fn generate_synthetic_datasets(
     let runs: Vec<crate::util::SimRun> = seeds.iter()
         .map(|&sim_seed| synthetic_sim_run(spec, model_path, sim_seed, dt))
         .collect::<Result<_, _>>()?;
-    crate::util::emit_run_notices(&runs.iter().collect::<Vec<_>>());
+    crate::util::emit_run_notices(&crate::out::detached(), &runs.iter().collect::<Vec<_>>());
     let mut out = Vec::with_capacity(seeds.len());
     for (i, run) in runs.iter().enumerate() {
         let idx = i + 1;

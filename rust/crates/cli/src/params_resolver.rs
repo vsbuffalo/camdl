@@ -2601,19 +2601,19 @@ pub fn notices(resolved: &[&ResolvedParameters]) -> Notices {
 /// - the parameters the override lines name are exactly the parameters with
 ///   recorded overrides, so a line without provenance, or provenance without
 ///   a line, is caught.
-pub fn emit_notices(resolved: &[&ResolvedParameters]) {
+pub fn emit_notices(out: &crate::out::Out, resolved: &[&ResolvedParameters]) {
     let parts: Vec<PartsRef<'_>> = resolved.iter().map(|r| PartsRef::from(*r)).collect();
-    emit_notices_of(&parts);
+    emit_notices_of(out, &parts);
 }
 
 /// [`emit_notices`] over kept [`NoticeParts`].
-pub fn emit_notices_from_parts(resolved: &[NoticeParts]) {
+pub fn emit_notices_from_parts(out: &crate::out::Out, resolved: &[NoticeParts]) {
     let parts: Vec<PartsRef<'_>> = resolved.iter().map(PartsRef::from).collect();
-    emit_notices_of(&parts);
+    emit_notices_of(out, &parts);
 }
 
-fn emit_notices_of(resolved: &[PartsRef<'_>]) {
-    notices_of(resolved).emit_stderr();
+fn emit_notices_of(out: &crate::out::Out, resolved: &[PartsRef<'_>]) {
+    out.notices(&notices_of(resolved));
 
     if cfg!(debug_assertions) {
         for r in resolved {
@@ -3567,7 +3567,7 @@ mod tests {
 
         // `emit_notices` is a thin wrapper; smoke-call it to confirm
         // no panic and to keep the symbol live.
-        emit_notices(&[&resolved]);
+        emit_notices(&crate::out::Out::new(true), &[&resolved]);
     }
 
     #[test]
@@ -3753,7 +3753,7 @@ n_particles = 10
         assert_eq!(rendered(&[&resolved]), vec![
             "info: --param/--fixed replaced beta = 0.3 (from scenario `worst_case`) with 0.5"
                 .to_string()]);
-        emit_notices(&[&resolved]);
+        emit_notices(&crate::out::Out::new(true), &[&resolved]);
     }
 
     #[test]
@@ -3839,7 +3839,7 @@ n_particles = 10
             .map(|o| (o.replaced.1, o.by.1)).collect();
         assert_eq!(chain, vec![(5.0, 4.0), (4.0, 3.0), (3.0, 7.0)]);
         assert_eq!(rendered(&[&resolved]).len(), 3);
-        emit_notices(&[&resolved]);
+        emit_notices(&crate::out::Out::new(true), &[&resolved]);
     }
 
     #[test]
@@ -3859,7 +3859,7 @@ n_particles = 10
         assert_eq!(rendered(&refs), vec![format!(
             "info: the draw or sweep point replaced beta = 0.5 (from {}) with 0.2 to 0.6, \
              across 3 cells", file.display())]);
-        emit_notices(&refs);
+        emit_notices(&crate::out::Out::new(true), &refs);
     }
 
     // ── fit.toml [fixed] ∩ [estimate] overlap: refused ──────────────────
@@ -4236,7 +4236,7 @@ n_particles = 10
                 }]), "{cell}: provenance");
 
                 // The emit path's own cross-check of notices against records.
-                emit_notices(&[&r]);
+                emit_notices(&crate::out::Out::new(true), &[&r]);
             }
         }
         // 6 tier groups of sizes 2, 1, 2, 1, 2, 1 → 33 cross-tier pairs, plus
@@ -4318,7 +4318,7 @@ n_particles = 10
         let rec = serde_json::to_value(
             crate::run_meta::ParameterProvenance::from_resolved(beta)).unwrap();
         assert_eq!(rec["overrides"].as_array().map(Vec::len), Some(5));
-        emit_notices(&[&r]);
+        emit_notices(&crate::out::Out::new(true), &[&r]);
     }
 
     // ── A single-point `--starts` rule's values (tier 1.5) ──────────────

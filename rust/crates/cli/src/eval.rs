@@ -79,6 +79,9 @@ fn references_compartments(expr: &Expr) -> Option<String> {
 }
 
 pub fn cmd_eval(a: &crate::args::EvalArgs) {
+    // eval has no `--no-color`: its painters follow the environment and
+    // whether each stream is a terminal.
+    let out = crate::out::Out::new(false);
     let ir_path = a.model.to_string_lossy();
     let at_points: Option<Vec<f64>> = if a.at.is_empty() { None } else { Some(a.at.clone()) };
 
@@ -120,7 +123,7 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
         eprintln!("error: {}", e.with_flags(crate::params_resolver::FlagStyle::Params));
         std::process::exit(1);
     });
-    emit_notices(&[&resolved]);
+    emit_notices(&out, &[&resolved]);
     if log::log_enabled!(log::Level::Debug) {
         for p in &resolved.params {
             log::debug!("eval: param `{}` = {} ({})",

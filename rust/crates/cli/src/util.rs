@@ -3736,20 +3736,19 @@ pub fn resolve_run_parameters_typed(
 /// Called by each entry point that runs [`resolve_run_ir`]'s cells, before
 /// they run. A cell whose parameters do not resolve contributes nothing here;
 /// its error surfaces when the cell itself resolves.
-pub fn emit_run_notices(runs: &[&SimRun]) {
+pub fn emit_run_notices(out: &crate::out::Out, runs: &[&SimRun]) {
     let Some(first) = runs.first() else { return };
     let Ok((model, anchors)) = load_run_model_and_anchors(first) else { return };
     let resolved: Vec<crate::params_resolver::ResolvedParameters> = runs.iter()
         .filter_map(|r| resolve_run_parameters_typed(&model, r).ok())
         .collect();
     let refs: Vec<&crate::params_resolver::ResolvedParameters> = resolved.iter().collect();
-    crate::params_resolver::emit_notices(&refs);
+    crate::params_resolver::emit_notices(out, &refs);
     // A bspline held past its window: one line per job, against the run's
     // resolved horizon (scenario and `--to` applied). Every cell of one job
     // shares the model's forcings, so the first cell answers for all.
     if let Ok(run_model) = resolve_run_ir(first) {
-        crate::obs_anchor::spline_hold_notices(&model, &anchors, run_model.simulation.t_end)
-            .emit_stderr();
+        out.notices(&crate::obs_anchor::spline_hold_notices(&model, &anchors, run_model.simulation.t_end));
     }
 }
 

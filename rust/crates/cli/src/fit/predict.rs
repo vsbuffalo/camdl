@@ -1552,13 +1552,11 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                 format!("resolving this model's observation anchors from the fit's data: {e}")
             })?;
             let moved = crate::obs_anchor::substitute(&mut model, w)?;
-            crate::obs_anchor::report(&moved, &model);
-            crate::obs_anchor::spline_hold_notices(&model, &moved, model.simulation.t_end)
-                .emit_stderr();
+            crate::obs_anchor::report(out, &moved, &model);
+            out.notices(&crate::obs_anchor::spline_hold_notices(&model, &moved, model.simulation.t_end));
             Some(w)
         } else {
-            crate::obs_anchor::spline_hold_notices(&model, &[], model.simulation.t_end)
-                .emit_stderr();
+            out.notices(&crate::obs_anchor::spline_hold_notices(&model, &[], model.simulation.t_end));
             None
         };
     let model = model;
@@ -2281,9 +2279,9 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             // resolver sees one draw/sweep-tier value and records no override:
             // the replacement of the draws' values is reported here instead,
             // once per swept parameter over every replayed draw.
-            crate::params_resolver::sweep_over_draws_notices(
+            out.notices(&crate::params_resolver::sweep_over_draws_notices(
                 ff_draws.iter().copied(), &sweep_points,
-            ).emit_stderr();
+            ));
 
             for sweep_pt in &sweep_points {
                 // A FRESH sink per sweep-point keeps the sink scenario-keyed (no sink
@@ -2839,6 +2837,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // describes, never over a chain the manifest says was dropped (gh#695).
     if !model.contrasts.is_empty() {
         let paths = crate::fit::contrasts::emit_contrasts(
+            out,
             &out_dir,
             &run_dir,
             None,
