@@ -118,12 +118,13 @@ impl KindFilter {
 }
 
 pub fn cmd_list(a: &crate::args::ListArgs) {
+    let out = crate::out::Out::new(false);
     // --parent=HASH: enumerate the grid-point × start runs of one
     // specific profile. Takes precedence over the default sim/fit
     // enumeration because it's a more specific request; the other
     // filters (since, limit, format) still apply.
     if let Some(parent_hash) = a.parent.as_ref() {
-        list_profile_children(&a.resolved_root().to_string_lossy(), parent_hash, a);
+        list_profile_children(&out, &a.resolved_root().to_string_lossy(), parent_hash, a);
         return;
     }
 
@@ -184,12 +185,12 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     let fits = if !filter_kind.includes_fits() {
         Vec::new()
     } else {
-        discover_fits(&root).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
+        discover_fits(&root).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); })
     };
     let profiles = if !filter_kind.includes_profiles() {
         Vec::new()
     } else {
-        discover_profiles(&root).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
+        discover_profiles(&root).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); })
     };
     let surveys = if !filter_kind.includes_surveys() {
         Vec::new()
@@ -274,12 +275,12 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     }
 
     if format_json {
-        print_sim_json(&filtered_runs);
-        print_fits_json(&filtered_fits);
-        print_profiles_json(&filtered_profiles);
-        print_survey_json(&filtered_surveys);
-        print_pfilter_json(&filtered_pfilters);
-        print_ensemble_json(&filtered_ensembles);
+        print_sim_json(&out, &filtered_runs);
+        print_fits_json(&out, &filtered_fits);
+        print_profiles_json(&out, &filtered_profiles);
+        print_survey_json(&out, &filtered_surveys);
+        print_pfilter_json(&out, &filtered_pfilters);
+        print_ensemble_json(&out, &filtered_ensembles);
     } else {
         let any_other = !filtered_fits.is_empty()
             || !filtered_profiles.is_empty()
@@ -287,33 +288,33 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
             || !filtered_pfilters.is_empty()
             || !filtered_ensembles.is_empty();
         if !filtered_ensembles.is_empty() {
-            eprintln!("{}", style::stderr().paint("ensembles", Style::Bold));
-            print_ensemble_table(&filtered_ensembles, now);
-            eprintln!();
+            out.say(format_args!("{}", style::stderr().paint("ensembles", Style::Bold)));
+            print_ensemble_table(&out, &filtered_ensembles, now);
+            out.say("");
         }
         if !filtered_fits.is_empty() {
-            eprintln!("{}", style::stderr().paint("fits", Style::Bold));
-            print_fits_table(&filtered_fits, now);
-            eprintln!();
+            out.say(format_args!("{}", style::stderr().paint("fits", Style::Bold)));
+            print_fits_table(&out, &filtered_fits, now);
+            out.say("");
         }
         if !filtered_profiles.is_empty() {
-            eprintln!("{}", style::stderr().paint("profiles", Style::Bold));
-            print_profiles_table(&filtered_profiles, now);
-            eprintln!();
+            out.say(format_args!("{}", style::stderr().paint("profiles", Style::Bold)));
+            print_profiles_table(&out, &filtered_profiles, now);
+            out.say("");
         }
         if !filtered_surveys.is_empty() {
-            eprintln!("{}", style::stderr().paint("surveys", Style::Bold));
-            print_survey_table(&filtered_surveys, now);
-            eprintln!();
+            out.say(format_args!("{}", style::stderr().paint("surveys", Style::Bold)));
+            print_survey_table(&out, &filtered_surveys, now);
+            out.say("");
         }
         if !filtered_pfilters.is_empty() {
-            eprintln!("{}", style::stderr().paint("pfilters", Style::Bold));
-            print_pfilter_table(&filtered_pfilters, now);
-            eprintln!();
+            out.say(format_args!("{}", style::stderr().paint("pfilters", Style::Bold)));
+            print_pfilter_table(&out, &filtered_pfilters, now);
+            out.say("");
         }
         if !filtered_runs.is_empty() || !any_other {
-            if any_other { eprintln!("{}", style::stderr().paint("sims", Style::Bold)); }
-            print_sim_table(&filtered_runs, now);
+            if any_other { out.say(format_args!("{}", style::stderr().paint("sims", Style::Bold))); }
+            print_sim_table(&out, &filtered_runs, now);
         }
     }
 }
@@ -323,7 +324,7 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
 /// `ProfilePoint` leaves under `<root>/profiles/` and prints those whose base
 /// hash matches, in (point, seed, start) order.
 fn list_profile_children(
-    root: &str,
+    out: &crate::out::Out, root: &str,
     parent_hash_prefix: &str,
     a: &crate::args::ListArgs,
 ) {
@@ -336,8 +337,8 @@ fn list_profile_children(
         .collect();
 
     if matches.is_empty() {
-        eprintln!("no profile-point runs found with profile-base hash prefix '{}'",
-            parent_hash_prefix);
+        out.say(format_args!("no profile-point runs found with profile-base hash prefix '{}'",
+            parent_hash_prefix));
         return;
     }
 
@@ -352,15 +353,15 @@ fn list_profile_children(
     if a.format.as_deref() == Some("json") {
         let slice: Vec<&runid::RunRecord> = matches.iter().take(limit).map(|l| &l.record).collect();
         match serde_json::to_string_pretty(&slice) {
-            Ok(s)  => println!("{}", s),
-            Err(e) => eprintln!("json error: {}", e),
+            Ok(s)  => out.report_line(format_args!("{}", s)),
+            Err(e) => out.say(format_args!("json error: {}", e)),
         }
         return;
     }
 
-    eprintln!("{}", style::stderr().paint("profile-point leaves", Style::Bold));
-    eprintln!("  {:<16} {:<8} {:<8} {:>14}  path",
-        "point", "seed", "start", "best_loglik");
+    out.say(format_args!("{}", style::stderr().paint("profile-point leaves", Style::Bold)));
+    out.say(format_args!("  {:<16} {:<8} {:<8} {:>14}  path",
+        "point", "seed", "start", "best_loglik"));
     for leaf in matches.iter().take(limit) {
         let ll = leaf.record.inputs.as_object()
             .and_then(|o| o.get("best_loglik"))
@@ -368,90 +369,90 @@ fn list_profile_children(
             .map(|x| format!("{:.2}", x))
             .unwrap_or_else(|| "—".into());
         let rel = pathdiff_str(&leaf.dir, &cwd);
-        eprintln!("  {:<16} {:<8} {:<8} {:>14}  {}",
+        out.say(format_args!("  {:<16} {:<8} {:<8} {:>14}  {}",
             leaf.level_label("point"), leaf.level_label("seed"),
-            leaf.level_label("start"), ll, style::stderr().paint(&rel.to_string(), Style::Dim));
+            leaf.level_label("start"), ll, style::stderr().paint(&rel.to_string(), Style::Dim)));
     }
     if matches.len() > limit {
-        eprintln!("  ... {} more (use --all to show)", matches.len() - limit);
+        out.say(format_args!("  ... {} more (use --all to show)", matches.len() - limit));
     }
 }
 
 // ── cmd_show ─────────────────────────────────────────────────────────────────
 
 pub fn cmd_show(a: &crate::args::ShowArgs) {
+    let out = crate::out::Out::new(false);
     let root = a.root.to_string_lossy();
     match resolve_any(&root, &a.target) {
-        Ok(Resolved::Sim { leaf, rel_path, created }) => show_sim_record(&leaf, &rel_path, created),
-        Ok(Resolved::Fit { leaf, rel_path, created }) => show_fit_record(&leaf, &rel_path, created),
-        Ok(Resolved::Profile { leaf, rel_path, created }) => show_profile_record(&leaf, &rel_path, created),
-        Ok(Resolved::Pfilter { leaf, rel_path, created }) => show_pfilter_record(&leaf, &rel_path, created),
-        Ok(Resolved::Survey { leaf, rel_path, created }) => show_survey_record(&leaf, &rel_path, created),
-        Ok(Resolved::SimEnsemble { leaf, rel_path, created }) => show_sim_ensemble_record(&leaf, &rel_path, created),
-        Ok(Resolved::FitEnvelope { segment, run, rel_path }) => show_fit_envelope(&segment, run.as_deref(), &rel_path),
+        Ok(Resolved::Sim { leaf, rel_path, created }) => show_sim_record(&out, &leaf, &rel_path, created),
+        Ok(Resolved::Fit { leaf, rel_path, created }) => show_fit_record(&out, &leaf, &rel_path, created),
+        Ok(Resolved::Profile { leaf, rel_path, created }) => show_profile_record(&out, &leaf, &rel_path, created),
+        Ok(Resolved::Pfilter { leaf, rel_path, created }) => show_pfilter_record(&out, &leaf, &rel_path, created),
+        Ok(Resolved::Survey { leaf, rel_path, created }) => show_survey_record(&out, &leaf, &rel_path, created),
+        Ok(Resolved::SimEnsemble { leaf, rel_path, created }) => show_sim_ensemble_record(&out, &leaf, &rel_path, created),
+        Ok(Resolved::FitEnvelope { segment, run, rel_path }) => show_fit_envelope(&out, &segment, run.as_deref(), &rel_path),
         Err(e) => {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
+            out.fail(format!("error: {}", e));
         }
     }
 }
 
 /// Render a new-format (`RunRecord`) sim: the factored levels, the run_id
 /// address, and provenance. Mirrors the legacy `show_simulate` layout.
-fn show_sim_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
+fn show_sim_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     let rec = &leaf.record;
-    println!("{}", style::stdout().paint("path", Style::Dim)); println!("  {}", style::stdout().paint(rel_path, Style::Code));
-    println!("{}", style::stdout().paint("kind", Style::Dim)); println!("  sim");
+    out.report_line(format_args!("{}", style::stdout().paint("path", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(rel_path, Style::Code)));
+    out.report_line(format_args!("{}", style::stdout().paint("kind", Style::Dim))); out.report_line("  sim");
     if let Some(ref l) = rec.provenance.label {
-        println!("{}", style::stdout().paint("label", Style::Dim)); println!("  {}", l);
+        out.report_line(format_args!("{}", style::stdout().paint("label", Style::Dim))); out.report_line(format_args!("  {}", l));
     }
-    println!("{}", style::stdout().paint("model", Style::Dim)); println!("  {}", leaf.level_label("model"));
-    println!("{}", style::stdout().paint("scenario", Style::Dim)); println!("  {}", leaf.level_label("scenario"));
-    println!("{}", style::stdout().paint("seed", Style::Dim)); println!("  {}", leaf.seed());
-    println!("{}", style::stdout().paint("config", Style::Dim)); println!("  {}", leaf.level_label("config"));
+    out.report_line(format_args!("{}", style::stdout().paint("model", Style::Dim))); out.report_line(format_args!("  {}", leaf.level_label("model")));
+    out.report_line(format_args!("{}", style::stdout().paint("scenario", Style::Dim))); out.report_line(format_args!("  {}", leaf.level_label("scenario")));
+    out.report_line(format_args!("{}", style::stdout().paint("seed", Style::Dim))); out.report_line(format_args!("  {}", leaf.seed()));
+    out.report_line(format_args!("{}", style::stdout().paint("config", Style::Dim))); out.report_line(format_args!("  {}", leaf.level_label("config")));
     // The resolved parameter values the `params` level hashed (recorded in
     // `run.json.inputs`, display-only — gh#583 item I).
     if let Some(params) = rec.inputs.get("params").and_then(|v| v.as_object()) {
-        println!("{}", style::stdout().paint("params", Style::Dim));
+        out.report_line(format_args!("{}", style::stdout().paint("params", Style::Dim)));
         for (name, value) in params {
-            println!("  {:<16} {}", name, value);
+            out.report_line(format_args!("  {:<16} {}", name, value));
         }
     }
-    println!("{}", style::stdout().paint("run_id", Style::Dim)); println!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim));
-    println!("{}", style::stdout().paint("levels", Style::Dim));
+    out.report_line(format_args!("{}", style::stdout().paint("run_id", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim)));
+    out.report_line(format_args!("{}", style::stdout().paint("levels", Style::Dim)));
     for lvl in &rec.levels {
-        println!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim));
+        out.report_line(format_args!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim)));
     }
-    println!("{}", style::stdout().paint("trajectory", Style::Dim));
-    println!("  {} bytes", leaf.traj_bytes());
-    println!("{}", style::stdout().paint("created", Style::Dim));
-    println!("  {}  ({})",
+    out.report_line(format_args!("{}", style::stdout().paint("trajectory", Style::Dim)));
+    out.report_line(format_args!("  {} bytes", leaf.traj_bytes()));
+    out.report_line(format_args!("{}", style::stdout().paint("created", Style::Dim)));
+    out.report_line(format_args!("  {}  ({})",
         rec.provenance.created_at.as_deref().unwrap_or("?"),
-        fmt_relative_time(created, SystemTime::now()));
-    println!("{}", style::stdout().paint("engine", Style::Dim)); println!("  {}", rec.engine_version);
-    println!("{}", style::stdout().paint("argv", Style::Dim));
-    println!("  {}", rec.provenance.argv.join(" "));
+        fmt_relative_time(created, SystemTime::now())));
+    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", rec.engine_version));
+    out.report_line(format_args!("{}", style::stdout().paint("argv", Style::Dim)));
+    out.report_line(format_args!("  {}", rec.provenance.argv.join(" ")));
 }
 
 /// Render a `RunRecord` fit-method leaf: the factored levels, the run_id
 /// address, the `deps` (lineage), and the recorded `inputs` (display-only).
 /// Mirrors `show_sim_record` for the CAS fit path.
-fn show_fit_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
+fn show_fit_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     let rec = &leaf.record;
-    println!("{}", style::stdout().paint("path", Style::Dim)); println!("  {}", style::stdout().paint(rel_path, Style::Code));
-    println!("{}", style::stdout().paint("kind", Style::Dim)); println!("  fit_method");
-    println!("{}", style::stdout().paint("fit", Style::Dim)); println!("  {}", leaf.level_label("fit"));
-    println!("{}", style::stdout().paint("method", Style::Dim)); println!("  {}", leaf.level_label("method"));
-    println!("{}", style::stdout().paint("seed", Style::Dim)); println!("  {}", leaf.level_label("seed"));
-    println!("{}", style::stdout().paint("run_id", Style::Dim)); println!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim));
-    println!("{}", style::stdout().paint("levels", Style::Dim));
+    out.report_line(format_args!("{}", style::stdout().paint("path", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(rel_path, Style::Code)));
+    out.report_line(format_args!("{}", style::stdout().paint("kind", Style::Dim))); out.report_line("  fit_method");
+    out.report_line(format_args!("{}", style::stdout().paint("fit", Style::Dim))); out.report_line(format_args!("  {}", leaf.level_label("fit")));
+    out.report_line(format_args!("{}", style::stdout().paint("method", Style::Dim))); out.report_line(format_args!("  {}", leaf.level_label("method")));
+    out.report_line(format_args!("{}", style::stdout().paint("seed", Style::Dim))); out.report_line(format_args!("  {}", leaf.level_label("seed")));
+    out.report_line(format_args!("{}", style::stdout().paint("run_id", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim)));
+    out.report_line(format_args!("{}", style::stdout().paint("levels", Style::Dim)));
     for lvl in &rec.levels {
-        println!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim));
+        out.report_line(format_args!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim)));
     }
     if !rec.deps.is_empty() {
-        println!("{}", style::stdout().paint("deps", Style::Dim));
+        out.report_line(format_args!("{}", style::stdout().paint("deps", Style::Dim)));
         for d in &rec.deps {
-            println!("  {} {} ({})", style::stdout().paint(&d.run_id.short8().to_string(), Style::Dim), d.artifact, style::stdout().paint(&d.digest.short8().to_string(), Style::Dim));
+            out.report_line(format_args!("  {} {} ({})", style::stdout().paint(&d.run_id.short8().to_string(), Style::Dim), d.artifact, style::stdout().paint(&d.digest.short8().to_string(), Style::Dim)));
         }
     }
     // Display fields recorded in `inputs` (display-only, never hashed), each
@@ -460,15 +461,15 @@ fn show_fit_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     if let Some(obj) = rec.inputs.as_object() {
         for key in ["method", "backend", "n_chains", "best_chain", "best_loglik"] {
             if let Some(v) = obj.get(key) {
-                println!("{}", style::stdout().paint(key, Style::Dim)); println!("  {}", v);
+                out.report_line(format_args!("{}", style::stdout().paint(key, Style::Dim))); out.report_line(format_args!("  {}", v));
             }
         }
     }
-    println!("{}", style::stdout().paint("created", Style::Dim));
-    println!("  {}  ({})",
+    out.report_line(format_args!("{}", style::stdout().paint("created", Style::Dim)));
+    out.report_line(format_args!("  {}  ({})",
         rec.provenance.created_at.as_deref().unwrap_or("?"),
-        fmt_relative_time(created, SystemTime::now()));
-    println!("{}", style::stdout().paint("engine", Style::Dim)); println!("  {}", rec.engine_version);
+        fmt_relative_time(created, SystemTime::now())));
+    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", rec.engine_version));
 }
 
 /// The directories `fit predict` wrote for a fit envelope, each with the
@@ -557,28 +558,28 @@ fn keyed_children(segment: &Path, family: &str, dirs: bool) -> Vec<String> {
 /// manifests). A read-side projection of the segment directory — there is no
 /// fit-wide `run.json`, so this is the fit's `show` view. Mirrors the visual
 /// style of [`show_fit_record`].
-fn show_fit_envelope(segment: &Path, run: Option<&str>, rel_path: &str) {
-    println!("{}", style::stdout().paint("path", Style::Dim)); println!("  {}", style::stdout().paint(rel_path, Style::Code));
-    println!("{}", style::stdout().paint("kind", Style::Dim)); println!("  fit");
+fn show_fit_envelope(out: &crate::out::Out, segment: &Path, run: Option<&str>, rel_path: &str) {
+    out.report_line(format_args!("{}", style::stdout().paint("path", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(rel_path, Style::Code)));
+    out.report_line(format_args!("{}", style::stdout().paint("kind", Style::Dim))); out.report_line("  fit");
     // Fit-level hash + declared methods from the folded view (when the segment
     // holds method leaves; an output-only / incomplete segment skips these).
     // Labels are its runs' (gh#896), never identity-bearing.
     if let Some(view) = crate::fit::fit_view::FitView::read(segment) {
         if let Some(label) = view.label() {
-            println!("{}", style::stdout().paint("label", Style::Dim)); println!("  {}", label);
+            out.report_line(format_args!("{}", style::stdout().paint("label", Style::Dim))); out.report_line(format_args!("  {}", label));
         }
         let short = if view.fit_hash.len() >= 8 { &view.fit_hash[..8] } else { &view.fit_hash };
-        println!("{}", style::stdout().paint("fit", Style::Dim)); println!("  {}", style::stdout().paint(short, Style::Dim));
+        out.report_line(format_args!("{}", style::stdout().paint("fit", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(short, Style::Dim)));
         if !view.methods_declared.is_empty() {
-            println!("{}", style::stdout().paint("methods", Style::Dim));
-            println!("  {}", view.methods_declared.join(", "));
+            out.report_line(format_args!("{}", style::stdout().paint("methods", Style::Dim)));
+            out.report_line(format_args!("  {}", view.methods_declared.join(", ")));
         }
     }
     // Output envelope: the predict/quantities artifacts the fit produced,
     // grouped by subdir, each as a segment-relative path the user can pass to
     // `cat --stream`. Absent subdirs are skipped (a not-yet-predicted fit just
     // shows fewer outputs).
-    println!("{}", style::stdout().paint("outputs", Style::Dim));
+    out.report_line(format_args!("{}", style::stdout().paint("outputs", Style::Dim)));
     let mut any = false;
     // None of these is one fixed name. `fit predict --quantities FILE` writes
     // `quantities-<key8>/` (proposal 2026-08-19), one per reporting vocabulary;
@@ -609,7 +610,7 @@ fn show_fit_envelope(segment: &Path, run: Option<&str>, rel_path: &str) {
                     .collect();
                 files.sort();
                 for f in files {
-                    println!("  {}", f);
+                    out.report_line(format_args!("  {}", f));
                     any = true;
                 }
             }
@@ -624,17 +625,17 @@ fn show_fit_envelope(segment: &Path, run: Option<&str>, rel_path: &str) {
         manifests.extend(keyed_children(&outputs, "quantities", false));
         for manifest in &manifests {
             if outputs.join(manifest).exists() {
-                println!("  {}{}", prefix, manifest);
+                out.report_line(format_args!("  {}{}", prefix, manifest));
                 any = true;
             }
         }
     }
     if segment.join("fit.meta.json").exists() {
-        println!("  fit.meta.json");
+        out.report_line("  fit.meta.json");
         any = true;
     }
     if !any {
-        println!("  {}", style::stdout().paint("(none — run `camdl fit predict` to generate)", Style::Dim));
+        out.report_line(format_args!("  {}", style::stdout().paint("(none — run `camdl fit predict` to generate)", Style::Dim)));
     }
 }
 
@@ -644,36 +645,36 @@ fn show_fit_envelope(segment: &Path, run: Option<&str>, rel_path: &str) {
 /// authoritative home, NOT copied per leaf), and the recorded `inputs`
 /// including the per-leaf provenance (gh#83/85 parameter resolution, per-chain
 /// init, suppressed-warnings waiver). Mirrors `show_fit_record`.
-fn show_profile_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
+fn show_profile_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     let rec = &leaf.record;
-    println!("{}", style::stdout().paint("path", Style::Dim)); println!("  {}", style::stdout().paint(rel_path, Style::Code));
-    println!("{}", style::stdout().paint("kind", Style::Dim)); println!("  profile_point");
+    out.report_line(format_args!("{}", style::stdout().paint("path", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(rel_path, Style::Code)));
+    out.report_line(format_args!("{}", style::stdout().paint("kind", Style::Dim))); out.report_line("  profile_point");
     // The label lives once on the profile-base sidecar; walk up the leaf's
     // ancestors to the first segment carrying a `fit.meta.json`.
     if let Some(sc) = leaf.dir.ancestors().find_map(crate::run_meta::read_fit_sidecar) {
         if let Some(ref l) = sc.label {
-            println!("{}", style::stdout().paint("label", Style::Dim)); println!("  {}", l);
+            out.report_line(format_args!("{}", style::stdout().paint("label", Style::Dim))); out.report_line(format_args!("  {}", l));
         }
     }
     for lvl_name in ["profile", "point", "method", "seed", "start"] {
-        println!("{}", style::stdout().paint(lvl_name, Style::Dim));
-        println!("  {}", leaf.level_label(lvl_name));
+        out.report_line(format_args!("{}", style::stdout().paint(lvl_name, Style::Dim)));
+        out.report_line(format_args!("  {}", leaf.level_label(lvl_name)));
     }
-    println!("{}", style::stdout().paint("run_id", Style::Dim)); println!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim));
-    println!("{}", style::stdout().paint("levels", Style::Dim));
+    out.report_line(format_args!("{}", style::stdout().paint("run_id", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim)));
+    out.report_line(format_args!("{}", style::stdout().paint("levels", Style::Dim)));
     for lvl in &rec.levels {
-        println!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim));
+        out.report_line(format_args!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim)));
     }
     if !rec.deps.is_empty() {
-        println!("{}", style::stdout().paint("deps", Style::Dim));
+        out.report_line(format_args!("{}", style::stdout().paint("deps", Style::Dim)));
         for d in &rec.deps {
-            println!("  {} {} ({})", style::stdout().paint(&d.run_id.short8().to_string(), Style::Dim), d.artifact, style::stdout().paint(&d.digest.short8().to_string(), Style::Dim));
+            out.report_line(format_args!("  {} {} ({})", style::stdout().paint(&d.run_id.short8().to_string(), Style::Dim), d.artifact, style::stdout().paint(&d.digest.short8().to_string(), Style::Dim)));
         }
     }
     if let Some(obj) = rec.inputs.as_object() {
         for key in ["method", "grid_point", "start", "best_loglik", "wall_time_seconds"] {
             if let Some(v) = obj.get(key) {
-                println!("{}", style::stdout().paint(key, Style::Dim)); println!("  {}", v);
+                out.report_line(format_args!("{}", style::stdout().paint(key, Style::Dim))); out.report_line(format_args!("  {}", v));
             }
         }
         // Per-leaf provenance (display-only, never hashed). Surface the audit
@@ -681,79 +682,79 @@ fn show_profile_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTim
         if let Some(prov) = obj.get("provenance").and_then(|v| v.as_object()) {
             if let Some(pp) = prov.get("parameters_provenance").and_then(|v| v.as_object()) {
                 if !pp.is_empty() {
-                    println!("{}", style::stdout().paint("parameter provenance", Style::Dim));
+                    out.report_line(format_args!("{}", style::stdout().paint("parameter provenance", Style::Dim)));
                     let mut names: Vec<&String> = pp.keys().collect();
                     names.sort();
                     for n in names {
                         let src = pp[n].get("source").and_then(|v| v.as_str()).unwrap_or("?");
                         let role = pp[n].get("role").and_then(|v| v.as_str()).unwrap_or("?");
-                        println!("  {:<16} {} ({})", n, src, role);
+                        out.report_line(format_args!("  {:<16} {} ({})", n, src, role));
                     }
                 }
             }
             if let Some(ip) = prov.get("init_provenance") {
                 if let Some(method) = ip.get("method").and_then(|v| v.as_str()) {
                     let n_chains = ip.get("chains").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
-                    println!("{}", style::stdout().paint("init provenance", Style::Dim));
-                    println!("  method {} ({} chain{})", method, n_chains,
-                        if n_chains == 1 { "" } else { "s" });
+                    out.report_line(format_args!("{}", style::stdout().paint("init provenance", Style::Dim)));
+                    out.report_line(format_args!("  method {} ({} chain{})", method, n_chains,
+                        if n_chains == 1 { "" } else { "s" }));
                 }
             }
         }
     }
-    println!("{}", style::stdout().paint("created", Style::Dim));
-    println!("  {}  ({})",
+    out.report_line(format_args!("{}", style::stdout().paint("created", Style::Dim)));
+    out.report_line(format_args!("  {}  ({})",
         rec.provenance.created_at.as_deref().unwrap_or("?"),
-        fmt_relative_time(created, SystemTime::now()));
-    println!("{}", style::stdout().paint("engine", Style::Dim)); println!("  {}", rec.engine_version);
+        fmt_relative_time(created, SystemTime::now())));
+    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", rec.engine_version));
 }
 
 /// Render a new-format (`RunRecord`) pfilter-eval leaf: the four factored
 /// levels (`model`/`config`/`params`/`seed`), the run_id address, and the
 /// recorded loglik result + scored point from `inputs`. A pfilter eval is a
 /// single leaf (no grid); the `--label`, if any, is on the leaf provenance.
-fn show_pfilter_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
+fn show_pfilter_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     let rec = &leaf.record;
-    println!("{}", style::stdout().paint("path", Style::Dim)); println!("  {}", style::stdout().paint(rel_path, Style::Code));
-    println!("{}", style::stdout().paint("kind", Style::Dim)); println!("  pfilter");
+    out.report_line(format_args!("{}", style::stdout().paint("path", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(rel_path, Style::Code)));
+    out.report_line(format_args!("{}", style::stdout().paint("kind", Style::Dim))); out.report_line("  pfilter");
     if let Some(ref l) = rec.provenance.label {
-        println!("{}", style::stdout().paint("label", Style::Dim)); println!("  {}", l);
+        out.report_line(format_args!("{}", style::stdout().paint("label", Style::Dim))); out.report_line(format_args!("  {}", l));
     }
     for lvl_name in ["model", "config", "params", "seed"] {
-        println!("{}", style::stdout().paint(lvl_name, Style::Dim));
-        println!("  {}", leaf.level_label(lvl_name));
+        out.report_line(format_args!("{}", style::stdout().paint(lvl_name, Style::Dim)));
+        out.report_line(format_args!("  {}", leaf.level_label(lvl_name)));
     }
-    println!("{}", style::stdout().paint("run_id", Style::Dim)); println!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim));
-    println!("{}", style::stdout().paint("levels", Style::Dim));
+    out.report_line(format_args!("{}", style::stdout().paint("run_id", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim)));
+    out.report_line(format_args!("{}", style::stdout().paint("levels", Style::Dim)));
     for lvl in &rec.levels {
-        println!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim));
+        out.report_line(format_args!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim)));
     }
     if let Some(obj) = rec.inputs.as_object() {
         for key in ["loglik", "loglik_sd", "n_replicates", "n_particles"] {
             if let Some(v) = obj.get(key) {
                 if v.is_null() { continue; }
-                println!("{}", style::stdout().paint(key, Style::Dim)); println!("  {}", v);
+                out.report_line(format_args!("{}", style::stdout().paint(key, Style::Dim))); out.report_line(format_args!("  {}", v));
             }
         }
         if let Some(params) = obj.get("params").and_then(|v| v.as_array()) {
             if !params.is_empty() {
-                println!("{}", style::stdout().paint("scored point", Style::Dim));
+                out.report_line(format_args!("{}", style::stdout().paint("scored point", Style::Dim)));
                 for pair in params {
                     if let Some(p) = pair.as_array() {
                         if p.len() == 2 {
-                            println!("  {:<16} {}",
-                                p[0].as_str().unwrap_or("?"), p[1]);
+                            out.report_line(format_args!("  {:<16} {}",
+                                p[0].as_str().unwrap_or("?"), p[1]));
                         }
                     }
                 }
             }
         }
     }
-    println!("{}", style::stdout().paint("created", Style::Dim));
-    println!("  {}  ({})",
+    out.report_line(format_args!("{}", style::stdout().paint("created", Style::Dim)));
+    out.report_line(format_args!("  {}  ({})",
         rec.provenance.created_at.as_deref().unwrap_or("?"),
-        fmt_relative_time(created, SystemTime::now()));
-    println!("{}", style::stdout().paint("engine", Style::Dim)); println!("  {}", rec.engine_version);
+        fmt_relative_time(created, SystemTime::now())));
+    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", rec.engine_version));
 }
 
 /// Render a new-format (`RunRecord`) survey leaf: the four factored levels
@@ -761,47 +762,47 @@ fn show_pfilter_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTim
 /// config + estimated set + best-loglik from `inputs`, and the landscape /
 /// summary / HTML artifact sizes. A survey is a single leaf (the N LHS points
 /// live within it, not as an axis). Mirrors `show_pfilter_record`.
-fn show_survey_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
+fn show_survey_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     let rec = &leaf.record;
-    println!("{}", style::stdout().paint("path", Style::Dim)); println!("  {}", style::stdout().paint(rel_path, Style::Code));
-    println!("{}", style::stdout().paint("kind", Style::Dim)); println!("  survey");
+    out.report_line(format_args!("{}", style::stdout().paint("path", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(rel_path, Style::Code)));
+    out.report_line(format_args!("{}", style::stdout().paint("kind", Style::Dim))); out.report_line("  survey");
     if let Some(ref l) = rec.provenance.label {
-        println!("{}", style::stdout().paint("label", Style::Dim)); println!("  {}", l);
+        out.report_line(format_args!("{}", style::stdout().paint("label", Style::Dim))); out.report_line(format_args!("  {}", l));
     }
     for lvl_name in ["model", "config", "box", "seed"] {
-        println!("{}", style::stdout().paint(lvl_name, Style::Dim));
-        println!("  {}", leaf.level_label(lvl_name));
+        out.report_line(format_args!("{}", style::stdout().paint(lvl_name, Style::Dim)));
+        out.report_line(format_args!("  {}", leaf.level_label(lvl_name)));
     }
-    println!("{}", style::stdout().paint("run_id", Style::Dim)); println!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim));
-    println!("{}", style::stdout().paint("levels", Style::Dim));
+    out.report_line(format_args!("{}", style::stdout().paint("run_id", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim)));
+    out.report_line(format_args!("{}", style::stdout().paint("levels", Style::Dim)));
     for lvl in &rec.levels {
-        println!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim));
+        out.report_line(format_args!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim)));
     }
     if let Some(obj) = rec.inputs.as_object() {
         if let Some(est) = obj.get("estimated").and_then(|v| v.as_array()) {
             let names: Vec<&str> = est.iter().filter_map(|v| v.as_str()).collect();
-            println!("{}", style::stdout().paint("estimated", Style::Dim)); println!("  {}", names.join(", "));
+            out.report_line(format_args!("{}", style::stdout().paint("estimated", Style::Dim))); out.report_line(format_args!("  {}", names.join(", ")));
         }
         for key in ["eval_method", "eval_particles", "eval_replicates", "n_points", "best_loglik"] {
             if let Some(v) = obj.get(key) {
                 if v.is_null() { continue; }
-                println!("{}", style::stdout().paint(key, Style::Dim)); println!("  {}", v);
+                out.report_line(format_args!("{}", style::stdout().paint(key, Style::Dim))); out.report_line(format_args!("  {}", v));
             }
         }
     }
     let landscape = leaf.dir.join("landscape.tsv");
     if landscape.exists() {
         let bytes = std::fs::metadata(&landscape).map(|m| m.len()).unwrap_or(0);
-        println!("{}", style::stdout().paint("landscape", Style::Dim));
-        println!("  landscape.tsv ({} bytes)", bytes);
+        out.report_line(format_args!("{}", style::stdout().paint("landscape", Style::Dim)));
+        out.report_line(format_args!("  landscape.tsv ({} bytes)", bytes));
     }
     let summary = leaf.dir.join("summary.json");
     if summary.exists() {
         if let Ok(s) = std::fs::read_to_string(&summary) {
             if let Ok(j) = serde_json::from_str::<serde_json::Value>(&s) {
                 if let Some(se_q) = j.get("loglik_se_quartiles") {
-                    println!("{}", style::stdout().paint("loglik_se quartiles", Style::Dim));
-                    println!("  {}", se_q);
+                    out.report_line(format_args!("{}", style::stdout().paint("loglik_se quartiles", Style::Dim)));
+                    out.report_line(format_args!("  {}", se_q));
                 }
             }
         }
@@ -809,77 +810,78 @@ fn show_survey_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime
     let html = leaf.dir.join("landscape.html");
     if html.exists() {
         let bytes = std::fs::metadata(&html).map(|m| m.len()).unwrap_or(0);
-        println!("{}", style::stdout().paint("rendered", Style::Dim));
-        println!("  landscape.html ({} bytes)", bytes);
+        out.report_line(format_args!("{}", style::stdout().paint("rendered", Style::Dim)));
+        out.report_line(format_args!("  landscape.html ({} bytes)", bytes));
     }
-    println!("{}", style::stdout().paint("created", Style::Dim));
-    println!("  {}  ({})",
+    out.report_line(format_args!("{}", style::stdout().paint("created", Style::Dim)));
+    out.report_line(format_args!("  {}  ({})",
         rec.provenance.created_at.as_deref().unwrap_or("?"),
-        fmt_relative_time(created, SystemTime::now()));
-    println!("{}", style::stdout().paint("engine", Style::Dim)); println!("  {}", rec.engine_version);
+        fmt_relative_time(created, SystemTime::now())));
+    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", rec.engine_version));
 }
 
 /// Render a new-format (`RunRecord`) `SimEnsemble` leaf: the four factored
 /// levels (`model`/`config`/`params`/`grid`), the run_id address, the cell
 /// count + scenario/seed/draw summary from `inputs`, the `deps` (the N per-cell
 /// `Sim` leaves the combined TSV is derived from), and the `ensemble.tsv` size.
-fn show_sim_ensemble_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
+fn show_sim_ensemble_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     let rec = &leaf.record;
-    println!("{}", style::stdout().paint("path", Style::Dim)); println!("  {}", style::stdout().paint(rel_path, Style::Code));
-    println!("{}", style::stdout().paint("kind", Style::Dim)); println!("  sim_ensemble");
+    out.report_line(format_args!("{}", style::stdout().paint("path", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(rel_path, Style::Code)));
+    out.report_line(format_args!("{}", style::stdout().paint("kind", Style::Dim))); out.report_line("  sim_ensemble");
     if let Some(ref l) = rec.provenance.label {
-        println!("{}", style::stdout().paint("label", Style::Dim)); println!("  {}", l);
+        out.report_line(format_args!("{}", style::stdout().paint("label", Style::Dim))); out.report_line(format_args!("  {}", l));
     }
     for lvl_name in ["model", "config", "params", "grid"] {
-        println!("{}", style::stdout().paint(lvl_name, Style::Dim));
-        println!("  {}", leaf.level_label(lvl_name));
+        out.report_line(format_args!("{}", style::stdout().paint(lvl_name, Style::Dim)));
+        out.report_line(format_args!("  {}", leaf.level_label(lvl_name)));
     }
-    println!("{}", style::stdout().paint("run_id", Style::Dim)); println!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim));
-    println!("{}", style::stdout().paint("levels", Style::Dim));
+    out.report_line(format_args!("{}", style::stdout().paint("run_id", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim)));
+    out.report_line(format_args!("{}", style::stdout().paint("levels", Style::Dim)));
     for lvl in &rec.levels {
-        println!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim));
+        out.report_line(format_args!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim)));
     }
     if let Some(obj) = rec.inputs.as_object() {
         for key in ["n_cells", "n_scenarios", "n_seeds", "n_draws", "n_points"] {
             if let Some(v) = obj.get(key) {
                 if v.is_null() { continue; }
-                println!("{}", style::stdout().paint(key, Style::Dim)); println!("  {}", v);
+                out.report_line(format_args!("{}", style::stdout().paint(key, Style::Dim))); out.report_line(format_args!("  {}", v));
             }
         }
         if let Some(sc) = obj.get("scenarios").and_then(|v| v.as_array()) {
             let names: Vec<&str> = sc.iter().filter_map(|v| v.as_str()).collect();
             if !names.is_empty() {
-                println!("{}", style::stdout().paint("scenarios", Style::Dim)); println!("  {}", names.join(", "));
+                out.report_line(format_args!("{}", style::stdout().paint("scenarios", Style::Dim))); out.report_line(format_args!("  {}", names.join(", ")));
             }
         }
     }
     // The deps are the N per-cell Sim leaves the combined TSV concatenates.
     if !rec.deps.is_empty() {
-        println!("{}", style::stdout().paint("deps", Style::Dim));
-        println!("  {} per-cell sim leaves", rec.deps.len());
+        out.report_line(format_args!("{}", style::stdout().paint("deps", Style::Dim)));
+        out.report_line(format_args!("  {} per-cell sim leaves", rec.deps.len()));
         for d in &rec.deps {
-            println!("  {} {} ({})", style::stdout().paint(&d.run_id.short8().to_string(), Style::Dim), d.artifact, style::stdout().paint(&d.digest.short8().to_string(), Style::Dim));
+            out.report_line(format_args!("  {} {} ({})", style::stdout().paint(&d.run_id.short8().to_string(), Style::Dim), d.artifact, style::stdout().paint(&d.digest.short8().to_string(), Style::Dim)));
         }
     }
     let ensemble = leaf.dir.join("ensemble.tsv");
     if ensemble.exists() {
         let bytes = std::fs::metadata(&ensemble).map(|m| m.len()).unwrap_or(0);
-        println!("{}", style::stdout().paint("ensemble", Style::Dim));
-        println!("  ensemble.tsv ({} bytes)", bytes);
+        out.report_line(format_args!("{}", style::stdout().paint("ensemble", Style::Dim)));
+        out.report_line(format_args!("  ensemble.tsv ({} bytes)", bytes));
     }
-    println!("{}", style::stdout().paint("created", Style::Dim));
-    println!("  {}  ({})",
+    out.report_line(format_args!("{}", style::stdout().paint("created", Style::Dim)));
+    out.report_line(format_args!("  {}  ({})",
         rec.provenance.created_at.as_deref().unwrap_or("?"),
-        fmt_relative_time(created, SystemTime::now()));
-    println!("{}", style::stdout().paint("engine", Style::Dim)); println!("  {}", rec.engine_version);
+        fmt_relative_time(created, SystemTime::now())));
+    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", rec.engine_version));
 }
 
 // ── cmd_cat ──────────────────────────────────────────────────────────────────
 
 pub fn cmd_cat(a: &crate::args::CatArgs) {
+    let out = crate::out::Out::new(false);
     let root = a.root.to_string_lossy();
     let resolved = resolve_any(&root, &a.target).unwrap_or_else(|e| {
-        eprintln!("error: {}", e); std::process::exit(1);
+        out.fail(format!("error: {}", e));
     });
 
     use std::io::Write as _;
@@ -889,18 +891,17 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
         Resolved::Sim { leaf, rel_path, .. } => {
             let bytes = if let Some(ref stream) = a.stream {
                 let path = find_obs_stream(&leaf.dir, stream).unwrap_or_else(|| {
-                    eprintln!("error: no observation stream '{}' in {}", stream, rel_path);
-                    std::process::exit(1);
+                    out.fail(format!("error: no observation stream '{}' in {}", stream, rel_path));
                 });
                 std::fs::read(&path).unwrap_or_else(|e| {
-                    eprintln!("error reading {}: {}", path.display(), e); std::process::exit(1);
+                    out.fail(format!("error reading {}: {}", path.display(), e));
                 })
             } else {
                 std::fs::read(leaf.dir.join("traj.tsv")).unwrap_or_else(|e| {
-                    eprintln!("error reading traj.tsv: {}", e); std::process::exit(1);
+                    out.fail(format!("error reading traj.tsv: {}", e));
                 })
             };
-            let _ = std::io::stdout().write_all(&bytes);
+            let _ = out.data().write_all(&bytes);
         }
         // New-format fit method: default to the θ̂ summary; `--stream NAME`
         // cats a named file from the leaf (e.g. `draws.tsv`,
@@ -909,10 +910,9 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
             let name = a.stream.as_deref().unwrap_or("fit_state.toml");
             let path = leaf.dir.join(name);
             let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-                eprintln!("error reading {} in {}: {}", name, rel_path, e);
-                std::process::exit(1);
+                out.fail(format!("error reading {} in {}: {}", name, rel_path, e));
             });
-            let _ = std::io::stdout().write_all(&bytes);
+            let _ = out.data().write_all(&bytes);
         }
         // New-format profile point: default to the per-(point, seed, start)
         // `mle.toml`; `--stream NAME` cats a named file from the leaf.
@@ -920,10 +920,9 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
             let name = a.stream.as_deref().unwrap_or("mle.toml");
             let path = leaf.dir.join(name);
             let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-                eprintln!("error reading {} in {}: {}", name, rel_path, e);
-                std::process::exit(1);
+                out.fail(format!("error reading {} in {}: {}", name, rel_path, e));
             });
-            let _ = std::io::stdout().write_all(&bytes);
+            let _ = out.data().write_all(&bytes);
         }
         // New-format pfilter eval: default to the `loglik.toml` summary;
         // `--stream NAME` cats a named saved artifact from the leaf.
@@ -931,10 +930,9 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
             let name = a.stream.as_deref().unwrap_or("loglik.toml");
             let path = leaf.dir.join(name);
             let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-                eprintln!("error reading {} in {}: {}", name, rel_path, e);
-                std::process::exit(1);
+                out.fail(format!("error reading {} in {}: {}", name, rel_path, e));
             });
-            let _ = std::io::stdout().write_all(&bytes);
+            let _ = out.data().write_all(&bytes);
         }
         // New-format survey: default to `landscape.tsv`; `--stream NAME`
         // cats a named file from the leaf (e.g. `summary.json`,
@@ -943,10 +941,9 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
             let name = a.stream.as_deref().unwrap_or("landscape.tsv");
             let path = leaf.dir.join(name);
             let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-                eprintln!("error reading {} in {}: {}", name, rel_path, e);
-                std::process::exit(1);
+                out.fail(format!("error reading {} in {}: {}", name, rel_path, e));
             });
-            let _ = std::io::stdout().write_all(&bytes);
+            let _ = out.data().write_all(&bytes);
         }
         // New-format ensemble: default to `ensemble.tsv` (the combined
         // wide-format trajectory — byte-identical to the `-o` mirror).
@@ -954,10 +951,9 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
             let name = a.stream.as_deref().unwrap_or("ensemble.tsv");
             let path = leaf.dir.join(name);
             let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-                eprintln!("error reading {} in {}: {}", name, rel_path, e);
-                std::process::exit(1);
+                out.fail(format!("error reading {} in {}: {}", name, rel_path, e));
             });
-            let _ = std::io::stdout().write_all(&bytes);
+            let _ = out.data().write_all(&bytes);
         }
         // Fit ENVELOPE: `--stream <rel>` cats an output file under the segment
         // (e.g. `predictive/weekly_cases.tsv`); no `--stream` defaults to the
@@ -988,14 +984,13 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
                 .find(|p| p.exists())
                 .unwrap_or_else(|| segment.join(rel));
             let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-                eprintln!(
+                out.fail(format!(
                     "error reading {} in fit {}: {}\n  \
                      run `camdl show {}` to list the available output streams",
                     rel, rel_path, e, a.target
-                );
-                std::process::exit(1);
+                ));
             });
-            let _ = std::io::stdout().write_all(&bytes);
+            let _ = out.data().write_all(&bytes);
         }
     }
 }
@@ -1180,7 +1175,7 @@ fn discover_survey_rows(root: &str) -> Vec<SurveyRow> {
         .collect()
 }
 
-fn print_survey_table(surveys: &[SurveyRow], now: SystemTime) {
+fn print_survey_table(out: &crate::out::Out, surveys: &[SurveyRow], now: SystemTime) {
     let mut t = comfy_table::Table::new();
     t.set_content_arrangement(comfy_table::ContentArrangement::Dynamic);
     t.set_header(vec!["model", "estimate", "n_points", "eval", "top_loglik", "age", "path"]);
@@ -1208,14 +1203,14 @@ fn print_survey_table(surveys: &[SurveyRow], now: SystemTime) {
             s.rel_path.clone(),
         ]);
     }
-    println!("{t}");
+    out.report_line(format_args!("{t}"));
 }
 
-fn print_survey_json(surveys: &[SurveyRow]) {
+fn print_survey_json(out: &crate::out::Out, surveys: &[SurveyRow]) {
     let recs: Vec<&runid::RunRecord> = surveys.iter().map(|s| &s.leaf.record).collect();
     match serde_json::to_string_pretty(&recs) {
-        Ok(s) => println!("{}", s),
-        Err(e) => eprintln!("json error: {}", e),
+        Ok(s) => out.report_line(format_args!("{}", s)),
+        Err(e) => out.say(format_args!("json error: {}", e)),
     }
 }
 
@@ -1484,11 +1479,11 @@ fn leaf_created(leaf: &cas_read::Leaf) -> SystemTime {
 
 // ── Output formatting ────────────────────────────────────────────────────────
 
-fn print_sim_table(rows: &[SimRow], now: SystemTime) {
+fn print_sim_table(out: &crate::out::Out, rows: &[SimRow], now: SystemTime) {
     use comfy_table::{Table, Cell, ContentArrangement, presets::NOTHING};
 
     if rows.is_empty() {
-        eprintln!("{}", style::stderr().paint("(no cached runs)", Style::Dim));
+        out.say(format_args!("{}", style::stderr().paint("(no cached runs)", Style::Dim)));
         return;
     }
 
@@ -1534,7 +1529,7 @@ fn print_sim_table(rows: &[SimRow], now: SystemTime) {
         ]);
     }
 
-    println!("{table}");
+    out.report_line(format_args!("{table}"));
 }
 
 /// Compact model identifier for the list's MODEL column. Full absolute
@@ -1550,21 +1545,21 @@ fn model_display_name(path: &str) -> String {
     base.to_string()
 }
 
-fn print_sim_json(rows: &[SimRow]) {
+fn print_sim_json(out: &crate::out::Out, rows: &[SimRow]) {
     for r in rows {
         let json = serde_json::to_string(&r.leaf.record).unwrap_or_default();
-        println!("{}", json);
+        out.report_line(format_args!("{}", json));
     }
 }
 
-fn print_pfilter_json(rows: &[PfilterRow]) {
+fn print_pfilter_json(out: &crate::out::Out, rows: &[PfilterRow]) {
     for r in rows {
         let json = serde_json::to_string(&r.leaf.record).unwrap_or_default();
-        println!("{}", json);
+        out.report_line(format_args!("{}", json));
     }
 }
 
-fn print_pfilter_table(rows: &[PfilterRow], now: SystemTime) {
+fn print_pfilter_table(out: &crate::out::Out, rows: &[PfilterRow], now: SystemTime) {
     use comfy_table::{Table, Cell, ContentArrangement, presets::NOTHING};
     let mut table = Table::new();
     table
@@ -1598,10 +1593,10 @@ fn print_pfilter_table(rows: &[PfilterRow], now: SystemTime) {
             Cell::new(&r.rel_path).fg(comfy_table::Color::Cyan),
         ]);
     }
-    println!("{table}");
+    out.report_line(format_args!("{table}"));
 }
 
-fn print_ensemble_table(rows: &[EnsembleRow], now: SystemTime) {
+fn print_ensemble_table(out: &crate::out::Out, rows: &[EnsembleRow], now: SystemTime) {
     use comfy_table::{Table, Cell, ContentArrangement, presets::NOTHING};
     let mut table = Table::new();
     table
@@ -1638,13 +1633,13 @@ fn print_ensemble_table(rows: &[EnsembleRow], now: SystemTime) {
             Cell::new(&r.rel_path).fg(comfy_table::Color::Cyan),
         ]);
     }
-    println!("{table}");
+    out.report_line(format_args!("{table}"));
 }
 
-fn print_ensemble_json(rows: &[EnsembleRow]) {
+fn print_ensemble_json(out: &crate::out::Out, rows: &[EnsembleRow]) {
     for r in rows {
         let json = serde_json::to_string(&r.leaf.record).unwrap_or_default();
-        println!("{}", json);
+        out.report_line(format_args!("{}", json));
     }
 }
 
@@ -1659,7 +1654,7 @@ fn print_ensemble_json(rows: &[EnsembleRow]) {
 const FIT_LIST_ROW_SCHEMA_NAME: &str = "fit_list_row";
 const FIT_LIST_ROW_SCHEMA_VERSION: u32 = 1;
 
-fn print_fits_json(fits: &[FitEntry]) {
+fn print_fits_json(out: &crate::out::Out, fits: &[FitEntry]) {
     for f in fits {
         let v = &f.view;
         // One object per discovered method leaf — the headline numbers
@@ -1724,7 +1719,7 @@ fn print_fits_json(fits: &[FitEntry]) {
             "argv": v.argv,
             "path": f.rel_path,
         });
-        println!("{}", serde_json::to_string(&json).unwrap_or_default());
+        out.report_line(format_args!("{}", serde_json::to_string(&json).unwrap_or_default()));
     }
 }
 
@@ -1739,7 +1734,7 @@ fn leaf_rel_path(seg_rel: &str, seg_dir: &Path, leaf_dir: &Path) -> String {
     }
 }
 
-fn print_fits_table(fits: &[FitEntry], now: SystemTime) {
+fn print_fits_table(out: &crate::out::Out, fits: &[FitEntry], now: SystemTime) {
     use comfy_table::{Table, Cell, ContentArrangement, presets::NOTHING};
     let mut table = Table::new();
     table
@@ -1779,11 +1774,11 @@ fn print_fits_table(fits: &[FitEntry], now: SystemTime) {
             Cell::new(&f.rel_path).fg(comfy_table::Color::Cyan),
         ]);
     }
-    println!("{table}");
+    out.report_line(format_args!("{table}"));
     crate::fit::fit_table::emit_unlabelled_warning(unlabelled);
 }
 
-fn print_profiles_json(profiles: &[ProfileEntry]) {
+fn print_profiles_json(out: &crate::out::Out, profiles: &[ProfileEntry]) {
     for p in profiles {
         let json = serde_json::json!({
             "hash":    p.hash,
@@ -1794,11 +1789,11 @@ fn print_profiles_json(profiles: &[ProfileEntry]) {
             "n_seeds": p.n_seeds,
             "path":    p.rel_path,
         });
-        println!("{}", serde_json::to_string(&json).unwrap_or_default());
+        out.report_line(format_args!("{}", serde_json::to_string(&json).unwrap_or_default()));
     }
 }
 
-fn print_profiles_table(profiles: &[ProfileEntry], now: SystemTime) {
+fn print_profiles_table(out: &crate::out::Out, profiles: &[ProfileEntry], now: SystemTime) {
     use comfy_table::{Table, Cell, ContentArrangement, presets::NOTHING};
     let mut table = Table::new();
     table
@@ -1839,7 +1834,7 @@ fn print_profiles_table(profiles: &[ProfileEntry], now: SystemTime) {
             Cell::new(&p.rel_path).fg(comfy_table::Color::Cyan),
         ]);
     }
-    println!("{table}");
+    out.report_line(format_args!("{table}"));
 }
 
 /// 8-char hash prefix cell — what `camdl show <hash>` and
