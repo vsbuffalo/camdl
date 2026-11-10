@@ -388,8 +388,13 @@ impl ResolvedStarts {
     /// A sourced rule bound directly to a file — the test seam, and the
     /// shape [`resolve_starts`] produces for a file-shaped handle.
     pub fn from_file(rule: ChainStarts, file: PathBuf) -> Result<Self, String> {
-        let artifact = source_artifact_name(&rule);
-        let dep = super::cas::cas_file_dep(&file, artifact)
+        // A `from_mle` source keys on its `start_values` alone
+        // (`cas_mle_start_dep`); a draws TSV or params TOML is read whole, so
+        // its bytes are the key.
+        let dep = match rule {
+            ChainStarts::Point(Point::FromMle { .. }) => super::cas::cas_mle_start_dep(&file),
+            _ => super::cas::cas_file_dep(&file, source_artifact_name(&rule)),
+        }
             .ok_or_else(|| format!("starts = {}: cannot read `{}`", rule.spelled(), file.display()))?;
         Ok(ResolvedStarts { rule, source: Some(ResolvedSource { file, leaf_dir: None, dep }) })
     }
@@ -399,7 +404,7 @@ impl ResolvedStarts {
 fn source_artifact_name(rule: &ChainStarts) -> &'static str {
     match rule {
         ChainStarts::Spread(Spread::FromPosterior { .. }) => "draws.tsv",
-        ChainStarts::Point(Point::FromMle { .. }) => "fit_state.toml",
+        ChainStarts::Point(Point::FromMle { .. }) => super::cas::MLE_START_ARTIFACT,
         ChainStarts::Point(Point::FromParams { .. }) => "params.toml",
         _ => "",
     }
@@ -453,7 +458,10 @@ pub fn resolve_starts(rule: &ChainStarts, allow_nonconverged: bool) -> Result<Re
             artifact
         ));
     }
-    let dep = super::cas::cas_leaf_file_dep(&leaf, artifact)
+    let dep = match rule {
+        ChainStarts::Point(Point::FromMle { .. }) => super::cas::cas_mle_start_dep(&file),
+        _ => super::cas::cas_leaf_file_dep(&leaf, artifact),
+    }
         .ok_or_else(|| format!("starts = {}: cannot read {}", rule.spelled(), file.display()))?;
     Ok(ResolvedStarts {
         rule: rule.clone(),
