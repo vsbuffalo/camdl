@@ -333,8 +333,8 @@ pub fn run_method(
         .collect();
 
     // Active interventions + events — see same block in pgas.rs.
-    crate::util::print_scheduled_actions_summary(&config.model_declared, &config.model);
-    crate::util::print_observations_summary(&config.model);
+    crate::util::print_scheduled_actions_summary(out, &config.model_declared, &config.model);
+    crate::util::print_observations_summary(out, &config.model);
     for c in super::report::obs_stream_checks(&config.model) {
         out.check(c);
     }

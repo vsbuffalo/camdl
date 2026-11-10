@@ -2697,6 +2697,7 @@ pub fn apply_scenario_filter(
 /// of 5 declared" immediately rather than discovering it from posteriors
 /// hours later.
 pub fn print_scheduled_actions_summary(
+    out: &crate::out::Out,
     model_before_filter: &ir::Model,
     model_after_filter: &ir::Model,
 ) {
@@ -2708,24 +2709,24 @@ pub fn print_scheduled_actions_summary(
 
     if !decl_interv.is_empty() {
         let active_count = decl_interv.iter().filter(|iv| active_names.contains(iv.name.as_str())).count();
-        eprintln!("  interventions ({} active of {} declared):", active_count, decl_interv.len());
+        out.say(format_args!("  interventions ({} active of {} declared):", active_count, decl_interv.len()));
         for iv in &decl_interv {
             let on = active_names.contains(iv.name.as_str());
-            let p = crate::out::paint::stderr();
+            let p = out.stderr_painter();
             let glyph = if on { p.paint("✓", Style::Ok) } else { p.paint("✗", Style::Dim) };
             let note = if on { "" } else { "  (off — not enabled)" };
-            eprintln!("    {} {}{}", glyph, iv.name, note);
+            out.say(format_args!("    {} {}{}", glyph, iv.name, note));
         }
     }
     if !decl_events.is_empty() {
         let active_count = decl_events.iter().filter(|iv| active_names.contains(iv.name.as_str())).count();
-        eprintln!("  events ({} declared, {} active):", decl_events.len(), active_count);
+        out.say(format_args!("  events ({} declared, {} active):", decl_events.len(), active_count));
         for iv in &decl_events {
             let on = active_names.contains(iv.name.as_str());
-            let p = crate::out::paint::stderr();
+            let p = out.stderr_painter();
             let glyph = if on { p.paint("✓", Style::Ok) } else { p.paint("✗", Style::Dim) };
             let note = if on { "" } else { "  (disabled)" };
-            eprintln!("    {} {}{}", glyph, iv.name, note);
+            out.say(format_args!("    {} {}{}", glyph, iv.name, note));
         }
     }
 }
@@ -2738,15 +2739,15 @@ pub fn print_scheduled_actions_summary(
 ///
 /// Silent when the model has no observations. Called by `fit run` and
 /// `pfilter` right after the interventions/events summary.
-pub fn print_observations_summary(model: &ir::Model) {
+pub fn print_observations_summary(out: &crate::out::Out, model: &ir::Model) {
     if model.observations.is_empty() { return; }
-    eprintln!("  observations ({} stream{}):",
+    out.say(format_args!("  observations ({} stream{}):",
         model.observations.len(),
-        if model.observations.len() == 1 { "" } else { "s" });
+        if model.observations.len() == 1 { "" } else { "s" }));
     for check in crate::fit::report::obs_stream_checks(model) {
         if let crate::fit::report::Check::ObsStream { name, carrier, family } = check {
-            eprintln!("    {} {:<16} {:<28} {}",
-                crate::out::paint::stderr().paint("✓", Style::Ok), name, carrier, family);
+            out.say(format_args!("    {} {:<16} {:<28} {}",
+                out.stderr_painter().paint("✓", Style::Ok), name, carrier, family));
         }
     }
     let warn_negbin_on_snapshot = model.observations.iter().any(|obs| {
@@ -2754,10 +2755,10 @@ pub fn print_observations_summary(model: &ir::Model) {
             && crate::fit::report::projection_is_snapshot(&obs.projection)
     });
     if warn_negbin_on_snapshot {
-        let p = crate::out::paint::stderr();
-        eprintln!("    {}", p.paint("note: NegBinomial on a prevalence / snapshot projection is valid", Style::Dim));
-        eprintln!("{}", p.paint("          but uncommon. Binomial or Poisson is the typical choice for", Style::Dim));
-        eprintln!("{}", p.paint("          point-in-time counts. See camdl-run-spec.md §14.4.", Style::Dim));
+        let p = out.stderr_painter();
+        out.say(format_args!("    {}", p.paint("note: NegBinomial on a prevalence / snapshot projection is valid", Style::Dim)));
+        out.say(format_args!("{}", p.paint("          but uncommon. Binomial or Poisson is the typical choice for", Style::Dim)));
+        out.say(format_args!("{}", p.paint("          point-in-time counts. See camdl-run-spec.md §14.4.", Style::Dim)));
     }
 }
 
