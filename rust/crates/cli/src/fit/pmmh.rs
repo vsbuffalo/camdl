@@ -93,7 +93,10 @@ pub fn run_method(
     pmmh_opts: PmmhMethodOpts,
     seed: u64,
     force: bool,
-    resume: bool,
+    // The leaf `--resume` continues, whose chain files the dispatcher has
+    // copied into `method_dir` (`resumed_chain::copy_parent_chains`); `None`
+    // for a fresh run.
+    resume_base: Option<&Path>,
     // The leaf's resume-compatibility key (`cas::resume_guard`); see
     // `pgas::run_method`.
     resume_guard: &str,
@@ -113,7 +116,7 @@ pub fn run_method(
     // The command's output handle: the checks the run shows are recorded on
     // it, and its findings go to the collector it holds.
     out: &mut crate::out::Out,
-) -> Result<Vec<ChainWarmup>, String> {
+) -> Result<(Vec<ChainWarmup>, Vec<usize>), String> {
     // The PMMH prefer-PGAS-for-long-series caveat banner is emitted by the
     // dispatch chokepoint (`methods::emit_status_banner`), driven by the
     // registry `status_note` so it can't drift from `camdl fit methods`.
@@ -121,6 +124,7 @@ pub fn run_method(
     // prints or records is the method that ran, never the runner's name.
     let method_name = method.algorithm.method_name();
     let collector = out.collector();
+    let resume = resume_base.is_some();
     let estimate = &fit.estimate;
 
     let n_chains = pmmh_opts.n_chains;
@@ -314,7 +318,7 @@ pub fn run_method(
             out.say(format_args!("{}", crate::out::paint::stderr().paint(&format!(
                 "{method_name} results already exist in {}. Use --force to re-run or --resume to continue.",
                 method_dir.display()), Style::Warn)));
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
     }
 
@@ -848,8 +852,29 @@ pub fn run_method(
         .collect();
     let cost = sampling_cost(elapsed.as_secs_f64(), &steps_run);
 
+    // The step each resumed chain began this call at: its base's completed
+    // steps. The rows below it in `chain_N/trace.tsv` are the base's.
+    let boundary: Vec<usize> = resume_states.iter()
+        .map(|s| s.as_ref().map_or(0, |s| s.completed_steps))
+        .collect();
+    // A resumed chain's retained draws from its base, read back from the
+    // leaf's own trace (`resumed_chain`), so R̂ and ESS are over the whole
+    // chain the leaf holds rather than the steps this call ran.
+    let param_names: Vec<String> = config.estimated_params.iter().map(|s| s.name.clone()).collect();
+    let inherited: Vec<Option<super::resumed_chain::InheritedDraws>> = results.iter()
+        .map(|(chain_id, _)| -> Result<_, String> {
+            if resume_states[*chain_id].is_none() {
+                return Ok(None);
+            }
+            super::resumed_chain::inherited_draws(
+                &ChainIndex(*chain_id).dir_in(method_dir).join("trace.tsv"),
+                "step", boundary[*chain_id], burn_in, thin, &param_names,
+            ).map(Some)
+        })
+        .collect::<Result<_, String>>()?;
+
     // Compute diagnostics
-    let diagnostics = compute_diagnostics(&results, &config.estimated_params);
+    let diagnostics = compute_diagnostics(&results, &inherited, &config.estimated_params);
 
     // Report. PMMH's θ-move is random-walk MH, so its band is the random-walk
     // one — taken from `AcceptanceKernel` rather than spelled here, so the
@@ -1131,7 +1156,7 @@ pub fn run_method(
     // (`report::render`'s run-end view, from what is recorded here).
     super::write_diagnostics(&collector, method_dir)?;
 
-    Ok(warmup)
+    Ok((warmup, if resume { boundary } else { Vec::new() }))
 }
 
 /// The `ScaleAtFloor` finding a chain's result raises: its scale sat at the
@@ -1164,13 +1189,21 @@ fn build_proposal_sd(config: &FitRunConfig) -> Vec<f64> {
     }).collect()
 }
 
+/// R̂ / ESS over each chain's retained draws: a resumed chain's `inherited`
+/// rows from its base (parallel to `results`, in `estimated_params` order),
+/// then the draws this call kept.
 fn compute_diagnostics(
     results: &[(usize, PMMHResult)],
+    inherited: &[Option<super::resumed_chain::InheritedDraws>],
     estimated_params: &[EstimatedParam],
 ) -> MethodConvergence {
-    MethodConvergence::compute(estimated_params.iter().map(|spec| {
-        let chains: Vec<Vec<f64>> = results.iter()
-            .map(|(_, r)| r.steps.iter().map(|s| s.params[spec.index]).collect())
+    MethodConvergence::compute(estimated_params.iter().enumerate().map(|(p, spec)| {
+        let chains: Vec<Vec<f64>> = results.iter().zip(inherited)
+            .map(|((_, r), base)| {
+                base.iter().flat_map(|b| b.column(p))
+                    .chain(r.steps.iter().map(|s| s.params[spec.index]))
+                    .collect()
+            })
             .collect();
         (spec.name.clone(), chains)
     }))

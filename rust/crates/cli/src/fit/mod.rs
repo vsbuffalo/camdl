@@ -77,6 +77,7 @@ pub mod report;
 pub mod pf_noise;
 pub mod pgas;
 pub mod trace_writer;
+pub(crate) mod resumed_chain; // a resumed sampler leaf holds the whole chain, and records its segments
 pub mod synthetic;
 pub mod gating;
 pub mod chain_diagnostics;  // gh#406: per-chain loglik outlier z-scores (read-side)
@@ -1545,14 +1546,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // The claimed record carries the label; another run's check now sees it.
         drop(label_lock);
 
-        // gh#147 (M3.2): seed the resumed leaf with the base chain's state
-        // (resume_state.bin per chain), copied from the read-only base. The runner then loads/extends these in the new leaf;
-        // the base is never written.
+        // gh#147 (M3.2): seed the resumed leaf with the base chain's files —
+        // its resume state and the rows it has written — copied from the
+        // read-only base. The runner continues the state and appends the new
+        // segment to the rows, so the leaf holds the whole chain
+        // (`resumed_chain`).
         if let Some(base) = &resume_base {
-            copy_resume_carryover(base, &method_dir).unwrap_or_else(|e| {
+            resumed_chain::copy_parent_chains(base, &method_dir).unwrap_or_else(|e| {
                 out.fail(format!("error: staging resume carry-over from {}: {}", base.display(), e));
             });
         }
+        // Per chain, the index the resumed segment begins at, as the runner
+        // read it from the base's chain state; empty for a fresh run.
+        let mut resume_boundary: Vec<usize> = Vec::new();
 
         let method_t0 = std::time::Instant::now();
         // Uninitialized on purpose: every dispatch arm must assign a
@@ -1903,13 +1909,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // gh#540: no CLI overrides here. Every flag that reaches this
                 // method was written into it before its content address was
                 // taken, so `from_algorithm` above already carries them.
-                pgas::run_method(
+                resume_boundary = pgas::run_method(
                     &sweep_config,
                     &method,
                     &method_dir,
                     pgas_opts,
                     seed, force,
-                    a.resume.is_some(),
+                    resume_base.as_deref(),
                     &resume_guard,
                     &resolved_starts,
                     &heartbeat,
@@ -1925,13 +1931,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             Algorithm::PMMH { .. } => {
                 let pmmh_opts = pmmh::PmmhMethodOpts::from_algorithm(&method.algorithm)
                     .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                method_warmup = pmmh::run_method(
+                (method_warmup, resume_boundary) = pmmh::run_method(
                     &sweep_config,
                     &method,
                     &method_dir,
                     pmmh_opts,
                     seed, force,
-                    a.resume.is_some(),
+                    resume_base.as_deref(),
                     &resume_guard,
                     &resolved_starts,
                     // A resumed chain extends its base's warm-up record.
@@ -1965,13 +1971,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // was taken, and the field is in Mh's identity_payload (the
                 // result is stored in fit_state.toml.dt_check).
                 let mh_dt_check = dt_check.clone();
-                method_warmup = pmmh::run_method(
+                (method_warmup, resume_boundary) = pmmh::run_method(
                     &sweep_config,
                     &method,
                     &method_dir,
                     pmmh_opts,
                     seed, force,
-                    a.resume.is_some(),
+                    resume_base.as_deref(),
                     &resume_guard,
                     &resolved_starts,
                     // A resumed chain extends its base's warm-up record.
@@ -2262,6 +2268,22 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             "header": run_header,
             "unused_starts": { "rule": starts_rule.tag(), "params": unused_starts },
         });
+        // A resumed leaf names its parent and where each segment of the chain
+        // it holds begins (`resumed_chain::ResumeLineage`); a fresh run
+        // records no `resume` key.
+        let mut inputs_json = inputs_json;
+        if let Some(base) = &resume_base {
+            let index_column = match &method.algorithm {
+                Algorithm::PGAS { .. } => "sweep",
+                _ => "step",
+            };
+            let lineage = resumed_chain::ResumeLineage::extend(
+                base, index_column, &resolved.run_id.to_hex(),
+                std::mem::take(&mut resume_boundary), method_elapsed.as_secs_f64(),
+            ).unwrap_or_else(|e| abandon_method(&out, format!("error: --resume lineage: {e}")));
+            inputs_json[resumed_chain::RESUME_KEY] = serde_json::to_value(&lineage)
+                .unwrap_or_else(|e| abandon_method(&out, format!("error: --resume lineage: {e}")));
+        }
         // Declare the tabular outputs' column schema in run.json (proposal
         // 2026-07-15): classify each written file's real header so a consumer
         // reads roles instead of reverse-engineering columns. Recorded, not
@@ -2539,27 +2561,6 @@ fn base_warmup(
     }
     .summary_filename();
     base.map(|b| report::read_warmup(&b.join(summary))).unwrap_or_default()
-}
-
-/// Copy the base leaf's per-chain resume state (`chain_*/resume_state.bin`)
-/// into the resumed leaf so the runner continues from it there. The base is
-/// read-only.
-fn copy_resume_carryover(base: &std::path::Path, new_leaf: &std::path::Path) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(base)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with("chain_") || !entry.path().is_dir() {
-            continue;
-        }
-        let dst = new_leaf.join(name.as_ref());
-        std::fs::create_dir_all(&dst)?;
-        let src = entry.path().join("resume_state.bin");
-        if src.is_file() {
-            std::fs::copy(&src, dst.join("resume_state.bin"))?;
-        }
-    }
-    Ok(())
 }
 
 // gh#147 (M3.2): `archive_fit_toml` (the legacy `fit.toml.original` writer

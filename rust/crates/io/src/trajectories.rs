@@ -258,29 +258,91 @@ pub fn write_trajectories_tsv(
     // hundreds of fields; unbuffered, each `write!` is a syscall. The simulate
     // and (old) PGAS writers both buffer for exactly this reason.
     let mut w = std::io::BufWriter::new(f);
-
-    writeln!(w, "{}", header_comment(model_hash, method, granularity))
+    w.write_all(header_lines(columns, date_origin, model_hash, method, granularity).as_bytes())
         .map_err(|e| e.to_string())?;
+    write_draw_rows(&mut w, draws, columns, date_origin)?;
 
-    // Column header.
-    write!(w, "chain\tdraw\ttime\tt_start\tt_stop").map_err(|e| e.to_string())?;
+    // Explicit flush: BufWriter swallows write errors on drop, which would
+    // silently truncate the file if the disk filled during the final drain.
+    w.flush()
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(())
+}
+
+/// Append `draws` to an existing `trajectories.tsv` — the one a resumed PGAS
+/// chain copied from its parent leaf — so the file holds every saved path of
+/// the whole chain under one header.
+///
+/// The file's two header lines must be exactly the ones
+/// [`write_trajectories_tsv`] would write for these arguments: a parent whose
+/// model, method, granularity, calendar or column layout differs is refused,
+/// never appended to under a header that does not describe the new rows.
+#[allow(clippy::too_many_arguments)]
+pub fn append_trajectories_tsv(
+    path: &Path,
+    draws: &[PosteriorDraw],
+    columns: &TrajColumnSpec,
+    date_origin: DateOrigin,
+    model_hash: &str,
+    method: &str,
+    granularity: Granularity,
+) -> Result<(), String> {
+    let expected = header_lines(columns, date_origin, model_hash, method, granularity);
+    let existing = std::fs::read(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if !existing.starts_with(expected.as_bytes()) {
+        return Err(format!(
+            "{}: its header is not the one this run writes, so the new paths \
+             cannot be appended under it (expected {:?})",
+            path.display(), expected
+        ));
+    }
+    if !existing.ends_with(b"\n") {
+        return Err(format!("{}: the last row is incomplete (no trailing newline)", path.display()));
+    }
+    let f = std::fs::OpenOptions::new().append(true).open(path)
+        .map_err(|e| format!("cannot open {} for append: {e}", path.display()))?;
+    let mut w = std::io::BufWriter::new(f);
+    write_draw_rows(&mut w, draws, columns, date_origin)?;
+    w.flush()
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(())
+}
+
+/// The `# camdl-trajectories v1 …` line and the column header line, each with
+/// its newline.
+fn header_lines(
+    columns: &TrajColumnSpec,
+    date_origin: DateOrigin,
+    model_hash: &str,
+    method: &str,
+    granularity: Granularity,
+) -> String {
+    use std::fmt::Write as _;
+    let mut w = String::new();
+    let _ = writeln!(w, "{}", header_comment(model_hash, method, granularity));
+    let _ = write!(w, "chain\tdraw\ttime\tt_start\tt_stop");
     if date_origin.is_some() {
-        write!(w, "\tdate\tdate_start\tdate_stop").map_err(|e| e.to_string())?;
+        let _ = write!(w, "\tdate\tdate_start\tdate_stop");
     }
-    for n in &columns.int_comps {
-        write!(w, "\t{}", n).map_err(|e| e.to_string())?;
+    for n in columns.int_comps.iter()
+        .chain(&columns.real_comps)
+        .chain(&columns.flows)
+        .chain(&columns.incidence)
+    {
+        let _ = write!(w, "\t{}", n);
     }
-    for n in &columns.real_comps {
-        write!(w, "\t{}", n).map_err(|e| e.to_string())?;
-    }
-    for n in &columns.flows {
-        write!(w, "\t{}", n).map_err(|e| e.to_string())?;
-    }
-    for n in &columns.incidence {
-        write!(w, "\t{}", n).map_err(|e| e.to_string())?;
-    }
-    writeln!(w).map_err(|e| e.to_string())?;
+    w.push('\n');
+    w
+}
 
+/// One row per snapshot per draw, in the layout [`header_lines`] declares.
+fn write_draw_rows(
+    w: &mut impl Write,
+    draws: &[PosteriorDraw],
+    columns: &TrajColumnSpec,
+    date_origin: DateOrigin,
+) -> Result<(), String> {
     let n_int = columns.int_comps.len();
     let n_real = columns.real_comps.len();
     let n_flow = columns.flows.len();
@@ -366,10 +428,6 @@ pub fn write_trajectories_tsv(
         }
     }
 
-    // Explicit flush: BufWriter swallows write errors on drop, which would
-    // silently truncate the file if the disk filled during the final drain.
-    w.flush()
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -966,6 +1024,37 @@ mod tests {
             assert_eq!(g.int_state.counts, w.int_state.counts);
             assert_eq!(g.flows, w.flows, "flows must survive, not be dropped to zero");
         }
+    }
+
+    /// A resumed chain's file is the parent's draws then the new ones, under
+    /// one header: byte-for-byte what one write of all of them gives. A
+    /// header written for another layout is refused, not appended under.
+    #[test]
+    fn append_extends_the_file_one_write_would_give() {
+        let tmp = std::env::temp_dir()
+            .join(format!("camdl_io_traj_append_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let draw = |d: usize, s: i64| {
+            let mut t = Trajectory::new();
+            t.push(snap(0.0, vec![99 - s, 1 + s, 0], vec![0, 0]));
+            t.push(snap(1.0, vec![97 - s, 2 + s, 1], vec![2, 1]));
+            PosteriorDraw { chain: 0, draw: d, path: t, incidence: vec![vec![0.0], vec![2.0]] }
+        };
+        let (old, new) = (vec![draw(4, 0), draw(9, 1)], vec![draw(14, 2)]);
+        let whole = tmp.join("whole.tsv");
+        let all = vec![draw(4, 0), draw(9, 1), draw(14, 2)];
+        write_trajectories_tsv(&whole, &all, &cols(), None, "h", "pgas", Granularity::Substep).unwrap();
+        let appended = tmp.join("appended.tsv");
+        write_trajectories_tsv(&appended, &old, &cols(), None, "h", "pgas", Granularity::Substep).unwrap();
+        append_trajectories_tsv(&appended, &new, &cols(), None, "h", "pgas", Granularity::Substep).unwrap();
+        assert_eq!(std::fs::read(&appended).unwrap(), std::fs::read(&whole).unwrap());
+
+        let before = std::fs::read(&appended).unwrap();
+        let err = append_trajectories_tsv(&appended, &new, &cols(), None, "another model", "pgas",
+            Granularity::Substep).unwrap_err();
+        assert!(err.contains("header"), "{err}");
+        assert_eq!(std::fs::read(&appended).unwrap(), before, "a refused append writes nothing");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// The forkable-subset boundary is an error with a name, not an empty path
