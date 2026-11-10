@@ -430,9 +430,6 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     let summary_path = staging.join("summary.json");
     let html_path = staging.join("landscape.html");
 
-    out.milestone("stored",
-        format!("{} \u{b7} {} points (eval={})", run_dir.display(), n_points, eval_method));
-    out.hint("camdl list --kind survey");
     if eval_method == SurveyEvalMethod::Simulate {
         out.say("  --eval simulate now computes p(y|θ, ODE_skeleton) via the ODE \
              backend (Phase 1 of the ODE-inference proposal). Pre-2026-05-04 \
@@ -648,9 +645,15 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         "parameters_provenance": resolved.parameters_provenance,
         "notices":         resolved.notices,
     });
+    // `stored` is said once it is true: after every point is evaluated and
+    // the leaf is committed. A leaf that did not commit is not stored, and
+    // the survey fails rather than exiting 0 on a warning.
     if let Err(e) = write.finalize(inputs_json) {
-        out.say(format_args!("warning: finalize survey leaf {}: {}", run_dir.display(), e));
+        out.fail(format!("error: finalize survey leaf {}: {}", run_dir.display(), e));
     }
+    out.milestone("stored",
+        format!("{} \u{b7} {} points (eval={})", run_dir.display(), n_points, eval_method));
+    out.hint("camdl list --kind survey");
 }
 
 // ─── Resolution ──────────────────────────────────────────────────────────────
