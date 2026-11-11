@@ -64,8 +64,66 @@ local function line_range(text, spec)
   return table.concat(out, "\n")
 end
 
+-- The colours camdl paints with (rust/crates/cli/src/out/paint.rs, `Style`),
+-- each mapped to a class the site theme colours for light and dark. A code not
+-- listed here fails the render: an unmapped code would otherwise vanish or
+-- show as raw escape bytes, and the page would stop matching the terminal.
+local SGR_CLASS = {
+  ["1"] = "ansi-bold",
+  ["2"] = "ansi-dim",
+  ["31"] = "ansi-err",
+  ["32"] = "ansi-ok",
+  ["33"] = "ansi-warn",
+  ["36"] = "ansi-info",
+}
+
+local function html_escape(s)
+  return (s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
+end
+
+-- A run's output as HTML: text escaped, each SGR colour a span, `ESC[0m` (or
+-- `ESC[m`) closing every open span. Any other escape sequence fails.
+local function ansi_to_html(s, cmd)
+  local function refuse(what)
+    error("camdl-run: `" .. cmd .. "` printed " .. what
+      .. "; map it in SGR_CLASS (docs/_web/camdl-run.lua) and the theme, or stop printing it")
+  end
+  local out, open, pos = {}, 0, 1
+  local function text(t)
+    if t:find("\27", 1, true) then
+      refuse("an escape sequence that is not a colour")
+    end
+    table.insert(out, html_escape(t))
+  end
+  while true do
+    local a, b, params, final = s:find("\27%[([%d;]*)(%a)", pos)
+    if not a then
+      text(s:sub(pos))
+      break
+    end
+    text(s:sub(pos, a - 1))
+    if final ~= "m" then
+      refuse("the escape sequence ESC[" .. params .. final .. ", which is not a colour")
+    end
+    for code in ((params == "") and "0" or params):gmatch("[^;]+") do
+      if code == "0" then
+        table.insert(out, string.rep("</span>", open))
+        open = 0
+      elseif SGR_CLASS[code] then
+        table.insert(out, '<span class="' .. SGR_CLASS[code] .. '">')
+        open = open + 1
+      else
+        refuse("colour code " .. code .. ", which the docs do not map")
+      end
+    end
+    pos = b + 1
+  end
+  table.insert(out, string.rep("</span>", open))
+  return table.concat(out)
+end
+
 local function strip_ansi(s)
-  return (s:gsub("\27%[[%d;]*[A-Za-z]", ""))
+  return (s:gsub("\27%[[%d;]*m", ""))
 end
 
 local function shell_quote(s)
@@ -74,11 +132,14 @@ end
 
 -- Runs the block under bash with -e and pipefail, so a failure anywhere in a
 -- multi-line block or a pipeline is its exit status, and with stderr folded
--- into the shown output for every command, not only the last.
+-- into the shown output for every command, not only the last. camdl paints
+-- its output as it would in a terminal (CLICOLOR_FORCE, NO_COLOR unset);
+-- CLICOLOR stays unset so `ls` and friends do not colour theirs. The raw
+-- output, escapes included, is returned; the caller renders or strips them.
 local workdir = nil -- set per page by setup(); nil means the page directory
 
 local function run(cmd)
-  local script = "set -eo pipefail\nexport NO_COLOR=1 CLICOLOR=0 TERM=dumb\n"
+  local script = "set -eo pipefail\nunset NO_COLOR CLICOLOR\nexport CLICOLOR_FORCE=1 TERM=dumb\n"
     .. "cd " .. shell_quote(workdir or page_dir()) .. " || exit 125\n" .. cmd
   local full = "bash -c " .. shell_quote(script)
     .. " 2>&1; printf '\\n__camdl_run_exit=%s' $?"
@@ -86,7 +147,7 @@ local function run(cmd)
   local out = handle:read("*a")
   handle:close()
   local body, code = out:match("^(.-)\n__camdl_run_exit=(%d+)$")
-  return strip_ansi(body or out):gsub("%s+$", ""), tonumber(code or "1")
+  return (body or out):gsub("%s+$", ""), tonumber(code or "1")
 end
 
 local function capture(cmd)
@@ -169,15 +230,21 @@ local function code_block(block)
     -- 125: cd failed; 126/127: not executable / not found. These are a broken
     -- build environment, never the failure a block means to show.
     if code == 125 or code == 126 or code == 127 then
-      error("camdl-run: `" .. cmd .. "` could not run (exit " .. code .. "):\n" .. output)
+      error("camdl-run: `" .. cmd .. "` could not run (exit " .. code .. "):\n" .. strip_ansi(output))
     elseif expect_fail and code == 0 then
       error("camdl-run: expected a failure but `" .. cmd .. "` succeeded")
     elseif not expect_fail and code ~= 0 then
-      error("camdl-run: `" .. cmd .. "` exited " .. code .. ":\n" .. output)
+      error("camdl-run: `" .. cmd .. "` exited " .. code .. ":\n" .. strip_ansi(output))
     end
     local blocks = { pandoc.CodeBlock(cmd, pandoc.Attr("", { "bash", "camdl-run-cmd" })) }
     if output ~= "" then
-      table.insert(blocks, pandoc.CodeBlock(output, pandoc.Attr("", { "camdl-run-out" })))
+      if quarto.doc.is_format("html") then
+        table.insert(blocks, pandoc.RawBlock("html",
+          '<pre class="camdl-run-out"><code>' .. ansi_to_html(output, cmd) .. "</code></pre>"))
+      else
+        ansi_to_html(output, cmd) -- the same refusal of unmapped codes
+        table.insert(blocks, pandoc.CodeBlock(strip_ansi(output), pandoc.Attr("", { "camdl-run-out" })))
+      end
     end
     local run_block = pandoc.Div(blocks, pandoc.Attr("", { "camdl-run" }))
     local figure = block.attributes["figure"]
