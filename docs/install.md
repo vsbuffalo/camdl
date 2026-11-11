@@ -45,9 +45,13 @@ make build && make install
 Run `make install` after every rebuild. `camdl` checks that the `camdlc` on your
 `PATH` is the one it was built with and refuses to run otherwise, since a
 mismatched compiler could produce a model description the runtime reads
-differently.
+differently. `make install` copies to `~/.local/bin`; if you installed somewhere
+else with `PREFIX`, run `make install INSTALL_DIR=<dir>/bin` instead.
 
 ### Options
+
+Set these in the environment when you run the script, for example
+`PREFIX=$HOME/opt/camdl ./install.sh`.
 
 | Variable                     | Effect                                                                                                      |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------- |
@@ -93,4 +97,5 @@ to it.
 Some guide pages draw their figures with short Python scripts that declare their
 own dependencies, and run them with `uv run`. To repeat those steps, install
 [uv](https://docs.astral.sh/uv/getting-started/installation/); nothing else is
-needed, since `uv run` fetches each script's packages on first use.
+needed, since `uv run` fetches each script's packages on first use. camdl
+'scope's install above already needs uv, so you may have it.
