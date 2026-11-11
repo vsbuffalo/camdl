@@ -18,7 +18,7 @@ and bookkeeping. You write the model once, declare which axes matter, and
 the compiler generates the expanded system — checked for dimensional
 consistency at every step.
 
-This chapter introduces the abstractions, shows how they connect to
+This page introduces the abstractions, shows how they connect to
 external data, and works through a series of examples drawn from
 measles, polio, STI, and malaria modeling. Every model shown is a file
 in [`docs/guide/dimensions/`](https://github.com/vsbuffalo/camdl/tree/main/docs/guide/dimensions),
@@ -91,11 +91,12 @@ denominator where `sum(a in age, S[r, a])` was meant:
 camdl check dimensions/partial_index.camdl
 ```
 
-This is the **no-auto-localization** principle, and it prevents a large
-class of silent bugs in stratified models. In frameworks where bare `S`
-implicitly means "the current stratum's S," a misplaced variable quietly
-produces wrong rates. In camdl, you must be explicit — and the compiler
-checks that every index has the right type.
+camdl never reads a bare or partly indexed name as "the current
+stratum's value" (we call this *no auto-localization*), and that rule
+prevents a large class of silent bugs in stratified models. In frameworks
+where bare `S` implicitly means "the current stratum's S," a misplaced
+variable quietly produces wrong rates. In camdl, you must be explicit, and
+the compiler checks that every index has the right type.
 
 ::: {.callout-important}
 ## How other frameworks handle this
@@ -140,12 +141,14 @@ stays the modeler's to check.
 ## Rates are total propensity — the compiler checks
 
 A related design choice: in camdl, the `@` rate on every transition is
-the **total propensity** — the absolute event rate in units of
-population per time (P·T⁻¹). The compiler checks this dimensionally.
-There is no hidden per-capita multiplication.
+the **total propensity**, the expected number of such events per unit
+time across the whole population, in units of population per time
+(P·T⁻¹). The compiler checks this dimensionally. There is no hidden
+per-capita multiplication.
 
 If you write a per-capita rate where a total propensity is needed, the
-compiler catches it. The correct form and the common mistake:
+compiler catches it. Here are the correct form and the common mistake,
+with the dimension of each term in the comment:
 
 ```camdl
 # ✓ Correct: beta:T⁻¹ × S:P × I:P / N:P = P·T⁻¹
@@ -269,14 +272,16 @@ camdl inspect dimensions/seir_spatial_data.camdl --tables
 The `pop, init_sus` multi-value declaration produced two separate tables
 from the same file. The adjacency matrix — loaded sparse with
 `default = 0.0` — is rendered as a full matrix with zeros filled in,
-making the connectivity pattern immediately visible. The `loaded:` and
-`inline` annotations tell you whether values came from a file or from
-the DSL source.
+making the connectivity pattern immediately visible. `loaded:` names
+the file each table came from; a table written in the model file itself
+is marked `inline` instead, as in the larger example at the end of this
+page.
 
 ### Data-derived dimensions
 
-For models with many patches (Nigerian LGAs, London boroughs), you don't
-want to type out hundreds of level names. Derive them from the data:
+For models with many patches, such as Nigeria's 774 local government
+areas (LGAs) or London's boroughs, you don't want to type out hundreds of
+level names. Derive them from the data:
 
 ```camdl
 dimensions {
@@ -313,7 +318,7 @@ groups `b` the contact rate times the prevalence in `b`. The WAIFW
 are reciprocal — but it need not be.
 
 `camdl inspect` confirms the expansion — 3 age groups × 4 compartments
-= 12 expanded compartments, and the inline contact matrix:
+= 12 expanded compartments, 9 transitions, and one `age × age` table:
 
 ```{.camdl-run}
 camdl inspect dimensions/seir_age_measles.camdl
@@ -475,6 +480,11 @@ still means all of `E`, summed over its stages:
 ```{.camdl-run}
 camdl inspect dimensions/seir_erlang_via.camdl
 ```
+
+The output shows the stages as a dimension the compiler made up,
+`__onset_stage`, on `E` alone: four compartments become six, not twelve.
+The five transitions are infection, two moves between stages, the exit
+from the last stage into `I`, and recovery.
 
 The stage arithmetic — `k / mean` per stage, not `1 / mean` — is exactly
 the part that goes wrong silently when stages are written by hand, which
@@ -708,9 +718,9 @@ individuals across strata by some default rule.
 
 These choices trade convenience for safety. For a 3-compartment teaching
 model, the overhead is negligible. For a 774-patch, 5-age-group,
-multi-intervention polio model, the compiler's checking is the
-difference between a model that works and one that silently computes
-the wrong force of infection for six months before anyone notices.
+multi-intervention polio model, the same checks turn an indexing mistake
+that would otherwise compute the wrong force of infection, with no error
+and no warning, into a compile error.
 
 The normative statement of these rules is §1 and §5 of the
 [language specification](../camdl-language-spec.md).
@@ -730,17 +740,20 @@ The normative statement of these rules is §1 and §5 of the
     failure requires both names to exist, which is exactly the situation
     in any stratified model with more than one stratum.
 
-[^spatpomp]: Asfaw K, Ionides EL et al. (2024). spatPomp: Statistical
-    Inference for Spatiotemporal Partially Observed Markov Processes.
-    CRAN package. The `dunit_measure` C snippet receives a predefined
+[^spatpomp]: Asfaw K, Ionides EL, King AA et al. spatPomp: Inference for
+    Spatiotemporal Partially Observed Markov Processes. CRAN package;
+    described in Asfaw et al. (2024), arXiv:2101.01157,
+    doi:[10.48550/arXiv.2101.01157](https://doi.org/10.48550/arXiv.2101.01157).
+    The `dunit_measure` C snippet receives a predefined
     integer `u` (current unit index, 0 to U−1) and bare `unit_statenames`
     resolve to unit `u`'s values. The `rprocess` snippet does not — it
-    requires explicit `S[u]`, `E[u]` indexing. See the spatPomp tutorial
-    vignette, §3 (unit-level measurement models).
+    requires explicit `S[u]`, `E[u]` indexing. See the spatPomp
+    tutorial vignette on CRAN.
 
-[^odin]: FitzJohn R et al. (2024). odin2: an R package for generating
-    dynamical models. CRAN package odin2. See also dust2 (FitzJohn R et
-    al., 2024) for the compiled simulation backend.
+[^odin]: FitzJohn R, Hinsley W. odin2: Next generation odin. R package,
+    distributed through the mrc-ide r-universe;
+    <https://mrc-ide.github.io/odin2/>. See also dust2 (FitzJohn R et al.)
+    for the compiled simulation backend.
 
 [^odin-e2022]: odin2 error E2022: "Trying to access an array without
     using square bracket indexes." Documented at
