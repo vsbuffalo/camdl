@@ -1,119 +1,31 @@
 //! Reading the content-addressed (`runid::RunRecord`) CAS store.
 //!
-//! A generic, Layout-driven walk: the presence of a parseable `RunRecord`
-//! `run.json` is the only discovery signal — no hardcoded level depth. Every
-//! run kind (sim / fit-method / profile-point / pfilter / survey) is discovered
-//! here; the per-kind projections live in `browse` and `fit::fit_view`.
+//! The walk itself is [`runid::discover`] (`runid::leaf`): the presence of a
+//! `run.json` (or a `.lock`) is the only discovery signal — no hardcoded level
+//! depth — and an unreadable candidate comes back as an explicit
+//! [`runid::UnreadableLeaf`] entry. The functions here are the per-kind
+//! accessors every command has used, kept with their existing output: each
+//! drops the unreadable entries (naming a renamed-`kind` record on stderr, as
+//! before) and the leaf state. Their callers move onto `runid::discover`
+//! directly, after which these go. The per-kind projections live in `browse`
+//! and `fit::fit_view`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use runid::{ArtifactKind, ContentHash, RunRecord};
+use runid::{ArtifactKind, ContentHash, RunRecord, Scope, Unreadable, UnreadableLeaf};
 
 use crate::cas_index;
-
-#[cfg(test)]
-thread_local! {
-    /// Full `RunRecord` parses performed by the walk **on this thread**.
-    ///
-    /// The point of the bounded walks below is that a leaf the caller is going
-    /// to discard never costs a full parse — a claim about *work*, not about
-    /// the rows returned, which are required to stay identical — so counting
-    /// the parses is the only way to assert it. Thread-local because the test
-    /// harness gives each test its own thread and the walk is single-threaded,
-    /// so each test sees exactly its own count with no synchronization.
-    /// Compiled out of the shipped binary.
-    pub(crate) static FULL_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
 
 // The fit-level provenance sidecar (`fit.meta.json`) lives in
 // `run_meta::FitSidecar` (it carries `run_meta` provenance types —
 // `ResolvedPriorEntry`, `ParameterProvenance`), with `write_fit_sidecar` /
 // `read_fit_sidecar` beside it there.
 
-/// The two identity fields a walk reads out of a `run.json` before deciding
-/// whether the record is worth materializing.
-struct RunHeader {
-    kind: ArtifactKind,
-    run_id: ContentHash,
-}
-
-/// Read `kind` + `run_id` out of `run.json` bytes WITHOUT materializing the
-/// rest of the record.
-///
-/// `RunRecord` serializes `format_version`, `kind`, `run_id` first (its field
-/// declaration order, `runid::record`), and this stops at the second of the
-/// two — so on a leaf record of several kilobytes it tokenizes roughly a
-/// hundred bytes, and `levels`, `artifacts`, `output_schema`, `inputs` and
-/// `provenance` are never even scanned, let alone allocated. Field order is a
-/// *speed* assumption only: a record that spells those two fields last still
-/// reads correctly here, just without the early exit.
-///
-/// `None` for anything that is not a JSON object carrying both fields —
-/// exactly the inputs on which the full `RunRecord` parse also fails, so
-/// gating on this can never drop a leaf [`walk_records`] would have kept.
-fn run_header(bytes: &[u8]) -> Option<RunHeader> {
-    use serde::de::{Error as _, IgnoredAny, MapAccess, Visitor};
-
-    /// The header is handed back through `out` rather than as the visitor's
-    /// value because the visitor **aborts** once it has both fields, and an
-    /// aborted deserialization has no value to return.
-    struct HeaderVisitor<'a> {
-        out: &'a mut Option<RunHeader>,
-    }
-
-    impl<'de> Visitor<'de> for HeaderVisitor<'_> {
-        type Value = ();
-
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a run.json object carrying `kind` and `run_id`")
-        }
-
-        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
-            let mut kind: Option<ArtifactKind> = None;
-            let mut run_id: Option<ContentHash> = None;
-            while let Some(key) = map.next_key::<String>()? {
-                match key.as_str() {
-                    "kind" => kind = Some(map.next_value()?),
-                    "run_id" => run_id = Some(map.next_value()?),
-                    _ => {
-                        map.next_value::<IgnoredAny>()?;
-                    }
-                }
-                if let (Some(kind), Some(run_id)) = (kind, run_id) {
-                    *self.out = Some(RunHeader { kind, run_id });
-                    // Stop: everything after `run_id` in a leaf record is the
-                    // kilobytes we are here not to read. serde_json still wants
-                    // the closing brace, so the only way out mid-document is an
-                    // error the caller discards.
-                    return Err(A::Error::custom("header read complete"));
-                }
-            }
-            Ok(())
-        }
-    }
-
-    let mut out = None;
-    let mut de = serde_json::Deserializer::from_slice(bytes);
-    // The error is deliberately ignored: it is either the early-exit abort
-    // (with `out` set) or a malformed record (with `out` still `None`).
-    let _ = serde::Deserializer::deserialize_map(&mut de, HeaderVisitor { out: &mut out });
-    out
-}
-
-/// Slack allowed when treating a leaf directory's mtime as an upper bound on
-/// the record's `created_at`.
-///
-/// The record is stamped in memory and then written into that directory, so
-/// `created_at <= mtime(dir)`. A filesystem that records mtime at one-second
-/// granularity can round the directory's timestamp *below* a sub-second
-/// `created_at`; two seconds is far more than any such rounding and far less
-/// than any `--since` a user types.
-const MTIME_BOUND_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
-
 /// Bounds a caller can put on a per-kind walk, decided from the leaf's cheap
-/// header and its directory mtime — before the full `RunRecord` parse.
+/// header and its directory mtime — before the full `RunRecord` parse. The
+/// kind-free part of [`runid::Scope`], whose docs give the rules.
 ///
 /// Every bound is **one-sided**: it may only rule out a leaf the caller was
 /// going to discard anyway, so a bounded walk returns exactly the subset of
@@ -130,156 +42,47 @@ pub struct Bounds<'a> {
     pub not_before: Option<SystemTime>,
 }
 
-impl Bounds<'_> {
-    /// `true` when `dir`'s mtime proves the record it holds is older than the
-    /// `--since` cutoff. Unknown mtime is never a proof — it declines to prune.
-    fn excluded_by_mtime(&self, dir: &Path) -> bool {
-        let Some(cutoff) = self.not_before else { return false };
-        let Ok(mtime) = std::fs::metadata(dir).and_then(|m| m.modified()) else {
-            return false;
-        };
-        mtime.checked_add(MTIME_BOUND_SLACK).is_some_and(|bound| bound < cutoff)
-    }
-}
-
-/// What a walk rules out before paying for the full `RunRecord` parse: the
-/// caller's [`Bounds`] plus, for a per-kind walk, the kind itself.
-struct LeafGate<'a> {
-    /// Keep only leaves of this kind; `None` keeps every kind.
-    kind: Option<ArtifactKind>,
-    bounds: Bounds<'a>,
-}
-
-impl LeafGate<'_> {
-    /// Materialize every record found — the unfiltered walk.
-    const ANY: LeafGate<'static> =
-        LeafGate { kind: None, bounds: Bounds { skip: None, not_before: None } };
-
-    /// Whether reading the cheap header can rule anything out. When it cannot,
-    /// reading it would be pure overhead.
-    fn is_selective(&self) -> bool {
-        self.kind.is_some() || self.bounds.skip.is_some_and(|m| !m.is_empty())
-    }
-
-    fn admits(&self, header: &RunHeader) -> bool {
-        self.kind.is_none_or(|k| k == header.kind)
-            && !self.bounds.skip.is_some_and(|m| m.contains(&header.run_id))
-    }
-}
-
 /// Say once per path, on stderr, that a skipped `run.json` was written by an
 /// older camdl under a since-renamed `kind` ([`runid::renamed_kind`]). Any
 /// other unreadable record is skipped silently, as before.
-fn warn_if_renamed_kind(run_json: &Path, bytes: &[u8]) {
-    use std::collections::HashSet;
+fn warn_if_renamed_kind(leaf: &UnreadableLeaf) {
     use std::sync::{Mutex, OnceLock};
     static WARNED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    let Some(why) = runid::renamed_kind(bytes) else { return };
+    if !matches!(leaf.reason, Unreadable::RenamedKind { .. }) {
+        return;
+    }
+    let run_json = leaf.dir.join("run.json");
     let first = WARNED
         .get_or_init(|| Mutex::new(HashSet::new()))
         .lock()
-        .map(|mut seen| seen.insert(run_json.to_path_buf()))
+        .map(|mut seen| seen.insert(run_json.clone()))
         .unwrap_or(true);
     if first {
-        crate::out::detached().say(format_args!("warning: skipping {}: {why}.", run_json.display()));
+        crate::out::detached()
+            .say(format_args!("warning: skipping {}: {}.", run_json.display(), leaf.reason));
     }
 }
 
-/// Recursively collect every `(dir, RunRecord)` under `subtree` whose dir holds
-/// a parseable `RunRecord` `run.json` **that `gate` admits**. Hidden dirs
-/// (`.staging`, `.quarantine`) are skipped. Descends through leaves too, but a
-/// leaf's declared child sub-artifacts under `obs/…` carry an `obs.json` (not a
-/// `run.json`), so they are not surfaced here as standalone records — they're
-/// reached as the trajectory leaf's `children`.
-fn walk_gated(subtree: &Path, gate: &LeafGate) -> Vec<(PathBuf, RunRecord)> {
-    let mut out = Vec::new();
-    if !subtree.exists() {
-        return out;
-    }
-    let mut stack = vec![subtree.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        // One `read_dir` answers both questions about this directory — which
-        // children to descend into, and whether it holds a `run.json` — from
-        // the entry types the directory listing already carries.
-        let run_json = match std::fs::read_dir(&dir) {
-            Ok(entries) => scan_dir(entries, &mut stack),
-            // A directory that cannot be listed may still hold a readable
-            // `run.json` (mode 0111); fall back to asking for it by name.
-            Err(_) => {
-                let rj = dir.join("run.json");
-                rj.is_file().then_some(rj)
+/// The readable leaves of a [`runid::discover_in_walk_order`] walk, in the
+/// order it met them, as `(dir, record)`. Unreadable entries are dropped here
+/// (renamed kinds named on stderr), which is what every caller of this module
+/// has always been given.
+fn readable(under: &Path, scope: Scope) -> Vec<(PathBuf, RunRecord)> {
+    runid::discover_in_walk_order(under, scope)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Ok(leaf) => Some((leaf.dir, leaf.record)),
+            Err(unreadable) => {
+                warn_if_renamed_kind(&unreadable);
+                None
             }
-        };
-        let Some(rj) = run_json else { continue };
-        // `--since`, applied before any JSON is read.
-        if gate.bounds.excluded_by_mtime(&dir) {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&rj) else { continue };
-        // The cheap header decides whether this record is worth materializing.
-        // A header that does not read could not have parsed as a full
-        // `RunRecord` either, so treating it as not-admitted drops exactly
-        // what the full parse dropped.
-        let header = gate.is_selective().then(|| run_header(&bytes));
-        let admitted = match &header {
-            None => true,
-            Some(h) => h.as_ref().is_some_and(|h| gate.admits(h)),
-        };
-        if matches!(header, Some(None)) {
-            warn_if_renamed_kind(&rj, &bytes);
-        }
-        if admitted {
-            #[cfg(test)]
-            FULL_PARSES.with(|n| n.set(n.get() + 1));
-            match serde_json::from_slice::<RunRecord>(&bytes) {
-                Ok(rec) => out.push((dir, rec)),
-                Err(_) => warn_if_renamed_kind(&rj, &bytes),
-            }
-        }
-    }
-    out
-}
-
-/// Sort one directory listing into "descend into this" (pushed onto `stack`)
-/// and "this is the leaf's `run.json`" (returned), reading each entry's type
-/// from the listing itself.
-///
-/// `DirEntry::file_type` answers from the directory entry on every filesystem
-/// camdl targets (APFS, ext4, XFS all populate `d_type`), where
-/// `Path::is_dir`/`is_file` cost a `stat` per entry — 274k of them on the
-/// synthetic 40k-leaf store, and the walk's dominant term.
-///
-/// A symlink is the exception: `file_type` reports the *link*, while
-/// `Path::is_dir`/`is_file` report the target, and following it is the
-/// behaviour a store with a symlinked subtree relies on. So a symlinked entry
-/// — and only a symlinked entry — is still resolved with a `stat`.
-fn scan_dir(entries: std::fs::ReadDir, stack: &mut Vec<PathBuf>) -> Option<PathBuf> {
-    let mut run_json = None;
-    for e in entries.flatten() {
-        let Ok(file_type) = e.file_type() else { continue };
-        let name = e.file_name();
-        let is_run_json = name == "run.json";
-        let (is_dir, is_file) = if file_type.is_symlink() {
-            let p = e.path();
-            (p.is_dir(), is_run_json && p.is_file())
-        } else {
-            (file_type.is_dir(), is_run_json && file_type.is_file())
-        };
-        if is_dir {
-            if name.to_string_lossy().starts_with('.') {
-                continue; // .staging / .quarantine
-            }
-            stack.push(e.path());
-        } else if is_file {
-            run_json = Some(e.path());
-        }
-    }
-    run_json
+        })
+        .collect()
 }
 
 /// Every `RunRecord` under `subtree`, of every kind — the unfiltered walk.
 pub fn walk_records(subtree: &Path) -> Vec<(PathBuf, RunRecord)> {
-    walk_gated(subtree, &LeafGate::ANY)
+    readable(subtree, Scope::default())
 }
 
 /// Every leaf of `kind` under that kind's store partition (`sims/`, `fits/`,
@@ -287,8 +90,8 @@ pub fn walk_records(subtree: &Path) -> Vec<(PathBuf, RunRecord)> {
 /// so the partition dir and the kind can never disagree — both come from
 /// [`ArtifactKind::store_dir`].
 fn walk_kind(root: &Path, kind: ArtifactKind, bounds: Bounds) -> Vec<Leaf> {
-    let gate = LeafGate { kind: Some(kind), bounds };
-    walk_gated(&root.join(kind.store_dir()), &gate)
+    let scope = Scope { kind: Some(kind), skip: bounds.skip, not_before: bounds.not_before };
+    readable(&root.join(kind.store_dir()), scope)
         .into_iter()
         .map(|(dir, record)| Leaf { dir, record })
         .collect()
@@ -370,7 +173,7 @@ pub fn walk_sim_leaves(root: &Path) -> Vec<Leaf> {
 /// *inside* the walk: on the store in gh#699, 461,282 of 550,647 sim leaves
 /// are ensemble members, so discovering them only to drop them afterwards is
 /// the whole cost of the command. A member is recognized from its `run_id`
-/// alone, which [`run_header`] reads without parsing the record.
+/// alone, which the walk reads from the record's header without parsing it.
 pub fn walk_sim_leaves_bounded(root: &Path, bounds: Bounds) -> Vec<Leaf> {
     walk_kind(root, ArtifactKind::Sim, bounds)
 }
@@ -446,293 +249,73 @@ pub fn resolve_sim_ensemble_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
 
-    /// Zero this thread's parse counter before the walk being measured.
-    fn measuring() {
-        FULL_PARSES.with(|n| n.set(0));
+    fn record(kind: &str, run_id: &str) -> String {
+        format!(
+            r#"{{"format_version":1,"kind":"{kind}","run_id":"{run_id}","hash_version":1,
+                "ir_version":"0.31","engine_version":"0.1.0+test",
+                "levels":[{{"name":"seed","label":"seed_1","hash":"{run_id}","schema_version":1}}],
+                "status":"completed","artifacts":{{}},
+                "provenance":{{"created_at":"2026-08-01T12:00:00Z","argv":[]}}}}"#
+        )
     }
 
-    fn full_parses() -> usize {
-        FULL_PARSES.with(|n| n.get())
+    fn plant(dir: &Path, bytes: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("run.json"), bytes).unwrap();
     }
 
-    /// A 64-hex `run_id` from a short readable stem.
-    pub fn id(stem: &str) -> String {
+    fn id(stem: &str) -> String {
         format!("{:0<64}", stem)
     }
 
-    /// Plant a `Sim` leaf at `root/sims/<sub>/` whose `run.json` carries
-    /// `run_id` plus a kilobyte-scale `inputs` payload, the shape a real
-    /// per-draw leaf has (that payload is exactly what the gated walk must not
-    /// pay to materialize).
-    pub fn plant_sim(root: &Path, sub: &str, run_id: &str) -> PathBuf {
-        let dir = root.join("sims").join(sub);
-        std::fs::create_dir_all(&dir).unwrap();
-        let params: Vec<String> =
-            (0..40).map(|i| format!("\"theta_{i}\": {}.5", i)).collect();
-        let rec = format!(
-            r#"{{
-                "format_version": 1,
-                "kind": "sim",
-                "run_id": "{run_id}",
-                "hash_version": 1,
-                "ir_version": "0.31",
-                "engine_version": "0.1.0+test",
-                "levels": [
-                    {{"name":"model","label":"m","hash":"{run_id}","schema_version":1}},
-                    {{"name":"scenario","label":"baseline","hash":"{run_id}","schema_version":1}},
-                    {{"name":"seed","label":"seed_1","hash":"{run_id}","schema_version":1}}
-                ],
-                "status": "completed",
-                "artifacts": {{}},
-                "inputs": {{"backend":"chain_binomial","dt":1.0,"params":{{{}}}}},
-                "provenance": {{"created_at":"2026-08-01T12:00:00Z","argv":[]}}
-            }}"#,
-            params.join(",")
-        );
-        std::fs::write(dir.join("run.json"), rec).unwrap();
-        dir
-    }
-
-    /// Plant a `SimEnsemble` leaf whose `deps` name `members` as its per-cell
-    /// `Sim` leaves — the record `camdl list` reads to learn which sim leaves
-    /// its own row already represents.
-    pub fn plant_ensemble(root: &Path, sub: &str, run_id: &str, members: &[String]) -> PathBuf {
-        let dir = root.join("ensembles").join(sub);
-        std::fs::create_dir_all(&dir).unwrap();
-        let deps: Vec<String> = members
-            .iter()
-            .map(|m| {
-                format!(
-                    r#"{{"run_id":"{m}","kind":"sim","artifact":"traj.tsv","digest":"{m}"}}"#
-                )
-            })
-            .collect();
-        let rec = format!(
-            r#"{{
-                "format_version": 1,
-                "kind": "sim_ensemble",
-                "run_id": "{run_id}",
-                "hash_version": 1,
-                "ir_version": "0.31",
-                "engine_version": "0.1.0+test",
-                "levels": [
-                    {{"name":"model","label":"m","hash":"{run_id}","schema_version":1}},
-                    {{"name":"grid","label":"cells-n{}","hash":"{run_id}","schema_version":1}}
-                ],
-                "deps": [{}],
-                "status": "completed",
-                "artifacts": {{}},
-                "provenance": {{"created_at":"2026-08-01T12:05:00Z","argv":[]}}
-            }}"#,
-            members.len(),
-            deps.join(",")
-        );
-        std::fs::write(dir.join("run.json"), rec).unwrap();
-        dir
-    }
-
-    /// A store shaped like the one in gh#699: most sim leaves are members of an
-    /// ensemble that already represents them. Returns (member ids, free ids).
-    pub fn ensemble_heavy_store(root: &Path, n_members: usize, n_free: usize)
-        -> (Vec<String>, Vec<String>)
-    {
-        let members: Vec<String> = (0..n_members).map(|i| id(&format!("aa{i:04x}"))).collect();
-        for (i, m) in members.iter().enumerate() {
-            plant_sim(root, &format!("m-1111/draw{i}-2222/baseline-3333/seed_1-4444"), m);
-        }
-        let free: Vec<String> = (0..n_free).map(|i| id(&format!("ff{i:04x}"))).collect();
-        for (i, f) in free.iter().enumerate() {
-            plant_sim(root, &format!("solo-5555/cfg{i}-6666/baseline-3333/seed_1-4444"), f);
-        }
-        plant_ensemble(root, "m-1111/cells-n-7777", &id("e0"), &members);
-        (members, free)
-    }
-
-    /// gh#699. `camdl list` suppresses every sim leaf an ensemble row already
-    /// represents — so those leaves must never cost a full `RunRecord` parse.
-    /// The walk may only materialize the leaves that survive to be printed.
+    /// The accessors keep their output while the walk reports unreadable
+    /// candidates: garbage, a truncated record, and a lock-only directory are
+    /// entries of `runid::discover`, and none of them is a row here.
     #[test]
-    fn ensemble_members_are_skipped_without_a_full_parse() {
-        measuring();
+    fn the_accessors_drop_unreadable_candidates() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let (members, free) = ensemble_heavy_store(root, 40, 5);
+        let sims = root.join("sims");
+        plant(&sims.join("good"), &record("sim", &id("a1")));
+        plant(&sims.join("garbage"), "{ not json");
+        let cut = record("sim", &id("b2"));
+        plant(&sims.join("truncated"), &cut[..cut.len() / 2]);
+        std::fs::create_dir_all(sims.join("lock-only")).unwrap();
+        std::fs::write(sims.join("lock-only/.lock"), "1\n").unwrap();
 
-        let member_ids: HashSet<ContentHash> =
+        let discovered = runid::discover(root, Scope::default());
+        assert_eq!(discovered.len(), 4, "{discovered:?}");
+        assert_eq!(discovered.iter().filter(|e| e.is_err()).count(), 3);
+
+        let rows: Vec<String> = walk_records(root).iter().map(|(_, r)| r.run_id.to_hex()).collect();
+        assert_eq!(rows, vec![id("a1")]);
+        let rows: Vec<String> = walk_sim_leaves(root).iter().map(Leaf::run_id_hex).collect();
+        assert_eq!(rows, vec![id("a1")]);
+    }
+
+    /// `walk_sim_leaves_bounded` hands its bounds to the walk: the skipped
+    /// members are not rows, and the unbounded walk still returns them.
+    #[test]
+    fn the_bounded_accessor_passes_its_bounds_to_the_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let members = [id("aa01"), id("aa02")];
+        for (i, m) in members.iter().enumerate() {
+            plant(&root.join(format!("sims/m/draw{i}")), &record("sim", m));
+        }
+        plant(&root.join("sims/solo"), &record("sim", &id("ff01")));
+        let skip: HashSet<ContentHash> =
             members.iter().map(|m| ContentHash::from_hex(m).unwrap()).collect();
 
-        let leaves =
-            walk_sim_leaves_bounded(root, Bounds { skip: Some(&member_ids), not_before: None });
-
-        // Correctness: exactly the non-member leaves, unchanged.
-        let mut got: Vec<String> = leaves.iter().map(|l| l.run_id_hex()).collect();
-        got.sort();
-        let mut want = free.clone();
-        want.sort();
-        assert_eq!(got, want, "the printed row set must be the non-member leaves");
-
-        // Cost: one full parse per printed row, not one per leaf in the tree.
-        assert_eq!(
-            full_parses(),
-            free.len(),
-            "ensemble members must not be fully parsed ({} sim leaves in the tree)",
-            members.len() + free.len()
-        );
-    }
-
-    /// Backdate a directory's mtime by `age`, so the walk sees it as written
-    /// then. Returns the instant it was set to.
-    fn backdate(dir: &Path, age: std::time::Duration) -> SystemTime {
-        let when = SystemTime::now() - age;
-        let times = std::fs::FileTimes::new().set_accessed(when).set_modified(when);
-        std::fs::File::options().read(true).open(dir).unwrap().set_times(times).unwrap();
-        when
-    }
-
-    /// gh#699. `--since` bounds discovery, not just the printed rows: a leaf
-    /// directory's mtime is an upper bound on the `created_at` inside it, so a
-    /// leaf older than the cutoff must never be read or parsed.
-    #[test]
-    fn leaves_older_than_the_since_cutoff_are_never_read() {
-        use std::time::Duration;
-        measuring();
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-
-        let old: Vec<String> = (0..12).map(|i| id(&format!("01d{i:02}"))).collect();
-        for (i, o) in old.iter().enumerate() {
-            let dir = plant_sim(root, &format!("m-1111/old{i}-2222"), o);
-            backdate(&dir, Duration::from_secs(30 * 24 * 3600));
-        }
-        let fresh: Vec<String> = (0..3).map(|i| id(&format!("0fe{i:02}"))).collect();
-        for (i, f) in fresh.iter().enumerate() {
-            plant_sim(root, &format!("m-1111/new{i}-3333"), f);
-        }
-
-        let cutoff = SystemTime::now() - Duration::from_secs(3600);
-        measuring();
-        let leaves =
-            walk_sim_leaves_bounded(root, Bounds { skip: None, not_before: Some(cutoff) });
-
-        let mut got: Vec<String> = leaves.iter().map(|l| l.run_id_hex()).collect();
-        got.sort();
-        let mut want = fresh.clone();
-        want.sort();
-        assert_eq!(got, want, "only the leaves inside the window are discovered");
-        assert_eq!(
-            full_parses(),
-            fresh.len(),
-            "leaves outside the --since window must not be read ({} in the tree)",
-            old.len() + fresh.len()
-        );
-    }
-
-    /// The mtime prune is one-sided. A store whose directory mtimes are NEWER
-    /// than the records inside them — every `cp -r`/`rsync` copy — must not
-    /// lose rows: the walk declines to prune and the `created_at` filter above
-    /// it does the real work.
-    #[test]
-    fn a_recently_copied_store_is_not_pruned() {
-        measuring();
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        // `plant_sim` stamps `created_at` in the past while the directories it
-        // makes carry today's mtime — exactly the copied-store shape.
-        let (_, free) = ensemble_heavy_store(root, 0, 4);
-
-        let cutoff = SystemTime::now() - std::time::Duration::from_secs(3600);
-        let leaves =
-            walk_sim_leaves_bounded(root, Bounds { skip: None, not_before: Some(cutoff) });
-        let mut got: Vec<String> = leaves.iter().map(|l| l.run_id_hex()).collect();
-        got.sort();
-        let mut want = free.clone();
-        want.sort();
-        assert_eq!(got, want, "a fresh mtime is never a proof that the record is old");
-    }
-
-    /// `--kind sim` is the explicit request for the per-cell level, so the
-    /// unexcluded walk must still return the member leaves. The exclusion is
-    /// opt-in, never a property of the store.
-    #[test]
-    fn the_unexcluded_walk_still_returns_member_leaves() {
-        measuring();
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let (members, free) = ensemble_heavy_store(root, 6, 2);
-
-        let mut got: Vec<String> =
-            walk_sim_leaves(root).iter().map(|l| l.run_id_hex()).collect();
-        got.sort();
-        let mut want: Vec<String> = members.into_iter().chain(free).collect();
-        want.sort();
-        assert_eq!(got, want);
-    }
-
-    /// The header read stops at `run_id`: a record whose bytes AFTER `run_id`
-    /// are unparseable still yields a header, while the full `RunRecord` parse
-    /// of the same bytes fails. That gap is what the walk is buying — a
-    /// `serde_json::from_slice::<RunHeader>` would tokenize the whole document
-    /// and fail here too, so this test fails if the early exit is lost.
-    #[test]
-    fn run_header_stops_at_run_id() {
-        let bytes = format!(
-            r#"{{"format_version":1,"kind":"sim","run_id":"{}","levels":[ NOT JSON"#,
-            id("abcd")
-        );
-        let hdr = run_header(bytes.as_bytes()).expect("header reads before the garbage");
-        assert_eq!(hdr.kind, ArtifactKind::Sim);
-        assert_eq!(hdr.run_id.to_hex(), id("abcd"));
-        assert!(
-            serde_json::from_slice::<RunRecord>(bytes.as_bytes()).is_err(),
-            "the full record parse must fail on the same bytes"
-        );
-    }
-
-    /// The walk follows symlinks, both to a subtree and to a `run.json`.
-    /// Reading entry types out of the directory listing (`DirEntry::file_type`)
-    /// instead of `stat`ing each path is what makes the walk cheap, but it
-    /// reports the *link*, not the target — so a symlinked subtree would
-    /// silently stop being walked, and a symlinked `run.json` would stop being
-    /// a leaf. Both are still resolved.
-    #[test]
-    #[cfg(unix)]
-    fn symlinked_subtrees_and_records_are_still_walked() {
-        measuring();
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-
-        // A leaf reached only through a symlinked directory.
-        let elsewhere = tmp.path().join("elsewhere");
-        plant_sim(&elsewhere, "m-1111/cfg-2222", &id("beef"));
-        std::fs::create_dir_all(root.join("sims")).unwrap();
-        std::os::unix::fs::symlink(
-            elsewhere.join("sims").join("m-1111"),
-            root.join("sims").join("linked-3333"),
-        )
-        .unwrap();
-
-        // A leaf whose `run.json` is itself a symlink to a record elsewhere.
-        let donor = plant_sim(&elsewhere, "donor-4444/cfg-5555", &id("cafe"));
-        let via_link = root.join("sims").join("via-link-6666");
-        std::fs::create_dir_all(&via_link).unwrap();
-        std::os::unix::fs::symlink(donor.join("run.json"), via_link.join("run.json")).unwrap();
-
-        let mut got: Vec<String> =
-            walk_sim_leaves(root).iter().map(|l| l.run_id_hex()).collect();
-        got.sort();
-        assert_eq!(got, vec![id("beef"), id("cafe")]);
-    }
-
-    /// Anything the header read rejects, the full parse rejects too — the
-    /// property that makes gating on the header safe. A `run.json` with no
-    /// `run_id` is dropped by both.
-    #[test]
-    fn a_record_without_identity_is_dropped_by_both_reads() {
-        let bytes = br#"{"format_version":1,"kind":"sim","status":"completed"}"#;
-        assert!(run_header(bytes).is_none());
-        assert!(serde_json::from_slice::<RunRecord>(bytes).is_err());
+        let rows: Vec<String> =
+            walk_sim_leaves_bounded(root, Bounds { skip: Some(&skip), not_before: None })
+                .iter()
+                .map(Leaf::run_id_hex)
+                .collect();
+        assert_eq!(rows, vec![id("ff01")]);
+        assert_eq!(walk_sim_leaves(root).len(), 3);
     }
 }
