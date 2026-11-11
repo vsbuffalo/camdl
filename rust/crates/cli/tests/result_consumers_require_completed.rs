@@ -59,6 +59,38 @@ burn_in    = 20
 starts     = "single"
 "#;
 
+/// A short IF2 fit of the same model and data, which completes: the source a
+/// `from_mle` start reads.
+const IF2: &str = r#"
+[model]
+camdl = "model/sir_patches.camdl"
+[data]
+file = "cases.tsv"
+[estimate.beta]
+bounds = [0.15, 0.6]
+start  = 0.3
+[estimate.gamma]
+bounds = [0.08, 0.3]
+start  = 0.15
+[fixed]
+rho = 0.6
+k   = 20
+I0  = 5
+[method]
+algorithm  = "if2"
+backend    = "chain_binomial"
+chains     = 2
+particles  = 100
+iterations = 2
+cooling    = 0.7
+starts     = "single"
+"#;
+
+/// [`IF2`] as a fit that starts every chain from `source`'s point estimate.
+fn from_mle_of(source: &Path) -> String {
+    IF2.replace("starts     = \"single\"", &format!("starts     = {{ from_mle = \"{}\" }}", source.display()))
+}
+
 /// A camdl command in `dir`, against the compiler under test.
 fn camdl_in(dir: &Path) -> Command {
     let mut c = Command::new(camdl());
@@ -262,5 +294,33 @@ fn a_handle_whose_run_json_is_corrupt_is_an_error_naming_it() {
         assert!(said.contains(&format!("{}: its run.json is not a run record", leaf.display())),
             "{args:?} names the record and why:\n{said}");
         assert!(!said.contains("holds no completed fit run"), "{args:?}:\n{said}");
+    }
+}
+
+/// A `from_mle` start reads its source's point estimate only from a
+/// completed run: a source leaf that failed, or is running, is refused with
+/// its state before the consuming fit claims a leaf. Lifting the convergence
+/// gate (`--allow-nonconverged-source`) does not lift this.
+#[test]
+fn a_from_mle_start_from_a_leaf_that_did_not_complete_is_refused() {
+    let tmp = project(IF2);
+    let dir = tmp.path();
+    fit_run(dir, "fit.toml");
+    let source = leaves(dir, "if2");
+    assert_eq!(source.len(), 1, "{source:?}");
+    let source = source[0].clone();
+    assert!(source.join("fit_state.toml").is_file(), "the source wrote its point estimate");
+    std::fs::write(dir.join("next.toml"), from_mle_of(&source)).unwrap();
+    for state in [NotCompleted::Failed, NotCompleted::Running, NotCompleted::Interrupted] {
+        state.apply(&source);
+        // The convergence gate is lifted, so the refusal is the state's alone
+        // (this short IF2 source is not converged).
+        let out = run(dir, &["fit", "run", "next.toml", "--seed", "2", "--progress", "none",
+            "--allow-nonconverged-source"]);
+        assert_refused(&out, &source, state, "starts = from_mle");
+        assert!(stderr(&out).contains("from_mle"), "the refusal says which start it is:\n{}", stderr(&out));
+        assert!(!dir.join("results/fits").read_dir().unwrap().flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("next-")),
+            "no leaf is claimed for the consuming fit ({state:?})");
     }
 }
