@@ -7,19 +7,25 @@
 //! its difference from the others is larger than the chains' sampling error can
 //! explain. It corroborates R̂ and ESS; it is not the convergence verdict.
 //!
-//! Read-side only. Everything here is computed at `fit summary` time from the
-//! committed trace files (or, for IF2, from `fit_state.toml`'s clean-eval
-//! record); nothing flows into a `run_id` / CAS key.
+//! Computed once, at the end of the run, and recorded in the leaf: a sampler
+//! from its chains' traces into its summary JSON (`chain_loglik_agreement`,
+//! [`ChainLoglikAgreement`]), IF2 from its clean evaluations into
+//! `fit_state.toml`. A sampler's flagged chain is also a `chain_loglik_differs`
+//! finding; IF2's are not (its spread is judged by the decibans leg of the
+//! source gate, which has a floor in log-likelihood units).
+//! `fit summary`, the scout gate and every other reader take the recorded
+//! comparison; none recomputes it. Nothing here flows into a `run_id` / CAS
+//! key.
 //!
-//! One shared seam, and one obligation on everyone who feeds it. The scout
-//! gate message (`gating::format_decibans_spread_verdict`) and the summary
-//! table both score chains through [`assess_chain_logliks`], so "what counts
-//! as a chain that differs" is defined in exactly one place. That function
-//! scores whatever estimates it is handed: **the caller owns the claim that
-//! they are comparable across chains, and that each standard error is the
-//! uncertainty of its estimate.** The scout gate hands it IF2 clean-eval
-//! marginals `log p(y | θ)` with the standard error of their replicate mean;
-//! this module's reader hands it the mean of whatever column
+//! One shared seam, and one obligation on everyone who feeds it. Both
+//! producers — [`clean_eval_agreement`] for IF2 and [`chain_loglik_agreement`]
+//! for a sampler — score chains through [`assess_chain_logliks`], so "what
+//! counts as a chain that differs" is defined in exactly one place. That
+//! function scores whatever estimates it is handed: **the caller owns the
+//! claim that they are comparable across chains, and that each standard error
+//! is the uncertainty of its estimate.** IF2 hands it clean-eval marginals
+//! `log p(y | θ)` with the standard error of their replicate mean; a sampler's
+//! trace reader hands it the mean of whatever column
 //! [`LoglikType::chain_agreement_column`] nominates, with that mean's Monte
 //! Carlo standard error. Anything else — most of all a per-chain quantity
 //! evaluated at that chain's own latent path — is not an input.
@@ -118,7 +124,8 @@
 //!   [`CHAIN_LOGLIK_MIN_ESS`] effective draws (a chain that never moved has
 //!   one) is reported "not assessed", neither passed nor flagged, and is left
 //!   out of the other chains' pooled mean. A chain frozen at one state is
-//!   caught by the point-mass and `-inf` screens of this module instead.
+//!   caught by [`chain_is_frozen`], and one stuck at `-inf` by this module's
+//!   `-inf` screen, instead.
 //! - **IF2 is an optimiser.** Its chains' final log-likelihoods are evaluated
 //!   at different θ; the gate compares them with their evaluation noise (the
 //!   standard error of the clean-eval replicate mean) to ask whether one start
@@ -126,6 +133,8 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+
+use serde::{Deserialize, Serialize};
 
 use crate::chain_index::ChainIndex;
 
@@ -135,6 +144,10 @@ use super::loglik::{LoglikType, TRACE_COL_COMPLETE_DATA_LL, TRACE_COL_TRANSITION
 /// Its presence is the structural check that a file is a trace at all, and it
 /// is itself read by the degeneracy screen (gh#608).
 const TRACE_COL_LOG_POSTERIOR: &str = "log_posterior";
+
+/// The `*_summary.json` key a sampler records its [`ChainLoglikAgreement`]
+/// under, and the `fit_state.toml` key IF2 records its under.
+pub const CHAIN_LOGLIK_AGREEMENT_KEY: &str = "chain_loglik_agreement";
 
 /// Family-wise false-alarm rate of the per-chain log-likelihood comparison:
 /// the probability, over all `k` chains of a well-mixed fit, that any one of
@@ -163,14 +176,18 @@ pub fn chain_loglik_cutoff(k: usize) -> f64 {
 }
 
 /// Why a chain was neither passed nor flagged.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
 pub enum NotAssessed {
     /// The chain has no readable trace, or its mean log-likelihood is not
     /// finite (a trace with `-inf` rows, gh#608).
     NonFiniteMean,
     /// The chain's trace carries fewer than [`CHAIN_LOGLIK_MIN_ESS`]
     /// effective draws, too few to estimate the standard error of its mean.
-    TooFewEffectiveDraws { ess: f64 },
+    TooFewEffectiveDraws {
+        #[serde(with = "sim::inference::json_f64")]
+        ess: f64,
+    },
     /// No usable standard error was supplied (IF2: `fit_state.toml` records
     /// no clean-eval standard error for the chain, or one that is zero or not
     /// finite).
@@ -213,31 +230,38 @@ pub struct ChainLoglikEstimate {
 }
 
 /// One chain's leave-one-out comparison, when it could be made.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ChainLoglikTest {
     /// `m_i − m_{−i}`: the chain's mean minus the pooled mean of the others,
     /// in nats. Negative when the chain sits below the others.
+    #[serde(with = "sim::inference::json_f64")]
     pub diff: f64,
     /// `sqrt(se_i² + se_{−i}²)`, the standard error of `diff`.
+    #[serde(with = "sim::inference::json_f64")]
     pub se: f64,
     /// `|diff| / se`.
+    #[serde(with = "sim::inference::json_f64")]
     pub z: f64,
     /// The cutoff `z` was compared with, [`chain_loglik_cutoff`] for the
     /// number of chains assessed.
+    #[serde(with = "sim::inference::json_f64")]
     pub cutoff: f64,
     /// `z > cutoff`.
     pub flagged: bool,
 }
 
-/// The outcome for one chain: compared, or why not.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// The outcome for one chain: compared, or why not. Serialized tagged by
+/// `status`: `{"status": "assessed", "diff", "se", "z", "cutoff", "flagged"}`
+/// or `{"status": "not_assessed", "reason", …}`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum ChainLoglikOutcome {
     Assessed(ChainLoglikTest),
     NotAssessed(NotAssessed),
 }
 
 /// One chain's mean log-likelihood and its comparison with the other chains.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChainLoglikScore {
     /// The chain's number — the one its `chain_N/` directory and every other
     /// artifact carry (gh#990), read from the directory, never from a row's
@@ -245,6 +269,7 @@ pub struct ChainLoglikScore {
     pub chain: ChainIndex,
     /// The chain's mean log-likelihood. `NaN` when the chain had no readable
     /// trace rows (rendered `—`, never counted as agreeing).
+    #[serde(rename = "mean", with = "sim::inference::json_f64")]
     pub mean_loglik: f64,
     pub outcome: ChainLoglikOutcome,
 }
@@ -391,49 +416,89 @@ pub fn flagged_chains(scores: &[ChainLoglikScore]) -> Vec<&ChainLoglikScore> {
     flagged
 }
 
-/// What was observed for each flagged chain, one sentence each: the
-/// difference in nats, its `Z` and the cutoff. Says nothing about cause.
-pub fn describe_flagged(scores: &[ChainLoglikScore], column: &str) -> Vec<String> {
-    flagged_chains(scores)
-        .into_iter()
-        .filter_map(|s| {
-            let t = s.test()?;
-            Some(format!(
-                "chain {}'s mean {column} differs from the other chains' by {:+.2} nats \
-                 (Z = {:.1} > {:.2}), beyond what Monte Carlo error explains",
-                s.chain, t.diff, t.z, t.cutoff
-            ))
+/// What was observed for each flagged chain, one sentence each, largest `Z`
+/// first: the `chain_loglik_differs` finding's sentence (the difference in
+/// nats, its `Z` and the cutoff), without its closing full stop. Says nothing
+/// about cause.
+pub fn describe_flagged(agreement: &ChainLoglikAgreement) -> Vec<String> {
+    agreement
+        .findings()
+        .iter()
+        .map(|k| {
+            let text = sim::inference::diagnostic::render_entry(&[k]);
+            text.strip_suffix('.').map(str::to_string).unwrap_or(text)
         })
         .collect()
 }
 
-/// What the per-chain table shows, and what it is allowed to rank on.
+/// The per-chain log-likelihood comparison as the run records it: the summary
+/// JSON's `chain_loglik_agreement` for a sampler, `fit_state.toml`'s for IF2.
 ///
-/// [`scored`](Self::scored) is the only column the chain comparison reads; the
-/// rest is display. Splitting them in the type is the point — it is what stops
-/// the sampler's own objective from being mistaken for a cross-chain
-/// comparison again (gh#667).
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChainLoglikMeans {
-    /// The trace column [`scored`](Self::scored) was read from, for labelling
-    /// the table and for saying which column is missing when it is.
-    pub scored_column: &'static str,
-    /// The chains, by the number of their `chain_N/` directory, ascending —
-    /// parallel to [`scored`](Self::scored) and to the `complete_data`
-    /// columns. Carried so a leaf with a gap labels each row with its own
-    /// chain (gh#913).
-    pub chain_ids: Vec<ChainIndex>,
-    /// Per-chain mean of `scored_column` over the retained draws, parallel to
-    /// [`chain_ids`](Self::chain_ids). `NaN` when a chain has no readable rows.
-    pub scored: Vec<f64>,
-    /// `true` when no discovered trace carries `scored_column` at all — a
-    /// method whose chains cannot be compared, which the caller must SAY rather
-    /// than render as a table of dashes.
-    pub scored_column_absent: bool,
-    /// PGAS only: the sampler's own target and its latent-path term, shown
-    /// beside the scored column and never ranked on. `None` for the marginal
-    /// samplers, where the scored column already IS the target.
+/// [`chains`](Self::chains) is the comparison, one row per chain in ascending
+/// chain order, each with its mean of [`column`](Self::column) and its
+/// outcome. [`complete_data`](Self::complete_data) is display only: the split
+/// into fields is what stops the sampler's own objective from being mistaken
+/// for a cross-chain comparison again (gh#667).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChainLoglikAgreement {
+    /// What each chain's estimate is: the trace column whose retained mean was
+    /// compared (`log_likelihood` for pmmh / mh, `obs_ll` for PGAS), or
+    /// `clean_loglik` for IF2's clean-evaluation means.
+    pub column: String,
+    /// `true` when traces were read and none names [`column`](Self::column):
+    /// the chains could not be compared on it, which a reader says rather than
+    /// rendering a table of dashes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub column_absent: bool,
+    /// [`CHAIN_LOGLIK_FAMILY_ALPHA`], recorded so the cutoff can be read.
+    #[serde(with = "sim::inference::json_f64")]
+    pub family_alpha: f64,
+    /// [`CHAIN_LOGLIK_MIN_ESS`], the fewest effective draws assessed.
+    #[serde(with = "sim::inference::json_f64")]
+    pub min_ess: f64,
+    pub chains: Vec<ChainLoglikScore>,
+    /// PGAS only: the sampler's own target and its latent-path term, parallel
+    /// to [`chains`](Self::chains), shown and never ranked on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub complete_data: Option<CompleteDataMeans>,
+}
+
+impl ChainLoglikAgreement {
+    /// The comparison of `estimates`, each a mean of `column`.
+    pub fn assess(column: &str, estimates: &[ChainLoglikEstimate]) -> Self {
+        ChainLoglikAgreement {
+            column: column.to_string(),
+            column_absent: false,
+            family_alpha: CHAIN_LOGLIK_FAMILY_ALPHA,
+            min_ess: CHAIN_LOGLIK_MIN_ESS,
+            chains: assess_chain_logliks(estimates),
+            complete_data: None,
+        }
+    }
+
+    /// Whether the chains were compared at all: the column is present and at
+    /// least two chains have an estimate. When not, a reader says so rather
+    /// than rendering rows that read as agreeing.
+    pub fn compared(&self) -> bool {
+        !self.column_absent && self.chains.len() >= 2
+    }
+
+    /// One `chain_loglik_differs` finding per flagged chain, largest `Z` first.
+    pub fn findings(&self) -> Vec<sim::inference::diagnostic::DiagnosticKind> {
+        flagged_chains(&self.chains)
+            .into_iter()
+            .filter_map(|s| {
+                let t = s.test()?;
+                Some(sim::inference::diagnostic::DiagnosticKind::ChainLoglikDiffers {
+                    chain_id: s.chain.0,
+                    column: self.column.clone(),
+                    diff: t.diff,
+                    z: t.z,
+                    cutoff: t.cutoff,
+                })
+            })
+            .collect()
+    }
 }
 
 /// PGAS's complete-data target and its latent-path term, per chain — the two
@@ -442,11 +507,13 @@ pub struct ChainLoglikMeans {
 /// has fallen off the joint support shows up here; `transition_ll` is what
 /// makes the diagnosis obvious, because a wide spread there next to a tight
 /// spread in `obs_ll` is the entropy effect rather than a fit difference.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompleteDataMeans {
     /// Per-chain mean `log p(y, X | θ)` (`log_complete_data_ll`).
+    #[serde(with = "sim::inference::json_f64::vec")]
     pub complete: Vec<f64>,
     /// Per-chain mean `log p(X | θ)` (`transition_ll`).
+    #[serde(with = "sim::inference::json_f64::vec")]
     pub transition: Vec<f64>,
 }
 
@@ -486,9 +553,10 @@ pub struct ChainLoglikSeries {
 ///
 /// ## Post-burn-in selection
 ///
-/// The post-burn-in kept draws are a suffix of the trace, and `draws.tsv`
-/// records exactly how many there are per chain, so we take the **last `K_c`
-/// rows** of chain `c`'s trace (`K_c` = that chain's row count in `draws.tsv`):
+/// The post-burn-in kept draws are a suffix of the trace, and `draw_counts`
+/// says how many there are per chain — the run passes the counts it kept,
+/// which are each chain's rows in `draws.tsv` — so we take the **last `K_c`
+/// rows** of chain `c`'s trace (`K_c` = `draw_counts[c]`):
 ///
 /// - **nuts** — the trace is written post-warmup only, `draws.tsv` has the same
 ///   `n_samples` rows: last `K_c` == all rows (exact).
@@ -501,20 +569,17 @@ pub struct ChainLoglikSeries {
 ///   so warm-up is never included — a subset of the post-burn-in region when
 ///   thinning is on).
 ///
-/// When `draws.tsv` is absent or unreadable (a partial / hand-built method) we
-/// fall back to the whole trace: without the posterior manifest we cannot strip
-/// warm-up, so the mean is noisier but still honest. This never contaminates a
-/// well-formed fit.
-pub fn read_chain_loglik_series(method_dir: &Path, kind: LoglikType) -> Option<ChainLoglikSeries> {
+/// A chain with no count (none of the run's chains) is read whole: without it
+/// warm-up cannot be stripped, so the mean is noisier but still honest.
+pub fn read_chain_loglik_series(
+    method_dir: &Path,
+    kind: LoglikType,
+    draw_counts: &BTreeMap<ChainIndex, usize>,
+) -> Option<ChainLoglikSeries> {
     let chain_dirs = discover_chain_dirs(method_dir);
     if chain_dirs.is_empty() {
         return None;
     }
-
-    // Per-chain kept-draw counts from draws.tsv, keyed by the chain number —
-    // the same number the directory carries (gh#990) — so a chain with no
-    // draws pairs with nothing rather than with its neighbour's count.
-    let draw_counts = read_draw_counts(&method_dir.join("draws.tsv"));
 
     let scored_column = kind.chain_agreement_column();
     // The complete-data split is PGAS's alone: the marginal samplers have no
@@ -566,23 +631,6 @@ pub fn read_chain_loglik_series(method_dir: &Path, kind: LoglikType) -> Option<C
     })
 }
 
-/// The per-chain means of [`ChainLoglikSeries`], ordered by chain number.
-/// The run and `fit summary` both call this, on the values as the traces
-/// store them.
-pub fn chain_mean_logliks(series: &ChainLoglikSeries) -> ChainLoglikMeans {
-    let mean = |v: &Option<Vec<f64>>| v.as_deref().map_or(f64::NAN, mean_or_nan);
-    ChainLoglikMeans {
-        scored_column: series.scored_column,
-        chain_ids: series.chains.iter().map(|c| c.chain).collect(),
-        scored: series.chains.iter().map(|c| mean(&c.scored)).collect(),
-        scored_column_absent: series.scored_column_absent,
-        complete_data: series.wants_split.then(|| CompleteDataMeans {
-            complete: series.chains.iter().map(|c| mean(&c.complete)).collect(),
-            transition: series.chains.iter().map(|c| mean(&c.transition)).collect(),
-        }),
-    }
-}
-
 /// Each chain's mean of the scored column with its Monte Carlo standard error
 /// ([`mcse_of_mean`]), weighted by its retained draws — the input
 /// [`assess_chain_logliks`] takes. A chain whose trace lacks the column has a
@@ -608,23 +656,72 @@ pub fn chain_loglik_estimates(series: &ChainLoglikSeries) -> Vec<ChainLoglikEsti
         .collect()
 }
 
-/// The per-chain means the table shows, and each chain's comparison with the
-/// others, from one read of the traces. `None` when no chain trace exists.
-/// The comparison is empty when it cannot be made at all — the scored column
-/// is absent from every trace, or fewer than two chains have traces — which
-/// the caller says rather than rendering as a table of chains that agree.
-pub fn read_chain_loglik_scores(
+/// The comparison the run records for its chains' traces: each chain's mean
+/// of the scored column, its comparison with the others
+/// ([`assess_chain_logliks`] over [`chain_loglik_estimates`]), and for PGAS
+/// the complete-data means beside them. The one place a sampler's comparison
+/// is computed.
+pub fn chain_loglik_agreement(series: &ChainLoglikSeries) -> ChainLoglikAgreement {
+    let mean = |v: &Option<Vec<f64>>| v.as_deref().map_or(f64::NAN, mean_or_nan);
+    ChainLoglikAgreement {
+        column_absent: series.scored_column_absent,
+        complete_data: series.wants_split.then(|| CompleteDataMeans {
+            complete: series.chains.iter().map(|c| mean(&c.complete)).collect(),
+            transition: series.chains.iter().map(|c| mean(&c.transition)).collect(),
+        }),
+        ..ChainLoglikAgreement::assess(series.scored_column, &chain_loglik_estimates(series))
+    }
+}
+
+/// The comparison a sampler records at the end of its run: its chains' traces
+/// under `method_dir`, each cut to its `retained` draws (the chains the run
+/// kept, with the draws each kept), through [`chain_loglik_agreement`].
+/// `None` when no chain wrote a trace directory.
+pub fn recorded_chain_loglik_agreement(
     method_dir: &Path,
     kind: LoglikType,
-) -> Option<(ChainLoglikMeans, Vec<ChainLoglikScore>)> {
-    let series = read_chain_loglik_series(method_dir, kind)?;
-    let means = chain_mean_logliks(&series);
-    let scores = if !means.scored_column_absent && means.scored.len() >= 2 {
-        assess_chain_logliks(&chain_loglik_estimates(&series))
-    } else {
-        Vec::new()
-    };
-    Some((means, scores))
+    retained: impl IntoIterator<Item = (ChainIndex, usize)>,
+) -> Option<ChainLoglikAgreement> {
+    let counts: BTreeMap<ChainIndex, usize> = retained.into_iter().collect();
+    read_chain_loglik_series(method_dir, kind, &counts).map(|s| chain_loglik_agreement(&s))
+}
+
+/// The comparison IF2 records for its chains' clean evaluations: each start's
+/// clean-eval log-likelihood (`clean_loglik`) against the others', over the
+/// standard error of its replicate mean, one weight each — IF2 is an
+/// optimiser, so a start that differs beyond that noise reached a different
+/// optimum. `None` when the three are not parallel or name no chain: a
+/// position is not a chain (gh#978), so no comparison is attributed.
+pub fn clean_eval_agreement(
+    ids: &[ChainIndex],
+    logliks: &[f64],
+    ses: &[f64],
+) -> Option<ChainLoglikAgreement> {
+    if ids.is_empty() || ids.len() != logliks.len() || ids.len() != ses.len() {
+        return None;
+    }
+    let estimates: Vec<ChainLoglikEstimate> = ids.iter().zip(logliks).zip(ses)
+        .map(|((&chain, &mean), &se)| ChainLoglikEstimate { chain, mean, weight: 1.0, se: Ok(se) })
+        .collect();
+    Some(ChainLoglikAgreement::assess(CLEAN_EVAL_COLUMN, &estimates))
+}
+
+/// What an IF2 comparison's estimates are: each start's clean-evaluation
+/// log-likelihood.
+pub const CLEAN_EVAL_COLUMN: &str = "clean_loglik";
+
+/// Put `agreement` into a sampler summary under
+/// [`CHAIN_LOGLIK_AGREEMENT_KEY`]; nothing when there is none.
+pub fn insert_agreement(
+    summary: &mut serde_json::Value,
+    agreement: Option<&ChainLoglikAgreement>,
+) -> Result<(), String> {
+    let Some(a) = agreement else { return Ok(()) };
+    let v = serde_json::to_value(a)
+        .map_err(|e| format!("cannot serialize the chain log-likelihood comparison: {e}"))?;
+    summary.as_object_mut().expect("a summary is an object")
+        .insert(CHAIN_LOGLIK_AGREEMENT_KEY.to_string(), v);
+    Ok(())
 }
 
 /// The retained tail of one chain's column: the last `k` rows when
@@ -743,56 +840,32 @@ pub struct ChainNegInf {
     pub n_retained: usize,
 }
 
-/// One chain's point-mass screen (gh#635, ebola item 1): over `draws.tsv`,
-/// how many DISTINCT parameter vectors the chain retained. A chain that
-/// never accepted a θ-move keeps exactly one — a point mass at its start,
-/// which the −inf screen (gh#608) cannot see when that start has FINITE
-/// density. Its draws still enter every pooled number (3 such chains were
-/// 37.5% of a pooled cloud downstream, R̂ 5.14, masquerading as a mode).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ChainUniqueDraws {
-    /// The chain's number, as its directory and the per-chain table carry it.
-    pub chain: ChainIndex,
-    /// Distinct parameter vectors among the retained draws.
-    pub n_unique: usize,
-    /// Retained draws for this chain.
-    pub n_draws: usize,
-}
-
-/// Per-chain distinct-parameter-vector counts from `draws.tsv`, keyed by its
-/// `chain` column; vectors are compared as their exact on-disk text (the
-/// writer round-trips full precision, so textual equality is value
-/// equality). `None` when draws.tsv is missing/unreadable.
-pub fn read_chain_unique_draws(method_dir: &Path) -> Option<Vec<ChainUniqueDraws>> {
-    let contents = std::fs::read_to_string(method_dir.join("draws.tsv")).ok()?;
-    let mut lines = contents.lines();
-    let header = lines.next()?;
-    let mut cols = header.split('\t');
-    if cols.next() != Some("chain") {
-        return None;
-    }
-    use std::collections::{BTreeMap, HashSet};
-    let mut per_chain: BTreeMap<usize, (HashSet<&str>, usize)> = BTreeMap::new();
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
+/// Whether a chain took no step after burn-in (gh#635, gh#1032): it retained
+/// more than one draw and every estimated parameter's value is the same in all
+/// of them, so its draws are one parameter vector. `columns` holds one slice
+/// per estimated parameter, the chain's retained draws of it in order.
+///
+/// A chain that never accepted a θ-move after warm-up keeps exactly one
+/// vector, a point mass at where it stood, and its draws still enter every
+/// pooled number: three such chains were 37.5% of a pooled cloud downstream on
+/// the ebola fit of gh#635, at R̂ 5.14, reading as a mode. The `-inf` screen
+/// cannot see it when that point has finite density, and the per-chain
+/// log-likelihood comparison does not assess it (one effective draw), so this
+/// is its own test.
+///
+/// Equality is exact (`==` on the values the sampler kept, which `draws.tsv`
+/// writes at full precision): a chain that moved by any amount moved. With no
+/// estimated parameter, or one draw, there is nothing to have moved and the
+/// chain is not called frozen.
+pub fn chain_is_frozen<'a>(columns: impl IntoIterator<Item = &'a [f64]>) -> bool {
+    let mut any = false;
+    for col in columns {
+        if col.len() < 2 || col.iter().any(|v| *v != col[0]) {
+            return false;
         }
-        let Some((chain_tok, rest)) = line.split_once('\t') else { continue };
-        let Ok(c) = chain_tok.parse::<usize>() else { continue };
-        // Strip the draw index (column 2): the PARAMS are what repeat.
-        let params = rest.split_once('\t').map(|(_, p)| p).unwrap_or(rest);
-        let e = per_chain.entry(c).or_default();
-        e.0.insert(params);
-        e.1 += 1;
+        any = true;
     }
-    if per_chain.is_empty() {
-        return None;
-    }
-    Some(per_chain.into_iter().map(|(c, (set, n))| ChainUniqueDraws {
-        chain: ChainIndex(c),
-        n_unique: set.len(),
-        n_draws: n,
-    }).collect())
+    any
 }
 
 /// Per-chain [`ChainNegInf`] screen over the retained trace rows. `None`
@@ -825,7 +898,7 @@ pub fn read_chain_neginf(method_dir: &Path) -> Option<Vec<ChainNegInf>> {
 
 /// Read `draws.tsv` and return the per-chain kept-draw count, keyed by the
 /// `chain` column. Empty when the file is missing or has no `chain` column.
-fn read_draw_counts(draws_path: &Path) -> BTreeMap<ChainIndex, usize> {
+pub(crate) fn read_draw_counts(draws_path: &Path) -> BTreeMap<ChainIndex, usize> {
     let Ok(contents) = std::fs::read_to_string(draws_path) else {
         return BTreeMap::new();
     };
@@ -866,7 +939,35 @@ mod tests {
             .collect()
     }
 
-    /// The per-chain means the table shows, as `fit summary` reads them.
+    /// The per-chain means a recorded comparison carries, laid out for the
+    /// assertions below.
+    struct ChainLoglikMeans {
+        scored_column: String,
+        chain_ids: Vec<ChainIndex>,
+        scored: Vec<f64>,
+        scored_column_absent: bool,
+        complete_data: Option<CompleteDataMeans>,
+    }
+
+    /// What the run records for the traces under `dir`, each chain cut to its
+    /// rows in `draws.tsv` — the counts the run passes are those rows — as
+    /// means and scores.
+    fn read_chain_loglik_scores(
+        dir: &std::path::Path,
+        kind: LoglikType,
+    ) -> Option<(ChainLoglikMeans, Vec<ChainLoglikScore>)> {
+        let a = recorded_chain_loglik_agreement(dir, kind, read_draw_counts(&dir.join("draws.tsv")))?;
+        let means = ChainLoglikMeans {
+            scored_column: a.column.clone(),
+            chain_ids: a.chains.iter().map(|c| c.chain).collect(),
+            scored: a.chains.iter().map(|c| c.mean_loglik).collect(),
+            scored_column_absent: a.column_absent,
+            complete_data: a.complete_data.clone(),
+        };
+        Some((means, a.chains))
+    }
+
+    /// The per-chain means, as the run records them.
     fn means_of(dir: &std::path::Path, kind: LoglikType) -> Option<ChainLoglikMeans> {
         read_chain_loglik_scores(dir, kind).map(|(m, _)| m)
     }
@@ -982,11 +1083,44 @@ mod tests {
         assert_eq!(flagged(&scores), vec![1], "Z = {:?}", zs(&scores));
         let t = scores[1].test().unwrap();
         assert!((t.diff - (-15.13)).abs() < 0.01 && t.z > 30.0, "{t:?}");
-        let msg = describe_flagged(&scores, "log_likelihood");
+        let recorded = ChainLoglikAgreement::assess("log_likelihood", &trace_estimates(&traces));
+        let msg = describe_flagged(&recorded);
         assert_eq!(msg.len(), 1);
-        assert!(msg[0].starts_with("chain 1's mean log_likelihood differs from the other chains' by -15.13 nats"),
+        assert!(msg[0].starts_with("chain 1: mean log_likelihood differs from the other chains' by -15.13 nats"),
             "{msg:?}");
-        assert!(msg[0].contains("beyond what Monte Carlo error explains"), "{msg:?}");
+        assert!(msg[0].ends_with("beyond what its standard error explains"), "{msg:?}");
+        // The run's finding is the same comparison, with its numbers.
+        let findings = recorded.findings();
+        assert_eq!(findings.len(), 1);
+        let sim::inference::diagnostic::DiagnosticKind::ChainLoglikDiffers {
+            chain_id, column, diff, z, cutoff,
+        } = &findings[0] else { panic!("{findings:?}") };
+        assert_eq!((*chain_id, column.as_str()), (1, "log_likelihood"));
+        assert_eq!((*diff, *z, *cutoff), (t.diff, t.z, t.cutoff));
+    }
+
+    /// The recorded comparison reads back from JSON as it was written, a
+    /// chain not assessed with its reason and a non-finite mean included.
+    #[test]
+    fn a_recorded_comparison_round_trips_through_json() {
+        let mut traces = gh1008_traces();
+        traces[1].iter_mut().for_each(|v| *v -= 15.0);
+        let mut est = trace_estimates(&traces);
+        est.push(ChainLoglikEstimate {
+            chain: ChainIndex(7), mean: f64::NAN, weight: 0.0, se: Err(NotAssessed::NonFiniteMean),
+        });
+        est.push(ChainLoglikEstimate {
+            chain: ChainIndex(9), mean: -60.0, weight: 3.0,
+            se: Err(NotAssessed::TooFewEffectiveDraws { ess: 1.0 }),
+        });
+        let a = ChainLoglikAgreement::assess("log_likelihood", &est);
+        let text = serde_json::to_string(&a).unwrap();
+        assert!(text.contains(r#""status":"not_assessed","reason":"too_few_effective_draws","ess":1.0"#), "{text}");
+        assert!(text.contains(r#""chain":7,"mean":"NaN""#), "{text}");
+        assert!(text.contains(r#""status":"assessed""#) && text.contains(r#""flagged":true"#), "{text}");
+        let back: ChainLoglikAgreement = serde_json::from_str(&text).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), text);
+        assert_eq!(back.findings().len(), 1);
     }
 
     /// A chain whose trace has fewer than ten effective draws is not

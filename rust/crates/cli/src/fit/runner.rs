@@ -3022,28 +3022,63 @@ pub const RHAT_REPORT_THRESHOLD: f64 = 1.1;
 /// their own copy of the report loop, which is how a new statistic ends up
 /// live in one sampler and absent in another. They now differ only in how they
 /// extract a parameter's per-chain trace from their own result type.
-pub struct MethodConvergence(Vec<(String, RhatEss)>);
+///
+/// It also carries the chains that took no step after burn-in
+/// ([`crate::fit::chain_diagnostics::chain_is_frozen`], gh#1032): the same
+/// per-chain draws the statistics are computed from decide it, and it is
+/// written beside them, so the verdict every reader takes from the summary
+/// (`PosteriorDiagnostics::max_rhat_status`) knows of a frozen chain whatever
+/// its R̂ came out as.
+pub struct MethodConvergence {
+    params: Vec<(String, RhatEss)>,
+    frozen: Vec<ChainIndex>,
+}
 
 use std::collections::BTreeMap;
 use sim::inference::convergence::{ConvergenceError, RankConvergence, RhatRefusal};
 
+/// The `*_summary.json` key holding the chains that took no step after
+/// burn-in, written by [`MethodConvergence::summary_fields`] and read by
+/// `method_result::ConvergenceMaps`.
+pub const FROZEN_CHAINS_KEY: &str = "frozen_chains";
+
 impl MethodConvergence {
     /// Score each `(param name, chains[chain][draw])` pair. Order is preserved
     /// — callers pass their estimated params in declaration order and the
-    /// report follows it.
-    pub fn compute(entries: impl IntoIterator<Item = (String, Vec<Vec<f64>>)>) -> Self {
-        MethodConvergence(
-            entries.into_iter()
+    /// report follows it. `chain_ids` names the chains, in the order every
+    /// entry's `chains` holds them.
+    pub fn compute(
+        chain_ids: &[ChainIndex],
+        entries: impl IntoIterator<Item = (String, Vec<Vec<f64>>)>,
+    ) -> Self {
+        let params: Vec<(String, Vec<Vec<f64>>)> = entries.into_iter().collect();
+        for (name, chains) in &params {
+            assert_eq!(chains.len(), chain_ids.len(),
+                "`{name}` holds {} chains where {} are named", chains.len(), chain_ids.len());
+        }
+        let frozen = chain_ids.iter().enumerate()
+            .filter(|(c, _)| crate::fit::chain_diagnostics::chain_is_frozen(
+                params.iter().map(|(_, chains)| chains[*c].as_slice())))
+            .map(|(_, id)| *id)
+            .collect();
+        MethodConvergence {
+            params: params.into_iter()
                 .map(|(name, chains)| {
                     let d = compute_rhat_ess(&chains);
                     (name, d)
                 })
                 .collect(),
-        )
+            frozen,
+        }
+    }
+
+    /// Whether `chain` took no step after burn-in.
+    pub fn is_frozen(&self, chain: usize) -> bool {
+        self.frozen.contains(&ChainIndex(chain))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &RhatEss)> {
-        self.0.iter().map(|(n, d)| (n.as_str(), d))
+        self.params.iter().map(|(n, d)| (n.as_str(), d))
     }
 
     /// Rank-normalized R̂ per param — **finite entries only**, so a `max` over
@@ -3074,7 +3109,7 @@ impl MethodConvergence {
     /// (every chain internally constant at its own value — the 0%-acceptance
     /// deadlock — which is not an `Err` but is just as fatal).
     pub fn rhat_not_reported(&self) -> BTreeMap<String, RhatRefusal> {
-        self.0.iter()
+        self.params.iter()
             .filter_map(|(n, d)| match d {
                 RhatEss::NotScored(e) => Some((n.clone(), e.refusal())),
                 RhatEss::Scored { rank, .. } if !rank.rhat.is_finite() => {
@@ -3090,7 +3125,7 @@ impl MethodConvergence {
     /// chains". Only params `rank_convergence` refused appear: a non-finite R̂
     /// is not a refusal of the input, so it has no detail to carry.
     pub fn rhat_refusal_detail(&self) -> BTreeMap<String, ConvergenceError> {
-        self.0.iter()
+        self.params.iter()
             .filter_map(|(n, d)| d.refusal().map(|e| (n.clone(), e.clone())))
             .collect()
     }
@@ -3114,7 +3149,7 @@ impl MethodConvergence {
 
     /// Per-chain Geyer ESS per param, omitting params with no per-chain values.
     pub fn ess_per_chain(&self) -> BTreeMap<String, Vec<f64>> {
-        self.0.iter()
+        self.params.iter()
             .filter(|(_, d)| !d.ess_per_chain().is_empty())
             .map(|(n, d)| (n.clone(), d.ess_per_chain().to_vec()))
             .collect()
@@ -3141,11 +3176,12 @@ impl MethodConvergence {
         put("ess", serde_json::json!(self.ess_bulk()));
         put("ess_tail", serde_json::json!(self.ess_tail()));
         put("ess_per_chain", serde_json::json!(self.ess_per_chain()));
+        put(FROZEN_CHAINS_KEY, serde_json::json!(self.frozen));
         m
     }
 
     fn finite(&self, f: impl Fn(&RhatEss) -> f64) -> BTreeMap<String, f64> {
-        self.0.iter()
+        self.params.iter()
             .filter_map(|(n, d)| {
                 let v = f(d);
                 v.is_finite().then(|| (n.clone(), v))
@@ -3162,7 +3198,7 @@ impl MethodConvergence {
     /// encoding the ESS maps need (a NaN becomes JSON `null`, read back as
     /// absent).
     fn per_param_rank(&self, f: impl Fn(&RankConvergence) -> f64) -> BTreeMap<String, f64> {
-        self.0.iter()
+        self.params.iter()
             .map(|(n, d)| (n.clone(), d.rank().map_or(f64::NAN, &f)))
             .collect()
     }
@@ -4695,6 +4731,7 @@ dt = 1.0
             dt_check: None,
             pf_noise: None,
             optimizer_convergence: None,
+            chain_loglik_agreement: None,
         };
         let gate = super::super::config_v2::GateConfig::default();
         for t0 in [names.clone(), vec![]] {
@@ -5781,8 +5818,8 @@ dt = 1.0
         use sim::inference::diagnostic::DiagnosticKind;
         let chains = load_convergence_chains();
         // R̂ ≈ 1.027 — under the 1.1 bar, over a 1.01 one.
-        let conv = MethodConvergence::compute([("ar1_mixed".to_string(),
-            chains["ar1_mixed"].clone())]);
+        let conv = MethodConvergence::compute(&chain_ids(&chains["ar1_mixed"]),
+            [("ar1_mixed".to_string(), chains["ar1_mixed"].clone())]);
 
         let table = run_table(&conv, None);
         let findings = conv.rhat_findings(RHAT_REPORT_THRESHOLD, None);
@@ -5822,6 +5859,11 @@ dt = 1.0
         ]
     }
 
+    /// The chains of `chains`, numbered from 0.
+    fn chain_ids(chains: &[Vec<f64>]) -> Vec<ChainIndex> {
+        ChainIndex::all(chains.len()).collect()
+    }
+
     /// The R̂ table `fit run` draws for `conv`: the convergence half of the
     /// summary the run writes (`summary_fields`), read back the way the report
     /// reads it (`ConvergenceMaps`), drawn by `report::render::rhat_run_table`.
@@ -5831,9 +5873,12 @@ dt = 1.0
         use crate::fit::method_result::{ConvergenceMaps, PosteriorDiagnostics};
         let summary = serde_json::Value::Object(conv.summary_fields());
         let n_samples = conv.iter().find_map(|(_, d)| d.rank().map(|r| r.n_draws_total)).unwrap_or(0);
+        let maps = ConvergenceMaps::read(&summary);
         let mut diag = PosteriorDiagnostics {
-            per_param: ConvergenceMaps::read(&summary).per_param(),
+            per_param: maps.per_param(),
             n_samples, thin: 1, wall_time_secs: None, n_chains: 4,
+            frozen_chains: maps.frozen_chains(),
+            chain_logliks: None,
         };
         if let Some(ConvergenceError::PointStart { n_chains, starts }) = withheld {
             diag.demote_point_start(*n_chains, starts);
@@ -5873,13 +5918,70 @@ dt = 1.0
             "an infinite R̂ is the worst band, not an absent one"
         );
 
-        let conv = MethodConvergence::compute([("beta".to_string(), frozen)]);
+        let conv = MethodConvergence::compute(&chain_ids(&frozen), [("beta".to_string(), frozen)]);
         // The table `fit run` draws reads the R̂ back from the summary, which
         // records a non-finite R̂ as a refusal, not as a number; the glyph
         // must still be the worst one.
         let table = run_table(&conv, None);
         let row = table.lines().find(|l| l.contains("beta")).expect("a row for beta");
         assert!(row.contains('✗'), "the run's table must say so loudly too:\n{table}");
+    }
+
+    /// Eight distinct pseudo-iid chains: the four of [`offset_chains`] at no
+    /// offset, and each of them reversed.
+    fn eight_moving_chains() -> Vec<Vec<f64>> {
+        offset_chains(0.0).into_iter()
+            .chain(offset_chains(0.0).into_iter().map(|c| c.into_iter().rev().collect()))
+            .collect()
+    }
+
+    /// gh#1032. One chain frozen where the other chains' cloud is dense can
+    /// leave R̂ below the bar camdl certifies at: eight moving chains and a
+    /// ninth that never moved from the cloud's lower quartile. The run
+    /// records the frozen chain beside the statistics, by its number, and the
+    /// verdict read back from the summary is not converged, whatever the R̂.
+    #[test]
+    fn a_frozen_chain_is_not_converged_even_when_its_rhat_passes() {
+        use crate::fit::method_result::{
+            ConvergenceMaps, MaxRhat, PosteriorDiagnostics, RHAT_CONVERGED_THRESHOLD,
+        };
+        let mut chains = eight_moving_chains();
+        let mut pooled: Vec<f64> = chains.iter().flatten().copied().collect();
+        pooled.sort_by(f64::total_cmp);
+        let quartile = pooled[pooled.len() / 4];
+        chains.push(vec![quartile; 200]);
+        // Numbered as a run with a refused chain numbers its chains: by their
+        // directories, not their positions.
+        let ids: Vec<ChainIndex> = (1..=9).map(ChainIndex).collect();
+
+        let conv = MethodConvergence::compute(&ids, [("beta".to_string(), chains)]);
+        let rhat = conv.rhat()["beta"];
+        assert!(rhat < RHAT_CONVERGED_THRESHOLD,
+            "fixture premise: R̂ alone would certify this fit; got {rhat}");
+        assert!(conv.is_frozen(9) && (1..=8).all(|c| !conv.is_frozen(c)),
+            "the frozen chain is named by its own number, and only it");
+
+        let summary = serde_json::Value::Object(conv.summary_fields());
+        assert_eq!(summary["frozen_chains"], serde_json::json!([9]), "{summary}");
+        let maps = ConvergenceMaps::read(&summary);
+        let diag = PosteriorDiagnostics {
+            per_param: maps.per_param(), n_samples: 1800, thin: 1, wall_time_secs: None,
+            n_chains: 9, frozen_chains: maps.frozen_chains(), chain_logliks: None,
+        };
+        assert_eq!(diag.max_rhat_status(), MaxRhat::ChainsFrozen { chains: vec![ChainIndex(9)] });
+        assert!(!diag.converged_at(RHAT_CONVERGED_THRESHOLD));
+
+        // Negative control: the eight moving chains alone record no frozen
+        // chain, which is not the same as recording nothing.
+        let moving = eight_moving_chains();
+        let conv = MethodConvergence::compute(&chain_ids(&moving), [("beta".to_string(), moving)]);
+        let summary = serde_json::Value::Object(conv.summary_fields());
+        assert_eq!(summary["frozen_chains"], serde_json::json!([]), "{summary}");
+        assert_eq!(ConvergenceMaps::read(&summary).frozen_chains(), Some(Vec::new()));
+        // A summary written before the key existed records nothing.
+        let mut old = summary.clone();
+        old.as_object_mut().unwrap().remove("frozen_chains");
+        assert_eq!(ConvergenceMaps::read(&old).frozen_chains(), None);
     }
 
     /// One R̂, two commands, two glyphs.
@@ -5904,7 +6006,7 @@ dt = 1.0
             "fixture premise: R̂ must land in the disputed gap; got {rhat}"
         );
 
-        let conv = MethodConvergence::compute([("beta".to_string(), chains)]);
+        let conv = MethodConvergence::compute(&chain_ids(&chains), [("beta".to_string(), chains)]);
         let out = run_table(&conv, None);
         let findings = conv.rhat_findings(RHAT_REPORT_THRESHOLD, None);
 
@@ -5959,7 +6061,7 @@ dt = 1.0
         use sim::inference::convergence::ConvergenceError;
 
         let chains = offset_chains(0.09);
-        let conv = MethodConvergence::compute([("beta".to_string(), chains)]);
+        let conv = MethodConvergence::compute(&chain_ids(&chains), [("beta".to_string(), chains)]);
 
         // Premise: with no refusal this block prints a number, a glyph and
         // (above the certification bar) a decomposition. Without this the
@@ -6018,7 +6120,7 @@ dt = 1.0
     #[test]
     fn a_non_converged_parameter_shows_the_classic_rhat_and_the_per_chain_ess() {
         let chains = load_convergence_chains();
-        let conv = MethodConvergence::compute([(
+        let conv = MethodConvergence::compute(&chain_ids(&chains["within_chain_drift"]), [(
             "within_chain_drift".to_string(),
             chains["within_chain_drift"].clone(),
         )]);
@@ -6056,7 +6158,7 @@ dt = 1.0
     #[test]
     fn the_report_names_which_half_drove_a_high_rhat() {
         let chains = load_convergence_chains();
-        let conv = MethodConvergence::compute([(
+        let conv = MethodConvergence::compute(&chain_ids(&chains["scale_disagree"]), [(
             "scale_disagree".to_string(),
             chains["scale_disagree"].clone(),
         )]);
@@ -6085,7 +6187,7 @@ dt = 1.0
     #[test]
     fn the_report_names_the_location_half_when_that_is_the_driver() {
         let chains = load_convergence_chains();
-        let conv = MethodConvergence::compute([(
+        let conv = MethodConvergence::compute(&chain_ids(&chains["within_chain_drift"]), [(
             "within_chain_drift".to_string(),
             chains["within_chain_drift"].clone(),
         )]);

@@ -86,6 +86,27 @@ impl AcceptanceKernel {
     }
 }
 
+/// The θ-move of a [`DiagnosticKind::ChainFrozen`] chain, and what it
+/// recorded after burn-in.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kernel", rename_all = "snake_case")]
+pub enum FrozenSampler {
+    /// PGAS's NUTS block. Under NUTS a sweep "accepts" when the trajectory
+    /// ends at a point other than the one it started from; a divergent
+    /// trajectory never does.
+    Nuts {
+        /// The step size adaptation ended on, which every post-burn-in step
+        /// used. `None` when no post-burn-in sweep of this run recorded one.
+        #[serde(with = "json_f64::option")]
+        step_size: Option<f64>,
+        /// Post-burn-in steps that diverged.
+        n_divergent: usize,
+    },
+    /// Random-walk Metropolis-Hastings (PMMH, `mh`, PGAS without gradients):
+    /// no proposal was accepted.
+    RandomWalk,
+}
+
 /// An acceptance kernel's healthy band, as fractions in `[0, 1]`, inclusive
 /// at both ends ([`AcceptanceKernel::healthy_band`]).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -262,6 +283,57 @@ pub enum DiagnosticKind {
     DivergentTransitions {
         n_divergent: usize,
         n_sweeps: usize,
+    },
+
+    // ── Any sampler ──────────────────────────────────────────────
+    /// gh#1032. Every retained draw of one chain is the same parameter vector:
+    /// the chain took no step after burn-in, so its draws are a point mass at
+    /// wherever it stood when warm-up ended, not a sample from the posterior.
+    ///
+    /// Distinct from [`Self::AcceptanceRateUnhealthy`], which is a rate
+    /// against a band. A PGAS rate counts the warm-up sweeps, so a chain that
+    /// moved on 7 of 10 warm-up sweeps and never after reads 12%, which looks
+    /// like a poorly tuned chain rather than a stopped one; and for a frozen
+    /// chain the rate adds nothing the frozen finding does not say. A frozen
+    /// chain's acceptance finding is therefore not raised (the runners skip
+    /// it), and under NUTS neither is its [`Self::DivergentTransitions`]: the
+    /// divergence count is carried here.
+    ChainFrozen {
+        /// The chain's number, as its `chain_N/` directory carries it.
+        chain_id: usize,
+        /// The chain's retained draws, all one parameter vector.
+        n_draws: usize,
+        /// The warm-up length, `burn_in` as configured: sweeps for PGAS,
+        /// iterations for PMMH and `mh`.
+        burn_in: usize,
+        /// Post-burn-in steps the chain took in which θ could have moved.
+        n_steps: usize,
+        /// The θ-move that did not move, with what it recorded.
+        sampler: FrozenSampler,
+    },
+    /// gh#406, gh#1008. One chain's mean log-likelihood differs from the
+    /// pooled mean of the other chains by more than the standard error of the
+    /// difference explains: the leave-one-out `Z` of
+    /// `cli::fit::chain_diagnostics`, above its Bonferroni cutoff. It
+    /// corroborates R̂ and ESS; it is not the convergence verdict, and it does
+    /// not name a cause — a side mode, a ridge along a weakly identified
+    /// parameter, a chain that has not mixed, or for IF2 a start that reached
+    /// another optimum all produce it.
+    ChainLoglikDiffers {
+        chain_id: usize,
+        /// What was compared: the trace column whose retained mean it is
+        /// (`log_likelihood`, or `obs_ll` for PGAS), or `clean_loglik` for
+        /// IF2's clean-evaluation means.
+        column: String,
+        /// The chain's mean minus the other chains' pooled mean, in nats.
+        #[serde(with = "json_f64")]
+        diff: f64,
+        /// `|diff|` over its standard error.
+        #[serde(with = "json_f64")]
+        z: f64,
+        /// The cutoff `z` exceeded.
+        #[serde(with = "json_f64")]
+        cutoff: f64,
     },
 
     // ── PGAS ─────────────────────────────────────────────────────
@@ -569,6 +641,8 @@ impl DiagnosticKind {
                 if *max_chain_agreement > CONVERGENCE_ERROR_SEVERITY => Severity::Error,
             Self::ConvergenceIncomplete { .. } => Severity::Warning,
             Self::DivergentTransitions { .. } => Severity::Warning,
+            Self::ChainFrozen { .. } => Severity::Error,
+            Self::ChainLoglikDiffers { .. } => Severity::Warning,
             Self::LowESS { ess_fraction, .. } if *ess_fraction < 0.05 => Severity::Error,
             Self::LowESS { .. } => Severity::Warning,
             Self::LowESSAtMLE { ess_min, n_particles, .. }
@@ -649,6 +723,11 @@ impl DiagnosticKind {
             Self::DivergentTransitions { n_divergent, n_sweeps } =>
                 format!("{} divergent transitions in {} sweeps.",
                     n_divergent, n_sweeps),
+            Self::ChainFrozen { n_draws, burn_in, n_steps, sampler, .. } =>
+                chain_frozen_message(*n_draws, *burn_in, *n_steps, sampler),
+            Self::ChainLoglikDiffers { column, diff, z, cutoff, .. } =>
+                format!("mean {column} differs from the other chains' by {diff:+.2} nats \
+                         (Z = {z:.1} > {cutoff:.2}), beyond what its standard error explains."),
             Self::DegenerateAncestorSampling { pct, .. } =>
                 format!("Ancestor sampling degenerate at {:.1}% of substeps.", pct),
             Self::LowTrajectoryRenewal { renewal } =>
@@ -790,6 +869,29 @@ impl DiagnosticKind {
                 "Reduce NUTS step size",
                 "Reparameterize (e.g., non-centered parameterization)",
             ],
+            Self::ChainFrozen { sampler: FrozenSampler::Nuts { .. }, .. } => vec![
+                "Lengthen the warm-up (`burn_in`) so the step-size adaptation can settle; \
+                 the step_size and accept_stat columns of the chain's trace.tsv show where \
+                 the warm-up left it",
+                "Raise `particles`. On the fixtures of gh#1032, burn_in = 10 with 20 \
+                 particles froze both chains, and burn_in = 100 with 50 particles moved θ \
+                 on 88-100% of post-burn-in sweeps",
+                "`fit summary --exclude-chains <chain>` shows the fit without this chain; \
+                 nothing excludes it automatically",
+            ],
+            Self::ChainLoglikDiffers { .. } => vec![
+                "This can indicate a chain sampling another region of the posterior (a \
+                 side mode, or a ridge along a weakly identified parameter) or one that \
+                 has not mixed; compare its per-chain posterior with the others'",
+            ],
+            Self::ChainFrozen { sampler: FrozenSampler::RandomWalk, .. } => vec![
+                "Read the chain's warm-up record and the `accepted` column of its trace.tsv",
+                "Under a particle-filter likelihood (pmmh) the spread of the log-likelihood \
+                 estimate caps acceptance: raise the particle count, aiming for a \
+                 log-likelihood standard deviation near 1 at the mode",
+                "`fit summary --exclude-chains <chain>` shows the fit without this chain; \
+                 nothing excludes it automatically",
+            ],
             Self::ZeroRateNonzeroFlow { .. } => vec![
                 "Add a seeding term (iota) to the rate expression",
             ],
@@ -862,6 +964,34 @@ fn scale_at_floor_lines(steps: &str, warmup_steps: usize, target_accept: f64) ->
     ]
 }
 
+/// The `ChainFrozen` sentence, without the chain label `render_entry` puts in
+/// front of it: what the chain's draws are, then what its sampler recorded.
+fn chain_frozen_message(n_draws: usize, burn_in: usize, n_steps: usize, sampler: &FrozenSampler) -> String {
+    let observed = format!(
+        "took no step after burn-in: all {n_draws} retained draws are one parameter vector, \
+         a point mass where the chain stood when warm-up ended, not a sample from the \
+         posterior.");
+    let why = match sampler {
+        FrozenSampler::Nuts { step_size, n_divergent } => {
+            let at = match step_size {
+                Some(h) => format!("step size {}", format_start_value(*h)),
+                None => "step size (not recorded)".to_string(),
+            };
+            let diverged = if *n_divergent == n_steps {
+                format!("Every one of its {n_steps} post-burn-in NUTS steps diverged")
+            } else {
+                format!("{n_divergent} of its {n_steps} post-burn-in NUTS steps diverged and \
+                         none of the others moved θ")
+            };
+            format!(" {diverged}, at the {at} that adaptation ended on after burn_in = {burn_in} \
+                     sweeps: the warm-up ended on a step size at which the sampler does not move.")
+        }
+        FrozenSampler::RandomWalk => format!(
+            " None of its {n_steps} post-burn-in proposals was accepted (burn_in = {burn_in})."),
+    };
+    observed + &why
+}
+
 /// The `ScaleFarFromOptimum` sentence.
 fn scale_far_lines(final_scale: f64) -> Vec<String> {
     let (factor, direction) = if final_scale < 1.0 {
@@ -911,6 +1041,8 @@ impl DiagnosticKind {
             | Self::ScaleAtFloor { chain_id, .. }
             | Self::ScaleFarFromOptimum { chain_id, .. } => Some(*chain_id),
             Self::AcceptanceRateUnhealthy { chain_id, .. } => *chain_id,
+            Self::ChainFrozen { chain_id, .. }
+            | Self::ChainLoglikDiffers { chain_id, .. } => Some(*chain_id),
             _ => None,
         }
     }
@@ -972,6 +1104,8 @@ impl DiagnosticKind {
             | Self::BadInit { .. }
             | Self::MaxTreeDepthHits { .. }
             | Self::DivergentTransitions { .. }
+            | Self::ChainFrozen { .. }
+            | Self::ChainLoglikDiffers { .. }
             | Self::DegenerateAncestorSampling { .. }
             | Self::LowTrajectoryRenewal { .. }
             | Self::PathRenewalCoalesced { .. }
@@ -1547,6 +1681,13 @@ mod tests {
                 chain_id: 1, steps_at_floor: 3, warmup_steps: 10, target_accept: x,
             },
             DiagnosticKind::ScaleFarFromOptimum { chain_id: 1, final_scale: x },
+            DiagnosticKind::ChainFrozen {
+                chain_id: 1, n_draws: 50, burn_in: 10, n_steps: 50,
+                sampler: FrozenSampler::Nuts { step_size: Some(x), n_divergent: 49 },
+            },
+            DiagnosticKind::ChainLoglikDiffers {
+                chain_id: 2, column: "obs_ll".into(), diff: x, z: x, cutoff: x,
+            },
         ]
     }
 
@@ -1586,6 +1727,8 @@ mod tests {
             PerturbedSwarmInfeasible { .. } => 27,
             ScaleAtFloor { .. } => 28,
             ScaleFarFromOptimum { .. } => 29,
+            ChainFrozen { .. } => 30,
+            ChainLoglikDiffers { .. } => 31,
         }
     }
 
@@ -1650,6 +1793,39 @@ mod tests {
         assert_eq!(lines[2], "33.7% target acceptance, so the proposal is far narrower");
         assert_eq!(lines.len(), 8);
         assert_eq!(render_entry(&[&f0]).lines().nth(1), Some("for 241 of 1000 warm-up steps: no scale reached the"));
+    }
+
+    /// gh#1032. A frozen chain's finding says what was observed — the chain,
+    /// its draws all one vector — and then what the sampler recorded: under
+    /// NUTS how many post-burn-in steps diverged, at which step size, after
+    /// how long a warm-up; under random-walk MH that no proposal was accepted.
+    /// "Every step diverged" is claimed only when every step did.
+    #[test]
+    fn a_frozen_chain_says_what_it_did_and_what_its_sampler_recorded() {
+        let nuts = |n_divergent| DiagnosticKind::ChainFrozen {
+            chain_id: 1, n_draws: 50, burn_in: 10, n_steps: 50,
+            sampler: FrozenSampler::Nuts { step_size: Some(0.4998), n_divergent },
+        };
+        let all = render_entry(&[&nuts(50)]);
+        assert!(all.starts_with("chain 1: took no step after burn-in: all 50 retained draws \
+            are one parameter vector"), "{all}");
+        assert!(all.contains("Every one of its 50 post-burn-in NUTS steps diverged, at the \
+            step size 0.4998 that adaptation ended on after burn_in = 10 sweeps"), "{all}");
+        let some = nuts(36).render();
+        assert!(some.contains("36 of its 50 post-burn-in NUTS steps diverged and none of the \
+            others moved θ"), "{some}");
+        assert!(!some.contains("Every one"), "{some}");
+        let rw = DiagnosticKind::ChainFrozen {
+            chain_id: 0, n_draws: 200, burn_in: 100, n_steps: 200,
+            sampler: FrozenSampler::RandomWalk,
+        };
+        assert!(rw.render().contains("None of its 200 post-burn-in proposals was accepted \
+            (burn_in = 100)."), "{}", rw.render());
+        for k in [nuts(50), rw] {
+            assert_eq!(k.severity(), Severity::Error);
+            assert_eq!(k.merge_key(), MergeKey::Never, "each chain's numbers are its own");
+            assert!(!k.hints(HintContext::default()).is_empty());
+        }
     }
 
     /// The compressed-position warning states the direction the per-particle
@@ -1726,7 +1902,7 @@ mod tests {
     fn every_variant_round_trips_non_finite_numbers_losslessly() {
         let covered: std::collections::BTreeSet<usize> =
             every_variant(0.5).iter().map(variant_index).collect();
-        assert_eq!(covered, (0..30).collect(),
+        assert_eq!(covered, (0..32).collect(),
             "every_variant must build one of every DiagnosticKind variant");
 
         for x in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
@@ -1809,6 +1985,14 @@ mod tests {
                 r#""warmup_steps":10,"target_accept":0.25}"#,
             ),
             r#"{"type":"scale_far_from_optimum","chain_id":1,"final_scale":0.25}"#,
+            concat!(
+                r#"{"type":"chain_frozen","chain_id":1,"n_draws":50,"burn_in":10,"n_steps":50,"#,
+                r#""sampler":{"kernel":"nuts","step_size":0.25,"n_divergent":49}}"#,
+            ),
+            concat!(
+                r#"{"type":"chain_loglik_differs","chain_id":2,"column":"obs_ll","#,
+                r#""diff":0.25,"z":0.25,"cutoff":0.25}"#,
+            ),
         ];
         assert_eq!(json.len(), want.len());
         for (got, want) in json.iter().zip(want) {

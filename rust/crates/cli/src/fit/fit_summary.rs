@@ -109,6 +109,7 @@ fn recompute_over_subset(
     }
     diag.n_samples = sub.n_samples;
     diag.n_chains = sub.n_chains;
+    diag.frozen_chains = Some(sub.frozen_chains);
     // `thin` and `wall_time_secs` are properties of the whole run, unchanged by
     // a read-side subset (ESS/iter and ESS/sec are then reported over the
     // subset's ESS against the same iteration / wall-clock denominators).
@@ -144,14 +145,12 @@ fn apply_selection_to_typed(
 /// first.
 fn chain_selection_advisory(
     out: &crate::out::Out,
-    method_dir: &Path,
+    chain_logliks: Option<&super::chain_diagnostics::ChainLoglikAgreement>,
     info: &SubsetInfo,
-    kind: super::loglik::LoglikType,
     stderr: Painter,
 ) {
-    use super::chain_diagnostics as cd;
-    if let Some((means, scores)) = cd::read_chain_loglik_scores(method_dir, kind) {
-        for observed in cd::describe_flagged(&scores, means.scored_column) {
+    if let Some(agreement) = chain_logliks {
+        for observed in super::chain_diagnostics::describe_flagged(agreement) {
             out.say(format_args!(
                 "{n} {observed}. Before excluding it, ask why: a chain sampling another \
                  region of the posterior (a side mode, or a ridge along a weakly identified \
@@ -161,6 +160,19 @@ fn chain_selection_advisory(
         }
     }
     warn_active_selection(out, info, stderr);
+}
+
+/// The per-chain log-likelihood comparison a Bayesian result carries, as the
+/// run recorded it; `None` for any other method and for a leaf that records
+/// none.
+pub(crate) fn recorded_chain_logliks(
+    result: &MethodResult,
+) -> Option<super::chain_diagnostics::ChainLoglikAgreement> {
+    match result {
+        MethodResult::Pgas(r) => r.diagnostics.chain_logliks.clone(),
+        MethodResult::Pmmh(r) => r.diagnostics.chain_logliks.clone(),
+        MethodResult::If2(_) | MethodResult::Nlopt(_) | MethodResult::Pfilter(_) => None,
+    }
 }
 
 /// Top-level entry point. Resolves `args.fit` (the fit handle) to its segment
@@ -405,6 +417,8 @@ fn verdict_text(report: &MethodReport) -> String {
     match &report.verdict {
         Verdict::Converged { max_rhat, .. } => format!("converged (max R̂ {max_rhat:.3})"),
         Verdict::NotConverged { max_rhat, .. } => format!("not converged (max R̂ {max_rhat:.3})"),
+        Verdict::ChainsFrozen { chains } => format!(
+            "not converged ({})", crate::fit::method_result::frozen_chains_clause(chains)),
         Verdict::Unassessable { .. } => "not converged (R̂ not computable)".into(),
         Verdict::NotAssessed { .. } => "R̂ not assessed".into(),
         Verdict::NotApplicable => match report.gate.as_ref().map(|g| g.overall_pass) {
@@ -669,10 +683,9 @@ fn format_text(
             }
         };
 
-        // The method's log-likelihood class, derived once from the typed result
-        // (the single authority). It selects the per-chain trace column the
-        // outlier diagnostics may compare across chains (gh#667).
-        let ll_kind = crate::fit::loglik::LoglikType::from(&typed);
+        // The per-chain log-likelihood comparison the run recorded, over every
+        // chain: the chain selection below does not recompute it.
+        let chain_logliks = recorded_chain_logliks(&typed);
 
         // Chain selection: recompute this Bayesian method's diagnostics over the
         // retained chains before rendering (an IF2 / NLopt method has no chains
@@ -683,7 +696,7 @@ fn format_text(
                 match apply_selection_to_typed(&mut typed, &resolved.method_dir, sel) {
                     Ok(info) => {
                         if !warned {
-                            chain_selection_advisory(out, &resolved.method_dir, &info, ll_kind, stderr);
+                            chain_selection_advisory(out, chain_logliks.as_ref(), &info, stderr);
                             warned = true;
                         }
                         subset_info = Some(info);
@@ -698,7 +711,7 @@ fn format_text(
         let chain_detail = match &typed {
             MethodResult::Pgas(_) | MethodResult::Pmmh(_) => Some(ChainDetail::gather(
                 &resolved.method_dir,
-                ll_kind,
+                chain_logliks,
                 matches!(typed, MethodResult::Pgas(_)),
                 subset_info,
                 forkability(dir, &resolved.name, selection),
@@ -934,13 +947,11 @@ fn build_summary_doc(
                 Some(MethodResult::Pgas(_)) | Some(MethodResult::Pmmh(_))
             ) {
                 if let Some(t) = typed.as_mut() {
-                    // Same authority as the text path: the class comes from the
-                    // typed result, never from a column position (gh#667).
-                    let ll_kind = crate::fit::loglik::LoglikType::from(&*t);
+                    let chain_logliks = recorded_chain_logliks(t);
                     match apply_selection_to_typed(t, &resolved.method_dir, sel) {
                         Ok(info) => {
                             if !advised {
-                                chain_selection_advisory(out, &resolved.method_dir, &info, ll_kind, stderr);
+                                chain_selection_advisory(out, chain_logliks.as_ref(), &info, stderr);
                                 advised = true;
                             }
                             chain_selection_json = Some(info.to_json());
@@ -1439,6 +1450,17 @@ mod tests {
         }
     }
 
+    /// The comparison a run records for the traces under `dir`, each chain
+    /// cut to its rows in `draws.tsv` (the counts the run passes are those
+    /// rows), standing in for the run in fixtures that write traces only.
+    fn recorded_on_disk(
+        dir: &std::path::Path,
+        kind: LoglikType,
+    ) -> Option<crate::fit::chain_diagnostics::ChainLoglikAgreement> {
+        use crate::fit::chain_diagnostics as cd;
+        cd::recorded_chain_loglik_agreement(dir, kind, cd::read_draw_counts(&dir.join("draws.tsv")))
+    }
+
     /// The `chains` section for a method on disk. `ChainDetail::gather` is asked
     /// for the PGAS reads unconditionally: a non-PGAS fixture writes neither a
     /// `pgas_summary.json` nor a `trajectories.tsv`, so they find nothing and
@@ -1449,8 +1471,20 @@ mod tests {
         n_chains: usize,
         kind: LoglikType,
     ) -> String {
-        let facts = ChainDetail::gather(dir, kind, true, None, None);
-        text(&chains_section(n_chains, &facts, fmt.explain))
+        frozen_chain_table(fmt, dir, n_chains, kind, &[])
+    }
+
+    /// [`chain_table`] for a method whose summary records `frozen` as the
+    /// chains that took no step after burn-in.
+    fn frozen_chain_table(
+        fmt: &TextView,
+        dir: &std::path::Path,
+        n_chains: usize,
+        kind: LoglikType,
+        frozen: &[ChainIndex],
+    ) -> String {
+        let facts = ChainDetail::gather(dir, recorded_on_disk(dir, kind), true, None, None);
+        text(&chains_section(n_chains, frozen, &facts, fmt.explain))
     }
 
     /// Which Bayesian result a [`block`] renders.
@@ -1474,7 +1508,7 @@ mod tests {
             BayesianView::Pmmh(r) => (MethodResult::Pmmh(r.clone()), false),
         };
         let mut report = bayesian_method_report(name, method, Some(result), &fmt.cal);
-        report.chain_detail = Some(ChainDetail::gather(method_dir, ll_kind, is_pgas, None, None));
+        report.chain_detail = Some(ChainDetail::gather(method_dir, recorded_on_disk(method_dir, ll_kind), is_pgas, None, None));
         text(&bayesian_block(false, &report, fmt.explain))
     }
 
@@ -1517,6 +1551,7 @@ mod tests {
             dt_check: None,
             pf_noise: None,
             optimizer_convergence: None,
+            chain_loglik_agreement: None,
         }
     }
 
@@ -1841,6 +1876,8 @@ mod tests {
                 thin: 1,
                 wall_time_secs: Some(11.8),
                 n_chains: 4,
+                frozen_chains: None,
+                chain_logliks: None,
             },
             posterior_mean: BTreeMap::from([("a2".to_string(), 0.5), ("tau".to_string(), 1.0)]),
             posterior_q025: BTreeMap::new(),
@@ -1891,6 +1928,8 @@ mod tests {
                 thin: 1,
                 wall_time_secs: Some(11.8),
                 n_chains: 4,
+                frozen_chains: None,
+                chain_logliks: None,
             },
             posterior_mean: BTreeMap::from([("a2".to_string(), 0.5), ("tau".to_string(), 1.0)]),
             posterior_q025: BTreeMap::new(),
@@ -1965,6 +2004,8 @@ mod tests {
             thin: 1,
             wall_time_secs: Some(1200.0),
             n_chains: 4,
+            frozen_chains: None,
+            chain_logliks: None,
         };
 
         // 8 / 48,000 iterations and 8 / 1,200 s: three significant figures at
@@ -2021,6 +2062,8 @@ mod tests {
                 thin: 1,
                 wall_time_secs: Some(11.8),
                 n_chains: 4,
+                frozen_chains: None,
+                chain_logliks: None,
             },
             posterior_mean: BTreeMap::from([
                 ("a2".to_string(), 0.5),
@@ -2081,6 +2124,8 @@ mod tests {
                 thin,
                 wall_time_secs: wall,
                 n_chains: 4,
+                frozen_chains: None,
+                chain_logliks: None,
             },
             posterior_mean: BTreeMap::from([("a2".to_string(), 0.5), ("g".to_string(), 1.0)]),
             posterior_q025: BTreeMap::new(),
@@ -2154,7 +2199,7 @@ mod tests {
         let flagged: Vec<&str> = table.lines().filter(|l| l.contains("← differs"))
             .map(|l| l.split_whitespace().next().unwrap_or("")).collect();
         assert_eq!(flagged, vec!["5"], "the stuck chain, and only it:\n{table}");
-        assert!(table.contains("chain 5's mean log_likelihood differs from the other chains' by"),
+        assert!(table.contains("chain 5: mean log_likelihood differs from the other chains' by"),
             "the note says what was observed:\n{table}");
         assert!(!table.contains("weakly identified?") && table.contains("can indicate"),
             "and does not assert a cause:\n{table}");
@@ -2201,7 +2246,7 @@ mod tests {
             .collect();
         assert_eq!(flagged, vec!["5"],
             "only chain 5 (the bad data fit) may be flagged:\n{table}");
-        assert!(table.contains("chain 5's mean obs_ll differs"),
+        assert!(table.contains("chain 5: mean obs_ll differs"),
             "the note must name chain 5:\n{table}");
 
         // …and the ranked column is obs_ll, not the complete-data target.
@@ -2341,9 +2386,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// gh#635: a chain with ONE distinct parameter vector across its retained
-    /// draws (zero accepted moves, finite density — evades the −inf screen)
-    /// draws the loud point-mass flag; mixing chains do not.
+    /// gh#635, gh#1032: a chain the run recorded as having taken no step after
+    /// burn-in (one parameter vector across its retained draws, finite density
+    /// — evades the −inf screen) draws the loud flag; mixing chains do not.
+    /// Which chains are frozen is the run's record (`frozen_chains`), not a
+    /// re-read of `draws.tsv`.
     #[test]
     fn bayesian_chain_table_flags_point_mass_chain() {
         let dir = crate::test_support::unique_temp_dir("summary_point_mass");
@@ -2365,15 +2412,17 @@ mod tests {
         std::fs::write(dir.join("draws.tsv"), draws).unwrap();
 
         let fmt = plain_formatter();
-        let table = chain_table(&fmt, &dir, 3, LoglikType::Marginal);
-        assert!(table.contains("point-mass"),
+        let table = frozen_chain_table(&fmt, &dir, 3, LoglikType::Marginal, &[ChainIndex(2)]);
+        assert!(table.contains("point mass"),
             "the frozen chain gets the loud flag:\n{table}");
-        assert!(table.contains("chain 2") && table.contains("across 3 retained"),
-            "the flag names the chain and the draw count:\n{table}");
+        assert!(table.contains("chain 2: took no step after burn-in"),
+            "the flag names the chain:\n{table}");
         assert_advised_exclusion_parses(&table, 2);
         // Exactly one flagged chain — mixing chains stay clean.
-        assert_eq!(table.matches("point-mass").count(), 1,
+        assert_eq!(table.matches("took no step after burn-in").count(), 1,
             "only the frozen chain is flagged:\n{table}");
+        let none = chain_table(&fmt, &dir, 3, LoglikType::Marginal);
+        assert!(!none.contains("took no step"), "no record, no flag:\n{none}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2429,7 +2478,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let fmt = plain_formatter();
         let table = chain_table(&fmt, &dir, 4, LoglikType::Marginal);
-        assert!(table.contains("per-chain traces unavailable"),
+        assert!(table.contains("no per-chain log-likelihood comparison recorded"),
             "must say traces are unavailable, not skip:\n{table}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2476,7 +2525,7 @@ mod tests {
         let fmt = plain_formatter();
         let out = chain_table(&fmt, &dir, 2, LoglikType::CompleteData);
         assert_eq!(section_of(&out, SECTION_CHAINS), concat!(
-"  (per-chain traces unavailable \u{2014} cannot break down by chain)\n",
+"  (no per-chain log-likelihood comparison recorded in this leaf)\n",
 "  chain   paths   forkable\n",
 "      1     250         50\n",
 "      2     250        250\n",
@@ -2498,7 +2547,7 @@ mod tests {
         let fmt = plain_formatter();
         let out = chain_table(&fmt, &dir, 2, LoglikType::CompleteData);
         assert_eq!(section_of(&out, SECTION_CHAINS), concat!(
-"  (per-chain traces unavailable \u{2014} cannot break down by chain)\n",
+"  (no per-chain log-likelihood comparison recorded in this leaf)\n",
 "  chain   paths   forkable\n",
 "      1     200        200\n",
 "      2     200        200\n",
@@ -2517,7 +2566,7 @@ mod tests {
         let fmt = plain_formatter();
         let out = chain_table(&fmt, &dir, 2, LoglikType::CompleteData);
         assert_eq!(section_of(&out, SECTION_CHAINS),
-"  (per-chain traces unavailable \u{2014} cannot break down by chain)\n",
+"  (no per-chain log-likelihood comparison recorded in this leaf)\n",
             "no `trajectories` block means no path columns and no note about \
              them \u{2014} there is nothing this method failed to report");
         std::fs::remove_dir_all(&dir).ok();
@@ -2598,6 +2647,8 @@ mod tests {
                 thin: 1,
                 wall_time_secs: Some(200.0),
                 n_chains: 4,
+                frozen_chains: None,
+                chain_logliks: None,
             },
             posterior_mean: BTreeMap::from([
                 ("alpha".to_string(), 0.235_134),
@@ -2654,6 +2705,9 @@ mod tests {
             "  ✗ NOT converged — the chains are in different places",
             "    max R̂ 4.870 (tau), threshold 1.05",
             "    3 of 4 parameters above threshold",
+            // The fixture writes no chain trace, so the run would have
+            // recorded no comparison: said, not skipped.
+            "    chains' log-likelihood comparison not recorded",
             "",
         ]);
     }
@@ -2762,8 +2816,8 @@ mod tests {
 "  a path is written on every 40 retained draw (thin 1), so every one should\n",
 "  be joinable; the shortfall is paths that were written outside this leaf's\n",
 "  retained set or skipped as incoherent records\n",
-"  ⚠ chain 2's mean obs_ll differs from the other chains' by -447.60 nats (Z\n",
-"  = 945.3 > 3.59), beyond what Monte Carlo error explains.\n",
+"  ⚠ chain 2: mean obs_ll differs from the other chains' by -447.60 nats (Z =\n",
+"  945.3 > 3.59), beyond what its standard error explains.\n",
 "  This can indicate a chain sampling another region of the posterior (a side\n",
 "  mode, or a ridge along a weakly identified parameter) or one that has not\n",
 "  mixed; compare its per-chain posterior with the others'.\n",
@@ -2941,8 +2995,8 @@ mod tests {
             kept: vec![ChainIndex(0), ChainIndex(1)],
             n_total: 3,
         };
-        let facts = ChainDetail::gather(&dir, LoglikType::Marginal, false, Some(info), None);
-        let section = text(&chains_section(2, &facts, false));
+        let facts = ChainDetail::gather(&dir, recorded_on_disk(&dir, LoglikType::Marginal), false, Some(info), None);
+        let section = text(&chains_section(2, &[], &facts, false));
 
         assert!(section.contains("including the excluded 2"),
             "the table must say whose rows it is still showing:\n{section}");
@@ -2956,8 +3010,8 @@ mod tests {
              that reads like a defect:\n{section}");
 
         // Without a selection the same method says none of it.
-        let facts = ChainDetail::gather(&dir, LoglikType::Marginal, false, None, None);
-        let plain = text(&chains_section(3, &facts, false));
+        let facts = ChainDetail::gather(&dir, recorded_on_disk(&dir, LoglikType::Marginal), false, None, None);
+        let plain = text(&chains_section(3, &[], &facts, false));
         assert!(!plain.contains("excluded"), "no scope note when nothing was \
             excluded:\n{plain}");
         std::fs::remove_dir_all(&dir).ok();
@@ -3031,6 +3085,8 @@ mod tests {
                 thin: 1,
                 wall_time_secs: None,
                 n_chains: 8,
+                frozen_chains: None,
+                chain_logliks: None,
             },
             // Six orders of magnitude between the smallest and largest mean.
             posterior_mean: BTreeMap::from([
@@ -3129,7 +3185,7 @@ mod tests {
         let fmt = plain_formatter();
         let out = chain_table(&fmt, &dir, 4, LoglikType::CompleteData);
         assert_eq!(section_of(&out, SECTION_CHAINS), concat!(
-"  (per-chain traces unavailable \u{2014} cannot break down by chain)\n",
+"  (no per-chain log-likelihood comparison recorded in this leaf)\n",
 "  chain   paths   forkable\n",
 "      4      10         10\n",
 "      7      10         10\n",
@@ -3164,7 +3220,7 @@ mod tests {
         let fmt = plain_formatter();
         let out = chain_table(&fmt, &dir, 2, LoglikType::CompleteData);
         assert_eq!(section_of(&out, SECTION_CHAINS),
-"  (per-chain traces unavailable \u{2014} cannot break down by chain)\n",
+"  (no per-chain log-likelihood comparison recorded in this leaf)\n",
             "no positional fallback may fill the columns");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3665,6 +3721,8 @@ mod tests {
             thin: 1,
             wall_time_secs: Some(10.0),
             n_chains: 4,
+            frozen_chains: None,
+            chain_logliks: None,
         };
         let mut mean = BTreeMap::from([("beta".to_string(), 0.475)]); // mixed (incl. outlier)
         let sel = ChainSelection::parse_exclude("3").unwrap();
@@ -3702,6 +3760,8 @@ mod tests {
                 thin: 1,
                 wall_time_secs: None,
                 n_chains: 4,
+                frozen_chains: None,
+                chain_logliks: None,
             },
             posterior_mean: BTreeMap::new(),
             posterior_q025: BTreeMap::new(),
@@ -3754,6 +3814,8 @@ mod tests {
                 thin: 1,
                 wall_time_secs: None,
                 n_chains: 4,
+                frozen_chains: None,
+                chain_logliks: None,
             },
             posterior_mean: BTreeMap::new(),
             acceptance_rate: 0.24,

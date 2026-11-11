@@ -13,6 +13,8 @@ use crate::version;
 pub(crate) fn max_rhat_cell(diag: &PosteriorDiagnostics) -> String {
     match diag.max_rhat_status() {
         MaxRhat::Reported(v) => format!("{v:.3}"),
+        MaxRhat::ChainsFrozen { chains } => format!(
+            "NOT converged — {}", crate::fit::method_result::frozen_chains_clause(&chains)),
         MaxRhat::Unassessable { params } =>
             format!("not computable for {} parameter(s) — NOT converged", params.len()),
         MaxRhat::NotApplicable { reason } => format!("not assessed ({})", reason.describe()),

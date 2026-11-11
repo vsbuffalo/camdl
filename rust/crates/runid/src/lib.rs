@@ -90,7 +90,7 @@ pub use record::{
 pub use runid_derive::RunInput;
 pub use store::{
     find_leaf, leaf_state, lock_owner, update_record, Artifacts, CasError, CasStore, FsCasStore, LeafIdentity,
-    LeafState, LockOwner, Lookup, StaleReason, ATTEMPTS_DIR, ATTEMPT_RECORD, EVENT_LOG,
+    LeafState, LockOwner, Lookup, StaleReason, write_file_atomic, ATTEMPTS_DIR, ATTEMPT_RECORD, EVENT_LOG,
     MAX_PRESERVED_ATTEMPTS,
 };
 

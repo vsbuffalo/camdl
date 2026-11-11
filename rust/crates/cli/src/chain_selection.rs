@@ -262,6 +262,9 @@ pub struct SubsetDiagnostics {
     pub n_samples: usize,
     /// Retained chain count.
     pub n_chains: usize,
+    /// The retained chains whose draws are all one parameter vector
+    /// ([`crate::fit::chain_diagnostics::chain_is_frozen`]), ascending.
+    pub frozen_chains: Vec<ChainIndex>,
 }
 
 /// Drop the selected chains from a method's `draws.tsv` and recompute the
@@ -320,12 +323,26 @@ pub fn recompute_subset_diagnostics(
         per_param.insert(p.clone(), d_to_param(&crate::fit::runner::compute_rhat_ess(&chains)));
     }
 
+    // The retained chains that took no step after burn-in, by the test the
+    // run applied to the same draws (gh#1032), so the subset's verdict cannot
+    // pass a frozen chain the run caught.
+    let frozen_chains: Vec<ChainIndex> = grouped.iter()
+        .filter(|(_, rows)| {
+            let cols: Vec<Vec<f64>> = param_names.iter()
+                .map(|p| rows.iter().filter_map(|r| r.params.get(p).copied()).collect())
+                .collect();
+            crate::fit::chain_diagnostics::chain_is_frozen(cols.iter().map(Vec::as_slice))
+        })
+        .map(|(c, _)| ChainIndex(*c))
+        .collect();
+
     Ok(SubsetDiagnostics {
         info,
         n_samples: kept.len(),
         n_chains: grouped.len(),
         kept,
         per_param,
+        frozen_chains,
     })
 }
 

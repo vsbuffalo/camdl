@@ -15,7 +15,7 @@ use sim::inference::{
     pmmh::Prior,
     prior::Density,
     pgas::{PGASConfig, ChainResumeState, run_pgas, PGASSweep, PGASTrajectory, PgasEvent, RENEWAL_BINS},
-    diagnostic::DiagnosticKind,
+    diagnostic::{DiagnosticKind, FrozenSampler},
 };
 use io::trajectories::{
     Granularity, PosteriorDraw, TrajColumnSpec, TrajManifest, write_trajectories_tsv,
@@ -1177,10 +1177,8 @@ pub fn run_method(
             } };
 
             // Save resume state for future --resume
-            let resume_path = chain_dir.join("resume_state.bin");
-            if let Ok(encoded) = bincode::serialize(&result.resume_state) {
-                let _ = std::fs::write(&resume_path, encoded);
-            }
+            super::resumed_chain::write_resume_state(&chain_dir, &result.resume_state)
+                .map_err(|e| format!("pgas chain {}: {e}", chain))?;
 
             // Write this chain's posterior latent trajectories: one tidy/long
             // `trajectories.tsv` (all saved draws stacked, leading `chain draw
@@ -1396,9 +1394,34 @@ pub fn run_method(
     // BLOCK update (identical rate on every parameter) is reported once per
     // chain, not once per parameter.
     let kernel = theta_move_kernel(use_nuts, config.compiled.as_ref());
+    let n_post_burn = n_sweeps.saturating_sub(burn_in);
+    // gh#1032. A chain whose retained draws are one parameter vector took no
+    // step after burn-in. Said once, as its own finding, before the rates: its
+    // acceptance rate counts the warm-up sweeps (a chain that moved on 7 of
+    // its first 10 sweeps and never after reads 12%) and so is not raised for
+    // it, and under NUTS neither is its divergence count, which this carries.
+    for ((chain_id, sweeps, _), base) in all_results.iter().zip(&inherited) {
+        if !diagnostics.is_frozen(*chain_id) {
+            continue;
+        }
+        let n_draws = base.as_ref().map_or(0, |b| b.index.len()) + sweeps.len();
+        let sampler = match kernel {
+            sim::inference::diagnostic::AcceptanceKernel::Nuts => FrozenSampler::Nuts {
+                step_size: sweeps.last().map(|s| s.nuts.step_size),
+                n_divergent: chain_nuts.lock().unwrap()[*chain_id].n_divergent_post_burn,
+            },
+            sim::inference::diagnostic::AcceptanceKernel::RandomWalk => FrozenSampler::RandomWalk,
+        };
+        out.finding(DiagnosticKind::ChainFrozen {
+            chain_id: *chain_id, n_draws, burn_in, n_steps: n_post_burn, sampler,
+        });
+    }
     // The table is drawn at the end of the run from the recorded rates
     // (`report::render::pgas_acceptance_table`); the findings are pushed here.
     for &(chain_id, _, ref rates) in &all_results {
+        if diagnostics.is_frozen(chain_id) {
+            continue;
+        }
         let block_update = rates.len() > 1
             && rates.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
         if block_update {
@@ -1438,6 +1461,21 @@ pub fn run_method(
         for kind in diagnostics.rhat_findings(super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()) {
             out.finding(kind);
         }
+    }
+
+    // gh#406, gh#1008. Each chain's mean `obs_ll` against the other chains',
+    // computed once here from the traces the chains have closed, over each
+    // chain's retained draws, and recorded in the summary for every reader. A
+    // chain that differs beyond its Monte Carlo error is a finding.
+    let chain_logliks = super::chain_diagnostics::recorded_chain_loglik_agreement(
+        method_dir,
+        LoglikType::CompleteData,
+        all_results.iter().zip(&inherited).map(|((c, sweeps, _), base)| {
+            (ChainIndex(*c), base.as_ref().map_or(0, |b| b.index.len()) + sweeps.len())
+        }),
+    );
+    for kind in chain_logliks.iter().flat_map(|a| a.findings()) {
+        out.finding(kind);
     }
 
     // gh#791. Trajectory renewal resolved in time, pooled over the retained
@@ -1513,11 +1551,11 @@ pub fn run_method(
     //     convention). Matters for posterior validity, not just
     //     adaptation.
     //   - MaxTreeDepthHits: > 5% of post-burn-in sweeps (Stan).
-    let n_post_burn = n_sweeps.saturating_sub(burn_in);
     let nuts_diag = chain_nuts.lock().unwrap();
     for chain_id in 0..n_chains {
         let nd = &nuts_diag[chain_id];
-        if nd.n_divergent_post_burn > 0 {
+        // A frozen chain's divergences are in its `ChainFrozen` finding.
+        if nd.n_divergent_post_burn > 0 && !diagnostics.is_frozen(chain_id) {
             collector.push(DiagnosticKind::DivergentTransitions {
                 n_divergent: nd.n_divergent_post_burn,
                 n_sweeps:    n_post_burn,
@@ -1629,7 +1667,7 @@ pub fn run_method(
         .collect();
     let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
     write_summary(method_dir, &all_results, kernel, thin, elapsed.as_secs_f64(), &traj_plan, &saved_paths,
-        n_trajectories, &diagnostics, path_renewal.as_ref(),
+        n_trajectories, &diagnostics, chain_logliks.as_ref(), path_renewal.as_ref(),
         filter_ess.as_ref().map(|fe| &fe.summary), latent_convergence.as_ref())?;
 
     // No-op resume: every chain already reached the target sweep count
@@ -1755,6 +1793,7 @@ pub fn run_method(
         // has no spread to record.
         pf_noise: None,
         optimizer_convergence: None,
+        chain_loglik_agreement: None,
     };
     state.save(&method_dir.to_string_lossy())?;
 
@@ -2168,7 +2207,8 @@ fn compute_diagnostics(
     inherited: &[Option<super::resumed_chain::InheritedDraws>],
     estimated_params: &[EstimatedParam],
 ) -> MethodConvergence {
-    MethodConvergence::compute(estimated_params.iter().enumerate().map(|(p, spec)| {
+    let chain_ids: Vec<ChainIndex> = results.iter().map(|(c, _, _)| ChainIndex(*c)).collect();
+    MethodConvergence::compute(&chain_ids, estimated_params.iter().enumerate().map(|(p, spec)| {
         let chains: Vec<Vec<f64>> = results.iter().zip(inherited)
             .map(|((_, sweeps, _), base)| {
                 base.iter().flat_map(|b| b.column(p))
@@ -2268,6 +2308,7 @@ fn write_summary(
     saved_paths: &SavedPathCounts,
     n_trajectories: usize,
     diagnostics: &MethodConvergence,
+    chain_logliks: Option<&super::chain_diagnostics::ChainLoglikAgreement>,
     path_renewal: Option<&super::path_renewal::PathRenewal>,
     filter_ess: Option<&super::filter_ess::FilterEss>,
     latent_convergence: Option<&super::latent_convergence::LatentConvergence>,
@@ -2344,6 +2385,7 @@ fn write_summary(
     // live in this summary and silently absent from pmmh's or nuts's.
     summary.as_object_mut().expect("json! built an object")
         .extend(diagnostics.summary_fields());
+    super::chain_diagnostics::insert_agreement(&mut summary, chain_logliks)?;
 
     let path = dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename());
     let contents = serde_json::to_string_pretty(&summary)

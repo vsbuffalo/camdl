@@ -73,6 +73,19 @@ fn filter_failed(message: String) -> crate::out::CommandError {
     crate::out::CommandError { code: FILTER_FAILED, message, hint: None }
 }
 
+/// The sentence for a filter whose log-likelihood is `-inf` because every
+/// particle that was alive scored `-inf` at some observation, naming the
+/// observation, the stream, the observed value and the guard that produced
+/// `-inf` (`sim::inference::obs_attempt::NegInfCause`). `None` for a result
+/// that is finite, or `-inf` for a reason the filter did not record.
+fn collapse_message(result: &sim::inference::particle_filter::PFilterResult) -> Option<String> {
+    if result.log_likelihood != f64::NEG_INFINITY {
+        return None;
+    }
+    result.collapse.as_ref().map(|c| format!(
+        "error: the log-likelihood is -inf at these parameters: {c}"))
+}
+
 pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // pfilter has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
@@ -729,7 +742,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         // into `sim::bootstrap_filter` — deferred (an inference-crate change).
         let bar = crate::out::progress::Reporter::new().task(n_replicates as u64, "pfilter", "reps");
         let acc = std::sync::Mutex::new((0.0_f64, 0usize)); // (Σ loglik, count)
-        let logliks: Vec<f64> = run_pooled(&pf_pool, || {
+        let (logliks, collapses): (Vec<f64>, Vec<Option<String>>) = run_pooled(&pf_pool, || {
             (0..n_replicates).into_par_iter().map(|rep| {
                 let rep_seed = seed.wrapping_add((rep as u64).wrapping_mul(SEED_STRIDE));
                 let result = bootstrap_filter(
@@ -746,16 +759,33 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                         bar.set(crate::out::progress::ll(g.0 / g.1 as f64));
                     }
                 }
-                result.log_likelihood
-            }).collect()
+                (result.log_likelihood, collapse_message(&result))
+            }).unzip()
         });
         bar.finish();
+
+        // Every replicate lost all its weight: the filter rejects these
+        // parameters, which is what exit status `FILTER_FAILED` says. A mean
+        // of `-inf` with no cause would be all the run reported. When only
+        // some replicates collapsed, the mean is still `-inf` and still
+        // reported, and the first collapse is named below it.
+        let n_collapsed = collapses.iter().flatten().count();
+        if n_collapsed == n_replicates {
+            out.error(filter_failed(format!(
+                "{} (all {n_replicates} replicates; replicate 1 shown)",
+                collapses[0].as_deref().unwrap_or_default()))).exit();
+        }
 
         let mean_ll = logliks.iter().sum::<f64>() / n_replicates as f64;
         let var_ll = logliks.iter().map(|&l| (l - mean_ll).powi(2)).sum::<f64>() / (n_replicates - 1) as f64;
         let sd_ll = var_ll.sqrt();
 
         out.say(format_args!("loglik = {:.1} ± {:.1} ({} replicates, N={})", mean_ll, sd_ll, n_replicates, n_particles));
+        if let Some(first) = collapses.iter().flatten().next() {
+            out.say(format_args!("warning: {n_collapsed} of {n_replicates} replicates scored \
+                -inf, so the mean is -inf; the first: {}",
+                first.strip_prefix("error: ").unwrap_or(first)));
+        }
 
         // Output: TSV of seed + loglik, or summary to --output
         match &output_path {
@@ -1004,6 +1034,14 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             out.fail(format!("error writing filtering: {}", e));
         });
         out.say(format_args!("filtering marginals written to {}", path));
+    }
+
+    // A filter that lost all its weight has no likelihood to report or store:
+    // the diagnostic outputs above (`--trace`'s `ll_increment`, `--pf-health`)
+    // are written, and the run then fails with the cause. Storing the `-inf`
+    // would make the identical rerun a cache hit that says nothing about why.
+    if let Some(message) = collapse_message(&result) {
+        out.error(filter_failed(message)).exit();
     }
 
     // Write loglik

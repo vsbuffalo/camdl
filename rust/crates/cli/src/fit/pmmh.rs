@@ -15,7 +15,7 @@ use crate::cas::iso8601_utc;
 use sim::inference::{
     if2::EstimatedParam,
     pmmh::{run_pmmh, Prior, PMMHConfig, PMMHResult, PMMHResumeState},
-    diagnostic::DiagnosticKind,
+    diagnostic::{DiagnosticKind, FrozenSampler},
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -795,10 +795,8 @@ pub fn run_method(
             }
 
             // Save resume state for future --resume
-            let resume_path = chain_dir.join("resume_state.bin");
-            if let Ok(encoded) = bincode::serialize(&result.resume_state) {
-                let _ = std::fs::write(&resume_path, encoded);
-            }
+            super::resumed_chain::write_resume_state(&chain_dir, &result.resume_state)
+                .map_err(|e| format!("chain {}: {e}", ChainIndex(chain_id)))?;
 
             Ok(Some((chain_id, result)))
         })?
@@ -887,10 +885,27 @@ pub fn run_method(
     // coloring, the finding and the message a user reads cannot disagree about
     // where the band starts (gh#299 item 3).
     let kernel = THETA_MOVE_KERNEL;
+    // gh#1032. A chain whose retained draws are one parameter vector accepted
+    // no proposal after burn-in. Said once, as its own finding, in place of
+    // its acceptance finding: the frozen finding states the stronger fact.
+    for ((chain_id, r), base) in results.iter().zip(&inherited) {
+        if diagnostics.is_frozen(*chain_id) {
+            out.finding(DiagnosticKind::ChainFrozen {
+                chain_id: *chain_id,
+                n_draws: base.as_ref().map_or(0, |b| b.index.len()) + r.steps.len(),
+                burn_in,
+                n_steps: n_steps.saturating_sub(burn_in),
+                sampler: FrozenSampler::RandomWalk,
+            });
+        }
+    }
     // The table — each chain's rate, and the scale its draws were proposed
     // under with its warm-up's floor count — is drawn at the end of the run
     // from the recorded rates (`report::render::acceptance_table`).
     for (chain_id, result) in &results {
+        if diagnostics.is_frozen(*chain_id) {
+            continue;
+        }
         if let Some(d) = sim::inference::diagnostic::acceptance_diagnostic(
             Some(*chain_id), result.acceptance_rate, None, kernel)
         {
@@ -914,6 +929,21 @@ pub fn run_method(
         for kind in diagnostics.rhat_findings(super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()) {
             out.finding(kind);
         }
+    }
+
+    // gh#406, gh#1008. Each chain's mean log-likelihood against the other
+    // chains', computed once here from the traces the chains have closed,
+    // over each chain's retained draws, and recorded in the summary for every
+    // reader. A chain that differs beyond its Monte Carlo error is a finding.
+    let chain_logliks = super::chain_diagnostics::recorded_chain_loglik_agreement(
+        method_dir,
+        loglik_kind,
+        results.iter().zip(&inherited).map(|((c, r), base)| {
+            (ChainIndex(*c), base.as_ref().map_or(0, |b| b.index.len()) + r.steps.len())
+        }),
+    );
+    for kind in chain_logliks.iter().flat_map(|a| a.findings()) {
+        out.finding(kind);
     }
 
     // What each chain's warm-up says about its draws, after the chains join
@@ -985,7 +1015,7 @@ pub fn run_method(
     } else {
         crate::run_meta::FitAlgorithm::Pmmh
     };
-    write_summary(method_dir, &results, &config, &diagnostics, algo, &warmup, &plan, &cost)?;
+    write_summary(method_dir, &results, &config, &diagnostics, chain_logliks.as_ref(), algo, &warmup, &plan, &cost)?;
 
     // Write fit_state.toml
     let mut start_values = std::collections::BTreeMap::new();
@@ -1072,6 +1102,7 @@ pub fn run_method(
         // a stuck pseudo-marginal chain exists only in the run's stderr.
         pf_noise: pf_noise_check,
         optimizer_convergence: None,
+        chain_loglik_agreement: None,
     };
     state.save(&method_dir.to_string_lossy())?;
 
@@ -1203,7 +1234,8 @@ fn compute_diagnostics(
     inherited: &[Option<super::resumed_chain::InheritedDraws>],
     estimated_params: &[EstimatedParam],
 ) -> MethodConvergence {
-    MethodConvergence::compute(estimated_params.iter().enumerate().map(|(p, spec)| {
+    let chain_ids: Vec<ChainIndex> = results.iter().map(|(c, _)| ChainIndex(*c)).collect();
+    MethodConvergence::compute(&chain_ids, estimated_params.iter().enumerate().map(|(p, spec)| {
         let chains: Vec<Vec<f64>> = results.iter().zip(inherited)
             .map(|((_, r), base)| {
                 base.iter().flat_map(|b| b.column(p))
@@ -1275,6 +1307,7 @@ fn write_summary(
     results: &[(usize, PMMHResult)],
     config: &FitRunConfig,
     diagnostics: &MethodConvergence,
+    chain_logliks: Option<&super::chain_diagnostics::ChainLoglikAgreement>,
     algo: crate::run_meta::FitAlgorithm,
     warmup: &[ChainWarmup],
     plan: &SamplingPlan,
@@ -1321,6 +1354,7 @@ fn write_summary(
     // live in this summary and silently absent from pgas's or nuts's.
     summary.as_object_mut().expect("json! built an object")
         .extend(diagnostics.summary_fields());
+    super::chain_diagnostics::insert_agreement(&mut summary, chain_logliks)?;
 
     let path = dir.join(algo.summary_filename());
     let contents = serde_json::to_string_pretty(&summary)

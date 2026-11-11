@@ -200,6 +200,9 @@ pub fn obs_stream_checks(model: &ir::Model) -> Vec<Check> {
 pub enum Verdict {
     Converged { max_rhat: f64, param: Option<String> },
     NotConverged { max_rhat: f64, param: Option<String>, band: crate::fit::method_result::RhatBand },
+    /// These chains took no step after burn-in (gh#1032): not converged,
+    /// whatever any R̂ says.
+    ChainsFrozen { chains: Vec<crate::chain_index::ChainIndex> },
     /// R̂ could not be computed for these parameters for a reason that is a
     /// problem: not converged, with no number to show.
     Unassessable { params: Vec<String> },
@@ -233,6 +236,7 @@ pub fn verdict(result: &crate::fit::method_result::MethodResult) -> Verdict {
             RhatBand::Converged => Verdict::Converged { max_rhat: v, param },
             band => Verdict::NotConverged { max_rhat: v, param, band },
         },
+        MaxRhat::ChainsFrozen { chains } => Verdict::ChainsFrozen { chains },
         MaxRhat::Unassessable { params } => Verdict::Unassessable { params },
         MaxRhat::NotApplicable { reason } => Verdict::NotAssessed { reason: reason.describe().to_string() },
         MaxRhat::NoParams => Verdict::NotAssessed { reason: "no parameter was assessed".to_string() },
@@ -498,14 +502,11 @@ pub fn unused_starts_note(rule_tag: &str, params: &[String], still_read: bool) -
 /// renderings of one fit that each go to disk for themselves is how they drift.
 #[derive(Debug, Clone, Default)]
 pub struct ChainDetail {
-    /// Per-chain mean log-likelihood and the trace column it was read from.
-    /// `None` when no per-chain trace is readable at all.
-    pub logliks: Option<crate::fit::chain_diagnostics::ChainLoglikMeans>,
-    /// Each chain's comparison of its mean log-likelihood with the other
-    /// chains' ([`crate::fit::chain_diagnostics::assess_chain_logliks`]).
-    /// Empty when no cross-chain comparison was possible — fewer than two
-    /// chains with traces, or no scored column.
-    pub scores: Vec<crate::fit::chain_diagnostics::ChainLoglikScore>,
+    /// Each chain's mean log-likelihood and its comparison with the other
+    /// chains', as the run recorded it (`PosteriorDiagnostics::chain_logliks`).
+    /// `None` when the leaf does not record one: written before camdl
+    /// recorded it, or a sampler that wrote no per-chain trace.
+    pub chain_logliks: Option<crate::fit::chain_diagnostics::ChainLoglikAgreement>,
     /// Per-chain saved / forkable latent-path counts. `None` for a method that
     /// saved none, and for one whose `trajectories` block predates the chain
     /// ids that key the rows (gh#727 follow-up: a row's position is not an
@@ -532,8 +533,6 @@ pub struct ChainDetail {
     pub cross_chain: Option<crate::fit::cross_chain_compat::CrossChainReading>,
     /// Per-chain count of retained draws whose log-posterior is `-inf`.
     pub neginf: Option<Vec<crate::fit::chain_diagnostics::ChainNegInf>>,
-    /// Per-chain count of distinct parameter vectors among the retained draws.
-    pub unique_draws: Option<Vec<crate::fit::chain_diagnostics::ChainUniqueDraws>>,
     /// How many posterior draws a counterfactual could fork from, over the
     /// same chains the rest of the summary reports.
     pub forkable: Option<Forkable>,
@@ -571,27 +570,23 @@ pub struct Forkable {
 
 impl ChainDetail {
     /// Everything the summary's Bayesian block reads from the leaf beside the
-    /// typed result. `subset` and `forkable` were resolved by the caller under
-    /// the command's `--exclude-chains`.
+    /// typed result. `chain_logliks` is the comparison the typed result
+    /// carries; `subset` and `forkable` were resolved by the caller under the
+    /// command's `--exclude-chains`.
     ///
     /// A PGAS leaf written before the per-cell latent table existed has the
     /// table written here, once, from its saved paths: the same bytes a re-run
     /// would leave.
     pub fn gather(
         method_dir: &Path,
-        ll_kind: crate::fit::loglik::LoglikType,
+        chain_logliks: Option<crate::fit::chain_diagnostics::ChainLoglikAgreement>,
         is_pgas: bool,
         subset: Option<crate::chain_selection::SubsetInfo>,
         forkable: Option<Forkable>,
     ) -> Self {
         use crate::fit::chain_diagnostics as cd;
-        let (logliks, scores) = match cd::read_chain_loglik_scores(method_dir, ll_kind) {
-            Some((means, scores)) => (Some(means), scores),
-            None => (None, Vec::new()),
-        };
         let mut detail = Self {
-            logliks,
-            scores,
+            chain_logliks,
             saved_paths: None,
             latent: None,
             latent_table_written: None,
@@ -600,7 +595,6 @@ impl ChainDetail {
             path_renewal: None,
             cross_chain: None,
             neginf: cd::read_chain_neginf(method_dir),
-            unique_draws: cd::read_chain_unique_draws(method_dir),
             forkable,
             subset,
             // Read for the identity line's chain count and the seeded-from

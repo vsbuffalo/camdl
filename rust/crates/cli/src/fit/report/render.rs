@@ -660,7 +660,8 @@ pub(crate) fn bayesian_block(version_lead: bool, report: &MethodReport, explain_
     out.extend(verdict_section(diag, detail));
     out.extend(posterior_section(diag, posterior_mean, &report.param_dates, explain_on));
     out.extend(convergence_section(diag, acceptance_summary, explain_on));
-    out.extend(chains_section(diag.n_chains, detail, explain_on));
+    out.extend(chains_section(
+        diag.n_chains, diag.frozen_chains.as_deref().unwrap_or(&[]), detail, explain_on));
     if method == "pgas" {
         out.extend(latent_paths_section(detail, explain_on));
     }
@@ -1047,6 +1048,23 @@ pub(crate) fn verdict_section(diag: &PosteriorDiagnostics, detail: &ChainDetail)
                 detail,
             ));
         }
+        MaxRhat::ChainsFrozen { chains } => {
+            out.push(Line(vec![
+                Span::plain("  "),
+                Span::styled("✗", Style::Err),
+                Span::plain(" NOT converged"),
+            ]));
+            let what = if chains.len() == 1 {
+                "its retained draws are one parameter vector, a point mass in every pooled \
+                 number below"
+            } else {
+                "the retained draws of each are one parameter vector, a point mass in every \
+                 pooled number below"
+            };
+            out.push(plain(format!(
+                "    {}: {what}", crate::fit::method_result::frozen_chains_clause(&chains))));
+            out.extend(verdict_facts(None, detail));
+        }
         MaxRhat::Unassessable { params } => {
             out.push(Line(vec![
                 Span::plain("  "),
@@ -1104,20 +1122,23 @@ fn not_assessed_headline() -> Line {
 ///
 /// Under `--exclude-chains` its job is also to say what the chain count is
 /// not. R̂ and the parameter counts on the lines above are recomputed over
-/// the retained chains; the log-likelihood comparison is read from the
-/// per-chain traces on disk, which the selection does not filter. Standing
+/// the retained chains; the log-likelihood comparison is the one the run
+/// recorded over every chain, which the selection does not filter. Standing
 /// unlabelled beside recomputed numbers, it would read as though it shared
 /// their scope.
 fn verdict_facts(lead: Option<String>, detail: &ChainDetail) -> Vec<Line> {
     let mut parts: Vec<String> = lead.into_iter().collect();
-    if !detail.scores.is_empty() {
-        let n = detail.scores.iter().filter(|s| s.is_flagged()).count();
-        let n_assessed = detail.scores.iter().filter(|s| s.test().is_some()).count();
+    match &detail.chain_logliks {
+        None => parts.push("chains' log-likelihood comparison not recorded".to_string()),
+        Some(a) if a.compared() => {
+        let scores = &a.chains;
+        let n = scores.iter().filter(|s| s.is_flagged()).count();
+        let n_assessed = scores.iter().filter(|s| s.test().is_some()).count();
         let scope = match detail.subset {
             Some(_) => " (over every chain, not the retained subset)",
             None => "",
         };
-        let n_all = detail.scores.len();
+        let n_all = scores.len();
         parts.push(match (n_assessed, n) {
             (0, _) => format!("chains' log-likelihoods not assessed{scope}"),
             (a, 0) if a == n_all => format!("chains' log-likelihoods agree{scope}"),
@@ -1127,6 +1148,8 @@ fn verdict_facts(lead: Option<String>, detail: &ChainDetail) -> Vec<Line> {
             (a, 1) => format!("{a} of {n_all} chains' log-likelihoods compared, 1 differs{scope}"),
             (a, n) => format!("{a} of {n_all} chains' log-likelihoods compared, {n} differ{scope}"),
         });
+        }
+        Some(_) => {}
     }
     if let Some(j) = &detail.forkable {
         let scope = match &j.selection {
@@ -1348,6 +1371,7 @@ pub(crate) fn efficiency_lines(diag: &PosteriorDiagnostics) -> Vec<Line> {
 /// skipping.
 pub(crate) fn chains_section(
     n_chains_expected: usize,
+    frozen_chains: &[crate::chain_index::ChainIndex],
     detail: &ChainDetail,
     explain_on: bool,
 ) -> Vec<Line> {
@@ -1363,7 +1387,7 @@ pub(crate) fn chains_section(
     if let Some(info) = &detail.subset {
         out.extend(note(Style::Dim, &format!(
             "(every chain is listed, including the excluded {} — this table \
-             is read from the traces on disk, and the chains are compared \
+             is the comparison the run recorded, and the chains are compared \
              over all of them)",
             info.excluded_csv())));
     }
@@ -1378,59 +1402,52 @@ pub(crate) fn chains_section(
         .unwrap_or_default();
     let show_paths = !paths.is_empty();
 
-    let Some(means) = &detail.logliks else {
-        out.push(indented("  ", "(per-chain traces unavailable — cannot break down by chain)", Style::Dim));
-        // The path counts are a separate artifact and survive the absence of
-        // the traces. Withholding them because the loglik columns cannot be
-        // filled would lose a fact this section still holds.
-        out.extend(path_only_table(&paths));
-        out.extend(saved_path_notes(detail, show_paths));
-        // `--explain` defines the section's terms, not this fit's numbers, so
-        // it belongs on every exit — a reader who gets the degraded table
-        // needs the vocabulary at least as much as one who does not.
-        out.extend(explain(explain_on, SECTION_CHAINS));
-        return out;
-    };
-
     // Whether a cross-chain comparison is possible at all. When it is not,
     // the reason is stated and the ranked table is skipped — but the
-    // degeneracy screens below still run: they read `log_posterior` and
-    // `draws.tsv`, so a -inf or point-mass chain must not go unreported just
-    // because the comparison column is missing (gh#608, gh#635).
-    if means.scored_column_absent {
+    // degeneracy screens below still run: the -inf screen reads
+    // `log_posterior` and the frozen chains are the run's record, so neither
+    // goes unreported because the comparison is missing (gh#608, gh#1032).
+    let agreement = detail.chain_logliks.as_ref();
+    if agreement.is_none() {
+        // A leaf written before the run recorded the comparison: said, never
+        // recomputed here and never rendered as chains that agree.
+        out.push(indented("  ", "(no per-chain log-likelihood comparison recorded in this leaf)",
+            Style::Dim));
+        out.extend(path_only_table(&paths));
+    } else if let Some(a) = agreement.filter(|a| a.column_absent) {
         // No silent gap: a method whose traces predate the column would
         // otherwise render as rows of dashes that read like broken chains.
         out.push(indented("  ", format!(
             "(traces carry no `{}` column — cannot compare chains on it)",
-            means.scored_column), Style::Dim));
+            a.column), Style::Dim));
         out.extend(path_only_table(&paths));
-    } else if means.scored.len() < 2 {
+    } else if agreement.is_some_and(|a| a.chains.len() < 2) {
         out.push(indented("  ", "(need ≥2 chains with traces to compare chains)", Style::Dim));
         out.extend(path_only_table(&paths));
-    } else {
+    } else if let Some(a) = agreement {
         // Under a selection `n_chains_expected` is the RETAINED count while
         // the rows are every chain on disk, so the comparison would read
         // "found traces for 16 of 6 chains". The note above already says why
         // the two differ; this line only makes sense unfiltered.
         if detail.subset.is_none() && n_chains_expected != 0
-            && means.scored.len() != n_chains_expected
+            && a.chains.len() != n_chains_expected
         {
             out.push(indented("  ", format!(
                 "(found traces for {} of {} chains)",
-                means.scored.len(), n_chains_expected), Style::Dim));
+                a.chains.len(), n_chains_expected), Style::Dim));
         }
         let path_head = if show_paths {
             format!(" {:>7} {:>10}", "paths", "forkable")
         } else {
             String::new()
         };
-        out.push(plain(match &means.complete_data {
+        out.push(plain(match &a.complete_data {
             Some(_) => format!("  {:5} {:>14}  {:>8}  {:>6}  {:>14} {:>14}{}   {}",
                 "chain", "obs ll", "Δ others", "Z", "transition ll", "complete ll", path_head, "flag"),
             None => format!("  {:5} {:>14}  {:>8}  {:>6}{}   {}",
                 "chain", "mean loglik", "Δ others", "Z", path_head, "flag"),
         }));
-        for (i, sc) in detail.scores.iter().enumerate() {
+        for (i, sc) in a.chains.iter().enumerate() {
             // A chain not assessed renders `—`, never a fake 0.
             let z = match sc.test() {
                 Some(t) => format!("{:>+8.2}  {:>6.2}", t.diff, t.z),
@@ -1450,7 +1467,7 @@ pub(crate) fn chains_section(
             // (—).
             row.extend(chain_loglik_cell(sc.mean_loglik, 14));
             row.push(Span::plain(format!("  {z}")));
-            if let Some(cd_means) = &means.complete_data {
+            if let Some(cd_means) = &a.complete_data {
                 row.push(Span::plain("  "));
                 row.extend(chain_loglik_cell(cd_means.transition.get(i).copied().unwrap_or(f64::NAN), 14));
                 row.push(Span::plain(" "));
@@ -1470,7 +1487,7 @@ pub(crate) fn chains_section(
         }
         // Why the chains not assessed were not, one line per reason.
         let mut reasons: Vec<(String, Vec<String>)> = Vec::new();
-        for sc in &detail.scores {
+        for sc in &a.chains {
             if let ChainLoglikOutcome::NotAssessed(why) = &sc.outcome {
                 let why = why.describe();
                 match reasons.iter_mut().find(|(w, _)| *w == why) {
@@ -1510,27 +1527,25 @@ pub(crate) fn chains_section(
         }
     }
 
-    // gh#635 (ebola item 1): a POINT-MASS chain — one distinct parameter
-    // vector across all retained draws (zero accepted θ-moves) — is not
-    // assessed by the comparison (one effective draw) and evades the −inf
-    // screen when its start has finite density.
-    // Same loud treatment.
-    if let Some(uniq) = &detail.unique_draws {
-        for u in uniq.iter().filter(|u| u.n_unique == 1 && u.n_draws > 1) {
-            out.extend(note(Style::Err, &format!(
-                "⚠ chain {}: ONE distinct parameter vector across {} retained \
-                 draws (zero accepted moves) — a point-mass chain; its draws \
-                 are in draws.tsv and every pooled number in this block. View \
-                 without it: --exclude-chains {} (exclusion stays \
-                 explicit — gh#419).",
-                u.chain, u.n_draws, u.chain,
-            )));
-        }
+    // gh#635, gh#1032: a chain that took no step after burn-in — one
+    // parameter vector across its retained draws — is not assessed by the
+    // comparison (one effective draw) and evades the −inf screen when its
+    // point has finite density. The run recorded it (`frozen_chains`); the
+    // same loud treatment, read from that record.
+    for c in frozen_chains {
+        out.extend(note(Style::Err, &format!(
+            "⚠ chain {c}: took no step after burn-in — its retained draws are one \
+             parameter vector, a point mass in draws.tsv and in every pooled number \
+             in this block. View without it: --exclude-chains {c} (exclusion stays \
+             explicit — gh#419).",
+        )));
     }
 
     // What was observed, and what it can indicate — never a cause stated as
     // fact. R̂ and ESS above are the convergence verdict; this corroborates.
-    let observed = crate::fit::chain_diagnostics::describe_flagged(&detail.scores, means.scored_column);
+    let observed: Vec<String> = detail.chain_logliks.as_ref()
+        .map(crate::fit::chain_diagnostics::describe_flagged)
+        .unwrap_or_default();
     for o in &observed {
         out.extend(note(Style::Warn, &format!("⚠ {o}.")));
     }
