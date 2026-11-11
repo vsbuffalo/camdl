@@ -209,12 +209,16 @@ fn completed_leaves(segment: &Path) -> Vec<crate::cas_read::Leaf> {
     leaves
 }
 
-/// The fit leaf at `dir`, when `dir` is one.
-fn leaf_at(dir: &Path) -> Option<crate::cas_read::Leaf> {
-    let bytes = std::fs::read(dir.join("run.json")).ok()?;
-    let record: runid::RunRecord = serde_json::from_slice(&bytes).ok()?;
-    (record.kind == runid::ArtifactKind::FitMethod)
-        .then(|| crate::cas_read::Leaf { dir: dir.to_path_buf(), record })
+/// The fit leaf at `dir`, when `dir` is one; `Ok(None)` when it holds no
+/// record or a record of another kind. A record that cannot be read is an
+/// error naming it: read as "no leaf here", it would send the directory on
+/// as a problem folder, and the reader would be told the folder "holds no
+/// completed fit run" about a run whose record is damaged.
+fn leaf_at(dir: &Path) -> Result<Option<crate::cas_read::Leaf>, ResolveError> {
+    let leaf = crate::leaf_use::read(dir).map_err(ResolveError::NotFound)?;
+    Ok(leaf
+        .filter(|l| l.record.kind == runid::ArtifactKind::FitMethod)
+        .map(|l| crate::cas_read::Leaf { dir: l.dir, record: l.record }))
 }
 
 /// Resolve a handle to what it names: a leaf directory, a run-id prefix,
@@ -222,7 +226,7 @@ fn leaf_at(dir: &Path) -> Option<crate::cas_read::Leaf> {
 /// names that folder.
 pub fn resolve_target(s: &str) -> Result<FitTarget, ResolveError> {
     match FitRef::classify(s) {
-        FitRef::RunDir(dir) => match leaf_at(&dir) {
+        FitRef::RunDir(dir) => match leaf_at(&dir)? {
             Some(leaf) => Ok(FitTarget::Leaf(LeafRef::of(leaf))),
             None if dir.is_dir() => Ok(FitTarget::Segment(dir)),
             None => Err(ResolveError::NotFound(format!("no such fit directory: {}", dir.display()))),
@@ -878,6 +882,22 @@ cooling = 0.7
         });
         std::fs::write(leaf.join("run.json"), rec.to_string()).unwrap();
         leaf
+    }
+
+    /// A run directory whose `run.json` is not a run record is an error
+    /// naming the leaf and why, not a problem folder that "holds no completed
+    /// fit run"; a directory with no record is still a problem folder.
+    #[test]
+    fn a_run_dir_with_an_unreadable_record_is_an_error_naming_it() {
+        let tmp = crate::test_support::unique_temp_dir("handle_unreadable_leaf");
+        let leaf = plant_run(&tmp.join("fits").join("toy-00000000"), None);
+        std::fs::write(leaf.join("run.json"), "{ truncated").unwrap();
+        let err = resolve_target(&leaf.to_string_lossy()).expect_err("an unreadable record").to_string();
+        assert!(err.starts_with(&format!("{}: its run.json is not a run record", leaf.display())), "{err}");
+        assert!(!err.contains("holds no completed fit run"), "{err}");
+        let segment = leaf.parent().unwrap().parent().unwrap();
+        assert!(matches!(resolve_target(&segment.to_string_lossy()), Ok(FitTarget::Segment(_))));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Stand up `<tmp>/fits/a.toml` plus a segment under `<tmp>/results/fits/`

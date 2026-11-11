@@ -236,3 +236,25 @@ fn simulate_from_the_posterior_of_a_leaf_that_did_not_complete_is_refused() {
         assert_refused(&out, &leaf, state, "simulate --draws posterior");
     }
 }
+
+/// A leaf handle whose `run.json` is not a run record is an error naming the
+/// leaf and why, from a reader of results (`fit predict`) and from a reader
+/// that shows any run (`fit summary`) alike, not a problem folder that
+/// "holds no completed fit run".
+#[test]
+fn a_handle_whose_run_json_is_corrupt_is_an_error_naming_it() {
+    let (tmp, leaf) = completed_pmmh();
+    let dir = tmp.path();
+    std::fs::write(leaf.join("run.json"), "{ \"format_version\": 1, \"kind\": ").unwrap();
+    for args in [vec!["fit", "predict"], vec!["fit", "summary"]] {
+        let mut args = args;
+        let handle = leaf.to_string_lossy().into_owned();
+        args.push(&handle);
+        let out = run(dir, &args);
+        let said = stderr(&out);
+        assert!(!out.status.success(), "{args:?}:\n{said}");
+        assert!(said.contains(&format!("{}: its run.json is not a run record", leaf.display())),
+            "{args:?} names the record and why:\n{said}");
+        assert!(!said.contains("holds no completed fit run"), "{args:?}:\n{said}");
+    }
+}
