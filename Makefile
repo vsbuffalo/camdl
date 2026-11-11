@@ -640,8 +640,14 @@ install-nvim-ts:
 DOCS_SITE_PORT ?= 4321
 DOCS_SITE_ENV  := PATH="$(CURDIR)/rust/target/release:$$PATH" CAMDLC="$(CURDIR)/$(CAMDLC)"
 
+# Quarto logs a Lua filter's error and keeps going, exiting 0, so a broken
+# executed example (docs/_web/camdl-run.lua) would not fail the build. Keep the
+# log and fail on any ERROR line in it.
 docs-site: build
-	cd docs && $(DOCS_SITE_ENV) quarto render
+	cd docs && $(DOCS_SITE_ENV) bash -o pipefail -c 'quarto render 2>&1 | tee .render.log'
+	@if grep -q 'ERROR' docs/.render.log; then \
+	  echo "docs-site: the render logged errors (docs/.render.log):" >&2; \
+	  grep 'ERROR' docs/.render.log >&2; exit 1; fi
 
 docs-site-preview: build
 	cd docs && $(DOCS_SITE_ENV) quarto preview --port $(DOCS_SITE_PORT) --host 0.0.0.0 --no-browser
