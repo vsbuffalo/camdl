@@ -1816,6 +1816,30 @@ fn write_file_synced(path: &Path, bytes: &[u8]) -> Result<(), CasError> {
     Ok(())
 }
 
+/// Write `bytes` to `path` so a reader sees the old file or the whole new one,
+/// never a partial one: the bytes go to `<path>.tmp` in the same directory
+/// ([`write_file_synced`]), which is renamed over `path`, and the directory is
+/// synced so the rename is durable. A failure at any step leaves `path` as it
+/// was, removes the temporary file, and names the step and the file in the
+/// error. The same ordering as [`write_record_atomic`], for a file that is
+/// not `run.json`.
+pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), CasError> {
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
+    let committed = write_file_synced(&tmp, bytes)
+        .and_then(|()| fs::rename(&tmp, path).at("commit", path));
+    if let Err(e) = committed {
+        // The cause is already in hand; a leftover temporary is only debris.
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    match path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(dir) => fsync_dir(dir),
+        None => fsync_dir(Path::new(".")),
+    }
+}
+
 /// Write `run.json` directly (Mode A staging: the whole dir is renamed
 /// atomically, so no tmp is needed).
 fn write_record_direct(dir: &Path, record: &RunRecord) -> Result<(), CasError> {
