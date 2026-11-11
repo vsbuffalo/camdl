@@ -21,7 +21,7 @@ pub const FORMAT_VERSION: u16 = 1;
 
 /// `kind` strings an older camdl wrote, each with the name it now has. A record
 /// carrying one does not deserialize; this table only lets a reader say why.
-const RENAMED_KINDS: &[(&str, &str)] = &[("fit_stage", "fit_method")];
+pub(crate) const RENAMED_KINDS: &[(&str, &str)] = &[("fit_stage", "fit_method")];
 
 /// Why a `run.json` that fails to deserialize was written by an older camdl,
 /// when the cause is a renamed `kind`; `None` for any other failure.
@@ -31,15 +31,23 @@ const RENAMED_KINDS: &[(&str, &str)] = &[("fit_stage", "fit_method")];
 /// leaf, `list` reports no runs, and nothing names the cause. The record is
 /// still refused; the sentence tells the user to re-run.
 pub fn renamed_kind(bytes: &[u8]) -> Option<String> {
+    renamed_kind_pair(bytes).map(|(old, new)| renamed_kind_sentence(old, new))
+}
+
+/// The `(old, new)` kind names of a record [`renamed_kind`] explains.
+pub(crate) fn renamed_kind_pair(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let kind = value.get("kind")?.as_str()?;
-    RENAMED_KINDS.iter().find(|(old, _)| *old == kind).map(|(old, new)| {
-        format!(
-            "its run.json has `kind = \"{old}\"`, which camdl now calls `{new}`; \
-             it was written by an older camdl and is not read. Delete it (or its \
-             fit directory) and run the fit again"
-        )
-    })
+    RENAMED_KINDS.iter().find(|(old, _)| *old == kind).copied()
+}
+
+/// The sentence [`renamed_kind`] gives for a record of kind `old`, now `new`.
+pub(crate) fn renamed_kind_sentence(old: &str, new: &str) -> String {
+    format!(
+        "its run.json has `kind = \"{old}\"`, which camdl now calls `{new}`; \
+         it was written by an older camdl and is not read. Delete it (or its \
+         fit directory) and run the fit again"
+    )
 }
 
 /// Run lifecycle state, as the record states it. Wire form is the

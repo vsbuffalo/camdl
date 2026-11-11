@@ -70,6 +70,7 @@ pub mod inputs;
 pub mod ir_hash;
 pub mod kind;
 pub mod layout;
+pub mod leaf;
 pub mod record;
 pub mod store;
 
@@ -78,6 +79,10 @@ pub use float::{FiniteF64, NonFiniteFloat};
 pub use hash::{CanonicalHasher, ContentAddressed, ContentHash, HexError, HASH_VERSION};
 pub use kind::{run_id, ArtifactKind};
 pub use layout::{path_label, segment, store_path};
+pub use leaf::{
+    discover, discover_in_walk_order, discover_kind, read_leaf, Leaf, Scope, Unreadable,
+    UnreadableLeaf,
+};
 pub use record::{
     renamed_kind, Failure, FileChecksum, LevelId, Provenance, RecordedOutcome, RunRecord,
     RunStatus, FORMAT_VERSION,
