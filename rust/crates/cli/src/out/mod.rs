@@ -170,7 +170,9 @@ impl Out {
     }
 
     /// Start recording a method: its opening block and its heartbeat, and
-    /// its event log, `leaf/events.jsonl`, which starts with a `begin` line.
+    /// its event log, `leaf/events.jsonl`, which starts with a `begin` line
+    /// carrying the healthy band of `acceptance`, the kernel behind the
+    /// method's acceptance diagnostics (`None` for a method without them).
     /// Returns the collector its findings go to, for the chain workers that
     /// push from their own threads; the command's own thread pushes through
     /// [`finding`](Self::finding). Every finding pushed is also an event.
@@ -181,11 +183,14 @@ impl Out {
         &mut self,
         header: crate::fit::report::RunHeader,
         method: &str,
+        acceptance: Option<sim::inference::diagnostic::AcceptanceKernel>,
         heartbeat: Arc<io::HeartbeatGuard>,
         leaf: &std::path::Path,
     ) -> Result<Arc<DiagnosticCollector>, String> {
         let log = events::EventLog::create(leaf)?;
-        log.record(&events::Event::Begin { method, header: &header });
+        log.record(&events::Event::Begin {
+            method, header: &header, acceptance: acceptance.map(|k| k.band()),
+        });
         log.result()?;
         let collector = Arc::new({
             let log = log.clone();
@@ -609,7 +614,7 @@ mod tests {
         let mut out = Out::new(true);
         let leaf = std::env::temp_dir().join(format!("camdl_out_record_{}", std::process::id()));
         std::fs::create_dir_all(&leaf).unwrap();
-        let worker = out.begin_method(header.clone(), "pmmh", Arc::new(io::HeartbeatGuard::inert()), &leaf)
+        let worker = out.begin_method(header.clone(), "pmmh", None, Arc::new(io::HeartbeatGuard::inert()), &leaf)
             .expect("the event log is created");
         out.check(Check::Starts { mode: "lhs".into(), params: vec!["beta".into()], note: "n".into() });
         out.finding(DiagnosticKind::InitialLoglikInfinite);

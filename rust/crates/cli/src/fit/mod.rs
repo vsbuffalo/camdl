@@ -777,6 +777,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // model on a chain_binomial method was silently mis-fit (the filter loops
     // freeze the real reservoir at its init value). Fail fast with the
     // actionable message instead.
+    //
+    // The same structural model decides which kernel's band the method's
+    // acceptance diagnostics apply, published in its event log's `begin`.
+    let acceptance_kernel: Option<sim::inference::diagnostic::AcceptanceKernel>;
     {
         // `required_capabilities()` is STRUCTURAL (transitions / compartments /
         // balance) — the parameter VALUES are irrelevant to it. But
@@ -803,6 +807,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         if let Err(msg) = gate_run_method_against_model(&method.algorithm, &compiled, config.problem.config.dt) {
             out.fail(format!("error: {}", msg));
         }
+        acceptance_kernel = methods::acceptance_kernel(&method.algorithm, &compiled);
         // PGAS runs NUTS only where the compiler emitted rate gradients
         // (`nuts_active`, the predicate the sampler itself uses); elsewhere it
         // falls back to Metropolis-within-Gibbs. Say so — and refuse an
@@ -1629,7 +1634,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // from here: the checks it shows and the findings it draws, in memory
         // and in the leaf's `events.jsonl`.
         let heartbeat = std::sync::Arc::new(method_heartbeat(&method_dir, &method.algorithm));
-        let collector = out.begin_method(run_header.clone(), method_name, heartbeat.clone(), &method_dir)
+        let collector = out.begin_method(run_header.clone(), method_name, acceptance_kernel,
+                heartbeat.clone(), &method_dir)
             .unwrap_or_else(|e| {
                 // No method is recorded yet, so there is no report or
                 // findings record to write; the heartbeat's terminal record

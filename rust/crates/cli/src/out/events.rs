@@ -33,7 +33,7 @@ use serde::Serialize;
 use crate::fit::loglik::LoglikType;
 use crate::fit::report::build::MethodReport;
 use crate::fit::report::{Check, RunHeader};
-use sim::inference::diagnostic::Diagnostic;
+use sim::inference::diagnostic::{AcceptanceBand, Diagnostic};
 
 /// The schema every line names. A change to what an existing field means,
 /// or a removed field, is a new version; a new event or a new field is not.
@@ -43,9 +43,15 @@ pub const SCHEMA: &str = "camdl.events/v1";
 #[derive(Debug, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event<'a> {
-    /// The method started: which one, and the run's opening block, which no
-    /// file in the leaf holds until it commits.
-    Begin { method: &'a str, header: &'a RunHeader },
+    /// The method started: which one, the run's opening block, which no file
+    /// in the leaf holds until it commits, and the healthy band its
+    /// acceptance diagnostics apply (`null` for a method that has none), so
+    /// a reader has the band before, and whether or not, a finding fires.
+    Begin {
+        method: &'a str,
+        header: &'a RunHeader,
+        acceptance: Option<AcceptanceBand>,
+    },
     /// A check the run showed before sampling (`Out::check`).
     Check { check: &'a Check },
     /// A chain's progress, at the plain progress line's cadence and at its
@@ -215,13 +221,18 @@ mod tests {
     fn the_event_schema() {
         use serde_json::json;
         let h = header();
-        assert_eq!(line(&Event::Begin { method: "pmmh", header: &h }), json!({
+        let band = Some(sim::inference::diagnostic::AcceptanceKernel::RandomWalk.band());
+        assert_eq!(line(&Event::Begin { method: "pmmh", header: &h, acceptance: band }), json!({
             "schema": "camdl.events/v1", "seq": 7, "event": "begin", "method": "pmmh",
             "header": {
                 "config": "fit.toml", "method": "pmmh", "model": "sir.camdl", "estimate": ["beta"],
                 "fixed": ["N0"], "starts": "single", "output": "results/fits/fit-aaaaaaaa",
             },
+            "acceptance": { "kernel": "random_walk", "band_lo": 0.15, "band_hi": 0.5 },
         }));
+        let h2 = header();
+        assert_eq!(line(&Event::Begin { method: "if2", header: &h2, acceptance: None })["acceptance"],
+            serde_json::Value::Null, "a method without acceptance diagnostics publishes null");
 
         let c = Check::MethodCaveat { method: "pmmh".into(), note: "n".into(), series_len: Some(14) };
         assert_eq!(line(&Event::Check { check: &c }), json!({
@@ -280,10 +291,10 @@ mod tests {
             state: Mutex::new(State { file: Some(file), seq: 0, failure: None }),
         }));
         let h = header();
-        log.record(&Event::Begin { method: "pmmh", header: &h });
+        log.record(&Event::Begin { method: "pmmh", header: &h, acceptance: None });
         let e = log.result().expect_err("a write to a read-only file failed");
         assert!(e.starts_with(&format!("cannot write {}: ", path.display())), "{e}");
-        log.record(&Event::Begin { method: "pmmh", header: &h });
+        log.record(&Event::Begin { method: "pmmh", header: &h, acceptance: None });
         assert_eq!(log.result(), Err(e), "the first failure is the one reported");
 
         std::fs::remove_file(&path).unwrap();
@@ -309,7 +320,7 @@ mod tests {
                 s.spawn(move || log.record(&Event::Progress(Progress::of_chain(chain, 1, 2, None))));
             }
         });
-        log.record(&Event::Begin { method: "pmmh", header: &h });
+        log.record(&Event::Begin { method: "pmmh", header: &h, acceptance: None });
         assert_eq!(log.result(), Ok(()));
         let text = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
         let seqs: Vec<u64> = text.lines()
