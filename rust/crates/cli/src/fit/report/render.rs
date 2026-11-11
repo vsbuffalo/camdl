@@ -160,7 +160,7 @@ pub fn render_report(outcome: &MethodOutcome, view: View) -> Vec<Line> {
                 bayesian_block(v.version_lead, report, v.explain)
             }
             Some(MethodResult::Nlopt(r)) => nlopt_block(v.version_lead, report, r),
-            Some(MethodResult::Pfilter(r)) => pfilter_block(v.version_lead, report, r),
+            Some(MethodResult::Pfilter(r)) => pfilter_block(v.version_lead, r),
             None => Vec::new(),
         },
         (View::Summary(v), MethodOutcome::Failed { header, findings, error, .. }) => {
@@ -407,7 +407,7 @@ fn pgas_acceptance_table(r: &crate::fit::method_result::PgasRun) -> Vec<Line> {
 /// An NLopt method's block: a point estimate with no IF2 gate, so a compact
 /// headline and the θ̂ table from the typed result.
 fn nlopt_block(version_lead: bool, report: &MethodReport, r: &NloptRun) -> Vec<Line> {
-    let mut out = vec![Line::default(), identity_line(version_lead, &report.name, &r.algorithm, &[])];
+    let mut out = vec![Line::default(), identity_line(version_lead, &r.algorithm, &[])];
     out.push(plain(format!(
         "    loglik:   {:.2} ({})     converged chains: {}/{}",
         r.best_loglik,
@@ -435,10 +435,10 @@ fn nlopt_block(version_lead: bool, report: &MethodReport, r: &NloptRun) -> Vec<L
 
 /// A pfilter method's block: the likelihood at fixed parameters, the mean
 /// and spread over its replicate filters, as the run printed them.
-fn pfilter_block(version_lead: bool, report: &MethodReport, r: &PfilterRun) -> Vec<Line> {
+fn pfilter_block(version_lead: bool, r: &PfilterRun) -> Vec<Line> {
     vec![
         Line::default(),
-        identity_line(version_lead, &report.name, "pfilter", &[]),
+        identity_line(version_lead, "pfilter", &[]),
         plain(format!("    loglik = {:.1} ± {:.1} ({} reps, {} particles)",
             r.ll_mean, r.ll_sd, r.n_replicates, r.n_particles)),
     ]
@@ -534,17 +534,17 @@ pub(crate) fn summary_foot(has_legend: bool, parameters: bool, explain: bool) ->
 /// so it opens the first method's line and is not repeated on the others'.
 /// `extra` is whatever the method alone can say — for PGAS, how many chains
 /// left a latent path behind.
-pub(crate) fn identity_line(version_lead: bool, name: &str, method: &str, extra: &[String]) -> Line {
+pub(crate) fn identity_line(version_lead: bool, method: &str, extra: &[String]) -> Line {
     let mut spans = vec![Span::plain("  ")];
     if version_lead {
         spans.push(Span::plain("camdl "));
         spans.push(Span::styled(crate::version::VERSION_SHORT, Style::Dim));
         spans.push(Span::plain(" · "));
     }
-    spans.push(Span::styled(name, Style::Bold));
-    let mut rest = vec![String::new(), method.to_string()];
-    rest.extend(extra.iter().cloned());
-    spans.push(Span::plain(rest.join(" · ")));
+    spans.push(Span::styled(method, Style::Bold));
+    for e in extra {
+        spans.push(Span::plain(format!(" · {e}")));
+    }
     Line(spans)
 }
 
@@ -650,7 +650,7 @@ pub(crate) fn bayesian_block(version_lead: bool, report: &MethodReport, explain_
             "loglik {:.1} at the highest log-posterior draw (natural-scale prior, no Jacobian)",
             ll));
     }
-    let mut out = vec![identity_line(version_lead, &report.name, method, &extra)];
+    let mut out = vec![identity_line(version_lead, method, &extra)];
     out.extend(refused_lines(&refused));
     out.push(seeded_from_line(
         detail.chain_starts.as_ref().and_then(|st| st.source.as_deref()),
@@ -677,7 +677,7 @@ pub(crate) fn if2_block(version_lead: bool, report: &MethodReport, if2: &If2Run)
     let refused = RefusedChains::from_findings(&report.findings, &report.findings_unreadable);
     let source_run = report.chain_detail.as_ref().and_then(|d| d.source_run.as_deref());
     let mut out = vec![identity_line(
-        version_lead, &report.name, "if2",
+        version_lead, "if2",
         &[refused
             .ran_of(state.n_chains, state.n_good_chains)
             .unwrap_or_else(|| format!("{} chains", state.n_chains))],
