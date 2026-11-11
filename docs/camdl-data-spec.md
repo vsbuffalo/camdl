@@ -853,14 +853,21 @@ it, and the trial count scored would not be the one written.
 
 At run time, `n` takes a different value on each trajectory, so `count > n` is
 the model disagreeing with valid data, and that trajectory is scored as
-impossible (log-likelihood `-inf`), exactly as for any other family. When PGAS
-initialization finds every particle impossible at a step, its report names the
-cause as the count exceeding the trial count; `pfilter` reports the resulting
-log-likelihood of `-inf` without naming the cause. An `n` that evaluates to a
-negative number or to NaN is not read as zero trials: it is outside the family's
-domain and also scores `-inf`, reported as the `n` argument being out of domain.
-A fractional `n` at run time (an `n` built from a real-valued compartment) is
-rounded to the nearest whole number.
+impossible (log-likelihood `-inf`), exactly as for any other family. When every
+particle is impossible at an observation, PGAS initialization and `pfilter` both
+say so and name the cause: the observation's time, the stream, the observed
+value, the range of what the particles projected, and how many particles each
+guard rejected, with the count exceeding the trial count as one such guard.
+`pfilter` then exits with status 3 (the filter rejected these parameters) and
+stores no result, instead of printing `-inf` as the answer; with `--replicates`,
+it does so when every replicate lost all its particles, and otherwise reports
+the mean as `-inf` with a warning naming the first collapse. A collapse that
+persists over several consecutive observations stops the filter earlier, with
+its effective-sample-size collapse error (also status 3), which does not name
+the guard. An `n` that evaluates to a negative number or to NaN is not read as
+zero trials: it is outside the family's domain and also scores `-inf`, reported
+as the `n` argument being out of domain. A fractional `n` at run time (an `n`
+built from a real-valued compartment) is rounded to the nearest whole number.
 
 `camdl survey` reads the same `n = <column>` as `camdl fit` and applies the same
 rules. Survey scores every row, so an `NA` in a column the likelihood reads is

@@ -206,6 +206,23 @@ impl std::fmt::Display for NegInfCause {
     }
 }
 
+/// Write what the ensemble managed at each stream of a collapsed observation:
+/// each as `; <attempt>`, the streams that scored `-inf` first (they are what
+/// refused), then the rest, so "this stream was not even scheduled here" is
+/// visible rather than inferred. Shared by every report of a swarm collapse
+/// (`InitFallback::SwarmCollapsed`, `FilterCollapse`), so the prose cannot
+/// differ between them.
+pub fn write_attempts(
+    f: &mut std::fmt::Formatter<'_>,
+    attempts: &[StreamAttempt],
+) -> std::fmt::Result {
+    let (refused, rest): (Vec<_>, Vec<_>) = attempts.iter().partition(|a| a.n_neg_inf > 0);
+    for a in refused.iter().chain(rest.iter()) {
+        write!(f, "; {a}")?;
+    }
+    Ok(())
+}
+
 impl std::fmt::Display for StreamAttempt {
     /// One line naming the measurement and what the ensemble managed at it.
     /// This is the prose half of the record, rendered from the same fields the
