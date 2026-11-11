@@ -64,8 +64,10 @@ local function line_range(text, spec)
   return table.concat(out, "\n")
 end
 
--- The colours camdl paints with (rust/crates/cli/src/out/paint.rs, `Style`),
--- each mapped to a class the site theme colours for light and dark. A code not
+-- The colours camdl paints with (rust/crates/cli/src/out/paint.rs, `Style`,
+-- and camdlc's ocaml/lib/compiler/term_style.ml, which adds blue for
+-- transitions and magenta for compartments), each mapped to a class the site
+-- theme colours for light and dark. A code not
 -- listed here fails the render: an unmapped code would otherwise vanish or
 -- show as raw escape bytes, and the page would stop matching the terminal.
 local SGR_CLASS = {
@@ -74,6 +76,8 @@ local SGR_CLASS = {
   ["31"] = "ansi-err",
   ["32"] = "ansi-ok",
   ["33"] = "ansi-warn",
+  ["34"] = "ansi-transition",
+  ["35"] = "ansi-compartment",
   ["36"] = "ansi-info",
 }
 
