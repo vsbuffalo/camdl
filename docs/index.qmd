@@ -4,17 +4,18 @@ subtitle: "Compartmental Model Description Language"
 toc: false
 ---
 
-camdl describes stochastic compartmental models. A `.camdl` file says what the
-compartments are, how individuals move between them and how fast; the compiler
-expands it to a flat intermediate representation that a Rust runtime simulates
-and fits to data.
+camdl is a language and toolkit for stochastic compartmental models of
+epidemics. You write a `.camdl` file that says what the compartments are (for
+example susceptible, infected and recovered), how individuals move between them
+and how fast. The compiler checks the file and expands it into a flat model
+description, which camdl then simulates and fits to data.
 
 Most guides and reference pages here are the same text the binary carries:
 `camdl docs <topic>` prints them offline, matched to the installed version.
 The tutorials are website-only, because they show the real output of each
 command, regenerated from the current code every time the site is built.
 
-<!-- figure: architecture, caption: camdl's architecture reshapes how responsibility is split between the modeler and camdl's developers. A researcher needs only to define the model's structure and prior assumptions, not its implementation or inference; camdl's responsibility is to execute the declared model faithfully and exactly. A trajectory inconsistent with the declared semantics is therefore a bug report against camdl, never the researcher's fault, and implementation risk moves from many privately maintained code bases to one audited, tested, externally validated one. -->
+<!-- figure: architecture, caption: How camdl splits responsibility between the modeler and camdl's developers. The modeler states the model's structure and prior assumptions, and writes no simulation or inference code; camdl's job is to execute the declared model exactly. A trajectory that contradicts the declared model is therefore a bug in camdl, not in the modeler's work, and implementation risk moves from many privately maintained code bases to one shared, tested one. -->
 
 ::: {.camdl-cards}
 [**camdl by example**<span>The language, one construct at a time.</span>](intro.md)
