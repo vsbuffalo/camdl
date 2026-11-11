@@ -324,3 +324,35 @@ fn a_from_mle_start_from_a_leaf_that_did_not_complete_is_refused() {
             "no leaf is claimed for the consuming fit ({state:?})");
     }
 }
+
+/// A source whose `run.json` cannot be read keys nothing: a `--resume` base
+/// and a `from_posterior` source with a damaged record are each refused,
+/// naming the record and why, before the consuming fit claims a leaf. A
+/// readable record keys the consumer by the source's `run_id`; keying it on
+/// a file digest instead would give the consumer another identity.
+#[test]
+fn a_source_with_a_corrupt_run_json_is_an_error_not_a_digest_key() {
+    let (tmp, leaf) = completed_pmmh();
+    let dir = tmp.path();
+    std::fs::write(dir.join("resumed.toml"), PMMH.replace("iterations = 60", "iterations = 90")).unwrap();
+    std::fs::write(dir.join("post.toml"), IF2.replace("starts     = \"single\"",
+        &format!("starts     = {{ from_posterior = \"{}\" }}", leaf.display()))).unwrap();
+    std::fs::write(leaf.join("run.json"), "{ \"format_version\": 1, \"kind\": ").unwrap();
+    let leaf_s = leaf.to_string_lossy().into_owned();
+    for (what, args) in [
+        ("--resume", vec!["fit", "run", "resumed.toml", "--seed", "1", "--progress", "none", "--resume", &leaf_s]),
+        ("from_posterior", vec!["fit", "run", "post.toml", "--seed", "2", "--progress", "none",
+            "--allow-nonconverged-source"]),
+    ] {
+        let out = run(dir, &args);
+        let said = stderr(&out);
+        assert!(!out.status.success(), "{what}:\n{said}");
+        assert!(said.contains(&format!("{}: its run.json is not a run record", leaf.display())),
+            "{what} names the record and why:\n{said}");
+        let consumers: Vec<String> = std::fs::read_dir(dir.join("results/fits")).unwrap().flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("resumed-") || n.starts_with("post-"))
+            .collect();
+        assert!(consumers.is_empty(), "{what}: no consuming leaf is claimed: {consumers:?}");
+    }
+}
