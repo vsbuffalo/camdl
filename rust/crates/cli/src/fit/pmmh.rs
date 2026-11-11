@@ -933,6 +933,21 @@ pub fn run_method(
         }
     }
 
+    // gh#406, gh#1008. Each chain's mean log-likelihood against the other
+    // chains', computed once here from the traces the chains have closed,
+    // over each chain's retained draws, and recorded in the summary for every
+    // reader. A chain that differs beyond its Monte Carlo error is a finding.
+    let chain_logliks = super::chain_diagnostics::recorded_chain_loglik_agreement(
+        method_dir,
+        loglik_kind,
+        results.iter().zip(&inherited).map(|((c, r), base)| {
+            (ChainIndex(*c), base.as_ref().map_or(0, |b| b.index.len()) + r.steps.len())
+        }),
+    );
+    for kind in chain_logliks.iter().flat_map(|a| a.findings()) {
+        out.finding(kind);
+    }
+
     // What each chain's warm-up says about its draws, after the chains join
     // and in chain order. Judged here from the chain's result, not inside the
     // sampler, so the finding can be recorded and printed once.
@@ -1002,7 +1017,7 @@ pub fn run_method(
     } else {
         crate::run_meta::FitAlgorithm::Pmmh
     };
-    write_summary(method_dir, &results, &config, &diagnostics, algo, &warmup, &plan, &cost)?;
+    write_summary(method_dir, &results, &config, &diagnostics, chain_logliks.as_ref(), algo, &warmup, &plan, &cost)?;
 
     // Write fit_state.toml
     let mut start_values = std::collections::BTreeMap::new();
@@ -1089,6 +1104,7 @@ pub fn run_method(
         // a stuck pseudo-marginal chain exists only in the run's stderr.
         pf_noise: pf_noise_check,
         optimizer_convergence: None,
+        chain_loglik_agreement: None,
     };
     state.save(&method_dir.to_string_lossy())?;
 
@@ -1293,6 +1309,7 @@ fn write_summary(
     results: &[(usize, PMMHResult)],
     config: &FitRunConfig,
     diagnostics: &MethodConvergence,
+    chain_logliks: Option<&super::chain_diagnostics::ChainLoglikAgreement>,
     algo: crate::run_meta::FitAlgorithm,
     warmup: &[ChainWarmup],
     plan: &SamplingPlan,
@@ -1339,6 +1356,7 @@ fn write_summary(
     // live in this summary and silently absent from pgas's or nuts's.
     summary.as_object_mut().expect("json! built an object")
         .extend(diagnostics.summary_fields());
+    super::chain_diagnostics::insert_agreement(&mut summary, chain_logliks)?;
 
     let path = dir.join(algo.summary_filename());
     let contents = serde_json::to_string_pretty(&summary)

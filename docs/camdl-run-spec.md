@@ -5529,6 +5529,39 @@ converged, whatever the R̂, since one frozen chain among moving ones can leave 
 finite and small. `fit summary --exclude-chains` recomputes the frozen chains
 over the retained ones from `draws.tsv` by the same test.
 
+**The per-chain log-likelihood comparison** (gh#406, gh#1008) is computed once,
+at the end of the run, and recorded in the leaf; `fit summary`, the warm-start
+source check and camdl-scope read the record and do not recompute it. Each
+chain's mean log-likelihood is compared with the pooled mean of the other
+chains, `Z = |Δ| / se(Δ)` against a Bonferroni cutoff at family-wise α = 0.001,
+with backward elimination of the worst chain; a chain with fewer than 10
+effective draws, a non-finite mean or no standard error is not assessed. A
+sampler compares the retained mean of `log_likelihood` (`pmmh`, `mh`) or
+`obs_ll` (`pgas`) with its Monte Carlo standard error, and records it in its
+summary under `chain_loglik_agreement`; IF2 compares each start's clean
+evaluation (`clean_loglik`) with the standard error of its replicate mean, and
+records it in `fit_state.toml` under the same key. The record:
+
+| field                     | what it holds                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `column`                  | what each chain's estimate is a mean of: `log_likelihood`, `obs_ll` or `clean_loglik`                                                                                                                                                                                                                                                                           |
+| `column_absent`           | present and `true` only when traces were read and none carries `column`                                                                                                                                                                                                                                                                                         |
+| `family_alpha`, `min_ess` | the family-wise α and the fewest effective draws assessed                                                                                                                                                                                                                                                                                                       |
+| `chains`                  | one row per chain, ascending: `chain`, `mean`, and `outcome`, tagged by `status`: `{"status": "assessed", "diff", "se", "z", "cutoff", "flagged"}` (`diff` in nats, the chain minus the others) or `{"status": "not_assessed", "reason"}` with `reason` one of `non_finite_mean`, `too_few_effective_draws` (with `ess`), `no_standard_error`, `too_few_chains` |
+| `complete_data`           | `pgas` only: `complete` and `transition`, each chain's mean `log_complete_data_ll` and `transition_ll`, parallel to `chains`; shown, never compared                                                                                                                                                                                                             |
+
+The comparison is over every chain the run kept; `fit summary --exclude-chains`
+does not recompute it and says so. A sampler's record reaches
+`fit summary --format json`, and so `events.jsonl`'s `method_report`, as
+`method_result.diagnostics.chain_logliks` (`null` when the leaf does not record
+one). Each chain a sampler's comparison flags is also a `chain_loglik_differs`
+finding, severity `warning`, carrying `chain_id`, `column`, `diff`, `z` and
+`cutoff`. IF2's flagged starts are not findings: the standard error of a clean
+evaluation is small enough that starts a tenth of a nat apart differ beyond it,
+and whether a spread matters is the decibans leg of the source gate, which has a
+floor in log-likelihood units; the comparison names the chains in that refusal.
+A leaf written before the comparison was recorded shows it as not recorded.
+
 The `mle_params.toml` `content_hash` is a _tamper_ hash — SHA-256 over
 `{name}={value:.12}\0` pairs, truncated to 8 hex — so a hand-edited parameter
 value is detectable; `camdl simulate --params` checks it and refuses an edited

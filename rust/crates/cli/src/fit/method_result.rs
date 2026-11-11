@@ -565,6 +565,12 @@ pub struct PosteriorDiagnostics {
     /// middle of the others' cloud.
     #[serde(default)]
     pub frozen_chains: Option<Vec<ChainIndex>>,
+    /// Each chain's mean log-likelihood compared with the other chains'
+    /// (gh#406, gh#1008), as the run recorded it; `None` when not recorded (a
+    /// summary written before camdl recorded it). Over every chain the run
+    /// kept: `--exclude-chains` does not recompute it, and the summary says so.
+    #[serde(default)]
+    pub chain_logliks: Option<crate::fit::chain_diagnostics::ChainLoglikAgreement>,
 }
 
 impl PosteriorDiagnostics {
@@ -1231,6 +1237,7 @@ fn posterior_diagnostics(
     let mut diag = PosteriorDiagnostics {
         per_param: conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
         frozen_chains: conv.frozen_chains(),
+        chain_logliks: conv.chain_logliks(),
     };
     if let Some((n, starts)) = point_start(method_dir)? {
         diag.demote_point_start(n, &starts);
@@ -1662,6 +1669,9 @@ pub struct ConvergenceMaps {
     /// The chains that took no step after burn-in; `None` when the summary
     /// does not record them.
     frozen_chains: Option<Vec<ChainIndex>>,
+    /// The per-chain log-likelihood comparison; `None` when the summary does
+    /// not record it.
+    chain_logliks: Option<crate::fit::chain_diagnostics::ChainLoglikAgreement>,
 }
 
 impl ConvergenceMaps {
@@ -1684,7 +1694,15 @@ impl ConvergenceMaps {
             // none frozen: the whole key then reads as not recorded.
             frozen_chains: summary.get(crate::fit::runner::FROZEN_CHAINS_KEY)
                 .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            chain_logliks: summary.get(crate::fit::chain_diagnostics::CHAIN_LOGLIK_AGREEMENT_KEY)
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
         }
+    }
+
+    /// The per-chain log-likelihood comparison the summary records, or `None`
+    /// when it records none.
+    pub fn chain_logliks(&self) -> Option<crate::fit::chain_diagnostics::ChainLoglikAgreement> {
+        self.chain_logliks.clone()
     }
 
     /// The chains the summary records as having taken no step after burn-in,
@@ -2056,6 +2074,7 @@ mod tests {
             dt_check: None,
             pf_noise: None,
             optimizer_convergence: None,
+            chain_loglik_agreement: None,
         }
     }
 
@@ -2613,6 +2632,7 @@ mod tests {
             wall_time_secs: wall,
             n_chains: 2,
             frozen_chains: None,
+            chain_logliks: None,
         }
     }
 
@@ -2671,6 +2691,7 @@ mod tests {
             wall_time_secs: wall,
             n_chains: 4,
             frozen_chains: None,
+            chain_logliks: None,
         }
     }
 
@@ -2805,6 +2826,7 @@ mod tests {
             per_param: ConvergenceMaps::read(&summary).per_param(),
             n_samples: 100, thin: 1, wall_time_secs: None, n_chains: 4,
             frozen_chains: None,
+            chain_logliks: None,
         }.max_rhat_status();
         let null_rhat = serde_json::json!({
             "rhat": { "beta": 1.001, "gamma": null },
@@ -2863,6 +2885,7 @@ mod tests {
             wall_time_secs: Some(60.0),
             n_chains: 4,
             frozen_chains: None,
+            chain_logliks: None,
         };
 
         match d.max_rhat_status() {
@@ -2950,6 +2973,7 @@ mod tests {
             ]),
             n_samples: 100, thin: 1, wall_time_secs: None, n_chains: 1,
             frozen_chains: None,
+            chain_logliks: None,
         };
         match d.max_rhat_status() {
             MaxRhat::NotApplicable { reason } => assert_eq!(reason, RhatRefusal::TooFewChains),
@@ -3080,6 +3104,7 @@ mod tests {
             wall_time_secs: Some(5.0),
             n_chains: 1,
             frozen_chains: None,
+            chain_logliks: None,
         };
         // Review blocker 1: an empty map is NOT `0.0`. Folding from zero made a
         // fit whose R̂ could not be computed report `max R̂ = 0.000 ✓` and

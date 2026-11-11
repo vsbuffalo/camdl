@@ -16,8 +16,8 @@
 //! alike, so admitting it as any one of them would be a guess.
 //!
 //! Use `#[serde(with = "crate::inference::json_f64")]` on an `f64`,
-//! [`option`] on an `Option<f64>` (where `None` stays `null`), and [`map`] on
-//! a `BTreeMap<String, f64>`.
+//! [`option`] on an `Option<f64>` (where `None` stays `null`), [`map`] on
+//! a `BTreeMap<String, f64>`, and [`vec`] on a `Vec<f64>`.
 //!
 //! JSON only: the reader dispatches on the token it finds (`deserialize_any`),
 //! which a non-self-describing format such as bincode cannot serve. No type
@@ -175,6 +175,20 @@ pub mod map {
     }
 }
 
+/// `Vec<f64>`, each value as above.
+pub mod vec {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(v: &[f64], s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(v.iter().map(|x| Number(*x)))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<f64>, D::Error> {
+        let v = Vec::<Number>::deserialize(d)?;
+        Ok(v.into_iter().map(|x| x.0).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -187,6 +201,22 @@ mod tests {
         o: Option<f64>,
         #[serde(with = "super::map")]
         m: BTreeMap<String, f64>,
+    }
+
+    /// A `Vec<f64>` keeps each non-finite element, and a finite one is the
+    /// plain number.
+    #[test]
+    fn a_vec_keeps_each_non_finite_element() {
+        #[derive(Debug, serde::Serialize, serde::Deserialize)]
+        struct V {
+            #[serde(with = "super::vec")]
+            v: Vec<f64>,
+        }
+        let text = serde_json::to_string(&V { v: vec![1.5, f64::NAN, f64::NEG_INFINITY] }).unwrap();
+        assert_eq!(text, r#"{"v":[1.5,"NaN","-inf"]}"#);
+        let back: V = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.v[0], 1.5);
+        assert!(back.v[1].is_nan() && back.v[2] == f64::NEG_INFINITY);
     }
 
     #[derive(Debug, serde::Serialize, serde::Deserialize)]

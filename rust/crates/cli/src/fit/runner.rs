@@ -4731,6 +4731,7 @@ dt = 1.0
             dt_check: None,
             pf_noise: None,
             optimizer_convergence: None,
+            chain_loglik_agreement: None,
         };
         let gate = super::super::config_v2::GateConfig::default();
         for t0 in [names.clone(), vec![]] {
@@ -5877,6 +5878,7 @@ dt = 1.0
             per_param: maps.per_param(),
             n_samples, thin: 1, wall_time_secs: None, n_chains: 4,
             frozen_chains: maps.frozen_chains(),
+            chain_logliks: None,
         };
         if let Some(ConvergenceError::PointStart { n_chains, starts }) = withheld {
             diag.demote_point_start(*n_chains, starts);
@@ -5964,7 +5966,7 @@ dt = 1.0
         let maps = ConvergenceMaps::read(&summary);
         let diag = PosteriorDiagnostics {
             per_param: maps.per_param(), n_samples: 1800, thin: 1, wall_time_secs: None,
-            n_chains: 9, frozen_chains: maps.frozen_chains(),
+            n_chains: 9, frozen_chains: maps.frozen_chains(), chain_logliks: None,
         };
         assert_eq!(diag.max_rhat_status(), MaxRhat::ChainsFrozen { chains: vec![ChainIndex(9)] });
         assert!(!diag.converged_at(RHAT_CONVERGED_THRESHOLD));

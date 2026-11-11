@@ -317,6 +317,7 @@ pub fn run_method(
             delta_loglik: convergence.delta_loglik,
             decibans_failed: convergence.decibans_failed,
         }),
+        chain_loglik_agreement: None,
     };
     fit_state
         .save(&method_dir.to_string_lossy())
