@@ -211,10 +211,16 @@ fn fit_predict_refuses_a_leaf_that_did_not_complete() {
         let out = run(dir, &["fit", "predict", &leaf.to_string_lossy(), "--n-draws", "4"]);
         assert_refused(&out, &leaf, state, "fit predict");
         let segment = leaf.parent().unwrap().parent().unwrap();
-        let written: Vec<PathBuf> = std::fs::read_dir(segment.join("predict")).into_iter().flatten()
-            .flatten().map(|e| e.path().join("predictive.json")).filter(|p| p.exists()).collect();
-        assert!(written.is_empty(), "no predictive is written for a {state:?} leaf: {written:?}");
+        assert!(!segment.join("predict").exists(),
+            "nothing is written for a {state:?} leaf: the run is refused before predict starts");
     }
+    // A run-id prefix names the run at any state; it is refused the same way.
+    NotCompleted::Failed.apply(&leaf);
+    let prefix = completed["run_id"].as_str().unwrap()[..12].to_string();
+    let out = run(dir, &["fit", "predict", &prefix, "--n-draws", "4"]);
+    let said = stderr(&out);
+    assert!(!out.status.success() && said.contains("is not a completed run: it failed"),
+        "a run-id prefix naming a failed run:\n{said}");
     // Restored, the completed leaf predicts.
     std::fs::write(leaf.join("run.json"), serde_json::to_vec_pretty(&completed).unwrap()).unwrap();
     let _ = std::fs::remove_file(leaf.join(".lock"));

@@ -71,12 +71,16 @@ pub enum ResolveError {
     /// which the runs actually differ — computed from their records, never
     /// assumed.
     AmbiguousRuns { handle: String, runs: Vec<crate::cas_read::Leaf> },
+    /// The handle names a run whose results are to be read, and the run did
+    /// not complete: the message names it and its state
+    /// ([`crate::leaf_use::require_completed`]).
+    NotCompleted(String),
 }
 
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ResolveError::NotFound(msg) => write!(f, "{msg}"),
+            ResolveError::NotFound(msg) | ResolveError::NotCompleted(msg) => write!(f, "{msg}"),
             ResolveError::Ambiguous { handle, candidates } => {
                 writeln!(f, "{} resolves to {} fits:", handle, candidates.len())?;
                 for c in candidates {
@@ -357,7 +361,10 @@ pub fn resolve_leaf(s: &str) -> Result<LeafRef, ResolveError> {
 /// run was used.
 pub fn resolve_run_with_draws(s: &str) -> Result<(LeafRef, Option<String>), ResolveError> {
     match resolve_target(s)? {
-        FitTarget::Leaf(leaf) => Ok((leaf, None)),
+        FitTarget::Leaf(leaf) => {
+            require_completed(&leaf.dir)?;
+            Ok((leaf, None))
+        }
         FitTarget::Segment(segment) => {
             let all = completed_leaves(&segment);
             let total = all.len();
@@ -383,6 +390,17 @@ pub fn resolve_run_with_draws(s: &str) -> Result<(LeafRef, Option<String>), Reso
                 _ => Err(ResolveError::AmbiguousRuns { handle: s.to_string(), runs: with_draws }),
             }
         }
+    }
+}
+
+/// Refuse a run, named by a handle for its results to be read, that did not
+/// complete. A run directory, a run-id prefix and a hash prefix name a run
+/// at any state; `@label`, a `fit.toml` and a problem folder resolve only to
+/// completed runs, and pass.
+fn require_completed(dir: &Path) -> Result<(), ResolveError> {
+    match crate::leaf_use::read(dir).map_err(ResolveError::NotFound)? {
+        Some(leaf) => crate::leaf_use::require_completed(&leaf).map_err(ResolveError::NotCompleted),
+        None => Err(ResolveError::NotFound(format!("{} holds no run.json", dir.display()))),
     }
 }
 
@@ -475,11 +493,14 @@ pub fn resolve_fit(s: &str) -> Result<ResolvedFit, ResolveError> {
 /// [`resolve_fit`] for a verb that reads one run (`fit predict`, `compare`):
 /// a problem-folder handle names its one run, and holding several it is
 /// refused with the runs listed rather than one chosen by a rule (gh#896).
-/// The returned `leaf` is always `Some`.
+/// The run must have completed: one that failed, is running or was
+/// interrupted is refused with its state. The returned `leaf` is always
+/// `Some`.
 pub fn resolve_fit_run(s: &str) -> Result<ResolvedFit, ResolveError> {
     let mut resolved = resolve_fit(s)?;
-    if resolved.leaf.is_none() {
-        resolved.leaf = Some(only_run(s, &resolved.segment)?.dir);
+    match &resolved.leaf {
+        Some(dir) => require_completed(dir)?,
+        None => resolved.leaf = Some(only_run(s, &resolved.segment)?.dir),
     }
     Ok(resolved)
 }
