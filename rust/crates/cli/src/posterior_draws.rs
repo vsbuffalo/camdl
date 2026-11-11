@@ -82,6 +82,20 @@ impl From<PosteriorDrawsError> for String {
     }
 }
 
+/// [`crate::leaf_use::require_completed`] for a method leaf of a fit view: its
+/// state read from its `run.json` and `.lock`, so the refusal says whether it
+/// failed (and why), is running, or was interrupted.
+fn require_completed(m: &crate::fit::fit_view::FitMethodView) -> Result<(), PosteriorDrawsError> {
+    use PosteriorDrawsError::Other;
+    if m.completed() {
+        return Ok(());
+    }
+    match crate::leaf_use::read(&m.method_dir).map_err(Other)? {
+        Some(leaf) => crate::leaf_use::require_completed(&leaf).map_err(Other),
+        None => Err(Other(format!("{} holds no run.json", m.method_dir.display()))),
+    }
+}
+
 /// [`crate::chain_index::refuse_one_based_layout`], as a resolution failure
 /// that is not "no posterior".
 fn refuse_old_layout(method_dir: &Path) -> Result<(), PosteriorDrawsError> {
@@ -99,6 +113,12 @@ fn refuse_old_layout(method_dir: &Path) -> Result<(), PosteriorDrawsError> {
 /// ([`PosteriorDrawsError::NoPosterior`]), and for every other failure,
 /// including a leaf refused for its chain numbering
 /// ([`PosteriorDrawsError::Other`]).
+///
+/// Only a completed run's `draws.tsv` is a posterior. A run that failed after
+/// writing it, or was killed after writing it, leaves a file that looks
+/// complete; such a leaf — named, or among the runs with draws — is refused
+/// with its state ([`crate::leaf_use::require_completed`]), never read and
+/// never passed over in silence.
 pub fn resolve_posterior_draws(
     fit_ref: &str,
     method: Option<&str>,
@@ -137,6 +157,7 @@ pub fn resolve_posterior_draws(
                 [one] => *one,
                 several => return Err(Other(several_runs(fit_ref, &format!("'{want}' runs"), several))),
             };
+            require_completed(chosen)?;
             let draws_path = chosen.method_dir.join(DRAWS_FILE);
             if !draws_path.is_file() {
                 return Err(NoPosterior(no_draws_for_method(want, chosen.method)));
@@ -155,7 +176,11 @@ pub fn resolve_posterior_draws(
         // refused with them listed rather than one chosen by label order
         // (gh#896). A leaf whose chain directories count from 1 is refused
         // here, before any reader follows a draw's `chain` key into
-        // `chain_<key>/` (gh#990).
+        // `chain_<key>/` (gh#990). A run with draws that did not complete is
+        // refused before any is chosen.
+        for s in &with_draws {
+            require_completed(s)?;
+        }
         let chosen = match with_draws.as_slice() {
             [] => return Err(NoPosterior(no_posterior_error(fit_ref, &view))),
             [one] => *one,
@@ -175,15 +200,19 @@ pub fn resolve_posterior_draws(
     }
 
     // Leaf-dir-passed-directly case: no fit-level view, but the directory
-    // itself may be a leaf holding draws.tsv. Its label comes from its own
-    // `run.json` when it has one.
+    // itself may hold a draws.tsv — a leaf outside a fit folder, or a bare
+    // directory of draws. A leaf must be a completed run, and its label comes
+    // from its own `run.json`; a record that cannot be read is refused rather
+    // than taken as a bare directory.
     let draws_path = dir.join(DRAWS_FILE);
     if draws_path.is_file() {
+        let leaf = crate::leaf_use::read(dir).map_err(Other)?;
+        if let Some(leaf) = &leaf {
+            crate::leaf_use::require_completed(leaf).map_err(Other)?;
+        }
         refuse_old_layout(dir)?;
-        let method = std::fs::read(dir.join("run.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<runid::RunRecord>(&b).ok())
-            .and_then(|r| r.inputs.get("method").and_then(|s| s.as_str()).map(String::from))
+        let method = leaf
+            .and_then(|l| l.record.inputs.get("method").and_then(|s| s.as_str()).map(String::from))
             .unwrap_or_default();
         return Ok(PosteriorDrawsRef {
             name: method,
@@ -510,6 +539,72 @@ mod tests {
         assert!(matches!(err, PosteriorDrawsError::Other(_)), "an unknown name is not 'no posterior': {err:?}");
         let err = err.to_string();
         assert!(err.contains("no method named 'nope'"), "got: {err}");
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Rewrite a fixture leaf's `run.json` as a run that did not complete:
+    /// `status` and, for a failed run, its `failure`.
+    fn mark(leaf: &Path, status: &str, failure: Option<&str>) {
+        let mut rec: serde_json::Value =
+            serde_json::from_slice(&fs::read(leaf.join("run.json")).unwrap()).unwrap();
+        rec["status"] = status.into();
+        if let Some(message) = failure {
+            rec["failure"] = serde_json::json!({"message": message, "operation": "pgas"});
+        }
+        fs::write(leaf.join("run.json"), rec.to_string()).unwrap();
+    }
+
+    /// A run that failed after writing its `draws.tsv` is not a posterior: it
+    /// is refused, with its state and reason, whether it is the folder's only
+    /// run with draws, is named by its method, or is the leaf passed — never
+    /// read, and never `NoPosterior` (which callers answer with a point
+    /// estimate).
+    #[test]
+    fn a_failed_run_with_draws_is_refused_naming_its_state() {
+        let tmp = crate::test_support::unique_temp_dir("pdraws_failed");
+        let seg = fixture_segment(&tmp, &[
+            ("if2",  "if2", None),
+            ("pgas", "pgas", Some(TWO_DRAWS)),
+        ]);
+        let leaf = seg.join("pgas-1fb03eee").join("seed_1-06cbd6b3");
+        mark(&leaf, "failed", Some("error: --resume lineage: cannot read the base"));
+        for (handle, method) in [(seg.clone(), None), (seg.clone(), Some("pgas")), (leaf.clone(), None)] {
+            let err = resolve_posterior_draws(handle.to_str().unwrap(), method).unwrap_err();
+            assert!(matches!(err, PosteriorDrawsError::Other(_)), "{handle:?} {method:?}: {err:?}");
+            let err = err.to_string();
+            assert!(err.contains(&format!("{} is not a completed run", leaf.display())), "{err}");
+            assert!(err.contains("it failed: --resume lineage: cannot read the base"), "{err}");
+        }
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The same for a run still `running` whose `.lock` names no live process
+    /// (killed after writing `draws.tsv`): refused as interrupted.
+    #[test]
+    fn an_interrupted_run_with_draws_is_refused_as_interrupted() {
+        let tmp = crate::test_support::unique_temp_dir("pdraws_interrupted");
+        let seg = fixture_segment(&tmp, &[("pgas", "pgas", Some(TWO_DRAWS))]);
+        let leaf = seg.join("pgas-1fb03eee").join("seed_1-06cbd6b3");
+        mark(&leaf, "running", None);
+        let err = resolve_posterior_draws(leaf.to_str().unwrap(), None).unwrap_err().to_string();
+        assert!(err.contains("it was interrupted: no live process holds it"), "{err}");
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A directory holding a `draws.tsv` beside a `run.json` that is not a run
+    /// record is refused, naming the file's problem, rather than read as a
+    /// bare directory of draws.
+    #[test]
+    fn a_dir_with_draws_and_an_unreadable_run_json_is_refused() {
+        let tmp = crate::test_support::unique_temp_dir("pdraws_unreadable");
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join(DRAWS_FILE), TWO_DRAWS).unwrap();
+        fs::write(tmp.join("run.json"), "{ truncated").unwrap();
+        let err = resolve_posterior_draws(tmp.to_str().unwrap(), None).unwrap_err();
+        assert!(matches!(err, PosteriorDrawsError::Other(_)), "{err:?}");
+        let err = err.to_string();
+        assert!(err.contains(&tmp.display().to_string()) && err.contains("its run.json is not a run record"),
+            "{err}");
         fs::remove_dir_all(&tmp).ok();
     }
 
