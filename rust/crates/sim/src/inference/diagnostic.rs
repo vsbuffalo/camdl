@@ -63,15 +63,57 @@ impl AcceptanceKernel {
         }
     }
 
-    /// The band as it appears in a message, naming the kernel it belongs to.
-    pub fn band_label(self) -> String {
-        let (lo, hi) = self.healthy_band();
-        let who = match self {
-            Self::RandomWalk => "random-walk MH",
-            Self::Nuts => "NUTS block; ~80% is the target",
-        };
-        format!("[{:.0}%, {:.0}%] ({})", lo * 100.0, hi * 100.0, who)
+    /// The band outside which an unhealthy rate is an **error** rather than a
+    /// warning, `(lo, hi)`: random-walk MH below 5% or above 80% is a chain
+    /// that is not moving or not exploring; a NUTS block below 30% or above
+    /// 99% is a step size that has collapsed or blown up. The severity
+    /// ladder, distinct from [`healthy_band`](Self::healthy_band), which
+    /// decides whether there is a finding at all.
+    pub fn error_band(self) -> (f64, f64) {
+        match self {
+            Self::RandomWalk => (0.05, 0.80),
+            Self::Nuts => (0.30, 0.99),
+        }
     }
+
+    /// The healthy band as a record a reader keys on: what a run publishes
+    /// for its acceptance diagnostics before any finding fires (the event
+    /// log's `begin` line), and what an `acceptance_rate_unhealthy` finding
+    /// carries.
+    pub fn band(self) -> AcceptanceBand {
+        let (band_lo, band_hi) = self.healthy_band();
+        AcceptanceBand { kernel: self, band_lo, band_hi }
+    }
+}
+
+/// An acceptance kernel's healthy band, as fractions in `[0, 1]`, inclusive
+/// at both ends ([`AcceptanceKernel::healthy_band`]).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AcceptanceBand {
+    pub kernel: AcceptanceKernel,
+    #[serde(with = "json_f64")]
+    pub band_lo: f64,
+    #[serde(with = "json_f64")]
+    pub band_hi: f64,
+}
+
+/// [`band_label`] of a finding's recorded band, or `(band not recorded)`
+/// when the entry predates it: no number is guessed.
+fn recorded_band_label(kernel: AcceptanceKernel, lo: Option<f64>, hi: Option<f64>) -> String {
+    match (lo, hi) {
+        (Some(lo), Some(hi)) => band_label(kernel, lo, hi),
+        _ => "(band not recorded)".to_string(),
+    }
+}
+
+/// A healthy band as it appears in a message, naming the kernel it belongs
+/// to: `[15%, 50%] (random-walk MH)`.
+fn band_label(kernel: AcceptanceKernel, lo: f64, hi: f64) -> String {
+    let who = match kernel {
+        AcceptanceKernel::RandomWalk => "random-walk MH",
+        AcceptanceKernel::Nuts => "NUTS block; ~80% is the target",
+    };
+    format!("[{:.0}%, {:.0}%] ({})", lo * 100.0, hi * 100.0, who)
 }
 
 /// The diagnostic an acceptance `rate` deserves under `kernel`, or `None` when
@@ -89,8 +131,9 @@ pub fn acceptance_diagnostic(
     kernel: AcceptanceKernel,
 ) -> Option<DiagnosticKind> {
     let (lo, hi) = kernel.healthy_band();
-    (!(lo..=hi).contains(&rate))
-        .then_some(DiagnosticKind::AcceptanceRateUnhealthy { rate, param, kernel, chain_id: chain })
+    (!(lo..=hi).contains(&rate)).then_some(DiagnosticKind::AcceptanceRateUnhealthy {
+        rate, param, kernel, chain_id: chain, band_lo: Some(lo), band_hi: Some(hi),
+    })
 }
 
 /// An acceptance rate as every per-chain surface prints it: one decimal at 1%
@@ -349,6 +392,16 @@ pub enum DiagnosticKind {
         /// or recorded before the field existed.
         #[serde(default)]
         chain_id: Option<usize>,
+        /// The healthy band the rate fell outside, as fractions: `kernel`'s
+        /// [`AcceptanceKernel::healthy_band`], recorded so a reader has the
+        /// numbers without parsing the message, which is rendered from them.
+        /// `None` on an entry written before the band was recorded: that
+        /// entry is read, and printed as the message it stored
+        /// ([`render_findings_entry`]); no band is guessed for it.
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "json_f64::option")]
+        band_lo: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "json_f64::option")]
+        band_hi: Option<f64>,
     },
     /// A PMMH chain's adaptive proposal scale sat at its lower bound
     /// (`pmmh::LOG_SCALE_MIN`) for some of its warm-up: no scale reached the
@@ -529,10 +582,8 @@ impl DiagnosticKind {
             Self::ZeroRateNonzeroFlow { .. } => Severity::Warning,
             Self::ResumeConfigMismatch { .. } => Severity::Error,
             Self::ResumeParamMissing { .. } => Severity::Warning,
-            Self::AcceptanceRateUnhealthy { rate, kernel: AcceptanceKernel::RandomWalk, .. }
-                if *rate < 0.05 || *rate > 0.80 => Severity::Error,
-            Self::AcceptanceRateUnhealthy { rate, kernel: AcceptanceKernel::Nuts, .. }
-                if *rate < 0.30 || *rate > 0.99 => Severity::Error,
+            Self::AcceptanceRateUnhealthy { rate, kernel, .. }
+                if !(kernel.error_band().0..=kernel.error_band().1).contains(rate) => Severity::Error,
             Self::AcceptanceRateUnhealthy { .. } => Severity::Warning,
             Self::ScaleAtFloor { .. } | Self::ScaleFarFromOptimum { .. } => Severity::Warning,
             // gh#791: never an error, at any gradient. The threshold behind it
@@ -641,10 +692,10 @@ impl DiagnosticKind {
                     worst_time, worst_mean, worst_min),
             Self::GammaDensityDisabled { reason } =>
                 format!("Gamma density disabled: {}", reason),
-            Self::AcceptanceRateUnhealthy { rate, param, kernel, .. } => {
+            Self::AcceptanceRateUnhealthy { rate, param, kernel, band_lo, band_hi, .. } => {
                 let target = if param.is_some() { "parameter" } else { "chain" };
                 format!("{} acceptance rate {} is outside healthy range {}.",
-                    target, fmt_rate(*rate), kernel.band_label())
+                    target, fmt_rate(*rate), recorded_band_label(*kernel, *band_lo, *band_hi))
             }
             Self::ScaleAtFloor { steps_at_floor, warmup_steps, target_accept, .. } =>
                 scale_at_floor_lines(&steps_at_floor.to_string(), *warmup_steps, *target_accept)
@@ -864,6 +915,15 @@ impl DiagnosticKind {
         }
     }
 
+    /// Whether the kind carries every value its sentence is rendered from.
+    /// False for an `acceptance_rate_unhealthy` entry written before its
+    /// band was recorded, which is printed as the message it stored.
+    pub fn rerenders(&self) -> bool {
+        !matches!(self,
+            Self::AcceptanceRateUnhealthy { band_lo: None, .. }
+            | Self::AcceptanceRateUnhealthy { band_hi: None, .. })
+    }
+
     /// Whether the printed entry names the finding's chain in front of the
     /// sentence. False for `BadInit`, whose sentence names it itself.
     fn labelled_by_chain(&self) -> bool {
@@ -873,13 +933,14 @@ impl DiagnosticKind {
     /// Exhaustive: a new variant does not compile until it decides.
     pub fn merge_key(&self) -> MergeKey {
         match self {
-            Self::AcceptanceRateUnhealthy { rate, param, kernel, chain_id: Some(_) } => {
-                let (lo, _) = kernel.healthy_band();
-                let side = if *rate < lo { "below" } else { "above" };
+            Self::AcceptanceRateUnhealthy {
+                rate, param, kernel, chain_id: Some(_), band_lo: Some(band_lo), band_hi: Some(band_hi),
+            } => {
+                let side = if *rate < *band_lo { "below" } else { "above" };
                 let mut identity = vec![
                     ("side", side.to_string()),
                     ("kernel", format!("{kernel:?}")),
-                    ("band", kernel.band_label()),
+                    ("band", band_label(*kernel, *band_lo, *band_hi)),
                     // One icon per entry: a warning-level and an error-level
                     // rate do not share one.
                     ("severity", format!("{:?}", self.severity())),
@@ -896,7 +957,10 @@ impl DiagnosticKind {
                     ("target", format!("{:.1}", target_accept * 100.0)),
                 ],
             },
+            // An entry with no recorded band prints alone, as it was stored.
             Self::AcceptanceRateUnhealthy { chain_id: None, .. }
+            | Self::AcceptanceRateUnhealthy { band_lo: None, .. }
+            | Self::AcceptanceRateUnhealthy { band_hi: None, .. }
             | Self::ScaleFarFromOptimum { .. }
             | Self::RhatHigh { .. }
             | Self::MultimodalLikelihood { .. }
@@ -929,6 +993,21 @@ impl DiagnosticKind {
     }
 }
 
+/// [`render_entry`] for findings as recorded. An entry written before a
+/// field its sentence is rendered from existed (an `acceptance_rate_unhealthy`
+/// without its band) prints the message it stored, as written, with the chain
+/// label in front as any other entry has; it never merges
+/// ([`DiagnosticKind::merge_key`]), so it is always alone.
+pub fn render_findings_entry(group: &[&Diagnostic]) -> String {
+    match group {
+        [d] if !d.kind.rerenders() => match d.kind.chain() {
+            Some(c) if d.kind.labelled_by_chain() => format!("chain {c}: {}", d.message),
+            _ => d.message.clone(),
+        },
+        _ => render_entry(&group.iter().map(|d| &d.kind).collect::<Vec<_>>()),
+    }
+}
+
 /// The printed text of one entry: findings that share a [`MergeKey::Group`]
 /// key (or one finding alone), in the order given.
 ///
@@ -950,7 +1029,7 @@ pub fn render_entry(group: &[&DiagnosticKind]) -> String {
         .collect();
     let label = format!("chains {}", chains.join(", "));
     match first {
-        DiagnosticKind::AcceptanceRateUnhealthy { param, kernel, .. } => {
+        DiagnosticKind::AcceptanceRateUnhealthy { param, kernel, band_lo, band_hi, .. } => {
             let rates: Vec<String> = group.iter()
                 .filter_map(|k| match k {
                     DiagnosticKind::AcceptanceRateUnhealthy { rate, .. } => Some(fmt_rate(*rate)),
@@ -959,7 +1038,7 @@ pub fn render_entry(group: &[&DiagnosticKind]) -> String {
                 .collect();
             let target = if param.is_some() { "parameter" } else { "chain" };
             format!("{label}: {target} acceptance rates {} are outside healthy range {}.",
-                join_and(&rates), kernel.band_label())
+                join_and(&rates), recorded_band_label(*kernel, *band_lo, *band_hi))
         }
         DiagnosticKind::ScaleAtFloor { warmup_steps, target_accept, .. } => {
             let steps: Vec<String> = group.iter()
@@ -1077,6 +1156,16 @@ fn chrono_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An `acceptance_rate_unhealthy` finding at `rate`, whether or not the
+    /// rate is in the band (the emitter, `acceptance_diagnostic`, makes one
+    /// only when it is not), carrying `kernel`'s band as the emitter does.
+    fn unhealthy(rate: f64, param: Option<String>, kernel: AcceptanceKernel) -> DiagnosticKind {
+        let (band_lo, band_hi) = kernel.healthy_band();
+        DiagnosticKind::AcceptanceRateUnhealthy {
+            rate, param, kernel, chain_id: None, band_lo: Some(band_lo), band_hi: Some(band_hi),
+        }
+    }
 
     /// An observer sees every finding, from every pushing thread, in the
     /// order `snapshot` keeps them.
@@ -1242,28 +1331,23 @@ mod tests {
     /// and simultaneously a broken random-walk chain (error).
     #[test]
     fn acceptance_severity_keys_on_kernel() {
-        let nuts_ok = DiagnosticKind::AcceptanceRateUnhealthy {
-            rate: 0.83, param: None, kernel: AcceptanceKernel::Nuts, chain_id: None };
+        let nuts_ok = unhealthy(0.83, None, AcceptanceKernel::Nuts);
         assert_eq!(nuts_ok.severity(), Severity::Warning,
             "0.83 under NUTS is at worst a warning, never an error");
-        let rw_bad = DiagnosticKind::AcceptanceRateUnhealthy {
-            rate: 0.83, param: None, kernel: AcceptanceKernel::RandomWalk, chain_id: None };
+        let rw_bad = unhealthy(0.83, None, AcceptanceKernel::RandomWalk);
         assert_eq!(rw_bad.severity(), Severity::Error,
             "0.83 under random-walk MH is the >0.80 error band");
-        let nuts_collapsed = DiagnosticKind::AcceptanceRateUnhealthy {
-            rate: 0.004, param: None, kernel: AcceptanceKernel::Nuts, chain_id: None };
+        let nuts_collapsed = unhealthy(0.004, None, AcceptanceKernel::Nuts);
         assert_eq!(nuts_collapsed.severity(), Severity::Error,
             "0.4% under NUTS is the genuinely-stuck error band");
     }
 
     #[test]
     fn acceptance_message_names_the_kernel_band() {
-        let m = DiagnosticKind::AcceptanceRateUnhealthy {
-            rate: 0.83, param: Some("r_eff".into()), kernel: AcceptanceKernel::Nuts, chain_id: None }.render();
+        let m = unhealthy(0.83, Some("r_eff".into()), AcceptanceKernel::Nuts).render();
         assert!(m.contains("[60%, 95%]") && m.contains("NUTS"),
             "NUTS message names its own band: {m}");
-        let m = DiagnosticKind::AcceptanceRateUnhealthy {
-            rate: 0.83, param: None, kernel: AcceptanceKernel::RandomWalk, chain_id: None }.render();
+        let m = unhealthy(0.83, None, AcceptanceKernel::RandomWalk).render();
         assert!(m.contains("[15%, 50%]"), "RW message keeps its band: {m}");
     }
 
@@ -1276,8 +1360,7 @@ mod tests {
     fn the_published_band_is_the_band_that_fires() {
         for kernel in [AcceptanceKernel::RandomWalk, AcceptanceKernel::Nuts] {
             let (lo, hi) = kernel.healthy_band();
-            let msg = DiagnosticKind::AcceptanceRateUnhealthy {
-                rate: lo - 0.01, param: None, kernel, chain_id: None }.render();
+            let msg = unhealthy(lo - 0.01, None, kernel).render();
             assert!(msg.contains(&format!("[{:.0}%, {:.0}%]", lo * 100.0, hi * 100.0)),
                 "{kernel:?}: message must name the band that fires: {msg}");
             // Just inside both ends: silent. Just outside: reported.
@@ -1292,6 +1375,54 @@ mod tests {
         }
         assert_eq!(AcceptanceKernel::RandomWalk.healthy_band(), (0.15, 0.50),
             "the random-walk band camdl publishes starts at 15%, not 10%");
+    }
+
+    /// The band an emitted finding carries is the band that fired it, as
+    /// fractions a reader keys on, and the message names the same numbers:
+    /// the structured fields and the sentence cannot disagree.
+    #[test]
+    fn an_unhealthy_rate_carries_the_band_it_fell_outside() {
+        for kernel in [AcceptanceKernel::RandomWalk, AcceptanceKernel::Nuts] {
+            let (lo, hi) = kernel.healthy_band();
+            let d = acceptance_diagnostic(Some(2), lo / 2.0, None, kernel).expect("below the band");
+            let DiagnosticKind::AcceptanceRateUnhealthy { band_lo, band_hi, .. } = &d else {
+                panic!("{d:?}")
+            };
+            assert_eq!((*band_lo, *band_hi), (Some(lo), Some(hi)), "{kernel:?}");
+            assert_eq!(kernel.band(), AcceptanceBand { kernel, band_lo: lo, band_hi: hi });
+            let json = serde_json::to_value(&d).unwrap();
+            assert_eq!((json["band_lo"].as_f64(), json["band_hi"].as_f64()), (Some(lo), Some(hi)));
+            assert!(d.render().contains(&format!("[{:.0}%, {:.0}%]", lo * 100.0, hi * 100.0)),
+                "{}", d.render());
+        }
+    }
+
+    /// An `acceptance_rate_unhealthy` entry written before the band was
+    /// recorded is read, not refused: its band is `None`, nothing is guessed
+    /// for it, and it prints as the message it stored, alone, with its chain
+    /// in front.
+    #[test]
+    fn an_acceptance_entry_without_a_recorded_band_reads_and_prints_as_stored() {
+        let stored = "chain acceptance rate 2.0% is outside healthy range [15%, 50%] (random-walk MH).";
+        let old: Diagnostic = serde_json::from_value(serde_json::json!({
+            "kind": { "type": "acceptance_rate_unhealthy", "rate": 0.02, "param": null,
+                      "kernel": "random_walk", "chain_id": 3 },
+            "severity": "warning", "message": stored, "method": "pmmh",
+            "timestamp": "2026-10-20T00:00:00Z",
+        })).expect("an entry without its band reads");
+        let DiagnosticKind::AcceptanceRateUnhealthy { band_lo, band_hi, .. } = &old.kind else { panic!() };
+        assert_eq!((*band_lo, *band_hi), (None, None), "no band is guessed");
+        assert!(!old.kind.rerenders());
+        assert_eq!(old.kind.merge_key(), MergeKey::Never, "it prints alone");
+        assert_eq!(render_findings_entry(&[&old]), format!("chain 3: {stored}"));
+        assert!(old.kind.render().contains("(band not recorded)"), "{}", old.kind.render());
+        let back = serde_json::to_value(&old.kind).unwrap();
+        assert!(back.get("band_lo").is_none(), "written back as recorded: {back}");
+        // A new entry still prints from its fields.
+        let new = acceptance_diagnostic(Some(3), 0.02, None, AcceptanceKernel::RandomWalk).unwrap();
+        let d = Diagnostic { kind: new, severity: Severity::Warning, message: "ignored".into(),
+            method: "pmmh".into(), timestamp: String::new() };
+        assert!(render_findings_entry(&[&d]).contains("[15%, 50%]"));
     }
 
     /// The gh#299 item 3 regression proper: NUTS runs at 0.90-0.99 and targets
@@ -1392,7 +1523,9 @@ mod tests {
             },
             DiagnosticKind::GammaDensityDisabled { reason: "r".into() },
             DiagnosticKind::AcceptanceRateUnhealthy {
-                rate: x, param: None, kernel: AcceptanceKernel::RandomWalk, chain_id: None },
+                rate: x, param: None, kernel: AcceptanceKernel::RandomWalk, chain_id: None,
+                band_lo: Some(x), band_hi: Some(x),
+            },
             DiagnosticKind::ParamNearBound {
                 param: "beta".into(), value: x, bound: x, bound_type: "upper".into(),
             },
@@ -1652,7 +1785,7 @@ mod tests {
             r#"{"type":"gamma_density_disabled","reason":"r"}"#,
             concat!(
                 r#"{"type":"acceptance_rate_unhealthy","rate":0.25,"param":null,"#,
-                r#""kernel":"random_walk","chain_id":null}"#,
+                r#""kernel":"random_walk","chain_id":null,"band_lo":0.25,"band_hi":0.25}"#,
             ),
             r#"{"type":"param_near_bound","param":"beta","value":0.25,"bound":0.25,"bound_type":"upper"}"#,
             r#"{"type":"profile_c_i_unbounded","param":"beta","direction":"above"}"#,

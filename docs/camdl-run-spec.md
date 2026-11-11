@@ -5679,7 +5679,7 @@ writes it, `pfilter` included, from the moment the method begins.
 
 | `event`         | when                                                                              | its fields                                                                                                                                                                                                                                                                                                                                 |
 | --------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `begin`         | first, as the method starts                                                       | `method`; `header`, the run's opening block (`config`, `method`, `model`, `estimate`, `fixed`, `starts`, `output`), which no other file in the leaf holds until the leaf commits                                                                                                                                                           |
+| `begin`         | first, as the method starts                                                       | `method`; `header`, the run's opening block (`config`, `method`, `model`, `estimate`, `fixed`, `starts`, `output`), which no other file in the leaf holds until the leaf commits; `acceptance`, the healthy band the method's acceptance diagnostics apply (`kernel`, `band_lo`, `band_hi`), or `null` for a method without them           |
 | `check`         | as each check before sampling is shown                                            | `check`, tagged by `kind`: `obs_stream` (`name`, `carrier`, `family`), `filter_noise` (`check`: `n_particles`, `pairs`, `sigma`, `s`, `ll_mean`), `method_caveat` (`method`, `note`, `series_len`), `starts` (`mode`, `params`, `note`)                                                                                                    |
 | `progress`      | per chain, at its first step, then at most every 30 seconds, and at its last step | `chain`; `step` of `of`, the chain's progress bar's count, which is the chain's own step (a chain resumed from step 2000 of 2500 reports 2001 first); `loglik` (`value`, and `kind`: `marginal`, `if2`, `ode_marginal` or `complete_data` — PGAS's, not comparable with the others) or `null`; `accept` or `null`                          |
 | `finding`       | as each finding is pushed                                                         | `finding`, the record `diagnostics.json` holds for it (`kind`, tagged by `type`; `severity`; `message`; `method`; `timestamp`)                                                                                                                                                                                                             |
@@ -5689,6 +5689,20 @@ writes it, `pfilter` included, from the moment the method begins.
 the terminal. A step is what `progress.json`'s step counts for the method
 (§10.10). PGAS, PMMH, `mh` and IF2 chains report progress; NLopt and `pfilter`
 report none.
+
+**The acceptance band.** `acceptance` on `begin` is
+`{"kernel": "random_walk", "band_lo": 0.15, "band_hi": 0.5}` for `pmmh` and
+`mh`, whose θ-move is random-walk Metropolis–Hastings; for `pgas` it is
+`{"kernel": "nuts", "band_lo": 0.6, "band_hi": 0.95}` when the sampler runs NUTS
+on the model (it needs the compiler's rate gradients) and the random-walk band
+when it falls back to Metropolis-within-Gibbs; it is `null` for `if2`, the NLopt
+methods and `pfilter`. The bounds are fractions, inclusive at both ends. An
+`acceptance_rate_unhealthy` finding carries the same `kernel`, `band_lo` and
+`band_hi` beside its `rate`, so a reader has the band whether or not a finding
+fires and never parses it from the message, which is rendered from those fields.
+An entry written before the band was recorded has neither field: it is read, its
+band is not recorded (no number is assumed for it), and `fit summary` prints the
+message it stored, as written.
 
 A finding's line is written when the run pushes the finding: a refused chain's
 `bad_init` as the chain is refused, and a sampler's per-chain and R̂ findings

@@ -21,6 +21,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// The kernel behind PMMH's (and `mh`'s) acceptance rate: a random-walk
+/// Metropolis–Hastings move on θ. The band the run publishes when it begins
+/// and the band its findings apply when it ends both come from here.
+pub(crate) const THETA_MOVE_KERNEL: sim::inference::diagnostic::AcceptanceKernel =
+    sim::inference::diagnostic::AcceptanceKernel::RandomWalk;
+
 /// Per-method knobs extracted from a `Algorithm::PMMH { ... }` variant by
 /// the `camdl fit run` dispatcher and passed verbatim into `run_method`.
 /// Mirrors every PMMH field. v1 calls iterations `steps`; v2 calls
@@ -880,7 +886,7 @@ pub fn run_method(
     // one — taken from `AcceptanceKernel` rather than spelled here, so the
     // coloring, the finding and the message a user reads cannot disagree about
     // where the band starts (gh#299 item 3).
-    let kernel = sim::inference::diagnostic::AcceptanceKernel::RandomWalk;
+    let kernel = THETA_MOVE_KERNEL;
     // The table — each chain's rate, and the scale its draws were proposed
     // under with its warm-up's floor count — is drawn at the end of the run
     // from the recorded rates (`report::render::acceptance_table`).
