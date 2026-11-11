@@ -392,7 +392,8 @@ impl ResolvedStarts {
         // (`cas_mle_start_dep`); a draws TSV or params TOML is read whole, so
         // its bytes are the key.
         let dep = match rule {
-            ChainStarts::Point(Point::FromMle { .. }) => super::cas::cas_mle_start_dep(&file),
+            ChainStarts::Point(Point::FromMle { .. }) => super::cas::cas_mle_start_dep(&file)
+                .map_err(|e| format!("starts = {}: {e}", rule.spelled()))?,
             _ => super::cas::cas_file_dep(&file, source_artifact_name(&rule)),
         }
             .ok_or_else(|| format!("starts = {}: cannot read `{}`", rule.spelled(), file.display()))?;
@@ -462,6 +463,7 @@ pub fn resolve_starts(rule: &ChainStarts, allow_nonconverged: bool) -> Result<Re
         ChainStarts::Point(Point::FromMle { .. }) => super::cas::cas_mle_start_dep(&file),
         _ => super::cas::cas_leaf_file_dep(&leaf, artifact),
     }
+        .map_err(|e| format!("starts = {}: {e}", rule.spelled()))?
         .ok_or_else(|| format!("starts = {}: cannot read {}", rule.spelled(), file.display()))?;
     Ok(ResolvedStarts {
         rule: rule.clone(),
@@ -494,13 +496,22 @@ pub fn refuse_sampler_as_mle_source(method: &str, handle: &str) -> Result<(), St
 /// `@label` names one run; a problem folder names one only while it holds
 /// one, and holding several is refused with the runs listed and what sets
 /// them apart. A directory holding a `fit_state.toml` is taken as named.
+///
+/// The source must be a completed run: its `fit_state.toml` and `draws.tsv`
+/// are written before the steps that end a run, so a run that failed or was
+/// killed after them leaves files that look like a result. Such a leaf is
+/// refused with its state; a directory with a `fit_state.toml` and no
+/// `run.json` (a source assembled by hand) is taken as named, and one whose
+/// `run.json` cannot be read is refused naming why.
 pub fn resolve_fit_leaf(handle: &str) -> Result<PathBuf, String> {
-    if let super::handle::FitRef::RunDir(dir) = super::handle::FitRef::classify(handle) {
-        if dir.join("fit_state.toml").is_file() {
-            return Ok(dir);
-        }
+    let dir = match super::handle::FitRef::classify(handle) {
+        super::handle::FitRef::RunDir(dir) if dir.join("fit_state.toml").is_file() => dir,
+        _ => super::handle::resolve_leaf(handle).map(|leaf| leaf.dir).map_err(|e| e.to_string())?,
+    };
+    if let Some(leaf) = crate::leaf_use::read(&dir)? {
+        crate::leaf_use::require_completed(&leaf)?;
     }
-    super::handle::resolve_leaf(handle).map(|leaf| leaf.dir).map_err(|e| e.to_string())
+    Ok(dir)
 }
 
 // ─── Context and entry point ─────────────────────────────────────────────────

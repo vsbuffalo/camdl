@@ -816,10 +816,11 @@ fn nlopt_source_verdict(state: &FitState) -> Option<String> {
 /// result cannot be read — an unreadable verdict is not a converged one.
 fn sampler_source_verdict(leaf: &Path) -> Result<Option<String>, String> {
     use super::method_result::{MaxRhat, MethodResult, RHAT_CONVERGED_THRESHOLD};
-    let bytes = std::fs::read(leaf.join("run.json"))
-        .map_err(|e| format!("cannot read its run.json, so its convergence cannot be checked: {e}"))?;
-    let rec = serde_json::from_slice::<runid::RunRecord>(&bytes)
-        .map_err(|e| format!("cannot parse its run.json, so its convergence cannot be checked: {e}"))?;
+    let rec = match runid::read_leaf(leaf) {
+        Ok(Some(l)) => l.record,
+        Ok(None) => return Err("it holds no run.json, so its convergence cannot be checked".into()),
+        Err(u) => return Err(format!("{}, so its convergence cannot be checked", u.reason)),
+    };
     let method = rec.inputs.get("method").and_then(|m| m.as_str())
         .ok_or("its run.json names no method, so its convergence cannot be checked")?
         .to_string();

@@ -1294,10 +1294,10 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
     if let crate::fit::handle::FitRef::Label(name) = crate::fit::handle::FitRef::classify(key) {
         let leaf = crate::fit::handle::resolve_label(Path::new(root), &name)
             .map_err(|e| e.to_string())?;
-        let segment = crate::fit::fit_view::leaf_segment(&leaf.dir)
+        let segment = crate::fit::fit_view::leaf_segment(&leaf.dir)?
             .ok_or_else(|| format!("{} is not inside a fit's directory", leaf.dir.display()))?;
         let rel_path = pathdiff_str(&segment, &cwd);
-        let run = crate::fit::fit_view::leaf_run_id(&leaf.dir);
+        let run = crate::fit::fit_view::leaf_run_id(&leaf.dir)?;
         return Ok(Resolved::FitEnvelope { segment, run, rel_path });
     }
 
@@ -1314,28 +1314,25 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
         return Ok(Resolved::FitEnvelope { segment: as_path.to_path_buf(), run: None, rel_path });
     }
     if as_path.is_dir() && as_path.join("run.json").exists() {
-        if let Ok(bytes) = std::fs::read(as_path.join("run.json")) {
-            if let Ok(rec) = serde_json::from_slice::<runid::RunRecord>(&bytes) {
-                let kind = rec.kind;
-                let leaf = cas_read::Leaf { dir: as_path.to_path_buf(), record: rec };
-                let created = leaf_created(&leaf);
-                let rel_path = pathdiff_str(as_path, &cwd);
-                return Ok(match kind {
-                    runid::ArtifactKind::FitMethod => Resolved::Fit { leaf, rel_path, created },
-                    runid::ArtifactKind::ProfilePoint => Resolved::Profile { leaf, rel_path, created },
-                    runid::ArtifactKind::Pfilter => Resolved::Pfilter { leaf, rel_path, created },
-                    runid::ArtifactKind::Survey => Resolved::Survey { leaf, rel_path, created },
-                    runid::ArtifactKind::SimEnsemble => Resolved::SimEnsemble { leaf, rel_path, created },
-                    _ => Resolved::Sim { leaf, rel_path, created },
-                });
+        let rec = match runid::read_leaf(as_path) {
+            Ok(Some(leaf)) => leaf.record,
+            Ok(None) => return Err(format!("{} holds no run.json", as_path.display())),
+            Err(u) => {
+                return Err(format!("could not read run.json at {}: {}", as_path.display(), u.reason))
             }
-        }
-        let why = std::fs::read(as_path.join("run.json"))
-            .ok()
-            .and_then(|b| runid::renamed_kind(&b))
-            .map(|w| format!(": {w}"))
-            .unwrap_or_default();
-        return Err(format!("could not read run.json at {}{why}", as_path.display()));
+        };
+        let kind = rec.kind;
+        let leaf = cas_read::Leaf { dir: as_path.to_path_buf(), record: rec };
+        let created = leaf_created(&leaf);
+        let rel_path = pathdiff_str(as_path, &cwd);
+        return Ok(match kind {
+            runid::ArtifactKind::FitMethod => Resolved::Fit { leaf, rel_path, created },
+            runid::ArtifactKind::ProfilePoint => Resolved::Profile { leaf, rel_path, created },
+            runid::ArtifactKind::Pfilter => Resolved::Pfilter { leaf, rel_path, created },
+            runid::ArtifactKind::Survey => Resolved::Survey { leaf, rel_path, created },
+            runid::ArtifactKind::SimEnsemble => Resolved::SimEnsemble { leaf, rel_path, created },
+            _ => Resolved::Sim { leaf, rel_path, created },
+        });
     }
 
     // Hash-prefix form.

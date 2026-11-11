@@ -426,10 +426,12 @@ pub(crate) fn note_leaf_from_another_model_file(leaf: &Path, model_path: &str) {
     let file_name = |p: &str| {
         Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned())
     };
-    let stored = std::fs::read_to_string(leaf.join("run.json"))
+    // A record that cannot be read says nothing about its model file; the
+    // reuse itself is decided by the store's lookup, not here.
+    let stored = runid::read_leaf(leaf)
         .ok()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|rec| rec["provenance"]["source_paths"][0].as_str().map(str::to_owned));
+        .flatten()
+        .and_then(|l| l.record.provenance.source_paths.into_iter().next());
     let (Some(stored), Some(current)) = (stored.as_deref().and_then(file_name), file_name(model_path))
     else {
         return;

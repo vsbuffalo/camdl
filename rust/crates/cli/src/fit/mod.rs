@@ -1277,8 +1277,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             if let Err(e) = crate::chain_index::refuse_one_based_layout(&base) {
                 out.fail(format!("error: --resume: {e}"));
             }
-            if let Some(dep) = cas::cas_resume_dep(&base) {
-                deps.push(dep);
+            match cas::cas_resume_dep(&base) {
+                Ok(Some(dep)) => deps.push(dep),
+                Ok(None) => {}
+                Err(e) => out.fail(format!("error: --resume base: {e}")),
             }
             base
         });
@@ -3246,29 +3248,25 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
     // `run.json` `provenance.label`. These are always written `Completed`, so
     // there is no in-progress gate. Rewritten under the record lock, through a
     // uniquely named temporary file.
-    if let Ok(txt) = std::fs::read_to_string(&run_json_path) {
-        if let Ok(rec) = serde_json::from_str::<runid::RunRecord>(&txt) {
-            let prior = rec.provenance.label.clone();
-            if let Err(e) = crate::cas_sink::ensure_provenance_label(&run_dir, &new_label) {
-                out.fail(format!("error: cannot write {}: {}", run_json_path.display(), e));
-            }
-            match prior {
-                Some(p) if p != new_label =>
-                    out.say(format_args!("ok: label updated from \"{}\" to \"{}\" on {}", p, new_label, run_dir.display())),
-                Some(_) => out.say(format_args!("ok: label unchanged (\"{}\") on {}", new_label, run_dir.display())),
-                None => out.say(format_args!("ok: label set to \"{}\" on {}", new_label, run_dir.display())),
-            }
-            return;
-        }
-    }
-
+    //
     // Leaf matches come from `resolve_*_prefix`, which only surfaces dirs
-    // holding a parseable `RunRecord` `run.json` (handled above). A match
-    // whose `run.json` failed to re-parse here is malformed — surface it
-    // rather than fabricating a label write.
-    out.fail(format!(
-        "error: {} is not a recognized (new-format) run.json — cannot relabel",
-        run_json_path.display()));
+    // holding a parseable `RunRecord` `run.json`. A match whose `run.json`
+    // fails to read here is surfaced with why, rather than relabelled.
+    let leaf = match runid::read_leaf(&run_dir) {
+        Ok(Some(leaf)) => leaf,
+        Ok(None) => out.fail(format!("error: {} holds no run.json — cannot relabel", run_dir.display())),
+        Err(u) => out.fail(format!("error: {} — cannot relabel", crate::leaf_use::unreadable(&u))),
+    };
+    let prior = leaf.record.provenance.label.clone();
+    if let Err(e) = crate::cas_sink::ensure_provenance_label(&run_dir, &new_label) {
+        out.fail(format!("error: cannot write {}: {}", run_json_path.display(), e));
+    }
+    match prior {
+        Some(p) if p != new_label =>
+            out.say(format_args!("ok: label updated from \"{}\" to \"{}\" on {}", p, new_label, run_dir.display())),
+        Some(_) => out.say(format_args!("ok: label unchanged (\"{}\") on {}", new_label, run_dir.display())),
+        None => out.say(format_args!("ok: label set to \"{}\" on {}", new_label, run_dir.display())),
+    }
 }
 
 #[cfg(test)]

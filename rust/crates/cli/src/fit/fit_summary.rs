@@ -389,11 +389,13 @@ pub(crate) fn status_word(status: runid::RunStatus) -> &'static str {
 }
 
 /// The leaf's state from its `run.json` (authoritative for status and
-/// failure) and its `.lock` (whether a `running` record is live).
+/// failure) and its `.lock` (whether a `running` record is live), through
+/// [`runid::read_leaf`], whose second read of `run.json` keeps a run that
+/// completes while it is read from being called interrupted. `None` when
+/// the record cannot be read now; the entry then shows the status the
+/// view read.
 fn recorded_state(leaf: &Path) -> Option<runid::LeafState> {
-    let rec: runid::RunRecord =
-        serde_json::from_slice(&std::fs::read(leaf.join("run.json")).ok()?).ok()?;
-    Some(runid::leaf_state(leaf, &rec))
+    runid::read_leaf(leaf).ok().flatten().map(|l| l.state)
 }
 
 
@@ -498,9 +500,8 @@ fn not_completed_section(
         Span::styled(status_word(r.status), style),
         Span::plain(format!(" · {}", r.method_dir.display())),
     ])];
-    let header: Option<crate::fit::report::RunHeader> = std::fs::read(r.method_dir.join("run.json")).ok()
-        .and_then(|b| serde_json::from_slice::<runid::RunRecord>(&b).ok())
-        .and_then(|rec| rec.inputs.get("header").cloned())
+    let header: Option<crate::fit::report::RunHeader> = runid::read_leaf(&r.method_dir).ok().flatten()
+        .and_then(|leaf| leaf.record.inputs.get("header").cloned())
         .and_then(|h| serde_json::from_value(h).ok());
     match (r.status, header) {
         (runid::RunStatus::Failed, Some(header)) => {
@@ -1001,9 +1002,8 @@ fn load_method_facts(
     mut chain_detail: Option<ChainDetail>,
 ) -> Result<MethodFacts, String> {
     let dir = &resolved.method_dir;
-    let inputs: serde_json::Value = std::fs::read(dir.join("run.json")).ok()
-        .and_then(|b| serde_json::from_slice::<runid::RunRecord>(&b).ok())
-        .map(|r| r.inputs)
+    let inputs: serde_json::Value = crate::leaf_use::read(dir)?
+        .map(|l| l.record.inputs)
         .unwrap_or(serde_json::Value::Null);
     let header: Option<crate::fit::report::RunHeader> = inputs.get("header")
         .and_then(|h| serde_json::from_value(h.clone()).ok());
