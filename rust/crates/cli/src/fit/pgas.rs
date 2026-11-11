@@ -1177,10 +1177,8 @@ pub fn run_method(
             } };
 
             // Save resume state for future --resume
-            let resume_path = chain_dir.join("resume_state.bin");
-            if let Ok(encoded) = bincode::serialize(&result.resume_state) {
-                let _ = std::fs::write(&resume_path, encoded);
-            }
+            super::resumed_chain::write_resume_state(&chain_dir, &result.resume_state)
+                .map_err(|e| format!("pgas chain {}: {e}", chain))?;
 
             // Write this chain's posterior latent trajectories: one tidy/long
             // `trajectories.tsv` (all saved draws stacked, leading `chain draw

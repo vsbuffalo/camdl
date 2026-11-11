@@ -185,6 +185,20 @@ pub trait ObservationModel<S>: Send + Sync {
         Vec::new()
     }
 
+    /// What the live particles managed at observation `obs_idx`, one record
+    /// per declared stream, for a filter whose every weight there was `-inf`:
+    /// the projection range, how many particles scored `-inf`, and which guard
+    /// produced it ([`StreamAttempt`](crate::inference::obs_attempt::StreamAttempt)).
+    /// Failure path only: it re-scores the live particles. `live` holds only
+    /// particles the process model did not already kill, and `n_dead` counts
+    /// the others. Uses no RNG. Default is empty (an impl with no stream
+    /// breakdown has nothing to say).
+    fn collapse_attempts(
+        &self, _obs_idx: usize, _live: &[&S], _n_dead: usize, _params: &[f64],
+    ) -> Vec<crate::inference::obs_attempt::StreamAttempt> {
+        Vec::new()
+    }
+
     /// Number of observation times.
     fn n_observations(&self) -> usize;
 

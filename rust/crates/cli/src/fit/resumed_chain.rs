@@ -20,7 +20,26 @@ use crate::chain_index::ChainIndex;
 /// from (and overwrites); `trace.tsv` (both methods) and `trajectories.tsv`
 /// (PGAS, when it saved paths) are extended in place by the new segment's
 /// rows. `trajectories.json` is not carried: it is rewritten whole.
-pub(crate) const CARRIED_CHAIN_FILES: [&str; 3] = ["resume_state.bin", "trace.tsv", "trajectories.tsv"];
+pub(crate) const CARRIED_CHAIN_FILES: [&str; 3] = [RESUME_STATE_FILE, "trace.tsv", "trajectories.tsv"];
+
+/// Write a chain's `resume_state.bin` into `chain_dir`, atomically.
+///
+/// A serialize or write failure is returned, naming the file: a completed run
+/// without its resume state would otherwise only show up later, as a
+/// `--resume` that cannot say why it fails.
+pub(crate) fn write_resume_state<T: serde::Serialize>(
+    chain_dir: &Path,
+    state: &T,
+) -> Result<(), String> {
+    let path = chain_dir.join(RESUME_STATE_FILE);
+    let encoded = bincode::serialize(state)
+        .map_err(|e| format!("cannot encode {}: {e}", path.display()))?;
+    runid::write_file_atomic(&path, &encoded)
+        .map_err(|e| format!("cannot write the chain's resume state: {e}"))
+}
+
+/// The per-chain file holding the state a resume continues from.
+pub(crate) const RESUME_STATE_FILE: &str = "resume_state.bin";
 
 /// Copy the parent leaf's [`CARRIED_CHAIN_FILES`] into the resumed leaf, chain
 /// by chain. The parent is read only.
@@ -265,6 +284,27 @@ mod tests {
         let d = crate::test_support::unique_temp_dir(tag);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn a_resume_state_is_written_whole_and_leaves_no_temporary() {
+        let d = tmp("resume_state_ok");
+        write_resume_state(&d, &vec![1.0_f64, 2.0]).unwrap();
+        let back: Vec<f64> = bincode::deserialize(&std::fs::read(d.join(RESUME_STATE_FILE)).unwrap()).unwrap();
+        assert_eq!(back, vec![1.0, 2.0]);
+        let names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from(RESUME_STATE_FILE)]);
+    }
+
+    /// A directory planted at the path makes the write fail; the failure
+    /// names the file, and no temporary is left behind.
+    #[test]
+    fn a_resume_state_that_cannot_be_written_is_an_error_naming_the_file() {
+        let d = tmp("resume_state_unwritable");
+        std::fs::create_dir(d.join(RESUME_STATE_FILE)).unwrap();
+        let e = write_resume_state(&d, &vec![1.0_f64]).unwrap_err();
+        assert!(e.contains(RESUME_STATE_FILE), "names the file: {e}");
+        assert!(!d.join("resume_state.bin.tmp").exists(), "no temporary left");
     }
 
     #[test]

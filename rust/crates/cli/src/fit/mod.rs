@@ -2285,7 +2285,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 
         // The method is done: every arm either reached here or abandoned the run
         // through `abandon_method`. The terminal write goes down BEFORE
-        // `finalize` below, so the timer thread is stopped before the leaf's
+        // `finalize` below (provisionally: a failure up to the commit replaces
+        // it with `failed`, so `progress.json` and `run.json` agree), so the timer thread is stopped before the leaf's
         // manifest is taken over its files — a `progress.json` rewritten during
         // the manifest walk would be hashed mid-flight. An event that was not
         // recorded fails the run here, before it is called done.
@@ -2362,6 +2363,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             Err(e) => abandon_method(&out, format!(
                 "error: could not finalize fit method leaf {}: {}", cas_path.display(), e)),
         };
+        // The leaf is `completed`: the `done` already in `progress.json` is
+        // final. Before this point a failure rewrites it as `failed`.
+        out.method_committed();
         // The end-of-run block, from the report built over what the run kept
         // in memory and the leaf it finalized; then the `stored` milestone.
         let record = out.end_method().expect("the method was begun before its dispatch");

@@ -9,6 +9,11 @@
 //!     `n = tested * 2`.
 //!   * `a_fractional_expression_n_is_refused_by_pfilter` — `n = tested / 2`
 //!     with an odd `tested` would silently score `round(n)` trials.
+//!   * `a_run_time_n_below_a_count_makes_pfilter_name_the_guard` and its
+//!     replicates variant — `n = I` is only known per trajectory, so a count
+//!     above it scores `-inf` for every particle; pfilter used to print a bare
+//!     `-inf` and exit 0, and now exits 3 (`FILTER_FAILED`) naming the stream,
+//!     the time, the observed value and the guard.
 //!   * `survey_scores_a_column_n_and_refuses_a_count_above_it` — survey bound
 //!     the stream with no aux columns, so every `n = tested` stream failed with
 //!     "aux column missing"; it now loads the column, scores, and refuses a
@@ -168,4 +173,59 @@ fn survey_scores_a_column_n_and_refuses_a_count_above_it() {
     let err = stderr(&out);
     assert!(!out.status.success(), "{err}");
     assert!(err.contains("row 2 (t = 3)") && err.contains("exceeds denominator 'tested' = 50"), "{err}");
+}
+
+fn pfilter_with(dir: &Path, ir: &Path, data: &Path, extra: &[&str]) -> Output {
+    camdl(dir)
+        .args(["pfilter", &ir.to_string_lossy(), "--data", &data.to_string_lossy(),
+               "--scenario", "baseline", "--particles", "50", "--seed", "1"])
+        .args(extra)
+        .output().unwrap()
+}
+
+/// `n = I` reads a compartment, so it is checked per trajectory: at t = 3 the
+/// count 40 is above the 1 to 20 infectious individuals any particle holds.
+#[test]
+fn a_run_time_n_below_a_count_makes_pfilter_name_the_guard() {
+    let tmp = tempdir("runtime_n");
+    let ir = compile_model(&tmp.0, "I");
+    // Control: counts of 0 are never above n, so the filter scores finitely.
+    let ok = write(&tmp.0, "ok.tsv", "time\tpos\n1\t0\n2\t0\n3\t0\n4\t0\n5\t0\n6\t0\n");
+    let out = pfilter(&tmp.0, &ir, &ok);
+    assert!(out.status.success(), "control must run: {}", stderr(&out));
+    let loglik = String::from_utf8_lossy(&out.stdout).lines().find_map(|l| l.trim().parse::<f64>().ok());
+    assert!(loglik.is_some_and(f64::is_finite), "control loglik must be finite: {:?}", out.stdout);
+
+    let leaves = |dir: &Path| -> usize {
+        fn walk(d: &Path, n: &mut usize) {
+            for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() { walk(&p, n) } else if e.file_name() == "run.json" { *n += 1 }
+            }
+        }
+        let mut n = 0;
+        walk(dir, &mut n);
+        n
+    };
+    let stored = leaves(&tmp.0);
+    assert_eq!(stored, 1, "the control stored its leaf");
+
+    let bad = write(&tmp.0, "bad.tsv", "time\tpos\n1\t0\n2\t0\n3\t40\n4\t0\n5\t0\n6\t0\n");
+    let out = pfilter(&tmp.0, &ir, &bad);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(3), "a filter that lost every particle is FILTER_FAILED:\n{err}");
+    assert!(err.contains("log-likelihood is -inf"), "{err}");
+    assert!(err.contains("stream 'survey' at t=3"), "names the stream and the time:\n{err}");
+    assert!(err.contains("observed 40"), "names the observed value:\n{err}");
+    assert!(err.contains("the observed count exceeds the denominator"), "names the guard:\n{err}");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("inf"),
+        "no bare -inf is printed as the answer: {:?}", out.stdout);
+    // No leaf is stored for a result that is not an answer.
+    assert_eq!(leaves(&tmp.0), stored, "no leaf is written");
+
+    // The same, over replicates.
+    let out = pfilter_with(&tmp.0, &ir, &bad, &["--replicates", "3"]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("all 3 replicates") && err.contains("the observed count exceeds the denominator"), "{err}");
 }

@@ -275,10 +275,23 @@ impl Out {
         }
     }
 
-    /// The method ran to its end: its heartbeat's terminal record is `done`.
+    /// The method ran to its end: its heartbeat's terminal record is `done`,
+    /// provisionally. An error reported before
+    /// [`method_committed`](Self::method_committed) (the leaf's finalize
+    /// failing, say) replaces it with `failed`, so `progress.json` never says
+    /// `done` for a run whose `run.json` says `failed`.
     pub fn method_done(&self) {
         if let Some(m) = &self.method {
             m.heartbeat.done();
+        }
+    }
+
+    /// The method's leaf is committed `completed`: the `done` in
+    /// `progress.json` is final. The leaf's manifest has hashed that file, so
+    /// no later error rewrites it.
+    pub fn method_committed(&self) {
+        if let Some(m) = &self.method {
+            m.heartbeat.commit();
         }
     }
 
@@ -597,6 +610,43 @@ mod tests {
         out.error(CommandError::new("error: after the claim was taken back"));
         assert_eq!(status(&dir), "running", "a taken-back claim is the caller's");
         drop(taken);
+    }
+
+    /// `progress.json` says `done` before the leaf is finalized (it is one of
+    /// the files the manifest hashes), so a finalize that then fails must turn
+    /// it into `failed`, with the reason, to agree with the leaf's `run.json`.
+    /// Once the leaf is committed `completed`, a later error leaves the
+    /// hashed file alone.
+    #[test]
+    fn a_failure_after_done_but_before_commit_makes_progress_json_say_failed() {
+        use crate::fit::report::RunHeader;
+        let header = RunHeader {
+            config: "f.toml".into(), method: "pmmh".into(), model: "m.camdl".into(),
+            estimate: vec!["beta".into()], fixed: Vec::new(), starts: "single".into(),
+            output: "results/fits/f".into(),
+        };
+        let state_after = |commit: bool| {
+            let leaf = std::env::temp_dir()
+                .join(format!("camdl_out_done_{}_{commit}", std::process::id()));
+            std::fs::create_dir_all(&leaf).unwrap();
+            let guard = io::HeartbeatGuard::new(io::Heartbeat::mcmc(
+                leaf.clone(), 1, 4, std::time::Duration::from_millis(20), 1));
+            let mut out = Out::new(true);
+            out.begin_method(header.clone(), "pmmh", None, Arc::new(guard), &leaf)
+                .expect("the event log is created");
+            out.method_done();
+            assert_eq!(io::read_progress(&leaf).unwrap().state, io::RunState::Done);
+            if commit {
+                out.method_committed();
+            }
+            out.error(CommandError::new("error: could not finalize fit method leaf: disk full"));
+            let state = io::read_progress(&leaf).unwrap().state;
+            std::fs::remove_dir_all(&leaf).ok();
+            state
+        };
+        assert_eq!(state_after(false), io::RunState::Failed {
+            reason: "error: could not finalize fit method leaf: disk full".into() });
+        assert_eq!(state_after(true), io::RunState::Done);
     }
 
     /// What a method records on `Out` — the checks it showed, the findings

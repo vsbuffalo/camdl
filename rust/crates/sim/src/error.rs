@@ -449,15 +449,7 @@ impl std::fmt::Display for InitFallback {
                     "every live particle scored -inf at observation {obs_index} \
                      (substep {substep})"
                 )?;
-                if attempts.is_empty() {
-                    return Ok(());
-                }
-                let (refused, rest): (Vec<_>, Vec<_>) =
-                    attempts.iter().partition(|a| a.n_neg_inf > 0);
-                for a in refused.iter().chain(rest.iter()) {
-                    write!(f, "; {a}")?;
-                }
-                Ok(())
+                crate::inference::obs_attempt::write_attempts(f, attempts)
             }
             InitFallback::AllParticlesDied { substep } => {
                 write!(f, "every particle died by substep {substep}")
