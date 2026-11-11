@@ -794,10 +794,10 @@ fn params_level_hash(rt: &crate::resolve::ResolvedTrajectory) -> Option<runid::C
 /// Read a committed leaf's `traj.tsv` SHA-256 from its `run.json` artifact
 /// manifest (recorded at commit). Used by the cache-hit path (`on_skip`) to
 /// recover the dep digest without re-reading the trajectory bytes.
+/// `None` when the record cannot be read or records no `traj.tsv`.
 fn read_traj_digest(dir: &std::path::Path) -> Option<runid::ContentHash> {
-    let bytes = std::fs::read(dir.join("run.json")).ok()?;
-    let rec: runid::RunRecord = serde_json::from_slice(&bytes).ok()?;
-    rec.artifacts.get("traj.tsv").map(|c| c.digest)
+    let leaf = runid::read_leaf(dir).ok()??;
+    leaf.record.artifacts.get("traj.tsv").map(|c| c.digest)
 }
 
 /// Rewrite a leaf's `run.json` through `edit`, which returns whether it changed
