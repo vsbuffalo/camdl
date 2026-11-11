@@ -100,7 +100,7 @@ stuck	events	line	"event":"method_report"	"outcome":"completed"
 stuck.cached	stderr	line	cache hit	reusing fits/pmmh_stuck-
 stuck.summary	stdout	line	results/fits/pmmh_stuck-	/
 stuck.summary	stdout	line	Closed SIR with daily reported cases	Fitted to one stream
-stuck.summary	stdout	line	pmmh · pmmh	4 chains · 200 draws · loglik -44.3 at the highest log-posterior draw
+stuck.summary	stdout	line	pmmh	4 chains · 200 draws · loglik -44.3 at the highest log-posterior draw
 stuck.summary	stdout	line	seeded from:	from_prior (one independent draw per chain)
 stuck.summary	stdout	line	✗ NOT converged	the chains are in different places
 stuck.summary	stdout	line	max R̂	3.479 (beta), threshold 1.05
@@ -141,7 +141,7 @@ converged	stderr	line	max R̂	1.001 (gamma), threshold 1.05
 converged	stderr	line	pmmh complete in	(8000 PF evaluations
 converged	stderr	line	loglik at the highest log-posterior draw	-44.3 (chain 3)
 converged	stderr	line	stored pmmh	results/fits/pmmh_converged-
-converged.summary	stdout	line	pmmh · pmmh	4 chains · 400 draws · loglik -44.3
+converged.summary	stdout	line	pmmh	4 chains · 400 draws · loglik -44.3
 converged.summary	stdout	line	✓ converged	✓ converged
 converged.summary	stdout	line	max R̂	1.001 (gamma), threshold 1.05
 converged.summary	stdout	line	parameters above threshold	0 of 2 parameters above threshold · chains' log-likelihoods agree
@@ -259,7 +259,7 @@ pfilter	stderr	line	pfilter: objective:	full likelihood (if2.toml does not set i
 pfilter	stderr	line	pfilter: bound streams:	cases(poisson)
 pfilter	stderr	line	pfilter:	14 observation boundaries × 1 streams, 200 particles, dt=1, seed=1
 pfilter	stderr	line	stored	results/pfilters/sir-
-stuck.excluded	stdout	line	pmmh · pmmh	3 of 4 chains (excluded 2) · 150 draws
+stuck.excluded	stdout	line	pmmh	3 of 4 chains (excluded 2) · 150 draws
 stuck.excluded	stdout	line	max R̂	1.765 (beta), threshold 1.05
 stuck.excluded	stdout	line	parameters above threshold	2 of 2 parameters above threshold
 stuck.excluded	stdout	line	none differs	(over every chain, not the retained subset)
@@ -271,7 +271,7 @@ stuck.excluded	stdout	block	(every chain is listed, including the excluded 2	the
 stuck.excluded	stdout	line	      2  	-679.42         —       —   not assessed
 stuck.excluded	stderr	line	warning: --exclude-chains dropped chain(s) 2	(3 of 4 chains kept)
 pgas.summary	stdout	line	results/fits/pgas-	/
-pgas.summary	stdout	line	pgas · pgas	2 chains · 40 draws · 2 chains saved paths
+pgas.summary	stdout	line	pgas	2 chains · 40 draws · 2 chains saved paths
 pgas.summary	stdout	line	seeded from:	from_prior (one independent draw per chain)
 pgas.summary	stdout	line	✗ NOT converged	the chains are in different places
 pgas.summary	stdout	line	max R̂	2.150 (gamma), threshold 1.05
@@ -302,7 +302,7 @@ pgas.explain	stdout	block	parameters	gamma  —  recovery rate; mean infectious 
 pgas.explain	stdout	block	R̂ compares within-chain to between-chain variance	`classic` is the unnormalized statistic
 pgas.explain	stdout	block	Compared on `obs ll` = log p(y | X)	so a fit whose chains agree is flagged
 pgas.explain	stdout	block	`frozen-disagree`: cells where every chain sits constant	so this is the honest denominator
-if2.summary	stdout	line	if2 · if2	4 chains
+if2.summary	stdout	line	if2	4 chains
 if2.summary	stdout	line	seeded from:	from_prior (one independent draw per chain)
 if2.summary	stdout	line	best loglik:	-44.2 (if2)  (loglik-eval, max across chains)
 if2.summary	stdout	block	compound convergence gate	Â leg:           max Â = 1.171 (beta)  ✗  (threshold 1.01)
@@ -322,7 +322,7 @@ if2.summary	stdout	line	dt =  0.2500	ll =    -47.07 ± 0.05
 if2.summary	stdout	line	⚠ PF-SE inflated	as dt halved (auxiliary signal).
 if2.summary	stdout	block	provenance	final_params.toml ↔ mle_params.toml: ✓ params match
 if2.summary	stdout	line	fit_state.toml ↔ final_params.toml:	✓ params match
-nlopt.summary	stdout	line	nl-sbplx · nl-sbplx	nl-sbplx · nl-sbplx
+nlopt.summary	stdout	line	nl-sbplx	nl-sbplx
 nlopt.summary	stdout	line	loglik:	-43.14 (ode_marginal)     converged chains: 2/2
 nlopt.summary	stdout	line	chain-agreement:	max rel range = 0.00% bound
 nlopt.summary	stdout	block	θ̂ (2 estimated params):	beta           = 0.4594461659761758
@@ -332,7 +332,7 @@ fail.summary	stderr	line	error: error running pmmh	all 2 chains failed init-eval
 fail.summary	stderr	line	error: no completed method leaf under	so there is nothing to summarise
 pfilter_fit	stderr	line	── method:	pfilter
 pfilter_fit	stderr	line	loglik =	-64.5 ± 0.5 (3 reps, 200 particles
-pfilter_fit.summary	stdout	line	pfilter · pfilter	pfilter · pfilter
+pfilter_fit.summary	stdout	line	pfilter	pfilter
 pfilter_fit.summary	stdout	line	loglik =	-64.5 ± 0.5 (3 reps, 200 particles)
 pfilter.replicates	stdout	line	seed	loglik
 pfilter.replicates	stdout	line	-43.9979	-43.9979

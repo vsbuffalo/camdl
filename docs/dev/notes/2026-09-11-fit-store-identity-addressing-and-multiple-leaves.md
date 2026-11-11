@@ -254,7 +254,7 @@ unchanged in the parts that matter on `bd368248`:
 
 ```
 $ camdl fit summary results/fits/pgas-9a53c2c4
-  camdl 0.1.0+57c607c1 · pgas · pgas · 2 chains · 16 draws · 2 chains saved paths
+  camdl 0.1.0+57c607c1 · pgas · 2 chains · 16 draws · 2 chains saved paths
 ```
 
 That is `pgas-34f379b8`, the 12-sweep run (2 chains × 8 retained sweeps),
