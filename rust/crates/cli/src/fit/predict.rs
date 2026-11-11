@@ -832,6 +832,7 @@ fn read_convergence(out: &crate::out::Out, method_dir: &Path, method: Option<Fit
             wall_time_secs: None,
             n_chains: 0,
             frozen_chains: maps.frozen_chains(),
+            chain_logliks: None,
         };
         match diag.max_rhat_status() {
             MaxRhat::Reported(rhat_max) => Some(ConvergenceStatus::Reported {
@@ -903,6 +904,7 @@ fn subset_convergence(
         wall_time_secs: None,
         n_chains: sub.n_chains,
         frozen_chains: Some(sub.frozen_chains.clone()),
+        chain_logliks: None,
     };
     match diag.max_rhat_status() {
         crate::fit::method_result::MaxRhat::Reported(rhat_max) => {

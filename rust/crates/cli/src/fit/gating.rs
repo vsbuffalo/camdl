@@ -140,6 +140,10 @@ pub enum ScoutGateVerdict {
         /// The clean-eval loglik of every chain that reached the eval, with
         /// the chain it belongs to when `fit_state.toml` records it.
         chain_logliks: SpreadChains,
+        /// The per-chain comparison the run recorded
+        /// (`FitState::chain_loglik_agreement`); `None` for a leaf written
+        /// before it was recorded.
+        agreement: Option<super::chain_diagnostics::ChainLoglikAgreement>,
     },
     /// No Â failed, but these parameters' Â is not finite (their
     /// within-chain variance collapsed), so the Â leg is incomplete. The
@@ -444,6 +448,7 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
                 } else {
                     SpreadChains::Unnamed(scout.chain_eval_logliks.clone())
                 },
+                agreement: scout.chain_loglik_agreement.clone(),
             };
         }
     }
@@ -479,6 +484,7 @@ pub fn format_decibans_spread_verdict(
     threshold_db: f64,
     sigma_max: f64,
     chain_logliks: &SpreadChains,
+    agreement: Option<&super::chain_diagnostics::ChainLoglikAgreement>,
 ) -> String {
     let se_floor_db = 8.0 * sigma_max * NATS_TO_DB;
     let floor_source = if se_floor_db >= threshold_db {
@@ -519,19 +525,16 @@ pub fn format_decibans_spread_verdict(
     }
 
     // Name the chains driving the spread, so the fix points at a chain index —
-    // not just "the spread is wide". The same comparison the `fit summary`
-    // per-chain table makes: each start's clean loglik against the pooled
-    // mean of the others, over the evaluation noise of both (the standard
-    // error of the clean-eval replicate mean). IF2 is an optimiser, so a
-    // start that differs beyond that noise reached a different optimum. The
-    // worst-chain fallback names the low end of a spread no single start
-    // explains.
+    // not just "the spread is wide". The comparison the run recorded
+    // (`chain_diagnostics::clean_eval_agreement`): each start's clean loglik
+    // against the pooled mean of the others, over the evaluation noise of
+    // both (the standard error of the clean-eval replicate mean). IF2 is an
+    // optimiser, so a start that differs beyond that noise reached a
+    // different optimum. The worst-chain fallback names the low end of a
+    // spread no single start explains.
     use super::chain_diagnostics as cd;
-    let estimates: Vec<cd::ChainLoglikEstimate> = chain_logliks.iter()
-        .map(|&(chain, mean, se)| cd::ChainLoglikEstimate { chain, mean, weight: 1.0, se: Ok(se) })
-        .collect();
-    let scores = cd::assess_chain_logliks(&estimates);
-    let flagged = cd::flagged_chains(&scores);
+    let scores: &[cd::ChainLoglikScore] = agreement.map_or(&[], |a| a.chains.as_slice());
+    let flagged = cd::flagged_chains(scores);
     let not_assessed: Vec<String> = scores.iter()
         .filter_map(|s| match &s.outcome {
             cd::ChainLoglikOutcome::NotAssessed(why) => Some(format!("chain {}, {}", s.chain, why.describe())),
@@ -565,6 +568,10 @@ pub fn format_decibans_spread_verdict(
     }
     for line in &not_assessed {
         msg.push_str(&format!("  Not compared: {line}.\n"));
+    }
+    if agreement.is_none() {
+        msg.push_str("  Not compared chain by chain: fit_state.toml records no \
+            chain_loglik_agreement (written before camdl recorded it).\n");
     }
 
     msg.push_str(PICK_ONE);
@@ -715,9 +722,9 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
                     loglik_spread, state.best_loglik, None,
                 ))),
                 ScoutGateVerdict::DecibansSpread {
-                    delta_db, threshold_db, sigma_max, chain_logliks,
+                    delta_db, threshold_db, sigma_max, chain_logliks, agreement,
                 } => Some(lost_note(format_decibans_spread_verdict(
-                    delta_db, threshold_db, sigma_max, &chain_logliks,
+                    delta_db, threshold_db, sigma_max, &chain_logliks, agreement.as_ref(),
                 ))),
                 ScoutGateVerdict::Incomplete { params, lost_chains } => {
                     let mut why: Vec<String> = Vec::new();
@@ -974,6 +981,7 @@ decibans_failed = true
             dt_check: None,
             pf_noise: None,
             optimizer_convergence: None,
+            chain_loglik_agreement: None,
         }
     }
 
@@ -1127,7 +1135,7 @@ decibans_failed = true
         let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
         match check_scout_convergence(&s, &gate) {
             ScoutGateVerdict::DecibansSpread {
-                delta_db, threshold_db, sigma_max, chain_logliks,
+                delta_db, threshold_db, sigma_max, chain_logliks, ..
             } => {
                 assert!((delta_db - 100.0).abs() < 0.5,
                     "delta_db ≈ 100 dB; got {}", delta_db);
@@ -1191,15 +1199,27 @@ decibans_failed = true
         SpreadChains::Named(logliks.iter().enumerate().map(|(i, &v)| (ChainIndex(i), v, se)).collect())
     }
 
+    /// The comparison an IF2 run records for these clean evaluations.
+    fn recorded(chains: &SpreadChains) -> Option<super::super::chain_diagnostics::ChainLoglikAgreement> {
+        let SpreadChains::Named(v) = chains else { return None };
+        let ids: Vec<ChainIndex> = v.iter().map(|t| t.0).collect();
+        let ll: Vec<f64> = v.iter().map(|t| t.1).collect();
+        let se: Vec<f64> = v.iter().map(|t| t.2).collect();
+        super::super::chain_diagnostics::clean_eval_agreement(&ids, &ll, &se)
+    }
+
+    /// [`format_decibans_spread_verdict`] with the comparison the run records.
+    fn spread_msg(delta_db: f64, threshold_db: f64, sigma_max: f64, chains: &SpreadChains) -> String {
+        format_decibans_spread_verdict(delta_db, threshold_db, sigma_max, chains, recorded(chains).as_ref())
+    }
+
     /// The refusals a user reads name no stage of the retired staged
     /// pipeline: "scout" is not a thing a fit has any more, so "re-run the
     /// scout" sends the reader looking for one.
     #[test]
     fn the_refusals_name_no_retired_stage() {
-        let named = format_decibans_spread_verdict(
-            240.0, 30.0, 0.5, &indexed(&[-60.0, -61.0, -300.0]));
-        let unnamed = format_decibans_spread_verdict(
-            240.0, 30.0, 0.5, &SpreadChains::Unnamed(vec![-60.0, -300.0]));
+        let named = spread_msg(240.0, 30.0, 0.5, &indexed(&[-60.0, -61.0, -300.0]));
+        let unnamed = spread_msg(240.0, 30.0, 0.5, &SpreadChains::Unnamed(vec![-60.0, -300.0]));
         let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
         let hard = format_hard_verdict(
             &gate, &[("beta".into(), 1.4)], &[("beta".into(), 1.4)], &[], 50.0, -60.0,
@@ -1216,7 +1236,7 @@ decibans_failed = true
     fn decibans_message_names_a_clear_outlier_chain() {
         // Five chains near -60, chain 5 stuck at -300; six chains → z* = 3.76.
         let chain_logliks = indexed(&[-60.0, -60.4, -59.6, -60.5, -60.2, -300.0]);
-        let msg = format_decibans_spread_verdict(240.0, 30.0, 0.5, &chain_logliks);
+        let msg = spread_msg(240.0, 30.0, 0.5, &chain_logliks);
         assert!(
             msg.contains("Clean loglik below the other chains' beyond its evaluation noise \
                           (Z > 3.76): chain 5\n"),
@@ -1232,7 +1252,7 @@ decibans_failed = true
     fn decibans_message_names_both_co_stuck_chains() {
         // Four good (jittered) near -60, two stuck near -400 (chains 4 and 5).
         let chain_logliks = indexed(&[-60.0, -60.4, -59.6, -60.5, -400.0, -401.0]);
-        let msg = format_decibans_spread_verdict(340.0, 30.0, 0.5, &chain_logliks);
+        let msg = spread_msg(340.0, 30.0, 0.5, &chain_logliks);
         let outliers = msg.lines().find(|l| l.contains("beyond its evaluation noise"))
             .unwrap_or_else(|| panic!("both co-stuck chains must be flagged:\n{msg}"));
         assert!(!outliers.contains("chain 0") && !outliers.contains("chain 3"), "{msg}");
@@ -1251,16 +1271,12 @@ decibans_failed = true
     #[test]
     fn decibans_message_fallback_names_worst_on_smooth_spread() {
         let chain_logliks = indexed_se(&[-60.0, -70.0, -80.0, -90.0, -100.0, -110.0], 15.0);
-        let SpreadChains::Named(named) = &chain_logliks else { unreachable!() };
-        use super::super::chain_diagnostics as cd;
-        let scores = cd::assess_chain_logliks(&named.iter()
-            .map(|&(chain, mean, se)| cd::ChainLoglikEstimate { chain, mean, weight: 1.0, se: Ok(se) })
-            .collect::<Vec<_>>());
+        let scores = recorded(&chain_logliks).expect("named chains are compared").chains;
         assert!(
             scores.iter().all(|s| s.test().is_some_and(|t| !t.flagged)),
             "precondition: no start differs beyond its noise: {scores:?}"
         );
-        let msg = format_decibans_spread_verdict(150.0, 30.0, 15.0, &chain_logliks);
+        let msg = spread_msg(150.0, 30.0, 15.0, &chain_logliks);
         assert!(
             msg.contains("Chain driving the spread (lowest clean loglik): chain 5"),
             "fallback must name the worst chain (-110 → chain 5):\n{msg}"
@@ -1279,11 +1295,15 @@ decibans_failed = true
         s.chain_eval_ids = vec![ChainIndex(0), ChainIndex(2)];
         s.chain_eval_logliks = vec![-60.0, -300.0];
         s.chain_eval_ses = vec![0.5, 0.5];
+        // As the run records it, from the same three fields.
+        s.chain_loglik_agreement = super::super::chain_diagnostics::clean_eval_agreement(
+            &s.chain_eval_ids, &s.chain_eval_logliks, &s.chain_eval_ses);
         let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
         let msg = match check_scout_convergence(&s, &gate) {
             ScoutGateVerdict::DecibansSpread {
-                delta_db, threshold_db, sigma_max, chain_logliks,
-            } => format_decibans_spread_verdict(delta_db, threshold_db, sigma_max, &chain_logliks),
+                delta_db, threshold_db, sigma_max, chain_logliks, agreement,
+            } => format_decibans_spread_verdict(
+                delta_db, threshold_db, sigma_max, &chain_logliks, agreement.as_ref()),
             other => panic!("expected DecibansSpread, got {other:?}"),
         };
         assert!(
@@ -1311,10 +1331,12 @@ decibans_failed = true
         let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
         let msg = match check_scout_convergence(&s, &gate) {
             ScoutGateVerdict::DecibansSpread {
-                delta_db, threshold_db, sigma_max, chain_logliks,
+                delta_db, threshold_db, sigma_max, chain_logliks, agreement,
             } => {
                 assert_eq!(chain_logliks, SpreadChains::Unnamed(vec![-60.0, -300.0]));
-                format_decibans_spread_verdict(delta_db, threshold_db, sigma_max, &chain_logliks)
+                assert_eq!(agreement, None, "no ids, nothing attributed");
+                format_decibans_spread_verdict(
+                    delta_db, threshold_db, sigma_max, &chain_logliks, agreement.as_ref())
             }
             other => panic!("expected DecibansSpread without ids, got {other:?}"),
         };

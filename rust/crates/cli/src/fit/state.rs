@@ -191,6 +191,16 @@ pub struct FitState {
     /// method, and on nl-* leaves written before it was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optimizer_convergence: Option<OptimizerConvergence>,
+
+    /// IF2: each chain's clean-evaluation log-likelihood compared with the
+    /// other chains' over its standard error (gh#406, gh#1008), computed once
+    /// at the end of the run from `chain_eval_ids`, `chain_eval_logliks` and
+    /// `chain_eval_ses`; the warm-start source check reads it. Last, so its
+    /// tables follow every plain value in the file. `None` on every other
+    /// method, on a run whose clean evaluations name no chains, and on a leaf
+    /// written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_loglik_agreement: Option<crate::fit::chain_diagnostics::ChainLoglikAgreement>,
 }
 
 /// The two-leg verdict an nl-* optimizer reaches on its chains: the chain
@@ -343,6 +353,7 @@ mod tests {
             dt_check: None,
             pf_noise: None,
             optimizer_convergence: None,
+            chain_loglik_agreement: None,
         }
     }
 

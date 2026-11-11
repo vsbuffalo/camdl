@@ -311,6 +311,30 @@ pub enum DiagnosticKind {
         /// The θ-move that did not move, with what it recorded.
         sampler: FrozenSampler,
     },
+    /// gh#406, gh#1008. One chain's mean log-likelihood differs from the
+    /// pooled mean of the other chains by more than the standard error of the
+    /// difference explains: the leave-one-out `Z` of
+    /// `cli::fit::chain_diagnostics`, above its Bonferroni cutoff. It
+    /// corroborates R̂ and ESS; it is not the convergence verdict, and it does
+    /// not name a cause — a side mode, a ridge along a weakly identified
+    /// parameter, a chain that has not mixed, or for IF2 a start that reached
+    /// another optimum all produce it.
+    ChainLoglikDiffers {
+        chain_id: usize,
+        /// What was compared: the trace column whose retained mean it is
+        /// (`log_likelihood`, or `obs_ll` for PGAS), or `clean_loglik` for
+        /// IF2's clean-evaluation means.
+        column: String,
+        /// The chain's mean minus the other chains' pooled mean, in nats.
+        #[serde(with = "json_f64")]
+        diff: f64,
+        /// `|diff|` over its standard error.
+        #[serde(with = "json_f64")]
+        z: f64,
+        /// The cutoff `z` exceeded.
+        #[serde(with = "json_f64")]
+        cutoff: f64,
+    },
 
     // ── PGAS ─────────────────────────────────────────────────────
     DegenerateAncestorSampling {
@@ -618,6 +642,7 @@ impl DiagnosticKind {
             Self::ConvergenceIncomplete { .. } => Severity::Warning,
             Self::DivergentTransitions { .. } => Severity::Warning,
             Self::ChainFrozen { .. } => Severity::Error,
+            Self::ChainLoglikDiffers { .. } => Severity::Warning,
             Self::LowESS { ess_fraction, .. } if *ess_fraction < 0.05 => Severity::Error,
             Self::LowESS { .. } => Severity::Warning,
             Self::LowESSAtMLE { ess_min, n_particles, .. }
@@ -700,6 +725,9 @@ impl DiagnosticKind {
                     n_divergent, n_sweeps),
             Self::ChainFrozen { n_draws, burn_in, n_steps, sampler, .. } =>
                 chain_frozen_message(*n_draws, *burn_in, *n_steps, sampler),
+            Self::ChainLoglikDiffers { column, diff, z, cutoff, .. } =>
+                format!("mean {column} differs from the other chains' by {diff:+.2} nats \
+                         (Z = {z:.1} > {cutoff:.2}), beyond what its standard error explains."),
             Self::DegenerateAncestorSampling { pct, .. } =>
                 format!("Ancestor sampling degenerate at {:.1}% of substeps.", pct),
             Self::LowTrajectoryRenewal { renewal } =>
@@ -850,6 +878,11 @@ impl DiagnosticKind {
                  on 88-100% of post-burn-in sweeps",
                 "`fit summary --exclude-chains <chain>` shows the fit without this chain; \
                  nothing excludes it automatically",
+            ],
+            Self::ChainLoglikDiffers { .. } => vec![
+                "This can indicate a chain sampling another region of the posterior (a \
+                 side mode, or a ridge along a weakly identified parameter) or one that \
+                 has not mixed; compare its per-chain posterior with the others'",
             ],
             Self::ChainFrozen { sampler: FrozenSampler::RandomWalk, .. } => vec![
                 "Read the chain's warm-up record and the `accepted` column of its trace.tsv",
@@ -1008,7 +1041,8 @@ impl DiagnosticKind {
             | Self::ScaleAtFloor { chain_id, .. }
             | Self::ScaleFarFromOptimum { chain_id, .. } => Some(*chain_id),
             Self::AcceptanceRateUnhealthy { chain_id, .. } => *chain_id,
-            Self::ChainFrozen { chain_id, .. } => Some(*chain_id),
+            Self::ChainFrozen { chain_id, .. }
+            | Self::ChainLoglikDiffers { chain_id, .. } => Some(*chain_id),
             _ => None,
         }
     }
@@ -1071,6 +1105,7 @@ impl DiagnosticKind {
             | Self::MaxTreeDepthHits { .. }
             | Self::DivergentTransitions { .. }
             | Self::ChainFrozen { .. }
+            | Self::ChainLoglikDiffers { .. }
             | Self::DegenerateAncestorSampling { .. }
             | Self::LowTrajectoryRenewal { .. }
             | Self::PathRenewalCoalesced { .. }
@@ -1650,6 +1685,9 @@ mod tests {
                 chain_id: 1, n_draws: 50, burn_in: 10, n_steps: 50,
                 sampler: FrozenSampler::Nuts { step_size: Some(x), n_divergent: 49 },
             },
+            DiagnosticKind::ChainLoglikDiffers {
+                chain_id: 2, column: "obs_ll".into(), diff: x, z: x, cutoff: x,
+            },
         ]
     }
 
@@ -1690,6 +1728,7 @@ mod tests {
             ScaleAtFloor { .. } => 28,
             ScaleFarFromOptimum { .. } => 29,
             ChainFrozen { .. } => 30,
+            ChainLoglikDiffers { .. } => 31,
         }
     }
 
@@ -1863,7 +1902,7 @@ mod tests {
     fn every_variant_round_trips_non_finite_numbers_losslessly() {
         let covered: std::collections::BTreeSet<usize> =
             every_variant(0.5).iter().map(variant_index).collect();
-        assert_eq!(covered, (0..31).collect(),
+        assert_eq!(covered, (0..32).collect(),
             "every_variant must build one of every DiagnosticKind variant");
 
         for x in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
@@ -1949,6 +1988,10 @@ mod tests {
             concat!(
                 r#"{"type":"chain_frozen","chain_id":1,"n_draws":50,"burn_in":10,"n_steps":50,"#,
                 r#""sampler":{"kernel":"nuts","step_size":0.25,"n_divergent":49}}"#,
+            ),
+            concat!(
+                r#"{"type":"chain_loglik_differs","chain_id":2,"column":"obs_ll","#,
+                r#""diff":0.25,"z":0.25,"cutoff":0.25}"#,
             ),
         ];
         assert_eq!(json.len(), want.len());

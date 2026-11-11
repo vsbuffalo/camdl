@@ -80,7 +80,7 @@ pub mod trace_writer;
 pub(crate) mod resumed_chain; // a resumed sampler leaf holds the whole chain, and records its segments
 pub mod synthetic;
 pub mod gating;
-pub mod chain_diagnostics;  // gh#406, gh#1008: per-chain loglik comparison (read-side)
+pub mod chain_diagnostics;  // gh#406, gh#1008: per-chain loglik comparison, recorded at run end
 pub mod cross_chain_compat; // gh#785: log p(x_j | θ_i) across the path-augmented chains
 pub mod path_renewal;       // gh#791: trajectory renewal resolved in time, and its two scalars
 pub mod latent_convergence; // gh#822: R̂/ESS of every latent state at every substep across chains
@@ -1882,6 +1882,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // ratio, so the acceptance ceiling does not apply to it.
                     pf_noise: None,
                     optimizer_convergence: None,
+                    // The per-chain comparison of the clean evaluations, computed
+                    // once here and read by the warm-start source check. Not
+                    // raised as findings: the clean-eval standard error of a
+                    // replicate mean is small enough that starts 0.07 nats apart
+                    // differ "significantly" (the reporting fixture's IF2 fit),
+                    // and whether such a spread matters is the decibans leg's
+                    // question, which has a floor in log-likelihood units. The
+                    // comparison names chains inside that refusal.
+                    chain_loglik_agreement: chain_diagnostics::clean_eval_agreement(
+                        &chain_results.chain_eval_ids(),
+                        &chain_results.chain_eval_logliks(),
+                        &chain_results.chain_eval_ses(),
+                    ),
                 };
                 fit_state.save(&method_dir.to_string_lossy()).unwrap_or_else(|e| {
                     out.say(format_args!("warning: could not save fit_state: {}", e));
@@ -2508,11 +2521,10 @@ fn completed_outcome(
     let result = MethodResult::load_from(leaf, method_name).map_err(|e| e.to_string())?;
     // The fit directory: `<fit>/<method>-<hash>/<seed leaf>`.
     let fit_dir = leaf.parent().and_then(|p| p.parent()).unwrap_or(leaf);
-    let ll_kind = loglik::LoglikType::from(&result);
     let chain_detail = match &result {
         MethodResult::Pgas(_) | MethodResult::Pmmh(_) => Some(report::ChainDetail::gather(
             leaf,
-            ll_kind,
+            fit_summary::recorded_chain_logliks(&result),
             matches!(result, MethodResult::Pgas(_)),
             None,
             fit_summary::forkability(&fit_dir.to_string_lossy(), method_name, None),

@@ -1463,6 +1463,21 @@ pub fn run_method(
         }
     }
 
+    // gh#406, gh#1008. Each chain's mean `obs_ll` against the other chains',
+    // computed once here from the traces the chains have closed, over each
+    // chain's retained draws, and recorded in the summary for every reader. A
+    // chain that differs beyond its Monte Carlo error is a finding.
+    let chain_logliks = super::chain_diagnostics::recorded_chain_loglik_agreement(
+        method_dir,
+        LoglikType::CompleteData,
+        all_results.iter().zip(&inherited).map(|((c, sweeps, _), base)| {
+            (ChainIndex(*c), base.as_ref().map_or(0, |b| b.index.len()) + sweeps.len())
+        }),
+    );
+    for kind in chain_logliks.iter().flat_map(|a| a.findings()) {
+        out.finding(kind);
+    }
+
     // gh#791. Trajectory renewal resolved in time, pooled over the retained
     // post-burn-in sweeps of every surviving chain. Printed unconditionally,
     // and BESIDE the aggregate rather than instead of it: the aggregate's last
@@ -1652,7 +1667,7 @@ pub fn run_method(
         .collect();
     let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
     write_summary(method_dir, &all_results, kernel, thin, elapsed.as_secs_f64(), &traj_plan, &saved_paths,
-        n_trajectories, &diagnostics, path_renewal.as_ref(),
+        n_trajectories, &diagnostics, chain_logliks.as_ref(), path_renewal.as_ref(),
         filter_ess.as_ref().map(|fe| &fe.summary), latent_convergence.as_ref())?;
 
     // No-op resume: every chain already reached the target sweep count
@@ -1778,6 +1793,7 @@ pub fn run_method(
         // has no spread to record.
         pf_noise: None,
         optimizer_convergence: None,
+        chain_loglik_agreement: None,
     };
     state.save(&method_dir.to_string_lossy())?;
 
@@ -2292,6 +2308,7 @@ fn write_summary(
     saved_paths: &SavedPathCounts,
     n_trajectories: usize,
     diagnostics: &MethodConvergence,
+    chain_logliks: Option<&super::chain_diagnostics::ChainLoglikAgreement>,
     path_renewal: Option<&super::path_renewal::PathRenewal>,
     filter_ess: Option<&super::filter_ess::FilterEss>,
     latent_convergence: Option<&super::latent_convergence::LatentConvergence>,
@@ -2368,6 +2385,7 @@ fn write_summary(
     // live in this summary and silently absent from pmmh's or nuts's.
     summary.as_object_mut().expect("json! built an object")
         .extend(diagnostics.summary_fields());
+    super::chain_diagnostics::insert_agreement(&mut summary, chain_logliks)?;
 
     let path = dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename());
     let contents = serde_json::to_string_pretty(&summary)
