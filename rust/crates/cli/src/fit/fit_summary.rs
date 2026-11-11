@@ -2644,7 +2644,7 @@ mod tests {
         // where to look for the rest.
         let head: Vec<&str> = out.lines().take_while(|l| !l.starts_with("── ")).collect();
         assert_eq!(head, vec![
-            "  posterior · pgas · 4 chains · 4000 draws",
+            "  pgas · 4 chains · 4000 draws",
             // No fit_state.toml under the fixture: the header says so rather
             // than guessing a rule.
             "  seeded from:  unknown",
