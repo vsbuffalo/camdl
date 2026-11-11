@@ -87,4 +87,5 @@ target/book/
 
 # Quarto documentation website (make docs-site)
 docs/_site/
+docs/.render.log
 docs/.quarto/
