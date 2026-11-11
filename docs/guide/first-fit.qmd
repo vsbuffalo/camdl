@@ -318,8 +318,9 @@ The pair plot shows each parameter's marginal posterior on the diagonal, with
 its prior shaded behind it, and the joint posterior of each pair below. The
 posterior is a narrow spike on a nearly flat prior: the data determined both
 parameters far more tightly than the prior did. `R0` and `gamma` lean against
-each other, because a slightly faster recovery with a slightly higher `R0` draws
-almost the same epidemic.
+each other (correlation about −0.5): the epidemic's early growth rate is roughly
+`gamma * (R0 - 1)`, so a slightly faster recovery with a slightly lower `R0`
+draws almost the same epidemic.
 
 ![Pair tab of the `r0` fit.](first-fit/img/scope-r0-pair.png)
 
@@ -331,12 +332,13 @@ chain.
 
 ![Diagnostics tab of the `r0` fit.](first-fit/img/scope-r0-diagnostics.png)
 
-The verdict at its top, `bulk-ESS = 388 < 400`, differs from `fit summary`'s
-because the viewer sets its own warm-up, the slider at the top, which by default
-discards half of each chain rather than the fit's 1000 steps. Four hundred is
-the minimum bulk effective sample size Vehtari et al. (2021) recommend for four
-chains. The chains agree, so the fit is converged; the flag says that a longer
-run, more `iterations`, would describe the posterior's tails more precisely.
+The verdict at its top is camdl's own, read from the run rather than recomputed,
+so it says what `fit summary` says: converged, with a largest `R̂` of 1.002. The
+warm-up slider starts at the run's declared burn-in, the 1000 steps camdl
+discards, so the tab's effective sample sizes match the summary's too. Moving
+the slider changes what the tab plots, not camdl's verdict. `R0`'s bulk effective
+sample size of 473 clears the 400 that Vehtari et al. (2021) recommend for four
+chains.
 
 ## 6. Check the posterior against the data
 
