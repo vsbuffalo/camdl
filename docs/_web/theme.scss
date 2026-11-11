@@ -127,11 +127,15 @@ main.content table th { font-weight: 600; }
 .ansi-warn { color: #9a6700; }
 .ansi-err { color: #cf222e; }
 .ansi-info { color: #0e7490; }
+.ansi-transition { color: #0550ae; }
+.ansi-compartment { color: #8250df; }
 body.quarto-dark {
   .ansi-ok { color: #56d364; }
   .ansi-warn { color: #e3b341; }
   .ansi-err { color: #ff7b72; }
   .ansi-info { color: #67d0e0; }
+  .ansi-transition { color: #79c0ff; }
+  .ansi-compartment { color: #d2a8ff; }
 }
 
 // Page subtitle (a page's `description`): larger, muted, and separated from
