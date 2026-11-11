@@ -200,6 +200,9 @@ pub fn obs_stream_checks(model: &ir::Model) -> Vec<Check> {
 pub enum Verdict {
     Converged { max_rhat: f64, param: Option<String> },
     NotConverged { max_rhat: f64, param: Option<String>, band: crate::fit::method_result::RhatBand },
+    /// These chains took no step after burn-in (gh#1032): not converged,
+    /// whatever any R̂ says.
+    ChainsFrozen { chains: Vec<crate::chain_index::ChainIndex> },
     /// R̂ could not be computed for these parameters for a reason that is a
     /// problem: not converged, with no number to show.
     Unassessable { params: Vec<String> },
@@ -233,6 +236,7 @@ pub fn verdict(result: &crate::fit::method_result::MethodResult) -> Verdict {
             RhatBand::Converged => Verdict::Converged { max_rhat: v, param },
             band => Verdict::NotConverged { max_rhat: v, param, band },
         },
+        MaxRhat::ChainsFrozen { chains } => Verdict::ChainsFrozen { chains },
         MaxRhat::Unassessable { params } => Verdict::Unassessable { params },
         MaxRhat::NotApplicable { reason } => Verdict::NotAssessed { reason: reason.describe().to_string() },
         MaxRhat::NoParams => Verdict::NotAssessed { reason: "no parameter was assessed".to_string() },
@@ -532,8 +536,6 @@ pub struct ChainDetail {
     pub cross_chain: Option<crate::fit::cross_chain_compat::CrossChainReading>,
     /// Per-chain count of retained draws whose log-posterior is `-inf`.
     pub neginf: Option<Vec<crate::fit::chain_diagnostics::ChainNegInf>>,
-    /// Per-chain count of distinct parameter vectors among the retained draws.
-    pub unique_draws: Option<Vec<crate::fit::chain_diagnostics::ChainUniqueDraws>>,
     /// How many posterior draws a counterfactual could fork from, over the
     /// same chains the rest of the summary reports.
     pub forkable: Option<Forkable>,
@@ -600,7 +602,6 @@ impl ChainDetail {
             path_renewal: None,
             cross_chain: None,
             neginf: cd::read_chain_neginf(method_dir),
-            unique_draws: cd::read_chain_unique_draws(method_dir),
             forkable,
             subset,
             // Read for the identity line's chain count and the seeded-from

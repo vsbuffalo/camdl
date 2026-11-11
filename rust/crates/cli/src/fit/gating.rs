@@ -836,6 +836,10 @@ fn sampler_source_verdict(leaf: &Path) -> Result<Option<String>, String> {
         MaxRhat::Reported(v) => Some(format!(
             "its posterior did not converge: max R̂ = {v:.3}, threshold {RHAT_CONVERGED_THRESHOLD}"
         )),
+        MaxRhat::ChainsFrozen { chains } => Some(format!(
+            "its posterior did not converge: {}, so its draws include a point mass",
+            super::method_result::frozen_chains_clause(&chains)
+        )),
         MaxRhat::Unassessable { params } => Some(format!(
             "its R̂ is unavailable for {} — a sampler failure, or a summary that does not \
              record it — so it is not certified",

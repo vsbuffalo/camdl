@@ -660,7 +660,8 @@ pub(crate) fn bayesian_block(version_lead: bool, report: &MethodReport, explain_
     out.extend(verdict_section(diag, detail));
     out.extend(posterior_section(diag, posterior_mean, &report.param_dates, explain_on));
     out.extend(convergence_section(diag, acceptance_summary, explain_on));
-    out.extend(chains_section(diag.n_chains, detail, explain_on));
+    out.extend(chains_section(
+        diag.n_chains, diag.frozen_chains.as_deref().unwrap_or(&[]), detail, explain_on));
     if method == "pgas" {
         out.extend(latent_paths_section(detail, explain_on));
     }
@@ -1047,6 +1048,23 @@ pub(crate) fn verdict_section(diag: &PosteriorDiagnostics, detail: &ChainDetail)
                 detail,
             ));
         }
+        MaxRhat::ChainsFrozen { chains } => {
+            out.push(Line(vec![
+                Span::plain("  "),
+                Span::styled("✗", Style::Err),
+                Span::plain(" NOT converged"),
+            ]));
+            let what = if chains.len() == 1 {
+                "its retained draws are one parameter vector, a point mass in every pooled \
+                 number below"
+            } else {
+                "the retained draws of each are one parameter vector, a point mass in every \
+                 pooled number below"
+            };
+            out.push(plain(format!(
+                "    {}: {what}", crate::fit::method_result::frozen_chains_clause(&chains))));
+            out.extend(verdict_facts(None, detail));
+        }
         MaxRhat::Unassessable { params } => {
             out.push(Line(vec![
                 Span::plain("  "),
@@ -1348,6 +1366,7 @@ pub(crate) fn efficiency_lines(diag: &PosteriorDiagnostics) -> Vec<Line> {
 /// skipping.
 pub(crate) fn chains_section(
     n_chains_expected: usize,
+    frozen_chains: &[crate::chain_index::ChainIndex],
     detail: &ChainDetail,
     explain_on: bool,
 ) -> Vec<Line> {
@@ -1510,22 +1529,18 @@ pub(crate) fn chains_section(
         }
     }
 
-    // gh#635 (ebola item 1): a POINT-MASS chain — one distinct parameter
-    // vector across all retained draws (zero accepted θ-moves) — is not
-    // assessed by the comparison (one effective draw) and evades the −inf
-    // screen when its start has finite density.
-    // Same loud treatment.
-    if let Some(uniq) = &detail.unique_draws {
-        for u in uniq.iter().filter(|u| u.n_unique == 1 && u.n_draws > 1) {
-            out.extend(note(Style::Err, &format!(
-                "⚠ chain {}: ONE distinct parameter vector across {} retained \
-                 draws (zero accepted moves) — a point-mass chain; its draws \
-                 are in draws.tsv and every pooled number in this block. View \
-                 without it: --exclude-chains {} (exclusion stays \
-                 explicit — gh#419).",
-                u.chain, u.n_draws, u.chain,
-            )));
-        }
+    // gh#635, gh#1032: a chain that took no step after burn-in — one
+    // parameter vector across its retained draws — is not assessed by the
+    // comparison (one effective draw) and evades the −inf screen when its
+    // point has finite density. The run recorded it (`frozen_chains`); the
+    // same loud treatment, read from that record.
+    for c in frozen_chains {
+        out.extend(note(Style::Err, &format!(
+            "⚠ chain {c}: took no step after burn-in — its retained draws are one \
+             parameter vector, a point mass in draws.tsv and in every pooled number \
+             in this block. View without it: --exclude-chains {c} (exclusion stays \
+             explicit — gh#419).",
+        )));
     }
 
     // What was observed, and what it can indicate — never a cause stated as

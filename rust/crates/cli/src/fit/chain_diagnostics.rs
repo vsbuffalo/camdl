@@ -118,7 +118,8 @@
 //!   [`CHAIN_LOGLIK_MIN_ESS`] effective draws (a chain that never moved has
 //!   one) is reported "not assessed", neither passed nor flagged, and is left
 //!   out of the other chains' pooled mean. A chain frozen at one state is
-//!   caught by the point-mass and `-inf` screens of this module instead.
+//!   caught by [`chain_is_frozen`], and one stuck at `-inf` by this module's
+//!   `-inf` screen, instead.
 //! - **IF2 is an optimiser.** Its chains' final log-likelihoods are evaluated
 //!   at different θ; the gate compares them with their evaluation noise (the
 //!   standard error of the clean-eval replicate mean) to ask whether one start
@@ -743,56 +744,32 @@ pub struct ChainNegInf {
     pub n_retained: usize,
 }
 
-/// One chain's point-mass screen (gh#635, ebola item 1): over `draws.tsv`,
-/// how many DISTINCT parameter vectors the chain retained. A chain that
-/// never accepted a θ-move keeps exactly one — a point mass at its start,
-/// which the −inf screen (gh#608) cannot see when that start has FINITE
-/// density. Its draws still enter every pooled number (3 such chains were
-/// 37.5% of a pooled cloud downstream, R̂ 5.14, masquerading as a mode).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ChainUniqueDraws {
-    /// The chain's number, as its directory and the per-chain table carry it.
-    pub chain: ChainIndex,
-    /// Distinct parameter vectors among the retained draws.
-    pub n_unique: usize,
-    /// Retained draws for this chain.
-    pub n_draws: usize,
-}
-
-/// Per-chain distinct-parameter-vector counts from `draws.tsv`, keyed by its
-/// `chain` column; vectors are compared as their exact on-disk text (the
-/// writer round-trips full precision, so textual equality is value
-/// equality). `None` when draws.tsv is missing/unreadable.
-pub fn read_chain_unique_draws(method_dir: &Path) -> Option<Vec<ChainUniqueDraws>> {
-    let contents = std::fs::read_to_string(method_dir.join("draws.tsv")).ok()?;
-    let mut lines = contents.lines();
-    let header = lines.next()?;
-    let mut cols = header.split('\t');
-    if cols.next() != Some("chain") {
-        return None;
-    }
-    use std::collections::{BTreeMap, HashSet};
-    let mut per_chain: BTreeMap<usize, (HashSet<&str>, usize)> = BTreeMap::new();
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
+/// Whether a chain took no step after burn-in (gh#635, gh#1032): it retained
+/// more than one draw and every estimated parameter's value is the same in all
+/// of them, so its draws are one parameter vector. `columns` holds one slice
+/// per estimated parameter, the chain's retained draws of it in order.
+///
+/// A chain that never accepted a θ-move after warm-up keeps exactly one
+/// vector, a point mass at where it stood, and its draws still enter every
+/// pooled number: three such chains were 37.5% of a pooled cloud downstream on
+/// the ebola fit of gh#635, at R̂ 5.14, reading as a mode. The `-inf` screen
+/// cannot see it when that point has finite density, and the per-chain
+/// log-likelihood comparison does not assess it (one effective draw), so this
+/// is its own test.
+///
+/// Equality is exact (`==` on the values the sampler kept, which `draws.tsv`
+/// writes at full precision): a chain that moved by any amount moved. With no
+/// estimated parameter, or one draw, there is nothing to have moved and the
+/// chain is not called frozen.
+pub fn chain_is_frozen<'a>(columns: impl IntoIterator<Item = &'a [f64]>) -> bool {
+    let mut any = false;
+    for col in columns {
+        if col.len() < 2 || col.iter().any(|v| *v != col[0]) {
+            return false;
         }
-        let Some((chain_tok, rest)) = line.split_once('\t') else { continue };
-        let Ok(c) = chain_tok.parse::<usize>() else { continue };
-        // Strip the draw index (column 2): the PARAMS are what repeat.
-        let params = rest.split_once('\t').map(|(_, p)| p).unwrap_or(rest);
-        let e = per_chain.entry(c).or_default();
-        e.0.insert(params);
-        e.1 += 1;
+        any = true;
     }
-    if per_chain.is_empty() {
-        return None;
-    }
-    Some(per_chain.into_iter().map(|(c, (set, n))| ChainUniqueDraws {
-        chain: ChainIndex(c),
-        n_unique: set.len(),
-        n_draws: n,
-    }).collect())
+    any
 }
 
 /// Per-chain [`ChainNegInf`] screen over the retained trace rows. `None`

@@ -554,6 +554,17 @@ pub struct PosteriorDiagnostics {
     /// Number of chains. R̂ requires ≥2; part of "how this posterior was
     /// sampled", so it lives here rather than on each method result.
     pub n_chains: usize,
+    /// The chains whose retained draws are all one parameter vector — they
+    /// took no step after burn-in (gh#1032) — ascending; empty when every
+    /// chain moved. `None` when not recorded: a summary written before camdl
+    /// recorded it.
+    ///
+    /// Any entry makes [`max_rhat_status`](Self::max_rhat_status)
+    /// [`MaxRhat::ChainsFrozen`], whatever the R̂: one frozen chain among
+    /// moving ones can leave R̂ finite and even small, when it sits near the
+    /// middle of the others' cloud.
+    #[serde(default)]
+    pub frozen_chains: Option<Vec<ChainIndex>>,
 }
 
 impl PosteriorDiagnostics {
@@ -584,6 +595,14 @@ impl PosteriorDiagnostics {
     /// The worst R̂ over the assessed params — **or the reason there isn't
     /// one**. The convergence headline; **R̂, not IF2's Â**. See [`MaxRhat`].
     pub fn max_rhat_status(&self) -> MaxRhat {
+        // A chain that took no step after burn-in contributes a point mass to
+        // every pooled number, and the between-chain statistic does not
+        // reliably see it (gh#1032). Checked first: it is the more specific
+        // cause of every other failure it produces (an infinite R̂ when every
+        // chain froze).
+        if let Some(chains) = self.frozen_chains.as_ref().filter(|c| !c.is_empty()) {
+            return MaxRhat::ChainsFrozen { chains: chains.clone() };
+        }
         if self.per_param.is_empty() {
             return MaxRhat::NoParams;
         }
@@ -875,6 +894,9 @@ impl RhatBand {
 pub enum MaxRhat {
     /// Every assessed parameter reported, and this is the worst.
     Reported(f64),
+    /// These chains took no step after burn-in (gh#1032): not converged,
+    /// whatever any R̂ says. Ascending.
+    ChainsFrozen { chains: Vec<ChainIndex> },
     /// At least one parameter's R̂ could not be computed for a reason that
     /// indicates a PROBLEM, or is unavailable with no reason recorded (a
     /// `null` in the stored summary, a refusal this build cannot read).
@@ -885,6 +907,18 @@ pub enum MaxRhat {
     NotApplicable { reason: RhatRefusal },
     /// No parameter was assessed and no reason was recorded.
     NoParams,
+}
+
+/// `chain 2 took no step after burn-in` / `chains 0 and 1 took no step after
+/// burn-in`: the clause every surface states a [`MaxRhat::ChainsFrozen`]
+/// verdict with.
+pub fn frozen_chains_clause(chains: &[ChainIndex]) -> String {
+    let names: Vec<String> = chains.iter().map(|c| c.to_string()).collect();
+    match names.as_slice() {
+        [one] => format!("chain {one} took no step after burn-in"),
+        [init @ .., last] => format!("chains {} and {last} took no step after burn-in", init.join(", ")),
+        [] => "no chain took a step after burn-in".to_string(),
+    }
 }
 
 /// The min-over-parameters ESS, or the reason there isn't one.
@@ -1188,13 +1222,16 @@ pub fn point_start(method_dir: &Path) -> Result<Option<(usize, String)>, MethodR
 /// a loader that forgot it.
 fn posterior_diagnostics(
     method_dir: &Path,
-    per_param: BTreeMap<String, ParamConvergence>,
+    conv: &ConvergenceMaps,
     n_samples: usize,
     thin: usize,
     wall_time_secs: Option<f64>,
     n_chains: usize,
 ) -> Result<PosteriorDiagnostics, MethodResultError> {
-    let mut diag = PosteriorDiagnostics { per_param, n_samples, thin, wall_time_secs, n_chains };
+    let mut diag = PosteriorDiagnostics {
+        per_param: conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
+        frozen_chains: conv.frozen_chains(),
+    };
     if let Some((n, starts)) = point_start(method_dir)? {
         diag.demote_point_start(n, &starts);
     }
@@ -1512,7 +1549,7 @@ impl PgasRun {
             best_chain: state.as_ref().map(|s| s.best_chain),
             best_loglik: state.as_ref().map(|s| s.best_loglik),
             diagnostics: posterior_diagnostics(
-                method_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
+                method_dir, &conv, n_samples, thin, wall_time_secs, n_chains,
             )?,
             posterior_mean,
             posterior_q025,
@@ -1588,7 +1625,7 @@ impl PmmhRun {
             pf_noise,
             loglik_type: crate::fit::loglik::LoglikType::from(algo),
             diagnostics: posterior_diagnostics(
-                method_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
+                method_dir, &conv, n_samples, thin, wall_time_secs, n_chains,
             )?,
             posterior_mean,
             acceptance_rate,
@@ -1622,6 +1659,9 @@ pub struct ConvergenceMaps {
     /// refusal of a newer camdl). Kept so the parameter cannot vanish; its R̂
     /// is unavailable.
     unreadable_refusals: std::collections::BTreeSet<String>,
+    /// The chains that took no step after burn-in; `None` when the summary
+    /// does not record them.
+    frozen_chains: Option<Vec<ChainIndex>>,
 }
 
 impl ConvergenceMaps {
@@ -1640,7 +1680,17 @@ impl ConvergenceMaps {
             ess_tail: read_f64_map(summary, "ess_tail"),
             ess_per_chain: read_typed_map(summary, "ess_per_chain"),
             unreadable_refusals: unreadable_keys::<RhatRefusal>(summary, "rhat_not_reported"),
+            // An entry that does not read as chain numbers is not a record of
+            // none frozen: the whole key then reads as not recorded.
+            frozen_chains: summary.get(crate::fit::runner::FROZEN_CHAINS_KEY)
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
         }
+    }
+
+    /// The chains the summary records as having taken no step after burn-in,
+    /// or `None` when it does not record them.
+    pub fn frozen_chains(&self) -> Option<Vec<ChainIndex>> {
+        self.frozen_chains.clone()
     }
 
     /// Every parameter this summary mentions, in any capacity. The key set is
@@ -2562,6 +2612,7 @@ mod tests {
             thin,
             wall_time_secs: wall,
             n_chains: 2,
+            frozen_chains: None,
         }
     }
 
@@ -2619,6 +2670,7 @@ mod tests {
             thin: 1,
             wall_time_secs: wall,
             n_chains: 4,
+            frozen_chains: None,
         }
     }
 
@@ -2752,6 +2804,7 @@ mod tests {
         let verdict = |summary: serde_json::Value| PosteriorDiagnostics {
             per_param: ConvergenceMaps::read(&summary).per_param(),
             n_samples: 100, thin: 1, wall_time_secs: None, n_chains: 4,
+            frozen_chains: None,
         }.max_rhat_status();
         let null_rhat = serde_json::json!({
             "rhat": { "beta": 1.001, "gamma": null },
@@ -2809,6 +2862,7 @@ mod tests {
             thin: 1,
             wall_time_secs: Some(60.0),
             n_chains: 4,
+            frozen_chains: None,
         };
 
         match d.max_rhat_status() {
@@ -2895,6 +2949,7 @@ mod tests {
                      reason: RhatRefusal::TooFewChains, detail: None }),
             ]),
             n_samples: 100, thin: 1, wall_time_secs: None, n_chains: 1,
+            frozen_chains: None,
         };
         match d.max_rhat_status() {
             MaxRhat::NotApplicable { reason } => assert_eq!(reason, RhatRefusal::TooFewChains),
@@ -3024,6 +3079,7 @@ mod tests {
             thin: 1,
             wall_time_secs: Some(5.0),
             n_chains: 1,
+            frozen_chains: None,
         };
         // Review blocker 1: an empty map is NOT `0.0`. Folding from zero made a
         // fit whose R̂ could not be computed report `max R̂ = 0.000 ✓` and
