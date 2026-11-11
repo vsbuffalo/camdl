@@ -194,18 +194,21 @@ fn method_view_from_record(dir: &Path, rec: &RunRecord) -> Result<FitMethodView,
 }
 
 /// The segment a fit leaf directory sits in (`<seg>/<algorithm>-<h8>/seed_<n>-<h8>`),
-/// or `None` when `dir` is not a fit leaf (holds no `FitMethod` `run.json`).
-pub fn leaf_segment(dir: &Path) -> Option<PathBuf> {
-    let bytes = std::fs::read(dir.join("run.json")).ok()?;
-    let rec: RunRecord = serde_json::from_slice(&bytes).ok()?;
-    if rec.kind != ArtifactKind::FitMethod {
-        return None;
+/// or `Ok(None)` when `dir` is not a fit leaf (holds no `run.json`, or one of
+/// another kind). `Err` when its `run.json` cannot be read
+/// ([`crate::leaf_use::unreadable`]).
+pub fn leaf_segment(dir: &Path) -> Result<Option<PathBuf>, String> {
+    match crate::leaf_use::read(dir)? {
+        Some(leaf) if leaf.record.kind == ArtifactKind::FitMethod => {}
+        _ => return Ok(None),
     }
     let lexical = dir.parent().and_then(Path::parent).filter(|p| !p.as_os_str().is_empty());
-    match lexical {
+    Ok(match lexical {
         Some(seg) => Some(seg.to_path_buf()),
-        None => std::fs::canonicalize(dir).ok()?.parent()?.parent().map(Path::to_path_buf),
-    }
+        None => std::fs::canonicalize(dir)
+            .ok()
+            .and_then(|d| d.parent()?.parent().map(Path::to_path_buf)),
+    })
 }
 
 /// Where `fit predict` writes for one run: `<segment>/predict/<run id, 12 hex>/`
@@ -225,11 +228,12 @@ pub fn predictions_dir(segment: &Path, run_id: &str, options_key: Option<&str>) 
     })
 }
 
-/// The `run_id` (full hex) a fit leaf's `run.json` records, when `dir` is one.
-pub fn leaf_run_id(dir: &Path) -> Option<String> {
-    let bytes = std::fs::read(dir.join("run.json")).ok()?;
-    let rec: RunRecord = serde_json::from_slice(&bytes).ok()?;
-    (rec.kind == ArtifactKind::FitMethod).then(|| rec.run_id.to_hex())
+/// The `run_id` (full hex) a fit leaf's `run.json` records; `Ok(None)` when
+/// `dir` is not a fit leaf, `Err` when its `run.json` cannot be read.
+pub fn leaf_run_id(dir: &Path) -> Result<Option<String>, String> {
+    Ok(crate::leaf_use::read(dir)?
+        .filter(|l| l.record.kind == ArtifactKind::FitMethod)
+        .map(|l| l.record.run_id.to_hex()))
 }
 
 /// Whether two paths name one directory, lexically or after resolving links.
@@ -279,7 +283,9 @@ impl FitView {
     /// holding the leaf alone. Every reader that takes a fit directory
     /// therefore reads exactly the run a leaf path names, never a sibling.
     pub fn read(dir: &Path) -> Option<FitView> {
-        let (seg, only): (PathBuf, Option<&Path>) = match leaf_segment(dir) {
+        // A leaf whose record cannot be read is neither a run nor a problem
+        // folder: there is no view of it.
+        let (seg, only): (PathBuf, Option<&Path>) = match leaf_segment(dir).ok()? {
             Some(seg) => (seg, Some(dir)),
             None => (dir.to_path_buf(), None),
         };

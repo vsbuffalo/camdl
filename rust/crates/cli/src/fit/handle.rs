@@ -473,9 +473,11 @@ pub fn resolve_fit(s: &str) -> Result<ResolvedFit, ResolveError> {
     let (segment, leaf) = match target {
         FitTarget::Segment(seg) => (seg, None),
         FitTarget::Leaf(l) => {
-            let seg = crate::fit::fit_view::leaf_segment(&l.dir).ok_or_else(|| {
-                ResolveError::NotFound(format!("{} is not inside a fit's directory", l.dir.display()))
-            })?;
+            let seg = crate::fit::fit_view::leaf_segment(&l.dir)
+                .map_err(ResolveError::NotFound)?
+                .ok_or_else(|| {
+                    ResolveError::NotFound(format!("{} is not inside a fit's directory", l.dir.display()))
+                })?;
             (seg, Some(l.dir))
         }
     };

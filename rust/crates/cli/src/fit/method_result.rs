@@ -1134,14 +1134,12 @@ impl MethodResult {
 /// record — the contract is "every fit-method writes a `RunRecord` leaf whose
 /// `inputs` carries its config".
 fn read_method_inputs(method_dir: &Path) -> Result<serde_json::Value, MethodResultError> {
-    let bytes = std::fs::read(method_dir.join("run.json")).map_err(|e| MethodResultError::Io {
-        method_dir: method_dir.to_owned(),
-        message: format!("run.json: {}", e),
-    })?;
-    let rec: runid::RunRecord = serde_json::from_slice(&bytes).map_err(|e| MethodResultError::Io {
-        method_dir: method_dir.to_owned(),
-        message: format!("run.json: {}", e),
-    })?;
+    let io = |message: String| MethodResultError::Io { method_dir: method_dir.to_owned(), message };
+    let rec = match runid::read_leaf(method_dir) {
+        Ok(Some(leaf)) => leaf.record,
+        Ok(None) => return Err(io("run.json: no such file".into())),
+        Err(u) => return Err(io(u.reason.to_string())),
+    };
     if rec.kind != runid::ArtifactKind::FitMethod {
         return Err(MethodResultError::Io {
             method_dir: method_dir.to_owned(),

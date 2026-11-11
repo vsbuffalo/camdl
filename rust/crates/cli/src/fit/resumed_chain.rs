@@ -203,10 +203,9 @@ impl ResumeLineage {
         boundary: Vec<usize>,
         wall_time_seconds: f64,
     ) -> Result<Self, String> {
-        let bytes = std::fs::read(parent.join("run.json"))
-            .map_err(|e| format!("cannot read {}: {e}", parent.join("run.json").display()))?;
-        let rec: runid::RunRecord = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("{}: {e}", parent.join("run.json").display()))?;
+        let rec = crate::leaf_use::read(parent)?
+            .ok_or_else(|| format!("{} holds no run.json", parent.display()))?
+            .record;
         let parent_run_id = rec.run_id.to_hex();
         let mut segments = match Self::read(&rec.inputs)? {
             Some(l) => l.segments,

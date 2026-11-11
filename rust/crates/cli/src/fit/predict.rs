@@ -1447,7 +1447,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // gh#896: everything predict writes goes under a directory keyed by the
     // run it read, so a second run's predict cannot overwrite this one's and
     // every file is attributable to one run.
-    let run_id: String = crate::fit::fit_view::leaf_run_id(&run_dir)
+    let run_id: String = crate::fit::fit_view::leaf_run_id(&run_dir)?
         .ok_or_else(|| format!("{} is not a fit run (no run.json)", run_dir.display()))?;
     let options = PredictOptions::of(args);
     let out_dir = crate::fit::fit_view::predictions_dir(
