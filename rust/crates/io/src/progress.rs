@@ -501,12 +501,19 @@ pub struct HeartbeatGuard {
     /// The heartbeat, taken by whichever terminal write happens first, and
     /// `None` from construction for an [`inert`](Self::inert) guard.
     hb: std::sync::Mutex<Option<Heartbeat>>,
+    /// The directory whose `progress.json` holds a `done` that the leaf's
+    /// record has not yet confirmed ([`commit`](Self::commit)); `None` before
+    /// `done`, and again once committed.
+    provisional_done: std::sync::Mutex<Option<PathBuf>>,
 }
 
 impl HeartbeatGuard {
     /// Take ownership of a heartbeat for the length of one method.
     pub fn new(hb: Heartbeat) -> HeartbeatGuard {
-        HeartbeatGuard { hb: std::sync::Mutex::new(Some(hb)) }
+        HeartbeatGuard {
+            hb: std::sync::Mutex::new(Some(hb)),
+            provisional_done: std::sync::Mutex::new(None),
+        }
     }
 
     /// A guard over no heartbeat: this method publishes no progress, so every
@@ -514,7 +521,10 @@ impl HeartbeatGuard {
     /// lets the runner hand *every* method a guard, so no call site branches
     /// on whether this one has a counter it can honestly advance.
     pub fn inert() -> HeartbeatGuard {
-        HeartbeatGuard { hb: std::sync::Mutex::new(None) }
+        HeartbeatGuard {
+            hb: std::sync::Mutex::new(None),
+            provisional_done: std::sync::Mutex::new(None),
+        }
     }
 
     /// A poisoned lock is recovered rather than propagated: this is a
@@ -537,16 +547,43 @@ impl HeartbeatGuard {
         }
     }
 
-    /// Record a clean completion. A no-op once any terminal state is written.
+    /// Record that the method finished. The `done` is provisional until
+    /// [`commit`](Self::commit): `progress.json` is one of the files the leaf's
+    /// manifest hashes, so it has to stop changing before the leaf is
+    /// finalized, which is why `done` goes down first. A failure reported
+    /// after `done` but before `commit` replaces it
+    /// ([`failed`](Self::failed)). A no-op once any terminal state is written.
     pub fn done(&self) {
+        let dir = self.slot().as_ref().map(|hb| hb.shared.dir.clone());
         self.terminal(RunState::Done);
+        if let Some(dir) = dir {
+            *self.provisional_done.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
+        }
+    }
+
+    /// The leaf's record is committed `completed`, so the `done` on disk is
+    /// final: a later failure leaves `progress.json` alone, because the leaf's
+    /// manifest has hashed it.
+    pub fn commit(&self) {
+        self.provisional_done.lock().unwrap_or_else(|e| e.into_inner()).take();
     }
 
     /// Record a caught failure, carrying the sentence the command reports, so
     /// a reader holding only `progress.json` learns the same thing as one
-    /// reading stderr. A no-op once any terminal state is written.
+    /// reading stderr. A no-op once any other terminal state is written; a
+    /// provisional `done` (see [`done`](Self::done)) is replaced, keeping the
+    /// per-chain block it recorded.
     pub fn failed(&self, reason: impl Into<String>) {
-        self.terminal(RunState::Failed { reason: reason.into() });
+        let reason = reason.into();
+        let provisional =
+            self.provisional_done.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(dir) = provisional {
+            let chains = read_progress(&dir).ok().and_then(|p| p.chains);
+            // Best effort, like every progress write: this is a diagnostic.
+            let _ = write_progress(&dir, &Progress::now(RunState::Failed { reason }, chains));
+            return;
+        }
+        self.terminal(RunState::Failed { reason });
     }
 
     fn terminal(&self, state: RunState) {
@@ -828,6 +865,32 @@ mod tests {
         assert_eq!(end.state, RunState::Done);
         let live = end.chains.expect("the per-chain block survives the guard");
         assert_eq!((live.completed, live.refused), (1, 1));
+    }
+
+    /// A `done` is provisional until the leaf commits: a failure reported
+    /// after it replaces it (keeping the chain block), and one reported after
+    /// `commit` does not.
+    #[test]
+    fn a_failure_replaces_a_done_the_leaf_never_committed() {
+        let run = |commit: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let guard = HeartbeatGuard::new(Heartbeat::mcmc(
+                dir.path().to_path_buf(), 1, 4, Duration::from_millis(20), 1,
+            ));
+            guard.chain(0, ChainState::Completed);
+            guard.done();
+            guard.done(); // a second `done` changes nothing
+            if commit {
+                guard.commit();
+            }
+            guard.failed("could not finalize");
+            drop(guard); // the Drop backstop must not change it either
+            read_progress(dir.path()).unwrap()
+        };
+        let replaced = run(false);
+        assert_eq!(replaced.state, RunState::Failed { reason: "could not finalize".into() });
+        assert_eq!(replaced.chains.expect("the chain block is kept").completed, 1);
+        assert_eq!(run(true).state, RunState::Done);
     }
 
     /// A method with no counter it can honestly advance gets an inert guard,
