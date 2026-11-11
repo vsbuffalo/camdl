@@ -35,7 +35,7 @@ use runid::inputs::{
     ArtifactRef, DataDigest, Deps, EngineVersion, FitDigest, ModelDigest, ResolvedObsAlignment,
     Seed, MethodConfig, MethodLevel,
 };
-use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId, RunRecord};
+use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId};
 
 use super::config_v2::{Algorithm, FitConfig, Method, Problem};
 
@@ -652,12 +652,13 @@ fn fit_method_levels(ctx: &FitMethodCtx, target_length: u64) -> Result<Vec<Level
 /// runs of one fixed-seed base write the same chain states, so they now
 /// address one resumed leaf, wherever the store lives.
 ///
-/// `None` when the base has no `chain_*/resume_state.bin`: the resume itself
-/// then refuses, naming the missing file.
-pub fn cas_resume_dep(leaf: &Path) -> Option<ArtifactRef> {
+/// `Ok(None)` when the base has no `chain_*/resume_state.bin`: the resume
+/// itself then refuses, naming the missing file. `Err` when the base's
+/// `run.json` exists and cannot be read ([`leaf_run_id`]).
+pub fn cas_resume_dep(leaf: &Path) -> Result<Option<ArtifactRef>, String> {
     use crate::fit::resumed_chain::CARRIED_CHAIN_FILES;
-    let mut chains: Vec<(crate::chain_index::ChainIndex, std::path::PathBuf)> = std::fs::read_dir(leaf)
-        .ok()?
+    let Ok(entries) = std::fs::read_dir(leaf) else { return Ok(None) };
+    let mut chains: Vec<(crate::chain_index::ChainIndex, std::path::PathBuf)> = entries
         .flatten()
         .filter_map(|e| {
             let chain = crate::chain_index::ChainIndex::parse_dir_name(&e.file_name().to_string_lossy())?;
@@ -665,7 +666,7 @@ pub fn cas_resume_dep(leaf: &Path) -> Option<ArtifactRef> {
         })
         .collect();
     if chains.is_empty() {
-        return None;
+        return Ok(None);
     }
     chains.sort_by_key(|(c, _)| c.0);
     // Each chain's number, then per carried file a presence byte and, when
@@ -686,24 +687,28 @@ pub fn cas_resume_dep(leaf: &Path) -> Option<ArtifactRef> {
         }
     }
     let digest = ContentHash::digest_bytes(&framed);
-    Some(ArtifactRef {
-        run_id: leaf_run_id(leaf).unwrap_or(digest),
+    Ok(Some(ArtifactRef {
+        run_id: leaf_run_id(leaf)?.unwrap_or(digest),
         kind: ArtifactKind::FitMethod,
         artifact: RESUME_DEP_ARTIFACT.to_string(),
         digest,
-    })
+    }))
 }
 
 /// The `artifact` a `--resume` dep names: the carried files of every chain.
 pub const RESUME_DEP_ARTIFACT: &str = "chain_*/{resume_state.bin,trace.tsv,trajectories.tsv}";
 
-/// The `run_id` a CAS leaf's `run.json` records, or `None` when the
-/// directory is not a CAS leaf.
-fn leaf_run_id(leaf: &Path) -> Option<ContentHash> {
-    std::fs::read(leaf.join("run.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<RunRecord>(&b).ok())
-        .map(|r| r.run_id)
+/// The `run_id` a CAS leaf's `run.json` records, the identity a dep on the
+/// leaf is keyed by; `Ok(None)` when the directory is not a CAS leaf (it
+/// holds no `run.json`), and the dep is keyed by the consumed content's
+/// digest instead.
+///
+/// A `run.json` that exists and cannot be read is an error, not "not a
+/// leaf": read as `None`, it silently keyed the consuming run on a digest
+/// where a readable record keys it on the leaf's identity, so a damaged
+/// record changed the consumer's `run_id` without a word.
+fn leaf_run_id(leaf: &Path) -> Result<Option<ContentHash>, String> {
+    Ok(crate::leaf_use::read(leaf)?.map(|l| l.record.run_id))
 }
 
 /// The lineage dep for a named artifact under a method leaf — `draws.tsv`
@@ -711,15 +716,18 @@ fn leaf_run_id(leaf: &Path) -> Option<ContentHash> {
 /// whole file: [`cas_mle_start_dep`]): the leaf's `run_id` (its identity, from `run.json`; the file's digest when the
 /// directory is not a CAS leaf) plus the consumed file's content digest, so a
 /// regenerated leaf re-keys the run that starts from it.
-pub fn cas_leaf_file_dep(leaf: &Path, artifact: &str) -> Option<ArtifactRef> {
-    let bytes = std::fs::read(leaf.join(artifact)).ok()?;
+///
+/// `Ok(None)` when the file cannot be read; `Err` when the leaf's `run.json`
+/// cannot ([`leaf_run_id`]).
+pub fn cas_leaf_file_dep(leaf: &Path, artifact: &str) -> Result<Option<ArtifactRef>, String> {
+    let Ok(bytes) = std::fs::read(leaf.join(artifact)) else { return Ok(None) };
     let digest = ContentHash::digest_bytes(&bytes);
-    Some(ArtifactRef {
-        run_id: leaf_run_id(leaf).unwrap_or(digest),
+    Ok(Some(ArtifactRef {
+        run_id: leaf_run_id(leaf)?.unwrap_or(digest),
         kind: ArtifactKind::FitMethod,
         artifact: artifact.to_string(),
         digest,
-    })
+    }))
 }
 
 /// The lineage dep for a `from_mle` source: the source leaf's `run_id` plus a
@@ -742,22 +750,23 @@ pub fn cas_leaf_file_dep(leaf: &Path, artifact: &str) -> Option<ArtifactRef> {
 /// reader of `run.json` sees what was keyed.
 ///
 /// `fit_state` is the source's `fit_state.toml`; its directory is the leaf.
-/// Unreadable → `None`, as for [`cas_file_dep`]: the draw downstream fails with
-/// the real message.
-pub fn cas_mle_start_dep(fit_state: &Path) -> Option<ArtifactRef> {
-    let leaf = fit_state.parent()?;
-    let state = super::state::FitState::load(&leaf.to_string_lossy()).ok()?;
+/// Unreadable → `Ok(None)`, as for [`cas_file_dep`]: the draw downstream fails
+/// with the real message. A leaf `run.json` that cannot be read → `Err`
+/// ([`leaf_run_id`]).
+pub fn cas_mle_start_dep(fit_state: &Path) -> Result<Option<ArtifactRef>, String> {
+    let Some(leaf) = fit_state.parent() else { return Ok(None) };
+    let Ok(state) = super::state::FitState::load(&leaf.to_string_lossy()) else { return Ok(None) };
     let mut h = runid::CanonicalHasher::new();
     h.write_type_tag("camdl::fit::from_mle::start_values");
     h.write_schema_version(1);
     h.write_str_f64_map(state.start_values.iter());
     let digest = h.finalize();
-    Some(ArtifactRef {
-        run_id: leaf_run_id(leaf).unwrap_or(digest),
+    Ok(Some(ArtifactRef {
+        run_id: leaf_run_id(leaf)?.unwrap_or(digest),
         kind: ArtifactKind::FitMethod,
         artifact: MLE_START_ARTIFACT.to_string(),
         digest,
-    })
+    }))
 }
 
 /// The `artifact` a `from_mle` dep records: the field of `fit_state.toml` the
@@ -1225,10 +1234,10 @@ mod tests {
         };
         let a = tempfile::tempdir().unwrap();
         let dep_a = cas_mle_start_dep(&write_state(a.path(), "2026-11-10T02:17:08Z", -10.0, 0.3))
-            .expect("a readable fit_state.toml");
+            .unwrap().expect("a readable fit_state.toml");
         let b = tempfile::tempdir().unwrap();
         let dep_b = cas_mle_start_dep(&write_state(b.path(), "2026-11-10T09:41:55Z", -10.5, 0.3))
-            .expect("a readable fit_state.toml");
+            .unwrap().expect("a readable fit_state.toml");
         assert_eq!(dep_a, dep_b,
             "the same start_values, recorded at another time with other diagnostics, \
              are the same starting point");
@@ -1236,7 +1245,7 @@ mod tests {
 
         // The load-bearing direction: a different point estimate re-keys.
         let moved = cas_mle_start_dep(&write_state(b.path(), "2026-11-10T09:41:55Z", -10.5, 0.30000000000000004))
-            .unwrap();
+            .unwrap().unwrap();
         assert_ne!(dep_a.digest, moved.digest,
             "a start value one ULP away is a different start and must re-key");
 
@@ -1249,11 +1258,11 @@ mod tests {
             ),
         )
         .unwrap();
-        let from_leaf = cas_mle_start_dep(&b.path().join("fit_state.toml")).unwrap();
+        let from_leaf = cas_mle_start_dep(&b.path().join("fit_state.toml")).unwrap().unwrap();
         assert_eq!(from_leaf.run_id.to_hex(), leaf_id);
         assert_eq!(from_leaf.digest, moved.digest, "the leaf's identity does not enter the digest");
 
-        assert!(cas_mle_start_dep(&a.path().join("missing").join("fit_state.toml")).is_none());
+        assert!(cas_mle_start_dep(&a.path().join("missing").join("fit_state.toml")).unwrap().is_none());
     }
 
     /// gh#1015: a `--resume` base is keyed by its chains' carried files, the
@@ -1272,22 +1281,57 @@ mod tests {
         write_base(a.path(), "2026-11-10T02:17:08Z", b"state 1");
         let b = tempfile::tempdir().unwrap();
         write_base(b.path(), "2026-11-10T02:17:19Z", b"state 1");
-        let dep_a = cas_resume_dep(a.path()).expect("a base with chain states");
-        let dep_b = cas_resume_dep(b.path()).expect("a base with chain states");
+        let dep_a = cas_resume_dep(a.path()).unwrap().expect("a base with chain states");
+        let dep_b = cas_resume_dep(b.path()).unwrap().expect("a base with chain states");
         assert_eq!(dep_a, dep_b, "the same chain states, finished at another time and in another directory");
         assert_eq!(dep_a.artifact, RESUME_DEP_ARTIFACT);
 
         write_base(b.path(), "2026-11-10T02:17:19Z", b"state 1, one step further");
-        assert_ne!(dep_a.digest, cas_resume_dep(b.path()).unwrap().digest,
+        assert_ne!(dep_a.digest, cas_resume_dep(b.path()).unwrap().unwrap().digest,
             "a different chain state is a different base");
 
         // The rows the resumed leaf copies are part of the base too.
         write_base(b.path(), "2026-11-10T02:17:19Z", b"state 1");
-        assert_eq!(dep_a.digest, cas_resume_dep(b.path()).unwrap().digest);
+        assert_eq!(dep_a.digest, cas_resume_dep(b.path()).unwrap().unwrap().digest);
         std::fs::write(b.path().join("chain_1").join("trace.tsv"), "step\tbeta\n0\t0.5\n").unwrap();
-        assert_ne!(dep_a.digest, cas_resume_dep(b.path()).unwrap().digest,
+        assert_ne!(dep_a.digest, cas_resume_dep(b.path()).unwrap().unwrap().digest,
             "a different trace is a different base");
 
-        assert!(cas_resume_dep(tempfile::tempdir().unwrap().path()).is_none(), "no chain states, no dep");
+        assert!(cas_resume_dep(tempfile::tempdir().unwrap().path()).unwrap().is_none(), "no chain states, no dep");
+    }
+
+    /// A source leaf's dep is keyed by the `run_id` its record holds and the
+    /// consumed file's SHA-256 (pinned: the planted id, and the digest
+    /// `shasum -a 256` gives the draws). A record that exists and cannot be
+    /// read is an error from each dep that keys on a leaf, never a dep keyed
+    /// on the file's digest in the leaf's place.
+    #[test]
+    fn a_source_leaf_keys_by_its_run_id_and_an_unreadable_record_is_an_error() {
+        let leaf = tempfile::tempdir().unwrap();
+        let dir = leaf.path();
+        std::fs::write(dir.join("draws.tsv"), "chain\tdraw\tbeta\n0\t0\t0.4\n").unwrap();
+        let leaf_id = "cd".repeat(32);
+        std::fs::write(dir.join("run.json"), format!(
+            r#"{{"format_version":1,"kind":"fit_method","run_id":"{leaf_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[],"status":"completed","artifacts":{{}},"inputs":null,"provenance":{{}}}}"#
+        )).unwrap();
+        let dep = cas_leaf_file_dep(dir, "draws.tsv").unwrap().unwrap();
+        assert_eq!(dep.run_id.to_hex(), leaf_id);
+        assert_eq!(dep.digest.to_hex(), "5c6c54cacdaf7af5c7a7610928c8e8e86a36d840e3414d4fa369145116504440");
+
+        std::fs::write(dir.join("fit_state.toml"),
+            "method = \"if2\"\nseed = 1\ntimestamp = \"t\"\nbest_loglik = -1.0\n\
+             initial_loglik = -2.0\nbest_chain = 0\nn_chains = 1\n[start_values]\nbeta = 0.4\n").unwrap();
+        std::fs::create_dir_all(dir.join("chain_0")).unwrap();
+        std::fs::write(dir.join("chain_0").join("resume_state.bin"), b"state 0").unwrap();
+        std::fs::write(dir.join("run.json"), "{ \"format_version\": 1, \"kind\": ").unwrap();
+        for (what, got) in [
+            ("from_posterior", cas_leaf_file_dep(dir, "draws.tsv").map(|_| ())),
+            ("from_mle", cas_mle_start_dep(&dir.join("fit_state.toml")).map(|_| ())),
+            ("--resume", cas_resume_dep(dir).map(|_| ())),
+        ] {
+            let err = got.expect_err(what);
+            assert!(err.contains(&dir.display().to_string()) && err.contains("its run.json is not a run record"),
+                "{what}: {err}");
+        }
     }
 }

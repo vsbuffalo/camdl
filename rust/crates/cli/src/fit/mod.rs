@@ -1277,8 +1277,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             if let Err(e) = crate::chain_index::refuse_one_based_layout(&base) {
                 out.fail(format!("error: --resume: {e}"));
             }
-            if let Some(dep) = cas::cas_resume_dep(&base) {
-                deps.push(dep);
+            match cas::cas_resume_dep(&base) {
+                Ok(Some(dep)) => deps.push(dep),
+                Ok(None) => {}
+                Err(e) => out.fail(format!("error: --resume base: {e}")),
             }
             base
         });

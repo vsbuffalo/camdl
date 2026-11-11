@@ -392,7 +392,8 @@ impl ResolvedStarts {
         // (`cas_mle_start_dep`); a draws TSV or params TOML is read whole, so
         // its bytes are the key.
         let dep = match rule {
-            ChainStarts::Point(Point::FromMle { .. }) => super::cas::cas_mle_start_dep(&file),
+            ChainStarts::Point(Point::FromMle { .. }) => super::cas::cas_mle_start_dep(&file)
+                .map_err(|e| format!("starts = {}: {e}", rule.spelled()))?,
             _ => super::cas::cas_file_dep(&file, source_artifact_name(&rule)),
         }
             .ok_or_else(|| format!("starts = {}: cannot read `{}`", rule.spelled(), file.display()))?;
@@ -462,6 +463,7 @@ pub fn resolve_starts(rule: &ChainStarts, allow_nonconverged: bool) -> Result<Re
         ChainStarts::Point(Point::FromMle { .. }) => super::cas::cas_mle_start_dep(&file),
         _ => super::cas::cas_leaf_file_dep(&leaf, artifact),
     }
+        .map_err(|e| format!("starts = {}: {e}", rule.spelled()))?
         .ok_or_else(|| format!("starts = {}: cannot read {}", rule.spelled(), file.display()))?;
     Ok(ResolvedStarts {
         rule: rule.clone(),
