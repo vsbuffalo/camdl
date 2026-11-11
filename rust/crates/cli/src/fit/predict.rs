@@ -824,12 +824,14 @@ fn read_convergence(out: &crate::out::Out, method_dir: &Path, method: Option<Fit
         // same per-parameter type, read by the same reader, so a band and the
         // summary cannot disagree about one fit (gh#409). A stored summary is
         // just another producer of that map.
+        let maps = crate::fit::method_result::ConvergenceMaps::read(&v);
         let diag = PosteriorDiagnostics {
-            per_param: crate::fit::method_result::ConvergenceMaps::read(&v).per_param(),
+            per_param: maps.per_param(),
             n_samples: 0,
             thin: 1,
             wall_time_secs: None,
             n_chains: 0,
+            frozen_chains: maps.frozen_chains(),
         };
         match diag.max_rhat_status() {
             MaxRhat::Reported(rhat_max) => Some(ConvergenceStatus::Reported {
@@ -900,6 +902,7 @@ fn subset_convergence(
         thin: 1,
         wall_time_secs: None,
         n_chains: sub.n_chains,
+        frozen_chains: Some(sub.frozen_chains.clone()),
     };
     match diag.max_rhat_status() {
         crate::fit::method_result::MaxRhat::Reported(rhat_max) => {

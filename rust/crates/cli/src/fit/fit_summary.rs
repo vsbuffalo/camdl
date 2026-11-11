@@ -109,6 +109,7 @@ fn recompute_over_subset(
     }
     diag.n_samples = sub.n_samples;
     diag.n_chains = sub.n_chains;
+    diag.frozen_chains = Some(sub.frozen_chains);
     // `thin` and `wall_time_secs` are properties of the whole run, unchanged by
     // a read-side subset (ESS/iter and ESS/sec are then reported over the
     // subset's ESS against the same iteration / wall-clock denominators).
@@ -405,6 +406,8 @@ fn verdict_text(report: &MethodReport) -> String {
     match &report.verdict {
         Verdict::Converged { max_rhat, .. } => format!("converged (max R̂ {max_rhat:.3})"),
         Verdict::NotConverged { max_rhat, .. } => format!("not converged (max R̂ {max_rhat:.3})"),
+        Verdict::ChainsFrozen { chains } => format!(
+            "not converged ({})", crate::fit::method_result::frozen_chains_clause(chains)),
         Verdict::Unassessable { .. } => "not converged (R̂ not computable)".into(),
         Verdict::NotAssessed { .. } => "R̂ not assessed".into(),
         Verdict::NotApplicable => match report.gate.as_ref().map(|g| g.overall_pass) {
@@ -1449,8 +1452,20 @@ mod tests {
         n_chains: usize,
         kind: LoglikType,
     ) -> String {
+        frozen_chain_table(fmt, dir, n_chains, kind, &[])
+    }
+
+    /// [`chain_table`] for a method whose summary records `frozen` as the
+    /// chains that took no step after burn-in.
+    fn frozen_chain_table(
+        fmt: &TextView,
+        dir: &std::path::Path,
+        n_chains: usize,
+        kind: LoglikType,
+        frozen: &[ChainIndex],
+    ) -> String {
         let facts = ChainDetail::gather(dir, kind, true, None, None);
-        text(&chains_section(n_chains, &facts, fmt.explain))
+        text(&chains_section(n_chains, frozen, &facts, fmt.explain))
     }
 
     /// Which Bayesian result a [`block`] renders.
@@ -1841,6 +1856,7 @@ mod tests {
                 thin: 1,
                 wall_time_secs: Some(11.8),
                 n_chains: 4,
+                frozen_chains: None,
             },
             posterior_mean: BTreeMap::from([("a2".to_string(), 0.5), ("tau".to_string(), 1.0)]),
             posterior_q025: BTreeMap::new(),
@@ -1891,6 +1907,7 @@ mod tests {
                 thin: 1,
                 wall_time_secs: Some(11.8),
                 n_chains: 4,
+                frozen_chains: None,
             },
             posterior_mean: BTreeMap::from([("a2".to_string(), 0.5), ("tau".to_string(), 1.0)]),
             posterior_q025: BTreeMap::new(),
@@ -1965,6 +1982,7 @@ mod tests {
             thin: 1,
             wall_time_secs: Some(1200.0),
             n_chains: 4,
+            frozen_chains: None,
         };
 
         // 8 / 48,000 iterations and 8 / 1,200 s: three significant figures at
@@ -2021,6 +2039,7 @@ mod tests {
                 thin: 1,
                 wall_time_secs: Some(11.8),
                 n_chains: 4,
+                frozen_chains: None,
             },
             posterior_mean: BTreeMap::from([
                 ("a2".to_string(), 0.5),
@@ -2081,6 +2100,7 @@ mod tests {
                 thin,
                 wall_time_secs: wall,
                 n_chains: 4,
+                frozen_chains: None,
             },
             posterior_mean: BTreeMap::from([("a2".to_string(), 0.5), ("g".to_string(), 1.0)]),
             posterior_q025: BTreeMap::new(),
@@ -2341,9 +2361,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// gh#635: a chain with ONE distinct parameter vector across its retained
-    /// draws (zero accepted moves, finite density — evades the −inf screen)
-    /// draws the loud point-mass flag; mixing chains do not.
+    /// gh#635, gh#1032: a chain the run recorded as having taken no step after
+    /// burn-in (one parameter vector across its retained draws, finite density
+    /// — evades the −inf screen) draws the loud flag; mixing chains do not.
+    /// Which chains are frozen is the run's record (`frozen_chains`), not a
+    /// re-read of `draws.tsv`.
     #[test]
     fn bayesian_chain_table_flags_point_mass_chain() {
         let dir = crate::test_support::unique_temp_dir("summary_point_mass");
@@ -2365,15 +2387,17 @@ mod tests {
         std::fs::write(dir.join("draws.tsv"), draws).unwrap();
 
         let fmt = plain_formatter();
-        let table = chain_table(&fmt, &dir, 3, LoglikType::Marginal);
-        assert!(table.contains("point-mass"),
+        let table = frozen_chain_table(&fmt, &dir, 3, LoglikType::Marginal, &[ChainIndex(2)]);
+        assert!(table.contains("point mass"),
             "the frozen chain gets the loud flag:\n{table}");
-        assert!(table.contains("chain 2") && table.contains("across 3 retained"),
-            "the flag names the chain and the draw count:\n{table}");
+        assert!(table.contains("chain 2: took no step after burn-in"),
+            "the flag names the chain:\n{table}");
         assert_advised_exclusion_parses(&table, 2);
         // Exactly one flagged chain — mixing chains stay clean.
-        assert_eq!(table.matches("point-mass").count(), 1,
+        assert_eq!(table.matches("took no step after burn-in").count(), 1,
             "only the frozen chain is flagged:\n{table}");
+        let none = chain_table(&fmt, &dir, 3, LoglikType::Marginal);
+        assert!(!none.contains("took no step"), "no record, no flag:\n{none}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2598,6 +2622,7 @@ mod tests {
                 thin: 1,
                 wall_time_secs: Some(200.0),
                 n_chains: 4,
+                frozen_chains: None,
             },
             posterior_mean: BTreeMap::from([
                 ("alpha".to_string(), 0.235_134),
@@ -2942,7 +2967,7 @@ mod tests {
             n_total: 3,
         };
         let facts = ChainDetail::gather(&dir, LoglikType::Marginal, false, Some(info), None);
-        let section = text(&chains_section(2, &facts, false));
+        let section = text(&chains_section(2, &[], &facts, false));
 
         assert!(section.contains("including the excluded 2"),
             "the table must say whose rows it is still showing:\n{section}");
@@ -2957,7 +2982,7 @@ mod tests {
 
         // Without a selection the same method says none of it.
         let facts = ChainDetail::gather(&dir, LoglikType::Marginal, false, None, None);
-        let plain = text(&chains_section(3, &facts, false));
+        let plain = text(&chains_section(3, &[], &facts, false));
         assert!(!plain.contains("excluded"), "no scope note when nothing was \
             excluded:\n{plain}");
         std::fs::remove_dir_all(&dir).ok();
@@ -3031,6 +3056,7 @@ mod tests {
                 thin: 1,
                 wall_time_secs: None,
                 n_chains: 8,
+                frozen_chains: None,
             },
             // Six orders of magnitude between the smallest and largest mean.
             posterior_mean: BTreeMap::from([
@@ -3665,6 +3691,7 @@ mod tests {
             thin: 1,
             wall_time_secs: Some(10.0),
             n_chains: 4,
+            frozen_chains: None,
         };
         let mut mean = BTreeMap::from([("beta".to_string(), 0.475)]); // mixed (incl. outlier)
         let sel = ChainSelection::parse_exclude("3").unwrap();
@@ -3702,6 +3729,7 @@ mod tests {
                 thin: 1,
                 wall_time_secs: None,
                 n_chains: 4,
+                frozen_chains: None,
             },
             posterior_mean: BTreeMap::new(),
             posterior_q025: BTreeMap::new(),
@@ -3754,6 +3782,7 @@ mod tests {
                 thin: 1,
                 wall_time_secs: None,
                 n_chains: 4,
+                frozen_chains: None,
             },
             posterior_mean: BTreeMap::new(),
             acceptance_rate: 0.24,

@@ -15,7 +15,7 @@ use sim::inference::{
     pmmh::Prior,
     prior::Density,
     pgas::{PGASConfig, ChainResumeState, run_pgas, PGASSweep, PGASTrajectory, PgasEvent, RENEWAL_BINS},
-    diagnostic::DiagnosticKind,
+    diagnostic::{DiagnosticKind, FrozenSampler},
 };
 use io::trajectories::{
     Granularity, PosteriorDraw, TrajColumnSpec, TrajManifest, write_trajectories_tsv,
@@ -1396,9 +1396,34 @@ pub fn run_method(
     // BLOCK update (identical rate on every parameter) is reported once per
     // chain, not once per parameter.
     let kernel = theta_move_kernel(use_nuts, config.compiled.as_ref());
+    let n_post_burn = n_sweeps.saturating_sub(burn_in);
+    // gh#1032. A chain whose retained draws are one parameter vector took no
+    // step after burn-in. Said once, as its own finding, before the rates: its
+    // acceptance rate counts the warm-up sweeps (a chain that moved on 7 of
+    // its first 10 sweeps and never after reads 12%) and so is not raised for
+    // it, and under NUTS neither is its divergence count, which this carries.
+    for ((chain_id, sweeps, _), base) in all_results.iter().zip(&inherited) {
+        if !diagnostics.is_frozen(*chain_id) {
+            continue;
+        }
+        let n_draws = base.as_ref().map_or(0, |b| b.index.len()) + sweeps.len();
+        let sampler = match kernel {
+            sim::inference::diagnostic::AcceptanceKernel::Nuts => FrozenSampler::Nuts {
+                step_size: sweeps.last().map(|s| s.nuts.step_size),
+                n_divergent: chain_nuts.lock().unwrap()[*chain_id].n_divergent_post_burn,
+            },
+            sim::inference::diagnostic::AcceptanceKernel::RandomWalk => FrozenSampler::RandomWalk,
+        };
+        out.finding(DiagnosticKind::ChainFrozen {
+            chain_id: *chain_id, n_draws, burn_in, n_steps: n_post_burn, sampler,
+        });
+    }
     // The table is drawn at the end of the run from the recorded rates
     // (`report::render::pgas_acceptance_table`); the findings are pushed here.
     for &(chain_id, _, ref rates) in &all_results {
+        if diagnostics.is_frozen(chain_id) {
+            continue;
+        }
         let block_update = rates.len() > 1
             && rates.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
         if block_update {
@@ -1513,11 +1538,11 @@ pub fn run_method(
     //     convention). Matters for posterior validity, not just
     //     adaptation.
     //   - MaxTreeDepthHits: > 5% of post-burn-in sweeps (Stan).
-    let n_post_burn = n_sweeps.saturating_sub(burn_in);
     let nuts_diag = chain_nuts.lock().unwrap();
     for chain_id in 0..n_chains {
         let nd = &nuts_diag[chain_id];
-        if nd.n_divergent_post_burn > 0 {
+        // A frozen chain's divergences are in its `ChainFrozen` finding.
+        if nd.n_divergent_post_burn > 0 && !diagnostics.is_frozen(chain_id) {
             collector.push(DiagnosticKind::DivergentTransitions {
                 n_divergent: nd.n_divergent_post_burn,
                 n_sweeps:    n_post_burn,
@@ -2168,7 +2193,8 @@ fn compute_diagnostics(
     inherited: &[Option<super::resumed_chain::InheritedDraws>],
     estimated_params: &[EstimatedParam],
 ) -> MethodConvergence {
-    MethodConvergence::compute(estimated_params.iter().enumerate().map(|(p, spec)| {
+    let chain_ids: Vec<ChainIndex> = results.iter().map(|(c, _, _)| ChainIndex(*c)).collect();
+    MethodConvergence::compute(&chain_ids, estimated_params.iter().enumerate().map(|(p, spec)| {
         let chains: Vec<Vec<f64>> = results.iter().zip(inherited)
             .map(|((_, sweeps, _), base)| {
                 base.iter().flat_map(|b| b.column(p))

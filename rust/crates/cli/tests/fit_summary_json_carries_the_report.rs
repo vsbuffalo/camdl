@@ -73,9 +73,14 @@ fn every_method_has_a_report_with_its_verdict_checks_warmup_and_findings() {
 
     run(&["fit", "run", "pmmh_stuck.toml", "--seed", "8", "--progress", "none"]);
     let m = summary("pmmh_stuck");
-    assert_eq!(m["verdict"]["kind"], "not_converged");
-    assert_eq!(m["verdict"]["band"], "severe");
-    assert_eq!(m["verdict"]["param"], "beta");
+    // Two of its chains never accepted a proposal after burn-in (gh#1032):
+    // the verdict names them, whatever R̂ says.
+    assert_eq!(m["verdict"], serde_json::json!({"kind": "chains_frozen", "chains": [1, 2]}));
+    let frozen: Vec<u64> = m["findings"].as_array().unwrap().iter()
+        .filter(|f| f["kind"]["type"] == "chain_frozen")
+        .map(|f| f["kind"]["chain_id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(frozen, [1, 2], "one chain_frozen finding per frozen chain");
     let kinds: Vec<&str> = m["checks"].as_array().unwrap().iter().map(|c| c["kind"].as_str().unwrap()).collect();
     // In the order the run shows them: PMMH says its caveat after the starts
     // note, once its data are bound.

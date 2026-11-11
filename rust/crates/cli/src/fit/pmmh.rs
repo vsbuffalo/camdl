@@ -15,7 +15,7 @@ use crate::cas::iso8601_utc;
 use sim::inference::{
     if2::EstimatedParam,
     pmmh::{run_pmmh, Prior, PMMHConfig, PMMHResult, PMMHResumeState},
-    diagnostic::DiagnosticKind,
+    diagnostic::{DiagnosticKind, FrozenSampler},
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -887,10 +887,27 @@ pub fn run_method(
     // coloring, the finding and the message a user reads cannot disagree about
     // where the band starts (gh#299 item 3).
     let kernel = THETA_MOVE_KERNEL;
+    // gh#1032. A chain whose retained draws are one parameter vector accepted
+    // no proposal after burn-in. Said once, as its own finding, in place of
+    // its acceptance finding: the frozen finding states the stronger fact.
+    for ((chain_id, r), base) in results.iter().zip(&inherited) {
+        if diagnostics.is_frozen(*chain_id) {
+            out.finding(DiagnosticKind::ChainFrozen {
+                chain_id: *chain_id,
+                n_draws: base.as_ref().map_or(0, |b| b.index.len()) + r.steps.len(),
+                burn_in,
+                n_steps: n_steps.saturating_sub(burn_in),
+                sampler: FrozenSampler::RandomWalk,
+            });
+        }
+    }
     // The table — each chain's rate, and the scale its draws were proposed
     // under with its warm-up's floor count — is drawn at the end of the run
     // from the recorded rates (`report::render::acceptance_table`).
     for (chain_id, result) in &results {
+        if diagnostics.is_frozen(*chain_id) {
+            continue;
+        }
         if let Some(d) = sim::inference::diagnostic::acceptance_diagnostic(
             Some(*chain_id), result.acceptance_rate, None, kernel)
         {
@@ -1203,7 +1220,8 @@ fn compute_diagnostics(
     inherited: &[Option<super::resumed_chain::InheritedDraws>],
     estimated_params: &[EstimatedParam],
 ) -> MethodConvergence {
-    MethodConvergence::compute(estimated_params.iter().enumerate().map(|(p, spec)| {
+    let chain_ids: Vec<ChainIndex> = results.iter().map(|(c, _)| ChainIndex(*c)).collect();
+    MethodConvergence::compute(&chain_ids, estimated_params.iter().enumerate().map(|(p, spec)| {
         let chains: Vec<Vec<f64>> = results.iter().zip(inherited)
             .map(|((_, r), base)| {
                 base.iter().flat_map(|b| b.column(p))

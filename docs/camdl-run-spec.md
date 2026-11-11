@@ -5504,6 +5504,31 @@ A sampler leaf (PGAS, PMMH, MH) additionally holds:
 | `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json` — one file per algorithm, deliberately never shared; each names its algorithm under `method` and carries `schema = "camdl.fit-summary/v2"`, which every reader requires                                                                                                                                                                      |
 | `diagnostics.json`          | R̂ / ESS / divergence diagnostics, and one `bad_init` record per refused chain — see below                                                                                                                                                                                                                                                                                                                |
 
+**A chain that took no step after burn-in** (gh#1032) is one whose retained
+draws are all one parameter vector: every estimated parameter has the same value
+in every retained draw. Its draws are a point mass at wherever the chain stood
+when warm-up ended, and they enter every pooled number. The run records such
+chains in the sampler summary under `frozen_chains`, a list of chain numbers
+(`[]` when every chain moved; the key is absent in a summary written before
+camdl recorded it), and raises one `chain_frozen` finding per chain in
+`diagnostics.json`, severity `error`:
+
+| field      | what it holds                                                                                                                                                                                                                     |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chain_id` | the chain's number                                                                                                                                                                                                                |
+| `n_draws`  | its retained draws, all equal                                                                                                                                                                                                     |
+| `burn_in`  | the warm-up as configured: sweeps for `pgas`, iterations for `pmmh` and `mh`                                                                                                                                                      |
+| `n_steps`  | post-burn-in steps in which θ could have moved                                                                                                                                                                                    |
+| `sampler`  | tagged by `kernel`: `{"kernel": "nuts", "step_size", "n_divergent"}` — the step size adaptation ended on (`null` if not recorded) and how many post-burn-in steps diverged — or `{"kernel": "random_walk"}`, no proposal accepted |
+
+A frozen chain's `acceptance_rate_unhealthy` finding is not raised, and under
+NUTS neither is its `divergent_transitions`: the `chain_frozen` finding states
+the stronger fact and carries the divergence count. Any recorded frozen chain
+makes the method's verdict `{"kind": "chains_frozen", "chains": [...]}` — not
+converged, whatever the R̂, since one frozen chain among moving ones can leave R̂
+finite and small. `fit summary --exclude-chains` recomputes the frozen chains
+over the retained ones from `draws.tsv` by the same test.
+
 The `mle_params.toml` `content_hash` is a _tamper_ hash — SHA-256 over
 `{name}={value:.12}\0` pairs, truncated to 8 hex — so a hand-edited parameter
 value is detectable; `camdl simulate --params` checks it and refuses an edited

@@ -18,7 +18,8 @@
 #
 # A label may match several lines; the fact holds if any of them carries the
 # value. The fixtures are deliberately small runs, not the tutorial's fits:
-# pmmh_stuck leaves two of four chains at the proposal-scale floor, fail has
+# pmmh_stuck leaves two of four chains at the proposal-scale floor, where
+# they take no step after burn-in (gh#1032), fail has
 # every chain refused at its start, pfilter.toml is a fit whose method is a
 # particle filter at fixed parameters. cases.tsv is
 # `camdl simulate sir.camdl --params truth.toml --seed 3 --obs-only cases.tsv`.
@@ -64,9 +65,8 @@ stuck	stderr	block	acceptance rates:	3           27.2% ✓                   9.0
 stuck	stderr	line	chain 1: proposal scale at its floor	for 415 of 1000 warm-up steps (details at the end)
 stuck	stderr	line	chain 2: proposal scale at its floor	for 331 of 1000 warm-up steps (details at the end)
 stuck	stderr	line	R̂ (rank-normalized split, Vehtari et al. 2021) / ESS	R̂ threshold 1.05
-stuck	stderr	line	✗ NOT converged	the chains are in different places
-stuck	stderr	line	max R̂	3.479 (beta), threshold 1.05
-stuck	stderr	line	parameters above threshold	2 of 2 parameters above threshold
+stuck	stderr	line	✗	NOT converged
+stuck	stderr	line	chains 1 and 2 took no step after burn-in	the retained draws of each are one parameter vector
 stuck	stderr	line	chains' log-likelihoods compared	2 of 4 chains' log-likelihoods compared, none differs · 0/200 forkable
 stuck	stderr	line	R̂: below 1.05 counts as converged	above 1.1 draws a finding, a warning up to 1.5
 stuck	stderr	line	beta         Rhat=	3.479 ✗ ESS bulk=5 tail=— (2.7% of 200 draws)
@@ -76,7 +76,8 @@ stuck	stderr	line	R̂ = max(bulk 2.157, folded 1.610)	classic 2.675; the bulk ha
 stuck	stderr	line	per-chain ESS	[50, 1, 1, 24]
 stuck	stderr	line	per-chain ESS	[50, 1, 1, 27]
 stuck	stderr	line	draws.tsv:	200 posterior samples (all 4 params)
-stuck	stderr	line	x chains 1, 2:	chain acceptance rates 0.0% and 0.0% are outside healthy range [15%, 50%] (random-walk MH)
+stuck	stderr	line	x chain 1: took no step after burn-in	None of its 500 post-burn-in proposals was accepted (burn_in = 1000).
+stuck	stderr	line	x chain 2: took no step after burn-in	all 50 retained draws are one parameter vector
 stuck	stderr	line	rank-normalized split R̂ for 'beta'	3.479 (threshold 1.100)
 stuck	stderr	line	rank-normalized split R̂ for 'gamma'	2.157 (threshold 1.100)
 stuck	stderr	line	error(s)	4 error(s), 2 warning(s), 0 info
@@ -92,7 +93,7 @@ stuck	events	line	"kind":"obs_stream"	"family":"Poisson"
 stuck	events	line	"event":"progress"	"of":1500
 stuck	events	line	"event":"progress"	"step":1500
 stuck	events	line	"event":"progress"	"kind":"marginal"
-stuck	events	line	"type":"acceptance_rate_unhealthy"	"severity":"error"
+stuck	events	line	"type":"chain_frozen"	"severity":"error"
 stuck	events	line	"type":"rhat_high"	"param":"beta"
 stuck	events	line	"type":"scale_at_floor"	"steps_at_floor":415
 stuck	events	line	"type":"scale_at_floor"	"steps_at_floor":331
@@ -102,9 +103,8 @@ stuck.summary	stdout	line	results/fits/pmmh_stuck-	/
 stuck.summary	stdout	line	Closed SIR with daily reported cases	Fitted to one stream
 stuck.summary	stdout	line	pmmh	4 chains · 200 draws · loglik -44.3 at the highest log-posterior draw
 stuck.summary	stdout	line	seeded from:	from_prior (one independent draw per chain)
-stuck.summary	stdout	line	✗ NOT converged	the chains are in different places
-stuck.summary	stdout	line	max R̂	3.479 (beta), threshold 1.05
-stuck.summary	stdout	line	parameters above threshold	2 of 2 parameters above threshold
+stuck.summary	stdout	line	✗	NOT converged
+stuck.summary	stdout	line	chains 1 and 2 took no step after burn-in	the retained draws of each are one parameter vector
 stuck.summary	stdout	line	chains' log-likelihoods compared	2 of 4 chains' log-likelihoods compared, none differs · 0/200 forkable
 stuck.summary	stdout	line	beta                   0.7425	5          —    3.479
 stuck.summary	stdout	line	gamma                  0.1317	6          5    2.157
@@ -116,8 +116,8 @@ stuck.summary	stdout	line	      0  	-44.66     -0.44    1.96
 stuck.summary	stdout	line	      1  	-158.12         —       —   not assessed
 stuck.summary	stdout	line	      2  	-679.42         —       —   not assessed
 stuck.summary	stdout	line	      3  	-44.22     +0.44    1.96
-stuck.summary	stdout	line	⚠ chain 1:	ONE distinct parameter vector across 50 retained draws
-stuck.summary	stdout	line	⚠ chain 2:	ONE distinct parameter vector across 50 retained draws
+stuck.summary	stdout	line	⚠ chain 1:	took no step after burn-in
+stuck.summary	stdout	line	⚠ chain 2:	took no step after burn-in
 stuck.summary	stdout	line	chains 1, 2 not compared:	the trace has 1.0 effective draws
 converged	stderr	line	fit:	pmmh_converged.toml (method=pmmh)
 converged	stderr	line	log L̂ mean	-65.6
@@ -260,8 +260,7 @@ pfilter	stderr	line	pfilter: bound streams:	cases(poisson)
 pfilter	stderr	line	pfilter:	14 observation boundaries × 1 streams, 200 particles, dt=1, seed=1
 pfilter	stderr	line	stored	results/pfilters/sir-
 stuck.excluded	stdout	line	pmmh	3 of 4 chains (excluded 2) · 150 draws
-stuck.excluded	stdout	line	max R̂	1.765 (beta), threshold 1.05
-stuck.excluded	stdout	line	parameters above threshold	2 of 2 parameters above threshold
+stuck.excluded	stdout	line	chain 1 took no step after burn-in	its retained draws are one parameter vector
 stuck.excluded	stdout	line	none differs	(over every chain, not the retained subset)
 stuck.excluded	stdout	line	0/150 forkable	over the retained chains (chain(s) 2 excluded)
 stuck.excluded	stdout	line	beta                   0.4763	6          4    1.765
