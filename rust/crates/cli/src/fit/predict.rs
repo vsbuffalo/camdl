@@ -4460,6 +4460,7 @@ mod tests {
                 per_stream_log_liks: vec![vec![vec![-5.0, -5.0]], vec![vec![-5.0, -5.0]]],
                 per_stream_samples: vec![per_time(base), per_time(base)],
             }),
+            collapse: None,
         }
     }
 

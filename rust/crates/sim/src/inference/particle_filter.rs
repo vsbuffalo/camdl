@@ -66,6 +66,33 @@ pub struct PFilterResult {
     /// `prequential::build_trace` with the observation series to build
     /// a `PrequentialTrace`.
     pub prequential: Option<PrequentialRecorded>,
+    /// Why the log-likelihood is `-inf`, when it is because every particle
+    /// scored `-inf` at some observation: the first such observation that
+    /// counts toward the log-likelihood. `None` for a filter that never lost
+    /// all its weight there (a finite log-likelihood, or one lost to a
+    /// non-finite weight that is not `-inf`).
+    pub collapse: Option<FilterCollapse>,
+}
+
+/// The first observation at which every particle that was alive scored `-inf`,
+/// with what the swarm managed at each stream there. The same
+/// [`StreamAttempt`] record PGAS's initialization reports for its own swarm
+/// collapse, so a modeller reads one vocabulary: the stream, the time, the
+/// observed value, the projections, and the guard that produced `-inf`
+/// (`CountExceedsTrials`, an out-of-domain `n`, ...).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilterCollapse {
+    /// Union-axis index of the observation (the runtime's bookkeeping; the
+    /// attempts name streams and times, which are stable).
+    pub obs_index: usize,
+    pub attempts: Vec<super::obs_attempt::StreamAttempt>,
+}
+
+impl std::fmt::Display for FilterCollapse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "every live particle scored -inf at observation {}", self.obs_index)?;
+        super::obs_attempt::write_attempts(f, &self.attempts)
+    }
 }
 
 /// Raw per-step ingredients for prequential trace construction.
@@ -257,6 +284,10 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // pathological dt aborts before the substep loop runs (and hangs).
     let mut iters: u64 = 0;
 
+    // The first observation at which every live particle scored `-inf` and
+    // that counts toward the log-likelihood (see `PFilterResult::collapse`).
+    let mut collapse: Option<FilterCollapse> = None;
+
     // gh#110. The (deterministic) degeneracy watchdog reads the K-window ESS
     // history after each observation window via `check_pf_degeneracy` and
     // returns `Err(PFDegenerate)`, which propagates through the existing
@@ -437,6 +468,25 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
             } else {
                 obs_model.log_likelihood(state, obs_idx, params)
             };
+        }
+
+        // Explain a total loss of weight while the states still hold what was
+        // scored. Failure path: it runs at most once per filter and only when
+        // no weight is finite; it draws nothing and changes no weight. An
+        // observation IC-free inference leaves out of the log-likelihood is
+        // not the reason a log-likelihood is `-inf`, so it is not recorded.
+        let counted = !(config.skip_first_obs_from_loglik && Some(obs_idx) == first_observation_idx);
+        if collapse.is_none() && counted && n_particles > 0
+            && !swarm.log_weights.iter().any(|w| w.is_finite())
+        {
+            let live: Vec<&ParticleState> = swarm.states.iter().enumerate()
+                .filter(|(i, _)| !deaths.is_dead(*i))
+                .map(|(_, s)| s)
+                .collect();
+            collapse = Some(FilterCollapse {
+                obs_index: obs_idx,
+                attempts: obs_model.collapse_attempts(obs_idx, &live, deaths.count(), params),
+            });
         }
 
         // Record prequential ingredients BEFORE resampling. Particles
@@ -650,6 +700,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         final_states: Some(swarm.states),
         ancestry,
         prequential,
+        collapse,
     })
 }
 

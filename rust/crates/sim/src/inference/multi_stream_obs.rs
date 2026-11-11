@@ -2747,6 +2747,17 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
         )
     }
 
+    fn collapse_attempts(
+        &self, obs_idx: usize, live: &[&ParticleState], n_dead: usize, params: &[f64],
+    ) -> Vec<crate::inference::obs_attempt::StreamAttempt> {
+        // The same record PGAS's initialization builds when its swarm
+        // collapses: one scoring seam, so the causes named here are the ones
+        // the filter's weights came from.
+        let live: Vec<(&[u64], &[i64])> =
+            live.iter().map(|s| (s.acc.as_slice(), s.counts.as_slice())).collect();
+        MultiStreamObsModel::stream_attempts(self, obs_idx, &live, n_dead, params)
+    }
+
     fn n_observations(&self) -> usize { self.obs_times.len() }
     fn obs_time(&self, obs_idx: usize) -> f64 { self.obs_times[obs_idx] }
     fn n_streams(&self) -> usize {
