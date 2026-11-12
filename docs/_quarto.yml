@@ -21,6 +21,8 @@ project:
     - intro.md
     - guide/dimensions.qmd
     - guide/first-fit.qmd
+    - guide/fit-goes-wrong.qmd
+    - guide/criticizing-a-model.qmd
     # Guides (how-to)
     - workflow.md
     - dates.md
@@ -88,6 +90,10 @@ website:
             href: guide/dimensions.qmd
           - text: "Your first fit"
             href: guide/first-fit.qmd
+          - text: "When a fit goes wrong"
+            href: guide/fit-goes-wrong.qmd
+          - text: "Criticizing an epidemic model"
+            href: guide/criticizing-a-model.qmd
       - section: "Guides"
         contents:
           - text: "The fit workflow"
