@@ -473,6 +473,10 @@ For the boarding-school example, a productive division is:
 The second and third pages can be scientifically substantial. They need not be
 disguised as first-run instructions.
 
+The boarding-school tutorial now on the site,
+[Your first fit](guide/first-fit.qmd), predates this guide and does not yet
+follow it.
+
 ## 9. Drafting and editing are separate jobs
 
 An agent should not treat its first complete draft as the finished document.

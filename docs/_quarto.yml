@@ -41,6 +41,8 @@ project:
     - camdl-run-spec.md
     - language-changes.md
     - agents.md
+    # Contributing
+    - documentation-style.md
 
 website:
   title: "camdl"
@@ -69,7 +71,8 @@ website:
         aria-label: camdl on GitHub
   # Four kinds of page, after the Diataxis framework (diataxis.fr): tutorials
   # to learn by doing, guides to finish a task, concepts to understand why,
-  # reference to look things up.
+  # reference to look things up. Contributing holds pages for the people
+  # writing the docs rather than using camdl.
   sidebar:
     style: floating
     collapse-level: 1
@@ -125,6 +128,10 @@ website:
             href: language-changes.md
           - text: "Guide for AI agents"
             href: agents.md
+      - section: "Contributing"
+        contents:
+          - text: "Writing the documentation"
+            href: documentation-style.md
   page-footer:
     left: "© 2026 Vince Buffalo. Supported by the Institute for Disease Modeling, Bill & Melinda Gates Foundation."
     right: "Also offline and version-matched: `camdl docs`"
