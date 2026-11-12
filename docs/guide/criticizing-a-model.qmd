@@ -1,0 +1,221 @@
+---
+title: "Criticizing an epidemic model"
+description: "Testing the boarding-school SIR fit against its data: posterior predictive checks at two horizons, a negative-binomial observation model, prequential model comparison, and an attack rate that disagrees with the historical record."
+camdl-run-scratch: first-fit
+---
+
+A fit that converged tells us the sampler found the posterior of the model we
+wrote. It does not tell us the model is a good description of what happened.
+This page takes the converged SIR fit from [Your first fit](first-fit.qmd) and
+asks that second question three ways: by comparing its predictions with the
+data it was fitted to, by fitting a competing model and scoring the two, and by
+checking an inferred quantity against a number the fit never saw. The first two
+point to the same weakness and suggest a repair; the third finds a problem the
+repair does not touch.
+
+The commands run in a copy of
+[`docs/guide/first-fit/`](https://github.com/vsbuffalo/camdl/tree/main/docs/guide/first-fit),
+as on the first page. Each page builds its own fits, so this one starts by
+repeating the first page's fit and its predictive check:
+
+```{.camdl-run show-match="converged|max R̂|subsampling"}
+camdl fit run fit-r0.toml --label r0 --seed 4
+camdl fit predict @r0
+```
+
+## Where the Poisson model misses
+
+```{.camdl-run figure="ppc-r0.svg" caption="Posterior predictive check of the Poisson model: median (line), 50% and 90% bands, and the observed counts (black)."}
+uv run plot_predictive.py ppc-r0.svg Poisson=results/fits/fit_r0-*/predict/*/
+```
+
+The two panels answer different questions. The free-forward band (left)
+simulates each epidemic from day 0 using only posterior draws of the parameters,
+so it asks whether the model can produce an epidemic like this one. It is wide,
+because an epidemic that takes off a day early or late stays early or late, and
+13 of the 14 counts fall inside its 90% band. The one-day-ahead band (right)
+predicts each day's count from the particle filter's estimate of the epidemic
+given the counts before it, so it asks whether the model knows how much a
+single day's count can vary. It is narrow, and only 10 of the 14 counts fall
+inside it. The misses are all in the decline, where the observed counts first
+stay above the model's median and then fall below it: the school's epidemic
+ended more abruptly than the model's.
+
+A free-forward check can pass while a one-day-ahead check fails, as here,
+because uncertainty about when the epidemic took off dominates the free-forward
+band and hides how much any one day may scatter. Both checks test particular
+consequences of the model; passing one does not show that the model is right.
+
+Two things could produce the one-day-ahead misses. The observation model may
+be too tight, or the SIR dynamics may be wrong in the decline. The first is
+easier to test.
+
+## A model that allows noisier counts
+
+A Poisson count has variance equal to its mean. With 300 boys in bed, the model
+expects the recorded count to lie within about $\pm 2\sqrt{300}\approx\pm35$ of
+the number infected. Counts read off a graph of a school infirmary are unlikely
+to be that precise. The negative binomial distribution adds a *dispersion*
+parameter $k$, and the observation model becomes
+
+$$
+y_t \mid x, \theta \sim \operatorname{NegBin}\bigl(\text{mean} = I_t(x),\ \text{dispersion} = k\bigr),
+\qquad
+\operatorname{Var}(y_t \mid x, \theta) = I_t(x) + \frac{I_t(x)^2}{k}.
+$$
+
+A small $k$ allows much more scatter; as $k\to\infty$ the distribution becomes
+Poisson. The process model, and therefore the distribution of epidemics, is the
+same as before; only the link from an epidemic to the counts changes.
+
+```{.camdl include="first-fit/sir-negbin.camdl" lines="15-26"}
+```
+
+```{.camdl include="first-fit/sir-negbin.camdl" lines="41-48"}
+```
+
+The `neg_binomial` distribution's `r` argument is $k$. Its prior is log-normal
+with median 20 and 90% of its weight between about 4 and 100. At a mean of 300
+boys, that range lets the standard deviation of a count be between about twice
+and about nine times the Poisson one, since the ratio is $\sqrt{1 + 300/k}$; at
+small counts every $k$ in the range is close to Poisson. `fit-negbin.toml` is
+`fit-r0.toml` with the new model and a start value for `k`.
+
+```{.camdl-run show-match="NegBinomial|prevalence|uncommon|point-in-time|converged|max R̂|% ✓|Rhat="}
+camdl fit run fit-negbin.toml --label negbin --seed 4
+```
+
+The chains converge from the same seed. camdl notes that a negative binomial on
+a count of people currently infected, rather than on new cases, is uncommon.
+The usual reason to use one is that transmission itself is overdispersed, which
+belongs in the process model; here the extra scatter stands for error in how
+the counts were recorded and read off the graph, which is an observation
+process, so the choice is deliberate.
+
+```{.camdl-run show-match="── posterior" show-context="4"}
+camdl fit summary @negbin
+```
+
+The two models give nearly the same epidemic. The posterior mean of $R_0$ is
+3.73 here against 3.81 for the Poisson model on the first page, and of
+$\gamma$ 0.51 against 0.49. The dispersion $k$ has a posterior mean of about
+46, above the prior's median of 20: at 300 boys in bed that makes the standard
+deviation of a count about $\sqrt{1 + 300/46}\approx2.7$ times the Poisson
+one, a modest amount of extra scatter. What differs is how much a day's count may scatter, and the predictive
+check shows the consequence:
+
+```{.camdl-run figure="ppc-both.svg" caption="Posterior predictive checks of both models: median (line), 50% and 90% bands, and the observed counts (black)." show-match="subsampling"}
+camdl fit predict @negbin
+uv run plot_predictive.py ppc-both.svg Poisson=results/fits/fit_r0-*/predict/*/ \
+  "Negative binomial"=results/fits/fit_negbin-*/predict/*/
+```
+
+The negative binomial's one-day-ahead band is wider and holds 13 of the 14
+counts, where the Poisson model's held 10; its free-forward band holds all 14.
+
+## Comparing the two models
+
+`camdl compare` scores each fit by how well it predicts each day's count from
+the counts before it. Its headline score is the *expected log predictive
+density*,
+
+$$
+\mathrm{elpd} = \sum_{t=0}^{13} \log\Bigl(\frac{1}{M}\sum_{m=1}^{M}
+  \widehat p\bigl(y_t \mid y_{0:t-1}, \theta_m\bigr)\Bigr),
+$$
+
+the total log probability the model gave each observed count before seeing it.
+The inner average is over $M = 64$ posterior draws $\theta_m$, each with its
+own particle filter, so the score is that of the model's predictive
+distribution with its parameter uncertainty included, not of one parameter
+value. Higher is better.
+
+```{.camdl-run}
+camdl compare @r0 @negbin
+```
+
+Each row is a model. `Δelpd` is its elpd minus the baseline's (the Poisson
+model, `@r0`), and `se(Δ)` the standard error of that difference across days.
+`crps`, the continuous ranked probability score, is an error in boys in bed,
+lower being better. `PIT_cov90` is the fraction of days whose count fell inside
+the model's one-day-ahead 90% interval.
+
+The difference in elpd is 0.3, with a standard error of 2.2, so the counts do
+not prefer either model, and camdl says so (`within noise`). The coverage is
+where they differ. The Poisson model's one-day-ahead 90% intervals contain 71%
+of the counts, 10 of the 14 days; the negative binomial's contain 93%. The
+Poisson model's smaller `crps` does not contradict this. `crps` rewards narrow
+predictions and penalizes a miss roughly in proportion to how far off it is,
+while the log score penalizes a confident miss much more heavily, so a model
+that is usually close and occasionally overconfident can win on one and not the
+other.
+
+Fourteen points cannot settle the choice by score alone, and the footer says
+why the scores flatter: they are in-sample, because the parameters were fitted
+to the same counts being scored, and that favors the more flexible model. Of
+the two, the negative binomial is the one to report. It gives the same answer
+about the epidemic, and its one-day-ahead intervals contain the counts about as
+often as they claim to. Keep in mind how it gets there. The Poisson model's
+misses fall in the decline, where the free-forward check showed the model's
+epidemic ending too slowly, and the negative binomial covers those days by
+allowing more scatter, not by explaining why the decline was faster.
+
+The `ⓘ` lines are informational. `StartsAtPrior` says the first day is
+predicted from the model's initial state alone, before the filter has seen any
+count. `EssCollapse` says that on one day the Poisson model's particle filter
+fell below 100 effective particles, a tenth of its 1000, which happens when a
+count is improbable under almost every simulated epidemic: one more sign of the
+Poisson model's overconfidence.
+
+::: {.internals title="How much can a score difference over fourteen days be trusted?"}
+
+Less than its standard error suggests, for three reasons, each of which camdl
+reports. First, `se(Δ)` treats the fourteen daily differences in log score as
+the data, and a normal approximation to their sum is rough with so few. camdl
+corrects for the differences being correlated from day to day, and prints the
+lag-one autocorrelation it corrected for (+0.25 here), but no correction makes
+fourteen days into many. Read `se(Δ)` as a description of scatter, not as a
+test. Second, each elpd is itself a Monte Carlo estimate from particle
+filters; the `filter-noise MC SE` note puts that noise at a few hundredths of a
+unit here, negligible next to the difference. Third, the scores are in-sample,
+optimistic by roughly the number of parameters fitted according to the footer,
+and the negative binomial fitted one more, so a fair comparison would move
+`Δelpd` slightly further against it; the conclusion, no preference either way,
+does not change. [Model comparison in camdl](../methods/model-comparison.md)
+gives the details, the evidence scale in decibans, and a held-out mode that
+scores days the fit did not see.
+
+:::
+
+## What the fit cannot see
+
+The `quantities` block reports, for each posterior draw, `attack_rate`, the
+fraction of the school ever infected. `fit predict` wrote its posterior
+quantiles for both fits:
+
+```{.camdl-run}
+head results/fits/fit_*/predict/*/quantities/attack_rate.tsv
+```
+
+Both models infer that nearly the whole school was infected: the posterior
+median of `attack_rate` (`q50`) is 97% for the negative binomial and 98% for
+the Poisson model, and even the 5% quantiles (`q05`) are 93% and 95%. The BMJ note counts 512 of 763 boys ill, 67%.
+
+The fit had no way to notice. The daily counts record how many boys were in bed,
+never how many escaped, and the model reconciles the counts with an epidemic in
+which almost everyone was infected. Either about a third of the boys were
+infected without falling ill enough to be counted, or the model is wrong in a
+way the counts alone do not expose. One candidate is the simplification flagged
+on the first page: a boy in the infirmary was isolated, and probably infected
+fewer others than an `I` in the model does, which would also explain an
+epidemic that ended faster than the model's. Telling those explanations apart
+needs data this fit did not use, such as a serological survey or a model with a
+separate isolated compartment fitted to the same counts.
+
+This is the strongest check on the page, and the only one that uses
+information independent of the fourteen counts. A posterior predictive check
+compares the model with the data it was fitted to; an external number can
+contradict a model that fits those data well. [The reasoning behind the fit
+workflow](../concepts.md#validating-against-the-world) places these checks in
+order of strength, and the [fit workflow](../workflow.md) lists what a larger
+fit adds.
