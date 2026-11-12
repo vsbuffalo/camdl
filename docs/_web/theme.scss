@@ -240,3 +240,39 @@ div.code-with-filename-file {
   --fig-bad: #ef8a7e;
   --fig-arrow: #8b929a;
 }
+
+// The four semantic boxes (docs/_web/boxes.lua; docs/documentation-style.md,
+// section 5). Quarto renders each as a callout; these rules give it the
+// guide's palette: a tinted panel, a solid left border and the title in the
+// accent colour, with body text in the page's text colour. Contrast, WCAG
+// 2.x, measured against each panel: title 4.7-6.1:1 light and 7.9-9.3:1 dark,
+// body text above 10:1 in both. The green accent is #2A7A51 rather than the
+// guide's #2F855A, which measures 4.34:1 on #F0FDF4 and fails AA.
+.callout.camdl-box {
+  --camdl-box-text: var(--bs-body-color);
+  background-color: var(--camdl-box-bg);
+  border-left-color: var(--camdl-box-accent) !important;
+  border-color: rgba(127, 127, 127, 0.18);
+  > .callout-header {
+    background-color: transparent !important;
+    color: var(--camdl-box-accent);
+    // Quarto dims callout titles to 85%, which would cut the measured contrast.
+    opacity: 1;
+    font-size: 0.95rem;
+  }
+  .callout-body { color: var(--camdl-box-text); }
+  // Quarto prefixes the title with its callout type for screen readers
+  // ("Tip", "Caution"), which here would contradict the visible label
+  // ("Under the hood:"). The label is already in the title text.
+  .callout-title-container > .screen-reader-only { display: none; }
+}
+.callout.camdl-box-practice { --camdl-box-accent: #2a7a51; --camdl-box-bg: #f0fdf4; }
+.callout.camdl-box-modeling { --camdl-box-accent: #946200; --camdl-box-bg: #fffbeb; }
+.callout.camdl-box-internals { --camdl-box-accent: #b45309; --camdl-box-bg: #fff7ed; }
+.callout.camdl-box-warning { --camdl-box-accent: #b42318; --camdl-box-bg: #fef3f2; }
+body.quarto-dark {
+  .callout.camdl-box-practice { --camdl-box-accent: #6fd39b; --camdl-box-bg: #13261c; }
+  .callout.camdl-box-modeling { --camdl-box-accent: #ebc35a; --camdl-box-bg: #2a2310; }
+  .callout.camdl-box-internals { --camdl-box-accent: #f4a469; --camdl-box-bg: #2d1d12; }
+  .callout.camdl-box-warning { --camdl-box-accent: #ff968c; --camdl-box-bg: #301716; }
+}
