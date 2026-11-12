@@ -129,6 +129,8 @@ main.content table th { font-weight: 600; }
 .ansi-info { color: #0e7490; }
 .ansi-transition { color: #0550ae; }
 .ansi-compartment { color: #8250df; }
+// The `...` that show-lines and show-match put where output was cut.
+.camdl-run-cut { opacity: 0.55; }
 body.quarto-dark {
   .ansi-ok { color: #56d364; }
   .ansi-warn { color: #e3b341; }

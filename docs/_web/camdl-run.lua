@@ -16,6 +16,25 @@
 --     `figure="prior.svg"` inlines an SVG the command wrote below its output,
 --     with an optional `caption="..."`; a missing file fails the render.
 --
+--   ```{.camdl-run show-lines="1-6,40-52"}
+--   ```
+--     Shows only those lines of the output (a single line is `7`; ranges
+--     ascending, not overlapping), with a `...` line wherever lines were cut:
+--     between two ranges that do not touch, and before the first or after
+--     the last range when the output continues there. The command still runs
+--     in full and its exit status is checked as above. A range past the end
+--     of the output fails the render, as `lines=` does on an include, so a
+--     change in the output cannot silently shift which lines the page shows.
+--
+--   ```{.camdl-run show-match="NOT converged|acceptance" show-context="1"}
+--   ```
+--     Shows the lines containing any of the `|`-separated texts, each with
+--     `show-context` lines (default 0) either side, cut with `...` the same
+--     way. The texts are plain text, not Lua patterns or regular
+--     expressions, matched against the output with its colours removed; a
+--     literal `|` cannot be matched. Each text must match at least one line,
+--     or the render fails. `show-lines` and `show-match` do not combine.
+--
 -- A page that writes results declares a scratch directory in its front matter:
 --
 --   camdl-run-scratch: first-fit
@@ -85,49 +104,148 @@ local function html_escape(s)
   return (s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
 end
 
--- A run's output as HTML: text escaped, each SGR colour a span, `ESC[0m` (or
--- `ESC[m`) closing every open span. Any other escape sequence fails.
-local function ansi_to_html(s, cmd)
+-- A run's output as HTML, one entry per line: text escaped, each SGR colour a
+-- span, `ESC[0m` (or `ESC[m`) closing every open span. Any other escape
+-- sequence fails. A colour left open at a line break is closed at the end of
+-- that line and reopened at the start of the next, so every line is balanced
+-- HTML on its own and a selection of lines (`show-lines`) cannot leave a span
+-- open or close one it never opened.
+local function ansi_to_html_lines(s, cmd)
   local function refuse(what)
     error("camdl-run: `" .. cmd .. "` printed " .. what
       .. "; map it in SGR_CLASS (docs/_web/camdl-run.lua) and the theme, or stop printing it")
   end
-  local out, open, pos = {}, 0, 1
-  local function text(t)
-    if t:find("\27", 1, true) then
-      refuse("an escape sequence that is not a colour")
-    end
-    table.insert(out, html_escape(t))
+  local lines, open = {}, {}
+  local function span(class)
+    return '<span class="' .. class .. '">'
   end
-  while true do
-    local a, b, params, final = s:find("\27%[([%d;]*)(%a)", pos)
-    if not a then
-      text(s:sub(pos))
-      break
+  for line in (s .. "\n"):gmatch("(.-)\n") do
+    local out, pos = {}, 1
+    for _, class in ipairs(open) do
+      table.insert(out, span(class))
     end
-    text(s:sub(pos, a - 1))
-    if final ~= "m" then
-      refuse("the escape sequence ESC[" .. params .. final .. ", which is not a colour")
-    end
-    for code in ((params == "") and "0" or params):gmatch("[^;]+") do
-      if code == "0" then
-        table.insert(out, string.rep("</span>", open))
-        open = 0
-      elseif SGR_CLASS[code] then
-        table.insert(out, '<span class="' .. SGR_CLASS[code] .. '">')
-        open = open + 1
-      else
-        refuse("colour code " .. code .. ", which the docs do not map")
+    local function text(t)
+      if t:find("\27", 1, true) then
+        refuse("an escape sequence that is not a colour")
       end
+      table.insert(out, html_escape(t))
     end
-    pos = b + 1
+    while true do
+      local a, b, params, final = line:find("\27%[([%d;]*)(%a)", pos)
+      if not a then
+        text(line:sub(pos))
+        break
+      end
+      text(line:sub(pos, a - 1))
+      if final ~= "m" then
+        refuse("the escape sequence ESC[" .. params .. final .. ", which is not a colour")
+      end
+      for code in ((params == "") and "0" or params):gmatch("[^;]+") do
+        if code == "0" then
+          table.insert(out, string.rep("</span>", #open))
+          open = {}
+        elseif SGR_CLASS[code] then
+          table.insert(out, span(SGR_CLASS[code]))
+          table.insert(open, SGR_CLASS[code])
+        else
+          refuse("colour code " .. code .. ", which the docs do not map")
+        end
+      end
+      pos = b + 1
+    end
+    table.insert(out, string.rep("</span>", #open))
+    table.insert(lines, table.concat(out))
   end
-  table.insert(out, string.rep("</span>", open))
-  return table.concat(out)
+  return lines
 end
 
 local function strip_ansi(s)
   return (s:gsub("\27%[[%d;]*m", ""))
+end
+
+local function split_lines(s)
+  local lines = {}
+  for line in (s .. "\n"):gmatch("(.-)\n") do
+    table.insert(lines, line)
+  end
+  return lines
+end
+
+-- `show-lines="1-6,40-52"`: the set of output lines to show. Ranges are
+-- ascending and do not overlap; a single line is `7`. A range past the end
+-- of the output fails, as `lines=` does on an include, because the excerpt
+-- no longer shows what it was written against.
+local function lines_by_number(spec, n, cmd)
+  local keep, last_seen = {}, 0
+  for part in (spec .. ","):gmatch("(.-),") do
+    part = part:gsub("^%s+", ""):gsub("%s+$", "")
+    local first, last = part:match("^(%d+)%-(%d+)$")
+    if not first then
+      first = part:match("^(%d+)$")
+      last = first
+    end
+    if not first then
+      error("camdl-run: show-lines must look like 1-6,40-52, got " .. spec)
+    end
+    first, last = tonumber(first), tonumber(last)
+    if first < 1 or last < first or first <= last_seen then
+      error("camdl-run: show-lines=" .. spec .. ": ranges must be ascending and must not overlap")
+    end
+    if last > n then
+      error("camdl-run: show-lines=" .. spec .. " but `" .. cmd .. "` printed " .. n .. " lines")
+    end
+    for i = first, last do
+      keep[i] = true
+    end
+    last_seen = last
+  end
+  return keep
+end
+
+-- `show-match="NOT converged|acceptance"`: the lines containing any of the
+-- `|`-separated texts (plain text, not patterns, matched against the output
+-- without its colours), each with `show-context` lines either side. Every
+-- alternative must match at least one line, so a line that stops being
+-- printed fails the render instead of quietly dropping out of the excerpt.
+local function lines_by_match(spec, context, plain, cmd)
+  local keep = {}
+  for needle in (spec .. "|"):gmatch("(.-)|") do
+    if needle == "" then
+      error("camdl-run: show-match has an empty alternative: " .. spec)
+    end
+    local found = false
+    for i, line in ipairs(plain) do
+      if line:find(needle, 1, true) then
+        found = true
+        for j = math.max(1, i - context), math.min(#plain, i + context) do
+          keep[j] = true
+        end
+      end
+    end
+    if not found then
+      error("camdl-run: show-match: no line of `" .. cmd .. "` contains \"" .. needle .. "\"")
+    end
+  end
+  return keep
+end
+
+-- The shown lines, with `...` wherever lines were cut: between two kept runs
+-- and before the first or after the last when the output continues there.
+local function excerpt(lines, keep, cut)
+  local out, prev = {}, 0
+  for i = 1, #lines do
+    if keep[i] then
+      if i > prev + 1 then
+        table.insert(out, cut)
+      end
+      table.insert(out, lines[i])
+      prev = i
+    end
+  end
+  if prev < #lines then
+    table.insert(out, cut)
+  end
+  return out
 end
 
 local function shell_quote(s)
@@ -242,12 +360,36 @@ local function code_block(block)
     end
     local blocks = { pandoc.CodeBlock(cmd, pandoc.Attr("", { "bash", "camdl-run-cmd" })) }
     if output ~= "" then
+      -- Converting every line first refuses an unmapped colour anywhere in
+      -- the output, shown or not.
+      local html = ansi_to_html_lines(output, cmd)
+      local plain = split_lines(strip_ansi(output))
+      local by_lines, by_match = block.attributes["show-lines"], block.attributes["show-match"]
+      local context = block.attributes["show-context"]
+      if by_lines and by_match then
+        error("camdl-run: use show-lines or show-match, not both")
+      elseif context and not by_match then
+        error("camdl-run: show-context only applies with show-match")
+      end
+      local keep = nil
+      if by_lines then
+        keep = lines_by_number(by_lines, #plain, cmd)
+      elseif by_match then
+        local n = tonumber(context or "0")
+        if not n or n < 0 or n ~= math.floor(n) then
+          error("camdl-run: show-context must be a whole number, got " .. context)
+        end
+        keep = lines_by_match(by_match, n, plain, cmd)
+      end
+      if keep then
+        html = excerpt(html, keep, '<span class="camdl-run-cut">...</span>')
+        plain = excerpt(plain, keep, "...")
+      end
       if quarto.doc.is_format("html") then
         table.insert(blocks, pandoc.RawBlock("html",
-          '<pre class="camdl-run-out"><code>' .. ansi_to_html(output, cmd) .. "</code></pre>"))
+          '<pre class="camdl-run-out"><code>' .. table.concat(html, "\n") .. "</code></pre>"))
       else
-        ansi_to_html(output, cmd) -- the same refusal of unmapped codes
-        table.insert(blocks, pandoc.CodeBlock(strip_ansi(output), pandoc.Attr("", { "camdl-run-out" })))
+        table.insert(blocks, pandoc.CodeBlock(table.concat(plain, "\n"), pandoc.Attr("", { "camdl-run-out" })))
       end
     end
     local run_block = pandoc.Div(blocks, pandoc.Attr("", { "camdl-run" }))
