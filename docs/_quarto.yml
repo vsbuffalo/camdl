@@ -135,13 +135,16 @@ camdl-published: *published
 
 # Ours run before Quarto's own filters (the `quarto` entry), so a filename
 # that camdl-run.lua attaches to an included file still gets Quarto's
-# filename header, and the spec banner's callout is rendered by Quarto.
+# filename header, and the spec banner's callout and the boxes are rendered
+# by Quarto. boxes.lua runs last of ours, after the code blocks inside a box
+# have been run and the figures placed.
 filters:
   - _web/unpublished-links.lua
   - _web/page-title.lua
   - _web/spec-banner.lua
   - _web/camdl-run.lua
   - _web/figures.lua
+  - _web/boxes.lua
   - quarto
 
 format:
