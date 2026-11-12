@@ -206,6 +206,14 @@ to show. An `include` whose `lines` range runs past the end of the file fails
 too, since the excerpt no longer matches what it was written against. Model
 files live next to the page, in `docs/guide/<page>/`.
 
+A long output can be trimmed to the lines a page discusses with
+`show-lines="1-6,40-52"`, or to the lines containing given text with
+`show-match="NOT converged|acceptance"` (plus `show-context="N"` lines around
+each), and a `...` line marks each cut. The command still runs in full and its
+exit status is still checked. A range past the end of the output, or a text no
+line contains, fails the render, so the excerpt cannot drift onto other lines.
+The exact rules are in the header comment of `_web/camdl-run.lua`.
+
 A tutorial whose commands write files, such as a fit, declares a scratch
 directory in its front matter:
 
