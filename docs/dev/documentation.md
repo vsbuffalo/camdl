@@ -9,7 +9,11 @@ documented examples are also checked against the code, so a page that drifts
 from the software fails a test instead of misleading a reader.
 
 This page describes how that works and what to do when adding to it. It is for
-anyone editing the docs, human or agent.
+anyone editing the docs, human or agent. How the prose itself should read
+(voice, page types, mathematics, the four kinds of collapsible box, trimming
+output) is the style guide,
+[Writing the camdl documentation](../documentation-style.md), which is also on
+the website.
 
 ## Each reader gets the same file, treated differently
 
@@ -308,3 +312,6 @@ run `cargo test -p cli --bin camdl docs::`.
 **Add a tutorial.** Write `docs/guide/<page>.qmd`, keep its models in
 `docs/guide/<page>/`, use `{.camdl include=…}` and `{.camdl-run}` for every
 model and command, and publish it as above.
+
+The boarding-school tutorial (`docs/guide/first-fit.qmd`) predates the style
+guide and has not yet been rewritten to follow it.

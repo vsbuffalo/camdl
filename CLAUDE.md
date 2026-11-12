@@ -115,6 +115,8 @@ Runbook: `docs/dev/testing.md` ("Gotcha: camdlc version check"). The deeper fix
 
 ## Markdown
 
+Docs prose follows the style guide, `docs/documentation-style.md`.
+
 Format any `.md` you touch with `mdfmt` (`dprint fmt`) as the last step, so
 formatting never rides in on the next substantive commit. `main` is protected,
 so a post-push reformat can't be force-pushed — it has to be a fresh commit.
@@ -172,13 +174,13 @@ in its own commit first.
   `rate_<name>`), and one line per intervention or event action that fires.
   Redirect stderr to a file; stdout carries the normal output.
   `CAMDL_EVAL_UNRESOLVED` routes propensities through the slow string-keyed
-  evaluator. Both live in `sim::trace` (`sim/src/trace.rs`), the one module
-  of `sim` allowed to write to stderr (`sim/tests/sim_prints_nothing.rs`).
+  evaluator. Both live in `sim::trace` (`sim/src/trace.rs`), the one module of
+  `sim` allowed to write to stderr (`sim/tests/sim_prints_nothing.rs`).
 - `RUST_LOG=sim=debug` — the `log::debug!` inference diagnostics in `pgas.rs`
   and `if2.rs` (-inf logliks, density mismatches, refused proposals). The log
   target is the crate name, `sim`; `camdl_sim` matches nothing.
-- Anything else `sim` has to say goes through a value: a `PgasEvent` (PGAS
-  chain events), a `RunNote` (`sim::run_notes`, said once as a warning), an
+- Anything else `sim` has to say goes through a value: a `PgasEvent` (PGAS chain
+  events), a `RunNote` (`sim::run_notes`, said once as a warning), an
   `eval_stats` counter, or a finding.
 
 ## Alpha posture
