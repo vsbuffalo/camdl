@@ -322,10 +322,18 @@ local function figure_block(path, caption)
   local svg = read_file((workdir or page_dir()) .. "/" .. path)
   svg = svg:gsub("^%s*<%?xml.-%?>%s*", ""):gsub("^%s*<!DOCTYPE.->%s*", "")
   local html = '<figure class="camdl-fig camdl-plot">' .. svg
-  if caption then
-    html = html .. "<figcaption>" .. caption:gsub("&", "&amp;"):gsub("<", "&lt;") .. "</figcaption>"
+  if not caption then
+    return pandoc.RawBlock("html", html .. "</figure>")
   end
-  return pandoc.RawBlock("html", html .. "</figure>")
+  -- The caption is markdown, parsed into the document rather than pasted in as
+  -- HTML, so its links and code are rendered and Quarto still resolves a link
+  -- to a .qmd or .md page to the published .html.
+  local inlines = pandoc.utils.blocks_to_inlines(pandoc.read(caption, "markdown").blocks)
+  return {
+    pandoc.RawBlock("html", html .. "<figcaption>"),
+    pandoc.Plain(inlines),
+    pandoc.RawBlock("html", "</figcaption></figure>"),
+  }
 end
 
 local function code_block(block)
@@ -400,10 +408,24 @@ local function code_block(block)
     end
     local run_block = pandoc.Div(blocks, pandoc.Attr("", { "camdl-run" }))
     local figure = block.attributes["figure"]
+    local show = block.attributes["show"]
+    if show and show ~= "figure" then
+      error("camdl-run: show must be \"figure\", got " .. show)
+    elseif show and not figure then
+      error("camdl-run: show=\"figure\" needs a figure")
+    end
     if not figure then
       return run_block
     end
-    return { run_block, figure_block(figure, block.attributes["caption"]) }
+    -- show="figure" keeps the plot and drops the commands and their output,
+    -- for a page (the home page) that shows a result rather than teaching
+    -- how it was made. The commands still run and must still succeed.
+    if show == "figure" then
+      return pandoc.Blocks(figure_block(figure, block.attributes["caption"]))
+    end
+    local out = pandoc.Blocks({ run_block })
+    out:extend(pandoc.Blocks(figure_block(figure, block.attributes["caption"])))
+    return out
   end
 end
 
