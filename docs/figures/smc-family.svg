@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 262" role="img" aria-labelledby="t d">
+  <title id="t">The particle methods and the filter they share</title>
+  <desc id="d">The bootstrap particle filter, which simulates forward and resamples particles to match the data, is used as a subroutine by three methods. IF2 finds the maximum-likelihood estimate. PMMH samples the posterior. PGAS samples the posterior together with the latent trajectories, running a version of the filter conditioned on the current trajectory.</desc>
+  <defs>
+    <marker id="smc-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
+    </marker>
+  </defs>
+
+  <!-- the filter -->
+  <rect x="150" y="2" width="340" height="68" rx="4" class="fig-ink-box"/>
+  <text x="320" y="30" class="t-label t-b fig-inverse" text-anchor="middle">Bootstrap particle filter</text>
+  <text x="320" y="54" class="t-small fig-inverse-muted" text-anchor="middle">simulate forward, resample to match the data</text>
+
+  <!-- fan-out -->
+  <line x1="320" y1="70" x2="320" y2="116" class="s-line"/>
+  <text x="330" y="99" class="t-small fig-muted">used as a subroutine by</text>
+  <path d="M106,116 H534" class="s-line" fill="none"/>
+  <g class="s-arrow">
+    <line x1="106" y1="116" x2="106" y2="142" marker-end="url(#smc-arrow)"/>
+    <line x1="320" y1="116" x2="320" y2="142" marker-end="url(#smc-arrow)"/>
+    <line x1="534" y1="116" x2="534" y2="142" marker-end="url(#smc-arrow)"/>
+  </g>
+
+  <!-- the three methods -->
+  <g text-anchor="middle">
+    <rect x="2" y="144" width="208" height="116" rx="4" class="fig-card s-line"/>
+    <text x="106" y="174" class="t-label t-b fig-ink">IF2</text>
+    <text x="106" y="200" class="t-small fig-muted">finds the maximum-</text>
+    <text x="106" y="218" class="t-small fig-muted">likelihood estimate</text>
+    <text x="106" y="244" class="t-small t-b fig-warm">point estimate</text>
+
+    <rect x="216" y="144" width="208" height="116" rx="4" class="fig-card s-line"/>
+    <text x="320" y="174" class="t-label t-b fig-ink">PMMH</text>
+    <text x="320" y="200" class="t-small fig-muted">filter's likelihood estimate</text>
+    <text x="320" y="218" class="t-small fig-muted">drives a Metropolis sampler</text>
+    <text x="320" y="244" class="t-small t-b fig-accent">posterior</text>
+
+    <rect x="430" y="144" width="208" height="116" rx="4" class="fig-accent-soft s-accent"/>
+    <text x="534" y="174" class="t-label t-b fig-ink">PGAS</text>
+    <text x="534" y="200" class="t-small fig-muted">a conditional filter</text>
+    <text x="534" y="218" class="t-small fig-muted">renews the trajectory</text>
+    <text x="534" y="244" class="t-small t-b fig-accent">posterior + trajectories</text>
+  </g>
+</svg>
