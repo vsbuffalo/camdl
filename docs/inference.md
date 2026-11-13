@@ -108,17 +108,27 @@ likelihood estimates. PGAS is more efficient (exact likelihood) but requires the
 ability to evaluate transition densities — currently only the chain-binomial
 (Euler-multinomial) backend supports this.
 
-### The recommended workflow
+### Which one to use
+
+PGAS is the default for the posterior of a chain-binomial model, and PMMH is a
+second sampler to check it against; IF2 gives a point estimate and, through
+`camdl profile`, profile likelihoods. The table, and the main reason to prefer a
+posterior (it shows parameters the data cannot separate, where a point estimate
+returns one point and hides them), are in [`camdl docs workflow`](workflow.md),
+"Choose a method".
+
+Chains start from draws from the priors by default. If those starts are slow to
+reach the region where the likelihood is high, a short run can seed a longer
+one:
 
 ```
-fit-if2.toml  [method] algorithm = "if2"                                → @mle
+short.toml    [method] algorithm = "pgas", sweeps = 200                → @short
 fit.toml      [method] algorithm = "pgas", starts = { from_posterior = "@short" }
 ```
 
-IF2 finds the right basin quickly (global exploration via many particles). PGAS
-characterizes the posterior within that basin (exact likelihood, NUTS gradient
-proposals, posterior trajectory samples). Starting PGAS from IF2 results avoids
-the trajectory convergence problem that plagues random starts.
+`from_posterior` draws one start per chain from the short run's posterior, so
+the chains still start apart and R̂ stays meaningful. `from_mle = "@mle"` starts
+every chain at one IF2 point instead, and R̂ is then reported as not assessed.
 
 These four methods all target the **stochastic-process** likelihood
 $p(y \mid \theta)$ on the chain-binomial backend. The ODE backend fits a
