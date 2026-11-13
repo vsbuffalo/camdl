@@ -48,7 +48,7 @@ project:
 
 website:
   title: "camdl"
-  site-url: https://vsbuffalo.github.io/camdl/
+  site-url: https://camdl.dev/
   repo-url: https://github.com/vsbuffalo/camdl
   repo-subdir: docs
   repo-actions: [source, issue]

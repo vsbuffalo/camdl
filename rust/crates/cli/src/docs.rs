@@ -26,7 +26,7 @@ struct Topic {
 
 /// Where the website is served; `site-url` in `docs/_quarto.yml`, which a test
 /// holds this to.
-const SITE_URL: &str = "https://vsbuffalo.github.io/camdl/";
+const SITE_URL: &str = "https://camdl.dev/";
 
 // Paths are four levels up from this file (`rust/crates/cli/src/docs.rs`) to
 // the repo root — the same `include_str!` convention as
@@ -520,8 +520,8 @@ mod tests {
         let doc = "Intro.\n\n<!-- figure: a -->\n\nTable.\n\n<!-- figure: b, caption: B. -->\n```\nA --> B\n```\n<!-- /figure -->\n\nEnd.\n";
         assert_eq!(
             terminal_text(&topic(doc, Some("guide/x.md"))),
-            "Intro.\n\n[Figure on the website: https://vsbuffalo.github.io/camdl/guide/x.html#fig-a]\n\nTable.\n\n\
-             [Figure on the website: https://vsbuffalo.github.io/camdl/guide/x.html#fig-b]\n```\nA --> B\n```\n\nEnd.\n"
+            "Intro.\n\n[Figure on the website: https://camdl.dev/guide/x.html#fig-a]\n\nTable.\n\n\
+             [Figure on the website: https://camdl.dev/guide/x.html#fig-b]\n```\nA --> B\n```\n\nEnd.\n"
         );
     }
 
@@ -536,7 +536,7 @@ mod tests {
         let doc = "Before.\n\n<!-- figure: a, caption: a long\ncaption that wraps -->\n\nAfter.\n";
         assert_eq!(
             terminal_text(&topic(doc, Some("p.md"))),
-            "Before.\n\n[Figure on the website: https://vsbuffalo.github.io/camdl/p.html#fig-a]\n\nAfter.\n"
+            "Before.\n\n[Figure on the website: https://camdl.dev/p.html#fig-a]\n\nAfter.\n"
         );
     }
 

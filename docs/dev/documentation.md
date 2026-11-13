@@ -2,11 +2,11 @@
 
 One set of markdown files in `docs/` serves three readers: someone running
 `camdl docs` in a terminal, someone browsing the repository on GitHub, and
-someone reading the website at <https://vsbuffalo.github.io/camdl/>. Wherever
-the three need something different, the difference is made at build time from
-the same file. There is never a second copy of a page to keep in step. The
-documented examples are also checked against the code, so a page that drifts
-from the software fails a test instead of misleading a reader.
+someone reading the website at <https://camdl.dev/>. Wherever the three need
+something different, the difference is made at build time from the same file.
+There is never a second copy of a page to keep in step. The documented examples
+are also checked against the code, so a page that drifts from the software fails
+a test instead of misleading a reader.
 
 This page describes how that works and what to do when adding to it. It is for
 anyone editing the docs, human or agent. How the prose itself should read
@@ -125,7 +125,7 @@ In the terminal, `camdl docs` prints each opening marker as a link to the
 figure's anchor and drops the closing marker:
 
 ```
-[Figure on the website: https://vsbuffalo.github.io/camdl/intro.html#fig-transition-anatomy]
+[Figure on the website: https://camdl.dev/intro.html#fig-transition-anatomy]
 ```
 
 Every figure on the website is a `<figure id="fig-<name>">`, so

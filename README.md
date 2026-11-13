@@ -248,8 +248,8 @@ More, in one table:
 
 ## Install
 
-The [installation page](https://vsbuffalo.github.io/camdl/install.html) covers
-camdl and the camdl 'scope viewer. The build details are below.
+The [installation page](https://camdl.dev/install.html) covers camdl and the
+camdl 'scope viewer. The build details are below.
 
 ### Quick install (Linux / macOS)
 
