@@ -1,4 +1,4 @@
--- The four semantic boxes of docs/documentation-style.md, section 5.
+-- The five semantic boxes of docs/documentation-style.md, section 5.
 --
 --   ::: {.practice title="Checking a fit without reading its full log"}
 --   ...
@@ -12,8 +12,9 @@
 --   .modeling    yellow  Modeling choice:  warning       collapsed
 --   .internals   orange  Under the hood:   caution       collapsed
 --   .warning     red     Warning:          important     always open
+--   .agents      slate   For AI agents:    note          collapsed
 --
--- `collapse="false"` shows a practice, modeling or internals box open (it can
+-- `collapse="false"` shows a practice, modeling, internals or agents box open (it can
 -- still be closed). A `.warning` box is never collapsible: any `collapse` on
 -- it is ignored, because a warning that changes whether to trust a result
 -- belongs in the reading path.
@@ -23,12 +24,16 @@
 -- needs a title, and a box inside another box fails the render, as does a
 -- paragraph starting with `:::` (a fence reflowed into its text). The colours
 -- are in _web/theme.scss, keyed on the `camdl-box-<kind>` class added here.
+--
+-- `camdl docs` prints the same boxes open, as their titled label
+-- (rust/crates/cli/src/docs.rs, BOX_LABELS, which a test holds to KINDS).
 
 local KINDS = {
   practice = { type = "tip", label = "In practice:", collapsible = true },
   modeling = { type = "warning", label = "Modeling choice:", collapsible = true },
   internals = { type = "caution", label = "Under the hood:", collapsible = true },
   warning = { type = "important", label = "Warning:", collapsible = false },
+  agents = { type = "note", label = "For AI agents:", collapsible = true },
 }
 
 local function kind_of(div)
