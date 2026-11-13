@@ -1,12 +1,12 @@
 ---
-title: "Criticizing an epidemic model"
+title: "Checking and comparing models"
 description: "Testing the boarding-school SIR fit against its data: posterior predictive checks at two horizons, a negative-binomial observation model, prequential model comparison, and an attack rate that disagrees with the historical record."
 camdl-run-scratch: first-fit
 ---
 
 A fit that converged tells us the sampler found the posterior of the model we
 wrote. It does not tell us the model is a good description of what happened.
-This page takes the converged SIR fit from [Your first fit](first-fit.qmd) and
+This page takes the converged SIR fit from [Fitting the boarding-school outbreak](first-fit.qmd) and
 asks that second question three ways: by comparing its predictions with the
 data it was fitted to, by fitting a competing model and scoring the two, and by
 checking an inferred quantity against a number the fit never saw. The first two

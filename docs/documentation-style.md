@@ -510,19 +510,20 @@ tutorial and a deeper explanation.
 
 For the boarding-school example, a productive division is:
 
-1. **Your first Bayesian fit:** one model, one fit, convergence assessment, and
-   a posterior predictive check.
+1. **Fitting the boarding-school outbreak:** one model, one fit, convergence
+   assessment, and a posterior predictive check.
 2. **When a fit goes wrong:** the prior predictive failure, stuck chains,
    likelihood noise, and reparameterization.
-3. **Criticizing an epidemic model:** competing observation models, predictive
+3. **Checking and comparing models:** competing observation models, predictive
    scores, and the mismatch with the historical attack rate.
 
 The second and third pages can be scientifically substantial. They need not be
 disguised as first-run instructions.
 
-The boarding-school tutorial now on the site,
-[Your first fit](guide/first-fit.qmd), predates this guide and does not yet
-follow it.
+The boarding-school tutorial on the site follows this division:
+[Fitting the boarding-school outbreak](guide/first-fit.qmd),
+[When a fit goes wrong](guide/fit-goes-wrong.qmd) and
+[Checking and comparing models](guide/checking-and-comparing-models.qmd).
 
 ## 9. Drafting and editing are separate jobs
 

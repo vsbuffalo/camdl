@@ -4,7 +4,7 @@ description: "The boarding-school SIR model with a vague prior on the transmissi
 camdl-run-scratch: first-fit
 ---
 
-[Your first fit](first-fit.qmd) fitted an SIR model to the 1978 boarding-school
+[Fitting the boarding-school outbreak](first-fit.qmd) fitted an SIR model to the 1978 boarding-school
 influenza counts and converged at the first attempt. It did so because the
 prior was placed on the basic reproduction number $R_0$. The more obvious
 choice is to put it on the parameter that appears in the infection rate, the
@@ -228,7 +228,7 @@ uv run plot_prior.py prior-r0.tsv prior-r0-runs.tsv data/in_bed.tsv prior-r0.svg
 Now 2% of draws have $R_0$ below 1, and the simulated epidemics range from slow
 to fast without spending their weight on outbreaks that never start. The prior
 on $R_0$ uses one piece of knowledge the prior on $\beta$ ignored, that this
-was an outbreak; [Your first fit](first-fit.qmd) discusses whether that is
+was an outbreak; [Fitting the boarding-school outbreak](first-fit.qmd) discusses whether that is
 fair.
 
 ::: {.modeling title="Did the reparameterization fix the sampler, or the prior?"}
@@ -307,5 +307,5 @@ are what to believe. That is the general lesson of this page: the pre-run check
 is a diagnosis at one point, and the end-of-run diagnostics, acceptance per
 chain, $\hat R$, and the chains' log-likelihoods side by side, are the verdict.
 [Diagnosing a fit](../diagnosing-fits.md) covers the failures this example did
-not reach, and [Criticizing an epidemic model](criticizing-a-model.qmd) turns
+not reach, and [Checking and comparing models](checking-and-comparing-models.qmd) turns
 from whether the fit worked to whether the model is right.

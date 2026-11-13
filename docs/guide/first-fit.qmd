@@ -1,5 +1,5 @@
 ---
-title: "Your first fit"
+title: "Fitting the boarding-school outbreak"
 description: "A Bayesian fit of an SIR model to fourteen days of influenza counts from a 1978 boarding school: the likelihood camdl computes, a fit, how to tell that it converged, and a check of the posterior against the data."
 camdl-run-scratch: first-fit
 ---
@@ -110,7 +110,7 @@ with $p(\theta)$ the prior. Two simplifications are built into this likelihood,
 and both deserve a sentence before we rely on it. Treating "in bed" as
 "infected" assumes every infected boy was in bed, and the Poisson distribution
 assumes the counts scatter around $I_t$ no more than a Poisson count does.
-[Criticizing an epidemic model](criticizing-a-model.qmd) tests both.
+[Checking and comparing models](checking-and-comparing-models.qmd) tests both.
 
 The `quantities` block names numbers to report from each simulated epidemic
 without fitting them: the mean time infected, the fraction of the school ever
@@ -323,7 +323,7 @@ The fit on this page went smoothly because of a choice made before it started:
 the prior on $R_0$. [When a fit goes wrong](fit-goes-wrong.qmd) puts the prior
 on $\beta$ instead, watches the same sampler fail, works out why, and checks
 that the fitting machinery recovers parameters it knows.
-[Criticizing an epidemic model](criticizing-a-model.qmd) takes up the misses in
+[Checking and comparing models](checking-and-comparing-models.qmd) takes up the misses in
 the decline: it fits a model with noisier counts, compares the two, and finds a
 quantity on which both disagree with the historical record.
 
