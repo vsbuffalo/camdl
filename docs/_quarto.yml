@@ -183,3 +183,5 @@ format:
     link-external-newwindow: true
     html-math-method: katex
     from: commonmark_x
+    # Every page, so visitor counts cover the whole site.
+    include-in-header: _web/goatcounter.html
