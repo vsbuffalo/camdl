@@ -2,9 +2,11 @@
 
 camdl is two programs that install together: `camdlc`, the compiler that turns a
 `.camdl` file into a flat model description, and `camdl`, which simulates and
-fits it. Both build from source. A separate viewer, camdl 'scope, shows a fit's
-traces, posteriors and predictive checks in the browser; you will want it from
-the first fit onwards.
+fits it. Both build from source. A separate viewer,
+[camdl 'scope](https://github.com/vsbuffalo/camdl-scope), shows a fit's traces,
+posteriors and predictive checks in the browser. We strongly recommend
+installing it too: it is the quickest way to see whether a fit converged and how
+well it matches the data.
 
 ## camdl
 
@@ -48,7 +50,7 @@ mismatched compiler could produce a model description the runtime reads
 differently. `make install` copies to `~/.local/bin`; if you installed somewhere
 else with `PREFIX`, run `make install INSTALL_DIR=<dir>/bin` instead.
 
-### Options
+:::: {.practice title="Installing somewhere else, or with a different OCaml"}
 
 Set these in the environment when you run the script, for example
 `PREFIX=$HOME/opt/camdl ./install.sh`.
@@ -66,12 +68,15 @@ To set up the toolchains by hand instead, follow the manual steps in the
 repository's
 [README](https://github.com/vsbuffalo/camdl#prerequisites-manual-install).
 
-## camdl 'scope
+::::
 
-camdl 'scope reads the fits camdl writes under `results/fits/` and draws them:
-per-chain traces, marginal posteriors, pair plots, posterior predictive bands
-against the data, and camdl's convergence diagnostics. It refreshes while a fit
-is still running, so you can watch chains mix rather than wait for the end.
+## camdl 'scope, the fit viewer (strongly recommended)
+
+[camdl 'scope](https://github.com/vsbuffalo/camdl-scope) reads the fits camdl
+writes under `results/fits/` and draws them: per-chain traces, marginal
+posteriors, pair plots, posterior predictive bands against the data, and camdl's
+convergence diagnostics. It refreshes while a fit is still running, so you can
+watch chains mix rather than wait for the end.
 
 It is a Python package installed with [uv](https://docs.astral.sh/uv/). Its
 install builds the browser interface from source, so Node.js (which provides
@@ -91,6 +96,10 @@ camdl-scope --port 8800 --host 0.0.0.0   # reachable from other devices on your 
 
 The viewer only reads the store, so it is safe to leave running while fits write
 to it.
+
+![camdl 'scope showing the posterior of the boarding-school fit from the
+tutorials: each parameter's marginal against its prior (grey), and the pairs
+plotted against each other.](guide/first-fit/img/scope-r0-pair.png)
 
 ## uv, for the guide pages
 
