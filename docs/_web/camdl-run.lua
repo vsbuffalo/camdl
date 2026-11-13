@@ -258,10 +258,16 @@ end
 -- its output as it would in a terminal (CLICOLOR_FORCE, NO_COLOR unset);
 -- CLICOLOR stays unset so `ls` and friends do not colour theirs. The raw
 -- output, escapes included, is returned; the caller renders or strips them.
+--
+-- `uv run` (the plotting scripts) is made quiet and colourless. With a cold
+-- cache, as on CI, uv prints coloured "Downloading ..." and "Installed ..."
+-- lines that are not page content, and CLICOLOR_FORCE would paint them in
+-- codes the docs do not map. Errors still print.
 local workdir = nil -- set per page by setup(); nil means the page directory
 
 local function run(cmd)
   local script = "set -eo pipefail\nunset NO_COLOR CLICOLOR\nexport CLICOLOR_FORCE=1 TERM=dumb\n"
+    .. "uv() { command uv --quiet --color never \"$@\"; }\n"
     .. "cd " .. shell_quote(workdir or page_dir()) .. " || exit 125\n" .. cmd
   local full = "bash -c " .. shell_quote(script)
     .. " 2>&1; printf '\\n__camdl_run_exit=%s' $?"
