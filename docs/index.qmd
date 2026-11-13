@@ -27,9 +27,11 @@ Some of camdl's features:
 - **The model is checked by a compiler before it runs.** The compiler checks
   the units and dimensions of every rate, so a per-capita rate used where a
   population rate belongs is a compile error rather than a quietly wrong
-  epidemic. While an AI agent built models of the 2026 Bundibugyo ebolavirus
-  outbreak, the compiler rejected its models 81 times, a third of them for
-  science errors that would otherwise have run and produced a number.
+  epidemic. When an AI agent was used to build models of the 2026 Bundibugyo
+  ebolavirus outbreak, the compiler caught problems preemptively and rejected
+  its models 81 times. A third of the rejections were science errors (a rate
+  with the wrong dimensions, or an observation that would have summed across
+  strata) that would otherwise have run and produced a number.
 - **Stratification is declared, not hand-written.** Age groups, places and
   disease stages are dimensions, and the compiler expands every compartment and
   transition across them.
