@@ -14,6 +14,8 @@ for, is in [`camdl docs concepts`](concepts.md). How each algorithm works is in
 
 ## At a glance
 
+<!-- figure: fit-workflow -->
+
 ```
 write model → check → simulate → synthetic recovery → choose a method
             → write fit.toml → fit run → fit summary → fit predict → validate
@@ -21,6 +23,8 @@ write model → check → simulate → synthetic recovery → choose a method
 optional, when a fit needs them:
   survey (map the likelihood surface) · if2 (a point estimate, profiles)
 ```
+
+<!-- /figure -->
 
 ## 1. Compile and sanity-check the dynamics
 

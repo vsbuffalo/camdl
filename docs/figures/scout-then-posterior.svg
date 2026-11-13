@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 366" role="img" aria-labelledby="t d">
+  <title id="t">Two fit files: an IF2 scout, then a posterior seeded from it</title>
+  <desc id="d">scout.toml and posterior.toml share model.camdl and data.tsv. camdl fit run scout.toml --label scout writes an IF2 leaf at results/fits/scout-h8/if2-h8/seed_1-h8 holding fit_state.toml, mle_params.toml and chain_starts.tsv. posterior.toml declares starts = { from_mle = "@scout" }, which reads the scout's point estimate; camdl fit run posterior.toml writes a PGAS leaf at results/fits/posterior-h8/pgas-h8/seed_1-h8 holding draws.tsv, chain_N/trace.tsv and chain_starts.tsv. Both fit directories carry the same hash because the two files share their problem half.</desc>
+  <defs>
+    <marker id="stp-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
+    </marker>
+  </defs>
+
+  <!-- shared problem -->
+  <rect x="2" y="2" width="636" height="34" rx="4" class="fig-panel"/>
+  <text x="16" y="24" class="t-small fig-muted">shared by both files:</text>
+  <text x="170" y="24" class="t-mono-label fig-ink">model.camdl  data.tsv</text>
+  <text x="624" y="24" class="t-small fig-accent" text-anchor="end">same &lt;h8&gt; in both fit directories</text>
+
+  <!-- scout -->
+  <rect x="2" y="50" width="636" height="120" rx="4" class="fig-card s-line"/>
+  <text x="16" y="76" class="t-label t-b fig-ink">scout.toml</text>
+  <text x="16" y="96" class="t-small fig-muted">algorithm = "if2"</text>
+  <text x="16" y="126" class="t-code-label fig-ink">camdl fit run scout.toml</text>
+  <text x="16" y="146" class="t-code-label fig-ink">  --label scout</text>
+  <g class="t-code-label fig-ink">
+    <text x="300" y="76">results/fits/<tspan class="fig-accent t-b">scout-&lt;h8&gt;</tspan>/</text>
+    <text x="300" y="96">  if2-&lt;h8&gt;/seed_1-&lt;h8&gt;/</text>
+    <text x="300" y="122" class="fig-warm t-b">    fit_state.toml</text>
+    <text x="300" y="140">    mle_params.toml</text>
+    <text x="300" y="158">    chain_starts.tsv</text>
+  </g>
+
+  <!-- handle -->
+  <path d="M466,118 H600 V237" class="s-arrow" fill="none" marker-end="url(#stp-arrow)"/>
+  <text x="16" y="200" class="t-code-label fig-warm">starts = { from_mle = "@scout" }</text>
+  <text x="16" y="220" class="t-small fig-muted">every chain begins at the scout's point estimate, so R̂&#160; is not assessed</text>
+
+  <!-- posterior -->
+  <rect x="2" y="240" width="636" height="120" rx="4" class="fig-accent-soft s-accent"/>
+  <text x="16" y="266" class="t-label t-b fig-ink">posterior.toml</text>
+  <text x="16" y="286" class="t-small fig-muted">algorithm = "pgas"</text>
+  <text x="16" y="316" class="t-code-label fig-ink">camdl fit run posterior.toml</text>
+  <g class="t-code-label fig-ink">
+    <text x="300" y="266">results/fits/<tspan class="fig-accent t-b">posterior-&lt;h8&gt;</tspan>/</text>
+    <text x="300" y="286">  pgas-&lt;h8&gt;/seed_1-&lt;h8&gt;/</text>
+    <text x="300" y="312">    draws.tsv</text>
+    <text x="300" y="330">    chain_N/trace.tsv</text>
+    <text x="300" y="348">    chain_starts.tsv</text>
+  </g>
+</svg>

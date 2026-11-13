@@ -55,9 +55,13 @@ problems:
 
 ## How the algorithms relate
 
-All four inference algorithms in camdl are built on Sequential Monte Carlo (SMC)
-— the particle filter. They differ in what they do with the particles and what
-they produce.
+The three particle methods in camdl — IF2, PMMH and PGAS — are built on
+Sequential Monte Carlo (SMC), the particle filter. They differ in what they do
+with the particles and what they produce. (The `ode`-backend methods, `mh` and
+the `nl-*` optimizers, need no filter: they fit the deterministic ODE's
+likelihood, which is computed directly.)
+
+<!-- figure: smc-family -->
 
 ```
     Bootstrap Particle Filter
@@ -68,8 +72,11 @@ they produce.
     ┌────────────┼────────────┐
     │            │            │
    IF2         PMMH         PGAS
-(find MLE)   (posterior)  (posterior + trajectories)
+(find MLE)   (posterior)  (posterior + trajectories,
+                           via a conditional filter)
 ```
+
+<!-- /figure -->
 
 **IF2** (Iterated Filtering) perturbs parameters inside the particle filter and
 cools toward the MLE. It's a stochastic optimization algorithm, not a sampler —
@@ -130,11 +137,11 @@ fit.toml      [method] algorithm = "pgas", starts = { from_posterior = "@short" 
 the chains still start apart and R̂ stays meaningful. `from_mle = "@mle"` starts
 every chain at one IF2 point instead, and R̂ is then reported as not assessed.
 
-These four methods all target the **stochastic-process** likelihood
-$p(y \mid \theta)$ on the chain-binomial backend. The ODE backend fits a
-different statistical object — the deterministic marginal likelihood — with its
-own methods: the NLopt optimizers for an MLE and gradient-free `mh` for a
-posterior; see **Fitting on the ODE backend**, below.
+The particle filter and these three methods all target the
+**stochastic-process** likelihood $p(y \mid \theta)$ on the chain-binomial
+backend. The ODE backend fits a different statistical object — the deterministic
+marginal likelihood — with its own methods: the NLopt optimizers for an MLE and
+gradient-free `mh` for a posterior; see **Fitting on the ODE backend**, below.
 
 ## The particle filter
 
@@ -1495,15 +1502,19 @@ IF2 is not a standalone command — an IF2 fit is a fit whose `[method]` is
 workflow driven by a `fit.toml` configuration file, one problem and one method
 per file:
 
+<!-- figure: scout-then-posterior -->
+
 ```
 scout.toml + model.camdl + data.tsv
     │
     ├── camdl fit run scout.toml --label scout
     │       results/fits/scout-<h8>/if2-<h8>/seed_1-<h8>/   fit_state.toml, mle_params.toml, chain_starts.tsv
     │
-    └── camdl fit run posterior.toml         # [method] starts = { from_posterior = "@scout" }
-            results/fits/posterior-<h8>/pgas-<h8>/seed_1-<h8>/   draws.tsv, chain_N/trace.tsv
+    └── camdl fit run posterior.toml         # [method] starts = { from_mle = "@scout" }
+            results/fits/posterior-<h8>/pgas-<h8>/seed_1-<h8>/   draws.tsv, chain_N/trace.tsv, chain_starts.tsv
 ```
+
+<!-- /figure -->
 
 Two files that share a problem half share the fit-level hash (`<h8>`); each is
 its own segment, named by its stem, with its own `--label`. A method reads a
@@ -1511,6 +1522,13 @@ stored fit only through a `starts` handle, and every multi-chain sampler writes
 `chain_starts.tsv`, the record of where each chain actually began. An IF2 leaf's
 `mle_params.toml` is a standard params file with provenance hashing that feeds
 directly into `camdl simulate`.
+
+`from_mle` reads the scout's point estimate from its `fit_state.toml` and starts
+every chain there, so the posterior fit's R̂ is not assessed: R̂ compares chains
+that began apart, and chains that all begin at one point can agree without
+having explored the posterior. An IF2 leaf writes no `draws.tsv`, so
+`from_posterior = "@scout"` is refused. To keep R̂, seed from a short posterior
+run instead (`starts = { from_posterior = "@short" }`, above).
 
 ```bash
 camdl fit run    scout.toml --seed 1 --label scout
