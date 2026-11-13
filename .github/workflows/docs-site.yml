@@ -73,7 +73,7 @@ jobs:
         # ci.yml skips its tests when only docs/ changed, but these hold the
         # embedded topics to the site: each topic's page is the embedded file
         # and is published, and figure markers print as links, not raw HTML.
-        run: cd rust && cargo test --release -p cli --bin camdl docs::
+        run: "cd rust && cargo test --release -p cli --bin camdl docs::"
 
       - name: Refuse unpublished files in the site
         # Only rendered pages and Quarto's own assets belong in _site/. A raw
