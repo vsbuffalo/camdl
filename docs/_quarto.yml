@@ -22,7 +22,7 @@ project:
     - guide/dimensions.qmd
     - guide/first-fit.qmd
     - guide/fit-goes-wrong.qmd
-    - guide/criticizing-a-model.qmd
+    - guide/checking-and-comparing-models.qmd
     # Guides (how-to)
     - workflow.md
     - dates.md
@@ -88,12 +88,12 @@ website:
             href: intro.md
           - text: "Dimensions and stratification"
             href: guide/dimensions.qmd
-          - text: "Your first fit"
+          - text: "Fitting the boarding-school outbreak"
             href: guide/first-fit.qmd
           - text: "When a fit goes wrong"
             href: guide/fit-goes-wrong.qmd
-          - text: "Criticizing an epidemic model"
-            href: guide/criticizing-a-model.qmd
+          - text: "Checking and comparing models"
+            href: guide/checking-and-comparing-models.qmd
       - section: "Guides"
         contents:
           - text: "The fit workflow"

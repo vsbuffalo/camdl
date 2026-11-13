@@ -313,5 +313,6 @@ run `cargo test -p cli --bin camdl docs::`.
 `docs/guide/<page>/`, use `{.camdl include=…}` and `{.camdl-run}` for every
 model and command, and publish it as above.
 
-The boarding-school tutorial (`docs/guide/first-fit.qmd`) predates the style
-guide and has not yet been rewritten to follow it.
+The boarding-school tutorial (`docs/guide/first-fit.qmd`, `fit-goes-wrong.qmd`,
+`checking-and-comparing-models.qmd`) follows the style guide and is its worked
+example.

@@ -19,7 +19,7 @@ command, regenerated from the current code every time the site is built.
 
 ::: {.camdl-cards}
 [**camdl by example**<span>The language, one construct at a time.</span>](intro.md)
-[**Your first fit**<span>Fourteen days of influenza counts, fitted and read.</span>](guide/first-fit.qmd)
+[**Fitting the boarding-school outbreak**<span>Fourteen days of influenza counts, fitted and read.</span>](guide/first-fit.qmd)
 [**The fit workflow**<span>From a model and data to a checked posterior.</span>](workflow.md)
 [**Language specification**<span>The normative reference for the DSL.</span>](camdl-language-spec.md)
 [**Dimensions and stratification**<span>Age, place and disease stage, expanded by the compiler.</span>](guide/dimensions.qmd)
