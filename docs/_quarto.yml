@@ -139,8 +139,8 @@ website:
           - text: "Writing the documentation"
             href: documentation-style.md
   page-footer:
-    left: "© 2026 Vince Buffalo. Supported by the Institute for Disease Modeling, Bill & Melinda Gates Foundation."
-    center: "Drafted largely with an LLM · [Report a problem](https://github.com/vsbuffalo/camdl/issues/new)"
+    left: "Originally created by Vince Buffalo at the Institute for Disease Modeling, Gates Foundation. [MIT License](https://github.com/vsbuffalo/camdl/blob/main/LICENSE)."
+    center: "Drafted largely with an LLM"
     right: "Also offline and version-matched: `camdl docs`"
 
 # Read by _web/unpublished-links.lua: a link to any other docs/ markdown file

@@ -52,8 +52,8 @@ model comparisons easy and reproducible. Every camdl run is fully provenanced
 and stored in an _input-addressed storage_ system, that ensures reproducibility
 and automatically caches to prevent accidental overwrites of expensive runs.
 
-Developed at the [Institute for Disease Modeling](https://www.idmod.org/) (IDM),
-Gates Foundation.
+Originally created at the [Institute for Disease Modeling](https://www.idmod.org/)
+(IDM), Gates Foundation.
 
 ## A Simple SIR camdl Model
 
