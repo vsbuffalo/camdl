@@ -75,7 +75,7 @@ def main(out_path: str, fits: list[str]) -> None:
     for ax in axes[-1]:
         ax.set_xlabel("day")
     for ax in axes[:, 0]:
-        ax.set_ylabel("boys in bed")
+        ax.set_ylabel("confined to bed")
 
     # The docs inline the SVG, so it is transparent and its ink follows the
     # page's text colour. PLOT_OPAQUE=1 (the README figure) gives a white
