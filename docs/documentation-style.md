@@ -196,7 +196,7 @@ result. Those belong in the main text.
 
 ### Color is a promise about the kind of depth
 
-camdl's documentation has four kinds of box, each with its own color:
+camdl's documentation has five kinds of box, each with its own color:
 
 | Color      | Kind                                  | Typical label            | What readers should expect                                                                                             |
 | ---------- | ------------------------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
@@ -204,16 +204,17 @@ camdl's documentation has four kinds of box, each with its own color:
 | **Yellow** | Modeling judgment                     | **Modeling choice: ...** | Assumptions, prior selection, identifiability, scientific tradeoffs, and decisions that do not have a universal answer |
 | **Orange** | Advanced mechanics                    | **Under the hood: ...**  | Particle filters, sampler mechanics, compiler behavior, numerical approximations, and derivations                      |
 | **Red**    | Critical warning, **not collapsible** | **Warning: ...**         | Data loss, invalid inference, a dangerous default, or a condition under which a result should not be trusted           |
+| **Slate**  | Notes for AI agents                   | **For AI agents: ...**   | What an agent running camdl for someone should do differently from a human at this step (section 5.1)                  |
 
 The light-theme tokens are green `#2A7A51` on `#F0FDF4`, yellow `#946200` on
-`#FFFBEB`, orange `#B45309` on `#FFF7ED`, and red `#B42318` on `#FEF3F2`; the
-dark theme uses lighter accents on dark tints of the same hues
-(`docs/_web/theme.scss`). Every title and body color meets the WCAG AA contrast
-ratio for body text, 4.5:1, against its panel in both themes, and any change to
-the palette should be checked against that bar. The boxes use a subdued
-background, a visible left border, and a clear disclosure chevron. Color alone
-must never convey meaning. The label—_In practice_, _Modeling choice_, or _Under
-the hood_—must remain visible in text and accessible to screen readers.
+`#FFFBEB`, orange `#B45309` on `#FFF7ED`, red `#B42318` on `#FEF3F2`, and slate
+`#475569` on `#F1F5F9`; the dark theme uses lighter accents on dark tints of the
+same hues (`docs/_web/theme.scss`). Every title and body color meets the WCAG AA
+contrast ratio for body text, 4.5:1, against its panel in both themes, and any
+change to the palette should be checked against that bar. The boxes use a
+subdued background, a visible left border, and a clear disclosure chevron. Color
+alone must never convey meaning. The label—_In practice_, _Modeling choice_, or
+_Under the hood_—must remain visible in text and accessible to screen readers.
 
 A box's title is an editorial sentence, not a category tag. **Good:** “Modeling
 choice: How should we choose a prior for $R_0$?” **Weak:** “Note,” “Details,”
@@ -259,16 +260,21 @@ If chains are stuck or have substantially different distributions, ...
 ```
 
 The site's filter (`docs/_web/boxes.lua`) writes the label at the start of the
-title (_In practice:_, _Modeling choice:_, _Under the hood:_ or _Warning:_),
-unless the title already begins with it, so the kind of box is in its text and
-not only its color. Green, yellow and orange boxes are collapsed by default;
-`collapse="false"` shows one open, and the reader can still close it. A red
-warning is never collapsible, and a `collapse` attribute on it is ignored. A box
-without a title, or a box inside another box, fails the render. Leave a blank
-line after the opening `:::` line and before the closing one: without it,
-`dprint` reflows the fences into the box's text, and the box stops being a box
-(the filter fails the render if it finds one). Write a box with these classes,
-never with hand-coded colors or a raw Quarto callout.
+title (_In practice:_, _Modeling choice:_, _Under the hood:_, _Warning:_ or _For
+AI agents:_), unless the title already begins with it, so the kind of box is in
+its text and not only its color. Green, yellow, orange and slate boxes are
+collapsed by default; `collapse="false"` shows one open, and the reader can
+still close it. A red warning is never collapsible, and a `collapse` attribute
+on it is ignored. A box without a title, or a box inside another box, fails the
+render. Leave a blank line after the opening `:::` line and before the closing
+one: without it, `dprint` reflows the fences into the box's text, and the box
+stops being a box (the filter fails the render if it finds one). Write a box
+with these classes, never with hand-coded colors or a raw Quarto callout.
+
+`camdl docs` prints the same pages in a terminal, where nothing collapses: each
+box's opening fence becomes its titled label in bold and the closing fence is
+dropped (`rust/crates/cli/src/docs.rs`). An agent reading a page there therefore
+sees every box, the agent notes among them.
 
 The examples below are live boxes.
 
@@ -348,6 +354,47 @@ numerical summary may not represent the intended posterior.
 
 This warning belongs beside the result, in the main reading path—not in a closed
 orange box.
+
+### 5.1 Notes for AI agents
+
+Many readers of a camdl page are AI agents running camdl on someone's behalf,
+and they read it through `camdl docs`. Most of what a page says applies to them
+as it does to a person. A slate **For AI agents** box holds the rest: what an
+agent should do differently at this step, because it is unreliable at something
+a person does well or because the decision belongs to the person it works for.
+
+Write one only when an agent would get the step wrong without it. Three kinds
+qualify:
+
+- **A judgment an agent makes badly.** Reading the geometry of a scatter plot, a
+  posterior ribbon or a pair plot is the standing example: say what to rely on
+  instead (the numerical table beside the figure) and what to hand to the person
+  (the figure's path).
+- **A decision that belongs to the person.** Choosing a prior, loosening a
+  convergence threshold, reaching for an escape-hatch flag, publishing a result.
+  Name the decision and say to stop and ask before making it.
+- **An action an agent is tempted to take.** Hand-rolling a pipeline that a
+  camdl verb already owns, or tuning a fit until it matches a published number.
+  Name the verb or the action to take instead.
+
+The box says what to do, in one to three sentences, and links to the longer
+reasoning in [`camdl docs agents`](agents.md) rather than repeating it. The
+title is the instruction itself: "Ask before choosing a prior shape", not
+"Priors". A rule an agent must follow on every page belongs in `agents.md`,
+once, and not in a box on each page.
+
+Never use the box to hide something from human readers. A caveat that changes
+whether a result can be trusted is a red warning or plain text, whoever is
+reading. If a person would need the point too, it belongs in the main text, and
+the box is the wrong place for it.
+
+::: {.agents title="Surface the survey plot rather than reading its geometry"}
+
+Rank points by the log-likelihoods in the survey's `landscape.tsv`, not by your
+reading of the scatter in its HTML page. Give the person the HTML path and your
+one-line reading, and let them confirm before you start a fit from it.
+
+:::
 
 ## 6. Show readers what matters in code and output
 

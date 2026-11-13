@@ -173,7 +173,8 @@ pub(crate) fn topic_body(name: &str) -> Option<String> {
 }
 
 /// The text `camdl docs` prints for an embedded doc: the markdown, with the
-/// website's figure markers turned into links to the drawings.
+/// website's figure markers turned into links to the drawings and its boxes
+/// into plain titled sections.
 ///
 /// A doc places a web-only figure with an HTML comment on its own line,
 ///
@@ -193,6 +194,12 @@ pub(crate) fn topic_body(name: &str) -> Option<String> {
 /// `marker` accepts exactly what `figures.lua` does, so the website and the
 /// terminal agree on which lines are markers.
 ///
+/// A box (`::: {.practice title="…"}` … `:::`, `docs/_web/boxes.lua`) is
+/// collapsed on the website and open here: its opening fence prints as the
+/// title the site shows, label first, in bold, and its closing fence is
+/// dropped with the blank line after it. Any other fenced div is printed as
+/// written.
+///
 /// The website follows the latest main, so the drawing a link reaches may be
 /// newer than this binary.
 fn terminal_text(topic: &Topic) -> String {
@@ -204,6 +211,10 @@ fn terminal_text(topic: &Topic) -> String {
     // show a ``` one inside it.
     let mut fence: Option<(char, usize)> = None;
     let mut drop_blank = false;
+    // The fenced divs open at this line, innermost last: whether each is one
+    // of the site's boxes, so its closing fence is dropped and any other
+    // div's is printed.
+    let mut divs: Vec<bool> = Vec::new();
     while let Some(line) = lines.next() {
         let t = line.trim();
         let run = |c: char| t.chars().take_while(|&x| x == c).count();
@@ -213,6 +224,24 @@ fn terminal_text(topic: &Topic) -> String {
             }
         } else if let Some(c) = ['`', '~'].into_iter().find(|&c| run(c) >= 3) {
             fence = Some((c, run(c)));
+        } else if let Some(div) = div_fence(t) {
+            match div {
+                DivFence::Open(attrs) => match box_heading(attrs) {
+                    Some(heading) => {
+                        divs.push(true);
+                        out.push_str(&heading);
+                        out.push('\n');
+                        continue;
+                    }
+                    None => divs.push(false),
+                },
+                DivFence::Close => {
+                    if divs.pop() == Some(true) {
+                        drop_blank = true;
+                        continue;
+                    }
+                }
+            }
         } else if let Some(m) = marker(t) {
             let name = match m {
                 Marker::Open(name) => Some(name),
@@ -249,6 +278,58 @@ fn terminal_text(topic: &Topic) -> String {
         out.pop();
     }
     out
+}
+
+/// The site's boxes (`docs/_web/boxes.lua`, which a test holds this to): the
+/// class a doc writes and the label the website puts before the title.
+const BOX_LABELS: &[(&str, &str)] = &[
+    ("practice", "In practice:"),
+    ("modeling", "Modeling choice:"),
+    ("internals", "Under the hood:"),
+    ("warning", "Warning:"),
+    ("agents", "For AI agents:"),
+];
+
+#[derive(Debug, PartialEq)]
+enum DivFence<'a> {
+    /// `::: {…}`, with the text between the braces.
+    Open(&'a str),
+    /// A line of three or more colons and nothing else.
+    Close,
+}
+
+/// Whether a trimmed line is a Pandoc fenced-div fence.
+fn div_fence(t: &str) -> Option<DivFence<'_>> {
+    let colons = t.chars().take_while(|&c| c == ':').count();
+    if colons < 3 {
+        return None;
+    }
+    let rest = t[colons..].trim();
+    if rest.is_empty() {
+        return Some(DivFence::Close);
+    }
+    rest.strip_prefix('{')?.strip_suffix('}').map(DivFence::Open)
+}
+
+/// The line the terminal prints for a box's opening fence, as the website
+/// titles it: `**<label> <title>**`, the label written once even when the
+/// title already begins with it. `None` for a div that is not a box.
+fn box_heading(attrs: &str) -> Option<String> {
+    let label = attrs
+        .split_whitespace()
+        .filter_map(|w| w.strip_prefix('.'))
+        .find_map(|class| BOX_LABELS.iter().find(|(k, _)| *k == class).map(|(_, l)| *l))?;
+    let title = attrs
+        .split_once("title=\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(title, _)| title.trim())
+        .unwrap_or("");
+    let heading = if title.to_lowercase().starts_with(&label.to_lowercase()) {
+        title.to_string()
+    } else {
+        format!("{label} {title}").trim_end().to_string()
+    };
+    Some(format!("**{heading}**"))
 }
 
 #[derive(Debug, PartialEq)]
@@ -530,6 +611,55 @@ mod tests {
             let on_disk = std::fs::read_to_string(repo.join("docs").join(page)).expect("read page");
             assert_eq!(on_disk, t.body, "topic {}: page {} is not the embedded file", t.slug, page);
             assert!(published.contains(&page), "topic {}: {} is not in the site's render list", t.slug, page);
+        }
+    }
+
+    #[test]
+    fn a_box_prints_as_its_titled_heading_and_other_divs_are_unchanged() {
+        let doc = "Text.\n\n::: {.agents title=\"Ask before widening a prior\"}\n\nBody.\n\n:::\n\nNext.\n\n\
+                   ::: {.callout-note}\nKept.\n:::\n\n::: {.warning title=\"Warning: stop\"}\n\nW.\n\n:::\n";
+        assert_eq!(
+            terminal_text(&topic(doc, Some("p.md"))),
+            "Text.\n\n**For AI agents: Ask before widening a prior**\n\nBody.\n\nNext.\n\n\
+             ::: {.callout-note}\nKept.\n:::\n\n**Warning: stop**\n\nW.\n\n"
+        );
+    }
+
+    #[test]
+    fn a_box_fence_inside_fenced_code_is_left_alone() {
+        let doc = "```markdown\n::: {.practice title=\"x\"}\n:::\n```\n";
+        assert_eq!(terminal_text(&topic(doc, Some("p.md"))), doc);
+    }
+
+    /// The terminal's labels are the website's: every kind and label in
+    /// `boxes.lua` is in `BOX_LABELS`, and nothing else is.
+    #[test]
+    fn box_labels_match_the_site_filter() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let lua = std::fs::read_to_string(repo.join("docs/_web/boxes.lua")).expect("read boxes.lua");
+        let kinds: Vec<(String, String)> = lua
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.contains("label = \""))
+            .map(|l| {
+                let kind = l.split_whitespace().next().unwrap().to_string();
+                let label = l.split_once("label = \"").unwrap().1.split_once('"').unwrap().0.to_string();
+                (kind, label)
+            })
+            .collect();
+        assert!(kinds.len() >= 4, "could not read the box kinds from boxes.lua");
+        let ours: Vec<(String, String)> =
+            BOX_LABELS.iter().map(|(k, l)| (k.to_string(), l.to_string())).collect();
+        assert_eq!(kinds, ours, "docs.rs BOX_LABELS disagree with docs/_web/boxes.lua");
+    }
+
+    #[test]
+    fn no_embedded_topic_prints_a_box_fence() {
+        for t in TOPICS {
+            let text = terminal_text(t);
+            for (kind, _) in BOX_LABELS {
+                assert!(!text.contains(&format!("{{.{kind}")), "topic {} prints a .{kind} fence", t.slug);
+            }
         }
     }
 
