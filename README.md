@@ -6,6 +6,19 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](VERSIONING.md)
 
+**Documentation: [camdl.dev](https://camdl.dev)** — installation, tutorials, the
+language reference and the fit workflow. The same guides are built into the
+binary: `camdl docs` prints them offline.
+
+![An SIR model fitted with camdl to a 1978 boarding-school influenza outbreak:
+the bands are the fitted model's 50% and 90% predictions and the points are the
+observed counts, predicted from day 0 (left) and one day ahead
+(right).](docs/assets/boarding-school-fit.svg)
+
+_An SIR model fitted to a 1978 boarding-school influenza outbreak. The
+[tutorial](https://camdl.dev/guide/first-fit.html) walks through the fit;
+`make readme-figure` redraws this plot._
+
 camdl is a small domain-specific language (DSL), simulation runtime, and
 statistical inference stack for compartmental infectious disease models. The
 goal of camdl is to make writing compartmental models easy — the mechanics of a

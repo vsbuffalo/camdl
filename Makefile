@@ -635,7 +635,7 @@ install-nvim-ts:
 # documented. Deployed to GitHub Pages by .github/workflows/docs-site.yml.
 # Requires `quarto` on PATH.
 
-.PHONY: docs-site docs-site-preview docs-first-fit-screenshots
+.PHONY: docs-site docs-site-preview docs-first-fit-screenshots readme-figure
 
 DOCS_SITE_PORT ?= 4321
 DOCS_SITE_ENV  := PATH="$(CURDIR)/rust/target/release:$$PATH" CAMDLC="$(CURDIR)/$(CAMDLC)"
@@ -657,6 +657,11 @@ docs-site-preview: build
 # to that page's fits or to camdl-scope. Needs camdl-scope, uv and Chrome.
 docs-first-fit-screenshots: build
 	$(DOCS_SITE_ENV) scripts/docs_first_fit_screenshots.sh
+
+# The boarding-school fit figure at the top of README.md, a committed file
+# because GitHub cannot run the fit. Re-run after a change to that fit.
+readme-figure: build
+	$(DOCS_SITE_ENV) scripts/readme_figure.sh
 
 # ── Housekeeping ──────────────────────────────────────────────────────────────
 
