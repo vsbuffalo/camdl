@@ -55,9 +55,9 @@ parameter-free.
 for the full sequence, the diagnostics table, and the guardrails. In one line:
 
 ```
-check -> simulate (sanity) -> survey -> write fit.toml -> fit run
-      -> fit summary -> read diagnostics -> refine priors
-      -> fit predict (predicted-vs-observed) -> validate
+check -> simulate (sanity) -> synthetic recovery -> choose a method
+      -> write fit.toml -> fit run -> fit summary -> read diagnostics
+      -> refine priors -> fit predict (predicted-vs-observed) -> validate
 ```
 
 The predicted-vs-observed step is **one verb, not a hand-rolled pipeline**:
@@ -405,14 +405,20 @@ when it is wrong.
 **Backend choice for fits.** Use `chain_binomial` — the production fit backend.
 Gillespie is for forward-simulation sanity checks, not fits (too slow).
 
-**Always `camdl survey` before `camdl fit run`.** Surveying is the cheapest hour
-of compute in the pipeline; fitting a model you haven't surveyed is the single
-most common way to spend a week producing a wrong answer.
+**Fit a posterior, not only a point estimate.** For a stochastic model the
+default method is `pgas`, with `pmmh` as a second sampler to check it against. A
+posterior shows a parameter the data cannot pin down (a ridge in the pair plot,
+a marginal that looks like its prior, a failing R̂); an `if2` or optimizer point
+estimate returns one point and hides it. Use `if2` for a likelihood estimate
+without priors or for profiles, not to place the final chains:
+`starts = { from_mle = … }` leaves R̂ not assessed. The method table and the
+reasoning are `camdl docs workflow`, "Choose a method".
 
-**One method at a time when iterating.** A `fit.toml` carries one `[method]`; a
-cheap `if2` file (`camdl fit new --from fit.toml fit-if2.toml`, edit `[method]`)
-gives you a point estimate and Â to inspect before committing to the posterior
-sampler in the main file.
+**Survey when a fit needs it, not by reflex.** `camdl survey` maps the
+likelihood over the bounds. Run it when the model estimates many parameters,
+when chains disagree or one chain's log-likelihood differs, or when the priors
+are weak; a small model with informative priors and agreeing chains gains little
+from it.
 
 **Explicit priors, always.** PGAS now refuses implicit-Flat priors. A wide
 uniform is fine if that's actually your belief; a wide normal is fine for log
