@@ -1,35 +1,90 @@
 ---
 title: "camdl"
-subtitle: "Compartmental Model Description Language"
+subtitle: "The Compartmental Model Description Language and Runtime"
 toc: false
+camdl-run-scratch: guide/first-fit
 ---
 
-camdl is a language and toolkit for stochastic compartmental models of
-epidemics. You write a `.camdl` file that says what the compartments are (for
-example susceptible, infected and recovered), how individuals move between them
-and how fast. The compiler checks the file and expands it into a flat model
-description, which camdl then simulates and fits to data.
+```{.camdl-run show="figure" figure="ppc-r0.svg" caption="An SIR model fitted to a 1978 boarding-school influenza outbreak, re-run on every site build. [Fitting the boarding-school outbreak](guide/first-fit.qmd) walks through it."}
+camdl fit run fit-r0.toml --label r0 --seed 4
+camdl fit predict @r0
+uv run plot_predictive.py ppc-r0.svg SIR=results/fits/fit_r0-*/predict/*/
+```
 
-Most guides and reference pages here are the same text the binary carries:
-`camdl docs <topic>` prints them offline, matched to the installed version.
-The tutorials are website-only, because they show the real output of each
-command, regenerated from the current code every time the site is built.
-
-**About these docs.** Much of this documentation was drafted with an AI model
-and is being revised by hand. In the tutorials, every command was run when the
-site was built, and the output shown is what camdl printed. The guides,
-concepts and reference pages are prose checked against the code, and can be
-wrong. If something is unclear, contradicts what camdl does, or looks wrong,
-please [open an issue](https://github.com/vsbuffalo/camdl/issues/new).
+camdl is a modeling language and toolkit for stochastic and deterministic
+compartmental models of epidemics. The modeler writes the model as it would
+appear on paper (the compartments, the transitions between them and their
+rates, the parameters and their priors, and how the data were observed) in one
+`.camdl` file. camdl's runtime then simulates it, fits it to data with
+particle-based Bayesian methods, and compares it with alternative models. The
+modeler writes no simulation or inference code, which is finicky and easy to
+get subtly wrong; that code lives once, in camdl's tested runtime.
 
 <!-- figure: architecture, caption: How camdl splits responsibility between the modeler and camdl's developers. The modeler states the model's structure and prior assumptions, and writes no simulation or inference code; camdl's job is to execute the declared model exactly. A trajectory that contradicts the declared model is therefore a bug in camdl, not in the modeler's work, and implementation risk moves from many privately maintained code bases to one shared, tested one. -->
 
-::: {.camdl-cards}
-[**camdl by example**<span>The language, one construct at a time.</span>](intro.md)
-[**Fitting the boarding-school outbreak**<span>Fourteen days of influenza counts, fitted and read.</span>](guide/first-fit.qmd)
-[**The fit workflow**<span>From a model and data to a checked posterior.</span>](workflow.md)
-[**Language specification**<span>The normative reference for the DSL.</span>](camdl-language-spec.md)
-[**Dimensions and stratification**<span>Age, place and disease stage, expanded by the compiler.</span>](guide/dimensions.qmd)
-[**Diagnosing a fit**<span>What to do when a fit will not behave.</span>](diagnosing-fits.md)
-[**Cheatsheet**<span>Every DSL form on one page.</span>](dsl-cheatsheet.md)
+Some of camdl's features:
+
+- **The model is checked by a compiler before it runs.** The compiler checks
+  the units and dimensions of every rate, so a per-capita rate used where a
+  population rate belongs is a compile error rather than a quietly wrong
+  epidemic. While an AI agent built models of the 2026 Bundibugyo ebolavirus
+  outbreak, the compiler rejected its models 81 times, a third of them for
+  science errors that would otherwise have run and produced a number.
+- **Stratification is declared, not hand-written.** Age groups, places and
+  disease stages are dimensions, and the compiler expands every compartment and
+  transition across them.
+- **One model file, several simulators.** The same file runs as an exact
+  stochastic simulation (Gillespie), a discrete-time chain-binomial process, or
+  a deterministic ODE.
+- **Fitting is built in.** Particle Gibbs with Ancestral Sampling (PGAS),
+  Particle Marginal Metropolis–Hastings (PMMH) and iterated filtering (IF2) fit
+  the stochastic model itself, using gradients the compiler derives from the
+  model.
+- **A fit reports when it has not converged.** Every fit comes with convergence
+  checks and diagnostics, and one that fails them says so instead of printing
+  estimates as if it had passed.
+- **Runs are reproducible.** Each run is stored under a hash of its model,
+  data, settings and camdl version, so the same inputs give the same result,
+  and re-running them reads the stored result instead of recomputing it.
+
+## Where to start
+
+::: {.camdl-start}
+::: {}
+**Learn the language**
+
+- [A tour of the language](intro.md)
+- [Dimensions and stratification](guide/dimensions.qmd)
+- [Fitting the boarding-school outbreak](guide/first-fit.qmd)
 :::
+
+::: {}
+**Fit and check a model**
+
+- [The fit workflow](workflow.md)
+- [Diagnosing a fit](diagnosing-fits.md)
+- [Checking and comparing models](guide/checking-and-comparing-models.qmd)
+:::
+
+::: {}
+**Look things up**
+
+- [Language specification](camdl-language-spec.md)
+- [Cheatsheet](dsl-cheatsheet.md)
+- [fit.toml reference](fit-toml.md)
+:::
+:::
+
+## About these docs
+
+Most of these pages also ship inside camdl itself: `camdl docs <topic>` prints
+them in your terminal, offline, for the version you have installed. The
+tutorials are on the website only, because they show the real output of every
+command, re-run against the current code each time the site is built.
+
+Much of this documentation was drafted with a large language model (LLM) and is
+being revised by hand. In the tutorials, every command was run when the site
+was built, and the output shown is what camdl printed. The guides, concepts and
+reference pages are prose checked against the code, and can be wrong. If
+something is unclear, contradicts what camdl does, or looks wrong, please
+[open an issue](https://github.com/vsbuffalo/camdl/issues/new).

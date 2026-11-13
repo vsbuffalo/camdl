@@ -140,7 +140,7 @@ website:
             href: documentation-style.md
   page-footer:
     left: "© 2026 Vince Buffalo. Supported by the Institute for Disease Modeling, Bill & Melinda Gates Foundation."
-    center: "Drafted largely with AI assistance · [Report a problem](https://github.com/vsbuffalo/camdl/issues/new)"
+    center: "Drafted largely with an LLM · [Report a problem](https://github.com/vsbuffalo/camdl/issues/new)"
     right: "Also offline and version-matched: `camdl docs`"
 
 # Read by _web/unpublished-links.lua: a link to any other docs/ markdown file

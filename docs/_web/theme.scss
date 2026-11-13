@@ -95,6 +95,17 @@ main.content table th { font-weight: 600; }
 .camdl-cards strong { display: block; color: $primary; margin-bottom: 0.25rem; }
 .camdl-cards span { font-size: 0.92em; opacity: 0.8; }
 
+// Landing page: three short link lists side by side, one column on a phone.
+.camdl-start {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.5rem 2rem;
+  margin: 0.5rem 0 1.5rem;
+}
+.camdl-start p { margin-bottom: 0.35rem; }
+.camdl-start ul { padding-left: 1.1rem; margin-bottom: 0; }
+.camdl-start li { margin-bottom: 0.2rem; }
+
 // Executed examples (docs/_web/camdl-run.lua): the command and its real
 // output read as one unit — a prompt line above a quieter output panel.
 .camdl-run {
