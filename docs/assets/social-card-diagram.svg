@@ -1,0 +1,62 @@
+<!-- Card-only variant of docs/figures/architecture.svg for the link-preview card
+     (scripts/social_card.sh): the "Responsible for" lists removed, the taglines
+     moved up, and the light-theme colours written in, since the card is a
+     standalone image with no page styles. Keep its boxes in step with the
+     original by hand. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 246" role="img" aria-labelledby="t d"><style>
+text{font-family:Helvetica Neue,Helvetica,Arial,sans-serif}
+.t-small{font-size:14px} .t-label{font-size:16px} .t-cap{font-size:12px;font-weight:700;letter-spacing:.12em} .t-b{font-weight:650}
+.t-mono-label{font-family:Menlo,monospace;font-size:15px}
+.fig-ink{fill:#373a3c} .fig-muted{fill:rgba(55,58,60,.62)} .fig-accent{fill:#2f6f8f} .fig-warm{fill:#a8680f}
+.fig-panel{fill:rgba(55,58,60,.045)} .fig-accent-soft{fill:rgba(47,111,143,.10)} .fig-card{fill:#fff}
+.fig-ink-box{fill:#373a3c} .fig-inverse{fill:#fff} .fig-inverse-muted{fill:rgba(255,255,255,.72)}
+.s-line{stroke:rgba(55,58,60,.22);stroke-width:1.2} .fig-arrow{fill:#868e96} .s-arrow{stroke:#868e96;stroke-width:1.4;fill:none}
+</style>
+  <title id="t">How camdl runs a model</title>
+  <desc id="d">The modeler writes the model. The compiler checks its units, dimensions and names and expands its strata into a flat intermediate representation (IR), from which the runtime performs simulation and inference. The modeler is responsible for the model structure, a scientific hypothesis, for the priors and their sources, and for choosing the right model for the question at hand: all science, no implementation. camdl is responsible for compiling the model correctly to the IR, faithful simulation of the declared model, correct inference, and an efficient runtime: all implementation, no science.</desc>
+  <defs>
+    <marker id="arch-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
+    </marker>
+  </defs>
+
+  <!-- responsibility columns -->
+  <rect x="2" y="2" width="234" height="242" rx="5" class="fig-accent-soft"/>
+  <rect x="244" y="2" width="394" height="242" rx="5" class="fig-panel"/>
+  <text x="16" y="28" class="t-cap fig-accent">MODELER</text>
+  <text x="258" y="28" class="t-cap fig-muted">CAMDL</text>
+
+  <!-- model -->
+  <rect x="16" y="44" width="204" height="140" rx="4" class="fig-card s-line"/>
+  <text x="28" y="70" class="t-label t-b fig-ink">Model</text>
+  <text x="28" y="92" class="t-mono-label fig-muted">model.camdl</text>
+  <text x="28" y="120" class="t-small fig-muted">compartments</text>
+  <text x="28" y="138" class="t-small fig-muted">transitions</text>
+  <text x="28" y="156" class="t-small fig-muted">observations</text>
+  <text x="28" y="174" class="t-small fig-muted">priors</text>
+
+  <!-- compiler -->
+  <rect x="258" y="44" width="146" height="140" rx="4" class="fig-ink-box"/>
+  <text x="270" y="70" class="t-label t-b fig-inverse">Compiler</text>
+  <text x="270" y="92" class="t-mono-label fig-inverse-muted">camdlc</text>
+  <text x="270" y="120" class="t-small fig-inverse-muted">checks units,</text>
+  <text x="270" y="138" class="t-small fig-inverse-muted">dimensions, names</text>
+  <text x="270" y="156" class="t-small fig-inverse-muted">expands strata</text>
+
+  <!-- runtime -->
+  <rect x="434" y="44" width="190" height="140" rx="4" class="fig-card s-line"/>
+  <text x="446" y="70" class="t-label t-b fig-ink">Runtime</text>
+  <rect x="446" y="86" width="80" height="84" rx="3" class="fig-panel s-line"/>
+  <text x="486" y="133" class="t-small fig-ink" text-anchor="middle">simulation</text>
+  <rect x="532" y="86" width="80" height="84" rx="3" class="fig-panel s-line"/>
+  <text x="572" y="133" class="t-small fig-ink" text-anchor="middle">inference</text>
+
+  <line x1="222" y1="114" x2="254" y2="114" class="s-arrow" marker-end="url(#arch-arrow)"/>
+  <line x1="406" y1="114" x2="430" y2="114" class="s-arrow" marker-end="url(#arch-arrow)"/>
+  <text x="418" y="106" class="t-cap fig-warm" text-anchor="middle">IR</text>
+
+
+  <!-- taglines -->
+  <text x="16" y="222" class="t-small t-b fig-accent" font-style="italic">All science, no implementation.</text>
+  <text x="258" y="222" class="t-small t-b fig-ink" font-style="italic">All implementation, no science.</text>
+</svg>

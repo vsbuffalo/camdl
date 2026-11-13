@@ -14,6 +14,8 @@
 project:
   type: website
   output-dir: _site
+  resources:
+    - assets/social-card.png
   render: &published
     - index.qmd
     # Get started (tutorials)
@@ -48,7 +50,16 @@ project:
 
 website:
   title: "camdl"
+  description: "Docs and tutorials for camdl, a language and runtime for fitting stochastic epidemic models to data."
   site-url: https://camdl.dev/
+  # The preview card shown when a page is shared (make social-card).
+  open-graph:
+    image: assets/social-card.png
+    image-width: 1200
+    image-height: 630
+  twitter-card:
+    card-style: summary_large_image
+    image: assets/social-card.png
   repo-url: https://github.com/vsbuffalo/camdl
   repo-subdir: docs
   repo-actions: [source, issue]

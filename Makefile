@@ -635,7 +635,7 @@ install-nvim-ts:
 # documented. Deployed to GitHub Pages by .github/workflows/docs-site.yml.
 # Requires `quarto` on PATH.
 
-.PHONY: docs-site docs-site-preview docs-first-fit-screenshots readme-figure
+.PHONY: docs-site docs-site-preview docs-first-fit-screenshots readme-figure social-card
 
 DOCS_SITE_PORT ?= 4321
 DOCS_SITE_ENV  := PATH="$(CURDIR)/rust/target/release:$$PATH" CAMDLC="$(CURDIR)/$(CAMDLC)"
@@ -662,6 +662,10 @@ docs-first-fit-screenshots: build
 # because GitHub cannot run the fit. Re-run after a change to that fit.
 readme-figure: build
 	$(DOCS_SITE_ENV) scripts/readme_figure.sh
+
+# The link-preview card docs/_quarto.yml names, rendered from its SVG sources.
+social-card:
+	scripts/social_card.sh
 
 # ── Housekeeping ──────────────────────────────────────────────────────────────
 

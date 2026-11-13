@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#ffffff"/>
+  <rect width="1200" height="8" fill="#2f6f8f"/>
+  <text x="60" y="108" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="72" font-weight="700" fill="#1b1f24">camdl</text>
+  <text x="60" y="160" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="32" fill="#3d444d">A language and runtime for fitting epidemic models to data</text>
+  <text x="1140" y="108" text-anchor="end" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="30" font-weight="600" fill="#2f6f8f">camdl.dev</text>
+  <image x="60" y="196" width="1080" height="414" xlink:href="social-card-diagram.svg" preserveAspectRatio="xMidYMid meet"/>
+</svg>
