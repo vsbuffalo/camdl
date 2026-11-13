@@ -55,7 +55,7 @@ jobs:
       - name: Install OCaml dependencies
         run: |
           cd ocaml
-          opam install . --deps-only --yes
+          opam install . --deps-only --with-test --yes
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
