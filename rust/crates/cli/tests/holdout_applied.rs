@@ -504,3 +504,74 @@ fn compare_refuses_holdout_stamp_when_training_runs_past_train_end() {
             && stderr.contains("--in-sample"),
         "the refusal must name the stream and both fixes:\n{stderr}");
 }
+
+/// gh#585: every method records the applied training window, not only IF2 and
+/// pfilter. Each method's runner trains on the truncated series (they all build
+/// their config through `FitRunConfig::build`, which applies the declaration),
+/// so a PMMH, PGAS, MH or NLopt fit that left the record out was refused by
+/// `compare` as if its θ had seen the held-out rows — the record is the only
+/// thing `compare` accepts as the proof that it did not.
+#[test]
+fn every_method_records_the_training_window() {
+    let bin = skip_if_missing_binary();
+    let methods = [
+        ("pmmh", "algorithm = \"pmmh\"\nbackend = \"chain_binomial\"\nchains = 1\n\
+                  particles = 30\niterations = 20\nburn_in = 5\n"),
+        ("pgas", "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 1\n\
+                  particles = 30\nsweeps = 10\nburn_in = 2\n"),
+        ("mh", "algorithm = \"mh\"\nbackend = \"ode\"\nchains = 1\n\
+                iterations = 20\nburn_in = 5\n"),
+        ("nl-sbplx", "algorithm = \"nl-sbplx\"\nbackend = \"ode\"\nchains = 1\n"),
+    ];
+    for (name, method) in methods {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("obs.tsv"),
+            "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
+        std::fs::write(dir.join("fit.toml"), format!(r#"
+output_dir = "results"
+
+[model]
+camdl = "{ir}"
+
+[data]
+holdout_after = 21.0
+
+[data.observations]
+weekly_cases = "obs.tsv"
+
+[estimate.beta]
+bounds = [0.01, 0.5]
+start  = 0.1
+prior  = {{ uniform = {{}} }}
+
+[fixed]
+sigma    = 0.25
+gamma    = 0.3
+rho      = 0.5
+k        = 10.0
+p_detect = 0.5
+N0       = 1000
+I0       = 5
+
+[method]
+{method}
+[config]
+dt = 1.0
+"#, ir = golden_path())).unwrap();
+        let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+            .args(["fit", "run", "fit.toml", "--seed", "1"])
+            .current_dir(dir)
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .output()
+            .expect("spawn camdl");
+        assert!(out.status.success(), "{name}: fit run with holdout_after failed:\n{}",
+            String::from_utf8_lossy(&out.stderr));
+        let meta_path = find_fit_meta(&dir.join("results"))
+            .unwrap_or_else(|| panic!("{name}: no fit.meta.json under results/"));
+        let meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        assert_eq!(meta["training_window"]["train_end"], serde_json::json!(21.0),
+            "{name}: fit.meta.json must record the applied training window: {meta}");
+    }
+}

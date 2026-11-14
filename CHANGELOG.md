@@ -7,6 +7,7 @@ their own heading. Pre-1.0: a MINOR bump may include breaking changes.
 
 ### Bug Fixes
 
+- *(fit)* Record the applied training window for every method, so PMMH, PGAS, MH and NLopt holdout fits can be scored held-out (gh#585)
 - *(sim)* Count Gillespie lineage edges in the sub-dt diagnostic
 - *(sim)* Realize batched events against frozen start-of-step pools
 - *(cli)* Infer --event-log format from output extension

@@ -1699,6 +1699,24 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let mut method_warmup: Vec<report::ChainWarmup> = Vec::new();
         let mut stored_hint: Option<String> = None;
 
+        // gh#585: the applied training window — the §3.7.3(b) proof `compare`
+        // requires before it stamps a score `hold_out_tail` — recorded into the
+        // fit-level sidecar written above, for every method. Each method's
+        // runner builds its config with `FitRunConfig::build` from this same
+        // problem, and that build is where the declaration is applied; this is
+        // the same build, run once here so that no method can leave the record
+        // out: without it `compare` refuses a held-out score for a fit that
+        // did train on the truncated series. A build that fails here fails
+        // again in the method's own runner, which reports it.
+        if let Some(seg) = cas_path.parent().and_then(|p| p.parent()) {
+            if let Ok(window_config) = runner::FitRunConfig::build(
+                &sweep_config, Some(&method.algorithm), 1, 1, 1, 1.0, 1, seed, false,
+            ) {
+                crate::run_meta::record_training_window(
+                    seg, window_config.applied_training_window);
+            }
+        }
+
         match &method.algorithm {
             Algorithm::IF2 { backend, chains, particles, iterations, cooling, cooling_target_iters, loglik_eval, gate, dt_check, .. } => {
                 // clean_eval comes straight from the `[method]` table — it is part
@@ -1725,14 +1743,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 });
                 run_config.loglik_eval = effective_loglik_eval.clone();
                 run_config.gate = effective_gate.clone();
-
-                // gh#585: the applied training window is the §3.7.3(b)
-                // proof — recorded from the build that actually truncated,
-                // into the fit-level sidecar written above.
-                if let Some(seg) = cas_path.parent().and_then(|p| p.parent()) {
-                    crate::run_meta::record_training_window(
-                        seg, run_config.applied_training_window);
-                }
 
                 std::fs::create_dir_all(&method_dir).unwrap_or_else(|e| {
                     abandon_method(&out, format!("error creating {}: {e}", method_dir.display()),
@@ -2144,13 +2154,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 ).unwrap_or_else(|e| {
                     abandon_method(&out, format!("error building pfilter config: {e}"))
                 });
-
-                // gh#585: same §3.7.3(b) proof recording as the IF2/Bayesian
-                // paths — a fit may run a PFilter method alone.
-                if let Some(seg) = cas_path.parent().and_then(|p| p.parent()) {
-                    crate::run_meta::record_training_window(
-                        seg, run_config.applied_training_window);
-                }
 
                 std::fs::create_dir_all(&method_dir).unwrap_or_else(|e| {
                     abandon_method(&out, format!("error creating {}: {e}", method_dir.display()),
