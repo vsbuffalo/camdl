@@ -436,3 +436,61 @@ fn partial_holdout_refuses_training_data_inside_the_held_out_window() {
     assert_eq!(meta["training_window"]["train_end"], serde_json::json!(21.0),
         "train_end is the latest training time over all streams: {meta}");
 }
+
+/// A stored `[data.holdout]` fit whose training data runs past its recorded
+/// `train_end` — what a fit run before `train_end` covered every bound
+/// stream looks like — is refused the `hold_out_tail` stamp by `compare`
+/// rather than scored: the rows past `train_end` in a training file are
+/// data θ was fitted to.
+#[test]
+fn compare_refuses_holdout_stamp_when_training_runs_past_train_end() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Two valid partial-holdout fits: `detection` ends training at t = 14,
+    // before the recorded train_end = 21.
+    let fits = [dir.join("a"), dir.join("b")];
+    for (sub, beta) in fits.iter().zip([0.10, 0.15]) {
+        write_partial_holdout_fit(sub, beta, "time\tdetection\n14\t1\n");
+        let out = fit_run(&bin, sub);
+        assert!(out.status.success(), "fit run in {} failed:\nstderr={}",
+            sub.display(), String::from_utf8_lossy(&out.stderr));
+    }
+    let compare = || {
+        Command::new(&bin).env_remove("CLICOLOR_FORCE")
+            .args(["compare", "a/fit.toml", "b/fit.toml",
+                   "--format", "json", "--particles", "100", "--replicates", "1"])
+            .current_dir(dir)
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .output().expect("spawn camdl")
+    };
+
+    // A valid partial holdout is scored held-out: only weekly_cases' t = 28
+    // and 35 lie past train_end = 21.
+    let out = compare();
+    assert!(out.status.success(), "valid partial-holdout compare failed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json output");
+    for row in v["rows"].as_array().unwrap() {
+        assert_eq!(row["conditioning"]["hold_out_tail"]["train_end"],
+            serde_json::json!(21.0), "row must be stamped hold_out_tail: {row}");
+        assert_eq!(row["t_score"], serde_json::json!(2), "{row}");
+    }
+
+    // The defective shape: `detection`'s training file now runs to t = 42,
+    // past the recorded train_end = 21. Its rows at t = 28 and 42 would be
+    // scored as held out although they are training data.
+    for sub in &fits {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true).open(sub.join("detection.tsv")).unwrap();
+        std::io::Write::write_all(&mut f, b"28\t0\n42\t1\n").unwrap();
+    }
+    let out = compare();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(),
+        "training data past train_end must refuse the hold_out_tail stamp:\n{stderr}");
+    assert!(stderr.contains("'detection'") && stderr.contains("Re-run")
+            && stderr.contains("--in-sample"),
+        "the refusal must name the stream and both fixes:\n{stderr}");
+}
