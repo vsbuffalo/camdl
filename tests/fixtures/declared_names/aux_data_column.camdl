@@ -1,0 +1,43 @@
+# Declared-section fixture: a likelihood that reads a data column.
+#
+# A serosurvey: each row of the data gives the number tested and the number
+# positive. The likelihood's `n` is the `tested` column of that row, a name
+# that refers to the data and to nothing declared in the model, so the
+# declared section's tree holds a name of kind `data_column`. Compile-only.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate  in [0.001, 2.0]
+  gamma : rate  in [0.01, 1.0]
+  N0    : count in [100, 100000]
+  I0    : count in [1, 1000]
+}
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+
+observations {
+  serosurvey {
+    columns       { time : time, positives : count, tested : count }
+    projected     = R / N
+    emit_schedule = every 28 'days
+    positives     ~ binomial(n = tested, p = projected)
+  }
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 168 'days
+}

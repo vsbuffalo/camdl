@@ -1,0 +1,56 @@
+# Declared-section fixture: a forcing argument that names a dimension.
+#
+# A table-backed interpolated forcing: `table = contact_data` names the table
+# holding one series per patch, and `time_dim = week` names the dimension that
+# is its time axis. `week` is a declared dimension used as a bare word, so the
+# declared section's tree holds a name of kind `dimension`. Compile-only.
+#
+# Data: data/contact_by_week.tsv and data/weeks.tsv, synthetic values written
+# for this fixture (two patches, three weeks); they have no external source.
+
+time_unit = 'days
+
+compartments { S, I }
+
+dimensions {
+  patch = [north, south]
+  week  = read("data/weeks.tsv", column = "week")
+}
+
+stratify(by = patch)
+
+let N[p in patch] = S[p] + I[p]
+
+parameters {
+  beta  : rate in [0.001, 2.0]
+  gamma : rate in [0.01, 1.0]
+}
+
+tables {
+  contact_data : patch × week = read("data/contact_by_week.tsv")
+}
+
+forcing {
+  contact[p in patch] : interpolated 'ratio {
+    table    = contact_data
+    time_dim = week
+    method   = linear
+  }
+}
+
+transitions {
+  infection[p in patch] : S[p] --> I[p] @ beta * contact[p] * S[p] * I[p] / N[p]
+  recovery[p in patch]  : I[p] --> S[p] @ gamma * I[p]
+}
+
+init {
+  S[north] = 990
+  I[north] = 10
+  S[south] = 495
+  I[south] = 5
+}
+
+simulate {
+  from = 0 'days
+  to   = 20 'days
+}

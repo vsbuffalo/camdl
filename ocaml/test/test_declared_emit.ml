@@ -330,6 +330,47 @@ let test_no_absolute_paths () =
         d.dm_compile_inputs.ci_files)
     (golden_models ())
 
+(* ── Every name kind is exercised by a compiled golden ───────────────────── *)
+
+let kinds_in (d : D.declared_model) : string list =
+  let seen = ref [] in
+  walk_section (fun _ _ -> ())
+    (fun (_, kind) -> if not (List.mem kind !seen) then seen := kind :: !seen)
+    (D.to_json d);
+  !seen
+
+let section_of path =
+  snd (compile ~filename:path
+         (Filename.remove_extension (Filename.basename path)) (read_file path))
+
+(* The three kinds that only a hand-written fixture used to reach each have a
+   compiled golden of their own (`tests/fixtures/declared_names`). *)
+let test_declared_names_fixtures () =
+  let dir = Filename.concat repo_root "tests/fixtures/declared_names" in
+  List.iter (fun (file, kind) ->
+      let kinds = kinds_in (section_of (Filename.concat dir file)) in
+      if not (List.mem kind kinds) then
+        Alcotest.failf "%s holds no name of kind '%s' (it has: %s)" file kind
+          (String.concat ", " (List.sort compare kinds)))
+    [ ("obs_anchor.camdl", "obs_anchor");
+      ("aux_data_column.camdl", "data_column");
+      ("table_time_dimension.camdl", "dimension") ]
+
+(* Every kind the codec knows, other than `unresolved`, appears in at least one
+   compiled golden: a kind with no golden is a rule nothing compiled checks. *)
+let test_every_kind_has_a_golden () =
+  let seen = Hashtbl.create 16 in
+  List.iter (fun path ->
+      List.iter (fun k -> Hashtbl.replace seen k (relative path))
+        (kinds_in (section_of path)))
+    (golden_models ());
+  List.iter (fun (kind, name) ->
+      if kind <> D.KUnresolved && not (Hashtbl.mem seen name) then
+        Alcotest.failf "no compiled golden holds a name of kind '%s'" name)
+    D.name_kind_table;
+  Alcotest.(check bool) "no golden holds an unresolved name" false
+    (Hashtbl.mem seen "unresolved")
+
 (* ── Parse facts ─────────────────────────────────────────────────────────── *)
 
 let sir rate =
@@ -555,7 +596,11 @@ let () =
            Alcotest.test_case (relative path) `Quick (test_golden path))
          (golden_models ())
        @ [ Alcotest.test_case "recorded paths are relative, with digests" `Quick
-             test_no_absolute_paths ]);
+             test_no_absolute_paths;
+           Alcotest.test_case "anchor, data column and dimension names each \
+                               have a golden" `Quick test_declared_names_fixtures;
+           Alcotest.test_case "every name kind appears in a compiled golden"
+             `Quick test_every_kind_has_a_golden ]);
       ("parse facts",
        [ Alcotest.test_case "redundant parentheses" `Quick test_parens;
          Alcotest.test_case "the spelling of a number" `Quick test_number_spelling;

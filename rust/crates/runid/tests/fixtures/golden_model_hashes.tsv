@@ -2,6 +2,7 @@
 # Source: the committed *.ir.json files under ocaml/golden and tests/fixtures/*/ir (primary).
 # Recorded at commit: f205c547
 # Regenerate: make update-golden-model-hashes
+# Rows added at commit 3d2631981: tests/fixtures/declared_names/ir/aux_data_column.ir.json, tests/fixtures/declared_names/ir/obs_anchor.ir.json, tests/fixtures/declared_names/ir/table_time_dimension.ir.json
 file	model_ir_hash
 ocaml/golden/bimolecular.ir.json	1807ff3ac07ff9993787251c081e08db0c650687497c0b4e2ac6547508c8d6df
 ocaml/golden/branching_si_symp_asym.ir.json	4a4635a6a5190eff62e7388d5981b690be57bb856b0e647d9714e1e2a2fa8ed5
@@ -89,6 +90,9 @@ tests/fixtures/corner_cases/ir/offset_origin.ir.json	6b6e6420625e8f9e672f50ae2d4
 tests/fixtures/corner_cases/ir/origin_effects.ir.json	92c8ab672c7cb661a3d21baed8c5788ab46e6cf6a984d25b312213ba5a9828ab
 tests/fixtures/corner_cases/ir/recurring_default_from.ir.json	555ebce9eb14bdd82f2fb27b927b9c4650c5e6d10648d79dcdf6f136d871d92a
 tests/fixtures/corner_cases/ir/seasonal_drift.ir.json	491b75aa0f91f9e5f138af4017453570ddaeeda9edb0409b274311c81c07d507
+tests/fixtures/declared_names/ir/aux_data_column.ir.json	fb9ef47f10cc74176490621fe12f0e68dda22774f83022f1822f199be9155829
+tests/fixtures/declared_names/ir/obs_anchor.ir.json	a4424b869e0b6d8335206f40e10e4d67ae6dcd47b12d848f3b2f1c5bf62c1996
+tests/fixtures/declared_names/ir/table_time_dimension.ir.json	579b594878d004013ae71b575abf5387cb646bae683591ae37300bdbfda053a0
 tests/fixtures/gradient/ir/bspline_forcing_grad.ir.json	c1d31e0915f8246a436d3dbdb293f6383d6e94dcd9983076607050b88c5f4963
 tests/fixtures/gradient/ir/bspline_smooth_grad.ir.json	59055fcea5a6de752cef675dcfff63d59887b125e321efdbda29d6f6256b74f5
 tests/fixtures/gradient/ir/seir_seasonal_lagged.ir.json	e603076093bebb2099ab57ec6c2634ae03ffa304916eab6476d1940d8091b520

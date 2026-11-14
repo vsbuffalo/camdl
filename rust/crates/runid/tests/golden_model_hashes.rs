@@ -96,6 +96,48 @@ fn every_golden_model_keeps_its_recorded_identity() {
         return;
     }
 
+    // `make add-golden-model-hashes` sets this, naming the commit at which new
+    // golden files are being added. Existing rows and the recorded-at line are
+    // kept exactly; only files with no row get one. A golden whose identity
+    // moved is not helped by this mode, and still fails the comparison below
+    // on the next plain run.
+    if let Ok(commit) = std::env::var("CAMDL_ADD_GOLDEN_MODEL_HASHES") {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(TABLE);
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let (_, recorded) = read_table();
+        let new: Vec<&String> = files.iter().filter(|f| !recorded.contains_key(*f)).collect();
+        if new.is_empty() {
+            return;
+        }
+        let mut header: Vec<String> = Vec::new();
+        let mut rows: Vec<String> = Vec::new();
+        let mut columns = String::new();
+        for line in text.lines() {
+            if line.starts_with('#') {
+                header.push(line.to_string());
+            } else if columns.is_empty() {
+                columns = line.to_string();
+            } else if !line.trim().is_empty() {
+                rows.push(line.to_string());
+            }
+        }
+        let names: Vec<&str> = new.iter().map(|f| f.as_str()).collect();
+        header.push(format!("# Rows added at commit {commit}: {}", names.join(", ")));
+        for f in &new {
+            rows.push(format!("{f}\t{}", model_hash(f)));
+        }
+        // Rows are keyed by file and kept sorted, as the full capture writes them.
+        rows.sort();
+        let mut out = header.join("\n");
+        out.push('\n');
+        out.push_str(&columns);
+        out.push('\n');
+        out.push_str(&rows.join("\n"));
+        out.push('\n');
+        std::fs::write(&path, out).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+        return;
+    }
+
     let (_, recorded) = read_table();
     let mut problems = Vec::new();
     for f in &files {

@@ -122,7 +122,7 @@ dev-camdlc: build-ocaml
 # CI can run and badge them independently (see .github/workflows/): test-rust =
 # everything except the sim crate; test-inference = the sim crate (simulation
 # engine + the inference stack). Their union is the whole workspace.
-test: lint test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
+test: lint test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden check-declared-names-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
 
 # Clippy, the same invocation CI's `test` job runs as its second step. Kept in
 # `make test` because CI aborts that job on a lint error before a single test
@@ -292,7 +292,7 @@ test-install:
 
 # ── Golden file management ────────────────────────────────────────────────────
 
-.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden update-gradient-golden update-bspline-inference-golden
+.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden check-declared-names-golden
 
 # Recompile all DSL fixtures → ocaml/golden/*.ir.json
 update-ocaml-golden: build-ocaml
@@ -303,7 +303,7 @@ update-ocaml-golden: build-ocaml
 		$(CAMDLC) "$$src" > "$$out"; \
 	done
 
-update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden update-contrasts-golden update-gradient-golden update-bspline-inference-golden
+update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden update-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden
 
 # Recompile the corner-case fixtures (params baked via --set) →
 # tests/fixtures/corner_cases/ir/*.ir.json. These pin the off-grid /
@@ -388,6 +388,14 @@ update-golden-model-hashes:
 	cd rust && CAMDL_CAPTURE_GOLDEN_MODEL_HASHES="$$(git rev-parse --short HEAD)" \
 	  cargo test -p runid --test golden_model_hashes
 
+# Add rows to that table for goldens it does not hold yet, and nothing else:
+# every existing row, and the commit the table was recorded at, stay as they
+# are. For a new golden file; never for a golden whose identity moved.
+.PHONY: add-golden-model-hashes
+add-golden-model-hashes:
+	cd rust && CAMDL_ADD_GOLDEN_MODEL_HASHES="$$(git rev-parse --short HEAD)" \
+	  cargo test -p runid --test golden_model_hashes
+
 # The run-id side of the same check: for five compiled goldens, the
 # model-bearing level hash and run_id of every CAS kind, with every non-model
 # input fixed (rust/crates/cli/tests/fixtures/golden_run_ids.tsv; the test is
@@ -408,6 +416,36 @@ DECLARED_FIXTURE := rust/crates/declared/tests/fixtures/all_variants.json
 .PHONY: update-declared-fixture
 update-declared-fixture: build-ocaml
 	cd ocaml && dune exec --no-print-directory ./test/gen_declared_fixture.exe > ../$(DECLARED_FIXTURE)
+
+# Recompile the declared-section name-kind fixtures →
+# tests/fixtures/declared_names/ir/*.ir.json. Compile-only: each is a small
+# model whose declared section holds a name of a kind no other golden has (an
+# observation anchor, a data column, a dimension named by a forcing argument),
+# checked by the golden walk in ocaml/test/test_declared_emit.ml and read
+# through the Rust types by crates/declared/tests/golden_sections.rs.
+DECLARED_NAMES_DIR := tests/fixtures/declared_names
+DECLARED_NAMES := obs_anchor aux_data_column table_time_dimension
+update-declared-names-golden: build-ocaml
+	@echo "Recompiling declared-names fixtures..."
+	@mkdir -p $(DECLARED_NAMES_DIR)/ir
+	@for f in $(DECLARED_NAMES); do \
+	  $(CAMDLC) $(DECLARED_NAMES_DIR)/$$f.camdl -o $(DECLARED_NAMES_DIR)/ir/$$f.ir.json; \
+	done
+
+# Drift gate: each declared-names .camdl must still compile byte-for-byte to
+# its committed .ir.json. Runs in `make test`.
+check-declared-names-golden: build-ocaml
+	@echo "Checking declared-names goldens match their .camdl..."
+	@fail=0; for f in $(DECLARED_NAMES); do \
+	  $(CAMDLC) $(DECLARED_NAMES_DIR)/$$f.camdl -o $(DECLARED_NAMES_DIR)/ir/$$f.ir.json.tmp; \
+	  if ! diff -q $(DECLARED_NAMES_DIR)/ir/$$f.ir.json $(DECLARED_NAMES_DIR)/ir/$$f.ir.json.tmp >/dev/null 2>&1; then \
+	    echo "  DRIFT: $$f.camdl no longer compiles to the committed .ir.json — run: make update-declared-names-golden"; \
+	    fail=1; \
+	  fi; \
+	  rm -f $(DECLARED_NAMES_DIR)/ir/$$f.ir.json.tmp; \
+	done; \
+	if [ $$fail -ne 0 ]; then exit 1; fi; \
+	echo "  declared-names goldens in sync"
 
 # Drift gate (gh#204): each reactive .camdl must still compile BYTE-FOR-BYTE to
 # its committed .ir.json. `update-reactive-golden` regenerates; this FAILS if

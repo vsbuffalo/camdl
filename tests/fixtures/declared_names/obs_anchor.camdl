@@ -1,0 +1,50 @@
+# Declared-section fixture: an observation anchor.
+#
+# `last_obs` and `first_obs` are times read from the data, not names declared
+# in the model. This model reads both from `quantities`, so the declared
+# section's trees hold names of kind `obs_anchor`. Compile-only: the anchors
+# sit in reporting quantities, which the compiled model's identity excludes.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate        in [0.001, 2.0]
+  gamma : rate        in [0.01, 1.0]
+  rho   : probability in [0.0, 1.0]
+  N0    : count       in [100, 100000]
+  I0    : count       in [1, 1000]
+}
+
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ poisson(rate = rho * projected)
+  }
+}
+
+quantities {
+  size_at_data_end   = value_at(N0 - S, last_obs)
+  infectious_at_week = value_at(I, first_obs + 1 'weeks)
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 84 'days
+}

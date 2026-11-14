@@ -1,0 +1,7 @@
+patch	week	cval
+north	0	1.0
+north	10	2.0
+north	20	1.5
+south	0	0.5
+south	10	0.8
+south	20	0.6
