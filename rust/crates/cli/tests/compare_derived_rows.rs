@@ -211,7 +211,6 @@ fn the_trace_records_its_filter_settings_and_compare_checks_them() {
         "theta": "supplied", "excluded_chains": [], "enabled": [], "disabled": [],
         "replicate_elpd": [elpd],
         "replicate_elpd_by_stream": {"weekly_cases": [stream_elpd]},
-        "mc_se_elpd": null,
     }), "pfilter records its single pass: {manual}");
 
     // Derived rows: two replicates of an optimizer fit's winner.
