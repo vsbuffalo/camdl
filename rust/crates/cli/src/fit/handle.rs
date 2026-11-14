@@ -250,7 +250,7 @@ pub fn resolve_target(s: &str) -> Result<FitTarget, ResolveError> {
 /// Both namespaces are searched; a prefix matching in both is refused with
 /// every match listed rather than resolved to the run (gh#896), and several
 /// matches in one namespace are refused as before.
-fn resolve_hash_prefix(root: &Path, prefix: &str) -> Result<FitTarget, ResolveError> {
+pub(crate) fn resolve_hash_prefix(root: &Path, prefix: &str) -> Result<FitTarget, ResolveError> {
     let mut leaves = crate::cas_read::resolve_fit_prefix(root, prefix);
     leaves.sort_by(|a, b| a.dir.cmp(&b.dir));
     let fits_dir = root.join("fits");

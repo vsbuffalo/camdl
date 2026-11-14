@@ -3354,7 +3354,18 @@ Fits are addressed downstream by handle (`fit/handle.rs`, `FitRef`): `@label`, a
 `fit.toml` path, a leaf or problem-folder directory, or a hash prefix (a run's
 `run_id`, else the fit id). `@label`, a leaf directory and a `run_id` prefix
 name one run; the others name a problem folder. Ambiguity is listed git-style
-rather than guessed.
+rather than guessed. `camdl show` and `camdl cat` resolve through the same
+module, so a handle names the same run there as in every fit verb: `show` on a
+run handle describes the run and its recorded outputs (`run.json` `artifacts`
+plus its predictions under `predict/<run id>/`, never a directory listing), and
+`cat --stream <name>` on a run looks in the leaf, then `predict/<run id>/`, then
+the problem folder. `show --format json` writes one `fit_show` (schema 1) object
+per run,
+`{schema, run_id, label, label_set_at, history_index, problem {fit_id, model, config}, method, seed, chains, starts {rule, handle, run_id, chains}, status, verdict {kind, max_rhat, min_ess_bulk}, path, outputs [{path, role}]}`,
+with `role` from `run.json` `output_schema`; on a problem folder,
+`{schema, problem, runs: [<fit_show>…]}`. For every other kind it writes
+`run_show` (schema 1), `{schema, kind, path, record}`, where `record` is the
+leaf's `run.json`.
 
 A label names exactly one run and never moves. It is recorded on that run's
 `run.json` (`provenance.label`) by `fit run --label` or `camdl label <run_id>`.

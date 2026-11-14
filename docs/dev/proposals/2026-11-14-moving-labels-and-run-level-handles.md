@@ -289,6 +289,14 @@ folder (today's lookup is the last two only, so existing `cat` paths keep
 working). A problem-folder handle with more than one run is an ambiguity listing
 the runs, as `fit summary` does.
 
+_Implementation note:_ a problem-folder handle holding several runs still reads
+a stream that is a file of the folder itself (`fit.meta.json`, or a
+`predict/<run id>/…` path), since that path names one file whichever run is
+meant; any other stream is the ambiguity. Without `--stream`, `cat` on a run
+handle prints the run's `fit_state.toml`, as it did for a leaf directory, so
+`cat @L` and `cat <leaf>` agree; on a folder it prints `fit.meta.json`, as
+before.
+
 ### C. One chain selector
 
 `ChainSubset` and `ChainSelection` become one type in `chain_selection.rs`:

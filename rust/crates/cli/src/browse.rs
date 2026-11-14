@@ -384,9 +384,26 @@ fn list_profile_children(
 pub fn cmd_show(a: &crate::args::ShowArgs) {
     let out = crate::out::Out::new(false);
     let root = a.root.to_string_lossy();
-    match resolve_any(&root, &a.target) {
+    let json = show_json(&out, a.format.as_deref());
+    let resolved = resolve_any(&root, &a.target).unwrap_or_else(|e| {
+        out.fail(format!("error: {}", e));
+    });
+    if json {
+        let value = match &resolved {
+            Resolved::Fit { leaf, rel_path, .. } => fit_show_json(leaf, rel_path),
+            Resolved::FitEnvelope { segment, .. } => fit_folder_json(segment),
+            Resolved::Sim { leaf, rel_path, .. } => run_show_json(leaf, "sim", rel_path),
+            Resolved::Profile { leaf, rel_path, .. } => run_show_json(leaf, "profile_point", rel_path),
+            Resolved::Pfilter { leaf, rel_path, .. } => run_show_json(leaf, "pfilter", rel_path),
+            Resolved::Survey { leaf, rel_path, .. } => run_show_json(leaf, "survey", rel_path),
+            Resolved::SimEnsemble { leaf, rel_path, .. } => run_show_json(leaf, "sim_ensemble", rel_path),
+        };
+        out.report_line(format_args!("{}", serde_json::to_string_pretty(&value).unwrap_or_default()));
+        return;
+    }
+    match Ok::<Resolved, String>(resolved) {
         Ok(Resolved::Sim { leaf, rel_path, created }) => show_sim_record(&out, &leaf, &rel_path, created),
-        Ok(Resolved::Fit { leaf, rel_path, created }) => show_fit_record(&out, &leaf, &rel_path, created),
+        Ok(Resolved::Fit { leaf, rel_path, created }) => show_fit_run(&out, &leaf, &rel_path, created),
         Ok(Resolved::Profile { leaf, rel_path, created }) => show_profile_record(&out, &leaf, &rel_path, created),
         Ok(Resolved::Pfilter { leaf, rel_path, created }) => show_pfilter_record(&out, &leaf, &rel_path, created),
         Ok(Resolved::Survey { leaf, rel_path, created }) => show_survey_record(&out, &leaf, &rel_path, created),
@@ -433,44 +450,6 @@ fn show_sim_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str,
     out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", rec.engine_version));
     out.report_line(format_args!("{}", style::stdout().paint("argv", Style::Dim)));
     out.report_line(format_args!("  {}", rec.provenance.argv.join(" ")));
-}
-
-/// Render a `RunRecord` fit-method leaf: the factored levels, the run_id
-/// address, the `deps` (lineage), and the recorded `inputs` (display-only).
-/// Mirrors `show_sim_record` for the CAS fit path.
-fn show_fit_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
-    let rec = &leaf.record;
-    out.report_line(format_args!("{}", style::stdout().paint("path", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(rel_path, Style::Code)));
-    out.report_line(format_args!("{}", style::stdout().paint("kind", Style::Dim))); out.report_line("  fit_method");
-    out.report_line(format_args!("{}", style::stdout().paint("fit", Style::Dim))); out.report_line(format_args!("  {}", leaf.level_label("fit")));
-    out.report_line(format_args!("{}", style::stdout().paint("method", Style::Dim))); out.report_line(format_args!("  {}", leaf.level_label("method")));
-    out.report_line(format_args!("{}", style::stdout().paint("seed", Style::Dim))); out.report_line(format_args!("  {}", leaf.level_label("seed")));
-    out.report_line(format_args!("{}", style::stdout().paint("run_id", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim)));
-    out.report_line(format_args!("{}", style::stdout().paint("levels", Style::Dim)));
-    for lvl in &rec.levels {
-        out.report_line(format_args!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim)));
-    }
-    if !rec.deps.is_empty() {
-        out.report_line(format_args!("{}", style::stdout().paint("deps", Style::Dim)));
-        for d in &rec.deps {
-            out.report_line(format_args!("  {} {} ({})", style::stdout().paint(&d.run_id.short8().to_string(), Style::Dim), d.artifact, style::stdout().paint(&d.digest.short8().to_string(), Style::Dim)));
-        }
-    }
-    // Display fields recorded in `inputs` (display-only, never hashed), each
-    // printed exactly as recorded — `best_chain` is the number of a
-    // `chain_N/` directory on this leaf (gh#912, gh#990).
-    if let Some(obj) = rec.inputs.as_object() {
-        for key in ["method", "backend", "n_chains", "best_chain", "best_loglik"] {
-            if let Some(v) = obj.get(key) {
-                out.report_line(format_args!("{}", style::stdout().paint(key, Style::Dim))); out.report_line(format_args!("  {}", v));
-            }
-        }
-    }
-    out.report_line(format_args!("{}", style::stdout().paint("created", Style::Dim)));
-    out.report_line(format_args!("  {}  ({})",
-        rec.provenance.created_at.as_deref().unwrap_or("?"),
-        fmt_relative_time(created, SystemTime::now())));
-    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", rec.engine_version));
 }
 
 /// The directories `fit predict` wrote for a fit envelope, each with the
@@ -576,6 +555,7 @@ fn show_fit_envelope(out: &crate::out::Out, segment: &Path, run: Option<&str>, r
             out.report_line(format_args!("  {}", view.methods_declared.join(", ")));
         }
     }
+    show_folder_runs(out, segment);
     // Output envelope: the predict/quantities artifacts the fit produced,
     // grouped by subdir, each as a segment-relative path the user can pass to
     // `cat --stream`. Absent subdirs are skipped (a not-yet-predicted fit just
@@ -930,9 +910,13 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
         // `chain_1/trace.tsv`).
         Resolved::Fit { leaf, rel_path, .. } => {
             let name = a.stream.as_deref().unwrap_or("fit_state.toml");
-            let path = leaf.dir.join(name);
+            let path = run_stream_path(&leaf, name).unwrap_or_else(|| leaf.dir.join(name));
             let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-                out.fail(format!("error reading {} in {}: {}", name, rel_path, e));
+                out.fail(format!(
+                    "error reading {} in {}: {}\n  \
+                     run `camdl show {}` to list the run's outputs",
+                    name, rel_path, e, a.target
+                ));
             });
             let bytes = match &selection {
                 None => bytes,
@@ -990,6 +974,21 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
         // predictive/weekly_cases` finds `predictive/weekly_cases.tsv`).
         Resolved::FitEnvelope { segment, run, rel_path } => {
             let rel = a.stream.as_deref().unwrap_or("fit.meta.json");
+            // A folder that holds several runs names none of them: a stream
+            // that is not the folder's own file is an ambiguity, listed as
+            // `fit summary` lists it.
+            if run.is_none() && !segment.join(rel).exists() {
+                let runs: Vec<cas_read::Leaf> = folder_runs(&segment)
+                    .into_iter()
+                    .filter(|l| l.record.status == runid::RunStatus::Completed)
+                    .collect();
+                if runs.len() > 1 {
+                    out.fail(format!("error: {}", crate::fit::handle::ResolveError::AmbiguousRuns {
+                        handle: a.target.clone(),
+                        runs,
+                    }));
+                }
+            }
             // A stream is looked up in the run's predictions directory first
             // (gh#896), then in the segment (`fit.meta.json`, or a
             // `predict/<run id>/…` path when the folder holds several runs).
@@ -1021,6 +1020,26 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
             let _ = out.data().write_all(&bytes);
         }
     }
+}
+
+/// Where a run handle's stream `name` is: the run's leaf, then its
+/// default-options predictions under the problem folder's `predict/<run id>/`,
+/// then the problem folder itself. An extensionless name also matches its
+/// `.tsv` sibling. `None` when no candidate exists.
+fn run_stream_path(leaf: &cas_read::Leaf, name: &str) -> Option<PathBuf> {
+    let mut bases = vec![leaf.dir.clone()];
+    if let Ok(Some(segment)) = crate::fit::fit_view::leaf_segment(&leaf.dir) {
+        let id = leaf.record.run_id.to_hex().to_string();
+        bases.push(crate::fit::fit_view::predictions_dir(&segment, &id, None));
+        bases.push(segment);
+    }
+    bases.iter().find_map(|b| {
+        let mut c = vec![b.join(name)];
+        if Path::new(name).extension().is_none() {
+            c.push(b.join(format!("{name}.tsv")));
+        }
+        c.into_iter().find(|p| p.is_file())
+    })
 }
 
 /// The rows of a fit leaf's stream `name` that a chain selection keeps
@@ -1343,18 +1362,12 @@ enum Resolved {
 fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    // `@label` is UNAMBIGUOUSLY a fit handle (no leaf or sim carries a `@`
-    // sigil), so resolve it before any leaf/hash logic: the one run carrying
-    // the label (gh#896), shown as the output envelope of the problem folder
-    // it sits in — where `fit predict` writes.
-    if let crate::fit::handle::FitRef::Label(name) = crate::fit::handle::FitRef::classify(key) {
-        let leaf = crate::fit::handle::resolve_label(Path::new(root), &name)
-            .map_err(|e| e.to_string())?;
-        let segment = crate::fit::fit_view::leaf_segment(&leaf.dir)?
-            .ok_or_else(|| format!("{} is not inside a fit's directory", leaf.dir.display()))?;
-        let rel_path = pathdiff_str(&segment, &cwd);
-        let run = crate::fit::fit_view::leaf_run_id(&leaf.dir)?;
-        return Ok(Resolved::FitEnvelope { segment, run, rel_path });
+    // `@label` and a `fit.toml` are fit handles only (no other kind carries a
+    // `@` sigil or is named by a config), so they resolve through the fit
+    // handle resolver every fit verb uses: `@label` to the run carrying it,
+    // a `fit.toml` to its problem folder.
+    if let Some(resolved) = resolve_fit_handle(Path::new(root), key) {
+        return resolved;
     }
 
     // Path form: read the leaf `run.json` (`RunRecord`) directly.
@@ -1410,12 +1423,39 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
         sim_matches.push((leaf, rel, created));
     }
 
-    // New-format fit methods (M3.2): match the run_id hex prefix under fits/.
+    // Fit runs and problem folders: the fit handle resolver's own prefix
+    // rule (a run's `run_id`, else a folder's fit id; a prefix matching both
+    // is ambiguous), so a prefix names the same fit here as in every fit verb.
     let mut fit_matches: Vec<(cas_read::Leaf, String, SystemTime)> = Vec::new();
-    for leaf in cas_read::resolve_fit_prefix(Path::new(root), hash_prefix) {
-        let created = leaf_created(&leaf);
-        let rel = pathdiff_str(&leaf.dir, &cwd);
-        fit_matches.push((leaf, rel, created));
+    let mut fit_envelope_matches: Vec<(PathBuf, String)> = Vec::new();
+    match crate::fit::handle::resolve_hash_prefix(Path::new(root), hash_prefix) {
+        Ok(crate::fit::handle::FitTarget::Leaf(l)) => {
+            if let Ok(Resolved::Fit { leaf, rel_path, created }) = fit_leaf(&l.dir, &cwd) {
+                fit_matches.push((leaf, rel_path, created));
+            }
+        }
+        Ok(crate::fit::handle::FitTarget::Segment(seg)) => {
+            let rel = pathdiff_str(&seg, &cwd);
+            fit_envelope_matches.push((seg, rel));
+        }
+        Err(crate::fit::handle::ResolveError::NotFound(_)) => {}
+        Err(crate::fit::handle::ResolveError::AmbiguousRuns { runs, .. }) => {
+            for leaf in runs {
+                let created = leaf_created(&leaf);
+                let rel = pathdiff_str(&leaf.dir, &cwd);
+                fit_matches.push((leaf, rel, created));
+            }
+        }
+        Err(crate::fit::handle::ResolveError::Ambiguous { candidates, .. }) => {
+            for dir in candidates {
+                let rel = pathdiff_str(&dir, &cwd);
+                match fit_leaf(&dir, &cwd) {
+                    Ok(Resolved::Fit { leaf, rel_path, created }) => fit_matches.push((leaf, rel_path, created)),
+                    _ => fit_envelope_matches.push((dir, rel)),
+                }
+            }
+        }
+        Err(e) => return Err(e.to_string()),
     }
 
     // New-format profile points (M3.3): match the run_id hex prefix under
@@ -1458,20 +1498,6 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
     // prefix. This resolves the whole fit's output envelope. Folded into the
     // same 0/1/many resolution below, so a prefix that collides with a method
     // leaf (`fit_matches`) surfaces as ambiguous rather than silently picked.
-    let mut fit_envelope_matches: Vec<(PathBuf, String)> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(Path::new(root).join("fits")) {
-        for entry in entries.flatten() {
-            let seg = entry.path();
-            if seg.is_dir()
-                && crate::fit::fit_view::FitView::read(&seg)
-                    .map(|v| v.fit_hash.starts_with(hash_prefix))
-                    .unwrap_or(false)
-            {
-                let rel = pathdiff_str(&seg, &cwd);
-                fit_envelope_matches.push((seg, rel));
-            }
-        }
-    }
 
     match sim_matches.len() + fit_matches.len() + profile_matches.len()
         + pfilter_matches.len() + survey_matches.len() + ensemble_matches.len()
@@ -1976,6 +2002,217 @@ fn pathdiff_str(path: &Path, base: &Path) -> String {
         Ok(rel) => rel.to_string_lossy().into_owned(),
         Err(_)  => path.to_string_lossy().into_owned(),
     }
+}
+
+
+// ── Fit runs: `show` and `cat` through the fit handle resolver ───────────────
+
+/// Resolve a fit handle the way every fit verb does (`fit/handle.rs`), under
+/// `root`: `@label` names the run carrying it; a `fit.toml` names the problem
+/// folder of the run made from it. `None` when `key` is neither form, so the
+/// caller resolves it as a path or hash prefix across every kind.
+fn resolve_fit_handle(root: &Path, key: &str) -> Option<Result<Resolved, String>> {
+    use crate::fit::handle::{FitRef, FitTarget};
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match FitRef::classify(key) {
+        FitRef::Label(name) => Some(
+            crate::fit::handle::resolve_label(root, &name)
+                .map_err(|e| e.to_string())
+                .and_then(|leaf| fit_leaf(&leaf.dir, &cwd)),
+        ),
+        FitRef::Config(_) => Some(match crate::fit::handle::resolve_target(key) {
+            Ok(FitTarget::Leaf(leaf)) => crate::fit::fit_view::leaf_segment(&leaf.dir)
+                .and_then(|s| s.ok_or_else(|| format!("{} is not inside a fit's directory", leaf.dir.display())))
+                .map(|segment| {
+                    let rel_path = pathdiff_str(&segment, &cwd);
+                    Resolved::FitEnvelope { segment, run: None, rel_path }
+                }),
+            Ok(FitTarget::Segment(segment)) => {
+                let rel_path = pathdiff_str(&segment, &cwd);
+                Ok(Resolved::FitEnvelope { segment, run: None, rel_path })
+            }
+            Err(e) => Err(e.to_string()),
+        }),
+        FitRef::RunDir(_) | FitRef::HashPrefix(_) => None,
+    }
+}
+
+/// The fit run whose leaf is `dir`, as a [`Resolved::Fit`].
+fn fit_leaf(dir: &Path, cwd: &Path) -> Result<Resolved, String> {
+    let record = match runid::read_leaf(dir) {
+        Ok(Some(leaf)) => leaf.record,
+        Ok(None) => return Err(format!("{} holds no run.json", dir.display())),
+        Err(u) => return Err(format!("could not read run.json at {}: {}", dir.display(), u.reason)),
+    };
+    let leaf = cas_read::Leaf { dir: dir.to_path_buf(), record };
+    let created = leaf_created(&leaf);
+    Ok(Resolved::Fit { rel_path: pathdiff_str(dir, cwd), leaf, created })
+}
+
+/// The output format `show` was asked for. `--format` takes `human` (the
+/// default; `text` is the same) or `json`; anything else is refused.
+fn show_json(out: &crate::out::Out, format: Option<&str>) -> bool {
+    match format {
+        None | Some("human") | Some("text") => false,
+        Some("json") => true,
+        Some(other) => out.fail(format!(
+            "error: --format {other}: `camdl show` writes `human` (the default) or `json`"
+        )),
+    }
+}
+
+/// `show` of one fit run: who it is, the problem it belongs to, how its chains
+/// started, its stored verdict, and the outputs it holds.
+fn show_fit_run(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
+    use crate::fit::run_view::{self, short};
+    let rec = &leaf.record;
+    let p = |k: &str| style::stdout().paint(k, Style::Dim);
+    let segment = crate::fit::fit_view::leaf_segment(&leaf.dir).ok().flatten();
+    let problem = segment.as_deref().map(run_view::Problem::of);
+    let id = rec.run_id.to_hex().to_string();
+    let label = rec.provenance.label.as_deref().map(|l| format!("  (@{l})")).unwrap_or_default();
+    out.report_line(format_args!("{}     {}{label}", p("run"), short(&id, 12)));
+    out.report_line(format_args!("{}    fit_method", p("kind")));
+    if let Some(problem) = &problem {
+        out.report_line(format_args!("{} {}", p("problem"), problem.line()));
+    }
+    out.report_line(format_args!("{}  {}", p("method"), method_line(leaf)));
+    out.report_line(format_args!("{}  {}", p("starts"), run_view::Starts::of(rec).cell()));
+    out.report_line(format_args!("{}  {}", p("status"), run_view::status_word(leaf)));
+    out.report_line(format_args!("{} {}", p("verdict"), run_view::RunVerdict::of(leaf).cell()));
+    if let Some(v) = rec.inputs.get("best_loglik").filter(|v| !v.is_null()) {
+        out.report_line(format_args!("{} {}", p("best loglik"), v));
+    }
+    out.report_line(format_args!("{}    {}", p("path"), style::stdout().paint(rel_path, Style::Code)));
+    out.report_line(format_args!("{} {}  ({})", p("created"),
+        rec.provenance.created_at.as_deref().unwrap_or("?"),
+        fmt_relative_time(created, SystemTime::now())));
+    out.report_line(format_args!("{}", p("outputs")));
+    let outputs = segment.as_deref().map(|s| run_view::outputs(leaf, s)).unwrap_or_else(|| {
+        rec.artifacts.keys().map(|k| run_view::Output { path: k.clone(), role: "file".into() }).collect()
+    });
+    let width = outputs.iter().map(|o| o.path.chars().count()).max().unwrap_or(0);
+    for o in &outputs {
+        out.report_line(format_args!("  {:<width$}  {}", o.path, p(&o.role)));
+    }
+    if outputs.is_empty() {
+        out.report_line(format_args!("  {}", p("(none recorded)")));
+    }
+}
+
+/// `mh · 6 chains · 100000 iterations · seed 1`, from the run's record.
+fn method_line(leaf: &cas_read::Leaf) -> String {
+    let inputs = &leaf.record.inputs;
+    let mut parts = vec![leaf.level_label("method").to_string()];
+    if let Some(n) = inputs.get("n_chains").and_then(|v| v.as_u64()) {
+        parts.push(format!("{n} chain{}", if n == 1 { "" } else { "s" }));
+    }
+    let algo = inputs.get("algorithm");
+    for (key, word) in [("iterations", "iterations"), ("sweeps", "sweeps")] {
+        if let Some(n) = algo.and_then(|a| a.get(key)).and_then(|v| v.as_u64()) {
+            parts.push(format!("{n} {word}"));
+        }
+    }
+    parts.push(format!("seed {}", leaf.seed()));
+    parts.join(" · ")
+}
+
+/// The `fit_show` (schema v1) object for one fit run.
+fn fit_show_json(leaf: &cas_read::Leaf, rel_path: &str) -> serde_json::Value {
+    use crate::fit::run_view;
+    let rec = &leaf.record;
+    let segment = crate::fit::fit_view::leaf_segment(&leaf.dir).ok().flatten();
+    let outputs: Vec<serde_json::Value> = segment
+        .as_deref()
+        .map(|s| run_view::outputs(leaf, s))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|o| serde_json::json!({ "path": o.path, "role": o.role }))
+        .collect();
+    serde_json::json!({
+        "schema": { "name": run_view::FIT_SHOW_SCHEMA_NAME, "version": run_view::FIT_SHOW_SCHEMA_VERSION },
+        "run_id": rec.run_id.to_hex().to_string(),
+        "label": rec.provenance.label,
+        "label_set_at": serde_json::Value::Null,
+        "history_index": serde_json::Value::Null,
+        "problem": segment.as_deref().map(|s| run_view::Problem::of(s).to_json()),
+        "method": leaf.level_label("method"),
+        "seed": leaf.seed(),
+        "chains": rec.inputs.get("n_chains"),
+        "starts": run_view::Starts::of(rec).to_json(),
+        "status": run_view::status_word(leaf),
+        "verdict": run_view::RunVerdict::of(leaf).to_json(),
+        "path": rel_path,
+        "outputs": outputs,
+    })
+}
+
+/// The fit runs directly under a problem folder, completed or not, in
+/// directory order.
+fn folder_runs(segment: &Path) -> Vec<cas_read::Leaf> {
+    let mut runs: Vec<cas_read::Leaf> = cas_read::walk_records(segment)
+        .into_iter()
+        .filter(|(_, r)| r.kind == runid::ArtifactKind::FitMethod)
+        .map(|(dir, record)| cas_read::Leaf { dir, record })
+        .collect();
+    runs.sort_by(|a, b| a.dir.cmp(&b.dir));
+    runs
+}
+
+/// The handle that selects `leaf`: `@label` when it carries one, else a
+/// 12-character prefix of its run id.
+fn run_handle(leaf: &cas_read::Leaf) -> String {
+    match &leaf.record.provenance.label {
+        Some(l) => format!("@{l}"),
+        None => crate::fit::run_view::short(&leaf.record.run_id.to_hex().to_string(), 12).to_string(),
+    }
+}
+
+/// The runs block of a problem folder's `show`: one line per run, with the
+/// handle that selects it.
+fn show_folder_runs(out: &crate::out::Out, segment: &Path) {
+    use crate::fit::run_view;
+    let runs = folder_runs(segment);
+    if runs.is_empty() {
+        return;
+    }
+    out.report_line(format_args!("{}", style::stdout().paint("runs", Style::Dim)));
+    for leaf in &runs {
+        out.report_line(format_args!(
+            "  {}  {}  {}  {}  {}",
+            run_handle(leaf),
+            leaf.level_label("method"),
+            format_args!("seed {}", leaf.seed()),
+            run_view::status_word(leaf),
+            run_view::RunVerdict::of(leaf).cell(),
+        ));
+    }
+}
+
+/// `show --format json` on a problem folder: `{schema, problem, runs}`.
+fn fit_folder_json(segment: &Path) -> serde_json::Value {
+    use crate::fit::run_view;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let runs: Vec<serde_json::Value> = folder_runs(segment)
+        .iter()
+        .map(|l| fit_show_json(l, &pathdiff_str(&l.dir, &cwd)))
+        .collect();
+    serde_json::json!({
+        "schema": { "name": run_view::FIT_SHOW_SCHEMA_NAME, "version": run_view::FIT_SHOW_SCHEMA_VERSION },
+        "problem": run_view::Problem::of(segment).to_json(),
+        "runs": runs,
+    })
+}
+
+/// `show --format json` for every other kind: `run_show` (schema v1), the
+/// leaf's kind and path beside its whole `run.json` record.
+fn run_show_json(leaf: &cas_read::Leaf, kind: &str, rel_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "schema": { "name": "run_show", "version": 1 },
+        "kind": kind,
+        "path": rel_path,
+        "record": leaf.record,
+    })
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
