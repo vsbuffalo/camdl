@@ -27,7 +27,6 @@
 //! yields a distinct leaf (count-in-the-key), at the cost of re-fitting when it
 //! changes.
 
-use indexmap::IndexMap;
 
 use std::path::Path;
 
@@ -38,6 +37,7 @@ use runid::inputs::{
 use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId};
 
 use super::config_v2::{Algorithm, FitConfig, Method, Problem};
+use super::stream_bindings::BoundDataDigests;
 
 /// A fully-resolved fit-method leaf: the factored identity levels (in path
 /// order) and the leaf `run_id` composed from their hashes.
@@ -58,9 +58,9 @@ pub struct FitMethodCtx<'a> {
     /// The resolved (sweep-applied) problem half. Hashed whole, less
     /// `output_dir` (see [`fit_config_blob_hash`]).
     pub problem: &'a Problem,
-    /// Resolved training observation streams (name → path); their *content*
-    /// is digested into `FitDigest.data`.
-    pub data_paths: &'a IndexMap<String, String>,
+    /// The digests of the files the problem's `[data]` binds, read once per
+    /// fit run; `FitDigest.data` and `.holdout_data` take them from here.
+    pub data: &'a BoundDataDigests,
     /// The method, with `starts` resolved.
     pub method: &'a Method,
     /// The resolved fit RNG seed.
@@ -129,8 +129,9 @@ pub(crate) fn structural_level_hash<T: ContentAddressed>(v: &T) -> LevelHash {
 
 /// Per-stream data digests from **pre-computed** SHA-256 hex hashes, sorted by
 /// name. Validates each is a well-formed 64-hex digest (a loud guard against a
-/// malformed hand-supplied hash). Distinct from [`build_data_digests`], which
-/// reads file *bytes*; this takes hashes the caller already holds.
+/// malformed hand-supplied hash). Distinct from
+/// [`crate::fit::stream_bindings::StreamBindings::digests`], which reads file
+/// *bytes*; this takes hashes the caller already holds.
 pub(crate) fn data_digests(data: &[(String, String)]) -> Result<Vec<DataDigest>, String> {
     let mut entries: Vec<&(String, String)> = data.iter().collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -385,33 +386,6 @@ pub(crate) fn ensure_finite<T: serde::Serialize>(v: &T) -> Result<(), String> {
         .map_err(|e| format!("cannot hash fit input: {e}"))
 }
 
-/// Per-stream data digests, sorted by stream name for a stable order.
-pub(crate) fn build_data_digests(paths: &IndexMap<String, String>) -> Result<Vec<DataDigest>, String> {
-    let mut entries: Vec<(&String, &String)> = paths.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-    let mut out = Vec::with_capacity(entries.len());
-    for (name, path) in entries {
-        let bytes = std::fs::read(path)
-            .map_err(|e| format!("cannot read data file '{}' ({}): {}", name, path, e))?;
-        out.push(DataDigest(ContentHash::digest_bytes(&bytes)));
-    }
-    Ok(out)
-}
-
-/// Content digests of the explicit `[data.holdout]` streams (gh#190), sorted
-/// by stream name. The fit.toml blob carries only the holdout *paths*, so
-/// without this an edit to a holdout file's bytes (same path) leaves the fit
-/// `run_id` unchanged and silently reuses a stale held-out score. Empty when
-/// no explicit holdout is configured (temporal `holdout_after` is a numeric
-/// threshold already in the blob, not a file). Reuses [`build_data_digests`],
-/// the same content-addressing the training streams use.
-fn build_holdout_digests(problem: &Problem) -> Result<Vec<DataDigest>, String> {
-    match problem.data.as_ref().and_then(|d| d.holdout.as_ref()) {
-        Some(holdout) => build_data_digests(holdout),
-        None => Ok(Vec::new()),
-    }
-}
-
 /// The fit-wide config blob hash: the whole problem half (include-by-default
 /// — so `ic_free`/`holdout`/`[config]`/priors can't be silently dropped) with
 /// the provenance slices normalized out ([`FIT_PROVENANCE_KEYS`]):
@@ -499,7 +473,7 @@ pub fn fit_level_digest(
     ir_version: &str,
     engine_version: &str,
     problem: &Problem,
-    data_paths: &IndexMap<String, String>,
+    data: &BoundDataDigests,
 ) -> Result<FitDigest, String> {
     Ok(FitDigest {
         // Presentation normalization is inside `from_model` (gh#442) — do not
@@ -509,8 +483,11 @@ pub fn fit_level_digest(
             ir_version.to_string(),
             EngineVersion(engine_version.to_string()),
         ),
-        data: build_data_digests(data_paths)?,
-        holdout_data: build_holdout_digests(problem)?,
+        data: data.identity_training(),
+        // gh#190: the explicit `[data.holdout]` files by content, so an edit
+        // to one (same path) re-keys the fit rather than reusing a stale
+        // held-out score. Empty for `holdout_after`, a number in the blob.
+        holdout_data: data.identity_holdout(),
         fit_toml: fit_config_blob_hash(problem)?,
         engine: EngineVersion(engine_version.to_string()),
     })
@@ -524,9 +501,9 @@ pub fn fit_level_hash(
     ir_version: &str,
     engine_version: &str,
     problem: &Problem,
-    data_paths: &IndexMap<String, String>,
+    data: &BoundDataDigests,
 ) -> Result<ContentHash, String> {
-    Ok(fit_level_digest(model, ir_version, engine_version, problem, data_paths)?.content_hash())
+    Ok(fit_level_digest(model, ir_version, engine_version, problem, data)?.content_hash())
 }
 
 /// The fit segment directory for a known fit-level hash:
@@ -612,7 +589,7 @@ fn fit_method_levels(ctx: &FitMethodCtx, target_length: u64) -> Result<Vec<Level
         ctx.ir_version,
         ctx.engine_version,
         ctx.problem,
-        ctx.data_paths,
+        ctx.data,
     )?;
 
     let method_config = MethodConfig {
@@ -1095,24 +1072,30 @@ mod tests {
     #[test]
     fn holdout_content_changes_the_fit_digest() {
         let dir = tempfile::tempdir().unwrap();
+        let train_path = dir.path().join("train.tsv");
+        std::fs::write(&train_path, b"time\tweekly_cases\n7\t1\n").unwrap();
         let holdout_path = dir.path().join("holdout.tsv");
-        let holdout_str = holdout_path.to_string_lossy().to_string();
-        // `minimal_config`'s base already declares `[data.observations]`;
-        // `[data.holdout]` is a new sub-table of the same `[data]`.
-        let cfg = minimal_config(&format!(
-            "[data.holdout]\nweekly_cases = \"{}\"\n",
-            holdout_str
-        ));
-        // Sanity: the holdout block parsed and points at our temp path.
-        assert_eq!(
-            cfg.data.as_ref().unwrap().holdout.as_ref().unwrap()["weekly_cases"],
-            holdout_str
-        );
+        let data = |holdout: &str| -> crate::fit::config_v2::DataSpec {
+            toml::from_str(&format!(
+                "[observations]\nweekly_cases = \"{}\"\n{holdout}",
+                train_path.display())).unwrap()
+        };
+        let path = format!("{}/../../../ocaml/golden/seir_observations.ir.json",
+            env!("CARGO_MANIFEST_DIR"));
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let model: ir::Model = serde_json::from_value(v["model"].clone()).unwrap();
+        let holdout_digests = |spec: &crate::fit::config_v2::DataSpec| {
+            crate::fit::stream_bindings::StreamBindings::resolve(&model, spec).unwrap()
+                .digests().unwrap().identity_holdout()
+        };
+        let with_holdout = data(&format!(
+            "[holdout]\nweekly_cases = \"{}\"\n", holdout_path.display()));
 
         std::fs::write(&holdout_path, b"time\tweekly_cases\n50\t10\n").unwrap();
-        let d1 = build_holdout_digests(&cfg).unwrap();
+        let d1 = holdout_digests(&with_holdout);
         std::fs::write(&holdout_path, b"time\tweekly_cases\n50\t999\n").unwrap();
-        let d2 = build_holdout_digests(&cfg).unwrap();
+        let d2 = holdout_digests(&with_holdout);
 
         assert_eq!(d1.len(), 1, "one holdout stream digested");
         assert_ne!(
@@ -1123,8 +1106,7 @@ mod tests {
 
         // No explicit holdout → empty (temporal holdout_after is a numeric
         // threshold already in the fit.toml blob, not a file).
-        let no_holdout = minimal_config("");
-        assert!(build_holdout_digests(&no_holdout).unwrap().is_empty());
+        assert!(holdout_digests(&data("")).is_empty());
     }
 
     /// gh#189: the *resolved* obs alignment is folded into the method identity,

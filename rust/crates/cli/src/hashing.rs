@@ -10,7 +10,10 @@
 //! favor of the `runid` model / fit-level digests. The functions here are one
 //! of two kinds:
 //!
-//! - **byte digests**: [`sha256_hex`], [`file_hash`] — hash some bytes.
+//! - **byte digests**: [`sha256_hex`] — hash some bytes. A fit's data files
+//!   are hashed once per run by
+//!   [`crate::fit::stream_bindings::StreamBindings::digests`], which the run
+//!   identity, `fit.meta.json` and the method provenance all read.
 //! - **path labels**: [`path_stem_slug`], [`slug`] — make a directory name
 //!   human-readable; the content hash that follows is the authoritative key.
 //!
@@ -22,25 +25,9 @@
 
 use sha2::{Sha256, Digest};
 
-/// Full 64-char SHA-256 of a byte slice, hex-encoded. Used where the
-/// caller wants a full content hash (e.g. fit_toml_hash in the top-level
-/// fit run record); the 8-char truncated form is only appropriate when
-/// the hash is paired with a richer identifier.
+/// Full 64-char SHA-256 of a byte slice, hex-encoded.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
-}
-
-/// Hash the contents of a file (first 4 bytes of SHA256, 8 hex chars).
-/// Returns `None` when the file can't be read — callers use this to
-/// surface `<unreadable>` in provenance records rather than failing
-/// the whole run.
-///
-/// Shared between simulate (data-file hashing for run metadata) and fit
-/// (data-file hashing for per-method provenance). Was
-/// `fit::provenance::file_content_hash` before the 2026-04-19 unification.
-pub fn file_hash(path: &str) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    Some(hex::encode(&Sha256::digest(&bytes)[..4]))
 }
 
 /// Extract a directory-safe stem from a file path: basename without
@@ -163,26 +150,5 @@ mod tests {
     fn slug_replaces_spaces_and_specials() {
         assert_eq!(slug("with sia!"), "with_sia_");
         assert_eq!(slug("r0=3.0"), "r0_3_0");
-    }
-
-    // ── file_hash ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn file_hash_returns_8_hex() {
-        let tmp = std::env::temp_dir().join(format!(
-            "camdl_hash_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::write(&tmp, b"hello world").unwrap();
-        let h = file_hash(tmp.to_str().unwrap()).unwrap();
-        assert_eq!(h.len(), 8, "file_hash should return 8 hex chars");
-        // SHA256("hello world")[..4] is b94d27b9 in hex.
-        assert_eq!(h, "b94d27b9");
-        std::fs::remove_file(&tmp).ok();
-    }
-
-    #[test]
-    fn file_hash_returns_none_for_missing() {
-        assert!(file_hash("/does/not/exist/at/all").is_none());
     }
 }

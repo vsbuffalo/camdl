@@ -714,8 +714,18 @@ pub struct FitSidecar {
     // between two identical runs by key order alone, which defeats diffing two
     // runs' metadata. The ordering requirement belongs to the artifact, so the
     // type says so.
+    /// Observation source → full SHA-256 (64 hex characters) of the training
+    /// file bound to it, in every `[data]` form: the digests the fit's run
+    /// identity folds (`StreamBindings::digests`). A sidecar written before
+    /// these were full digests holds the first 8 characters, and one written
+    /// before they were keyed by source keys a one-file-shorthand fit by leaf.
     #[serde(default)]
     pub data_hashes: BTreeMap<String, String>,
+    /// Observation source → full SHA-256 of the explicit `[data.holdout]` file
+    /// bound to it. Empty, and omitted, without one; also absent from sidecars
+    /// written before holdout files were recorded.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub holdout_hashes: BTreeMap<String, String>,
     /// Generated from `partition` by
     /// [`crate::roles::PartitionRecord::legacy_fields`] and written no other
     /// way.

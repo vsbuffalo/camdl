@@ -462,6 +462,7 @@ mod tests {
             source_model: None,
             fit_toml_hash: "cafe".repeat(16),
             data_hashes: std::collections::BTreeMap::from([("cases".to_string(), "d4ta".repeat(2))]),
+            holdout_hashes: Default::default(),
             estimated: vec!["beta".into(), "gamma".into()],
             fixed: std::collections::BTreeMap::from([("N0".to_string(), 1000.0)]),
             partition: None,

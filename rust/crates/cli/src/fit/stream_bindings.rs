@@ -13,7 +13,11 @@
 //! [`StreamBindings::resolve`] is the one place that reads `[data]` against a
 //! model; every command that loads, hashes or checks a fit's data asks it.
 
+use std::collections::BTreeMap;
+
 use indexmap::IndexMap;
+use runid::inputs::DataDigest;
+use runid::ContentHash;
 
 use super::config_v2::DataSpec;
 
@@ -94,6 +98,27 @@ impl StreamBindings {
         self.leaves.iter().filter(|(_, s)| s == source).map(|(l, _)| l.as_str()).collect()
     }
 
+    /// Read and hash every bound file once: training and holdout, by source.
+    /// An unreadable file is an error, as it is for the run identity built
+    /// from these digests.
+    pub(crate) fn digests(&self) -> Result<BoundDataDigests, String> {
+        let read = |map: &IndexMap<String, String>| -> Result<BTreeMap<String, (String, ContentHash)>, String> {
+            map.iter().map(|(source, path)| {
+                let bytes = std::fs::read(path)
+                    .map_err(|e| format!("cannot read data file '{source}' ({path}): {e}"))?;
+                Ok((source.clone(), (path.clone(), ContentHash::digest_bytes(&bytes))))
+            }).collect()
+        };
+        let training = read(&self.training)?;
+        let holdout = read(&self.holdout)?;
+        let identity_training = if self.shorthand {
+            self.leaves.iter().map(|(_, source)| DataDigest(training[source].1)).collect()
+        } else {
+            training.values().map(|(_, h)| DataDigest(*h)).collect()
+        };
+        Ok(BoundDataDigests { training, holdout, identity_training })
+    }
+
     /// The training files keyed as the run identities of `fit`, `survey`,
     /// `profile` and `pfilter --fit` have always been built over:
     /// `[data.observations]` as written (by source), and under the one-file
@@ -111,6 +136,52 @@ impl StreamBindings {
         self.leaves.iter()
             .map(|(leaf, source)| (leaf.clone(), self.training[source].clone()))
             .collect()
+    }
+}
+
+/// The SHA-256 of every file a fit binds, each read once
+/// ([`StreamBindings::digests`]). The run identity (`FitDigest.data`,
+/// `.holdout_data`), `fit.meta.json` and the per-method provenance all take
+/// their digests from here, so they cannot disagree about which bytes a fit
+/// read.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BoundDataDigests {
+    /// Source → (training file, its digest), sorted by source.
+    training: BTreeMap<String, (String, ContentHash)>,
+    /// Source → (holdout file, its digest), sorted by source; empty without
+    /// an explicit `[data.holdout]`.
+    holdout: BTreeMap<String, (String, ContentHash)>,
+    /// `FitDigest.data`, in the layout [`StreamBindings::identity_keyed_training`]
+    /// gives it.
+    identity_training: Vec<DataDigest>,
+}
+
+impl BoundDataDigests {
+    /// `FitDigest.data`: one digest per [`StreamBindings::identity_keyed_training`]
+    /// key, in key order.
+    pub(crate) fn identity_training(&self) -> Vec<DataDigest> {
+        self.identity_training.clone()
+    }
+
+    /// `FitDigest.holdout_data`: one digest per holdout source, in source
+    /// order.
+    pub(crate) fn identity_holdout(&self) -> Vec<DataDigest> {
+        self.holdout.values().map(|(_, h)| DataDigest(*h)).collect()
+    }
+
+    /// Source → full hex digest of its training file.
+    pub(crate) fn training_hex(&self) -> BTreeMap<String, String> {
+        self.training.iter().map(|(s, (_, h))| (s.clone(), h.to_hex())).collect()
+    }
+
+    /// Source → full hex digest of its holdout file.
+    pub(crate) fn holdout_hex(&self) -> BTreeMap<String, String> {
+        self.holdout.iter().map(|(s, (_, h))| (s.clone(), h.to_hex())).collect()
+    }
+
+    /// Every training file as (source, path, full hex digest), by source.
+    pub(crate) fn training_files(&self) -> impl Iterator<Item = (&str, &str, String)> {
+        self.training.iter().map(|(s, (p, h))| (s.as_str(), p.as_str(), h.to_hex()))
     }
 }
 

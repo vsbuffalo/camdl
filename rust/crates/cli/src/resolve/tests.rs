@@ -511,7 +511,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         ir_version: IRV,
         engine_version: ENGV,
         problem: &cfg.problem,
-        data_paths: &indexmap::IndexMap::new(),
+        data: &Default::default(),
         method: &method,
         seed: 7,
         deps: vec![],

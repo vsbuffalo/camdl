@@ -891,17 +891,22 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     let announce_stem = crate::hashing::path_stem_slug(&fit_path)
         .unwrap_or_else(|| "fit".to_string());
     let announce_ir_version = ir::IR_VERSION.trim().to_string();
-    // Real fits resolve their base `[data]` streams; synthetic fits have none
-    // (empty map → no data digests folded).
-    let fit_data_paths: indexmap::IndexMap<String, String> = config.problem.data_spec().ok()
-        .and_then(|ds| identity_data_paths(&ds, &model).ok())
-        .unwrap_or_default();
+    // Real fits hash the files their `[data]` binds, once: the identity, the
+    // sidecar and every method's provenance read these digests. Synthetic
+    // fits have none (no data digests folded); each synthetic cell hashes
+    // its own generated files below.
+    let fit_data_digests: stream_bindings::BoundDataDigests = match config.problem.data_spec() {
+        Ok(ds) => read_data_digests(ds, &model).unwrap_or_else(|e| {
+            out.fail(format!("error: fit-level identity: {}", e));
+        }),
+        Err(_) => Default::default(),
+    };
     let parent_fit_hash_ch = cas::fit_level_hash(
         &model,
         &announce_ir_version,
         crate::version::VERSION_SHORT,
         &config.problem,
-        &fit_data_paths,
+        &fit_data_digests,
     )
     .unwrap_or_else(|e| {
         out.fail(format!("error: fit-level identity: {}", e));
@@ -913,7 +918,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // segment.
     let fit_dir = announced_fit_dir.clone();
 
-    let fit_sidecar = build_fit_sidecar(&config, &fit_path, Some(&model));
+    let fit_sidecar = build_fit_sidecar(&config, &fit_path, Some(&model), &fit_data_digests);
     // gh#896: the identity of the config this run was read from, recorded on
     // every leaf it writes or reuses (`inputs.config_identities`), so a
     // `fit.toml` handle names the runs made from the file as it now reads, not
@@ -1230,18 +1235,17 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let method_name = method.algorithm.method_name();
         out.say(format_args!("\n── method: {} ──", method_name));
 
-        // Resolve data the runners load from (also feeds the data digests).
+        // The cell's data digests: the fit's own, read once above, or a
+        // synthetic cell's generated files, read here.
         let data_spec = sweep_config.data_spec().unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));
         });
-        // Expand the [data] shorthand (`file = "..."`) into the canonical
-        // per-stream map before hashing, so the shorthand and the
-        // verbose `[data.observations]` form produce identical method
-        // hashes when they reference the same data.
-        let effective_obs = identity_data_paths(&data_spec, &model)
-            .unwrap_or_else(|e| {
+        let data_digests = match &cell.data_override {
+            None => fit_data_digests.clone(),
+            Some(_) => read_data_digests(data_spec, &model).unwrap_or_else(|e| {
                 out.fail(format!("error: {}", e));
-            });
+            }),
+        };
         // The method level's `deps`: the content of a sourced `starts` rule's
         // file, so a regenerated source re-keys this run (gh#541), plus the
         // `--resume` base.
@@ -1282,7 +1286,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             ir_version: &ir_version_str,
             engine_version: crate::version::VERSION_SHORT,
             problem: &sweep_config,
-            data_paths: &effective_obs,
+            data: &data_digests,
             method: &method,
             seed,
             deps: deps.clone(),
@@ -1311,7 +1315,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         ir_version: &ir_version_str,
                         engine_version: crate::version::VERSION_SHORT,
                         problem: &cell_problem,
-                        data_paths: &effective_obs,
+                        data: &data_digests,
                         method: &file_method,
                         seed,
                         deps: file_deps.clone(),
@@ -1897,19 +1901,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let mle_path = format!("{}/mle_params.toml", method_dir.display());
                 let model_identity =
                     crate::resolve::model_identity_from_ir(&run_config.model_ir_json);
-                let data_hashes: Vec<(String, String)> = sweep_config.data_spec()
-                    .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")))
-                    .observations.iter()
-                    .map(|(name, path)| {
-                        let bytes = std::fs::read(path).unwrap_or_default();
-                        let hash = {
-                            use sha2::{Sha256, Digest};
-                            let result = Sha256::digest(&bytes);
-                            hex::encode(&result[..4])
-                        };
-                        (format!("{} ({})", name, path), hash)
-                    })
-                    .collect();
+                let data_hashes = provenance_data_hashes(&data_digests);
                 let rescore = &chain_results.loglik_eval.per_chain
                     [chain_results.loglik_eval.overall_winner_idx];
                 let metadata = provenance::MleMetadata {
@@ -2070,20 +2062,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         .unwrap_or_default();
                     let model_identity_for_prov =
                         crate::resolve::model_identity_from_ir(&model_ir_json);
-                    let data_hashes_for_prov: Vec<(String, String)> = sweep_config
-                        .data_spec()
-                        .map(|d| d.observations.iter()
-                            .map(|(name, path)| {
-                                let bytes = std::fs::read(path).unwrap_or_default();
-                                let hash = {
-                                    use sha2::{Sha256, Digest};
-                                    let result = Sha256::digest(&bytes);
-                                    hex::encode(&result[..4])
-                                };
-                                (format!("{} ({})", name, path), hash)
-                            })
-                            .collect())
-                        .unwrap_or_default();
+                    let data_hashes_for_prov = provenance_data_hashes(&data_digests);
                     // Deterministic ODE dt-check at θ̂ (gh#52, gh#227). On by
                     // default. gh#726: the method's dt_check field — CLI
                     // overrides were applied through `apply_cli_overrides`
@@ -2626,22 +2605,33 @@ fn base_warmup(
 // fit-level config archive for `fit table` config_diff is reworked in M3.3
 // alongside the fit-level outputs' CAS relocation.
 
-/// The data files a fit's run identity (`FitDigest.data`) is built over
-/// ([`stream_bindings::StreamBindings::identity_keyed_training`]). Every site
-/// that computes a fit-level or method-level identity calls this, so they
-/// agree.
-fn identity_data_paths(
+/// The digests of every file a fit's `[data]` binds, read once
+/// ([`stream_bindings::StreamBindings::digests`]). Every site that computes a
+/// fit-level or method-level identity takes its data digests from here, so
+/// they agree.
+fn read_data_digests(
     data: &config_v2::DataSpec,
     model: &ir::Model,
-) -> Result<indexmap::IndexMap<String, String>, String> {
-    Ok(stream_bindings::StreamBindings::resolve(model, data)?.identity_keyed_training())
+) -> Result<stream_bindings::BoundDataDigests, String> {
+    stream_bindings::StreamBindings::resolve(model, data)?.digests()
 }
 
-/// Content hash of each training file the problem binds, keyed by source
-/// ([`stream_bindings::StreamBindings::training_by_source`]), so the one-file
-/// shorthand records its file under every source it binds (gh#771). With no
-/// model in scope the shorthand cannot be expanded and the map is empty;
-/// `[data.observations]` is then hashed as written, which is by source too.
+/// `mle_params.toml`'s `[provenance.data]` entries: `"<source> (<path>)"` →
+/// the full SHA-256 of the training file, from the digests the run identity
+/// was built from.
+fn provenance_data_hashes(data: &stream_bindings::BoundDataDigests) -> Vec<(String, String)> {
+    data.training_files()
+        .map(|(source, path, hex)| (format!("{source} ({path})"), hex))
+        .collect()
+}
+
+/// `camdl fit diff`'s data side: the full SHA-256 of each training file a
+/// config binds, keyed by source
+/// ([`stream_bindings::StreamBindings::training_by_source`]). With no model in
+/// scope the shorthand cannot be expanded and the map is empty;
+/// `[data.observations]` is then hashed as written, which is by source too. A
+/// file that cannot be read is left out: this compares two configs, it builds
+/// no identity.
 fn resolved_data_hashes(
     problem: &config_v2::Problem,
     model: Option<&ir::Model>,
@@ -2655,7 +2645,7 @@ fn resolved_data_hashes(
     by_source
         .map(|obs| obs.into_iter()
             .filter_map(|(name, path)| {
-                crate::hashing::file_hash(&path).map(|h| (name, h))
+                std::fs::read(&path).ok().map(|b| (name, crate::hashing::sha256_hex(&b)))
             })
             .collect())
         .unwrap_or_default()
@@ -2732,6 +2722,7 @@ fn build_fit_sidecar(
     config: &config_v2::FitConfig,
     fit_path: &str,
     model: Option<&ir::Model>,
+    data: &stream_bindings::BoundDataDigests,
 ) -> crate::run_meta::FitSidecar {
     let problem = &config.problem;
     // Prefer the pre-compiled IR (set by `cmd_fit_run_v2`); `load_model`
@@ -2744,15 +2735,13 @@ fn build_fit_sidecar(
         .unwrap_or_default();
     let fit_toml_bytes = std::fs::read(fit_path).unwrap_or_default();
     let fit_toml_hash = crate::hashing::sha256_hex(&fit_toml_bytes);
-    // gh#771: hash the files the RESOLVED bindings name, by source
-    // (`StreamBindings`). The single-file `[data] file = "..."` shorthand
-    // leaves `[data.observations]` empty and binds one wide TSV to every
-    // source the model declares; hashing `observations` directly wrote an
-    // empty `data_hashes` for exactly that config style, and the `camdl
-    // compare` data preflight (gh#713) then reported such a fit as unchecked.
-    // With no model in scope (`fit where`) the shorthand cannot be expanded
-    // and the map stays empty.
-    let data_hashes = resolved_data_hashes(problem, model);
+    // gh#771: the digests of the files the RESOLVED bindings name, by source
+    // (`StreamBindings`), the same ones the run identity folds. The one-file
+    // `[data] file = "..."` shorthand leaves `[data.observations]` empty and
+    // binds one wide TSV to every source the model declares; hashing
+    // `observations` directly wrote an empty `data_hashes` for exactly that
+    // config style, and the `camdl compare` data preflight (gh#713) then
+    // reported such a fit as unchecked.
     // gh#75: resolve per-parameter prior provenance. This sidecar belongs to
     // the fit segment, which every method run on the problem shares
     // (`[method]` is not in the fit-level hash), so it records the problem's
@@ -2804,7 +2793,8 @@ fn build_fit_sidecar(
         // gh#542: the in-memory maps stay `HashMap`; the ARTIFACT is ordered.
         // Same seam gh#519 used for `FitState` — the ordering requirement
         // belongs to `fit.meta.json`, not to the computation that feeds it.
-        data_hashes: data_hashes.into_iter().collect(),
+        data_hashes: data.training_hex(),
+        holdout_hashes: data.holdout_hex(),
         // Per segment, generated from the segment's partition record.
         estimated: Vec::new(),
         fixed: Default::default(),
@@ -3004,10 +2994,10 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
     if let Ok(cfg) = config_v2::Problem::load(&from) {
         let seg = crate::util::load_model(&cfg.model.camdl).ok().and_then(|(m, _)| {
             let ir_version = ir::IR_VERSION.trim().to_string();
-            let data_paths = cfg.data_spec().ok()
-                .and_then(|ds| identity_data_paths(&ds, &m).ok())
+            let data = cfg.data_spec().ok()
+                .and_then(|ds| read_data_digests(ds, &m).ok())
                 .unwrap_or_default();
-            cas::fit_level_hash(&m, &ir_version, crate::version::VERSION_SHORT, &cfg, &data_paths)
+            cas::fit_level_hash(&m, &ir_version, crate::version::VERSION_SHORT, &cfg, &data)
                 .ok()
                 .map(|h| {
                     let root = crate::run_paths::output_root(None, cfg.output_dir.as_deref());
@@ -3661,8 +3651,8 @@ mod tests {
              chains = 1\nparticles = 10\niterations = 1\ncooling = 0.7\n"))
             .expect("fixture fit.toml parses").problem;
         let digest = |problem: &config_v2::Problem| {
-            let paths = identity_data_paths(problem.data_spec().unwrap(), &model).unwrap();
-            let d = cas::fit_level_digest(&model, "pin-ir", "pin-engine", problem, &paths).unwrap();
+            let data = read_data_digests(problem.data_spec().unwrap(), &model).unwrap();
+            let d = cas::fit_level_digest(&model, "pin-ir", "pin-engine", problem, &data).unwrap();
             let hex = |v: &[runid::inputs::DataDigest]| -> Vec<String> {
                 v.iter().map(|x| x.0.to_hex()).collect()
             };
@@ -3704,9 +3694,37 @@ mod tests {
         std::fs::write(&fit_path, &toml_src).unwrap();
         let config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
         let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
-        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model));
+        let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
+        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model), &data);
         assert_eq!(sidecar.data_hashes.keys().collect::<Vec<_>>(), vec!["cases"],
             "one entry, keyed by the source both leaves read: {:?}", sidecar.data_hashes);
+    }
+
+    /// `fit.meta.json` records the full SHA-256 of every bound file, training
+    /// and `[data.holdout]`, by source: the digests the run identity folds.
+    #[test]
+    fn sidecar_records_full_training_and_holdout_digests() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let train = tmp.path().join("train.tsv");
+        std::fs::write(&train, b"time\tpatch\tcases\n7\turban\t12\n7\trural\t3\n").unwrap();
+        let holdout = tmp.path().join("holdout.tsv");
+        std::fs::write(&holdout, b"time\tpatch\tcases\n14\turban\t18\n14\trural\t6\n").unwrap();
+        let fit_path = tmp.path().join("fit.toml");
+        let toml_src = format!(
+            "[model]\ncamdl = \"no-such-model.ir.json\"\n\
+             [data.observations]\ncases = \"{}\"\n[data.holdout]\ncases = \"{}\"\n\
+             [estimate]\nbeta = {{ bounds = [0.01, 0.5] }}\n[fixed]\nrho = 0.5\n\
+             [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+             chains = 1\nparticles = 10\niterations = 1\ncooling = 0.7\n",
+            train.display(), holdout.display());
+        std::fs::write(&fit_path, &toml_src).unwrap();
+        let config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
+        let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
+        let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
+        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model), &data);
+        let sha = |p: &std::path::Path| crate::hashing::sha256_hex(&std::fs::read(p).unwrap());
+        assert_eq!(sidecar.data_hashes, std::collections::BTreeMap::from([("cases".into(), sha(&train))]));
+        assert_eq!(sidecar.holdout_hashes, std::collections::BTreeMap::from([("cases".into(), sha(&holdout))]));
     }
 
     #[test]
@@ -3758,11 +3776,11 @@ cooling = 0.7
             model.observations.iter().map(|o| o.name.clone()).collect();
         assert_eq!(stream_names.len(), 2, "fixture must declare two streams");
 
+        let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
         let sidecar = build_fit_sidecar(
-            &config, fit_path.to_str().unwrap(), Some(&model));
+            &config, fit_path.to_str().unwrap(), Some(&model), &data);
 
-        let expected = crate::hashing::file_hash(data_path.to_str().unwrap())
-            .expect("the fixture data file must hash");
+        let expected = crate::hashing::sha256_hex(&std::fs::read(&data_path).unwrap());
         assert_eq!(
             sidecar.data_hashes.len(), stream_names.len(),
             "the shorthand must produce one digest per declared stream; got {:?}",
@@ -3807,7 +3825,9 @@ N0 = 1000
             std::fs::write(&fit_path, &toml_src).expect("write fit.toml");
             let config = config_v2::FitConfig::from_toml_str(&toml_src)
                 .expect("fixture fit.toml should parse");
-            build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model))
+            // The data digests are not under test here.
+            build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model),
+                &Default::default())
         };
         let pmmh = sidecar_for(
             "algorithm = \"pmmh\"\nbackend = \"chain_binomial\"\nchains = 1\n\
