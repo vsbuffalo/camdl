@@ -137,6 +137,18 @@ test: lint test-ocaml check-reactive-golden check-quantities-golden check-contra
 lint:
 	cd rust && $(CARGO_WRAP) cargo clippy --workspace --all-targets -- -D warnings
 
+# The `score` crate builds for a browser target (scoring-report proposal, test
+# 16): it shows the crate and its dependencies compile for
+# wasm32-unknown-unknown. It is not a check on file or thread access — std
+# compiles those calls for that target and fails them at run time; the crate's
+# own tests/source.rs is that check. Needs the target installed for the
+# toolchain pinned in rust/rust-toolchain.toml
+# (`cd rust && rustup target add wasm32-unknown-unknown`), so it is run by CI's
+# `test` job and not by `make test`.
+.PHONY: check-score-wasm
+check-score-wasm:
+	cd rust && $(CARGO_WRAP) cargo check -p score --target wasm32-unknown-unknown
+
 # Inner-loop gate: the whole Rust workspace (unit + integration + doctests) via
 # `cargo test`. Deliberately SKIPS the slow cross-language / doc phases
 # (test-ocaml's dune runtest, check-reactive-golden, test-integration's OCaml→Rust

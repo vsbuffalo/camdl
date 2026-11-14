@@ -83,6 +83,13 @@ jobs:
         # the gate cannot go red for anything in the real crates (gh#743).
         run: cd rust && cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: score builds for wasm32
+        # The target is added from rust/ so it lands on the toolchain pinned by
+        # rust/rust-toolchain.toml, which is the one `make` builds with.
+        run: |
+          cd rust && rustup target add wasm32-unknown-unknown
+          cd .. && make check-score-wasm
+
       # make test-rust builds camdlc + the release binaries, symlinks camdlc onto
       # PATH (so spawned `camdl` finds it), and runs `cargo test --workspace
       # --exclude sim --no-fail-fast`.
