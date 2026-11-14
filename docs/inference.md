@@ -732,6 +732,21 @@ camdl profile model.camdl --starts from_params=p.toml --data cases.tsv \
 Output: TSV with R₀, max loglik at each grid point, and the estimated values of
 all other parameters.
 
+With `--fit`, `--rw-sd` is optional. Each cell then estimates the config's
+`[estimate]` less the swept and pinned parameters, and an IF2 cell steps each by
+its `[estimate]` `rw_sd`, or the automatic default from its bounds, as `fit run`
+does; an `nl-*` cell reads no step at all. A swept parameter belongs in
+`[estimate]`: its entry's bounds bound the grid, and each cell pins it and
+estimates the rest (listing it in `[fixed]` is refused). Given with `--fit`, a
+`--rw-sd` list overrides the steps and must name every `[estimate]` parameter
+that is not swept or pinned, since one it left out would be held at its start.
+Without `--fit`, `--rw-sd` names the estimated set and is required.
+
+```bash
+camdl profile model.camdl --fit fit.toml \
+    --sweep "gamma=lin(0.08,0.2,13)" --algorithm nl-sbplx --backend ode
+```
+
 With `--fit`, every cell scores the data `fit run` of that config trains on. A
 config that declares `[data] holdout_after` is refused, since a profile does not
 truncate the series and would fit the held-out rows; `[data.holdout]` files are

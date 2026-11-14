@@ -261,6 +261,41 @@ pub(crate) fn refuse_if2_flags_for_nlopt(
     Ok(())
 }
 
+/// Neither `--rw-sd` nor `--fit` names what a cell estimates.
+const PROFILE_NO_ESTIMATED_SET: &str = "error: nothing names the parameters each cell \
+    estimates. Pass `--fit FIT.toml` (its [estimate], less the swept and pinned \
+    parameters, is the estimated set, with each IF2 step its `rw_sd` or the automatic \
+    default), or `--rw-sd NAME=auto,...` (or `--rw-sd auto`: every parameter not \
+    swept or pinned). An IF2 step is `NAME=SD`; an nl-* cell takes names only.";
+
+/// With `--fit`, an explicit `--rw-sd NAME=…` list that leaves out an
+/// `[estimate]` parameter (not swept, not pinned) would hold that parameter at
+/// its start in every cell, unannounced, while the config says it is
+/// estimated. The message names the parameters and both ways out.
+pub(crate) fn refuse_rw_sd_list_short_of_estimate(
+    fit_estimate: &indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
+    exclude: &std::collections::HashSet<String>,
+    listed: &HashMap<String, Option<f64>>,
+    fit_path: &str,
+) -> Option<String> {
+    let left_out: Vec<&str> = fit_estimate.keys()
+        .filter(|n| !exclude.contains(*n) && !listed.contains_key(*n))
+        .map(String::as_str)
+        .collect();
+    if left_out.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "--rw-sd lists the estimated parameters, and it leaves out {} of the --fit \
+         config '{fit_path}' [estimate], which every cell would then hold at its start. \
+         Add {} to --rw-sd (`NAME=auto` takes the automatic step), drop --rw-sd to \
+         estimate the config's [estimate], or move {} to [fixed] in a copy of the config.",
+        left_out.join(", "),
+        if left_out.len() == 1 { "it" } else { "them" },
+        if left_out.len() == 1 { "it" } else { "them" },
+    ))
+}
+
 /// The refusal of a `--fit` config whose `[data] holdout_after` withholds
 /// rows from training. `fit run` drops every row after the cutoff before it
 /// fits (`fit::runner::apply_holdout_declaration`); profile scores the whole
@@ -447,13 +482,17 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     struct FocalGrid { name: String, values: Vec<f64>, param_idx: usize }
     let mut focal_grids: Vec<FocalGrid> = Vec::new();
 
-    let rw_sd = a.rw_sd.as_ref().unwrap_or_else(|| {
-        out.fail("error: --rw-sd required (e.g., --rw-sd \"sigma=0.01\" or --rw-sd auto)");
-    });
-    let rw_sd_auto = matches!(rw_sd, crate::args::types::RwSd::Auto);
-    let rw_sd_map_raw: HashMap<String, Option<f64>> = match rw_sd {
-        crate::args::types::RwSd::Auto => HashMap::new(),
-        crate::args::types::RwSd::Map(m) => m.clone(),
+    // What names the estimated set: `--rw-sd` when given, else the --fit
+    // config's [estimate] (less swept and pinned names), whose `rw_sd` entries
+    // or automatic defaults are each IF2 cell's steps, as in `fit run`.
+    // Without either there is nothing that says what a cell estimates.
+    if a.rw_sd.is_none() && a.fit.is_none() {
+        out.fail(PROFILE_NO_ESTIMATED_SET);
+    }
+    let rw_sd_auto = matches!(a.rw_sd, Some(crate::args::types::RwSd::Auto));
+    let rw_sd_map_raw: HashMap<String, Option<f64>> = match &a.rw_sd {
+        Some(crate::args::types::RwSd::Map(m)) => m.clone(),
+        Some(crate::args::types::RwSd::Auto) | None => HashMap::new(),
     };
 
     // Load model (pre-resolution). `mut` because the gh#34
@@ -1052,18 +1091,32 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let exclude: std::collections::HashSet<String> = focal_names.iter()
         .chain(fixed_names.iter()).cloned().collect();
 
-    let param_names_to_estimate: Vec<String> = if rw_sd_auto {
-        model.parameters.iter()
+    let param_names_to_estimate: Vec<String> = match &a.rw_sd {
+        Some(crate::args::types::RwSd::Auto) => model.parameters.iter()
             .filter(|p| !exclude.contains(&p.name))
             .filter(|p| compiled.param_index.contains_key(p.name.as_str()))
             .map(|p| p.name.clone())
-            .collect()
-    } else {
-        rw_sd_map_raw.keys()
+            .collect(),
+        Some(crate::args::types::RwSd::Map(_)) => rw_sd_map_raw.keys()
             .filter(|name| !exclude.contains(*name))
             .cloned()
-            .collect()
+            .collect(),
+        None => fit_estimate.keys()
+            .filter(|name| !exclude.contains(*name))
+            .cloned()
+            .collect(),
     };
+    // An explicit `--rw-sd` list with --fit names the estimated set itself, so
+    // an [estimate] parameter it leaves out would be held at its start in
+    // every cell while the config, and the record of the run, say it is
+    // estimated. Refused, naming the parameters.
+    if let (Some(crate::args::types::RwSd::Map(_)), Some(fit_path)) = (&a.rw_sd, a.fit.as_ref()) {
+        if let Some(msg) = refuse_rw_sd_list_short_of_estimate(
+            &fit_estimate, &exclude, &rw_sd_map_raw, &fit_path.to_string_lossy(),
+        ) {
+            out.fail(format!("error: {msg}"));
+        }
+    }
 
     // The scenario × estimate rule, on the set this profile estimates. The
     // check at the top of the function reads the fit config's `[estimate]`;
@@ -1071,10 +1124,15 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // swept or pinned under `auto`), which a fit config need not list, and
     // which exists without `--fit` (run spec §1.3).
     if let Some(scenario) = scenario_name.as_deref() {
+        let fit_path_str: Option<String> = a.fit.as_ref().map(|p| p.to_string_lossy().into_owned());
         let estimated: Vec<&str> = param_names_to_estimate.iter().map(|n| n.as_str()).collect();
         let clash = crate::params_resolver::scenario_estimate_collision(
             &model_pre, scenario, &estimated,
-            crate::params_resolver::EstimatedBy::RwSd { auto: rw_sd_auto },
+            match (&a.rw_sd, fit_path_str.as_deref()) {
+                (None, Some(fit_path)) =>
+                    crate::params_resolver::EstimatedBy::FitToml(fit_path),
+                _ => crate::params_resolver::EstimatedBy::RwSd { auto: rw_sd_auto },
+            },
         ).unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
         if let Some(msg) = clash {
             out.fail(format!("error: {msg}"));
@@ -1170,7 +1228,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 if !if2_params.iter().any(|p| p.name == *name) {
                     let why = if focal_names.contains(name) { "it is swept (--sweep)" }
                         else if fixed_names.contains(name) { "it is pinned" }
-                        else { "it is not in --rw-sd" };
+                        else { "it is not in the estimated set (--rw-sd, or the --fit [estimate])" };
                     out.fail(format!(
                         "error: simplex_groups[{gi}] member '{name}' is not estimated by this \
                          profile: {why}. The members of a simplex group sum to one and are \

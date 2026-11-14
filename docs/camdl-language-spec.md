@@ -5747,7 +5747,10 @@ to say which stream (or indexed family) the file is. The legacy `--flow` /
 `--obs-model` projection-override flags were removed in the 2026-05-25 CLI UX
 revision.
 
-**`--rw-sd`** (`camdl profile`): Perturbation scale per parameter. Three modes:
+**`--rw-sd`** (`camdl profile`): Perturbation scale per parameter. Optional
+with `--fit`, whose `[estimate]` (less swept and pinned parameters) is then the
+estimated set, each IF2 step its `rw_sd` or the automatic default; given with
+`--fit`, a list must name every such `[estimate]` parameter. Three modes:
 
 - Explicit: `--rw-sd "R0=5,sigma=0.01"` — the list IS the partition. Parameters
   not listed are held fixed. No `--fixed` needed.

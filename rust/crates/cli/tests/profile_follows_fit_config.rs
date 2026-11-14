@@ -250,3 +250,74 @@ fn a_swept_fixed_parameter_is_refused() {
     let o = profile(tmp.path(), &args);
     assert_refused(&o, "a swept [fixed] parameter", &["'gamma' is in both `--sweep`", "[fixed]"]);
 }
+/// The `[mle]` table of every `mle.toml` the run wrote.
+fn mle_tables(dir: &Path) -> Vec<toml::Table> {
+    let files = find_all(&dir.join("results"), "mle.toml");
+    assert!(!files.is_empty(), "no mle.toml under {}", dir.display());
+    files
+        .iter()
+        .map(|f| {
+            let t: toml::Table = std::fs::read_to_string(f).unwrap().parse().unwrap();
+            t["mle"].as_table().expect("[mle]").clone()
+        })
+        .collect()
+}
+
+/// Item 2 of gh#1059: an nl-* cell reads no step, so with `--fit` it needs no
+/// `--rw-sd`; it estimates `[estimate]` less the swept `gamma`, i.e. `beta`.
+#[test]
+fn an_nlopt_profile_of_a_fit_config_needs_no_rw_sd() {
+    let tmp = workdir(&fit_toml(""));
+    let dir = tmp.path();
+    let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.12,0.15",
+        "--n-starts", "1", "--starts", "single"];
+    args.extend_from_slice(&NL);
+    let o = profile(dir, &args);
+    assert_ok(&o, "nl-sbplx --fit without --rw-sd");
+    for mle in mle_tables(dir) {
+        let names: Vec<&String> = mle.keys().collect();
+        assert_eq!(names, vec!["beta"], "each cell estimates [estimate] less the swept gamma");
+    }
+}
+
+/// An IF2 profile of a fit config steps each parameter by its `[estimate]`
+/// `rw_sd` or the automatic default, as `fit run` does; `--rw-sd` is optional.
+#[test]
+fn an_if2_profile_of_a_fit_config_takes_the_automatic_step() {
+    let tmp = workdir(&fit_toml(""));
+    let dir = tmp.path();
+    let o = profile(dir, &["--fit", "fit.toml", "--sweep", "gamma=0.15", "--n-starts", "1",
+        "--starts", "single", "--particles", "50", "--iterations", "2"]);
+    assert_ok(&o, "if2 --fit without --rw-sd");
+    let tables = mle_tables(dir);
+    assert_eq!(tables.len(), 1);
+    assert!(tables[0].contains_key("beta") && !tables[0].contains_key("gamma"),
+        "the cell estimates beta and pins gamma: {:?}", tables[0]);
+}
+
+/// Without `--fit` nothing but `--rw-sd` names the estimated set.
+#[test]
+fn without_a_fit_config_the_estimated_set_must_be_named() {
+    let tmp = workdir(&fit_toml(""));
+    let mut args: Vec<&str> = vec!["--data", "weekly_cases.tsv", "--sweep", "gamma=0.15",
+        "--fixed", "N0=10000", "--fixed", "I0=10", "--fixed", "rho=0.6", "--fixed", "k=10"];
+    args.extend_from_slice(&NL);
+    let o = profile(tmp.path(), &args);
+    assert_refused(&o, "no --fit, no --rw-sd", &["--fit", "--rw-sd NAME=auto"]);
+}
+
+/// With `--fit`, an explicit `--rw-sd` list that leaves out an `[estimate]`
+/// parameter would hold it at its start in every cell, while the config says
+/// it is estimated: refused, naming it.
+#[test]
+fn an_rw_sd_list_short_of_the_fit_estimate_is_refused() {
+    let fit = fit_toml("").replace(
+        "[fixed]\nN0 = 10000\nI0 = 10\nrho = 0.6\n",
+        "rho = { bounds = [0.1, 0.9], start = 0.6 }\n\n[fixed]\nN0 = 10000\nI0 = 10\n");
+    let tmp = workdir(&fit);
+    let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
+        "--rw-sd", "beta=auto", "--n-starts", "1", "--starts", "single"];
+    args.extend_from_slice(&NL);
+    let o = profile(tmp.path(), &args);
+    assert_refused(&o, "--rw-sd beta with rho also in [estimate]", &["leaves out rho"]);
+}

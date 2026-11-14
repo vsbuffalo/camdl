@@ -7198,7 +7198,12 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 --rw-sd SPEC                NAME=SD,... or `auto`: every parameter that is not
                             swept, pinned (--fixed, --fixed-file, [fixed]) or a
                             model constant (`let`). An nl-* cell takes names
-                            only (NAME=auto, or `auto`) and refuses an SD
+                            only (NAME=auto, or `auto`) and refuses an SD.
+                            Optional with --fit: the estimated set is then the
+                            config's [estimate] less swept and pinned names,
+                            each IF2 step its `rw_sd` or the automatic default;
+                            a list given with --fit must name every such
+                            [estimate] parameter. Required without --fit
 --algorithm NAME            per-cell algorithm (default if2); pair with --backend
 --backend NAME              chain_binomial (default) or ode
 --fit PATH                  fit.toml supplying the estimated set, bounds, the

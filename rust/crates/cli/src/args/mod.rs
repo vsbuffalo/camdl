@@ -1767,6 +1767,11 @@ Examples:
   camdl profile sir.camdl --data cases.tsv \\
       --sweep \"tau=lin(-35,-1,30)\" --fixed gamma=0.1 --rw-sd auto
 
+  # Deterministic per-cell MLE on the ODE backend; the estimated set
+  # and bounds come from the fit config's [estimate] (no --rw-sd)
+  camdl profile sir.camdl --fit fit.toml \\
+      --sweep \"gamma=lin(0.08,0.2,13)\" --algorithm nl-sbplx --backend ode
+
   # Warm-start chains from a hand-written params TOML
   camdl profile sir.camdl --data cases.tsv \\
       --sweep \"R0=lin(0.5,5,20)\" --starts from_params=truth.toml \\
@@ -1934,10 +1939,15 @@ pub struct ProfileArgs {
     #[arg(long, value_name = "N")]
     pub cooling_target_iters: Option<usize>,
 
-    /// The estimated set, and for IF2 each parameter's random-walk SD:
-    /// `NAME=SD,...`, `NAME=auto,...`, or `auto` (every parameter not swept,
-    /// pinned or a model constant). An nl-* cell perturbs nothing, so it takes
-    /// names only (`NAME=auto` or `auto`) and refuses an SD.
+    /// Optional with `--fit`: without it each cell estimates the fit
+    /// config's `[estimate]` less the swept and pinned parameters, and an IF2
+    /// cell steps each by its `[estimate]` `rw_sd`, or the automatic default
+    /// from its bounds, as `fit run` does. Given, it names the estimated set
+    /// and overrides the steps: `NAME=SD,...`, `NAME=auto,...`, or `auto`
+    /// (every parameter not swept, pinned or a model constant). With `--fit`
+    /// a list must name every `[estimate]` parameter that is not swept or
+    /// pinned. Required without `--fit`. An nl-* cell perturbs nothing, so it
+    /// takes names only (`NAME=auto` or `auto`) and refuses an SD.
     #[arg(long)]
     pub rw_sd: Option<RwSd>,
 
