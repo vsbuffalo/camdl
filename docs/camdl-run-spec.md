@@ -7266,11 +7266,20 @@ not calibrate, `se(Δ)`'s Newey–West/HLN construction and its small-`T`
 unreliability (Sivula, Magnusson & Vehtari, arXiv:2008.10296) — live in that
 guide (`docs/methods/model-comparison.md`), not under every table.
 
-The JSON keeps every field: `optimism_caveat`, `evidence_scale_note`,
-`se_caveat` (populated below 100 scored steps), `data_mismatch` and
-`data_unchecked`, `data_changed` and `data_change_unchecked`,
-`data_compared_on_prefix`, `filter_settings_mismatch` and
-`filter_settings_unchecked`, and `filter_noise_unassessed`, plus per-row
+A comparison that renders only because an `--allow-*` flag waived a failed check
+states each such override once in every format: one `⚠` line in the `table` and
+`md` footers naming the flag, the rows it concerned, what differed and what that
+does to the reading of the table, and one entry of the JSON's top-level
+`overrides` array (`flag`, `rows`, `finding`, `consequence`; an empty array when
+every check passed). A flag given to a comparison whose check passes waived
+nothing and is not listed. The checks run once, before any rendering, and every
+format states that one outcome.
+
+The JSON keeps every field: `overrides`, `optimism_caveat`,
+`evidence_scale_note`, `se_caveat` (populated below 100 scored steps),
+`data_mismatch` and `data_unchecked`, `data_changed` and
+`data_change_unchecked`, `data_compared_on_prefix`, `filter_settings_mismatch`
+and `filter_settings_unchecked`, and `filter_noise_unassessed`, plus per-row
 `provenance`, `conditioning`, `derivation`, `lag1_autocorr_delta_elpd`,
 `mc_se_elpd`, `warnings` and `pit_cov90_warning`. It is the machine surface and
 loses nothing by repeating itself.

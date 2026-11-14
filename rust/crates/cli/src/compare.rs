@@ -364,22 +364,26 @@ fn check_training_freshness(
     DataFreshness { findings, row_unchecked: None }
 }
 
-/// The statement that rows were scored on data changed since their fit ran,
-/// or `None`. The refusal and the `--allow-changed-data` renderings share it.
-fn changed_data_note(rows: &[Row]) -> Option<String> {
+/// The rows scored on data changed since their fit ran, and which files, or
+/// `None`. The refusal and the `--allow-changed-data` renderings share it.
+fn changed_data(rows: &[Row]) -> Option<Mismatch> {
+    let mut concerned: Vec<String> = Vec::new();
     let changed: Vec<String> = rows.iter().flat_map(|r| {
         r.freshness.findings.iter().filter_map(move |f| match &f.check {
-            FileCheck::Changed { recorded, current } => Some(format!(
+            FileCheck::Changed { recorded, current } => Some((r.name.clone(), format!(
                 "'{}' stream '{}' ({}): the fit recorded {recorded}, the file now \
                  hashes to {current}",
-                r.name, f.stream, f.path)),
+                r.name, f.stream, f.path))),
             _ => None,
         })
+    }).map(|(name, text)| {
+        if !concerned.contains(&name) { concerned.push(name); }
+        text
     }).collect();
-    (!changed.is_empty()).then(|| format!(
-        "data changed after the fit ran: {}. `compare` re-reads these \
-         files, so the row is scored on data its θ̂ was not fitted to.",
-        changed.join("; ")))
+    (!changed.is_empty()).then(|| Mismatch {
+        rows: concerned,
+        finding: format!("data changed after the fit ran: {}", changed.join("; ")),
+    })
 }
 
 /// The scope of the changed-data check: every derived file, or derived row,
@@ -476,7 +480,6 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
 
     let config_path: Option<String> = a.config.clone();
     let baseline: Option<String> = a.baseline.clone();
-    let allow_mismatched_horizon = a.allow_mismatched_horizon;
     let positional: Vec<String> = a.paths.clone();
     let derive = DeriveSettings {
         particles: a.particles,
@@ -547,157 +550,19 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         Row { name: m.name, path: m.path, trace, data, freshness }
     }).collect();
 
-    // Fairness, part zero (gh#585, Stage 3.4): rows with different
-    // conditioning modes are never differenced. An in-sample score (θ saw
-    // the scored window) and a held-out score (θ sealed before it) answer
-    // different questions; their Δ is meaningless however displayed, so
-    // there is no override — the fix is to make the modes agree.
-    {
-        use sim::inference::prequential::Conditioning;
-        use std::mem::discriminant;
-        let mixed = rows.windows(2).any(|w|
-            discriminant(&w[0].trace.conditioning)
-                != discriminant(&w[1].trace.conditioning));
-        if mixed {
-            let mut message = "error: the compared traces mix conditioning modes:".to_string();
-            for r in &rows {
-                let kind = match &r.trace.conditioning {
-                    Conditioning::InSample =>
-                        "in_sample (θ saw the scored window)".to_string(),
-                    Conditioning::HoldOutTail { train_end, .. } =>
-                        format!("hold_out_tail (θ sealed at t = {train_end})"),
-                };
-                message.push_str(&format!("\n       {}: {}", r.name, kind));
-            }
-            message.push_str("\n       Declare the same holdout in every compared fit, or pass \
-                       --in-sample to score all of them in-sample.");
-            refuse(&out, message);
-        }
-        // All held-out: the sealed boundaries must also agree, or the rows
-        // score different windows (the axis check would refuse anyway, but
-        // this names the actual cause).
-        let ends: Vec<f64> = rows.iter().filter_map(|r| match &r.trace.conditioning {
-            Conditioning::HoldOutTail { train_end, .. } => Some(*train_end),
-            _ => None,
-        }).collect();
-        if ends.windows(2).any(|w| !same_sealed_boundary(w[0], w[1])) {
-            refuse(&out, format!("error: the compared fits seal training at different \
-                       boundaries: {ends:?}\n       Held-out scores over different windows are not \
-                       commensurable; declare the same holdout_after in every \
-                       compared fit."));
-        }
-    }
+    // Every cross-row check, once: a refusal exits here; what renders states
+    // the outcome, overrides included, from this one value (`Preflight`).
+    let checks = preflight(&rows, &Waivers::from_args(a)).unwrap_or_else(|e| refuse(&out, e));
 
-    // Provenance preflight (Stage 4.1): a plug-in trace (under-dispersed —
-    // one θ) against a posterior mixture is a Δ between predictives of
-    // different dispersion. Overridable, unlike conditioning: an optimizer
-    // fit has no posterior and comparing it against a Bayesian fit is a
-    // legitimate ask — as long as the reader chose it.
-    {
-        use sim::inference::prequential::Provenance;
-        use std::mem::discriminant;
-        let mixed = rows.windows(2).any(|w|
-            discriminant(&w[0].trace.provenance)
-                != discriminant(&w[1].trace.provenance));
-        if mixed && !a.allow_mixed_provenance {
-            let mut message = "error: the compared traces mix provenance kinds:".to_string();
-            for r in &rows {
-                let kind = match &r.trace.provenance {
-                    Provenance::PlugIn => "plug_in (a single θ)".to_string(),
-                    Provenance::Posterior { n_draws } =>
-                        format!("posterior (mixture over {n_draws} draws)"),
-                };
-                message.push_str(&format!("\n       {}: {}", r.name, kind));
-            }
-            message.push_str("\n       A plug-in predictive is under-dispersed relative to a \
-                       posterior mixture, so the Δ confounds model difference with \
-                       dispersion treatment.\n       Pass --draws 1 to score every fit plug-in, or \
-                       --allow-mixed-provenance to render anyway.");
-            refuse(&out, message);
-        }
-    }
-
-    // Fairness: T_score (n_scored) must agree across rows unless overridden.
-    let t_scores: Vec<usize> = rows.iter().map(|r| r.trace.n_scored()).collect();
-    let t_ref = t_scores[0];
-    let t_mismatch = t_scores.iter().any(|&t| t != t_ref);
-    if t_mismatch && !allow_mismatched_horizon {
-        refuse(&out, format!("error: T_score differs across models: {:?}\n       \
-            Δelpd and Δcrps are not commensurable.\n       \
-            Pass --allow-mismatched-horizon to render (uncomparable Δ columns → '—').", t_scores));
-    }
-
-    // Fairness, part two: equal T_score is not an equal observation AXIS.
-    // `paired_delta` zips steps by index, so two traces scoring the same NUMBER
-    // of observations at different TIMES — a hole in one series, a different
-    // `t0` — produce a Δelpd, an se(Δ) and a deciban verdict computed across
-    // two different axes, rendered as a confident answer. This is not
-    // overridable by `--allow-mismatched-horizon`: that flag says "render the Δ
-    // columns as '—' because the horizons differ", whereas this is a pairing
-    // that is meaningless however it is displayed.
-    //
-    // With the horizons differing (and the flag set — otherwise refused
-    // above), the flag waives the times only one row scored, and nothing
-    // else: at every time both rows scored, the stream-set (gh#570) and
-    // coverage (gh#833) checks still hold.
-    let pairing = if t_mismatch {
-        check_shared_times(&rows)
-    } else {
-        check_shared_observation_axis(&rows)
-    };
-    if let Err(e) = pairing {
-        refuse(&out, format!("error: {e}"));
-    }
-
-    // Fairness, part three (gh#713): the compared fits must have been bound to
-    // the same observations. Two fits on different data produce a Δelpd that is
-    // part model difference and part data difference, with nothing in the table
-    // to say which. Overridable, unlike the axis checks: comparing a fit on
-    // revised counts against the fit on the original ones is a real thing to
-    // want, as long as the reader knows the Δ is confounded.
-    // The note naming what the check covered, and the confound when it is
-    // overridden, are emitted by the renderers (`warning_lines`) so they travel
-    // with the artifact; only the refusal is a terminal-side error.
-    let data_entries: Vec<(&str, &DataIdentity)> =
-        rows.iter().map(|r| (r.name.as_str(), &r.data)).collect();
-    if let Err(e) = check_shared_data(&data_entries) {
-        if !a.allow_data_mismatch {
-            refuse(&out, format!("error: {e}"));
-        }
-    }
-
-    // A derived row's training file edited after its fit ran is scored at a
-    // θ̂ fitted to other bytes. The same class as the shared-data refusal, and
-    // overridable for the same reason; the statement then travels with the
-    // artifact (`warning_lines`, `data_changed`).
-    if let Some(note) = changed_data_note(&rows) {
-        if !a.allow_changed_data {
-            refuse(&out, format!(
-                "error: {note}\n       Re-run the fit on the current file, restore the \
-                 file the fit read, or pass --allow-changed-data to render anyway."));
-        }
-        // Rendered under the override: each trace scored on a changed file
-        // records which streams' files it was.
-        for r in &mut rows {
-            let streams: Vec<String> = r.freshness.findings.iter()
-                .filter(|f| matches!(f.check, FileCheck::Changed { .. }))
-                .map(|f| f.stream.clone())
-                .collect();
-            if let (false, Some(d)) = (streams.is_empty(), r.trace.derivation.as_mut()) {
-                d.overrides.push(TraceOverride::ChangedData { streams });
-            }
-        }
-    }
-
-    // Two rows scored at different particle or replicate counts differ partly
-    // by the filters. Overridable: comparing a cheap explicit trace against a
-    // derived row is a legitimate ask once the reader knows.
-    if let Some(note) = filter_settings_mismatch_note(&rows) {
-        if !a.allow_mismatched_filter_settings {
-            refuse(&out, format!(
-                "error: {note}\n       Re-derive every row with the same --particles and \
-                 --replicates, or pass --allow-mismatched-filter-settings to render \
-                 anyway."));
+    // Rendered under `--allow-changed-data`: each trace scored on a changed
+    // file records which streams' files it was.
+    for r in &mut rows {
+        let streams: Vec<String> = r.freshness.findings.iter()
+            .filter(|f| matches!(f.check, FileCheck::Changed { .. }))
+            .map(|f| f.stream.clone())
+            .collect();
+        if let (false, Some(d)) = (streams.is_empty(), r.trace.derivation.as_mut()) {
+            d.overrides.push(TraceOverride::ChangedData { streams });
         }
     }
 
@@ -735,9 +600,9 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     }
 
     let rendered = match fmt_final {
-        Format::Json  => render_json(&rows, base_idx, &metrics_chosen),
-        Format::Md    => render_md(&rows, base_idx, &metrics_chosen, t_mismatch),
-        Format::Table => render_table(&rows, base_idx, &metrics_chosen, t_mismatch),
+        Format::Json  => render_json(&rows, base_idx, &metrics_chosen, &checks),
+        Format::Md    => render_md(&rows, base_idx, &metrics_chosen, &checks),
+        Format::Table => render_table(&rows, base_idx, &metrics_chosen, &checks),
     };
     out.report_raw(rendered);
 }
@@ -759,6 +624,327 @@ fn same_sealed_boundary(a: f64, b: f64) -> bool {
 /// every such refusal always has, distinct from the 1 of an input error.
 fn refuse(out: &crate::out::Out, message: String) -> ! {
     out.error(crate::out::CommandError { code: crate::out::ExitCode(2), message, hint: None }).exit()
+}
+
+// ── the cross-row checks, computed once (D13) ───────────────────────────
+
+/// A cross-row check that a `compare` flag lets a comparison render through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Waiver {
+    MismatchedHorizon,
+    MixedProvenance,
+    DataMismatch,
+    ChangedData,
+    MismatchedFilterSettings,
+}
+
+impl Waiver {
+    fn flag(self) -> &'static str {
+        match self {
+            Waiver::MismatchedHorizon => "--allow-mismatched-horizon",
+            Waiver::MixedProvenance => "--allow-mixed-provenance",
+            Waiver::DataMismatch => "--allow-data-mismatch",
+            Waiver::ChangedData => "--allow-changed-data",
+            Waiver::MismatchedFilterSettings => "--allow-mismatched-filter-settings",
+        }
+    }
+
+    /// What the failed check does to the reading of the table, in one
+    /// sentence. The refusal and every rendering under the flag share it.
+    fn consequence(self) -> &'static str {
+        match self {
+            Waiver::MismatchedHorizon =>
+                "Δ columns suppressed ('—' in the table, null in the JSON): a Δ pairs \
+                 two rows' scores observation by observation, and these rows scored \
+                 different numbers of observations.",
+            Waiver::MixedProvenance =>
+                "A plug-in predictive is under-dispersed relative to a posterior \
+                 mixture, so the Δ confounds model difference with dispersion treatment.",
+            Waiver::DataMismatch =>
+                "Δelpd across them is part model difference and part data difference, \
+                 and the table cannot separate the two.",
+            Waiver::ChangedData =>
+                "`compare` re-reads these files, so the row is scored on data its θ̂ \
+                 was not fitted to.",
+            Waiver::MismatchedFilterSettings =>
+                "The log of a particle-filter likelihood estimate is biased downward, \
+                 and by more at fewer particles (and fewer replicates combined), so \
+                 part of Δelpd would measure the filters rather than the models.",
+        }
+    }
+}
+
+/// The waivers the command line gave.
+#[derive(Debug, Clone, Copy, Default)]
+struct Waivers {
+    mismatched_horizon: bool,
+    mixed_provenance: bool,
+    data_mismatch: bool,
+    changed_data: bool,
+    mismatched_filter_settings: bool,
+}
+
+impl Waivers {
+    fn from_args(a: &crate::args::CompareArgs) -> Self {
+        Waivers {
+            mismatched_horizon: a.allow_mismatched_horizon,
+            mixed_provenance: a.allow_mixed_provenance,
+            data_mismatch: a.allow_data_mismatch,
+            changed_data: a.allow_changed_data,
+            mismatched_filter_settings: a.allow_mismatched_filter_settings,
+        }
+    }
+
+    fn allows(&self, w: Waiver) -> bool {
+        match w {
+            Waiver::MismatchedHorizon => self.mismatched_horizon,
+            Waiver::MixedProvenance => self.mixed_provenance,
+            Waiver::DataMismatch => self.data_mismatch,
+            Waiver::ChangedData => self.changed_data,
+            Waiver::MismatchedFilterSettings => self.mismatched_filter_settings,
+        }
+    }
+}
+
+/// A failed cross-row check: the rows it concerns and what differed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Mismatch {
+    rows: Vec<String>,
+    finding: String,
+}
+
+impl Mismatch {
+    /// The finding and its consequence as one statement.
+    fn note(&self, w: Waiver) -> String {
+        format!("{}. {}", self.finding, w.consequence())
+    }
+}
+
+/// A waiver that was given and needed: the check would have refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Override {
+    waiver: Waiver,
+    mismatch: Mismatch,
+}
+
+impl Override {
+    /// The one line every human rendering prints for it.
+    fn line(&self) -> String {
+        let rows: Vec<String> = self.mismatch.rows.iter().map(|r| format!("'{r}'")).collect();
+        format!("⚠ {} was set for {}: {}", self.waiver.flag(), rows.join(", "),
+            self.mismatch.note(self.waiver))
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "flag": self.waiver.flag(),
+            "rows": self.mismatch.rows,
+            "finding": self.mismatch.finding,
+            "consequence": self.waiver.consequence(),
+        })
+    }
+}
+
+/// The outcome of every cross-row check, computed once by [`preflight`] and
+/// read by every renderer, so no format can state a different outcome from
+/// another, or from the refusal.
+#[derive(Debug, Clone, Default)]
+struct Preflight {
+    /// The waivers that were given and needed, in check order.
+    overrides: Vec<Override>,
+    /// The bound-data refusal text, present only under its override.
+    data_mismatch: Option<String>,
+    /// What the bound-data check could not cover.
+    data_unchecked: Option<String>,
+    /// The changed-data statement, present only under its override.
+    data_changed: Option<String>,
+    /// What the changed-data check could not cover.
+    data_change_unchecked: Option<String>,
+    /// Rows whose data hashes were compared on an 8-character prefix.
+    data_compared_on_prefix: Option<String>,
+    /// The filter-settings statement, present only under its override.
+    filter_settings_mismatch: Option<String>,
+    /// Rows whose trace records no filter settings.
+    filter_settings_unchecked: Option<String>,
+}
+
+impl Preflight {
+    /// Record `w` as needed, or refuse with `refusal` when it was not given.
+    fn waive(&mut self, waived: &Waivers, w: Waiver, m: Mismatch, refusal: String)
+        -> Result<(), String>
+    {
+        if !waived.allows(w) {
+            return Err(refusal);
+        }
+        self.overrides.push(Override { waiver: w, mismatch: m });
+        Ok(())
+    }
+
+    fn overridden(&self, w: Waiver) -> bool {
+        self.overrides.iter().any(|o| o.waiver == w)
+    }
+
+    /// Whether the rows scored different numbers of observations, so no Δ is
+    /// formed (the comparison rendered under `--allow-mismatched-horizon`).
+    fn horizons_differ(&self) -> bool {
+        self.overridden(Waiver::MismatchedHorizon)
+    }
+}
+
+fn provenance_kind(p: &sim::inference::prequential::Provenance) -> String {
+    use sim::inference::prequential::Provenance;
+    match p {
+        Provenance::PlugIn => "plug_in (a single θ)".to_string(),
+        Provenance::Posterior { n_draws } => format!("posterior (mixture over {n_draws} draws)"),
+    }
+}
+
+/// Run every cross-row check over the loaded rows: `Err` with the refusal
+/// message when a check fails and `waived` does not allow it, otherwise the
+/// outcome every renderer states.
+fn preflight(rows: &[Row], waived: &Waivers) -> Result<Preflight, String> {
+    use std::mem::discriminant;
+    let mut checks = Preflight::default();
+    let names: Vec<String> = rows.iter().map(|r| r.name.clone()).collect();
+
+    // Fairness, part zero (gh#585, Stage 3.4): rows with different
+    // conditioning modes are never differenced. An in-sample score (θ saw
+    // the scored window) and a held-out score (θ sealed before it) answer
+    // different questions; their Δ is meaningless however displayed, so
+    // there is no override — the fix is to make the modes agree.
+    let mixed = rows.windows(2).any(|w|
+        discriminant(&w[0].trace.conditioning) != discriminant(&w[1].trace.conditioning));
+    if mixed {
+        let mut message = "error: the compared traces mix conditioning modes:".to_string();
+        for r in rows {
+            let kind = match &r.trace.conditioning {
+                Conditioning::InSample => "in_sample (θ saw the scored window)".to_string(),
+                Conditioning::HoldOutTail { train_end, .. } =>
+                    format!("hold_out_tail (θ sealed at t = {train_end})"),
+            };
+            message.push_str(&format!("\n       {}: {}", r.name, kind));
+        }
+        message.push_str("\n       Declare the same holdout in every compared fit, or pass \
+                   --in-sample to score all of them in-sample.");
+        return Err(message);
+    }
+    // All held-out: the sealed boundaries must also agree, or the rows
+    // score different windows (the axis check would refuse anyway, but
+    // this names the actual cause).
+    let ends: Vec<f64> = rows.iter().filter_map(|r| match &r.trace.conditioning {
+        Conditioning::HoldOutTail { train_end, .. } => Some(*train_end),
+        _ => None,
+    }).collect();
+    if ends.windows(2).any(|w| !same_sealed_boundary(w[0], w[1])) {
+        return Err(format!("error: the compared fits seal training at different \
+                   boundaries: {ends:?}\n       Held-out scores over different windows are not \
+                   commensurable; declare the same holdout_after in every \
+                   compared fit."));
+    }
+
+    // Provenance preflight (Stage 4.1): a plug-in trace (under-dispersed —
+    // one θ) against a posterior mixture is a Δ between predictives of
+    // different dispersion. Overridable, unlike conditioning: an optimizer
+    // fit has no posterior and comparing it against a Bayesian fit is a
+    // legitimate ask — as long as the reader chose it.
+    let mixed = rows.windows(2).any(|w|
+        discriminant(&w[0].trace.provenance) != discriminant(&w[1].trace.provenance));
+    if mixed {
+        let kinds: Vec<String> = rows.iter()
+            .map(|r| format!("'{}' {}", r.name, provenance_kind(&r.trace.provenance)))
+            .collect();
+        let mut message = "error: the compared traces mix provenance kinds:".to_string();
+        for r in rows {
+            message.push_str(&format!("\n       {}: {}", r.name, provenance_kind(&r.trace.provenance)));
+        }
+        message.push_str(&format!("\n       {}\n       Pass --draws 1 to score every fit \
+                   plug-in, or --allow-mixed-provenance to render anyway.",
+                   Waiver::MixedProvenance.consequence()));
+        checks.waive(waived, Waiver::MixedProvenance, Mismatch {
+            rows: names.clone(),
+            finding: format!("the compared traces mix provenance kinds: {}", kinds.join("; ")),
+        }, message)?;
+    }
+
+    // Fairness: T_score (n_scored) must agree across rows unless overridden.
+    let t_scores: Vec<usize> = rows.iter().map(|r| r.trace.n_scored()).collect();
+    let t_mismatch = t_scores.iter().any(|&t| t != t_scores[0]);
+    if t_mismatch {
+        let per_row: Vec<String> = rows.iter()
+            .map(|r| format!("'{}' {}", r.name, r.trace.n_scored()))
+            .collect();
+        checks.waive(waived, Waiver::MismatchedHorizon, Mismatch {
+            rows: names.clone(),
+            finding: format!("T_score differs across models: {}", per_row.join(", ")),
+        }, format!("error: T_score differs across models: {:?}\n       \
+            Δelpd and Δcrps are not commensurable.\n       \
+            Pass --allow-mismatched-horizon to render (uncomparable Δ columns → '—').",
+            t_scores))?;
+    }
+
+    // Fairness, part two: equal T_score is not an equal observation AXIS.
+    // `paired_delta` zips steps by index, so two traces scoring the same NUMBER
+    // of observations at different TIMES — a hole in one series, a different
+    // `t0` — produce a Δelpd, an se(Δ) and a deciban verdict computed across
+    // two different axes, rendered as a confident answer. This is not
+    // overridable by `--allow-mismatched-horizon`: that flag says "render the Δ
+    // columns as '—' because the horizons differ", whereas this is a pairing
+    // that is meaningless however it is displayed.
+    //
+    // With the horizons differing (and the flag set — otherwise refused
+    // above), the flag waives the times only one row scored, and nothing
+    // else: at every time both rows scored, the stream-set (gh#570) and
+    // coverage (gh#833) checks still hold.
+    let pairing = if t_mismatch {
+        check_shared_times(rows)
+    } else {
+        check_shared_observation_axis(rows)
+    };
+    pairing.map_err(|e| format!("error: {e}"))?;
+
+    // Fairness, part three (gh#713): the compared fits must have been bound to
+    // the same observations. Two fits on different data produce a Δelpd that is
+    // part model difference and part data difference, with nothing in the table
+    // to say which. Overridable, unlike the axis checks: comparing a fit on
+    // revised counts against the fit on the original ones is a real thing to
+    // want, as long as the reader knows the Δ is confounded.
+    let data_entries: Vec<(&str, &DataIdentity)> =
+        rows.iter().map(|r| (r.name.as_str(), &r.data)).collect();
+    if let Err(m) = check_shared_data(&data_entries) {
+        let message = format!("{}.\n       {}\n       Re-fit both on the same \
+            observations, or pass --allow-data-mismatch to render the comparison as \
+            confounded.", m.finding, Waiver::DataMismatch.consequence());
+        checks.waive(waived, Waiver::DataMismatch, m, format!("error: {message}"))?;
+        checks.data_mismatch = Some(message);
+    }
+    checks.data_unchecked = unchecked_data_note(&data_entries);
+
+    // A derived row's training file edited after its fit ran is scored at a
+    // θ̂ fitted to other bytes. The same class as the shared-data refusal, and
+    // overridable for the same reason.
+    if let Some(m) = changed_data(rows) {
+        let note = m.note(Waiver::ChangedData);
+        checks.waive(waived, Waiver::ChangedData, m, format!(
+            "error: {note}\n       Re-run the fit on the current file, restore the \
+             file the fit read, or pass --allow-changed-data to render anyway."))?;
+        checks.data_changed = Some(note);
+    }
+    checks.data_change_unchecked = data_change_unchecked_note(rows);
+    checks.data_compared_on_prefix = data_prefix_note(rows);
+
+    // Two rows scored at different particle or replicate counts differ partly
+    // by the filters. Overridable: comparing a cheap explicit trace against a
+    // derived row is a legitimate ask once the reader knows.
+    if let Some(m) = filter_settings_mismatch(rows) {
+        let note = m.note(Waiver::MismatchedFilterSettings);
+        checks.waive(waived, Waiver::MismatchedFilterSettings, m, format!(
+            "error: {note}\n       Re-derive every row with the same --particles and \
+             --replicates, or pass --allow-mismatched-filter-settings to render \
+             anyway."))?;
+        checks.filter_settings_mismatch = Some(note);
+    }
+    checks.filter_settings_unchecked = filter_settings_unchecked_note(rows);
+    Ok(checks)
 }
 
 // ── the pointwise Δelpd vector (gh#706) ──────────────────────────────────
@@ -977,7 +1163,7 @@ fn fmt_coverage(c: sim::inference::Coverage) -> String {
 /// Rows with no data identity ([`DataIdentity::Unknown`]) are not evidence
 /// either way and are skipped, as is a source either row could not resolve
 /// ([`RecordedData::unresolved`]); [`unchecked_data_note`] names both.
-fn check_shared_data(entries: &[(&str, &DataIdentity)]) -> Result<(), String> {
+fn check_shared_data(entries: &[(&str, &DataIdentity)]) -> Result<(), Mismatch> {
     use std::collections::BTreeSet;
     let known: Vec<(&str, &RecordedData)> = entries
         .iter()
@@ -1016,15 +1202,11 @@ fn check_shared_data(entries: &[(&str, &DataIdentity)]) -> Result<(), String> {
             }).collect::<Vec<_>>()
         }).collect();
         if !differing.is_empty() {
-            return Err(format!(
-                "'{ref_name}' and '{name}' were fit to different observed data: \
-                 {}.\n       \
-                 Δelpd across them is part model difference and part data \
-                 difference, and the table cannot separate the two.\n       \
-                 Re-fit both on the same observations, or pass \
-                 --allow-data-mismatch to render the comparison as confounded.",
-                differing.join("; "),
-            ));
+            return Err(Mismatch {
+                rows: vec![ref_name.to_string(), name.to_string()],
+                finding: format!("'{ref_name}' and '{name}' were fit to different observed \
+                    data: {}", differing.join("; ")),
+            });
         }
     }
     Ok(())
@@ -1417,18 +1599,19 @@ fn mc_se_delta(row: &Row, base: &Row) -> Option<f64> {
     }
 }
 
-/// The statement that two rows were scored with different particle-filter
-/// settings — particle count or replicate count — or `None`. Only rows that
-/// record their settings take part; [`filter_settings_unchecked_note`] names
-/// the others. The refusal and the `--allow-mismatched-filter-settings`
+/// The rows scored with different particle-filter settings — particle count
+/// or replicate count — and how they differ, or `None`. Only rows that record
+/// their settings take part; [`filter_settings_unchecked_note`] names the
+/// others. The refusal and the `--allow-mismatched-filter-settings`
 /// renderings share it.
-fn filter_settings_mismatch_note(rows: &[Row]) -> Option<String> {
+fn filter_settings_mismatch(rows: &[Row]) -> Option<Mismatch> {
     let recorded: Vec<(&str, &sim::inference::prequential::Derivation)> = rows.iter()
         .filter_map(|r| r.trace.derivation.as_ref().map(|d| (r.name.as_str(), d)))
         .collect();
     // Equality is transitive, so every row is checked against the first that
     // records its settings.
     let (ref_name, ref_d) = *recorded.first()?;
+    let mut concerned = vec![ref_name.to_string()];
     let differing: Vec<String> = recorded.iter().skip(1).filter_map(|&(name, d)| {
         let mut parts = Vec::new();
         if d.particles != ref_d.particles {
@@ -1437,14 +1620,16 @@ fn filter_settings_mismatch_note(rows: &[Row]) -> Option<String> {
         if d.replicates != ref_d.replicates {
             parts.push(format!("replicates {} vs replicates {}", ref_d.replicates, d.replicates));
         }
-        (!parts.is_empty()).then(|| format!("'{ref_name}' and '{name}': {}", parts.join(", ")))
+        (!parts.is_empty()).then(|| {
+            concerned.push(name.to_string());
+            format!("'{ref_name}' and '{name}': {}", parts.join(", "))
+        })
     }).collect();
-    (!differing.is_empty()).then(|| format!(
-        "the compared traces were scored with different particle-filter settings: \
-         {}. The log of a particle-filter likelihood estimate is biased downward, \
-         and by more at fewer particles (and fewer replicates combined), so part of \
-         Δelpd would measure the filters rather than the models.",
-        differing.join("; ")))
+    (!differing.is_empty()).then(|| Mismatch {
+        rows: concerned,
+        finding: format!("the compared traces were scored with different \
+            particle-filter settings: {}", differing.join("; ")),
+    })
 }
 
 /// The rows whose trace records no filter settings, so the settings check
@@ -2422,7 +2607,8 @@ fn fmt_lr(lr: f64) -> String {
 /// Render the comparison as an aligned text table. Returns the whole rendering
 /// (including its trailing newline) rather than printing, so every line the
 /// reader sees — footers, caveats, warnings — is assertable in a unit test.
-fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool) -> String {
+fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflight) -> String {
+    let t_mismatch = checks.horizons_differ();
     let want_crps = metrics.iter().any(|m| m == "crps");
     let want_pit  = metrics.iter().any(|m| m == "pit_cov90" || m == "pit");
 
@@ -2534,7 +2720,7 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
     }
     out.push_str(&conditioning_line(base));
     out.push('\n');
-    for line in warning_lines(rows, base_idx, t_mismatch) {
+    for line in warning_lines(rows, base_idx, checks) {
         out.push_str(&line);
         out.push('\n');
     }
@@ -2543,47 +2729,25 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
     out
 }
 
-/// Everything below the table that the reader must not miss: the suppressed-Δ
-/// notice, an overridden data mismatch and what the data check could not cover,
-/// the miscalibration flags, each trace's own warnings, and the optimism
-/// caveat.
+/// Everything below the table that the reader must not miss: each override
+/// the comparison needed and what the checks could not cover (both from
+/// `checks`, never recomputed here), the miscalibration flags, each trace's own
+/// warnings, and the optimism caveat.
 ///
 /// One function, called by every renderer, because the failure this guards is
 /// asymmetry: the table warned about a miscalibrated model and the markdown
 /// someone pasted into a report did not. A new warning added here appears in
 /// every format by construction.
-fn warning_lines(rows: &[Row], base_idx: usize, t_mismatch: bool) -> Vec<String> {
-    let mut lines = Vec::new();
-    if t_mismatch {
-        lines.push("⚠ T_score differs across models — Δ columns suppressed \
-            (--allow-mismatched-horizon was set).".to_string());
-    }
-    // A comparison that reaches a renderer with a failed data check was
-    // rendered under `--allow-data-mismatch`; the confound belongs in the
-    // artifact, not only in the terminal session that asked for it.
-    let data_entries: Vec<(&str, &DataIdentity)> =
-        rows.iter().map(|r| (r.name.as_str(), &r.data)).collect();
-    if let Err(e) = check_shared_data(&data_entries) {
-        lines.push(format!("⚠ {e}"));
-    }
-    if let Some(note) = unchecked_data_note(&data_entries) {
-        lines.push(format!("ⓘ {note}"));
-    }
-    // Reaching a renderer with changed data means `--allow-changed-data`.
-    if let Some(note) = changed_data_note(rows) {
-        lines.push(format!("⚠ {note} (--allow-changed-data was set)"));
-    }
-    if let Some(note) = data_change_unchecked_note(rows) {
-        lines.push(format!("ⓘ {note}"));
-    }
-    if let Some(note) = data_prefix_note(rows) {
-        lines.push(format!("ⓘ {note}"));
-    }
-    // Reaching a renderer with mismatched settings means the override.
-    if let Some(note) = filter_settings_mismatch_note(rows) {
-        lines.push(format!("⚠ {note} (--allow-mismatched-filter-settings was set)"));
-    }
-    if let Some(note) = filter_settings_unchecked_note(rows) {
+fn warning_lines(rows: &[Row], base_idx: usize, checks: &Preflight) -> Vec<String> {
+    // Each override that was needed, in one line: the flag, the rows, what
+    // differed and what that does to the table. The terminal session that
+    // granted it is not where the table is read a week later.
+    let mut lines: Vec<String> = checks.overrides.iter().map(Override::line).collect();
+    // What the checks could not cover.
+    for note in [&checks.data_unchecked, &checks.data_change_unchecked,
+                 &checks.data_compared_on_prefix, &checks.filter_settings_unchecked]
+        .into_iter().flatten()
+    {
         lines.push(format!("ⓘ {note}"));
     }
     // PIT warnings — flag clear miscalibration.
@@ -2675,7 +2839,8 @@ fn fmt_table_row(cells: &[String], widths: &[usize]) -> String {
 
 /// Render the comparison as a markdown table. Returns the rendering rather than
 /// printing it, for the same reason [`render_table`] does.
-fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool) -> String {
+fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflight) -> String {
+    let t_mismatch = checks.horizons_differ();
     let want_crps = metrics.iter().any(|m| m == "crps");
     let want_pit  = metrics.iter().any(|m| m == "pit_cov90" || m == "pit");
 
@@ -2753,7 +2918,7 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
     out.push_str(&format!("_{}_\n", conditioning_line(base)));
     // The same block the text table prints, as a markdown list so each warning
     // stays its own line when the document is rendered.
-    let warnings = warning_lines(rows, base_idx, t_mismatch);
+    let warnings = warning_lines(rows, base_idx, checks);
     if !warnings.is_empty() {
         out.push('\n');
         for line in warnings {
@@ -2766,7 +2931,7 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
 }
 
 /// Render the comparison as JSON. Returns the document rather than printing it.
-fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
+fn render_json(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflight) -> String {
     use serde_json::json;
     let base = &rows[base_idx].trace;
     let entries: Vec<serde_json::Value> = rows.iter().enumerate().map(|(i, r)| {
@@ -2839,8 +3004,6 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
     let any_evidence = rows.iter().enumerate().any(|(i, r)| {
         i != base_idx && paired_delta(&r.trace, base, Field::LogScore).0.is_finite()
     });
-    let data_entries: Vec<(&str, &DataIdentity)> =
-        rows.iter().map(|r| (r.name.as_str(), &r.data)).collect();
     let out = json!({
         "baseline": rows[base_idx].name,
         "metrics": metrics,
@@ -2850,22 +3013,25 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
         "evidence_scale_note": any_evidence.then_some(JEFFREYS_SCALE_NOTE),
         // The `se_delta_elpd` column's own caveat at a short scoring window.
         "se_caveat": se_caveat(base.n_scored()),
-        // The bound-data check (gh#713), as the renderers state it: a document
-        // present here at all was rendered under --allow-data-mismatch, and the
-        // note says which rows the check could not cover.
-        "data_mismatch": check_shared_data(&data_entries).err(),
-        "data_unchecked": unchecked_data_note(&data_entries),
+        // Every waiver the comparison needed to render: the flag, the rows it
+        // concerned, what differed, and what it does to the reading. Empty
+        // when every cross-row check passed.
+        "overrides": checks.overrides.iter().map(Override::to_json).collect::<Vec<_>>(),
+        // The bound-data check (gh#713): present only under
+        // --allow-data-mismatch, and the rows the check could not cover.
+        "data_mismatch": checks.data_mismatch,
+        "data_unchecked": checks.data_unchecked,
         // A training file edited after its fit ran (present only under
         // --allow-changed-data), and the files that could not be checked.
-        "data_changed": changed_data_note(rows),
-        "data_change_unchecked": data_change_unchecked_note(rows),
+        "data_changed": checks.data_changed,
+        "data_change_unchecked": checks.data_change_unchecked,
         // Rows whose recorded hashes are 8 characters (an older fit.meta.json):
         // both data checks compared them on that prefix.
-        "data_compared_on_prefix": data_prefix_note(rows),
+        "data_compared_on_prefix": checks.data_compared_on_prefix,
         // Particle-filter settings that differ across rows (present only under
         // --allow-mismatched-filter-settings), and the rows that record none.
-        "filter_settings_mismatch": filter_settings_mismatch_note(rows),
-        "filter_settings_unchecked": filter_settings_unchecked_note(rows),
+        "filter_settings_mismatch": checks.filter_settings_mismatch,
+        "filter_settings_unchecked": checks.filter_settings_unchecked,
         // Rows whose evidence label skipped the within-filter-noise gate
         // because only one side of the pair carries an MC SE.
         "filter_noise_unassessed": filter_noise_unassessed_note(rows, base_idx),
@@ -2985,15 +3151,15 @@ mod tests {
         ];
         let metrics = vec!["elpd".to_string()];
 
-        let table = render_table(&rows, 0, &metrics, false);
+        let table = render_table(&rows, 0, &metrics, &checked(&rows));
         assert!(table.contains("LR"), "the table names the column LR:\n{table}");
         assert!(!table.contains("E_T"), "and never E_T:\n{table}");
 
-        let md = render_md(&rows, 0, &metrics, false);
+        let md = render_md(&rows, 0, &metrics, &checked(&rows));
         assert!(md.contains("| LR |"), "the md header names the column LR:\n{md}");
         assert!(!md.contains("E_T"), "and never E_T:\n{md}");
 
-        let json = render_json(&rows, 0, &metrics);
+        let json = render_json(&rows, 0, &metrics, &checked(&rows));
         assert!(json.contains("\"lr\""), "the JSON key is `lr`:\n{json}");
         assert!(!json.contains("\"e_t\""), "and never `e_t`:\n{json}");
     }
@@ -3012,17 +3178,17 @@ mod tests {
         ];
         let metrics = vec!["elpd".to_string()];
 
-        let table = render_table(&rows, 0, &metrics, false);
+        let table = render_table(&rows, 0, &metrics, &checked(&rows));
         assert!(table.contains("within noise"),
             "a Δ inside the noise band is labelled `within noise`:\n{table}");
         assert!(!table.contains("indeterminate"),
             "and carries no Jeffreys tier:\n{table}");
 
-        let md = render_md(&rows, 0, &metrics, false);
+        let md = render_md(&rows, 0, &metrics, &checked(&rows));
         assert!(md.contains("within noise"), "the md table agrees:\n{md}");
         assert!(!md.contains("indeterminate"), "{md}");
 
-        let json = render_json(&rows, 0, &metrics);
+        let json = render_json(&rows, 0, &metrics, &checked(&rows));
         assert!(json.contains("\"evidence_label\": \"within_noise\""),
             "the JSON label is `within_noise`, not a tier:\n{json}");
     }
@@ -3038,12 +3204,12 @@ mod tests {
         ];
         let metrics = vec!["elpd".to_string()];
 
-        let table = render_table(&rows, 0, &metrics, false);
+        let table = render_table(&rows, 0, &metrics, &checked(&rows));
         assert!(table.contains("overwhelming for"),
             "10 nats ≈ 43 dB against se = 1.00 keeps its tier:\n{table}");
         assert!(!table.contains("within noise"), "{table}");
 
-        let json = render_json(&rows, 0, &metrics);
+        let json = render_json(&rows, 0, &metrics, &checked(&rows));
         assert!(json.contains("\"evidence_label\": \"overwhelming\""),
             "the JSON label is the tier:\n{json}");
     }
@@ -3122,9 +3288,9 @@ mod tests {
         rows[1].trace.warnings.push(PrequentialWarning::SamplesNotSaved);
         let metrics = vec!["elpd".to_string(), "pit_cov90".to_string()];
 
-        let table = render_table(&rows, 0, &metrics, false);
-        let md = render_md(&rows, 0, &metrics, false);
-        let json = render_json(&rows, 0, &metrics);
+        let table = render_table(&rows, 0, &metrics, &checked(&rows));
+        let md = render_md(&rows, 0, &metrics, &checked(&rows));
+        let json = render_json(&rows, 0, &metrics, &checked(&rows));
 
         for (fmt, text) in [("table", &table), ("md", &md)] {
             assert!(text.contains("PIT 90%-coverage"),
@@ -3213,17 +3379,25 @@ mod tests {
         // One stream's file differs → refused, naming the stream and both fits.
         let revised = digests(&[("north", "aaa"), ("south", "ccc")]);
         let err = check_shared_data(&[("a", &same_a), ("b", &revised)])
-            .expect_err("a differing data file must be refused");
+            .expect_err("a differing data file must be refused").finding;
         assert!(err.contains("south"), "names the stream that differs: {err}");
         assert!(!err.contains("north"), "and not the one that agrees: {err}");
         assert!(err.contains("'a'") && err.contains("'b'"), "names both fits: {err}");
-        assert!(err.contains("--allow-data-mismatch"),
-            "and how to proceed deliberately: {err}");
+        let mut rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+        rows[0].data = digests(&[("north", "aaa"), ("south", "bbb")]);
+        rows[1].data = revised;
+        let refusal = preflight(&rows, &Waivers::default())
+            .expect_err("refused without the flag");
+        assert!(refusal.contains("south") && refusal.contains("--allow-data-mismatch"),
+            "and how to proceed deliberately: {refusal}");
 
         // A stream one fit bound and the other did not is the same failure.
         let extra = digests(&[("north", "aaa"), ("south", "bbb"), ("east", "ddd")]);
         let err = check_shared_data(&[("a", &same_a), ("b", &extra)])
-            .expect_err("an extra bound stream must be refused");
+            .expect_err("an extra bound stream must be refused").finding;
         assert!(err.contains("east"), "{err}");
 
         // Rows with no data identity are not evidence either way: they neither
@@ -3317,7 +3491,7 @@ mod tests {
             &[iv(0.0, 7.0), iv(7.0, 14.0), iv(14.0, 21.0)]);
         let rows = vec![short, long];
         check_shared_times(&rows).expect("agreeing shared times render");
-        let table = render_table(&rows, 0, &["elpd".to_string()], true);
+        let table = render_table(&rows, 0, &["elpd".to_string()], &checked(&rows));
         assert!(table.contains("Δ columns suppressed"), "{table}");
     }
 
@@ -3385,7 +3559,7 @@ mod tests {
         rows[1].freshness = check_training_freshness(&streams,
             &DataIdentity::Unknown("its fit.meta.json records no data hashes".into()));
 
-        let changed = changed_data_note(&rows).expect("south changed");
+        let changed = changed_data(&rows).map(|m| m.note(Waiver::ChangedData)).expect("south changed");
         assert!(changed.contains("'a' stream 'south'") && changed.contains("deadbeef")
                 && changed.contains(&south_hash[..8]) && !changed.contains("north"),
             "{changed}");
@@ -3396,8 +3570,8 @@ mod tests {
             "{unchecked}");
 
         let metrics = vec!["elpd".to_string()];
-        for (fmt, text) in [("table", render_table(&rows, 0, &metrics, false)),
-                            ("md", render_md(&rows, 0, &metrics, false))] {
+        for (fmt, text) in [("table", render_table(&rows, 0, &metrics, &checked(&rows))),
+                            ("md", render_md(&rows, 0, &metrics, &checked(&rows)))] {
             assert!(text.contains("changed after the fit ran")
                     && text.contains("--allow-changed-data was set"),
                 "the {fmt} rendering states the change:\n{text}");
@@ -3405,7 +3579,7 @@ mod tests {
                 "and what was not checked:\n{text}");
         }
         let v: serde_json::Value =
-            serde_json::from_str(&render_json(&rows, 0, &metrics)).unwrap();
+            serde_json::from_str(&render_json(&rows, 0, &metrics, &checked(&rows))).unwrap();
         assert!(v["data_changed"].as_str().is_some_and(|s| s.contains("south")), "{v}");
         assert!(v["data_change_unchecked"].as_str().is_some_and(|s| s.contains("north")), "{v}");
     }
@@ -3474,11 +3648,11 @@ mod tests {
         ];
         rows[0].trace.derivation = Some(derivation(1000, 5));
         rows[1].trace.derivation = Some(derivation(1000, 5));
-        assert!(filter_settings_mismatch_note(&rows).is_none(), "equal settings");
+        assert!(filter_settings_mismatch(&rows).map(|m| m.note(Waiver::MismatchedFilterSettings)).is_none(), "equal settings");
         assert!(filter_settings_unchecked_note(&rows).is_none(), "both recorded");
 
         rows[1].trace.derivation = Some(derivation(200, 5));
-        let note = filter_settings_mismatch_note(&rows).expect("particles differ");
+        let note = filter_settings_mismatch(&rows).map(|m| m.note(Waiver::MismatchedFilterSettings)).expect("particles differ");
         assert!(note.contains("'a'") && note.contains("'b'")
                 && note.contains("particles 1000") && note.contains("particles 200"),
             "names both rows and both values: {note}");
@@ -3486,18 +3660,18 @@ mod tests {
         assert!(!note.contains("replicates 5 vs"), "replicates agree: {note}");
 
         rows[1].trace.derivation = Some(derivation(1000, 1));
-        let note = filter_settings_mismatch_note(&rows).expect("replicates differ");
+        let note = filter_settings_mismatch(&rows).map(|m| m.note(Waiver::MismatchedFilterSettings)).expect("replicates differ");
         assert!(note.contains("replicates 5") && note.contains("replicates 1"), "{note}");
 
         let metrics = vec!["elpd".to_string()];
-        for (fmt, text) in [("table", render_table(&rows, 0, &metrics, false)),
-                            ("md", render_md(&rows, 0, &metrics, false))] {
+        for (fmt, text) in [("table", render_table(&rows, 0, &metrics, &checked(&rows))),
+                            ("md", render_md(&rows, 0, &metrics, &checked(&rows)))] {
             assert!(text.contains("different particle-filter settings")
                     && text.contains("--allow-mismatched-filter-settings was set"),
                 "the {fmt} rendering states the mismatch:\n{text}");
         }
         let v: serde_json::Value =
-            serde_json::from_str(&render_json(&rows, 0, &metrics)).unwrap();
+            serde_json::from_str(&render_json(&rows, 0, &metrics, &checked(&rows))).unwrap();
         assert!(v["filter_settings_mismatch"].as_str()
                 .is_some_and(|s| s.contains("replicates 1")), "{v}");
         assert_eq!(v["rows"][1]["derivation"]["replicates"], serde_json::json!(1),
@@ -3524,7 +3698,7 @@ mod tests {
         rows[0].trace.derivation = Some(derivation(1000, 5));
         rows[1].trace = old;
 
-        assert!(filter_settings_mismatch_note(&rows).is_none(),
+        assert!(filter_settings_mismatch(&rows).map(|m| m.note(Waiver::MismatchedFilterSettings)).is_none(),
             "an unrecorded side cannot contradict anything");
         let note = filter_settings_unchecked_note(&rows).expect("old is unchecked");
         assert!(note.contains(
@@ -3533,10 +3707,10 @@ mod tests {
         assert!(!note.contains("'new'"), "{note}");
 
         let metrics = vec!["elpd".to_string()];
-        let table = render_table(&rows, 0, &metrics, false);
+        let table = render_table(&rows, 0, &metrics, &checked(&rows));
         assert!(table.contains("filter settings not recorded for 'old'"), "{table}");
         let v: serde_json::Value =
-            serde_json::from_str(&render_json(&rows, 0, &metrics)).unwrap();
+            serde_json::from_str(&render_json(&rows, 0, &metrics, &checked(&rows))).unwrap();
         assert!(v["filter_settings_unchecked"].as_str().is_some_and(|s| s.contains("'old'")),
             "{v}");
         assert!(v["rows"][1]["derivation"].is_null(), "{v}");
@@ -3566,13 +3740,13 @@ mod tests {
         let note = filter_noise_unassessed_note(&rows, 0).expect("half is unassessed");
         assert!(note.contains("'half'") && !note.contains("'both'"), "{note}");
         assert!(note.contains("not checked against filter noise"), "{note}");
-        for (fmt, text) in [("table", render_table(&rows, 0, &metrics, false)),
-                            ("md", render_md(&rows, 0, &metrics, false))] {
+        for (fmt, text) in [("table", render_table(&rows, 0, &metrics, &checked(&rows))),
+                            ("md", render_md(&rows, 0, &metrics, &checked(&rows)))] {
             assert!(text.contains("not checked against filter noise") && text.contains("'half'"),
                 "the {fmt} rendering carries the note:\n{text}");
         }
         let v: serde_json::Value =
-            serde_json::from_str(&render_json(&rows, 0, &metrics)).unwrap();
+            serde_json::from_str(&render_json(&rows, 0, &metrics, &checked(&rows))).unwrap();
         assert!(v["filter_noise_unassessed"].as_str().is_some_and(|s| s.contains("'half'")),
             "the JSON carries it as a field:\n{v}");
 
@@ -3590,7 +3764,7 @@ mod tests {
         let all = mk([Some(0.3), Some(0.2), Some(0.4)]);
         assert!(filter_noise_unassessed_note(&all, 0).is_none());
         let v: serde_json::Value =
-            serde_json::from_str(&render_json(&all, 0, &metrics)).unwrap();
+            serde_json::from_str(&render_json(&all, 0, &metrics, &checked(&all))).unwrap();
         assert!(v["filter_noise_unassessed"].is_null(), "{v}");
     }
 
@@ -3607,15 +3781,15 @@ mod tests {
             row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
         ];
 
-        let json = render_json(&short, 0, &metrics);
+        let json = render_json(&short, 0, &metrics, &checked(&short));
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["se_caveat"].as_str().is_some_and(|s| s.contains("2008.10296")),
             "the JSON carries the caveat as a field:\n{json}");
 
-        let table = render_table(&short, 0, &metrics, false);
+        let table = render_table(&short, 0, &metrics, &checked(&short));
         assert!(!table.contains("2008.10296"),
             "the citation belongs to the methods page now:\n{table}");
-        let md = render_md(&short, 0, &metrics, false);
+        let md = render_md(&short, 0, &metrics, &checked(&short));
         assert!(!md.contains("2008.10296"), "{md}");
 
         // A long scoring window does not carry it at all: the field must mean
@@ -3625,7 +3799,7 @@ mod tests {
             row_at("a", &times, &vec![-6.0; 120]),
             row_at("b", &times, &vec![-5.9; 120]),
         ];
-        let json = render_json(&long, 0, &metrics);
+        let json = render_json(&long, 0, &metrics, &checked(&long));
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["se_caveat"].is_null(),
             "120 scored steps is not a small-T window:\n{json}");
@@ -3644,8 +3818,8 @@ mod tests {
         ];
         let metrics = vec!["elpd".to_string()];
 
-        for (fmt, out) in [("table", render_table(&rows, 0, &metrics, false)),
-                           ("md",    render_md(&rows, 0, &metrics, false))] {
+        for (fmt, out) in [("table", render_table(&rows, 0, &metrics, &checked(&rows))),
+                           ("md",    render_md(&rows, 0, &metrics, &checked(&rows)))] {
             assert!(out.contains("camdl compare --explain"),
                 "the {fmt} footer names where the definitions are:\n{out}");
             assert!(out.contains("camdl docs model-comparison"),
@@ -3661,7 +3835,7 @@ mod tests {
                 "the lag-1 number survives the collapse:\n{out}");
         }
 
-        let json = render_json(&rows, 0, &metrics);
+        let json = render_json(&rows, 0, &metrics, &checked(&rows));
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["evidence_scale_note"].as_str()
                 .is_some_and(|s| s.contains("not Bayes factors")),
@@ -3683,12 +3857,12 @@ mod tests {
             row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
             row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
         ];
-        let table = render_table(&in_sample, 0, &metrics, false);
+        let table = render_table(&in_sample, 0, &metrics, &checked(&in_sample));
         assert!(table.contains("Conditioning: in-sample"),
             "the in-sample stamp reaches the table:\n{table}");
         assert_eq!(table.matches("Conditioning:").count(), 1,
             "stated once for the cohort, not once per row:\n{table}");
-        let md = render_md(&in_sample, 0, &metrics, false);
+        let md = render_md(&in_sample, 0, &metrics, &checked(&in_sample));
         assert!(md.contains("Conditioning: in-sample"), "{md}");
 
         // Held out at t = 42: the boundary is the fact a reader needs, so the
@@ -3700,11 +3874,11 @@ mod tests {
                 theta_source: "results/fits/sir-abc12345".into(),
             };
         }
-        let table = render_table(&held, 0, &metrics, false);
+        let table = render_table(&held, 0, &metrics, &checked(&held));
         assert!(table.contains("Conditioning: held-out tail (train_end = 42)"),
             "the sealed boundary is named:\n{table}");
         assert!(!table.contains("in-sample"), "{table}");
-        let md = render_md(&held, 0, &metrics, false);
+        let md = render_md(&held, 0, &metrics, &checked(&held));
         assert!(md.contains("train_end = 42"), "{md}");
     }
 
@@ -3722,13 +3896,13 @@ mod tests {
         rows[1].data = digests(&[("cases", "bbbbbbbb22")]);
         let metrics = vec!["elpd".to_string()];
 
-        let table = render_table(&rows, 0, &metrics, false);
+        let table = render_table(&rows, 0, &metrics, &checked(&rows));
         assert!(table.contains("different observed data") && table.contains("cases"),
             "the text table states the confound:\n{table}");
-        let md = render_md(&rows, 0, &metrics, false);
+        let md = render_md(&rows, 0, &metrics, &checked(&rows));
         assert!(md.contains("different observed data"), "and the markdown:\n{md}");
 
-        let json = render_json(&rows, 0, &metrics);
+        let json = render_json(&rows, 0, &metrics, &checked(&rows));
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["data_mismatch"].as_str().is_some_and(|s| s.contains("cases")),
             "and the JSON, as a field:\n{json}");
@@ -3737,11 +3911,138 @@ mod tests {
 
         // Matching data: no confound line anywhere.
         rows[1].data = digests(&[("cases", "aaaaaaaa11")]);
-        let table = render_table(&rows, 0, &metrics, false);
+        let table = render_table(&rows, 0, &metrics, &checked(&rows));
         assert!(!table.contains("different observed data"), "{table}");
-        let json = render_json(&rows, 0, &metrics);
+        let json = render_json(&rows, 0, &metrics, &checked(&rows));
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["data_mismatch"].is_null(), "{json}");
+    }
+
+    /// Every waiver given to every check, as a test renders a comparison the
+    /// command would have rendered.
+    fn every_waiver() -> Waivers {
+        Waivers {
+            mismatched_horizon: true, mixed_provenance: true, data_mismatch: true,
+            changed_data: true, mismatched_filter_settings: true,
+        }
+    }
+
+    /// The preflight outcome `cmd_compare` would hand the renderers for
+    /// `rows`, every flag given.
+    fn checked(rows: &[Row]) -> Preflight {
+        preflight(rows, &every_waiver()).expect("every check is waived")
+    }
+
+    /// Two clean rows, then the one change that makes `w` necessary.
+    fn rows_needing(w: Waiver) -> Vec<Row> {
+        let mut rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+        match w {
+            Waiver::MismatchedHorizon => rows[1] = row_at("b", &[7.0, 14.0], &[-5.0, -6.0]),
+            Waiver::MixedProvenance => rows[1].trace.provenance =
+                sim::inference::prequential::Provenance::Posterior { n_draws: 4 },
+            Waiver::DataMismatch => {
+                rows[0].data = digests(&[("cases", "aaaaaaaa11")]);
+                rows[1].data = digests(&[("cases", "bbbbbbbb22")]);
+            }
+            Waiver::ChangedData => rows[1].freshness.findings.push(FileFinding {
+                stream: "cases".into(), path: "cases.tsv".into(),
+                check: FileCheck::Changed { recorded: "aaaaaaaa".into(), current: "bbbbbbbb".into() },
+            }),
+            Waiver::MismatchedFilterSettings => {
+                rows[0].trace.derivation = Some(derivation(1000, 5));
+                rows[1].trace.derivation = Some(derivation(200, 5));
+            }
+        }
+        rows
+    }
+
+    const ALL_WAIVERS: [Waiver; 5] = [
+        Waiver::MismatchedHorizon, Waiver::MixedProvenance, Waiver::DataMismatch,
+        Waiver::ChangedData, Waiver::MismatchedFilterSettings,
+    ];
+
+    /// D13: a comparison that renders only because a flag waived a failed
+    /// check states that override once, in every format: the flag, the rows
+    /// it concerned and what it does to the reading. Without the flag the
+    /// same rows are refused.
+    #[test]
+    fn every_needed_override_is_stated_once_in_every_format() {
+        let metrics = vec!["elpd".to_string()];
+        for w in ALL_WAIVERS {
+            let rows = rows_needing(w);
+            assert!(preflight(&rows, &Waivers::default()).is_err(),
+                "{w:?}: refused without its flag");
+            let checks = checked(&rows);
+            assert_eq!(checks.overrides.iter().map(|o| o.waiver).collect::<Vec<_>>(), vec![w],
+                "{w:?}: exactly the needed override is listed");
+
+            for (fmt, text) in [("table", render_table(&rows, 0, &metrics, &checks)),
+                                ("md", render_md(&rows, 0, &metrics, &checks))] {
+                let lines: Vec<&str> = text.lines()
+                    .filter(|l| l.contains(w.flag())).collect();
+                assert_eq!(lines.len(), 1, "{w:?}: the {fmt} rendering states it once:\n{text}");
+                assert!(lines[0].contains(w.consequence()) && lines[0].contains("'b'"),
+                    "{w:?}: with the rows and the consequence:\n{text}");
+            }
+            let v: serde_json::Value =
+                serde_json::from_str(&render_json(&rows, 0, &metrics, &checks)).unwrap();
+            let o = v["overrides"].as_array().expect("an array");
+            assert_eq!(o.len(), 1, "{w:?}: {v}");
+            assert_eq!(o[0]["flag"], w.flag(), "{v}");
+            assert_eq!(o[0]["consequence"], w.consequence(), "{v}");
+            assert!(o[0]["rows"].as_array().unwrap().contains(&serde_json::json!("b")), "{v}");
+        }
+    }
+
+    /// A flag given to a comparison whose check passes waived nothing, and
+    /// nothing says it did.
+    #[test]
+    fn a_flag_given_but_not_needed_lists_nothing() {
+        let rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+        let checks = checked(&rows);
+        assert!(checks.overrides.is_empty(), "{checks:?}");
+        let metrics = vec!["elpd".to_string()];
+        for text in [render_table(&rows, 0, &metrics, &checks), render_md(&rows, 0, &metrics, &checks)] {
+            assert!(!text.contains("was set"), "{text}");
+            for w in ALL_WAIVERS {
+                assert!(!text.contains(w.flag()), "{text}");
+            }
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&rows, 0, &metrics, &checks)).unwrap();
+        assert_eq!(v["overrides"], serde_json::json!([]), "an empty array, not null: {v}");
+    }
+
+    /// The renderers state the preflight's outcome and recompute nothing: a
+    /// JSON document for a mismatched-horizon comparison says why its Δ
+    /// fields are null, and rows whose data differ, rendered with an outcome
+    /// that records no mismatch, are not reported as mismatched by any format.
+    #[test]
+    fn the_renderers_state_the_preflight_outcome_and_recompute_no_check() {
+        let metrics = vec!["elpd".to_string()];
+        let rows = rows_needing(Waiver::MismatchedHorizon);
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&rows, 0, &metrics, &checked(&rows))).unwrap();
+        assert!(v["rows"][1]["delta_elpd"].is_null(), "{v}");
+        assert!(v["overrides"][0]["consequence"].as_str()
+                .is_some_and(|s| s.contains("null in the JSON")),
+            "the document says why its Δ fields are null: {v}");
+
+        let rows = rows_needing(Waiver::DataMismatch);
+        let silent = Preflight::default();
+        let table = render_table(&rows, 0, &metrics, &silent);
+        let md = render_md(&rows, 0, &metrics, &silent);
+        assert!(!table.contains("different observed data") && !md.contains("different observed data"),
+            "a renderer that re-ran the data check would print it:\n{table}\n{md}");
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&rows, 0, &metrics, &silent)).unwrap();
+        assert!(v["data_mismatch"].is_null() && v["overrides"] == serde_json::json!([]), "{v}");
     }
 
     fn digests(entries: &[(&str, &str)]) -> DataIdentity {
