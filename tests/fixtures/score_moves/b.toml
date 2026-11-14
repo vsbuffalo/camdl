@@ -1,0 +1,38 @@
+# One of the two fits scripts/check_score_moves.sh compares: the golden
+# two-stream SEIR (weekly_cases, a negative-binomial weekly count, and
+# detection, a Bernoulli reading every 14 days), with beta estimated by
+# PGAS. a.toml and b.toml differ only in the fixed reporting fraction rho,
+# so they are two distinct fits scored on the same data.
+
+[model]
+camdl = "../../../ocaml/golden/seir_observations.ir.json"
+
+[data.observations]
+weekly_cases = "weekly_cases.tsv"
+detection    = "detection.tsv"
+
+[estimate.beta]
+bounds = [0.05, 0.5]
+start  = 0.3
+prior  = { log_normal = { mu = -1.2, sigma = 0.5 } }
+
+[fixed]
+sigma    = 0.25
+gamma    = 0.2
+rho      = 0.6
+k        = 10.0
+p_detect = 0.5
+N0       = 10000
+I0       = 10
+
+[method]
+algorithm = "pgas"
+backend   = "chain_binomial"
+chains    = 2
+particles = 50
+sweeps    = 200
+burn_in   = 100
+thin      = 1
+
+[config]
+dt = 1.0
