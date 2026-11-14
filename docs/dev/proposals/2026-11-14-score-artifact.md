@@ -19,7 +19,12 @@ The typed comparison report that reads these artifacts is
 `2026-11-14-scoring-report-library.md` (proposal B). The crate both proposals
 put their types in, `score`, is introduced there.
 
-Code references are to `main` at `e8e7c24a0` (2026-11-14). Every statement under
+Code references are to `main` at `e8e7c24a0` (2026-11-14). Since then the trace
+module has moved from `rust/crates/sim/src/inference/prequential.rs` to
+`rust/crates/score/src/trace.rs` and the evidence module from `cli` to
+`rust/crates/score/src/evidence.rs` (phase 1 of proposal B), and `compare`'s
+chain selection has gained `--chains` (`982eca439`, `770013f76`). File paths and
+line numbers below are as they were at `e8e7c24a0`. Every statement under
 [What exists today](#what-exists-today) was read in the code at that commit.
 Nothing was built or run for this proposal; a statement that rests on something
 other than reading the cited lines is marked _not verified_ with the reason.
@@ -148,7 +153,40 @@ a hash of the whole configuration less `[provenance]` (`config_identity_hash`,
 computes the CRPS, the PIT and the interval on the pool
 (`compare.rs:2726-2740`), drawing one uniform per pooled value for the PIT
 (`compare.rs:2711`, `:2735`). Each pass's draws reach it through the trace file
-the child `pfilter` process wrote.
+the child `pfilter` process wrote. Log scores combine by log-mean-exp across
+draws within a replicate and then across replicates; a step's effective sample
+size is the minimum over passes (`compare.rs:2721`); warnings are merged
+(`compare.rs:2755-2763`); passes whose steps are not at the same times are
+refused (`compare.rs:2697-2711`).
+
+### The training cut and the scoring cut are on different time axes
+
+A data row has a **label time**, the value in its time column. A stream that
+accumulates over a period is **scored** at the close of that period, which need
+not be the label: a stream declared `covers = day(D)` gives a row labelled D the
+period [D, D+1) and scores it at D+1 (`Covers::From`,
+`rust/crates/ir/src/observation.rs:304-309`).
+
+The fit cuts its training rows by label (`o.time <= tau`,
+`rust/crates/cli/src/fit/runner.rs:1972`; the last training label,
+`runner.rs:1993`), and records that label time as `train_end`. `compare` then
+scores every step whose scoring time is after `train_end`
+(`pfilter
+--score-from`, `rust/crates/cli/src/pfilter.rs:999-1000`), and its
+last check is that every scored time is after `train_end` (`compare.rs:2589`).
+
+For a stream whose scoring time is later than its label, the last training row
+has a label at or before `train_end` and a scoring time after it. It passes the
+check and is scored as held-out, although the fit trained on it. This follows
+from the lines cited and was not reproduced with a run; the existing holdout
+tests use streams whose label is the period's close. It is a defect on `main`
+today, independent of this proposal, and the design below removes it.
+
+### The score may run a model other than the fit's
+
+`derive_prequential` uses the fit's archived compiled model when present and
+otherwise recompiles the source file the configuration names
+(`compare.rs:2306-2311`), which may have changed since the fit.
 
 ### Time is model time
 
@@ -253,11 +291,13 @@ the column readers the loader already uses (`load_data_tsv_column_cells`,
 `load_long_form_stream`, `load_stream_aux`, `read_boundary_column`), which are
 extended to return each temporal cell as written and its column's kind beside
 the converted time. `load_observations` and `stream_times_for` are rebuilt on
-`observed_rows`, so the digest and the likelihood read the same rows by
-construction, and there is one reader. The rows are those of the file, routed to
-the leaf, before any filtering that depends on the run (the drop of a hole whose
-period opens before the run starts, `runner.rs:1647-1669`, and the alignment
-check against the integration step).
+`observed_rows`, and so is the survey command's loader, which reads observations
+through a separate dense reader today (`load_data_tsv_column`,
+`rust/crates/cli/src/survey.rs:1271-1280`). Then the digest and every likelihood
+read the same rows by construction, and there is one reader. The rows are those
+of the file, routed to the leaf, before any filtering that depends on the run
+(the drop of a hole whose period opens before the run starts,
+`runner.rs:1647-1669`, and the alignment check against the integration step).
 
 ```rust
 pub struct ObservedRow {
@@ -321,6 +361,14 @@ whitespace around cells, line endings, the file name, and the leaf's name.
 Observation files are tab-separated (`pfilter.rs:1259`, `:1308`), so the
 separator does not vary.
 
+**Two limits.** A file with dated cells and the same series written with numeric
+times digest differently: the digest hashes what the file states, and which
+calendar a number means is the model's business. And a long-form stream with
+per-row windows is not a form the loader supports (`stream_times_for` reads one
+window start per file row, `pfilter.rs:1517-1524`); the digest is defined for
+the forms the loader reads, and `observed_rows` refuses the others as the loader
+does.
+
 **Names.** The digest leaves the leaf's name out, so one series has one digest
 wherever it is bound. Every identity that folds row digests folds
 `(leaf name,
@@ -341,7 +389,7 @@ records a training window only when its configuration declares a holdout
 `rust/crates/cli/src/run_meta.rs:902-906`). `fit.meta.json` gains, for every
 fit:
 
-- `training_window.train_end`: the model time of the latest row the fit trained
+- `training_window.train_end`: the label time of the latest row the fit trained
   on, over every bound leaf. This is the one definition. Under
   `holdout_after =
   τ` the recorded value today is `τ` (`runner.rs:1981`); it
@@ -379,6 +427,12 @@ last observation (`last_obs - 6 weeks`) re-keys the fit when the appended rows
 move the boundary past another training row, and not otherwise; in both cases
 the recorded `train_end` and `training_rows` describe what the fit trained on.
 
+One exception is correct and stays. A model that declares a time anchor from the
+data (`last_obs`) resolves it over the whole training file, without the holdout
+cut (`rust/crates/cli/src/main.rs:4106-4160`), and the resolved value is in the
+model digest (`rust/crates/cli/src/obs_anchor.rs:10-15`). Appending rows to such
+a fit's file changes its model and re-keys it.
+
 **The other identities.** `Pfilter`, `Survey` and `ProfilePoint` fold
 observation data too. They switch to `(leaf name, row digest)` pairs over every
 row read for each bound leaf, in the same commit. `Pfilter` already folds name
@@ -397,36 +451,91 @@ leaf is recomputed on next use. Old leaves stay on disk and readable by path.
 Today a score is stamped held-out only if the fit's configuration declares a
 holdout and the fit record carries a training window (`detect_sealed_holdout`,
 `compare.rs:1997-2025`). With the declaration out of the fit's identity it can
-no longer carry that. The rule becomes:
+no longer carry that, and the cut it implies is on the wrong axis for some
+streams (above). The rule becomes a statement about rows.
 
-- A score is **held-out** when the rows it scores all lie strictly after the
-  fit's recorded `train_end`, and for every leaf the rows read at or before
-  `train_end` digest to the fit's recorded `training_rows`. The second condition
-  is the proof that the parameters were fitted to exactly the earlier rows.
-- A score is **in-sample** when `--in-sample` is given, or when the files read
-  hold no row after `train_end`.
-- A fit record without `training_window` and `training_rows` (written before
-  this change) cannot be scored held-out; the refusal says to re-run the fit,
-  which the hash-version bump requires in any case.
+For each leaf, the rows read split into the **training prefix** (rows whose
+label time is at or before the fit's `train_end`) and the **later rows**.
 
-Which later rows are read: from `--data` when given; else from the
-`[data.holdout]` table of the configuration the handle names (a `fit.toml`
-handle reads the file as it is now; a stored fit reads its archived
-configuration); else from the training files themselves, which under
-`holdout_after` hold the later rows.
+- **The prefix result**, per leaf, is a fact: `Matches` when the training prefix
+  digests to the fit's recorded `training_rows` for that leaf, `Differs` when it
+  does not, `NotRecorded` when the fit record has none.
+- **The scoring boundary** is on the scoring axis: the latest scoring time of
+  any training-prefix row, over every leaf. The filter assimilates and does not
+  score every step at or before it. A later row of one leaf whose scoring time
+  falls at or before the boundary is therefore assimilated and not scored: the
+  filter has one boundary for all leaves (a boundary per leaf needs the filter
+  to record more; it is out of scope, as
+  `2026-11-13-compare-on-selected-streams.md` records). This errs toward not
+  scoring a held-out row, never toward scoring a training row.
+- After scoring, the derivation checks that no scored row is a training-prefix
+  row, per leaf, by row. This replaces the check that scored times exceed
+  `train_end`.
 
-### What replaces the byte checks
+The conditioning recorded in the trace is then one of three:
+
+| Conditioning          | When                                                                                     |
+| --------------------- | ---------------------------------------------------------------------------------------- |
+| `HoldOutTail`         | scoring is past the boundary and every leaf's prefix result is `Matches`                 |
+| `HoldOutTailUnproven` | scoring is past the boundary and some leaf's prefix result is `Differs` or `NotRecorded` |
+| `InSample`            | `--in-sample` was given: every row read is scored, and no boundary is applied            |
+
+`HoldOutTail` loses its `theta_source` field, which is a directory name and not
+a function of the score's key; the fit is named by `ScoredFit.run_id`.
+
+Three refusals, each made before any filter pass runs:
+
+- **Nothing to score.** No later row has a scoring time past the boundary and
+  `--in-sample` was not given. This keeps today's refusal
+  (`compare.rs:2582-2587`): a missing or wrong holdout file must not turn into
+  an in-sample score without being asked for. A fit with no later data is scored
+  with `--in-sample`.
+- **A different set of leaves.** The leaves read must be exactly the leaves the
+  fit recorded `training_rows` for.
+- **No recorded training rows.** A fit record written before this change has no
+  `training_rows`; it is refused held-out with a message to re-run the fit,
+  which the hash-version bump (below) forces in any case, and may be scored with
+  `--in-sample`.
+
+Which files are read. Each source is read from one file holding the whole series
+for that source, training rows and later rows together:
+
+- from `--data SOURCE=FILE` when given;
+- else, for a fit whose configuration has a `[data.holdout]` file for the
+  source, the training file followed by the holdout file, joined as today
+  (`merge_holdout_file`, `compare.rs:2825`). A `fit.toml` handle reads the
+  configuration as it is now; a stored fit reads its archived one;
+- else the training file, which under `holdout_after` holds the later rows.
+
+A `--data` file that holds only later rows has a training prefix that differs
+from the fit's, and is reported as such.
+
+### What replaces the byte checks, and where a waiver lives
 
 `compare` today compares the bytes of each training and holdout file against the
 fit record (`check_training_freshness`, `compare.rs:447`; the holdout files at
 `compare.rs:2359-2374`) and refuses a difference as changed data. Under this
 proposal a file that grew, or a new holdout file, is the expected case. The
-check becomes the prefix condition above: for each leaf, the rows read at or
-before `train_end` must digest to the fit's `training_rows`. A mismatch is the
-changed-data refusal, with its existing override (`--allow-changed-data`) and
-its existing record in the trace (`TraceOverride::ChangedData`). Rows after
-`train_end` have no recorded expectation and are not checked; they are part of
-the score's own identity.
+check becomes the prefix result above. Rows after `train_end` have no recorded
+expectation and are not checked; they are part of the score's own identity.
+
+The prefix result is stored in the artifact, per leaf (`StreamData.prefix`). It
+is a function of the rows read and the fit, so of the score's key. A waiver is
+not: it is a fact about one command. So no waiver is stored in the artifact or
+its trace. `TraceOverride::ChangedData` and `TraceOverride::InSampleForced` are
+deleted from the trace, and what they said is carried by facts:
+
+- "the scored data was not what the fit trained on" is `HoldOutTailUnproven`
+  with a `Differs` prefix;
+- "scored in-sample although later rows were available" is `InSample` with a
+  leaf whose `n_rows_read` exceeds its `n_rows_training`.
+
+`camdl score` refuses to compute an artifact with a `Differs` prefix unless
+`--allow-changed-data` is given. `camdl compare` reads the fact from whatever
+artifact it is handed, stored or fresh, and applies its changed-data check to it
+(proposal B): a `Differs` prefix refuses unless the waiver is given on that
+`compare` command, and the override is recorded in that report. An artifact
+computed under a waiver therefore cannot pass a later comparison silently.
 
 ### The score's identity and the store
 
@@ -467,6 +576,8 @@ pub struct StreamData {
     pub rows_training: RowDigest,     // the fit's training rows for this leaf
     pub rows_read: RowDigest,         // every row the filter read
     pub rows_scored: RowDigest,       // the rows it scored
+    pub prefix: PrefixResult,         // Matches, Differs, or NotRecorded
+    pub n_rows_training: usize,
     pub n_rows_read: usize,
     pub n_rows_scored: usize,
 }
@@ -530,19 +641,33 @@ A new command writes the artifact:
 ```
 camdl score FIT [--data SOURCE=FILE ...] [--profile NAME | --particles N
                  --replicates N --draws N --seed N] [--in-sample]
-                 [--exclude-chains ...]
+                 [--chains ... | --exclude-chains ...] [--allow-changed-data]
 ```
 
-`FIT` is any fit handle `compare` accepts. Which rows it scores, and whether the
-score is held-out, is decided by the rules above.
+`FIT` is any fit handle `compare` accepts. Chain selection is `compare`'s: the
+selector `main` gained in `982eca439` and `770013f76`, in either spelling. The
+score's key folds the resolved set of excluded chains, so the two spellings of
+one selection are one score.
+
+**The model scored is the fit's.** The derivation uses the fit's archived
+compiled model (`model.ir.json`) and checks that its digest equals the model
+digest in the fit's run identity. A fit folder without the archive, or whose
+archive does not match, is refused. The fallback that recompiles the source file
+the configuration names is deleted: the score's key names the fit, so the score
+must be of the fit's model.
+
+**Order of work.** Read the rows; compute the row digests, the prefix results
+and the scoring boundary; make the three refusals above and the changed-data
+refusal; resolve the score's run id; look it up; on a miss, derive. Everything a
+refusal depends on is computed before the lookup, so a stored artifact is never
+returned for a request that would have been refused.
 
 The derivation is the body of today's `derive_prequential`, moved to a function
 both commands call. It still runs one `camdl pfilter` process per parameter draw
 per replicate.
 
-`camdl compare`, given a fit handle, resolves the score identity for its
-settings and looks it up. On a hit it reads `score.json`. On a miss it derives,
-stores the leaf, and reads it. Its `--particles`, `--replicates`, `--draws` and
+`camdl compare`, given a fit handle, does the same and reads the stored or
+freshly derived `score.json`. Its `--particles`, `--replicates`, `--draws` and
 `--seed` options remain and select a `custom` settings level. `compare` no
 longer keeps traces in the temporary directory.
 
@@ -553,33 +678,67 @@ reports it as not checked.
 
 ### One filter pass, and the stored trace
 
-A combined score pools predictive draws across passes: `combine_scored_traces`
-concatenates each pass's draws and computes the CRPS, the PIT and the interval
-on the pool (`compare.rs:2726-2740`), and `combine_mixture` goes through it
-(`compare.rs:2659`). A mixture's CRPS and quantiles cannot be formed from each
-pass's CRPS and quantiles. So the draws must survive until the passes are
-combined, and are dropped only then.
-
-There are therefore two types.
+A mixture's CRPS and quantiles cannot be formed from each pass's CRPS and
+quantiles, so the predictive draws must survive until the passes are combined,
+and are dropped only then. There are therefore two types.
 
 - **`score::trace::PassTrace`** is one filter pass at one parameter vector and
-  one seed: per step and leaf, the observed value, the predictive draws, the log
-  score and the coverage; and the pass's settings. `build_trace` produces it. It
-  is the interchange between a `camdl pfilter` child process and its parent,
-  written by a new option `pfilter --save-pass FILE` and read back by the same
-  binary. It is not a stored or published format and carries no schema promise.
-- **`PrequentialTrace`, schema 6** is the finished trace, with no draws. It is
-  produced by one function,
-  `score::combine::finish(passes, layout) ->
-  PrequentialTrace`, which combines
-  log scores as today (log-mean-exp across draws within a replicate, then across
-  replicates), pools the draws per step and leaf, and computes from the pool,
-  once: the CRPS (`crps_sample_fair`), the PIT endpoints, and the quantiles. A
-  single pass is finished by the same function with a pool of one.
-  `pfilter --save-prequential` writes the finished trace of its one pass.
+  one seed: per step, the time, the joint log score and the effective sample
+  size; per step and leaf, the observed value, the predictive draws, the leaf's
+  log score and the coverage; and the pass's settings and warnings.
+  `build_trace` produces it. It is the interchange between a `camdl pfilter`
+  child process and its parent, written by a new option
+  `pfilter --save-pass
+  FILE` and read back by the same binary. It is not a
+  stored or published format and carries no schema promise.
+- **`PrequentialTrace`, schema 6** is the finished trace, with no draws.
 
-`finish` replaces `combine_mixture` and `combine_scored_traces`. It draws no
-random number, so it lives in `score`.
+One function produces the second from the first:
+
+```rust
+pub fn finish(
+    passes: &[Vec<PassTrace>],            // replicates, each a list of draws
+    date_of: &dyn Fn(f64) -> Recorded<String>,
+) -> Result<PrequentialTrace, CombineError>
+```
+
+`passes[r][m]` is replicate `r` at parameter draw `m`. Every replicate has the
+same number of draws. `finish` computes, in this order:
+
+1. **Agreement.** Every pass must have the same step times and, at each step,
+   the same leaves with the same observed values and coverage. Otherwise it
+   returns `CombineError`, with the pass and step named. This is today's
+   refusal.
+2. **Per replicate.** At each step, the joint log score and each leaf's log
+   score are the log-mean-exp over that replicate's draws. The replicate's total
+   elpd is the sum over steps of its joint log scores, and its per-leaf totals
+   likewise. These are `replicate_elpd` and `replicate_elpd_by_stream`, and
+   `mc_se_elpd` is `logmeanexp_with_se` of the totals, absent for one replicate.
+3. **Across replicates.** The finished step's joint log score and each leaf's
+   log score are the log-mean-exp over replicates of the per-replicate values.
+   This is the nested combination `main` computes today, and the finished log
+   scores are numerically identical to today's.
+4. **Effective sample size.** The finished step's is the minimum over all
+   passes, as today.
+5. **The pool.** At each step and leaf, the draws of every pass are
+   concatenated, replicates in order and draws in order within a replicate. From
+   the pool, once: the CRPS (`crps_sample_fair`), the PIT endpoints, and the
+   quantiles (below).
+6. **Warnings.** `EssCollapse` is recomputed on the finished steps against the
+   threshold the passes recorded; `StartsAtPrior` is kept if any pass carries
+   it. `SamplesNotSaved` no longer exists.
+7. **Provenance.** `PlugIn` for one draw per replicate, `Posterior { n_draws }`
+   otherwise.
+8. **Dates.** Each step's `date` is `date_of(t)`. The caller supplies the
+   function, because `score` does not depend on the crate that knows calendars.
+
+The `derivation` block's remaining fields (particles, seed, step, where the
+parameters came from, excluded chains, interventions) are filled by the caller,
+as today. A single pass is finished by the same function with `passes` holding
+one replicate of one draw; `pfilter --save-prequential` writes that.
+
+`finish` replaces `combine_mixture` and `combine_scored_traces`, which are
+deleted. It draws no random number, so it lives in `score`.
 
 ### Trace schema 6
 
@@ -590,8 +749,11 @@ pub pit_lower: f64,   // P̂(X < y_obs): the share of pooled draws below the obs
 pub pit_upper: f64,   // P̂(X ≤ y_obs): the share at or below it
 ```
 
-and `pit_randomization_seed` is deleted. For an empty pool both are not a
-number, as the randomized value is today (`prequential.rs:911`).
+and `pit_randomization_seed` is deleted. Both are shares of the pool's finite
+draws, the same draws the quantiles use. Today the randomized value divides by
+every draw, finite or not (`prequential.rs:910-915`), while the interval uses
+the finite ones (`prequential.rs:950`); the two now agree. When the pool has no
+finite draw both endpoints are not a number.
 
 **Expected coverage.** Coverage at level ℓ, with central interval
 `[a, b] =
@@ -613,10 +775,18 @@ contributes a distribution function on [0, 1]: for `pit_lower < pit_upper` it is
 scored values with finite endpoints. With `J = 10` equal bins, the height of bin
 `j` is the mass the average puts on `[(j−1)/J, j/J)`, the last bin closed at 1;
 a step at `u = 0` falls in the first bin and a step at `u = 1` in the last. The
-heights sum to 1.
+heights sum to 1. When no scored value has finite endpoints there is no
+histogram: `PitHistogram.bins` is `NotRecorded`.
 
-Both are computed when the trace is finished and stored in `StreamSummary`,
-because the viewer computes no statistic (R3). This closes gh#1049.
+`PrequentialTrace` gains `expected_coverage(stream, level)` and
+`pit_histogram(stream, bins)` in the step that introduces schema 6, replacing
+`pit_coverage`; the comparison table, the prequential summary `pfilter` prints
+and, later, `StreamSummary` all call them. The per-stream TSV
+(`rust/crates/cli/src/prequential_out.rs:65-71`) replaces its `pit` column with
+`pit_lower` and `pit_upper`.
+
+In the artifact both are stored in `StreamSummary`, because the viewer computes
+no statistic (R3). This closes gh#1049.
 
 **Quantiles.** `y_pred_samples` and the five-quantile `interval` are replaced by
 `quantiles: Vec<f64>` at the levels listed once in the trace, `quantile_levels`.
@@ -756,13 +926,15 @@ pub struct TimeAxis {
 pub struct TimePoint { pub t: f64, pub date: Recorded<String> }
 ```
 
-A `date` is the calendar date of the model time `t`, computed once, at scoring
-time, by `ir::caltime::internal_to_date_hires` (`caltime.rs:250`), which stays
-one-to-one with a time that falls inside a day. A step's `t` is the time the
-observation is scored at. For a stream that accumulates over a period, that is
-the period's close, not the label the data file gives the row: a row labelled
-day D under `covers = day(D)` is scored at D+1
-(`multi_stream_obs.rs:1507-1523`). The period itself is already recorded per
+A `date` is the calendar day that contains the model time `t`, as `YYYY-MM-DD`,
+computed once, at scoring time, by `ir::caltime::internal_to_date`
+(`caltime.rs:231`). The higher-resolution form (`internal_to_date_hires`) is not
+used: for a time inside a day it returns text with a fractional-day suffix,
+which is not a date. `t` is always stored beside it, so nothing is lost. A
+step's `t` is the time the observation is scored at. For a stream that
+accumulates over a period, that is the period's close, not the label the data
+file gives the row: a row labelled day D under `covers = day(D)` is scored at
+D+1 (`multi_stream_obs.rs:1507-1523`). The period itself is already recorded per
 scored value (`coverage`). The page states dates as "scored at".
 
 For a model with no calendar origin every `date` and `origin` is `NotRecorded`;
@@ -891,7 +1063,8 @@ Each is a test that fails if the property is lost.
 2. **New data, same fit.** Appending rows after the training boundary to a
    `holdout_after` file leaves the fit's run id unchanged and changes the score
    run id. The same for adding, replacing and removing a `[data.holdout]` table,
-   and a `fit.toml` handle still finds the fit after each.
+   and a `fit.toml` handle still finds the fit after each. For a model that
+   anchors a time on `last_obs`, appending rows does change the fit's run id.
 3. **Training data still keys the fit.** Changing one training value, one
    training row's time, one auxiliary value, or one per-row window start changes
    the fit's run id.
@@ -906,8 +1079,9 @@ Each is a test that fails if the property is lost.
    stop, a stream with an auxiliary column) have committed digests per leaf; the
    test fails if a digest changes without `ROW_DIGEST_VERSION` changing.
 7. **The digest reads what the likelihood reads.** For every fixture,
-   `load_observations` and `stream_times_for` return what they returned before
-   they were rebuilt on `observed_rows`.
+   `load_observations`, `stream_times_for` and the survey loader return what
+   they returned before they were rebuilt on `observed_rows`. And the rows the
+   fit keeps for training (`retain_rows`) are the rows `training_rows` digests.
 8. **Names do not alias.** One file bound to leaf `a` and the same file bound to
    leaf `b` give different fit run ids and different pfilter run ids.
 9. **Store round trip.** `camdl compare` run twice on the same fits spawns no
@@ -916,12 +1090,16 @@ Each is a test that fails if the property is lost.
     same settings reads the stored leaf and derives nothing.
 11. **Engine keys the score.** The score run id changes when the engine version
     string changes, with fit, data and settings fixed.
-12. **Prefix check.** Scoring with a file whose rows up to the training boundary
-    differ from the fit's is refused, and under the override is recorded in the
-    trace. Scoring with a file that only grew is not refused.
+12. **Prefix result.** Scoring with a file whose rows up to the training
+    boundary differ from the fit's is refused by `camdl score`; under
+    `--allow-changed-data` the artifact is stored with `prefix: Differs` and
+    conditioning `HoldOutTailUnproven`, and a later `camdl compare` without the
+    waiver refuses it from the store. Scoring with a file that only grew is not
+    refused and is `HoldOutTail`.
 13. **Held-out without a declaration.** A fit run with no holdout declared,
-    scored with `--data` naming a file that extends past its training rows, is
-    stamped held-out and scores only the later rows.
+    scored with `--data` naming the whole series extended past its training
+    rows, is stamped held-out and scores only the later rows. Scored with no
+    later rows and without `--in-sample`, it is refused.
 14. **The boundary is a row time.** Under `holdout_after = τ` with `τ` between
     two rows, the recorded `train_end` is the earlier row's time, and appending
     rows after `τ` changes neither it nor the fit's run id.
@@ -954,8 +1132,24 @@ Each is a test that fails if the property is lost.
     values.
 23. **No sum across streams.** No field of the artifact equals the sum of
     `StreamSummary.elpd` on a two-stream fixture, and none is named as one.
-24. **Mutation checks.** For tests 3, 8, 11 and 12, removing the property in the
-    source makes the test fail; the commit message records the run.
+24. **No training row is scored.** A fit of a `covers = day(D)` stream with a
+    holdout: the last training row, whose scoring time is after `train_end`, is
+    not among the scored rows, and the first scored row is the first row the fit
+    did not train on. The same fixture on `main` scores the training row.
+25. **A leaf that ends early.** With two streams, one having no row after the
+    boundary, that leaf is `AssimilatedOnly` and the other is scored.
+26. **The fit's model.** A fit folder whose archived model is missing, or does
+    not match the fit's model digest, is refused.
+27. **One selection, one score.** `--chains` naming the kept chains and
+    `--exclude-chains` naming the rest give the same score run id.
+28. **Finished scores are today's.** On the phase 1 script's fixture with two
+    draws and two replicates, the finished trace's per-step log scores, elpd,
+    `replicate_elpd` and `mc_se_elpd` equal the values `main` computes.
+29. **In-sample past training.** `--in-sample` on a fit with later rows gives
+    `InSample` with `n_rows_read` greater than `n_rows_training`, and the same
+    run id whether or not the configuration declares a holdout.
+30. **Mutation checks.** For tests 3, 8, 11, 12 and 24, removing the property in
+    the source makes the test fail; the commit message records the run.
 
 ## What this proposal does not do
 
@@ -971,7 +1165,9 @@ Each is a test that fails if the property is lost.
   pass in-process. It changes what a pass writes for its parent (`PassTrace`).
 - It does not add the report, the convergence refusal or the draw-count check;
   those are proposal B. It does replace the byte-based changed-data check with
-  the prefix check, and changes how held-out is decided, as stated above.
+  the prefix result, changes how held-out is decided, and deletes the fallback
+  that scores a recompiled model, as stated above.
+- It does not give each stream its own scoring boundary.
 
 ## Steps
 
@@ -981,21 +1177,29 @@ phases 1 and 2 come first, then the steps below.
 
 - **A1.** `PassTrace`, `pfilter --save-pass`, `score::combine::finish` (which
   replaces and deletes `combine_mixture` and `combine_scored_traces`), and trace
-  schema 6: PIT endpoints, expected coverage, the histogram, quantiles, step
-  dates. Every reader updated. The printed coverage figures change; the commit
-  re-pins them and that is its subject. Tests 15, 16, 17, 18. Closes gh#1049.
-- **A2.** `observed_rows`, with `load_observations` and `stream_times_for`
-  rebuilt on it, and `runid::row_digest` with `ROW_DIGEST_VERSION`. Tests 4, 5,
-  6, 7.
-- **A3.** The fit record: `train_end` as the latest training row and
-  `training_rows` for every fit; `holdout_hashes` deleted; held-out decided by
-  rows; the prefix check in place of the byte checks. Tests 12, 13, 14.
+  schema 6: PIT endpoints, `expected_coverage` and `pit_histogram` on the trace,
+  quantiles, step dates, `theta_source` removed. Every reader updated, including
+  the per-stream TSV's columns, and the descriptions of the trace in
+  `docs/camdl-run-spec.md` and `docs/inference.md`. The printed coverage figures
+  change; the commit re-pins them and that is its subject. Tests 15, 16, 17, 18,
+  28. Closes gh#1049.
+- **A2.** `observed_rows`, with `load_observations`, `stream_times_for` and the
+  survey loader rebuilt on it, and `runid::row_digest` with
+  `ROW_DIGEST_VERSION`. Tests 4, 5, 6, 7.
+- **A3.** The fit record: `train_end` as the latest training row's label time
+  and `training_rows` for every fit; `holdout_hashes` deleted. The derivation:
+  the prefix result, the scoring boundary on the scoring axis, the three
+  conditionings, the three refusals, the row check after scoring, the archived
+  model required; the two trace overrides deleted. Tests 12, 13, 14, 24, 25, 26,
+  29.
 - **A4.** Identity: `FitDigest.data` as `(leaf, row digest)` pairs,
   `holdout_data` deleted, `[data.holdout]` removed from both configuration
   hashes, the other data-folding identities switched, `HASH_VERSION` raised
   together with the D25 change. The commit states what the bump invalidates.
   Tests 2 (fit half), 3, 8. This step needs the maintainer's confirmation before
-  it lands, as every identity change does.
+  it lands, as every identity change does. A3 and A4 land in one pull request,
+  in this order: A3 makes fits recorded earlier unscorable as held-out until
+  they are re-run, and A4's bump is what re-runs them.
 - **A5.** The `.meta.toml` reader; the two values in the fit record;
   `docs/camdl-data-spec.md`.
 - **A6.** `ScoreArtifact` and its parts in `score`; `ScoredLeadTime`,
@@ -1004,7 +1208,7 @@ phases 1 and 2 come first, then the steps below.
 - **A7.** `ArtifactKind::Score`, its resolver (`cli/src/score_cas.rs`), and
   `camdl score`, with the statements in `run.json`. `docs/camdl-run-spec.md`
   §9.2.4, §9.3 and a new §10 entry for `score.json`. Tests 2 (score half), 11,
-  22.
+  22, 27.
 - **A8.** `compare` reads and derives through the store, and its shared-data
   check compares `rows_read`. `docs/commands.md` and
   `docs/methods/model-comparison.md`. Tests 9, 10, 20.
@@ -1045,4 +1249,6 @@ The two literature citations were checked against their sources on 2026-11-14
 (Crossref and the authors' technical report for Czado et al., whose journal text
 was not reachable; the PLOS article and the hub's README for the quantile set).
 The design was reviewed against the code by an independent agent the same day;
-its twelve findings are resolved in the text above.
+its twelve findings are resolved in the text above. A second independent review
+of the revised text, against `main` after phase 1 of proposal B, found two
+blockers and nine major items; they are resolved above too.

@@ -13,10 +13,15 @@ This is proposal 3 in the set defined by
 score artifact defined in `2026-11-14-score-artifact.md` (proposal A) and
 creates the crate both proposals put their types in.
 
-Code references are to `main` at `e8e7c24a0` (2026-11-14). Every statement under
-[What exists today](#what-exists-today) was read in the code at that commit.
-Nothing was built or run for this proposal; anything that rests on more than
-reading the cited lines is marked _not verified_ with the reason.
+Code references are to `main` at `e8e7c24a0` (2026-11-14). Since then phase 1 of
+this proposal has moved the trace and evidence modules into `rust/crates/score`,
+and `compare`'s chain selection has gained `--chains` beside `--exclude-chains`
+(`982eca439`, `770013f76`); "excluded chains" below means the resolved set under
+either spelling. File paths and line numbers are as they were at `e8e7c24a0`.
+Every statement under [What exists today](#what-exists-today) was read in the
+code at that commit. Nothing was built or run for this proposal; anything that
+rests on more than reading the cited lines is marked _not verified_ with the
+reason.
 
 ## Terms
 
@@ -301,6 +306,14 @@ members were scored on the same observations when, for each scored leaf, their
 `rows_read` digests are equal. Under `--streams` only the scored leaf's digest
 is compared, as today.
 
+**`data_now`** is today's per-file finding (each scored file's bytes against the
+fit record). When proposal A's artifact exists it is replaced by the artifact's
+per-leaf prefix result (`Matches`, `Differs`, `NotRecorded`): the `ChangedData`
+check fails on `Differs`, lists `NotRecorded` under `not_checked`, and is waived
+by `--allow-changed-data` given on this `compare` command. Proposal A stores no
+waiver in an artifact, so an artifact computed under a waiver is refused here
+unless the waiver is given again.
+
 ### The Report
 
 ```rust
@@ -370,9 +383,11 @@ pub enum Difference {
 }
 ```
 
-`Recorded<T>` is proposal A's explicit "value or not recorded". `Report` and
-everything in it derive `Serialize` and `Deserialize`. A `Report` contains no
-trace and no timestamp.
+`Recorded<T>` is an explicit "value or not recorded": `Value(T)` or
+`NotRecorded`, serialized as a named variant and never as an absent key or
+`null`. It is defined in `score` in step 7, and proposal A's artifact uses it.
+`Report` and everything in it derive `Serialize` and `Deserialize`. A `Report`
+contains no trace and no timestamp.
 
 **Numbers that may not be finite.** A step's log score can be negative infinity
 (no particle could produce the observed value) or not a number
