@@ -1600,6 +1600,85 @@ mod tests {
         assert_eq!(pit(&a), pit_sample_randomized(&[1.0, 2.0, 2.0, 3.0], 2.0, v));
     }
 
+    /// The randomized PIT of a two-stream trace, value by value. Uniforms
+    /// come from the seeded PIT stream in step order, one per present
+    /// stream in stream order: a tied value takes its own uniform, a
+    /// non-tied value consumes one but does not depend on it, a hole
+    /// consumes none, and there is no step-level draw. The uniforms and
+    /// the tied PITs are pinned to their literal values, so a change to
+    /// the draw order or to the PIT stream shows here as a changed number.
+    #[test]
+    fn build_trace_pit_draws_one_uniform_per_present_stream_in_order() {
+        let recorded = super::super::particle_filter::PrequentialRecorded {
+            obs_times: vec![1.0, 2.0, 3.0],
+            log_liks: vec![vec![-1.0; 4]; 3],
+            stream_names: vec!["a".to_string(), "b".to_string()],
+            per_stream_log_liks: vec![vec![vec![-1.0; 4]; 2]; 3],
+            per_stream_samples: vec![
+                vec![vec![1.0, 2.0, 2.0, 3.0], vec![0.0, 4.0, 4.0, 8.0]],
+                vec![vec![7.0, 7.0, 7.0, 7.0], vec![1.0, 1.0, 2.0, 5.0]],
+                vec![vec![10.0, 12.0, 14.0, 16.0], vec![3.0, 3.0, 3.0, 3.0]],
+            ],
+        };
+        // Step 1: `a` ties (two of four draws equal 2), `b` does not (5).
+        // Step 2: `a` is a hole, `b` ties (two draws equal 1).
+        // Step 3: `a` does not tie (13), `b` ties with every draw (3).
+        let observed = vec![
+            vec![2.0, 5.0],
+            vec![f64::NAN, 1.0],
+            vec![13.0, 3.0],
+        ];
+        let cov = interval_coverage(&recorded.obs_times, 2);
+        let ess = vec![4.0; 3];
+        let build = |seed: u64| build_trace(&recorded, &observed, &cov, &ess, 0, seed, true, None);
+        let pits = |t: &PrequentialTrace| -> Vec<(String, f64)> {
+            t.steps.iter().flat_map(|s| s.per_stream.iter().map(|p| (p.stream.clone(), p.pit)))
+                .collect()
+        };
+
+        let trace = build(11);
+        let got = pits(&trace);
+        let names: Vec<&str> = got.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(names, ["a", "b", "b", "a", "b"], "the hole has no score");
+
+        // Five present values, five uniforms, consumed in this order.
+        let mut rng = crate::rng::StatefulRng::new_stream(11, PIT_RNG_STREAM);
+        let u: Vec<f64> = (0..5).map(|_| rng.uniform()).collect();
+        let pinned_u = [
+            0.8732899451957135, 0.8035777362823348, 0.038731235530629515,
+            0.7962383186794344, 0.7860387529800408,
+        ];
+        for (k, (&a, &b)) in u.iter().zip(pinned_u.iter()).enumerate() {
+            assert!((a - b).abs() <= 1e-15, "uniform {k} of the seed-11 PIT stream: {a:e} vs {b:e}");
+        }
+        // u = (#draws below y + v · #draws equal to y) / #draws.
+        let want = [
+            (1.0 + u[0] * 2.0) / 4.0, // a, step 1: tied, first uniform
+            3.0 / 4.0,                // b, step 1: not tied (u[1] consumed, unused)
+            (0.0 + u[2] * 2.0) / 4.0, // b, step 2: tied; the hole in `a` drew nothing
+            2.0 / 4.0,                // a, step 3: not tied (u[3] consumed, unused)
+            (0.0 + u[4] * 4.0) / 4.0, // b, step 3: tied with every draw
+        ];
+        for (k, ((s, g), w)) in got.iter().zip(want.iter()).enumerate() {
+            assert_eq!(g.to_bits(), w.to_bits(), "value {k} (stream {s}): {g:e} vs {w:e}");
+        }
+        let pinned_tied =
+            [(0, 0.6866449725978567), (2, 0.019365617765314758), (4, 0.7860387529800408)];
+        for (k, p) in pinned_tied {
+            assert!((got[k].1 - p).abs() <= 1e-15, "tied value {k}: {:e} vs {p:e}", got[k].1);
+        }
+
+        // Another seed moves every tied value and no other.
+        let other = pits(&build(12));
+        for k in [0, 2, 4] {
+            assert_ne!(got[k].1, other[k].1, "tied value {k} must depend on the seed");
+        }
+        for k in [1, 3] {
+            assert_eq!(got[k].1.to_bits(), other[k].1.to_bits(),
+                "non-tied value {k} is the empirical CDF at any seed");
+        }
+    }
+
     /// A trace whose streams carry the given (CRPS, PIT) at successive steps;
     /// a stream with fewer entries than another is absent from the later steps.
     fn trace_of_streams(streams: &[(&str, &[(f64, f64)])]) -> PrequentialTrace {
