@@ -522,6 +522,7 @@ dependencies = [
  "ir",
  "libc",
  "log",
+ "numerics",
  "rand 0.8.5",
  "rand_distr",
  "rayon",

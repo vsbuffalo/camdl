@@ -46,7 +46,8 @@ use crate::error::SimError;
 use crate::schedule::Cursor;
 use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error};
 use super::traits::{ProcessModel, ObservationModel};
-use super::types::{ParticleState, log_sum_exp, normalize_log_weights, ess_from_log_weights, LOG_PROB_FLOOR, init_particle_rngs};
+use super::types::{ParticleState, normalize_log_weights, ess_from_log_weights, LOG_PROB_FLOOR, init_particle_rngs};
+use numerics::log_sum_exp;
 use super::resampling::systematic_resample;
 
 // `Transform` and `EstimatedParam` are defined in `types.rs` (shared by all

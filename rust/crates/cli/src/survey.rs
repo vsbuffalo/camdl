@@ -31,6 +31,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use indexmap::{IndexMap, IndexSet};
+use numerics::log_sum_exp;
 use rayon::prelude::*;
 use sim::{
     compiled_model::CompiledModel,
@@ -39,7 +40,7 @@ use sim::{
         BoundObs, ChainBinomialProcess, MultiStreamObsModel, StreamTimes,
         multi_stream_obs::{StreamProjection, StreamSpec},
         traits::{ObservationModel, SMCConfig},
-        types::{log_sum_exp, EstimatedParam, ParticleState},
+        types::{EstimatedParam, ParticleState},
     },
 };
 
