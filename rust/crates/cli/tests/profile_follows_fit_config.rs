@@ -322,3 +322,23 @@ fn an_rw_sd_list_short_of_the_fit_estimate_is_refused() {
     let o = profile(tmp.path(), &args);
     assert_refused(&o, "--rw-sd beta with rho also in [estimate]", &["leaves out rho"]);
 }
+
+/// Item 6 of gh#1059: `fit run` takes no `--fixed` (a held parameter is a
+/// `[fixed]` entry of the config), and `profile --help` must not say it does.
+#[test]
+fn profile_help_does_not_offer_fixed_on_fit_run() {
+    let tmp = workdir(&fit_toml(""));
+    let o = Command::new(binary())
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .current_dir(tmp.path())
+        .args(["fit", "run", "fit.toml", "--fixed", "gamma=0.15"])
+        .output()
+        .unwrap();
+    assert!(!o.status.success(), "fit run --fixed must be rejected");
+    let help = profile(tmp.path(), &["--help"]);
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("`camdl fit run` takes no `--fixed`"),
+        "profile --help must say fit run takes no --fixed:\n{text}");
+    assert!(!text.contains("(if2, profile, fit run)"),
+        "profile --help still lists fit run for --fixed:\n{text}");
+}

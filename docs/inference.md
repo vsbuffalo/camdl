@@ -896,12 +896,17 @@ if2, fit run, survey) were removed in the same revision. Their replacements are:
   _warm-start chain origin_ case — when the file is a starting point for
   inference, not a pin.
 
-`--fixed`/`--fixed-file` on inference subcommands also removes the listed
-parameter from the `[estimate]` set if it was there — so
+`--fixed` (on `profile` and `survey`) and `--fixed-file` (on `profile`) also
+remove the listed parameter from the `[estimate]` set if it was there — so
 `--fixed gamma=0.1 --sweep tau=lin(-35,-1,30)` is the canonical
 slice-while-holding-gamma pattern. Each such parameter gets one `info:` line on
 stderr, so the override is never silent:
 ``info: gamma: `--fixed gamma=0.1` pins it, so it is not estimated (the fit config lists it in [estimate])``.
+
+`camdl fit run` takes no `--fixed`: the fit config is the record of the problem
+it runs, so a held parameter is a `[fixed]` entry, one line moved from
+`[estimate]` to `[fixed]` in a copy of the config. A one-value
+`fit run --sweep NAME=V` re-values an existing `[fixed]` entry.
 
 **Override visibility.** Whenever one tier replaces, with a different value, a
 value a lower tier supplied — `--fixed` over the active scenario, a later

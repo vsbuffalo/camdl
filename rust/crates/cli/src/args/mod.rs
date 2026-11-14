@@ -33,13 +33,18 @@ SET PARAMETER VALUES
                           parameter name (repeatable, later files override
                           earlier ones)
 
-ON INFERENCE SUBCOMMANDS (if2, profile, fit run)
+ON `camdl profile`
 
   Any name appearing in `--fixed`/`--fixed-file` is pinned at the supplied
-  value AND removed from the inference [estimate] set if present (so that
-  `--fixed gamma=0.1 --sweep tau=lin(...)` is the canonical pattern for
+  value AND removed from the --fit config's [estimate] set if present (so
+  that `--fixed gamma=0.1 --sweep tau=lin(...)` is the canonical pattern for
   profile-likelihood slicing — hold gamma, sweep tau). One info line names
   each such parameter, the flag that pinned it and its value.
+
+  `camdl fit run` takes no `--fixed`: a fit config is the record of the
+  problem it runs, so a held parameter is a [fixed] entry in it (one line
+  moved from [estimate] to [fixed] in a copy). A one-value
+  `fit run --sweep NAME=V` re-values a [fixed] entry without editing it.
 
 PRECEDENCE (last wins, per docs/camdl-run-spec.md §1.3)
 
