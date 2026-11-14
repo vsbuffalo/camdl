@@ -2755,8 +2755,12 @@ pub struct CompareArgs {
     ///
     /// `Δelpd = 12 nats` says a model won; this says WHERE it won — on three
     /// weeks around an intervention, on one district, on a single reporting
-    /// batch. One row per candidate × scored step, joint and per stream, with
-    /// the candidate's log score, the baseline's, and their difference. The
+    /// batch. PATH gets one row per candidate × scored step with the joint
+    /// log score (all streams observed at that time), the baseline's, and
+    /// their difference. Each stream's own scores go to a sibling file with
+    /// `.streams` before the extension (`scores.tsv` → `scores.streams.tsv`),
+    /// one row per candidate × step × stream: a stream's score is not a share
+    /// of the joint one, and those rows do not sum to the joint rows. The
     /// quantity is already computed to form `se(Δelpd)`; this stops discarding
     /// it. The natural consumer is a plot faceted by stream.
     ///

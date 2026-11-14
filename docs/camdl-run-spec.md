@@ -7244,7 +7244,9 @@ PATHS                       ≥2 when --config is absent. Each is a prequential.
                             read as `simulate --draws posterior --fit` reads it, §3.4)
 --exclude-chains [@FIT:]IDS per-fit (`@a:4`) or cohort-wide (`3,4`); mixing the two
                             forms is rejected. Always warns
---pointwise PATH            write the per-observation Δelpd vector as a TSV
+--pointwise PATH            write the per-observation Δelpd vector: joint scores
+                            to PATH, per-stream scores to PATH with .streams
+                            before its extension
 ```
 
 Columns: `T_score`, `elpd`, `Δelpd`, `LR` (= exp(Δelpd), the in-sample

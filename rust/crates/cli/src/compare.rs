@@ -592,7 +592,9 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
 
     if let Some(path) = &a.pointwise {
         match write_pointwise(&rows, base_idx, path) {
-            Ok(n) => out.say(format_args!("wrote {n} pointwise rows to {}", path.display())),
+            Ok(PointwiseWritten { joint: (jp, nj), streams: (sp, ns) }) => out.say(format_args!(
+                "wrote {nj} joint pointwise rows to {} and {ns} per-stream rows to {}",
+                jp.display(), sp.display())),
             Err(e) => {
                 out.fail(format!("error: {e}"));
             }
@@ -962,12 +964,6 @@ struct PointwiseRow {
     model: String,
     baseline: String,
     t: f64,
-    /// `joint` for the cross-stream score, `stream` for one stream's own.
-    scope: &'static str,
-    /// The stream name; empty for `scope = joint`. A separate column rather
-    /// than a sentinel in the name column, so no real stream can collide with
-    /// it.
-    stream: String,
     log_score: Option<f64>,
     baseline_log_score: Option<f64>,
 }
@@ -976,6 +972,23 @@ impl PointwiseRow {
     fn delta(&self) -> Option<f64> {
         Some(self.log_score? - self.baseline_log_score?)
     }
+}
+
+/// One stream's own row: that stream's scores at one observation time.
+#[derive(Debug, Clone, PartialEq)]
+struct StreamPointwiseRow {
+    stream: String,
+    row: PointwiseRow,
+}
+
+/// The pointwise projection of a comparison, in its two files: the joint
+/// scores, and each stream's own. A stream's score is not a share of the joint
+/// one — the joint is the log of a joint predictive, not a sum of the
+/// per-stream logs — so the two never share a column.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct Pointwise {
+    joint: Vec<PointwiseRow>,
+    streams: Vec<StreamPointwiseRow>,
 }
 
 /// Every pair of traces that will be differenced must sit on the same
@@ -1273,9 +1286,9 @@ fn fmt_stream_set(s: &std::collections::BTreeSet<&str>) -> String {
 /// that paired steps carry the same `t`; the check is repeated here because
 /// this function is also the one that would turn a mismatch into a plot that
 /// looks fine, and it must not depend on a caller having run the preflight.
-fn pointwise_rows(rows: &[Row], base_idx: usize) -> Result<Vec<PointwiseRow>, String> {
+fn pointwise_rows(rows: &[Row], base_idx: usize) -> Result<Pointwise, String> {
     let base = &rows[base_idx];
-    let mut out = Vec::new();
+    let mut out = Pointwise::default();
     for (i, r) in rows.iter().enumerate() {
         if i == base_idx {
             continue;
@@ -1296,12 +1309,10 @@ fn pointwise_rows(rows: &[Row], base_idx: usize) -> Result<Vec<PointwiseRow>, St
                     r.name, base.name, step.t, bstep.t,
                 ));
             }
-            out.push(PointwiseRow {
+            out.joint.push(PointwiseRow {
                 model: r.name.clone(),
                 baseline: base.name.clone(),
                 t: step.t,
-                scope: "joint",
-                stream: String::new(),
                 log_score: Some(step.log_score),
                 baseline_log_score: Some(bstep.log_score),
             });
@@ -1319,14 +1330,15 @@ fn pointwise_rows(rows: &[Row], base_idx: usize) -> Result<Vec<PointwiseRow>, St
                 ss.iter().find(|s| s.stream == n).map(|s| s.log_score)
             };
             for n in names {
-                out.push(PointwiseRow {
-                    model: r.name.clone(),
-                    baseline: base.name.clone(),
-                    t: step.t,
-                    scope: "stream",
+                out.streams.push(StreamPointwiseRow {
                     stream: n.to_string(),
-                    log_score: find(&step.per_stream, n),
-                    baseline_log_score: find(&bstep.per_stream, n),
+                    row: PointwiseRow {
+                        model: r.name.clone(),
+                        baseline: base.name.clone(),
+                        t: step.t,
+                        log_score: find(&step.per_stream, n),
+                        baseline_log_score: find(&bstep.per_stream, n),
+                    },
                 });
             }
         }
@@ -1334,25 +1346,55 @@ fn pointwise_rows(rows: &[Row], base_idx: usize) -> Result<Vec<PointwiseRow>, St
     Ok(out)
 }
 
-/// Render the pointwise rows as a TSV. An absent score is an EMPTY cell, never
-/// `NaN` or `0` — the reader must be able to tell "this model did not score
-/// here" from "this model scored zero here".
-fn render_pointwise_tsv(rows: &[PointwiseRow]) -> String {
-    let cell = |v: Option<f64>| v.map(|x| format!("{:.10}", x)).unwrap_or_default();
+/// A score cell. An absent score is an EMPTY cell, never `NaN` or `0` — the
+/// reader must be able to tell "this model did not score here" from "this
+/// model scored zero here".
+fn pointwise_cell(v: Option<f64>) -> String {
+    v.map(|x| format!("{:.10}", x)).unwrap_or_default()
+}
+
+/// The joint file: one row per candidate × scored step. `streams_name` is the
+/// sibling file the header points at.
+fn render_pointwise_joint_tsv(rows: &[PointwiseRow], streams_name: &str) -> String {
     let mut s = String::new();
-    s.push_str("# camdl compare --pointwise: per-observation log predictive scores\n");
+    s.push_str("# camdl compare --pointwise: per-observation joint log predictive scores\n");
+    s.push_str("# log_score is the log of the joint one-step-ahead predictive density of \
+                every stream observed at t; summed over t it is the row's elpd.\n");
     s.push_str("# delta_log_score = log_score - baseline_log_score, in nats.\n");
-    s.push_str("# scope=joint is the cross-stream score; scope=stream is one \
-                stream's own.\n");
-    s.push_str("# An empty cell means that side did not score that stream at \
-                that time.\n");
-    s.push_str("model\tbaseline\tt\tscope\tstream\tlog_score\t\
-                baseline_log_score\tdelta_log_score\n");
+    s.push_str(&format!("# Each stream's own score is in {streams_name}.\n"));
+    s.push_str("model\tbaseline\tt\tlog_score\tbaseline_log_score\tdelta_log_score\n");
     for r in rows {
         s.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            r.model, r.baseline, fmt_pointwise_time(r.t), r.scope, r.stream,
-            cell(r.log_score), cell(r.baseline_log_score), cell(r.delta()),
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            r.model, r.baseline, fmt_pointwise_time(r.t),
+            pointwise_cell(r.log_score), pointwise_cell(r.baseline_log_score),
+            pointwise_cell(r.delta()),
+        ));
+    }
+    s
+}
+
+/// The per-stream file: one row per candidate × scored step × stream either
+/// side scored there. `joint_name` is the sibling file the header points at.
+fn render_pointwise_streams_tsv(rows: &[StreamPointwiseRow], joint_name: &str) -> String {
+    let mut s = String::new();
+    s.push_str("# camdl compare --pointwise: per-observation log predictive scores, \
+                one stream at a time\n");
+    s.push_str("# log_score is the stream's own one-step-ahead log predictive density. \
+                These rows do not sum to the joint scores in ");
+    s.push_str(joint_name);
+    s.push_str(": a joint score is the log of a joint predictive, not a sum of \
+                per-stream logs.\n");
+    s.push_str("# delta_log_score = log_score - baseline_log_score, in nats.\n");
+    s.push_str("# An empty cell means that side did not score that stream at \
+                that time.\n");
+    s.push_str("model\tbaseline\tt\tstream\tlog_score\tbaseline_log_score\tdelta_log_score\n");
+    for StreamPointwiseRow { stream, row: r } in rows {
+        s.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            r.model, r.baseline, fmt_pointwise_time(r.t), stream,
+            pointwise_cell(r.log_score), pointwise_cell(r.baseline_log_score),
+            pointwise_cell(r.delta()),
         ));
     }
     s
@@ -1368,12 +1410,49 @@ fn fmt_pointwise_time(t: f64) -> String {
     }
 }
 
-fn write_pointwise(rows: &[Row], base_idx: usize, path: &Path) -> Result<usize, String> {
+/// The per-stream sibling of a joint TSV path: `.streams` inserted before the
+/// final extension (`scores.tsv` → `scores.streams.tsv`), or appended when the
+/// path has none (`scores` → `scores.streams`). `prequential.tsv` uses the same
+/// naming.
+pub(crate) fn streams_sibling(path: &Path) -> PathBuf {
+    match (path.file_stem(), path.extension()) {
+        (Some(stem), Some(ext)) => {
+            let mut name = stem.to_os_string();
+            name.push(".streams.");
+            name.push(ext);
+            path.with_file_name(name)
+        }
+        _ => {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(".streams");
+            PathBuf::from(name)
+        }
+    }
+}
+
+/// What `--pointwise` wrote: each file and its row count.
+struct PointwiseWritten {
+    joint: (PathBuf, usize),
+    streams: (PathBuf, usize),
+}
+
+/// Write the joint rows to `path` and the per-stream rows to its
+/// [`streams_sibling`]. Both are rendered before either is written, so a
+/// refusal leaves neither file behind.
+fn write_pointwise(rows: &[Row], base_idx: usize, path: &Path) -> Result<PointwiseWritten, String> {
     let pw = pointwise_rows(rows, base_idx)?;
-    let text = render_pointwise_tsv(&pw);
-    std::fs::write(path, text)
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    Ok(pw.len())
+    let streams_path = streams_sibling(path);
+    let file_name = |p: &Path| p.file_name().map_or_else(
+        || p.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let joint_text = render_pointwise_joint_tsv(&pw.joint, &file_name(&streams_path));
+    let streams_text = render_pointwise_streams_tsv(&pw.streams, &file_name(path));
+    for (p, text) in [(path, &joint_text), (streams_path.as_path(), &streams_text)] {
+        std::fs::write(p, text).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
+    }
+    Ok(PointwiseWritten {
+        joint: (path.to_path_buf(), pw.joint.len()),
+        streams: (streams_path, pw.streams.len()),
+    })
 }
 
 /// One compared input, loaded: what [`Row`] carries besides its name.
@@ -3226,8 +3305,9 @@ mod tests {
         let base = || row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]);
         let b = row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]);
         let ok = pointwise_rows(&[b, base()], 1).expect("aligned traces score");
-        assert_eq!(ok.len(), 3, "one joint row per step (no per-stream data here)");
-        assert!((ok[0].delta().unwrap() - 1.0).abs() < 1e-12);
+        assert_eq!(ok.joint.len(), 3, "one joint row per step");
+        assert!(ok.streams.is_empty(), "no per-stream data here");
+        assert!((ok.joint[0].delta().unwrap() - 1.0).abs() < 1e-12);
 
         // Same count, different times.
         let shifted = row_at("b", &[7.0, 14.0, 28.0], &[-5.0, -6.0, -6.0]);
@@ -3248,24 +3328,67 @@ mod tests {
     /// zero is a perfectly ordinary log score.
     #[test]
     fn pointwise_tsv_writes_an_absent_score_as_an_empty_cell() {
-        let r = PointwiseRow {
-            model: "cand".into(),
-            baseline: "base".into(),
-            t: 14.0,
-            scope: "stream",
+        let r = StreamPointwiseRow {
             stream: "east".into(),
-            log_score: Some(-1.0),
-            baseline_log_score: None,
+            row: PointwiseRow {
+                model: "cand".into(),
+                baseline: "base".into(),
+                t: 14.0,
+                log_score: Some(-1.0),
+                baseline_log_score: None,
+            },
         };
-        assert_eq!(r.delta(), None, "no difference without both sides");
-        let tsv = render_pointwise_tsv(&[r]);
+        assert_eq!(r.row.delta(), None, "no difference without both sides");
+        let tsv = render_pointwise_streams_tsv(&[r], "scores.tsv");
         let data = tsv.lines().find(|l| l.starts_with("cand")).expect("a data row");
         let cells: Vec<&str> = data.split('\t').collect();
-        assert_eq!(cells.len(), 8, "eight columns: {cells:?}");
+        assert_eq!(cells.len(), 7, "seven columns: {cells:?}");
         assert_eq!(cells[2], "14", "integral times are written as integers");
-        assert_eq!(cells[6], "", "the absent baseline score is empty: {cells:?}");
-        assert_eq!(cells[7], "", "the absent difference is empty: {cells:?}");
+        assert_eq!(cells[3], "east");
+        assert_eq!(cells[5], "", "the absent baseline score is empty: {cells:?}");
+        assert_eq!(cells[6], "", "the absent difference is empty: {cells:?}");
         assert!(!tsv.contains("NaN"), "never NaN: {tsv}");
+    }
+
+    /// D16: the joint scores and the per-stream scores go to two files, and
+    /// neither has a `scope` column. Each header says what its `log_score` is;
+    /// the per-stream file says its rows do not sum to the joint file's.
+    #[test]
+    fn pointwise_writes_the_joint_and_the_per_stream_scores_to_two_files() {
+        assert_eq!(streams_sibling(Path::new("out/scores.tsv")), Path::new("out/scores.streams.tsv"));
+        assert_eq!(streams_sibling(Path::new("out/scores")), Path::new("out/scores.streams"));
+        assert_eq!(streams_sibling(Path::new("a.b.tsv")), Path::new("a.b.streams.tsv"));
+
+        let t = [7.0, 14.0];
+        let base = row_with_streams("base", &t, &["north", "south"]);
+        let mut cand = row_with_streams("cand", &t, &["north", "south"]);
+        cand.trace.steps[1].log_score = -4.0;
+        cand.trace.steps[1].per_stream[0].log_score = -1.0;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scores.tsv");
+        let w = write_pointwise(&[cand, base], 1, &path).expect("writes");
+        assert_eq!(w.joint, (path.clone(), 2));
+        assert_eq!(w.streams, (dir.path().join("scores.streams.tsv"), 4));
+
+        let joint = std::fs::read_to_string(&path).unwrap();
+        let header = joint.lines().find(|l| !l.starts_with('#')).unwrap();
+        assert_eq!(header, "model\tbaseline\tt\tlog_score\tbaseline_log_score\tdelta_log_score");
+        assert!(joint.contains("# log_score is the log of the joint"), "{joint}");
+        assert!(joint.contains("scores.streams.tsv"), "names its sibling: {joint}");
+        let rows: Vec<&str> = joint.lines().filter(|l| l.starts_with("cand")).collect();
+        assert_eq!(rows[1].split('\t').nth(5), Some("2.0000000000"), "{joint}");
+
+        let streams = std::fs::read_to_string(dir.path().join("scores.streams.tsv")).unwrap();
+        let header = streams.lines().find(|l| !l.starts_with('#')).unwrap();
+        assert_eq!(header,
+            "model\tbaseline\tt\tstream\tlog_score\tbaseline_log_score\tdelta_log_score");
+        assert!(streams.contains("do not sum to the joint scores in scores.tsv"), "{streams}");
+        let north14 = streams.lines()
+            .find(|l| l.starts_with("cand\tbase\t14\tnorth")).expect("north at 14");
+        assert_eq!(north14.split('\t').nth(6), Some("2.0000000000"), "{streams}");
+        for text in [&joint, &streams] {
+            assert!(!text.contains("scope"), "no scope column: {text}");
+        }
     }
 
     /// gh#295 / the "one format, one warning" rule: a warning or caveat that
