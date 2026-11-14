@@ -3211,8 +3211,8 @@ fn paired_delta(a: &PrequentialTrace, b: &PrequentialTrace) -> (f64, f64) {
         None => return (f64::NAN, f64::NAN),
     };
     let delta: f64 = diffs.iter().sum();
-    let se = crate::evidence::newey_west_se_of_sum(&diffs)
-        / crate::evidence::hln_factor(diffs.len());
+    let se = score::evidence::newey_west_se_of_sum(&diffs)
+        / score::evidence::hln_factor(diffs.len());
     (delta, se)
 }
 
@@ -3482,7 +3482,7 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pref
             row.push(format!("{:+.2}", d));
             row.push(fmt_lr(d.exp()));
             row.push(format!("{:.2}", se));
-            row.push(crate::evidence::evidence_cell(d, se, mc_se_delta(r, &rows[base_idx])));
+            row.push(score::evidence::evidence_cell(d, se, mc_se_delta(r, &rows[base_idx])));
         }
         if let (Some(_), Accuracy::PerStream(v)) = (&single, &accuracy[i]) {
             row.extend(accuracy_cells(&v[0], false, want_crps, want_pit,
@@ -3632,7 +3632,7 @@ fn warning_lines(rows: &[Row], base_idx: usize, checks: &Preflight, accuracy: &[
         .filter(|(i, _)| *i != base_idx)
         .filter_map(|(_, r)| {
             let d = paired_diffs(&r.trace, &rows[base_idx].trace)?;
-            let a1 = crate::evidence::lag1_autocorrelation(&d);
+            let a1 = score::evidence::lag1_autocorrelation(&d);
             a1.is_finite().then(|| format!("{} {:+.2}", r.name, a1))
         })
         .collect();
@@ -3717,7 +3717,7 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflig
             cells.push(format!("{:+.2}", d));
             cells.push(fmt_lr(d.exp()));
             cells.push(format!("{:.2}", se));
-            cells.push(crate::evidence::evidence_cell(d, se, mc_se_delta(r, &rows[base_idx])));
+            cells.push(score::evidence::evidence_cell(d, se, mc_se_delta(r, &rows[base_idx])));
         }
         if let (Some(_), Accuracy::PerStream(v)) = (&single, &accuracy[i]) {
             cells.extend(accuracy_cells(&v[0], false, want_crps, want_pit,
@@ -3832,9 +3832,9 @@ fn json_document(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pre
         // table shows. See
         // docs/dev/proposals/2026-04-23-evidence-in-decibans.md.
         let (d_elpd_db, evidence_label) = if d_elpd.is_finite() {
-            let db = d_elpd * crate::evidence::NATS_TO_DB;
+            let db = d_elpd * score::evidence::NATS_TO_DB;
             (option_finite(db),
-             serde_json::json!(crate::evidence::evidence_label(d_elpd, se_elpd,
+             serde_json::json!(score::evidence::evidence_label(d_elpd, se_elpd,
                  mc_se_delta(r, &rows[base_idx]))))
         } else {
             (serde_json::Value::Null, serde_json::Value::Null)
@@ -3864,7 +3864,7 @@ fn json_document(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pre
             } else {
                 paired_diffs(&r.trace, base)
                     .map_or(serde_json::Value::Null, |d| option_finite(
-                        crate::evidence::lag1_autocorrelation(&d)))
+                        score::evidence::lag1_autocorrelation(&d)))
             },
             "mean_crps": field("mean_crps"),
             "delta_mean_crps": field("delta_mean_crps"),
