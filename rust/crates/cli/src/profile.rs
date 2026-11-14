@@ -1101,10 +1101,23 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             .filter(|p| compiled.param_index.contains_key(p.name.as_str()))
             .map(|p| p.name.clone())
             .collect(),
-        Some(crate::args::types::RwSd::Map(_)) => rw_sd_map_raw.keys()
-            .filter(|name| !exclude.contains(*name))
-            .cloned()
-            .collect(),
+        // In the model's order, as `auto` and [estimate] give it: the list is
+        // a hash map, whose order changes from one process to the next, and a
+        // start rule draws per parameter in this order. Names the model does
+        // not declare follow, sorted, for the spec builder to refuse.
+        Some(crate::args::types::RwSd::Map(_)) => {
+            let mut names: Vec<String> = model.parameters.iter()
+                .filter(|p| rw_sd_map_raw.contains_key(&p.name) && !exclude.contains(&p.name))
+                .map(|p| p.name.clone())
+                .collect();
+            let mut unknown: Vec<String> = rw_sd_map_raw.keys()
+                .filter(|n| !exclude.contains(*n) && !model.parameters.iter().any(|p| &p.name == *n))
+                .cloned()
+                .collect();
+            unknown.sort();
+            names.extend(unknown);
+            names
+        }
         None => fit_estimate.keys()
             .filter(|name| !exclude.contains(*name))
             .cloned()

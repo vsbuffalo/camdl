@@ -342,3 +342,33 @@ fn profile_help_does_not_offer_fixed_on_fit_run() {
     assert!(!text.contains("(if2, profile, fit run)"),
         "profile --help still lists fit run for --fixed:\n{text}");
 }
+
+/// An explicit `--rw-sd` list is a hash map; the cells must estimate its
+/// names in one order (the model's), or a start rule that draws per parameter
+/// in that order hands each run's draws to different parameters, and the same
+/// invocation, with the same run key, stores different estimates from one
+/// process to the next. Four runs in fresh directories must agree byte for
+/// byte.
+#[test]
+fn an_explicit_rw_sd_list_profiles_reproducibly() {
+    let fit = fit_toml("").replace(
+        "[fixed]\nN0 = 10000\nI0 = 10\nrho = 0.6\nk = 10.0\n",
+        "rho = { bounds = [0.1, 0.9], start = 0.6 }\nk = { bounds = [1.0, 100.0], start = 10.0 }\n\n\
+         [fixed]\nN0 = 10000\nI0 = 10\n");
+    let mut seen: Vec<Vec<String>> = Vec::new();
+    for _ in 0..4 {
+        let tmp = workdir(&fit);
+        let dir = tmp.path();
+        let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
+            "--rw-sd", "beta=auto,rho=auto,k=auto", "--n-starts", "2", "--starts", "uniform"];
+        args.extend_from_slice(&NL);
+        let o = profile(dir, &args);
+        assert_ok(&o, "explicit --rw-sd list");
+        let mut files = find_all(&dir.join("results"), "mle.toml");
+        files.sort();
+        seen.push(files.iter().map(|f| std::fs::read_to_string(f).unwrap()).collect());
+    }
+    for run in &seen[1..] {
+        assert_eq!(run, &seen[0], "the same invocation must store the same cells");
+    }
+}
