@@ -1829,7 +1829,7 @@ still deterministic and still content-addressed.
 layer).** clap rejects the combination at parse time, before the model is
 compiled:
 
-```bash
+```bash cli-check=refused
 camdl simulate seir_vaccine.camdl --params params.toml --scenario with_sia --enable sia_round_1
 ```
 

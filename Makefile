@@ -222,7 +222,8 @@ test-integration: build
 # (grammar churn) that break documented models; a doc-only-PR gate needs a
 # separate doc-triggered CI job since ci.yml ignores docs/** paths.
 DOCTEST_DOCS := docs/camdl-language-spec.md docs/intro.md docs/user-features.md \
-                docs/dsl-cheatsheet.md docs/dates.md docs/camdl-run-spec.md
+                docs/dsl-cheatsheet.md docs/dates.md docs/camdl-run-spec.md \
+                docs/agents.md docs/inference.md
 test-docs: build-ocaml
 	$(CAMDLC) doctest --gate $(DOCTEST_DOCS)
 
@@ -235,9 +236,16 @@ test-docs: build-ocaml
 # drift AND does not over-flag valid-but-input-missing commands, so this target
 # can never silently degrade into a no-op.
 #
-# CLI_DOCS is the set of docs verified drift-free / kept-clean. Extend it as
-# other docs are brought to green.
-CLI_DOCS := docs/workflow.md docs/inference.md docs/debugging.md docs/diagnosing-fits.md
+# CLI_DOCS is every markdown page the website publishes (`project.render` in
+# docs/_quarto.yml); the .qmd tutorials run their commands on every site build.
+# A block showing a command camdl refuses is fenced ```bash cli-check=refused.
+CLI_DOCS := docs/install.md docs/intro.md docs/workflow.md docs/dates.md \
+            docs/camdl-data-spec.md docs/diagnosing-fits.md docs/debugging.md \
+            docs/methods/model-comparison.md docs/mre.md docs/concepts.md \
+            docs/inference.md docs/runtimes.md docs/camdl-language-spec.md \
+            docs/dsl-cheatsheet.md docs/user-features.md docs/fit-toml.md \
+            docs/camdl-run-spec.md docs/language-changes.md docs/agents.md \
+            docs/documentation-style.md
 test-cli-docs: build-rust
 	bash scripts/check_cli_docs.sh --selftest
 	bash scripts/check_cli_docs.sh $(CLI_DOCS)

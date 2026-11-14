@@ -10,20 +10,16 @@ on:
   push:
     branches: [main]
     paths:
-      - "docs/workflow.md"
-      - "docs/inference.md"
-      - "docs/debugging.md"
-      - "docs/diagnosing-fits.md"
+      - "docs/*.md"
+      - "docs/methods/*.md"
       - "scripts/check_cli_docs.sh"
       - "rust/crates/cli/**"
       - ".github/workflows/cli-docs.yml"
   pull_request:
     branches: [main]
     paths:
-      - "docs/workflow.md"
-      - "docs/inference.md"
-      - "docs/debugging.md"
-      - "docs/diagnosing-fits.md"
+      - "docs/*.md"
+      - "docs/methods/*.md"
       - "scripts/check_cli_docs.sh"
       - "rust/crates/cli/**"
       - ".github/workflows/cli-docs.yml"

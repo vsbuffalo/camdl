@@ -16,6 +16,8 @@ on:
       - "docs/dsl-cheatsheet.md"
       - "docs/dates.md"
       - "docs/camdl-run-spec.md"
+      - "docs/agents.md"
+      - "docs/inference.md"
       - "ocaml/**"
       - ".github/workflows/doctest.yml"
   pull_request:
@@ -27,6 +29,8 @@ on:
       - "docs/dsl-cheatsheet.md"
       - "docs/dates.md"
       - "docs/camdl-run-spec.md"
+      - "docs/agents.md"
+      - "docs/inference.md"
       - "ocaml/**"
       - ".github/workflows/doctest.yml"
 
