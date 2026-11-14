@@ -57,6 +57,7 @@ pub mod coeff_guard;  // gh#342 P4: NUTS guard — param reaching a coefficient 
 pub mod config_v2;
 pub mod loglik;  // gh#280: LoglikType — the single typed source for loglik class
 pub mod state;
+pub(crate) mod stream_bindings; // which leaves a fit's [data] binds, by source, and to which files
 pub mod provenance;
 pub mod runner;
 pub mod priors_precedence;  // gh#75: shared prior-resolution chain for fit run + profile
@@ -844,14 +845,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // top-level key such as `ic_free` written below the `[data.observations]`
     // header, which TOML scopes into the table.
     if let Ok(ds) = config.problem.data_spec() {
-        for (origin, table) in [
-            ("[data.observations]", Some(&ds.observations)),
-            ("[data.holdout]", ds.holdout.as_ref()),
-        ] {
-            let Some(table) = table else { continue };
-            if let Err(e) = runner::check_bound_sources(&model, origin, table) {
-                out.fail(format!("error: {}", e));
-            }
+        if let Err(e) = stream_bindings::StreamBindings::resolve(&model, ds) {
+            out.fail(format!("error: {}", e));
         }
     }
 
@@ -2631,17 +2626,15 @@ fn base_warmup(
 // fit-level config archive for `fit table` config_diff is reworked in M3.3
 // alongside the fit-level outputs' CAS relocation.
 
-/// The data files a fit's run identity (`FitDigest.data`) is built over:
-/// `[data.observations]` as written (keyed by source), or, under the
-/// one-file shorthand, the file once per model observation leaf. Every site
+/// The data files a fit's run identity (`FitDigest.data`) is built over
+/// ([`stream_bindings::StreamBindings::identity_keyed_training`]). Every site
 /// that computes a fit-level or method-level identity calls this, so they
 /// agree.
 fn identity_data_paths(
     data: &config_v2::DataSpec,
     model: &ir::Model,
 ) -> Result<indexmap::IndexMap<String, String>, String> {
-    let names: Vec<String> = model.observations.iter().map(|o| o.name.clone()).collect();
-    data.effective_observations(&names)
+    Ok(stream_bindings::StreamBindings::resolve(model, data)?.identity_keyed_training())
 }
 
 /// Content hash of each observation stream the problem binds, over the

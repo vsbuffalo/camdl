@@ -420,22 +420,12 @@ impl FitRunConfig {
 
         // Load data — one or more observation streams (real-data only;
         // synthetic-data fits route through a generator before this path).
-        // Resolve any single-file shorthand (`[data] file = "..."`) into
-        // the canonical per-stream map by mapping every model-declared
-        // stream name to that file. From here on the loop is the same.
         // The one dt rule (`crate::dt_rule`): the model's declared step, else
         // the config's. `fit run` has already refused a written `[config] dt`
         // that disagrees; a reader of a stored fit gets the step it ran at.
         let dt = crate::dt_rule::resolved_dt(model.simulation.dt, fit.config.dt);
-        let data_spec = fit.data_spec()?;
-        // `--data`/`[data.observations]` keys by the `from <label>` SOURCE
-        // (defaults to the stream name; §2.4). Resolve against the distinct
-        // source labels so several streams can share one wide file.
-        let mut source_labels: Vec<String> = model.observations.iter()
-            .map(|o| o.source.clone()).collect();
-        source_labels.sort();
-        source_labels.dedup();
-        let effective = data_spec.effective_observations(&source_labels)?;
+        let bindings = super::stream_bindings::StreamBindings::resolve(&model, fit.data_spec()?)?;
+        let effective = bindings.training_by_source();
         if effective.is_empty() {
             return Err(
                 "fit.toml [data] resolves to zero observation streams. Either \
@@ -456,7 +446,7 @@ impl FitRunConfig {
         // and profile also route through (multi-cadence: each stream keeps its
         // OWN times + cells; `bind` merges to the union below).
         let mut streams =
-            resolve_and_load_obs_streams(&model, &compiled, &effective, dt, &time_opts)?;
+            resolve_and_load_obs_streams(&model, &compiled, effective, dt, &time_opts)?;
 
         // gh#585 / Stage 3.1: the declared holdout, applied. Training
         // truncation happens HERE — the fit-only callsite — never inside
@@ -464,7 +454,8 @@ impl FitRunConfig {
         // profile, compare's holdout scoring) must see the full series.
         let applied_training_window = apply_holdout_declaration(
             &mut streams,
-            fit.data.as_ref(),
+            fit.data.as_ref().and_then(|d| d.holdout_after.as_ref()),
+            bindings.holdout_by_source(),
             &model,
             compiled.model.simulation.t_start,
             dt,
@@ -1777,66 +1768,13 @@ pub(crate) fn data_bindings_to_effective(
     Ok(effective)
 }
 
-/// Reject a data-binding key that names no observation stream `source`.
-///
-/// `[data.observations]`, `[data.holdout]` and `--data NAME=PATH` all key by
-/// observation SOURCE (the `from <label>`, defaulting to the stream name;
-/// §2.4). A key matching none of them binds a file to nothing — at best a
-/// mistyped stream name, at worst a *top-level* fit.toml setting that TOML
-/// scoping captured into the table by accident, which then silently does not
-/// apply (a top-level key such as `ic_free` written below the
-/// `[data.observations]` header is the motivating case: it looks set and is
-/// not).
-///
-/// `origin` names the table (or flag) the keys were typed in, so the message
-/// points at what the user wrote.
-///
-/// The fit driver calls this BEFORE the identity digests read any bytes, so an
-/// unbound key reports as a binding error naming the real sources rather than
-/// as an unreadable data file.
-pub(crate) fn check_bound_sources(
-    model: &ir::Model,
-    origin: &str,
-    bound: &indexmap::IndexMap<String, String>,
-) -> Result<(), String> {
-    let mut sources: Vec<&str> =
-        model.observations.iter().map(|o| o.source.as_str()).collect();
-    sources.sort_unstable();
-    sources.dedup();
-    for (key, path) in bound {
-        if sources.contains(&key.as_str()) {
-            continue;
-        }
-        // A key whose value is not even a readable file is far likelier to be a
-        // top-level setting swallowed by the preceding `[table]` header than a
-        // mistyped stream name — and the two have different fixes, so say which
-        // one the evidence points at rather than offering both.
-        let hint = if std::path::Path::new(path).is_file() {
-            String::new()
-        } else {
-            format!(
-                " Its value (\"{path}\") is not a readable file either — if \
-                 `{key}` was meant as a TOP-LEVEL fit.toml key, note that TOML \
-                 binds every key after a `[table]` header to that table, so it \
-                 must sit ABOVE the first `[table]`."
-            )
-        };
-        return Err(format!(
-            "{origin}: '{key}' is not an observation source. Keys here bind a \
-             data file to an observation stream declared in the model's \
-             `observations {{ }}` block.{hint} Available sources: {}",
-            sources.join(", ")));
-    }
-    Ok(())
-}
-
 /// Resolve the DATA-bound observation streams (BY SOURCE) and load each one's
 /// per-observation values + aux, returning one [`ObsStream`] per bound leaf.
 ///
 /// `effective` maps observation SOURCE → data-file path — the `[data]`
-/// resolution the caller has already done (`DataSpec::effective_observations`
-/// for the fit-toml form, or `data_bindings_to_effective` for the CLI `--data`
-/// form). This function:
+/// resolution the caller has already done
+/// ([`super::stream_bindings::StreamBindings::training_by_source`] for a fit
+/// config, or `data_bindings_to_effective` for the CLI `--data` form). This function:
 ///
 /// - filters `model.observations` to the blocks whose `source` is bound (sorted
 ///   by name for deterministic ordering — two fits with the same observations
@@ -1864,7 +1802,7 @@ pub(crate) fn resolve_and_load_obs_streams(
             .collect();
     obs_blocks.sort_by(|a, b| a.name.cmp(&b.name));
 
-    check_bound_sources(model, "[data.observations] / --data", effective)?;
+    super::stream_bindings::check_bound_sources(model, "[data.observations] / --data", effective)?;
     if obs_blocks.is_empty() {
         return Err(
             "no observation stream is bound to a data file — check that \
@@ -1990,15 +1928,14 @@ pub use crate::run_meta::TrainingWindow;
 /// scoring also use and which must see the full series.
 pub(crate) fn apply_holdout_declaration(
     streams: &mut [ObsStream],
-    data: Option<&super::config_v2::DataSpec>,
+    holdout_after: Option<&super::config_v2::TimeSpecToml>,
+    holdout_files: &indexmap::IndexMap<String, String>,
     model: &ir::Model,
     t_start: f64,
     dt: f64,
     time_opts: &crate::caltime_load::TimeOpts,
 ) -> Result<Option<TrainingWindow>, String> {
-    let Some(data) = data else { return Ok(None) };
-
-    if let Some(spec) = &data.holdout_after {
+    if let Some(spec) = holdout_after {
         let raw = spec.raw();
         let all_times = || streams.iter().flat_map(|s| s.data.iter().map(|o| o.time));
         let first_obs = all_times().fold(f64::INFINITY, f64::min);
@@ -2044,7 +1981,7 @@ pub(crate) fn apply_holdout_declaration(
         return Ok(Some(TrainingWindow { train_end: tau }));
     }
 
-    if let Some(holdout_files) = &data.holdout {
+    if !holdout_files.is_empty() {
         let sources: Vec<&str> =
             streams.iter().map(|s| s.obs_model_ir.source.as_str()).collect();
         let last_train_of = |s: &ObsStream| s.data.iter()
@@ -6720,8 +6657,11 @@ dt = 1.0
             let path = map.shift_remove("weekly_cases").unwrap();
             map.insert("no_such_stream".into(), path);
             let err = match build(&fit) { Err(e) => e, Ok(_) => panic!("unknown holdout stream must error") };
-            assert!(err.contains("no_such_stream") && err.contains("bound"),
-                "must name the unknown stream and the bound set: {err}");
+            // The refusal `fit run` gives before any build (the key names no
+            // source), naming the sources to choose from.
+            assert!(err.contains("no_such_stream")
+                    && err.contains("Available sources: detection, weekly_cases"),
+                "must name the unknown stream and the sources it could name: {err}");
         }
     }
 
