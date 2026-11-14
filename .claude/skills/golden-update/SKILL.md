@@ -20,7 +20,8 @@ plus the per-fixture sets under `tests/fixtures/*/ir/`:
 ```
 update-golden: update-ocaml-golden update-corner-golden update-regression-golden \
                update-reactive-golden update-quantities-golden \
-               update-contrasts-golden update-gradient-golden
+               update-contrasts-golden update-gradient-golden \
+               update-bspline-inference-golden
 ```
 
 ```bash
@@ -31,9 +32,9 @@ make update-golden    # recompile every DSL fixture → its committed *.ir.json
 
 `CLAUDE.md` states the rule (`ir/golden/` is separate and frozen). What it does
 not say is what reads it: `rust/tests/golden_deser.rs`,
-`sim/tests/golden_simulate.rs`, and ~two dozen other integration tests — the
-cross-language serde + forward-sim smoke surface. That is why regenerating it is
-a deliberate act, not a refresh.
+`rust/crates/sim/tests/golden_simulate.rs`, and ~two dozen other integration
+tests — the cross-language serde + forward-sim smoke surface. That is why
+regenerating it is a deliberate act, not a refresh.
 
 ## There is no `make update-expected`
 
