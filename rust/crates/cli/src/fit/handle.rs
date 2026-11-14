@@ -567,7 +567,13 @@ fn load_config_for_segment(segment: &Path) -> Result<FitConfig, String> {
 
 /// `Err` naming every data file the recovered config binds that is not on
 /// disk: the stream, where it was looked for, and the hash `fit.meta.json`
-/// recorded for it (`data_hashes`, keyed by stream).
+/// recorded for it (`data_hashes` / `holdout_hashes`, keyed by source).
+///
+/// Reads `[data]` without the model: which files are bound needs none (the
+/// shorthand's one file, or the keys as written), and the shorthand's hash is
+/// every recorded value, whether an older sidecar keyed it by leaf or a newer
+/// one by source. Resolving `StreamBindings` here would load (or compile) the
+/// model on every handle resolution to answer a question it does not change.
 fn refuse_missing_data(
     config: &FitConfig,
     side: &crate::run_meta::FitSidecar,
@@ -600,7 +606,9 @@ fn refuse_missing_data(
     }
     for (stream, path) in data.holdout.iter().flatten() {
         if !Path::new(path).is_file() {
-            missing.push(format!("holdout stream `{stream}`: looked for {path} (no hash recorded)"));
+            let recorded = side.holdout_hashes.get(stream)
+                .map_or_else(|| "no hash recorded".to_string(), |h| format!("recorded hash {h}"));
+            missing.push(format!("holdout stream `{stream}`: looked for {path} ({recorded})"));
         }
     }
     if missing.is_empty() {
@@ -850,6 +858,30 @@ cooling = 0.7
         assert!(err.contains("recorded hash b39b0a43"), "{err}");
         assert!(err.contains("source_config"), "says how the path was resolved: {err}");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A missing `[data.holdout]` file is named with the hash the fit recorded
+    /// for it (`holdout_hashes`), and as unrecorded by an older sidecar.
+    #[test]
+    fn a_missing_holdout_file_is_named_with_its_recorded_hash() {
+        for (slug, holdout_hashes, expect) in [
+            ("missing_holdout_new", vec![("cases", "c0ffee11")], "recorded hash c0ffee11"),
+            ("missing_holdout_old", vec![], "no hash recorded"),
+        ] {
+            let (tmp, toml_path, seg) = portable_project(slug);
+            std::fs::write(&toml_path, format!(
+                "{PORTABLE_TOML}\n[data.holdout]\ncases = \"../data/streams/holdout.tsv\"\n")).unwrap();
+            let side = crate::run_meta::FitSidecar {
+                holdout_hashes: holdout_hashes.into_iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                ..Default::default()
+            };
+            crate::run_meta::write_fit_sidecar(&seg, &toml_path, Path::new(""), &side).unwrap();
+            let err = resolve_fit(&seg.to_string_lossy()).err().expect("the holdout is gone").to_string();
+            assert!(err.contains("holdout stream `cases`") && err.contains("holdout.tsv")
+                    && err.contains(expect), "{slug}: {err}");
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
     }
 
     /// An older `fit.meta.json` is refused with its version named, never read
