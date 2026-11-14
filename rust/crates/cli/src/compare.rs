@@ -706,16 +706,21 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
             .unwrap_or_else(|e| refuse(&out, for_stream(leaf, e)))
     }).collect();
     if let Some(path) = &a.pointwise {
-        match write_pointwise_streams(&tables, path) {
+        match write_pointwise_streams(&tables, &leaves, path) {
             Ok((sp, ns)) => out.say(format_args!(
-                "wrote {ns} per-stream pointwise rows to {}", sp.display())),
+                "wrote {ns} per-stream pointwise rows to {}; no joint file was written to {}, \
+                 because --streams scores each stream alone", sp.display(), path.display())),
             Err(e) => {
                 out.fail(format!("error: {e}"));
             }
         }
     }
-    let rendered: Vec<String> = tables.iter().map(render).collect();
-    out.report_raw(rendered.join("\n"));
+    // One table per stream, and nothing that combines them.
+    let rendered = match fmt_final {
+        Format::Json => render_json_tables(&tables, &leaves, &metrics_chosen),
+        Format::Md | Format::Table => tables.iter().map(render).collect::<Vec<_>>().join("\n"),
+    };
+    out.report_raw(rendered);
 }
 
 /// One comparison table, checked and ready to render: its rows, the
@@ -992,6 +997,32 @@ fn assimilated_sets(rows: &[Row]) -> Vec<String> {
     }).collect()
 }
 
+/// The leaf a `--streams` table scores, from its rows' traces; `None` for a
+/// joint comparison. The pairing check has shown the rows agree on it.
+fn scored_leaf(rows: &[Row]) -> Option<&str> {
+    rows.first()?.trace.scored_streams.as_ref()?.first().map(String::as_str)
+}
+
+/// The footer line of a `--streams` table whose rows assimilated different
+/// streams, listing each distinct set with its rows; `None` otherwise.
+fn assimilated_line(rows: &[Row]) -> Option<String> {
+    (scored_leaf(rows).is_some() && assimilated_sets_differ(rows))
+        .then(|| format!("Assimilated: {}.", assimilated_sets(rows).join("; ")))
+}
+
+/// The sentence a horizon or time refusal of a `--streams` table adds when
+/// its rows assimilated different streams and start scoring the leaf at
+/// different times; `None` otherwise.
+fn first_step_note(rows: &[Row]) -> Option<&'static str> {
+    scored_leaf(rows)?;
+    let firsts: Vec<f64> = rows.iter().filter_map(|r| r.trace.steps.first().map(|s| s.t)).collect();
+    (assimilated_sets_differ(rows) && firsts.windows(2).any(|w| w[0] != w[1])).then_some(
+        "These fits assimilated different streams and start scoring this stream at \
+         different times: a fit that conditions on its first observation (`ic_free`) \
+         starts scoring one step later on its own time axis, and that axis depends on \
+         which streams it assimilated.")
+}
+
 /// Whether `rows` assimilated different streams: some row's set is not
 /// recorded, or two recorded sets differ.
 fn assimilated_sets_differ(rows: &[Row]) -> bool {
@@ -1100,6 +1131,11 @@ fn preflight(rows: &[Row], waived: &Waivers) -> Result<Preflight, String> {
         }, message)?;
     }
 
+    // Under `--streams`, rows that assimilated different streams may start
+    // scoring the leaf at different times for a reason the refusals below
+    // would not otherwise name.
+    let first_step = first_step_note(rows).map(|n| format!("\n       {n}")).unwrap_or_default();
+
     // Fairness: T_score (n_scored) must agree across rows unless overridden.
     let t_scores: Vec<usize> = rows.iter().map(|r| r.trace.n_scored()).collect();
     let t_mismatch = t_scores.iter().any(|&t| t != t_scores[0]);
@@ -1112,7 +1148,7 @@ fn preflight(rows: &[Row], waived: &Waivers) -> Result<Preflight, String> {
             finding: format!("T_score differs across models: {}", per_row.join(", ")),
         }, format!("error: T_score differs across models: {:?}\n       \
             Δelpd and Δcrps are not commensurable.\n       \
-            Pass --allow-mismatched-horizon to render (uncomparable Δ columns → '—').",
+            Pass --allow-mismatched-horizon to render (uncomparable Δ columns → '—').{first_step}",
             t_scores))?;
     }
 
@@ -1134,7 +1170,7 @@ fn preflight(rows: &[Row], waived: &Waivers) -> Result<Preflight, String> {
     } else {
         check_shared_observation_axis(rows)
     };
-    pairing.map_err(|e| format!("error: {e}"))?;
+    pairing.map_err(|e| format!("error: {e}{first_step}"))?;
 
     // Fairness, part three (gh#713): the compared fits must have been bound to
     // the same observations. Two fits on different data produce a Δelpd that is
@@ -1353,11 +1389,22 @@ fn check_step_pair(
             fmt_stream_set(if sa.is_empty() { &sb } else { &sa }),
         )
     } else {
+        // The streams both traces score anywhere, in the first trace's order:
+        // `--streams` compares the rows on those, each alone.
+        let other = r.trace.streams();
+        let shared: Vec<&str> = first.trace.streams().into_iter()
+            .filter(|s| other.contains(s)).collect();
+        let hint = if shared.is_empty() {
+            String::new()
+        } else {
+            format!("\n       To compare them on the streams they share, each scored \
+                     alone, pass --streams {}.", shared.join(","))
+        };
         format!(
             "'{}' scored {} there and '{}' scored {}.\n       \
              The step's log score is the JOINT score over those streams, \
              so differencing them compares unlike quantities.\n       \
-             Re-score both models on the same set of observation streams.",
+             Re-score both models on the same set of observation streams.{hint}",
             first.name, fmt_stream_set(&sa), r.name, fmt_stream_set(&sb),
         )
     };
@@ -1727,17 +1774,37 @@ fn render_pointwise_joint_tsv(rows: &[PointwiseRow], streams_name: &str) -> Stri
     s
 }
 
+/// What the per-stream pointwise file sits beside, which its header states.
+enum StreamsFile<'a> {
+    /// The joint file of the same comparison, by name.
+    BesideJoint(&'a str),
+    /// No joint file: `--streams` scored each of these streams alone.
+    Selected(&'a [String]),
+}
+
 /// The per-stream file: one row per candidate × scored step × stream either
-/// side scored there. `joint_name` is the sibling file the header points at.
-fn render_pointwise_streams_tsv(rows: &[StreamPointwiseRow], joint_name: &str) -> String {
+/// side scored there.
+fn render_pointwise_streams_tsv(rows: &[StreamPointwiseRow], about: StreamsFile) -> String {
     let mut s = String::new();
-    s.push_str("# camdl compare --pointwise: per-observation log predictive scores, \
-                one stream at a time\n");
-    s.push_str("# log_score is the stream's own one-step-ahead log predictive density. \
-                These rows do not sum to the joint scores in ");
-    s.push_str(joint_name);
-    s.push_str(": a joint score is the log of a joint predictive, not a sum of \
-                per-stream logs.\n");
+    match about {
+        StreamsFile::BesideJoint(joint_name) => {
+            s.push_str("# camdl compare --pointwise: per-observation log predictive scores, \
+                        one stream at a time\n");
+            s.push_str("# log_score is the stream's own one-step-ahead log predictive density. \
+                        These rows do not sum to the joint scores in ");
+            s.push_str(joint_name);
+            s.push_str(": a joint score is the log of a joint predictive, not a sum of \
+                        per-stream logs.\n");
+        }
+        StreamsFile::Selected(leaves) => {
+            s.push_str(&format!("# camdl compare --pointwise --streams {}: per-observation \
+                log predictive scores on the selected streams only, one stream at a time\n",
+                leaves.join(",")));
+            s.push_str("# log_score is the stream's own one-step-ahead log predictive density, \
+                        each row re-scored on that stream alone. No joint file is written: \
+                        a sum of these rows over streams is not a joint score.\n");
+        }
+    }
     s.push_str("# delta_log_score = log_score - baseline_log_score, in nats.\n");
     s.push_str("# An empty cell means that side did not score that stream at \
                 that time.\n");
@@ -1778,7 +1845,8 @@ fn write_pointwise(rows: &[Row], base_idx: usize, path: &Path) -> Result<Pointwi
     let file_name = |p: &Path| p.file_name().map_or_else(
         || p.display().to_string(), |n| n.to_string_lossy().into_owned());
     let joint_text = render_pointwise_joint_tsv(&pw.joint, &file_name(&streams_path));
-    let streams_text = render_pointwise_streams_tsv(&pw.streams, &file_name(path));
+    let streams_text = render_pointwise_streams_tsv(&pw.streams,
+        StreamsFile::BesideJoint(&file_name(path)));
     for (p, text) in [(path, &joint_text), (streams_path.as_path(), &streams_text)] {
         std::fs::write(p, text).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
     }
@@ -1791,15 +1859,15 @@ fn write_pointwise(rows: &[Row], base_idx: usize, path: &Path) -> Result<Pointwi
 /// Under `--streams`: write each table's per-stream rows, table by table, to
 /// the [`streams_sibling`] of `path`, and no joint file. Every table's rows are
 /// rendered before the file is written, so a refusal leaves no file behind.
-fn write_pointwise_streams(tables: &[Table], path: &Path) -> Result<(PathBuf, usize), String> {
+fn write_pointwise_streams(tables: &[Table], leaves: &[String], path: &Path)
+    -> Result<(PathBuf, usize), String>
+{
     let mut rows: Vec<StreamPointwiseRow> = Vec::new();
     for t in tables {
         rows.extend(pointwise_rows(&t.rows, t.base_idx)?.streams);
     }
     let streams_path = crate::prequential_out::streams_sibling(path);
-    let joint_name = path.file_name().map_or_else(
-        || path.display().to_string(), |n| n.to_string_lossy().into_owned());
-    std::fs::write(&streams_path, render_pointwise_streams_tsv(&rows, &joint_name))
+    std::fs::write(&streams_path, render_pointwise_streams_tsv(&rows, StreamsFile::Selected(leaves)))
         .map_err(|e| format!("cannot write {}: {e}", streams_path.display()))?;
     Ok((streams_path, rows.len()))
 }
@@ -3264,6 +3332,9 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pref
     }
 
     let mut out = String::new();
+    if let Some(leaf) = scored_leaf(rows) {
+        out.push_str(&format!("Stream: {leaf} — every row scored on this stream alone.\n\n"));
+    }
     push_aligned(&mut out, &header, &body);
     if single.is_none() {
         if let Some(block) = accuracy_block(rows, &order, &accuracy, want_crps, want_pit, t_mismatch) {
@@ -3279,13 +3350,23 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pref
     // still in the JSON (`evidence_scale_note`, `se_caveat`), which is the
     // machine surface and loses nothing by repeating itself.
     out.push('\n');
-    out.push_str(&format!("Scored steps: {} (t0={}).  Baseline: {}.\n",
-        base.n_scored(), base.t0, rows[base_idx].name));
+    // `t0` indexes each fit's own time axis, which differs between fits that
+    // assimilated different streams, so a re-scored table does not print it.
+    match scored_leaf(rows) {
+        None => out.push_str(&format!("Scored steps: {} (t0={}).  Baseline: {}.\n",
+            base.n_scored(), base.t0, rows[base_idx].name)),
+        Some(_) => out.push_str(&format!("Scored steps: {}.  Baseline: {}.\n",
+            base.n_scored(), rows[base_idx].name)),
+    }
     if !t_mismatch {
         out.push_str("Sorted by Δelpd ascending — best-supported model at the bottom.\n");
     }
     out.push_str(&conditioning_line(base));
     out.push('\n');
+    if let Some(line) = assimilated_line(rows) {
+        out.push_str(&line);
+        out.push('\n');
+    }
     for line in warning_lines(rows, base_idx, checks, &accuracy) {
         out.push_str(&line);
         out.push('\n');
@@ -3481,6 +3562,9 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflig
         body.push(cells);
     }
     let mut out = String::new();
+    if let Some(leaf) = scored_leaf(rows) {
+        out.push_str(&format!("### Stream `{leaf}`\n\n_Every row scored on this stream alone._\n\n"));
+    }
     md_table(&mut out, &header, &body);
     if single.is_none() {
         if let Some(block) = accuracy_block(rows, &order, &accuracy, want_crps, want_pit, t_mismatch) {
@@ -3497,6 +3581,9 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflig
     }
     out.push('\n');
     out.push_str(&format!("_{}_\n", conditioning_line(base)));
+    if let Some(line) = assimilated_line(rows) {
+        out.push_str(&format!("\n_{line}_\n"));
+    }
     // The same block the text table prints, as a markdown list so each warning
     // stays its own line when the document is rendered.
     let warnings = warning_lines(rows, base_idx, checks, &accuracy);
@@ -3513,7 +3600,31 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflig
 
 /// Render the comparison as JSON. Returns the document rather than printing it.
 fn render_json(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflight) -> String {
+    format!("{}\n", serde_json::to_string_pretty(&json_document(rows, base_idx, metrics, checks))
+        .unwrap())
+}
+
+/// The `--streams` JSON document: the selected streams in order, and one
+/// [`json_document`] per stream, each naming its stream. Nothing else: no
+/// field combines streams.
+fn render_json_tables(tables: &[Table], leaves: &[String], metrics: &[String]) -> String {
+    let out = serde_json::json!({
+        "streams_scored": leaves,
+        "tables": tables.iter()
+            .map(|t| json_document(&t.rows, t.base_idx, metrics, &t.checks))
+            .collect::<Vec<_>>(),
+    });
+    format!("{}\n", serde_json::to_string_pretty(&out).unwrap())
+}
+
+/// The comparison as a JSON value. A `--streams` table also names the stream
+/// it scores (`stream`) and, per row, the leaves its fit assimilated
+/// (`streams_assimilated`, null when the input does not record them).
+fn json_document(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflight)
+    -> serde_json::Value
+{
     use serde_json::json;
+    let scored = scored_leaf(rows);
     let base = &rows[base_idx].trace;
     let t_mismatch = checks.horizons_differ();
     let (accuracy, single) = accuracy_view(rows, base_idx);
@@ -3561,7 +3672,7 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Prefl
         } else {
             (serde_json::Value::Null, serde_json::Value::Null)
         };
-        json!({
+        let mut entry = json!({
             "name": r.name,
             "path": r.path,
             "t_score": r.trace.n_scored(),
@@ -3607,12 +3718,16 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Prefl
             // must not have to re-derive them from `pit_cov90`.
             "warnings": r.trace.warnings,
             "pit_cov90_warning": field("pit_cov90_warning"),
-        })
+        });
+        if scored.is_some() {
+            entry["streams_assimilated"] = json!(r.assimilated());
+        }
+        entry
     }).collect();
     let any_evidence = rows.iter().enumerate().any(|(i, r)| {
         i != base_idx && paired_delta(&r.trace, base).0.is_finite()
     });
-    let out = json!({
+    let mut out = json!({
         "baseline": rows[base_idx].name,
         "metrics": metrics,
         // The same footnote the table and markdown renderers print: a consumer
@@ -3648,7 +3763,10 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Prefl
         "optimism_caveat": optimism_caveat(rows),
         "rows": entries,
     });
-    format!("{}\n", serde_json::to_string_pretty(&out).unwrap())
+    if let Some(leaf) = scored {
+        out["stream"] = json!(leaf);
+    }
+    out
 }
 
 fn option_finite(x: f64) -> serde_json::Value {
@@ -3869,7 +3987,7 @@ mod tests {
             },
         };
         assert_eq!(r.row.delta(), None, "no difference without both sides");
-        let tsv = render_pointwise_streams_tsv(&[r], "scores.tsv");
+        let tsv = render_pointwise_streams_tsv(&[r], StreamsFile::BesideJoint("scores.tsv"));
         let data = tsv.lines().find(|l| l.starts_with("cand")).expect("a data row");
         let cells: Vec<&str> = data.split('\t').collect();
         assert_eq!(cells.len(), 7, "seven columns: {cells:?}");
@@ -5658,6 +5776,137 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let rows = two_stream_rows();
         let metrics = vec!["elpd".to_string(), "crps".to_string(), "pit_cov90".to_string()];
         assert_eq!(render_json(&rows, 0, &metrics, &checked(&rows)), TWO_STREAM_JSON);
+    }
+
+    /// A `--streams` table, rendered: rows of different stream sets re-scored
+    /// on `cases`, held out so the comparison needs no waiver.
+    fn ablation_table() -> Table {
+        let held = |r: Row| {
+            let mut p = r.onto("cases").unwrap();
+            p.trace.conditioning = Conditioning::HoldOutTail {
+                train_end: 3.0, theta_source: r.name.clone() };
+            p
+        };
+        let rows = vec![
+            held(derived_row("full", &CASES_DEATHS, &["cases", "deaths"])),
+            held(derived_row("cases_only", &CASES_DEATHS, &["cases"])),
+        ];
+        let checks = preflight(&rows, &Waivers::default()).unwrap();
+        Table { rows, base_idx: 0, checks }
+    }
+
+    /// Every format states the stream a `--streams` table scores and what
+    /// each row's fit assimilated; the text footer drops `t0`, which indexes
+    /// each fit's own time axis; and nothing in any format combines streams.
+    #[test]
+    fn every_format_states_the_scored_stream_and_each_rows_assimilated_set() {
+        let t = ablation_table();
+        let metrics = vec!["elpd".to_string(), "crps".to_string(), "pit_cov90".to_string()];
+        let table = render_table(&t.rows, t.base_idx, &metrics, &t.checks);
+        let md = render_md(&t.rows, t.base_idx, &metrics, &t.checks);
+        assert!(table.starts_with("Stream: cases — every row scored on this stream alone.\n\n"),
+            "{table}");
+        assert!(md.starts_with("### Stream `cases`\n\n_Every row scored on this stream alone._\n\n"),
+            "{md}");
+        for (fmt, text) in [("table", &table), ("md", &md)] {
+            assert!(text.contains("Assimilated: 'full' assimilated cases, deaths; \
+                                   'cases_only' assimilated cases."), "{fmt}:\n{text}");
+            assert!(text.contains("crps") && text.contains("PIT_cov90"),
+                "a one-stream table keeps its accuracy columns:\n{text}");
+        }
+        assert!(table.contains("Scored steps: 3.  Baseline: full.\n") && !table.contains("t0="),
+            "{table}");
+
+        // Rows that assimilated the same set: no list.
+        let same = vec![derived_row("a", &CASES_DEATHS, &["cases", "deaths"]).onto("cases").unwrap(),
+                        derived_row("b", &CASES_DEATHS, &["cases", "deaths"]).onto("cases").unwrap()];
+        let checks = preflight(&same, &Waivers::default()).unwrap();
+        assert!(!render_table(&same, 0, &metrics, &checks).contains("Assimilated:"));
+
+        let doc = json_document(&t.rows, t.base_idx, &metrics, &t.checks);
+        assert_eq!(doc["stream"], "cases", "{doc}");
+        assert_eq!(doc["rows"][0]["streams_assimilated"], serde_json::json!(["cases", "deaths"]));
+        assert_eq!(doc["rows"][1]["streams_assimilated"], serde_json::json!(["cases"]));
+        let mut explicit = t.rows[1].clone();
+        explicit.streams = RowStreams::Explicit;
+        let rows = vec![t.rows[0].clone(), explicit];
+        let doc = json_document(&rows, 0, &metrics, &t.checks);
+        assert!(doc["rows"][1]["streams_assimilated"].is_null(), "unknown is null: {doc}");
+
+        // The command's document: the selection, and one table per stream, and
+        // nothing beside them.
+        let whole: serde_json::Value = serde_json::from_str(
+            &render_json_tables(&[ablation_table(), ablation_table()], &["cases".into(), "deaths".into()], &metrics)).unwrap();
+        let keys: Vec<&String> = whole.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["streams_scored", "tables"], "{whole}");
+        assert_eq!(whole["streams_scored"], serde_json::json!(["cases", "deaths"]));
+        assert_eq!(whole["tables"].as_array().unwrap().len(), 2);
+        assert_eq!(whole["tables"][0]["stream"], "cases");
+
+        // Without --streams none of this appears.
+        let rows = two_stream_rows();
+        let doc = json_document(&rows, 0, &metrics, &checked(&rows));
+        assert!(doc.get("stream").is_none() && doc["rows"][0].get("streams_assimilated").is_none());
+        assert!(!render_table(&rows, 0, &metrics, &checked(&rows)).starts_with("Stream:"));
+    }
+
+    /// Under `--streams` the pointwise output is the per-stream file alone,
+    /// and its header says so; no row combines streams.
+    #[test]
+    fn pointwise_under_streams_writes_the_per_stream_file_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scores.tsv");
+        let (written, n) = write_pointwise_streams(&[ablation_table()], &["cases".into()], &path)
+            .unwrap();
+        assert_eq!(written, dir.path().join("scores.streams.tsv"));
+        assert!(!path.exists(), "no joint file under --streams");
+        let text = std::fs::read_to_string(&written).unwrap();
+        assert!(text.contains("# camdl compare --pointwise --streams cases:")
+                && text.contains("No joint file is written"), "{text}");
+        assert!(!text.contains("do not sum to the joint scores"), "{text}");
+        assert_eq!(n, 3, "one candidate × three steps");
+        let rows: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).skip(1).collect();
+        assert!(rows.iter().all(|l| l.split('\t').nth(3) == Some("cases")), "{text}");
+    }
+
+    /// Without `--streams`, the stream-set refusal names the option and the
+    /// streams the two rows share; it does not suggest the horizon waiver.
+    #[test]
+    fn the_stream_set_refusal_names_streams_and_the_shared_leaves() {
+        let t = [7.0, 14.0, 21.0];
+        let full = row_with_streams("full", &t, &["cases", "deaths"]);
+        let cases_only = row_with_streams("cases_only", &t, &["cases"]);
+        let err = check_shared_observation_axis(&[full.clone(), cases_only]).unwrap_err();
+        assert!(err.contains("--streams cases"), "{err}");
+        assert!(!err.contains("--allow-mismatched-horizon"), "{err}");
+        // Nothing shared, nothing suggested.
+        let hosp = row_with_streams("hosp", &t, &["hospital"]);
+        let err = check_shared_observation_axis(&[full, hosp]).unwrap_err();
+        assert!(!err.contains("--streams"), "{err}");
+    }
+
+    /// Under `--streams`, when rows that assimilated different sets start
+    /// scoring the leaf at different times, the refusal says that a fit
+    /// conditioning on its first observation starts one step later.
+    #[test]
+    fn a_first_step_mismatch_between_ablated_fits_names_ic_free() {
+        let full = derived_row("full", &CASES_DEATHS, &["cases", "deaths"]).onto("cases").unwrap();
+        let mut late = derived_row("cases_only", &CASES_DEATHS, &["cases"]).onto("cases").unwrap();
+        late.trace.steps.remove(0);
+        let waived = Waivers { in_sample_ablation: true, ..Default::default() };
+        let err = preflight(&[full.clone(), late.clone()], &waived).unwrap_err();
+        assert!(err.contains("T_score") && err.contains("ic_free") && err.contains("one step later"),
+            "{err}");
+        // The same count of steps at different times: the axis check speaks.
+        let mut early = full.clone();
+        early.trace.steps.pop();
+        let err = preflight(&[early.clone(), late.clone()], &waived).unwrap_err();
+        assert!(err.contains("not on the same observation axis") && err.contains("ic_free"), "{err}");
+        // Rows that assimilated the same set get no such sentence.
+        let mut twin = derived_row("twin", &CASES_DEATHS, &["cases", "deaths"]).onto("cases").unwrap();
+        twin.trace.steps.remove(0);
+        let err = preflight(&[early, twin], &waived).unwrap_err();
+        assert!(!err.contains("ic_free"), "{err}");
     }
 }
 
